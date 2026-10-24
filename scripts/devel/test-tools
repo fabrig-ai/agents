@@ -320,7 +320,8 @@ git clone -q "$t/ff.git" "$t/ff"
 git -C "$t/ff" -c user.email=test@example.com -c user.name=test commit -q --allow-empty -m "Advance origin"
 git -C "$t/ff" push -q origin main
 mkdir -p "$HOME/.local/bin"
-ln -s "$kit/plan" "$HOME/.local/bin/plan"
+# An older install linked retired tools into skein's scripts/dev.
+ln -s "$t/skein/scripts/dev/plan" "$HOME/.local/bin/plan"
 out=$(setup_check --fix)
 expect "setup --fix fast-forwards" "$out" "ok    alpha: main fast-forwarded 1 commits to origin/main"
 expect "setup --fix links in the world" "$(readlink "$HOME/.local/bin/setup" "$HOME/.local/bin/heavy" "$HOME/.local/bin/land")" \
