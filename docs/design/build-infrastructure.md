@@ -313,7 +313,10 @@ The director owns this sequence after the complete quiet accounting/drain:
 2. Use the exact `release` path returned by the copier. With the accounted
    legacy queue still quiet, run `"$release/setup" --fix` using the intended
    `DEV_ROOT`, `DEV_TMP` and queue configuration. This links heavy, land and
-   setup together to that stable kit, including workspace assets. The stable
+   setup together to that stable kit. Workspace `AGENTS.md` and `CLAUDE.md`
+   link directly to the agents checkout's `scripts/devel/recovery-v1/workspace/`
+   files; `.claude/settings.json` links to the read-only kit's workspace copy.
+   Missing checkout files fail by path, without creating links. The stable
    setup is self-contained and never invokes baseline setup. Mutable-source
    setup refuses even `--fix` before any mutation. Readiness can report failure
    here until the new reconciler is installed; that is not permission to admit.
@@ -325,8 +328,9 @@ The director owns this sequence after the complete quiet accounting/drain:
    configuration/state, restore explicit maintenance holds, then check setup
    again. Admit new submissions only after readiness and ownership are proved.
 
-Later landings can change the source kit, but cannot move stable links or
-change installed helper bytes. A new release requires another explicit quiet
+Later landings can change the source kit and the workspace instructions
+linked to it, but cannot move stable tool/settings links or change installed
+helper bytes. A new release requires another explicit quiet
 drain/copy/verify/link/reconcile/admit sequence; there is no online upgrade
 or automatic fleet installation. Read-only permissions prevent accidental
 writes, not deliberate chmod by the owning account. Retain each release

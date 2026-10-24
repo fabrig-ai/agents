@@ -4,9 +4,10 @@ This directory holds the Rust projects, each a git repository with its own
 `AGENTS.md`, and the machine's working files in `tmp/`. Read a
 repository's `AGENTS.md` before touching its code.
 
-This file is agents' `scripts/devel/recovery-v1/workspace/AGENTS.md`, linked into
-`~/src/rust/`: change it there, and land it in agents. It holds only what
-every agent here needs.
+`~/src/rust/AGENTS.md` and `CLAUDE.md` link directly to the agents checkout's
+`scripts/devel/recovery-v1/workspace/` files. Change them in a worktree and
+land them in agents. `.claude/settings.json` stays linked to the read-only
+kit. This file holds only what every agent here needs.
 
 ## The projects
 

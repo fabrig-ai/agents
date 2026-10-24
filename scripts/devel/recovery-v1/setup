@@ -136,7 +136,7 @@ check_machine() {
         command -v "$tool" >/dev/null && ok "has $tool" || fail "no $tool"
     done
     cargo nextest --version >/dev/null 2>&1 && ok "has cargo-nextest" || fail "no cargo-nextest"
-    # The tools and files link to this kit.
+    # The tools link to this kit.
     local bin=$HOME/.local/bin home=$kit
     for tool in heavy land setup; do
         if [[ $(readlink -f "$bin/$tool" 2>/dev/null) == "$home/$tool" ]]; then
@@ -160,13 +160,17 @@ check_machine() {
         esac
     done
 
-    # The workspace's own files live in agents, beside setup.
+    # Workspace instructions follow the agents checkout; permissions stay in
+    # this read-only kit.
     local pair link target
-    for pair in "$root/AGENTS.md=AGENTS.md" "$root/CLAUDE.md=CLAUDE.md" \
-        "$root/.claude/settings.json=claude-settings.json"; do
+    for pair in "$root/AGENTS.md=$root/agents/scripts/devel/recovery-v1/workspace/AGENTS.md" \
+        "$root/CLAUDE.md=$root/agents/scripts/devel/recovery-v1/workspace/CLAUDE.md" \
+        "$root/.claude/settings.json=$home/workspace/claude-settings.json"; do
         link=${pair%%=*}
-        target=$home/workspace/${pair#*=}
-        if [[ $(readlink -f "$link" 2>/dev/null) == "$target" ]]; then
+        target=${pair#*=}
+        if [[ ! -f $target ]]; then
+            fail "missing workspace file: $target"
+        elif [[ $(readlink -f "$link" 2>/dev/null) == "$target" ]]; then
             ok "$link is agents'"
         elif [[ -e $link && ! -L $link ]]; then
             fail "$link is a file of its own; replace it with a link to $target"
