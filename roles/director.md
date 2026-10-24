@@ -262,11 +262,12 @@ machine's `tmp/post/` (section 5).
   stop <id>` to stop, with the job's short `id` from that list, never
   its `sessionId`. A resume by hand takes the full `sessionId`,
   `claude --bg --resume <sessionId> "<message>"`, and the session is
-  checked to be working after it. Only a done or stopped session
-  resumes in place: a blocked or working one isn't woken by a resume,
-  which starts a copy with a new id that acts at once, so stop it
-  first. A finished session is ended with `claude stop`, never by
-  killing its waiter, which wakes it.
+  checked to be working after it. Only a stopped session resumes in
+  place: a done one still runs, idle, and a resume of a running
+  session, done, blocked or working, starts a copy with a new id and
+  an invented name that acts at once, so stop it first (post's wake
+  does so for a done one). A finished session is ended with `claude
+  stop`, never by killing its waiter, which wakes it.
 
 ## 6. Answering owners
 
