@@ -43,7 +43,7 @@ poll_until() {
 export HOME=$t/home DEV_ROOT=$t/a POST_NAME=sender POST_RESUME_CHECK=0 POST_RETRY_DELAYS="0 0 0"
 export POST_TOOL=$kit/post FIXTURE=$t
 unset SSH_ORIGINAL_COMMAND
-mkdir -p "$HOME/.local/bin" "$t"/{a,b}/tmp/post
+mkdir -p "$HOME/.local/bin" "$t"/{a,b}/tmp/post "$t/session cwd"
 export PATH=$HOME/.local/bin:$PATH
 printf 'a local\nb fake-b\n' >"$t/a/tmp/post/machines"
 printf '# Other machine\nb local\na fake-a\n' >"$t/b/tmp/post/machines"
@@ -52,9 +52,10 @@ echo '[]' >"$t/sessions.json"
 cat >"$HOME/.local/bin/ssh" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
-[[ $# == 10 && $1 == -i && $2 == "$HOME/.ssh/post_ed25519" && $3 == -o && $4 == IdentitiesOnly=yes &&
-    $5 == -o && $6 == BatchMode=yes && $7 == -o && $8 == ConnectTimeout=20 ]]
-case $9 in
+[[ $# == 14 && $1 == -i && $2 == "$HOME/.ssh/post_ed25519" && $3 == -o && $4 == IdentitiesOnly=yes &&
+    $5 == -o && $6 == BatchMode=yes && $7 == -o && $8 == ConnectTimeout=20 &&
+    $9 == -o && ${10} == ControlMaster=no && ${11} == -o && ${12} == ControlPath=none ]]
+case ${13} in
     fake-b) destination=b; from=a ;;
     fake-a) destination=a; from=b ;;
     *) exit 255 ;;
@@ -67,7 +68,7 @@ case ${FIXTURE_SSH_MODE:-} in
     silent) exit 0 ;;
 esac
 code=0
-PATH=/usr/bin:/bin DEV_ROOT=$FIXTURE/$destination SSH_ORIGINAL_COMMAND=${10} "$POST_TOOL" deliver --from "$from" >"$FIXTURE/ack" || code=$?
+PATH=/usr/bin:/bin DEV_ROOT=$FIXTURE/$destination SSH_ORIGINAL_COMMAND=${14} "$POST_TOOL" deliver --from "$from" >"$FIXTURE/ack" || code=$?
 if [[ ${FIXTURE_SSH_MODE:-} == ack-lost && ! -f $FIXTURE/ack-lost ]]; then
     touch "$FIXTURE/ack-lost"
     exit 255
@@ -82,6 +83,7 @@ if [[ $* == 'agents --json --all' ]]; then
     cat "$FIXTURE/sessions.json"
 elif [[ $# == 4 && $1 == --bg && $2 == --resume ]]; then
     [[ ! -t 0 ]]
+    pwd >"$FIXTURE/resume-cwd"
     printf '%s\n' "$3" "$4" >>"$FIXTURE/resumes"
     [[ ${FIXTURE_RESUME_FAIL:-0} == 0 ]] || exit 1
     sleep "${FIXTURE_RESUME_DELAY:-0}"
@@ -102,9 +104,9 @@ STUB
 chmod 700 "$HOME/.local/bin/ssh" "$HOME/.local/bin/claude"
 post() { "$POST_TOOL" "$@"; }
 session() {
-    jq -n --arg name "$1" --arg state "$2" \
+    jq -n --arg name "$1" --arg state "$2" --arg cwd "$t/session cwd" \
         '[{id:"short",sessionId:"full-session-id",name:$name,state:$state,
-           startedAt:"2026-10-24T12:00:00Z",cwd:"/fixture",kind:"claude"}]' >"$t/sessions.json"
+           startedAt:"2026-10-24T12:00:00Z",cwd:$cwd,kind:"claude"}]' >"$t/sessions.json"
 }
 message() {
     printf 'Id: 20261024T213500Z-7f3a0000\nFrom: sender@%s\nTo: %s@b\nSubject: fixture\n\nbody\n' "$1" "$2"
@@ -144,6 +146,7 @@ jq '. + [.[0] | .state="stopped" | .startedAt="2026-10-23T12:00:00Z"]' "$t/sessi
 mv "$t/older.json" "$t/sessions.json"
 out=$(capture post send sleeping wake <<< body)
 expect 'done session wakes' "$out" 'status=0' 'woken'
+expect 'resume from session directory' "$(cat "$t/resume-cwd")" "$t/session cwd"
 expect 'resume full id and prompt' "$(cat "$t/resumes")" 'full-session-id' 'Post for sleeping: run post read sleeping, then start post wait sleeping in the background.'
 expect 'resumed once' "$(wc -l <"$t/resumes")" 2
 session working working
@@ -151,6 +154,17 @@ expect 'working session queues' "$(capture post send working busy <<< body)" 'st
 expect 'working session not resumed' "$(wc -l <"$t/resumes")" 2
 session blocked blocked
 expect 'blocked session queues' "$(capture post send blocked busy <<< body)" 'status=0' 'queued'
+for cwd in missing absent; do
+    session "cwd-$cwd" 'done'
+    if [[ $cwd == missing ]]; then
+        jq --arg cwd "$t/nonexistent" 'map(.cwd = $cwd)' "$t/sessions.json" >"$t/cwd.json"
+    else
+        jq 'map(del(.cwd))' "$t/sessions.json" >"$t/cwd.json"
+    fi
+    mv "$t/cwd.json" "$t/sessions.json"
+    expect "$cwd cwd session wakes" "$(capture post send "cwd-$cwd" wake <<< body)" 'status=0' 'woken'
+    expect "$cwd cwd resumes from workspace" "$(cat "$t/resume-cwd")" "$t/a"
+done
 for state in stopped failed absent; do
     if [[ $state == absent ]]; then echo '[]' >"$t/sessions.json"; reason='no session'; else session "$state" "$state"; reason=$state; fi
     expect "$state session cannot wake" "$(capture post send "$state" unwoken <<< body)" 'status=3' "queued, nobody will wake it: $reason"

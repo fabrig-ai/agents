@@ -103,7 +103,7 @@ session() {
 }
 unwoken() { echo "queued, nobody will wake it: $*"; return 3; }
 wake() (
-    local name=$1 info state full_id kind='' alive=0
+    local name=$1 info state full_id cwd kind='' alive=0
     exec 8>"$box/.wake.lock"
     flock -x 8 || fail 'cannot lock wake'
     {
@@ -123,8 +123,10 @@ wake() (
         done)
             full_id=$(jq -r '.sessionId // .id // empty' <<<"$info")
             [[ -n $full_id ]] || { unwoken 'session has no id'; return $?; }
-            if ! claude --bg --resume "$full_id" \
-                "Post for $name: run post read $name, then start post wait $name in the background." </dev/null >/dev/null 2>&1; then
+            cwd=$(jq -r '.cwd // empty' <<<"$info")
+            [[ -d $cwd ]] || cwd=$root
+            if ! (cd -- "$cwd" && claude --bg --resume "$full_id" \
+                "Post for $name: run post read $name, then start post wait $name in the background.") </dev/null >/dev/null 2>&1; then
                 unwoken 'resume failed'; return $?
             fi
             sleep "${POST_RESUME_CHECK:-10}"
@@ -247,6 +249,7 @@ send() {
             status=$(SSH_ORIGINAL_COMMAND="deliver $to_name" timeout 60 "$kit/post" deliver --from "$local_machine" <"$scratch") || code=$?
         else
             status=$(timeout 60 ssh -i "$HOME/.ssh/post_ed25519" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=20 \
+                -o ControlMaster=no -o ControlPath=none \
                 "$route" "deliver $to_name" <"$scratch") || code=$?
         fi
         if [[ ( $code == 0 || $code == 3 ) && -n $status && $status != *$'\n'* ]]; then break; fi

@@ -154,7 +154,8 @@ overwrites another.
   - a Codex owner without a waiter: exit 3, since only its parent
     restarts its unit;
   - a Claude name: the newest session of that name in `claude agents
-    --json --all`. If it's `done`, the tool resumes it in place,
+    --json --all`. If it's `done`, the tool resumes it in place from its
+    directory,
     `claude --bg --resume <full id> "Post for NAME: run post read NAME,
     then start post wait NAME."`, and checks after 10 seconds that the
     session with that id is working: `woken`, or exit 3. If it's working
