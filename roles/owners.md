@@ -374,7 +374,13 @@ it prints. Once the owner has judged the result, it records it, once:
 ### 4.3 The task
 
 An implementer other than Opus 5.5 at xhigh reads its task literally.
-Its task file is whole, and holds:
+How it builds, tests, lints and formats is
+[implementer.md](implementer.md)'s, never repeated in a task. The task
+file's first line is: "Read `~/src/rust/agents/roles/implementer.md`
+first; this task departs from it only where it says so." A departure
+says its reason: a stability trial, a measurement, a profile the change
+needs, a wider run after an upstream change. Beyond that, the task file
+is whole, and holds:
 - the goal, in two or three lines;
 - what to read first: the design's sections and the files, never a
   whole design, and of the rules, the sections the task touches beyond
@@ -388,9 +394,12 @@ Its task file is whole, and holds:
 - the files it may touch, and that the mechanical follow-through of its
   change in the same crate is in scope: a call site, a match arm, a
   test's expected value;
-- done when: the tests that pass, and the gate, with what it checks
-  beyond the tests (the commit's trailers, the profiles it runs, the
-  figures it compares);
+- done when: the tests that pass, with their packages, binaries and
+  profiles where they aren't the default; the dependents whose tests it
+  runs when it widens (implementer.md 2); what else it proves (the
+  commit's trailers, the figures it compares); and which of the gate's
+  other checks it runs, where the change needs one (the wasm lints, the
+  fuzzy or browser profile). The gate itself runs at landing (4.4);
 - the security lines of `director.md` 10, verbatim: a brief's copy
   doesn't reach an implementer that reads only its task;
 - on a doubt: stop, write the question in the owner's `inbox/`, and

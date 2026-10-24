@@ -13,8 +13,9 @@ itself are skein's: `docs/foundation/programming-model.md` and
   rest), `product.md` (the product owners, in charge of features),
   `owners.md` (how an owner takes a mission to `main`) with the
   departments' files `app.md`, `ui.md` and `infra.md`, `qa.md` with
-  `qa-milestone.md` and `qa-lab.md` (the QA agents), and `keeper.md`
-  (the session that judges the landing queue's failures).
+  `qa-milestone.md` and `qa-lab.md` (the QA agents), `implementer.md`
+  (how an implementer builds, tests and repairs), and `keeper.md` (the
+  session that judges the landing queue's failures).
 - **The designs:** `docs/design/`. `landing-flow.md` (how changes reach
   `main` across the repositories), `build-cache.md` (kache and the
   shared store), `build-infrastructure.md` (`heavy`, `land`, `repin`,
