@@ -56,14 +56,16 @@ metadata by the tools. The surveys behind it are
     turns;
   - it checks each path: its place in the tree (section 3), its front
     matter, its cap (section 6), and that it holds no secret (a private
-    key block, a token's known prefixes, a path under
-    `tmp/github-conformance/`);
+    key block or a token's known prefixes);
   - it commits those paths only, the message starting with the
     writer's name (`POST_NAME`, [post.md](post.md) 2);
   - it rebases on `origin/main` and pushes, and starts again when `main`
     moved, five times at most.
   - Exit 0: pushed. 2: refused, with the reason. 3: committed but not
     pushed; the next `record commit` pushes it.
+- **Shared checkout:** `record` uses a temporary index and plumbing to replay commits on `origin/main`; unrelated staged and unstaged edits stay in place, and conflicts refuse without changing HEAD, index or files.
+- **Message and exit:** the prefix is `POST_NAME:` (otherwise `USER:`); no changes is exit 0 with a message.
+- **Secrets:** private key blocks, `ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`, `github_pat_`, `sk-` with at least 20 token characters, `xox[abpr]-`, and `AKIA` plus 16 characters are refused.
 - **One writer per file** (section 3), so a rebase never conflicts. A
   record is never moved or renamed once committed.
 - **Reading another machine's record:** `record pull`, then the file.
@@ -92,6 +94,8 @@ metadata by the tools. The surveys behind it are
   sub-owner writes `m<N>.md` in the mission's. A roadmap is named by
   its goal (`real-backends`, `first-release`), and its decisions keep
   their prefix (`R2-17`).
+- Names are lowercase slugs of letters, digits, hyphens and underscores; numbered milestone and decision files use the tree’s spelling.
+- **Claims and decisions:** a new mission README loses a push race with “name taken”; a decision is a level-2 heading starting with its number (`1067`, `R3-12`, `12.`).
 - **Front matter,** `key: value` lines between `---` lines, which
   `record` checks:
   - a mission's README: `roadmap`, `feature` (the draft's repository
@@ -112,6 +116,7 @@ metadata by the tools. The surveys behind it are
   is started with "Read `~/src/rust/records/missions/<m>/README.md` and
   do what it says.", a sub-owner with its `m<N>.md`, whose head says
   what to read.
+- **Summary:** the first paragraph after the front matter (skipping headings) is required and at most 60 words.
 - **A report is a file.** The plan report is `plan.md`; a milestone's
   design report (at most 15 lines, owners.md 3.3) and end report (at
   most 10, owners.md 3.1) are sections of `m<N>.md`; the closing note
@@ -170,6 +175,12 @@ metadata by the tools. The surveys behind it are
 - **`record runs --all [--since DATE]`** prints the same rows across
   missions, as TSV, for the director and Infra.
 
+- **Old layouts:** `owners/<m>-m<N>/` joins milestone N; an unsplit owner with no milestone directories joins milestone 1; modern mission-level sessions stay outside milestone directories.
+- **Session totals:** Codex uses the last cumulative token snapshot (output already includes reasoning); Claude deduplicates usage by message id, takes each field’s maximum snapshot, and reads only the first user prompt for ownership.
+- **Bounded tables:** keep the largest rows by running/wall seconds across all three tables, with an omission count; kind counts show `count/running seconds/waiting seconds`, and a bundled command’s seconds by kind are `unknown`.
+- **Joins:** gate attempts join by heavy’s working directory; gate-cache keys and landing-turn events lack a worktree/token link, so turn wait and cached gate stamps are omitted.
+- **codex-run:** join its fixed columns by TASK and deduplicate by thread; unlabelled token fields are `unknown`.
+
 ### 5.1 Builds and tests
 
 The question is whether implementers build and test as
@@ -184,6 +195,8 @@ The question is whether implementers build and test as
   (nextest's exit 4); two commands at once from one worktree; `fmt` or
   `check.sh` through `heavy`; `clippy` more than once without a commit
   between.
+
+Build receipts name HEAD’s tree at submission, which may differ from dirty inputs: only clean gate receipts establish repeats; no receipt supplies commit identity, so clippy-without-a-commit remains `unknown`.
 
 `implementer.md`'s baseline is 741 runs from 10-22 to 10-24, whose
 commands ran 43 hours and waited 104. `record runs --all --since

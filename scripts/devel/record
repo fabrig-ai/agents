@@ -1,0 +1,637 @@
+#!/usr/bin/env python3
+"""Write the records repository, and count the machine's recorded runs."""
+import argparse
+import csv
+from contextlib import contextmanager
+from datetime import datetime
+import fcntl
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+
+UNKNOWN = 'unknown'
+NAME = r'[a-z0-9][a-z0-9_-]*'
+SECRET = re.compile(r'-----BEGIN [^\n]*PRIVATE KEY-----|gh[pousr]_|github_pat_|sk-[A-Za-z0-9_-]{20,}|xox[abpr]-|AKIA[A-Z0-9]{16}')
+MISSION_KEYS = 'roadmap feature department parent owner machine model effort started ended state end'.split()
+MILESTONE_KEYS = 'driver model effort started cap ended'.split()
+
+
+class Refusal(Exception):
+    pass
+
+
+def need(ok, why):
+    if not ok:
+        raise Refusal(why)
+
+
+def git(root, *args, data=None, env=None, check=True):
+    result = subprocess.run(['git', '-C', str(root), *args], input=data,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            env=dict(os.environ, GIT_TERMINAL_PROMPT='0', **(env or {})))
+    if check and result.returncode:
+        raise Refusal(result.stderr.decode(errors='replace').strip())
+    return result
+
+
+def out(root, *args, **kw):
+    return git(root, *args, **kw).stdout.decode().strip()
+
+
+def safe(root, name):
+    path = Path(name)
+    need(not path.is_absolute() and path.parts and all(p not in ('.', '..') for p in name.split('/')),
+         f'{name}: place must be a file in the records tree')
+    for part in [root / path, *(root / path).parents]:
+        if part == root:
+            break
+        need(not part.is_symlink(), f'{name}: symlink refused')
+    return root / path
+
+
+def blocked(path, root):
+    child = path
+    while child != root:
+        if child.is_symlink() or (child != path and child.exists() and not child.is_dir()):
+            return True
+        child = child.parent
+    return False
+
+
+def cap_for(name):
+    if name == 'STATUS.md':
+        return 16 * 1024
+    if name == 'director/direction.md' or re.fullmatch(rf'(director|roadmaps/{NAME})/backlog.md', name):
+        return 32 * 1024
+    if re.fullmatch(rf'(director|roadmaps/{NAME})/decisions/[0-9]{{4}}\.md', name):
+        return 128 * 1024
+    if re.fullmatch(rf'roadmaps/{NAME}/README.md', name):
+        return 16 * 1024
+    match = re.fullmatch(rf'missions/{NAME}/(README|plan|decisions|qa|closing|m[1-9][0-9]*)\.md', name)
+    need(match, f'{name}: place is not in the records tree')
+    return (16 if match[1] in ('plan', 'decisions', 'qa') else 8) * 1024
+
+
+def runs_body(text):
+    return re.search(r'^## Runs[^\S\n]*(?:\n|\Z)(.*?)(?=^##[ \t]+|\Z)', text, re.M | re.S)
+
+
+def validate(name, content):
+    need(len(content) <= cap_for(name), f'{name}: cap exceeded')
+    text = content.decode('utf-8')
+    need(not SECRET.search(text), f'{name}: secret refused')
+    if '/decisions/' in name or name.endswith('/decisions.md'):
+        count = len(re.findall(r'^## (?:R[0-9]+-)?[0-9]+(?:\b|\.)', text, re.M))
+        need(count <= 100, f'{name}: more than 100 decisions')
+    if name.startswith('missions/') and (name.endswith('/README.md') or re.search(r'/m[0-9]+\.md$', name)):
+        front = re.match(r'\A---\n(.*?)\n---(?:\n|$)', text, re.S)
+        need(front, f'{name}: front matter missing')
+        fields = {}
+        for line in front[1].splitlines():
+            key, sep, value = line.partition(':')
+            need(sep and re.fullmatch('[a-z]+', key) and value.strip() and key not in fields,
+                 f'{name}: front matter must be unique key: value lines')
+            fields[key] = value.strip()
+        keys = MISSION_KEYS if name.endswith('/README.md') else MILESTONE_KEYS
+        need(all(k in fields for k in keys), f'{name}: front matter requires {", ".join(keys)}')
+        for key in ('started', 'ended'):
+            if fields[key] != UNKNOWN:
+                need(re.fullmatch(r'\d{4}-\d\d-\d\dT\d\d:\d\d(?::\d\d)?Z', fields[key]),
+                     f'{name}: front matter {key} must be UTC or unknown')
+                try:
+                    datetime.fromisoformat(fields[key].replace('Z', '+00:00'))
+                except ValueError as error:
+                    raise Refusal(f'{name}: front matter {key} is not a time') from error
+        if name.endswith('/README.md'):
+            need(fields['state'] in ('active', 'paused', 'ended', 'abandoned', UNKNOWN),
+                 f'{name}: front matter state invalid')
+            body = re.sub(r'(?m)^#{1,6}[ \t].*(?:\n|$)', '', text[front.end():]).strip()
+            summary = re.split(r'\n[ \t]*\n', body, 1)[0]
+            need(summary, f'{name}: summary missing')
+            need(len(summary.split()) <= 60, f'{name}: summary exceeds 60 words')
+        runs = runs_body(text)
+        need(not runs or len(runs[1].encode()) <= 4096, f'{name}: Runs table cap exceeded')
+
+
+def entries(root, tree):
+    result = {}
+    for row in git(root, 'ls-tree', '-rz', tree).stdout.split(b'\0'):
+        if row:
+            meta, name = row.split(b'\t', 1)
+            mode, kind, oid = meta.decode().split()
+            need(kind == 'blob' and mode in ('100644', '100755'), f'{name.decode()}: non-file refused')
+            result[name.decode()] = (mode, oid)
+    return result
+
+
+def total_caps(root, tree):
+    totals = {}
+    for name, (_, oid) in entries(root, tree).items():
+        if name.startswith('missions/'):
+            mission = name.split('/')[1]
+            totals[mission] = totals.get(mission, 0) + int(out(root, 'cat-file', '-s', oid))
+    for mission, size in totals.items():
+        need(size <= 128 * 1024, f'missions/{mission}: mission total cap exceeded')
+
+
+def replay(root, old, base, claims):
+    """Rebase unpublished commits without ever checking them out."""
+    for name in claims:
+        need(name not in entries(root, base), f'{name}: name taken')
+    common = out(root, 'merge-base', old, base)
+    target = base
+    for commit in out(root, 'rev-list', '--reverse', f'{common}..{old}').splitlines():
+        parent = out(root, 'rev-parse', commit + '^')
+        before, after = entries(root, parent), entries(root, commit)
+        for name in {n for n in after if n not in before and re.fullmatch(r'missions/[^/]+/README.md', n)}:
+            need(name not in entries(root, target), f'{name}: name taken')
+        merged = git(root, 'merge-tree', '--write-tree', '--name-only', '--merge-base=' + parent,
+                     target, commit, check=False)
+        lines = merged.stdout.decode().splitlines()
+        need(merged.returncode == 0, 'conflict: ' + ', '.join(lines[1:]).strip())
+        merged_files = entries(root, lines[0])
+        target_files = entries(root, target)
+        for name, (_, oid) in merged_files.items():
+            if merged_files[name] != target_files.get(name):
+                validate(name, git(root, 'cat-file', 'blob', oid).stdout)
+        message = git(root, 'show', '-s', '--format=%B', commit).stdout
+        target = out(root, 'commit-tree', lines[0], '-p', target, data=message)
+    return target
+
+
+@contextmanager
+def installation(root, old, target, selected, working):
+    """Follow main, retaining unrelated index entries and modified working files."""
+    before, after = entries(root, old), entries(root, target)
+    submitted = entries(root, working)
+    index = Path(out(root, 'rev-parse', '--path-format=absolute', '--git-path', 'index'))
+    # Prepare all fallible index work before changing HEAD or the working tree.
+    lockpath = index.with_name('index.lock')
+    fd = os.open(lockpath, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    changed, followed = [], False
+    try:
+        with os.fdopen(fd, 'wb') as lock, tempfile.TemporaryDirectory(dir=index.parent) as directory:
+            staged = {}
+            for row in git(root, 'ls-files', '--stage', '-z').stdout.split(b'\0'):
+                if row:
+                    meta, name = row.split(b'\t')
+                    mode, oid, stage = meta.decode().split()
+                    need(stage == '0', f'{name.decode()}: unmerged index')
+                    staged[name.decode()] = (mode, oid)
+            changes = []
+            for name in before.keys() | after.keys():
+                source = submitted.get(name) if name in selected else before.get(name)
+                if source == after.get(name):
+                    continue
+                path = root / name
+                if blocked(path, root):
+                    continue  # A local symlink is a modification, including directory symlinks.
+                clean = name in selected or staged.get(name) == before.get(name)
+                if path.exists():
+                    clean = clean and path.is_file() and source is not None and (
+                        out(root, 'hash-object', '--', str(path)) == source[1])
+                    if source and path.is_file() and name not in selected:
+                        clean = clean and bool(path.stat().st_mode & 0o111) == (source[0] == '100755')
+                else:
+                    clean = clean and source is None
+                if clean:
+                    changes.append((name, path, path.read_bytes() if path.exists() else None,
+                                    path.stat().st_mode if path.exists() else None))
+            need(not Path(out(root, 'rev-parse', '--path-format=absolute', '--git-path', 'refs/heads/main.lock')).exists(), 'main is locked')
+            temporary = str(Path(directory) / 'index')
+            env = {'GIT_INDEX_FILE': temporary}
+            git(root, 'read-tree', target, env=env)
+            for name in before.keys() | staged.keys():
+                if name not in selected and staged.get(name) != before.get(name):
+                    mode, oid = staged.get(name, ('0', '0' * 40))
+                    git(root, 'update-index', '-z', '--index-info', env=env,
+                        data=f'{mode} {oid}\t{name}\0'.encode())
+            lock.write(Path(temporary).read_bytes())
+            lock.flush()
+            def follow():
+                nonlocal followed
+                for name, path, content, mode in changes:
+                    # Editors need not take our lock: retain any edit made during a push.
+                    if blocked(path, root):
+                        continue
+                    if (path.read_bytes() if path.is_file() else None) != content:
+                        continue
+                    if mode is not None and path.stat().st_mode != mode:
+                        continue
+                    changed.append((path, content, mode))
+                    if name in after:
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as output:
+                            output.write(git(root, 'cat-file', 'blob', after[name][1]).stdout)
+                        os.chmod(output.name, 0o755 if after[name][0] == '100755' else 0o644)
+                        os.replace(output.name, path)
+                    else:
+                        path.unlink()
+                git(root, 'update-ref', 'refs/heads/main', target, old)
+                followed = True
+                os.replace(lockpath, index)
+            yield follow
+    except BaseException:
+        if followed:
+            git(root, 'update-ref', 'refs/heads/main', old, target)
+        for path, content, mode in reversed(changed):
+            if content is None:
+                path.unlink(missing_ok=True)
+            else:
+                path.write_bytes(content)
+                path.chmod(mode)
+        raise
+    finally:
+        lockpath.unlink(missing_ok=True)
+
+
+def write(root, args):
+    need(Path(out(root, 'rev-parse', '--show-toplevel')) == root, 'expected records checkout root')
+    common = Path(out(root, 'rev-parse', '--path-format=absolute', '--git-common-dir'))
+    with (common / 'record.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        need(not any((common / p).exists() for p in ('MERGE_HEAD', 'rebase-merge', 'rebase-apply')),
+             'merge or rebase in progress')
+        need(out(root, 'symbolic-ref', '--short', 'HEAD') == 'main', 'checkout must be on main')
+        old = out(root, 'rev-parse', 'HEAD')
+        selected = set(args.paths) if args.command == 'commit' else set()
+        files = {}
+        before = entries(root, old)
+        for name in selected:
+            path = safe(root, name)
+            cap_for(name)
+            need(path.is_file(), f'{name}: missing file; records cannot be removed or renamed')
+            need(path.stat().st_size <= cap_for(name), f'{name}: cap exceeded')
+            files[name] = path.read_bytes()
+            validate(name, files[name])
+        candidate = old
+        with tempfile.TemporaryDirectory(dir=common) as directory:
+            env = {'GIT_INDEX_FILE': str(Path(directory) / 'index')}
+            git(root, 'read-tree', old, env=env)
+            for name, content in files.items():
+                oid = out(root, 'hash-object', '-w', '--stdin', data=content)
+                git(root, 'update-index', '--add', '--cacheinfo', '100644', oid, name, env=env)
+            tree = out(root, 'write-tree', env=env)
+            total_caps(root, tree)
+            if tree != out(root, 'rev-parse', old + '^{tree}'):
+                writer = os.environ.get('POST_NAME') or os.environ.get('USER', UNKNOWN)
+                message = args.message or 'record ' + ', '.join(sorted(selected))
+                candidate = out(root, 'commit-tree', tree, '-p', old, data=f'{writer}: {message}\n'.encode())
+        claims = {n for n in selected if n not in before and re.fullmatch(r'missions/[^/]+/README.md', n)}
+        for attempt in range(5):
+            fetched = git(root, 'fetch', '--quiet', 'origin', 'main', check=False).returncode == 0
+            if not fetched:
+                if args.command == 'pull':
+                    raise Refusal('cannot fetch origin/main')
+                if candidate == old and git(root, 'merge-base', '--is-ancestor', old, 'origin/main', check=False).returncode == 0:
+                    print('record: nothing to commit; cannot fetch origin/main')
+                    return 0
+                with installation(root, old, candidate, selected, candidate) as follow:
+                    follow()
+                print('record: committed but not pushed; cannot fetch origin/main', file=sys.stderr)
+                return 3
+            remote = out(root, 'rev-parse', 'refs/remotes/origin/main')
+            target = replay(root, candidate, remote, claims)
+            total_caps(root, target)
+            if args.command == 'pull':
+                with installation(root, old, target, selected, candidate) as follow:
+                    follow()
+                print('record: pulled origin/main')
+                return 0
+            # Keep Git's index lock from preflight through push and following main.
+            with installation(root, old, target, selected, candidate) as follow:
+                if target == remote or git(root, 'push', '--quiet', 'origin', target + ':refs/heads/main', check=False).returncode == 0:
+                    follow()
+                    print('record: nothing to commit; up to date' if target == remote else 'record: pushed')
+                    return 0
+        # The last failed push can also lose a name; check without a sixth push.
+        if git(root, 'fetch', '--quiet', 'origin', 'main', check=False).returncode == 0:
+            target = replay(root, candidate, out(root, 'rev-parse', 'origin/main'), claims)
+            total_caps(root, target)
+        with installation(root, old, target, selected, candidate) as follow:
+            follow()
+        print('record: committed but not pushed after five attempts', file=sys.stderr)
+        return 3
+
+
+def jsonlines(path):
+    try:
+        with path.open() as source:
+            for line in source:
+                try:
+                    value = json.loads(line)
+                    if isinstance(value, dict):
+                        yield value
+                except ValueError:
+                    pass  # A live writer can leave an incomplete last line.
+    except OSError:
+        return
+
+
+def seconds(value):
+    try:
+        return datetime.fromisoformat(value.replace('Z', '+00:00')).timestamp()
+    except (ValueError, TypeError, AttributeError):
+        return None
+
+
+def duration(start, end):
+    a, b = seconds(start), seconds(end)
+    return round(max(0, b - a)) if a is not None and b is not None else UNKNOWN
+
+
+def owner(path, tmp):
+    try:
+        parts = Path(path).relative_to(tmp / 'owners').parts
+    except (ValueError, TypeError):
+        return None
+    if not parts or not re.fullmatch(NAME, parts[0]):
+        return None
+    old = re.fullmatch(r'(.+)-m([1-9][0-9]*)', parts[0])
+    if old:
+        return old[1], old[2]
+    if len(parts) > 1 and re.fullmatch(r'm[1-9][0-9]*', parts[1]):
+        return parts[0], parts[1][1:]
+    # The old unsuffixed layout was one milestone, unless split siblings exist.
+    if not any(p.is_dir() for p in (tmp / 'owners' / parts[0]).glob('m[0-9]*')) and not list((tmp / 'owners').glob(parts[0] + '-m[0-9]*')):
+        return parts[0], '1'
+    return parts[0], ''
+
+
+def prompt_owner(text, tmp):
+    paths = re.findall(r'(?:~|/)[^\s`\"\'<>]+', text)
+    for path in paths:
+        match = re.search(r'/missions/([^/\s]+)/(README|m[0-9]+)\.md', path)
+        if match:
+            return match[1], '' if match[2] == 'README' else match[2][1:]
+        path = path.rstrip('.,:)')
+        result = owner(str(Path.home()) + path[1:] if path.startswith('~/') else path, tmp)
+        if result:
+            return result
+    return None
+
+
+def sessions(home, tmp):
+    result = []
+    for path in (home / '.codex/sessions').glob('**/rollout-*.jsonl'):
+        meta, models, usage, end = {}, [], {}, None
+        for row in jsonlines(path):
+            payload = row.get('payload', {})
+            end = row.get('timestamp', end)
+            if row.get('type') == 'session_meta':
+                meta = payload
+            elif row.get('type') == 'turn_context':
+                pair = (payload.get('model', UNKNOWN), payload.get('effort') or payload.get('reasoning_effort', UNKNOWN))
+                if pair not in models:
+                    models.append(pair)
+            elif row.get('type') == 'event_msg' and payload.get('type') == 'token_count':
+                usage = (payload.get('info') or {}).get('total_token_usage') or usage
+        who = owner(meta.get('cwd'), tmp)
+        if who:
+            result.append(dict(who=who, cwd=meta.get('cwd'), id=meta.get('id', path.stem), kind='Codex',
+                               model=','.join(str(p[0]) for p in models) or UNKNOWN,
+                               effort=','.join(str(p[1]) for p in models) or UNKNOWN,
+                               wall=duration(meta.get('timestamp'), end), start=meta.get('timestamp', ''),
+                               tokens=[usage.get(k, UNKNOWN) for k in ('input_tokens', 'cached_input_tokens', 'output_tokens')]))
+    for path in (home / '.claude/projects').glob('*/*.jsonl'):
+        who, first, last, models, efforts, usage = None, None, None, [], [], {}
+        first_user = False
+        messages = {}
+        for row in jsonlines(path):
+            stamp = row.get('timestamp')
+            if stamp:
+                first = min(first, stamp) if first else stamp
+                last = max(last, stamp) if last else stamp
+            message = row.get('message') or {}
+            if row.get('type') == 'user' and not first_user:
+                first_user = True
+                content = message.get('content', '')
+                text = content if isinstance(content, str) else '\n'.join(p.get('text', '') for p in content if isinstance(p, dict) and p.get('type') == 'text')
+                who = prompt_owner(text, tmp)
+            if row.get('type') == 'assistant':
+                model = message.get('model')
+                effort = row.get('effort') or row.get('reasoningEffort') or message.get('effort')
+                if model and model not in models:
+                    models.append(model)
+                if effort and effort not in efforts:
+                    efforts.append(effort)
+                mid = message.get('id')
+                if mid:
+                    prior = messages.setdefault(mid, {})
+                    for key, value in (message.get('usage') or {}).items():
+                        if isinstance(value, (int, float)):
+                            prior[key] = max(prior.get(key, 0), value)
+        for values in messages.values():
+            for key, value in values.items():
+                usage[key] = usage.get(key, 0) + value
+        if who:
+            result.append(dict(who=who, cwd=None, id=path.stem, kind='Claude', start=first or '',
+                               model=','.join(models) or UNKNOWN, effort=','.join(efforts) or UNKNOWN,
+                               wall=duration(first, last), tokens=[usage.get('input_tokens', UNKNOWN),
+                               usage.get('cache_read_input_tokens', UNKNOWN), usage.get('output_tokens', UNKNOWN)]))
+    # The design specifies these columns; use thread to avoid counting a rollout twice.
+    try:
+        with (tmp / 'codex-run/runs.tsv').open() as source:
+            headers = []
+            for row in csv.reader(source, delimiter='\t'):
+                if row and row[0] == 'id':
+                    headers = row
+                    continue
+                if len(row) < 11:
+                    continue
+                who = prompt_owner(row[8], tmp)
+                if who and not any(s['id'] == row[10] for s in result):
+                    fields = dict(zip(headers, row))
+                    tokens = [fields.get(key, UNKNOWN) for key in ('input_tokens', 'cached_input_tokens', 'output_tokens')]
+                    result.append(dict(who=who, cwd=None, id=row[0], kind='codex-run', start=row[2],
+                                       model=row[6], effort=row[7], wall=duration(row[2], row[3]), tokens=tokens))
+    except OSError:
+        pass
+    return result
+
+
+def kinds(command):
+    # heavy flattens argv; shell wrappers may contain several cargo commands.
+    segments = re.split(r'&&|\|\||[;\n]', command)
+    result, flags = [], set()
+    for segment in segments:
+        if 'nextest' in segment:
+            focused = bool(re.search(r'--(?:test(?:[=\s]|$)|lib\b)', segment))
+            result.append('focused' if focused else 'package' if re.search(r'(?:^|\s)-p(?:\s|=|\S)', segment) else 'workspace')
+            if re.search(r'(?:^|\s)(?:-E|--filter-expr)(?:\s|=|\S)', segment) and not focused:
+                flags.add('filter without --test or --lib')
+        elif re.search(r'\bcheck\.sh\b', segment):
+            result.append('check.sh')
+            flags.add('check.sh through heavy')
+        elif re.search(r'\bcargo\s+test\b.*--doc\b', segment):
+            result.append('doc tests')
+        else:
+            match = re.search(r'\bcargo\s+(check|clippy|fmt)\b', segment)
+            result.append(match[1] if match else 'other')
+            if match and match[1] == 'fmt':
+                flags.add('fmt through heavy')
+    return result, flags
+
+
+def heavy_rows(tmp):
+    receipts = {}
+    for path in (tmp / 'heavy/receipts').glob('*.json'):
+        for row in jsonlines(path):
+            if row.get('log'):
+                receipts[row['log']] = row
+    result = []
+    try:
+        with (tmp / 'logs/heavy.tsv').open() as source:
+            for row in csv.reader(source, delimiter='\t'):
+                if len(row) < 10 or not owner(row[7], tmp):
+                    continue
+                try:
+                    wait, run = float(row[3]), float(row[4])
+                except ValueError:
+                    continue
+                receipt = receipts.get(row[8], {})
+                # Only gate receipts certify clean inputs; build tree is HEAD at submission.
+                tree = receipt.get('tree', UNKNOWN) if row[1] == 'gate' else UNKNOWN
+                tree = UNKNOWN if tree == 'unversioned' else tree
+                classified, flags = kinds(row[9])
+                if 'nextest' in row[9] and row[5] == '4':
+                    flags.add('no test selected')
+                result.append(dict(who=owner(row[7], tmp), cwd=row[7], end=seconds(row[2]), start=row[2],
+                                   run=run, wait=wait, code=row[5], kinds=classified, flags=flags,
+                                   command=row[9], tree=tree, lane=row[1]))
+    except OSError:
+        pass
+    return result
+
+
+def implementers(ss, rows, since):
+    result = []
+    for cwd in sorted({s['cwd'] for s in ss if s['cwd']}):
+        commands = sorted([r for r in rows if r['cwd'] == cwd and (not since or r['start'] >= since)], key=lambda r: r['start'])
+        if since and not commands and not any(s['cwd'] == cwd and s['start'] >= since for s in ss):
+            continue
+        flags, counts, times, seen, repeats = set(), {}, {}, set(), 0
+        for i, row in enumerate(commands):
+            flags.update(row['flags'])
+            for kind in row['kinds']:
+                counts[kind] = counts.get(kind, 0) + 1
+                running, waiting = times.get(kind, (0, 0))
+                times[kind] = (running + row['run'], waiting + row['wait']) if len(row['kinds']) == 1 and running != UNKNOWN else (UNKNOWN, UNKNOWN)
+            tree = row['tree']
+            key = row['command'], tree
+            if tree == UNKNOWN:
+                repeats = UNKNOWN
+            elif key in seen and repeats != UNKNOWN:
+                repeats += 1
+            seen.add(key)
+            if row['end'] is not None:
+                queued = row['end'] - row['wait'] - row['run']
+                if any(other['end'] is not None and max(queued, other['end'] - other['wait'] - other['run']) < min(row['end'], other['end']) for other in commands[:i]):
+                    flags.add('two commands at once')
+        if sum(r['kinds'].count('clippy') for r in commands) > 1:
+            flags.add('clippy without commit: unknown')
+        first = next(s for s in ss if s['cwd'] == cwd)
+        result.append(dict(who=first['who'], cwd=cwd, counts=','.join(f'{k}={v}/{round(times[k][0]) if times[k][0] != UNKNOWN else UNKNOWN}/{round(times[k][1]) if times[k][1] != UNKNOWN else UNKNOWN}' for k, v in sorted(counts.items())) if commands else UNKNOWN,
+                           run=round(sum(r['run'] for r in commands)) if commands else UNKNOWN,
+                           wait=round(sum(r['wait'] for r in commands)) if commands else UNKNOWN,
+                           repeats=repeats if commands else UNKNOWN, flags='; '.join(sorted(flags)) or ('none' if commands else UNKNOWN)))
+    return result
+
+
+def table(headers, rows):
+    def cell(value):
+        return str(value).replace('|', '/').replace('\n', ' ').replace('\t', ' ')
+    return ['| ' + ' | '.join(map(cell, headers)) + ' |', '| ' + ' | '.join('---' for _ in headers) + ' |'] + ['| ' + ' | '.join(map(cell, row)) + ' |' for row in rows]
+
+
+def runs(root, tmp, args):
+    ss = sessions(Path.home(), tmp)
+    rows = heavy_rows(tmp)
+    runs = implementers(ss, rows, args.since)
+    if args.all:
+        writer = csv.writer(sys.stdout, delimiter='\t', lineterminator='\n')
+        writer.writerow(('mission', 'milestone', 'worktree', 'counts', 'running_s', 'waiting_s', 'repeats', 'flags'))
+        for run in runs:
+            writer.writerow((*run['who'], run['cwd'], run['counts'], run['run'], run['wait'], run['repeats'], run['flags']))
+        return 0
+    need(args.mission and re.fullmatch(NAME, args.mission), 'runs needs a mission or --all')
+    need(not args.number or re.fullmatch('[1-9][0-9]*', args.number), 'invalid milestone')
+    who = args.mission, args.number or ''
+    name = f'missions/{args.mission}/' + (f'm{args.number}.md' if args.number else 'README.md')
+    path = safe(root, name)
+    text = path.read_text()
+    groups = [('Sessions', ['session', 'kind', 'model', 'effort', 'wall s', 'in', 'cached', 'out'],
+               [(s['wall'], [s['id'], s['kind'], s['model'], s['effort'], s['wall'], *s['tokens']]) for s in ss if s['who'] == who]),
+              ('Implementer runs', ['worktree', 'kind=count/run s/wait s', 'running s', 'waiting s', 'repeats', 'flags'],
+               [(r['run'], [r['cwd'], r['counts'], r['run'], r['wait'], r['repeats'], r['flags']]) for r in runs if r['who'] == who]),
+              ('Landings', ['worktree', 'gate s', 'result', 'queue wait s'],
+               [(r['run'], [r['cwd'], r['run'], r['code'], r['wait']]) for r in rows if r['who'] == who and r['lane'] == 'gate'])]
+    # Reserve space for all headers and one omission count; largest runtimes win globally.
+    chosen = {title: [] for title, _, _ in groups}
+    def render(omitted):
+        lines = []
+        for title, headers, _ in groups:
+            lines += ['### ' + title, '', *table(headers, chosen[title] or [[UNKNOWN] * len(headers)]), '']
+        lines += [f'{omitted} rows left out.'] if omitted else []
+        return '\n'.join(lines) + '\n\n'
+    ordered = sorted([(time if isinstance(time, (int, float)) else -1, title, row) for title, _, items in groups for time, row in items], key=lambda x: x[0], reverse=True)
+    omitted = 0
+    for _, title, row in ordered:
+        chosen[title].append(row)
+        if len(render(len(ordered)).encode()) > 4096:
+            chosen[title].pop()
+            omitted += 1
+    body = render(omitted)
+    found = runs_body(text)
+    updated = text[:found.start(1)] + body + text[found.end(1):] if found else text.rstrip() + '\n\n## Runs\n\n' + body
+    need(len(updated.encode()) <= cap_for(name), f'{name}: cap exceeded')
+    # Replace the file under the same lock used by the writer.
+    with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as target:
+        target.write(updated.encode())
+    os.chmod(target.name, path.stat().st_mode)
+    os.replace(target.name, path)
+    print(f'record: wrote {name}')
+    return 0
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest='command', required=True)
+    commit = sub.add_parser('commit')
+    commit.add_argument('-m', '--message')
+    commit.add_argument('paths', nargs='+')
+    sub.add_parser('pull')
+    count = sub.add_parser('runs')
+    count.add_argument('--all', action='store_true')
+    count.add_argument('--since')
+    count.add_argument('mission', nargs='?')
+    count.add_argument('number', nargs='?')
+    args = parser.parse_args()
+    workspace = Path.home() / ('src/rust' if (Path.home() / 'src/rust').exists() else 'src')
+    root = Path(os.environ.get('RECORDS', workspace / 'records')).expanduser().absolute()
+    tmp = Path(os.environ.get('DEV_TMP', Path(os.environ.get('DEV_ROOT', workspace)) / 'tmp')).expanduser().absolute()
+    try:
+        if args.command == 'runs':
+            need(not args.since or args.all, '--since requires --all')
+            need(not args.all or not args.mission, '--all takes no mission')
+            if args.since:
+                need(re.fullmatch(r'\d{4}-\d\d-\d\d', args.since), '--since needs DATE')
+                datetime.fromisoformat(args.since)
+            if args.all:
+                return runs(root, tmp, args)
+            common = Path(out(root, 'rev-parse', '--path-format=absolute', '--git-common-dir'))
+            with (common / 'record.lock').open('a') as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                return runs(root, tmp, args)
+        return write(root, args)
+    except (Refusal, OSError, ValueError) as error:
+        print(f'record: {error}', file=sys.stderr)
+        return 2
+
+
+if __name__ == '__main__':
+    sys.exit(main())

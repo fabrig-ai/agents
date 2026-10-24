@@ -1,0 +1,429 @@
+#!/usr/bin/env python3
+"""Offline records fixtures: two machines, scratch HOME and optional telemetry."""
+import csv
+import io
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+
+SCRIPT = Path(__file__).resolve().with_name('record')
+REAL_GIT = shutil.which('git')
+
+
+def front(milestone=False):
+    keys = ('driver model effort started cap ended' if milestone else
+            'roadmap feature department parent owner machine model effort started ended state end').split()
+    return '---\n' + ''.join(f'{key}: unknown\n' for key in keys) + '---\n\nSummary.\n'
+
+
+class Lab:
+    def __init__(self, root):
+        self.root = root
+        self.home = root / 'home'
+        self.tmp = root / 'tmp'
+        self.bin = root / 'bin'
+        for path in (self.home, self.tmp, self.bin):
+            path.mkdir()
+        self.env = dict(PATH=str(self.bin) + ':' + os.environ['PATH'], HOME=str(self.home),
+                        DEV_TMP=str(self.tmp), USER='fixture', POST_NAME='o/fixture',
+                        GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1',
+                        GIT_AUTHOR_NAME='Fixture', GIT_AUTHOR_EMAIL='fixture@invalid',
+                        GIT_COMMITTER_NAME='Fixture', GIT_COMMITTER_EMAIL='fixture@invalid',
+                        GIT_ALLOW_PROTOCOL='file', LC_ALL='C.UTF-8')
+        # Pause one machine immediately before push; the other can win the race.
+        wrapper = self.bin / 'git'
+        wrapper.write_text('#!' + sys.executable + '\nimport os,sys,time\nfrom pathlib import Path\n'
+                           "if 'push' in sys.argv and os.environ.get('PAUSE_PUSH'):\n"
+                           " p=Path(os.environ['PAUSE_PUSH'])\n"
+                           " if not p.exists():\n"
+                           "  p.touch(); until=time.monotonic()+15\n"
+                           "  while not p.with_suffix('.release').exists():\n"
+                           "   assert time.monotonic()<until; time.sleep(.02)\n"
+                           'os.execv(' + repr(REAL_GIT) + ', sys.argv)\n')
+        wrapper.chmod(0o700)
+        self.a, self.b, self.origin = (root / name for name in ('a', 'b', 'origin.git'))
+        self.a.mkdir()
+        self.git(self.a, 'init', '-b', 'main')
+        self.put('STATUS.md', 'base\n')
+        self.put('director/backlog.md', 'base backlog\n')
+        self.git(self.a, 'add', '.')
+        self.git(self.a, 'commit', '-m', 'baseline')
+        self.git(root, 'clone', '--bare', str(self.a), str(self.origin))
+        self.git(self.a, 'remote', 'add', 'origin', str(self.origin))
+        self.git(self.a, 'fetch', 'origin')
+        self.git(root, 'clone', str(self.origin), str(self.b))
+
+    def git(self, root, *args):
+        p = subprocess.run([REAL_GIT, '-C', str(root), *args], env=self.env, text=True,
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        assert p.returncode == 0, p.stderr
+        return p.stdout.strip()
+
+    def put(self, name, text, machine=None):
+        path = (machine or self.a) / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+        return path
+
+    def run(self, *args, machine=None, status=0, extra=None):
+        env = dict(self.env, RECORDS=str(machine or self.a), **(extra or {}))
+        p = subprocess.run([sys.executable, '-I', str(SCRIPT), *args], env=env, text=True,
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+        assert p.returncode == status, (args, p.returncode, p.stdout, p.stderr)
+        return p.stdout + p.stderr
+
+    def race(self, name, first, second, status=0):
+        self.put(name, first)
+        self.put(name, second, self.b)
+        pause = self.root / 'pause'
+        env = dict(self.env, RECORDS=str(self.a), PAUSE_PUSH=str(pause))
+        process = subprocess.Popen([sys.executable, '-I', str(SCRIPT), 'commit', name], env=env,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            until = time.monotonic() + 15
+            while not pause.exists():
+                assert process.poll() is None and time.monotonic() < until
+                time.sleep(.02)
+            self.run('commit', name, machine=self.b)
+            pause.with_suffix('.release').touch()
+            stdout, stderr = process.communicate(timeout=20)
+            assert process.returncode == status, (stdout, stderr)
+            return stdout + stderr
+        finally:
+            pause.with_suffix('.release').touch()
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+
+
+def writer(lab):
+    lab.put('missions/first/README.md', front())
+    assert 'pushed' in lab.run('commit', '-m', 'brief', 'missions/first/README.md')
+    assert lab.git(lab.origin, 'log', '-1', '--format=%s') == 'o/fixture: brief'
+    lab.run('commit', 'missions/first/README.md')
+    # An unrelated staged version and its later unstaged edit both survive.
+    lab.put('director/backlog.md', 'staged\n')
+    lab.git(lab.a, 'add', 'director/backlog.md')
+    lab.put('director/backlog.md', 'unstaged\n')
+    lab.put('STATUS.md', 'first\n')
+    lab.run('commit', 'STATUS.md')
+    assert lab.git(lab.a, 'show', ':director/backlog.md') == 'staged'
+    assert (lab.a / 'director/backlog.md').read_text() == 'unstaged\n'
+    assert lab.git(lab.origin, 'show', 'main:director/backlog.md') == 'base backlog'
+    lab.run('pull', machine=lab.b)
+    lab.put('director/backlog.md', 'remote\n', lab.b)
+    lab.put('director/direction.md', 'remote direction\n', lab.b)
+    lab.run('commit', 'director/backlog.md', 'director/direction.md', machine=lab.b)
+    lab.run('pull')
+    assert lab.git(lab.a, 'show', ':director/backlog.md') == 'staged'
+    assert (lab.a / 'director/backlog.md').read_text() == 'unstaged\n'
+    assert (lab.a / 'director/direction.md').read_text() == 'remote direction\n'
+    # USER is used when POST_NAME is absent.
+    lab.put('STATUS.md', 'user fallback\n')
+    lab.run('commit', 'STATUS.md', extra={'POST_NAME': ''})
+    assert lab.git(lab.origin, 'log', '-1', '--format=%s').startswith('fixture:')
+
+
+def refusals(lab):
+    cases = [('elsewhere.md', 'wrong', 'place'),
+             ('director/decisions/0001Xmd', 'wrong', 'place'),
+             ('missions/x/README.md', 'no front matter', 'front matter'),
+             ('STATUS.md', 'x' * 16385, 'cap'),
+             ('missions/x/README.md', front() + ' '.join(['word'] * 61), 'summary'),
+             ('director/decisions/0001.md', '\n'.join(f'## {i}. call' for i in range(101)), '100 decisions'),
+             ('missions/x/README.md', front().replace('started: unknown', 'started: yesterday'), 'UTC')]
+    secrets = ['-----BEGIN RSA PRIVATE KEY-----', 'ghp_fake', 'gho_fake', 'ghu_fake', 'ghs_fake', 'ghr_fake',
+               'github_pat_fake', 'sk-' + 'A' * 20, 'xoxb-fake', 'xoxa-fake', 'xoxp-fake', 'xoxr-fake', 'AKIA' + 'A' * 16]
+    cases += [('STATUS.md', secret, 'secret') for secret in secrets]
+    for name, content, reason in cases:
+        path = lab.put(name, content)
+        old = lab.git(lab.a, 'rev-parse', 'HEAD')
+        assert reason in lab.run('commit', name, status=2)
+        assert lab.git(lab.a, 'rev-parse', 'HEAD') == old
+        path.unlink()
+    # Path traversal, symlinks and deletions are refused.
+    assert 'place' in lab.run('commit', '../escape.md', status=2)
+    outside = lab.root / 'outside'
+    outside.write_text('outside')
+    (lab.a / 'STATUS.md').symlink_to(outside)
+    assert 'symlink' in lab.run('commit', 'STATUS.md', status=2)
+    (lab.a / 'STATUS.md').unlink()
+    assert 'missing' in lab.run('commit', 'STATUS.md', status=2)
+    lab.put('STATUS.md', 'tmp/github-conformance/ is a valid reference\n')
+    lab.run('commit', 'STATUS.md')
+    # Mission total and Runs section caps.
+    paths = []
+    for number in range(17):
+        name = f'missions/large/m{number + 1}.md'
+        lab.put(name, front(True) + 'x' * 7900)
+        paths.append(name)
+    assert 'mission total' in lab.run('commit', *paths, status=2)
+    lab.put('missions/x/m1.md', front(True) + '\n## Runs\n' + 'a' * 4097)
+    assert 'Runs table' in lab.run('commit', 'missions/x/m1.md', status=2)
+    for prefix in ('1067', 'R3-12', '12.'):
+        lab.put('missions/x/decisions.md', ('## ' + prefix + ' decision\n') * 101)
+        assert '100 decisions' in lab.run('commit', 'missions/x/decisions.md', status=2)
+
+
+def different_files(lab):
+    lab.put('director/direction.md', 'other machine\n', lab.b)
+    lab.put('STATUS.md', 'this machine\n')
+    pause = lab.root / 'pause'
+    with (lab.root / 'log').open('w') as output:
+        process = subprocess.Popen([sys.executable, '-I', str(SCRIPT), 'commit', 'STATUS.md'],
+                                   env=dict(lab.env, RECORDS=str(lab.a), PAUSE_PUSH=str(pause)),
+                                   stdout=output, stderr=output)
+        try:
+            until = time.monotonic() + 15
+            while not pause.exists():
+                assert process.poll() is None and time.monotonic() < until
+                time.sleep(.02)
+            lab.run('commit', 'director/direction.md', machine=lab.b)
+            pause.with_suffix('.release').touch()
+            assert process.wait(timeout=20) == 0, (lab.root / 'log').read_text()
+        finally:
+            pause.with_suffix('.release').touch()
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+    assert lab.git(lab.origin, 'show', 'main:STATUS.md') == 'this machine'
+    assert (lab.a / 'director/direction.md').read_text() == 'other machine\n'
+
+
+def name_race(lab):
+    old = lab.git(lab.a, 'rev-parse', 'HEAD')
+    assert 'name taken' in lab.race('missions/same/README.md', front() + '\nFirst.', front() + '\nSecond.', status=2)
+    assert lab.git(lab.a, 'rev-parse', 'HEAD') == old
+    assert 'First.' in (lab.a / 'missions/same/README.md').read_text()
+    # The ordinary stale-checkout case is refused too.
+    assert 'name taken' in lab.run('commit', 'missions/same/README.md', status=2)
+
+
+def conflict(lab):
+    old = lab.git(lab.a, 'rev-parse', 'HEAD')
+    lab.put('director/backlog.md', 'another session\n')
+    lab.git(lab.a, 'add', 'director/backlog.md')
+    index = (lab.a / '.git/index').read_bytes()
+    assert 'STATUS.md' in lab.race('STATUS.md', 'one\n', 'two\n', status=2)
+    assert lab.git(lab.a, 'rev-parse', 'HEAD') == old
+    assert (lab.a / '.git/index').read_bytes() == index
+    assert (lab.a / 'STATUS.md').read_text() == 'one\n'
+    assert (lab.a / 'director/backlog.md').read_text() == 'another session\n'
+    assert not (lab.a / '.git/rebase-merge').exists()
+
+
+def offline(lab):
+    hidden = lab.origin.with_name('hidden.git')
+    lab.origin.rename(hidden)
+    assert 'nothing to commit' in lab.run('commit', 'STATUS.md')
+    lab.put('STATUS.md', 'offline\n')
+    lab.run('commit', 'STATUS.md', status=3)
+    assert lab.git(lab.a, 'show', 'HEAD:STATUS.md') == 'offline'
+    hidden.rename(lab.origin)
+    lab.put('director/direction.md', 'back online\n')
+    lab.run('commit', 'director/direction.md')
+    assert lab.git(lab.origin, 'show', 'main:STATUS.md') == 'offline'
+    # Failed push, successful fetch: pending commit is retained and retried later.
+    hook = lab.origin / 'hooks/pre-receive'
+    hook.write_text('#!/bin/sh\nexit 1\n')
+    hook.chmod(0o700)
+    lab.put('STATUS.md', 'push unavailable\n')
+    lab.run('commit', 'STATUS.md', status=3)
+    hook.unlink()
+    lab.run('commit', 'STATUS.md')
+    assert lab.git(lab.origin, 'show', 'main:STATUS.md') == 'push unavailable'
+
+
+def merged_validation(lab):
+    base = 'start\n' + 'middle\n' * 10 + 'end\n'
+    lab.put('STATUS.md', base)
+    lab.run('commit', 'STATUS.md')
+    lab.run('pull', machine=lab.b)
+    old = lab.git(lab.a, 'rev-parse', 'HEAD')
+    # Both sides fit, but their clean merge exceeds the cap.
+    lab.put('STATUS.md', 'a' * 9000 + '\n' + base)
+    lab.put('STATUS.md', base + 'b' * 9000 + '\n', lab.b)
+    lab.run('commit', 'STATUS.md', machine=lab.b)
+    remote = lab.git(lab.origin, 'rev-parse', 'main')
+    assert 'cap' in lab.run('commit', 'STATUS.md', status=2)
+    assert lab.git(lab.a, 'rev-parse', 'HEAD') == old
+    assert lab.git(lab.origin, 'rev-parse', 'main') == remote
+    # A valid clean merge also brings the selected working file up to date.
+    lab.put('STATUS.md', 'first\n' + base)
+    lab.run('commit', 'STATUS.md')
+    assert (lab.a / 'STATUS.md').read_text() == 'first\n' + base + 'b' * 9000 + '\n'
+    assert not lab.git(lab.a, 'status', '--porcelain')
+
+
+def installation_failures(lab):
+    lab.put('STATUS.md', 'named\n')
+    old = lab.git(lab.origin, 'rev-parse', 'main')
+    oid = lab.git(lab.a, 'rev-parse', 'HEAD:director/backlog.md')
+    # Unmerged unrelated files are refused before any push.
+    subprocess.run([REAL_GIT, '-C', str(lab.a), 'update-index', '--index-info'],
+                   env=lab.env, input=f'0 {"0" * 40}\tdirector/backlog.md\n100644 {oid} 1\tdirector/backlog.md\n100644 {oid} 2\tdirector/backlog.md\n',
+                   text=True, check=True)
+    assert 'unmerged index' in lab.run('commit', 'STATUS.md', status=2)
+    assert lab.git(lab.origin, 'rev-parse', 'main') == old
+    assert not (lab.a / '.git/index.lock').exists()
+    lab.git(lab.a, 'read-tree', 'HEAD')
+    # Failure after acquiring index.lock cleans it and keeps the checkout intact.
+    invalid = lab.a / '.git/refs/heads/main.lock'
+    invalid.touch()
+    lab.run('commit', 'STATUS.md', status=2)
+    assert not (lab.a / '.git/index.lock').exists()
+    assert lab.git(lab.a, 'rev-parse', 'HEAD') == old
+    invalid.unlink()
+    lab.run('commit', 'STATUS.md')
+    # Local symlinks and untracked collisions survive a pull, including remote updates.
+    lab.run('pull', machine=lab.b)
+    lab.put('director/direction.md', 'remote\n', lab.b)
+    lab.run('commit', 'director/direction.md', machine=lab.b)
+    elsewhere = lab.root / 'elsewhere'
+    elsewhere.write_text('local\n')
+    (lab.a / 'director/direction.md').symlink_to(elsewhere)
+    lab.run('pull')
+    assert (lab.a / 'director/direction.md').is_symlink()
+    assert elsewhere.read_text() == 'local\n'
+
+
+def setup(lab):
+    # Exercise only setup's records check; never its machine/queue checks.
+    source = SCRIPT.parent.parent / 'infra/setup'
+    kit = lab.root / 'kit/scripts'
+    (kit / 'infra').mkdir(parents=True)
+    (kit / 'devel').mkdir()
+    shutil.copyfile(SCRIPT.with_name('kit.sh'), kit / 'devel/kit.sh')
+    text = source.read_text()
+    assert 'for tool in heavy land record setup' in text
+    check = kit / 'infra/setup'
+    check.write_text(text.replace('check "$@"', 'fix=${FIX:-0}; failed=0\nok() { :; }; fail() { echo "$*"; failed=1; }\ncheck_records\nexit "$failed"'))
+    wrapper = lab.bin / 'git'
+    wrapper.write_text('#!' + sys.executable + '\nimport os,sys\n'
+                       "args=[os.environ['FIXTURE_ORIGIN'] if a=='git@github.com:fabrig-ai/records.git' else a for a in sys.argv[1:]]\n"
+                       'os.execv(' + repr(REAL_GIT) + ', ["git", *args])\n')
+    env = dict(lab.env, DEV_ROOT=str(lab.root / 'workspace'), FIXTURE_ORIGIN=str(lab.origin))
+    (lab.root / 'workspace').mkdir()
+    result = subprocess.run(['bash', str(check)], env=env, capture_output=True, text=True)
+    assert result.returncode == 1 and '--fix clones' in result.stdout
+    assert not (lab.root / 'workspace/records').exists()
+    result = subprocess.run(['bash', str(check)], env=dict(env, FIX='1'), capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    records = lab.root / 'workspace/records'
+    assert lab.git(records, 'rev-parse', '--abbrev-ref', 'HEAD') == 'main'
+    (records / 'uncommitted').write_text('keep')
+    result = subprocess.run(['bash', str(check)], env=env, capture_output=True, text=True)
+    assert result.returncode == 0 and (records / 'uncommitted').read_text() == 'keep'
+
+
+def telemetry(lab):
+    cwd = str(lab.tmp / 'owners/demo/m1/wt/task')
+    Path(cwd).mkdir(parents=True)
+    lab.put('missions/demo/m1.md', front(True) + '\n## Runs\nold\n## End\nKept.\n')
+    def jl(path, rows):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+    def rollout(cwd, sid):
+        return [dict(type='session_meta', payload=dict(cwd=cwd, id=sid, timestamp='2026-10-24T00:00:00Z')),
+                dict(type='turn_context', timestamp='2026-10-24T00:00:01Z', payload=dict(model='model-as-run', effort='high')),
+                dict(type='event_msg', timestamp='2026-10-24T00:01:00Z', payload=dict(type='token_count', info=dict(total_token_usage=dict(input_tokens=10, cached_input_tokens=3, output_tokens=5, reasoning_output_tokens=2)))),
+                dict(type='event_msg', timestamp='2026-10-24T00:02:00Z', payload=dict(type='token_count', info=dict(total_token_usage=dict(input_tokens=100, cached_input_tokens=30, output_tokens=50, reasoning_output_tokens=20))))]
+    jl(lab.home / '.codex/sessions/date/rollout-fake.jsonl', rollout(cwd, 'thread'))
+    message = dict(id='message', model='claude-as-run', usage=dict(input_tokens=8, cache_read_input_tokens=2, output_tokens=4))
+    jl(lab.home / '.claude/projects/fake/session.jsonl', [
+        dict(type='user', timestamp='2026-10-24T00:00:00Z', message=dict(content='Read /records/missions/demo/m1.md')),
+        dict(type='assistant', timestamp='2026-10-24T00:01:00Z', message=message),
+        dict(type='assistant', timestamp='2026-10-24T00:02:00Z', message=message),
+        dict(type='user', timestamp='2026-10-24T00:03:00Z', message=dict(content='Other messages must not assign missions.'))])
+    commands = ['cargo nextest run -p pkg -E test(foo)', 'cargo nextest run -p pkg --lib',
+                'cargo nextest run -p pkg', 'cargo nextest run --workspace', 'cargo check -p pkg',
+                'cargo clippy --workspace', 'cargo clippy --workspace', 'cargo fmt',
+                'scripts/check.sh', 'cargo test --doc -p pkg', 'echo other', 'cargo check -p pkg']
+    rows = []
+    for i, command in enumerate(commands):
+        log = str(lab.tmp / f'logs/{i}.log')
+        rows.append([i, 'gate', '2026-10-24T00:01:00Z', 10, 20, 4 if i == 0 else 0, 8, cwd, log, command, 'label'])
+        jl(lab.tmp / f'heavy/receipts/{i}.json', [dict(schema='heavy-receipt-v1', tree='a' * 40, log=log)])
+    path = lab.tmp / 'logs/heavy.tsv'
+    path.parent.mkdir(exist_ok=True)
+    with path.open('w') as source:
+        csv.writer(source, delimiter='\t').writerows(rows)
+    codex = lab.tmp / 'codex-run/runs.tsv'
+    codex.parent.mkdir()
+    codex.write_text('run\tcaller\t2026-10-24T00:00:00Z\t2026-10-24T00:01:00Z\t0\t1\tother\tlow\t' + str(lab.tmp / 'owners/demo/m1/task.md') + '\treport\tthread\t1\t2\t3\n')
+    # Repository-only landing evidence cannot be assigned to this worktree.
+    jl(lab.tmp / 'landing-turn/events.jsonl', [dict(repository='temper', event='grant', wait_s=999)])
+    gate = lab.tmp / 'gates/temper/opaque-key'
+    gate.parent.mkdir(parents=True)
+    gate.write_text('unjoinable gate stamp')
+    headers = 'id caller start end exit tries model effort TASK REPORT thread input_tokens cached_input_tokens output_tokens'.split()
+    codex.write_text('\t'.join(headers) + '\n' + codex.read_text() +
+                     'fallback\tcaller\t2026-10-24T00:00:00Z\t2026-10-24T00:01:00Z\t0\t1\tfallback-model\tlow\t' + str(lab.tmp / 'owners/demo/m1/task2.md') + '\treport\tmissing-thread\t12\t3\t4\n')
+    lab.run('runs', 'demo', '1')
+    text = (lab.a / 'missions/demo/m1.md').read_text()
+    assert '| fallback | codex-run | fallback-model | low | 60 | 12 | 3 | 4 |' in text
+    assert 'turn wait' not in text and '999' not in text
+
+    for value in ('model-as-run', 'claude-as-run', '| 100 | 30 | 50 |', '| 8 | 2 | 4 |',
+                  'filter without', 'no test selected', 'two commands at once', 'fmt through heavy',
+                  'check.sh through heavy', 'clippy without commit: unknown', '| 2 |', '## End\nKept.'):
+        assert value in text, (value, text)
+    assert 'old' not in text
+    assert text.count('| thread |') == 1
+    assert len(text.split('## Runs\n', 1)[1].split('## End', 1)[0].encode()) <= 4096
+    output = lab.run('runs', '--all', '--since', '2026-10-24')
+    assert len(output.splitlines()) == 2 and 'demo\t1\t' in output
+    assert 'focused=1/20/10' in output and 'package=2/40/20' in output
+    assert len(lab.run('runs', '--all', '--since', '2026-10-25').splitlines()) == 1
+    # Missing receipts are unknown; an old unsuffixed owner is milestone 1.
+    old = str(lab.tmp / 'owners/old/wt')
+    jl(lab.home / '.codex/sessions/date/rollout-old.jsonl', rollout(old, 'old'))
+    jl(lab.home / '.codex/sessions/date/rollout-split.jsonl', rollout(str(lab.tmp / 'owners/split-m2/wt'), 'split'))
+    output = lab.run('runs', '--all')
+    assert 'old\t1\t' in output and 'split\t2\t' in output
+    shutil.rmtree(lab.tmp / 'heavy/receipts')
+    assert '\tunknown\t' in lab.run('runs', '--all')
+    # Modern mission's own sessions go in its README.
+    lab.put('missions/demo/README.md', front())
+    jl(lab.home / '.codex/sessions/date/rollout-owner.jsonl', rollout(str(lab.tmp / 'owners/demo/codex'), 'owner'))
+    lab.run('runs', 'demo')
+    assert '| owner |' in (lab.a / 'missions/demo/README.md').read_text()
+
+    # Arbitrary tilde text in a first prompt must not invoke user lookup.
+    jl(lab.home / '.claude/projects/fake/unrelated.jsonl', [dict(type='user', message=dict(content='~not-a-user/path'))])
+    # The mission may start with m2; mission-level work still stays in README.
+    (lab.tmp / 'owners/second/m2').mkdir(parents=True)
+    jl(lab.home / '.codex/sessions/date/rollout-second.jsonl', rollout(str(lab.tmp / 'owners/second/codex'), 'second'))
+    assert 'second\t\t' in lab.run('runs', '--all')
+    # More rows than fit: keep the largest and report an omission count.
+    for i in range(60):
+        fake = rollout(cwd, f'extra-{i}')
+        jl(lab.home / f'.codex/sessions/date/rollout-extra-{i}.jsonl', fake)
+    lab.run('runs', 'demo', '1')
+    text = (lab.a / 'missions/demo/m1.md').read_text()
+    assert 'rows left out' in text
+    assert len(text.split('## Runs\n', 1)[1].split('## End', 1)[0].encode()) <= 4096
+    # A heading at EOF is replaced, rather than duplicated.
+    lab.put('missions/demo/m2.md', front(True) + '\n## Runs')
+    lab.run('runs', 'demo', '2')
+    assert (lab.a / 'missions/demo/m2.md').read_text().count('## Runs') == 1
+
+
+def main():
+    with tempfile.TemporaryDirectory(prefix='record-fixture-') as directory:
+        cases = (writer, refusals, different_files, name_race, conflict, offline, merged_validation, installation_failures, setup, telemetry)
+        for number, case in enumerate(cases):
+            root = Path(directory) / str(number)
+            root.mkdir()
+            case(Lab(root))
+            print(f'ok {number + 1}: {case.__name__}', flush=True)
+    print(f'completed {len(cases)} isolated cases')
+
+
+if __name__ == '__main__':
+    main()

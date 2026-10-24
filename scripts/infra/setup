@@ -84,8 +84,27 @@ check() {
         fi
     done
 
+    check_records
     check_machine
     return "$failed"
+}
+
+# records is shared by sessions; setup never resets or cleans an existing checkout.
+check_records() {
+    local dir=${RECORDS:-$root/records}
+    if [[ -e $dir/.git ]]; then
+        ok "records: checkout at $dir"
+    elif [[ -e $dir ]]; then
+        fail "records: $dir exists without a checkout"
+    elif ((fix)); then
+        if git clone --quiet --branch main git@github.com:fabrig-ai/records.git "$dir"; then
+            ok "records: cloned $dir"
+        else
+            fail "records: cannot clone $dir"
+        fi
+    else
+        fail "records: no checkout at $dir (--fix clones it)"
+    fi
 }
 
 # The queue's user unit is repairable without restarting a running daemon.
@@ -138,7 +157,7 @@ check_machine() {
     cargo nextest --version >/dev/null 2>&1 && ok "has cargo-nextest" || fail "no cargo-nextest"
     # The tools and files link to this kit.
     local bin=$HOME/.local/bin home=$kit target
-    for tool in heavy land setup post codex-run; do
+    for tool in heavy land record setup post codex-run; do
         target=$home/../devel/$tool
         [[ $tool != setup ]] || target=$home/setup
         target=$(readlink -f "$target")
