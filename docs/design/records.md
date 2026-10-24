@@ -285,19 +285,26 @@ The user, 10-24: the small backfill, and the 500 GB freed.
   1067, and the roadmaps' R2 and R3, split by script into section 3's
   files. One Codex run per machine writes to a staging directory; the
   stagings are merged and committed once. Nothing is read from the
-  paths the surveys list as holding secrets.
+  paths the surveys list as holding secrets. Done 10-24, records
+  9fde4b3: 81 missions from seven machines (carbon-forge was
+  unreachable), the director's decisions to 1070, R2-175 and R3-112;
+  the files of decisions 401 to 500 and 601 to 700 are over the cap,
+  kept whole.
 - **The runs, later.** Once `record runs` works, it runs over every
   backfilled mission. Until then `tmp/logs/heavy.tsv`,
   `tmp/heavy/receipts/` and `tmp/gates/` stay on every machine.
 - **The cleanup** frees what ended missions leave in `tmp/`: worktrees,
   targets, build trees, copied evidence and big logs, and the scratch
-  entries the surveys list. Never a running or paused mission's, never a
-  tool's state (`heavy`, the gates, the landing turns, `kache`, the
+  entries the surveys list. Never a running mission's, and of a paused
+  one's only its targets (the user, 10-24); never a tool's state (`heavy`, the gates, the landing turns, `kache`, the
   lab, `after-landing`'s locks), and never `~/.claude` or `~/.codex`.
   A list comes first, per machine, checked against `STATUS.md` (or the
-  director's `owners.md` until it exists) and the processes running; a
-  worktree whose commits are on no remote has them pushed first. The
-  missions' Markdown stays until the backfill is checked.
+  director's `owners.md` until it exists) and the processes running.
+  What is on no remote is saved first in `tmp/cleanup-saved/`: a
+  clone's commits as a bundle, a tree's changes as a diff; a worktree's
+  branch stays in its repository. The missions' Markdown stays. Done
+  10-24: about 555 GB freed on seven machines; six ended missions'
+  directories stay, a process still in them.
 
 ## 10. Left out, on purpose
 
