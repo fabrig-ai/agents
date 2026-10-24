@@ -1,0 +1,332 @@
+#!/usr/bin/env python3
+"""Offline landing-feed fixtures; every case has its own temporary directory."""
+import argparse
+import ast
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import time
+
+os.umask(0o077)
+SCRIPT = Path(__file__).resolve().with_name('landings')
+PYTHON = sys.executable
+
+
+def record(label='fixture/m1', event='waiting', token='run1', minute=0, **extra):
+    row = dict(time=f'2026-10-24T12:{minute:02d}:00+00:00', set=label,
+               host='fixture-host', token=token, **extra)
+    if event is not None:
+        row['event'] = event
+    return row
+
+
+class Lab:
+    def __init__(self, root):
+        self.root = root
+        self.feed = root / 'feed.jsonl'
+        self.feed.touch()
+        self.trace = root / 'ssh.json'
+        self.bin = root / 'bin'
+        self.bin.mkdir()
+        self.env = dict(os.environ, LANDINGS_FEED=str(self.feed), LANDINGS_POLL='.02',
+                        LANDINGS_UNREACHABLE='.20', LANDINGS_FIXTURE_HOSTNAME='fixture-remote',
+                        PATH=str(self.bin) + ':' + os.environ['PATH'],
+                        FIXTURE_TRACE=str(self.trace), FIXTURE_FEED=str(self.feed))
+        # Even an accidental remote read can only reach this rejecting stand-in.
+        self.ssh("raise SystemExit('unexpected ssh in local fixture')\n")
+
+    def ssh(self, body):
+        script = self.bin / 'ssh'
+        script.write_text(f'#!{PYTHON}\nimport json, os, sys, time\nfrom pathlib import Path\n'
+                          "Path(os.environ['FIXTURE_TRACE']).write_text(json.dumps(sys.argv[1:]))\n"
+                          + body)
+        script.chmod(0o700)
+
+    def append(self, *rows):
+        with self.feed.open('a') as out:
+            for row in rows:
+                out.write(json.dumps(row) + '\n')
+
+    def run(self, *args, status=0, env=None):
+        result = subprocess.run([PYTHON, '-I', str(SCRIPT), *args], cwd=self.root,
+                                env=env or self.env, stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=20)
+        assert result.returncode == status, (result.returncode, result.stdout, result.stderr)
+        return result
+
+    def following(self, rows, status=0, before=None):
+        with subprocess.Popen([PYTHON, '-I', str(SCRIPT), 'wait', 'fixture/m1', '--timeout', '3'],
+                              cwd=self.root, env=self.env, stdin=subprocess.DEVNULL,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as proc:
+            try:
+                time.sleep(.12)
+                assert proc.poll() is None, 'wait returned before appended records'
+                if before:
+                    before()
+                self.append(*rows)
+                out, err = proc.communicate(timeout=4)
+                assert proc.returncode == status, (proc.returncode, out, err)
+                return out
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.wait()
+
+
+def status_view(lab):
+    lab.append(record(event=None, token='legacy', repo='old-repo', commit='0123456789abcdef'),
+               record('done', 'started', 'done-run', 1),
+               record('done', 'landed', 'done-run', 2, repo='skein', commit='a' * 40),
+               record('done', 'done', 'done-run', 3),
+               record('stopped', 'stopped', 'stop-run', 4, status=7, repo='smith', reason='gate failed'),
+               record('running', 'waiting', 'run', 5),
+               record('running', 'started', 'run', 6),
+               record('running', 'gated', 'run', 7, repo='jig', commit='b' * 40),
+               record('waiting', 'waiting', 'wait', 8))
+    output = lab.run().stdout
+    lines = output.splitlines()
+    assert lines[:5] == [
+        '10-24 12:00Z fixture/m1 landed old-repo 012345678 fixture-host',
+        '10-24 12:01Z done started fixture-host',
+        '10-24 12:02Z done landed skein aaaaaaaaa fixture-host',
+        '10-24 12:03Z done done fixture-host',
+        '10-24 12:04Z stopped stopped smith status=7 reason=gate failed fixture-host'], output
+    assert lines[-2:] == [
+        '  running: running (holds set lock) since 2026-10-24T12:06:00+00:00 on fixture-host; last event 12:07Z; last gated jig bbbbbbbbb',
+        '  waiting: waiting since 2026-10-24T12:08:00+00:00 on fixture-host; last event 12:08Z'], output
+    assert 'in flight:' in lines and len(lines) == 12, output
+
+
+def last_two(lab):
+    lab.append(*(record(event='done', token=f'run{i}', minute=i) for i in range(25)))
+    assert lab.run('--last', '2').stdout.splitlines() == [
+        '10-24 12:23Z fixture/m1 done fixture-host', '10-24 12:24Z fixture/m1 done fixture-host', 'in flight: none']
+    assert len(lab.run().stdout.splitlines()) == 21
+    assert lab.run('--last', '0').stdout == 'in flight: none\n'
+
+
+def already_done(lab):
+    lab.append(record(event='started'), record(event='landed', repo='jig', commit='a' * 40),
+               record(event='done'))
+    result = lab.run('wait', 'fixture/m1', '--timeout', '0')
+    assert result.stdout == '10-24 12:00Z fixture/m1 landed jig aaaaaaaaa fixture-host\n', result
+
+
+def retry_commits(lab):
+    lab.append(record(event='landed', token='old', repo='old', commit='0' * 40),
+               record(event='done', token='old'),
+               record(event=None, token='partial', repo='skein', commit='1' * 40),
+               record(event='stopped', token='partial', status=1, reason='partial'),
+               record('other', 'landed', 'other', repo='other', commit='9' * 40),
+               record(event='waiting', token='retry'),
+               record(event='landed', token='retry', repo='temper', commit='2' * 40),
+               record(event='done', token='retry'))
+    assert lab.run('wait', 'fixture/m1').stdout.splitlines() == [
+        '10-24 12:00Z fixture/m1 landed skein 111111111 fixture-host',
+        '10-24 12:00Z fixture/m1 landed temper 222222222 fixture-host']
+
+
+def latest_first_line(lab):
+    lab.append(record(event='started', token='old'), record(event='waiting', token='new', minute=1),
+               record(event='done', token='old', minute=2))
+    assert lab.run('--last', '0').stdout.splitlines() == [
+        'in flight:', '  fixture/m1: waiting since 2026-10-24T12:01:00+00:00 on fixture-host; last event 12:01Z']
+    lab.run('wait', 'fixture/m1', '--timeout', '.06', status=3)
+
+
+def history_only(lab):
+    # Legacy landings and tails with a lost start remain visible as history.
+    lab.append(record(event=None, token='legacy', repo='old', commit='0' * 40),
+               record(event='gated', token='cut', minute=1),
+               record(event='landed', token='cut', minute=2, repo='jig', commit='a' * 40),
+               record(event='done', token='cut', minute=3),
+               record('failed', 'stopped', 'cut-stop', 4, status=7, reason='old failure'))
+    output = lab.run().stdout.splitlines()
+    assert len(output) == 6 and output[-1] == 'in flight: none', output
+    assert 'landed old 000000000' in output[0], output
+    assert 'done' in output[3] and 'stopped' in output[4], output
+    lab.run('wait', 'fixture/m1', '--timeout', '0', status=3)
+    lab.run('wait', 'failed', '--timeout', '0', status=3)
+
+
+def truncated_start(lab):
+    # A's missing start must not make it newer than B or end B's wait.
+    lab.append(record(event='waiting', token='B'),
+               record(event='landed', token='A', minute=1, repo='jig', commit='a' * 40),
+               record(event='done', token='A', minute=2),
+               record(event='stopped', token='C', minute=3, status=7, reason='cut off'))
+    assert lab.run('--last', '0').stdout.splitlines() == [
+        'in flight:',
+        '  fixture/m1: waiting since 2026-10-24T12:00:00+00:00 on fixture-host; last event 12:00Z']
+    lab.run('wait', 'fixture/m1', '--timeout', '0', status=3)
+    lab.append(record(event='started', token='B', minute=4),
+               record(event='done', token='B', minute=5))
+    lab.run('wait', 'fixture/m1', '--timeout', '0')
+
+
+def last_event(lab):
+    lab.append(record(event='waiting'), record(event='started', minute=1),
+               record(event='gated', minute=2, repo='jig', commit='b' * 40),
+               record(event='waiting', minute=3, token='waiting', label='queued'),
+               record(event='heartbeat', minute=9),
+               record(event='heartbeat', minute=10, token='waiting', label='queued'))
+    assert lab.run('--last', '0').stdout.splitlines() == [
+        'in flight:',
+        '  fixture/m1: running (holds set lock) since 2026-10-24T12:01:00+00:00 on fixture-host; last event 12:09Z; last gated jig bbbbbbbbb',
+        '  queued: waiting since 2026-10-24T12:03:00+00:00 on fixture-host; last event 12:10Z']
+
+
+def event_dates(lab):
+    lab.append(dict(record(event='waiting'), time='2026-10-23T12:00:00+00:00'),
+               record(event='started'),
+               dict(record(event='done'), time='2026-10-25T00:30:00+02:00'))
+    assert lab.run().stdout.splitlines() == [
+        '10-23 12:00Z fixture/m1 waiting fixture-host',
+        '10-24 12:00Z fixture/m1 started fixture-host',
+        '10-24 22:30Z fixture/m1 done fixture-host', 'in flight: none']
+
+
+def appended_done(lab):
+    lab.append(record(event='started'))
+    out = lab.following([record(event='landed', repo='jig', commit='c' * 40), record(event='done')])
+    assert out == '10-24 12:00Z fixture/m1 landed jig ccccccccc fixture-host\n', out
+
+
+def appended_stopped(lab):
+    lab.append(record(event='started'))
+    out = lab.following([record(event='stopped', status=6, repo='smith', reason='main kept moving')], status=1)
+    assert out == '10-24 12:00Z fixture/m1 stopped smith status=6 reason=main kept moving fixture-host\n', out
+
+
+def absent_then_present(lab):
+    out = lab.following([record(), record(event='started'),
+                         record(event='landed', repo='temper', commit='d' * 40), record(event='done')])
+    assert 'temper ddddddddd' in out, out
+
+
+def timeout(lab):
+    result = lab.run('wait', 'absent', '--timeout', '.06', status=3)
+    assert 'timed out waiting for absent' in result.stderr
+
+
+def unreadable_status(lab):
+    lab.feed.unlink()
+    result = lab.run(status=4)
+    assert 'feed unreadable:' in result.stderr and str(lab.feed) in result.stderr, result
+
+
+def unreadable_wait(lab):
+    lab.feed.unlink()
+    start = time.monotonic()
+    result = lab.run('wait', 'fixture/m1', status=4)
+    assert time.monotonic() - start >= .20
+    assert 'feed unreadable:' in result.stderr, result
+
+
+def unreadable_recovers(lab):
+    lab.feed.unlink()
+    assert lab.following([record(event='started'), record(event='done')]) == ''
+
+
+def timeout_before_unreachable(lab):
+    lab.feed.unlink()
+    lab.run('wait', 'fixture/m1', '--timeout', '.04', status=3)
+
+
+def malformed_lines(lab):
+    lab.feed.write_bytes(b'not json\n[]\nnull\n42\n{}\n{"time":\n\xff\n'
+                         + b'[' * 2000 + b'0' + b']' * 2000 + b'\n')
+    lab.append(record(event='done', time_bad='ignored'),
+               dict(record(), time='bad'), dict(record(), repo=[]), dict(record(), event=[]),
+               dict(record(), time='0001-01-01T00:00:00+01:00'))
+    assert lab.run().stdout.splitlines() == ['10-24 12:00Z fixture/m1 done fixture-host', 'in flight: none']
+
+
+def remote_command(lab):
+    lab.append(record(event='done'))
+    lab.ssh("sys.stdout.buffer.write(Path(os.environ['FIXTURE_FEED']).read_bytes())\n")
+    env = dict(lab.env)
+    del env['LANDINGS_FEED']
+    assert lab.run(env=env).stdout.splitlines() == ['10-24 12:00Z fixture/m1 done fixture-host', 'in flight: none']
+    tree = ast.parse(SCRIPT.with_name('land-set').read_text())
+    ssh = next(ast.literal_eval(node.value) for node in tree.body
+               if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'SSH'
+                                                       for t in node.targets))
+    assert json.loads(lab.trace.read_text()) == [*ssh[1:],
+        'tail -n 5000 /home/free/.local/state/agents-land-set/feed.jsonl']
+
+
+def remote_failure(lab):
+    lab.ssh("print('fixture transport failed', file=sys.stderr)\nsys.exit(9)\n")
+    env = dict(lab.env)
+    del env['LANDINGS_FEED']
+    assert 'fixture transport failed' in lab.run(status=4, env=env).stderr
+    assert 'fixture transport failed' in lab.run('wait', 'fixture/m1', status=4, env=env).stderr
+
+
+def remote_hang(lab):
+    lab.ssh('time.sleep(60)\n')
+    env = dict(lab.env)
+    del env['LANDINGS_FEED']
+    start = time.monotonic()
+    lab.run('wait', 'fixture/m1', status=4, env=env)
+    assert time.monotonic() - start >= 15, 'initial read was cut short'
+
+
+def remote_first_read(lab):
+    # A delayed stand-in exceeds tiny user deadlines but gets a full first read.
+    lab.ssh("with Path(os.environ['FIXTURE_FEED']).with_suffix('.reads').open('a') as out:\n"
+            "    out.write('read\\n')\n"
+            "time.sleep(.08)\nsys.stdout.buffer.write(Path(os.environ['FIXTURE_FEED']).read_bytes())\n")
+    env = dict(lab.env)
+    del env['LANDINGS_FEED']
+    reads = 0
+    for timeout_value in ('0', '.01'):
+        for event, status in (('done', 0), ('stopped', 1), ('waiting', 3)):
+            lab.feed.write_text('')
+            lab.append(record(event='started'), record(event=event, status=7, reason='fixture'))
+            result = lab.run('wait', 'fixture/m1', '--timeout', timeout_value, status=status, env=env)
+            reads += 1
+            assert lab.feed.with_suffix('.reads').read_text().splitlines() == ['read'] * reads
+            if status == 1:
+                assert 'status=7 reason=fixture' in result.stdout, result
+            elif status == 3:
+                assert 'timed out' in result.stderr, result
+
+
+def invalid_arguments(lab):
+    for args in (('--last', '-1'), ('wait', 'fixture/m1', '--timeout', 'nan'),
+                 ('wait', 'fixture/m1', '--timeout', '-1')):
+        lab.run(*args, status=2)
+    lab.run('wait', 'fixture/m1', status=2, env=dict(lab.env, LANDINGS_POLL='0'))
+
+
+def main():
+    start = time.monotonic()
+    cases = (status_view, last_two, already_done, retry_commits, latest_first_line,
+             history_only, truncated_start, last_event, event_dates,
+             appended_done, appended_stopped, absent_then_present, timeout,
+             unreadable_status, unreadable_wait, unreadable_recovers,
+             timeout_before_unreachable, malformed_lines, remote_command,
+             remote_failure, remote_hang, remote_first_read, invalid_arguments)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--case', action='append', choices=[case.__name__ for case in cases])
+    selected = parser.parse_args().case
+    if selected:
+        cases = tuple(case for case in cases if case.__name__ in selected)
+    for number, case in enumerate(cases, 1):
+        with tempfile.TemporaryDirectory(prefix='landings-fixture-') as directory:
+            lab = Lab(Path(directory))
+            case_start = time.monotonic()
+            case(lab)
+            if not case.__name__.startswith('remote_'):
+                assert not lab.trace.exists(), 'local fixture attempted ssh'
+            print(f'ok {number}: {case.__name__} ({time.monotonic() - case_start:.2f}s)', flush=True)
+    print(f'completed {len(cases)} cases in {time.monotonic() - start:.2f}s', flush=True)
+
+
+if __name__ == '__main__':
+    main()

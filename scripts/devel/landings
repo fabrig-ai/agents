@@ -1,0 +1,204 @@
+#!/usr/bin/env python3
+"""Show the landing feed and wait for a set to finish."""
+import argparse
+from datetime import datetime, timezone
+import json
+import math
+import os
+from pathlib import Path
+import socket
+import subprocess
+import sys
+import time
+
+os.umask(0o077)
+# Copied from scripts/devel/land-set: COORDINATOR, SSH and feed()'s path.
+COORDINATOR = 'debian-16gb-hel1-3'
+SSH = ['ssh', '-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
+       '-o', 'ConnectTimeout=5', '-o', 'ServerAliveInterval=5',
+       '-o', 'ServerAliveCountMax=2', '-o', 'UpdateHostKeys=no',
+       '-o', 'LogLevel=QUIET', 'free@2.29.124.199']
+FEED = '/home/free/.local/state/agents-land-set/feed.jsonl'
+TAIL = 'tail -n 5000 ' + FEED
+
+
+def seconds(value):
+    number = float(value)
+    if not math.isfinite(number) or number < 0:
+        raise argparse.ArgumentTypeError('seconds must be finite and nonnegative')
+    return number
+
+
+def count(value):
+    number = int(value)
+    if number < 0:
+        raise argparse.ArgumentTypeError('count must be nonnegative')
+    return number
+
+
+def read_feed(timeout=15):
+    local = os.environ.get('LANDINGS_FEED')
+    # Fixtures can force the remote branch without depending on this machine.
+    host = os.environ.get('LANDINGS_FIXTURE_HOSTNAME', socket.gethostname())
+    if local is not None or host == COORDINATOR:
+        data = Path(local if local is not None else FEED).read_bytes()
+    else:
+        result = subprocess.run([*SSH, TAIL], stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                timeout=timeout)
+        if result.returncode:
+            reason = result.stderr.decode(errors='replace').strip()
+            raise OSError(f'ssh exited {result.returncode}: {reason}')
+        data = result.stdout
+    records = []
+    for line in data.splitlines():
+        try:
+            record = json.loads(line)
+            if not isinstance(record, dict) or not all(
+                    isinstance(record.get(key), str) and record[key]
+                    for key in ('time', 'set', 'host', 'token')):
+                continue
+            stamp = datetime.fromisoformat(record['time'])
+            if stamp.tzinfo is None:
+                continue
+            stamp = stamp.astimezone(timezone.utc)
+            record['date'] = stamp.strftime('%m-%d')
+            record['clock'] = stamp.strftime('%H:%MZ')
+            record.setdefault('event', 'landed')
+            if not isinstance(record['event'], str):
+                continue
+            if any(key in record and not isinstance(record[key], str)
+                   for key in ('repo', 'commit', 'reason')):
+                continue
+            records.append(record)
+        except (ValueError, UnicodeError, OverflowError, RecursionError):
+            continue
+    return records
+
+
+def event_line(record):
+    parts = [record['date'], record['clock'], record['set'], record['event']]
+    if record.get('repo'):
+        parts.append(record['repo'])
+    if record.get('commit'):
+        parts.append(record['commit'][:9])
+    if record['event'] == 'stopped':
+        parts.extend(('status=' + str(record.get('status', '?')),
+                      'reason=' + record.get('reason', '')))
+    parts.append(record['host'])
+    return ' '.join(parts)
+
+
+def latest_runs(records):
+    runs, latest = {}, {}
+    for record in records:
+        key = record['set'], record['token']
+        if key not in runs:
+            runs[key] = []
+            # Without the start, legacy or truncated runs are history only.
+            if record['event'] in ('waiting', 'started'):
+                latest[record['set']] = runs[key]
+        runs[key].append(record)
+    return latest
+
+
+def ending(run):
+    return next((r for r in reversed(run) if r['event'] in ('done', 'stopped')), None)
+
+
+def show(records, last):
+    for record in records[-last:] if last else []:
+        print(event_line(record))
+    active = [run for run in latest_runs(records).values() if ending(run) is None]
+    if not active:
+        print('in flight: none')
+        return
+    print('in flight:')
+    for run in active:
+        started = next((r for r in run if r['event'] == 'started'), None)
+        since = started or run[0]
+        state = 'running (holds set lock)' if started else 'waiting'
+        line = f"  {run[0]['set']}: {state} since {since['time']} on {since['host']}"
+        line += f"; last event {run[-1]['clock']}"
+        progress = next((r for r in reversed(run) if r['event'] in ('gated', 'landed')), None)
+        if progress:
+            line += f"; last {progress['event']} {progress.get('repo', '')} {progress.get('commit', '')[:9]}"
+        print(line)
+
+
+def wait(label, timeout, poll, unreachable):
+    start = last_read = time.monotonic()
+    deadline = start + timeout if timeout is not None else math.inf
+    last_error = None
+    first_read = True
+    while True:
+        now = time.monotonic()
+        # Always attempt the initial read, even with --timeout 0.
+        read_limit = 15 if first_read else max(
+            .001, min(15, deadline - now, last_read + unreachable - now))
+        first_read = False
+        try:
+            records = read_feed(read_limit)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            # A final attempt with little time left must not hide the transport's reason.
+            if last_error is None or not isinstance(error, subprocess.TimeoutExpired):
+                last_error = error
+            now = time.monotonic()
+            if now >= last_read + unreachable and last_read + unreachable <= deadline:
+                print(f'landings: feed unreadable: {last_error}', file=sys.stderr)
+                return 4
+        else:
+            last_read = time.monotonic()
+            last_error = None
+            run = latest_runs(records).get(label, [])
+            terminal = ending(run)
+            if terminal is not None:
+                if terminal['event'] == 'stopped':
+                    print(event_line(terminal))
+                    return 1
+                previous_done = -1
+                for index, record in enumerate(records):
+                    if record is terminal:
+                        end = index
+                        break
+                    if record['set'] == label and record['event'] == 'done':
+                        previous_done = index
+                for record in records[previous_done + 1:end]:
+                    if record['set'] == label and record['event'] == 'landed':
+                        print(event_line(record))
+                return 0
+        now = time.monotonic()
+        if now >= deadline:
+            print(f'landings: timed out waiting for {label}', file=sys.stderr)
+            return 3
+        time.sleep(max(0, min(poll, deadline - now, last_read + unreachable - now)))
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--last', type=count, default=20)
+    commands = parser.add_subparsers(dest='command')
+    waiter = commands.add_parser('wait', help='wait for a set to land or stop')
+    waiter.add_argument('set')
+    waiter.add_argument('--timeout', type=seconds)
+    args = parser.parse_args()
+    if args.command == 'wait':
+        try:
+            poll = seconds(os.environ.get('LANDINGS_POLL', '30'))
+            unreachable = seconds(os.environ.get('LANDINGS_UNREACHABLE', '300'))
+            if poll == 0 or unreachable == 0:
+                raise ValueError('poll and unreachable intervals must be positive')
+        except (ValueError, argparse.ArgumentTypeError) as error:
+            parser.error(str(error))
+        return wait(args.set, args.timeout, poll, unreachable)
+    try:
+        records = read_feed()
+    except (OSError, subprocess.TimeoutExpired) as error:
+        print(f'landings: feed unreadable: {error}', file=sys.stderr)
+        return 4
+    show(records, args.last)
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

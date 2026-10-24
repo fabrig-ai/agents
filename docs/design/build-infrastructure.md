@@ -680,15 +680,22 @@ failure warns and never fails the run. A run killed by SIGKILL leaves no last
 line.
 
 **`landings`.** `scripts/devel/landings` reads the feed: on hetzner3
-directly, elsewhere with one fixed `tail` over the same ssh argv.
-`LANDINGS_FEED`, a local path, replaces both, for fixtures.
-- `landings [--last N]` prints the last N events (20), then each set whose
-  latest run has not ended, as waiting or running, since when, and the last
-  repository it gated or landed. A running set holds the set lock.
+directly, elsewhere with one fixed `tail -n 5000` over the same ssh argv.
+`LANDINGS_FEED`, a local path, replaces both, for fixtures. An unreadable
+feed exits 4 at once; `wait` keeps polling, and exits 4 after five minutes
+without a read. A run whose first line read is neither `waiting` nor
+`started` is history, from before the events or cut off by the read: its
+lines are printed, but it is never in flight, and `wait` passes over it.
+- `landings [--last N]` prints the last N events (20), dated `MM-DD
+  HH:MMZ`, then each set whose latest run has not ended, as waiting or
+  running, since when, its last event's time, and the last repository it
+  gated or landed. A running set holds the set lock; a run killed without
+  an ending shows its age in its last event.
 - `landings wait SET [--timeout SECONDS]` reads the feed every 30 seconds. It
   exits 0 once the set's latest run is `done`, printing its landed commits; 1
   once that run has `stopped`, printing its status, repository and reason; 3
-  at the timeout. A set not yet in the feed is waited for.
+  at the timeout. A set not yet in the feed is waited for. The first read
+  gets its full 15 seconds, so `--timeout 0` checks the feed once.
 
 **Tests.** `scripts/devel/test-land-set` runs its cases on disposable
 repositories with `file://` origins, real Cargo and stand-ins for `heavy` and

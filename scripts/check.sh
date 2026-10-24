@@ -29,6 +29,7 @@ mkdir -p "$scratch/workspace/tmp"
 
 DEV_ROOT=$scratch/workspace scripts/devel/test-tools
 scripts/devel/test-land-set
+scripts/devel/test-landings
 scripts/devel/test-repin --evidence "$scratch/repin"
 DEV_TMP=$scratch scripts/infra/test-kache-setup
 scripts/devel/recovery-v1/test-gate-policy
