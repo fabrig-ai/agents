@@ -28,6 +28,7 @@ trap cleanup EXIT
 mkdir -p "$scratch/workspace/tmp"
 
 DEV_ROOT=$scratch/workspace scripts/devel/test-tools
+scripts/devel/test-post
 scripts/devel/test-land-set
 scripts/devel/test-landings
 scripts/devel/test-repin --evidence "$scratch/repin"

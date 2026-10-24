@@ -1,0 +1,337 @@
+#!/usr/bin/env bash
+# Durable mailboxes for agents, with local or restricted-SSH delivery.
+#   post send [--as NAME] [--re ID] TO SUBJECT [FILE]
+#   post deliver --from MACHINE
+#   post wait NAME [--timeout SECONDS] [--holder PID --kind KIND]
+#   post read NAME
+#   post list [--older MINUTES]
+# See docs/design/post.md for the addresses, delivery and waking rules.
+set -euo pipefail
+umask 077
+export PATH=$HOME/.local/bin:$PATH
+
+kit=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
+workspace() {
+    local agents
+    agents=$(cd "$kit/../.." && pwd)
+    if [[ $(basename "$agents") == agents ]]; then dirname "$agents"; else echo "$HOME/src/rust"; fi
+}
+root=${DEV_ROOT:-$(workspace)}
+# wait changes directory before registering; keep relative DEV_ROOT usable.
+root=$(realpath -m "$root")
+post=$root/tmp/post
+name_pattern='^[a-z][a-z0-9-]*(/[a-z0-9][a-z0-9-]*)*$'
+machine_pattern='^[a-z][a-z0-9-]*$'
+id_pattern='^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{4}$'
+scratch=
+trap '[[ -z $scratch ]] || rm -f -- "$scratch"' EXIT
+
+fail() { echo "post: not delivered: $*" >&2; exit 2; }
+usage() { fail 'usage: post {send|deliver|wait|read|list} (see docs/design/post.md)'; }
+valid_name() { [[ $1 =~ $name_pattern ]]; }
+valid_machine() { [[ $1 =~ $machine_pattern ]]; }
+valid_subject() { [[ ${#1} -le 200 && ! $1 =~ [[:cntrl:]] ]]; }
+valid_address() {
+    [[ $1 == *@* ]] && valid_name "${1%@*}" && valid_machine "${1##*@}"
+}
+mailbox() {
+    local name=$1
+    mkdir -p -- "$post/$name"/{tmp,new,cur,sent} || fail 'cannot create mailbox'
+    box=$post/$name
+}
+receive() {
+    head -c 65537 >"$scratch" || fail 'cannot read message'
+    (($(stat -c %s "$scratch") <= 65536)) || fail 'message exceeds 64 KiB'
+}
+
+parse_message() {
+    local line re='' lines=5
+    {
+        IFS= read -r line && [[ $line == 'Id: '* ]] || return 1
+        msg_id=${line#Id: }
+        [[ $msg_id =~ $id_pattern ]] || return 1
+        IFS= read -r line && [[ $line == 'From: '* ]] || return 1
+        msg_from=${line#From: }
+        valid_address "$msg_from" || return 1
+        IFS= read -r line && [[ $line == 'To: '* ]] || return 1
+        msg_to=${line#To: }
+        valid_address "$msg_to" || return 1
+        IFS= read -r line || return 1
+        if [[ $line == 'Re: '* ]]; then
+            re=${line#Re: }
+            [[ $re =~ $id_pattern ]] || return 1
+            lines=6
+            IFS= read -r line || return 1
+        fi
+        [[ $line == 'Subject: '* ]] || return 1
+        msg_subject=${line#Subject: }
+        valid_subject "$msg_subject" || return 1
+        IFS= read -r line && [[ -z $line ]] || return 1
+    } <"$1"
+    # read discards NUL bytes; require the original header to match too.
+    cmp -s <(header "$msg_id" "$msg_from" "$msg_to" "$re" "$msg_subject") <(head -n "$lines" "$1")
+}
+header() {
+    printf 'Id: %s\nFrom: %s\nTo: %s\n' "$1" "$2" "$3"
+    [[ -z $4 ]] || printf 'Re: %s\n' "$4"
+    printf 'Subject: %s\n\n' "$5"
+}
+starttime() {
+    local stat rest
+    [[ $1 =~ ^[1-9][0-9]*$ ]] || return 1
+    IFS= read -r stat 2>/dev/null <"/proc/$1/stat" || return 1
+    # comm may contain spaces or parentheses; the fields follow its last ).
+    rest=${stat##*) }
+    awk '{print $20}' <<<"$rest"
+}
+waiter_alive() {
+    local current
+    [[ ${wait_pid:-} =~ ^[1-9][0-9]*$ && ${wait_start:-} =~ ^[0-9]+$ ]] || return 1
+    current=$(starttime "$wait_pid") || return 1
+    [[ $current == "$wait_start" ]]
+}
+load_waiter() {
+    wait_pid='' wait_start='' wait_kind=''
+    if [[ -f $box/waiter ]]; then
+        read -r wait_pid wait_start wait_kind <"$box/waiter" || true
+    fi
+}
+session() {
+    claude agents --json --all | jq -cer --arg name "$1" '
+        [.[] | select(.name == $name)] | sort_by(.startedAt) | last // empty'
+}
+unwoken() { echo "queued, nobody will wake it: $*"; return 3; }
+wake() {
+    local name=$1 info state full_id kind='' alive=0
+    {
+        flock -s 9 || fail 'cannot lock waiter'
+        load_waiter
+        if waiter_alive; then alive=1; fi
+        [[ ! -f $box/kind ]] || IFS= read -r kind <"$box/kind" || true
+    } 9>"$box/.lock"
+    if ((alive)); then echo waiting; return 0; fi
+    if [[ $wait_kind == codex || $kind == codex ]]; then
+        unwoken 'codex owner not running'; return $?
+    fi
+    if ! info=$(session "$name"); then unwoken 'no session'; return $?; fi
+    state=$(jq -r '.state' <<<"$info")
+    case $state in
+        working|blocked) echo queued ;;
+        done)
+            full_id=$(jq -r '.sessionId // .id // empty' <<<"$info")
+            [[ -n $full_id ]] || { unwoken 'session has no id'; return $?; }
+            if ! claude --bg --resume "$full_id" \
+                "Post for $name: run post read $name, then start post wait $name in the background." </dev/null >/dev/null 2>&1; then
+                unwoken 'resume failed'; return $?
+            fi
+            sleep "${POST_RESUME_CHECK:-10}"
+            if info=$(session "$name"); then state=$(jq -r '.state' <<<"$info"); else state='no session'; fi
+            case $state in
+                working|blocked) echo woken ;;
+                *) unwoken "$state" ;;
+            esac ;;
+        *) unwoken "$state" ;;
+    esac
+}
+deliver_message() {
+    local name=$1 from=$2 destination
+    parse_message "$scratch" || fail 'invalid message header'
+    [[ ${msg_to%@*} == "$name" ]] || fail 'recipient name mismatch'
+    [[ ${msg_from##*@} == "$from" ]] || fail 'sender machine mismatch'
+    mailbox "$name"
+    destination=$box
+    (
+        flock -x 9 || fail 'cannot lock mailbox'
+        [[ ! -e $destination/new/$msg_id.md && ! -e $destination/cur/$msg_id.md ]] || fail 'message id already delivered'
+        local staged
+        staged=$(mktemp "$destination/tmp/message.XXXXXX") || fail 'cannot stage message'
+        if ! cat -- "$scratch" >"$staged" || ! mv -- "$staged" "$destination/new/$msg_id.md"; then
+            rm -f -- "$staged"
+            fail 'cannot store message'
+        fi
+    ) 9>"$box/.lock" || return $?
+    wake "$name"
+}
+machines() {
+    local line machine target extra
+    local_machine='' route=''
+    [[ -r $post/machines ]] || fail "no machines file at $post/machines"
+    while IFS= read -r line || [[ -n $line ]]; do
+        line=${line%%#*}
+        read -r machine target extra <<<"$line"
+        [[ -n $machine ]] || continue
+        valid_machine "$machine" && [[ -n $target && -z $extra && $target != -* ]] || fail 'invalid machines file'
+        if [[ $target == local ]]; then
+            [[ -z $local_machine ]] || fail 'multiple local machines'
+            local_machine=$machine
+        fi
+        [[ $machine != "${to_machine:-}" ]] || route=$target
+    done <"$post/machines"
+    [[ -n $local_machine ]] || fail 'machines file has no local machine'
+}
+send() {
+    local sender=${POST_NAME:-} re='' to subject to_name to_machine='' id status code=0 file=''
+    while (($#)); do
+        case $1 in
+            --as|--re)
+                (($# >= 2)) || usage
+                if [[ $1 == --as ]]; then sender=$2; else re=$2; fi
+                shift 2 ;;
+            --) shift; break ;;
+            -*) usage ;;
+            *) break ;;
+        esac
+    done
+    (($# == 2 || $# == 3)) || usage
+    [[ -n $sender ]] || fail 'set POST_NAME or pass --as'
+    valid_name "$sender" || fail 'invalid sender name'
+    [[ -z $re || $re =~ $id_pattern ]] || fail 'invalid reply id'
+    to=$1 subject=$2 file=${3:-}
+    valid_subject "$subject" || fail 'subject must be one line, at most 200 characters, without control characters'
+    if [[ $to == *@* ]]; then
+        valid_address "$to" || fail 'invalid recipient address'
+        to_name=${to%@*} to_machine=${to##*@}
+    else
+        valid_name "$to" || fail 'invalid recipient name'
+        to_name=$to
+    fi
+    machines
+    to_machine=${to_machine:-$local_machine}
+    [[ $to_machine == "$local_machine" || -n $route ]] || fail "no route to $to_machine"
+    id=$(date -u +%Y%m%dT%H%M%SZ)-$(od -An -N2 -tx1 /dev/urandom | tr -d ' \n')
+    scratch=$(mktemp) || fail 'cannot stage message'
+    header "$id" "$sender@$local_machine" "$to_name@$to_machine" "$re" "$subject" >"$scratch"
+    if (($# == 3)); then
+        [[ -r $file ]] || fail "cannot read body: $file"
+        head -c 65537 -- "$file" >>"$scratch" || fail 'cannot read body'
+    else
+        head -c 65537 >>"$scratch" || fail 'cannot read body'
+    fi
+    (($(stat -c %s "$scratch") <= 65536)) || fail 'message exceeds 64 KiB'
+    if [[ $to_machine == "$local_machine" ]]; then
+        status=$(deliver_message "$to_name" "$local_machine") || code=$?
+    else
+        status=$(ssh -i "$HOME/.ssh/post_ed25519" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=20 \
+            "$route" "deliver $to_name" <"$scratch") || code=$?
+    fi
+    [[ ( $code == 0 || $code == 3 ) && -n $status && $status != *$'\n'* ]] || fail 'delivery failed or no status line'
+    mailbox "$sender"
+    (
+        flock -x 9 || fail 'cannot lock sent mailbox'
+        cp -- "$scratch" "$box/sent/$id.md" || fail 'cannot save sent message'
+    ) 9>"$box/.lock" || return $?
+    printf '%s %s\n' "$id" "$status"
+    return "$code"
+}
+deliver() {
+    [[ $# == 2 && $1 == --from ]] || usage
+    valid_machine "$2" || fail 'invalid sender machine'
+    local name=${SSH_ORIGINAL_COMMAND:-}
+    [[ $name == 'deliver '* ]] || fail 'invalid SSH_ORIGINAL_COMMAND'
+    name=${name#deliver }
+    valid_name "$name" || fail 'invalid SSH_ORIGINAL_COMMAND'
+    scratch=$(mktemp) || fail 'cannot stage message'
+    receive
+    deliver_message "$name" "$2"
+}
+wait_mail() {
+    (($#)) || usage
+    local name=$1 timeout='' holder=$$ kind=claude started=$SECONDS holder_start line delay
+    shift
+    valid_name "$name" || fail 'invalid mailbox name'
+    while (($#)); do
+        (($# >= 2)) || usage
+        case $1 in
+            --timeout) timeout=$2; [[ $timeout =~ ^[0-9]+$ ]] || usage; timeout=$((10#$timeout)) ;;
+            --holder) holder=$2 ;;
+            --kind) kind=$2; [[ $kind == claude || $kind == codex ]] || usage ;;
+            *) usage ;;
+        esac
+        shift 2
+    done
+    holder_start=$(starttime "$holder") || fail 'holder is not running'
+    cd /
+    mailbox "$name"
+    (
+        flock -x 9 || fail 'cannot lock waiter'
+        printf '%s %s %s\n' "$holder" "$holder_start" "$kind" >"$box/waiter"
+        printf '%s\n' "$kind" >"$box/kind"
+    ) 9>"$box/.lock"
+    while :; do
+        line=$(
+            {
+                flock -x 9 || exit 2
+                load_waiter
+                if [[ $wait_pid != "$holder" || $wait_start != "$holder_start" ]]; then
+                    echo "post: another waiter took $name"; exit 4
+                fi
+                local message
+                for message in "$box/new/"*.md; do
+                    [[ -f $message ]] || continue
+                    parse_message "$message" || exit 2
+                    printf '%s %s %s\n' "$msg_id" "$msg_from" "$msg_subject"
+                done
+            } 9>"$box/.lock"
+        ) || { local code=$?; [[ -z $line ]] || echo "$line"; return "$code"; }
+        if [[ -n $line ]]; then echo "$line"; return 0; fi
+        [[ -z $timeout ]] || ((SECONDS - started < timeout)) || return 1
+        delay=2
+        if [[ -n $timeout ]] && ((timeout - SECONDS + started < delay)); then delay=$((timeout - SECONDS + started)); fi
+        sleep "$delay"
+    done
+}
+read_mail() {
+    [[ $# == 1 ]] || usage
+    valid_name "$1" || usage
+    local name=$1 message found=0
+    mailbox "$name"
+    (
+        flock -x 9 || fail 'cannot lock mailbox'
+        for message in "$box/new/"*.md; do
+            [[ -f $message ]] || continue
+            found=1
+            printf '== %s\n' "$(basename "$message" .md)"
+            cat -- "$message"
+            mv -- "$message" "$box/cur/"
+        done
+        ((found)) || echo "no new post for $name"
+    ) 9>"$box/.lock"
+}
+list_mail() {
+    local older=0 message name age now box alive
+    if (($#)); then
+        [[ $# == 2 && $1 == --older && $2 =~ ^[0-9]+$ ]] || usage
+        older=$((10#$2))
+    fi
+    [[ -d $post ]] || return 0
+    now=$(date +%s)
+    while IFS= read -r -d '' message; do
+        [[ ${message%/*} == */new ]] || continue
+        box=${message%/new/*}
+        name=${box#"$post/"}
+        valid_name "$name" || continue
+        (
+            flock -x 9 || exit 2
+            [[ -f $message ]] || exit 0
+            age=$(((now - $(stat -c %Y "$message")) / 60))
+            ((age >= older)) || exit 0
+            parse_message "$message" || exit 2
+            load_waiter
+            alive=dead
+            if waiter_alive; then alive=alive; fi
+            printf '%s %s %s %s waiter=%s %s\n' "$age" "$name" "$msg_id" "$msg_from" "$alive" "$msg_subject"
+        ) 9>"$box/.lock"
+    done < <(find "$post" -type f -path '*/new/*.md' -print0 | sort -z)
+}
+
+(($#)) || usage
+command=$1
+shift
+case $command in
+    send) send "$@" ;;
+    deliver) deliver "$@" ;;
+    wait) wait_mail "$@" ;;
+    read) read_mail "$@" ;;
+    list) list_mail "$@" ;;
+    *) usage ;;
+esac
