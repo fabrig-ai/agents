@@ -96,6 +96,8 @@ pueue group add gate >/dev/null
 moved=$DEV_ROOT/agents/scripts/devel
 mkdir -p "$moved"
 cp "$kit/heavy" "$kit/kit.sh" "$moved/"
+mkdir -p "$moved/recovery-v1"
+cp "$kit/recovery-v1/receipt_inputs.py" "$moved/recovery-v1/"
 (cd "$repo"; unset DEV_ROOT DEV_TMP; HEAVY_TASK='' "$moved/heavy" true) >"$t/discovery.out" 2>&1 || {
     cat "$t/discovery.out" >&2
     exit 1

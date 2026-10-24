@@ -17,6 +17,7 @@ import uuid
 
 sys.dont_write_bytecode = True
 from recovery_message import RECOVERY_DIAGNOSTIC
+from receipt_inputs import capture as capture_inputs
 
 os.umask(0o077)
 KIT = Path(__file__).resolve().parent
@@ -413,6 +414,7 @@ def publish_receipt(ledger, task):
                'payload_ended': bool(task.get('payload_ended')), 'release_complete': True,
                'cgroup_empty': True, 'elapsed_s': max(0.0, task.get('payload_ended', 0) - task.get('payload_started', 0)) if task.get('payload_ended') else 0.0,
                'log': task['log'], 'log_sha256': digest}
+    receipt.update({key: task[key] for key in ('head', 'inputs') if key in task})
     fault('receipt_ready', task['token'])
     atomic(path, receipt)
     fault('receipt_published', task['token'])
@@ -999,6 +1001,7 @@ def payload(token):
             return 137
         if not check_gate_candidate(ledger, task):
             return 2
+        task.update(capture_inputs(task['repo']))
         task['payload_started'] = time.time()
         ledger.event(task, 'payload_begin')
         ledger.save()

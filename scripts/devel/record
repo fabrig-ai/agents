@@ -15,7 +15,7 @@ import tempfile
 
 UNKNOWN = 'unknown'
 NAME = r'[a-z0-9][a-z0-9_-]*'
-SECRET = re.compile(r'-----BEGIN [^\n]*PRIVATE KEY-----|gh[pousr]_|github_pat_|sk-[A-Za-z0-9_-]{20,}|xox[abpr]-|AKIA[A-Z0-9]{16}')
+SECRET = re.compile(r'-----BEGIN [^\n]*PRIVATE KEY-----|(?<![\w-])(?:gh[pousr]_[A-Za-z0-9_-]{20,}|github_pat_[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9_-]{20,})|xox[abpr]-|AKIA[A-Z0-9]{16}')
 MISSION_KEYS = 'roadmap feature department parent owner machine model effort started ended state end'.split()
 MILESTONE_KEYS = 'driver model effort started cap ended'.split()
 
@@ -431,7 +431,7 @@ def sessions(home, tmp):
         if who:
             result.append(dict(who=who, cwd=None, id=path.stem, kind='Claude', start=first or '',
                                model=','.join(models) or UNKNOWN, effort=','.join(efforts) or UNKNOWN,
-                               wall=duration(first, last), tokens=[usage.get('input_tokens', UNKNOWN),
+                               wall=duration(first, last), tokens=[sum(usage.get(k, 0) for k in ('input_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens')) if 'input_tokens' in usage else UNKNOWN,
                                usage.get('cache_read_input_tokens', UNKNOWN), usage.get('output_tokens', UNKNOWN)]))
     # The design specifies these columns; use thread to avoid counting a rollout twice.
     try:
@@ -459,7 +459,7 @@ def kinds(command):
     segments = re.split(r'&&|\|\||[;\n]', command)
     result, flags = [], set()
     for segment in segments:
-        if 'nextest' in segment:
+        if 'nextest' in segment or (re.search(r'\bcargo\s+test\b', segment) and '--doc' not in segment):
             focused = bool(re.search(r'--(?:test(?:[=\s]|$)|lib\b)', segment))
             result.append('focused' if focused else 'package' if re.search(r'(?:^|\s)-p(?:\s|=|\S)', segment) else 'workspace')
             if re.search(r'(?:^|\s)(?:-E|--filter-expr)(?:\s|=|\S)', segment) and not focused:
@@ -468,7 +468,7 @@ def kinds(command):
             result.append('check.sh')
             flags.add('check.sh through heavy')
         elif re.search(r'\bcargo\s+test\b.*--doc\b', segment):
-            result.append('doc tests')
+            result.append('doc')
         else:
             match = re.search(r'\bcargo\s+(check|clippy|fmt)\b', segment)
             result.append(match[1] if match else 'other')
@@ -494,52 +494,141 @@ def heavy_rows(tmp):
                 except ValueError:
                     continue
                 receipt = receipts.get(row[8], {})
-                # Only gate receipts certify clean inputs; build tree is HEAD at submission.
-                tree = receipt.get('tree', UNKNOWN) if row[1] == 'gate' else UNKNOWN
+                # Old receipts certify only clean gates; new ones name actual inputs.
+                tree = receipt.get('inputs') or (receipt.get('tree', UNKNOWN) if row[1] == 'gate' else UNKNOWN)
                 tree = UNKNOWN if tree == 'unversioned' else tree
                 classified, flags = kinds(row[9])
+                order = 'workspace package focused check.sh clippy check doc fmt other'.split()
+                kind = min(classified, key=order.index)
                 if 'nextest' in row[9] and row[5] == '4':
                     flags.add('no test selected')
                 result.append(dict(who=owner(row[7], tmp), cwd=row[7], end=seconds(row[2]), start=row[2],
                                    run=run, wait=wait, code=row[5], kinds=classified, flags=flags,
-                                   command=row[9], tree=tree, lane=row[1]))
+                                   command=row[9], tree=tree, head=receipt.get('head') or UNKNOWN, kind=kind, lane=row[1]))
     except OSError:
         pass
     return result
 
 
-def implementers(ss, rows, since):
+def implementers(ss, rows, since, have_heavy):
     result = []
-    for cwd in sorted({s['cwd'] for s in ss if s['cwd']}):
+    worktrees = {s['cwd'] for s in ss if s['cwd']}
+    if have_heavy:
+        worktrees &= {row['cwd'] for row in rows}
+    for cwd in sorted(worktrees):
         commands = sorted([r for r in rows if r['cwd'] == cwd and (not since or r['start'] >= since)], key=lambda r: r['start'])
         if since and not commands and not any(s['cwd'] == cwd and s['start'] >= since for s in ss):
             continue
-        flags, counts, times, seen, repeats = set(), {}, {}, set(), 0
+        flags, counts, times, waits, seen, heads = {}, {}, {}, {}, set(), set()
+        repeats, repeat_time, missing = 0, 0, False
         for i, row in enumerate(commands):
-            flags.update(row['flags'])
-            for kind in row['kinds']:
-                counts[kind] = counts.get(kind, 0) + 1
-                running, waiting = times.get(kind, (0, 0))
-                times[kind] = (running + row['run'], waiting + row['wait']) if len(row['kinds']) == 1 and running != UNKNOWN else (UNKNOWN, UNKNOWN)
-            tree = row['tree']
-            key = row['command'], tree
-            if tree == UNKNOWN:
-                repeats = UNKNOWN
-            elif key in seen and repeats != UNKNOWN:
+            for flag in row['flags']:
+                flags[flag] = flags.get(flag, 0) + 1
+            kind = row['kind']
+            counts[kind] = counts.get(kind, 0) + 1
+            times[kind] = times.get(kind, 0) + row['run']
+            waits[kind] = waits.get(kind, 0) + row['wait']
+            key = row['command'], row['tree']
+            if row['tree'] == UNKNOWN:
+                missing = True
+            elif key in seen:
                 repeats += 1
+                repeat_time += row['run']
             seen.add(key)
+            if 'clippy' in row['kinds'] and row['head'] != UNKNOWN:
+                if row['head'] in heads:
+                    flags['clippy without commit'] = flags.get('clippy without commit', 0) + 1
+                heads.add(row['head'])
             if row['end'] is not None:
                 queued = row['end'] - row['wait'] - row['run']
                 if any(other['end'] is not None and max(queued, other['end'] - other['wait'] - other['run']) < min(row['end'], other['end']) for other in commands[:i]):
-                    flags.add('two commands at once')
-        if sum(r['kinds'].count('clippy') for r in commands) > 1:
-            flags.add('clippy without commit: unknown')
+                    flags['two at once'] = flags.get('two at once', 0) + 1
         first = next(s for s in ss if s['cwd'] == cwd)
-        result.append(dict(who=first['who'], cwd=cwd, counts=','.join(f'{k}={v}/{round(times[k][0]) if times[k][0] != UNKNOWN else UNKNOWN}/{round(times[k][1]) if times[k][1] != UNKNOWN else UNKNOWN}' for k, v in sorted(counts.items())) if commands else UNKNOWN,
-                           run=round(sum(r['run'] for r in commands)) if commands else UNKNOWN,
-                           wait=round(sum(r['wait'] for r in commands)) if commands else UNKNOWN,
-                           repeats=repeats if commands else UNKNOWN, flags='; '.join(sorted(flags)) or ('none' if commands else UNKNOWN)))
+        result.append(dict(who=first['who'], cwd=cwd, counts=','.join(f'{k}={v}/{round(times[k])}/{round(waits[k])}' for k, v in sorted(counts.items())) if commands else UNKNOWN,
+                           kinds=counts, times=times, commands=len(commands), flag_counts=flags,
+                           run=sum(r['run'] for r in commands) if commands else UNKNOWN,
+                           wait=sum(r['wait'] for r in commands) if commands else UNKNOWN,
+                           repeat_count=repeats, repeat_time=repeat_time,
+                           repeats=UNKNOWN if missing or not commands else repeats,
+                           flags=flag_text(flags)))
     return result
+
+
+def flag_text(flags):
+    return '; '.join(f'{key} ×{value}' for key, value in sorted(flags.items()))
+
+
+def total(values):
+    values = list(values)
+    return UNKNOWN if UNKNOWN in values else sum(float(v) for v in values)
+
+
+def minutes(value):
+    return UNKNOWN if value == UNKNOWN else f'{value / 60:.1f}'
+
+
+def clock_time(value, unit=60):
+    if value == UNKNOWN:
+        return UNKNOWN
+    value = round(float(value) / (60 if unit == 3600 else 1))
+    return f'{value // 60}:{value % 60:02}'
+
+
+def relative_worktree(cwd, tmp):
+    parts = Path(cwd).relative_to(tmp / 'owners').parts
+    old = re.fullmatch(r'(.+)-m([1-9][0-9]*)', parts[0])
+    return '/'.join(([f'm{old[2]}'] if old else []) + list(parts[1:])) or '.'
+
+
+def markdown_groups(ss, rows, runs, who, tmp):
+    runs = [r for r in runs if r['who'] == who]
+    counts, times, flags = {}, {}, {}
+    for run in runs:
+        for key, count in run['kinds'].items():
+            counts[key] = counts.get(key, 0) + count
+            times[key] = times.get(key, 0) + run['times'][key]
+        for key, count in run['flag_counts'].items():
+            flags[key] = flags.get(key, 0) + count
+    hours = lambda value: f'{value / 3600:.1f} h'
+    summary = f'Implementers: {len(runs)} runs'
+    if any(r['commands'] for r in runs):
+        summary += f", {sum(r['commands'] for r in runs)} commands, ran {hours(sum(r['run'] for r in runs if r['run'] != UNKNOWN))}, waited {hours(sum(r['wait'] for r in runs if r['wait'] != UNKNOWN))}"
+    kinds_order = 'workspace package focused check.sh clippy check doc other fmt'.split()
+    if counts:
+        summary += '; ' + ', '.join(f'{k} {counts[k]} ({hours(times[k])})' for k in kinds_order if counts.get(k))
+    repeats = sum(r['repeat_count'] for r in runs)
+    if repeats:
+        summary += f"; repeats {repeats} ({hours(sum(r['repeat_time'] for r in runs))})"
+    if flags:
+        summary += '; flags: ' + flag_text(flags)
+    summary += '.'
+    grouped = {}
+    for session in ss:
+        if session['who'] == who:
+            grouped.setdefault((session['kind'], session['model'], session['effort']), []).append(session)
+    session_rows = []
+    for key, group in grouped.items():
+        wall = total(s['wall'] for s in group)
+        incoming, cached, outgoing = [total(s['tokens'][i] for s in group) for i in range(3)]
+        percent = UNKNOWN if UNKNOWN in (incoming, cached) or not incoming else f'{100 * cached / incoming:.0f}'
+        scaled = lambda value, scale: UNKNOWN if value == UNKNOWN else f'{value / scale:.2f}'
+        session_rows.append((wall, [*key, len(group), clock_time(wall, 3600), scaled(incoming, 1e6), percent, scaled(outgoing, 1e3)]))
+    run_rows = []
+    for run in runs:
+        cells = []
+        for kind in ('focused', 'package', 'workspace', 'clippy', 'check.sh', 'other'):
+            keys = ('check', 'fmt', 'doc', 'other') if kind == 'other' else (kind,)
+            count = sum(run['kinds'].get(k, 0) for k in keys)
+            elapsed = sum(run['times'].get(k, 0) for k in keys)
+            cells.append(f'{count} / {minutes(elapsed)}' if count else '')
+        cost = total((run['run'], run['wait']))
+        run_rows.append((cost, [relative_worktree(run['cwd'], tmp), run['commands'] if run['commands'] else UNKNOWN,
+                               minutes(run['run']), minutes(run['wait']), *cells, run['repeats'], run['flags']]))
+    return summary, [
+        ('Sessions', ['kind', 'model', 'effort', 'sessions', 'wall (h:mm)', 'in (M)', 'cached (%)', 'out (k)'], session_rows),
+        ('Implementer runs', ['run', 'commands', 'ran (min)', 'waited (min)', 'focused', 'package', 'workspace', 'clippy', 'check.sh', 'other', 'repeats', 'flags'], run_rows),
+        ('Landings', ['worktree', 'gate (m:ss)', 'result', 'queue wait (m:ss)'],
+         [(r['run'], [relative_worktree(r['cwd'], tmp), clock_time(r['run']), r['code'], clock_time(r['wait'])]) for r in rows if r['who'] == who and r['lane'] == 'gate'])]
 
 
 def table(headers, rows):
@@ -551,7 +640,7 @@ def table(headers, rows):
 def runs(root, tmp, args):
     ss = sessions(Path.home(), tmp)
     rows = heavy_rows(tmp)
-    runs = implementers(ss, rows, args.since)
+    runs = implementers(ss, rows, args.since, (tmp / 'logs/heavy.tsv').is_file())
     if args.all:
         writer = csv.writer(sys.stdout, delimiter='\t', lineterminator='\n')
         writer.writerow(('mission', 'milestone', 'worktree', 'counts', 'running_s', 'waiting_s', 'repeats', 'flags'))
@@ -564,16 +653,11 @@ def runs(root, tmp, args):
     name = f'missions/{args.mission}/' + (f'm{args.number}.md' if args.number else 'README.md')
     path = safe(root, name)
     text = path.read_text()
-    groups = [('Sessions', ['session', 'kind', 'model', 'effort', 'wall s', 'in', 'cached', 'out'],
-               [(s['wall'], [s['id'], s['kind'], s['model'], s['effort'], s['wall'], *s['tokens']]) for s in ss if s['who'] == who]),
-              ('Implementer runs', ['worktree', 'kind=count/run s/wait s', 'running s', 'waiting s', 'repeats', 'flags'],
-               [(r['run'], [r['cwd'], r['counts'], r['run'], r['wait'], r['repeats'], r['flags']]) for r in runs if r['who'] == who]),
-              ('Landings', ['worktree', 'gate s', 'result', 'queue wait s'],
-               [(r['run'], [r['cwd'], r['run'], r['code'], r['wait']]) for r in rows if r['who'] == who and r['lane'] == 'gate'])]
+    summary, groups = markdown_groups(ss, rows, runs, who, tmp)
     # Reserve space for all headers and one omission count; largest runtimes win globally.
     chosen = {title: [] for title, _, _ in groups}
     def render(omitted):
-        lines = []
+        lines = [summary, '']
         for title, headers, _ in groups:
             lines += ['### ' + title, '', *table(headers, chosen[title] or [[UNKNOWN] * len(headers)]), '']
         lines += [f'{omitted} rows left out.'] if omitted else []

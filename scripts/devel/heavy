@@ -46,6 +46,23 @@ kache_gc() {
     if command -v kache >/dev/null; then kache gc >/dev/null 2>&1 || true; fi
 }
 
+# Capture immediately before the payload, after a gate's settling wait.
+# Optional evidence must never make the command fail.
+capture_inputs() {
+    [[ -n ${HEAVY_INPUTS_FILE:-} ]] || return 0
+    python3 -B "$kit/recovery-v1/receipt_inputs.py" >"$HEAVY_INPUTS_FILE" 2>/dev/null ||
+        printf '{}\n' >"$HEAVY_INPUTS_FILE" || true
+}
+# shellcheck disable=SC2329 # called by the EXIT trap
+write_receipt() {
+    local receipt=$tmp/heavy/receipts/$receipt_token.json
+    jq -n --arg log "$log" --arg token "$receipt_token" --arg id "$id" \
+        --arg lane "$lane" --argjson code "$code" --slurpfile inputs "$HEAVY_INPUTS_FILE" \
+        '{schema:"heavy-receipt-v1",log:$log,token:$token,id:$id,lane:$lane,code:$code} + $inputs[0]' \
+        >"$receipt.new" && chmod 600 "$receipt.new" && mv "$receipt.new" "$receipt"
+    rm -f "$HEAVY_INPUTS_FILE" "$receipt.new"
+}
+
 # Inside a gate task: hold every other group, run the command alone, then
 # release what it held.
 held=()
@@ -98,6 +115,7 @@ exclusive() {
     { while sleep 120; do kache_gc; done; } >/dev/null 2>&1 &
     collector=$!
     local status=0 start=$SECONDS
+    capture_inputs
     "$@" || status=$?
     echo "heavy: ran alone for $((SECONDS - start))s"
     return "$status"
@@ -118,7 +136,7 @@ write_row() {
 }
 
 run_task() {
-    local token=$1 info start
+    local token=$1 info start receipt_token=$1
     shift
     [[ ${1:-} != -- ]] || shift
     info=$(pueue status --json | jq -c --arg token "$token" \
@@ -130,11 +148,14 @@ run_task() {
     if [[ $1 == "$kit/heavy" && ${2:-} == --exclusive ]]; then command="${*:4}"; fi
     start=$(date +%s)
     waited=$((start - ${token%-*} / 1000000000))
-    trap 'code=$?; ran=$(($(date +%s) - start)); write_row' EXIT
+    trap 'code=$?; ran=$(($(date +%s) - start)); write_row; write_receipt || true' EXIT
     trap 'exit 143' TERM
     trap 'exit 130' INT
     trap 'exit 129' HUP
     code=0
+    mkdir -p "$tmp/heavy/receipts" || true
+    export HEAVY_INPUTS_FILE=$tmp/heavy/receipts/.$token.inputs
+    if [[ $1 != "$kit/heavy" || ${2:-} != --exclusive ]]; then capture_inputs; fi
     "$@" 2>&1 | tee "$log" || code=${PIPESTATUS[0]}
     kache_gc
     exit "$code"

@@ -56,16 +56,20 @@ metadata by the tools. The surveys behind it are
     turns;
   - it checks each path: its place in the tree (section 3), its front
     matter, its cap (section 6), and that it holds no secret (a private
-    key block or a token's known prefixes);
+    key block or a token's known prefixes: `ghp_`, `gho_`, `ghu_`,
+    `ghs_`, `ghr_`, `github_pat_`, `sk-`, `xox[abpr]-`, or `AKIA`
+    plus 16 characters). `sk-` and GitHub prefixes start a token, not
+    after a letter, digit,
+    underscore or hyphen, and need at least 20 token characters;
   - it commits those paths only, the message starting with the
-    writer's name (`POST_NAME`, [post.md](post.md) 2);
-  - it rebases on `origin/main` and pushes, and starts again when `main`
-    moved, five times at most.
+    writer's name (`POST_NAME`, [post.md](post.md) 2), or `USER`;
+  - with a temporary index and plumbing it replays commits on
+    `origin/main` and pushes, retrying when `main` moved, five times
+    at most. Unrelated staged and unstaged edits stay in place; a
+    conflict refuses without changing HEAD, index or files.
   - Exit 0: pushed. 2: refused, with the reason. 3: committed but not
-    pushed; the next `record commit` pushes it.
-- **Shared checkout:** `record` uses a temporary index and plumbing to replay commits on `origin/main`; unrelated staged and unstaged edits stay in place, and conflicts refuse without changing HEAD, index or files.
-- **Message and exit:** the prefix is `POST_NAME:` (otherwise `USER:`); no changes is exit 0 with a message.
-- **Secrets:** private key blocks, `ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`, `github_pat_`, `sk-` with at least 20 token characters, `xox[abpr]-`, and `AKIA` plus 16 characters are refused.
+    pushed; the next `record commit` pushes it. Nothing to commit is
+    exit 0 with a message.
 - **One writer per file** (section 3), so a rebase never conflicts. A
   record is never moved or renamed once committed.
 - **Reading another machine's record:** `record pull`, then the file.
@@ -89,19 +93,20 @@ metadata by the tools. The surveys behind it are
 | `missions/<m>/closing.md` | its owner | once | the closing note (owners.md 6) |
 
 - **Names.** A mission's name is its own for good: `record` refuses a
-  new README in a directory that has one. A second mission on the same
-  work is `<name>-2`. A milestone has no directory of its own: its
-  sub-owner writes `m<N>.md` in the mission's. A roadmap is named by
-  its goal (`real-backends`, `first-release`), and its decisions keep
-  their prefix (`R2-17`).
-- Names are lowercase slugs of letters, digits, hyphens and underscores; numbered milestone and decision files use the tree’s spelling.
-- **Claims and decisions:** a new mission README loses a push race with “name taken”; a decision is a level-2 heading starting with its number (`1067`, `R3-12`, `12.`).
+  new README in a directory that has one, including a lost push race
+  ("name taken"). A second mission on the same work is `<name>-2`. A
+  milestone has no directory of its own: its sub-owner writes `m<N>.md`
+  in the mission's. A roadmap is named by its goal (`real-backends`,
+  `first-release`), and its decisions keep their prefix (`R2-17`). Names
+  are lowercase slugs of letters, digits, hyphens and underscores;
+  numbered files use the tree's spelling. A decision is a level-2
+  heading starting with its number (`1067`, `R3-12`, `12.`).
 - **Front matter,** `key: value` lines between `---` lines, which
   `record` checks:
   - a mission's README: `roadmap`, `feature` (the draft's repository
-    and path), `department`, `parent` and `owner` (addresses), `machine`,
-    `model`, `effort`, `started`, `ended`, `state` (`active`, `paused`,
-    `ended`, `abandoned`) and `end` (one line: why it ended);
+    and path), `department`, `parent` and `owner` (addresses),
+    `machine`, `model`, `effort`, `started`, `ended`, `state` (`active`,
+    `paused`, `ended`, `abandoned`) and `end` (one line: why it ended);
   - `m<N>.md`: `driver`, `model`, `effort`, `started`, `cap`, `ended`.
   - Times are UTC, `2026-10-24T21:54Z`; what the writer doesn't know is
     `unknown`, never a guess.
@@ -109,14 +114,13 @@ metadata by the tools. The surveys behind it are
 ## 4. Written once
 
 - **The brief is the README.** The parent writes it before starting the
-  owner: the front matter, a summary of at most 60 words, then what is
-  particular to the mission: its input, its end, its budgets, what the
-  parent knows that bears on it. The reading order, the security rules
-  and the channels are the roles', and no brief repeats them. The owner
-  is started with "Read `~/src/rust/records/missions/<m>/README.md` and
-  do what it says.", a sub-owner with its `m<N>.md`, whose head says
-  what to read.
-- **Summary:** the first paragraph after the front matter (skipping headings) is required and at most 60 words.
+  owner: the front matter, a required first paragraph of at most 60
+  words (skipping headings), then what is particular to the mission: its
+  input, its end, its budgets, what the parent knows that bears on it.
+  The reading order, security rules and channels are the roles', and no
+  brief repeats them. The owner is started with "Read
+  `~/src/rust/records/missions/<m>/README.md` and do what it says.", a
+  sub-owner with its `m<N>.md`, whose head says what to read.
 - **A report is a file.** The plan report is `plan.md`; a milestone's
   design report (at most 15 lines, owners.md 3.3) and end report (at
   most 10, owners.md 3.1) are sections of `m<N>.md`; the closing note
@@ -154,7 +158,9 @@ metadata by the tools. The surveys behind it are
 - **The paths name the work.** A mission's scratch is
   `tmp/owners/<m>/`, a milestone's tasks and worktrees
   `tmp/owners/<m>/m<N>/`. A session belongs to the record its first
-  prompt names. No tool needs a tag.
+  prompt names. No tool needs a tag. Old `owners/<m>-m<N>/` joins
+  milestone N; an unsplit owner without milestone directories joins
+  milestone 1. Modern mission sessions stay outside milestone paths.
 - **`record runs <m> <N>`,** which the driver runs before its end
   report, rewrites the table under `m<N>.md`'s `## Runs` heading (and
   `record runs <m>` the mission's own, in its README). From what each
@@ -163,40 +169,60 @@ metadata by the tools. The surveys behind it are
     role, the model and effort it actually ran with, its wall time and
     its tokens (input, cached, output), from the Claude transcripts, the
     Codex rollouts (whose working directory is the worktree) and
-    `codex-run`'s `runs.tsv` ([post.md](post.md) 5);
+    `codex-run`'s `runs.tsv` ([post.md](post.md) 5). Codex uses its last
+    cumulative token snapshot (output includes reasoning); Claude
+    deduplicates message ids and takes each usage field's maximum.
+    Claude inputs include cache reads and creation. Only its first
+    user prompt is read for ownership. `codex-run` joins by TASK,
+    deduplicates by thread; unlabelled tokens are
+    `unknown`;
   - **each implementer run's builds and tests,** from `heavy.tsv`
     (whose working directory is the worktree) and `heavy`'s receipts,
     as section 5.1 counts them;
-  - **landings:** each gate, its seconds and result, its queue wait and
-    its landing turn's, from `heavy.tsv`, the gates' stamps and the
-    landing turn's events.
+  - **landings:** worktree, gate time and result, queue wait, joined
+    by heavy's working directory. Gate-cache keys and landing-turn
+    events lack a worktree/token link, so cached stamps and turn wait
+    are omitted.
   A source that lacks a field gives `unknown`. The table is at most 4
   KB; the long form stays where the tools keep it.
-- **`record runs --all [--since DATE]`** prints the same rows across
-  missions, as TSV, for the director and Infra.
+- **`record runs --all [--since DATE]`** prints implementer rows across
+  missions as TSV with raw seconds, for the director and Infra.
 
-- **Old layouts:** `owners/<m>-m<N>/` joins milestone N; an unsplit owner with no milestone directories joins milestone 1; modern mission-level sessions stay outside milestone directories.
-- **Session totals:** Codex uses the last cumulative token snapshot (output already includes reasoning); Claude deduplicates usage by message id, takes each field’s maximum snapshot, and reads only the first user prompt for ownership.
-- **Bounded tables:** keep the largest rows by running/wall seconds across all three tables, with an omission count; kind counts show `count/running seconds/waiting seconds`, and a bundled command’s seconds by kind are `unknown`.
-- **Joins:** gate attempts join by heavy’s working directory; gate-cache keys and landing-turn events lack a worktree/token link, so turn wait and cached gate stamps are omitted.
-- **codex-run:** join its fixed columns by TASK and deduplicate by thread; unlabelled token fields are `unknown`.
+- **Bounded tables:** always start with implementer totals: runs,
+  commands, time running and waiting, kinds, repeats and counted flags.
+  Implementers join Codex and heavy by worktree; absent heavy telemetry
+  leaves counts unknown. Session-only directories stay in Sessions.
+  Omit zero kinds and flags; show only established flags. Sessions
+  group by kind, model and effort: count, wall (h:mm), input (M),
+  cached (%), output (k). Implementers have one row per worktree,
+  relative to the mission directory, largest running plus waiting
+  first: commands, minutes running and waiting, focused, package,
+  workspace, clippy, check.sh, other, repeats and flags. Kind cells are
+  count or count / minutes; zero is empty. Other includes check, fmt
+  and doc. Landings use m:ss. Within 4 KiB, keep totals, the largest
+  rows, and one count of rows left out.
 
 ### 5.1 Builds and tests
 
 The question is whether implementers build and test as
 [implementer.md](../../roles/implementer.md) says. For each run:
-- **its commands by kind:** focused (`nextest` with `--test` or
-  `--lib`), package (`-p` without them), workspace, `check`, `clippy`,
-  `fmt`, doc tests, `check.sh`, other; and their seconds running and
-  waiting;
-- **repeats:** a command run again on the same tree (the receipt's tree
-  hash), nothing having changed;
-- **flags:** a filter without `--test` or `--lib`; no test selected
-  (nextest's exit 4); two commands at once from one worktree; `fmt` or
-  `check.sh` through `heavy`; `clippy` more than once without a commit
-  between.
-
-Build receipts name HEAD’s tree at submission, which may differ from dirty inputs: only clean gate receipts establish repeats; no receipt supplies commit identity, so clippy-without-a-commit remains `unknown`.
+- **its commands by kind:** workspace, package, focused (`nextest`
+  with `--test` or `--lib`), check.sh, clippy, check, doc, fmt, other,
+  in heaviest-first order. A bundle counts once under its heaviest
+  kind, with all its time running and waiting;
+- **repeats:** the same command on the same receipt `inputs` tree,
+  including dirty tracked and untracked files, excluding ignored files.
+  Heavy computes it at command start with a temporary index seeded
+  from the real one, `git add -A` and `git write-tree`, without changing
+  the real index or refs. Receipts also name `head`, the commit at
+  command start. Both fields are optional in receipt v1: outside Git
+  or on failure, omit the unavailable field and still run the command.
+  Legacy receipts establish repeats only for clean gates; otherwise
+  repeats remain `unknown`;
+- **flags:** count commands with a filter without `--test` or `--lib`,
+  no test selected (nextest exit 4), overlap with an earlier command
+  from the same worktree, fmt or check.sh through heavy, or clippy
+  after another clippy with the same `head`. Omit unestablished flags.
 
 `implementer.md`'s baseline is 741 runs from 10-22 to 10-24, whose
 commands ran 43 hours and waited 104. `record runs --all --since

@@ -1,0 +1,135 @@
+#!/usr/bin/env python3
+"""Offline input and receipt checks; no queue, service, or heavy invocation."""
+import json
+import os
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+import tempfile
+from unittest.mock import patch
+
+sys.dont_write_bytecode = True
+KIT = Path(__file__).resolve().parent
+
+
+def main():
+    with tempfile.TemporaryDirectory(prefix='heavy-inputs-fixture-') as directory:
+        root = Path(directory)
+        os.environ.update(HOME=str(root / 'home'), DEV_TMP=str(root / 'tmp'),
+                          XDG_CONFIG_HOME=str(root / 'config'), GIT_CONFIG_GLOBAL='/dev/null',
+                          GIT_CONFIG_NOSYSTEM='1', GIT_AUTHOR_NAME='Fixture',
+                          GIT_AUTHOR_EMAIL='fixture@invalid', GIT_COMMITTER_NAME='Fixture',
+                          GIT_COMMITTER_EMAIL='fixture@invalid')
+        for key in ('GIT_INDEX_FILE', 'GIT_DIR', 'GIT_WORK_TREE', 'PUEUE_CONFIG_PATH'):
+            os.environ.pop(key, None)
+        sys.path.insert(0, str(KIT))
+        from receipt_inputs import capture
+        def git(*args):
+            return subprocess.check_output(['git', '-C', str(root), *args], stderr=subprocess.DEVNULL).decode().strip()
+        git('init', '-b', 'main')
+        (root / '.gitignore').write_text('ignored\ntmp/\ninput.json\npayload.log\nlegacy/\noutside/\n')
+        (root / 'tracked').write_text('base\n')
+        git('add', '.')
+        git('commit', '-m', 'base')
+        head = git('rev-parse', 'HEAD')
+        original_tree = git('rev-parse', 'HEAD^{tree}')
+        (root / 'tracked').write_text('staged\n')
+        git('add', 'tracked')
+        (root / 'tracked').write_text('unstaged\n')
+        (root / 'untracked').write_text('new\n')
+        (root / 'ignored').write_text('ignored\n')
+        subdir = root / 'subdir'
+        subdir.mkdir()
+        index = root / '.git/index'
+        before = index.read_bytes()
+        refs = git('show-ref')
+        result = capture(subdir)
+        assert result['head'] == head and result['inputs'] != original_tree
+        assert git('show', result['inputs'] + ':tracked') == 'unstaged'
+        assert git('show', result['inputs'] + ':untracked') == 'new'
+        assert 'ignored' not in git('ls-tree', '--name-only', result['inputs']).splitlines()
+        assert capture(root) == result
+        assert index.read_bytes() == before and git('show-ref') == refs
+        # A dirty input edit differs even while HEAD stays put.
+        (root / 'tracked').write_text('changed again\n')
+        changed = capture(root)
+        assert changed['head'] == head and changed['inputs'] != result['inputs']
+        # A commit can change while the command's inputs stay identical.
+        git('commit', '--allow-empty', '-m', 'same tree')
+        assert capture(root)['head'] != head
+        assert capture(root)['inputs'] == changed['inputs']
+        before = index.read_bytes()
+        # Outside the repository, and best-effort failures.
+        with tempfile.TemporaryDirectory(prefix='unversioned-inputs-') as unversioned:
+            assert capture(unversioned) == {}
+        with patch('subprocess.check_output', side_effect=OSError('fixture')):
+            assert capture(root) == {}
+        import receipt_inputs
+        real = receipt_inputs.subprocess.check_output
+        def fail_add(args, **kwargs):
+            if 'add' in args:
+                raise subprocess.CalledProcessError(1, args)
+            return real(args, **kwargs)
+        with patch('receipt_inputs.subprocess.check_output', side_effect=fail_add):
+            assert capture(root) == {'head': git('rev-parse', 'HEAD')}
+        assert index.read_bytes() == before
+        # Index optimizations must not hide edited tracked inputs.
+        for flag in ('assume-unchanged', 'skip-worktree'):
+            git('update-index', '--' + flag, 'tracked')
+            before = index.read_bytes()
+            assert git('show', capture(subdir)['inputs'] + ':tracked') == 'changed again'
+            assert index.read_bytes() == before
+            git('update-index', '--no-' + flag, 'tracked')
+        before = index.read_bytes()
+        # Git caller variables must not select some other repository.
+        expected = capture(root)
+        with tempfile.TemporaryDirectory(prefix='foreign-inputs-') as foreign:
+            subprocess.run(['git', '-C', foreign, 'init', '-q'], check=True)
+            with patch.dict(os.environ, GIT_DIR=foreign + '/.git', GIT_WORK_TREE=foreign):
+                assert capture(root) == capture(subdir) == expected
+        # Unborn HEAD: inputs exist, commit identity does not.
+        with tempfile.TemporaryDirectory(prefix='unborn-inputs-') as unborn:
+            subprocess.run(['git', '-C', unborn, 'init', '-q'], check=True)
+            (Path(unborn) / 'new').write_text('unborn')
+            captured = capture(unborn)
+            assert captured.get('inputs') and 'head' not in captured
+            assert not (Path(unborn) / '.git/index').exists()
+        # Recovery receipts retain the v1 format and optional fields.
+        recovery = runpy.run_path(str(KIT / 'heavy-recovery.py'))
+        publish = recovery['publish_receipt']
+        log = root / 'payload.log'
+        log.write_text('fixture\n')
+        task = dict(token='fixture', row_durable=True, release_complete=True, log=str(log),
+                    log_complete=True, queue='fixture', lane='build', tree=original_tree,
+                    policy='fixture', args=['true'], code=0, **changed)
+        class Ledger:
+            def save(self):
+                pass
+        (root / 'tmp/heavy').mkdir(parents=True, exist_ok=True)
+        publish(Ledger(), task)
+        receipt = json.loads((root / 'tmp/heavy/receipts/fixture.json').read_text())
+        assert receipt['head'] == changed['head'] and receipt['inputs'] == changed['inputs']
+        assert receipt['schema'] == 'heavy-receipt-v1'
+        task = dict(task, token='no-inputs')
+        task.pop('head'); task.pop('inputs')
+        publish(Ledger(), task)
+        receipt = json.loads((root / 'tmp/heavy/receipts/no-inputs.json').read_text())
+        assert 'head' not in receipt and 'inputs' not in receipt
+        # Exercise the legacy script's actual receipt functions in isolation.
+        legacy = (KIT.parent / 'heavy').read_text()
+        functions = legacy[legacy.index('capture_inputs() {'):legacy.index('# Inside a gate task:')]
+        script = ('set -eu\n' + functions + '\ncapture_inputs\nwrite_receipt\n')
+        env = dict(os.environ, kit=str(KIT.parent), tmp=str(root / 'tmp'), log=str(log),
+                   id='1', lane='build', code='0', receipt_token='legacy',
+                   HEAVY_INPUTS_FILE=str(root / 'input.json'))
+        subprocess.run(['bash', '-c', script], cwd=root, env=env, check=True)
+        receipt = json.loads((root / 'tmp/heavy/receipts/legacy.json').read_text())
+        assert receipt['head'] == capture(root)['head']
+        assert receipt['inputs'] == capture(root)['inputs']
+        assert index.read_bytes() == before and not (root / 'input.json').exists()
+        print('ok: inputs, index/refs preserved, failures, both receipt writers (no queue)')
+
+
+if __name__ == '__main__':
+    main()

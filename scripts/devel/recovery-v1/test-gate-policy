@@ -59,7 +59,7 @@ class PolicyFixtures(unittest.TestCase):
                     "DEV_ROOT": str(self.root), "DEV_TMP": str(self.root / "tmp"),
                     "LAND_PREBUILD": "", "GIT_CONFIG_GLOBAL": os.devnull,
                     "GIT_CONFIG_NOSYSTEM": "1", "FIXTURE_CALLS": str(self.root / "calls")}
-        for name in ("land", "gate-policy.sh", "kit.sh", "land-capture.py", "recovery_message.py"):
+        for name in ("land", "gate-policy.sh", "kit.sh", "land-capture.py", "recovery_message.py", "receipt_inputs.py"):
             shutil.copy(KIT / name, self.kit / name)
         self.script(self.kit / "heavy", r'''#!/usr/bin/env python3
 import hashlib
@@ -489,7 +489,7 @@ sys.exit(result.returncode)
 
     def test_implementation_and_tool_contents_invalidate(self):
         for path in (self.kit / "gate-policy.sh", self.kit / "land", self.kit / "heavy", self.kit / "heavy-recovery.py",
-                     self.kit / "kit.sh", self.kit / "land-capture.py", self.kit / "recovery_message.py", self.bin / "rustc", self.bin / "cargo"):
+                     self.kit / "kit.sh", self.kit / "land-capture.py", self.kit / "recovery_message.py", self.kit / "receipt_inputs.py", self.bin / "rustc", self.bin / "cargo"):
             with self.subTest(path=path.name):
                 baseline = self.identity().stdout
                 with path.open("a") as output:

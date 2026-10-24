@@ -4,6 +4,7 @@ import csv
 import io
 import json
 import os
+import runpy
 from pathlib import Path
 import shutil
 import subprocess
@@ -137,8 +138,7 @@ def refusals(lab):
              ('missions/x/README.md', front() + ' '.join(['word'] * 61), 'summary'),
              ('director/decisions/0001.md', '\n'.join(f'## {i}. call' for i in range(101)), '100 decisions'),
              ('missions/x/README.md', front().replace('started: unknown', 'started: yesterday'), 'UTC')]
-    secrets = ['-----BEGIN RSA PRIVATE KEY-----', 'ghp_fake', 'gho_fake', 'ghu_fake', 'ghs_fake', 'ghr_fake',
-               'github_pat_fake', 'sk-' + 'A' * 20, 'xoxb-fake', 'xoxa-fake', 'xoxp-fake', 'xoxr-fake', 'AKIA' + 'A' * 16]
+    secrets = ['-----BEGIN RSA PRIVATE KEY-----', *[prefix + 'A' * 20 for prefix in ('ghp_', 'gho_', 'ghu_', 'ghs_', 'ghr_', 'github_pat_')], 'sk-' + 'A' * 20, 'xoxb-fake', 'xoxa-fake', 'xoxp-fake', 'xoxr-fake', 'AKIA' + 'A' * 16]
     cases += [('STATUS.md', secret, 'secret') for secret in secrets]
     for name, content, reason in cases:
         path = lab.put(name, content)
@@ -156,6 +156,16 @@ def refusals(lab):
     assert 'missing' in lab.run('commit', 'STATUS.md', status=2)
     lab.put('STATUS.md', 'tmp/github-conformance/ is a valid reference\n')
     lab.run('commit', 'STATUS.md')
+    validate = runpy.run_path(str(SCRIPT))['validate']
+    for prefix in ('sk-', 'ghp_', 'gho_', 'ghu_', 'ghs_', 'ghr_', 'github_pat_'):
+        for before in ('task-fake-llm-port-', 'word', '9', '_', '-', 'é'):
+            validate('STATUS.md', (before + prefix + 'A' * 30).encode())
+        lab.put('STATUS.md', '(' + prefix + 'A' * 20)
+        assert 'secret' in lab.run('commit', 'STATUS.md', status=2)
+    lab.put('director/decisions/0001.md', '## 1067 task-fake-llm-port-sk-' + 'a' * 25 + '\n')
+    lab.run('commit', 'director/decisions/0001.md')
+    for prefix in ('ghp_', 'gho_', 'ghu_', 'ghs_', 'ghr_', 'github_pat_', 'sk-'):
+        validate('STATUS.md', (prefix + 'A' * 19).encode())
     # Mission total and Runs section caps.
     paths = []
     for number in range(17):
@@ -366,24 +376,33 @@ def telemetry(lab):
                      'fallback\tcaller\t2026-10-24T00:00:00Z\t2026-10-24T00:01:00Z\t0\t1\tfallback-model\tlow\t' + str(lab.tmp / 'owners/demo/m1/task2.md') + '\treport\tmissing-thread\t12\t3\t4\n')
     lab.run('runs', 'demo', '1')
     text = (lab.a / 'missions/demo/m1.md').read_text()
-    assert '| fallback | codex-run | fallback-model | low | 60 | 12 | 3 | 4 |' in text
+    assert '| codex-run | fallback-model | low | 1 | 0:01 | 0.00 | 25 | 0.00 |' in text
     assert 'turn wait' not in text and '999' not in text
 
-    for value in ('model-as-run', 'claude-as-run', '| 100 | 30 | 50 |', '| 8 | 2 | 4 |',
-                  'filter without', 'no test selected', 'two commands at once', 'fmt through heavy',
-                  'check.sh through heavy', 'clippy without commit: unknown', '| 2 |', '## End\nKept.'):
+    for value in ('model-as-run', 'claude-as-run', '| 0.00 | 30 | 0.05 |', '| 0.00 | 20 | 0.00 |',
+                  'filter without', 'no test selected', 'two at once', 'fmt through heavy',
+                  'check.sh through heavy ×1', '| 2 |', '## End\nKept.'):
         assert value in text, (value, text)
     assert 'old' not in text
-    assert text.count('| thread |') == 1
+    assert '| thread |' not in text and 'without commit' not in text
     assert len(text.split('## Runs\n', 1)[1].split('## End', 1)[0].encode()) <= 4096
     output = lab.run('runs', '--all', '--since', '2026-10-24')
     assert len(output.splitlines()) == 2 and 'demo\t1\t' in output
     assert 'focused=1/20/10' in output and 'package=2/40/20' in output
     assert len(lab.run('runs', '--all', '--since', '2026-10-25').splitlines()) == 1
+    # Session-only directories do not inflate implementer counts.
+    jl(lab.home / '.codex/sessions/date/rollout-driver.jsonl', rollout(str(lab.tmp / 'owners/demo/m1/driver'), 'driver'))
+    assert len(lab.run('runs', '--all').splitlines()) == 2
+    (lab.home / '.codex/sessions/date/rollout-driver.jsonl').unlink()
+    def append_heavy(cwd):
+        with path.open('a') as source:
+            csv.writer(source, delimiter='\t').writerow([99, 'build', '2026-10-24T00:01:00Z', 0, 0, 0, 8, cwd, cwd + '.log', 'echo fixture', 'label'])
     # Missing receipts are unknown; an old unsuffixed owner is milestone 1.
     old = str(lab.tmp / 'owners/old/wt')
     jl(lab.home / '.codex/sessions/date/rollout-old.jsonl', rollout(old, 'old'))
     jl(lab.home / '.codex/sessions/date/rollout-split.jsonl', rollout(str(lab.tmp / 'owners/split-m2/wt'), 'split'))
+    append_heavy(old)
+    append_heavy(str(lab.tmp / 'owners/split-m2/wt'))
     output = lab.run('runs', '--all')
     assert 'old\t1\t' in output and 'split\t2\t' in output
     shutil.rmtree(lab.tmp / 'heavy/receipts')
@@ -392,22 +411,57 @@ def telemetry(lab):
     lab.put('missions/demo/README.md', front())
     jl(lab.home / '.codex/sessions/date/rollout-owner.jsonl', rollout(str(lab.tmp / 'owners/demo/codex'), 'owner'))
     lab.run('runs', 'demo')
-    assert '| owner |' in (lab.a / 'missions/demo/README.md').read_text()
+    assert '| Codex | model-as-run | high | 1 |' in (lab.a / 'missions/demo/README.md').read_text()
 
     # Arbitrary tilde text in a first prompt must not invoke user lookup.
     jl(lab.home / '.claude/projects/fake/unrelated.jsonl', [dict(type='user', message=dict(content='~not-a-user/path'))])
     # The mission may start with m2; mission-level work still stays in README.
     (lab.tmp / 'owners/second/m2').mkdir(parents=True)
     jl(lab.home / '.codex/sessions/date/rollout-second.jsonl', rollout(str(lab.tmp / 'owners/second/codex'), 'second'))
+    append_heavy(str(lab.tmp / 'owners/second/codex'))
     assert 'second\t\t' in lab.run('runs', '--all')
     # More rows than fit: keep the largest and report an omission count.
     for i in range(60):
-        fake = rollout(cwd, f'extra-{i}')
+        extra_cwd = str(lab.tmp / f'owners/demo/m1/extra-{i}')
+        fake = rollout(extra_cwd, f'extra-{i}')
+        append_heavy(extra_cwd)
         jl(lab.home / f'.codex/sessions/date/rollout-extra-{i}.jsonl', fake)
     lab.run('runs', 'demo', '1')
     text = (lab.a / 'missions/demo/m1.md').read_text()
     assert 'rows left out' in text
     assert len(text.split('## Runs\n', 1)[1].split('## End', 1)[0].encode()) <= 4096
+    assert 'Implementers: 61 runs, 72 commands' in text
+    assert '| Codex | model-as-run | high | 61 |' in text
+    assert '| m1/wt/task | 12 |' in text
+    assert 'wall s' not in text and cwd not in text
+    # New receipts distinguish inputs and commits, also for bundled commands.
+    bundled = 'cargo fmt && cargo clippy && cargo nextest run --workspace'
+    commands = [bundled, bundled, bundled, bundled, 'cargo clippy', 'cargo clippy', 'cargo clippy']
+    # Different input trees under the same HEAD; same inputs across different HEADs.
+    inputs = ['a', 'a', 'b', 'a', 'b', 'b', 'b']
+    heads = ['h1', 'h1', 'h1', 'h2', 'h2', 'h3', 'h3']
+    rows = []
+    for i, (command, tree, head) in enumerate(zip(commands, inputs, heads)):
+        log = str(lab.tmp / f'logs/new-{i}.log')
+        rows.append([i, 'build', f'2026-10-24T01:{i:02}:00Z', 10, 20, 0, 8, cwd, log, command, 'label'])
+        jl(lab.tmp / f'heavy/receipts/new-{i}.json', [dict(log=log, inputs=tree, head=head, tree='misleading-head-tree')])
+    with path.open('w') as source:
+        csv.writer(source, delimiter='\t').writerows(rows)
+    output = lab.run('runs', '--all')
+    assert 'clippy=3/60/30,workspace=4/80/40' in output, output
+    assert '\t4\tclippy without commit ×4; fmt through heavy ×4' in output, output
+    lab.run('runs', 'demo', '1')
+    text = (lab.a / 'missions/demo/m1.md').read_text()
+    assert '| m1/wt/task | 7 | 2.3 | 1.2 |  |  | 4 / 1.3 | 3 / 1.0 |  |  | 4 |' in text
+    assert 'workspace 4' in text and 'fmt 4 (' not in text
+    assert 'repeats 4 (0.0 h)' in text
+    # Mixed legacy build receipts leave the repeat total unknown, but keep facts.
+    jl(lab.tmp / 'heavy/receipts/new-0.json', [dict(log=rows[0][8], tree='a')])
+    output = lab.run('runs', '--all')
+    assert '\tunknown\t' in output and 'clippy without commit ×3' in output
+    # A missing heavy source retains unknowns, rather than claiming no work.
+    path.unlink()
+    assert '\tunknown\tunknown\tunknown\t' in lab.run('runs', '--all')
     # A heading at EOF is replaced, rather than duplicated.
     lab.put('missions/demo/m2.md', front(True) + '\n## Runs')
     lab.run('runs', 'demo', '2')

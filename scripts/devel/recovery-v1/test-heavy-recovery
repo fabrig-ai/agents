@@ -217,7 +217,9 @@ class Lab:
             receipt_path = self.base / 'receipts' / (task['token'] + '.json')
             receipt = wait_for(lambda: json.loads(receipt_path.read_text()) if receipt_path.exists() else None,
                                'durable receipt')
-            assert len(receipt) == 17 and receipt['schema'] == 'heavy-receipt-v1'
+            assert len(receipt.keys() - {'head', 'inputs'}) == 17 and receipt['schema'] == 'heavy-receipt-v1'
+            for key in ('head', 'inputs'):
+                assert receipt.get(key) == task.get(key)
             assert receipt['token'] == task['token'] and receipt['tree'] == task['tree']
             assert receipt['policy'] == task['policy'] and receipt['code'] == task['code']
             assert receipt['release_complete'] and receipt['cgroup_empty']

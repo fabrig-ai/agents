@@ -33,6 +33,7 @@ scripts/devel/test-land-set
 scripts/devel/test-landings
 scripts/devel/test-codex-run
 scripts/devel/test-record
+scripts/devel/recovery-v1/test-receipt-inputs
 scripts/devel/test-repin --evidence "$scratch/repin"
 DEV_TMP=$scratch scripts/infra/test-kache-setup
 scripts/devel/recovery-v1/test-gate-policy
