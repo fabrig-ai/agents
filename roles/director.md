@@ -216,7 +216,8 @@ runs.
   in that machine's `~/src/rust/tmp/director/inbox/o-<name>.md`, at
   most 15 lines under a `## HH:MMZ o/<name>: <subject>` header, and
   the owner's turn ends (owners.md, 5). After-landing failures arrive
-  in `inbox/after-landing.md` (owners.md, 4.5).
+  in `inbox/after-landing.md` (owners.md, 4.5); while after-landing is
+  paused (since 10-24, on the user's word), none do.
 - **The watcher.** `watch.sh` runs `probe.sh` on each machine every
   five minutes, over ssh, so `probe.sh` uses only bash, coreutils,
   awk, jq and claude. It prints `t:` keys, the triggers, and `i:` keys,

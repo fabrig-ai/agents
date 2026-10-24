@@ -439,6 +439,15 @@ updates the repository's `docs/design/STATUS.md` rows its work changes.
   `tmp/director/inbox/after-landing.md`, naming the repository, the
   commit, its branch and subject, and the log; the director sends it to
   the owner whose landing broke the tier.
+  **Paused since 10-24 16:40Z,** on the user's word, while they design
+  how it should work. On every machine the user unit
+  `after-landing-paused` (the director's
+  `tmp/director/after-landing-pause.sh`) holds each repository's lock in
+  `tmp/after-landing/`, so that no run starts, and ends each
+  `after-landing` that `land` starts, logging the commit it skips to
+  `tmp/after-landing/paused.log`. `land` still says it queued one;
+  nothing runs. Until the pause lifts, no tier outside the gate runs on
+  `main` by itself. The director lifts it on the user's word.
 - **The disk floor.** Below the machine's floor, 40 GB unless
   `tmp/machine.env` says otherwise, no new implementer starts, and
   finished targets are cleared. A target grows to about 21 GB. `heavy`

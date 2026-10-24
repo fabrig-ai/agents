@@ -250,7 +250,8 @@ The queue is the only writer to every repository's `main`. Its tool,
    no gate, so the queue stays `main`'s only writer.
 8. **After landing.** The slow tiers that run after a landing still do.
    A failure goes to the set's owner with the keeper's note (keeper.md
-   4.3).
+   4.3). Paused since 10-24, on the user's word, while they design how
+   it should work (owners.md 4.5).
 
 The queue replaces today's advisory landing turn
 (build-infrastructure.md 8). Speculative runs come later, when the

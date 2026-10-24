@@ -151,7 +151,8 @@ set whose landing broke the tier: the first landing it fails on, which
 its notes and the earlier runs show. `queue wait --after` delivers the
 note to that set's sub-owner. If no one waits on that set any more,
 the note goes to the director instead, as `inbox/after-landing.md`'s
-lines do today (owners.md 4.5).
+lines do today (owners.md 4.5). After-landing is paused since 10-24, on
+the user's word, while they design how it should work.
 
 ### 4.4 An infrastructure fault
 
