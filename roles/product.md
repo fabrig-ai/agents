@@ -51,15 +51,20 @@ it governs.
   --autocompact 282000 --dangerously-skip-permissions --settings
   '{"autoMemoryEnabled": false, "env": {"POST_NAME": "p/<name>"}}'
   "Read <brief> and do what it says."`
-- **Its notes** are in `~/src/rust/tmp/director/<name>/`, kept short and
-  true as the director's are (director.md 3):
-  - `notes.md`: its features, its owners with their machines, sessions,
-    briefs, footprints and states, and the calls still in force;
-  - `decisions.md`: each call, numbered under its own prefix, appended;
-  - `log.md`: the timeline, one line per event;
+- **Its record** is `~/src/rust/records/roadmaps/<r>/`, the roadmap
+  named by its goal, committed with `record commit`
+  ([records.md](../docs/design/records.md) 3):
+  - `README.md`: the goal, each feature with its draft, its missions
+    with their owners, machines and states, and each feature's closing
+    note (section 6), rewritten as they change;
+  - `decisions/NNNN.md`: each call, numbered under its prefix (`R2-17`),
+    100 to a file, appended;
   - `backlog.md`: its features' findings that triage keeps waiting, each
-    with its source and reproduction;
-  - `briefs/`: what it gave.
+    with its source and reproduction.
+  Git's history is its timeline: there is no log.
+- **Its notes** are scratch in `~/src/rust/tmp/director/<name>/`, kept
+  short and true as the director's are (director.md 3): `notes.md`,
+  its owners' sessions and footprints and the calls still in force.
 - **Its timers:** its waiter, `post wait p/<name>`, started again after
   each wake, and a check every two hours from a cron, as the director's
   (director.md 2, 5 and 7).
@@ -71,8 +76,8 @@ it governs.
 ## 3. Its owners
 
 - **One mission per department,** each with a defined end, in at most
-  four milestones (owners.md 3.1). Each owner's brief holds what
-  director.md 4 lists, its department and its product owner among it.
+  four milestones (owners.md 3.1). Each owner's brief is its mission's
+  README, as director.md 4 says, committed before the owner starts.
 - **When.** App's missions as soon as the draft is in. UI's once the
   user's mockups are in for what it would build, even while App is at
   work. Lab runs on landings (section 4).
@@ -81,9 +86,9 @@ it governs.
 - **Overlaps.** Its own owners' footprints are its to order. One that
   touches another product's owner's files goes to the director
   (director.md 6).
-- **The end.** An owner's closing note comes to it. It folds the note
-  into its notes, records the mission's end, and tells the director,
-  with the note's path.
+- **The end.** An owner points it to its closing note. It reads it,
+  updates the mission's state in its README, and tells the director the
+  note's path. It copies nothing from the note.
 
 ## 4. QA
 
@@ -99,9 +104,10 @@ it governs.
   judges the finding itself.
 - **Triage** (owners.md 4.6): a finding on v0.1.0's happy path is fixed
   now, by the owner of the work or by a new mission; any other goes to
-  `backlog.md`, and its test stays `#[ignore = "backlog: <why>"]` where
-  one exists. A security hole, lost data and a flake that fails gates
-  count as on the happy path. When unsure, the director decides.
+  its record's `backlog.md`, and its test stays `#[ignore = "backlog:
+  <why>"]` where one exists. A security hole, lost data and a flake
+  that fails gates count as on the happy path. When unsure, the director
+  decides.
 
 ## 5. The channels
 
@@ -122,7 +128,7 @@ it governs.
 ## 6. A feature's end
 
 When a feature's last mission has landed, the product owner writes its
-closing note in its notes, in at most half a page: what landed, what is
-left of the draft, its backlog, the missions' times, and what went well
-and what didn't. It reports to the director. Once all its features have
-ended, the director stops it.
+closing note in its README, under the feature, in at most half a page:
+what landed, what is left of the draft, its backlog, the missions'
+times, and what went well and what didn't. It reports to the
+director. Once all its features have ended, the director stops it.

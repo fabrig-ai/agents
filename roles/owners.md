@@ -9,7 +9,8 @@ implemented. Its department's file ([app.md](app.md), [ui.md](ui.md),
 own rules. QA's agents work under [qa.md](qa.md) instead.
 
 **What an owner reads:** at its start, its whole brief, its
-department's file, sections 1, 3.1 and 5 of this file, and the rules
+department's file, sections 1, 3.1 and 5 of this file, the security
+rules (director.md 10), and the rules
 its department's file names: for App and UI, section 1, "In one page",
 of skein's `docs/foundation/programming-model.md` and
 `testing-strategy.md`, the rules for the code's shape and its tests;
@@ -103,7 +104,8 @@ and the budgets bind from the start. The repository's `AGENTS.md` loads on its o
   `claude --bg -n o/<name> --model 'claude-opus-5-5[1m]' --effort <effort>
   --autocompact 282000 --dangerously-skip-permissions --settings
   '{"autoMemoryEnabled": false, "env": {"POST_NAME": "o/<name>"}}'
-  "Read <brief> and do what it says."`
+  "Read ~/src/rust/records/missions/<m>/README.md and do what it
+  says."`
   Its notes are its memory: Claude Code's auto-memory stays off, since
   in `~/src/rust` it would share the director's.
 - **Its mail** is post (agents' `docs/design/post.md`): its address is
@@ -117,41 +119,56 @@ and the budgets bind from the start. The repository's `AGENTS.md` loads on its o
 - **An advisor.** An owner below xhigh may start an advisor, a session
   at xhigh under the same discipline (notes, compaction), and consult
   it on what it judges delicate. Sparingly: tokens count.
-- **Its brief** names the input (draft sections, designs, a README to
-  grow; for a milestone's sub-owner, its milestone and the plan's
-  file), its department, its parent and how to reach it, its machine, its notes
-  directory, and anything the parent knows that bears on it: other
-  owners' footprints, budgets, dates.
-- **Its notes** are in `~/src/rust/tmp/owners/<name>/`:
-  - `notes.md`: the state, the decisions taken with their reasons, the
-    open questions, and the footprint (section 4.5). Kept short and
-    true: corrected, pruned, never only appended.
-  - `milestones.md`, the plan (section 3.1), kept current like the
-    notes.
-  - `ledger.md`: its own and its children's session ids, its
-    implementers' sessions and Codex threads, each landing's commit, and
-    the start and end times, its own and each milestone's. The director
-    computes the cost from it.
+- **Its brief** is its mission's README in the record, which its parent
+  writes ([records.md](../docs/design/records.md) 4): the front matter
+  (its department, its parent, its machine), a summary, then the input
+  (draft sections, designs, a README to grow) and anything the parent
+  knows that bears on it: other owners' footprints, budgets, dates. A
+  milestone's sub-owner's brief is the head of its `m<N>.md`. The
+  README's front matter is then the owner's to keep: its `state`, and
+  at the end `ended` and `end`.
+- **Its record** is `~/src/rust/records/missions/<m>/`, each file
+  written by one writer and committed with `record commit <path>`,
+  which pushes it (records.md 2 and 3):
+  - `plan.md`, the plan (section 3.1), rewritten when it changes;
+  - `decisions.md`: its calls and its sub-owners', numbered, each with
+    its reason, appended;
+  - `m<N>.md`, each milestone's: its brief at the head, then its design
+    report (3.3), its end report and the table `record runs` writes
+    (3.1);
+  - `qa.md`, its QA passes (4.6), and `closing.md` (section 6).
+  A report is one of these files: the writer commits it and points its
+  parent to it in one line, naming the file and the commit. The parent
+  reads it, after `record pull` from another machine, and copies
+  nothing. There is no ledger: `record runs` takes the sessions,
+  tokens, builds and landings from the tools (records.md 5). A mission
+  started before the record (10-24) keeps its notes in `tmp/` to its
+  end, and is backfilled.
+- **Its notes** are scratch, in `~/src/rust/tmp/owners/<m>/`, a
+  milestone's in `m<N>/` beneath it:
+  - `notes.md`: the state, the open questions, and the footprint
+    (section 4.5). Kept short and true: corrected, pruned, never only
+    appended.
   - `handover.md`: the last handover (below), replaced at the next.
 - **After a compaction or a restart,** it reads its brief and its notes
   first.
 - **A fresh session at each milestone's end.** An owner with more than
   one milestone hands over to a new session at each milestone's end but
   the last, so that each milestone starts on a fresh context. The
-  outgoing session brings `notes.md`, `milestones.md` and the ledger up
-  to date, and writes `handover.md` with what only it holds: what is in
+  outgoing session brings `notes.md` and `plan.md` up to date, and
+  writes `handover.md` with what only it holds: what is in
   flight (the ended milestone's QA pass, its sub-owner still at work),
   what waits on other owners or the director, and its read of the next
   milestone. It starts the new session with the same name and command
   (above), prompted "Read <brief>, then the notes and handover.md in
-  <notes directory>, and go on.", records its id in the ledger, sends
-  its parent the milestone's report (3.1) naming the new session, and
-  ends its turn. The new session reads the brief, the notes and the
-  handover, starts its waiter, which replaces the old one's, stops the
-  old session once its turn has ended (`claude stop <id>`, the job's
-  short id in `claude agents`), so that one session answers to the
-  name, and starts the next milestone's sub-owner (3.1). Its children's
-  post to `o/<name>` reaches it.
+  <notes directory>, and go on.", points its parent to the milestone's
+  end report (3.1), naming the new session, and ends its turn. The new
+  session reads the brief, the notes and the handover, starts its
+  waiter, which replaces the old one's, stops the old session once its
+  turn has ended (`claude stop <id>`, the job's short id in `claude
+  agents`), so that one session answers to the name, and starts the
+  next milestone's sub-owner (3.1). Its children's post to `o/<name>`
+  reaches it.
 - **Its context is the scarce thing.** It reads code through Codex
   surveys (short reports) and a Codex task's report, never its log. It
   ends its turn while implementers work, and is woken by their
@@ -182,7 +199,7 @@ and the budgets bind from the start. The repository's `AGENTS.md` loads on its o
   adopted. The owner may split one; merging, reordering or changing
   what one delivers changes the draft's expectations, and goes to its
   parent (section 5).
-- **The plan,** in `milestones.md` in the owner's notes, before the
+- **The plan,** `plan.md` in the mission's record, before the
   first milestone: a rough design of the whole mission, reaching into
   the rest of the draft where it settles what later missions build
   on, and the
@@ -192,12 +209,13 @@ and the budgets bind from the start. The repository's `AGENTS.md` loads on its o
   format, an interface between repositories, a protocol's shape), so
   that no milestone has to undo an earlier one's; the rest waits for
   its milestone's design. The plan is the owner's first report to its
-  parent, in at most 15 lines beside the file, checked as a design is
-  (3.3). With a single milestone, the plan is a line of the design's
-  report.
+  parent: `plan.md` opens with its summary, in at most 15 lines, and is
+  checked as a design is (3.3). With a single milestone, the plan is a
+  line of the design's report.
 - **Who drives.** With one milestone, the owner drives it. With more,
-  each goes to a sub-owner, started with a brief by the owner's fresh
-  session once the milestone before has ended (below, and section 2).
+  each goes to a sub-owner, `o/<name>-m<N>`, its brief the head of
+  `m<N>.md`, started by the owner's fresh session once the milestone
+  before has ended (below, and section 2).
   The owner keeps the plan and the whole mission's picture: it checks
   each milestone's design, answers its sub-owner, and reports to its
   parent. A sub-owner starts no sub-owner of its own, and no two
@@ -211,27 +229,29 @@ and the budgets bind from the start. The repository's `AGENTS.md` loads on its o
   fit the cap asks its parent for the split early, rather than run into
   the cap. The owner changes the plan, and says so in its next report.
 - **The cap, a rule: 4 hours.** No milestone runs past 4 hours of wall
-  time, from its start, its design included, to its end, as the ledger
-  records them. Milestones are planned at 2 to 3 hours, so that the cap
-  leaves room. A milestone at its cap pauses: it starts no task, job,
-  landing or repin, and what runs finishes untouched (a pause,
-  director.md 6). Its owner escalates through its parent to its
-  product owner, or Infra's to the director (section 5): what has
-  landed, the cause, the options (most
-  often a split: what has landed as the milestone, the rest as the
-  next) and a recommendation. It resumes on the answer.
+  time, from its start, its design included, to its end, as
+  `m<N>.md`'s `started` and `ended` record them. Milestones are planned
+  at 2 to 3 hours, so that the cap leaves room. A milestone at its cap
+  pauses: it starts no task, job, landing or repin, and what runs
+  finishes untouched (a pause, director.md 6). Its owner escalates
+  through its parent to its product owner, or Infra's to the director
+  (section 5): what has landed, the cause, the options (most often a
+  split: what has landed as the milestone, the rest as the next) and a
+  recommendation. It resumes on the answer.
 - **A milestone ends** when what it delivers has landed. The end is a
   checkpoint:
-  - its owner updates `STATUS.md` (4.4) and reports to its parent in at
-    most 10 lines: what the MVP now does, the commits, its time against
-    the cap, and what comes next. The owner passes it on to its
-    product owner, or Infra's to the director;
+  - its driver updates the repository's `docs/design/STATUS.md` (4.4),
+    runs `record runs <m> <N>` for the table, and writes the end report
+    in `m<N>.md`, in at most 10 lines: what the MVP now does, the
+    commits, its time against the cap, and what comes next. It commits
+    it and points its parent to it; the owner points its product owner
+    to it, or Infra's the director;
   - the owner hands over to a fresh session (section 2), which starts
     the next milestone at once;
   - a QA pass on what has landed may start (4.6), beside the next
     milestone. The ended milestone's sub-owner stays on for it: it
-    judges the pass and lands its fixes, reporting to the owner's new
-    session, then writes its closing note (section 6).
+    judges the pass in `qa.md` and lands its fixes, telling the owner's
+    new session, then ends.
 
 ### 3.2 Designing a milestone
 
@@ -275,13 +295,14 @@ and the budgets bind from the start. The repository's `AGENTS.md` loads on its o
 ### 3.3 The report and the check
 
 - **The report.** When a milestone's design has landed, its owner
-  writes to its parent, in at most 15 lines: what is designed and
+  writes it in `m<N>.md`, in at most 15 lines: what is designed and
   where, the commits, where it departs from the draft or the plan, what
   is open, and how it means to implement, with what will run in
-  parallel.
+  parallel. It commits it and points its parent to it.
 - **The parent's check** is brief: the report and the design's summary,
   or the plan, against the draft's direction, not a review. It answers
-  with a green light, or names the obvious departures to amend.
+  with a green light, or names the obvious departures to amend; a call
+  it makes goes in its own decisions.
 
 ## 4. Implementing
 
@@ -436,20 +457,21 @@ departs from this section or 4.5, it wins.
 
 ### 4.5 Sharing the machines
 
-- **Worktrees** under `tmp/owners/<name>/`, one per implementer, never
-  a primary checkout. A worktree's `target/` is cleared when done with,
-  as soon as its branch lands: the build cache's limit leaves out the
-  entries a target shares blocks with (cloned or linked, since evicting
-  them frees nothing), so a kept target holds its entries on the disk
-  past the limit until it goes and the cache is next collected.
+- **Worktrees** under `tmp/owners/<m>/m<N>/`, the milestone's, so that
+  `record runs` finds their builds (records.md 5), one per implementer,
+  never a primary checkout. A worktree's `target/` is cleared when done
+  with, as soon as its branch lands: the build cache's limit leaves out
+  the entries a target shares blocks with (cloned or linked, since
+  evicting them frees nothing), so a kept target holds its entries on
+  the disk past the limit until it goes and the cache is next collected.
   Worktrees of different repositories may share a target directory,
-  named by its real path in `CARGO_TARGET_DIR`, never through a
-  `target` link: a test that refuses a path reached through a link
-  fails on its scratch directory then. Two worktrees of one repository
-  may not share one. Cargo names a workspace member's artifacts by a
-  hash that leaves out the worktree's path and judges them fresh by
-  their sources' mtimes, so one worktree takes another's older build
-  as current: a false failure, or a false pass.
+  named by its real path in `CARGO_TARGET_DIR`, never through a `target`
+  link: a test that refuses a path reached through a link fails on its
+  scratch directory then. Two worktrees of one repository may not share
+  one. Cargo names a workspace member's artifacts by a hash that leaves
+  out the worktree's path and judges them fresh by their sources'
+  mtimes, so one worktree takes another's older build as current: a
+  false failure, or a false pass.
 - **`heavy`** is the only way to build and test, for everyone: `heavy
   cargo nextest run -p <crate>`. It queues on pueue in two lanes:
   builds, two at a time, and gates, alone on a quiet machine.
@@ -520,8 +542,9 @@ natural point for one, beside the next milestone (3.1).
 
 - **The tester** is a QA agent, a Codex session under
   [qa.md](qa.md) and [qa-milestone.md](qa-milestone.md), which say how
-  it works, with its notes beside the owner's, in `qa/`. It never reads
-  the code under test or its tests.
+  it works, with its notes beside the owner's, in `qa/`, and its passes
+  in the record's `qa.md`. It never reads the code under test or its
+  tests.
 - **The tester decides which tests to write,** not the owner: the owner
   names the part and the design, never the cases.
 - **A missing fake or hook** that a test needs, the tester names, and
@@ -541,8 +564,10 @@ natural point for one, beside the next milestone (3.1).
   regression test goes in the default suite, in the lowest world that
   owns the behaviour, under testing-strategy.md. A test that misreads the design is corrected or
   dropped, and a design that let it is made clearer. A gap the owner
-  accepts stays, as `#[ignore = "<why>"]`, listed in its notes. When
-  the owner ends a pass, the `qa` profile passes.
+  accepts stays, as `#[ignore = "<why>"]`. Each finding's disposition
+  goes beside it in `qa.md`: fixed in a commit, sent to the backlog, a
+  gap kept, or not a defect. When the owner ends a pass, the `qa`
+  profile passes.
 - **Findings are triaged until v0.1.0** (the user, 10-22). A bug that
   any QA finds is fixed now only when it lies on v0.1.0's happy path.
   That covers an owner's pass, the external loops and an after-landing
@@ -575,23 +600,25 @@ it ([qa-lab.md](qa-lab.md)). They are judged as a pass's are.
   parent's mailbox, and the director's watcher reports it if it stays
   unread.
 - The director asks the user only what has long-term consequences that
-  would be hard to change, or what the user's rules keep theirs.
+  would be hard to change, or what the user's rules keep theirs. An
+  owner never uses AskUserQuestion.
 
 ## 6. The closing note
 
 When its mission has landed, the owner writes `closing.md` in its
-notes directory, in at most half a page:
+record, in at most half a page:
 - what landed, with its commits;
 - what is left of the draft past the mission's end, for the next
   mission's brief;
-- the wall time from its start to its last landing, and its ledger's
-  sessions;
+- the wall time from its start to its last landing, and the sessions'
+  and builds' totals from `record runs`;
 - with more than one milestone, each one's time against the cap, and
   how the plan changed and why;
 - for a world it added to, the test time at its start and at its end;
 - its QA passes: how many, what they found, and the tests left ignored;
 - what went well and what didn't, in this process.
 
-It reports to its parent, which folds the note into its own, and the
-owner's session ends. The director compares the notes across owners, to judge what in this file
-pays and what to change.
+It commits the note with the README's `state`, `ended` and `end` set,
+points its parent to it, and the owner's session ends. The director
+compares the notes across owners, to judge what in this file pays and
+what to change.

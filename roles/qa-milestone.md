@@ -27,7 +27,8 @@ owners.md 4.6.
 - **Its brief** names the part and the design sections, the commits on
   `main` or the set's branches it tests, the repository and its `qa`
   profile, its worktree and notes (`qa/` beside the owner's), its effort
-  and budget. Never the cases.
+  and budget. Never the cases. Its pass goes in the mission's `qa.md`
+  (qa.md 3).
 - **It reads** the design sections, and the public surface of the world
   or harness it writes in: its builders, its fakes' scenarios, its
   stories' steps, as the project's testing document names them

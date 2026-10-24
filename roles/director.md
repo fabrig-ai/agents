@@ -92,15 +92,15 @@ user's behalf. The roles and the departments together are
 - **A fresh context at the third check,** about six hours in,
   however many compactions came before: `session.sh` says "hand
   over". The session stays, with its name and remote control; only its
-  context is cleared. The director brings `notes/` up to date (the
-  owners, the direction, the budgets, what waits on the user), writes
-  `notes/handover.md` with what only it holds (what is in flight, what
-  is held, the items between owners), logs the handover, stops the
-  watcher and the waiter, deletes the cron, runs `tmp/director/context.sh
-  clear` and ends its turn. The script types `/clear`, then the starting
-  prompt above. The fresh context reads its notes (section 3) and starts
-  the cron, the watcher and the waiter. Should the clear fail, the
-  script types the failure into the old context.
+  context is cleared. The director brings its record up to date
+  (`STATUS.md`, the direction, the budgets, what waits on the user),
+  writes `notes/handover.md` with what only it holds (what is in
+  flight, what is held, the items between owners), stops the watcher
+  and the waiter, deletes the cron, runs `tmp/director/context.sh
+  clear` and ends its turn. The script types `/clear`, then the
+  starting prompt above. The fresh context reads its notes (section 3)
+  and starts the cron, the watcher and the waiter. Should the clear
+  fail, the script types the failure into the old context.
 - **Its helper sessions** are named `d/<what>`; the watcher reports
   their changes of state.
 
@@ -109,35 +109,39 @@ user's behalf. The roles and the departments together are
 `~/src/rust/tmp/director/` on hel8. The mail is post's, in each
 machine's `tmp/post/` (section 5).
 
-- **`README.md`,** the entry point: it points here.
-- **`notes/`** is the current state. Each file is short and true:
-  edited when things change, pruned when done, never only appended.
-  - `direction.md`: the vision, the user's priorities and standing
-    rules, each draft and each piece of work waiting, the budgets, and
-    what is with the user.
-  - `owners.md`: the live tree. Each owner with its machine, session,
-    brief, footprint and state; the director's helper sessions. An
-    entry leaves when its work ends, with a line in `log.md`.
-  - `decisions-live.md`: a digest of the archived decisions that still
-    bind.
-  - `findings.md`: the backlog of findings that triage keeps waiting
-    (owners.md 4.6), each with its source and reproduction.
-  - `handover.md`, while it exists (section 2).
-- **`decisions.md`:** each call, numbered and appended: the call, its
-  reason, what it changes. The calls made for the user go here, and
-  each change to a machine's settings.
-- **`log.md`:** the timeline, one line per event.
-- **Folders:** `briefs/` (finished ones in `done/`), `for-user/` (notes
-  sent to the user), `archive/` (old decisions, the old log, the old
-  channels' messages).
+- **Its record** is in `~/src/rust/records`
+  ([records.md](../docs/design/records.md) 3), committed with `record
+  commit`. Each file is short and true: rewritten when things change,
+  pruned when done, never only appended, but for the decisions.
+  - `STATUS.md`: one line per mission in progress, with its owner's
+    address, its milestone, its state or blocker and its next step;
+    the director's helper sessions; then what waits on the user. A
+    mission leaves it when its closing note is committed.
+  - `director/direction.md`: the vision, the user's priorities and
+    standing rules, each draft and each piece of work waiting, and the
+    budgets.
+  - `director/decisions/NNNN.md`: each call, numbered and appended, 100
+    to a file: the call, its reason, what it changes. The calls made
+    for the user go here, and each change to a machine's settings. A
+    call that answers a report cites the report's path.
+  - `director/backlog.md`: the findings that triage keeps waiting and
+    no roadmap holds (owners.md 4.6), each with its source and
+    reproduction.
+  Git's history is the timeline: there is no log.
+- **Its notes** are scratch: `README.md`, the entry point, which points
+  here; `notes/decisions-live.md`, a digest of the decisions that still
+  bind; and `notes/handover.md` while it exists (section 2).
+- **Folders:** `briefs/` (product owners' and helpers'), `for-user/`
+  (notes sent to the user), `archive/` (the notes from before the
+  record: decisions, log, owners, the old channels' messages).
 - **Stamps** come from `date -u +%H:%MZ`, run before stamping anything.
-- **About weekly,** the decisions that `decisions-live.md` no longer
-  needs fold into `archive/`, and the log's old entries with them.
-- **After a compaction or a restart,** it reads `notes/direction.md`,
-  `notes/owners.md`, `notes/decisions-live.md`, the decisions newer
-  than that digest, the last entries of `log.md`, and `handover.md`
-  while it exists. Then it makes sure the cron, the watcher and the
-  waiter run, and after a compaction runs `session.sh` (section 2).
+- **About weekly,** `decisions-live.md` drops what no longer binds.
+- **After a compaction or a restart,** it reads `STATUS.md`,
+  `director/direction.md`, `notes/decisions-live.md`, the decisions
+  newer than that digest, the record's `git log` since its last check,
+  and `handover.md` while it exists. Then it makes sure the cron, the
+  watcher and the waiter run, and after a compaction runs `session.sh`
+  (section 2).
 
 ## 4. Starting an owner
 
@@ -190,39 +194,32 @@ machine's `tmp/post/` (section 5).
   decisions to its parent: public APIs, a test's world or a suite's
   organization, new harnesses, design text, kit behaviour that others
   feel, budgets.
-- **The brief,** `briefs/o-<name>.md`, holds what owners.md 2 lists, in
-  this order:
-  - who it is: its part, its department, its parent, its machine, "the
-    owners' way";
-  - what to read first: owners.md and its department's file, then what
-    that file names of the rules (a QA agent: qa.md and its kind's
-    file instead);
+- **The brief** is the mission's README in the record,
+  `missions/<m>/README.md` (records.md 4), committed before the owner
+  starts on it (owners.md 2). It holds what is particular to the
+  mission, in this order; the roles hold the rest, and no brief repeats
+  them:
+  - the front matter (records.md 3): its roadmap and feature, its
+    department, its parent and owner, its machine, its model and
+    effort, `started`, and `state: active`;
+  - a summary, at most 60 words: what it sets out to do;
+  - who it is, in a line: "o/<name>, an owner under agents'
+    `roles/owners.md` and `roles/<department>.md`, which say what to
+    read" (a QA agent: `roles/qa.md` and its kind's file);
   - its mission: the draft with its commit, the part of it this
     mission reaches and its end, what the draft names, what is adopted
-    and what is left open, and for a later mission the notes and
-    closing note of the one before;
+    and what is left open, and for a later mission the record of the
+    one before;
   - why it matters, in the user's words where there are some;
-  - how to start: the milestone plan, at most four, with the draft's
-    milestones where it lists them (owners.md 3.1), then the first
-    milestone's design, the report in parts where that is faster;
-  - who is near: the other owners' footprints, and that repins and API
-    breaks go through the director;
-  - how it spends: Claude for taste, Codex for the rest, with the
-    commands;
-  - its tests: the testing documents, where its stories go, and that a
-    budget is the user's;
-  - the security rules (section 10);
-  - its machine: cores, memory, disk and floor, who else builds there,
-    how many implementers at once, where it lands from;
-  - its notes, and that it re-reads the brief after a compaction;
-  - its own name and its parent's address, for post (section 5), and
-    when it writes: at the start (its milestone plan and footprint),
-    with each design report, at each milestone's end, with each
-    question (its options and a recommendation), at a milestone's cap,
-    at each landing another owner waits on (its hash), and at the end;
-  - "Never use AskUserQuestion."
-- **The record:** a row in `notes/owners.md`, a decision and a log
-  line. The owner's ledger gives its cost (owners.md, 2).
+  - how to start, where it departs from owners.md 3.1: the draft's
+    milestones, the report in parts where that is faster;
+  - who is near: the other owners' footprints;
+  - its budgets, and its machine: cores, memory, disk and floor, who
+    else builds there, how many implementers at once, where it lands
+    from;
+  - its own name and its parent's address, for post (section 5).
+- **The record:** the README, and the mission's line in `STATUS.md`.
+  `record runs` gives its cost (records.md 5).
 
 ## 5. The channels
 
@@ -278,7 +275,7 @@ machine's `tmp/post/` (section 5).
   features.
 - **A plan or a design report** gets owners.md 3.3's brief check, and
   a green light or the amendments. A milestone's end updates the
-  owner's row in `notes/owners.md`, its new session among it (owners.md
+  mission's line in `STATUS.md`, its new session among it (owners.md
   2).
 - **A milestone at its cap** waits, paused (owners.md 3.1), for an
   answer decided like any question's: a split, more time, or a change
@@ -289,7 +286,7 @@ machine's `tmp/post/` (section 5).
 - **A finding** is triaged (owners.md 4.6). One on v0.1.0's happy path
   goes to the owner of what it names. Any other goes to the backlog of
   the product owner whose feature it names (product.md 4), or, where no
-  product holds it, to `notes/findings.md`, where a later mission takes
+  product holds it, to `director/backlog.md`, where a later mission takes
   it, chosen from the direction.
 - **Footprints.** It orders the owners whose footprints overlap
   (owners.md, 4.5): who lands first. The second to land rebases, and
@@ -313,9 +310,9 @@ machine's `tmp/post/` (section 5).
   clearing targets for disk, goes on. Its questions wait. Each resumes
   on the user's word, owner by owner, through its channel, and the
   director then relays what it waits on from others.
-- **Closing notes** fold into the director's own comparison across
-  owners (owners.md, 6): what in owners.md pays and what to change,
-  with each owner's cost from its ledger.
+- **Closing notes** feed the director's comparison across owners
+  (owners.md, 6): what in owners.md pays and what to change, with each
+  mission's cost from `record runs --all`.
 
 ## 7. The check
 
@@ -325,7 +322,8 @@ is mechanical, and Codex reads what needs reading.
 1. **The session:** `tmp/director/session.sh`. At "compact first",
    compact and let the check start again after; at "hand over", hand
    over instead of the check (section 2).
-2. **Catch up:** `notes/owners.md` and the last entries of `log.md`.
+2. **Catch up:** `record pull`, `STATUS.md`, and the record's `git
+   log` since the last check.
 3. **The report:** `tmp/director/check-report.sh [MINUTES]`, over the
    last 120 minutes by default, reads every machine at once. For each:
    Claude's usage, who spent what, the owners' sessions and Codex units
@@ -342,10 +340,11 @@ is mechanical, and Codex reads what needs reading.
    growth) against the rate its plan expects. A stall past its first
    hour gets a fix at once, never a watch: on 10-23 a spend experiment
    enrolled 0 of 56 runs in 2.5 hours, with the zero reported after one.
-5. **Next:** which work in `notes/direction.md` gets an owner, and
+5. **Next:** which work in `director/direction.md` gets an owner, and
    where (section 4). Act.
-6. **Record:** update `notes/`, add to `decisions.md` and `log.md`,
-   and make sure the cron, the watcher and the waiter run.
+6. **Record:** rewrite `STATUS.md`, add the decisions, commit them
+   with `record commit`, and make sure the cron, the watcher and the
+   waiter run.
 7. **Push the user** only for what needs them.
 
 ## 8. The user
@@ -395,7 +394,7 @@ is mechanical, and Codex reads what needs reading.
 - **Its authority:**
   - sudo on every machine, used with judgement;
   - Claude's and Codex's settings on any machine, each change recorded
-    in `decisions.md`;
+    in its decisions;
   - disk: `~/src/rust` (tmp, worktrees, targets), `~/.claude` and
     `~/.codex` are its to free, never the user's own files; it keeps
     what the costs are read from (Claude's transcripts, Codex's

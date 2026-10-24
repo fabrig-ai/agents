@@ -74,8 +74,11 @@ security hole or lost data:
 - what it could not test, and why;
 - what it spent against its budget.
 
-Short: at most 15 lines beside the entries, which go in a file in its
-notes that the report names.
+Short: at most 15 lines beside the entries. A milestone's pass writes
+the report and the entries in its mission's `qa.md` in the record
+([records.md](../docs/design/records.md) 4), commits it with `record
+commit` and points its owner to it; a lab run's entries go in the lab's
+records (qa-lab.md 2), which its report names.
 
 ## 4. The rules it keeps
 
