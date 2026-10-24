@@ -2,6 +2,7 @@
 """Forward recovery instructions while heavy waits; retain its protocol in memory."""
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 
@@ -22,9 +23,10 @@ while True:
     while b'\n' in pending:
         line, _, rest = pending.partition(b'\n')
         pending = bytearray(rest)
-        if line + b'\n' == diagnostic:
+        if line + b'\n' == diagnostic or re.fullmatch(
+                rb'heavy: queued task [0-9]+ in the (?:build|gate) lane token [0-9a-f]{32}', line):
             # No writable file is needed before the caller sees this warning.
-            sys.stderr.buffer.write(diagnostic)
+            sys.stderr.buffer.write(line + b'\n')
             sys.stderr.buffer.flush()
 code = child.wait()
 try:

@@ -1032,7 +1032,31 @@ def payload(token):
     return code
 
 
+def cancel(token):
+    if not re.fullmatch(r'[0-9a-f]{32}', token):
+        raise Refusal('cancel requires a 32-digit lowercase hexadecimal task token')
+    with locked() as ledger:
+        task = ledger.tasks.get(token)
+        if task is None or Path(task['repo']).resolve() != Path.cwd().resolve():
+            raise Refusal('cancel requires a task submitted from this worktree')
+        if task['state'] != 'queued' or task.get('wrapper'):
+            raise Refusal('cancel requires a queued task not yet claimed by its wrapper')
+        # Revoke the token, never its numeric queue ID: that ID may have been
+        # reused. A late wrapper checks this state under the same host lock.
+        task.update(state='closing', outcome='cancelled', code=137,
+                    refusal='queued task cancelled by its owner')
+        ledger.event(task, 'release_begin', outcome='cancelled')
+        ledger.event(task, 'cancel', reason='explicit owner cancellation')
+        ledger.save()
+        reconcile(ledger)
+    print(f'heavy: cancelled queued task token {token}; its inert queue row remains until reached',
+          flush=True)
+    return 0
+
+
 def main(args):
+    if len(args) == 2 and args[0] == '--cancel':
+        return cancel(args[1])
     if len(args) == 2 and args[0] == '--group-held':
         with locked() as ledger:
             return 0 if args[1] in ledger.data['maintenance'] or (

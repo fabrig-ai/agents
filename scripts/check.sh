@@ -32,6 +32,7 @@ scripts/devel/test-land-set
 scripts/devel/test-repin --evidence "$scratch/repin"
 DEV_TMP=$scratch scripts/infra/test-kache-setup
 scripts/devel/recovery-v1/test-gate-policy
+scripts/devel/recovery-v1/test-heavy-offline
 scripts/devel/recovery-v1/test-inert-install --evidence "$scratch/inert-install"
 # The full heavy-recovery and land-turn suites install real systemd units.
 # Only land-turn's five local pipe/protocol cases belong in this gate.

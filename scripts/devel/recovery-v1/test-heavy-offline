@@ -1,0 +1,295 @@
+#!/usr/bin/env python3
+"""Heavy's real ledger/lifecycle against fake queue and systemd boundaries."""
+import contextlib
+import hashlib
+import importlib.util
+import io
+import json
+import os
+from pathlib import Path
+import select
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from types import SimpleNamespace
+from unittest.mock import patch
+
+os.umask(0o077)
+sys.dont_write_bytecode = True
+KIT = Path(__file__).resolve().parent
+sys.path.insert(0, str(KIT))
+
+
+class Lab:
+    def __init__(self, root):
+        self.root = root
+        self.repo = root / 'repo'
+        self.repo.mkdir()
+        self.groups = {'build': {'status': 'Running'}, 'gate': {'status': 'Running'}}
+        self.calls = []
+        self.units = {}
+        self.on_health = None
+        self.env = dict(os.environ, DEV_ROOT=str(root), DEV_TMP=str(root / 'tmp'),
+                        HOME=str(root / 'home'), XDG_CONFIG_HOME=str(root / 'config'),
+                        PUEUE_CONFIG_PATH=str(root / 'queue.yml'))
+        for name in ('HEAVY_TASK', 'HEAVY_FAULT_DIR', 'HEAVY_BOOT_ID_FILE', 'PUEUE_PROFILE'):
+            self.env.pop(name, None)
+        with patch.dict(os.environ, self.env, clear=True):
+            spec = importlib.util.spec_from_file_location('offline_heavy', KIT / 'heavy-recovery.py')
+            self.m = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(self.m)
+        self.m.PUEUE = str(root / 'must-never-exist-pueue')
+        self.m.CGROOT = root / 'cgroups'
+        self.m.run = self.run
+
+    @contextlib.contextmanager
+    def entered(self):
+        previous = Path.cwd()
+        with patch.dict(os.environ, self.env, clear=True):
+            os.chdir(self.repo)
+            try:
+                yield self
+            finally:
+                os.chdir(previous)
+
+    def run(self, args, **kwargs):
+        args = [str(value) for value in args]
+        self.calls.append(args)
+        output, code = '', 0
+        if args[0] == self.m.PUEUE:
+            command = args[1:]
+            if command == ['group', '--json']:
+                output = json.dumps(self.groups)
+            elif command[:2] == ['pause', '--wait']:
+                self.groups[command[-1]]['status'] = 'Paused'
+            elif command[:2] == ['start', '--group']:
+                self.groups[command[-1]]['status'] = 'Running'
+            elif command[0] == 'add':
+                output = '7\n'
+            elif command == ['enqueue', '7']:
+                pass
+            else:
+                raise AssertionError('unexpected queue operation: ' + repr(command))
+        elif args[:3] == ['systemctl', '--user', 'show']:
+            unit = args[3]
+            if unit == self.m.PREFIX + '-reconcile.timer' and self.on_health:
+                callback, self.on_health = self.on_health, None
+                callback()
+            group = self.units.get(unit, '')
+            active = bool(group) or '-observe.service' in unit or '-reconcile.' in unit
+            output = ('LoadState=loaded\nActiveState=' + ('active' if active else 'inactive') +
+                      '\nControlGroup=' + group + '\nResult=success\nExecMainStatus=0\n')
+        elif args[:3] == ['systemctl', '--user', 'is-active']:
+            pass
+        elif args[:3] == ['systemctl', '--user', 'kill']:
+            group = self.units.get(args[-1])
+            if group:
+                (self.m.CGROOT / group.lstrip('/') / 'cgroup.events').write_text('populated 0\n')
+        elif args[:3] == ['systemctl', '--user', 'stop']:
+            self.units.pop(args[-1], None)
+        elif args[:2] == ['git', 'rev-parse']:
+            code = 128  # This fixture's submission is unversioned.
+        else:
+            raise AssertionError('unexpected external operation: ' + repr(args))
+        return SimpleNamespace(returncode=code, stdout=output, stderr='')
+
+    def add(self, label, lane='build', state='queued', task_id='7'):
+        m = self.m
+        token = hashlib.sha256(label.encode()).hexdigest()[:32]
+        with m.locked() as ledger:
+            task = dict(token=token, id=task_id, label=label, lane=lane,
+                        repo=str(self.repo), boot=m.boot(), queue=m.QUEUE,
+                        tree='unversioned', commit='unversioned', policy='fixture-policy',
+                        unit=m.PREFIX + '-' + token + '.service', args=['never-run-payload'],
+                        submitted=time.time(), submitter=m.identity(), state=state,
+                        log=str(m.LOGS / (token + '.log')),
+                        capture=str(m.LOGS / (token + '.capture')))
+            Path(task['capture']).touch(mode=0o600)
+            if state != 'queued':
+                task['wrapper'] = m.identity()
+            ledger.tasks[token] = task
+            ledger.save()
+        return token
+
+    def snapshot(self):
+        return json.loads((self.m.BASE / 'state.json').read_text())
+
+    def receipt(self, token):
+        return json.loads((self.m.BASE / 'receipts' / (token + '.json')).read_text())
+
+    def events(self):
+        return [json.loads(line) for line in (self.m.BASE / 'events.jsonl').read_text().splitlines()]
+
+    def cancel(self, token):
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            assert self.m.main(['--cancel', token]) == 0
+        assert 'inert queue row remains' in out.getvalue()
+
+
+def refuses(lab, token, message):
+    before = lab.snapshot()
+    try:
+        lab.m.main(['--cancel', token])
+    except lab.m.Refusal as error:
+        assert message in str(error), str(error)
+    else:
+        raise AssertionError('cancellation accepted')
+    assert lab.snapshot() == before
+
+
+def queued_cancel(lab, lane):
+    token = lab.add('cancelled', lane)
+    # A distinct live token may already own the same numeric queue ID.
+    other = lab.add('unrelated-reused-id', state='active')
+    before = lab.snapshot()['tasks'][other]
+    lab.cancel(token)
+    receipt = lab.receipt(token)
+    assert receipt['outcome'] == 'cancelled' and receipt['code'] == 137
+    assert not receipt['payload_started'] and not receipt['payload_ended']
+    assert receipt['cgroup_empty'] and receipt['release_complete']
+    assert receipt['token'] == token
+    assert hashlib.sha256(Path(receipt['log']).read_bytes()).hexdigest() == receipt['log_sha256']
+    assert lab.snapshot()['tasks'][other] == before
+    assert not any(call[2:3] == ['kill'] and call[-1] == before['unit'] for call in lab.calls)
+    try:
+        lab.m.wrapper(token)
+    except lab.m.Refusal as error:
+        assert 'refusing replay' in str(error)
+    else:
+        raise AssertionError('cancelled wrapper ran')
+    refuses(lab, token, 'not yet claimed')
+    for _ in range(2):
+        with lab.m.locked() as ledger:
+            lab.m.reconcile(ledger)
+    assert sum(e['event'] == 'release_end' and e['token'] == token for e in lab.events()) == 1
+    rows = (lab.m.LOGS / 'heavy.tsv').read_text().splitlines()
+    assert len(rows) == 1 and token in rows[0]
+
+
+def not_owned_or_claimed(lab):
+    token = lab.add('candidate')
+    for value in ('', '7', 'A' * 32, '../' + 'a' * 32, 'a' * 33):
+        refuses(lab, value, '32-digit')
+    refuses(lab, 'f' * 32, 'this worktree')
+    other = lab.root / 'other-repo'
+    other.mkdir()
+    os.chdir(other)
+    try:
+        refuses(lab, token, 'this worktree')
+    finally:
+        os.chdir(lab.repo)
+    for state in ('waiting', 'launching', 'active', 'finishing', 'closing', 'released'):
+        claimed = lab.add(state, state=state)
+        refuses(lab, claimed, 'not yet claimed')
+    with lab.m.locked() as ledger:
+        ledger.tasks[token]['wrapper'] = lab.m.identity()
+        ledger.save()
+    refuses(lab, token, 'not yet claimed')
+
+
+def claim_wins(lab):
+    token = lab.add('claim-first')
+    gate = lab.add('held-gate', lane='gate', state='active')
+    with lab.m.locked() as ledger:
+        ledger.data['gate'] = gate
+        ledger.save()
+    class Claimed(Exception):
+        pass
+    # The actual wrapper claims the token under the actual host lock; a gate
+    # holds its subsequent admission. Stop at its first wait, before any IO.
+    with patch.object(lab.m.time, 'sleep', side_effect=Claimed):
+        try:
+            lab.m.wrapper(token)
+        except Claimed:
+            pass
+    assert lab.snapshot()['tasks'][token]['state'] == 'waiting'
+    refuses(lab, token, 'not yet claimed')
+
+
+def original_waiter(lab):
+    with lab.m.locked() as ledger:
+        ledger.data['installation'] = {'boot': lab.m.boot()}
+        ledger.save()
+    def cancel_submitted():
+        task = next(iter(lab.snapshot()['tasks'].values()))
+        assert task['state'] == 'queued'
+        lab.cancel(task['token'])
+    lab.on_health = cancel_submitted
+    with contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()):
+        code = lab.m.submit(['never-run-payload'], 'build', 0)
+    assert code == 137
+    assert 'queued task cancelled by its owner' in out.getvalue()
+    assert out.getvalue().splitlines()[-1].startswith('heavy: receipt ')
+
+
+def below_disk_floor(root):
+    kit = root / 'kit'
+    kit.mkdir()
+    shutil.copy2(KIT / 'heavy', kit / 'heavy')
+    (kit / 'kit.sh').write_text('machine_setting() { echo "4 fixture"; }\n'
+                              'disk_floor() { echo unexpected-disk-check >&2; return 2; }\n')
+    (kit / 'heavy-recovery.py').write_text('import sys\nassert sys.argv[1:]==["--cancel", "a"*32]\n'
+                                         'print("cancel-dispatched-without-floor-or-policy")\n')
+    result = subprocess.run([str(kit / 'heavy'), '--cancel', 'a' * 32],
+                            stdin=subprocess.DEVNULL, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == 'cancel-dispatched-without-floor-or-policy'
+    assert 'unexpected' not in result.stderr
+
+
+def live_capture(root):
+    allow = root / 'allow'
+    destination = root / 'capture'
+    token = 'b' * 32
+    header = f'heavy: queued task 42 in the gate lane token {token}\n'.encode()
+    invalid = b'heavy: queued task 42 in the gate lane token INVALID\n'
+    body = invalid + header + b'payload\x00bytes\n'
+    writer = ('import os,time\nfrom pathlib import Path\n'
+              f'os.write(1,{invalid!r})\nos.write(1,{header[:15]!r})\nos.write(1,{header[15:]!r})\n'
+              f'while not Path({str(allow)!r}).exists(): time.sleep(.01)\n'
+              'os.write(1,b"payload\\x00bytes\\n")\n')
+    child = subprocess.Popen([sys.executable, '-B', str(KIT / 'land-capture.py'), str(destination),
+                              sys.executable, '-c', writer],
+                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        assert select.select([child.stderr], [], [], 5)[0], 'header was not forwarded live'
+        assert child.stderr.readline() == header
+        assert child.poll() is None and not destination.exists()
+        allow.touch()
+        output, error = child.communicate(timeout=5)
+        assert child.returncode == 0 and output == b'' and error == b''
+        assert destination.read_bytes() == body
+    finally:
+        allow.touch()
+        if child.poll() is None:
+            child.kill()
+            child.communicate()
+
+
+def main():
+    cases = [('cancel-build', lambda lab: queued_cancel(lab, 'build')),
+             ('cancel-gate', lambda lab: queued_cancel(lab, 'gate')),
+             ('foreign-and-claimed-refusal', not_owned_or_claimed),
+             ('claim-wins', claim_wins), ('original-waiter', original_waiter)]
+    with tempfile.TemporaryDirectory(prefix='heavy-offline-') as directory:
+        root = Path(directory)
+        for name, test in cases:
+            path = root / name
+            path.mkdir()
+            with Lab(path).entered() as lab:
+                test(lab)
+                assert all('remove' not in call and 'status' not in call and 'env' not in call
+                           for call in lab.calls if call[0] == lab.m.PUEUE)
+            print('PASS ' + name, flush=True)
+        for name, test in [('cancel-below-floor', below_disk_floor), ('live-capture', live_capture)]:
+            path = root / name
+            path.mkdir()
+            test(path)
+            print('PASS ' + name, flush=True)
+    print('PASS 7 offline heavy cases (no queue or systemd executables)', flush=True)
+
+
+if __name__ == '__main__':
+    main()

@@ -72,6 +72,19 @@ after token release: without a safe identity API, a queue row cannot be
 removed without risking an unrelated replacement. Completed queue rows
 therefore require operator retention handling on the dedicated queue.
 
+`heavy --cancel TOKEN` cancels an unclaimed queued submission from the
+caller's current canonical worktree. It requires the printed 32-digit task
+token; a numeric queue ID is never accepted. Under the host lock it revokes
+the token and publishes a nonzero cancellation receipt through normal
+release. A delayed wrapper cannot start its payload. A claimed, running,
+released, unknown or foreign-worktree task refuses without cancellation.
+The inert queue row remains until reached, then its wrapper exits at once;
+the command never removes a row by an ID that another task could reuse.
+Cancellation works below the disk floor without preparing the gate policy.
+Land forwards the validated queued-token header while waiting, retaining
+its completion capture byte-for-byte, so the token is available even if
+its waiting client is later killed. Client death alone does not cancel.
+
 A gate saves pause intent, pauses every non-gate group without stopping
 running tasks, then drains the ledger's live build lifetimes. Persisted
 gate holds also block build admission if the queue restarts and forgets
