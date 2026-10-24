@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Land one closed set of branches, upstream first, under a connection-held lock."""
 import argparse
+import ctypes
 from datetime import datetime, timezone
 import json
 import math
@@ -60,13 +61,44 @@ def require(condition, reason, status=2):
 class Runner:
     def __init__(self):
         self.lock = self.child = None
+        self.cancelling = False
+        # Reap orphaned grandchildren too when a shell exits before its publisher.
+        require(ctypes.CDLL(None).prctl(36, 1, 0, 0, 0) == 0,
+                'cannot become child subreaper', 1)  # PR_SET_CHILD_SUBREAPER (Linux)
 
-    def run(self, root, argv, *, check=True, quiet=False, discard_stdout=False, data=None):
+    def cancel(self, child, signum):
+        self.cancelling = True
+        try:
+            os.killpg(child.pid, signum)
+        except ProcessLookupError:
+            pass
+        deadline = time.monotonic() + 1
+        while True:
+            child.poll()
+            try:
+                while os.waitpid(-child.pid, os.WNOHANG)[0]:
+                    pass
+            except ChildProcessError:
+                pass
+            try:
+                os.killpg(child.pid, 0)
+            except ProcessLookupError:
+                break
+            if time.monotonic() >= deadline:
+                try:
+                    os.killpg(child.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            time.sleep(.01)
+        child.wait()
+        self.cancelling = False
+
+    def run(self, root, argv, *, check=True, quiet=False, discard_stdout=False, data=None, diagnostic=False):
         child = subprocess.Popen(argv, cwd=root, stdin=subprocess.PIPE if data else subprocess.DEVNULL,
                                  stdout=subprocess.DEVNULL if discard_stdout else subprocess.PIPE if quiet else None,
                                  stderr=subprocess.PIPE if quiet else None,
                                  env=dict(os.environ, GIT_EDITOR='true', LAND_TURN_ACTIVE='1'),
-                                 close_fds=True)
+                                 close_fds=True, start_new_session=True)
         self.child = child
         try:
             while True:
@@ -77,14 +109,9 @@ class Runner:
                     data = None
                     if self.lock:
                         self.lock.tick()
-        except BaseException:
-            if child.poll() is None:
-                child.terminate()
-            try:
-                child.wait(timeout=1)
-            except subprocess.TimeoutExpired:
-                child.kill()
-                child.wait()
+        except BaseException as error:
+            signum = error.status - 128 if isinstance(error, Failure) else 0
+            self.cancel(child, signum if signum in (signal.SIGINT, signal.SIGTERM) else signal.SIGTERM)
             raise
         finally:
             self.child = None
@@ -94,7 +121,7 @@ class Runner:
         if check and child.returncode:
             raise Failure(1, f'command failed ({child.returncode}): {shlex.join(argv)}'
                           + (': ' + err.decode(errors='replace').strip() if err else ''))
-        return child.returncode, (out or b'').decode().strip()
+        return child.returncode, ((err if diagnostic else out) or b'').decode().strip()
 
     def git(self, root, *args):
         return self.run(root, ['git', *args], quiet=True)[1]
@@ -125,7 +152,7 @@ class SetLock:
         print('land-set: waiting for the set lock', flush=True)
         try:
             self.transport = subprocess.Popen(self.argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                              stderr=subprocess.DEVNULL, close_fds=True)
+                                              stderr=subprocess.DEVNULL, close_fds=True, start_new_session=True)
             os.set_blocking(self.transport.stdin.fileno(), False)
             pending = bytearray()
             while True:
@@ -224,8 +251,8 @@ def load(runner, filename, root):
         raise Failure(2, str(error)) from error
 
 
-def rebase(runner, path):
-    status, _ = runner.run(path, ['git', 'rebase', 'origin/main'], check=False)
+def rebase(runner, path, base):
+    status, _ = runner.run(path, ['git', 'rebase', base], check=False)
     while status:
         conflicts = runner.git(path, 'diff', '--name-only', '--diff-filter=U').splitlines()
         require(conflicts, 'rebase failed without conflicted paths', 1)
@@ -237,8 +264,19 @@ def rebase(runner, path):
         status, _ = runner.run(path, ['git', 'rebase', '--continue'], check=False)
 
 
-def repin(runner, path, name, label, landed):
-    pins = {up: landed[up] for up in reversed(UPSTREAM[name]) if up in landed}
+def repin(runner, path, name, label, landed, candidates, root, mains):
+    pins = {}
+    for up in reversed(UPSTREAM[name]):
+        commit = candidates.get(up) or landed.get(up)
+        if not commit:
+            if up not in mains:
+                remote = runner.git(root / up, 'ls-remote', 'origin', 'refs/heads/main').split()
+                require(len(remote) == 2 and remote[1] == 'refs/heads/main'
+                        and re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', remote[0]),
+                        f'{name}: cannot determine {up} main', 1)
+                mains[up] = remote[0]
+            commit = mains[up]
+        pins[up] = commit
     selected = {}
 
     def packages():
@@ -258,18 +296,9 @@ def repin(runner, path, name, label, landed):
                     f'{name}: multiple revisions for source {identity}: ' + ', '.join(sorted(revisions)), 1)
         return {identity: next(iter(revisions)) for identity, revisions in found.items()}
 
-    base = sources()
-    # A new downstream pin can refresh only its own edges to other sources.
-    # Restore untouched upstreams afterwards, with their dependencies last.
-    targets = dict(pins)
-    for up in reversed(UPSTREAM[name]):
-        if up not in pins:
-            choices = [identity for identity in base
-                       if repo_name(urlsplit(identity[4:]).path) == up]
-            require(len(choices) <= 1, f'{name}: ambiguous source {up}', 1)
-            if choices:
-                targets[up] = base[choices[0]]
-
+    sources()
+    # Sources whose packages depend on other upstream sources go first.
+    targets = pins
     for up, commit in targets.items():
         records = [p for p in packages() if p.get('source', '').startswith('git+')
                    and repo_name(urlsplit(p['source'][4:].split('#')[0]).path) == up]
@@ -279,7 +308,7 @@ def repin(runner, path, name, label, landed):
         selected[identity] = commit
         require('rev' not in parse_qs(urlsplit(identity[4:]).query), f'{name}: rev constraint on {up}', 1)
         selector = identity + '#' + records[0]['name'] + '@' + records[0]['version']
-        status, _ = runner.run(path, ['heavy', 'cargo', 'update', '--precise', commit, '-p', selector], check=False)
+        status, _ = runner.run(path, ['cargo', 'update', '--precise', commit, '-p', selector], check=False)
         require(status == 0, f'{name}: repin failed ({status})', 1)
 
     def verify():
@@ -289,7 +318,7 @@ def repin(runner, path, name, label, landed):
             require(up not in targets or revision == targets[up], f'{name}: wrong pin for {up}', 1)
         require(selected.keys() <= found.keys(), f'{name}: pinned source disappeared', 1)
     verify()
-    status, _ = runner.run(path, ['heavy', 'cargo', 'metadata', '--format-version', '1'],
+    status, _ = runner.run(path, ['cargo', 'metadata', '--format-version', '1'],
                            check=False, discard_stdout=True)
     require(status == 0, f'{name}: metadata failed ({status})', 1)
     verify()
@@ -309,7 +338,9 @@ def feed(runner, fixture, record):
         argv = [*SSH, shlex.join(argv)]
     try:
         runner.run(None, argv, quiet=True, data=(json.dumps(record) + '\n').encode())
-    except (OSError, Failure):
+    except (OSError, Failure) as error:
+        if isinstance(error, Failure) and error.status in (128 + signal.SIGINT, 128 + signal.SIGTERM):
+            raise
         print('land-set: warning: feed append failed', file=sys.stderr, flush=True)
 
 
@@ -338,6 +369,40 @@ def write_state(path, label, landed):
     pending.replace(path)
 
 
+def gate_step(runner, path, name, label, landed, candidates, root, mains):
+    runner.git(path, 'fetch', 'origin')
+    base = runner.git(path, 'rev-parse', 'origin/main')
+    rebase(runner, path, base)
+    repin(runner, path, name, label, landed, candidates, root, mains)
+    if runner.git(path, 'rev-parse', 'HEAD') == base:
+        require(not any(up in landed or up in candidates for up in UPSTREAM[name]),
+                f'{name}: no change after an upstream landed or gated; set is incomplete', 1)
+        return None
+    code, _ = runner.run(path, ['land', '--no-push'], check=False)
+    require(code == 0, f'{name}: land --no-push failed ({code})', code if code > 0 else 128 - code)
+    return (runner.git(path, 'rev-parse', 'HEAD'), base)
+
+
+def push_step(runner, path, name, candidate):
+    code, _ = runner.run(path, ['land'], check=False)
+    commit = runner.git(path, 'rev-parse', 'HEAD')
+    try:
+        runner.git(path, 'fetch', 'origin')
+        for published in dict.fromkeys((commit, candidate)):
+            found, _ = runner.run(path, ['git', 'merge-base', '--is-ancestor', published, 'origin/main'],
+                                  check=False, quiet=True)
+            if found == 0:
+                return published, code
+    except (Failure, OSError) as error:
+        if isinstance(error, Failure) and error.status in (128 + signal.SIGINT, 128 + signal.SIGTERM):
+            raise
+        if not code:
+            raise
+        print(f'land-set: warning: {name}: cannot reconcile failed land', file=sys.stderr, flush=True)
+    require(code != 0, f'{name}: HEAD is not on origin/main', 1)
+    return None, code
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('setfile')
@@ -346,83 +411,203 @@ def main():
     root = Path(os.environ.get('DEV_ROOT', str(Path.home() / 'src/rust')))
     tmp = Path(os.environ.get('DEV_TMP', str(root / 'tmp'))).resolve()
     lock, spec, summary, current = None, None, {}, None
+    fixture, paths, staging = None, {}, {}
+    candidates, bases, made = {}, {}, set()
+    announced = cleaning = terminal = False
     token = secrets.token_hex(16)
     host = re.sub('[^A-Za-z0-9_.-]', '-', socket.gethostname()).lstrip('._-')[:64] or 'local'
 
+    def event(kind, **fields):
+        feed(runner, fixture, dict(time=datetime.now(timezone.utc).isoformat(), set=spec['set'],
+                                   event=kind, host=host, token=token, **fields))
+
     def interrupted(signum, frame):
-        if runner.child and runner.child.poll() is None:
-            runner.child.send_signal(signum)
+        nonlocal status, reason
+        if runner.cancelling:
+            return
+        if cleaning:
+            if status == 0 and not terminal:
+                status, reason = 128 + signum, 'land-set: interrupted'
+                print(reason, file=sys.stderr, flush=True)
+            return
         raise Failure(128 + signum, 'interrupted')
+
+    def remove_pin_only(name):
+        if name in made:
+            runner.git(root / name, 'worktree', 'remove', '--force', str(paths[name]))
+            runner.git(root / name, 'branch', '-D', f'land-set/{token}/{name}')
+            made.remove(name)
+
+    def invalidate(start):
+        for name in names[start:]:
+            commit = candidates.pop(name, None)
+            if commit:
+                summary[name] = 'invalidated ' + commit + ' (not pushed)'
+            bases.pop(name, None)
+
+    def gates(start):
+        nonlocal current
+        # Three gate/check rounds, including the first, bound a moving main.
+        for attempt in range(3):
+            invalidate(start)
+            mains, moved = {}, []
+            for name in names[start:]:
+                lock.boundary()
+                current = name
+                if name in landed:
+                    path = paths[name]
+                    runner.git(path, 'fetch', 'origin')
+                    commit = landed[name]
+                    code, _ = runner.run(path, ['git', 'merge-base', '--is-ancestor', commit, 'origin/main'],
+                                         check=False, quiet=True)
+                    require(code == 0, f'{name}: recorded commit {commit} is not on origin/main', 1)
+                    summary[name] = 'recorded landed ' + commit
+                    current = None
+                    continue
+                if spec['repos'][name] == 'pin-only' and name not in made:
+                    primary = root / name
+                    path = tmp / 'land-set' / token / name
+                    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                    runner.git(primary, 'fetch', 'origin')
+                    runner.git(primary, 'worktree', 'add', '-b', f'land-set/{token}/{name}',
+                               str(path), 'origin/main')
+                    paths[name] = path
+                    made.add(name)
+                path = paths[name]
+                result = gate_step(runner, path, name, spec['set'], landed, candidates, root, mains)
+                if result is None:
+                    summary[name] = 'skipped'
+                    remove_pin_only(name)
+                else:
+                    commit, base = result
+                    # land may itself have fetched and rebased after our repin.
+                    if runner.git(path, 'merge-base', commit, 'origin/main') != base:
+                        summary[name] = 'invalidated ' + commit + ' (not pushed)'
+                        moved.append(names.index(name))
+                        break
+                    candidates[name], bases[name] = commit, base
+                    summary[name] = 'gated ' + commit + ' (not pushed)'
+                    event('gated', repo=name, commit=commit)
+                    if any(name in UPSTREAM[down] for down in names[names.index(name) + 1:]):
+                        ref = f'refs/heads/land-set/{token}/{name}'
+                        previous = staging.get(name, (None, ''))[1]
+                        # Register before the push so even an interrupted push is cleaned up.
+                        staging[name] = (path, commit, runner.git(path, 'remote', 'get-url', 'origin'))
+                        runner.git(path, 'push', '--force-with-lease=' + ref + ':' + previous,
+                                   'origin', commit + ':' + ref)
+                current = None
+            for index, name in enumerate(names):
+                if name not in candidates:
+                    continue
+                lock.boundary()
+                current = name
+                runner.git(paths[name], 'fetch', 'origin')
+                if runner.git(paths[name], 'rev-parse', 'origin/main') != bases[name]:
+                    moved.append(index)
+                current = None
+            if not moved:
+                return
+            start = min(moved)
+            current = names[start]
+            invalidate(start)
+            require(attempt < 2, f'{current}: main kept moving after three gate rounds', 6)
+            print(f'land-set: {current}: main moved; gating again', flush=True)
 
     for signum in (signal.SIGINT, signal.SIGTERM):
         signal.signal(signum, interrupted)
-    status = 0
+    status, reason = 0, None
     try:
         spec, paths = load(runner, args.setfile, root)
-        summary = {name: 'not reached' for name in ORDER if name in paths}
+        names = [name for name in ORDER if name in paths]
+        summary = {name: 'not reached' for name in names}
+        try:
+            code, output = runner.run(None, ['land', '--no-push', '--docs'], check=False, quiet=True, diagnostic=True)
+        except OSError as error:
+            raise Failure(2, 'land with --no-push is required on PATH') from error
+        # The incompatible-flags diagnostic happens before any Git or build work.
+        require(code == 2 and '--no-push cannot be combined' in output,
+                'land on PATH must support --no-push')
         fixture = os.environ.get('LAND_SET_FIXTURE_DIR')
         if fixture is not None:
             fixture = Path(fixture).resolve()
             require(os.environ.get('HEAVY_RECOVERY_FIXTURE') == '1' and fixture != tmp
                     and fixture.is_relative_to(tmp), 'invalid fixture directory', 5)
+        announced = True
+        event('waiting')
         lock = SetLock(tmp, fixture, token, host)
         runner.lock = lock
         lock.acquire()
+        event('started')
         state = tmp / 'land-set' / 'state' / (quote(spec['set'], safe='') + '.json')
         landed = read_state(state, spec['set'], paths)
-        for name in summary:
+        gates(0)
+        for index, name in enumerate(names):
+            if name not in candidates:
+                continue
             lock.boundary()
-            path = paths[name]
             current = name
-            pin_only = spec['repos'][name] == 'pin-only'
-            if pin_only:
-                primary = path
-                path = tmp / 'land-set' / token / name
-                paths[name] = path
-                path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-                runner.git(primary, 'worktree', 'add', '--detach', str(path), 'HEAD')
-            runner.git(path, 'fetch', 'origin')
-            if pin_only:
-                runner.git(path, 'checkout', '-b', f'land-set/{token}/{name}', 'origin/main')
-            if name in landed:
-                commit = landed[name]
-                code, _ = runner.run(path, ['git', 'merge-base', '--is-ancestor', commit, 'origin/main'],
-                                     check=False, quiet=True)
-                require(code == 0, f'{name}: recorded commit {commit} is not on origin/main', 1)
-                summary[name] = 'recorded landed ' + commit
-            else:
-                rebase(runner, path)
-                repin(runner, path, name, spec['set'], landed)
-                if runner.git(path, 'rev-parse', 'HEAD') == runner.git(path, 'rev-parse', 'origin/main'):
-                    require(not any(up in landed for up in UPSTREAM[name]),
-                            f'{name}: no change after an upstream landed; set is incomplete', 1)
-                    summary[name] = 'skipped'
-                else:
-                    code, _ = runner.run(path, ['land'], check=False)
-                    require(code == 0, f'{name}: land failed ({code})', code if code > 0 else 128 - code)
-                    commit = runner.git(path, 'rev-parse', 'HEAD')
-                    runner.git(path, 'fetch', 'origin')
-                    require(commit == runner.git(path, 'rev-parse', 'origin/main'), f'{name}: HEAD is not origin/main', 1)
-                    landed[name] = commit
-                    write_state(state, spec['set'], landed)
-                    summary[name] = 'landed ' + commit
-                    feed(runner, fixture, dict(time=datetime.now(timezone.utc).isoformat(), set=spec['set'],
-                                              repo=name, commit=commit, host=host, token=token))
-            if pin_only:
-                runner.git(primary, 'worktree', 'remove', '--force', str(path))
+            candidate = candidates[name]
+            commit, code = push_step(runner, paths[name], name, candidate)
+            if commit:
+                landed[name] = commit
+                candidates.pop(name)
+                write_state(state, spec['set'], landed)
+                summary[name] = 'landed ' + commit
+                event('landed', repo=name, commit=commit)
+                if code:
+                    print(f'land-set: {name}: landed {commit} despite land failing ({code})', flush=True)
+            require(code == 0, f'{name}: land failed ({code})', code if code > 0 else 128 - code)
+            remove_pin_only(name)
             current = None
+            if commit != candidate:
+                gates(index + 1)
         lock.boundary()
         state.unlink(missing_ok=True)
     except (Failure, OSError, ValueError, KeyError, TypeError) as error:
         status = error.status if isinstance(error, Failure) else 1
-        print('land-set: ' + str(error), file=sys.stderr, flush=True)
+        reason = 'land-set: ' + str(error)
+        print(reason, file=sys.stderr, flush=True)
         if current:
-            summary[current] = f'failed ({status}) {paths[current]}'
+            prefix = summary[current] + '; ' if summary[current].startswith('landed ') else ''
+            summary[current] = prefix + f'failed ({status}) {paths[current]}'
     finally:
+        # Finish cleanup under the lock, even if a signal arrives during it.
+        cleaning = True
+        for name, (path, commit, origin) in staging.items():
+            # A landed pin-only worktree has already been removed.
+            path = path if path.exists() else root / name
+            try:
+                runner.git(path, 'push', 'origin', f':refs/heads/land-set/{token}/{name}')
+            except (Failure, OSError):
+                print(f'land-set: warning: staging branch deletion failed: {origin} '
+                      f'refs/heads/land-set/{token}/{name} {commit}', file=sys.stderr, flush=True)
         if lock:
-            lock.close()
+            lock.tick()
             if lock.lost and status == 0:
                 status = 5
+                reason = 'land-set: set lock lost before terminal event'
+                print(reason, file=sys.stderr, flush=True)
+        if status:
+            for name in list(made - {current}):
+                try:
+                    remove_pin_only(name)
+                except (Failure, OSError):
+                    print(f'land-set: warning: cannot remove pin-only worktree {paths[name]}',
+                          file=sys.stderr, flush=True)
+        # The terminal append commits the outcome; signals after this point
+        # cannot change done into a failure, and the lock still covers the append.
+        terminal = True
+        if announced:
+            if status:
+                fields = dict(status=status, reason=reason.splitlines()[0][:200])
+                if current:
+                    fields['repo'] = current
+                event('stopped', **fields)
+            else:
+                event('done')
+        if lock:
+            lock.close()
+        runner.lock = None
         for name, result in summary.items():
             print(f'land-set: {name}: {result}', flush=True)
     return status

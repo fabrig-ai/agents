@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Land the current branch on main (owners.md, 4.4).
 #
-#   land [--docs] [--local] [--gate COMMAND] [--tries N]
+#   land [--docs] [--local] [--no-push] [--gate COMMAND] [--tries N]
 #
 # From a clean worktree on the branch to land: rebase it on origin/main,
 # build it and run its lints in the build lane, run the repository's gate
@@ -27,6 +27,9 @@
 #          skip the gate.
 # --local  No remote: land on the local main under a lock (LAND_LOCK, or
 #          the repository's land.lock) instead of pushing.
+# --no-push  Gate and record trailers, then stop with not pushed; no main
+#          follows and no after-landing tier runs. Incompatible with --docs
+#          and --local.
 # --gate   The gate, a shell command, instead of scripts/check.sh.
 # --tries  How many times to start again when main moves (default 5).
 #
@@ -65,19 +68,21 @@ source "$kit/gate-policy.sh"
 start_dir=$PWD
 original_args=("$@")
 
-docs=0 local=0 gate=scripts/check.sh tries=5
+docs=0 local=0 no_push=0 gate=scripts/check.sh tries=5
 while (($#)); do
     case $1 in
     --docs) docs=1; shift ;;
     --local) local=1; shift ;;
+    --no-push) no_push=1; shift ;;
     --gate) gate=${2:?}; shift 2 ;;
     --tries) tries=${2:?}; shift 2 ;;
-    *) echo "usage: land [--docs] [--local] [--gate COMMAND] [--tries N]" >&2; exit 2 ;;
+    *) echo "usage: land [--docs] [--local] [--no-push] [--gate COMMAND] [--tries N]" >&2; exit 2 ;;
     esac
 done
 
 die() { echo "land: $2" >&2; exit "$1"; }
 trap 'echo "land: line $LINENO failed" >&2; exit 8' ERR
+((!no_push || (!docs && !local))) || die 2 "--no-push cannot be combined with --docs or --local"
 
 top=$(git rev-parse --show-toplevel)
 cd "$top"
@@ -448,13 +453,16 @@ Resolve them, run git rebase --continue, then land again."
         git interpret-trailers --if-exists replace \
             --trailer "Gate-Tree: $gated" --trailer "Gate-Result: $summary" \
             --trailer "Gate-Policy: $policy")
-    read -r -a parents <<<"$(git show -s --format=%P "$candidate")"
-    parent_args=()
-    for parent in "${parents[@]}"; do parent_args+=(-p "$parent"); done
-    commit=$(GIT_AUTHOR_NAME="$(git show -s --format=%an "$candidate")" \
-        GIT_AUTHOR_EMAIL="$(git show -s --format=%ae "$candidate")" \
-        GIT_AUTHOR_DATE="$(git show -s --format=%aI "$candidate")" \
-        git commit-tree "$tree" "${parent_args[@]}" <<<"$message")
+    commit=$candidate
+    if [[ $message != "$(git log -1 --format=%B "$candidate")" ]]; then
+        read -r -a parents <<<"$(git show -s --format=%P "$candidate")"
+        parent_args=()
+        for parent in "${parents[@]}"; do parent_args+=(-p "$parent"); done
+        commit=$(GIT_AUTHOR_NAME="$(git show -s --format=%an "$candidate")" \
+            GIT_AUTHOR_EMAIL="$(git show -s --format=%ae "$candidate")" \
+            GIT_AUTHOR_DATE="$(git show -s --format=%aI "$candidate")" \
+            git commit-tree "$tree" "${parent_args[@]}" <<<"$message")
+    fi
     [[ $(git rev-parse "$commit^{tree}") == "$tree" ]] || die 4 "amended tree differs; rerun land"
     candidate_check
     land_fault before_candidate_cas
@@ -463,6 +471,11 @@ Resolve them, run git rebase --continue, then land again."
     candidate_check "$commit"
     land_fault before_push
     candidate_check "$commit"
+
+    if ((no_push)); then
+        where="not pushed"
+        break
+    fi
 
     if ((local)); then
         exec 9>"$lock"
@@ -504,13 +517,15 @@ done
 
 # A repository's tier too slow for its gate runs after its landing, in the
 # background (after-landing; owners.md, 4.5).
-if ((!docs && !local)) && [[ -x scripts/after-landing.sh ]]; then
+if ((!docs && !local && !no_push)) && [[ -x scripts/after-landing.sh ]]; then
     setsid "$kit/after-landing" "$common" "$commit" "$branch" 6>&- 9>&- </dev/null >/dev/null 2>&1 &
     echo "land: queued scripts/after-landing.sh on $commit; a failure goes to $tmp/director/inbox/after-landing.md" >&2
 fi
 
+location="on $where"
+if ((no_push)); then location="not pushed"; fi
 cat <<EOF
-land: landed $repo $branch on $where
+land: landed $repo $branch $location
   commit  $commit
   parent  $base
   tree    $tree${gated:+$([[ $gated == "$tree" ]] || printf ', gated as %s' "$gated")}

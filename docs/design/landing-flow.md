@@ -549,17 +549,18 @@ Until the rest is built, agents do by hand what the tools don't:
 - **Stacking.** Once the earlier set has landed, an implementer moves
   the new milestone with `git rebase --onto main <fork point>` in each
   repository, then repins.
-- **A failure** pushes nothing to any `main`. The summary and the feed
-  say where the run stopped and why. The owner reads the failure as
-  keeper.md 5 says, the keeper's job later; its implementer repairs the
-  set, and the owner runs `land-set` again.
+- **A failure in the gates** pushes nothing to any `main`. The
+  summary and the feed say where the run stopped and why. The owner
+  reads the failure as keeper.md 5 says, the keeper's job later; its
+  implementer repairs the set, and the owner runs `land-set` again.
 - **A race.** A plain `land` of temper or hearth, or a docs landing,
   can still move a `main` during a set's run. `land-set` checks every
   `main` again before its pushes and gates again what moved, so only a
-  move during the pushes themselves, seconds long, can leave a set
-  half-landed. Its rerun then resumes: the landings it recorded are
-  checked against `origin/main`, and reused to pin downstream
-  repositories without landing them again.
+  failure once the pushes have begun can leave a set half-landed: a
+  `main` moving under them, a gate run again that fails, a signal. Its
+  rerun then resumes: the landings it recorded are checked against
+  `origin/main`, and reused to pin downstream repositories without
+  landing them again.
 - **Order and escalation.** The set lock is the only order. An owner
   brings to its director what the keeper would escalate (keeper.md 8).
 - **Landing news.** Whoever waits on a set runs `landings wait`, and

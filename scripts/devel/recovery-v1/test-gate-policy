@@ -273,6 +273,62 @@ sys.exit(result.returncode)
         self.git("update-ref", "refs/heads/main", self.git("rev-parse", "HEAD").strip())
         self.git("switch", "-q", "work")
 
+    def test_no_push_then_lands_identical_commit(self):
+        origin = self.root / "origin.git"
+        self.run_command(["git", "clone", "--bare", str(self.repo), str(origin)])
+        self.git("remote", "add", "origin", origin.as_uri())
+        self.git("--git-dir=" + str(origin), "update-ref", "refs/heads/main", self.base)
+        # An executable tier makes scheduling visible in land's stderr.
+        self.script(self.repo / "scripts/after-landing.sh", "#!/bin/sh\nexit 99\n")
+        self.git("add", "scripts")
+        self.git("commit", "-qm", "after-landing fixture")
+        refs = self.git("--git-dir=" + str(origin), "show-ref")
+        result = self.run_command([str(self.kit / "land"), "--no-push", "--gate", "true"])
+        self.assertEqual(self.git("--git-dir=" + str(origin), "show-ref"), refs)
+        self.assertIn("not pushed", result.stdout)
+        self.assertNotIn("queued scripts/after-landing", result.stderr)
+        self.assertEqual(self.git("rev-parse", "main").strip(), self.base)
+        self.assertEqual(self.git("--git-dir=" + str(origin), "rev-parse", "main").strip(), self.base)
+        candidate = self.git("rev-parse", "HEAD").strip()
+        # Force a different committer time: a redundant amend must change SHA.
+        self.run_command([str(self.kit / "land"), "--gate", "true"],
+                         extra={"GIT_COMMITTER_DATE": "2030-01-01T00:00:00Z"})
+        self.assertEqual(self.git("rev-parse", "HEAD").strip(), candidate)
+        self.assertEqual(self.git("rev-parse", "main").strip(), candidate)
+        self.assertEqual(self.git("--git-dir=" + str(origin), "rev-parse", "main").strip(), candidate)
+        self.assertEqual(len(self.calls()), 1)
+
+    def test_no_push_rejects_docs_and_local(self):
+        before = self.git("rev-parse", "HEAD")
+        for option in ("--docs", "--local"):
+            result = self.run_command([str(self.kit / "land"), "--no-push", option], check=False)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("--no-push cannot be combined", result.stderr)
+        self.assertEqual(self.git("rev-parse", "HEAD"), before)
+        self.assertEqual(self.calls(), [])
+
+    def test_mirror_no_push_and_unchanged_amendment(self):
+        shutil.copy(KIT.parent / "land", self.kit / "land")
+        self.script(self.kit / "heavy", r'''#!/usr/bin/env python3
+import os
+from pathlib import Path
+import subprocess
+import sys
+args = sys.argv[1:]
+assert args[:3] == ['--gate', '--tail', '60']
+with open(os.environ['FIXTURE_CALLS'], 'a') as out:
+    out.write('gate\n')
+result = subprocess.run(args[3:])
+log = Path(os.environ['DEV_TMP']) / 'gate.log'
+log.parent.mkdir(parents=True, exist_ok=True)
+log.write_text('heavy: ran alone for 1s\n')
+print('heavy: queued task 1 in the gate lane')
+print('heavy: task 1 (gate) exit 0, waited 0s, ran 1s, log ' + str(log))
+sys.exit(result.returncode)
+''')
+        self.test_no_push_rejects_docs_and_local()
+        self.test_no_push_then_lands_identical_commit()
+
     def test_same_policy_reuses_and_propagates_runtime(self):
         self.land()
         policy = self.git("log", "-1", "--format=%(trailers:key=Gate-Policy,valueonly)").strip()

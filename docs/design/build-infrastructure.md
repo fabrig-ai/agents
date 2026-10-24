@@ -603,10 +603,11 @@ hearth, jig, temper:
    run's candidate of that upstream (step 5) where there is one; else its
    landed commit recorded by an earlier run of the set (below); else the
    upstream's current `main`, as `git ls-remote origin refs/heads/main` gives
-   it from the upstream's primary checkout. `cargo update --precise` moves
-   each source to its target, the sources others name last, and `cargo
-   metadata` then completes the lock for the rebased manifests. Both run
-   directly, not through `heavy`: they build nothing. Every package of each
+   it from the upstream's primary checkout, read once per round so that
+   every downstream of the round pins the same commit. `cargo update
+   --precise` moves each source to its target, the sources others name
+   last, and `cargo metadata` then completes the lock for the rebased
+   manifests. Both run directly, not through `heavy`: they build nothing. Every package of each
    upstream source must then be at its target, with one revision per source.
    A changed lock is committed as `land-set: <set>: pin <repo> to ...`.
 4. A branch now equal to `origin/main` is skipped. A downstream with no
@@ -616,10 +617,13 @@ hearth, jig, temper:
    no-op unless `main` has just moved, its build lane, its gate and its
    trailers. A nonzero exit stops the run with land's status, and no `main`
    has been pushed. Its tip is the repository's candidate, and the
-   `origin/main` it rebased on is the repository's base.
+   `origin/main` it rebased on is the repository's base. If `land` rebased
+   onto another `main` than the one step 3 pinned on, the repository goes
+   round again, a round toward phase 2's bound.
 6. A candidate that a later repository of the set pins is pushed to
    `refs/heads/land-set/TOKEN/<repo>` on origin, a new name, so that the
-   downstream's Cargo can fetch it.
+   downstream's Cargo can fetch it. A later round replaces only this run's
+   previous staging tip, with a lease on that tip.
 
 **Phase 2, the pushes.**
 1. Fetch every repository with a candidate. If any `origin/main` is no
@@ -633,25 +637,34 @@ hearth, jig, temper:
    `land` does.
 3. If `land` landed a commit other than the candidate, because a `main`
    moved between steps 1 and 2, every later repository of the set runs phase
-   1 again, against what has landed, before its own push. A failure there
-   leaves the set half-landed: the run stops with that status.
+   1 again, against what has landed, before its own push. A failure there,
+   the three-round bound included, leaves the set half-landed: the run
+   stops with that status.
 4. Each landed commit is checked against `origin/main` after a fetch,
-   recorded (below) and written to the feed.
+   recorded (below) and written to the feed. A `land` that exits nonzero
+   after its push (its local `main` failing to follow, say) is checked the
+   same way: a candidate found on `origin/main` is recorded as landed
+   before the run stops.
 5. On every exit, the run deletes the staging branches it pushed. A
-   deletion that fails warns, and never changes the exit status.
+   deletion that fails warns, naming the origin, the branch and its commit,
+   and never changes the exit status; that branch, or one a SIGKILL left,
+   stays until deleted by hand.
 
-A pin-only worktree is removed after its repository lands or is skipped,
-its target with it. One that fails is kept, and its path printed.
+A pin-only worktree is removed, its target with it, once its repository
+lands or is skipped, or when the run fails in another repository. The
+failing one is kept, and its path printed. Each child runs in its own
+process group, which a signal to the run reaches whole before the lock goes.
 
-The run releases the lock on every exit, SIGINT and SIGTERM included, and
-prints each repository as landed (with its commit), skipped, failed (with its
-status and worktree) or not reached. Exit statuses: 0 all landed or skipped; 2
-refused before the lock; 3 a rebase conflict outside `Cargo.lock`; 5 the
-lock; 6 `main` kept moving; land's own status otherwise; 1 an unexpected
-failure. Landings made before a failure, in phase 2 only, stay landed. Their
-commits are recorded by set name at
-`DEV_TMP/land-set/state/<URL-escaped-set-name>.json` until the whole set
-completes. A rerun after the repair checks that each recorded commit is on
+The run appends its last feed event, then releases the lock, on every
+exit, SIGINT and SIGTERM included, and
+prints each repository as landed (with its commit), gated (with its
+candidate, not pushed), skipped, failed (with its status and worktree) or not
+reached. Exit statuses: 0 all landed or skipped; 2 refused before the lock; 3
+a rebase conflict outside `Cargo.lock`; 5 the lock; 6 `main` kept moving;
+land's own status otherwise; 1 an unexpected failure. Landings made before
+a failure, in phase 2 only, stay landed. Their commits are recorded by set
+name at `DEV_TMP/land-set/state/<URL-escaped-set-name>.json` until the whole
+set completes. A rerun after the repair checks that each recorded commit is on
 its repository's `origin/main`, reports `recorded landed COMMIT`, and uses
 that commit for downstream pins without landing it again.
 
