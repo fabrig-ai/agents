@@ -296,7 +296,11 @@ overwrites another.
    the machines file, the post key, the authorized lines and the known
    hosts, and lingering (`loginctl enable-linger`), so that user units
    outlive a logout; then a `post send` to `t/ping` on each machine,
-   checked with `post list` and cleaned up.
+   checked with `post list` and cleaned up. The stable kit
+   (build-infrastructure.md 7) predates both tools, so on its machines
+   they link to the primary agents checkout's `scripts/devel/`, as
+   recovery-v1's `setup` now links them, until a stable release carries
+   them: a fix reaches those machines when that checkout fast-forwards.
 3. **The roles' edits land** (section 6). New sessions follow them.
    Running sessions switch at their next handover, told once by the old
    channel. The old scripts move to `tmp/director/archive/` once no
