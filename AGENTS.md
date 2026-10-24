@@ -14,7 +14,8 @@ itself are skein's: `docs/foundation/programming-model.md` and
   `main` across the repositories), `build-cache.md` (kache and the
   shared store), `build-infrastructure.md` (`heavy`, `land`, `repin`,
   `land-set` and the recovery kit), `gate-policy.md` (the gate's
-  runtime identity). The user's drafts go in `docs/design/draft/`.
+  runtime identity). `STATUS.md` says what is built. The user's drafts
+  go in `docs/design/draft/`.
 - **The tools:** `scripts/devel/` for building and landing (`heavy`,
   `land`, `land-set`, `repin`, `after-landing`, the recovery kit
   `recovery-v1/`); `scripts/infra/` for setting up a machine (`setup`,
