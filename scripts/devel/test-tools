@@ -339,14 +339,31 @@ expect "setup --fix links the workspace files" \
     "$(readlink "$DEV_ROOT/AGENTS.md" "$DEV_ROOT/CLAUDE.md" "$DEV_ROOT/.claude/settings.json")" \
     "$infra/workspace/AGENTS.md" "$infra/workspace/CLAUDE.md" "$infra/workspace/claude-settings.json"
 expect "setup --fix removes a stale plan link" "$(if [[ ! -L $HOME/.local/bin/plan && ! -e $HOME/.local/bin/plan ]]; then echo gone; fi)" gone
-# Compare the graph index with origin/main's tip.
-graph=$(readlink -f "$repo" | sed 's|^/||; s|/|-|g')
-expect "setup says the graph has no index" "$(setup_check)" "ok    alpha: the graph has no index of it ($graph)"
-mkdir -p "$HOME/.cache/codebase-memory-mcp"
-touch -d 2020-01-01 "$HOME/.cache/codebase-memory-mcp/$graph.db"
-expect "setup warns of an older index" "$(setup_check)" "warn  alpha: the graph's index is older than origin/main: re-index $repo (project $graph)"
-touch "$HOME/.cache/codebase-memory-mcp/$graph.db"
-expect "setup accepts a fresh index" "$(setup_check)" "ok    alpha: the graph's index is as new as origin/main"
+# Instructions and retired configuration outside agents are warnings only.
+out=$(setup_check)
+warning_status=${out%%$'\n'*}
+expect "setup has no outside warnings when files are absent" \
+    "$(if ! grep -qE 'holds instructions outside agents|names codebase-memory-mcp' <<<"$out"; then echo absent; fi)" absent
+mkdir -p "$HOME/.claude" "$HOME/.codex"
+echo 'fixture instructions' >"$HOME/.claude/CLAUDE.md"
+echo 'fixture instructions' >"$HOME/.codex/AGENTS.md"
+echo '{"mcpServers":{"codebase-memory-mcp":{}}}' >"$HOME/.claude.json"
+echo '{"mcpServers":{"codebase-memory-mcp":{}}}' >"$HOME/.claude/settings.json"
+echo '[mcp_servers.codebase-memory-mcp]' >"$HOME/.codex/config.toml"
+warning_files=("$HOME/.claude/CLAUDE.md" "$HOME/.codex/AGENTS.md" "$HOME/.claude.json"
+    "$HOME/.claude/settings.json" "$HOME/.codex/config.toml")
+warning_contents=$(cat "${warning_files[@]}")
+for mode in check fix; do
+    if [[ $mode == fix ]]; then out=$(setup_check --fix); else out=$(setup_check); fi
+    expect "setup $mode leaves warnings nonfatal" "${out%%$'\n'*}" "$warning_status"
+    for file in "${warning_files[@]:0:2}"; do
+        expect "setup $mode warns of outside instructions" "$out" "warn  $file holds instructions outside agents"
+    done
+    for file in "${warning_files[@]:2}"; do
+        expect "setup $mode warns of retired configuration" "$out" "warn  $file names codebase-memory-mcp, which is retired"
+    done
+    expect "setup $mode preserves outside files" "$(cat "${warning_files[@]}")" "$warning_contents"
+done
 expect "the machine's links stay" "$(if [[ $(readlink "$machine_home/.local/bin/heavy" || true) == "$machine_heavy_link" &&
     $(readlink "$machine_home/.local/bin/land" || true) == "$machine_land_link" &&
     $(readlink "$machine_home/.local/bin/setup" || true) == "$machine_setup_link" ]]; then echo unchanged; fi)" unchanged
