@@ -47,7 +47,8 @@ and milestones are [owners.md](../../roles/owners.md).
   - Then it lands the whole set, or sends it back to its owner.
   - Sets that need no gate go first, then returned sets, then the rest
     as they came.
-- **A tool runs the queue, and a keeper watches it** (section 5).
+- **A tool runs the queue, and a keeper watches it** (section 5, and
+  [keeper.md](../../roles/keeper.md)).
   - The tool does the mechanics, the order's fixed rules included.
   - The keeper is a Codex session, woken only for what needs judgement.
     It reads failures and writes the owner a note, overrides the order
@@ -200,7 +201,7 @@ The queue is the only writer to every repository's `main`. Its tool,
      tuple;
    - a receipt that doesn't check out (step 3).
 2. **The order.** It follows fixed rules, which the keeper may override
-   (section 5):
+   (keeper.md 7):
    1. sets that need no gate: docs sets, and sets whose base is still
       current and whose receipts check out. Each takes seconds, and
       landing them early saves their gates;
@@ -238,16 +239,18 @@ The queue is the only writer to every repository's `main`. Its tool,
    - The landing goes into the landings feed.
 6. **Red.** The tool reruns the tests that failed, alone, once.
    - If they pass, it was a flake. The set lands, and the keeper files
-     the flake as a finding.
+     the flake as a finding (keeper.md 4.2).
    - If not, the set is parked and the next one starts. The keeper
-     reads the failure and returns the set with its note (section 5).
+     reads the failure and acts on its reading: most often it returns
+     the set with its note (keeper.md 4.1).
    - A fault of the infrastructure is not a red: heavy refusing the
      run, or a machine or GitHub out of reach. The tool retries it, and
-     wakes the keeper if it lasts.
+     wakes the keeper if it lasts (keeper.md 4.4).
 7. **Docs sets.** Markdown-only changes go through the queue too, with
    no gate, so the queue stays `main`'s only writer.
 8. **After landing.** The slow tiers that run after a landing still do.
-   A failure goes to the set's owner with the keeper's note.
+   A failure goes to the set's owner with the keeper's note (keeper.md
+   4.3).
 
 The queue replaces today's advisory landing turn
 (build-infrastructure.md 8). Speculative runs come later, when the
@@ -271,26 +274,11 @@ code, and never decides whether a set lands: the gates do.
     order, rebases, repins, mechanical conflicts, gates, the rerun,
     pushes, the journal and the feed.
   - It is tested in fixtures, like `heavy` and `land`.
-- **The keeper** is a Codex session (GPT Sol, high effort). The tool
-  starts it fresh for each event that needs judgement, and it is never
-  left running. The events:
-  - a red result that survives its rerun;
-  - an infrastructure fault the tool can't retry past;
-  - a note from an owner;
-  - an owner's silence.
-
-  Such events should be few, and a wrong reading costs an owner a
-  repair round, hence high effort. Its memory is the queue's journal
-  and a notes file. It acts only through the tool's commands: return a
-  set with a note, hold or move a set, file a finding, escalate. The
-  queue doesn't wait for it.
-  - **The return note** names the repository, the step and the test,
-    where the log is, the likely cause and the commits behind it. It
-    says whether the fault looks like the set's, `main`'s, a flake's or
-    the infrastructure's.
-  - **Overrides of the order** are rare, and each goes in the feed with
-    its reason: two sets that keep breaking each other, or an owner's
-    note asking to wait.
+- **The keeper** is a Codex session (GPT Sol, high effort) that the
+  tool starts fresh for each event that needs judgement. It reads
+  failures, returns sets with a note, holds or moves sets, files
+  findings and escalates, through the tool's commands alone. Its role,
+  its events and its rules are [keeper.md](../../roles/keeper.md).
 - **Owners** reach the queue through three commands, and need no
   messages:
   - `queue request <set file>` (section 4);
@@ -309,21 +297,12 @@ code, and never decides whether a set lands: the gates do.
   one-branch request, and the tool adds the downstream pin-only branches
   the invariant needs. `land --docs` becomes a docs request. Habits and
   scripts keep working.
-- **Directors and sub-directors** read the landings feed. The keeper
-  writes to the director's inbox only for:
-  - a set sent back a third time;
-  - a returned set with no new request or note from its owner after 2
-    hours;
-  - two sets that keep breaking each other;
-  - an infrastructure fault that lasts 15 minutes: a machine, or
-    GitHub. The store going down isn't one, since kache then compiles
-    locally;
-  - a flake, as a finding for the director to assign.
-
-  They don't order landings, and they don't relay them.
+- **Directors and sub-directors** read the landings feed, and hear
+  from the keeper only in keeper.md 8's cases. They don't order
+  landings, and they don't relay them.
 - **Building and running it.** The build-infra mission, with a Codex
-  owner, builds the tool and writes the keeper's brief. The director
-  runs the service.
+  owner, builds the tool and the keeper's prompt from keeper.md. The
+  director runs the service.
 
 ## 6. Why this shape
 
@@ -496,14 +475,14 @@ mission, then flood it with four milestones at once.
 1. **The shared store on every build machine** (build-cache.md 7),
    under way.
 2. **The queue's tool and the keeper,** as a build-infra mission
-   (section 5). The first version:
+   (section 5, keeper.md). The first version:
    - serial, with sets across repositories;
    - request and receipt checks, the order's rules, automatic rebases,
      and mechanical lock and generated-file resolution;
    - the rerun, journaled pushes, git-note evidence and the landings
      feed;
    - `queue wait` and `queue note`, and `land` as a front end;
-   - the keeper's brief.
+   - the keeper's prompt, from keeper.md.
 
    Fixtures cover it as they cover `heavy`.
 3. **`scripts/devel/repin` learns sets:** one command moves every branch of
@@ -542,11 +521,11 @@ Until the rest is built, agents do by hand what the tools don't:
   repository, then repins.
 - **A failure.** `land-set` lands one repository at a time, so a failure
   leaves the repositories before it landed. Its summary says which. The
-  owner reads the failure, which is the keeper's job later. Its
-  implementer repairs the rest, and the owner runs `land-set` again: the
-  repositories already landed have nothing left and are skipped.
+  owner reads the failure as keeper.md 5 says, the keeper's job later.
+  Its implementer repairs the rest, and the owner runs `land-set` again:
+  the repositories already landed have nothing left and are skipped.
 - **Order and escalation.** The set lock is the only order. An owner
-  brings to its director what the keeper would escalate (section 5).
+  brings to its director what the keeper would escalate (keeper.md 8).
 - **Landing news.** Owners report their landings as today, until the
   directors read the feed.
 - **What `land` still does.** A docs change still lands with `land
