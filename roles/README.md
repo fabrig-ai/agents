@@ -60,8 +60,9 @@ an Opus 5.5 one-shot, and brings its public decisions to its parent.
    to the owner of the work, or to the product owner once that owner
    has ended. On v0.1.0's happy path, a finding is fixed now; anything
    else goes to the product owner's backlog, for later.
-4. **The user draws the mockups,** during App's work or after it. UI
-   never draws one.
+4. **The user draws the mockups,** during App's work or after it, as
+   the pages' design. What App hasn't landed yet is drawn under View →
+   Future, marked with what it needs. UI never draws one.
 5. **UI builds the pages and views** from the mockups. While App is at
    work, it builds what App's landings allow and defers the rest; once
    App is done, it takes them to completion. A small change in App's

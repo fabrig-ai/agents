@@ -25,8 +25,10 @@ what it reads and its own rules. The other departments are in
   `client/domain/pages.md` and `view.md`, skein's `ui.md` and
   `ui-web.md`); and the project's testing document.
 - **The mockups are the user's,** always: UI never draws one. They are
-  the pages' reference (temper's `docs/design/client/mockups/`, or a
-  branch the user names).
+  the pages' design (temper's `docs/design/client/mockups/`, its
+  `README.md` first, or a branch the user names): what a page's main
+  drawing shows, the engine has; a piece under View → Future waits for
+  what its mark names.
 - **It follows App.** While App is still at work on a feature, UI builds
   what App's landings allow, and defers the rest; once App is done, it
   takes the pages to completion.
@@ -57,3 +59,8 @@ what it reads and its own rules. The other departments are in
   in the view's world, and browser stories are few.
 - **QA's look checks are evidence;** whether a page matches its mockup
   is UI's judgement.
+- **Its landings keep the mockups' `STATUS.md`:** a row dropped for what
+  it drew, one added for what it left of a mockup. A future piece whose
+  need has landed is built like the rest, and its mark goes with the
+  build: moving it into the main drawing is not drawing it (temper's
+  mockups `README.md`, section 5).
