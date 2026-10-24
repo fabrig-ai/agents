@@ -104,6 +104,7 @@ check_units() {
 
 # The tools, the workspace's files, the queue and room to work.
 check_machine() {
+    # Instructions and tools come from agents alone.
     local file
     for file in "$HOME/.claude/CLAUDE.md" "$HOME/.codex/AGENTS.md"; do
         [[ ! -e $file ]] || warn "$file holds instructions outside agents"

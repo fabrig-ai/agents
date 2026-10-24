@@ -9,8 +9,8 @@ Clone agents, skein, smith, jig, hearth and temper from
 `git@github.com:fabrig-ai/` into `~/src/rust/`, then run
 `agents/scripts/infra/setup --fix`. It links the tools (`heavy`, `land`,
 `setup`, `post`, `codex-run`) into `~/.local/bin`, links `AGENTS.md`,
-`CLAUDE.md` and the Claude Code settings (`.claude/settings.json`) into the workspace, sets
-up the queue, and names what is still missing (pueue, kache, jq,
+`CLAUDE.md` and the Claude Code settings (`.claude/settings.json`) into
+the workspace, sets up the queue, and names what is still missing (pueue, kache, jq,
 cargo-nextest, and cargo's `[net] git-fetch-with-cli = true` in
 `~/.cargo/config.toml`).
 
