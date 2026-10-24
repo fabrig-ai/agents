@@ -1,14 +1,19 @@
 # Owners
 
-Provisional, 2026-10-19, revised 2026-10-21. How a draft reaches
-`main` through owners: each a session with one mission, the draft or a
-part of it, that it takes there in a few milestones, each designed and
-then implemented.
+Provisional, 2026-10-19, revised 2026-10-24. How a draft reaches
+`main` through owners of App, UI and Infra ([README.md](README.md),
+section 2): each a session with one mission, the draft or a part of
+it, that it takes there in a few milestones, each designed and then
+implemented. Its department's file ([app.md](app.md), [ui.md](ui.md),
+[infra.md](infra.md)) adds its scope, its model, what it reads and its
+own rules. QA's agents work under [qa.md](qa.md) instead.
 
-**What an owner reads:** at its start, its whole brief, sections 1,
-3.1 and 5 of this file, and section 1, "In one page", of skein's
-`docs/foundation/programming-model.md` and `testing-strategy.md`, the
-rules for the code's shape and its tests. That is enough to start. Each
+**What an owner reads:** at its start, its whole brief, its
+department's file, sections 1, 3.1 and 5 of this file, and the rules
+its department's file names: for App and UI, section 1, "In one page",
+of skein's `docs/foundation/programming-model.md` and
+`testing-strategy.md`, the rules for the code's shape and its tests;
+for Infra, none. That is enough to start. Each
 other section of this file is read before the work it governs: 3.2 and
 3.3 before a design; 2 and 4.1 to 4.3 before starting a session or an
 agent; 4.4 and 4.5 before landing or building; 4.6 before a QA pass; 6
@@ -30,16 +35,24 @@ and the budgets bind from the start. The repository's `AGENTS.md` loads on its o
   after another, each by a fresh owner, so that each keeps its context
   and its focus on one end. No owner is standing: recurring work
   (hygiene, QA) is given as missions too, such as `o/hygiene-<what>`.
-- **The director** knows every draft and the
-  direction. It starts one owner per mission, gives the final call on
-  what owners escalate, and asks the user only what it can't reasonably
-  decide. Its role is [director.md](director.md).
-- **An owner** (Claude Code, Opus 5.5) designs and implements its
-  part: its mission, or one milestone of it. Its effort is its parent's
-  choice (section 2). An owner whose part needs little taste (tooling,
-  hygiene, optimization) is a Codex session instead, under this same
-  file, and brings its significant code and test decisions to its
-  parent.
+- **A department.** Each mission belongs to one: App, UI or Infra
+  (README.md, section 2). A feature that needs several gets a mission
+  in each.
+- **The product owner** holds the feature a mission serves, across the
+  departments. It starts one owner per mission, checks its plan and
+  designs, answers it, and brings to the director what crosses
+  products. Its role is [product.md](product.md). Infra's owners answer
+  to the director itself.
+- **The director** knows every draft and the direction, gives the final
+  call on what is escalated to it, and asks the user only what it
+  can't reasonably decide. Its role is [director.md](director.md).
+- **An owner** designs and implements its part: its mission, or one
+  milestone of it. Its model is its department's: Claude Code, Opus
+  5.5, for App and UI; Codex for Infra. Its effort is its parent's
+  choice (section 2). An App or UI owner whose part needs little taste
+  (hygiene, optimization, a repair on an existing pattern) is a Codex
+  session instead, under this same file. A Codex owner brings its
+  significant code and test decisions to its parent.
 - **Milestones.** A mission is reached through one to four milestones,
   one after another, each an MVP built on the one before: something
   meaningful that works on its own. The owner drives a single milestone
@@ -72,9 +85,11 @@ and the budgets bind from the start. The repository's `AGENTS.md` loads on its o
   upfront perfection: QA (section 4.6) catches the rest, and what is wrong is
   corrected as it shows.
 - **Rules and guidelines.** programming-model.md, testing-strategy.md
-  and the project's testing documents are rules: they shape the code
-  and its tests, and a departure needs its reason, stated in the design
-  or the commit. This file is guidelines, unless it says a rule: good
+  and the project's testing documents are rules for App's and UI's
+  code: they shape the code and its tests, and a departure needs its
+  reason, stated in the design or the commit. Infra's tools follow
+  infra.md's rules instead. A department's file holds rules too, and says which. This
+  file is guidelines, unless it says a rule: good
   practice for the owner to apply with judgement, case by case, as the
   work goes, partly, later, or not at all where it doesn't pay. None of
   it is upfront work to complete before starting. What holds: its
@@ -98,7 +113,7 @@ and the budgets bind from the start. The repository's `AGENTS.md` loads on its o
   it on what it judges delicate. Sparingly: tokens count.
 - **Its brief** names the input (draft sections, designs, a README to
   grow; for a milestone's sub-owner, its milestone and the plan's
-  file), its parent and how to reach it, its machine, its notes
+  file), its department, its parent and how to reach it, its machine, its notes
   directory, and anything the parent knows that bears on it: other
   owners' footprints, budgets, dates.
 - **Its notes** are in `~/src/rust/tmp/owners/<name>/`:
@@ -194,16 +209,17 @@ and the budgets bind from the start. The repository's `AGENTS.md` loads on its o
   records them. Milestones are planned at 2 to 3 hours, so that the cap
   leaves room. A milestone at its cap pauses: it starts no task, job,
   landing or repin, and what runs finishes untouched (a pause,
-  director.md 6). Its owner escalates through its parent to the
-  director (section 5): what has landed, the cause, the options (most
+  director.md 6). Its owner escalates through its parent to its
+  product owner, or Infra's to the director (section 5): what has
+  landed, the cause, the options (most
   often a split: what has landed as the milestone, the rest as the
   next) and a recommendation. It resumes on the answer.
 - **A milestone ends** when what it delivers has landed. The end is a
   checkpoint:
   - its owner updates `STATUS.md` (4.4) and reports to its parent in at
     most 10 lines: what the MVP now does, the commits, its time against
-    the cap, and what comes next. The owner passes it on to the
-    director;
+    the cap, and what comes next. The owner passes it on to its
+    product owner, or Infra's to the director;
   - the owner hands over to a fresh session (section 2), which starts
     the next milestone at once;
   - a QA pass on what has landed may start (4.6), beside the next
@@ -297,6 +313,10 @@ and where they pay:
   computed by the first task that can, and kept current. A suite that
   several tasks add to ends merged: their copies of captures, polls and
   helpers become one.
+- **Words have readers.** Whoever changes words that a person or an
+  agent reads (a refusal, a label, a line `temper ctl` prints) updates
+  every test that reads them, in its own department or another's, and
+  runs those tests before it lands.
 
 The one that pays most often: **the meeting point comes first.** Where two parts
 meet (a client and its server, a protocol's two ends, a domain and its
@@ -365,7 +385,9 @@ Its task file is whole, and holds:
   documents name. The owner checks them against `main` before the task
   goes out: the names, files and behaviours they assume are there (a
   Codex survey may check a large task's);
-- the files it may touch;
+- the files it may touch, and that the mechanical follow-through of its
+  change in the same crate is in scope: a call site, a match arm, a
+  test's expected value;
 - done when: the tests that pass, and the gate, with what it checks
   beyond the tests (the commit's trailers, the profiles it runs, the
   figures it compares);
@@ -395,6 +417,10 @@ the user, 2026-10-23). Its exit status 3 is a rebase stopped on
 conflicts, left in progress; 4 a failed build, lint or gate; 9 heavy
 refused to run the build or gate, so nothing ran. The owner
 updates the repository's `docs/design/STATUS.md` rows its work changes.
+
+Until the landing queue is built, landing-flow.md 9.1 says how a set
+of branches lands (`land-set`) and what owners do by hand; where it
+departs from this section or 4.5, it wins.
 
 ### 4.5 Sharing the machines
 
@@ -480,32 +506,28 @@ to start its tester, resume it after more has landed, stop it, and when
 it is happy with what the passes have done. A milestone's end is the
 natural point for one, beside the next milestone (3.1).
 
-- **The tester** is a Codex session by default (section 1), of the
-  owner's choice of model and effort, with its notes beside the owner's, in `qa/`. It reads the
-  design only: the sections its part covers, the testing documents (of
-  testing-strategy.md, its one page and the sections its world needs),
-  and the public surface of the world or harness it writes in. It never
-  reads the code under test or its tests.
+- **The tester** is a QA agent, a Codex session under
+  [qa.md](qa.md) and [qa-milestone.md](qa-milestone.md), which say how
+  it works, with its notes beside the owner's, in `qa/`. It never reads
+  the code under test or its tests.
 - **The tester decides which tests to write,** not the owner: the owner
   names the part and the design, never the cases.
-- **Its tests are adversarial,** aimed at what the design promises: the
-  edges, the orders, the failures, the limits, and the seams between
-  parts. Each goes in the highest layer that can express it: the real
-  loop or the process tier in temper, a kit's highest world.
-- **On the existing infrastructure.** They use the worlds, harnesses
-  and fakes that exist; a pass builds no test infrastructure of its own.
-  When a test needs a fake or a hook that is missing, the tester says
-  so, and the owner decides whether its layer grows it, as ordinary work
-  under that layer's own tests.
+- **A missing fake or hook** that a test needs, the tester names, and
+  the owner decides whether its layer grows it, as ordinary work under
+  that layer's own tests.
 - **A suite apart.** Their test binaries are named `qa_<area>`. The
   repository's nextest default and fuzzy profiles exclude
   `binary(/^qa_/)`, and a `qa` profile selects them: `cargo nextest run
   --workspace --profile qa`. The gate builds them but does not run them,
   and no test-time ceiling counts them. The first owner to add one to a
   repository adds the profiles.
+- **A changed world runs its `qa_*` tests** before the change lands: a
+  change to a world's facts, fakes or harness runs that world's `qa`
+  profile, so that tests outside the gate don't rot unseen.
 - **Each failure is the owner's to judge.** A bug that triage lets in
-  (below) is fixed, and its regression test goes in the default suite,
-  in the lowest world that owns the behaviour. A test that misreads the design is corrected or
+  (below) is fixed, by an implementer task (landing-flow.md 3), and its
+  regression test goes in the default suite, in the lowest world that
+  owns the behaviour, under testing-strategy.md. A test that misreads the design is corrected or
   dropped, and a design that let it is made clearer. A gap the owner
   accepts stays, as `#[ignore = "<why>"]`, listed in its notes. When
   the owner ends a pass, the `qa` profile passes.
@@ -516,23 +538,28 @@ natural point for one, beside the next milestone (3.1).
   as intended, in ordinary conditions. A security hole, lost data and
   a flake that fails gates count as on it. Anything else waits: a
   corner case, a race under load, a rare condition. Its owner sends it
-  to the director as one entry: what fails, where, its reproduction,
-  and why it is off the happy path. The director keeps it in a
-  backlog, and its test stays `#[ignore = "backlog: <why>"]` where one
-  exists. When unsure, the owner asks the director.
-- **Its tests land** like any other (section 4.4).
+  to its product owner as one entry: what fails, where, its
+  reproduction, and why it is off the happy path. The product owner
+  keeps it in its backlog (product.md 4), Infra's the director, and its
+  test stays `#[ignore = "backlog: <why>"]` where one exists. When
+  unsure, the owner asks its product owner.
+- **Its tests land** like any other (section 4.4), with the pass's
+  fixes, by the owner.
 
-Continuous QA, agents using a running build (temper's draft
-`docs/design/draft/qa.md`), is another thing, and still a draft.
+Lab runs, QA agents driving a running build through `temper ctl`, are
+the product owner's call, and their findings come to an owner through
+it ([qa-lab.md](qa-lab.md)). They are judged as a pass's are.
 
 ## 5. Escalation
 
-- An implementer asks its owner, a sub-owner its parent, an owner the
-  director, and the director the user.
-- On one machine, by SendMessage. To the director on another machine:
-  the report or question in that machine's
-  `~/src/rust/tmp/director/inbox/<name>.md`, which the director watches,
-  and the turn ends. The director answers by message.
+- An implementer asks its owner, a sub-owner its parent, an owner its
+  product owner (Infra's, the director), a product owner the director,
+  and the director the user.
+- On one machine, by SendMessage. To a product owner or the director on
+  another machine: the report or question in that machine's
+  `~/src/rust/tmp/director/inbox/<name>.md`, which its watcher reads,
+  and the turn ends. An entry goes to one parent only, never to two.
+  The answer comes by message.
 - The director asks the user only what has long-term consequences that
   would be hard to change, or what the user's rules keep theirs.
 

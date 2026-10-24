@@ -8,9 +8,13 @@ itself are skein's: `docs/foundation/programming-model.md` and
 
 ## Where things are
 
-- **The roles:** `roles/`. `owners.md` (how a draft reaches `main`
-  through owners), `director.md` (the session that runs them) and
-  `keeper.md` (the session that judges the landing queue's failures).
+- **The roles:** `roles/`, whose `README.md` gives the whole picture
+  and the departments. `director.md` (the session that coordinates the
+  rest), `product.md` (the product owners, in charge of features),
+  `owners.md` (how an owner takes a mission to `main`) with the
+  departments' files `app.md`, `ui.md` and `infra.md`, `qa.md` with
+  `qa-milestone.md` and `qa-lab.md` (the QA agents), and `keeper.md`
+  (the session that judges the landing queue's failures).
 - **The designs:** `docs/design/`. `landing-flow.md` (how changes reach
   `main` across the repositories), `build-cache.md` (kache and the
   shared store), `build-infrastructure.md` (`heavy`, `land`, `repin`,

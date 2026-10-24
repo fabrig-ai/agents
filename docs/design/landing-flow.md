@@ -53,7 +53,7 @@ and milestones are [owners.md](../../roles/owners.md).
   - The keeper is a Codex session, woken only for what needs judgement.
     It reads failures and writes the owner a note, overrides the order
     when it must, and escalates.
-  - Directors and sub-directors take no part in merging: they get news
+  - Directors and product owners take no part in merging: they get news
     of what landed, and escalations when merging goes wrong (the user,
     10-24).
 - **Why per milestone** (section 6):
@@ -298,7 +298,7 @@ code, and never decides whether a set lands: the gates do.
   one-branch request, and the tool adds the downstream pin-only branches
   the invariant needs. `land --docs` becomes a docs request. Habits and
   scripts keep working.
-- **Directors and sub-directors** read the landings feed, and hear
+- **Directors and product owners** read the landings feed, and hear
   from the keeper only in keeper.md 8's cases. They don't order
   landings, and they don't relay them.
 - **Building and running it.** The build-infra mission, with a Codex
@@ -463,7 +463,7 @@ mission, then flood it with four milestones at once.
   milestone has landed.
 - **director.md:**
   - The ordering of landings and repins, and the relaying of hashes,
-    leave the director and the sub-directors.
+    leave the director and the product owners.
   - The landings feed replaces landing news.
   - The keeper's escalations come to the director.
   - The director runs the queue's service.

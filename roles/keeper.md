@@ -350,6 +350,6 @@ changing.
 - **Its launcher:** whether the tool starts the keeper through the
   director's `start.sh`, which records implementers' runs (owners.md
   4.2), or keeps its record in the journal alone.
-- **Sub-directors:** escalations go to the director. Whether a
-  sub-director (director.md 11) takes those for its roadmap's sets is
-  open with the pilot.
+- **Product owners:** escalations go to the director. Whether a
+  product owner (product.md) takes those for its features' sets is
+  open.
