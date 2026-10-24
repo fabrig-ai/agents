@@ -150,7 +150,7 @@ check_machine() {
     for tool in plan test-plan; do
         [[ -L $bin/$tool ]] || continue
         case $(readlink -m "$bin/$tool") in
-            */scripts/devel/*)
+            */scripts/dev/*)
                 if ((fix)); then
                     rm "$bin/$tool"
                     ok "removed $bin/$tool, a link to a retired tool"
