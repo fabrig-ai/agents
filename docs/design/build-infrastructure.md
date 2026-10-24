@@ -354,10 +354,10 @@ swap binaries first or leave an old client paired with the new recovery path. Th
 receipt/cache files can remain; rollback requires no destructive cache or
 ledger cleanup.
 
-`scripts/devel/recovery-v1/test-inert-install --evidence NEW_DIRECTORY` compares all legacy
-files to baseline `01c6ab91`, fast-forwards a disposable primary from a
-separate disposable clone, and compares its unmigrated symlink bytes and
-setup behavior. It verifies stable release hashes/links across another
+`scripts/devel/recovery-v1/test-inert-install --evidence NEW_DIRECTORY`
+snapshots the primary kit into a disposable primary, fast-forwards it from
+a separate disposable clone that adds the recovery kit, and checks that the
+primary tools, their symlink bytes and setup's behavior are unchanged. It verifies stable release hashes/links across another
 primary advance, repeat-copy refusal and mutable-setup refusal. It never
 runs global setup. Recovery fixtures also cover relocated after-landing
 helper lookup and real Chromium 147 receipt/cache reuse. Land-entry storage
