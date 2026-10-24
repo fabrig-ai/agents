@@ -27,9 +27,7 @@ working, wide once, and nothing twice without a reason.
   package is still built and linked, twelve for one test in a 10-24
   experiment.
 - **Finding it.** `rg` for the changed items' uses, tests included;
-  then read the test's assertions before choosing it. The code graph
-  covers `main` only, and is a lead, never proof that nothing else uses
-  an item.
+  then read the test's assertions before choosing it.
 - **Check the count.** A run that selected no test proves nothing, and
   nextest exits 4 when none matched. A test outside the default
   profile needs its `--profile`.

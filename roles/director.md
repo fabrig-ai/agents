@@ -383,7 +383,7 @@ is mechanical, and Codex reads what needs reading.
   agent doesn't explore.
 - **Plain shell first:** `probe.sh`, `tell.sh` and a direct `ssh … cat`
   before any agent, when the answer is one file.
-- **Code is read through others:** Codex surveys and the code graph.
+- **Code is read through others:** Codex surveys.
 - **Few wakes** (section 5).
 
 ## 10. Machines and security
@@ -428,10 +428,7 @@ is mechanical, and Codex reads what needs reading.
     fixtures) the director copies where a mission needs them, 0600 in a
     0700 directory, never into a worktree or a log. It reads none of
     them, no credential record and no `auth.json`, and never sends a
-    browser's final address;
-  - the code graph indexes the primary checkouts only, never a
-    worktree, and `index_repository` and `delete_project` are the
-    director's alone.
+    browser's final address.
 
 ## 11. Product owners
 

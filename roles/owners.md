@@ -147,9 +147,9 @@ and the budgets bind from the start. The repository's `AGENTS.md` loads on its o
   next milestone's sub-owner (3.1). Its children's messages to
   `o/<name>` reach it.
 - **Its context is the scarce thing.** It reads code through Codex
-  surveys (short reports) and the code graph, and a Codex task's report,
-  never its log. It ends its turn while
-  implementers work, and is woken by their completion: it never polls.
+  surveys (short reports) and a Codex task's report, never its log. It
+  ends its turn while implementers work, and is woken by their
+  completion: it never polls.
   Between designing and implementing, it may write its notes and go on
   in a fresh session rather than carry the design conversation.
 
