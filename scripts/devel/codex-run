@@ -1,0 +1,249 @@
+#!/usr/bin/env bash
+# Start Codex in a detached user unit and post its report when it ends.
+#   codex-run task [--model M] [--effort E] [--read-only] [--to ADDR] [--resume RUN] TASK DIR REPORT
+#   codex-run owner [--model M] [--effort E] NAME BRIEF
+# See docs/design/post.md, section 5.
+set -euo pipefail
+umask 077
+
+script=$(readlink -f "${BASH_SOURCE[0]}")
+kit=$(dirname "$script")
+workspace() {
+    local agents
+    agents=$(cd "$kit/../.." && pwd)
+    if [[ $(basename "$agents") == agents ]]; then dirname "$agents"; else echo "$HOME/src/rust"; fi
+}
+root=${DEV_ROOT:-$(workspace)}
+runs=$root/tmp/codex-run
+search_rule='Before any command, read the rules in the text below. Search only your worktree and the paths it names: never run rg, find, ls -R or grep -r from ~/src/rust/tmp or any directory above it, and never in ~/.local, ~/.config or /run/user. '
+capacity='Selected model is at capacity. Please try a different model.'
+
+refuse() {
+    local reason=${1//$'\n'/ }
+    printf 'codex-run: %s\n' "$reason" >&2
+    exit 2
+}
+absolute() { [[ $1 == /* ]] || refuse "$2 must be absolute"; }
+settings() {
+    [[ -n $model ]] || refuse 'model must not be empty'
+    case $effort in medium|high|xhigh) ;; *) refuse 'effort must be medium, high or xhigh' ;; esac
+}
+meta_get() {
+    local key value
+    while IFS='=' read -r key value; do
+        [[ $key != "$2" ]] || { printf '%s\n' "$value"; return; }
+    done <"$1"
+}
+
+# Each invocation repeats the settings, including when continuing a thread.
+turn() {
+    local prompt=$1 event_offset stderr_offset thread delay
+    local -a command delays
+    read -r -a delays <<<"${CODEX_RUN_RETRY_DELAYS:-120 300 900}"
+    tries=0 run_exit=0
+    touch "$state/events.jsonl" "$state/stderr.log"
+    while :; do
+        tries=$((tries + 1))
+        event_offset=$(wc -c <"$state/events.jsonl")
+        stderr_offset=$(wc -c <"$state/stderr.log")
+        command=(codex exec)
+        # --sandbox belongs to exec, rather than its resume subcommand.
+        if [[ $read_only == 1 ]]; then command+=(--sandbox read-only); fi
+        thread=''
+        [[ ! -s $state/thread ]] || thread=$(<"$state/thread")
+        [[ -z $thread ]] || command+=(resume)
+        command+=(-m "$model" -c "model_reasoning_effort=$effort")
+        if [[ $read_only == 0 ]]; then command+=(--dangerously-bypass-approvals-and-sandbox); fi
+        command+=(--skip-git-repo-check --json -o "$state/last.md")
+        [[ -z $thread ]] || command+=("$thread")
+        command+=("$prompt")
+        run_exit=0
+        (cd "$dir" && "${command[@]}" </dev/null) >>"$state/events.jsonl" 2>>"$state/stderr.log" || run_exit=$?
+        tail -c "+$((event_offset + 1))" "$state/events.jsonl" >"$state/attempt.jsonl"
+        tail -c "+$((stderr_offset + 1))" "$state/stderr.log" >"$state/attempt.stderr"
+        if [[ ! -s $state/thread ]]; then
+            jq -Rrs '[split("\n")[] | fromjson? | select(.type == "thread.started") | .thread_id | select(type == "string" and length > 0)][0] // empty' \
+                "$state/attempt.jsonl" >"$state/thread"
+        fi
+        ((run_exit != 0 && tries <= 3 && tries <= ${#delays[@]})) || break
+        [[ -s $state/thread ]] || break
+        if ! jq -Rse --arg message "$capacity" 'any(split("\n")[] | fromjson?;
+            (.type == "error" and .message == $message) or
+            (.type == "turn.failed" and .error.message == $message))' "$state/attempt.jsonl" >/dev/null &&
+            ! grep -Fq -- "$capacity" "$state/attempt.stderr"; then break; fi
+        delay=${delays[tries-1]}
+        sleep "$delay"
+        prompt='Go on with the task: the model was at capacity.'
+    done
+    rm -f "$state/attempt.jsonl" "$state/attempt.stderr"
+}
+
+finish_task() {
+    local status=$? ended tokens thread='' subject first post_exit=0 minutes
+    trap - EXIT
+    ended=$(date -u +%FT%TZ)
+    if [[ ! -e $report ]]; then
+        if [[ -f $state/last.md ]]; then
+            { printf '%s\n' 'codex-run: the run wrote no report; its last message follows.'; cat "$state/last.md"; } >"$report"
+        else
+            printf 'codex-run: the run wrote no report and no last message; exit %s; see %s.\n' "$status" "$state" >"$report"
+        fi
+    fi
+    [[ ! -s $state/thread ]] || thread=$(<"$state/thread")
+    tokens=$(jq -Rrs '[split("\n")[] | fromjson? | select(.type == "turn.completed" and (.usage | type) == "object") | .usage] |
+        if length == 0 then "-" else
+        [([.[].input_tokens // 0] | add), ([.[].cached_input_tokens // 0] | add),
+         ([.[].output_tokens // 0] | add)] | map(tostring) | join("/") end' "$state/events.jsonl")
+    first=$(head -n1 "$report" | cut -c1-80)
+    if ((status == 0)); then subject="run $id ok: $first"; else subject="run $id failed $status: $first"; fi
+    minutes=$(( ($(date -d "$ended" +%s) - $(date -d "$started" +%s)) / 60 ))
+    printf 'Report: %s\nRun: %s\nThread: %s\nMinutes: %s\nTries: %s\n' \
+        "$report" "$state" "${thread:--}" "$minutes" "$tries" >"$state/post-body"
+    post send --as codex-run "$to" "$subject" "$state/post-body" >"$state/post-output" 2>&1 || post_exit=$?
+    if ((post_exit != 0)); then
+        cp "$state/post-output" "$state/post-failed"
+        cat "$state/post-failed"
+    fi
+    (
+        flock 9
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "$id" "$to" "$started" "$ended" "$status" "$tries" "$model" "$effort" "$task" "$report" \
+            "${thread:--}" "$tokens" "$post_exit" >&9
+    ) 9>>"$runs/runs.tsv"
+}
+
+launch() {
+    local unit=$1 output status=0
+    shift
+    local -a envs=("--setenv=PATH=$PATH" "--setenv=HOME=$HOME" "--setenv=DEV_ROOT=$root")
+    if [[ -v CODEX_RUN_RETRY_DELAYS ]]; then envs+=("--setenv=CODEX_RUN_RETRY_DELAYS=$CODEX_RUN_RETRY_DELAYS"); fi
+    output=$(systemd-run --user --collect --quiet --unit "$unit" "${envs[@]}" "$@" 2>&1) || status=$?
+    if ((status != 0)); then
+        [[ ${mode:-} != task ]] || rm -rf "$state"
+        refuse "systemd-run failed: $output"
+    fi
+}
+
+task_launch() {
+    local model='' effort='' read_only='' to=${POST_NAME:-} resume='' previous='' task report dir=''
+    local id state started caller=${POST_NAME:-} key
+    while (($#)); do
+        case $1 in
+            --model|--effort|--to|--resume)
+                (($# >= 2)) || refuse "missing value for $1"
+                key=${1#--}; printf -v "$key" '%s' "$2"; shift 2 ;;
+            --read-only) read_only=1; shift ;;
+            --) shift; break ;;
+            -*) refuse "unknown option $1" ;;
+            *) break ;;
+        esac
+    done
+    if [[ -n $resume ]]; then
+        [[ $resume != */* && $resume != . && $resume != .. ]] || refuse 'resume must name a run id'
+        previous=$runs/$resume
+        [[ -s $previous/thread ]] || refuse 'resume run has no thread'
+        [[ -f $previous/meta ]] || refuse 'resume run has no meta'
+        model=${model:-$(meta_get "$previous/meta" model)}
+        effort=${effort:-$(meta_get "$previous/meta" effort)}
+        read_only=${read_only:-$(meta_get "$previous/meta" read_only)}
+        dir=$(meta_get "$previous/meta" dir)
+    fi
+    if (($# == 3)); then task=$1 dir=$2 report=$3
+    elif (($# == 2)) && [[ -n $resume ]]; then task=$1 report=$2
+    else refuse 'usage: codex-run task [options] TASK DIR REPORT'; fi
+    model=${model:-gpt-6.1-sol} effort=${effort:-high} read_only=${read_only:-0}
+    settings
+    absolute "$task" TASK; absolute "$dir" DIR; absolute "$report" REPORT
+    [[ -f $task && -r $task ]] || refuse 'TASK is not readable'
+    [[ -d $dir ]] || refuse 'DIR is not a directory'
+    [[ ! -e $report && ! -L $report ]] || refuse 'REPORT already exists'
+    [[ -d $(dirname "$report") ]] || refuse 'REPORT directory does not exist'
+    [[ -n $to ]] || refuse 'no recipient: use --to or POST_NAME'
+    mkdir -p "$runs"
+    while :; do
+        id=$(date -u +%Y%m%dT%H%M%SZ)-$(od -An -N2 -tx1 /dev/urandom | tr -d ' \n')
+        state=$runs/$id
+        if mkdir "$state" 2>/dev/null; then break; fi
+        [[ -e $state ]] || refuse "cannot create run directory $state"
+    done
+    started=$(date -u +%FT%TZ)
+    printf 'caller=%s\nto=%s\nmodel=%s\neffort=%s\nread_only=%s\ntask=%s\ndir=%s\nreport=%s\nresume_of=%s\nstarted=%s\n' \
+        "$caller" "$to" "$model" "$effort" "$read_only" "$task" "$dir" "$report" "$resume" "$started" >"$state/meta"
+    [[ -z $previous ]] || cp "$previous/thread" "$state/thread"
+    launch "codex-run-$id" "$script" _run "$id"
+    printf '%s %s\n' "$id" "$state"
+}
+
+task_run() {
+    (($# == 1)) || refuse 'usage: codex-run _run ID'
+    local id=$1 state=$runs/$1 key value
+    local model='' effort='' read_only='' task='' dir='' report='' to='' started='' tries=0 run_exit=0
+    while IFS='=' read -r key value; do
+        case $key in model|effort|read_only|task|dir|report|to|started) printf -v "$key" '%s' "$value" ;; esac
+    done <"$state/meta"
+    touch "$state/events.jsonl" "$state/stderr.log"
+    trap finish_task EXIT
+    turn "${search_rule}Read $task and do what it says. Write your report to $report."
+    exit "$run_exit"
+}
+
+owner_launch() {
+    local model=gpt-6.1-sol effort=high key name brief unit
+    while (($#)); do
+        case $1 in
+            --model|--effort)
+                (($# >= 2)) || refuse "missing value for $1"
+                key=${1#--}; printf -v "$key" '%s' "$2"; shift 2 ;;
+            --) shift; break ;;
+            -*) refuse "unknown option $1" ;;
+            *) break ;;
+        esac
+    done
+    (($# == 2)) || refuse 'usage: codex-run owner [options] NAME BRIEF'
+    name=$1 brief=$2
+    [[ $name =~ ^[a-z][a-z0-9-]*(/[a-z0-9][a-z0-9-]*)*$ ]] || refuse 'invalid owner name'
+    absolute "$brief" BRIEF
+    [[ -f $brief && -r $brief ]] || refuse 'BRIEF is not readable'
+    settings
+    unit=codex-owner-${name//\//-}
+    if systemctl --user is-active --quiet "$unit"; then refuse "$unit is active"; fi
+    launch "$unit" "--setenv=POST_NAME=$name" "--setenv=CODEX_RUN_MODEL=$model" \
+        "--setenv=CODEX_RUN_EFFORT=$effort" "$script" _owner "$name" "$brief"
+    printf '%s\n' "$unit"
+}
+
+owner_run() {
+    (($# == 2)) || refuse 'usage: codex-run _owner NAME BRIEF'
+    local name=$1 brief=$2 dir=$root model=${CODEX_RUN_MODEL:-gpt-6.1-sol} effort=${CODEX_RUN_EFFORT:-high}
+    local state=$root/tmp/owners/${1##*/}/codex read_only=0 prompt status start end tries=0 run_exit=0
+    export POST_NAME=$name
+    mkdir -p "$state"
+    status=0
+    post wait "$name" --timeout 0 --holder "$$" --kind codex || status=$?
+    case $status in 0|1) ;; 4) return 0 ;; *) return "$status" ;; esac
+    prompt="You are $name: read $brief and do what it says. Your messages arrive as your turns' prompts; send yours with post send (agents' docs/design/post.md)."
+    while :; do
+        start=$(date -u +%FT%TZ)
+        turn "$prompt"
+        end=$(date -u +%FT%TZ)
+        printf '%s\t%s\t%s\t%s\n' "$start" "$end" "$run_exit" "$tries" >>"$state/turns.tsv"
+        status=0
+        post wait "$name" --timeout 3600 --holder "$$" --kind codex || status=$?
+        case $status in
+            0) prompt="Post for $name:"$'\n'"$(post read "$name")" ;;
+            1) prompt='An hour without post: check your running tasks, act on what has ended, and keep your notes current.' ;;
+            4) break ;;
+            *) return "$status" ;;
+        esac
+    done
+}
+
+mode=${1:-}
+(($# == 0)) || shift
+case $mode in
+    task) task_launch "$@" ;;
+    owner) owner_launch "$@" ;;
+    _run) task_run "$@" ;;
+    _owner) owner_run "$@" ;;
+    *) refuse 'usage: codex-run task|owner ...' ;;
+esac

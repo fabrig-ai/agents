@@ -138,7 +138,7 @@ check_machine() {
     cargo nextest --version >/dev/null 2>&1 && ok "has cargo-nextest" || fail "no cargo-nextest"
     # The tools and files link to this kit.
     local bin=$HOME/.local/bin home=$kit target
-    for tool in heavy land setup post; do
+    for tool in heavy land setup post codex-run; do
         target=$home/../devel/$tool
         [[ $tool != setup ]] || target=$home/setup
         target=$(readlink -f "$target")
