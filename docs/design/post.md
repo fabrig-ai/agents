@@ -45,7 +45,8 @@ four launchers. The survey behind this design is x1's
   posts the caller the report's path (section 5).
 - **What goes away** (section 6): `tell.sh`, the inbox files and
   their watchers, `wake/`, `inbox-since.sh`, `subwatch.sh`, `start.sh`
-  with its effort knobs (the experiment ended, 858), `codex-helper.sh`,
+  with its effort knobs (the experiment ended, 858; the spawner keeps
+  its choice of model and effort), `codex-helper.sh`,
   `codex-owner.sh`, and SendMessage between roles.
 
 ## 2. Names and machines
@@ -170,7 +171,10 @@ Each command takes the mailbox's lock (`flock`) while it moves files.
     - a REPORT that exists, or whose directory doesn't;
     - no recipient: neither `--to` nor `POST_NAME`;
     - for `--resume`, a run with no thread.
-  - **Its defaults** are gpt-6.1-sol and high effort. `--read-only`
+  - **The spawner chooses the model and the effort,** by the task
+    (owners.md 4.2): `--model`, by default gpt-6.1-sol, and `--effort`,
+    medium, high or xhigh, by default high. The tool never changes
+    them, as `start.sh`'s knobs did. `--read-only`
     (for surveys) runs Codex with `--sandbox read-only`, and every
     other run with `--dangerously-bypass-approvals-and-sandbox`.
   - **It returns at once.** It starts `systemd-run --user --collect
@@ -227,7 +231,8 @@ Each command takes the mailbox's lock (`flock`) while it moves files.
     with `inbox-since.sh`, `subwatch.sh`, `probe.sh`'s inbox key and the
     product owners' inbox watchers;
   - `wake/` and `codex-owner.sh`;
-  - `start.sh` (and `effort2.py`, the knobs), and `codex-helper.sh`;
+  - `start.sh` (and `effort2.py`, the knobs that lowered an effort at
+    launch), and `codex-helper.sh`;
   - SendMessage between roles. Claude's own sub-agents are unaffected.
 - **The roles' edits,** in one docs change at go-live:
   - director.md: 2 (the watcher and the waiter), 4 (starting a Codex
