@@ -103,7 +103,7 @@ session() {
 }
 unwoken() { echo "queued, nobody will wake it: $*"; return 3; }
 wake() (
-    local name=$1 info state full_id cwd kind='' alive=0
+    local name=$1 info state full_id short_id cwd kind='' alive=0
     exec 8>"$box/.wake.lock"
     flock -x 8 || fail 'cannot lock wake'
     {
@@ -123,10 +123,24 @@ wake() (
         done)
             full_id=$(jq -r '.sessionId // .id // empty' <<<"$info")
             [[ -n $full_id ]] || { unwoken 'session has no id'; return $?; }
+            if ! info=$(session "$name"); then unwoken 'no session'; return $?; fi
+            state=$(jq -r '.state // "interactive session"' <<<"$info")
+            case $state in
+                working|blocked) echo queued; return 0 ;;
+                done) ;;
+                *) unwoken "$state"; return $? ;;
+            esac
+            if [[ $(jq -r '.sessionId // .id // empty' <<<"$info") != "$full_id" ]]; then
+                unwoken 'session changed'; return $?
+            fi
+            short_id=$(jq -r '.id // empty' <<<"$info")
+            if [[ -z $short_id ]] || ! claude stop "$short_id" </dev/null >/dev/null 2>&1; then
+                unwoken 'stop failed'; return $?
+            fi
             cwd=$(jq -r '.cwd // empty' <<<"$info")
             [[ -d $cwd ]] || cwd=$root
-            if ! (cd -- "$cwd" && claude --bg --resume "$full_id" \
-                "Post for $name: run post read $name, then start post wait $name in the background.") </dev/null >/dev/null 2>&1; then
+            if ! (cd -- "$cwd" && claude --bg --resume "$full_id" --name "$name" \
+                "Post for $name: run post read $name and act on it, then start post wait $name in the background, and do the same each time it ends.") </dev/null >/dev/null 2>&1; then
                 unwoken 'resume failed'; return $?
             fi
             sleep "${POST_RESUME_CHECK:-10}"

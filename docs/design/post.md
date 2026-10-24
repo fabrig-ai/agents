@@ -140,9 +140,9 @@ overwrites another.
 ## 4. Waking
 
 - **A Claude session** ends each turn with its waiter running:
-  `post wait $POST_NAME` as a background task, started again after each
-  wake. When the task ends, the session runs `post read $POST_NAME` and
-  acts on what it read. The waiter needs no working directory and
+  `post wait $POST_NAME` as a background task. Each time the task ends,
+  the session runs `post read $POST_NAME`, acts on what it read and
+  starts its waiter again. The waiter needs no working directory and
   almost no memory.
 - **A Codex owner's loop is its waiter,** during its turns too: mail
   that arrives in a turn is read when the turn ends (section 5).
@@ -154,13 +154,17 @@ overwrites another.
   - a Codex owner without a waiter: exit 3, since only its parent
     restarts its unit;
   - a Claude name: the newest session of that name in `claude agents
-    --json --all`. If it's `done`, the tool resumes it in place from its
-    directory,
-    `claude --bg --resume <full id> "Post for NAME: run post read NAME,
-    then start post wait NAME."`, and checks after 10 seconds that the
-    session with that id is working: `woken`, or exit 3. If it's working
-    or blocked, the message is `queued`, since a resume then would start
-    a copy (director.md 5). If it's stopped, failed, interactive or
+    --json --all`. A `done` session still runs, so the tool checks it
+    again, stops it with `claude stop <short id>` and resumes it under
+    its id from its directory (a resume of a running session would
+    start a copy),
+    `claude --bg --resume <full id> --name NAME "Post for NAME: run post
+    read NAME and act on it, then start post wait NAME in the
+    background, and do the same each time it ends."`, and checks after
+    10 seconds that the session with that id is working or blocked:
+    `woken`, or exit 3. If it's working or blocked, the message is
+    `queued`, since a resume then would start a copy (director.md 5).
+    If it's stopped, failed, interactive or
     absent: exit 3. A stopped session was ended on purpose, and its
     parent decides.
 - **At a handover** the outgoing session doesn't restart its waiter.

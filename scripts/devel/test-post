@@ -79,12 +79,26 @@ STUB
 cat >"$HOME/.local/bin/claude" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
+jq -nc --arg cwd "$PWD" --args '{cwd:$cwd,args:$ARGS.positional}' -- "$@" >>"$FIXTURE/claude-calls"
 if [[ $* == 'agents --json --all' ]]; then
     cat "$FIXTURE/sessions.json"
-elif [[ $# == 4 && $1 == --bg && $2 == --resume ]]; then
+    if [[ -n ${FIXTURE_SESSION_NEXT_STATE:-}${FIXTURE_SESSION_NEXT_ID:-} ]]; then
+        jq --arg state "${FIXTURE_SESSION_NEXT_STATE:-}" --arg id "${FIXTURE_SESSION_NEXT_ID:-}" \
+            'map(if $state != "" then .state=$state else . end |
+                 if $id != "" then .sessionId=$id else . end)' \
+            "$FIXTURE/sessions.json" >"$FIXTURE/sessions.next"
+        mv "$FIXTURE/sessions.next" "$FIXTURE/sessions.json"
+    fi
+elif [[ $# == 2 && $1 == stop ]]; then
+    printf '%s\n' "$2" >>"$FIXTURE/stops"
+    [[ ${FIXTURE_STOP_FAIL:-0} == 0 ]] || exit 1
+    jq --arg id "$2" 'map(if .id == $id then .state="stopped" else . end)' \
+        "$FIXTURE/sessions.json" >"$FIXTURE/sessions.next"
+    mv "$FIXTURE/sessions.next" "$FIXTURE/sessions.json"
+elif [[ $# == 6 && $1 == --bg && $2 == --resume && $4 == --name ]]; then
     [[ ! -t 0 ]]
     pwd >"$FIXTURE/resume-cwd"
-    printf '%s\n' "$3" "$4" >>"$FIXTURE/resumes"
+    printf '%s\n' "$3" "$6" >>"$FIXTURE/resumes"
     [[ ${FIXTURE_RESUME_FAIL:-0} == 0 ]] || exit 1
     sleep "${FIXTURE_RESUME_DELAY:-0}"
     jq --arg id "$3" --arg state "${FIXTURE_RESUME_STATE:-working}" \
@@ -147,8 +161,29 @@ mv "$t/older.json" "$t/sessions.json"
 out=$(capture post send sleeping wake <<< body)
 expect 'done session wakes' "$out" 'status=0' 'woken'
 expect 'resume from session directory' "$(cat "$t/resume-cwd")" "$t/session cwd"
-expect 'resume full id and prompt' "$(cat "$t/resumes")" 'full-session-id' 'Post for sleeping: run post read sleeping, then start post wait sleeping in the background.'
+expect 'resume full id and prompt' "$(cat "$t/resumes")" 'full-session-id' 'Post for sleeping: run post read sleeping and act on it, then start post wait sleeping in the background, and do the same each time it ends.'
+expect 'stop by short id' "$(cat "$t/stops")" short
+expect 'stop before named resume in session cwd' "$(jq -sc --arg cwd "$t/session cwd" '
+    [.[] | select(.args[0] != "agents")] |
+    length == 2 and .[0].args == ["stop","short"] and
+    .[1].args[0:5] == ["--bg","--resume","full-session-id","--name","sleeping"] and
+    .[1].cwd == $cwd' "$t/claude-calls")" true
 expect 'resumed once' "$(wc -l <"$t/resumes")" 2
+for state in working blocked; do
+    session "changed-$state" 'done'
+    : >"$t/claude-calls"
+    expect "session turns $state queues" "$(capture env FIXTURE_SESSION_NEXT_STATE="$state" "$POST_TOOL" send "changed-$state" busy <<< body)" 'status=0' 'queued'
+    expect "session turns $state neither stopped nor resumed" "$(jq -sc '[.[] | select(.args[0] != "agents")] | length' "$t/claude-calls")" 0
+done
+session replaced-session 'done'
+: >"$t/claude-calls"
+expect 'changed full id refuses wake' "$(capture env FIXTURE_SESSION_NEXT_ID=other-id "$POST_TOOL" send replaced-session busy <<< body)" 'status=3' 'session changed'
+expect 'changed full id neither stopped nor resumed' "$(jq -sc '[.[] | select(.args[0] != "agents")] | length' "$t/claude-calls")" 0
+session stop-failed 'done'
+: >"$t/claude-calls"
+expect 'stop failure keeps mail' "$(capture env FIXTURE_STOP_FAIL=1 "$POST_TOOL" send stop-failed failure <<< body)" 'status=3' 'stop failed'
+expect 'stop failure never resumes' "$(jq -sc '[.[] | select(.args[0] != "agents") | .args] == [["stop","short"]]' "$t/claude-calls")" true
+expect 'stop failure retains mail' "$(count "$t/a/tmp/post/stop-failed/new")" 1
 session working working
 expect 'working session queues' "$(capture post send working busy <<< body)" 'status=0' 'queued'
 expect 'working session not resumed' "$(wc -l <"$t/resumes")" 2
