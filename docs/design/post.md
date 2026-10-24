@@ -78,17 +78,18 @@ four launchers. The survey behind this design is x1's
 
 ## 3. post
 
-The mailbox of `NAME` is `~/src/rust/tmp/post/NAME/` on its machine:
-`tmp/`, `new/`, `cur/`, `sent/`, with mode 0700 and 0600 files, a
-`waiter` file and a `kind` file (`claude` or `codex`).
+The mailbox of `NAME` is `~/src/rust/tmp/post/<NAME, with / as +>/` on
+its machine (`o+first-run-ux`), so that no name reaches inside another's
+mailbox: `tmp/`, `new/`, `cur/`, `sent/`, with mode 0700 and 0600 files,
+a `waiter` file and a `kind` file (`claude` or `codex`).
 
 A message:
 
 ```
-Id: 20261024T213500Z-7f3a
+Id: 20261024T213500Z-7f3a90c1
 From: o/first-run-ux@hetzner3
 To: p/sign-in@hel8
-Re: 20261024T210100Z-11c2
+Re: 20261024T210100Z-11c2e4d8
 Subject: M2 design report
 
 <the body: at most 15 lines by the roles' rule, 64 KiB by the tool's>
@@ -107,15 +108,19 @@ The commands:
   - exit 3, `queued, nobody will wake it: <why>`: the message is in the
     mailbox, but the waiter is dead and the session is absent, stopped,
     or failed to resume;
-  - exit 2, `not delivered: <why>`: a bad name, no route, or ssh failed.
-    Nothing changed at the destination.
+  - exit 2, `not delivered: <why>`: a bad name, no route, a refusal,
+    or a transport that failed three retries (after 5, 20 and 60
+    seconds, each try bounded to 60). A retry resends the same id, and
+    a destination that already holds it with the same text counts it
+    delivered, so a lost acknowledgement never duplicates a message.
 
   On exit 2 or 3, the sender tells its own parent.
 - **`post deliver --from MACHINE`** is the key's forced command: it
   reads `deliver NAME` from `SSH_ORIGINAL_COMMAND` and the message from
-  stdin, checks both, and writes the message to `tmp/` and then renames
-  it into `new/`. `post send` uses the same path for a local recipient.
-  It then wakes the recipient (section 4).
+  stdin (within 30 seconds), checks both, and that `To:` names this
+  machine, and writes the message to `tmp/` and then renames it into
+  `new/`. `post send` uses the same path for a local recipient. It then
+  wakes the recipient (section 4).
 - **`post wait NAME [--timeout SECONDS]`** makes itself NAME's waiter.
   It returns when `new/` holds a message, at once if one is there
   already, and prints one line per message: id, sender, subject. On a
@@ -128,6 +133,8 @@ The commands:
   whether the name's waiter is alive.
 
 Each command takes the mailbox's lock (`flock`) while it moves files.
+An id is the stamp and eight random hex digits; a sent copy never
+overwrites another.
 `cur/` and `sent/` are the record that the inbox files are today.
 
 ## 4. Waking
@@ -140,7 +147,8 @@ Each command takes the mailbox's lock (`flock`) while it moves files.
 - **A Codex owner's loop is its waiter,** during its turns too: mail
   that arrives in a turn is read when the turn ends (section 5).
 - **Delivery wakes the recipient** on its own machine, right after the
-  message is in `new/`:
+  message is in `new/`, holding the mailbox's wake lock throughout, so
+  that two senders never resume one session twice:
   - the waiter is alive (the pid in `waiter` runs, as `post wait` for
     that name or as a Codex owner's loop): `waiting`;
   - a Codex owner without a waiter: exit 3, since only its parent
@@ -148,11 +156,12 @@ Each command takes the mailbox's lock (`flock`) while it moves files.
   - a Claude name: the newest session of that name in `claude agents
     --json --all`. If it's `done`, the tool resumes it in place,
     `claude --bg --resume <full id> "Post for NAME: run post read NAME,
-    then start post wait NAME."`, and checks after 10 seconds that it's
-    working: `woken`, or exit 3. If it's working or blocked, the
-    message is `queued`, since a resume then would start a copy
-    (director.md 5). If it's stopped or absent: exit 3. A stopped
-    session was ended on purpose, and its parent decides.
+    then start post wait NAME."`, and checks after 10 seconds that the
+    session with that id is working: `woken`, or exit 3. If it's working
+    or blocked, the message is `queued`, since a resume then would start
+    a copy (director.md 5). If it's stopped, failed, interactive or
+    absent: exit 3. A stopped session was ended on purpose, and its
+    parent decides.
 - **At a handover** the outgoing session doesn't restart its waiter.
   The new session starts one, which replaces any that is left.
 - **Stuck mail.** The director's `probe.sh` runs `post list --older 15`
@@ -169,8 +178,14 @@ Each command takes the mailbox's lock (`flock`) while it moves files.
     - a path that isn't absolute;
     - a TASK that can't be read, or a DIR that isn't a directory;
     - a REPORT that exists, or whose directory doesn't;
-    - no recipient: neither `--to` nor `POST_NAME`;
+    - no recipient, neither `--to` nor `POST_NAME`, or one that isn't
+      an address;
+    - a tab or a newline in a path or the model;
     - for `--resume`, a run with no thread.
+
+    It then reserves REPORT, creating it with one line, `codex-run: run
+    <id> is writing this report.`, so that a second launch on the same
+    path refuses.
   - **The spawner chooses the model and the effort,** by the task
     (owners.md 4.2): `--model`, by default gpt-6.1-sol, and `--effort`,
     medium, high or xhigh, by default high. The tool never changes
@@ -178,11 +193,15 @@ Each command takes the mailbox's lock (`flock`) while it moves files.
     (for surveys) runs Codex with `--sandbox read-only`, and every
     other run with `--dangerously-bypass-approvals-and-sandbox`.
   - **It returns at once.** It starts `systemd-run --user --collect
-    --unit codex-run-<id>` and prints the run's id and directory,
+    --service-type=exec --unit codex-run-<id>`, whose command runs
+    through a login shell, so that the run sees the machine's profile
+    as an owner's shell does, and prints the run's id and directory,
     `~/src/rust/tmp/codex-run/<id>/`. The caller ends its turn: the end
     comes by post.
 - **The run itself:**
-  - It runs with umask 077, in DIR, with stdin `</dev/null`.
+  - It runs with umask 077, in DIR. Its prompt comes on stdin from a
+    file, so that no prompt is too long for an argument, and nothing
+    else can reach stdin.
   - Its command is `codex exec --json -o <run dir>/last.md`, with the
     events and stderr written to the run directory, and the thread's id
     kept from its first event.
@@ -194,29 +213,42 @@ Each command takes the mailbox's lock (`flock`) while it moves files.
 - **Capacity.** A turn that fails because the model is at capacity
   resumes its thread after 2, 5 and then 15 minutes, "Go on with the
   task: the model was at capacity.", three tries at most.
-- **The end, whichever it is:**
-  - if the run didn't write REPORT, `last.md` is copied there, and the
-    copy says so in its first line;
+- **The end, whichever it is,** a TERM or an INT among them (exit 143
+  or 130), each step tried even if one before it failed:
+  - if REPORT is gone or still holds only the reservation, `last.md` is
+    copied there, and the copy says so in its first line;
   - a row goes to `~/src/rust/tmp/codex-run/runs.tsv`: id, caller,
     start, end, exit, tries, model, effort, TASK, REPORT, thread, and
     tokens from the events;
   - a post goes to the caller, with the subject `run <id> ok: <REPORT's
-    first line>` or `run <id> failed <exit>: ...`, and the report's path,
-    the run directory and the minutes in the body.
+    first line, without control characters>` or `run <id> failed <exit>:
+    ...`, and the report's path, the run directory and the minutes in the
+    body.
+- **`codex-run stale`** lists the runs that will never post: those
+  without an end whose unit is gone (killed, out of memory, a reboot, a
+  unit that never started), and those whose post failed. The director's
+  probe reports its lines as a trigger, as it does stuck mail.
 
   The caller reads REPORT, never the events. An implementer with a
   question writes it as its report's first line and ends, so the
   question arrives as the post's subject.
 - **`codex-run owner [--model M] [--effort E] NAME BRIEF`** runs a Codex
-  owner, or a QA agent, as the unit `codex-owner-<NAME, with / as ->`:
+  owner, or a QA agent, as the unit `codex-owner-<NAME, escaped by
+  systemd-escape>`:
   - its first turn is "You are NAME: read BRIEF and do what it says.
     Your messages come by post.";
   - between turns it rests in `post wait NAME --timeout 3600`;
   - the next turn's prompt is what `post read NAME` printed, or the
     hour's prompt ("check your running tasks...", as now);
+  - the batch of post a turn takes is kept in `pending.md` until the
+    turn succeeds. A failed turn keeps it, the loop rests five minutes
+    instead of an hour, and the next turn's prompt holds it before any
+    new post. A restart takes a batch left from before first;
   - it sets `POST_NAME` and the mailbox's kind to `codex`, and keeps
-    the thread, `turns.tsv` and the events in `tmp/owners/NAME/codex/`,
-    as `codex-owner.sh` does;
+    the thread, `turns.tsv` and the events in
+    `tmp/owners/<NAME's last part>/codex/`, as `codex-owner.sh` does,
+    with the full name in a `name` file there: another name that would
+    share the directory is refused;
   - capacity errors are retried as a task's are;
   - its parent ends it with `systemctl --user stop codex-owner-<...>`,
     once its closing note is in.
@@ -255,8 +287,9 @@ Each command takes the mailbox's lock (`flock`) while it moves files.
    them. They land unused.
 2. **The director installs the routes,** one quiet machine at a time:
    the machines file, the post key, the authorized lines and the known
-   hosts, then a `post send` to `t/ping` on each machine, checked with
-   `post list` and cleaned up.
+   hosts, and lingering (`loginctl enable-linger`), so that user units
+   outlive a logout; then a `post send` to `t/ping` on each machine,
+   checked with `post list` and cleaned up.
 3. **The roles' edits land** (section 6). New sessions follow them.
    Running sessions switch at their next handover, told once by the old
    channel. The old scripts move to `tmp/director/archive/` once no
@@ -279,6 +312,10 @@ From the mailboxes and `runs.tsv`, against the survey:
 - **A registry of names across machines:** the address carries the
   machine.
 - **A relay daemon,** and polling another machine for mail.
+- **Durability past a power loss** (fsync), and limits per sender on
+  mail's rate and storage: the keys' holders are our own machines.
+- **A reconciler** that finishes a killed run: `codex-run stale`
+  surfaces it, and its owner decides.
 - **A Stop hook** that refuses to end a turn with mail unread. It
   would close the race between a turn's end and its waiter's start,
   which the waiter already closes by returning at once on mail
