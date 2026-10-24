@@ -55,7 +55,7 @@ doing now is in its notes (section 3), never here.
 - **Its timers** live in the session: a new session starts them, and
   they stop for a compaction or a fresh context (below):
   - a cron, `17 */2 * * *`, recurring, with the prompt "Director's
-    2-hour check: section 7 of skein's docs/foundation/director.md.";
+    2-hour check: section 7 of agents' roles/director.md.";
   - the watcher, `tmp/director/watch.sh`, as a background task, started
     again after each wake (section 5).
 - **Its context** compacts by itself at Claude Code's autocompact
@@ -72,7 +72,7 @@ doing now is in its notes (section 3), never here.
     is while a cron or a background task is registered, types
     `/compact` into it through `claude attach` (a scheduled `/compact`
     would reach it as plain text), then "Director's check, after
-    compaction: section 7 of skein's docs/foundation/director.md.",
+    compaction: section 7 of agents' roles/director.md.",
     which runs the check on the fresh context, after its notes and the
     timers (section 3). Should the script fail, it types the failure
     into the session;
@@ -450,4 +450,4 @@ changed or dropped.
   `check-report.sh`, `session.sh`, `context.sh`, `codex-owner.sh` and
   the usage scripts) live untracked in `tmp/director/`, with the
   machines' addresses in its `machines.sh`. Whether they move into
-  skein's `scripts/dev/` is open.
+  this repository's `scripts/` is open.
