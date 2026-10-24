@@ -127,7 +127,7 @@ finish_task() {
     minutes=$(( ($(date -d "$ended" +%s) - $(date -d "$started" +%s)) / 60 ))
     printf 'Report: %s\nRun: %s\nThread: %s\nMinutes: %s\nTries: %s\n' \
         "$report" "$state" "${thread:--}" "$minutes" "$tries" >"$state/post-body" || finish_error 'post body failed'
-    post send --as codex-run "$to" "$subject" "$state/post-body" >"$state/post-output" 2>&1 || post_exit=$?
+    "$kit/post" send --as codex-run "$to" "$subject" "$state/post-body" >"$state/post-output" 2>&1 || post_exit=$?
     if ((post_exit != 0)); then
         finish_error "post failed: $post_exit"
         cp "$state/post-output" "$state/post-failed" || printf 'post failed: %s\n' "$post_exit" >"$state/post-failed"
@@ -279,7 +279,7 @@ owner_run() {
     export POST_NAME=$name
     owner_identity
     status=0
-    post wait "$name" --timeout 0 --holder "$$" --kind codex || status=$?
+    "$kit/post" wait "$name" --timeout 0 --holder "$$" --kind codex || status=$?
     case $status in 0|1) ;; 4) return 0 ;; *) return "$status" ;; esac
     prompt="You are $name: read $brief and do what it says. Your messages arrive as your turns' prompts; send yours with post send (agents' docs/design/post.md)."
     if [[ -s $state/pending.md ]]; then prompt+=$'\n'"$(cat "$state/pending.md")"; fi
@@ -293,13 +293,13 @@ owner_run() {
         wait_timeout=3600
         if ((run_exit == 0)); then rm -f "$state/pending.md"; else wait_timeout=300; fi
         status=0
-        post wait "$name" --timeout "$wait_timeout" --holder "$$" --kind codex || status=$?
+        "$kit/post" wait "$name" --timeout "$wait_timeout" --holder "$$" --kind codex || status=$?
         case $status in
             0|1)
                 prompt=''
                 [[ ! -s $state/pending.md ]] || prompt=$(cat "$state/pending.md")
                 if ((status == 0)); then
-                    prompt+="${prompt:+$'\n'}Post for $name:"$'\n'"$(post read "$name")"
+                    prompt+="${prompt:+$'\n'}Post for $name:"$'\n'"$("$kit/post" read "$name")"
                     printf '%s\n' "$prompt" >"$state/pending.md"
                 elif [[ -z $prompt ]]; then
                     prompt='An hour without post: check your running tasks, act on what has ended, and keep your notes current.'

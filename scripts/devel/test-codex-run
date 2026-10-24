@@ -17,8 +17,10 @@ cleanup() {
 }
 export HOME=$t/home DEV_ROOT=$t/workspace POST_NAME=o/caller
 export CODEX_RUN_RETRY_DELAYS='0 0 0'
-mkdir -p "$HOME" "$DEV_ROOT/fake" "$t/bin" "$t/reports" "$t/work dir"
+mkdir -p "$HOME" "$DEV_ROOT/fake" "$t/bin" "$t/reports" "$t/work dir" "$t/kit"
 trap cleanup EXIT
+cp "$kit/codex-run" "$t/kit/codex-run"
+kit=$t/kit
 export PATH=$t/bin:$PATH
 fake=$DEV_ROOT/fake
 printf 'Implement the fixture task.\n' >"$t/task file.md"
@@ -137,7 +139,7 @@ for usage in ({'input_tokens': 10, 'cached_input_tokens': 2, 'output_tokens': 3}
               {'input_tokens': 20, 'cached_input_tokens': 4, 'output_tokens': 5}):
     print(json.dumps({'type': 'turn.completed', 'usage': usage}))
 FAKE
-cat >"$t/bin/post" <<'FAKE'
+cat >"$kit/post" <<'FAKE'
 #!/usr/bin/env python3
 import json, os, pathlib, sys
 args = sys.argv[1:]
@@ -179,7 +181,13 @@ cat >"$t/bin/flock" <<'FAKE'
 [[ ! -f $DEV_ROOT/fake/row-fail ]] || exit 1
 exec /usr/bin/flock "$@"
 FAKE
-chmod +x "$t/bin/"*
+# A PATH lookup must fail safely instead of reaching another checkout's post.
+cat >"$t/bin/post" <<'FAKE'
+#!/usr/bin/env bash
+echo 'fixture: post must be called from the sibling kit' >&2
+exit 99
+FAKE
+chmod +x "$t/bin/"* "$kit/post"
 for tool in codex post systemd-run systemctl; do
     [[ $(command -v "$tool") == "$t/bin/$tool" ]]
 done
