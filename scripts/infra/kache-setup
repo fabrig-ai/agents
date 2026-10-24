@@ -27,15 +27,15 @@ digest=93f8551e8f1deedfab30118957d5450e2204b4a09a9cd951e092426c096839a3
 
 kit=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
 workspace() {
-    local skein
-    skein=$(cd "$kit/../.." && pwd)
-    if [[ $(basename "$skein") == skein ]]; then dirname "$skein"; else echo "$HOME/src/rust"; fi
+    local agents
+    agents=$(cd "$kit/../.." && pwd)
+    if [[ $(basename "$agents") == agents ]]; then dirname "$agents"; else echo "$HOME/src/rust"; fi
 }
 root=${DEV_ROOT:-$(workspace)}
 # shellcheck disable=SC2034 # kit.sh reads it
 tmp=${DEV_TMP:-$root/tmp}
-# shellcheck source=kit.sh
-source "$kit/kit.sh"
+# shellcheck source=../devel/kit.sh
+source "$kit/../devel/kit.sh"
 
 [[ $(uname -m) == x86_64 ]] || { echo "kache-setup: only x86_64 has a pinned release" >&2; exit 2; }
 read -r cap _ < <(machine_setting KACHE_MAX_GB 12)
@@ -96,7 +96,7 @@ mkdir -p "${config%/*}"
 # A machine that keeps its cache elsewhere, on a larger disk, keeps it there.
 local=$(sed -n 's/^local_store *= *"\(.*\)"$/\1/p' "$config" 2>/dev/null | head -n1 || true)
 cat >"$config.new" <<TOML
-# Written by skein's scripts/dev/kache-setup.
+# Written by agents' scripts/infra/kache-setup.
 [cache]
 ${local:+local_store = \"$local\"
 }local_max_size = "${cap}GiB"
@@ -122,7 +122,7 @@ dropin=${unit}.d/20-shared-store.conf
 if ((remote)); then
     mkdir -p "${dropin%/*}"
     cat >"$dropin.new" <<'UNIT'
-# Written by skein's scripts/dev/kache-setup.
+# Written by agents' scripts/infra/kache-setup.
 [Service]
 EnvironmentFile=%h/.config/kache/store.env
 UNIT
@@ -133,7 +133,7 @@ fi
 
 mkdir -p "${unit%/*}"
 cat >"$unit.new" <<UNIT
-# Written by skein's scripts/dev/kache-setup.
+# Written by agents' scripts/infra/kache-setup.
 [Unit]
 Description=kache build cache daemon
 

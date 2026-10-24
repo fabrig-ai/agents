@@ -8,16 +8,16 @@ set -euo pipefail
 
 kit=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
 workspace() {
-    local skein
-    skein=$(cd "$kit/../.." && pwd)
-    if [[ $(basename "$skein") == skein ]]; then dirname "$skein"; else echo "$HOME/src/rust"; fi
+    local agents
+    agents=$(cd "$kit/../.." && pwd)
+    if [[ $(basename "$agents") == agents ]]; then dirname "$agents"; else echo "$HOME/src/rust"; fi
 }
 root=${DEV_ROOT:-$(workspace)}
 tmp=${DEV_TMP:-$root/tmp}
-repos=${DEV_REPOS:-skein smith jig hearth temper}
+repos=${DEV_REPOS:-skein smith jig hearth temper agents}
 claude_dir=${SETUP_CLAUDE_DIR:-$root}
-# shellcheck source=kit.sh
-source "$kit/kit.sh"
+# shellcheck source=../devel/kit.sh
+source "$kit/../devel/kit.sh"
 
 # Compare the primary checkout's graph database time with origin/main.
 graph_index() {
@@ -137,20 +137,23 @@ check_machine() {
     done
     cargo nextest --version >/dev/null 2>&1 && ok "has cargo-nextest" || fail "no cargo-nextest"
     # The tools and files link to this kit.
-    local bin=$HOME/.local/bin home=$kit
+    local bin=$HOME/.local/bin home=$kit target
     for tool in heavy land setup; do
-        if [[ $(readlink -f "$bin/$tool" 2>/dev/null) == "$home/$tool" ]]; then
+        target=$home/../devel/$tool
+        [[ $tool != setup ]] || target=$home/setup
+        target=$(readlink -f "$target")
+        if [[ $(readlink -f "$bin/$tool" 2>/dev/null) == "$target" ]]; then
             ok "$tool is on PATH"
         elif ((fix)); then
-            mkdir -p "$bin" && ln -sfn "$home/$tool" "$bin/$tool" && ok "linked $bin/$tool"
+            mkdir -p "$bin" && ln -sfn "$target" "$bin/$tool" && ok "linked $bin/$tool"
         else
-            fail "$bin/$tool does not link to $home/$tool (--fix links it)"
+            fail "$bin/$tool does not link to $target (--fix links it)"
         fi
     done
     for tool in plan test-plan; do
         [[ -L $bin/$tool ]] || continue
         case $(readlink -m "$bin/$tool") in
-            */scripts/dev/*)
+            */scripts/devel/*)
                 if ((fix)); then
                     rm "$bin/$tool"
                     ok "removed $bin/$tool, a link to a retired tool"
@@ -160,14 +163,14 @@ check_machine() {
         esac
     done
 
-    # The workspace's own files live in skein, beside the tools.
-    local pair link target
+    # The workspace's own files live in agents, beside setup.
+    local pair link
     for pair in "$root/AGENTS.md=AGENTS.md" "$root/CLAUDE.md=CLAUDE.md" \
         "$root/.claude/settings.json=claude-settings.json"; do
         link=${pair%%=*}
         target=$home/workspace/${pair#*=}
         if [[ $(readlink -f "$link" 2>/dev/null) == "$target" ]]; then
-            ok "$link is skein's"
+            ok "$link is agents'"
         elif [[ -e $link && ! -L $link ]]; then
             fail "$link is a file of its own; replace it with a link to $target"
         elif ((fix)); then

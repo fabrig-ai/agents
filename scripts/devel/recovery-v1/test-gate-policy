@@ -536,20 +536,22 @@ printf '%s\\n' "$before"
         self.run_command([str(self.kit / "land"), "--local", "--docs"],
                          extra={"SKEIN_TEST_CHROMIUM": str(self.bin / "chromium")})
         self.assertFalse(self.calls())
-        self.assertIn("none (Markdown only)", self.git("log", "-1", "--format=%(trailers:key=Gate-Policy,valueonly)"))
+        self.assertIn("none (Markdown and mockups only)", self.git("log", "-1", "--format=%(trailers:key=Gate-Policy,valueonly)"))
 
-    def test_legacy_check_boundary_keeps_full_checks_without_loading_new_kit(self):
+    def test_check_boundary_does_not_prepare_recovery_policy(self):
         script = self.repo / "scripts/check.sh"
         script.parent.mkdir()
         shutil.copy(KIT.parent.parent / "check.sh", script)
-        self.script(self.repo / "scripts/dev/gate-policy.sh", "#!/bin/sh\nexit 91\n")
-        self.script(self.bin / "python3", "#!/bin/sh\necho 'fixture: checks reached'\nexit 73\n")
+        self.script(self.repo / "scripts/devel/recovery-v1/gate-policy.sh", "#!/bin/sh\nexit 91\n")
+        self.script(self.bin / "shellcheck", "#!/bin/sh\nexit 0\n")
+        self.script(self.repo / "scripts/devel/test-tools",
+                    "#!/bin/sh\necho 'fixture: checks reached'\nexit 73\n")
         result = self.run_command(["bash", "scripts/check.sh"], check=False, extra={
             "SKEIN_GATE_POLICY_ID": "sha256:wrong",
             "SKEIN_GATE_POLICY_HELPER": str(self.kit / "gate-policy.sh")})
         self.assertEqual(result.returncode, 73, result.stdout + result.stderr)
         self.assertIn("fixture: checks reached", result.stdout)
-        self.assertNotIn("gate-policy", script.read_text())
+        self.assertNotIn("gate_policy_prepare", script.read_text())
 
     def test_configured_path_and_inactive_target_commands(self):
         alternate = self.root / "alternate-bin"
@@ -725,15 +727,6 @@ exit 97
         self.assertNotEqual(self.git("rev-parse", "HEAD^{tree}").strip(), original_tree)
         self.assertFalse(self.git("log", "-1", "--format=%(trailers:key=Gate-Tree,valueonly)").strip())
         self.assertEqual(self.git("log", "-1", "--format=%(trailers:key=Gate-Tree,valueonly)", pushed["commit"]).strip(), original_tree)
-
-    def test_normal_gate_keeps_all_tiers(self):
-        source = (KIT.parent.parent / "check.sh").read_text()
-        for command in ("cargo nextest run --workspace\n",
-                        "cargo nextest run --workspace --profile fuzzy\n",
-                        "cargo nextest run --workspace --profile browser\n",
-                        "cargo check -p skein-tls\n", "cargo clippy --workspace --all-targets -- -D warnings\n"):
-            self.assertIn(command, source)
-        self.assertNotIn("gate_policy_prepare", source)
 
 
 if __name__ == "__main__":

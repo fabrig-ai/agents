@@ -11,9 +11,9 @@ def verify():
     kit = Path(__file__).resolve().parent
     release = json.loads((kit / 'release.json').read_text())
     commit = release['commit']
-    if release['schema'] != 'skein-recovery-release-v1' or not re.fullmatch('[0-9a-f]{40,64}', commit):
+    if release['schema'] != 'agents-recovery-release-v1' or not re.fullmatch('[0-9a-f]{40,64}', commit):
         raise ValueError('invalid release identity')
-    expected = Path.home() / '.local/share/skein-kits' / ('recovery-v1-' + commit)
+    expected = Path.home() / '.local/share/agents-kits' / ('recovery-v1-' + commit)
     if kit != expected or expected.is_symlink():
         raise ValueError('release is outside its stable installation path')
     for directory in [kit, *kit.parents]:

@@ -49,7 +49,7 @@ set -euo pipefail
 umask 077
 
 kit=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
-# The workspace: DEV_ROOT, or the directory holding the skein checkout these
+# The workspace: DEV_ROOT, or the directory holding the agents checkout these
 # tools come from, or ~/src/rust.
 workspace() {
     echo "$HOME/src/rust"
@@ -94,9 +94,9 @@ lock=${LAND_LOCK:-$common/land.lock}
 
 # The advisory connection spans retries, before the host turn and prebuild.
 if ((!docs && !local)) && [[ $repo == temper && ${LAND_TURN_ACTIVE:-0} != 1 &&
-    -f $HOME/.config/skein-land-turn/enabled ]]; then
+    -f $HOME/.config/agents-land-turn/enabled ]]; then
     export LAND_TURN=1 LAND_TURN_HOLDER="$kit/land-turn.py"
-    LAND_TURN_MODE=$(cat "$HOME/.config/skein-land-turn/enabled" 2>/dev/null) || LAND_TURN_MODE=invalid
+    LAND_TURN_MODE=$(cat "$HOME/.config/agents-land-turn/enabled" 2>/dev/null) || LAND_TURN_MODE=invalid
     export LAND_TURN_MODE
 fi
 

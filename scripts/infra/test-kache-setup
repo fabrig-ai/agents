@@ -2,6 +2,7 @@
 """Exercise setup with an isolated home, binary and service manager."""
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import tomllib
@@ -88,6 +89,22 @@ def main():
         cache = tomllib.loads(config.read_text())['cache']
         assert 'remote' not in cache and cache['local_store'] == '/fixture/large-disk'
         assert not dropin.exists()
+        assert config.read_text().startswith("# Written by agents' scripts/infra/kache-setup.\n")
+
+        # Discover the workspace from agents/scripts/infra, with HOME elsewhere.
+        workspace = root / 'workspace'
+        moved = workspace / 'agents/scripts/infra'
+        moved.mkdir(parents=True)
+        shutil.copy2(KIT / 'kache-setup', moved / 'kache-setup')
+        devel = moved.parent / 'devel'
+        devel.mkdir()
+        shutil.copy2(KIT / '../devel/kit.sh', devel / 'kit.sh')
+        discovered = workspace / 'tmp/kache' / artifact.name
+        discovered.parent.mkdir(parents=True)
+        shutil.copy2(artifact, discovered)
+        discovery_env = {key: value for key, value in env.items() if key not in ('DEV_ROOT', 'DEV_TMP')}
+        subprocess.run([moved / 'kache-setup'], env=discovery_env, check=True,
+                       capture_output=True, text=True)
         print('test-kache-setup: passed (local, remote, repeat, mode, owner, removal)')
 
 

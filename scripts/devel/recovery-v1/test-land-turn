@@ -148,7 +148,7 @@ def construction(root):
     root.mkdir()
     module = turn_module()
     who = module.identity('a' * 32, 'temper', 'fixture')
-    path = '/home/free/.local/share/skein-kits/recovery-v1-' + 'b' * 40 + '/land-turn.py'
+    path = '/home/free/.local/share/agents-kits/recovery-v1-' + 'b' * 40 + '/land-turn.py'
     environment = {'LAND_TURN_HOLDER': path}
     with patch.dict(os.environ, environment, clear=True):
         argv, heartbeat = module.transport_command(root, who)
@@ -246,7 +246,7 @@ def installed_validation(root):
     for fault, expected in [('valid', 0), ('mutable', 2), ('tampered', 2), ('missing', 2)]:
         home = root / fault
         commit = 'd' * 40
-        release = home / '.local/share/skein-kits' / ('recovery-v1-' + commit)
+        release = home / '.local/share/agents-kits' / ('recovery-v1-' + commit)
         release.mkdir(parents=True)
         manifest = {}
         for name in required:
@@ -255,7 +255,7 @@ def installed_validation(root):
             manifest[name] = hashlib.sha256(asset.read_bytes()).hexdigest()
             asset.chmod(0o400)
         marker = release / 'release.json'
-        marker.write_text(json.dumps(dict(schema='skein-recovery-release-v1', commit=commit, files=manifest)))
+        marker.write_text(json.dumps(dict(schema='agents-recovery-release-v1', commit=commit, files=manifest)))
         marker.chmod(0o400)
         asset = release / 'land-turn.py'
         if fault in ('mutable', 'tampered', 'missing'):
@@ -302,7 +302,7 @@ class TurnLab(Lab):
     def __init__(self, root, name):
         super().__init__(root, name)
         toolhome = Path(self.env['HOME'])
-        self.switch = self.path / 'home/.config/skein-land-turn/enabled'
+        self.switch = self.path / 'home/.config/agents-land-turn/enabled'
         self.switch.parent.mkdir(parents=True)
         self.env.update(HOME=str(self.path / 'home'),
             CARGO_HOME=self.env.get('CARGO_HOME', str(toolhome / '.cargo')),
@@ -661,7 +661,7 @@ def terminated(lab):
 
 def missing_local_helper(lab):
     env = dict(lab.env, LAND_TURN_MODE='local',
-        LAND_TURN_HOLDER='/home/free/.local/share/skein-kits/recovery-v1-' + '0' * 40 + '/land-turn.py')
+        LAND_TURN_HOLDER='/home/free/.local/share/agents-kits/recovery-v1-' + '0' * 40 + '/land-turn.py')
     assert not Path(env['LAND_TURN_HOLDER']).exists()
     del env['LAND_TURN_FIXTURE_DIR']
     client = lab.start_land(environment=env)
@@ -687,7 +687,7 @@ def long_gate(lab):
 
 
 def simulated_ssh(lab, test, failure=None):
-    path = '/home/free/.local/share/skein-kits/recovery-v1-' + 'b' * 40 + '/land-turn.py'
+    path = '/home/free/.local/share/agents-kits/recovery-v1-' + 'b' * 40 + '/land-turn.py'
     shim = lab.path / 'fixture-bin/ssh'
     shim.write_text('#!/usr/bin/env python3\nimport json,runpy,shlex,sys\nfrom pathlib import Path\n'
         + f'Path({str(lab.path / "ssh-argv.json")!r}).write_text(json.dumps(sys.argv[1:]))\n'

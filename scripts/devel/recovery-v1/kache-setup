@@ -85,7 +85,7 @@ mkdir -p "${config%/*}"
 # A machine that keeps its cache elsewhere, on a larger disk, keeps it there.
 local=$(sed -n 's/^local_store *= *"\(.*\)"$/\1/p' "$config" 2>/dev/null | head -n1)
 cat >"$config.new" <<TOML
-# Written by skein's scripts/dev/kache-setup.
+# Written by agents' scripts/infra/kache-setup.
 [cache]
 ${local:+local_store = \"$local\"
 }local_max_size = "${cap}GiB"
@@ -96,7 +96,7 @@ mv -f "$config.new" "$config"
 
 mkdir -p "${unit%/*}"
 cat >"$unit.new" <<UNIT
-# Written by skein's scripts/dev/kache-setup.
+# Written by agents' scripts/infra/kache-setup.
 [Unit]
 Description=kache build cache daemon
 

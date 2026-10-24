@@ -23,7 +23,7 @@ os.umask(0o077)
 ORDER = ('skein', 'smith', 'hearth', 'jig', 'temper')
 UPSTREAM = dict(skein=(), smith=('skein',), hearth=('skein',),
                 jig=('skein', 'smith'), temper=('skein', 'smith', 'jig'))
-HOLDER = r'/home/free/\.local/share/skein-kits/recovery-v1-[0-9a-f]{40,64}/land-turn\.py'
+HOLDER = r'/home/free/\.local/share/agents-kits/recovery-v1-[0-9a-f]{40,64}/land-turn\.py'
 COORDINATOR = 'debian-16gb-hel1-3'
 SSH = ['ssh', '-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
        '-o', 'ConnectTimeout=5', '-o', 'ServerAliveInterval=5',
@@ -281,7 +281,7 @@ def repin(runner, path, name, label, landed):
 
 
 def feed(runner, fixture, record):
-    path = str(fixture / 'feed.jsonl') if fixture else '/home/free/.local/state/skein-land-set/feed.jsonl'
+    path = str(fixture / 'feed.jsonl') if fixture else '/home/free/.local/state/agents-land-set/feed.jsonl'
     argv = ['python3', '-I', '-c', FEED, path]
     if not fixture and socket.gethostname() != COORDINATOR:
         argv = [*SSH, shlex.join(argv)]

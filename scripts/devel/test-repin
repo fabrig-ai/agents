@@ -98,7 +98,7 @@ class Lab:
         self.bin.mkdir()
         self.env = dict(os.environ, PATH=str(self.bin) + ':/usr/bin:/bin',
                         CARGO_HOME=str(root / 'cargo'), GIT_CONFIG_GLOBAL='/dev/null',
-                        GIT_CONFIG_NOSYSTEM='1', GIT_AUTHOR_NAME='Fixture',
+                        GIT_CONFIG_NOSYSTEM='1', GIT_ALLOW_PROTOCOL='file', GIT_AUTHOR_NAME='Fixture',
                         GIT_AUTHOR_EMAIL='fixture@invalid', GIT_COMMITTER_NAME='Fixture',
                         GIT_COMMITTER_EMAIL='fixture@invalid', CARGO_NET_OFFLINE='false')
         self.env.pop('RUSTC_WRAPPER', None)

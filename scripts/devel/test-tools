@@ -32,7 +32,9 @@ cleanup() {
 }
 export DEV_ROOT=$t/src DEV_TMP=$t/src/tmp DEV_REPOS=alpha
 export HOME=$t/home XDG_CONFIG_HOME=$t/config XDG_CACHE_HOME=$t/cache HEAVY_SETTLE=0
-unset XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS
+# Scratch filesystems need not meet a build machine's capacity floors.
+export PLAN_MIN_DISK_GB=0 PLAN_MIN_MEM_GB=0
+unset XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS PUEUE_PROFILE HEAVY_TASK
 mkdir -p "$HOME" "$DEV_TMP" "$t/stub"
 # User service checks never reach the machine's service manager.
 cat >"$t/stub/systemctl" <<'EOF'
@@ -40,6 +42,12 @@ cat >"$t/stub/systemctl" <<'EOF'
 exit 1
 EOF
 chmod +x "$t/stub/systemctl"
+# Heavy collects its cache after each task; keep that inside the fixture too.
+cat >"$t/stub/kache" <<'EOF'
+#!/usr/bin/env bash
+[[ $* == gc ]]
+EOF
+chmod +x "$t/stub/kache"
 export PATH=$t/stub:$PATH
 repo=$DEV_ROOT/alpha
 mkdir -p "$repo"
@@ -83,6 +91,16 @@ trap cleanup EXIT
 poll_until 100 queue_up
 pueue group add build >/dev/null
 pueue group add gate >/dev/null
+
+# Find a sibling workspace from the moved kit without DEV_ROOT/DEV_TMP.
+moved=$DEV_ROOT/agents/scripts/devel
+mkdir -p "$moved"
+cp "$kit/heavy" "$kit/kit.sh" "$moved/"
+(cd "$repo"; unset DEV_ROOT DEV_TMP; HEAVY_TASK='' "$moved/heavy" true) >"$t/discovery.out" 2>&1 || {
+    cat "$t/discovery.out" >&2
+    exit 1
+}
+expect "heavy finds the agents workspace" "$(cat "$t/src/tmp/logs/heavy.tsv")" "$repo"
 
 # These commands share one queue and one row file; clients wait together.
 heavy_run() (cd "$repo" || exit; HEAVY_TASK='' DEV_TMP=$t/heavy-tmp "$kit/heavy" "$@")
@@ -241,8 +259,8 @@ x1|0|removed
 x1|23|removed
 x1|9|removed
 x1.example.test|0|removed
-other|0|kept
-carbon-forge.example.test|0|kept
+other|0|removed
+carbon-forge.example.test|0|removed
 AFTER
 expect "after-landing failure context" "$(cat "$after/tmp/director/inbox/after-landing.md")" \
     "clone ${after_commit:0:10} (fixture-branch, \"Add the test\") failed (exit 23)" \
@@ -250,7 +268,7 @@ expect "after-landing failure context" "$(cat "$after/tmp/director/inbox/after-l
 rm -rf "$after_target"
 out=$(AFTER_ABSENT=1 capture status after_run x1 0)
 expect "after-landing missing target is harmless" "$out" 'status=0'
-expect "after-landing collects released cache blocks best effort" "$(wc -l <"$after/gc")" 5
+expect "after-landing collects released cache blocks best effort" "$(wc -l <"$after/gc")" 7
 expect "after-landing log is private" "$(stat -c %a "$after_log")" 600
 
 ln -s "$after/outside" "$after_target"
@@ -294,7 +312,8 @@ expect "after-landing next tier starts after cleanup" "$(wc -l <"$after/attempts
 expect "after-landing retains lane and lock" "$(if [[ -d ${after_target%/target} && -f $after/tmp/after-landing/clone.lock && ! -e $after_target ]]; then echo kept; fi)" kept
 
 # A clean primary checkout behind its origin is advanced by --fix.
-setup_check() { capture status "$kit/setup" "$@"; }
+infra=$(cd "$kit/../infra" && pwd)
+setup_check() { capture status "$infra/setup" "$@"; }
 git clone -q --bare "$repo" "$t/ff.git"
 git -C "$repo" remote add origin "$t/ff.git"
 git clone -q "$t/ff.git" "$t/ff"
@@ -305,7 +324,10 @@ ln -s "$kit/plan" "$HOME/.local/bin/plan"
 out=$(setup_check --fix)
 expect "setup --fix fast-forwards" "$out" "ok    alpha: main fast-forwarded 1 commits to origin/main"
 expect "setup --fix links in the world" "$(readlink "$HOME/.local/bin/setup" "$HOME/.local/bin/heavy" "$HOME/.local/bin/land")" \
-    "$kit/setup" "$kit/heavy" "$kit/land"
+    "$infra/setup" "$kit/heavy" "$kit/land"
+expect "setup --fix links the workspace files" \
+    "$(readlink "$DEV_ROOT/AGENTS.md" "$DEV_ROOT/CLAUDE.md" "$DEV_ROOT/.claude/settings.json")" \
+    "$infra/workspace/AGENTS.md" "$infra/workspace/CLAUDE.md" "$infra/workspace/claude-settings.json"
 expect "setup --fix removes a stale plan link" "$(if [[ ! -L $HOME/.local/bin/plan && ! -e $HOME/.local/bin/plan ]]; then echo gone; fi)" gone
 # Compare the graph index with origin/main's tip.
 graph=$(readlink -f "$repo" | sed 's|^/||; s|/|-|g')

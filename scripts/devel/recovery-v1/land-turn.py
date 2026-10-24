@@ -18,8 +18,8 @@ import sys
 import time
 
 os.umask(0o077)
-STATE = Path('/home/free/.local/state/skein-landing-turn')
-HOLDER = r'/home/free/\.local/share/skein-kits/recovery-v1-[0-9a-f]{40,64}/land-turn\.py'
+STATE = Path('/home/free/.local/state/agents-landing-turn')
+HOLDER = r'/home/free/\.local/share/agents-kits/recovery-v1-[0-9a-f]{40,64}/land-turn\.py'
 COORDINATOR = 'debian-16gb-hel1-3'  # hetzner3
 
 

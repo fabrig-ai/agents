@@ -11,7 +11,7 @@ import tarfile
 
 os.umask(0o077)
 source = Path(__file__).resolve().parent
-prefix = 'scripts/dev/recovery-v1/'
+prefix = 'scripts/devel/recovery-v1/'
 
 
 def main():
@@ -23,7 +23,7 @@ def main():
     if subprocess.check_output(['git', '-C', top, 'status', '--porcelain', '--', prefix]):
         raise ValueError('commit the kit before copying its release')
     commit = subprocess.check_output(['git', '-C', top, 'rev-parse', 'HEAD'], text=True).strip()
-    destination = Path.home() / '.local/share/skein-kits' / ('recovery-v1-' + commit)
+    destination = Path.home() / '.local/share/agents-kits' / ('recovery-v1-' + commit)
     # Refuse any destination below a Git checkout, including a linked worktree.
     for parent in [destination, *destination.parents]:
         if (parent / '.git').exists():
@@ -51,7 +51,7 @@ def main():
             target.chmod(0o500 if member.mode & 0o111 else 0o400)
             manifest[str(relative)] = hashlib.sha256(data).hexdigest()
     marker = destination / 'release.json'
-    marker.write_text(json.dumps({'schema': 'skein-recovery-release-v1', 'commit': commit,
+    marker.write_text(json.dumps({'schema': 'agents-recovery-release-v1', 'commit': commit,
                                   'files': manifest}, sort_keys=True) + '\n')
     marker.chmod(0o400)
     for directory in sorted(destination.rglob('*'), reverse=True):
