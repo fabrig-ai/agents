@@ -556,7 +556,8 @@ failure may leave its amended/rebased candidate; do not rerun it unguarded.
 (landing-flow.md 9.1). It is a standalone Python 3.11 command, run from a
 committed agents checkout like `repin`; installation and stable links do not
 change. It lands one milestone's set across skein, smith, hearth, jig and
-temper, upstream first, under one lock:
+temper under one lock, and gates every repository of the set before it pushes
+any of them:
 
 ```text
 scripts/devel/land-set SETFILE
@@ -576,8 +577,8 @@ repository downstream of each one it names: skein's are smith, hearth, jig and
 temper; smith's are jig and temper; jig's is temper. A worktree must be clean,
 on a named branch other than `main`, with no rebase or merge in progress, and
 its `origin` must name its repository. A pin-only repository's primary
-checkout, `DEV_ROOT/<repo>`, must have that origin. Every check precedes the
-lock; a failure exits 2.
+checkout, `DEV_ROOT/<repo>`, must have that origin. The `land` on PATH must
+take `--no-push` (below). Every check precedes the lock; a failure exits 2.
 
 **The lock.** The run holds a turn named `set` from the landing turn's
 installed holder on hetzner3 (section 8): the `land-turn.py` beside the
@@ -585,56 +586,126 @@ resolved `land` on PATH, which must be an installed release's. On hetzner3 it
 runs locally; elsewhere over section 8's ssh argv, with its heartbeat. The
 client fails closed: a missing holder, a transport closed or a message
 invalid before the grant exits 5 with nothing fetched. A transport lost after
-the grant lets the repository in progress finish, then stops with exit 5.
-Sets therefore land one at a time. The run's children carry
-`LAND_TURN_ACTIVE=1`, so a temper `land` inside it doesn't also wait for the
-temper turn; a plain `land` that pushes temper first makes it rebase and gate
-again.
+the grant lets the step in progress finish, then stops with exit 5. Sets
+therefore land one at a time. The run's children carry `LAND_TURN_ACTIVE=1`,
+so a temper `land` inside it doesn't also wait for the temper turn; a plain
+`land` that pushes temper meanwhile is phase 2's race (below).
 
-**Each repository,** in the order skein, smith, hearth, jig, temper:
+**Phase 1, the gates.** For each repository, in the order skein, smith,
+hearth, jig, temper:
 1. A pin-only repository gets a worktree at `DEV_TMP/land-set/TOKEN/<repo>`
    from its primary checkout, on branch `land-set/TOKEN/<repo>` at
    `origin/main` after a fetch.
 2. Fetch, then rebase on `origin/main`. A stop whose only conflicted path is
    the root `Cargo.lock` keeps the side being rebased onto and continues; any
    other conflict aborts the rebase and exits 3.
-3. Repin the root lock to each upstream this run has landed, through `heavy
-   cargo update --precise`, the sources others name last, and check that
-   every package of each landed source is at its commit. `heavy cargo
-   metadata` then completes the lock for the rebased manifests. A changed
-   lock is committed as `land-set: <set>: pin <repo> to ...`. Upstreams this
-   run didn't land keep their pins.
-4. A branch now equal to `origin/main` is skipped.
-5. Otherwise the ordinary `land` runs, with no arguments: its rebase, gate,
-   trailers and push. A nonzero exit stops the run with land's status. The
-   landed commit is the worktree's `HEAD` after land, checked against
-   `origin/main` after a fetch.
-6. One JSON line goes to the feed: time, set, repository, commit, host and
-   token, appended under `flock` to
-   `/home/free/.local/state/agents-land-set/feed.jsonl` on hetzner3 (0600 in a
-   0700 directory), over the same ssh from elsewhere. A feed failure warns and
-   never fails the landing.
-7. A pin-only worktree is removed after it lands or is skipped, its target
-   with it. One that fails is kept, and its path printed.
+3. Repin the root lock. Each upstream of the repository has a target: this
+   run's candidate of that upstream (step 5) where there is one; else its
+   landed commit recorded by an earlier run of the set (below); else the
+   upstream's current `main`, as `git ls-remote origin refs/heads/main` gives
+   it from the upstream's primary checkout. `cargo update --precise` moves
+   each source to its target, the sources others name last, and `cargo
+   metadata` then completes the lock for the rebased manifests. Both run
+   directly, not through `heavy`: they build nothing. Every package of each
+   upstream source must then be at its target, with one revision per source.
+   A changed lock is committed as `land-set: <set>: pin <repo> to ...`.
+4. A branch now equal to `origin/main` is skipped. A downstream with no
+   change although an upstream has a candidate, or a recorded landing, fails
+   explicitly, naming the downstream.
+5. Otherwise `land --no-push` runs, with no other argument: its own rebase, a
+   no-op unless `main` has just moved, its build lane, its gate and its
+   trailers. A nonzero exit stops the run with land's status, and no `main`
+   has been pushed. Its tip is the repository's candidate, and the
+   `origin/main` it rebased on is the repository's base.
+6. A candidate that a later repository of the set pins is pushed to
+   `refs/heads/land-set/TOKEN/<repo>` on origin, a new name, so that the
+   downstream's Cargo can fetch it.
+
+**Phase 2, the pushes.**
+1. Fetch every repository with a candidate. If any `origin/main` is no
+   longer its base, phase 1 runs again from the most upstream such
+   repository to the end of the set. After three rounds that each found one,
+   the run exits 6, having pushed no `main`.
+2. Then, upstream first, the ordinary `land` runs in each repository with a
+   candidate, with no arguments. Its rebase is a no-op, its gate's result is
+   cached for the tree, and it amends nothing, so it pushes the candidate
+   itself, follows the local `main` and starts the after-landing tier as any
+   `land` does.
+3. If `land` landed a commit other than the candidate, because a `main`
+   moved between steps 1 and 2, every later repository of the set runs phase
+   1 again, against what has landed, before its own push. A failure there
+   leaves the set half-landed: the run stops with that status.
+4. Each landed commit is checked against `origin/main` after a fetch,
+   recorded (below) and written to the feed.
+5. On every exit, the run deletes the staging branches it pushed. A
+   deletion that fails warns, and never changes the exit status.
+
+A pin-only worktree is removed after its repository lands or is skipped,
+its target with it. One that fails is kept, and its path printed.
 
 The run releases the lock on every exit, SIGINT and SIGTERM included, and
 prints each repository as landed (with its commit), skipped, failed (with its
 status and worktree) or not reached. Exit statuses: 0 all landed or skipped; 2
-an invalid set or worktree; 3 a rebase conflict outside `Cargo.lock`; 5 the
-lock; land's own status otherwise; 1 an unexpected failure. Repositories
-landed before a failure stay landed. Their commits are recorded by set name
-at `DEV_TMP/land-set/state/<URL-escaped-set-name>.json` until the whole set
+refused before the lock; 3 a rebase conflict outside `Cargo.lock`; 5 the
+lock; 6 `main` kept moving; land's own status otherwise; 1 an unexpected
+failure. Landings made before a failure, in phase 2 only, stay landed. Their
+commits are recorded by set name at
+`DEV_TMP/land-set/state/<URL-escaped-set-name>.json` until the whole set
 completes. A rerun after the repair checks that each recorded commit is on
 its repository's `origin/main`, reports `recorded landed COMMIT`, and uses
-that commit for downstream pins without landing it again. A downstream
-with no change after an upstream landed (in this run or a recorded one)
-fails explicitly, naming the downstream, and retains the records.
+that commit for downstream pins without landing it again.
 
-`scripts/devel/test-land-set` runs eight cases on disposable repositories with
-`file://` origins, real Cargo and stand-ins for `heavy` and `land`: a whole
-set with pin-only repositories, a moved lock, a conflict outside the lock, a
-failing land, a missing downstream repository, two concurrent runs, an absent
-holder and a pin-only repository with nothing to land. With
+**`land --no-push`.** The kit's `land`, and `scripts/devel/land` which mirrors
+it, take `--no-push`: everything up to and including the trailers, then land's
+summary with `not pushed` in place of where it landed, and exit 0. It pushes
+nothing, moves no local `main` and starts no after-landing tier; `--docs` or
+`--local` with it exits 2. And `land` amends the tip only when the trailers it
+would write differ from the tip's, so that landing again, on an unchanged
+`main`, a commit it gated pushes that very commit.
+
+**The feed.** Each line is one JSON object, appended under `flock` to
+`/home/free/.local/state/agents-land-set/feed.jsonl` on hetzner3 (0600 in a
+0700 directory), over the same ssh from elsewhere. Every line has `time`,
+`set`, `event`, `host` and `token`. The events:
+- `waiting`: the lock is requested;
+- `started`: the lock is granted;
+- `gated`: `repo` and `commit`, a candidate (phase 1, step 5);
+- `landed`: `repo` and `commit`;
+- `stopped`: `status`, `repo` when the run stopped in one, and `reason`, the
+  first line of what the run printed for it, at most 200 characters;
+- `done`: every repository landed or skipped.
+
+Lines written before this version have no `event`; each is a `landed`. A feed
+failure warns and never fails the run. A run killed by SIGKILL leaves no last
+line.
+
+**`landings`.** `scripts/devel/landings` reads the feed: on hetzner3
+directly, elsewhere with one fixed `tail` over the same ssh argv.
+`LANDINGS_FEED`, a local path, replaces both, for fixtures.
+- `landings [--last N]` prints the last N events (20), then each set whose
+  latest run has not ended, as waiting or running, since when, and the last
+  repository it gated or landed. A running set holds the set lock.
+- `landings wait SET [--timeout SECONDS]` reads the feed every 30 seconds. It
+  exits 0 once the set's latest run is `done`, printing its landed commits; 1
+  once that run has `stopped`, printing its status, repository and reason; 3
+  at the timeout. A set not yet in the feed is waited for.
+
+**Tests.** `scripts/devel/test-land-set` runs its cases on disposable
+repositories with `file://` origins, real Cargo and stand-ins for `heavy` and
+`land`: a whole set with pin-only repositories, a moved lock, a conflict
+outside the lock, a failing land, a missing downstream repository, two
+concurrent runs, an absent holder, a pin-only repository with nothing to
+land, and a resumed partial set. With this version it adds:
+- a downstream's failing gate after its upstream's, which pushes no `main`;
+- a `main` moved between the phases, gated again before any push;
+- a `main` moved during the pushes, whose later repositories are gated again;
+- a pin-only repository whose upstream the set doesn't touch, pinned to that
+  upstream's current `main`;
+- the staging branches, deleted on success and on failure;
+- the feed's events for each of these.
+
+`scripts/devel/test-landings` covers the status view, `wait` ending `done`,
+`stopped` and at its timeout, and lines with no `event`. With
 `HEAVY_RECOVERY_FIXTURE=1` and `LAND_SET_FIXTURE_DIR` strictly below
 `DEV_TMP`, the lock is the source kit's local fixture holder and the feed is
 that directory's `feed.jsonl`.

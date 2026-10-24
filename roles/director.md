@@ -253,8 +253,9 @@ runs.
   `tell.sh MACHINE SESSION FILE`, which has a one-shot Sonnet session
   there pass the text verbatim to the newest session of that name; to
   a Codex owner, a file in its `wake/`, with umask 077.
-- **Relays:** owners report their landings, and the director passes
-  each one, with its hash, to the owners waiting on it.
+- **Relays:** an owner waiting on another's set runs `landings wait`
+  (landing-flow.md 9.1); the director reads `landings`, and relays a
+  landing only to an owner that can't reach the feed.
 - **Sessions on other machines** run on that machine's claude daemon,
   so they are driven over ssh, not by SendMessage: `claude --bg` to
   start, `claude --bg --resume <full id> "<message>"` to wake, `claude
