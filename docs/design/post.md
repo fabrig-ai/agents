@@ -1,0 +1,281 @@
+# Post and codex-run
+
+Provisional, 2026-10-24, proposed with the user. How agents send each
+other messages, and how they start Codex and learn that a run ended:
+- `post`, one durable mailbox per role name, on every machine;
+- `codex-run`, the one way to start Codex, which reports by post.
+
+Both are small scripts in `scripts/devel/`, under
+[infra.md](../../roles/infra.md)'s rules. They replace five channels and
+four launchers. The survey behind this design is x1's
+`~/src/rust/tmp/comms-survey/report.md` (10-24, seven machines since
+10-16).
+
+## 1. In one page
+
+- **Why.** The survey's failures share three causes:
+  - **We address sessions, not roles.** Names repeat after handovers,
+    and sockets go stale at restarts: 98 sends hit a dead socket, 59
+    found no session, four went to the wrong one, and one resume
+    started copies that landed twice.
+  - **Wakes depend on whoever remembers them.** Watchers died, matched
+    themselves or were never restarted, and about 15 episodes stalled
+    for 24 to 218 minutes. Codex runs ended unseen, and a launcher's
+    refusal went unnoticed for 102 minutes.
+  - **Each channel has its own rules.** There are five channels and
+    four launchers, untracked and copied by hand to each machine, and
+    one of the channels pays a Sonnet session to forward a file (376
+    relays, 23.6M weighted tokens in one day).
+- **An address is a role,** `NAME@MACHINE`: `director@hel8`,
+  `o/first-run-ux@hetzner3`. The session that holds the name may
+  change; the address doesn't (section 2).
+- **A message is a file** in the recipient's mailbox on its machine,
+  written atomically, with an id, a sender, a stamp and the id it
+  answers. Delivery is a restricted ssh key that can only drop mail. No
+  LLM is in the path, and nobody polls another machine (section 3).
+- **The recipient is woken by its waiter,** `post wait NAME`, which a
+  Claude session keeps running in the background and a Codex owner's
+  loop is. When there's no waiter, delivery resumes an idle session in
+  place, and otherwise says that nobody will wake it (section 4).
+- **Stuck mail surfaces:** the director's watcher reports any message
+  unread for 15 minutes, on any machine (section 4).
+- **`codex-run` starts every Codex run** as a systemd user unit, so it
+  outlives its caller. It refuses a bad launch at once, and retries
+  the model's capacity errors itself. Whichever way the run ends, it
+  posts the caller the report's path (section 5).
+- **What goes away** (section 6): `tell.sh`, the inbox files and
+  their watchers, `wake/`, `inbox-since.sh`, `subwatch.sh`, `start.sh`
+  with its effort knobs (the experiment ended, 858), `codex-helper.sh`,
+  `codex-owner.sh`, and SendMessage between roles.
+
+## 2. Names and machines
+
+- **A name** is a role, never a session: `director`, `p/<name>`,
+  `o/<name>`, `d/<what>`, or the user's session, `user`. It matches
+  `^[a-z][a-z0-9-]*(/[a-z0-9][a-z0-9-]*)*$`.
+- **An address** is `NAME@MACHINE`; `NAME` alone is this machine. A
+  brief names the parent's address, as it names the parent's machine
+  today.
+- **A session's own name** is `POST_NAME` in its environment, set when
+  it starts: in a Claude session's `--settings` `env`, and by
+  `codex-run` for a Codex owner. A session without a name, such as the
+  user's, sends with `--as NAME`.
+- **The machines file,** `~/src/rust/tmp/post/machines`, has one line
+  per machine this one can reach, `MACHINE SSH-TARGET`, and its own as
+  `MACHINE local`. The director writes it on each machine: the
+  addresses stay out of this repository (director.md 10).
+- **The key.** Each machine has `~/.ssh/post_ed25519`. Every other
+  machine authorizes it only as
+  `restrict,command="$HOME/.local/bin/post deliver --from MACHINE"`,
+  so the key can drop a message and do nothing else. The machine that
+  the key names becomes the sender's machine: a message that claims
+  another is refused. Mail is what the inbox files carry today, so no
+  new trust is given.
+- **carbon-forge is left out:** it's unreachable since 10-24, and its
+  sessions need their own scopes (the director's memory). It joins
+  when the director adds a route for it.
+
+## 3. post
+
+The mailbox of `NAME` is `~/src/rust/tmp/post/NAME/` on its machine:
+`tmp/`, `new/`, `cur/`, `sent/`, with mode 0700 and 0600 files, a
+`waiter` file and a `kind` file (`claude` or `codex`).
+
+A message:
+
+```
+Id: 20261024T213500Z-7f3a
+From: o/first-run-ux@hetzner3
+To: p/sign-in@hel8
+Re: 20261024T210100Z-11c2
+Subject: M2 design report
+
+<the body: at most 15 lines by the roles' rule, 64 KiB by the tool's>
+```
+
+The commands:
+
+- **`post send [--as NAME] [--re ID] TO SUBJECT [FILE]`** sends FILE,
+  or stdin. The tool sets the id and the stamp (`date -u`), keeps a copy
+  in the sender's `sent/`, and delivers over the post key, or locally.
+  It prints the id and what happened:
+  - `waiting`: a waiter will wake the recipient;
+  - `woken`: an idle session was resumed in place;
+  - `queued`: the session is at work, and its waiter starts when its
+    turn ends;
+  - exit 3, `queued, nobody will wake it: <why>`: the message is in the
+    mailbox, but the waiter is dead and the session is absent, stopped,
+    or failed to resume;
+  - exit 2, `not delivered: <why>`: a bad name, no route, or ssh failed.
+    Nothing changed at the destination.
+
+  On exit 2 or 3, the sender tells its own parent.
+- **`post deliver --from MACHINE`** is the key's forced command: it
+  reads `deliver NAME` from `SSH_ORIGINAL_COMMAND` and the message from
+  stdin, checks both, and writes the message to `tmp/` and then renames
+  it into `new/`. `post send` uses the same path for a local recipient.
+  It then wakes the recipient (section 4).
+- **`post wait NAME [--timeout SECONDS]`** makes itself NAME's waiter.
+  It returns when `new/` holds a message, at once if one is there
+  already, and prints one line per message: id, sender, subject. On a
+  timeout it exits 1 and prints nothing. A newer waiter for the same
+  name replaces it, and the older one exits 4.
+- **`post read NAME`** prints the new messages, oldest first, and moves
+  them to `cur/`. Reading through it is what marks a message read.
+- **`post list [--older MINUTES]`** lists this machine's unread
+  messages, for every name: their age, name, id, sender and subject, and
+  whether the name's waiter is alive.
+
+Each command takes the mailbox's lock (`flock`) while it moves files.
+`cur/` and `sent/` are the record that the inbox files are today.
+
+## 4. Waking
+
+- **A Claude session** ends each turn with its waiter running:
+  `post wait $POST_NAME` as a background task, started again after each
+  wake. When the task ends, the session runs `post read $POST_NAME` and
+  acts on what it read. The waiter needs no working directory and
+  almost no memory.
+- **A Codex owner's loop is its waiter,** during its turns too: mail
+  that arrives in a turn is read when the turn ends (section 5).
+- **Delivery wakes the recipient** on its own machine, right after the
+  message is in `new/`:
+  - the waiter is alive (the pid in `waiter` runs, as `post wait` for
+    that name or as a Codex owner's loop): `waiting`;
+  - a Codex owner without a waiter: exit 3, since only its parent
+    restarts its unit;
+  - a Claude name: the newest session of that name in `claude agents
+    --json --all`. If it's `done`, the tool resumes it in place,
+    `claude --bg --resume <full id> "Post for NAME: run post read NAME,
+    then start post wait NAME."`, and checks after 10 seconds that it's
+    working: `woken`, or exit 3. If it's working or blocked, the
+    message is `queued`, since a resume then would start a copy
+    (director.md 5). If it's stopped or absent: exit 3. A stopped
+    session was ended on purpose, and its parent decides.
+- **At a handover** the outgoing session doesn't restart its waiter.
+  The new session starts one, which replaces any that is left.
+- **Stuck mail.** The director's `probe.sh` runs `post list --older 15`
+  on each machine and reports each line as a trigger. That covers
+  what's left: a session that shows working but sits idle, and a waiter
+  that died during a turn.
+
+## 5. codex-run
+
+- **`codex-run task [--model M] [--effort E] [--read-only] [--to ADDR]
+  [--resume RUN] TASK DIR REPORT`** starts one run.
+  - **It refuses at once,** with exit 2 and the reason, before anything
+    starts:
+    - a path that isn't absolute;
+    - a TASK that can't be read, or a DIR that isn't a directory;
+    - a REPORT that exists, or whose directory doesn't;
+    - no recipient: neither `--to` nor `POST_NAME`;
+    - for `--resume`, a run with no thread.
+  - **Its defaults** are gpt-6.1-sol and high effort. `--read-only`
+    (for surveys) runs Codex with `--sandbox read-only`, and every
+    other run with `--dangerously-bypass-approvals-and-sandbox`.
+  - **It returns at once.** It starts `systemd-run --user --collect
+    --unit codex-run-<id>` and prints the run's id and directory,
+    `~/src/rust/tmp/codex-run/<id>/`. The caller ends its turn: the end
+    comes by post.
+- **The run itself:**
+  - It runs with umask 077, in DIR, with stdin `</dev/null`.
+  - Its command is `codex exec --json -o <run dir>/last.md`, with the
+    events and stderr written to the run directory, and the thread's id
+    kept from its first event.
+  - Its prompt is `start.sh`'s search rule, then "Read TASK and do what
+    it says. Write your report to REPORT.", so a task never lacks its
+    report's path.
+  - `--resume RUN` continues that run's thread, with that run's
+    settings.
+- **Capacity.** A turn that fails because the model is at capacity
+  resumes its thread after 2, 5 and then 15 minutes, "Go on with the
+  task: the model was at capacity.", three tries at most.
+- **The end, whichever it is:**
+  - if the run didn't write REPORT, `last.md` is copied there, and the
+    copy says so in its first line;
+  - a row goes to `~/src/rust/tmp/codex-run/runs.tsv`: id, caller,
+    start, end, exit, tries, model, effort, TASK, REPORT, thread, and
+    tokens from the events;
+  - a post goes to the caller, with the subject `run <id> ok: <REPORT's
+    first line>` or `run <id> failed <exit>: ...`, and the report's path,
+    the run directory and the minutes in the body.
+
+  The caller reads REPORT, never the events. An implementer with a
+  question writes it as its report's first line and ends, so the
+  question arrives as the post's subject.
+- **`codex-run owner [--model M] [--effort E] NAME BRIEF`** runs a Codex
+  owner, or a QA agent, as the unit `codex-owner-<NAME, with / as ->`:
+  - its first turn is "You are NAME: read BRIEF and do what it says.
+    Your messages come by post.";
+  - between turns it rests in `post wait NAME --timeout 3600`;
+  - the next turn's prompt is what `post read NAME` printed, or the
+    hour's prompt ("check your running tasks...", as now);
+  - it sets `POST_NAME` and the mailbox's kind to `codex`, and keeps
+    the thread, `turns.tsv` and the events in `tmp/owners/NAME/codex/`,
+    as `codex-owner.sh` does;
+  - capacity errors are retried as a task's are;
+  - its parent ends it with `systemctl --user stop codex-owner-<...>`,
+    once its closing note is in.
+- **Claude sessions** still start with `claude --bg`, as the roles say,
+  with `POST_NAME` added to their `--settings` `env`.
+
+## 6. What it replaces
+
+- **Retired:**
+  - `tell.sh` and its Sonnet relay;
+  - the inbox files (`tmp/director/inbox*/`, the owners' `inbox/`),
+    with `inbox-since.sh`, `subwatch.sh`, `probe.sh`'s inbox key and the
+    product owners' inbox watchers;
+  - `wake/` and `codex-owner.sh`;
+  - `start.sh` (and `effort2.py`, the knobs), and `codex-helper.sh`;
+  - SendMessage between roles. Claude's own sub-agents are unaffected.
+- **The roles' edits,** in one docs change at go-live:
+  - director.md: 2 (the watcher and the waiter), 4 (starting a Codex
+    owner), 5 (the channels, rewritten short), 9 (Codex for surveys),
+    and 12, whose question these two scripts answer;
+  - owners.md: 2 (the start command's `POST_NAME`, the waiter, no
+    `inbox/`), 4.2 (the launcher), 4.3 (a doubt goes in the report) and
+    5 (escalation by post);
+  - product.md 2 and 5, qa.md 4, keeper.md 2 and 8, and implementer.md
+    wherever they name an inbox.
+- **Kept:** `watch.sh` and `probe.sh` for the machines, sessions and
+  usage, with the stuck-mail trigger in place of the inbox key; `claude
+  --bg` and the session rules of director.md 5.
+
+## 7. Going live
+
+1. **Infra builds both tools** in `scripts/devel/`, with fixtures that
+   use a scratch workspace, a fake `claude`, a fake `codex` and a fake
+   `ssh`, and never a machine's live sessions. `setup`'s tool list links
+   them. They land unused.
+2. **The director installs the routes,** one quiet machine at a time:
+   the machines file, the post key, the authorized lines and the known
+   hosts, then a `post send` to `t/ping` on each machine, checked with
+   `post list` and cleaned up.
+3. **The roles' edits land** (section 6). New sessions follow them.
+   Running sessions switch at their next handover, told once by the old
+   channel. The old scripts move to `tmp/director/archive/` once no
+   session uses them.
+
+## 8. Measures
+
+From the mailboxes and `runs.tsv`, against the survey:
+- the time from `new/` to `cur/` per message, its median and p90 (the
+  survey: 3 to 6 minutes median, p90 9 to 13, the director's 53);
+- the stuck-mail triggers per day, and their causes;
+- exits 2 and 3 per day, by reason;
+- runs that failed, by exit, and the capacity retries;
+- the Sonnet relays: none.
+
+## 9. Left out, on purpose
+
+- **Read and answered receipts** beyond `new/` and `cur/`. Stuck mail
+  surfaces anyway, and `Re:` links an answer to its question.
+- **A registry of names across machines:** the address carries the
+  machine.
+- **A relay daemon,** and polling another machine for mail.
+- **A Stop hook** that refuses to end a turn with mail unread. It
+  would close the race between a turn's end and its waiter's start,
+  which the waiter already closes by returning at once on mail
+  that's waiting. It comes back if the measures show the need.
+- **A launcher for Claude sessions.**
