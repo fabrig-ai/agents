@@ -30,7 +30,9 @@ cleanup() {
     wait "$daemon_pid" 2>/dev/null || true
     rm -rf "$t"
 }
-export DEV_ROOT=$t/src DEV_TMP=$t/src/tmp DEV_REPOS=alpha
+export DEV_ROOT=$t/src DEV_TMP=$t/src/tmp DEV_REPOS=alpha RECORDS=$t/src/records
+# Every Git remote in this fixture is a local repository, including records.
+export GIT_CONFIG_GLOBAL=$t/gitconfig GIT_CONFIG_NOSYSTEM=1 GIT_ALLOW_PROTOCOL=file
 export HOME=$t/home XDG_CONFIG_HOME=$t/config XDG_CACHE_HOME=$t/cache HEAVY_SETTLE=0
 # Scratch filesystems need not meet a build machine's capacity floors.
 export PLAN_MIN_DISK_GB=0 PLAN_MIN_MEM_GB=0
@@ -313,6 +315,9 @@ wait "$after_next"
 expect "after-landing next tier starts after cleanup" "$(wc -l <"$after/attempts")" 2
 expect "after-landing retains lane and lock" "$(if [[ -d ${after_target%/target} && -f $after/tmp/after-landing/clone.lock && ! -e $after_target ]]; then echo kept; fi)" kept
 
+# Setup clones records from this world too, never from the real remote.
+git config --global url."$t/origin.git".insteadOf git@github.com:fabrig-ai/records.git
+
 # A clean primary checkout behind its origin is advanced by --fix.
 infra=$(cd "$kit/../infra" && pwd)
 setup_check() { capture status "$infra/setup" "$@"; }
@@ -325,6 +330,8 @@ mkdir -p "$HOME/.local/bin"
 # An older install linked retired tools into skein's scripts/dev.
 ln -s "$t/skein/scripts/dev/plan" "$HOME/.local/bin/plan"
 out=$(setup_check --fix)
+expect "setup --fix clones records locally" \
+    "$(git -C "$RECORDS" remote get-url origin)" "$t/origin.git"
 expect "setup --fix fast-forwards" "$out" "ok    alpha: main fast-forwarded 1 commits to origin/main"
 expect "setup --fix links in the world" "$(readlink "$HOME/.local/bin/setup" "$HOME/.local/bin/heavy" "$HOME/.local/bin/land")" \
     "$infra/setup" "$kit/heavy" "$kit/land"
