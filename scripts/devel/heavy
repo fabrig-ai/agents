@@ -53,7 +53,7 @@ capture_inputs() {
     python3 -B "$kit/recovery-v1/receipt_inputs.py" >"$HEAVY_INPUTS_FILE" 2>/dev/null ||
         printf '{}\n' >"$HEAVY_INPUTS_FILE" || true
 }
-# shellcheck disable=SC2329 # called by the EXIT trap
+# shellcheck disable=SC2317,SC2329 # called by the EXIT trap
 write_receipt() {
     local receipt=$tmp/heavy/receipts/$receipt_token.json
     jq -n --arg log "$log" --arg token "$receipt_token" --arg id "$id" \

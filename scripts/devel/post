@@ -171,6 +171,7 @@ machines() {
         line=${line%%#*}
         read -r machine target extra <<<"$line"
         [[ -n $machine ]] || continue
+        # shellcheck disable=SC2015 # fail exits
         valid_machine "$machine" && [[ -n $target && -z $extra && $target != -* ]] || fail 'invalid machines file'
         if [[ $target == local ]]; then
             [[ -z $local_machine ]] || fail 'multiple local machines'
