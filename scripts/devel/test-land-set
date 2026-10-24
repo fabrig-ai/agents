@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Eight disposable Git/Cargo fixtures for land-set; no project remotes."""
+"""Disposable Git/Cargo fixtures for land-set; no project remotes."""
 import json
 import os
 from pathlib import Path
@@ -104,6 +104,8 @@ class Lab:
             self.primary[name] = path
             self.git(path, 'init', '-b', 'main')
             crates = [name + '-a'] + (['skein-b'] if name == 'skein' else [])
+            if name in ('skein', 'smith'):
+                crates.append(name + '-extra')
             (path / 'Cargo.toml').write_text('[workspace]\nresolver="2"\nmembers=' + json.dumps(crates) + '\n')
             (path / '.gitignore').write_text('/target/\n')
             (path / 'shared.txt').write_text('base\n')
@@ -113,6 +115,8 @@ class Lab:
                 manifest = f'[package]\nname="{crate}"\nversion="0.1.0"\nedition="2021"\n[dependencies]\n'
                 for up in UPSTREAM[name]:
                     manifest += f'{up}-a={{git=' + json.dumps(self.origin[up].as_uri()) + '}\n'
+                    if name == 'temper' and up in ('skein', 'smith'):
+                        manifest += f'{up}-extra={{git=' + json.dumps(self.origin[up].as_uri()) + '}\n'
                 if crate == 'skein-a':
                     manifest += 'skein-b={path="../skein-b"}\n'
                 (sub / 'Cargo.toml').write_text(manifest)
@@ -208,6 +212,55 @@ def success(lab):
     assert (lab.holder / 'feed.jsonl').stat().st_mode & 0o777 == 0o600
     assert lab.holder.stat().st_mode & 0o777 == 0o700
     lab.assert_released()
+
+
+def partial_set(lab):
+    # New upstream heads are outside this set. Pinning jig must not pull them
+    # into temper through jig's dependency edges, splitting either source.
+    for name in ('skein', 'smith'):
+        lab.change(name, path=lab.primary[name])
+        lab.git(lab.primary[name], 'push', 'origin', 'HEAD:main')
+    lab.change('jig')
+    output = lab.run(lab.spec({'jig': str(lab.work['jig']), 'temper': 'pin-only'}))
+    heads = lab.heads()
+    assert 'jig: landed ' in output and 'temper: landed ' in output, output
+    assert [r['repo'] for r in lab.records()] == ['jig', 'temper']
+    for name in ('jig', 'temper'):
+        lock = tomllib.loads(lab.git(lab.origin[name], 'show', 'main:Cargo.lock'))
+        for up in UPSTREAM[name]:
+            revisions = {p['source'].rsplit('#', 1)[1] for p in lock['package']
+                         if p.get('source', '').split('#')[0].endswith('/' + up + '.git')}
+            expected = heads['jig'] if up == 'jig' else lab.base[up]
+            assert revisions == {expected}, (name, up, revisions, expected)
+
+
+def split_source(lab):
+    # The invariant covers every git identity, including sources outside ORDER,
+    # both on entry and after metadata has had a chance to rewrite the lock.
+    identity = 'git+https://example.invalid/other.git'
+    revisions = ('a' * 40, 'b' * 40)
+    records = ''.join(f'\n[[package]]\nname="other-{i}"\nversion="0.1.0"\n'
+                      f'source="{identity}#{revision}"\n'
+                      for i, revision in enumerate(revisions))
+    lock = lab.work['temper'] / 'Cargo.lock'
+    lab.change('temper', 'Cargo.lock', lock.read_text() + records)
+    spec = lab.spec({'temper': str(lab.work['temper'])})
+    for after_metadata in (False, True):
+        if after_metadata:
+            lab.git(lab.work['temper'], 'reset', '--hard', lab.base['temper'])
+            (lab.bin / 'heavy').write_text('#!' + PYTHON + '\n'
+                'import subprocess, sys\nfrom pathlib import Path\n'
+                'status = subprocess.run(sys.argv[1:]).returncode\n'
+                "if status == 0 and sys.argv[1:3] == ['cargo', 'metadata']:\n"
+                "    lock = Path('Cargo.lock')\n"
+                '    lock.write_text(lock.read_text() + ' + repr(records) + ')\n'
+                'sys.exit(status)\n')
+        output = lab.run(spec, status=1)
+        assert 'multiple revisions' in output and identity in output, output
+        assert all(revision in output for revision in revisions), output
+        assert not lab.trace.read_text(), 'invalid lock reached land'
+        lab.untouched(ORDER)
+        lab.assert_released()
 
 
 def lock_conflict(lab):
@@ -395,14 +448,15 @@ def main():
     start = time.monotonic()
     with tempfile.TemporaryDirectory(prefix='land-set-fixture-') as directory:
         root = Path(directory)
-        for number, case in enumerate((success, lock_conflict, other_conflict, land_failure,
-                                       closure, concurrent, refusal, skipped), 1):
+        cases = (partial_set, split_source, success, lock_conflict, other_conflict, land_failure,
+                 closure, concurrent, refusal, skipped)
+        for number, case in enumerate(cases, 1):
             path = root / str(number)
             path.mkdir()
             case_start = time.monotonic()
             case(Lab(path))
             print(f'ok {number}: {case.__name__} ({time.monotonic() - case_start:.2f}s)', flush=True)
-    print(f'completed 8 cases in {time.monotonic() - start:.2f}s', flush=True)
+    print(f'completed {len(cases)} cases in {time.monotonic() - start:.2f}s', flush=True)
 
 
 if __name__ == '__main__':

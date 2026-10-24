@@ -244,7 +244,33 @@ def repin(runner, path, name, label, landed):
     def packages():
         return tomllib.loads((path / 'Cargo.lock').read_text())['package']
 
-    for up, commit in pins.items():
+    def sources():
+        found = {}
+        for p in packages():
+            source = p.get('source', '')
+            if source.startswith('git+'):
+                identity, mark, revision = source.rpartition('#')
+                require(mark and identity and re.fullmatch(r'(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})', revision),
+                        f'{name}: invalid git source {source}', 1)
+                found.setdefault(identity, set()).add(revision.lower())
+        for identity, revisions in found.items():
+            require(len(revisions) == 1,
+                    f'{name}: multiple revisions for source {identity}: ' + ', '.join(sorted(revisions)), 1)
+        return {identity: next(iter(revisions)) for identity, revisions in found.items()}
+
+    base = sources()
+    # A new downstream pin can refresh only its own edges to other sources.
+    # Restore untouched upstreams afterwards, with their dependencies last.
+    targets = dict(pins)
+    for up in reversed(UPSTREAM[name]):
+        if up not in pins:
+            choices = [identity for identity in base
+                       if repo_name(urlsplit(identity[4:]).path) == up]
+            require(len(choices) <= 1, f'{name}: ambiguous source {up}', 1)
+            if choices:
+                targets[up] = base[choices[0]]
+
+    for up, commit in targets.items():
         records = [p for p in packages() if p.get('source', '').startswith('git+')
                    and repo_name(urlsplit(p['source'][4:].split('#')[0]).path) == up]
         identities = {p['source'].rsplit('#', 1)[0] for p in records}
@@ -257,15 +283,11 @@ def repin(runner, path, name, label, landed):
         require(status == 0, f'{name}: repin failed ({status})', 1)
 
     def verify():
-        found = set()
-        for p in packages():
-            source = p.get('source', '')
-            if source.startswith('git+'):
-                identity, _, revision = source.rpartition('#')
-                up = repo_name(urlsplit(identity[4:]).path)
-                require(up not in pins or revision == pins[up], f'{name}: wrong pin for {up}', 1)
-                found.add(identity)
-        require(selected.keys() <= found, f'{name}: pinned source disappeared', 1)
+        found = sources()
+        for identity, revision in found.items():
+            up = repo_name(urlsplit(identity[4:]).path)
+            require(up not in targets or revision == targets[up], f'{name}: wrong pin for {up}', 1)
+        require(selected.keys() <= found.keys(), f'{name}: pinned source disappeared', 1)
     verify()
     status, _ = runner.run(path, ['heavy', 'cargo', 'metadata', '--format-version', '1'],
                            check=False, discard_stdout=True)
