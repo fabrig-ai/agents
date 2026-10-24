@@ -40,7 +40,7 @@ poll_until() {
     done
     return 1
 }
-export HOME=$t/home DEV_ROOT=$t/a POST_NAME=sender POST_RESUME_CHECK=0
+export HOME=$t/home DEV_ROOT=$t/a POST_NAME=sender POST_RESUME_CHECK=0 POST_RETRY_DELAYS="0 0 0"
 export POST_TOOL=$kit/post FIXTURE=$t
 unset SSH_ORIGINAL_COMMAND
 mkdir -p "$HOME/.local/bin" "$t"/{a,b}/tmp/post
@@ -59,11 +59,21 @@ case $9 in
     fake-a) destination=a; from=b ;;
     *) exit 255 ;;
 esac
+printf 'try\n' >>"$FIXTURE/ssh-tries"
 case ${FIXTURE_SSH_MODE:-} in
+    refuse) exit 2 ;;
+    timeout) exit 124 ;;
     fail) exit 255 ;;
     silent) exit 0 ;;
 esac
-PATH=/usr/bin:/bin DEV_ROOT=$FIXTURE/$destination SSH_ORIGINAL_COMMAND=${10} "$POST_TOOL" deliver --from "$from"
+code=0
+PATH=/usr/bin:/bin DEV_ROOT=$FIXTURE/$destination SSH_ORIGINAL_COMMAND=${10} "$POST_TOOL" deliver --from "$from" >"$FIXTURE/ack" || code=$?
+if [[ ${FIXTURE_SSH_MODE:-} == ack-lost && ! -f $FIXTURE/ack-lost ]]; then
+    touch "$FIXTURE/ack-lost"
+    exit 255
+fi
+cat "$FIXTURE/ack"
+exit "$code"
 STUB
 cat >"$HOME/.local/bin/claude" <<'STUB'
 #!/usr/bin/env bash
@@ -74,10 +84,16 @@ elif [[ $# == 4 && $1 == --bg && $2 == --resume ]]; then
     [[ ! -t 0 ]]
     printf '%s\n' "$3" "$4" >>"$FIXTURE/resumes"
     [[ ${FIXTURE_RESUME_FAIL:-0} == 0 ]] || exit 1
+    sleep "${FIXTURE_RESUME_DELAY:-0}"
     jq --arg id "$3" --arg state "${FIXTURE_RESUME_STATE:-working}" \
         'map(if (.sessionId // .id) == $id then .state = $state else . end)' \
         "$FIXTURE/sessions.json" >"$FIXTURE/sessions.next"
-    mv "$FIXTURE/sessions.next" "$FIXTURE/sessions.json"
+    if [[ ${FIXTURE_NEW_SESSION:-0} == 1 ]]; then
+        jq '. + [.[0] | .sessionId="new-session" | .state="done" | .startedAt="2027"]' \
+            "$FIXTURE/sessions.next" >"$FIXTURE/sessions.json"
+    else
+        mv "$FIXTURE/sessions.next" "$FIXTURE/sessions.json"
+    fi
 else
     echo "unexpected claude arguments: $*" >&2
     exit 1
@@ -91,14 +107,14 @@ session() {
            startedAt:"2026-10-24T12:00:00Z",cwd:"/fixture",kind:"claude"}]' >"$t/sessions.json"
 }
 message() {
-    printf 'Id: 20261024T213500Z-7f3a\nFrom: sender@%s\nTo: %s@b\nSubject: fixture\n\nbody\n' "$1" "$2"
+    printf 'Id: 20261024T213500Z-7f3a0000\nFrom: sender@%s\nTo: %s@b\nSubject: fixture\n\nbody\n' "$1" "$2"
 }
 count() { find "$1" -maxdepth 1 -type f -name '*.md' | wc -l; }
 
 post wait o/live --timeout 5 >"$t/wait.out" &
 waiter=$!
 pids+=("$waiter")
-poll_until test -s "$t/a/tmp/post/o/live/waiter"
+poll_until test -s "$t/a/tmp/post/o+live/waiter"
 out=$(capture post send o/live 'local subject' <<< 'local body')
 expect 'local send reaches live waiter' "$out" 'status=0' 'waiting'
 id=$(sed -n '2s/ .*//p' <<<"$out")
@@ -107,10 +123,10 @@ pids=()
 expect 'wait prints message' "$(cat "$t/wait.out")" "$id sender@a local subject"
 expect 'sent copy' "$(count "$t/a/tmp/post/sender/sent")" 1
 expect 'read prints whole message' "$(post read o/live)" "== $id" 'From: sender@a' 'To: o/live@a' 'local body'
-expect 'read moves new into cur' "new=$(count "$t/a/tmp/post/o/live/new") cur=$(count "$t/a/tmp/post/o/live/cur")" 'new=0 cur=1'
+expect 'read moves new into cur' "new=$(count "$t/a/tmp/post/o+live/new") cur=$(count "$t/a/tmp/post/o+live/cur")" 'new=0 cur=1'
 expect 'read with no mail' "$(post read o/live)" 'no new post for o/live'
-expect 'private directories' "$(stat -c %a "$t/a/tmp/post/o/live/new")" 700
-expect 'private message' "$(stat -c %a "$t/a/tmp/post/o/live/cur/$id.md")" 600
+expect 'private directories' "$(stat -c %a "$t/a/tmp/post/o+live/new")" 700
+expect 'private message' "$(stat -c %a "$t/a/tmp/post/o+live/cur/$id.md")" 600
 
 session remote working
 out=$(capture post send remote@b 'remote subject' <<< 'remote body')
@@ -197,9 +213,9 @@ printf 'a local\nb fake-b\n' >"$t/a/tmp/post/machines"
 
 session file working
 printf 'file body\n' >"$t/body"
-out=$(capture post send --as codex-run --re 20261024T210100Z-11c2 file 'file subject' "$t/body")
+out=$(capture post send --as codex-run --re 20261024T210100Z-11c20000 file 'file subject' "$t/body")
 expect 'codex-run sender and file body' "$out" 'status=0' 'queued'
-expect 'reply header and sender override' "$(cat "$t/a/tmp/post/file/new/"*.md)" 'Re: 20261024T210100Z-11c2' 'From: codex-run@a' 'file body'
+expect 'reply header and sender override' "$(cat "$t/a/tmp/post/file/new/"*.md)" 'Re: 20261024T210100Z-11c20000' 'From: codex-run@a' 'file body'
 stopped_message=$(find "$t/a/tmp/post/stopped/new" -type f -name '*.md')
 expect 'sent exit 3 copy survives' "$(cmp -s "$stopped_message" "$t/a/tmp/post/sender/sent/${stopped_message##*/}" && echo identical)" identical
 message a wrong >"$t/message"
@@ -222,13 +238,13 @@ expect 'nested sender sent folder' "$(capture post send --as a/new/sender a/new/
 expect 'sent and cur excluded from nested list' "$(post list --older 0 | grep -cF ' a/new/')" 1
 
 session limit working
-printf 'Id: 20261024T213500Z-0001\nFrom: sender@a\nTo: limit@b\nSubject: limit\n\n' >"$t/limit"
+printf 'Id: 20261024T213500Z-00010000\nFrom: sender@a\nTo: limit@b\nSubject: limit\n\n' >"$t/limit"
 remaining=$((65536 - $(stat -c %s "$t/limit")))
 head -c "$remaining" /dev/zero >>"$t/limit"
 expect '64 KiB accepted by deliver' "$(capture env DEV_ROOT="$t/b" SSH_ORIGINAL_COMMAND='deliver limit' "$POST_TOOL" deliver --from a <"$t/limit")" 'status=0' 'queued'
-expect '64 KiB preserved' "$(stat -c %s "$t/b/tmp/post/limit/new/20261024T213500Z-0001.md")" 65536
-expect 'duplicate does not overwrite' "$(capture env DEV_ROOT="$t/b" SSH_ORIGINAL_COMMAND='deliver limit' "$POST_TOOL" deliver --from a <"$t/limit")" 'status=2' 'already delivered'
-printf 'Id: 20261024T213500Z-0002\nFrom: sender@a\nTo: limit@b\nSubject: nu\0l\n\nbody' >"$t/nul"
+expect '64 KiB preserved' "$(stat -c %s "$t/b/tmp/post/limit/new/20261024T213500Z-00010000.md")" 65536
+expect 'identical duplicate is delivered' "$(capture env DEV_ROOT="$t/b" SSH_ORIGINAL_COMMAND='deliver limit' "$POST_TOOL" deliver --from a <"$t/limit")" 'status=0' 'queued'
+printf 'Id: 20261024T213500Z-00020000\nFrom: sender@a\nTo: limit@b\nSubject: nu\0l\n\nbody' >"$t/nul"
 expect 'NUL in header rejected' "$(capture env DEV_ROOT="$t/b" SSH_ORIGINAL_COMMAND='deliver limit' "$POST_TOOL" deliver --from a <"$t/nul")" 'status=2' 'invalid message header'
 
 echo '[]' >"$t/sessions.json"
@@ -238,16 +254,109 @@ remote_id=$(sed -n '2s/ .*//p' <<<"$out")
 expect 'remote exit 3 keeps sent copy' "$(cmp -s "$t/b/tmp/post/remote-dead/new/$remote_id.md" "$t/a/tmp/post/sender/sent/$remote_id.md" && echo identical)" identical
 
 session ordered working
-message a ordered | sed 's/20261024T213500Z-7f3a/20261025T213500Z-0002/' >"$t/newer"
-message a ordered | sed 's/20261024T213500Z-7f3a/20261024T213500Z-0001/' >"$t/older"
+message a ordered | sed 's/20261024T213500Z-7f3a0000/20261025T213500Z-00020000/' >"$t/newer"
+message a ordered | sed 's/20261024T213500Z-7f3a0000/20261024T213500Z-00010000/' >"$t/older"
 expect 'newer ordered message delivered' "$(capture env DEV_ROOT="$t/b" SSH_ORIGINAL_COMMAND='deliver ordered' "$POST_TOOL" deliver --from a <"$t/newer")" 'status=0'
 expect 'older ordered message delivered' "$(capture env DEV_ROOT="$t/b" SSH_ORIGINAL_COMMAND='deliver ordered' "$POST_TOOL" deliver --from a <"$t/older")" 'status=0'
-expect 'wait oldest first' "$(DEV_ROOT=$t/b post wait ordered --timeout 0 | awk '{printf "%s ", $1}')" '20261024T213500Z-0001 20261025T213500Z-0002'
+expect 'wait oldest first' "$(DEV_ROOT=$t/b post wait ordered --timeout 0 | awk '{printf "%s ", $1}')" '20261024T213500Z-00010000 20261025T213500Z-00020000'
 expect 'wait leaves mail unread' "$(count "$t/b/tmp/post/ordered/new")" 2
-expect 'read oldest first' "$(DEV_ROOT=$t/b post read ordered | awk '/^== / {printf "%s ", $2}')" '20261024T213500Z-0001 20261025T213500Z-0002'
+expect 'read oldest first' "$(DEV_ROOT=$t/b post read ordered | awk '/^== / {printf "%s ", $2}')" '20261024T213500Z-00010000 20261025T213500Z-00020000'
 expect 'read moved both messages' "new=$(count "$t/b/tmp/post/ordered/new") cur=$(count "$t/b/tmp/post/ordered/cur")" 'new=0 cur=2'
 
+# Nested role names cannot create or replace the parent's control files.
+post wait director --timeout 0 --holder "$$" --kind codex || [[ $? == 1 ]]
+cp "$t/a/tmp/post/director/waiter" "$t/parent-waiter"
+for nested in waiter kind; do
+    session "director/$nested" working
+    expect 'flat child delivery' "$(capture post send "director/$nested" child <<< body)" 'status=0'
+    expect 'flat child stored' "$(count "$t/a/tmp/post/director+$nested/new")" 1
+done
+expect 'parent waiter intact' "$(cmp -s "$t/parent-waiter" "$t/a/tmp/post/director/waiter" && echo intact)" intact
+expect 'parent kind intact' "$(cat "$t/a/tmp/post/director/kind")" codex
+expect 'flat names decoded in list' "$(post list)" 'director/waiter' 'director/kind'
+expect 'non-delivery errors are plain' "$(capture post wait ../bad)" 'post: invalid mailbox name'
+
+# Reserve before transport and regenerate forced collisions, including one recipient twice.
+cat >"$HOME/.local/bin/od" <<'STUB'
+#!/usr/bin/env bash
+[[ $* == '-An -N4 -tx1 /dev/urandom' ]]
+n=0
+[[ ! -f $FIXTURE/od-count ]] || n=$(<"$FIXTURE/od-count")
+printf '%s\n' "$((n + 1))" >"$FIXTURE/od-count"
+if ((n < 2)); then echo 'aa bb cc dd'; elif ((n == 3)); then echo '00000002'; else printf '%08x\n' "$n"; fi
+STUB
+cat >"$HOME/.local/bin/date" <<'STUB'
+#!/usr/bin/env bash
+if [[ $* == '-u +%Y%m%dT%H%M%SZ' ]]; then echo 20261024T213500Z; else exec /usr/bin/date "$@"; fi
+STUB
+chmod 700 "$HOME/.local/bin/od" "$HOME/.local/bin/date"
+session collision-one working
+expect 'first forced id' "$(capture post send --as collision-sender collision-one first <<< body)" 'status=0'
+session collision-two working
+expect 'collision regenerated for other recipient' "$(capture post send --as collision-sender collision-two second <<< body)" 'status=0'
+expect 'both sent copies kept' "$(count "$t/a/tmp/post/collision-sender/sent")" 2
+expect 'same recipient sent again' "$(capture post send --as collision-sender collision-two third <<< body)" 'status=0'
+expect 'three sent copies kept' "$(count "$t/a/tmp/post/collision-sender/sent")" 3
+rm "$HOME/.local/bin/od" "$HOME/.local/bin/date"
+
+session retry working
+: >"$t/ssh-tries"
+expect 'lost acknowledgement retried successfully' "$(capture env FIXTURE_SSH_MODE=ack-lost "$POST_TOOL" send retry@b retry <<< body)" 'status=0' 'queued'
+expect 'acknowledgement retry made two tries' "$(wc -l <"$t/ssh-tries")" 2
+expect 'acknowledgement retry delivered once' "$(count "$t/b/tmp/post/retry/new")" 1
+DEV_ROOT=$t/b post read retry >/dev/null
+retry_message=$(find "$t/b/tmp/post/retry/cur" -name '*.md')
+expect 'retry in cur also acknowledged' "$(capture env DEV_ROOT="$t/b" SSH_ORIGINAL_COMMAND='deliver retry' "$POST_TOOL" deliver --from a <"$retry_message")" 'status=0'
+printf 'different body\n' >>"$retry_message"
+retry_id=${retry_message##*/}
+expect 'different content refused' "$(capture env DEV_ROOT="$t/b" SSH_ORIGINAL_COMMAND='deliver retry' "$POST_TOOL" deliver --from a <"$t/a/tmp/post/sender/sent/$retry_id")" 'status=2' 'different content'
+: >"$t/ssh-tries"
+expect 'transport exhausted' "$(capture env FIXTURE_SSH_MODE=fail "$POST_TOOL" send --as uncertain retry@b retry <<< body)" 'status=2'
+expect 'three retries after first attempt' "$(wc -l <"$t/ssh-tries")" 4
+expect 'uncertain delivery keeps sent record' "$(count "$t/a/tmp/post/uncertain/sent")" 1
+expect 'refusal' "$(capture env FIXTURE_SSH_MODE=refuse "$POST_TOOL" send --as refused retry@b retry <<< body)" 'status=2'
+expect 'refusal removes sent record' "$(count "$t/a/tmp/post/refused/sent")" 0
+message a wrong-host | sed 's/@b$/@elsewhere/' >"$t/wrong-host"
+expect 'wrong destination machine' "$(capture env DEV_ROOT="$t/b" SSH_ORIGINAL_COMMAND='deliver wrong-host' "$POST_TOOL" deliver --from a <"$t/wrong-host")" 'status=2' 'recipient machine mismatch'
+
+# Input and transport deadlines are exercised without waiting for real deadlines.
+cat >"$HOME/.local/bin/timeout" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$1" >>"$FIXTURE/timeouts"
+[[ ${FIXTURE_INPUT_TIMEOUT:-0} == 0 || $1 != 30 ]] || exit 124
+exec /usr/bin/timeout "$@"
+STUB
+chmod 700 "$HOME/.local/bin/timeout"
+expect 'stdin deadline refuses' "$(message a slow | capture env FIXTURE_INPUT_TIMEOUT=1 DEV_ROOT="$t/b" SSH_ORIGINAL_COMMAND='deliver slow' "$POST_TOOL" deliver --from a)" 'status=2' 'cannot read message'
+expect 'transport deadline retries' "$(capture env FIXTURE_SSH_MODE=timeout "$POST_TOOL" send retry@b timeout <<< body)" 'status=2'
+expect 'configured input and transport bounds' "$(sort -u "$t/timeouts")" 30 60
+rm "$HOME/.local/bin/timeout"
+mkdir -p "$t/a/tmp/post/no-sent"
+touch "$t/a/tmp/post/no-sent/sent"
+: >"$t/ssh-tries"
+expect 'sent store failure stops before delivery' "$(capture post send --as no-sent retry@b subject <<< body)" 'status=2' 'cannot create mailbox'
+expect 'sent store failure makes no transport call' "$(wc -l <"$t/ssh-tries")" 0
+
+session interactive working
+jq 'map(del(.state) | .status="idle")' "$t/sessions.json" >"$t/interactive"
+mv "$t/interactive" "$t/sessions.json"
+expect 'interactive session cannot wake' "$(capture post send interactive subject <<< body)" 'status=3' 'interactive session'
+session exact-id 'done'
+expect 'resume rechecks exact id' "$(capture env FIXTURE_NEW_SESSION=1 "$POST_TOOL" send exact-id subject <<< body)" 'status=0' 'woken'
+session concurrent 'done'
+: >"$t/resumes"
+FIXTURE_RESUME_DELAY=0.05 post send concurrent first <<< body >"$t/concurrent-1" &
+one=$!
+pids+=("$one")
+FIXTURE_RESUME_DELAY=0.05 post send concurrent second <<< body >"$t/concurrent-2" &
+two=$!
+pids+=("$two")
+wait "$one" "$two"
+pids=()
+expect 'concurrent delivery resumes once' "$(wc -l <"$t/resumes")" 2
+expect 'both concurrent messages delivered' "$(count "$t/a/tmp/post/concurrent/new")" 2
+
 elapsed=$(awk -v start="$started" -v end="$(date +%s.%N)" 'BEGIN {printf "%.3f", end-start}')
-expect 'fixture under ten seconds' "$(awk -v elapsed="$elapsed" 'BEGIN {print elapsed < 10 ? "yes" : "no"}')" yes
+expect 'fixture under fifteen seconds' "$(awk -v elapsed="$elapsed" 'BEGIN {print elapsed < 15 ? "yes" : "no"}')" yes
 ((failed == 0)) || exit 1
 echo "test-post: $checks checks passed in ${elapsed}s"

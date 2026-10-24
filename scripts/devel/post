@@ -22,11 +22,11 @@ root=$(realpath -m "$root")
 post=$root/tmp/post
 name_pattern='^[a-z][a-z0-9-]*(/[a-z0-9][a-z0-9-]*)*$'
 machine_pattern='^[a-z][a-z0-9-]*$'
-id_pattern='^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{4}$'
+id_pattern='^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$'
 scratch=
 trap '[[ -z $scratch ]] || rm -f -- "$scratch"' EXIT
 
-fail() { echo "post: not delivered: $*" >&2; exit 2; }
+fail() { echo "post: ${error_prefix:-}$*" >&2; exit 2; }
 usage() { fail 'usage: post {send|deliver|wait|read|list} (see docs/design/post.md)'; }
 valid_name() { [[ $1 =~ $name_pattern ]]; }
 valid_machine() { [[ $1 =~ $machine_pattern ]]; }
@@ -35,12 +35,12 @@ valid_address() {
     [[ $1 == *@* ]] && valid_name "${1%@*}" && valid_machine "${1##*@}"
 }
 mailbox() {
-    local name=$1
+    local name=${1//\//+}
     mkdir -p -- "$post/$name"/{tmp,new,cur,sent} || fail 'cannot create mailbox'
     box=$post/$name
 }
 receive() {
-    head -c 65537 >"$scratch" || fail 'cannot read message'
+    timeout 30 head -c 65537 >"$scratch" || fail 'cannot read message'
     (($(stat -c %s "$scratch") <= 65536)) || fail 'message exceeds 64 KiB'
 }
 
@@ -97,12 +97,15 @@ load_waiter() {
     fi
 }
 session() {
-    claude agents --json --all | jq -cer --arg name "$1" '
-        [.[] | select(.name == $name)] | sort_by(.startedAt) | last // empty'
+    claude agents --json --all | jq -cer --arg value "$1" --arg field "${2:-name}" '
+        [.[] | select((if $field == "id" then (.sessionId // .id) else .name end) == $value)] |
+        sort_by(.startedAt) | last // empty'
 }
 unwoken() { echo "queued, nobody will wake it: $*"; return 3; }
-wake() {
+wake() (
     local name=$1 info state full_id kind='' alive=0
+    exec 8>"$box/.wake.lock"
+    flock -x 8 || fail 'cannot lock wake'
     {
         flock -s 9 || fail 'cannot lock waiter'
         load_waiter
@@ -114,7 +117,7 @@ wake() {
         unwoken 'codex owner not running'; return $?
     fi
     if ! info=$(session "$name"); then unwoken 'no session'; return $?; fi
-    state=$(jq -r '.state' <<<"$info")
+    state=$(jq -r '.state // "interactive session"' <<<"$info")
     case $state in
         working|blocked) echo queued ;;
         done)
@@ -125,24 +128,32 @@ wake() {
                 unwoken 'resume failed'; return $?
             fi
             sleep "${POST_RESUME_CHECK:-10}"
-            if info=$(session "$name"); then state=$(jq -r '.state' <<<"$info"); else state='no session'; fi
+            if info=$(session "$full_id" id); then state=$(jq -r '.state // "interactive session"' <<<"$info"); else state='no session'; fi
             case $state in
                 working|blocked) echo woken ;;
                 *) unwoken "$state" ;;
             esac ;;
         *) unwoken "$state" ;;
     esac
-}
+)
 deliver_message() {
     local name=$1 from=$2 destination
     parse_message "$scratch" || fail 'invalid message header'
     [[ ${msg_to%@*} == "$name" ]] || fail 'recipient name mismatch'
     [[ ${msg_from##*@} == "$from" ]] || fail 'sender machine mismatch'
+    machines
+    [[ ${msg_to##*@} == "$local_machine" ]] || fail 'recipient machine mismatch'
     mailbox "$name"
     destination=$box
     (
         flock -x 9 || fail 'cannot lock mailbox'
-        [[ ! -e $destination/new/$msg_id.md && ! -e $destination/cur/$msg_id.md ]] || fail 'message id already delivered'
+        local existing
+        for existing in "$destination/new/$msg_id.md" "$destination/cur/$msg_id.md"; do
+            if [[ -e $existing ]]; then
+                cmp -s -- "$scratch" "$existing" || fail 'message id already delivered with different content'
+                exit 0
+            fi
+        done
         local staged
         staged=$(mktemp "$destination/tmp/message.XXXXXX") || fail 'cannot stage message'
         if ! cat -- "$scratch" >"$staged" || ! mv -- "$staged" "$destination/new/$msg_id.md"; then
@@ -170,7 +181,9 @@ machines() {
     [[ -n $local_machine ]] || fail 'machines file has no local machine'
 }
 send() {
-    local sender=${POST_NAME:-} re='' to subject to_name to_machine='' id status code=0 file=''
+    local sender=${POST_NAME:-} re='' to subject to_name to_machine='' id status code=0 file='' sent attempt=0
+    local -a delays
+    read -r -a delays <<<"${POST_RETRY_DELAYS:-5 20 60}"
     while (($#)); do
         case $1 in
             --as|--re)
@@ -198,28 +211,54 @@ send() {
     machines
     to_machine=${to_machine:-$local_machine}
     [[ $to_machine == "$local_machine" || -n $route ]] || fail "no route to $to_machine"
-    id=$(date -u +%Y%m%dT%H%M%SZ)-$(od -An -N2 -tx1 /dev/urandom | tr -d ' \n')
     scratch=$(mktemp) || fail 'cannot stage message'
-    header "$id" "$sender@$local_machine" "$to_name@$to_machine" "$re" "$subject" >"$scratch"
     if (($# == 3)); then
         [[ -r $file ]] || fail "cannot read body: $file"
-        head -c 65537 -- "$file" >>"$scratch" || fail 'cannot read body'
+        head -c 65537 -- "$file" >"$scratch" || fail 'cannot read body'
     else
-        head -c 65537 >>"$scratch" || fail 'cannot read body'
+        head -c 65537 >"$scratch" || fail 'cannot read body'
     fi
     (($(stat -c %s "$scratch") <= 65536)) || fail 'message exceeds 64 KiB'
-    if [[ $to_machine == "$local_machine" ]]; then
-        status=$(deliver_message "$to_name" "$local_machine") || code=$?
-    else
-        status=$(ssh -i "$HOME/.ssh/post_ed25519" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=20 \
-            "$route" "deliver $to_name" <"$scratch") || code=$?
-    fi
-    [[ ( $code == 0 || $code == 3 ) && -n $status && $status != *$'\n'* ]] || fail 'delivery failed or no status line'
     mailbox "$sender"
-    (
-        flock -x 9 || fail 'cannot lock sent mailbox'
-        cp -- "$scratch" "$box/sent/$id.md" || fail 'cannot save sent message'
-    ) 9>"$box/.lock" || return $?
+    {
+        flock -x 7 || fail 'cannot lock sent mailbox'
+        while :; do
+            id=$(date -u +%Y%m%dT%H%M%SZ)-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')
+            sent=$box/sent/$id.md
+            [[ ! -e $sent && ! -L $sent ]] || continue
+            if ! (set -o noclobber
+                { header "$id" "$sender@$local_machine" "$to_name@$to_machine" "$re" "$subject"; cat -- "$scratch"; } >"$sent"
+            ); then
+                rm -f -- "$sent"
+                fail 'cannot save sent message'
+            fi
+            break
+        done
+    } 7>"$box/.lock"
+    if (($(stat -c %s "$sent") > 65536)); then
+        rm -f -- "$sent"
+        fail 'message exceeds 64 KiB'
+    fi
+    cp -- "$sent" "$scratch" || fail 'cannot stage sent message'
+    while :; do
+        code=0 status=''
+        if [[ $to_machine == "$local_machine" ]]; then
+            status=$(SSH_ORIGINAL_COMMAND="deliver $to_name" timeout 60 "$kit/post" deliver --from "$local_machine" <"$scratch") || code=$?
+        else
+            status=$(timeout 60 ssh -i "$HOME/.ssh/post_ed25519" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=20 \
+                "$route" "deliver $to_name" <"$scratch") || code=$?
+        fi
+        if [[ ( $code == 0 || $code == 3 ) && -n $status && $status != *$'\n'* ]]; then break; fi
+        if [[ $code == 2 ]]; then
+            rm -f -- "$sent"
+            fail 'delivery refused'
+        fi
+        if [[ $code != 255 && $code != 124 && -n $status ]] || ((attempt >= 3 || attempt >= ${#delays[@]})); then
+            fail 'delivery failed or no status line'
+        fi
+        sleep "${delays[attempt]}"
+        attempt=$((attempt + 1))
+    done
     printf '%s %s\n' "$id" "$status"
     return "$code"
 }
@@ -309,6 +348,7 @@ list_mail() {
         [[ ${message%/*} == */new ]] || continue
         box=${message%/new/*}
         name=${box#"$post/"}
+        name=${name//+/\/}
         valid_name "$name" || continue
         (
             flock -x 9 || exit 2
@@ -327,6 +367,8 @@ list_mail() {
 (($#)) || usage
 command=$1
 shift
+error_prefix=''
+case $command in send|deliver) error_prefix='not delivered: ' ;; esac
 case $command in
     send) send "$@" ;;
     deliver) deliver "$@" ;;
