@@ -1,7 +1,7 @@
 # The landing flow
 
 Provisional, 2026-10-24, proposed with the user. Live in part since
-10-24: `scripts/dev/land-set` is its starting primitive, and agents do
+10-24: `scripts/devel/land-set` is its starting primitive, and agents do
 the rest by hand until it is built (section 9.1). How changes reach
 `main` across skein, smith, jig, hearth and temper:
 - one set of branches per milestone;
@@ -11,8 +11,8 @@ the rest by hand until it is built (section 9.1). How changes reach
 It has two goals. It gets the most out of the shared build cache
 ([build-cache.md](build-cache.md)), and it leaves owners nothing to
 coordinate with each other but `main`. Today's `heavy` and `land` are
-[build-infrastructure.md](../design/build-infrastructure.md); missions
-and milestones are [owners.md](owners.md).
+[build-infrastructure.md](build-infrastructure.md); missions
+and milestones are [owners.md](../../roles/owners.md).
 
 ## 1. In one page
 
@@ -109,7 +109,7 @@ commit of each.
   - One tuple of commits therefore holds across the whole set, just as
     one holds across the mains.
 - **One pin mechanism.** Pins inside a set are `Cargo.lock` commits,
-  like `main`'s, moved with `scripts/dev/repin`, never with `[patch]`
+  like `main`'s, moved with `scripts/devel/repin`, never with `[patch]`
   overrides to local paths.
   - The kache patch normalizes Cargo's git checkouts, not arbitrary
     paths. A build from a path would key differently, and the queue
@@ -473,7 +473,7 @@ mission, then flood it with four milestones at once.
   requests the milestone's landing with `queue request`, and waits on
   it with `queue wait`. The queue lands it.
 - **owners.md 4.5:**
-  - Repins happen inside the set, by its owner, with `scripts/dev/repin`.
+  - Repins happen inside the set, by its owner, with `scripts/devel/repin`.
   - "Breaking upstream" waits for no one's word: the break and its
     downstream fix land together.
   - The footprint stays, to plan narrow sets and to group missions, but
@@ -506,7 +506,7 @@ mission, then flood it with four milestones at once.
    - the keeper's brief.
 
    Fixtures cover it as they cover `heavy`.
-3. **`scripts/dev/repin` learns sets:** one command moves every branch of
+3. **`scripts/devel/repin` learns sets:** one command moves every branch of
    a set to its tuple. It also learns a stacked set's rebase: onto
    `main` from the recorded fork point, in each repository.
 4. **A trial** with two or three missions, then everyone. owners.md and
@@ -517,8 +517,8 @@ mission, then flood it with four milestones at once.
 ### 9.1 Where it stands
 
 Live as soon as possible, perfected over time (the user, 10-24). The
-starting primitive is `scripts/dev/land-set`
-(build-infrastructure.md 10), run from a skein checkout like `repin`:
+starting primitive is `scripts/devel/land-set`
+(build-infrastructure.md 10), run from an agents checkout like `repin`:
 - It takes one set lock on hetzner3, through the landing turn's holder.
   Sets land one at a time.
 - In each repository of the set, upstream first, it rebases the branch

@@ -6,19 +6,18 @@ part of it, that it takes there in a few milestones, each designed and
 then implemented.
 
 **What an owner reads:** at its start, its whole brief, sections 1,
-3.1 and 5 of this file, and section 1, "In one page", of
-[programming-model.md](programming-model.md) and
-[testing-strategy.md](testing-strategy.md), the rules for the code's
-shape and its tests. That is enough to start. Each other section of
-this file is read before the work it governs: 3.2 and 3.3 before a
-design; 2 and 4.1 to 4.3 before starting a session or an agent; 4.4 and
-4.5 before landing or building; 4.6 before a QA pass; 6 before the
-closing note. A later section of the two rules is read when the work
-touches it (a new protocol, a world's checks, a memory bound), and
-[notes.md](notes.md), the reasons and open questions behind the rules,
-when a rule's reason matters. A read put off never puts off a rule: the
-brief's constraints, the security rules, the caps and the budgets bind
-from the start. The repository's `AGENTS.md` loads on its own.
+3.1 and 5 of this file, and section 1, "In one page", of skein's
+`docs/foundation/programming-model.md` and `testing-strategy.md`, the
+rules for the code's shape and its tests. That is enough to start. Each
+other section of this file is read before the work it governs: 3.2 and
+3.3 before a design; 2 and 4.1 to 4.3 before starting a session or an
+agent; 4.4 and 4.5 before landing or building; 4.6 before a QA pass; 6
+before the closing note. A later section of the two rules is read when
+the work touches it (a new protocol, a world's checks, a memory bound),
+and skein's `docs/foundation/notes.md`, the reasons and open questions
+behind the rules, when a rule's reason matters. A read put off never
+puts off a rule: the brief's constraints, the security rules, the caps
+and the budgets bind from the start. The repository's `AGENTS.md` loads on its own.
 
 ## 1. In one page
 
@@ -416,7 +415,7 @@ updates the repository's `docs/design/STATUS.md` rows its work changes.
 - **`heavy`** is the only way to build and test, for everyone: `heavy
   cargo nextest run -p <crate>`. It queues on pueue in two lanes:
   builds, two at a time, and gates, alone on a quiet machine.
-- **The build cache.** `scripts/dev/kache-setup` pins kache
+- **The build cache.** `scripts/infra/kache-setup` pins kache
   `1.2.2-gitrev.1`. The director places its binary at
   `tmp/kache/kache-1.2.2-gitrev.1` on each machine; setup checks its
   digest before stopping the daemon. Run setup through `heavy --gate`
@@ -424,7 +423,7 @@ updates the repository's `docs/design/STATUS.md` rows its work changes.
   of another version. A user-owned 0600 `~/.config/kache/store.env`
   enables the shared S3 store through a config section and a service
   drop-in; without that file setup removes both and keeps caching local
-  ([build-cache.md](build-cache.md), section 7).
+  ([build-cache.md](../docs/design/build-cache.md), section 7).
 - **Every machine's gate.** A repository's `main` must pass its gate
   on every machine that builds it, x1 the slowest. A test that fits
   its time budget only on a fast machine breaks other owners' and

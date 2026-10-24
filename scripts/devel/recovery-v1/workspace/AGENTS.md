@@ -4,15 +4,16 @@ This directory holds the Rust projects, each a git repository with its own
 `AGENTS.md`, and the machine's working files in `tmp/`. Read a
 repository's `AGENTS.md` before touching its code.
 
-This file is skein's `scripts/dev/recovery-v1/workspace/AGENTS.md`, linked into
-`~/src/rust/`: change it there, and land it in skein. It holds only what
+This file is agents' `scripts/devel/recovery-v1/workspace/AGENTS.md`, linked into
+`~/src/rust/`: change it there, and land it in agents. It holds only what
 every agent here needs.
 
 ## The projects
 
 | Repository | What it is | Builds on | Its gate |
 |---|---|---|---|
-| `skein` | the io and protocol kit, and the foundation documents | — | `scripts/check.sh` |
+| `agents` | the roles, the process's designs and the tools | — | `scripts/check.sh` |
+| `skein` | the io and protocol kit, and the code's rules | — | `scripts/check.sh` |
 | `smith` | the agent kit | skein | `scripts/check.sh` |
 | `jig` | the kit for agentic applications | skein, smith | `scripts/check.sh` |
 | `hearth` | the factory's build daemon | skein | `scripts/check.sh` |

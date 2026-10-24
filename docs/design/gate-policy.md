@@ -4,7 +4,7 @@ Provisional, 2026-10-22. The runtime contract for reusable gate evidence.
 
 ## 1. In one page
 
-- **One effective policy.** `scripts/dev/recovery-v1/gate-policy.sh` provides
+- **One effective policy.** `scripts/devel/recovery-v1/gate-policy.sh` provides
   `gate_policy_prepare`, which validates and exports `SKEIN_TEST_CHROMIUM`,
   `SKEIN_TEST_FONTS` and `SKEIN_GATE_POLICY_ID`. The prepared
   `SKEIN_GATE_POLICY_HELPER` path identifies the stable kit helper used by
@@ -193,7 +193,7 @@ main and accepted cache untouched. These fixtures exercise `land`'s consumer
 boundary; queue lifecycle and durable receipt publication need heavy's
 separate recovery fixtures.
 
-The source kit is `scripts/dev/recovery-v1/`. Top-level legacy tools and
+The source kit is `scripts/devel/recovery-v1/`. Top-level legacy tools and
 `scripts/check.sh` load none of it. A landing therefore installs no runtime
 on an unmigrated host. Build-infrastructure.md, section 7 specifies the
 explicit quiet migration to a committed, read-only release outside all

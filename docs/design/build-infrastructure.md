@@ -241,7 +241,7 @@ receipt path and token as its final output line, outside the hashed log.
 
 ## 6. Fault verification
 
-`scripts/dev/recovery-v1/test-heavy-recovery --evidence NEW_DIRECTORY`
+`scripts/devel/recovery-v1/test-heavy-recovery --evidence NEW_DIRECTORY`
 exercises the production heavy entrypoints with disposable pueued instances and user
 systemd units. It covers killed pause intent, fsynced intent before
 rename, paused groups, setsid/private descendants, release and release
@@ -291,9 +291,9 @@ account for every legacy caller, wrapper, queued/running entry and TSV
 writer. Drain all of them; absence of Cargo processes or a completion-only
 TSV does not prove the queue is quiet. Record intentional pauses and
 restore them as explicit maintenance holds where appropriate. The source
-kit is `scripts/dev/recovery-v1/`; legacy `scripts/dev/heavy`, `land`,
+kit is `scripts/devel/recovery-v1/`; legacy `scripts/devel/heavy`, `land`,
 `setup`, `kit.sh`, `after-landing`, `kache-setup`, workspace assets and
-`scripts/check.sh` retain their pre-M2 baseline contents. Nothing in a
+skein's `scripts/check.sh` retain their pre-M2 baseline contents. Nothing in a
 legacy entrypoint loads the new kit, and following main does not migrate
 a host. Baseline setup retains its link-to-primary behavior. After migration,
 use only the stable setup on PATH; explicitly running baseline setup would
@@ -302,10 +302,10 @@ restore legacy links.
 The director owns this sequence after the complete quiet accounting/drain:
 
 1. Select and verify the committed release and its source/evidence hashes.
-   Run `release=$(skein/scripts/dev/recovery-v1/install-release)` from the
+   Run `release=$(agents/scripts/devel/recovery-v1/install-release)` from the
    workspace containing that verified checkout.
    It copies HEAD's complete kit with `git archive` into a new
-   `~/.local/share/skein-kits/recovery-v1-COMMIT` directory outside every
+   `~/.local/share/agents-kits/recovery-v1-COMMIT` directory outside every
    primary/linked checkout. It writes a content manifest and makes every
    file/directory read-only. An existing release is refused, never rewritten.
    It changes no links, queues or services. Verify the release manifest with
@@ -354,7 +354,7 @@ swap binaries first or leave an old client paired with the new recovery path. Th
 receipt/cache files can remain; rollback requires no destructive cache or
 ledger cleanup.
 
-`scripts/dev/recovery-v1/test-inert-install --evidence NEW_DIRECTORY` compares all legacy
+`scripts/devel/recovery-v1/test-inert-install --evidence NEW_DIRECTORY` compares all legacy
 files to baseline `01c6ab91`, fast-forwards a disposable primary from a
 separate disposable clone, and compares its unmigrated symlink bytes and
 setup behavior. It verifies stable release hashes/links across another
@@ -371,7 +371,7 @@ landing after that capture failure.
 
 The recovery kit has an opt-in advisory turn before land's host repository
 lock and build-lane prebuild. Only remote code landings whose repository
-name is `temper` enter it. `~/.config/skein-land-turn/enabled` containing
+name is `temper` enter it. `~/.config/agents-land-turn/enabled` containing
 `ssh` or `local` enables it, overriding environment mode and holder with that
 mode and this release's sibling `land-turn.py`. Removal turns off future
 ordinary invocations; without it, the `LAND_TURN=1` environment fixture
@@ -386,12 +386,12 @@ per connection, a retained repository-specific flock, and no listener,
 queue, fairness promise, origin lease ref or failover. The bounded
 current-holder record is diagnostic: stale bytes after a killed holder
 never establish ownership. The coordinator's lock and journals use
-`/home/free/.local/state/skein-landing-turn` across release updates.
+`/home/free/.local/state/agents-landing-turn` across release updates.
 Never unlink or replace a live lock file or select a different state
 path while callers exist: that would split the flock identity.
 
 The operator must set `LAND_TURN_HOLDER` to the exact coordinator asset
-`/home/free/.local/share/skein-kits/recovery-v1-COMMIT/land-turn.py`, with
+`/home/free/.local/share/agents-kits/recovery-v1-COMMIT/land-turn.py`, with
 COMMIT a full lowercase 40–64 digit hexadecimal commit identity. This
 path is independent of the caller's release. Relative paths, mutable
 checkout paths, shell syntax and invalid modes fail open with a fixed
@@ -453,7 +453,7 @@ The caller confirms release only after its owned transport exits zero.
 A nonzero exit or transport reap timeout records a fixed fail-open reason
 without claiming the coordinator's lock was released; land's exit status
 is retained. Release is also emitted on the holder's stderr and stored at
-`/home/free/.local/state/skein-landing-turn/landing-turn/events.jsonl`;
+`/home/free/.local/state/agents-landing-turn/landing-turn/events.jsonl`;
 transport stderr is discarded at the client. Join these journals by
 token. Queued EOF/liveness expiry also records release without runtime.
 A killed holder cannot record release; the caller's fail-open provides
@@ -472,12 +472,12 @@ and real temper landings are outside these fixtures.
 
 ## 9. Explicit dependency repins
 
-`scripts/dev/repin` is a standalone Python 3.11 command, invoked explicitly
-from a committed skein checkout; installation and stable links do not change.
+`scripts/devel/repin` is a standalone Python 3.11 command, invoked explicitly
+from a committed agents checkout; installation and stable links do not change.
 It prepares and commits one exact tuple in a consumer's clean linked worktree:
 
 ```text
-scripts/dev/repin --consumer ABS_LINKED_WORKTREE --base FULL_SHA \
+scripts/devel/repin --consumer ABS_LINKED_WORKTREE --base FULL_SHA \
   --pin skein=FULL_SHA [--pin smith=FULL_SHA] \
   [--generated REL_FILE ...] [--regenerate JSON_ARGV ...] \
   --check JSON_ARGV [--check JSON_ARGV ...] [--land]
@@ -548,14 +548,14 @@ failure may leave its amended/rebased candidate; do not rerun it unguarded.
 
 ## 10. Landing a set
 
-`scripts/dev/land-set` is the landing flow's starting primitive
+`scripts/devel/land-set` is the landing flow's starting primitive
 (landing-flow.md 9.1). It is a standalone Python 3.11 command, run from a
-committed skein checkout like `repin`; installation and stable links do not
+committed agents checkout like `repin`; installation and stable links do not
 change. It lands one milestone's set across skein, smith, hearth, jig and
 temper, upstream first, under one lock:
 
 ```text
-scripts/dev/land-set SETFILE
+scripts/devel/land-set SETFILE
 ```
 
 The set file is JSON with exactly two keys:
@@ -607,7 +607,7 @@ again.
    `origin/main` after a fetch.
 6. One JSON line goes to the feed: time, set, repository, commit, host and
    token, appended under `flock` to
-   `/home/free/.local/state/skein-land-set/feed.jsonl` on hetzner3 (0600 in a
+   `/home/free/.local/state/agents-land-set/feed.jsonl` on hetzner3 (0600 in a
    0700 directory), over the same ssh from elsewhere. A feed failure warns and
    never fails the landing.
 7. A pin-only worktree is removed after it lands or is skipped, its target
@@ -620,7 +620,7 @@ an invalid set or worktree; 3 a rebase conflict outside `Cargo.lock`; 5 the
 lock; land's own status otherwise; 1 an unexpected failure. Repositories
 landed before a failure stay landed: a rerun after the repair skips them.
 
-`scripts/dev/test-land-set` runs eight cases on disposable repositories with
+`scripts/devel/test-land-set` runs eight cases on disposable repositories with
 `file://` origins, real Cargo and stand-ins for `heavy` and `land`: a whole
 set with pin-only repositories, a moved lock, a conflict outside the lock, a
 failing land, a missing downstream repository, two concurrent runs, an absent

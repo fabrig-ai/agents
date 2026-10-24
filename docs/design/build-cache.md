@@ -5,7 +5,7 @@ worktrees, pins and machines: kache, our patch to it, and the fleet's
 shared store, with the reasons for each choice and what they measured.
 The landing flow built on it is [landing-flow.md](landing-flow.md);
 `heavy` and `land` are
-[build-infrastructure.md](../design/build-infrastructure.md).
+[build-infrastructure.md](build-infrastructure.md).
 
 ## 1. In one page
 
@@ -40,7 +40,7 @@ The landing flow built on it is [landing-flow.md](landing-flow.md);
 ## 2. kache and its keys
 
 [kache](https://github.com/kunobi-ninja/kache) is a rustc wrapper with
-a daemon. `scripts/dev/kache-setup` points Cargo's `rustc-wrapper` at
+a daemon. `scripts/infra/kache-setup` points Cargo's `rustc-wrapper` at
 it in `~/.cargo/config.toml` and runs the daemon as the user unit
 `kache.service`. Build machines keep a 40 GiB local store with
 `cache_executables = true`, so linked test binaries are cached too.
@@ -143,7 +143,7 @@ almost all of it in `src/path_normalizer.rs` and its tests.
   wrapper. A new version clears that machine's local store once.
 - **Its source** is, for now, only in `tmp/kache-patch/` on hel8 and
   hetzner2: the kache clone at `0f4075c`, and
-  `out/git-checkout-rev.patch`. It should move into skein with its build
+  `out/git-checkout-rev.patch`. It should move into agents with its build
   recipe (section 8).
 
 ## 5. The shared store
@@ -244,7 +244,7 @@ hetzner2 and hetzner, with the shared store:
 
 ## 7. Operating it
 
-`scripts/dev/kache-setup` pins the patched binary and writes the local
+`scripts/infra/kache-setup` pins the patched binary and writes the local
 store settings. When `~/.config/kache/store.env` exists, setup checks that
 it is a regular file owned by the current user with mode 0600, before
 stopping the daemon or changing anything. It never reads the key.
@@ -260,7 +260,7 @@ stopping the daemon or changing anything. It never reads the key.
 - Without the key file, setup removes the remote section and that
   drop-in: x1, carbon, hel8 and a machine awaiting its key stay local.
 - Rerunning setup preserves the local store at the same kache version.
-  Run it through `heavy --gate -- ~/src/rust/skein/scripts/dev/kache-setup`
+  Run it through `heavy --gate -- ~/src/rust/agents/scripts/infra/kache-setup`
   so the daemon restarts between builds. Plain HTTP is expected to be
   flagged by `kache doctor` (section 5).
 
@@ -291,7 +291,7 @@ Day to day:
 ## 8. Open
 
 - **The patch's home.** Keep the patch and a script that builds the
-  binary in skein (`scripts/dev/kache/`), so it can be rebuilt without
+  binary in agents (`scripts/infra/kache/`), so it can be rebuilt without
   `tmp/`. Offer it upstream later.
 - **An alert** when the store nears its quota or stops answering.
 - **One key per machine,** so a key can be revoked, if the fleet ever
