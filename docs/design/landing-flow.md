@@ -524,7 +524,8 @@ Until the rest is built, agents do by hand what the tools don't:
   leaves the repositories before it landed. Its summary says which. The
   owner reads the failure as keeper.md 5 says, the keeper's job later.
   Its implementer repairs the rest, and the owner runs `land-set` again:
-  the repositories already landed have nothing left and are skipped.
+  the set's recorded landings are checked against `origin/main`, reported
+  and reused to pin downstream repositories without landing them again.
 - **Order and escalation.** The set lock is the only order. An owner
   brings to its director what the keeper would escalate (keeper.md 8).
 - **Landing news.** Owners report their landings as today, until the

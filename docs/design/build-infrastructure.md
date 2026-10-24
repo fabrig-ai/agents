@@ -618,7 +618,13 @@ prints each repository as landed (with its commit), skipped, failed (with its
 status and worktree) or not reached. Exit statuses: 0 all landed or skipped; 2
 an invalid set or worktree; 3 a rebase conflict outside `Cargo.lock`; 5 the
 lock; land's own status otherwise; 1 an unexpected failure. Repositories
-landed before a failure stay landed: a rerun after the repair skips them.
+landed before a failure stay landed. Their commits are recorded by set name
+at `DEV_TMP/land-set/state/<URL-escaped-set-name>.json` until the whole set
+completes. A rerun after the repair checks that each recorded commit is on
+its repository's `origin/main`, reports `recorded landed COMMIT`, and uses
+that commit for downstream pins without landing it again. A downstream
+with no change after an upstream landed (in this run or a recorded one)
+fails explicitly, naming the downstream, and retains the records.
 
 `scripts/devel/test-land-set` runs eight cases on disposable repositories with
 `file://` origins, real Cargo and stand-ins for `heavy` and `land`: a whole

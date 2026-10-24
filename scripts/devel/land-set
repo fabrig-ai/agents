@@ -17,7 +17,7 @@ import subprocess
 import sys
 import time
 import tomllib
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, quote, urlsplit
 
 os.umask(0o077)
 ORDER = ('skein', 'smith', 'hearth', 'jig', 'temper')
@@ -313,6 +313,31 @@ def feed(runner, fixture, record):
         print('land-set: warning: feed append failed', file=sys.stderr, flush=True)
 
 
+def read_state(path, label, repos):
+    try:
+        state = json.loads(path.read_text())
+    except FileNotFoundError:
+        return {}
+    require(isinstance(state, dict) and set(state) == {'set', 'landed'}
+            and state['set'] == label, f'{label}: invalid set state', 1)
+    landed = state['landed']
+    require(isinstance(landed, dict) and landed.keys() <= repos.keys()
+            and all(isinstance(commit, str) and re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', commit)
+                    for commit in landed.values()), f'{label}: invalid landed records', 1)
+    return landed
+
+
+def write_state(path, label, landed):
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    pending = path.with_suffix('.tmp')
+    with pending.open('w') as out:
+        json.dump(dict(set=label, landed=landed), out)
+        out.write('\n')
+        out.flush()
+        os.fsync(out.fileno())
+    pending.replace(path)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('setfile')
@@ -343,7 +368,8 @@ def main():
         lock = SetLock(tmp, fixture, token, host)
         runner.lock = lock
         lock.acquire()
-        landed = {}
+        state = tmp / 'land-set' / 'state' / (quote(spec['set'], safe='') + '.json')
+        landed = read_state(state, spec['set'], paths)
         for name in summary:
             lock.boundary()
             path = paths[name]
@@ -358,24 +384,35 @@ def main():
             runner.git(path, 'fetch', 'origin')
             if pin_only:
                 runner.git(path, 'checkout', '-b', f'land-set/{token}/{name}', 'origin/main')
-            rebase(runner, path)
-            repin(runner, path, name, spec['set'], landed)
-            if runner.git(path, 'rev-parse', 'HEAD') == runner.git(path, 'rev-parse', 'origin/main'):
-                summary[name] = 'skipped'
+            if name in landed:
+                commit = landed[name]
+                code, _ = runner.run(path, ['git', 'merge-base', '--is-ancestor', commit, 'origin/main'],
+                                     check=False, quiet=True)
+                require(code == 0, f'{name}: recorded commit {commit} is not on origin/main', 1)
+                summary[name] = 'recorded landed ' + commit
             else:
-                code, _ = runner.run(path, ['land'], check=False)
-                require(code == 0, f'{name}: land failed ({code})', code if code > 0 else 128 - code)
-                commit = runner.git(path, 'rev-parse', 'HEAD')
-                runner.git(path, 'fetch', 'origin')
-                require(commit == runner.git(path, 'rev-parse', 'origin/main'), f'{name}: HEAD is not origin/main', 1)
-                landed[name] = commit
-                summary[name] = 'landed ' + commit
-                feed(runner, fixture, dict(time=datetime.now(timezone.utc).isoformat(), set=spec['set'],
-                                          repo=name, commit=commit, host=host, token=token))
+                rebase(runner, path)
+                repin(runner, path, name, spec['set'], landed)
+                if runner.git(path, 'rev-parse', 'HEAD') == runner.git(path, 'rev-parse', 'origin/main'):
+                    require(not any(up in landed for up in UPSTREAM[name]),
+                            f'{name}: no change after an upstream landed; set is incomplete', 1)
+                    summary[name] = 'skipped'
+                else:
+                    code, _ = runner.run(path, ['land'], check=False)
+                    require(code == 0, f'{name}: land failed ({code})', code if code > 0 else 128 - code)
+                    commit = runner.git(path, 'rev-parse', 'HEAD')
+                    runner.git(path, 'fetch', 'origin')
+                    require(commit == runner.git(path, 'rev-parse', 'origin/main'), f'{name}: HEAD is not origin/main', 1)
+                    landed[name] = commit
+                    write_state(state, spec['set'], landed)
+                    summary[name] = 'landed ' + commit
+                    feed(runner, fixture, dict(time=datetime.now(timezone.utc).isoformat(), set=spec['set'],
+                                              repo=name, commit=commit, host=host, token=token))
             if pin_only:
                 runner.git(primary, 'worktree', 'remove', '--force', str(path))
             current = None
         lock.boundary()
+        state.unlink(missing_ok=True)
     except (Failure, OSError, ValueError, KeyError, TypeError) as error:
         status = error.status if isinstance(error, Failure) else 1
         print('land-set: ' + str(error), file=sys.stderr, flush=True)
