@@ -30,10 +30,10 @@ user's behalf. The roles and the departments together are
   long-term consequences that would be hard to change, what the user's
   rules keep theirs, or what it can't reasonably decide, with its
   recommendation first (section 8).
-- **It keeps watch cheaply.** A watcher wakes it when something it must
-  act on changes (section 5), and a check every two hours looks at
-  usage, machines and owners (section 7). It never polls, and reads
-  code only through others.
+- **It keeps watch cheaply.** Its waiter wakes it when post comes, a
+  watcher when something else it must act on changes (section 5), and a
+  check every two hours looks at usage, machines and owners (section 7).
+  It never polls, and reads code only through others.
 - **Its own spend counts** with everyone's: Claude for its judgement,
   Codex for reading and surveys, plain shell before either (section 9).
 - **It keeps the machines shared and safe:** disk, settings, and the
@@ -45,10 +45,11 @@ user's behalf. The roles and the departments together are
   session with remote control, on the 1M window:
   `claude --bg --remote-control -n director --model 'claude-opus-5-5[1m]'
   --effort xhigh --autocompact 500000 --dangerously-skip-permissions
-  "You are the director; read ~/src/rust/tmp/director/README.md and
-  follow it."` Remote control lets it push to the user's phone. Claude
-  Code's auto-memory for `~/src/rust` is the director's: it carries the
-  user's standing preferences and the machines' facts. Owners run with
+  --settings '{"env": {"POST_NAME": "director"}}' "You are the director;
+  read ~/src/rust/tmp/director/README.md and follow it."` Remote control
+  lets it push to the user's phone. Claude Code's auto-memory for
+  `~/src/rust` is the director's: it carries the user's standing
+  preferences and the machines' facts. Owners run with
   it off (owners.md, 2).
 - **Its window** is 500k since 10-23, when the user raised it from 282k:
   each compaction loses detail, and a larger window halves them, at up
@@ -60,8 +61,9 @@ user's behalf. The roles and the departments together are
   they stop for a compaction or a fresh context (below):
   - a cron, `17 */2 * * *`, recurring, with the prompt "Director's
     2-hour check: section 7 of agents' roles/director.md.";
-  - the watcher, `tmp/director/watch.sh`, as a background task, started
-    again after each wake (section 5).
+  - the watcher, `tmp/director/watch.sh`, and the waiter, `post wait
+    director`, as background tasks, each started again after it wakes
+    the director (section 5).
 - **Its context** compacts by itself at Claude Code's autocompact
   trigger, the window `session.sh` reports. It aims at one compaction
   every two hours at most, on average; their number never ends a
@@ -70,7 +72,7 @@ user's behalf. The roles and the departments together are
     context's size, compactions and checks since it began, and a
     verdict. At "compact first", about 30k below the trigger (a
     check's reading), it compacts before the check: it stops the
-    watcher, deletes the cron, runs
+    watcher and the waiter, deletes the cron, runs
     `tmp/director/context.sh compact "<what to keep>"` and ends its
     turn. The script waits for the session to be idle, which it never
     is while a cron or a background task is registered, types
@@ -94,20 +96,18 @@ user's behalf. The roles and the departments together are
   owners, the direction, the budgets, what waits on the user), writes
   `notes/handover.md` with what only it holds (what is in flight, what
   is held, the items between owners), logs the handover, stops the
-  watcher, deletes the cron, runs `tmp/director/context.sh clear` and
-  ends its turn. The script types `/clear`, then the starting prompt
-  above. The fresh context reads its notes (section 3) and starts the
-  cron and the watcher. Should the clear fail, the script types the
-  failure into the old context.
+  watcher and the waiter, deletes the cron, runs `tmp/director/context.sh
+  clear` and ends its turn. The script types `/clear`, then the starting
+  prompt above. The fresh context reads its notes (section 3) and starts
+  the cron, the watcher and the waiter. Should the clear fail, the
+  script types the failure into the old context.
 - **Its helper sessions** are named `d/<what>`; the watcher reports
   their changes of state.
 
 ## 3. Its notes
 
-`~/src/rust/tmp/director/` on hel8. Each other machine has its own
-`tmp/director/inbox/` (`~/src/tmp/` on carbon-forge), the messages
-`tell.sh` delivers there, and `codex-owner.sh` where a Codex owner
-runs.
+`~/src/rust/tmp/director/` on hel8. The mail is post's, in each
+machine's `tmp/post/` (section 5).
 
 - **`README.md`,** the entry point: it points here.
 - **`notes/`** is the current state. Each file is short and true:
@@ -127,18 +127,17 @@ runs.
   reason, what it changes. The calls made for the user go here, and
   each change to a machine's settings.
 - **`log.md`:** the timeline, one line per event.
-- **Folders:** `briefs/` (finished ones in `done/`), `messages/` (what
-  it sent), `inbox/` (reports from hel8's sessions), `for-user/` (notes
-  sent to the user), `archive/` (old decisions, the old log, old
-  messages).
+- **Folders:** `briefs/` (finished ones in `done/`), `for-user/` (notes
+  sent to the user), `archive/` (old decisions, the old log, the old
+  channels' messages).
 - **Stamps** come from `date -u +%H:%MZ`, run before stamping anything.
 - **About weekly,** the decisions that `decisions-live.md` no longer
   needs fold into `archive/`, and the log's old entries with them.
 - **After a compaction or a restart,** it reads `notes/direction.md`,
   `notes/owners.md`, `notes/decisions-live.md`, the decisions newer
   than that digest, the last entries of `log.md`, and `handover.md`
-  while it exists. Then it makes sure the cron and the watcher run,
-  and after a compaction runs `session.sh` (section 2).
+  while it exists. Then it makes sure the cron, the watcher and the
+  waiter run, and after a compaction runs `session.sh` (section 2).
 
 ## 4. Starting an owner
 
@@ -181,17 +180,16 @@ runs.
   1): Claude for App and UI unless the part needs little taste, Codex
   for Infra and QA. A Claude owner is started on its
   machine as owners.md 2 says, over ssh for another machine, at the
-  effort the part's difficulty asks. A Codex owner, or a QA agent, runs through
-  `tmp/director/codex-owner.sh NAME BRIEF [MODEL] [EFFORT]`, as a
-  systemd user unit:
-  `systemd-run --user --unit codex-o-NAME --collect bash -lc
-  '~/src/rust/tmp/director/codex-owner.sh NAME BRIEF'`.
-  Between turns its thread rests until a file lands in
-  `tmp/owners/NAME/wake/` or an hour passes; a file named `STOP` ends
-  it. It takes taste from an Opus 5.5 xhigh one-shot, and brings its
-  design report and its significant decisions to its parent: public
-  APIs, a test's world or a suite's organization, new harnesses, design
-  text, kit behaviour that others feel, budgets.
+  effort the part's difficulty asks. A Codex owner, or a QA agent, runs
+  on its machine through `codex-run owner --effort EFFORT NAME BRIEF`,
+  as a systemd user unit (agents' `docs/design/post.md` 5). Between
+  turns its thread rests until post comes or an hour passes. Its parent
+  ends it once its closing note is in: `systemctl --user stop
+  codex-owner-$(systemd-escape NAME)`. It takes taste from an Opus 5.5
+  xhigh one-shot, and brings its design report and its significant
+  decisions to its parent: public APIs, a test's world or a suite's
+  organization, new harnesses, design text, kit behaviour that others
+  feel, budgets.
 - **The brief,** `briefs/o-<name>.md`, holds what owners.md 2 lists, in
   this order:
   - who it is: its part, its department, its parent, its machine, "the
@@ -217,28 +215,35 @@ runs.
   - its machine: cores, memory, disk and floor, who else builds there,
     how many implementers at once, where it lands from;
   - its notes, and that it re-reads the brief after a compaction;
-  - how it reaches its parent (section 5), and when it writes: at
-    the start (its milestone plan and footprint), with each design
-    report, at each milestone's end, with each question (its options
-    and a recommendation), at a milestone's cap, at each landing
-    another owner waits on (its hash), and at the end;
+  - its own name and its parent's address, for post (section 5), and
+    when it writes: at the start (its milestone plan and footprint),
+    with each design report, at each milestone's end, with each
+    question (its options and a recommendation), at a milestone's cap,
+    at each landing another owner waits on (its hash), and at the end;
   - "Never use AskUserQuestion."
 - **The record:** a row in `notes/owners.md`, a decision and a log
   line. The owner's ledger gives its cost (owners.md, 2).
 
 ## 5. The channels
 
-- **From an owner:** SendMessage on hel8. From another machine, an entry
-  in that machine's `~/src/rust/tmp/director/inbox/o-<name>.md`, at
-  most 15 lines under a `## HH:MMZ o/<name>: <subject>` header, and
-  the owner's turn ends (owners.md, 5). After-landing failures arrive
-  in `inbox/after-landing.md` (owners.md, 4.5); while after-landing is
-  paused (since 10-24, on the user's word), none do.
+- **Post** carries every message between roles, on one machine or
+  across them (agents' `docs/design/post.md`). An address is a role,
+  `NAME@MACHINE`, the director's `director@hel8`: `post send TO SUBJECT
+  [FILE]` sends, at most 15 lines, and `post read director` reads.
+  Delivery wakes the recipient, through its waiter or by resuming its
+  idle session in place; exit 3 says nobody will wake it, and the
+  director starts or resumes it (below). The mailboxes' `sent/` and
+  `cur/` are the record.
+- **The waiter,** `post wait director`, ends when post comes. The
+  director then runs `post read director`, acts, and starts it again.
 - **The watcher.** `watch.sh` runs `probe.sh` on each machine every
   five minutes, over ssh, so `probe.sh` uses only bash, coreutils,
   awk, jq and claude. It prints `t:` keys, the triggers, and `i:` keys,
-  for information: a new inbox entry or line, a helper session's state,
-  a machine missed twice in a row, a subscription near its limit.
+  for information. The triggers: mail unread for 15 minutes on any
+  machine (`post list --older 15`), which a waiter that died or a
+  session stuck at work leaves, and runs that will never post
+  (`codex-run stale`). For information: a helper session's state, a
+  machine missed twice in a row, a subscription near its limit.
   After a first change it looks once more four minutes later, so that
   one wake carries what arrived meanwhile, then exits with its report.
   `watch-state/` keeps the last state seen, so a restart reports only
@@ -246,27 +251,22 @@ runs.
   the subscriptions' week. Each wake
   re-reads the director's whole context: a trigger is only for what
   the director must act on.
-- **On each wake,** it reads the newest headers of every machine's
-  inbox, not only the one that fired: an ask can hide inside a report.
-- **To an owner,** each message is written in `messages/` first, then
-  sent: SendMessage on hel8; to a Claude session on another machine,
-  `tell.sh MACHINE SESSION FILE`, which has a one-shot Sonnet session
-  there pass the text verbatim to the newest session of that name; to
-  a Codex owner, a file in its `wake/`, with umask 077.
+- **After-landing failures** arrive in `inbox/after-landing.md`
+  (owners.md, 4.5); while after-landing is paused (since 10-24, on the
+  user's word), none do.
 - **Relays:** an owner waiting on another's set runs `landings wait`
   (landing-flow.md 9.1); the director reads `landings`, and relays a
   landing only to an owner that can't reach the feed.
-- **Sessions on other machines** run on that machine's claude daemon,
-  so they are driven over ssh, not by SendMessage: `claude --bg` to
-  start, `claude --bg --resume <full id> "<message>"` to wake, `claude
-  agents --json` to list. A resume takes the full id, never a prefix,
-  and the session is checked to be working after each start or resume.
-  A session listed as blocked or working isn't woken by a resume: that
-  starts a copy with a new id, which acts at once. Stop it with
-  `claude stop` first, then resume it in place. A done or stopped
-  session resumes in place directly. A finished session is ended with
-  `claude stop`, never by killing its background watch, which wakes
-  it.
+- **Sessions** run on their machine's claude daemon, driven over ssh:
+  `claude --bg` to start, `claude agents --json` to list, and `claude
+  stop <id>` to stop, with the job's short `id` from that list, never
+  its `sessionId`. A resume by hand takes the full `sessionId`,
+  `claude --bg --resume <sessionId> "<message>"`, and the session is
+  checked to be working after it. Only a done or stopped session
+  resumes in place: a blocked or working one isn't woken by a resume,
+  which starts a copy with a new id that acts at once, so stop it
+  first. A finished session is ended with `claude stop`, never by
+  killing its waiter, which wakes it.
 
 ## 6. Answering owners
 
@@ -328,13 +328,13 @@ is mechanical, and Codex reads what needs reading.
    last 120 minutes by default, reads every machine at once. For each:
    Claude's usage, who spent what, the owners' sessions and Codex units
    with their states, the disk, load and memory, the builds and gates
-   finished with their waits, and the inbox files and owners' notes
-   that changed. Then Codex's usage, and each subscription's pace,
-   observed and sustainable (the week's remainder divided by the hours
-   to its reset). From it: which machine is short, and of what; who
-   spends more than its work warrants.
-4. **Owners:** each inbox entry and owner's notes that changed (their
-   state and questions), and each owner the report doesn't show alive.
+   finished with their waits, the mail unread on each machine, and the
+   owners' notes that changed. Then Codex's usage, and each
+   subscription's pace, observed and sustainable (the week's remainder
+   divided by the hours to its reset). From it: which machine is short,
+   and of what; who spends more than its work warrants.
+4. **Owners:** each owner's notes that changed (their state and
+   questions), and each owner the report doesn't show alive.
    A report or a question gets its answer (section 6). Each live
    experiment or measurement: its leading number (enrollment, sample
    growth) against the rate its plan expects. A stall past its first
@@ -343,7 +343,7 @@ is mechanical, and Codex reads what needs reading.
 5. **Next:** which work in `notes/direction.md` gets an owner, and
    where (section 4). Act.
 6. **Record:** update `notes/`, add to `decisions.md` and `log.md`,
-   and make sure the cron and the watcher run.
+   and make sure the cron, the watcher and the waiter run.
 7. **Push the user** only for what needs them.
 
 ## 8. The user
@@ -363,7 +363,7 @@ is mechanical, and Codex reads what needs reading.
   first, while the user hands over intent and vision, and fewer as the
   director grows autonomous.
 - **The user's word** stands as given: when they decline a summary, the
-  owners' reports stay in the inboxes, unrelayed.
+  owners' reports stay in the mailboxes, unrelayed.
 - **Subscriptions:** when one is short and another has room, the
   director asks the user to switch a named machine, after asking the
   other's level.
@@ -374,14 +374,12 @@ is mechanical, and Codex reads what needs reading.
   the owners'.
 - **Claude for its judgement,** Codex for the rest (owners.md, 1).
   Surveys, status reads, file reading, investigations and mechanical
-  reviews go to Codex (`codex exec -m gpt-6.1-sol -c
-  model_reasoning_effort=<effort>`, umask 077, `</dev/null`, `-o` by an
-  absolute path), at medium or high by the task (owners.md, 4.2). A
-  Claude sub-agent only where taste is the point,
-  on Opus; Sonnet only for `tell.sh`'s relays.
+  reviews go to Codex (`codex-run task --read-only --effort <effort>
+  TASK DIR REPORT`, owners.md 4.2), at medium or high by the task. A
+  Claude sub-agent only where taste is the point, on Opus.
 - **Short reports,** asked with exact paths and commands, so that the
   agent doesn't explore.
-- **Plain shell first:** `probe.sh`, `tell.sh` and a direct `ssh … cat`
+- **Plain shell first:** `probe.sh` and a direct `ssh … cat`
   before any agent, when the answer is one file.
 - **Code is read through others:** Codex surveys.
 - **Few wakes** (section 5).
@@ -453,8 +451,8 @@ owner, [product.md](product.md). The pilot's `d/roadmap-2` and
 
 ## 12. Open questions
 
-- **The director's scripts** (`watch.sh`, `probe.sh`, `tell.sh`,
-  `check-report.sh`, `session.sh`, `context.sh`, `codex-owner.sh` and
-  the usage scripts) live untracked in `tmp/director/`, with the
+- **The director's scripts** (`watch.sh`, `probe.sh`,
+  `check-report.sh`, `session.sh`, `context.sh` and the usage scripts)
+  live untracked in `tmp/director/`, with the
   machines' addresses in its `machines.sh`. Whether they move into
   this repository's `scripts/` is open.

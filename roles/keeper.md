@@ -285,11 +285,10 @@ landings: not owners for others' sets, and not directors
 
 ## 8. Escalation
 
-To the director, in hetzner3's `~/src/rust/tmp/director/inbox/keeper.md`,
-which the director's watcher reads (director.md 5): at most 15 lines
-under a `## HH:MMZ keeper: <subject>` header, stamped from `date -u
-+%H:%MZ`. Each entry names the case, the set and its owner, where the
-evidence is, what the keeper did, and its recommendation.
+To the director by post (director.md 5), `post send --as keeper
+director@hel8 "<subject>"`, at most 15 lines. Each message names the
+case, the set and its owner, where the evidence is, what the keeper
+did, and its recommendation.
 
 The cases:
 - a set sent back a third time (4.1, 4.7);
@@ -320,8 +319,7 @@ keeper to carry it out.
 - **It reads only what its prompt names:** the event's directory, the
   tool's clones, its notes, the journal and this file.
 - **It writes to no one directly:** owners hear from it through their
-  sets' notes, the director through its inbox. No messages, and no
-  other inboxes.
+  sets' notes, the director by post. No other messages.
 - **It keeps nothing across runs** but its notes and log: what it
   hasn't written there, the next run doesn't know.
 
@@ -347,9 +345,9 @@ changing.
   syntax, the event directory's layout and the request's line for
   section 10 are the build-infra mission's to fix with the tool, which
   keeps this file in step.
-- **Its launcher:** whether the tool starts the keeper through the
-  director's `start.sh`, which records implementers' runs (owners.md
-  4.2), or keeps its record in the journal alone.
+- **Its launcher:** whether the tool starts the keeper through
+  `codex-run`, whose `runs.tsv` records every run (owners.md 4.2), or
+  keeps its record in the journal alone.
 - **Product owners:** escalations go to the director. Whether a
   product owner (product.md) takes those for its features' sets is
   open.

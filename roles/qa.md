@@ -87,5 +87,5 @@ notes that the report names.
 - **Its notes** are in the directory its brief names: `notes.md` (its
   state, kept short and true) and its reports. After a compaction or a
   restart, it reads its brief and its notes first.
-- **On a doubt,** it stops, writes the question in its parent's
-  `inbox/`, and ends its turn.
+- **On a doubt,** it stops, sends the question to its parent by post,
+  with the options and its recommendation, and ends its turn.

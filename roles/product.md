@@ -49,7 +49,8 @@ it governs.
   named `p/<name>`:
   `claude --bg -n p/<name> --model 'claude-opus-5-5[1m]' --effort high
   --autocompact 282000 --dangerously-skip-permissions --settings
-  '{"autoMemoryEnabled": false}' "Read <brief> and do what it says."`
+  '{"autoMemoryEnabled": false, "env": {"POST_NAME": "p/<name>"}}'
+  "Read <brief> and do what it says."`
 - **Its notes** are in `~/src/rust/tmp/director/<name>/`, kept short and
   true as the director's are (director.md 3):
   - `notes.md`: its features, its owners with their machines, sessions,
@@ -58,10 +59,10 @@ it governs.
   - `log.md`: the timeline, one line per event;
   - `backlog.md`: its features' findings that triage keeps waiting, each
     with its source and reproduction;
-  - `briefs/` and `messages/`: what it gave and sent.
-- **Its timers:** a watcher over its owners' inbox files only, started
-  again after each wake, and a check every two hours from a cron, as
-  the director's (director.md 2, 5 and 7).
+  - `briefs/`: what it gave.
+- **Its timers:** its waiter, `post wait p/<name>`, started again after
+  each wake, and a check every two hours from a cron, as the director's
+  (director.md 2, 5 and 7).
 - **Its context** compacts by itself, and is cleared about every six
   hours after a handover in its notes, as the director's (director.md
   2). After either, it reads its brief and its notes first.
@@ -104,17 +105,16 @@ it governs.
 
 ## 5. The channels
 
-- **From its owners:** SendMessage on its machine; from another
-  machine, their inbox file there, `tmp/director/inbox/o-<name>.md`,
-  which its watcher reads. An owner writes to its product owner only,
-  never to the director as well: two readers of one entry answer it
-  twice or drop it.
-- **To its owners:** as director.md 5 says, the message written in
-  `messages/` first, then sent: SendMessage, `tell.sh`, or a file in a
-  Codex owner's `wake/`. A message to a stopped session goes nowhere:
-  check the session is alive first.
-- **To the director:** SendMessage to `director`, at most 15 lines, the
-  recommendation first, and the owner's words where they matter.
+- **Post,** on one machine or across them, as director.md 5 says: its
+  address is `p/<name>@<machine>`. An owner writes to its product owner
+  only, never to the director as well: two readers of one message
+  answer it twice or drop it.
+- **To its owners:** `post send o/<name>@<machine> "<subject>"`. Exit 3
+  says nobody will wake the owner: its session is stopped or gone, and
+  the product owner starts or resumes it (director.md 5).
+- **To the director:** `post send director@hel8 "<subject>"`, at most 15
+  lines, the recommendation first, and the owner's words where they
+  matter.
 - **To the user:** never directly, and never AskUserQuestion. A
   question for the user, a UI owner's flag among them, goes to the
   director with its recommendation (README.md, section 4).

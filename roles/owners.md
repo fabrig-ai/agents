@@ -102,9 +102,15 @@ and the budgets bind from the start. The repository's `AGENTS.md` loads on its o
   on, named `o/<name>`:
   `claude --bg -n o/<name> --model 'claude-opus-5-5[1m]' --effort <effort>
   --autocompact 282000 --dangerously-skip-permissions --settings
-  '{"autoMemoryEnabled": false}' "Read <brief> and do what it says."`
+  '{"autoMemoryEnabled": false, "env": {"POST_NAME": "o/<name>"}}'
+  "Read <brief> and do what it says."`
   Its notes are its memory: Claude Code's auto-memory stays off, since
   in `~/src/rust` it would share the director's.
+- **Its mail** is post (agents' `docs/design/post.md`): its address is
+  `o/<name>@<machine>`, and it ends each turn with its waiter, `post
+  wait o/<name>`, running as a background task. When the waiter ends,
+  it runs `post read o/<name>`, acts on what it read, and starts the
+  waiter again.
 - **Its effort** is the parent's choice by the part's difficulty: xhigh,
   high or medium. The parent may raise it after the first report, when
   the output falls short.
@@ -127,7 +133,6 @@ and the budgets bind from the start. The repository's `AGENTS.md` loads on its o
     the start and end times, its own and each milestone's. The director
     computes the cost from it.
   - `handover.md`: the last handover (below), replaced at the next.
-  - `inbox/`: its children's reports and questions.
 - **After a compaction or a restart,** it reads its brief and its notes
   first.
 - **A fresh session at each milestone's end.** An owner with more than
@@ -142,10 +147,11 @@ and the budgets bind from the start. The repository's `AGENTS.md` loads on its o
   <notes directory>, and go on.", records its id in the ledger, sends
   its parent the milestone's report (3.1) naming the new session, and
   ends its turn. The new session reads the brief, the notes and the
-  handover, stops the old one once its turn has ended (`claude stop
-  <full id>`), so that one session answers to the name, and starts the
-  next milestone's sub-owner (3.1). Its children's messages to
-  `o/<name>` reach it.
+  handover, starts its waiter, which replaces the old one's, stops the
+  old session once its turn has ended (`claude stop <id>`, the job's
+  short id in `claude agents`), so that one session answers to the
+  name, and starts the next milestone's sub-owner (3.1). Its children's
+  post to `o/<name>` reaches it.
 - **Its context is the scarce thing.** It reads code through Codex
   surveys (short reports) and a Codex task's report, never its log. It
   ends its turn while implementers work, and is woken by their
@@ -195,8 +201,8 @@ and the budgets bind from the start. The repository's `AGENTS.md` loads on its o
   The owner keeps the plan and the whole mission's picture: it checks
   each milestone's design, answers its sub-owner, and reports to its
   parent. A sub-owner starts no sub-owner of its own, and no two
-  milestones are designed or implemented at once. A parent keeps its
-  children on its own machine, where SendMessage reaches them.
+  milestones are designed or implemented at once. A sub-owner runs on
+  its owner's machine.
 - **Parallel within.** Inside a milestone, whatever can run in parallel
   does (4.1): that is where an owner finds its throughput.
 - **The plan moves** as the work teaches. Most often, a milestone
@@ -331,45 +337,41 @@ either.
 
 ### 4.2 The implementer
 
-The implementer is Codex: gpt-6.1-sol, through `codex exec` in its own
-worktree, with `-o` naming the report the owner reads by an absolute
-path (a relative one is taken from the shell's directory, not `-C`'s,
-and the report is lost). So is the owner's other work that needs no
-taste (section 1): an investigation, a profile, a survey, a review's
-fixes. An investigation's task names the question and what its report
-holds: the cause, the evidence that shows it (a measurement, a trace, a
-failing test), and the fix it proposes, in a few lines. Codex's effort,
-medium or high (`-c model_reasoning_effort=<effort>`), is the owner's
-choice by the task, as the owner's own is its parent's (section 2):
-medium where the work is plain, high where it is harder, and raised
-when a report falls short or the quality suffers. Where the work gets
-hard (two tries without the cause, evidence that conflicts, a fix that
-would reach across a boundary), Opus 5.5 at xhigh advises (`claude -p`
-or a sub-agent), from the report and the evidence rather than the whole
-history. gpt-6-astra costs more than Opus: it advises in Opus's place
-only when Claude's budget runs low while Codex's has room, and
-sparingly. Claude (Opus 5.5, through `claude -p` or a sub-agent)
-implements only when Codex is out, or when the task is mostly taste:
-an API's shape, a test suite's organization and names. Sonnet is
-parked while Codex has room (the user, 10-22): GPT Sol does what
-Sonnet would, reports and surveys among them.
+The implementer is Codex: gpt-6.1-sol, through `codex-run` (below) in
+its own worktree. So is the owner's other work that needs no taste
+(section 1): an investigation, a profile, a survey, a review's fixes. An
+investigation's task names the question and what its report holds: the
+cause, the evidence that shows it (a measurement, a trace, a failing
+test), and the fix it proposes, in a few lines. Codex's effort, medium
+or high (`--effort`), is the owner's choice by the task, as the owner's
+own is its parent's (section 2): medium where the work is plain, high
+where it is harder, and raised when a report falls short or the quality
+suffers. Where the work gets hard (two tries without the cause, evidence
+that conflicts, a fix that would reach across a boundary), Opus 5.5 at
+xhigh advises (`claude -p` or a sub-agent), from the report and the
+evidence rather than the whole history. gpt-6-astra costs more than
+Opus: it advises in Opus's place only when Claude's budget runs low
+while Codex's has room, and sparingly. Claude (Opus 5.5, through
+`claude -p` or a sub-agent) implements only when Codex is out, or when
+the task is mostly taste: an API's shape, a test suite's organization
+and names. Sonnet is parked while Codex has room (the user, 10-22): GPT
+Sol does what Sonnet would, reports and surveys among them.
 
-An implementer starts through the director's launcher, on every
-machine, which records each run for the spend experiments and may
-lower a high run to medium at launch:
+An implementer starts through `codex-run`, on every machine (agents'
+`docs/design/post.md` 5):
 
 ```
-umask 077; bash ~/src/rust/tmp/director/start.sh implementer \
-    TASK WORKTREE REPORT EFFORT SITUATION SIZE
+codex-run task --effort EFFORT TASK WORKTREE REPORT
 ```
 
-Its paths are absolute, and its report is fresh. `--exempt "reason"`
-keeps the owner's effort: a tight test-time limit, a retry after a
-failed run, a fix across a boundary. The launcher waits, so the owner
-runs it on its detached route with null stdin, and keeps the run's id
-it prints. Once the owner has judged the result, it records it, once:
-`start.sh outcome RUN_ID accepted|fixed|redone|abandoned "note"`, with
-`--gate-first-pass pass|fail|not-applicable|unknown --redispatches N`.
+Its paths are absolute, and its report is fresh. It refuses a bad
+launch at once, with exit 2 and the reason. The run goes on in a user
+unit, so the owner ends its turn, and whichever way the run ends, its
+post wakes the owner: `run <id> ok: <the report's first line>`, or
+`failed`, with the report's path. `--read-only` serves a survey or a
+review, and `--resume RUN TASK ...` continues a run's thread with a new
+task, a review's fixes for one. The model's capacity errors are retried
+by the tool. The model and the effort stay the owner's choice.
 
 ### 4.3 The task
 
@@ -402,8 +404,9 @@ is whole, and holds:
   fuzzy or browser profile). The gate itself runs at landing (4.4);
 - the security lines of `director.md` 10, verbatim: a brief's copy
   doesn't reach an implementer that reads only its task;
-- on a doubt: stop, write the question in the owner's `inbox/`, and
-  end. Never improvise across a boundary.
+- on a doubt: stop, write the question as the report's first line,
+  starting `Question:`, with the options and a recommendation, and end:
+  the run's post carries it. Never improvise across a boundary.
 
 ### 4.4 Landing
 
@@ -564,11 +567,13 @@ it ([qa-lab.md](qa-lab.md)). They are judged as a pass's are.
 - An implementer asks its owner, a sub-owner its parent, an owner its
   product owner (Infra's, the director), a product owner the director,
   and the director the user.
-- On one machine, by SendMessage. To a product owner or the director on
-  another machine: the report or question in that machine's
-  `~/src/rust/tmp/director/inbox/<name>.md`, which its watcher reads,
-  and the turn ends. An entry goes to one parent only, never to two.
-  The answer comes by message.
+- By post, on one machine or across them: `post send PARENT@MACHINE
+  "<subject>"`, the report or question in at most 15 lines, and the
+  turn ends. A message goes to one parent only, never to two. The
+  answer comes by post. A send that exits 2, not delivered, goes to the
+  director instead, with the reason; on exit 3 the message waits in the
+  parent's mailbox, and the director's watcher reports it if it stays
+  unread.
 - The director asks the user only what has long-term consequences that
   would be hard to change, or what the user's rules keep theirs.
 
