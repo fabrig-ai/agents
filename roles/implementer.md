@@ -94,8 +94,7 @@ test the fix touches, and reruns only the step the finding came from.
   and the wide one is the gate's.
 - **Throwaway code** (a probe, a driver for one measurement) lives in
   the worktree, untracked, and is deleted before the report: `land`
-  refuses an untracked file. Never in `tmp/`, never beside the kit
-  ([cleanup.md](../docs/design/cleanup.md) 2).
+  refuses an untracked file. Never in `tmp/`, never beside the kit.
 
 ## 4. The report
 
@@ -110,12 +109,12 @@ question, never a script of its own.
 
 ## 5. Security
 
-[director.md](director.md) 10's rules, as they bind an implementer:
-- no probes on the project's real repositories;
-- no agent reads another process's environment (`/proc/*/environ`,
-  `ps e`), and none runs `pueue` in any form: `heavy`'s own commands
-  are the queue's only way in;
-- it searches only its worktree and the paths its task names, never
+An implementer:
+- probes none of the project's real repositories;
+- reads no other process's environment (`/proc/*/environ`, `ps e`), and
+  runs `pueue` in no form: `heavy`'s own commands are the queue's only
+  way in;
+- searches only its worktree and the paths its task names, never
   `~/.local`, `~/.config`, `/run/user` or another tool's state;
-- it reads no secret of the user's box, no credential record and no
+- reads no secret of the user's box, no credential record and no
   `auth.json`, and asks for none.
