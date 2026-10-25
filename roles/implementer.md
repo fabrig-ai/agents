@@ -15,7 +15,8 @@ each command one implementer submits, every other waits behind. The
 hours went to repeats: clippy rerun 833 times on what it had already
 linted (4.2 hours running), fmt waiting 74,000 seconds to run for
 seconds, and workspace suites rerun after small fixes. So: narrow while
-working, wide once, and nothing twice without a reason.
+working, the focused suite at most once, and nothing twice without a
+reason. The wide checks are the landing's gates (section 2).
 
 ## 1. After each change
 
@@ -41,30 +42,28 @@ working, wide once, and nothing twice without a reason.
 
 ## 2. When a set of changes is done
 
-Once, when the set's focused tests pass:
+Optimistic (the user, 2026-10-25): the landing's gates run every wide
+check, and what fails there comes back as a repair. So, once, when the
+set's narrow tests pass:
 
 1. **Format:** `cargo fmt`, directly, not through `heavy`: it builds
    nothing.
-2. **Widen the tests:** the whole package (`heavy cargo nextest run -p
-   PKG`), where sibling tests in the same binary run too. Where the
-   change reaches a public item, a feature, or a shared world, fake or
-   harness, add its direct dependents (`cargo tree -i PKG --depth 1`
-   lists them, and builds nothing) in the same command:
-   `-p PKG -p DEP ...`.
-3. **Lint:** `heavy cargo clippy --workspace --all-targets -- -D
-   warnings`, the gate's native lint. It also compiles every crate with
-   the features the workspace enables, so it catches a dependent or a
-   path under a feature that the tests above didn't build.
-4. **Doc examples:** where it changed one, `heavy cargo test --doc -p
-   PKG`. temper's gate doesn't run them.
+2. **The focused suite, if it wants one:** `heavy cargo nextest run
+   --workspace`, the default profile: every test but the fuzzy ones and
+   the tiers', under 20 seconds of tests. Its builds are the gate's
+   first, from the shared store.
 
-Steps 2 to 4 may go in one command, so that they wait once:
-`heavy bash -c 'cargo nextest run ... && cargo clippy ...'`. After a
-finding, it fixes it, runs the focused test the fix touches, and
-reruns only the step the finding came from. The gate's other checks
-(the wasm lints, the fuzzy and browser profiles, the builds for the
-browser) are the landing's (owners.md 4.4), unless the task names them.
-It never runs `scripts/check.sh`.
+Nothing else: not the fuzzy or browser profiles, the process, live or
+QA tiers, clippy, the wasm lints or the doc examples, and never
+`scripts/check.sh`. They are the gates' (owners.md 4.4), unless the
+task names one.
+
+**A repair** of what a gate found is where another suite runs: first
+the failing check alone (the failing tests in their profile, as
+`--profile fuzzy -E 'test(=NAME)'`, or the lint that failed), then that
+whole profile or lint once it passes, then the focused suite. After a
+finding, it fixes it, runs the narrowest test the fix touches, and
+reruns only the step the finding came from.
 
 ## 3. The queue
 
@@ -72,11 +71,11 @@ It never runs `scripts/check.sh`.
   slots, and suites that share ports or fixtures fail each other.
 - **Where the code isn't Rust** (a script, a Python tool), the same
   loop holds with its own tools: the narrowest check after each change,
-  the wide one once.
+  and the wide one is the gate's.
 
 ## 4. The report
 
-Besides what the task asks, the report says what section 2 ran and
-what each step found, how many tests ran, and what wasn't run and why:
-the gate's other checks, left to the landing, and any test it couldn't
-run.
+Besides what the task asks, the report says what it ran (section 1's
+tests, the focused suite, a repair's checks) and what each found, how
+many tests ran, and any test it couldn't run. The gates' checks need no
+mention: they are the landing's.

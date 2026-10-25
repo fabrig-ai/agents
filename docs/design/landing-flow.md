@@ -29,9 +29,10 @@ and milestones are [owners.md](../../roles/owners.md).
   branches, one in each repository it reaches, and the set keeps the
   same invariant inside it (section 3).
 - **One landing per milestone.** At a milestone's end the set is
-  rebased on the current mains and made green, and the owner asks the
-  queue to land it. Tasks inside a milestone merge into the set's
-  branches, not into `main`.
+  rebased on the current mains, and the owner asks the queue to land
+  it. The queue's gates are the set's only gates: optimistic (the user,
+  10-25), a failure there comes back to the set as a repair. Tasks
+  inside a milestone merge into the set's branches, not into `main`.
 - **The next milestone doesn't wait for the landing** (the user,
   10-24). It starts as soon as the set is in the queue, on top of it.
   - If the landing fails, the set is repaired beside the new
@@ -153,13 +154,12 @@ commit of each.
      That gives a new base.
      - A `Cargo.lock` conflict is never merged by hand: take `main`'s
        lock and repin to the set's tuple.
-  2. Run the gate of every repository in the set through `heavy
-     --gate`. These builds publish to the shared store.
-  3. Push the set's branches and ask the queue to land it.
-  4. Start the next milestone at once (below).
+  2. Push the set's branches and ask the queue to land it. No gate
+     runs before the queue's, which would run every test twice.
+  3. Start the next milestone at once (below).
 
-  Steps 1 and 2 are one implementer task (above). The owner checks its
-  result, then takes steps 3 and 4.
+  Step 1 is one implementer task (above). The owner checks its result,
+  then takes steps 2 and 3.
 - **The next milestone stacks on the queued set.** It doesn't wait for
   the landing, just as it doesn't wait for a QA pass (owners.md 3.1).
   - **Where it starts.** Its branches start from the queued set's heads,
@@ -320,13 +320,12 @@ code, and never decides whether a set lands: the gates do.
   - The invariant, which repins on every upstream landing, is only
     affordable because of the patch.
 - **Each tree is built once for the fleet.**
-  - The owner's gates at the milestone's end publish their builds.
-  - If `main` hasn't moved, the queue's build of the same tree is all
-    hits, and the receipt saves even the tests.
+  - The implementers' builds publish to the shared store as they work,
+    so the queue's gate of the set is mostly hits.
   - Once a set lands, every other owner's next rebase restores the
     queue's builds of the new `main` instead of compiling them.
 - **A stacked milestone starts warm.** The next milestone builds on the
-  queued set's tuple, which that set's gates have already published. If
+  queued set's tuple, which that set's own builds have published. If
   that set lands unchanged, the rebase onto `main` leaves the tuple as
   it was and rebuilds nothing.
 - **Divergence stays short.** While a set is unlanded, every crate
@@ -543,9 +542,11 @@ Until the rest is built, agents do by hand what the tools don't:
   the set are `cargo update --precise SHA -p <package>`, run directly
   since it builds nothing, of a commit pushed to its branch.
 - **The milestone's end** follows section 3. One implementer task
-  rebases the set and runs every repository's gate. Then the owner runs
-  `land-set` on its detached route, and starts the next milestone on the
-  set's branches without waiting for it.
+  rebases and repins the set, and runs no gate: `land-set`'s are the
+  set's only gates. Then the owner runs `land-set` on its detached
+  route, and starts the next milestone on the set's branches without
+  waiting for it. A rerun after a repair takes its unchanged
+  repositories' gates from the cache, on the same machine.
 - **Stacking.** Once the earlier set has landed, an implementer moves
   the new milestone with `git rebase --onto main <fork point>` in each
   repository, then repins.
@@ -572,9 +573,8 @@ Until the rest is built, agents do by hand what the tools don't:
 
 Not built yet:
 - the queue's service and order;
-- reused receipts: a set gated at its milestone's end is gated again by
-  `land-set`, though mostly from the cache; and git-note evidence
-  (land's trailers stay);
+- receipts shared between machines, and git-note evidence (land's
+  trailers stay);
 - the rerun of failed tests, and the keeper;
 - `queue note`, and `land` as a front end;
 - `repin` for sets and stacked rebases.

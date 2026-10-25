@@ -417,12 +417,10 @@ is whole, and holds:
 - the files it may touch, and that the mechanical follow-through of its
   change in the same crate is in scope: a call site, a match arm, a
   test's expected value;
-- done when: the tests that pass, with their packages, binaries and
-  profiles where they aren't the default; the dependents whose tests it
-  runs when it widens (implementer.md 2); what else it proves (the
-  commit's trailers, the figures it compares); and which of the gate's
-  other checks it runs, where the change needs one (the wasm lints, the
-  fuzzy or browser profile). The gate itself runs at landing (4.4);
+- done when: the focused tests that pass, with their packages and
+  binaries, and for a repair the failing check's (implementer.md 2);
+  what else it proves (the commit's trailers, the figures it compares).
+  The gates run every other check at landing (4.4);
 - the security lines of `director.md` 10, verbatim: a brief's copy
   doesn't reach an implementer that reads only its task;
 - on a doubt: stop, write the question as the report's first line,
