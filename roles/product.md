@@ -66,11 +66,13 @@ it governs.
   short and true as the director's are (director.md 3): `notes.md`,
   its owners' sessions and footprints and the calls still in force.
 - **Its timers:** its waiter, `post wait p/<name>`, started again after
-  each wake, and a check every two hours from a cron, as the director's
-  (director.md 2, 5 and 7).
+  each wake, and a cron every two hours, prompt "Product owner's check:
+  product.md 2.". The check: `record pull` and its roadmap's `git log`
+  since the last; its owners alive and their caps due within two hours;
+  the next mission due; then its README and decisions, committed.
 - **Its context** compacts by itself, and is cleared about every six
   hours after a handover in its notes, as the director's (director.md
-  2). After either, it reads its brief and its notes first.
+  2 and 12). After either, it reads its brief and its notes first.
 - **Stamps** come from `date -u +%H:%MZ`, never typed.
 
 ## 3. Its owners
@@ -98,8 +100,9 @@ it governs.
 - **Lab runs are its call.** As something lands that a person could
   use, it judges whether a run is warranted, and if so starts a QA agent
   under [qa-lab.md](qa-lab.md), a Codex unit as director.md 4 starts a
-  Codex owner, with a brief: what landed, the design sections and the
-  stories they promise, the happy path first, the budget.
+  Codex owner, with a brief, its mission's README (director.md 4): what
+  landed, the design sections and the stories they promise, the happy
+  path first, the budget.
 - **Their reports** come to it. Each finding goes to the owner of the
   work while that owner runs. Once it has ended, the product owner
   judges the finding itself.

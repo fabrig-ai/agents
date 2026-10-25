@@ -162,10 +162,10 @@ machine's `tmp/post/` (section 5).
   subscriptions' usage pace limits it too. Where machines or seats
   hold the pace back, the director asks the user for more.
 - **Roadmaps.** A roadmap the user has agreed is the go for its
-  missions: the director starts each one as soon as what it needs is
-  in, not when the wave before it ends, and tells the user as it
-  starts. It also pauses, resumes and wraps up owners. A side roadmap, a lower-priority track, runs on
-  what the main one leaves free. Its mission starts when three things
+  missions: each starts as soon as what it needs is in, not when the
+  wave before it ends, and the director tells the user as it starts. A
+  side roadmap, a lower-priority track, runs on what the main one
+  leaves free. Its mission starts when three things
   hold. A machine is free once the main missions are staffed. The
   user's inputs for it are in. Its landings stay off a running main
   mission's files, a soft rule weighed by what the conflicts would cost
@@ -278,8 +278,8 @@ machine's `tmp/post/` (section 5).
   features.
 - **A plan or a design report** gets owners.md 3.3's brief check, and
   a green light or the amendments. A milestone's end updates the
-  mission's line in `STATUS.md`, its new session among it (owners.md
-  2).
+  mission's line in `STATUS.md`, or in a product owner's README
+  (records.md 4), its new session among it (owners.md 2).
 - **A milestone at its cap** waits, paused (owners.md 3.1), for an
   answer decided like any question's: a split, more time, or a change
   of course. Whether the user hears of it is section 8's call.
@@ -296,8 +296,9 @@ machine's `tmp/post/` (section 5).
   it, chosen from the direction.
 - **Footprints.** It orders the owners whose footprints overlap
   (owners.md, 4.5): who lands first. The second to land rebases, and
-  keeps the other's values. A diff to a file that another owner holds goes
-  to the director and to that owner.
+  keeps the other's values. A diff to a file that another owner holds
+  goes, through the owner's parent, to whoever orders the two
+  (product.md 3).
 - **Repins,** one at a time per repository. Compatible adaptations
   ride one ordered repin, and each owner adapts the downstream code to
   its own change. An upstream change that breaks a downstream build
@@ -393,8 +394,9 @@ is mechanical, and Codex reads what needs reading.
 
 ## 10. Machines and security
 
-- **Each machine's reach** (its ssh command, its workspace, its quirks)
-  is in the director's memory, not here. The workspace is `~/src/rust`,
+- **Each machine's reach:** its ssh target is in post's machines file
+  ([post.md](../docs/design/post.md) 2), its quirks in the director's
+  memory, not here. The workspace is `~/src/rust`,
   `~/src` on carbon-forge. Remote commands run in a login shell
   (`bash -lc`), or `claude` is not on PATH.
 - **Its authority:**
@@ -471,4 +473,6 @@ owner, [product.md](product.md). The pilot's `d/roadmap-2` and
   Where sections 2, 5 and 7 name one, the director does its step by
   hand, until Infra builds what it needs into this repository's
   `scripts/`. Which ones, and in what shape, is open: the director asks
-  for them as for any tool (section 6).
+  for them as for any tool (section 6). A session can't clear itself,
+  so the six-hour clear waits for its tool: until then a context only
+  compacts.
