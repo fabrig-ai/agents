@@ -56,12 +56,11 @@ set's narrow tests pass:
    fuzzy ones and the tiers'. Its builds are the gate's first, from the
    shared store.
 
-Nothing else: not the fuzzy or browser profiles, the process or live
-tiers, clippy, the wasm lints or the doc examples, and never
+Nothing else: not the fuzzy, browser or `qa` profiles, the process or
+live tiers, clippy, the wasm lints or the doc examples, and never
 `scripts/check.sh`, `land` or `land-set`. They are the gates' and the
-owner's (owners.md 4.4), unless the task names one. A change to a
-world's facts, fakes or harness also runs that world's `qa` profile
-(owners.md 4.6).
+owner's (owners.md 4.4), and a repair's (below), unless the task names
+one.
 
 **A repair** of what a gate found is where another suite runs: first
 the failing check alone (the failing tests in their profile, as

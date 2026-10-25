@@ -550,9 +550,6 @@ natural point for one, beside the next milestone (3.1).
   --workspace --profile qa`. The gate builds them but does not run them,
   and no test-time ceiling counts them. The first owner to add one to a
   repository adds the profiles.
-- **A changed world runs its `qa_*` tests** before the change lands: a
-  change to a world's facts, fakes or harness runs that world's `qa`
-  profile, so that tests outside the gate don't rot unseen.
 - **Each failure is the owner's to judge.** A bug that triage lets in
   (below) is fixed, by an implementer task (landing-flow.md 3), and its
   regression test goes in the default suite, in the lowest world that
