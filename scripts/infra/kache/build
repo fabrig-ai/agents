@@ -6,7 +6,7 @@ set -euo pipefail
 umask 077
 kit=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
 base=96052b4842239bb216f6c4812054203c21550788
-pinned=93f8551e8f1deedfab30118957d5450e2204b4a09a9cd951e092426c096839a3
+pinned=91fb6aa7d7ddd427e3e2732aa346ce116fbf075df0c871e1148bf309aaadafaf
 musl_digest=a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4
 
 if [[ ${1:-} != --queued ]]; then
@@ -28,6 +28,8 @@ if [[ ${1:-} != --queued ]]; then
     [[ $(git -C "$work/source" rev-parse HEAD) == "$base" ]]
     git -C "$work/source" apply --check "$kit/git-checkout-rev.patch"
     git -C "$work/source" apply "$kit/git-checkout-rev.patch"
+    git -C "$work/source" apply --check "$kit/upload-bound.patch"
+    git -C "$work/source" apply "$kit/upload-bound.patch"
     curl --fail --silent --show-error --location --connect-timeout 10 --max-time 120 --retry 2 https://musl.libc.org/releases/musl-1.2.5.tar.gz -o "$work/musl.tar.gz"
     echo "$musl_digest  $work/musl.tar.gz" | sha256sum -c --quiet
     tar -xzf "$work/musl.tar.gz" -C "$work"
@@ -63,7 +65,7 @@ export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS='-C target-feature=+crt-
 cd "$work/source"
 cargo build --locked --release --bin kache --target x86_64-unknown-linux-musl -j2
 install -m 755 "$work/target/x86_64-unknown-linux-musl/release/kache" "$work/out/kache"
-[[ $("$work/out/kache" --version) == 'kache 1.2.2-gitrev.1' ]]
+[[ $("$work/out/kache" --version) == 'kache 1.2.2-gitrev.2' ]]
 if readelf -l "$work/out/kache" | grep -q INTERP; then
     echo 'kache/build: unexpected dynamic interpreter' >&2; exit 1;
 fi

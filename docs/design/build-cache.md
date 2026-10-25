@@ -101,7 +101,7 @@ replaced only the `CARGO_HOME` prefix with its placeholder, so
   projects will use them. A single workspace with path dependencies
   would have avoided the defect.
 
-## 4. The patch: kache 1.2.2-gitrev.1
+## 4. The patches: kache 1.2.2-gitrev.2
 
 One commit (`0f4075c`) on v1.2.2 (`96052b4`), four files, +262/−5,
 almost all of it in `src/path_normalizer.rs` and its tests.
@@ -139,15 +139,26 @@ almost all of it in `src/path_normalizer.rs` and its tests.
   Ten rlibs restored across pins matched independent cold builds byte
   for byte. kache's own suite: 6,101 passed; the 5 failures also fail
   on v1.2.2.
-- **Deployed** through `kache-setup`, which pins `1.2.2-gitrev.1` by
-  its digest `93f8551e…` (skein 9e6f4d9e). The director places the
-  binary at `tmp/kache/kache-1.2.2-gitrev.1` on each machine, and setup
+- **Upload bounds** in `scripts/infra/kache/upload-bound.patch`, applied
+  second, retire a retryable upload after three attempted failures or 30
+  minutes from the intent's first write, whichever comes first. Attempts
+  and first-write time survive daemon restart; old intents start at replay.
+  An open write breaker consumes age but no attempt when it makes no
+  network request. Retirement releases the GC pin and requests a size
+  sweep; the entry stays local until GC. Under `[cache]`, the new
+  `remote_upload_max_bytes` defaults to 0 (unlimited) and rejects larger
+  compressed packs before PUT; the fleet chooses 64 MiB. Neither this
+  patch nor the executable version bump changes keys, schema 32, remote
+  namespace/layout, or the local store format.
+- **Pinned** through `kache-setup` at `1.2.2-gitrev.2`; the patch README
+  records the binary digest and build time. The director places the
+  binary at `tmp/kache/kache-1.2.2-gitrev.2` on each machine, and setup
   runs through `heavy --gate`, so no build runs while it swaps the
   wrapper. A new version clears that machine's local store once.
 - **Its source** is kept in `scripts/infra/kache/git-checkout-rev.patch`,
   based on v1.2.2 (`96052b4`). `scripts/infra/kache/build` fetches the exact
-  base, applies the patch and builds the static musl binary through
-  `heavy`, with Rust 1.95.0. Its README names the prerequisites and how
+  base, checks and applies both patches in order, and builds the static
+  musl binary through `heavy`, with Rust 1.95.0. Its README names the prerequisites and how
   to compare the printed digest with the deployed pin.
 
 ## 5. The shared store
@@ -213,8 +224,8 @@ Why each choice:
   it failed to upload pinned in the local store, where no collection
   evicts it: on 10-24 a full bucket grew local stores past their caps
   (77 GB against 20 GiB on hetzner) until disks ran out (director 1020,
-  1041). The pruner keeps the quota from filling; releasing those pins
-  is open (section 8). A Hetzner volume grows
+  1041). The pruner keeps the quota from filling; the second patch bounds
+  those pins (section 4). A Hetzner volume grows
   without downtime but never shrinks. Garage refuses to start unless
   the volume is mounted, so a missing volume can't turn into an empty
   store on the root disk.
@@ -282,9 +293,11 @@ stopping the daemon or changing anything. It never reads the key.
   of demand. In the 24 h to 10-25 05:10Z it downloaded 13,388 entries,
   76 GiB, on the five builders, and 657 of them were used, all on
   hetzner3: 1.6% of the builders' 40,875 hits, from the same Garage
-  whose uploads were timing out. Off, the daemon still checks
-  the remote for each exact key it misses and still uploads (kache's
-  `src/config.rs`, `prefetch_enabled`).
+  whose uploads were timing out. Remote-enabled machines also get
+  `remote_upload_max_bytes = 67108864`: compressed packs above 64 MiB
+  stay local without a PUT. With prefetch off, the daemon still checks
+  the remote for each exact key it misses and uploads eligible entries
+  (kache's `src/config.rs`, `prefetch_enabled`).
 - Without the key file, setup removes the remote section and that
   drop-in: x1, carbon, hel8 and a machine awaiting its key stay local.
 - Rerunning setup preserves the local store at the same kache version.
@@ -314,8 +327,8 @@ Day to day:
   | Failure | Effect |
   |---|---|
   | Store or network down | Misses compile locally |
-  | An upload times out (30 s; large packs while hetzner3 is busy) | Another machine compiles the unit again; the entry stays pinned locally (section 5) |
-  | Quota full | No new uploads, and their entries pinned past the local cap, until the pruner or expiry frees space |
+  | An upload times out (30 s; large packs while hetzner3 is busy) | Another machine compiles the unit again; the pin is released after 3 failed attempts or 30 minutes from first intent, whichever comes first |
+  | Quota full | No new uploads; pins retire after 3 failed attempts or 30 minutes from first intent, whichever comes first; breaker suppression without network uses age only |
   | kache version change | That machine's local store is cleared once. Remote entries under an old key namespace are dead until they expire |
 
 - **Adding a machine:**
@@ -328,10 +341,11 @@ Day to day:
 - **Upstreaming the patch.** Its patch and build recipe live in
   `scripts/infra/kache/`; offer the patch upstream later.
 - **An alert** when the store nears its quota or stops answering.
-- **The pins of failed uploads.** kache keeps an entry pinned until its
-  upload succeeds, past the local cap. A patch could retire an upload
-  that fails for good, release its pin, and bound the retries
-  (director 1026).
+- **Done: the pins of failed uploads.** `upload-bound.patch` in
+  `1.2.2-gitrev.2` releases pins after 3 failed attempts or 30 minutes,
+  including across restarts. The fleet's 64 MiB compressed upload limit
+  keeps executables of about 100 MiB local: per-worktree test binaries,
+  among the uploads that time out (director 1026).
 - **Upload timeouts.** Packs of 13 to 37 MB time out at 30 s while
   hetzner3, which also builds, is busy: in the 24 h to 10-25 05:10Z
   hetzner5 failed 3,549 of its 7,276 uploads, most of them from 15 to

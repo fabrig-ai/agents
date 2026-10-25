@@ -37,11 +37,11 @@ def main():
             path = stubs / name
             path.write_text('#!/bin/bash\nset -eu\n' + body)
             path.chmod(0o700)
-        artifact = root / 'kache/kache-1.2.2-gitrev.1'
+        artifact = root / 'kache/kache-1.2.2-gitrev.2'
         artifact.parent.mkdir()
         artifact.write_text('#!/bin/bash\nset -eu\n'
                             'echo "kache $*" >>"$FIXTURE_TRACE"\n'
-                            'if [[ $* == --version ]]; then echo kache 1.2.2-gitrev.1; fi\n')
+                            'if [[ $* == --version ]]; then echo kache 1.2.2-gitrev.2; fi\n')
         artifact.chmod(0o700)
         binary = home / '.local/bin/kache'
         binary.parent.mkdir(parents=True)
@@ -59,6 +59,7 @@ def main():
         # A fresh machine needs no prior config; the same version keeps its store.
         setup()
         cache = tomllib.loads(config.read_text())['cache']
+        assert 'remote_upload_max_bytes' not in cache
         assert 'remote' not in cache
         assert cache['cache_executables'] is True and cache['prefetch_enabled'] is False
         assert not dropin.exists()
@@ -70,6 +71,7 @@ def main():
         setup()
         cache = tomllib.loads(config.read_text())['cache']
         assert cache['local_store'] == '/fixture/large-disk'
+        assert cache['remote_upload_max_bytes'] == 67108864
         assert cache['remote'] == dict(type='s3', bucket='kache',
                                       endpoint='http://10.80.0.13:3900',
                                       region='garage', prefix='artifacts')
@@ -91,6 +93,7 @@ def main():
         key.unlink()
         setup()
         cache = tomllib.loads(config.read_text())['cache']
+        assert 'remote_upload_max_bytes' not in cache
         assert 'remote' not in cache and cache['local_store'] == '/fixture/large-disk'
         assert not dropin.exists()
         assert config.read_text().startswith("# Written by agents' scripts/infra/kache-setup.\n")

@@ -23,8 +23,8 @@
 set -euo pipefail
 umask 077
 
-version=1.2.2-gitrev.1
-digest=93f8551e8f1deedfab30118957d5450e2204b4a09a9cd951e092426c096839a3
+version=1.2.2-gitrev.2
+digest=91fb6aa7d7ddd427e3e2732aa346ce116fbf075df0c871e1148bf309aaadafaf
 
 kit=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
 workspace() {
@@ -110,6 +110,8 @@ auto_recover_min_free_bytes = $((floor * 1024 * 1024 * 1024))
 TOML
 if ((remote)); then
     cat >>"$config.new" <<'TOML'
+# Large per-worktree test executables stay local; smaller entries still share.
+remote_upload_max_bytes = 67108864
 
 [cache.remote]
 type = "s3"
