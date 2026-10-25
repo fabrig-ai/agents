@@ -98,7 +98,8 @@ test the fix touches, and reruns only the step the finding came from.
 
 ## 4. The report
 
-The report replaces `codex-run`'s reservation line. Besides what the
+The report is written whole over the file at the path the run is
+given, whatever it holds: its first line is read first. Besides what the
 task asks, it says what it ran (section 1's tests, the focused suite, a
 repair's checks) and what each found, how many tests ran, and any test
 it couldn't run. The gates' checks need no mention: they are the
