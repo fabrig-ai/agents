@@ -63,7 +63,7 @@ GitHub, and the sweep of the six machines' `tmp/` (section 6).
 
 | Path | Whose | What |
 |---|---|---|
-| `heavy/`, `logs/`, `gates/`, `landing-turn/` | `heavy`, `land` | receipts, `heavy.tsv`, the gates' stamps, the landing turns |
+| `heavy/`, `logs/`, `gates/`, `landing-turn/`, `land-set/` | `heavy`, `land`, `land-set` | receipts, `heavy.tsv`, the gates' stamps, the landing turns, the sets' locks and state |
 | `kache/`, `lab/`, `after-landing/` | their tools | the build cache's binary, the lab's store, after-landing's worktrees and locks |
 | `post/`, `codex-run/` | `post`, `codex-run` | the mailboxes, the runs and `runs.tsv` |
 | `machine.env` | `setup` | the machine's floor and limits |
@@ -149,9 +149,21 @@ no remote.
   4,391, hetzner4 389, hetzner5 1,156. Each machine keeps them in
   `~/.cache/tmp-scripts-20261025.tar.gz`, with their list, to delete
   once nothing turns out to be missing.
-- **The ended missions' directories** (about 3 GB on the six machines)
-  **and the landed branches** (113 on GitHub, 276 on hetzner3
-  alone) are `tidy`'s first run, unless the user has them swept before.
+- **The ended missions' directories:** 124 deleted, about 3 GB, on the
+  user's word: hel8 7, hetzner 25, hetzner2 54, hetzner3 21, hetzner4
+  8, hetzner5 9. A dirty worktree's diff and untracked files, and a
+  commit no branch held, are in each machine's
+  `~/.cache/cleanup-20261025/`.
+- **The landed branches:** 112 on GitHub (agents 2, skein 4, jig 6,
+  temper 100) and 2,084 on the six machines (hel8 233, hetzner 928,
+  hetzner2 412, hetzner3 268, hetzner4 153, hetzner5 90), with the
+  stale remote-tracking refs. A branch checked out, named in records'
+  `STATUS.md`, direction, backlog or roadmaps, or on the director's
+  keep list stayed. `~/.cache/cleanup-20261025/` holds each one's name
+  and commit, and a bundle of the commits main lacks.
+- **What stays is `tidy`'s first run:** the paused missions'
+  directories, and the entries at the top of `tmp/` outside section
+  3's table, which it reports.
 
 ## 7. Going live
 
