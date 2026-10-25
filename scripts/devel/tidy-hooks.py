@@ -22,25 +22,19 @@ def clear_target(caller, worktree):
 
 
 def start_tidy(caller, variable, tmp, arguments):
-    command = os.environ.get(variable, shlex.quote(str(Path(__file__).resolve().with_name('tidy'))))
-    if not command:
-        return
     try:
+        if variable in os.environ:
+            command = os.environ[variable]
+        else:
+            tidy = Path(__file__).resolve().with_name('tidy')
+            if not tidy.is_file() or not os.access(tidy, os.X_OK):
+                warn(caller, f'cannot start tidy: {tidy} is not executable')
+                return
+            command = shlex.quote(str(tidy))
+        if not command:
+            return
         logs = tmp / 'logs'
         logs.mkdir(parents=True, exist_ok=True)
-        # Catch a missing executable before detaching. Compound shell commands
-        # remain shell commands; their later diagnostics go to the tidy log.
-        lexer = shlex.shlex(command, posix=True, punctuation_chars=';&|()<>')
-        lexer.whitespace_split = True
-        words = list(lexer)
-        if (words and not any(word and all(c in ';&|()<>' for c in word) for word in words)
-                and not any(c in words[0] for c in '$`~*?[]{}')):
-            available = subprocess.run(['bash', '-c', 'command -v -- "$1"', 'tidy', words[0]],
-                                       cwd=tmp,
-                                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                       stderr=subprocess.DEVNULL, check=False)
-            if available.returncode and '=' not in words[0]:
-                raise FileNotFoundError(f'tidy command not found: {words[0]}')
         with (logs / 'tidy.log').open('ab') as log:
             subprocess.Popen(['setsid', 'bash', '-c', command + ' "$@"', 'tidy', *arguments],
                              cwd=tmp, stdin=subprocess.DEVNULL, stdout=log, stderr=log,

@@ -201,6 +201,41 @@ def closing_nested(lab):
     assert str(nested) in output and 'commits on no origin branch' in output, output
 
 
+def closing_cached_output(lab):
+    paths = ending(lab)
+    worktree = mission_worktree(lab)
+    exclude = Path(lab.git(worktree, 'rev-parse', '--git-path', 'info/exclude'))
+    with exclude.open('a') as stream:
+        stream.write('\n/target/\n')
+    caches = (worktree / 'target', lab.tmp / 'owners/demo/other-cargo-output')
+    unreadable = []
+    try:
+        for cache in caches:
+            deep = cache / 'debug/build/crate/out/deep'
+            deep.mkdir(parents=True)
+            (cache / 'CACHEDIR.TAG').write_text('Signature: 8a477f597d28d172789f06886806bc55\n')
+            deep.chmod(0)
+            unreadable.append(deep)
+        lab.run('commit', *paths)
+        assert lab.git(lab.a, 'show', 'HEAD:missions/demo/closing.md').startswith('# Closing')
+    finally:
+        for deep in unreadable:
+            deep.chmod(0o700)
+
+
+def closing_cached_worktree(lab):
+    paths = ending(lab)
+    worktree = mission_worktree(lab)
+    exclude = Path(lab.git(worktree, 'rev-parse', '--git-path', 'info/exclude'))
+    with exclude.open('a') as stream:
+        stream.write('\n/CACHEDIR.TAG\n')
+    (worktree / 'CACHEDIR.TAG').write_text('Signature: 8a477f597d28d172789f06886806bc55\n')
+    (worktree / 'STATUS.md').write_text('unpublished cached worktree\n')
+    lab.git(worktree, 'commit', '-am', 'unpublished cached worktree')
+    output = lab.run('commit', *paths, status=2)
+    assert str(worktree) in output and 'commits on no origin branch' in output, output
+
+
 def closing_clean(lab):
     paths = ending(lab, committed=True)
     worktree = mission_worktree(lab)
@@ -230,8 +265,14 @@ def closing_clean(lab):
 def closing_abandoned(lab):
     paths = ending(lab, state='abandoned')
     output = lab.run('commit', *paths, extra=dict(RECORD_TIDY='/missing-fixture-tidy'))
-    assert 'warning: cannot start tidy' in output, output
+    assert 'warning: cannot start tidy' not in output, output
     assert 'pushed' in output, output
+    log = lab.tmp / 'logs/tidy.log'
+    deadline = time.monotonic() + 5
+    while not log.exists() or 'No such file or directory' not in log.read_text():
+        assert time.monotonic() < deadline, 'missing override did not log its failure'
+        time.sleep(.01)
+    assert '/missing-fixture-tidy' in log.read_text()
 
 
 def closing_active(lab):
@@ -707,7 +748,7 @@ def main():
     # The cases share nothing (each has its own Lab, and every subprocess its
     # own env), so they run at once on threads; results print in case order.
     cases = (closing_unpublished, closing_dirty, closing_deleted_remote, closing_fetch_failure, closing_unreadable, closing_nested,
-             closing_clean, closing_abandoned, closing_active,
+             closing_cached_output, closing_cached_worktree, closing_clean, closing_abandoned, closing_active,
              writer, refusals, different_files, name_race, conflict, offline, merged_validation, installation_failures, setup, telemetry, milestone)
     if len(sys.argv) > 1:
         cases = tuple(case for case in cases if case.__name__ in sys.argv[1:])

@@ -427,13 +427,48 @@ sys.exit(result.returncode)
         self.assertFalse((self.root / "tmp/logs/tidy.log").exists())
 
     def test_landed_tidy_missing(self):
-        result = self.land({"LAND_TIDY": "/missing-fixture-tidy --flag"})
+        self.env.pop('LAND_TIDY')
+        result = self.land()
         self.assertIn("warning: cannot start tidy", result.stderr)
         self.assertEqual(self.result_json(result)["exit"], 0)
+        self.assertFalse((self.root / 'tmp/logs/tidy.log').exists())
+
+    def test_landed_tidy_not_executable(self):
+        self.env.pop('LAND_TIDY')
+        (self.kit / 'tidy').write_text('#!/bin/sh\nexit 99\n')
+        (self.kit / 'tidy').chmod(0o600)
+        result = self.land()
+        self.assertIn('warning: cannot start tidy', result.stderr)
+        self.assertEqual(self.result_json(result)['exit'], 0)
+        self.assertFalse((self.root / 'tmp/logs/tidy.log').exists())
+
+    def test_landed_tidy_default(self):
+        self.env.pop('LAND_TIDY')
+        shutil.copy(shlex.split(self.tidy_stub())[0], self.kit / 'tidy')
+        result = self.land()
+        self.assertNotIn('warning: cannot start tidy', result.stderr)
+        calls = self.root / 'tidy.args'
+        deadline = time.monotonic() + 5
+        while not calls.exists() or not calls.read_text().endswith('repo\n'):
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(.01)
+        self.assertEqual(calls.read_text(), 'repo\n')
+
+    def test_landed_tidy_override_missing(self):
+        result = self.land({'LAND_TIDY': '/missing-fixture-tidy --flag'})
+        self.assertNotIn('warning: cannot start tidy', result.stderr)
+        self.assertEqual(self.result_json(result)['exit'], 0)
+        log = self.root / 'tmp/logs/tidy.log'
+        deadline = time.monotonic() + 5
+        while not log.exists() or 'No such file or directory' not in log.read_text():
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(.01)
+        self.assertIn('/missing-fixture-tidy', log.read_text())
 
     def test_landed_tidy_shell_expansion(self):
         stub = shlex.split(self.tidy_stub())[0]
-        self.land({'LAND_TIDY': '"$FIXTURE_TIDY" --fixture-flag', 'FIXTURE_TIDY': stub})
+        result = self.land({'LAND_TIDY': '"$FIXTURE_TIDY" --fixture-flag', 'FIXTURE_TIDY': stub})
+        self.assertNotIn('warning: cannot start tidy', result.stderr)
         deadline = time.monotonic() + 5
         calls = self.root / 'tidy.args'
         while not calls.exists() or not calls.read_text().endswith('repo\n'):

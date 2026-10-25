@@ -283,7 +283,10 @@ def check_closing(tmp, missions):
             if directory.is_symlink() or not directory.exists():
                 continue
             for parent, dirs, names in os.walk(directory, onerror=unreadable):
-                dirs[:] = [d for d in dirs if d != '.git' and not (Path(parent) / d).is_symlink()]
+                if 'CACHEDIR.TAG' in names:
+                    dirs[:] = []
+                else:
+                    dirs[:] = [d for d in dirs if d != '.git' and not (Path(parent) / d).is_symlink()]
                 if '.git' not in names:
                     continue
                 worktree = Path(parent)
