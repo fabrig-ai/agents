@@ -241,7 +241,7 @@ The queue is the only writer to every repository's `main`. Its tool,
      lints, the wasm32 ones included, and the focused and fuzzy suites
      (the user, 10-25). The browser tier, with the bundle it serves, is
      `scripts/browser.sh`, and no gate runs it (step 8).
-   - Gates run through `heavy --gate` on a free build machine, upstream
+   - Gates run through `heavy --land` on a free build machine, upstream
      first. A failing skein gate stops the set before four more run, and
      each downstream gate restores its upstream's builds from the store.
    - With the cache, only the set's own changes and the crates built on

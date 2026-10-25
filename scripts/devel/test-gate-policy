@@ -92,7 +92,7 @@ os.umask(0o077)
 args = sys.argv[1:]
 lane = "build"
 while args:
-    if args[0] == "--gate":
+    if args[0] in ("--gate", "--land"):
         lane = "gate"
         args = args[1:]
     elif args[0] == "--tail":

@@ -5,11 +5,11 @@
 #
 # From a clean worktree on the branch to land: rebase it on origin/main,
 # build it and run its lints in the build lane, run the repository's gate
-# through `heavy --gate`, record the gate's evidence in the tip commit's
+# through `heavy --land`, record the gate's evidence in the tip commit's
 # trailers, and push the tip to origin's main. The build lane's pass leaves
-# the gate's own build and lints nothing to redo, so the gate lane, which
-# runs alone, holds the machine for the suites, and a tree that does not
-# build or lint never takes it.
+# the gate's own build and lints nothing to redo, so the gate, first by its
+# CPU weight beside the machine's builds, runs only the suites, and a tree
+# that does not build or lint never reaches it.
 # A gate that passed before the rebase still holds when what moved main
 # changed only Markdown files under docs/, which no gate reads.
 # The push only fast-forwards: a rejected push means main moved, and land
@@ -578,7 +578,7 @@ Resolve them, run git rebase --continue, then land again."
                 grep '^heavy: task ' "$out" | tail -n1 >&2 || true
             fi
             policy_recheck
-            if HEAVY_LABEL="land $repo" python3 -B "$kit/land-capture.py" "$out" "$kit/heavy" --gate --tail 60 bash -c "$gate"; then
+            if HEAVY_LABEL="land $repo" python3 -B "$kit/land-capture.py" "$out" "$kit/heavy" --land --tail 60 bash -c "$gate"; then
                 gate_heard=$(heard)
             else
                 capture_status=$?

@@ -15,8 +15,12 @@ root=${DEV_ROOT:-$(workspace)}
 tmp=${DEV_TMP:-$root/tmp}
 # shellcheck source=kit.sh
 source "$kit/kit.sh"
-read -r build_jobs _ < <(machine_setting HEAVY_BUILD_JOBS 4)
-export DEV_ROOT=$root DEV_TMP=$tmp HEAVY_BUILD_JOBS_EFFECTIVE=$build_jobs
+# Every task builds as wide as the machine, and builds take no slot but the
+# machine's setting (0, the default: no limit). CPU weights, not a queue, order
+# them (build-infrastructure.md, 2).
+read -r build_jobs _ < <(machine_setting HEAVY_BUILD_JOBS "$(nproc)")
+read -r build_slots _ < <(machine_setting HEAVY_BUILD_SLOTS 0)
+export DEV_ROOT=$root DEV_TMP=$tmp HEAVY_BUILD_JOBS_EFFECTIVE=$build_jobs HEAVY_BUILD_SLOTS_EFFECTIVE=$build_slots
 prepare_gate_policy() {
     local token=${1:-} expected=${SKEIN_GATE_POLICY_ID:-}
     if [[ -f $kit/gate-policy.sh ]]; then
@@ -48,17 +52,24 @@ case ${1:-} in
         }
         # Preparation at submission preserves the policy helper selection in
         # the queue; contained entry validates it again before payload start.
-        pending_tail=0
+        pending_tail=0 command=()
         for argument in "$@"; do
             if ((pending_tail)); then pending_tail=0; continue; fi
+            if ((${#command[@]})); then command+=("$argument"); continue; fi
             case $argument in
-                --gate) prepare_gate_policy "" ;;
+                --gate | --land) prepare_gate_policy "" ;;
                 --tail) pending_tail=1 ;;
-                --) break ;;
+                --) command=(--) ;;
                 -*) ;;
-                *) break ;;
+                *) command=("$argument") ;;
             esac
         done
+        [[ ${command[0]:-} != -- ]] || command=("${command[@]:1}")
+        # cargo fmt builds nothing: it runs at once, outside the queue.
+        if [[ ${command[0]:-} == cargo && ${command[1]:-} == fmt ]]; then
+            echo 'heavy: cargo fmt builds nothing; running it directly' >&2
+            exec "${command[@]}"
+        fi
         ;;
 esac
 exec python3 -B "$kit/heavy-recovery.py" "$@"

@@ -33,7 +33,11 @@ CONFIG = Path(os.environ.get('PUEUE_CONFIG_PATH', str(
 PREFIX = 'skein-heavy-' + hashlib.sha256(str(BASE).encode()).hexdigest()[:12]
 CGROOT = Path('/sys/fs/cgroup')
 CANCELLED = 130  # A cancelled task's exit, as check.sh and codex-run exit on SIGINT.
-USAGE = 'usage: heavy [--gate] [--tail N] [--] command... | heavy --cancel TOKEN'
+USAGE = 'usage: heavy [--gate | --land] [--tail N] [--] command... | heavy --cancel TOKEN'
+# Each task's CPU weight in its systemd unit (build-infrastructure.md, 2): a
+# landing's work first, an agent's builds next, background work after, and
+# idle work only on otherwise idle cores. HEAVY_CLASS names one.
+WEIGHTS = {'land': '10000', 'build': '1000', 'background': '100', 'idle': 'idle'}
 
 
 class Refusal(Exception):
@@ -186,6 +190,7 @@ class Ledger:
                   'free_memory_bytes': available_memory()}
         if task:
             fields.update({key: task[key] for key in ('lane', 'label', 'repo', 'tree', 'policy')})
+            fields['exclusive'] = task.get('exclusive', task['lane'] == 'gate')
         fields.update(extra)
         self.data['pending'].append(fields)
 
@@ -813,7 +818,16 @@ def check_gate_candidate(ledger, task):
     return valid
 
 
-def submit(args, lane, tail_lines):
+def weight(lane, label):
+    chosen = os.environ.get('HEAVY_CLASS', '')
+    if chosen in WEIGHTS:
+        return WEIGHTS[chosen]
+    if lane == 'gate' or label.startswith('land '):
+        return WEIGHTS['land']
+    return WEIGHTS['build']
+
+
+def submit(args, lane, tail_lines, exclusive):
     if os.environ.get('HEAVY_TASK'):
         raise Refusal('already inside a heavy task; run the command directly')
     # An interrupt of the waiting client cancels its task (request_cancel).
@@ -830,8 +844,11 @@ def submit(args, lane, tail_lines):
         ensure_reconciler(ledger)
         if not reconcile(ledger):
             raise Refusal('queue is unavailable; admission is held')
-        task = {'token': token, 'lane': lane, 'args': args, 'label': os.environ.get('HEAVY_LABEL', Path.cwd().name),
-                'repo': str(Path.cwd()), 'tree': tree, 'commit': commit, 'policy': os.environ.get('SKEIN_GATE_POLICY_ID', 'gate-policy-unavailable') if lane == 'gate' else 'build-4',
+        jobs = os.environ.get('HEAVY_BUILD_JOBS_EFFECTIVE', str(len(os.sched_getaffinity(0))))
+        label = os.environ.get('HEAVY_LABEL', Path.cwd().name)
+        task = {'token': token, 'lane': lane, 'exclusive': exclusive, 'weight': weight(lane, label),
+                'args': args, 'label': label,
+                'repo': str(Path.cwd()), 'tree': tree, 'commit': commit, 'policy': os.environ.get('SKEIN_GATE_POLICY_ID', 'gate-policy-unavailable') if lane == 'gate' else 'build-' + jobs,
                 'boot': boot(), 'queue': QUEUE, 'unit': PREFIX + '-' + token + '.service',
                 'submitter': identity(),
                 'submitted': time.time(), 'state': 'submitted', 'log': str(LOGS / (token + '.log')),
@@ -844,7 +861,7 @@ def submit(args, lane, tail_lines):
         env['HEAVY_TASK'] = '1'
         env['NEXTEST_DOUBLE_SPAWN'] = os.environ.get('NEXTEST_DOUBLE_SPAWN', '0')
         env.pop('NEXTEST_TEST_THREADS', None)
-        env['CARGO_BUILD_JOBS'] = os.environ.get('HEAVY_BUILD_JOBS_EFFECTIVE', '4') if lane == 'build' else '8'
+        env['CARGO_BUILD_JOBS'] = jobs
         env['HEAVY_LANE'] = lane
         # A stashed task cannot beat the durable token -> queue-ID mapping.
         result = run(pueue_command('add', '--stashed', '--print-task-id', '--group', lane,
@@ -927,7 +944,8 @@ def wrapper(token):
             if not queue_available or task['state'] != 'waiting':
                 time.sleep(0.1)
                 continue
-            if task['lane'] == 'gate':
+            # A task saved before the land flag existed is exclusive if a gate.
+            if task['lane'] == 'gate' and task.get('exclusive', True):
                 if ledger.data['gate'] not in (None, token):
                     ready = False
                 else:
@@ -946,15 +964,20 @@ def wrapper(token):
                         ledger.event(task, 'drain_begin')
                         ledger.save()
                         fault('paused', token)
-                    ready = not any(other['token'] != token and other['lane'] == 'build'
+                    ready = not any(other['token'] != token and (other['lane'] == 'build'
+                                                                 or not other.get('exclusive', True))
                                     and other['state'] in ('launching', 'active', 'finishing', 'closing')
                                     for other in ledger.tasks.values())
                     if ready:
                         ledger.event(task, 'drain_end')
+            elif task['lane'] == 'gate':
+                # A landing's gate runs beside the builds, first by its weight.
+                ready = not ledger.data['gate']
             else:
-                ready = not ledger.data['gate'] and sum(other['lane'] == 'build' and
+                slots = int(os.environ.get('HEAVY_BUILD_SLOTS_EFFECTIVE', '0'))
+                ready = not ledger.data['gate'] and (not slots or sum(other['lane'] == 'build' and
                     other['state'] in ('launching', 'active', 'finishing', 'closing')
-                    for other in ledger.tasks.values()) < 2
+                    for other in ledger.tasks.values()) < slots)
                 ready = ready and 'build' not in ledger.data['maintenance']
             if ready:
                 # Lazy-starting kache here would place the shared daemon inside
@@ -967,7 +990,8 @@ def wrapper(token):
                     ledger.save()
                     continue
                 task['state'] = 'launching'
-                ledger.event(task, 'admit', build_slots=2, jobs=os.environ.get('CARGO_BUILD_JOBS'))
+                ledger.event(task, 'admit', build_slots=int(os.environ.get('HEAVY_BUILD_SLOTS_EFFECTIVE', '0')),
+                             jobs=os.environ.get('CARGO_BUILD_JOBS'), weight=task.get('weight', WEIGHTS['build']))
                 environment_file(BASE / (token + '.env'), safe_environment())
                 ledger.save()
                 # The in-cgroup guard takes the same lock and checks the durable
@@ -977,6 +1001,7 @@ def wrapper(token):
                     '--unit=' + task['unit'], '--service-type=exec', '--property=ExitType=cgroup',
                     '--property=KillMode=control-group', '--property=Delegate=no',
                     '--property=CPUAccounting=yes', '--property=MemoryAccounting=yes',
+                    '--property=CPUWeight=' + task.get('weight', WEIGHTS['build']),
                     '--property=EnvironmentFile=' + str(BASE / (token + '.env')),
                     '--property=StandardOutput=append:' + task['capture'], '--property=StandardError=inherit',
                     '--working-directory=' + task['repo'], str(KIT / 'heavy'), '--payload', token],
@@ -1083,9 +1108,11 @@ def payload(token):
         ledger.event(task, 'scope_enter', cgroup=group)
         ledger.save()
         args, lane = task['args'], task['lane']
+        alone = lane == 'gate' and task.get('exclusive', True)
     if lane == 'gate':
         if not prepare_payload_policy(token):
             return 2
+    if alone:
         phase(token, 'settle_begin')
         settle = int(os.environ.get('HEAVY_SETTLE', '120'))
         start = time.monotonic()
@@ -1113,7 +1140,7 @@ def payload(token):
             next_gc = time.monotonic() + 120
         time.sleep(0.05)
     code = child.returncode if child.returncode >= 0 else 128 - child.returncode
-    if lane == 'gate':
+    if alone:
         with locked() as ledger:
             elapsed = int(time.time() - ledger.tasks[token]['payload_started'])
         print(f'heavy: ran alone for {elapsed}s', flush=True)
@@ -1190,10 +1217,12 @@ def main(args):
         return cancel(args[1])
     if len(args) == 2 and args[0] in ('--task', '--payload', '--observe'):
         return {'--task': wrapper, '--payload': payload, '--observe': observe}[args[0]](args[1])
-    lane, tail_lines = 'build', int(os.environ.get('HEAVY_TAIL', '200'))
+    lane, exclusive, tail_lines = 'build', False, int(os.environ.get('HEAVY_TAIL', '200'))
     while args:
         if args[0] == '--gate':
-            lane, args = 'gate', args[1:]
+            lane, exclusive, args = 'gate', True, args[1:]
+        elif args[0] == '--land':
+            lane, exclusive, args = 'gate', False, args[1:]
         elif args[0] == '--tail' and len(args) > 1:
             tail_lines, args = int(args[1]), args[2:]
         elif args[0] == '--':
@@ -1205,7 +1234,7 @@ def main(args):
             break
     if not args or tail_lines < 0:
         raise Refusal(USAGE)
-    return submit(args, lane, tail_lines)
+    return submit(args, lane, tail_lines, exclusive)
 
 
 if __name__ == '__main__':

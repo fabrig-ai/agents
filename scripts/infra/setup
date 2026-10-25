@@ -217,7 +217,8 @@ check_machine() {
         warn 'the machine may reboot unattended (Unattended-Upgrade::Automatic-Reboot)'
     fi
     local group want have status slots slots_source line source
-    read -r slots slots_source < <(machine_setting HEAVY_BUILD_SLOTS 2)
+    # Builds take no slot by default: heavy orders them by CPU weight (build-infrastructure.md, 2).
+    read -r slots slots_source < <(machine_setting HEAVY_BUILD_SLOTS 0)
     while IFS= read -r line; do warn "machine.env: ignored line $line"; done < <(
         awk 'NF && $0 !~ /^(PLAN_MIN_MEM_GB|PLAN_MIN_DISK_GB|HEAVY_BUILD_SLOTS|HEAVY_BUILD_JOBS|KACHE_MAX_GB)=[0-9]+$/ { print NR ": " $0 }' "$tmp/machine.env" 2>/dev/null || true)
     for group in gate build; do
@@ -236,7 +237,7 @@ check_machine() {
         if [[ $have != "$want" ]] && ((fix)); then
             pueue parallel "$want" --group "$group" >/dev/null && have=$want
         fi
-        [[ $have == "$want" ]] && ok "queue lane $group runs $want at once ($source)" ||
+        [[ $have == "$want" ]] && ok "queue lane $group runs $( ((want)) && echo "$want" || echo 'every task') at once ($source)" ||
             warn "queue lane $group runs $have at once, not $want ($source; --fix sets it)"
         status=$(pueue group --json | jq -r --arg g "$group" '.[$g].status')
         if [[ $status != Running ]] && ((fix)); then

@@ -153,14 +153,15 @@ class Lab:
     def task(self, label):
         return next((task for task in self.state()['tasks'].values() if task['label'] == label), None)
 
-    def start(self, label, gate=False, code=None, duration=0.15, args=None):
+    def start(self, label, gate=False, code=None, duration=0.15, args=None, land=False):
         if args is None:
             args = [sys.executable, '-c', code or f'import time; time.sleep({duration})']
         env = dict(self.env, HEAVY_LABEL=label)
         # Only fixture-owned input variables are examined by the payload.
         env['FIXTURE_TOKEN'] = 'must-be-omitted'
         out = (self.path / (label + '.client.txt')).open('w')
-        child = subprocess.Popen([str(HEAVY), *(['--gate'] if gate else []), '--', *args],
+        flags = ['--gate'] if gate else ['--land'] if land else []
+        child = subprocess.Popen([str(HEAVY), *flags, '--', *args],
                     env=env, cwd=self.repo, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT)
         out.close()
         self.clients.append(child)
@@ -200,12 +201,15 @@ class Lab:
         for event in events:
             name, token = event['event'], event['token']
             if name == 'scope_enter':
-                lane = event['lane']
-                if lane == 'gate':
-                    assert not active, ('gate overlaps live scope', active)
+                # Only an exclusive gate runs alone; a landing's gate runs
+                # beside builds, and builds beside it.
+                lane = 'exclusive' if event.get('exclusive', event['lane'] == 'gate') else event['lane']
+                if lane == 'exclusive':
+                    assert not active, ('exclusive gate overlaps live scope', active)
                 else:
-                    assert 'gate' not in active.values(), ('build overlaps gate', active)
-                    assert len(active) < 2, ('more than two builds', active)
+                    assert 'exclusive' not in active.values(), ('scope overlaps exclusive gate', active)
+                    assert list(active.values()).count('build') < 2 or lane != 'build', \
+                        ("more than the lab queue's two builds", active)
                 active[token] = lane
             elif name == 'release_end':
                 active.pop(token, None)
@@ -334,9 +338,9 @@ class Lab:
 
 def normal(lab):
     lab.env['FIXTURE_ESCAPED'] = '$literal $(not-a-command) `literal` \\ quote"\nline two'
-    child = lab.start('failure', code='import os; print("payload-output"); assert "FIXTURE_TOKEN" not in os.environ; assert os.environ["CARGO_BUILD_JOBS"] == "4"; raise SystemExit(3)')
+    child = lab.start('failure', code='import os; print("payload-output"); assert "FIXTURE_TOKEN" not in os.environ; assert os.environ["CARGO_BUILD_JOBS"] == str(len(os.sched_getaffinity(0))); raise SystemExit(3)')
     lab.done(child, 3)
-    gate = lab.start('gate', gate=True, code='import os; assert os.environ["CARGO_BUILD_JOBS"] == "8"')
+    gate = lab.start('gate', gate=True, code='import os; assert os.environ["CARGO_BUILD_JOBS"] == str(len(os.sched_getaffinity(0)))')
     lab.done(gate)
     assert 'payload-output' in (lab.path / 'failure.client.txt').read_text()
     assert lab.event('gate', 'wrapper_start')['time_ns'] < lab.event('gate', 'payload_begin')['time_ns']
@@ -633,8 +637,9 @@ def land_diagnostic(lab, point, prebuild=False):
     if point == 'missing':
         assert owned_wrapper(task['wrapper']) and task['state'] == 'active'
     elif not prebuild and point != 'seal':
-        assert lab.state()['gate'] == token
-        assert json.loads(lab.q('group', '--json'))['build']['status'] != 'Running'
+        # A landing's gate holds nothing: the builds go on beside it.
+        assert lab.state()['gate'] is None
+        assert json.loads(lab.q('group', '--json'))['build']['status'] == 'Running'
     assert lab.call(['git', 'rev-parse', 'main']).stdout.strip() == base
     assert not (lab.path / 'tmp/gates').exists()
     if point == 'missing':
@@ -782,6 +787,38 @@ def concurrent(lab):
     builds = [lab.start('build-' + str(i), duration=0.15) for i in range(3)]
     for client in [a, b, *gates, *builds]:
         lab.done(client)
+
+
+def weighted(lab):
+    # A landing's gate runs beside a build, first by its CPU weight: it
+    # neither pauses nor drains the builds, nor waits for the load to settle.
+    build = lab.start('build', duration=6)
+    wait_for(lambda: lab.event('build', 'payload_begin'), 'build running')
+    lab.done(lab.start('land-gate', land=True, duration=0.1))
+    lab.done(build)
+    assert lab.event('land-gate', 'payload_begin')['time_ns'] < lab.event('build', 'payload_end')['time_ns'], \
+        'the gate ran while the build did'
+    for name in ('pause_begin', 'drain_begin', 'settle_begin'):
+        assert not lab.event('land-gate', name), name
+    assert lab.event('land-gate', 'admit')['weight'] == '10000', 'a landing first'
+    assert lab.event('build', 'admit')['weight'] == '1000', "an agent's build next"
+    lab.env['HEAVY_CLASS'] = 'idle'
+    lab.done(lab.start('idle', duration=0.05))
+    del lab.env['HEAVY_CLASS']
+    assert lab.event('idle', 'admit')['weight'] == 'idle', 'idle work on idle cores'
+
+
+def fmt_direct(lab):
+    # cargo fmt builds nothing: heavy runs it at once, outside the queue.
+    fake = lab.path / 'fake-bin'
+    fake.mkdir()
+    (fake / 'cargo').write_text('#!/bin/sh\necho "fake cargo $*"\n')
+    (fake / 'cargo').chmod(0o755)
+    env = dict(lab.env, PATH=str(fake) + ':' + lab.env['PATH'])
+    result = lab.call([HEAVY, '--tail', '5', 'cargo', 'fmt', '--check'], environment=env)
+    assert 'fake cargo fmt --check' in result.stdout, result.stdout + result.stderr
+    lab.done(lab.start('after-fmt'))
+    assert [event['label'] for event in lab.events() if event['event'] == 'submit'] == ['after-fmt'], 'not queued'
 
 
 def replay(lab):
@@ -1509,6 +1546,7 @@ def main():
              ('daemon-restart', lambda lab: descendants(lab, 'restart')),
              ('boot-change', lambda lab: descendants(lab, 'boot')),
              ('prepaused', prepaused), ('maintenance', maintenance), ('concurrent', concurrent),
+             ('weighted', weighted), ('fmt-direct', fmt_direct),
              ('journal-replay', replay), ('late-launch', late_launch),
              ('late-launch-release-crash', lambda lab: late_launch(lab, True)),
              ('policy-helper-descendants', policy_helper_descendants),

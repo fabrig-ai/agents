@@ -5,14 +5,21 @@ owners' `heavy` commands. Runtime identity is specified by gate-policy.md.
 
 ## 1. In one page
 
-- **Two build slots, four jobs each.** Builds run through pueue's `build`
-  group. An exclusive gate uses the `gate` group, one at a time, with
-  eight jobs. Host admission also counts task lifetimes, independently of
-  the queue daemon's view of its wrappers.
-- **Intent precedes effects.** A gate records its token, boot identity,
-  queue identity, owned systemd unit and the groups found running in a
-  durable atomic snapshot before pausing any group. Groups already paused
-  remain paused when the gate releases.
+- **Weights, not slots** (build-efficiency.md, 5). Every task builds as
+  wide as the machine, and builds take no slot unless the machine sets
+  `HEAVY_BUILD_SLOTS`. Each task's systemd unit carries a CPU weight: a
+  landing's prebuild and gate (`heavy --land`) 10000, an agent's builds
+  1000, `HEAVY_CLASS=background` 100, `HEAVY_CLASS=idle` only idle cores.
+  When the cores are contended, landing work takes them first; when they
+  are not, nothing waits. `cargo fmt` builds nothing and runs at once.
+- **One exclusive gate, by choice.** `heavy --gate` still runs alone, in
+  pueue's `gate` group, one at a time: for what needs a quiet machine,
+  a kache setup or a measurement. Host admission also counts task
+  lifetimes, independently of the queue daemon's view of its wrappers.
+- **Intent precedes effects.** An exclusive gate records its token, boot
+  identity, queue identity, owned systemd unit and the groups found
+  running in a durable atomic snapshot before pausing any group. Groups
+  already paused remain paused when the gate releases.
 - **Containment owns descendants.** Every payload executes in a user
   systemd service with `ExitType=cgroup`, `KillMode=control-group` and no
   delegated subtree. Changing sessions does not escape it. PID exit and
@@ -72,12 +79,19 @@ after token release: without a safe identity API, a queue row cannot be
 removed without risking an unrelated replacement. Completed queue rows
 therefore require operator retention handling on the dedicated queue.
 
-A gate saves pause intent, pauses every non-gate group without stopping
-running tasks, then drains the ledger's live build lifetimes. Persisted
-gate holds also block build admission if the queue restarts and forgets
-its group pause. Builds occupy at most two ledger slots until their
-cgroups are empty, regardless of the queue's slot accounting. Gates
-serialize through both the queue and the host ledger.
+An exclusive gate (`--gate`) saves pause intent, pauses every non-gate
+group without stopping running tasks, then drains the ledger's live
+lifetimes, builds and landing gates alike, and waits for the load to
+settle. Persisted gate holds also block every other admission if the
+queue restarts and forgets its group pause. A landing's gate (`--land`)
+takes the same policy, candidate checks and receipt, but no hold: it
+starts beside the builds, first by its CPU weight. Builds occupy at most
+`HEAVY_BUILD_SLOTS` ledger slots (0, the default: no limit) until their
+cgroups are empty, regardless of the queue's slot accounting, and `setup`
+gives the queue's `build` group the same number. Gates of both kinds
+serialize through the queue's `gate` group. Every task builds with
+`HEAVY_BUILD_JOBS` jobs, the machine's CPU count by default, and its unit
+carries its class's `CPUWeight` (section 1).
 
 ## 3. Durable state and release
 

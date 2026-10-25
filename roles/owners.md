@@ -447,7 +447,7 @@ not as a code review:
 A sub-agent may check a large one. Then the owner lands it, or tells
 the implementer to, with `land`, from a clean worktree on its branch:
 it rebases on `origin/main`, builds and lints, runs the repository's
-gate (`scripts/check.sh`) through `heavy --gate`, records the evidence
+gate (`scripts/check.sh`) through `heavy --land`, records the evidence
 in the tip commit's trailers, and pushes. `land --docs` lands Markdown
 alone, without the gate, and the mockups under `docs/design/` (a
 directory named `mockups`) with it: they need no tests or builds (with
