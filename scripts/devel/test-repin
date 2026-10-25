@@ -144,7 +144,7 @@ class Lab:
         private.mkdir()
         self.bin = root / 'bin'
         self.bin.mkdir()
-        self.env = dict(os.environ, PATH=str(self.bin) + ':/usr/bin:/bin',
+        self.env = dict(os.environ, PATH=str(self.bin) + ':/usr/bin:/bin', LAND_TIDY='',
                         CARGO_HOME=str(root / 'cargo'), GIT_CONFIG_GLOBAL='/dev/null',
                         GIT_CONFIG_NOSYSTEM='1', GIT_ALLOW_PROTOCOL='file', GIT_AUTHOR_NAME='Fixture',
                         GIT_AUTHOR_EMAIL='fixture@invalid', GIT_COMMITTER_NAME='Fixture',

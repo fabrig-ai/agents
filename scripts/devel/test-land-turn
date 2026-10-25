@@ -387,7 +387,7 @@ class TurnLab(Lab):
             'sys.exit(1 if (control/("fail-"+key)).exists() else 0)\n')
         self.command = 'python3 ' + str(gate) + ' gate'
         self.env.update(LAND_TURN='1', LAND_TURN_FIXTURE_DIR=str(self.path / 'tmp/coordinator'),
-                        LAND_PREBUILD='python3 ' + str(gate) + ' prebuild', PLAN_MIN_DISK_GB='0')
+                        LAND_PREBUILD='python3 ' + str(gate) + ' prebuild', LAND_TIDY='', PLAN_MIN_DISK_GB='0')
         self.env.pop('LAND_TURN_ACTIVE', None)
         self.clones = {}
         for tag in ('a', 'b'):

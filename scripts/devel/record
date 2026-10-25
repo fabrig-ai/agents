@@ -9,10 +9,12 @@ import json
 import os
 from pathlib import Path
 import re
+import runpy
 import subprocess
 import sys
 import tempfile
 
+HOOKS = runpy.run_path(str(Path(__file__).resolve().with_name('tidy-hooks.py')))
 UNKNOWN = 'unknown'
 NAME = r'[a-z0-9][a-z0-9_-]*'
 SECRET = re.compile(r'-----BEGIN [^\n]*PRIVATE KEY-----|(?<![\w-])(?:gh[pousr]_[A-Za-z0-9_-]{20,}|github_pat_[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9_-]{20,})|xox[abpr]-|AKIA[A-Z0-9]{16}')
@@ -249,7 +251,62 @@ def installation(root, old, target, selected, working):
         lockpath.unlink(missing_ok=True)
 
 
-def write(root, args):
+def closing_missions(root, selected, files, old):
+    missions = []
+    for name in sorted(selected):
+        match = re.fullmatch(rf'missions/({NAME})/closing.md', name)
+        if not match:
+            continue
+        readme = f'missions/{match[1]}/README.md'
+        content = files.get(readme)
+        if content is None:
+            content = git(root, 'show', f'{old}:{readme}', check=False).stdout
+        front = re.match(r'\A---\n(.*?)\n---(?:\n|$)', content.decode(), re.S)
+        if front and re.search(r'^state:[ \t]*(ended|abandoned)[ \t]*$', front[1], re.M):
+            missions.append(match[1])
+    return missions
+
+
+def check_closing(tmp, missions):
+    def unreadable(error):
+        raise Refusal(f'{error.filename}: cannot inspect mission worktrees: {error.strerror}')
+
+    held = []
+    for mission in missions:
+        owners = tmp / 'owners'
+        directories = [owners / mission]
+        if owners.is_dir():
+            directories += sorted(p for p in owners.iterdir()
+                                  if re.fullmatch(re.escape(mission) + r'-m[1-9][0-9]*', p.name))
+        for directory in directories:
+            # Do not follow symlinks out of the mission's directories.
+            if directory.is_symlink() or not directory.exists():
+                continue
+            for parent, dirs, names in os.walk(directory, onerror=unreadable):
+                dirs[:] = [d for d in dirs if d != '.git' and not (Path(parent) / d).is_symlink()]
+                if '.git' not in names:
+                    continue
+                worktree = Path(parent)
+                reasons = []
+                fetched = git(worktree, 'fetch', '--prune', 'origin', check=False)
+                if fetched.returncode:
+                    reasons.append('cannot fetch origin to check unpublished work')
+                else:
+                    commits = out(worktree, 'rev-list', 'HEAD', '--not', '--remotes=origin')
+                    if commits:
+                        reasons.append('commits on no origin branch: ' + ', '.join(commits.splitlines()))
+                status = git(worktree, 'status', '--porcelain=v1', '-z', '--untracked-files=all').stdout
+                rows = status.split(b'\0')
+                if any(row.startswith(b'?? ') for row in rows):
+                    reasons.append('untracked files')
+                if any(row and not row.startswith(b'?? ') for row in rows):
+                    reasons.append('changes to tracked files')
+                if reasons:
+                    held.append(f'{worktree}: ' + '; '.join(reasons))
+    need(not held, '\n'.join(held) + '\npush it and name it in the closing note\'s "what is left", or delete it')
+
+
+def write(root, tmp, args):
     need(Path(out(root, 'rev-parse', '--show-toplevel')) == root, 'expected records checkout root')
     common = Path(out(root, 'rev-parse', '--path-format=absolute', '--git-common-dir'))
     with (common / 'record.lock').open('a') as lock:
@@ -268,6 +325,8 @@ def write(root, args):
             need(path.stat().st_size <= cap_for(name), f'{name}: cap exceeded')
             files[name] = path.read_bytes()
             validate(name, files[name])
+        missions = closing_missions(root, selected, files, old)
+        check_closing(tmp, missions)
         candidate = old
         with tempfile.TemporaryDirectory(dir=common) as directory:
             env = {'GIT_INDEX_FILE': str(Path(directory) / 'index')}
@@ -296,6 +355,8 @@ def write(root, args):
                 with installation(root, old, candidate, selected, candidate) as follow:
                     follow()
                 print('record: committed but not pushed; cannot fetch origin/main', file=sys.stderr)
+                for mission in missions:
+                    HOOKS['start_tidy']('record', 'RECORD_TIDY', tmp, ['--mission', mission])
                 return 3
             remote = out(root, 'rev-parse', 'refs/remotes/origin/main')
             target = replay(root, candidate, remote, claims)
@@ -310,6 +371,8 @@ def write(root, args):
                 if target == remote or git(root, 'push', '--quiet', 'origin', target + ':refs/heads/main', check=False).returncode == 0:
                     follow()
                     print('record: nothing to commit; up to date' if target == remote else 'record: pushed')
+                    for mission in missions:
+                        HOOKS['start_tidy']('record', 'RECORD_TIDY', tmp, ['--mission', mission])
                     return 0
         # The last failed push can also lose a name; check without a sixth push.
         if git(root, 'fetch', '--quiet', 'origin', 'main', check=False).returncode == 0:
@@ -318,6 +381,8 @@ def write(root, args):
         with installation(root, old, target, selected, candidate) as follow:
             follow()
         print('record: committed but not pushed after five attempts', file=sys.stderr)
+        for mission in missions:
+            HOOKS['start_tidy']('record', 'RECORD_TIDY', tmp, ['--mission', mission])
         return 3
 
 
@@ -745,7 +810,7 @@ def main():
             with (common / 'record.lock').open('a') as lock:
                 fcntl.flock(lock, fcntl.LOCK_EX)
                 return runs(root, tmp, args)
-        return write(root, args)
+        return write(root, tmp, args)
     except (Refusal, OSError, ValueError) as error:
         print(f'record: {error}', file=sys.stderr)
         return 2

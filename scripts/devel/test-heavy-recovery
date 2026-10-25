@@ -78,7 +78,7 @@ class Lab:
         for key in ('HEAVY_TASK', 'DEV_ROOT', 'DEV_TMP', 'PUEUE_CONFIG_PATH', 'PUEUE_PROFILE',
                     'HEAVY_FAULT_DIR', 'HEAVY_BOOT_ID_FILE', 'RUSTC_WRAPPER'):
             self.env.pop(key, None)
-        self.env.update(DEV_ROOT=str(self.path), DEV_TMP=str(self.path / 'tmp'),
+        self.env.update(DEV_ROOT=str(self.path), DEV_TMP=str(self.path / 'tmp'), LAND_TIDY='',
                         PUEUE_CONFIG_PATH=str(self.config), HEAVY_SETTLE='0',
                         HEAVY_BOOT_ID_FILE=str(self.boot), HEAVY_FAULT_DIR=str(self.faults), HEAVY_RECOVERY_FIXTURE='1')
         cache_bin = self.path / 'fixture-bin'

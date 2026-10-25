@@ -20,6 +20,10 @@
 # landing that pushes also holds the set lock on hetzner3, land-set's, a
 # code landing once it has proved its tree without it, and for as long as
 # that proof holds.
+# After a push or --local landing, mark the branch landed, clear a linked
+# worktree's own target/, and start tidy REPO detached, logging to
+# $tmp/logs/tidy.log. LAND_TIDY is a shell command (default "$kit/tidy");
+# set and empty, none starts. Cleanup warnings do not change the result.
 #
 # land starts no tier after landing, not even a repository's
 # scripts/after-landing.sh: how one runs is still to be designed (the user,
@@ -501,6 +505,13 @@ PYRESULT
         echo "land: warning: the result was not written" >&2
 }
 
+land_cleanup() {
+    git config "branch.$branch.landed" "$commit" ||
+        echo "land: warning: cannot mark $branch landed" >&2
+    python3 -B "$kit/tidy-hooks.py" "$top" "$tmp" "$repo" ||
+        echo "land: warning: cleanup could not start" >&2
+}
+
 try=0 pushed=false
 while :; do
     try=$((try + 1))
@@ -675,6 +686,7 @@ Resolve them, run git rebase --continue, then land again."
     status=0
     follow "$commit" || status=$?
     flock -u 9
+    land_cleanup
     case $status in
     0) ;;
     1) die 5 "landed $commit on origin/main, but a checkout of main has changes and did not follow" ;;
@@ -682,6 +694,8 @@ Resolve them, run git rebase --continue, then land again."
     esac
     break
 done
+
+if ((local)); then land_cleanup; fi
 
 location="on $where"
 if ((no_push)); then location="not pushed"; fi

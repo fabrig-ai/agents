@@ -38,6 +38,7 @@ class Lab:
             path.mkdir()
         self.env = dict(PATH=str(self.bin) + ':' + os.environ['PATH'], HOME=str(self.home),
                         DEV_TMP=str(self.tmp), USER='fixture', POST_NAME='o/fixture',
+                        RECORD_TIDY='',
                         GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1',
                         GIT_AUTHOR_NAME='Fixture', GIT_AUTHOR_EMAIL='fixture@invalid',
                         GIT_COMMITTER_NAME='Fixture', GIT_COMMITTER_EMAIL='fixture@invalid',
@@ -112,6 +113,134 @@ class Lab:
             if process.poll() is None:
                 process.kill()
                 process.wait()
+
+
+def ending(lab, committed=False, state='ended'):
+    name = 'missions/demo/README.md'
+    lab.put(name, front().replace('state: unknown', 'state: ' + state))
+    if committed:
+        lab.run('commit', name)
+    closing = 'missions/demo/closing.md'
+    lab.put(closing, '# Closing\n\n## What is left\n\nNothing.\n')
+    return [closing] if committed else [name, closing]
+
+
+def mission_worktree(lab, suffix=''):
+    worktree = lab.tmp / ('owners/demo' + suffix) / 'm1/work'
+    worktree.parent.mkdir(parents=True)
+    lab.git(lab.b, 'worktree', 'add', '-b', 'mission' + suffix, str(worktree))
+    return worktree
+
+
+def closing_unpublished(lab):
+    paths = ending(lab)
+    worktree = mission_worktree(lab, '-m2')
+    (worktree / 'STATUS.md').write_text('unpublished\n')
+    lab.git(worktree, 'commit', '-am', 'unpublished mission work')
+    old = lab.git(lab.a, 'rev-parse', 'HEAD')
+    output = lab.run('commit', *paths, status=2)
+    assert str(worktree) in output and 'commits on no origin branch' in output, output
+    assert 'push it and name it in the closing note\'s "what is left", or delete it' in output
+    assert lab.git(lab.a, 'rev-parse', 'HEAD') == old
+
+
+def closing_dirty(lab):
+    paths = ending(lab, committed=True)
+    worktree = mission_worktree(lab)
+    (worktree / 'STATUS.md').write_text('dirty\n')
+    (worktree / 'new.txt').touch()
+    output = lab.run('commit', *paths, status=2)
+    assert str(worktree) in output and 'tracked files' in output and 'untracked files' in output, output
+
+
+def closing_deleted_remote(lab):
+    paths = ending(lab)
+    worktree = mission_worktree(lab)
+    (worktree / 'STATUS.md').write_text('formerly published\n')
+    lab.git(worktree, 'commit', '-am', 'formerly published')
+    lab.git(worktree, 'push', 'origin', 'HEAD:temporary')
+    lab.git(worktree, 'fetch', 'origin')
+    lab.git(lab.a, 'push', 'origin', ':temporary')
+    output = lab.run('commit', *paths, status=2)
+    assert str(worktree) in output and 'commits on no origin branch' in output, output
+
+
+def closing_fetch_failure(lab):
+    paths = ending(lab)
+    worktree = mission_worktree(lab)
+    lab.git(worktree, 'remote', 'set-url', 'origin', str(lab.root / 'missing-origin.git'))
+    old = lab.git(lab.a, 'rev-parse', 'HEAD')
+    output = lab.run('commit', *paths, status=2)
+    assert str(worktree) in output and 'cannot fetch origin' in output, output
+    assert lab.git(lab.a, 'rev-parse', 'HEAD') == old
+
+
+def closing_unreadable(lab):
+    paths = ending(lab)
+    worktree = mission_worktree(lab)
+    directory = worktree.parent
+    directory.chmod(0)
+    try:
+        output = lab.run('commit', *paths, status=2)
+        assert str(directory) in output and 'cannot inspect mission worktrees' in output, output
+    finally:
+        directory.chmod(0o700)
+
+
+def closing_nested(lab):
+    paths = ending(lab)
+    outer = mission_worktree(lab)
+    exclude = Path(lab.git(outer, 'rev-parse', '--git-path', 'info/exclude'))
+    with exclude.open('a') as stream:
+        stream.write('\n/nested/\n')
+    nested = outer / 'nested'
+    lab.git(lab.b, 'worktree', 'add', '-b', 'nested-work', str(nested))
+    (nested / 'STATUS.md').write_text('unpublished nested work\n')
+    lab.git(nested, 'commit', '-am', 'nested work')
+    output = lab.run('commit', *paths, status=2)
+    assert str(nested) in output and 'commits on no origin branch' in output, output
+
+
+def closing_clean(lab):
+    paths = ending(lab, committed=True)
+    worktree = mission_worktree(lab)
+    # Fetch must discover this published branch, absent from a's refs.
+    (worktree / 'STATUS.md').write_text('published\n')
+    lab.git(worktree, 'commit', '-am', 'published mission work')
+    lab.git(worktree, 'push', 'origin', 'HEAD:mission-published')
+    (worktree / '.gitignore').write_text('/target/\n')
+    lab.git(worktree, 'add', '.gitignore')
+    lab.git(worktree, 'commit', '-m', 'ignore build output')
+    lab.git(worktree, 'push', 'origin', 'HEAD:mission-published')
+    (worktree / 'target').mkdir()
+    (worktree / 'target/build').touch()
+    calls = lab.root / 'tidy.args'
+    stub = lab.root / 'tidy stub'
+    stub.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > ' + shlex.quote(str(calls)) + '\n')
+    stub.chmod(0o700)
+    lab.run('commit', *paths, extra=dict(RECORD_TIDY=shlex.quote(str(stub))))
+    deadline = time.monotonic() + 5
+    while not calls.exists() or not calls.read_text().endswith('demo\n'):
+        assert time.monotonic() < deadline, 'tidy never started'
+        time.sleep(.01)
+    assert calls.read_text() == '--mission\ndemo\n'
+    assert lab.git(lab.a, 'show', 'HEAD:missions/demo/closing.md').startswith('# Closing')
+
+
+def closing_abandoned(lab):
+    paths = ending(lab, state='abandoned')
+    output = lab.run('commit', *paths, extra=dict(RECORD_TIDY='/missing-fixture-tidy'))
+    assert 'warning: cannot start tidy' in output, output
+    assert 'pushed' in output, output
+
+
+def closing_active(lab):
+    paths = ending(lab, committed=True, state='active')
+    # The unselected working README must not end the committed mission.
+    lab.put('missions/demo/README.md', front().replace('state: unknown', 'state: ended'))
+    worktree = mission_worktree(lab)
+    (worktree / 'untracked').touch()
+    lab.run('commit', *paths, extra=dict(RECORD_TIDY='/missing-fixture-tidy'))
 
 
 def writer(lab):
@@ -577,7 +706,12 @@ def milestone(lab):
 def main():
     # The cases share nothing (each has its own Lab, and every subprocess its
     # own env), so they run at once on threads; results print in case order.
-    cases = (writer, refusals, different_files, name_race, conflict, offline, merged_validation, installation_failures, setup, telemetry, milestone)
+    cases = (closing_unpublished, closing_dirty, closing_deleted_remote, closing_fetch_failure, closing_unreadable, closing_nested,
+             closing_clean, closing_abandoned, closing_active,
+             writer, refusals, different_files, name_race, conflict, offline, merged_validation, installation_failures, setup, telemetry, milestone)
+    if len(sys.argv) > 1:
+        cases = tuple(case for case in cases if case.__name__ in sys.argv[1:])
+        assert cases, 'no cases selected'
     with tempfile.TemporaryDirectory(prefix='record-fixture-') as directory:
         def run(number, case):
             root = Path(directory) / str(number)

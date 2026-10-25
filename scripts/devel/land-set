@@ -14,6 +14,7 @@ import math
 import os
 from pathlib import Path
 import re
+import runpy
 import secrets
 import select
 import shlex
@@ -27,6 +28,7 @@ import time
 import tomllib
 from urllib.parse import parse_qs, quote, urlsplit
 
+HOOKS = runpy.run_path(str(Path(__file__).resolve().with_name('tidy-hooks.py')))
 os.umask(0o077)
 ORDER = ('skein', 'smith', 'hearth', 'jig', 'temper')
 UPSTREAM = dict(skein=(), smith=('skein',), hearth=('skein',),
@@ -374,7 +376,8 @@ def repin(runner, path, name, label, landed, candidates, root, mains):
 def land(runner, path, *args, **options):
     """Run land; return its status, its output and the land-result-v1 object it wrote, or None."""
     target = runner.results / secrets.token_hex(8)
-    code, output = runner.run(path, ['land', *args], check=False, env=dict(LAND_RESULT=str(target)), **options)
+    code, output = runner.run(path, ['land', *args], check=False,
+                             env=dict(LAND_RESULT=str(target), LAND_TIDY=''), **options)
     try:
         result = json.loads(target.read_text())
         target.unlink()
@@ -527,6 +530,7 @@ def main():
     lock, spec, summary, current = None, None, {}, None
     fixture, paths, staging, failed = None, {}, {}, None
     candidates, bases, made, proved, warnings = {}, {}, set(), {}, []
+    pushed = []
     announced = cleaning = terminal = False
     token = secrets.token_hex(16)
     host = re.sub('[^A-Za-z0-9_.-]', '-', socket.gethostname()).lstrip('._-')[:64] or 'local'
@@ -705,6 +709,16 @@ def main():
             candidate = candidates[name]
             commit, code, outcome = push_step(runner, paths[name], name, candidate)
             if commit:
+                pushed.append(name)
+                if spec['repos'][name] != 'pin-only':
+                    try:
+                        branch = runner.git(paths[name], 'symbolic-ref', '--short', 'HEAD')
+                        runner.git(paths[name], 'config', f'branch.{branch}.landed', commit)
+                    except (Failure, OSError) as error:
+                        if isinstance(error, Failure) and error.status in (128 + signal.SIGINT, 128 + signal.SIGTERM):
+                            raise
+                        print(f'land-set: warning: cannot mark {name} landed: {error}', file=sys.stderr)
+                HOOKS['clear_target']('land-set', paths[name])
                 landed[name] = commit
                 candidates.pop(name)
                 write_state(state, spec['set'], landed)
@@ -781,6 +795,8 @@ def main():
             print(f'land-set: {name}: {result}', flush=True)
         if prove and not status:
             print(f'land-set: proved; land it on {host} with land-set {args.setfile}', flush=True)
+        if pushed:
+            HOOKS['start_tidy']('land-set', 'LAND_TIDY', tmp, pushed)
     return status
 
 

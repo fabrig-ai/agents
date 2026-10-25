@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import runpy
 import shutil
 import shlex
 import stat
@@ -12,6 +13,9 @@ import subprocess
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
+from contextlib import redirect_stderr
+import io
 
 KIT = Path(__file__).resolve().parent
 
@@ -74,9 +78,9 @@ class PolicyFixtures(unittest.TestCase):
             path.mkdir()
         self.env = {"PATH": str(self.bin) + ":" + os.defpath, "HOME": str(self.home),
                     "DEV_ROOT": str(self.root), "DEV_TMP": str(self.root / "tmp"),
-                    "LAND_PREBUILD": "", "GIT_CONFIG_GLOBAL": os.devnull,
+                    "LAND_PREBUILD": "", "LAND_TIDY": "", "GIT_CONFIG_GLOBAL": os.devnull,
                     "GIT_CONFIG_NOSYSTEM": "1", "FIXTURE_CALLS": str(self.root / "calls")}
-        for name in ("land", "gate-policy.sh", "kit.sh", "land-capture.py", "recovery_message.py", "receipt_inputs.py"):
+        for name in ("land", "tidy-hooks.py", "gate-policy.sh", "kit.sh", "land-capture.py", "recovery_message.py", "receipt_inputs.py"):
             shutil.copy(KIT / name, self.kit / name)
         self.script(self.kit / "heavy", r'''#!/usr/bin/env python3
 import hashlib
@@ -295,6 +299,166 @@ sys.exit(result.returncode)
         self.git("update-ref", "refs/heads/main", self.git("rev-parse", "HEAD").strip())
         self.git("switch", "-q", "work")
 
+    def linked_worktree(self):
+        primary = self.repo
+        self.repo = self.root / "linked"
+        self.repo.mkdir()
+        self.run_command(["git", "-C", str(primary), "switch", "-q", "main"])
+        self.run_command(["git", "-C", str(primary), "worktree", "add", str(self.repo), "work"])
+        return primary
+
+    def target(self):
+        self.ignore_target()
+        (self.repo / "target").mkdir()
+        (self.repo / "target/build").write_text("build")
+
+    def ignore_target(self):
+        exclude = self.repo / self.git("rev-parse", "--git-path", "info/exclude").strip()
+        with exclude.open('a') as stream:
+            stream.write('\n/target\n')
+
+    def result_json(self, result):
+        return json.loads(next(line.removeprefix('land: result ') for line in result.stdout.splitlines()
+                               if line.startswith('land: result ')))
+
+    def tidy_stub(self):
+        path = self.root / "tidy stub"
+        self.script(path, '#!/bin/sh\nprintf "%s\\n" "$@" > "$DEV_ROOT/tidy.args"\n'
+                    'echo tidy-output\necho tidy-error >&2\n')
+        return shlex.quote(str(path))
+
+    def test_landed_mark_push(self):
+        origin = self.root / "origin.git"
+        self.git("clone", "--bare", str(self.repo), str(origin))
+        self.git("remote", "add", "origin", str(origin))
+        result = self.run_command([str(self.kit / "land"), "--gate", "true"])
+        self.assertEqual(self.git("config", "branch.work.landed").strip(),
+                         self.git("rev-parse", "origin/main").strip())
+        self.assertTrue(self.result_json(result)["pushed"])
+
+    def test_landed_mark_local(self):
+        self.land()
+        self.assertEqual(self.git("config", "branch.work.landed").strip(), self.git("rev-parse", "main").strip())
+
+    def test_landed_no_push(self):
+        origin = self.root / "origin.git"
+        self.git("clone", "--bare", str(self.repo), str(origin))
+        self.git("remote", "add", "origin", str(origin))
+        self.target()
+        self.run_command([str(self.kit / "land"), "--no-push", "--gate", "true"],
+                         extra={"LAND_TIDY": self.tidy_stub()})
+        self.assertEqual(self.run_command(["git", "config", "branch.work.landed"], check=False).returncode, 1)
+        self.assertTrue((self.repo / "target/build").is_file())
+        self.assertFalse((self.root / "tidy.args").exists())
+
+    def test_landed_failed_gate(self):
+        self.target()
+        result = self.land({"LAND_TIDY": self.tidy_stub()}, check=False, gate="false")
+        self.assertEqual(result.returncode, 4)
+        self.assertEqual(self.run_command(["git", "config", "branch.work.landed"], check=False).returncode, 1)
+        self.assertTrue((self.repo / "target/build").is_file())
+        self.assertFalse((self.root / "tidy.args").exists())
+
+    def test_landed_target_linked(self):
+        primary = self.linked_worktree()
+        self.target()
+        elsewhere = self.root / "shared-target"
+        elsewhere.mkdir()
+        (elsewhere / "build").touch()
+        self.land({"CARGO_TARGET_DIR": str(elsewhere)})
+        self.assertFalse((self.repo / "target").exists())
+        self.assertTrue((elsewhere / "build").exists())
+        self.assertEqual(self.run_command(["git", "-C", str(primary), "config", "branch.work.landed"]).stdout.strip(),
+                         self.git("rev-parse", "HEAD").strip())
+
+    def test_landed_target_primary(self):
+        self.target()
+        self.land()
+        self.assertTrue((self.repo / "target/build").is_file())
+
+    def test_landed_target_failure_warns(self):
+        self.linked_worktree()
+        self.target()
+        (self.repo / 'target').chmod(0o500)
+        try:
+            result = self.land()
+            self.assertIn('warning: cannot clear', result.stderr)
+            self.assertEqual(self.result_json(result)['exit'], 0)
+        finally:
+            (self.repo / 'target').chmod(0o700)
+
+    def test_landed_target_stat_failure_warns(self):
+        hooks = runpy.run_path(str(self.kit / 'tidy-hooks.py'))
+        warning = io.StringIO()
+        with patch.object(Path, 'is_file', side_effect=PermissionError('fixture stat denied')):
+            with redirect_stderr(warning):
+                hooks['clear_target']('land-set', self.repo)
+        self.assertIn('land-set: warning: cannot clear', warning.getvalue())
+
+    def test_landed_target_symlink(self):
+        self.linked_worktree()
+        self.ignore_target()
+        elsewhere = self.root / "shared-target"
+        elsewhere.mkdir()
+        (elsewhere / "build").touch()
+        (self.repo / "target").symlink_to(elsewhere, target_is_directory=True)
+        self.land()
+        self.assertTrue((elsewhere / "build").exists())
+        self.assertTrue((self.repo / "target").is_symlink())
+
+    def test_landed_tidy(self):
+        log = self.root / "tmp/logs/tidy.log"
+        log.parent.mkdir(parents=True)
+        log.write_text('previous\n')
+        result = self.land({"LAND_TIDY": self.tidy_stub()})
+        deadline = time.monotonic() + 5
+        while not log.exists() or 'tidy-error' not in log.read_text():
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(.01)
+        self.assertEqual((self.root / "tidy.args").read_text(), "repo\n")
+        self.assertIn("tidy-output", log.read_text())
+        self.assertTrue(log.read_text().startswith('previous\n'))
+        self.assertEqual(self.result_json(result)["exit"], 0)
+
+    def test_landed_tidy_empty(self):
+        self.script(self.kit / "tidy", '#!/bin/sh\ntouch "$DEV_ROOT/unwanted-tidy"\n')
+        self.land()
+        self.assertFalse((self.root / "unwanted-tidy").exists())
+        self.assertFalse((self.root / "tmp/logs/tidy.log").exists())
+
+    def test_landed_tidy_missing(self):
+        result = self.land({"LAND_TIDY": "/missing-fixture-tidy --flag"})
+        self.assertIn("warning: cannot start tidy", result.stderr)
+        self.assertEqual(self.result_json(result)["exit"], 0)
+
+    def test_landed_tidy_shell_expansion(self):
+        stub = shlex.split(self.tidy_stub())[0]
+        self.land({'LAND_TIDY': '"$FIXTURE_TIDY" --fixture-flag', 'FIXTURE_TIDY': stub})
+        deadline = time.monotonic() + 5
+        calls = self.root / 'tidy.args'
+        while not calls.exists() or not calls.read_text().endswith('repo\n'):
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(.01)
+        self.assertEqual(calls.read_text(), '--fixture-flag\nrepo\n')
+
+    def test_landed_tidy_detached(self):
+        stub = self.root / 'waiting-tidy'
+        ready, release = self.root / 'tidy.ready', self.root / 'tidy.release'
+        self.script(stub, '#!/usr/bin/python3\nimport os,sys,time,json\nfrom pathlib import Path\n'
+                    'assert sys.stdin.read() == ""\n'
+                    f'Path({str(ready)!r}).write_text(json.dumps([os.getpid(), os.getsid(0)]))\n'
+                    f'while not Path({str(release)!r}).exists(): time.sleep(.01)\n')
+        try:
+            self.land({'LAND_TIDY': shlex.quote(str(stub))})
+            deadline = time.monotonic() + 5
+            while not ready.exists() or not ready.read_text():
+                self.assertLess(time.monotonic(), deadline)
+                time.sleep(.01)
+            pid, session = json.loads(ready.read_text())
+            self.assertEqual(pid, session)
+        finally:
+            release.touch()
+
     def test_after_landing_paused(self):
         result = self.run_command([str(KIT / "after-landing"), "/x", "abc", "main"], check=False)
         self.assertEqual(result.returncode, 2)
@@ -385,6 +549,19 @@ sys.exit(result.returncode)
             self.assertEqual(self.git("-C", str(anchor), "ls-files"), "")
             self.assertFalse((anchor / "code").exists())
             self.assertEqual((anchor / "untracked").read_text(), "leave this alone\n")
+        return result
+
+    def test_landed_pushed_follow_failure(self):
+        self.env['LAND_TIDY'] = self.tidy_stub()
+        result = self.main_checkout_follow(populated=True, local=False)
+        self.assertEqual(self.git('config', 'branch.work.landed').strip(),
+                         self.git('rev-parse', 'HEAD').strip())
+        self.assertEqual(self.result_json(result)['exit'], 5)
+        self.assertTrue(self.result_json(result)['pushed'])
+        deadline = time.monotonic() + 5
+        while not (self.root / 'tidy.args').exists():
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(.01)
 
     def test_no_checkout_anchor_follows_pushed_landing(self):
         self.main_checkout_follow(populated=False, local=False)
@@ -396,7 +573,10 @@ sys.exit(result.returncode)
         self.main_checkout_follow(populated=True, local=False)
 
     def test_dirty_main_checkout_refuses_local_landing(self):
+        self.env['LAND_TIDY'] = self.tidy_stub()
         self.main_checkout_follow(populated=True, local=True)
+        self.assertEqual(self.run_command(['git', 'config', 'branch.work.landed'], check=False).returncode, 1)
+        self.assertFalse((self.root / 'tidy.args').exists())
 
     def test_main_index_read_failure_refuses_local_landing(self):
         self.main_checkout_follow(populated=False, local=True, index_error=True)

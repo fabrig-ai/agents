@@ -34,6 +34,7 @@ import os, signal, subprocess, sys, time
 from pathlib import Path
 import hashlib, json
 args = sys.argv[1:]
+assert os.environ.get('LAND_TIDY') == '', 'land-set must suppress per-branch tidy calls'
 if args == ['--no-push', '--docs']:
     print('land: --no-push cannot be combined with --docs or --local', file=sys.stderr)
     sys.exit(2)
@@ -157,6 +158,7 @@ class Lab:
         self.git_trace.touch()
         self.env = dict(os.environ, PATH=str(self.bin) + ':' + os.environ['PATH'],
                         DEV_ROOT=str(root / 'primary'), DEV_TMP=str(self.tmp),
+                        LAND_TIDY='',
                         HEAVY_RECOVERY_FIXTURE='1', LAND_SET_FIXTURE_DIR=str(self.holder),
                         LAND_TRACE=str(self.trace), GIT_TRACE_FILE=str(self.git_trace),
                         CARGO_HOME=str(root / 'cargo'), CARGO_NET_OFFLINE='false',
@@ -314,6 +316,42 @@ class Lab:
             except BlockingIOError:
                 return
             raise AssertionError('lock released before active work finished')
+
+
+def tidy_hooks(lab):
+    lab.change('skein')
+    stub = lab.root / 'tidy stub'
+    calls = lab.root / 'tidy.calls'
+    stub.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> ' + shlex.quote(str(calls)) + '\n')
+    stub.chmod(0o700)
+    lab.run(env=dict(LAND_TIDY=shlex.quote(str(stub))))
+    deadline = time.monotonic() + HANG
+    while not calls.exists() or not calls.read_text().endswith('\n'):
+        assert time.monotonic() < deadline, 'tidy never started'
+        time.sleep(.01)
+    assert calls.read_text().splitlines() == [' '.join(ORDER)], calls.read_text()
+    for name in ('skein', 'smith', 'temper'):
+        branch = lab.git(lab.work[name], 'symbolic-ref', '--short', 'HEAD')
+        assert lab.git(lab.work[name], 'config', f'branch.{branch}.landed') == lab.heads()[name]
+        assert not (lab.work[name] / 'target').exists()
+    for name in ('hearth', 'jig'):
+        result = execute(lab.primary[name], ['git', 'config', '--get-regexp', r'branch\..*\.landed'], lab.env, check=False)
+        assert result.returncode == 1, result.stdout
+
+
+def tidy_hooks_partial(lab):
+    lab.change('skein')
+    calls = lab.root / 'tidy.calls'
+    command = 'printf "%s\\n" > ' + shlex.quote(str(calls))
+    lab.run(status=4, env=dict(LAND_TIDY=command, FAIL_PUSH_REPO='temper'))
+    deadline = time.monotonic() + HANG
+    while not calls.exists() or not calls.read_text():
+        assert time.monotonic() < deadline, 'tidy never started'
+        time.sleep(.01)
+    assert calls.read_text().splitlines() == list(ORDER[:-1]), calls.read_text()
+    assert (lab.work['temper'] / 'target').is_dir()
+    result = execute(lab.work['temper'], ['git', 'config', '--get-regexp', r'branch\..*\.landed'], lab.env, check=False)
+    assert result.returncode == 1, result.stdout
 
 
 def staging_cargo(lab):
@@ -1033,6 +1071,7 @@ def refusal(lab):
     kit.mkdir()
     script = kit / 'land-set'
     shutil.copyfile(SCRIPT, script)
+    shutil.copyfile(SCRIPT.with_name('tidy-hooks.py'), kit / 'tidy-hooks.py')
     holder = kit / 'land-turn.py'
     for response in ('', 'not-json\n', '{}\n', 'x' * 513 + '\n'):
         holder.write_text('import sys\nsys.stdout.write(' + repr(response) + ')\nsys.stdout.flush()\n')
@@ -1076,7 +1115,7 @@ def skipped(lab):
     lab.untouched(ORDER)
 
 
-CASES = (staging_cargo, rerun, advanced_main, recorded_commit_refusal, unchanged_downstream,
+CASES = (tidy_hooks, tidy_hooks_partial, staging_cargo, rerun, advanced_main, recorded_commit_refusal, unchanged_downstream,
          partial_set, split_source, success, moved_between_phases, moved_during_pushes,
          moved_earlier_in_second_round, regate_failure_resume, catch_up,
          pushed_then_failed, lagging_fetch, proved, proved_then_moved, prove_failure, same_set,
