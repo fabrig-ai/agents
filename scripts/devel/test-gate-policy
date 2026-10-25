@@ -586,8 +586,9 @@ printf '%s\\n' "$before"
         result = self.run_command(["bash", "scripts/check.sh"], check=False, extra={
             "SKEIN_GATE_POLICY_ID": "sha256:wrong",
             "SKEIN_GATE_POLICY_HELPER": str(self.kit / "gate-policy.sh")})
-        self.assertEqual(result.returncode, 73, result.stdout + result.stderr)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("fixture: checks reached", result.stdout)
+        self.assertRegex(result.stderr, r"(?m)^gate-step test-post [0-9.]+ 73$")
         self.assertNotIn("gate_policy_prepare", script.read_text())
 
     def test_configured_path_and_inactive_target_commands(self):
