@@ -46,22 +46,30 @@ reason. The wide checks are the landing's gates (section 2).
 ## 2. When a set of changes is done
 
 Optimistic (the user, 2026-10-25): the landing's gates run the wide
-checks (the lints and the focused and fuzzy suites), and what fails
-there comes back as a repair. The slow tiers are after landing's
-(owners.md 4.5). So, once, when the set's narrow tests pass:
+checks (the workspace's lints and the focused and fuzzy suites), and
+what fails there comes back as a repair. The slow tiers are after
+landing's (owners.md 4.5). So, once, when the set's narrow tests pass:
 
 1. **Format:** `cargo fmt`, directly, not through `heavy`: it builds
    nothing.
-2. **The focused suite, unless the task waives it:** `heavy cargo
+2. **Clippy on the changed packages:** `heavy cargo clippy -p PKG
+   [-p PKG ...] --all-targets -- -D warnings`, one command per
+   repository, naming every package the set changed there, its tests
+   included. A finding is fixed, and only this command reruns. Why
+   (the user, 2026-10-25): with the lints left to the gate, a test's
+   disallowed method stopped a whole set, and forgejo-elsewhere-3's M4
+   spent a land-set run and a repair on it.
+3. **The focused suite, unless the task waives it:** `heavy cargo
    nextest run --workspace`, the default profile: every test but the
    fuzzy ones and the tiers'. Its builds are the gate's first, from the
    shared store.
 
 Nothing else: not the fuzzy, browser or `qa` profiles, the process or
-live tiers, clippy, the wasm lints or the doc examples, and never
-`scripts/check.sh`, `scripts/after-landing.sh`, `land` or `land-set`.
-They are the gates', the slow tiers' and the owner's (owners.md 4.4
-and 4.5), and a repair's (below), unless the task names one.
+live tiers, the workspace's clippy, the wasm lints or the doc examples,
+and never `scripts/check.sh`, `scripts/after-landing.sh`, `land` or
+`land-set`. They are the gates', the slow tiers' and the owner's
+(owners.md 4.4 and 4.5), and a repair's (below), unless the task names
+one.
 
 **A repair** of what a gate found runs the failing tests alone, in
 their profile (`--profile fuzzy -E 'test(=NAME)'`), or the lint that
