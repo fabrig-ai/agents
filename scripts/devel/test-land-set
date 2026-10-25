@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Disposable Git/Cargo fixtures for land-set; no project remotes."""
+from concurrent.futures import ThreadPoolExecutor
 import json
 import fcntl
 import os
 from pathlib import Path
+import shlex
 import shutil
 import signal
 import subprocess
@@ -18,11 +20,10 @@ ORDER = ('skein', 'smith', 'hearth', 'jig', 'temper')
 UPSTREAM = dict(skein=(), smith=('skein',), hearth=('skein',),
                 jig=('skein', 'smith'), temper=('skein', 'smith', 'jig'))
 PYTHON = sys.executable
-HEAVY = '''#!{python}
-import os, sys
-os.execvp(sys.argv[1], sys.argv[1:])
-'''
-LAND = r'''#!{python}
+HEAVY = '#!/bin/sh\nexec "$@"\n'
+# Only the cases that read the argv log pay for logging each git call.
+GIT_TRACED = ('lock_conflict', 'outside_snapshot', 'kit_refusal', 'closure', 'refusal')
+LAND = r'''#!{python} -IS
 import os, signal, subprocess, sys, time
 from pathlib import Path
 args = sys.argv[1:]
@@ -116,8 +117,9 @@ def until(predicate, proc):
 
 
 class Lab:
-    def __init__(self, root):
+    def __init__(self, root, trace_git=False):
         self.root = root
+        self.trace_git = trace_git
         self.primary, self.work, self.origin, self.base = {}, {}, {}, {}
         self.bin = root / 'bin'
         self.bin.mkdir()
@@ -144,12 +146,6 @@ class Lab:
             path = self.bin / name
             path.write_text(body.format(python=PYTHON))
             path.chmod(0o700)
-        git = self.bin / 'git'
-        git.write_text('#!' + PYTHON + '\nimport os, sys, json\n'
-                       "with open(os.environ['GIT_TRACE_FILE'], 'a') as out:\n"
-                       "    out.write(json.dumps(sys.argv[1:]) + '\\n')\n"
-                       'os.execv(' + repr(shutil.which('git')) + ', sys.argv)\n')
-        git.chmod(0o700)
         for name in ORDER:
             path = root / 'primary' / name
             path.mkdir(parents=True)
@@ -186,7 +182,12 @@ class Lab:
             work = root / 'work' / name
             self.git(path, 'worktree', 'add', '-b', 'milestone', str(work), 'HEAD')
             self.work[name] = work
-        self.git_trace.write_text('')
+        if trace_git:
+            # One record per call, in one append: the argument count, then each argument, NUL-terminated.
+            git = self.bin / 'git'
+            git.write_text('#!/bin/sh\nprintf \'%s\\0\' "$#" "$@" >> "$GIT_TRACE_FILE" || exit 125\n'
+                           'exec ' + shlex.quote(shutil.which('git')) + ' "$@"\n')
+            git.chmod(0o700)
 
     def git(self, path, *args):
         return execute(path, ['git', *args], self.env).stdout.strip()
@@ -238,8 +239,20 @@ class Lab:
         heads = self.heads()
         assert all(heads[name] == self.base[name] for name in names), heads
 
+    def git_commands(self):
+        assert self.trace_git, 'case reads the git log without GIT_TRACED'
+        fields = self.git_trace.read_bytes().decode().split('\0')
+        assert fields.pop() == '', 'truncated git log'
+        commands = []
+        while fields:
+            count = int(fields.pop(0))
+            commands.append(fields[:count])
+            del fields[:count]
+            assert len(commands[-1]) == count, 'truncated git log'
+        return commands
+
     def no_fetch(self):
-        commands = [json.loads(line) for line in self.git_trace.read_text().splitlines()]
+        commands = self.git_commands()
         assert not any('fetch' in command or 'push' in command for command in commands), commands
 
     def assert_released(self):
@@ -438,7 +451,7 @@ def lock_conflict(lab):
     output = lab.run()
     assert 'CONFLICT' in output, output
     lab.verify()
-    commands = [json.loads(line) for line in lab.git_trace.read_text().splitlines()]
+    commands = lab.git_commands()
     assert ['checkout', '--ours', '--', 'Cargo.lock'] in commands
     assert ['rebase', '--abort'] not in commands
 
@@ -601,7 +614,7 @@ def outside_snapshot(lab):
         lock = tomllib.loads(lab.git(lab.origin[name], 'show', 'main:Cargo.lock'))
         assert {p['source'].rsplit('#', 1)[1] for p in lock['package']
                 if p.get('source', '').split('#')[0].endswith('/skein.git')} == {snapshot}
-    commands = [json.loads(line) for line in lab.git_trace.read_text().splitlines()]
+    commands = lab.git_commands()
     assert commands.count(['ls-remote', 'origin', 'refs/heads/main']) == 2, commands  # skein, smith
 
 
@@ -927,30 +940,59 @@ def skipped(lab):
     lab.untouched(ORDER)
 
 
-def main():
-    start = time.monotonic()
+CASES = (staging_cargo, rerun, advanced_main, recorded_commit_refusal, unchanged_downstream,
+         partial_set, split_source, success, moved_between_phases, moved_during_pushes,
+         moved_earlier_in_second_round, regate_failure_resume, catch_up,
+         pushed_then_failed, outside_snapshot, moved_gate_base,
+         interrupted_with_staging, interrupted_during_feed, interrupted_during_cleanup,
+         feed_failure, cleanup_warning,
+         moving_bound, kit_refusal, lock_conflict,
+         other_conflict, land_failure,
+         closure, concurrent, refusal, skipped)
+SLOW = ('moved_earlier_in_second_round', 'moved_between_phases', 'lock_conflict', 'land_failure',
+        'refusal', 'pushed_then_failed', 'success', 'moved_gate_base', 'moving_bound')
+
+
+def run_one(name):
+    """Run one case in this process, on its own disposable lab."""
+    case = next(case for case in CASES if case.__name__ == name)
     with tempfile.TemporaryDirectory(prefix='land-set-fixture-') as directory:
-        root = Path(directory)
-        cases = (staging_cargo, rerun, advanced_main, recorded_commit_refusal, unchanged_downstream,
-                 partial_set, split_source, success, moved_between_phases, moved_during_pushes,
-                 moved_earlier_in_second_round, regate_failure_resume, catch_up,
-                 pushed_then_failed, outside_snapshot, moved_gate_base,
-                 interrupted_with_staging, interrupted_during_feed, interrupted_during_cleanup,
-                 feed_failure, cleanup_warning,
-                 moving_bound, kit_refusal, lock_conflict,
-                 other_conflict, land_failure,
-                 closure, concurrent, refusal, skipped)
-        if len(sys.argv) > 1:
-            cases = tuple(case for case in cases if case.__name__ in sys.argv[1:])
-            assert cases, 'no cases selected'
+        case(Lab(Path(directory), trace_git=name in GIT_TRACED))
+
+
+def main():
+    if sys.argv[1:2] == ['--one']:
+        return run_one(sys.argv[2])
+    start = time.monotonic()
+    cases = CASES
+    if len(sys.argv) > 1:
+        cases = tuple(case for case in cases if case.__name__ in sys.argv[1:])
+        assert cases, 'no cases selected'
+
+    def child(case):
+        # Each case is its own process and lab: no paths, locks or holders are shared.
+        case_start = time.monotonic()
+        result = subprocess.run([PYTHON, __file__, '--one', case.__name__], stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        return result, time.monotonic() - case_start
+
+    failed = 0
+    with ThreadPoolExecutor(min(len(cases), os.cpu_count() or 1)) as pool:
+        # The longest cases start first; results still print in case order.
+        futures = {case: pool.submit(child, case)
+                   for case in sorted(cases, key=lambda case: case.__name__ not in SLOW)}
         for number, case in enumerate(cases, 1):
-            path = root / str(number)
-            path.mkdir()
-            case_start = time.monotonic()
-            case(Lab(path))
-            print(f'ok {number}: {case.__name__} ({time.monotonic() - case_start:.2f}s)', flush=True)
-    print(f'completed {len(cases)} cases in {time.monotonic() - start:.2f}s', flush=True)
+            result, elapsed = futures[case].result()
+            if result.returncode:
+                failed += 1
+                print(f'FAIL {number}: {case.__name__} ({elapsed:.2f}s) exit {result.returncode}\n'
+                      + result.stdout, flush=True)
+            else:
+                print(f'ok {number}: {case.__name__} ({elapsed:.2f}s)', flush=True)
+    print(f'{"failed " + str(failed) + " of" if failed else "completed"} {len(cases)} cases '
+          f'in {time.monotonic() - start:.2f}s', flush=True)
+    return 1 if failed else 0
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())
