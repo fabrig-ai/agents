@@ -613,7 +613,10 @@ tool that sees it; the reports only read.
   --no-run`), `focused`, `fuzzy`; and, in results from before the
   browser tier left the gates, `bundle` (what that tier serves) and
   `browser`. A name may come twice, and its times add. What
-  no step covers is `other`: the gate's time less its steps'.
+  no step covers is `other`: the gate's time less its steps'. agents'
+  own gate is the exception: its steps are its suites (`test-land-set`,
+  `shellcheck` and the rest), they run side by side, and their times
+  add up to more than the gate's, so its `other` means nothing.
 - **`land`'s result.** Once `land` has rebased, it ends by printing one
   line, `land: result JSON`, and writes the same object to the file
   `LAND_RESULT` names, when it is set:

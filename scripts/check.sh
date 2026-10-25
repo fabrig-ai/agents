@@ -13,17 +13,32 @@ scratch=$(mktemp -d /tmp/agents-check.XXXXXX)
 export TMPDIR=$scratch
 # Retention requested by a caller must not escape this gate's scratch.
 unset GATE_POLICY_FIXTURE_EVIDENCE
-names=() pids=()
+names=() pids=() stopped=0
 cleanup() {
+    local pid tries
+    # No suite's process group outlives the gate, and the scratch goes only
+    # once each has gone: a stopped suite may still be stopping its own
+    # children, and a second signal would cut that short.
+    for pid in "${pids[@]}"; do
+        if ((!stopped)); then
+            kill -TERM -- "-$pid" 2>/dev/null || continue
+        fi
+        for ((tries = 0; tries < 150; tries++)); do
+            kill -0 -- "-$pid" 2>/dev/null || continue 2
+            sleep 0.1
+        done
+        kill -KILL -- "-$pid" 2>/dev/null || true
+    done
     wait
     # Whatever a fixture left read-only must still go.
-    chmod -R u+w "$scratch"
+    chmod -R u+w "$scratch" 2>/dev/null || true
     rm -rf "$scratch"
 }
 trap cleanup EXIT
 # A stopped gate stops its suites before their scratch goes.
 stop() {
     local pid
+    stopped=1
     for pid in "${pids[@]}"; do
         kill -TERM -- "-$pid" 2>/dev/null || true
     done
@@ -82,12 +97,20 @@ for i in "${!names[@]}"; do
     name=${names[i]}
     status=0
     wait "${pids[i]}" || status=$?
-    cat "$scratch/$name.log"
+    log=$scratch/$name.log
+    cat "$log"
+    # A log cut off mid-line must not swallow its gate-step line.
+    [[ ! -s $log || -z $(tail -c1 "$log") ]] || echo
     ms=$(cat "$scratch/$name.ms" 2>/dev/null) || ms=0
     printf 'gate-step %s %d.%03d %d\n' "$name" $((ms / 1000)) $((ms % 1000)) "$status" >&2
     ((status == 0)) || failed+=("$name")
 done
 if ((${#failed[@]})); then
+    # land shows the gate's last lines: they end with the failures' own.
+    for name in "${failed[@]}"; do
+        echo "== $name, its log's last lines:"
+        tail -n 40 "$scratch/$name.log"
+    done
     echo "check.sh: failed: ${failed[*]}" >&2
     exit 1
 fi
