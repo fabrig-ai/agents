@@ -15,6 +15,9 @@ import tempfile
 import time
 import traceback
 
+# Loading record as a module must leave no __pycache__ in the checkout.
+sys.dont_write_bytecode = True
+
 SCRIPT = Path(__file__).resolve().with_name('record')
 REAL_GIT = shutil.which('git')
 
@@ -137,6 +140,13 @@ def writer(lab):
     lab.put('STATUS.md', 'user fallback\n')
     lab.run('commit', 'STATUS.md', extra={'POST_NAME': ''})
     assert lab.git(lab.origin, 'log', '-1', '--format=%s').startswith('fixture:')
+    # A message that already names its writer is not prefixed twice.
+    lab.put('STATUS.md', 'named writer\n')
+    lab.run('commit', '-m', 'o/fixture: did y', 'STATUS.md')
+    assert lab.git(lab.origin, 'log', '-1', '--format=%s') == 'o/fixture: did y'
+    lab.put('STATUS.md', 'other writer\n')
+    lab.run('commit', '-m', 'o/other: did z', 'STATUS.md')
+    assert lab.git(lab.origin, 'log', '-1', '--format=%s') == 'o/fixture: o/other: did z'
 
 
 def refusals(lab):
@@ -459,6 +469,9 @@ def telemetry(lab):
         jl(lab.tmp / f'heavy/receipts/new-{i}.json', [dict(log=log, inputs=tree, head=head, tree='misleading-head-tree')])
     with path.open('w') as source:
         csv.writer(source, delimiter='\t').writerows(rows)
+    # These commands fall in a later run of the same thread.
+    with codex.open('a') as source:
+        source.write('later\tcaller\t2026-10-24T00:59:00Z\t2026-10-24T01:10:00Z\t0\t1\tmodel-as-run\thigh\t' + str(lab.tmp / 'owners/demo/m1/task3.md') + '\treport\tthread\t1\t1\t1\n')
     output = lab.run('runs', '--all')
     assert 'clippy=3/60/30,workspace=4/80/40' in output, output
     assert '\t4\tclippy without commit ×4; fmt through heavy ×4' in output, output
@@ -480,10 +493,91 @@ def telemetry(lab):
     assert (lab.a / 'missions/demo/m2.md').read_text().count('## Runs') == 1
 
 
+def milestone(lab):
+    # forgejo-elsewhere-3's M4: one resumed thread, started in skein's worktree,
+    # works in five; land then prebuilds and gates in the same worktrees.
+    m4 = lab.tmp / 'owners/fe/m4'
+    lab.put('missions/fe/m4.md', front(True) + '\n## Runs\n')
+    def jl(path, rows):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+    jl(lab.home / '.codex/sessions/date/rollout-m4.jsonl', [
+        dict(type='session_meta', payload=dict(cwd=str(m4 / 'wt-skein-a1b'), id='thread', timestamp='2026-10-25T03:17:24Z')),
+        dict(type='turn_context', timestamp='2026-10-25T03:17:25Z', payload=dict(model='gpt-6.1-sol', effort='high')),
+        dict(type='turn_context', timestamp='2026-10-25T03:39:57Z', payload=dict(model='gpt-6.1-sol', effort='medium')),
+        dict(type='turn_context', timestamp='2026-10-25T03:43:19Z', payload=dict(model='gpt-6.1-sol', effort='medium')),
+        dict(type='event_msg', timestamp='2026-10-25T03:43:46Z', payload=dict(type='token_count', info=dict(total_token_usage=dict(input_tokens=10, cached_input_tokens=9, output_tokens=1)))),
+        dict(type='event_msg', timestamp='2026-10-25T04:10:00Z', payload=dict(type='agent_message'))])
+    codex = lab.tmp / 'codex-run/runs.tsv'
+    codex.parent.mkdir()
+    codex.write_text(''.join(f'run{i}\tcaller\t{start}\t{end}\t0\t1\tgpt-6.1-sol\t{effort}\t{m4}/tasks/a1b{suffix}.md\treport\tthread\t1\t1\t1\n'
+                             for i, (start, end, effort, suffix) in enumerate([
+                                 ('2026-10-25T03:17:24Z', '2026-10-25T03:27:02Z', 'high', ''),
+                                 ('2026-10-25T03:39:56Z', '2026-10-25T03:42:41Z', 'medium', '-r1'),
+                                 ('2026-10-25T03:43:18Z', '2026-10-25T03:43:46Z', 'medium', '-r2')])))
+    focused = 'cargo nextest run -p skein-forge-connection --lib -E test(/keeps$/)'
+    prebuild = 'bash -c cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings && cargo nextest run --workspace --no-run'
+    check = 'cargo check --workspace --all-targets'
+    # id, lane, end, wait, run, code, worktree, command, label
+    heavy = [(3271, 'build', '03:18:00', 3, 9, 100, 'skein-a1b', focused, None),
+             (3272, 'build', '03:18:21', 2, 9, 0, 'skein-a1b', focused, None),
+             (3273, 'build', '03:18:38', 3, 8, 0, 'skein-a1b', 'cargo nextest run -p skein-forge --lib -E test(/repo$/)', None),
+             (3274, 'build', '03:20:18', 3, 86, 0, 'skein-a1b', 'cargo nextest run --workspace', None),
+             (3275, 'build', '03:21:44', 3, 33, 0, 'smith-a1b', check, None),
+             (3276, 'build', '03:22:18', 3, 13, 0, 'hearth-a1b', check, None),
+             (3277, 'build', '03:23:23', 3, 37, 137, 'jig-a1b', check, None),
+             (3278, 'build', '03:25:12', 3, 87, 0, 'jig-a1b', check, None),
+             (3279, 'build', '03:26:05', 3, 18, 0, 'temper-a1', 'cargo nextest run -p forge-world --profile fuzzy --test fuzzy -E test(/once$/)', None),
+             (3280, 'build', '03:33:00', 0, 5, 0, 'jig-a1b', 'cargo fmt', 'between runs'),
+             (3281, 'build', '03:37:18', 3, 34, 101, 'skein-a1b', prebuild, 'land skein prebuild'),
+             (3282, 'build', '03:40:21', 3, 10, 0, 'skein-a1b', 'cargo clippy -p skein-forge-connection --all-targets -- -D warnings', None),
+             (3283, 'build', '03:40:53', 3, 4, 0, 'skein-a1b', focused, None),
+             (3284, 'build', '03:49:54', 3, 27, 0, 'skein-a1b', prebuild, 'land skein prebuild'),
+             (3285, 'gate', '03:50:41', 5, 37, 0, 'skein-a1b', 'bash -c scripts/check.sh', 'land skein')]
+    for repo, prebuilt, gated in (('smith-a1b', '03:52:41', '03:53:10'), ('hearth-a1b', '03:54:06', '03:54:45'),
+                                  ('jig-a1b', '03:59:50', '04:00:36'), ('temper-a1', '04:04:48', '04:05:58')):
+        name = repo.split('-')[0]
+        # land's commands run inside a run's window too, and still are land's.
+        heavy += [(len(heavy) + 4000, 'build', prebuilt, 3, 40, 0, repo, prebuild, f'land {name} prebuild'),
+                  (len(heavy) + 4001, 'gate', gated, 6, 30, 0, repo, 'bash -c scripts/check.sh', f'land {name}')]
+    heavy.append((5000, 'build', '03:43:40', 3, 10, 0, 'jig-a1b', prebuild, 'land jig prebuild'))
+    rows = []
+    for number, lane, end, wait, run, code, repo, command, label in heavy:
+        log = str(lab.tmp / f'logs/{number}.log')
+        rows.append([number, lane, f'2026-10-25T{end}Z', wait, run, code, 12.8, str(m4 / f'wt-{repo}'), log, command, label or f'wt-{repo}'])
+        # The land prebuilds share inputs and a head: counted, they would repeat.
+        jl(lab.tmp / f'heavy/receipts/{number}.json', [dict(log=log, head='h1', inputs='land' if label and label.startswith('land') else f'tree-{number}')])
+    # An old row outside any owner, as heavy.tsv's first line.
+    rows.insert(0, [1066, 'build', '2026-10-09T15:50:12Z', 0, 29, 0, 12.7, str(lab.tmp / 'dev-workflow/wt/skein'), 'old.log', 'cargo clippy --workspace'])
+    path = lab.tmp / 'logs/heavy.tsv'
+    path.parent.mkdir(exist_ok=True)
+    with path.open('w') as source:
+        csv.writer(source, delimiter='\t').writerows(rows)
+    lab.run('runs', 'fe', '4')
+    text = (lab.a / 'missions/fe/m4.md').read_text()
+    summary = text.split('## Runs\n', 1)[1].strip().split('\n', 1)[0]
+    assert summary == ('Implementers: 5 runs, 11 commands, ran 0.1 h, waited 0.0 h; workspace 1 (0.0 h), '
+                       'focused 5 (0.0 h), clippy 1 (0.0 h), check 4 (0.0 h).'), summary
+    for row in ('| m4/wt-skein-a1b | 6 | 2.1 | 0.3 | 4 / 0.5 |  | 1 / 1.4 | 1 / 0.2 |  |  | 0 |  |',
+                '| m4/wt-jig-a1b | 2 | 2.1 | 0.1 |  |  |  |  |  | 2 / 2.1 | 0 |  |',
+                '| m4/wt-smith-a1b | 1 | 0.6 | 0.1 |  |  |  |  |  | 1 / 0.6 | 0 |  |',
+                '| m4/wt-temper-a1 | 1 | 0.3 | 0.1 | 1 / 0.3 |  |  |  |  |  | 0 |  |',
+                '| m4/wt-hearth-a1b | 1 | 0.2 | 0.1 |  |  |  |  |  | 1 / 0.2 | 0 |  |',
+                '| Codex | gpt-6.1-sol | high,medium | 1 |'):
+        assert row in text, (row, text)
+    runs = text.split('### Implementer runs', 1)[1].split('### Landings', 1)[0]
+    assert [line.split(' | ')[0] for line in runs.splitlines() if line.startswith('| m4/')] == [
+        '| m4/wt-skein-a1b', '| m4/wt-jig-a1b', '| m4/wt-smith-a1b', '| m4/wt-temper-a1', '| m4/wt-hearth-a1b']
+    for absent in ('through heavy', 'without commit', 'two at once', '; repeats', 'gpt-6.1-sol,'):
+        assert absent not in text, (absent, text)
+    landings = text.split('### Landings', 1)[1]
+    assert len([line for line in landings.splitlines() if line.startswith('| m4/')]) == 5, landings
+
+
 def main():
     # The cases share nothing (each has its own Lab, and every subprocess its
     # own env), so they run at once on threads; results print in case order.
-    cases = (writer, refusals, different_files, name_race, conflict, offline, merged_validation, installation_failures, setup, telemetry)
+    cases = (writer, refusals, different_files, name_race, conflict, offline, merged_validation, installation_failures, setup, telemetry, milestone)
     with tempfile.TemporaryDirectory(prefix='record-fixture-') as directory:
         def run(number, case):
             root = Path(directory) / str(number)

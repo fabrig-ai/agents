@@ -167,9 +167,9 @@ metadata by the tools. The surveys behind it are
   `record runs <m>` the mission's own, in its README). From what each
   tool already keeps on the machine:
   - **sessions:** each Claude and Codex session of the milestone, its
-    role, the model and effort it actually ran with, its wall time and
-    its tokens (input, cached, output), from the Claude transcripts, the
-    Codex rollouts (whose working directory is the worktree) and
+    role, the models and efforts it actually ran with (each once, first
+    seen first), its wall time and its tokens (input, cached, output),
+    from the Claude transcripts, the Codex rollouts (whose working directory is the worktree) and
     `codex-run`'s `runs.tsv` ([post.md](post.md) 5). Codex uses its last
     cumulative token snapshot (output includes reasoning); Claude
     deduplicates message ids and takes each usage field's maximum.
@@ -179,7 +179,11 @@ metadata by the tools. The surveys behind it are
     `unknown`;
   - **each implementer run's builds and tests,** from `heavy.tsv`
     (whose working directory is the worktree) and `heavy`'s receipts,
-    as section 5.1 counts them;
+    as section 5.1 counts them. A Codex run's commands are its
+    milestone directory's heavy rows, in any worktree, submitted
+    between the run's start and end in `runs.tsv` (or its session's),
+    except land's (labelled `land <repo>` or `land <repo> prebuild`),
+    which count only in Landings;
   - **landings:** worktree, gate time and result, queue wait, joined
     by heavy's working directory. Gate-cache keys and landing-turn
     events lack a worktree/token link, so cached stamps and turn wait
@@ -191,8 +195,9 @@ metadata by the tools. The surveys behind it are
 
 - **Bounded tables:** always start with implementer totals: runs,
   commands, time running and waiting, kinds, repeats and counted flags.
-  Implementers join Codex and heavy by worktree; absent heavy telemetry
-  leaves counts unknown. Session-only directories stay in Sessions.
+  Implementers join Codex and heavy by milestone and time, as above;
+  absent heavy telemetry leaves counts unknown. Session-only
+  directories stay in Sessions.
   Omit zero kinds and flags; show only established flags. Sessions
   group by kind, model and effort: count, wall (h:mm), input (M),
   cached (%), output (k). Implementers have one row per worktree,
