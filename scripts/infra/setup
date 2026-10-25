@@ -153,18 +153,6 @@ check_machine() {
             fail "$bin/$tool does not link to $target (--fix links it)"
         fi
     done
-    for tool in plan test-plan; do
-        [[ -L $bin/$tool ]] || continue
-        case $(readlink -m "$bin/$tool") in
-            */scripts/dev/*)
-                if ((fix)); then
-                    rm "$bin/$tool"
-                    ok "removed $bin/$tool, a link to a retired tool"
-                else
-                    warn "$bin/$tool links to a retired tool (--fix removes it)"
-                fi ;;
-        esac
-    done
 
     # The workspace's own files live in agents, beside setup.
     local pair link

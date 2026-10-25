@@ -301,20 +301,12 @@ the workspace files to the primary agents checkout (infra.md 2), and each
 tool finds its helpers beside it, so `heavy`, `land` and their helpers
 always move together. There is no installed copy.
 
-Until 10-25 the fleet ran a frozen release of the kit, a copy under
-`~/.local/share/agents-kits/recovery-v1-COMMIT/`. A machine moves from it to
-the checkout once, hetzner3 first, since it holds the landing turn (section 8):
-
-1. Fast-forward the primary agents checkout.
-2. Run `heavy --gate -- ~/src/rust/agents/scripts/infra/setup --fix`, so that
-   no build runs meanwhile. It relinks the tools and the workspace files.
-3. Run `heavy --install-reconciler`. Under the host lock, it rewrites the
-   reconciler's units to the checkout's helper, so tasks in flight carry
-   on. Then `heavy --check-recovery` and `setup`.
-
-The queue, its ledger and its state directory stay the same: the kit's
-ledger changes since the release only add fields. The old release stays on
-disk until no unit or caller uses it.
+Until 10-25 the fleet ran a frozen release of the kit, copied under
+`~/.local/share/agents-kits/`. Every machine moved to the checkout that day,
+keeping its queue, ledger and state directory, and the releases are gone. A
+new machine runs `setup --fix`, then `heavy --install-reconciler`, which
+writes the reconciler's units for the checkout's helper under the host lock,
+then `setup` again.
 
 A change to `heavy`'s ledger or units must stay compatible with tasks in
 flight, because each machine takes it as its checkout moves. One that can't
@@ -382,9 +374,7 @@ Director-owned per-host configuration: hetzner, hetzner2 and hel8 use
 hostname `debian-16gb-hel1-3`. Every host sets the explicit coordinator
 `LAND_TURN_HOLDER`. A wrong local hostname fails open. Hetzner4 uses
 strict SSH too and fails open until the director verifies its trust and
-auth; no setup is attempted by the client. hetzner3's checkout carries
-the holder before any caller moves to the checkout (section 7). Callers
-not yet moved name the old release's holder, which takes the same lock.
+auth; no setup is attempted by the client.
 Set `LAND_TURN=1` for temper only after the whole fleet has moved and the
 director's explicit activation word. No activation or fleet saving is
 established by disposable acceptance. The first benefit window is the 24
