@@ -7,17 +7,17 @@
 set -euo pipefail
 
 kit=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
-# Refuse before fetching, linking, repairing a queue or touching user units.
-python3 -I -B "$kit/stable-release.py" || exit 2
 workspace() {
-    echo "$HOME/src/rust"
+    local agents
+    agents=$(cd "$kit/../.." && pwd)
+    if [[ $(basename "$agents") == agents ]]; then dirname "$agents"; else echo "$HOME/src/rust"; fi
 }
 root=${DEV_ROOT:-$(workspace)}
 tmp=${DEV_TMP:-$root/tmp}
 repos=${DEV_REPOS:-skein smith jig hearth temper agents}
 claude_dir=${SETUP_CLAUDE_DIR:-$root}
-# shellcheck source=kit.sh
-source "$kit/kit.sh"
+# shellcheck source=../devel/kit.sh
+source "$kit/../devel/kit.sh"
 
 check() {
     local fix=0 failed=0
@@ -58,8 +58,27 @@ check() {
         fi
     done
 
+    check_records
     check_machine
     return "$failed"
+}
+
+# records is shared by sessions; setup never resets or cleans an existing checkout.
+check_records() {
+    local dir=${RECORDS:-$root/records}
+    if [[ -e $dir/.git ]]; then
+        ok "records: checkout at $dir"
+    elif [[ -e $dir ]]; then
+        fail "records: $dir exists without a checkout"
+    elif ((fix)); then
+        if git clone --quiet --branch main git@github.com:fabrig-ai/records.git "$dir"; then
+            ok "records: cloned $dir"
+        else
+            fail "records: cannot clone $dir"
+        fi
+    else
+        fail "records: no checkout at $dir (--fix clones it)"
+    fi
 }
 
 # The queue's user unit is repairable without restarting a running daemon.
@@ -118,22 +137,12 @@ check_machine() {
         command -v "$tool" >/dev/null && ok "has $tool" || fail "no $tool"
     done
     cargo nextest --version >/dev/null 2>&1 && ok "has cargo-nextest" || fail "no cargo-nextest"
-    # The tools link to this kit.
-    local bin=$HOME/.local/bin home=$kit
-    for tool in heavy land setup; do
-        if [[ $(readlink -f "$bin/$tool" 2>/dev/null) == "$home/$tool" ]]; then
-            ok "$tool is on PATH"
-        elif ((fix)); then
-            mkdir -p "$bin" && ln -sfn "$home/$tool" "$bin/$tool" && ok "linked $bin/$tool"
-        else
-            fail "$bin/$tool does not link to $home/$tool (--fix links it)"
-        fi
-    done
-    # These tools are outside the stable kit and follow the agents checkout,
-    # like the workspace instructions.
-    local target
-    for tool in post codex-run; do
-        target=$root/agents/scripts/devel/$tool
+    # The tools link to this checkout.
+    local bin=$HOME/.local/bin home=$kit target
+    for tool in heavy land record setup post codex-run; do
+        target=$home/../devel/$tool
+        [[ $tool != setup ]] || target=$home/setup
+        target=$(readlink -f "$target")
         if [[ ! -f $target ]]; then
             fail "missing tool file: $target"
         elif [[ $(readlink -f "$bin/$tool" 2>/dev/null) == "$target" ]]; then
@@ -157,14 +166,12 @@ check_machine() {
         esac
     done
 
-    # Workspace instructions follow the agents checkout; permissions stay in
-    # this read-only kit.
+    # The workspace's own files live in agents, beside setup.
     local pair link
-    for pair in "$root/AGENTS.md=$root/agents/scripts/devel/recovery-v1/workspace/AGENTS.md" \
-        "$root/CLAUDE.md=$root/agents/scripts/devel/recovery-v1/workspace/CLAUDE.md" \
-        "$root/.claude/settings.json=$home/workspace/claude-settings.json"; do
+    for pair in "$root/AGENTS.md=AGENTS.md" "$root/CLAUDE.md=CLAUDE.md" \
+        "$root/.claude/settings.json=claude-settings.json"; do
         link=${pair%%=*}
-        target=${pair#*=}
+        target=$home/workspace/${pair#*=}
         if [[ ! -f $target ]]; then
             fail "missing workspace file: $target"
         elif [[ $(readlink -f "$link" 2>/dev/null) == "$target" ]]; then
@@ -212,10 +219,11 @@ check_machine() {
     check_units
     # Installation is explicit: setup never probes/installs a new recovery
     # mechanism while repairing an existing queue.
-    if "$home/heavy" --check-recovery >/dev/null 2>&1; then
+    local heavy=$home/../devel/heavy
+    if "$heavy" --check-recovery >/dev/null 2>&1; then
         ok "heavy's independent reconciler and containment proof are ready"
     else
-        fail "heavy recovery is not ready: drain legacy tasks, then heavy --install-reconciler"
+        fail "heavy recovery is not ready: heavy --install-reconciler"
     fi
     if apt-config dump 2>/dev/null | grep -E '^Unattended-Upgrade::Automatic-Reboot "true";' >/dev/null; then
         warn 'the machine may reboot unattended (Unattended-Upgrade::Automatic-Reboot)'
@@ -244,12 +252,12 @@ check_machine() {
             warn "queue lane $group runs $have at once, not $want ($source; --fix sets it)"
         status=$(pueue group --json | jq -r --arg g "$group" '.[$g].status')
         if [[ $status != Running ]] && ((fix)); then
-            "$home/heavy" --repair-group "$group" >/dev/null || true
+            "$heavy" --repair-group "$group" >/dev/null || true
             status=$(pueue group --json | jq -r --arg g "$group" '.[$g].status')
         fi
         if [[ $status == Running ]]; then
             ok "queue lane $group is running"
-        elif "$home/heavy" --group-held "$group"; then
+        elif "$heavy" --group-held "$group"; then
             ok "queue lane $group is held by heavy"
         else
             fail "queue lane $group is $status (--fix starts it, preserving gate and maintenance holds)"

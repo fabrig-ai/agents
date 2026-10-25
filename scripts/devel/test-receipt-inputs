@@ -28,7 +28,7 @@ def main():
         def git(*args):
             return subprocess.check_output(['git', '-C', str(root), *args], stderr=subprocess.DEVNULL).decode().strip()
         git('init', '-b', 'main')
-        (root / '.gitignore').write_text('ignored\ntmp/\ninput.json\npayload.log\nlegacy/\noutside/\n')
+        (root / '.gitignore').write_text('ignored\ntmp/\npayload.log\noutside/\n')
         (root / 'tracked').write_text('base\n')
         git('add', '.')
         git('commit', '-m', 'base')
@@ -116,19 +116,8 @@ def main():
         publish(Ledger(), task)
         receipt = json.loads((root / 'tmp/heavy/receipts/no-inputs.json').read_text())
         assert 'head' not in receipt and 'inputs' not in receipt
-        # Exercise the legacy script's actual receipt functions in isolation.
-        legacy = (KIT.parent / 'heavy').read_text()
-        functions = legacy[legacy.index('capture_inputs() {'):legacy.index('# Inside a gate task:')]
-        script = ('set -eu\n' + functions + '\ncapture_inputs\nwrite_receipt\n')
-        env = dict(os.environ, kit=str(KIT.parent), tmp=str(root / 'tmp'), log=str(log),
-                   id='1', lane='build', code='0', receipt_token='legacy',
-                   HEAVY_INPUTS_FILE=str(root / 'input.json'))
-        subprocess.run(['bash', '-c', script], cwd=root, env=env, check=True)
-        receipt = json.loads((root / 'tmp/heavy/receipts/legacy.json').read_text())
-        assert receipt['head'] == capture(root)['head']
-        assert receipt['inputs'] == capture(root)['inputs']
-        assert index.read_bytes() == before and not (root / 'input.json').exists()
-        print('ok: inputs, index/refs preserved, failures, both receipt writers (no queue)')
+        assert index.read_bytes() == before
+        print('ok: inputs, index/refs preserved, failures, the receipt writer (no queue)')
 
 
 if __name__ == '__main__':

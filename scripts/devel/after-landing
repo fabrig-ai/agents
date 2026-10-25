@@ -18,7 +18,9 @@ umask 077
 kit=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
 # The workspace, as land finds it.
 workspace() {
-    echo "$HOME/src/rust"
+    local agents
+    agents=$(cd "$kit/../.." && pwd)
+    if [[ $(basename "$agents") == agents ]]; then dirname "$agents"; else echo "$HOME/src/rust"; fi
 }
 root=${DEV_ROOT:-$(workspace)}
 tmp=${DEV_TMP:-$root/tmp}

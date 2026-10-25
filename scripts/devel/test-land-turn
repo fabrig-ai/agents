@@ -2,7 +2,6 @@
 """Exercise advisory turns with isolated local pipes and simulated SSH; no real gate."""
 import argparse
 import fcntl
-import hashlib
 import importlib.util
 import json
 import os
@@ -148,7 +147,7 @@ def construction(root):
     root.mkdir()
     module = turn_module()
     who = module.identity('a' * 32, 'temper', 'fixture')
-    path = '/home/free/.local/share/agents-kits/recovery-v1-' + 'b' * 40 + '/land-turn.py'
+    path = '/home/free/src/rust/agents/scripts/devel/land-turn.py'
     environment = {'LAND_TURN_HOLDER': path}
     with patch.dict(os.environ, environment, clear=True):
         argv, heartbeat = module.transport_command(root, who)
@@ -237,44 +236,32 @@ def heartbeat_lifetime(root):
             'healthy_beyond_10s': True, 'queued_and_granted_release': True, 'real_ssh': False}
 
 
-def installed_validation(root):
+def holder_validation(root):
     root.mkdir()
     outcomes = {}
-    required = ['heavy', 'land', 'setup', 'heavy-recovery.py', 'gate-policy.sh', 'kit.sh',
-                'after-landing', 'kache-setup', 'stable-release.py', 'land-capture.py',
-                'recovery_message.py', 'land-turn.py']
-    for fault, expected in [('valid', 0), ('mutable', 2), ('tampered', 2), ('missing', 2)]:
+    # A refusal raises from main before any state; called directly, it exits 1
+    # (the script's own entry gives 2).
+    for fault, expected in [('valid', 0), ('symlinked', 1), ('elsewhere', 1)]:
         home = root / fault
-        commit = 'd' * 40
-        release = home / '.local/share/agents-kits' / ('recovery-v1-' + commit)
-        release.mkdir(parents=True)
-        manifest = {}
-        for name in required:
-            asset = release / name
-            shutil.copyfile(KIT / name, asset)
-            manifest[name] = hashlib.sha256(asset.read_bytes()).hexdigest()
-            asset.chmod(0o400)
-        marker = release / 'release.json'
-        marker.write_text(json.dumps(dict(schema='agents-recovery-release-v1', commit=commit, files=manifest)))
-        marker.chmod(0o400)
-        asset = release / 'land-turn.py'
-        if fault in ('mutable', 'tampered', 'missing'):
-            asset.chmod(0o600)
-            if fault == 'tampered':
-                asset.write_text(asset.read_text() + '# fixture tamper\n')
-                asset.chmod(0o400)
-            elif fault == 'missing':
-                asset.unlink()
-        release.chmod(0o500)
+        devel = home / 'src/rust/agents/scripts/devel'
+        devel.mkdir(parents=True)
+        asset = devel / 'land-turn.py'
+        if fault == 'symlinked':
+            shutil.copyfile(KIT / 'land-turn.py', home / 'land-turn.py')
+            asset.symlink_to(home / 'land-turn.py')
+        else:
+            shutil.copyfile(KIT / 'land-turn.py', asset)
         state = home / 'state'
-        # Only the test redirects the installation root and coordinator state.
-        code = ('import importlib.util,re,sys; from pathlib import Path; from unittest.mock import patch; '
+        # Only the test redirects the holder's path and the coordinator state;
+        # 'elsewhere' keeps the checkout's path, which the copy is not at.
+        accepted = '' if fault == 'elsewhere' else 'm.HOLDER=re.escape(m.__file__); '
+        code = ('import importlib.util,re,sys; from pathlib import Path; '
             f's=importlib.util.spec_from_file_location("turn", {str(KIT / "land-turn.py")!r}); '
             'm=importlib.util.module_from_spec(s); s.loader.exec_module(m); '
-            f'm.__file__={str(asset)!r}; m.HOLDER=re.escape(m.__file__); m.STATE=Path({str(state)!r}); '
+            f'm.__file__={str(asset)!r}; ' + accepted + f'm.STATE=Path({str(state)!r}); '
             'm.COORDINATOR=m.socket.gethostname(); '
             f'sys.argv=[m.__file__, "connection-holder", {"e" * 32!r}, "temper", "fixture", "local"]; '
-            f'p=patch.object(Path,"home",return_value=Path({str(home)!r})); p.start(); sys.exit(m.main())')
+            'sys.exit(m.main())')
         process = subprocess.Popen([sys.executable, '-I', '-B', '-c', code],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
@@ -284,7 +271,9 @@ def installed_validation(root):
                 assert json.loads(reply)['token'] == 'e' * 32
             process.stdin.close()
             assert process.wait(timeout=10) == expected, fault
-            (home / 'stderr.txt').write_text(process.stderr.read())
+            stderr = process.stderr.read()
+            (home / 'stderr.txt').write_text(stderr)
+            assert fault == 'valid' or 'ValueError: invalid-holder-path' in stderr, fault
             assert state.exists() == (fault == 'valid')
             outcomes[fault] = process.returncode
         finally:
@@ -294,8 +283,8 @@ def installed_validation(root):
             process.stdin.close()
             process.stdout.close()
             process.stderr.close()
-    return {'layer': 'disposable-installed-verifier', 'redirected_home_and_state': True,
-            'outcomes': outcomes, 'global_install': False}
+    return {'layer': 'disposable-holder-verifier', 'redirected_state': True,
+            'outcomes': outcomes, 'live_state': False}
 
 
 class TurnLab(Lab):
@@ -659,19 +648,6 @@ def terminated(lab):
         disconnect(blocker)
 
 
-def missing_local_helper(lab):
-    env = dict(lab.env, LAND_TURN_MODE='local',
-        LAND_TURN_HOLDER='/home/free/.local/share/agents-kits/recovery-v1-' + '0' * 40 + '/land-turn.py')
-    assert not Path(env['LAND_TURN_HOLDER']).exists()
-    del env['LAND_TURN_FIXTURE_DIR']
-    client = lab.start_land(environment=env)
-    lab.finish(client)
-    assert [e['event'] for e in lab.turn_events()] == ['request', 'fail-open']
-    assert lab.turn_events()[-1]['reason'] == 'transport-eof'
-    return {'layer': 'actual-land-production-local-command', 'missing_installed_helper': True,
-            'ordinary_land_completed': True, 'real_ssh': False}
-
-
 def long_gate(lab):
     client = lab.start_land()
     lab.allow('prebuild-a-1')
@@ -687,7 +663,7 @@ def long_gate(lab):
 
 
 def simulated_ssh(lab, test, failure=None):
-    path = '/home/free/.local/share/agents-kits/recovery-v1-' + 'b' * 40 + '/land-turn.py'
+    path = '/home/free/src/rust/agents/scripts/devel/land-turn.py'
     shim = lab.path / 'fixture-bin/ssh'
     shim.write_text('#!/usr/bin/env python3\nimport json,runpy,shlex,sys\nfrom pathlib import Path\n'
         + f'Path({str(lab.path / "ssh-argv.json")!r}).write_text(json.dumps(sys.argv[1:]))\n'
@@ -718,7 +694,7 @@ def simulated_ssh(lab, test, failure=None):
 
 
 def config_hook(lab, route=True):
-    # Capture only switch routing; fixture holders do not prove installed acceptance.
+    # Capture only switch routing; fixture holders do not prove the real holder's acceptance.
     interpreter = shutil.which('python3', path=lab.env['PATH'])
     shim = lab.path / 'fixture-bin/python3'
     shim.write_text('#!' + interpreter + '\nimport json,os,sys\nfrom pathlib import Path\n'
@@ -765,7 +741,7 @@ def config_cycle(lab, mode):
     return {'layer': 'actual-land-hook-routing-fixture', 'file_mode': mode,
             'absent_present_removed': True, 'stale_environment_overridden': True,
             'own_sibling_holder': True, 'args_subdir_lock_and_recursive_guard': True,
-            'installed_holder_acceptance': False, 'landings': 3}
+            'real_holder_acceptance': False, 'landings': 3}
 
 
 def config_invalid(lab, value, read_failure=False):
@@ -787,7 +763,7 @@ def config_invalid(lab, value, read_failure=False):
     assert len(captured) == 1
     assert captured[0]['selection']['LAND_TURN_MODE'] == ('invalid' if read_failure else value.rstrip('\n'))
     assert [row['event'] for row in lab.turn_events()] == ['request', 'fail-open']
-    # Mutable source is rejected before mode validation; construction tests validate modes.
+    # A worktree's holder is rejected before mode validation; construction tests validate modes.
     assert lab.turn_events()[-1]['reason'] == 'invalid-holder-path'
     output = (lab.path / 'a.land.txt').read_text()
     assert 'untrusted-read-error' not in output and 'land: line ' not in output
@@ -829,8 +805,7 @@ def main():
     results = []
     cases = [('serialization', serialization), ('invocation-lock', invocation_lock), ('stale', stale), ('unavailable', unavailable),
              ('local-unavailable', lambda lab: unavailable(lab, True)),
-             ('failed-gate', failure), ('after-landing', after_landing), ('terminated-client', terminated),
-             ('missing-local-helper', missing_local_helper)]
+             ('failed-gate', failure), ('after-landing', after_landing), ('terminated-client', terminated)]
     cases += [('inert-' + mode, lambda lab, mode=mode: inert(lab, mode)) for mode in ('off', 'docs', 'local', 'other')]
     cases += [('inert-docs-mockups', docs_mockups)]
     cases += [('config-' + mode, lambda lab, mode=mode: config_cycle(lab, mode))
@@ -862,7 +837,7 @@ def main():
               for queued in (True, False)]
     for name, test in [('protocol', protocol), ('construction', construction),
                        ('release-visibility', release_visibility),
-                       ('heartbeat-lifetime', heartbeat_lifetime), ('installed-validation', installed_validation)]:
+                       ('heartbeat-lifetime', heartbeat_lifetime), ('holder-validation', holder_validation)]:
         if not opts.case or name in opts.case:
             results.append(dict(case=name, status='pass', **test(root / name)))
             (root / 'results.json').write_text(json.dumps(results, indent=2) + '\n')

@@ -244,7 +244,7 @@ class Lab:
 
     def assert_released(self):
         # A second real holder must grant promptly, without the completed client's pipes.
-        holder = SCRIPT.parent / 'recovery-v1/land-turn.py'
+        holder = SCRIPT.with_name('land-turn.py')
         with subprocess.Popen([PYTHON, '-I', str(holder), 'holder', str(self.holder), 'a' * 32,
                                'set', 'fixture', str(self.holder)], stdin=subprocess.PIPE,
                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as proc:
@@ -881,10 +881,10 @@ def refusal(lab):
     lab.no_fetch()
     # A disposable source kit injects protocol faults without changing the real holder.
     kit = lab.root / 'kit'
-    (kit / 'recovery-v1').mkdir(parents=True)
+    kit.mkdir()
     script = kit / 'land-set'
     shutil.copyfile(SCRIPT, script)
-    holder = kit / 'recovery-v1/land-turn.py'
+    holder = kit / 'land-turn.py'
     for response in ('', 'not-json\n', '{}\n', 'x' * 513 + '\n'):
         holder.write_text('import sys\nsys.stdout.write(' + repr(response) + ')\nsys.stdout.flush()\n')
         result = execute(lab.root, [PYTHON, '-I', str(script), str(lab.spec())], lab.env, check=False)

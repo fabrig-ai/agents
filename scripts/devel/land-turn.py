@@ -6,7 +6,6 @@ import math
 import os
 from pathlib import Path
 import re
-import runpy
 import secrets
 import select
 import shlex
@@ -19,7 +18,7 @@ import time
 
 os.umask(0o077)
 STATE = Path('/home/free/.local/state/agents-landing-turn')
-HOLDER = r'/home/free/\.local/share/agents-kits/recovery-v1-[0-9a-f]{40,64}/land-turn\.py'
+HOLDER = r'/home/free/src/rust/agents/scripts/devel/land-turn\.py'
 COORDINATOR = 'debian-16gb-hel1-3'  # hetzner3
 
 
@@ -248,7 +247,6 @@ def main():
         mode = sys.argv[5]
         if mode not in ('ssh', 'local') or (mode == 'local' and socket.gethostname() != COORDINATOR):
             raise ValueError('invalid-transport-mode')
-        runpy.run_path(str(path.with_name('stable-release.py')))
         holder(STATE, identity(*sys.argv[2:5]), STATE, heartbeat=mode == 'ssh')
         return 0
     if sys.argv[1] == 'holder' and len(sys.argv) == 7:

@@ -307,28 +307,6 @@ sys.exit(result.returncode)
         self.assertEqual(self.git("rev-parse", "HEAD"), before)
         self.assertEqual(self.calls(), [])
 
-    def test_mirror_no_push_and_unchanged_amendment(self):
-        shutil.copy(KIT.parent / "land", self.kit / "land")
-        self.script(self.kit / "heavy", r'''#!/usr/bin/env python3
-import os
-from pathlib import Path
-import subprocess
-import sys
-args = sys.argv[1:]
-assert args[:3] == ['--gate', '--tail', '60']
-with open(os.environ['FIXTURE_CALLS'], 'a') as out:
-    out.write('gate\n')
-result = subprocess.run(args[3:])
-log = Path(os.environ['DEV_TMP']) / 'gate.log'
-log.parent.mkdir(parents=True, exist_ok=True)
-log.write_text('heavy: ran alone for 1s\n')
-print('heavy: queued task 1 in the gate lane')
-print('heavy: task 1 (gate) exit 0, waited 0s, ran 1s, log ' + str(log))
-sys.exit(result.returncode)
-''')
-        self.test_no_push_rejects_docs_and_local()
-        self.test_no_push_then_lands_identical_commit()
-
     def test_same_policy_reuses_and_propagates_runtime(self):
         self.land()
         policy = self.git("log", "-1", "--format=%(trailers:key=Gate-Policy,valueonly)").strip()
@@ -594,13 +572,13 @@ printf '%s\\n' "$before"
         self.assertFalse(self.calls())
         self.assertIn("none (Markdown and mockups only)", self.git("log", "-1", "--format=%(trailers:key=Gate-Policy,valueonly)"))
 
-    def test_check_boundary_does_not_prepare_recovery_policy(self):
+    def test_check_boundary_does_not_prepare_gate_policy(self):
         script = self.repo / "scripts/check.sh"
         script.parent.mkdir()
-        shutil.copy(KIT.parent.parent / "check.sh", script)
-        self.script(self.repo / "scripts/devel/recovery-v1/gate-policy.sh", "#!/bin/sh\nexit 91\n")
+        shutil.copy(KIT.parent / "check.sh", script)
+        self.script(self.repo / "scripts/devel/gate-policy.sh", "#!/bin/sh\nexit 91\n")
         self.script(self.bin / "shellcheck", "#!/bin/sh\nexit 0\n")
-        self.script(self.repo / "scripts/devel/test-tools",
+        self.script(self.repo / "scripts/devel/test-post",
                     "#!/bin/sh\necho 'fixture: checks reached'\nexit 73\n")
         result = self.run_command(["bash", "scripts/check.sh"], check=False, extra={
             "SKEIN_GATE_POLICY_ID": "sha256:wrong",

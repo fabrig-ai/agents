@@ -4,8 +4,12 @@
 set -euo pipefail
 umask 077
 kit=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
+# The workspace: DEV_ROOT, or the directory holding the agents checkout these
+# tools come from, or ~/src/rust.
 workspace() {
-    echo "$HOME/src/rust"
+    local agents
+    agents=$(cd "$kit/../.." && pwd)
+    if [[ $(basename "$agents") == agents ]]; then dirname "$agents"; else echo "$HOME/src/rust"; fi
 }
 root=${DEV_ROOT:-$(workspace)}
 tmp=${DEV_TMP:-$root/tmp}

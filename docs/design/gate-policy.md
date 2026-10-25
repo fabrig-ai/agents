@@ -4,10 +4,10 @@ Provisional, 2026-10-22. The runtime contract for reusable gate evidence.
 
 ## 1. In one page
 
-- **One effective policy.** `scripts/devel/recovery-v1/gate-policy.sh` provides
+- **One effective policy.** `scripts/devel/gate-policy.sh` provides
   `gate_policy_prepare`, which validates and exports `SKEIN_TEST_CHROMIUM`,
   `SKEIN_TEST_FONTS` and `SKEIN_GATE_POLICY_ID`. The prepared
-  `SKEIN_GATE_POLICY_HELPER` path identifies the stable kit helper used by
+  `SKEIN_GATE_POLICY_HELPER` path identifies the kit's helper used by
   admission and the contained payload.
   `gate_policy_identity`
   prepares in a subshell and prints only the identity. Errors disclose no
@@ -22,10 +22,10 @@ Provisional, 2026-10-22. The runtime contract for reusable gate evidence.
   accepting the result. Its cache record and `Gate-Policy` trailer carry
   the identity. Evidence without a policy is invalid. Documentation-only
   differences under `docs/` preserve evidence only under the same policy.
-- **The gate stays full.** The new heavy validates before entering the
-  payload; `scripts/check.sh` retains its baseline bytes and runs all of
-  its checks and the focused, fuzzy and browser suites. Deliberate
-  wrapper overrides for direct-rustc work and benchmarks remain possible.
+- **The gate stays full.** `heavy` validates before entering the
+  payload; `scripts/check.sh` runs all of its checks and the focused,
+  fuzzy and browser suites. Deliberate wrapper overrides for direct-rustc
+  work and benchmarks remain possible.
 
 ## 2. Identity
 
@@ -193,12 +193,8 @@ main and accepted cache untouched. These fixtures exercise `land`'s consumer
 boundary; queue lifecycle and durable receipt publication need heavy's
 separate recovery fixtures.
 
-The source kit is `scripts/devel/recovery-v1/`. Top-level legacy tools and
-`scripts/check.sh` load none of it. A landing therefore installs no runtime
-on an unmigrated host. Build-infrastructure.md, section 7 specifies the
-explicit quiet migration to a committed, read-only release outside all
-checkouts. Setup refuses repair from the mutable source kit before any
-fetch, link or queue change.
+The policy module is part of the kit that every machine links from its
+agents checkout (build-infrastructure.md 7).
 
 `land-capture.py` reads heavy's combined output through a pipe. It forwards
 only the fixed recovery/storage diagnostic to the caller as soon as that

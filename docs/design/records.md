@@ -274,10 +274,7 @@ largest useful files and far below their journals.
    where they name the report's file. New missions follow them; a
    running mission ends in `tmp/`, and is backfilled once it has.
 
-Live 10-25. The stable kit (build-infrastructure.md 7) predates
-`record`, so on its machines `record` links to the primary agents
-checkout's `scripts/devel/`, as `post` does (post.md 7.2), until a
-stable release carries it.
+Live 10-25.
 
 ## 9. The backfill and the cleanup
 

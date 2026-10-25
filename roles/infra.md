@@ -9,9 +9,10 @@ it reads and its own rules. The other departments are in
 ## 1. In one page
 
 - **What it owns:** this repository's tools and their designs
-  (`scripts/devel/`: `heavy`, `land`, `land-set`, `repin`,
-  `after-landing`, the recovery kit; `scripts/infra/`: `setup`,
-  `kache-setup`, the workspace files; `docs/design/`); the machines'
+  (`scripts/devel/`: `heavy`, `land`, `after-landing` and their
+  helpers, `land-set`, `landings`, `repin`, `post`, `codex-run`,
+  `record`, `start-director`; `scripts/infra/`: `setup`, `kache-setup`,
+  the workspace files; `docs/design/`); the machines'
   setup (packages, toolchains, Chromium, the build cache, pueue's
   groups, settings); the landing queue's tool; and the director's
   scripts once they move here (director.md 12).

@@ -24,7 +24,7 @@ os.umask(0o077)
 ORDER = ('skein', 'smith', 'hearth', 'jig', 'temper')
 UPSTREAM = dict(skein=(), smith=('skein',), hearth=('skein',),
                 jig=('skein', 'smith'), temper=('skein', 'smith', 'jig'))
-HOLDER = r'/home/free/\.local/share/agents-kits/recovery-v1-[0-9a-f]{40,64}/land-turn\.py'
+HOLDER = r'/home/free/src/rust/agents/scripts/devel/land-turn\.py'
 COORDINATOR = 'debian-16gb-hel1-3'
 SSH = ['ssh', '-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
        '-o', 'ConnectTimeout=5', '-o', 'ServerAliveInterval=5',
@@ -135,13 +135,13 @@ class SetLock:
         self.who = dict(token=token, repository='set', holder=host)
         self.heartbeat = not fixture and socket.gethostname() != COORDINATOR
         if fixture:
-            argv = [sys.executable, '-I', '-B', str(Path(__file__).resolve().parent /
-                    'recovery-v1/land-turn.py'), 'holder', str(fixture), token, 'set', host, str(fixture)]
+            argv = [sys.executable, '-I', '-B', str(Path(__file__).resolve().with_name('land-turn.py')),
+                    'holder', str(fixture), token, 'set', host, str(fixture)]
         else:
             land = shutil.which('land')
             require(land, 'land is not on PATH', 5)
             holder = Path(land).resolve().with_name('land-turn.py')
-            require(re.fullmatch(HOLDER, str(holder)), 'invalid installed holder path', 5)
+            require(re.fullmatch(HOLDER, str(holder)), 'invalid holder path', 5)
             mode = 'ssh' if self.heartbeat else 'local'
             argv = ['python3', '-I', '-B', str(holder), 'connection-holder', token, 'set', host, mode]
             if self.heartbeat:

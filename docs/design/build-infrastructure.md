@@ -1,8 +1,7 @@
 # Build infrastructure
 
 Provisional, 2026-10-22. The host admission and recovery contract for the
-owners' `heavy` commands. Runtime identity is specified by gate-policy.md
-when that policy module is installed.
+owners' `heavy` commands. Runtime identity is specified by gate-policy.md.
 
 ## 1. In one page
 
@@ -183,13 +182,13 @@ installing it; its group repairs use `heavy --repair-group` under the host
 lock, preserving gate and maintenance holds. Tests use distinct config, data, socket,
 state and unit names; no live owners' daemon or groups are touched.
 
-Unknown legacy pauses have no durable owner. An empty process list or
-absence of Cargo does not authorize resuming them. Migration must be quiet:
-an operator accounts for legacy work and pause intent, drains the dedicated
-queue and explicitly restores groups or records maintenance holds before
-enabling admission. The root cause of incident 587 is unknown; the stale
-pause fixture demonstrates recovery of a durable owned hold without
-inferring that incident's cause.
+A pause that no ledger records has no durable owner. An empty process list
+or absence of Cargo does not authorize resuming it. Migration must be quiet:
+an operator accounts for the older queue's work and pause intent, drains
+the dedicated queue and explicitly restores groups or records maintenance
+holds before enabling admission. The root cause of incident 587 is
+unknown; the stale pause fixture demonstrates recovery of a durable owned
+hold without inferring that incident's cause.
 
 ## 5. Events and compatibility
 
@@ -205,9 +204,9 @@ and collection, task completion, refusal and recovery. Records include a
 unique event ID, token, timestamp, boot and queue identity, lane, label,
 repository, tree, effective safe policy ID, free disk and memory capacity,
 and the entrypoint recording the event. A contained gate sources
-`gate-policy.sh` and calls `gate_policy_prepare` when that module is
-installed, both at submission and inside the contained task. Policy
-errors prevent payload entry. The recovery fixture can
+`gate-policy.sh` and calls `gate_policy_prepare`, both at submission and
+inside the contained task. Policy errors prevent payload entry. The
+recovery fixture can
 use a fake Chromium 147 repeatedly, while its combined land/cache and
 policy overhead cases use the installed Chromium 147. Missing policy
 helpers or runtimes refuse gate submission visibly.
@@ -241,7 +240,7 @@ receipt path and token as its final output line, outside the hashed log.
 
 ## 6. Fault verification
 
-`scripts/devel/recovery-v1/test-heavy-recovery --evidence NEW_DIRECTORY`
+`scripts/devel/test-heavy-recovery --evidence NEW_DIRECTORY`
 exercises the production heavy entrypoints with disposable pueued instances and user
 systemd units. It covers killed pause intent, fsynced intent before
 rename, paused groups, setsid/private descendants, release and release
@@ -274,6 +273,13 @@ missing-runtime changes before payload refuse without cache or ref advance.
 Receipt faults cover before publication, a fsynced temporary receipt before
 rename, and after atomic publication. The five-second case anchors a live
 reconciliation, then observes recovery on the subsequent periodic tick.
+Recovery fixtures also cover after-landing's helper lookup from a relocated
+kit and real Chromium 147 receipt/cache reuse. Land-entry storage and
+missing-reconciler cases require the warning on the waiting caller's
+stream before restoring the same service/ledger, with no receipt/green
+while broken. The capture write uses guarded `/dev/full` to obtain kernel
+ENOSPC without consuming disk space; both prebuild and gate paths refuse
+landing after that capture failure.
 
 Overhead measurements run the same lightweight payload directly and
 through heavy in interleaved pairs, at least three times. Event counts
@@ -283,62 +289,41 @@ Fault barriers and boot overrides require the explicit recovery-fixture
 flag and paths beneath the isolated DEV_TMP. No full repository gate is
 part of this recovery fixture.
 
-
 ## 7. Quiet migration, queue replacement and rollback
 
-Before fleet installation, stop old `heavy` and `land` submissions and
-account for every legacy caller, wrapper, queued/running entry and TSV
-writer. Drain all of them; absence of Cargo processes or a completion-only
-TSV does not prove the queue is quiet. Record intentional pauses and
-restore them as explicit maintenance holds where appropriate. The source
-kit is `scripts/devel/recovery-v1/`; legacy `scripts/devel/heavy`, `land`,
-`setup`, `kit.sh`, `after-landing`, `kache-setup`, workspace assets and
-skein's `scripts/check.sh` retain their pre-M2 baseline contents. Nothing in a
-legacy entrypoint loads the new kit, and following main does not migrate
-a host. Baseline setup retains its link-to-primary behavior. After migration,
-use only the stable setup on PATH; explicitly running baseline setup would
-restore legacy links.
+One generation of the kit runs on every machine (the user, 10-25):
+`scripts/devel/`'s `heavy`, `heavy-recovery.py`, `land`, `land-capture.py`,
+`land-turn.py`, `gate-policy.sh`, `receipt_inputs.py`,
+`recovery_message.py`, `after-landing` and `kit.sh`, with their `test-*`
+fixtures; `scripts/infra/setup` and `kache-setup`; and the workspace files
+in `scripts/infra/workspace/`. `setup --fix` links the tools on PATH and
+the workspace files to the primary agents checkout (infra.md 2), and each
+tool finds its helpers beside it, so `heavy`, `land` and their helpers
+always move together. There is no installed copy.
 
-The director owns this sequence after the complete quiet accounting/drain:
+Until 10-25 the fleet ran a frozen release of the kit, a copy under
+`~/.local/share/agents-kits/recovery-v1-COMMIT/`. A machine moves from it to
+the checkout once, hetzner3 first, since it holds the landing turn (section 8):
 
-1. Select and verify the committed release and its source/evidence hashes.
-   Run `release=$(agents/scripts/devel/recovery-v1/install-release)` from the
-   workspace containing that verified checkout.
-   It copies HEAD's complete kit with `git archive` into a new
-   `~/.local/share/agents-kits/recovery-v1-COMMIT` directory outside every
-   primary/linked checkout. It writes a content manifest and makes every
-   file/directory read-only. An existing release is refused, never rewritten.
-   It changes no links, queues or services. Verify the release manifest with
-   `python3 -I -B "$release/stable-release.py"` and the reviewed source hashes.
-2. Use the exact `release` path returned by the copier. With the accounted
-   legacy queue still quiet, run `"$release/setup" --fix` using the intended
-   `DEV_ROOT`, `DEV_TMP` and queue configuration. This links heavy, land and
-   setup together to that stable kit. Workspace `AGENTS.md` and `CLAUDE.md`
-   link directly to the agents checkout's `scripts/devel/recovery-v1/workspace/`
-   files; `.claude/settings.json` links to the read-only kit's workspace copy.
-   Missing checkout files fail by path, without creating links. The stable
-   setup is self-contained and never invokes baseline setup. Mutable-source
-   setup refuses even `--fix` before any mutation. Readiness can report failure
-   here until the new reconciler is installed; that is not permission to admit.
-3. Establish the dedicated queue/config/data identity and its own shared
-   ledger/state; preserve the recorded intentional pauses. Do not mix legacy
-   TSV writers with durable-ledger writers or adopt queued legacy work.
-   Install and verify that queue's independent reconciler with the stable
-   `heavy --install-reconciler` and `heavy --check-recovery` under the same
-   configuration/state, restore explicit maintenance holds, then check setup
-   again. Admit new submissions only after readiness and ownership are proved.
+1. Fast-forward the primary agents checkout.
+2. Run `heavy --gate -- ~/src/rust/agents/scripts/infra/setup --fix`, so that
+   no build runs meanwhile. It relinks the tools and the workspace files.
+3. Run `heavy --install-reconciler`. Under the host lock, it rewrites the
+   reconciler's units to the checkout's helper, so tasks in flight carry
+   on. Then `heavy --check-recovery` and `setup`.
 
-Later landings can change the source kit and the workspace instructions
-linked to it, but cannot move stable tool/settings links or change installed
-helper bytes. A new release requires another explicit quiet
-drain/copy/verify/link/reconcile/admit sequence; there is no online upgrade
-or automatic fleet installation. Read-only permissions prevent accidental
-writes, not deliberate chmod by the owning account. Retain each release
-unchanged while it has callers, tasks, services or rollback evidence.
+The queue, its ledger and its state directory stay the same: the kit's
+ledger changes since the release only add fields. The old release stays on
+disk until no unit or caller uses it.
+
+A change to `heavy`'s ledger or units must stay compatible with tasks in
+flight, because each machine takes it as its checkout moves. One that can't
+lands only once every machine is drained, and its commit says so
+(infra.md 2).
 
 Never reset or replace a live queue or erase its ledger. Enqueue recovery
 uses a persisted bare numeric queue ID; it cannot prove identity after a
-reset/replacement. Replacement requires stopping submissions and the same
+reset/replacement. Replacement requires stopping submissions and a
 complete accounting/drain, including callers, wrappers, observers,
 unfinished tokens and pause/resume intent, before changing queue identity
 or selecting a fresh state directory. Retain the retired ledger and
@@ -348,36 +333,16 @@ recovery and the shared kache service when selected, then reconcile with
 the same configuration and state. Resolve recovered nonzero completions
 by rerunning land.
 
-For rollback, stop new submissions and account for/drain every new token,
-caller, wrapper and queue entry using the new kit. Explicitly resolve all
-maintenance holds and resume requests with the new maintenance commands;
-a drained task list alone does not resolve them. Remove the reconciler
-with the new kit while its helpers still exist, then restore old `heavy`
-and old `land` together, plus baseline setup and workspace links. Do not
-swap binaries first or leave an old client paired with the new recovery path. The old cache namespace and the new
-receipt/cache files can remain; rollback requires no destructive cache or
-ledger cleanup.
-
-`scripts/devel/recovery-v1/test-inert-install --evidence NEW_DIRECTORY`
-snapshots the primary kit into a disposable primary, fast-forwards it from
-a separate disposable clone that adds the recovery kit, and checks that the
-primary tools, their symlink bytes and setup's behavior are unchanged. It verifies stable release hashes/links across another
-primary advance, repeat-copy refusal and mutable-setup refusal. It never
-runs global setup. Recovery fixtures also cover relocated after-landing
-helper lookup and real Chromium 147 receipt/cache reuse. Land-entry storage
-and missing-reconciler cases require the warning on the waiting caller's
-stream before restoring the same service/ledger, with no receipt/green
-while broken. The capture write uses guarded `/dev/full` to obtain kernel
-ENOSPC without consuming disk space; both prebuild and gate paths refuse
-landing after that capture failure.
+Rollback is reverting the commit, under the same rule for the ledger and
+units. It requires no destructive cache or ledger cleanup.
 
 ## 8. Advisory landing turn
 
-The recovery kit has an opt-in advisory turn before land's host repository
+`land` has an opt-in advisory turn before its host repository
 lock and build-lane prebuild. Only remote code landings whose repository
 name is `temper` enter it. `~/.config/agents-land-turn/enabled` containing
 `ssh` or `local` enables it, overriding environment mode and holder with that
-mode and this release's sibling `land-turn.py`. Removal turns off future
+mode and the `land-turn.py` beside `land`. Removal turns off future
 ordinary invocations; without it, the `LAND_TURN=1` environment fixture
 interface below remains available. Invalid contents or read failure fail open.
 `--docs`, `--local` and other repository names bypass it even when opted
@@ -390,19 +355,16 @@ per connection, a retained repository-specific flock, and no listener,
 queue, fairness promise, origin lease ref or failover. The bounded
 current-holder record is diagnostic: stale bytes after a killed holder
 never establish ownership. The coordinator's lock and journals use
-`/home/free/.local/state/agents-landing-turn` across release updates.
+`/home/free/.local/state/agents-landing-turn` across kit updates.
 Never unlink or replace a live lock file or select a different state
 path while callers exist: that would split the flock identity.
 
-The operator must set `LAND_TURN_HOLDER` to the exact coordinator asset
-`/home/free/.local/share/agents-kits/recovery-v1-COMMIT/land-turn.py`, with
-COMMIT a full lowercase 40–64 digit hexadecimal commit identity. This
-path is independent of the caller's release. Relative paths, mutable
-checkout paths, shell syntax and invalid modes fail open with a fixed
-reason. The holder verifies its read-only installed kit and manifest
-with that release's `stable-release.py` before creating state or granting.
-Missing helpers, invalid releases and failed connections also fail open;
-there is no automatic copy, install or fallback to mutable source.
+The holder is `/home/free/src/rust/agents/scripts/devel/land-turn.py` in
+the coordinator's primary checkout, and `LAND_TURN_HOLDER` must name
+exactly that path. Every fleet machine keeps its checkout there, so the
+`land-turn.py` beside its `land` has that path too. Other paths, shell
+syntax and invalid modes fail open with a fixed reason. Missing helpers
+and failed connections also fail open; there is no fallback holder.
 
 `LAND_TURN_MODE` defaults to `ssh`. The client builds an argv for `ssh -T`
 to the fixed `free@2.29.124.199`, with `BatchMode=yes`,
@@ -411,26 +373,22 @@ and `ServerAliveCountMax=2`. `UpdateHostKeys=no` prevents opportunistic
 trust updates; `LogLevel=QUIET` and discarded transport stderr keep SSH
 and remote interpreter diagnostics out of the narrow turn records. The
 remote command is shell-quoted from validated argv and starts
-`python3 -I -B` with the exact installed asset. No key, trust or SSH
+`python3 -I -B` with the exact holder path. No key, trust or SSH
 configuration is changed. Trust/auth/connect/start failures surface on
 the caller as fixed fail-open reasons without raw remote output.
 
-Director-owned per-host configuration, after landing and section 7's
-fleet installation: hetzner, hetzner2 and hel8 use `LAND_TURN_MODE=ssh`;
-hetzner3 uses `LAND_TURN_MODE=local`, allowed only on hostname
-`debian-16gb-hel1-3`. Every host sets the explicit coordinator
+Director-owned per-host configuration: hetzner, hetzner2 and hel8 use
+`LAND_TURN_MODE=ssh`; hetzner3 uses `LAND_TURN_MODE=local`, allowed only on
+hostname `debian-16gb-hel1-3`. Every host sets the explicit coordinator
 `LAND_TURN_HOLDER`. A wrong local hostname fails open. Hetzner4 uses
 strict SSH too and fails open until the director verifies its trust and
-auth; no setup is attempted by the client. Older releases without the
-helper must first receive a new committed kit through section 7's
-explicit quiet copy/verify/link/reconcile/admit sequence. Install and
-verify the coordinator's selected release first, then caller releases;
-retain old releases and the shared coordinator lock state. Verify the
-selected holder release on the coordinator before recording its path
-on callers. Set `LAND_TURN=1` for temper only after the complete fleet
-install and the director's explicit activation word. No activation or
-fleet saving is established by disposable acceptance. The first benefit
-window is the 24 hours after activation; M4 repin is separate.
+auth; no setup is attempted by the client. hetzner3's checkout carries
+the holder before any caller moves to the checkout (section 7). Callers
+not yet moved name the old release's holder, which takes the same lock.
+Set `LAND_TURN=1` for temper only after the whole fleet has moved and the
+director's explicit activation word. No activation or fleet saving is
+established by disposable acceptance. The first benefit window is the 24
+hours after activation; M4 repin is separate.
 
 The SSH client sends a single zero byte immediately and every five
 seconds while queued or granted. The holder consumes these bytes and
@@ -471,14 +429,14 @@ isolated `DEV_TMP` selects only the local acceptance holder.
 production command construction, real-value heartbeat expiry and
 ordinary disposable Git landings. Simulated SSH cases run through the
 production constructor with a fixture executable; they do not prove
-real SSH connectivity or remote installation. The full repository gate
-and real temper landings are outside these fixtures.
+real SSH connectivity or the coordinator's holder. The full repository
+gate and real temper landings are outside these fixtures.
 
 ## 9. Explicit dependency repins
 
 `scripts/devel/repin` is a standalone Python 3.11 command, invoked explicitly
-from a committed agents checkout; installation and stable links do not change.
-It prepares and commits one exact tuple in a consumer's clean linked worktree:
+from a committed agents checkout. It prepares and commits one exact tuple in
+a consumer's clean linked worktree:
 
 ```text
 scripts/devel/repin --consumer ABS_LINKED_WORKTREE --base FULL_SHA \
@@ -506,10 +464,11 @@ batching, scheduling, persistent job state or configuration file here.
 Current consumers pin solely in Cargo.lock; selected `?rev=` sources refuse.
 The command starts with `git show BASE:Cargo.lock`, never another consumer's
 lock or a whole-lock regeneration, and never rewrites a manifest. For each
-selected source it passes `cargo update --precise FULL_SHA -p PACKAGE_SELECTOR` through installed
-`heavy`, selecting one unambiguous package and checking every package from
-that source afterward. A manifest constraint Cargo cannot honor refuses;
-there is no automatic manifest fix or network API probe.
+selected source it passes `cargo update --precise FULL_SHA -p
+PACKAGE_SELECTOR` through the `heavy` on PATH, selecting one unambiguous
+package and checking every package from that source afterward. A manifest
+constraint Cargo cannot honor refuses; there is no automatic manifest fix or
+network API probe.
 
 Parsed TOML records outside selected source identities must remain equal,
 including registry versions/checksums, other git SHAs, workspace records and
@@ -523,7 +482,7 @@ takes skein's branch). The whole lock is checked once the last pin is in, as
 it is after each generator and check. So a source others name goes last
 (`--pin jig=... --pin skein=...`); in the other order the run refuses.
 
-Generators and checks run through installed heavy, in the consumer root.
+Generators and checks run through the heavy on PATH, in the consumer root.
 Only Cargo.lock and explicitly named generated regular files may change.
 The allowlist rejects absolute paths, traversal, `.git`, directories, prefixes,
 symlinks and manifest/lock aliases (all TOML and lock outputs refuse).
@@ -537,11 +496,11 @@ outside the boundary. Keep the worktree exclusively owned during preparation.
 Default success commits only the lock and allowlisted files, after checking
 branch/HEAD again. Failure before that point commits nothing and preserves
 reviewable changes: no reset, clean or retry. Inspect `git diff` and status.
-`--land` then invokes installed `land` with no arguments or custom prebuild;
-the ordinary full gate is authoritative. A temporary, process-scoped pre-push
-guard requires the pushed commit's sole parent to remain BASE and its lock
-blob to equal the prepared lock. Existing hooks are retained and the original
-pre-push hook is chained. A conditional Git include scopes this temporary
+`--land` then invokes the `land` on PATH with no arguments or custom
+prebuild; the ordinary full gate is authoritative. A temporary,
+process-scoped pre-push guard requires the pushed commit's sole parent to
+remain BASE and its lock blob to equal the prepared lock. Existing hooks
+are retained and the original pre-push hook is chained. A conditional Git include scopes this temporary
 override to the consumer's Git directory; other repositories keep their hooks.
 A later-base rebase therefore refuses before push; focused checks never claim
 validation of that later base. The temporary hook directory is removed on
@@ -554,10 +513,9 @@ failure may leave its amended/rebased candidate; do not rerun it unguarded.
 
 `scripts/devel/land-set` is the landing flow's starting primitive
 (landing-flow.md 9.1). It is a standalone Python 3.11 command, run from a
-committed agents checkout like `repin`; installation and stable links do not
-change. It lands one milestone's set across skein, smith, hearth, jig and
-temper under one lock, and gates every repository of the set before it pushes
-any of them:
+committed agents checkout like `repin`. It lands one milestone's set across
+skein, smith, hearth, jig and temper under one lock, and gates every
+repository of the set before it pushes any of them:
 
 ```text
 scripts/devel/land-set SETFILE
@@ -581,9 +539,9 @@ checkout, `DEV_ROOT/<repo>`, must have that origin. The `land` on PATH must
 take `--no-push` (below). Every check precedes the lock; a failure exits 2.
 
 **The lock.** The run holds a turn named `set` from the landing turn's
-installed holder on hetzner3 (section 8): the `land-turn.py` beside the
-resolved `land` on PATH, which must be an installed release's. On hetzner3 it
-runs locally; elsewhere over section 8's ssh argv, with its heartbeat. The
+holder on hetzner3 (section 8): the `land-turn.py` beside the resolved
+`land` on PATH, which must be section 8's holder path. On hetzner3 it runs
+locally; elsewhere over section 8's ssh argv, with its heartbeat. The
 client fails closed: a missing holder, a transport closed or a message
 invalid before the grant exits 5 with nothing fetched. A transport lost after
 the grant lets the step in progress finish, then stops with exit 5. Sets
@@ -668,13 +626,13 @@ set completes. A rerun after the repair checks that each recorded commit is on
 its repository's `origin/main`, reports `recorded landed COMMIT`, and uses
 that commit for downstream pins without landing it again.
 
-**`land --no-push`.** The kit's `land`, and `scripts/devel/land` which mirrors
-it, take `--no-push`: everything up to and including the trailers, then land's
-summary with `not pushed` in place of where it landed, and exit 0. It pushes
-nothing, moves no local `main` and starts no after-landing tier; `--docs` or
-`--local` with it exits 2. And `land` amends the tip only when the trailers it
-would write differ from the tip's, so that landing again, on an unchanged
-`main`, a commit it gated pushes that very commit.
+**`land --no-push`.** `land` takes `--no-push`: everything up to and
+including the trailers, then land's summary with `not pushed` in place of
+where it landed, and exit 0. It pushes nothing, moves no local `main` and
+starts no after-landing tier; `--docs` or `--local` with it exits 2. And
+`land` amends the tip only when the trailers it would write differ from the
+tip's, so that landing again, on an unchanged `main`, a commit it gated
+pushes that very commit.
 
 **The feed.** Each line is one JSON object, appended under `flock` to
 `/home/free/.local/state/agents-land-set/feed.jsonl` on hetzner3 (0600 in a
@@ -727,5 +685,5 @@ land, and a resumed partial set. With this version it adds:
 `scripts/devel/test-landings` covers the status view, `wait` ending `done`,
 `stopped` and at its timeout, and lines with no `event`. With
 `HEAVY_RECOVERY_FIXTURE=1` and `LAND_SET_FIXTURE_DIR` strictly below
-`DEV_TMP`, the lock is the source kit's local fixture holder and the feed is
+`DEV_TMP`, the lock is `land-turn.py`'s local fixture holder and the feed is
 that directory's `feed.jsonl`.
