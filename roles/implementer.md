@@ -4,9 +4,12 @@ Provisional, 2026-10-24. How an implementer works: the Codex run that
 takes one task file from its owner ([owners.md](owners.md) 4.2 and
 4.3), in a worktree of its own, and writes, builds, tests and repairs
 until the task is done. Every implementer reads this file before its
-task. The task holds what is particular to it; where it departs from
-this file, it says why, and the task wins: a stability trial, a
-measurement, a profile the change needs.
+task, and outside agents, section 1 of skein's `docs/foundation/`
+rules, `programming-model.md` and `testing-strategy.md`: a later
+section only where the task names it. The task holds what is
+particular to it; where it departs from this file, it says why, and
+the task wins: a stability trial, a measurement, a profile the change
+needs.
 
 **Why.** Every build and test goes through
 `heavy`, one queue for the whole machine. Over 741 runs from 10-22 to
@@ -48,15 +51,17 @@ set's narrow tests pass:
 
 1. **Format:** `cargo fmt`, directly, not through `heavy`: it builds
    nothing.
-2. **The focused suite, if it wants one:** `heavy cargo nextest run
-   --workspace`, the default profile: every test but the fuzzy ones and
-   the tiers', under 20 seconds of tests. Its builds are the gate's
-   first, from the shared store.
+2. **The focused suite, unless the task waives it:** `heavy cargo
+   nextest run --workspace`, the default profile: every test but the
+   fuzzy ones and the tiers'. Its builds are the gate's first, from the
+   shared store.
 
-Nothing else: not the fuzzy or browser profiles, the process, live or
-QA tiers, clippy, the wasm lints or the doc examples, and never
-`scripts/check.sh`. They are the gates' (owners.md 4.4), unless the
-task names one.
+Nothing else: not the fuzzy or browser profiles, the process or live
+tiers, clippy, the wasm lints or the doc examples, and never
+`scripts/check.sh`, `land` or `land-set`. They are the gates' and the
+owner's (owners.md 4.4), unless the task names one. A change to a
+world's facts, fakes or harness also runs that world's `qa` profile
+(owners.md 4.6).
 
 **A repair** of what a gate found is where another suite runs: first
 the failing check alone (the failing tests in their profile, as
@@ -75,7 +80,22 @@ reruns only the step the finding came from.
 
 ## 4. The report
 
-Besides what the task asks, the report says what it ran (section 1's
-tests, the focused suite, a repair's checks) and what each found, how
-many tests ran, and any test it couldn't run. The gates' checks need no
-mention: they are the landing's.
+The report replaces `codex-run`'s reservation line. Besides what the
+task asks, it says what it ran (section 1's tests, the focused suite, a
+repair's checks) and what each found, how many tests ran, and any test
+it couldn't run. The gates' checks need no mention: they are the
+landing's. **On a doubt** it stops: the report's first line is the
+question, starting `Question:`, with the options and a recommendation.
+It never improvises across a boundary.
+
+## 5. Security
+
+[director.md](director.md) 10's rules, as they bind an implementer:
+- no probes on the project's real repositories;
+- no agent reads another process's environment (`/proc/*/environ`,
+  `ps e`), and none runs `pueue` in any form: `heavy`'s own commands
+  are the queue's only way in;
+- it searches only its worktree and the paths its task names, never
+  `~/.local`, `~/.config`, `/run/user` or another tool's state;
+- it reads no secret of the user's box, no credential record and no
+  `auth.json`, and asks for none.

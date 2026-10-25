@@ -406,7 +406,8 @@ is mechanical, and Codex reads what needs reading.
 - **x1 is the user's workstation:** its load is theirs. When it has no
   margin, landings go from another machine, with the same gate and
   budgets.
-- **The security rules,** in every brief:
+- **The security rules,** in every brief (an implementer's are
+  implementer.md 5's):
   - the user's classic token never goes to an implementer;
   - no probes on the project's real repositories;
   - no agent reads another process's environment (`/proc/*/environ`,

@@ -139,11 +139,11 @@ commit of each.
   or its sub-owner, keeps the judgement: when to rebase, which findings
   to fix, the task's brief, the check of each diff (owners.md 4.4) and
   the request to the queue.
-  - **Escalation** follows the implementers' rules (owners.md 4.3, 5):
-    on a doubt the implementer stops, writes the question in its
-    owner's `inbox/` and ends, and it never improvises across a
-    boundary. A conflict that needs a call on whose intent wins is
-    such a doubt.
+  - **Escalation** follows the implementers' rules (implementer.md 4,
+    owners.md 5): on a doubt the implementer stops, writes the
+    question as its report's first line and ends, and it never
+    improvises across a boundary. A conflict that needs a call on
+    whose intent wins is such a doubt.
   - Where the work gets hard, Opus advises the owner, as for any task
     (owners.md 4.2).
 - **Rebasing during the milestone** is the owner's choice, when it needs

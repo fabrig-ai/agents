@@ -68,8 +68,7 @@ moves a set, 8 before it escalates. Owners and directors need section
   directory. The next event's keeper starts after this one ends, so
   two never act on one set. The queue goes on meanwhile.
 - **Its prompt** names the event, the event's directory and the paths
-  it may read, and carries director.md 10's security lines verbatim,
-  as a task file does (owners.md 4.3).
+  it may read, and carries director.md 10's security lines verbatim.
 - **The event's directory** holds what the event needs, all on
   hetzner3: the set file and the journal's lines for the set; for a
   failure, the gate's and the rerun's logs, copied by the tool from

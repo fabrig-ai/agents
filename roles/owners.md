@@ -23,7 +23,8 @@ the work touches it (a new protocol, a world's checks, a memory bound),
 and skein's `docs/foundation/notes.md`, the reasons and open questions
 behind the rules, when a rule's reason matters. A read put off never
 puts off a rule: the brief's constraints, the security rules, the caps
-and the budgets bind from the start. The repository's `AGENTS.md` loads on its own.
+and the budgets bind from the start. A repository's `AGENTS.md` is read
+before touching its code: an owner's session doesn't load it.
 
 ## 1. In one page
 
@@ -321,7 +322,7 @@ and where they pay:
 - **Settle first** what the tasks rest on: the scope, the APIs that may
   break and who repairs them, credentials and live services, the
   interface sketches.
-- **Small tasks,** each landed on its own and leaving `main` coherent:
+- **Small tasks,** each merged on its own, leaving its branch coherent:
   nothing half-built in sight, no dead code. Transitional code names
   the task that removes it.
 - **Upstream first:** a task that needs an upstream change waits for
@@ -397,13 +398,13 @@ by the tool. The model and the effort stay the owner's choice.
 ### 4.3 The task
 
 An implementer other than Opus 5.5 at xhigh reads its task literally.
-How it builds, tests, lints and formats is
-[implementer.md](implementer.md)'s, never repeated in a task. The task
-file's first line is: "Read `~/src/rust/agents/roles/implementer.md`
-first; this task departs from it only where it says so." A departure
-says its reason: a stability trial, a measurement, a profile the change
-needs, a wider run after an upstream change. Beyond that, the task file
-is whole, and holds:
+How it builds, tests, lints and formats, its security rules and its
+questions are [implementer.md](implementer.md)'s, never repeated in a
+task. The task file's first line is: "Read
+`~/src/rust/agents/roles/implementer.md` first; this task departs from
+it only where it says so." A departure says its reason: a stability
+trial, a measurement, a profile the change needs, a wider run after an
+upstream change. Beyond that, the task file is whole, and holds:
 - the goal, in two or three lines;
 - what to read first: the design's sections and the files, never a
   whole design, and of the rules, the sections the task touches beyond
@@ -414,18 +415,13 @@ is whole, and holds:
   documents name. The owner checks them against `main` before the task
   goes out: the names, files and behaviours they assume are there (a
   Codex survey may check a large task's);
-- the files it may touch, and that the mechanical follow-through of its
-  change in the same crate is in scope: a call site, a match arm, a
-  test's expected value;
+- the files it may touch and the branch its commits are pushed to, and
+  that the mechanical follow-through of its change in the same crate is
+  in scope: a call site, a match arm, a test's expected value;
 - done when: the focused tests that pass, with their packages and
   binaries, and for a repair the failing check's (implementer.md 2);
   what else it proves (the commit's trailers, the figures it compares).
-  The gates run every other check at landing (4.4);
-- the security lines of `director.md` 10, verbatim: a brief's copy
-  doesn't reach an implementer that reads only its task;
-- on a doubt: stop, write the question as the report's first line,
-  starting `Question:`, with the options and a recommendation, and end:
-  the run's post carries it. Never improvise across a boundary.
+  The gates run every other check at landing (4.4).
 
 ### 4.4 Landing
 
