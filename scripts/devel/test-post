@@ -40,7 +40,7 @@ poll_until() {
     done
     return 1
 }
-export HOME=$t/home DEV_ROOT=$t/a POST_NAME=sender POST_RESUME_CHECK=0 POST_RETRY_DELAYS="0 0 0"
+export HOME=$t/home DEV_ROOT=$t/a POST_NAME=sender POST_RESUME_CHECK=0 POST_STOP_WAIT=0 POST_RETRY_DELAYS="0 0 0"
 export POST_TOOL=$kit/post FIXTURE=$t
 unset SSH_ORIGINAL_COMMAND
 mkdir -p "$HOME/.local/bin" "$t"/{a,b}/tmp/post "$t/session cwd"
@@ -82,6 +82,11 @@ set -euo pipefail
 jq -nc --arg cwd "$PWD" --args '{cwd:$cwd,args:$ARGS.positional}' -- "$@" >>"$FIXTURE/claude-calls"
 if [[ $* == 'agents --json --all' ]]; then
     cat "$FIXTURE/sessions.json"
+    if [[ -f $FIXTURE/stopping ]]; then
+        jq 'map(del(.pid))' "$FIXTURE/sessions.json" >"$FIXTURE/sessions.next"
+        mv "$FIXTURE/sessions.next" "$FIXTURE/sessions.json"
+        rm "$FIXTURE/stopping"
+    fi
     if [[ -n ${FIXTURE_SESSION_NEXT_STATE:-}${FIXTURE_SESSION_NEXT_ID:-} ]]; then
         jq --arg state "${FIXTURE_SESSION_NEXT_STATE:-}" --arg id "${FIXTURE_SESSION_NEXT_ID:-}" \
             'map(if $state != "" then .state=$state else . end |
@@ -92,7 +97,9 @@ if [[ $* == 'agents --json --all' ]]; then
 elif [[ $# == 2 && $1 == stop ]]; then
     printf '%s\n' "$2" >>"$FIXTURE/stops"
     [[ ${FIXTURE_STOP_FAIL:-0} == 0 ]] || exit 1
-    jq --arg id "$2" 'map(if .id == $id then .state="stopped" else . end)' \
+    if [[ ${FIXTURE_STOP_PENDING:-0} == 1 ]]; then exit 0; fi
+    if [[ ${FIXTURE_STOP_DELAY:-0} == 1 ]]; then touch "$FIXTURE/stopping"; exit 0; fi
+    jq --arg id "$2" 'map(if .id == $id then del(.pid) else . end)' \
         "$FIXTURE/sessions.json" >"$FIXTURE/sessions.next"
     mv "$FIXTURE/sessions.next" "$FIXTURE/sessions.json"
 elif [[ $# == 6 && $1 == --bg && $2 == --resume && $4 == --name ]]; then
@@ -100,12 +107,16 @@ elif [[ $# == 6 && $1 == --bg && $2 == --resume && $4 == --name ]]; then
     pwd >"$FIXTURE/resume-cwd"
     printf '%s\n' "$3" "$6" >>"$FIXTURE/resumes"
     [[ ${FIXTURE_RESUME_FAIL:-0} == 0 ]] || exit 1
+    # A resume is unsafe until the old process has actually gone.
+    jq -e --arg id "$3" 'all(.[]; (.sessionId // .id) != $id or .pid == null)' "$FIXTURE/sessions.json" >/dev/null
     sleep "${FIXTURE_RESUME_DELAY:-0}"
     jq --arg id "$3" --arg state "${FIXTURE_RESUME_STATE:-working}" \
-        'map(if (.sessionId // .id) == $id then .state = $state else . end)' \
+        '. + [.[] | select((.sessionId // .id) == $id) |
+              .id="resumed" | .sessionId="resumed-session" | .pid=456 |
+              .state=$state | .startedAt="2027"]' \
         "$FIXTURE/sessions.json" >"$FIXTURE/sessions.next"
     if [[ ${FIXTURE_NEW_SESSION:-0} == 1 ]]; then
-        jq '. + [.[0] | .sessionId="new-session" | .state="done" | .startedAt="2027"]' \
+        jq '. + [.[0] | .id="new" | .sessionId="new-session" | .pid=789 | .state="done" | .startedAt="2028"]' \
             "$FIXTURE/sessions.next" >"$FIXTURE/sessions.json"
     else
         mv "$FIXTURE/sessions.next" "$FIXTURE/sessions.json"
@@ -119,7 +130,7 @@ chmod 700 "$HOME/.local/bin/ssh" "$HOME/.local/bin/claude"
 post() { "$POST_TOOL" "$@"; }
 session() {
     jq -n --arg name "$1" --arg state "$2" --arg cwd "$t/session cwd" \
-        '[{id:"short",sessionId:"full-session-id",name:$name,state:$state,
+        '[{id:"short",sessionId:"full-session-id",name:$name,state:$state,pid:123,
            startedAt:"2026-10-24T12:00:00Z",cwd:$cwd,kind:"claude"}]' >"$t/sessions.json"
 }
 message() {
@@ -156,7 +167,7 @@ done
 
 session sleeping 'done'
 # An older stopped session must not hide the newest done session.
-jq '. + [.[0] | .state="stopped" | .startedAt="2026-10-23T12:00:00Z"]' "$t/sessions.json" >"$t/older.json"
+jq '. + [.[0] | .id="older" | .sessionId="older-session" | del(.pid) | .startedAt="2026-10-23T12:00:00Z"]' "$t/sessions.json" >"$t/older.json"
 mv "$t/older.json" "$t/sessions.json"
 out=$(capture post send sleeping wake <<< body)
 expect 'done session wakes' "$out" 'status=0' 'woken'
@@ -169,6 +180,15 @@ expect 'stop before named resume in session cwd' "$(jq -sc --arg cwd "$t/session
     .[1].args[0:5] == ["--bg","--resume","full-session-id","--name","sleeping"] and
     .[1].cwd == $cwd' "$t/claude-calls")" true
 expect 'resumed once' "$(wc -l <"$t/resumes")" 2
+expect 'wake follows new id while original stays done without pid' "$(jq -c '
+    any(.[]; .sessionId == "resumed-session" and .state == "working" and .pid != null) and
+    all(.[]; .sessionId != "full-session-id" or (.state == "done" and .pid == null))' "$t/sessions.json")" true
+session deliberately-stopped 'done'
+jq 'map(del(.pid))' "$t/sessions.json" >"$t/stopped.json"
+mv "$t/stopped.json" "$t/sessions.json"
+: >"$t/claude-calls"
+expect 'done without pid is stopped' "$(capture post send deliberately-stopped unwoken <<< body)" 'status=3' 'nobody will wake it: stopped'
+expect 'stopped session neither stopped nor resumed' "$(jq -sc '[.[] | select(.args[0] != "agents")] | length' "$t/claude-calls")" 0
 for state in working blocked; do
     session "changed-$state" 'done'
     : >"$t/claude-calls"
@@ -184,9 +204,16 @@ session stop-failed 'done'
 expect 'stop failure keeps mail' "$(capture env FIXTURE_STOP_FAIL=1 "$POST_TOOL" send stop-failed failure <<< body)" 'status=3' 'stop failed'
 expect 'stop failure never resumes' "$(jq -sc '[.[] | select(.args[0] != "agents") | .args] == [["stop","short"]]' "$t/claude-calls")" true
 expect 'stop failure retains mail' "$(count "$t/a/tmp/post/stop-failed/new")" 1
+session stop-pending 'done'
+: >"$t/claude-calls"
+expect 'stop timeout refuses wake' "$(capture env FIXTURE_STOP_PENDING=1 POST_STOP_WAIT=1 "$POST_TOOL" send stop-pending failure <<< body)" 'status=3' 'stop did not complete'
+expect 'stop timeout never resumes' "$(jq -sc '[.[] | select(.args[0] != "agents") | .args] == [["stop","short"]]' "$t/claude-calls")" true
+expect 'stop timeout polls again' "$(jq -sc '[.[] | select(.args[0] == "agents")] | length' "$t/claude-calls")" 4
 session working working
 expect 'working session queues' "$(capture post send working busy <<< body)" 'status=0' 'queued'
 expect 'working session not resumed' "$(wc -l <"$t/resumes")" 2
+session stop-delayed 'done'
+expect 'waits for stop before resume' "$(capture env FIXTURE_STOP_DELAY=1 POST_STOP_WAIT=1 "$POST_TOOL" send stop-delayed wake <<< body)" 'status=0' 'woken'
 session blocked blocked
 expect 'blocked session queues' "$(capture post send blocked busy <<< body)" 'status=0' 'queued'
 for cwd in missing absent; do
@@ -390,8 +417,8 @@ session interactive working
 jq 'map(del(.state) | .status="idle")' "$t/sessions.json" >"$t/interactive"
 mv "$t/interactive" "$t/sessions.json"
 expect 'interactive session cannot wake' "$(capture post send interactive subject <<< body)" 'status=3' 'interactive session'
-session exact-id 'done'
-expect 'resume rechecks exact id' "$(capture env FIXTURE_NEW_SESSION=1 "$POST_TOOL" send exact-id subject <<< body)" 'status=0' 'woken'
+session newest-name 'done'
+expect 'resume checks newest session of name' "$(capture env FIXTURE_NEW_SESSION=1 "$POST_TOOL" send newest-name subject <<< body)" 'status=3' 'nobody will wake it: done'
 session concurrent 'done'
 : >"$t/resumes"
 FIXTURE_RESUME_DELAY=0.05 post send concurrent first <<< body >"$t/concurrent-1" &

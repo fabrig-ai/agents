@@ -103,7 +103,7 @@ session() {
 }
 unwoken() { echo "queued, nobody will wake it: $*"; return 3; }
 wake() (
-    local name=$1 info state full_id short_id cwd kind='' alive=0
+    local name=$1 info state full_id short_id cwd stop_info attempt kind='' alive=0
     exec 8>"$box/.wake.lock"
     flock -x 8 || fail 'cannot lock wake'
     {
@@ -121,13 +121,15 @@ wake() (
     case $state in
         working|blocked) echo queued ;;
         done)
+            if jq -e '.pid == null' <<<"$info" >/dev/null; then unwoken stopped; return $?; fi
             full_id=$(jq -r '.sessionId // .id // empty' <<<"$info")
             [[ -n $full_id ]] || { unwoken 'session has no id'; return $?; }
             if ! info=$(session "$name"); then unwoken 'no session'; return $?; fi
             state=$(jq -r '.state // "interactive session"' <<<"$info")
             case $state in
                 working|blocked) echo queued; return 0 ;;
-                done) ;;
+                done)
+                    if jq -e '.pid == null' <<<"$info" >/dev/null; then unwoken stopped; return $?; fi ;;
                 *) unwoken "$state"; return $? ;;
             esac
             if [[ $(jq -r '.sessionId // .id // empty' <<<"$info") != "$full_id" ]]; then
@@ -137,6 +139,13 @@ wake() (
             if [[ -z $short_id ]] || ! claude stop "$short_id" </dev/null >/dev/null 2>&1; then
                 unwoken 'stop failed'; return $?
             fi
+            for ((attempt=0; ; attempt++)); do
+                if stop_info=$(session "$full_id" id) && jq -e '.pid == null' <<<"$stop_info" >/dev/null; then break; fi
+                if ((attempt >= ${POST_STOP_WAIT:-10})); then
+                    unwoken 'stop did not complete'; return $?
+                fi
+                sleep 1
+            done
             cwd=$(jq -r '.cwd // empty' <<<"$info")
             [[ -d $cwd ]] || cwd=$root
             if ! (cd -- "$cwd" && claude --bg --resume "$full_id" --name "$name" \
@@ -144,7 +153,7 @@ wake() (
                 unwoken 'resume failed'; return $?
             fi
             sleep "${POST_RESUME_CHECK:-10}"
-            if info=$(session "$full_id" id); then state=$(jq -r '.state // "interactive session"' <<<"$info"); else state='no session'; fi
+            if info=$(session "$name"); then state=$(jq -r '.state // "interactive session"' <<<"$info"); else state='no session'; fi
             case $state in
                 working|blocked) echo woken ;;
                 *) unwoken "$state" ;;
