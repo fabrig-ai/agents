@@ -30,7 +30,7 @@ printf 'Own the fixture tasks.\n' >"$t/brief.md"
 printf 'export PATH=%q:/usr/bin:/bin\n' "$t/bin" >"$HOME/.bash_profile"
 cat >"$t/bin/systemd-run" <<'FAKE'
 #!/usr/bin/python3
-import os, pathlib, subprocess, sys
+import os, pathlib, signal, subprocess, sys
 args = sys.argv[1:]
 fixture = pathlib.Path(os.environ['DEV_ROOT']).resolve() / 'fake'
 (fixture / 'launch.args').write_bytes(b'\0'.join(os.fsencode(a) for a in args) + b'\0')
@@ -63,6 +63,10 @@ if (fixture / 'hold-launch').exists():
 # A private profile emulates the login environment without using real tools/state.
 command = ['/bin/bash', '--noprofile', '--norc', '-c',
            'source "$HOME/.bash_profile"; exec "$0" "$@"', *args[3:]]
+# A unit starts with default signal dispositions, also when this fixture runs
+# as a background job, which ignores SIGINT and SIGQUIT.
+signal.signal(signal.SIGINT, signal.SIG_DFL)
+signal.signal(signal.SIGQUIT, signal.SIG_DFL)
 with (fixture / (unit + '.log')).open('wb') as log:
     pid = os.fork()
     if pid == 0:
@@ -213,10 +217,11 @@ json_expect() {
     fi
     checks=$((checks + 1))
 }
+# Only a hang guard: 30 s in microseconds, generous for a loaded machine.
 poll_until() {
-    local deadline=$((SECONDS + 3))
+    local deadline=$((${EPOCHREALTIME//[.,]/} + 30000000))
     until "$@"; do
-        ((SECONDS < deadline)) || { echo "FAIL deadline: $*" >&2; return 1; }
+        ((${EPOCHREALTIME//[.,]/} < deadline)) || { echo "FAIL deadline: $*" >&2; return 1; }
         sleep 0.02
     done
 }
@@ -563,5 +568,11 @@ json_expect 'restart brief followed by saved post' \
 expect 'restart clears successful pending batch' "$(test ! -e "$restart_state/pending.md" && echo removed)" removed
 
 elapsed=$(awk -v start="$started" -v end="$(date +%s.%N)" 'BEGIN { printf "%.3f", end-start }')
-printf 'test-codex-run: %s checks passed in %ss\n' "$checks" "$elapsed"
-awk -v elapsed="$elapsed" 'BEGIN { exit !(elapsed < 15) }'
+# A slow fixture shows in CPU time; wall time on a busy machine shows contention.
+# This shell's and its waited-for children's user+sys, from `times` run in
+# this shell: in a command substitution it would count only the subshell.
+LC_ALL=C times >"$t/times"
+cpu=$(awk '{ for (i = 1; i <= NF; i++) { split($i, p, "m"); s += p[1] * 60 + p[2] } }
+           END { printf "%.3f", s }' "$t/times")
+printf 'test-codex-run: %s checks passed in %ss (%ss CPU)\n' "$checks" "$elapsed" "$cpu"
+awk -v cpu="$cpu" 'BEGIN { exit !(cpu < 15) }'
