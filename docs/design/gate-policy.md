@@ -116,7 +116,7 @@ The selected file is named `TOKEN.json`. Heavy writes it privately (0600)
 with an atomic rename only after the task's events and TSV completion,
 its owned cgroup is proved empty and terminal release is durable. A failed
 task may also produce a receipt; only successful completion is accepted.
-The JSON object has exactly these fields:
+The JSON object has these fields and no others:
 
 | Field | Required value |
 |---|---|
@@ -133,6 +133,7 @@ The JSON object has exactly these fields:
 | `elapsed_s` | Finite nonnegative JSON number (boolean is invalid) |
 | `log` | Absolute path to the completed `TOKEN.log` |
 | `log_sha256` | 64-hex SHA-256 digest of that log's bytes |
+| `head`, `inputs` | Optional: the checkout's commit and the tree of its files, each 40 or 64 hex digits, when heavy could read them |
 
 `land` parses JSON as data, refuses duplicate fields, checks the header ID
 and token, current tree, policy, arguments and every completion field, and

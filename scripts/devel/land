@@ -303,7 +303,15 @@ def main():
     fields = {"schema", "token", "id", "queue", "lane", "tree", "policy", "args",
               "outcome", "code", "payload_started", "payload_ended", "release_complete",
               "cgroup_empty", "elapsed_s", "log", "log_sha256"}
-    require(type(receipt) is dict and receipt.keys() == fields, "receipt schema fields are invalid")
+    # heavy adds the checkout's head and inputs when it can read them
+    # (receipt_inputs.py); land checks only their form.
+    optional = {"head", "inputs"}
+    require(type(receipt) is dict and fields <= receipt.keys() <= fields | optional,
+            "receipt schema fields are invalid")
+    for field in sorted(optional & receipt.keys()):
+        require(type(receipt[field]) is str and
+                re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", receipt[field]) is not None,
+                f"receipt {field} is malformed")
     expected = {"schema": "heavy-receipt-v1", "token": token, "id": task_id,
                 "lane": "gate", "tree": tree, "policy": policy,
                 "args": ["bash", "-c", command], "outcome": "completed"}

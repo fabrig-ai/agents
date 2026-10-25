@@ -28,7 +28,7 @@ RECEIPT_FAULTS = (
     "duplicate_field", "non_object_json", "extra_field", "mutated_log", "missing_log",
     "wrong_log_name", "relative_log", "wrong_digest", "wrong_filename", "duplicate_receipt",
     "output_after_receipt", "receipt_symlink", "receipt_directory", "receipt_fifo",
-    "log_symlink", "log_directory", "log_fifo",
+    "log_symlink", "log_directory", "log_fifo", "malformed_head", "non_string_inputs",
 )
 UNREADABLE_RECEIPT_FAULTS = ("unreadable_log", "unreadable_receipt")
 
@@ -130,7 +130,9 @@ receipt = dict(schema="heavy-receipt-v1", token=token, id="1", queue="isolated-f
                lane=lane, tree=tree, policy=os.environ["SKEIN_GATE_POLICY_ID"], args=args,
                outcome="completed", code=result.returncode, payload_started=True,
                payload_ended=True, release_complete=True, cgroup_empty=True,
-               elapsed_s=0.25, log=str(log), log_sha256=hashlib.sha256(result.stdout).hexdigest())
+               elapsed_s=0.25, log=str(log), log_sha256=hashlib.sha256(result.stdout).hexdigest(),
+               head=subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
+               inputs=tree)
 if fault == "old_build_same_id":
     # A queued cancellation finds an older build's successful numeric-ID row.
     old = state / "old-build.log"
@@ -151,12 +153,15 @@ changes = {
     "empty_queue": ("queue", ""), "non_string_queue": ("queue", 1),
     "wrong_schema": ("schema", "heavy-receipt-v0"), "wrong_log_name": ("log", str(logs / "other.log")),
     "relative_log": ("log", token + ".log"), "wrong_digest": ("log_sha256", "0" * 64),
+    "malformed_head": ("head", "HEAD"), "non_string_inputs": ("inputs", 1),
 }
 if fault in changes:
     key, value = changes[fault]
     receipt[key] = value
 if fault == "missing_duration":
     del receipt["elapsed_s"]
+if fault == "no_inputs":
+    del receipt["head"], receipt["inputs"]
 if fault == "extra_field":
     receipt["unknown"] = True
 path = receipts / (token + ".json")
@@ -338,6 +343,12 @@ sys.exit(result.returncode)
         cache = next((self.root / "tmp/gates/repo").iterdir())
         self.assertEqual(cache.read_text().splitlines()[:2], ["gate-evidence-v3", policy])
         self.assertEqual(cache.stat().st_mode & 0o777, 0o600)
+
+    def test_receipt_without_inputs_lands(self):
+        # heavy records the head and inputs only when it can read the checkout.
+        self.land({"FIXTURE_RECEIPT_FAULT": "no_inputs"})
+        self.assertEqual(self.git("rev-parse", "main").strip(), self.git("rev-parse", "HEAD").strip())
+        self.assertEqual(len(self.calls()), 1)
 
     def test_docs_only_same_policy_reuses(self):
         self.land()
