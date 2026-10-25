@@ -231,8 +231,9 @@ commands ran 43 hours and waited 104. `record runs --all --since
 
 ## 6. Caps
 
-`record` refuses a file over its cap. The writer shortens it, and
-names by path what it cut, in `tmp/`. The caps sit above the surveys'
+`record` refuses a file over its cap. The writer shortens it; what it
+cut is scratch, in its notes until its mission ends, and no record
+points to it. The caps sit above the surveys'
 largest useful files and far below their journals.
 
 | File | Cap |
@@ -248,6 +249,8 @@ largest useful files and far below their journals.
 
 ## 7. What stays in tmp
 
+What `tmp/` may hold, and how it goes, is [cleanup.md](cleanup.md).
+
 - **An owner's `tmp/owners/<m>/`:** `notes.md` (its state, its open
   questions and its footprint: no decisions, no plan), `handover.md`,
   its implementers' tasks and reports, `codex/`, the worktrees and the
@@ -255,7 +258,8 @@ largest useful files and far below their journals.
   `closing.md` is committed and its branches have landed or been
   pushed.
 - **The director's and product owners' `tmp/director/`:** their
-  scripts, messages, handovers and helper tasks. `direction.md`,
+  notes, messages, handovers and helper tasks, and no scripts
+  ([cleanup.md](cleanup.md) 2). `direction.md`,
   `owners.md` (now `STATUS.md`), `decisions.md` and `findings.md` move
   to the record; `log.md` ends; `decisions-live.md` stays the
   director's digest, in its notes.

@@ -151,6 +151,9 @@ before touching its code: an owner's session doesn't load it.
     (section 4.5). Kept short and true: corrected, pruned, never only
     appended.
   - `handover.md`: the last handover (below), replaced at the next.
+  - No scripts, the owner's own included
+    ([cleanup.md](../docs/design/cleanup.md) 2): throwaway code lives
+    in a worktree, and a tool the kit lacks is escalated (section 5).
 - **After a compaction or a restart,** it reads its brief and its notes
   first.
 - **A fresh session at each milestone's end.** An owner with more than
@@ -598,6 +601,10 @@ it ([qa-lab.md](qa-lab.md)). They are judged as a pass's are.
   director instead, with the reason; on exit 3 the message waits in the
   parent's mailbox, and the director's watcher reports it if it stays
   unread.
+- **A tool the kit lacks** (a watcher, a launcher, a sweep) is
+  escalated like a question, through the parents to the director, and
+  never written beside the kit: the director gives it to Infra or
+  declines it (cleanup.md 2).
 - The director asks the user only what has long-term consequences that
   would be hard to change, or what the user's rules keep theirs. An
   owner never uses AskUserQuestion.

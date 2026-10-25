@@ -34,8 +34,10 @@ or tool it uses.
   now or kept in a backlog, is its parent's call, or the product
   owner's once the owner of the work has ended.
 - **On what exists.** It uses the worlds, harnesses, fakes and lab tools
-  there are, and builds none of its own beyond a small script. What is
-  missing, it names.
+  there are, and builds none of its own beyond a small script, kept in
+  a worktree of its own and deleted with it, never in `tmp/`
+  ([cleanup.md](../docs/design/cleanup.md) 2). What is missing, it
+  names.
 
 ## 2. How it tests
 

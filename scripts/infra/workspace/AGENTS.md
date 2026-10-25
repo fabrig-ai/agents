@@ -40,6 +40,10 @@ holds their reasons and open questions.
 - **Work on a branch in a worktree of your own,** never in a primary
   checkout. Run no git command there, not even `git fetch`: your
   worktree's own `git fetch` updates the same remote refs.
+- **No scripts in `tmp/`.** Throwaway code lives in your worktree,
+  untracked, and goes before the branch lands. A tool the kit lacks is
+  a question for your parent, never a script beside it (agents'
+  `docs/design/cleanup.md`).
 - **A rebased branch is pushed under a new name;** never force-push.
 - **Build and test through `heavy`:** `heavy cargo nextest run -p
   <crate>`. It queues every build on the machine, so that builds don't

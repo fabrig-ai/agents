@@ -78,6 +78,10 @@ test the fix touches, and reruns only the step the finding came from.
 - **Where the code isn't Rust** (a script, a Python tool), the same
   loop holds with its own tools: the narrowest check after each change,
   and the wide one is the gate's.
+- **Throwaway code** (a probe, a driver for one measurement) lives in
+  the worktree, untracked, and is deleted before the report: `land`
+  refuses an untracked file. Never in `tmp/`, never beside the kit
+  ([cleanup.md](../docs/design/cleanup.md) 2).
 
 ## 4. The report
 
@@ -87,7 +91,8 @@ repair's checks) and what each found, how many tests ran, and any test
 it couldn't run. The gates' checks need no mention: they are the
 landing's. **On a doubt** it stops: the report's first line is the
 question, starting `Question:`, with the options and a recommendation.
-It never improvises across a boundary.
+It never improvises across a boundary. A tool the task lacks is such a
+question, never a script of its own.
 
 ## 5. Security
 

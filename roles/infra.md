@@ -14,8 +14,9 @@ it reads and its own rules. The other departments are in
   `record`, `start-director`; `scripts/infra/`: `setup`, `kache-setup`,
   the workspace files; `docs/design/`); the machines'
   setup (packages, toolchains, Chromium, the build cache, pueue's
-  groups, settings); the landing queue's tool; and the director's
-  scripts once they move here (director.md 12).
+  groups, settings); the landing queue's tool; and every tool another
+  role asks for, the director's included: none is built beside the kit
+  ([cleanup.md](../docs/design/cleanup.md) 2).
 - **Its model:** Codex, always, for the owner and its implementers (the
   user, 10-24). Taste comes from an Opus 5.5 xhigh one-shot. A public
   decision (a tool's commands or the output others read, a record's

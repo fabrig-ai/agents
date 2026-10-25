@@ -86,5 +86,7 @@ an Opus 5.5 one-shot, and brings its public decisions to its parent.
 - **temper's drafts that read our roles:** `draft/configuring.md` and
   `draft/temper-on-temper.md` take owners.md and director.md as the
   description of how we work, and that description is now these files.
-- **The director's scripts** live untracked in `tmp/director/`
-  (director.md 12).
+- **The director's tools** left `tmp/director/` on 10-25 with every
+  script there ([cleanup.md](../docs/design/cleanup.md) 2). Which come
+  back as tools in `scripts/`, Infra's to build, is open (director.md
+  12).
