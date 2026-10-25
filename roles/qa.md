@@ -6,7 +6,8 @@ started them. QA in a milestone is [qa-milestone.md](qa-milestone.md),
 QA in the lab [qa-lab.md](qa-lab.md). temper's `docs/design/qa.md` is
 another thing: the product's binding to the lab, which qa-lab.md cites.
 
-**What a QA agent reads:** its brief, this file, and its kind's file.
+**What a QA agent reads:** its brief, this file, its kind's file, and
+the security rules (director.md 10).
 Not owners.md, and not skein's programming-model.md or
 testing-strategy.md: what it needs of them is here. Then the design
 sections its brief names, and the public surface of the world, harness
@@ -84,8 +85,7 @@ records (qa-lab.md 2), which its report names.
 
 ## 4. The rules it keeps
 
-- **The security rules** of director.md 10, which its brief carries
-  verbatim.
+- **The security rules** of director.md 10, which no brief repeats.
 - **Builds and tests through `heavy`,** in a worktree of its own under
   its notes, never a primary checkout; a target cleared when done with;
   nothing started below the disk floor (owners.md 4.5).

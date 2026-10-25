@@ -53,8 +53,9 @@ before touching its code: an owner's session doesn't load it.
   5.5, for App and UI; Codex for Infra. Its effort is its parent's
   choice (section 2). An App or UI owner whose part needs little taste
   (hygiene, optimization, a repair on an existing pattern) is a Codex
-  session instead, under this same file. A Codex owner brings its
-  significant code and test decisions to its parent.
+  session instead, under this same file. A Codex owner takes its taste
+  from an Opus 5.5 xhigh one-shot, and brings its significant code and
+  test decisions to its parent.
 - **Milestones.** A mission is reached through one to four milestones,
   one after another, each an MVP built on the one before: something
   meaningful that works on its own. The owner drives a single milestone

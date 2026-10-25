@@ -77,7 +77,8 @@ it governs.
 
 - **One mission per department,** each with a defined end, in at most
   four milestones (owners.md 3.1). Each owner's brief is its mission's
-  README, as director.md 4 says, committed before the owner starts.
+  README, as director.md 4 says, committed and pulled on the owner's
+  machine before the owner starts.
 - **When.** App's missions as soon as the draft is in. UI's once the
   user's mockups are in for what it would build, even while App is at
   work. Lab runs on landings (section 4).

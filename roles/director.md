@@ -176,10 +176,12 @@ machine's `tmp/post/` (section 5).
   the director for Infra, cuts each draft into missions of at most four
   milestones, one department each, each ending where something works
   on its own, and starts a fresh owner for each, the next one's brief
-  carrying the last one's notes and closing note. No owner stays on
-  past its mission: recurring work (hygiene, findings) waits in the
-  product owner's or the director's notes until there is a mission's
-  worth, then gets one, `o/<area>-<what>`.
+  carrying the last one's notes and closing note. A fresh owner is
+  named after its mission, `o/<m>`, never after the one before:
+  `codex-run owner` resumes the thread its name's state holds. No
+  owner stays on past its mission: recurring work (hygiene, findings)
+  waits in the product owner's or the director's notes until there is a
+  mission's worth, then gets one, `o/<area>-<what>`.
 - **Claude or Codex,** by department (README.md, section 2; owners.md
   1): Claude for App and UI unless the part needs little taste, Codex
   for Infra and QA. A Claude owner is started on its
@@ -195,8 +197,9 @@ machine's `tmp/post/` (section 5).
   organization, new harnesses, design text, kit behaviour that others
   feel, budgets.
 - **The brief** is the mission's README in the record,
-  `missions/<m>/README.md` (records.md 4), committed before the owner
-  starts on it (owners.md 2). It holds what is particular to the
+  `missions/<m>/README.md` (records.md 4), committed, and pulled on the
+  owner's machine (`record pull`), before the owner starts on it
+  (owners.md 2). It holds what is particular to the
   mission, in this order; the roles hold the rest, and no brief repeats
   them:
   - the front matter (records.md 3): its roadmap and feature, its
@@ -445,9 +448,12 @@ owner, [product.md](product.md). The pilot's `d/roadmap-2` and
 `d/roadmap-3` carry on under it.
 
 - **The director is their coordinator.** It gives each product owner
-  its features, with a brief, and the machines it may use; it answers
-  what each brings; and it breaks the ties between them, from the
-  vision, the goals and the direction it holds.
+  its features and the machines it may use, with a brief that holds
+  what its owners' briefs need of the director (section 4): the user's
+  words on each draft, each machine's cores, memory, disk and builders,
+  the budgets, and the other products' owners near its features. It
+  answers what each brings, and it breaks the ties between them, from
+  the vision, the goals and the direction it holds.
 - **What stays the director's** is product.md 1's list: the user;
   machines, placement and spend; security; Infra and the landing queue;
   what crosses products; starting and stopping product owners.
