@@ -1,14 +1,22 @@
 #!/usr/bin/env python3
 """Disposable process fixtures: real Git/Cargo, stub inner heavy and land."""
 import argparse
+from concurrent.futures import ThreadPoolExecutor
+import contextlib
+import itertools
 import json
 import os
 from pathlib import Path
+import queue
+import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import tomllib
+import traceback
 
 os.umask(0o077)
 SCRIPT = Path(__file__).resolve()
@@ -54,46 +62,86 @@ def mutate(kind):
     dump_lock(path, lock)
 
 
-HEAVY = '''#!{python}
-import json, os, subprocess, sys
-with open(os.environ['FIXTURE_TRACE'], 'a') as out:
-    out.write(json.dumps(sys.argv[1:]) + '\\n')
-result = subprocess.run(sys.argv[1:], stdin=subprocess.DEVNULL,
-                        env=dict(os.environ, FIXTURE_INSIDE_HEAVY='1'))
-fault = os.environ.get('FIXTURE_FAULT')
-if result.returncode == 0 and fault and sys.argv[1:3] == ['cargo', 'update']:
-    subprocess.run([{python!r}, {script!r}, '--mutate', fault], check=True)
-sys.exit(result.returncode)
+# The stand-ins are shell, not Python: they run several times a case, and a shell starts in a
+# millisecond where Python takes tens. Each argv is recorded as one JSON array, as json.dumps
+# spells it for the argv the fixtures pass; the reader parses it with json.loads.
+JSON = r'''json() {
+    local out='' sep='' arg
+    for arg; do
+        arg=${arg//\\/\\\\}; arg=${arg//\"/\\\"}
+        arg=${arg//$'\n'/\\n}; arg=${arg//$'\t'/\\t}; arg=${arg//$'\r'/\\r}
+        out+=$sep\"$arg\"; sep=', '
+    done
+    printf '[%s]' "$out"
+}
 '''
-LAND = '''#!{python}
-import json, os, subprocess, sys, tempfile
-from pathlib import Path
-Path(os.environ['FIXTURE_LAND']).write_text(json.dumps(sys.argv[1:]))
-Path(os.environ['FIXTURE_LAND'] + '.hooks').write_text(subprocess.check_output(
-    ['git', 'config', 'core.hooksPath']).decode().strip())
-with tempfile.TemporaryDirectory(prefix='nested-', dir=Path(os.environ['FIXTURE_LAND']).parent) as nested:
-    subprocess.run(['git', 'init', '--bare', nested], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    assert subprocess.run(['git', '-C', nested, 'config', '--get', 'core.hooksPath'],
-                          stdout=subprocess.DEVNULL).returncode == 1, 'hook override leaked to another repo'
-assert sys.argv[1:] == []
-assert 'LAND_PREBUILD' not in os.environ
-mode = os.environ.get('FIXTURE_LAND_MODE', 'success')
-if mode == 'move-base':
-    base = subprocess.check_output(['git', 'rev-parse', 'HEAD^']).decode().strip()
-    later = subprocess.check_output(['git', 'commit-tree', base + '^{{tree}}', '-p', base, '-m', 'later base']).decode().strip()
-    subprocess.run(['git', 'rebase', later], check=True)
-if mode == 'move-lock':
-    subprocess.run([{python!r}, {script!r}, '--mutate', 'wrong-sha'], check=True)
-    subprocess.run(['git', 'add', 'Cargo.lock'], check=True)
-    subprocess.run(['git', 'commit', '--amend', '--no-edit'], check=True)
-if mode == 'reject': sys.exit(8)
-sys.exit(subprocess.run(['git', 'push', 'origin', 'HEAD:main']).returncode)
+HEAVY = '''#!/bin/bash
+@JSON@: "${FIXTURE_TRACE:?}"
+{ json "$@"; echo; } >> "$FIXTURE_TRACE" || exit 1
+FIXTURE_INSIDE_HEAVY=1 "$@" </dev/null
+status=$?
+if [ "$status" = 0 ] && [ -n "${FIXTURE_FAULT-}" ] && [ "${1-}" = cargo ] && [ "${2-}" = update ]; then
+    @MUTATE@ "$FIXTURE_FAULT" || exit 1
+fi
+exit "$status"
 '''
+CARGO = '''#!/bin/bash
+[ "${FIXTURE_INSIDE_HEAVY-}" = 1 ] || { echo 'AssertionError: raw cargo bypassed heavy' >&2; exit 1; }
+case ${1-} in generate-lockfile|update) ;; *) echo 'AssertionError: fixture cannot compile' >&2; exit 1;; esac
+exec -a "$0" @CARGO@ "$@"
+'''
+LAND = '''#!/bin/bash
+@JSON@: "${FIXTURE_LAND:?}"
+json "$@" > "$FIXTURE_LAND" || exit 1
+hooks=$(git config core.hooksPath) || exit 1
+printf '%s' "$hooks" > "$FIXTURE_LAND.hooks" || exit 1
+nested=$(mktemp -d "${FIXTURE_LAND%/*}/nested-XXXXXXXX") || exit 1
+git init --bare "$nested" >/dev/null 2>&1 || { rm -rf "$nested"; exit 1; }
+git -C "$nested" config --get core.hooksPath >/dev/null
+leak=$?
+rm -rf "$nested"
+[ "$leak" = 1 ] || { echo 'AssertionError: hook override leaked to another repo' >&2; exit 1; }
+[ "$#" = 0 ] || { echo 'AssertionError: land given arguments' >&2; exit 1; }
+[ -z "${LAND_PREBUILD+set}" ] || { echo 'AssertionError: LAND_PREBUILD reached land' >&2; exit 1; }
+case ${FIXTURE_LAND_MODE-success} in
+move-base)
+    base=$(git rev-parse HEAD^) || exit 1
+    later=$(git commit-tree "$base^{tree}" -p "$base" -m 'later base') || exit 1
+    git rebase "$later" || exit 1;;
+move-lock)
+    @MUTATE@ wrong-sha || exit 1
+    git add Cargo.lock || exit 1
+    git commit --amend --no-edit || exit 1;;
+reject)
+    exit 8;;
+esac
+exec git push origin HEAD:main
+'''
+# Synthetic lock fixtures/stub Cargo preserve registry records for drift checks.
+STUB_CARGO = ('#!' + PYTHON + '\nimport json, sys, tomllib\nfrom pathlib import Path\n'
+    'import runpy\nsupport=runpy.run_path(' + repr(str(SCRIPT)) + ')\n'
+    "lock=tomllib.loads(Path('Cargo.lock').read_text())\n"
+    "args=sys.argv[1:]; identity=args[args.index('-p')+1].split('#')[0]\n"
+    "for p in lock['package']:\n"
+    "    if p.get('source','').split('#')[0] == identity:\n"
+    "        p['source']=identity+'#'+args[args.index('--precise')+1]\n"
+    "support['dump_lock'](Path('Cargo.lock'),lock)\n")
+
+
+def stand_in(body):
+    mutate_command = shlex.join([PYTHON, str(SCRIPT), '--mutate'])
+    return (body.replace('@JSON@', JSON).replace('@MUTATE@', mutate_command)
+            .replace('@CARGO@', shlex.quote(shutil.which('cargo'))))
 
 
 class Lab:
-    def __init__(self, root, evidence):
-        self.root, self.evidence, self.number = root, evidence, 0
+    """One worker's repositories; its cases run one at a time, since they share its refs."""
+
+    def __init__(self, root, evidence, private):
+        self.root, self.evidence, self.private, self.number = root, evidence, private, 0
+        self.results, self.current = [], None
+        root.mkdir()
+        private.mkdir()
         self.bin = root / 'bin'
         self.bin.mkdir()
         self.env = dict(os.environ, PATH=str(self.bin) + ':/usr/bin:/bin',
@@ -103,18 +151,10 @@ class Lab:
                         GIT_COMMITTER_EMAIL='fixture@invalid', CARGO_NET_OFFLINE='false')
         self.env.pop('RUSTC_WRAPPER', None)
         self.env.pop('RUSTC_WORKSPACE_WRAPPER', None)
-        for name in ('cargo', 'rustc'):
-            (self.bin / name).symlink_to(shutil.which(name))
-        cargo = self.bin / 'cargo'
-        cargo.unlink()
-        cargo.write_text('#!' + PYTHON + '\nimport os, sys\n'
-            "assert os.environ.get('FIXTURE_INSIDE_HEAVY') == '1', 'raw cargo bypassed heavy'\n"
-            "assert sys.argv[1] in ('generate-lockfile','update'), 'fixture cannot compile'\n"
-            'os.execv(' + repr(shutil.which('cargo')) + ', sys.argv)\n')
-        cargo.chmod(0o700)
-        for name, body in [('heavy', HEAVY), ('land', LAND)]:
+        (self.bin / 'rustc').symlink_to(shutil.which('rustc'))
+        for name, body in [('cargo', CARGO), ('heavy', HEAVY), ('land', LAND)]:
             path = self.bin / name
-            path.write_text(body.format(python=PYTHON, script=str(SCRIPT)))
+            path.write_text(stand_in(body))
             path.chmod(0o700)
         self.old, self.new, self.urls = {}, {}, {}
         for name, crates in [('skein', ['skein-a', 'skein-b']), ('smith', ['smith-a'])]:
@@ -184,8 +224,8 @@ class Lab:
         (primary / 'Cargo.toml').write_text(manifest)
         (primary / 'generated.txt').write_text('base\n')
         (primary / 'other.txt').write_text('base\n')
-        trace = evidence / 'initial-heavy.jsonl'
-        self.env.update(FIXTURE_TRACE=str(trace), FIXTURE_LAND=str(evidence / 'unused-land.json'))
+        trace = private / 'initial-heavy.jsonl'
+        self.env.update(FIXTURE_TRACE=str(trace), FIXTURE_LAND=str(private / 'unused-land.json'))
         execute(primary, ['heavy', 'cargo', 'generate-lockfile'], self.env)
         # Synthetic registry record tests semantic preservation without network access.
         lock = tomllib.loads((primary / 'Cargo.lock').read_text())
@@ -201,9 +241,20 @@ class Lab:
         git(primary, self.env, 'push', '-u', 'origin', 'main')
         git(primary, self.env, 'checkout', '--detach')
         self.origin = origin
+        # Registry sentinel would be pruned by real Cargo: retain it only in stub fault tests.
+        self.sentinel = next(p for p in tomllib.loads((primary / 'Cargo.lock').read_text())['package']
+                             if p['name'] == 'registry-sentinel')
+        lock = tomllib.loads((primary / 'Cargo.lock').read_text())
+        lock['package'] = [p for p in lock['package'] if p['name'] != self.sentinel['name']]
+        dump_lock(primary / 'Cargo.lock', lock)
+        git(primary, self.env, 'add', 'Cargo.lock')
+        git(primary, self.env, 'commit', '-m', 'real Cargo baseline')
+        self.base = git(primary, self.env, 'rev-parse', 'HEAD')
+        git(primary, self.env, 'push', 'origin', 'HEAD:refs/heads/fixture-baseline')
 
     def case(self, label, *, setup=None, extra=(), pins=None, fault=None, success=False,
              land_mode=None, base=None, moves_head=False, reason=None, checks=None, consumer=None):
+        self.current, started = label, time.monotonic()
         self.number += 1
         root = self.root / ('work-' + str(self.number))
         env = dict(self.env, FIXTURE_TRACE=str(self.evidence / (label + '.heavy.jsonl')),
@@ -251,7 +302,8 @@ class Lab:
                 if args[0] == 'cargo':
                     assert args == ['cargo', 'generate-lockfile'] or (
                         args[:2] == ['cargo', 'update'] and '--precise' in args and '-p' in args)
-        print('PASS ' + label, flush=True)
+        self.results.append((label, time.monotonic() - started))
+        self.current = None
         return root, env
 
     def checkpoint(self, root, env):
@@ -262,200 +314,294 @@ class Lab:
         git(root, env, 'update-ref', 'refs/remotes/origin/main', self.base)
         git(root, env, 'push', 'origin', 'HEAD:refs/heads/baseline-' + str(self.number))
 
+    def mutate_base(self, root, env, edit):
+        lock = tomllib.loads((root / 'Cargo.lock').read_text())
+        edit(lock)
+        dump_lock(root / 'Cargo.lock', lock)
+        self.checkpoint(root, env)
 
-def fixtures(root, evidence):
-    lab = Lab(root, evidence)
-    # Registry sentinel would be pruned by real Cargo: retain it only in stub fault tests.
-    sentinel = next(p for p in tomllib.loads((lab.primary / 'Cargo.lock').read_text())['package']
-                    if p['name'] == 'registry-sentinel')
-    lock = tomllib.loads((lab.primary / 'Cargo.lock').read_text())
-    lock['package'] = [p for p in lock['package'] if p['name'] != sentinel['name']]
-    dump_lock(lab.primary / 'Cargo.lock', lock)
-    git(lab.primary, lab.env, 'add', 'Cargo.lock')
-    git(lab.primary, lab.env, 'commit', '-m', 'real Cargo baseline')
-    lab.base = git(lab.primary, lab.env, 'rev-parse', 'HEAD')
-    git(lab.primary, lab.env, 'push', 'origin', 'HEAD:refs/heads/fixture-baseline')
-    focused = ("from pathlib import Path; import tomllib; "
-        "assert Path('generated.txt').read_text() == " + repr('generated\n') + "; "
-        "packages=tomllib.loads(Path('Cargo.lock').read_text())['package']; "
-        "assert {p['source'].split('#')[-1] for p in packages if p['name'].startswith('skein-')} == {"
-        + repr(lab.new['skein']) + "}")
-    prepared, env = lab.case('real-prepare', success=True, checks=[[PYTHON, '-c', focused]], extra=['--generated', 'generated.txt', '--regenerate',
-        json.dumps([PYTHON, '-c', "from pathlib import Path; Path('generated.txt').write_text('generated\\n')"] )])
-    assert git(prepared, env, 'show', 'HEAD:generated.txt') == 'generated'
-    assert set(git(prepared, env, 'diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD').splitlines()) == {'Cargo.lock', 'generated.txt'}
-    packages = tomllib.loads((prepared / 'Cargo.lock').read_text())['package']
-    assert {p['name'] for p in packages if 'skein.git' in p.get('source', '')} == {'skein-a', 'skein-b'}
-    assert next(p['source'] for p in packages if p['name'] == 'smith-a').endswith('#' + lab.old['smith'])
-    assert len(Path(env['FIXTURE_TRACE']).read_text().splitlines()) == 3
-    stale, stale_env = lab.case('stale-local-main', success=True, setup=lambda p, e:
-        git(p, e, 'update-ref', 'refs/heads/main', lab.base + '^'))
-    assert git(stale, stale_env, 'rev-parse', 'main') == git(stale, stale_env, 'rev-parse', lab.base + '^')
-    lab.case('multiple-sources', success=True, pins=[('skein', lab.new['skein']), ('smith', lab.new['smith'])])
-    skein_main = lab.root / 'skein.git'
-    def ahead(p, e):
-        git(skein_main, e, 'update-ref', 'refs/heads/main', lab.ahead)
-    drifted, drifted_env = lab.case('dependency-runs-ahead', success=True, setup=ahead,
-                                    pins=[('jig', lab.new['jig']), ('skein', lab.with_c)])
-    packages = tomllib.loads((drifted / 'Cargo.lock').read_text())['package']
-    assert {p['name'] for p in packages if 'skein.git' in p.get('source', '')} == {'skein-a', 'skein-b', 'skein-c'}
-    lab.case('dependency-runs-ahead-last', setup=ahead, pins=[('skein', lab.with_c), ('jig', lab.new['jig'])],
-             reason='multiple revisions')
-    git(skein_main, lab.env, 'update-ref', 'refs/heads/main', lab.old['skein'])
-    for label, pins in [('abbrev', [('skein', 'a' * 12)]), ('malformed', [('skein', 'z' * 40)]),
-                        ('duplicate', [('skein', lab.new['skein'])] * 2),
-                        ('absent', [('missing', 'a' * 40)]), ('no-change', [('skein', lab.old['skein'])]),
-                        ('sha64-missing-object', [('skein', 'a' * 64)])]:
-        lab.case(label, pins=pins)
-    lab.case('wrong-base', base=lab.old['skein'])
+    @contextlib.contextmanager
+    def stub_cargo(self):
+        cargo = self.bin / 'cargo'
+        wrapper = cargo.read_text()
+        cargo.write_text(STUB_CARGO)
+        try:
+            yield
+        finally:
+            cargo.write_text(wrapper)
+
+
+def groups(evidence):
+    """The cases, in groups that share a lab's state between their cases; each runs on one lab."""
+    out = []
+
+    def add(group):
+        out.append(group)
+        return group
+
+    @add
+    def real_prepare(lab):
+        focused = ("from pathlib import Path; import tomllib; "
+            "assert Path('generated.txt').read_text() == " + repr('generated\n') + "; "
+            "packages=tomllib.loads(Path('Cargo.lock').read_text())['package']; "
+            "assert {p['source'].split('#')[-1] for p in packages if p['name'].startswith('skein-')} == {"
+            + repr(lab.new['skein']) + "}")
+        prepared, env = lab.case('real-prepare', success=True, checks=[[PYTHON, '-c', focused]], extra=['--generated', 'generated.txt', '--regenerate',
+            json.dumps([PYTHON, '-c', "from pathlib import Path; Path('generated.txt').write_text('generated\\n')"] )])
+        assert git(prepared, env, 'show', 'HEAD:generated.txt') == 'generated'
+        assert set(git(prepared, env, 'diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD').splitlines()) == {'Cargo.lock', 'generated.txt'}
+        packages = tomllib.loads((prepared / 'Cargo.lock').read_text())['package']
+        assert {p['name'] for p in packages if 'skein.git' in p.get('source', '')} == {'skein-a', 'skein-b'}
+        assert next(p['source'] for p in packages if p['name'] == 'smith-a').endswith('#' + lab.old['smith'])
+        assert len(Path(env['FIXTURE_TRACE']).read_text().splitlines()) == 3
+
+    @add
+    def stale_local_main(lab):
+        stale, stale_env = lab.case('stale-local-main', success=True, setup=lambda p, e:
+            git(p, e, 'update-ref', 'refs/heads/main', lab.base + '^'))
+        assert git(stale, stale_env, 'rev-parse', 'main') == git(stale, stale_env, 'rev-parse', lab.base + '^')
+
+    add(lambda lab: lab.case('multiple-sources', success=True,
+                             pins=[('skein', lab.new['skein']), ('smith', lab.new['smith'])]))
+
+    @add
+    def dependency_runs_ahead(lab):
+        skein_main = lab.root / 'skein.git'
+        def ahead(p, e):
+            git(skein_main, e, 'update-ref', 'refs/heads/main', lab.ahead)
+        try:
+            drifted, drifted_env = lab.case('dependency-runs-ahead', success=True, setup=ahead,
+                                            pins=[('jig', lab.new['jig']), ('skein', lab.with_c)])
+            packages = tomllib.loads((drifted / 'Cargo.lock').read_text())['package']
+            assert {p['name'] for p in packages if 'skein.git' in p.get('source', '')} == {'skein-a', 'skein-b', 'skein-c'}
+            lab.case('dependency-runs-ahead-last', setup=ahead, pins=[('skein', lab.with_c), ('jig', lab.new['jig'])],
+                     reason='multiple revisions')
+        finally:
+            git(skein_main, lab.env, 'update-ref', 'refs/heads/main', lab.old['skein'])
+
+    for label, pins in [('abbrev', lambda lab: [('skein', 'a' * 12)]),
+                        ('malformed', lambda lab: [('skein', 'z' * 40)]),
+                        ('duplicate', lambda lab: [('skein', lab.new['skein'])] * 2),
+                        ('absent', lambda lab: [('missing', 'a' * 40)]),
+                        ('no-change', lambda lab: [('skein', lab.old['skein'])]),
+                        ('sha64-missing-object', lambda lab: [('skein', 'a' * 64)])]:
+        add(lambda lab, label=label, pins=pins: lab.case(label, pins=pins(lab)))
+    add(lambda lab: lab.case('wrong-base', base=lab.old['skein']))
     for label, setup in [
-        ('dirty', lambda p, e: (p / 'other.txt').write_text('dirty')),
-        ('staged', lambda p, e: ((p / 'other.txt').write_text('dirty'), git(p, e, 'add', 'other.txt'))),
-        ('untracked', lambda p, e: (p / 'new.txt').write_text('new')),
-        ('merge', lambda p, e: Path(git(p, e, 'rev-parse', '--git-path', 'MERGE_HEAD')).write_text(lab.base)),
-        ('rebase', lambda p, e: Path(git(p, e, 'rev-parse', '--git-path', 'rebase-merge')).mkdir()),
-        ('main', lambda p, e: git(p, e, 'checkout', 'main')),
-        ('divergent', lambda p, e: git(p, e, 'commit', '--allow-empty', '-m', 'diverged')),
+        ('dirty', lambda lab, p, e: (p / 'other.txt').write_text('dirty')),
+        ('staged', lambda lab, p, e: ((p / 'other.txt').write_text('dirty'), git(p, e, 'add', 'other.txt'))),
+        ('untracked', lambda lab, p, e: (p / 'new.txt').write_text('new')),
+        ('merge', lambda lab, p, e: Path(git(p, e, 'rev-parse', '--git-path', 'MERGE_HEAD')).write_text(lab.base)),
+        ('rebase', lambda lab, p, e: Path(git(p, e, 'rev-parse', '--git-path', 'rebase-merge')).mkdir()),
+        ('main', lambda lab, p, e: git(p, e, 'checkout', 'main')),
+        ('divergent', lambda lab, p, e: git(p, e, 'commit', '--allow-empty', '-m', 'diverged')),
     ]:
-        lab.case(label, setup=setup)
+        add(lambda lab, label=label, setup=setup: lab.case(label, setup=lambda p, e: setup(lab, p, e)))
     for label, path in [('traversal', '../escape'), ('absolute', '/tmp/repin-escape'),
                         ('git-path', '.git/config'), ('manifest', 'Cargo.toml'),
                         ('nested-manifest', 'sub/Cargo.toml'), ('lock-alias', 'sub/Cargo.lock'),
                         ('directory', 'src')]:
-        lab.case(label, extra=['--generated', path])
-    saved_base = lab.base
-    def symlink(p, e):
-        (p / 'generated.txt').unlink()
-        (p / 'generated.txt').symlink_to('other.txt')
-        lab.checkpoint(p, e)
-    lab.case('symlink', setup=symlink, extra=['--generated', 'generated.txt'], reason='symlink')
-    lab.base = saved_base
+        add(lambda lab, label=label, path=path: lab.case(label, extra=['--generated', path]))
+
+    @add
+    def symlink(lab):
+        def setup(p, e):
+            (p / 'generated.txt').unlink()
+            (p / 'generated.txt').symlink_to('other.txt')
+            lab.checkpoint(p, e)
+        lab.case('symlink', setup=setup, extra=['--generated', 'generated.txt'], reason='symlink')
+
     for label, body in [('unrelated-write', "Path('other.txt').write_text('bad')"),
                         ('untracked-write', "Path('surprise').write_text('bad')"),
                         ('staged-write', "Path('other.txt').write_text('bad'); subprocess.run(['git','add','other.txt'],check=True)"),
                         ('deleted-write', "Path('other.txt').unlink()"),
                         ('check-failure', 'raise SystemExit(7)')]:
         for phase in ('--regenerate', '--check'):
-            lab.case(label + phase, extra=[phase, json.dumps([PYTHON, '-c',
-                     'from pathlib import Path; import subprocess; ' + body])])
+            add(lambda lab, label=label + phase, phase=phase, body=body: lab.case(label, extra=[phase, json.dumps(
+                [PYTHON, '-c', 'from pathlib import Path; import subprocess; ' + body])]))
     for fault in ('other-git', 'wrong-sha', 'new-package', 'metadata'):
-        lab.case('resolver-' + fault, fault=fault)
+        add(lambda lab, fault=fault: lab.case('resolver-' + fault, fault=fault))
     for phase in ('--regenerate', '--check'):
-        lab.case('HEAD-move' + phase, moves_head=True, extra=[phase, json.dumps([PYTHON, '-c',
-            "import subprocess; subprocess.run(['git','commit','--allow-empty','-m','moved'],check=True)"])])
+        add(lambda lab, phase=phase: lab.case('HEAD-move' + phase, moves_head=True, extra=[phase, json.dumps([PYTHON, '-c',
+            "import subprocess; subprocess.run(['git','commit','--allow-empty','-m','moved'],check=True)"])]))
     for mode, expected in [('success', True), ('move-base', False), ('move-lock', False), ('reject', False)]:
-        lab.case('land-' + mode, success=expected, extra=['--land'], land_mode=mode)
-        assert git(lab.origin, lab.env, 'rev-parse', 'main') == (
-            git(lab.primary, lab.env, 'rev-parse', 'case-' + str(lab.number)) if expected else lab.base)
-    def original_hook(p, e):
-        hooks = Path(git(p, e, 'rev-parse', '--path-format=absolute', '--git-path', 'hooks'))
-        hooks.mkdir(exist_ok=True)
-        (hooks / 'guard.config').write_text('existing hook helper\n')
-        hook = hooks / 'pre-push'
-        hook.write_text('#!' + PYTHON + '\nimport sys\nfrom pathlib import Path\n'
-                        'Path(' + repr(str(evidence / 'original-hook-input')) + ').write_bytes(sys.stdin.buffer.read())\n')
-        hook.chmod(0o700)
-    lab.case('land-original-hook', setup=original_hook, success=True, extra=['--land'], land_mode='success')
-    assert 'refs/heads/main' in (evidence / 'original-hook-input').read_text()
-    hooks = Path(git(lab.primary, lab.env, 'rev-parse', '--path-format=absolute', '--git-path', 'hooks'))
-    assert (hooks / 'guard.config').read_text() == 'existing hook helper\n'
-    custom = lab.root / 'custom-hooks'
-    def custom_hook(p, e):
-        custom.mkdir()
-        git(p, e, 'config', 'core.hooksPath', str(custom))
-        original_hook(p, e)
-    lab.case('land-custom-hooks', setup=custom_hook, success=True, extra=['--land'], land_mode='success')
-    assert git(lab.primary, lab.env, 'config', 'core.hooksPath') == str(custom)
-    def mutate_base(p, e, edit):
-        lock = tomllib.loads((p / 'Cargo.lock').read_text())
-        edit(lock)
-        dump_lock(p / 'Cargo.lock', lock)
-        lab.checkpoint(p, e)
-    saved_base = lab.base
-    def ambiguous(p, e):
+        @add
+        def land(lab, mode=mode, expected=expected):
+            lab.case('land-' + mode, success=expected, extra=['--land'], land_mode=mode)
+            assert git(lab.origin, lab.env, 'rev-parse', 'main') == (
+                git(lab.primary, lab.env, 'rev-parse', 'case-' + str(lab.number)) if expected else lab.base)
+
+    @add
+    def land_hooks(lab):
+        hook_input = lab.private / 'original-hook-input'
+        def original_hook(p, e):
+            hooks = Path(git(p, e, 'rev-parse', '--path-format=absolute', '--git-path', 'hooks'))
+            hooks.mkdir(exist_ok=True)
+            (hooks / 'guard.config').write_text('existing hook helper\n')
+            hook = hooks / 'pre-push'
+            hook.write_text('#!' + PYTHON + '\nimport sys\nfrom pathlib import Path\n'
+                            'Path(' + repr(str(hook_input)) + ').write_bytes(sys.stdin.buffer.read())\n')
+            hook.chmod(0o700)
+        hooks = Path(git(lab.primary, lab.env, 'rev-parse', '--path-format=absolute', '--git-path', 'hooks'))
+        try:
+            lab.case('land-original-hook', setup=original_hook, success=True, extra=['--land'], land_mode='success')
+            assert 'refs/heads/main' in hook_input.read_text()
+            assert (hooks / 'guard.config').read_text() == 'existing hook helper\n'
+            custom = lab.root / 'custom-hooks'
+            def custom_hook(p, e):
+                custom.mkdir()
+                git(p, e, 'config', 'core.hooksPath', str(custom))
+                original_hook(p, e)
+            lab.case('land-custom-hooks', setup=custom_hook, success=True, extra=['--land'], land_mode='success')
+            assert git(lab.primary, lab.env, 'config', 'core.hooksPath') == str(custom)
+        finally:
+            # Later groups on this lab start from the hooks every other group sees.
+            execute(lab.primary, ['git', 'config', '--unset', 'core.hooksPath'], lab.env, check=False)
+            for name in ('pre-push', 'guard.config'):
+                (hooks / name).unlink(missing_ok=True)
+
+    @add
+    def ambiguous_ref(lab):
         def edit(lock):
             record = next(p.copy() for p in lock['package'] if 'skein.git' in p.get('source', ''))
             identity, revision = record['source'].split('#')
             record['source'] = identity + '?branch=main#' + revision
             lock['package'].append(record)
-        mutate_base(p, e, edit)
-    lab.case('ambiguous-ref', setup=ambiguous, reason='absent or ambiguous source')
-    lab.base = saved_base
-    def manifest_rev(p, e):
-        manifest = tomllib.loads((p / 'Cargo.toml').read_text())
-        text = '[package]\n' + '\n'.join(k + '=' + json.dumps(v) for k, v in manifest['package'].items())
-        text += '\n[dependencies]\n'
-        for name, dependency in manifest['dependencies'].items():
-            entries = dict(dependency)
-            if name.startswith('skein-'):
-                entries['rev'] = lab.old['skein']
-            text += name + '={' + ','.join(k + '=' + json.dumps(v) for k, v in entries.items()) + '}\n'
-        (p / 'Cargo.toml').write_text(text)
-        execute(p, ['heavy', 'cargo', 'generate-lockfile'], e)
-        lab.checkpoint(p, e)
-    lab.case('manifest-rev', setup=manifest_rev, reason='manifest rev constraints')
-    lab.base = saved_base
-    lab.case('prefix-allowlist', extra=['--generated', 'out', 'out/file'])
-    def hardlink(p, e):
-        (p / 'generated.txt').unlink()
-        os.link(p / 'other.txt', p / 'generated.txt')
-    lab.case('hardlink', setup=hardlink, extra=['--generated', 'generated.txt'], reason='hardlink aliases')
-    lab.base = saved_base
-    lab.case('missing-check', checks=[], reason='--check')
-    lab.case('malformed-command', extra=['--check', '"cargo check"'], reason='JSON argv arrays')
-    lab.case('command-failure', extra=['--check', json.dumps([PYTHON, '-c', 'raise SystemExit(9)']), '--land'], reason='check failed')
+        lab.case('ambiguous-ref', setup=lambda p, e: lab.mutate_base(p, e, edit), reason='absent or ambiguous source')
+
+    @add
+    def manifest_rev(lab):
+        def setup(p, e):
+            manifest = tomllib.loads((p / 'Cargo.toml').read_text())
+            text = '[package]\n' + '\n'.join(k + '=' + json.dumps(v) for k, v in manifest['package'].items())
+            text += '\n[dependencies]\n'
+            for name, dependency in manifest['dependencies'].items():
+                entries = dict(dependency)
+                if name.startswith('skein-'):
+                    entries['rev'] = lab.old['skein']
+                text += name + '={' + ','.join(k + '=' + json.dumps(v) for k, v in entries.items()) + '}\n'
+            (p / 'Cargo.toml').write_text(text)
+            execute(p, ['heavy', 'cargo', 'generate-lockfile'], e)
+            lab.checkpoint(p, e)
+        lab.case('manifest-rev', setup=setup, reason='manifest rev constraints')
+
+    add(lambda lab: lab.case('prefix-allowlist', extra=['--generated', 'out', 'out/file']))
+
+    @add
+    def hardlink(lab):
+        def setup(p, e):
+            (p / 'generated.txt').unlink()
+            os.link(p / 'other.txt', p / 'generated.txt')
+        lab.case('hardlink', setup=setup, extra=['--generated', 'generated.txt'], reason='hardlink aliases')
+
+    add(lambda lab: lab.case('missing-check', checks=[], reason='--check'))
+    add(lambda lab: lab.case('malformed-command', extra=['--check', '"cargo check"'], reason='JSON argv arrays'))
+    add(lambda lab: lab.case('command-failure', extra=['--check', json.dumps([PYTHON, '-c', 'raise SystemExit(9)']), '--land'],
+                             reason='check failed'))
     for phase in ('--regenerate', '--check'):
-        lab.case('branch-move' + phase, extra=[phase, json.dumps([PYTHON, '-c',
-            "import subprocess; subprocess.run(['git','checkout','-b','moved-" + phase[2:] + "'],check=True)"])], reason='branch or HEAD moved')
-    lab.case('generated-symlink', extra=['--generated', 'generated.txt', '--regenerate', json.dumps(
-        [PYTHON, '-c', "from pathlib import Path; p=Path('generated.txt'); p.unlink(); p.symlink_to('other.txt')"])], reason='symlink')
-    lab.case('primary-refused', consumer=lab.primary, reason='linked worktree')
+        add(lambda lab, phase=phase: lab.case('branch-move' + phase, extra=[phase, json.dumps([PYTHON, '-c',
+            "import subprocess; subprocess.run(['git','checkout','-b','moved-" + phase[2:] + "'],check=True)"])],
+            reason='branch or HEAD moved'))
+    add(lambda lab: lab.case('generated-symlink', extra=['--generated', 'generated.txt', '--regenerate', json.dumps(
+        [PYTHON, '-c', "from pathlib import Path; p=Path('generated.txt'); p.unlink(); p.symlink_to('other.txt')"])], reason='symlink'))
+    add(lambda lab: lab.case('primary-refused', consumer=lab.primary, reason='linked worktree'))
     for ref in ('refs/heads/main', 'refs/remotes/origin/main'):
         for phase in ('--regenerate', '--check'):
-            lab.case(ref.replace('/', '-') + phase, extra=[phase, json.dumps([PYTHON, '-c',
-                "import subprocess; subprocess.run(['git','update-ref'," + repr(ref) + ",'HEAD^'],check=True)"])], reason='base refs moved')
-    def gitlink(p, e):
-        (p / 'sub').mkdir()
-        git(p, e, 'update-index', '--add', '--cacheinfo', '160000,' + lab.base + ',sub')
-        git(p, e, 'commit', '-m', 'submodule base')
-        lab.base = git(p, e, 'rev-parse', 'HEAD')
-        git(p, e, 'update-ref', 'refs/heads/main', lab.base)
-        git(p, e, 'update-ref', 'refs/remotes/origin/main', lab.base)
-        git(p, e, 'push', 'origin', 'HEAD:refs/heads/submodule-base')
-    lab.case('submodule', setup=gitlink, reason='submodules refused')
-    lab.base = saved_base
-    unusual = 'generated \n:(glob)*;$.txt'
-    prepared, env = lab.case('literal-argv-path', success=True, extra=['--generated', unusual, '--regenerate', json.dumps(
-        [PYTHON, '-c', 'from pathlib import Path; import sys; Path(sys.argv[1]).write_text(sys.argv[2])',
-         unusual, 'literal ; $HOME $(false)'])])
-    assert (prepared / unusual).read_text() == 'literal ; $HOME $(false)'
-    def hidden_lock(p, e):
-        git(p, e, 'update-index', '--assume-unchanged', 'Cargo.lock')
-        with (p / 'Cargo.lock').open('a') as out:
-            out.write('\n# hidden stale lock\n')
-    lab.case('base-lock-bytes', setup=hidden_lock, reason='worktree lock differs from base bytes')
+            add(lambda lab, ref=ref, phase=phase: lab.case(ref.replace('/', '-') + phase, extra=[phase, json.dumps([PYTHON, '-c',
+                "import subprocess; subprocess.run(['git','update-ref'," + repr(ref) + ",'HEAD^'],check=True)"])], reason='base refs moved'))
+
+    @add
+    def submodule(lab):
+        def gitlink(p, e):
+            (p / 'sub').mkdir()
+            git(p, e, 'update-index', '--add', '--cacheinfo', '160000,' + lab.base + ',sub')
+            git(p, e, 'commit', '-m', 'submodule base')
+            lab.base = git(p, e, 'rev-parse', 'HEAD')
+            git(p, e, 'update-ref', 'refs/heads/main', lab.base)
+            git(p, e, 'update-ref', 'refs/remotes/origin/main', lab.base)
+            git(p, e, 'push', 'origin', 'HEAD:refs/heads/submodule-base')
+        lab.case('submodule', setup=gitlink, reason='submodules refused')
+
+    @add
+    def literal_argv_path(lab):
+        unusual = 'generated \n:(glob)*;$.txt'
+        prepared, env = lab.case('literal-argv-path', success=True, extra=['--generated', unusual, '--regenerate', json.dumps(
+            [PYTHON, '-c', 'from pathlib import Path; import sys; Path(sys.argv[1]).write_text(sys.argv[2])',
+             unusual, 'literal ; $HOME $(false)'])])
+        assert (prepared / unusual).read_text() == 'literal ; $HOME $(false)'
+
+    @add
+    def base_lock_bytes(lab):
+        def hidden_lock(p, e):
+            git(p, e, 'update-index', '--assume-unchanged', 'Cargo.lock')
+            with (p / 'Cargo.lock').open('a') as out:
+                out.write('\n# hidden stale lock\n')
+        lab.case('base-lock-bytes', setup=hidden_lock, reason='worktree lock differs from base bytes')
+
     for phase in ('--regenerate', '--check'):
-        lab.case('lock-edit' + phase, extra=[phase, json.dumps([PYTHON, str(SCRIPT), '--mutate', 'wrong-sha'])])
-    # Synthetic lock fixtures/stub Cargo preserve registry records for drift checks.
-    cargo = lab.bin / 'cargo'
-    cargo.unlink()
-    cargo.write_text('#!' + PYTHON + '\nimport json, sys, tomllib\nfrom pathlib import Path\n'
-        'import runpy\nsupport=runpy.run_path(' + repr(str(SCRIPT)) + ')\n'
-        "lock=tomllib.loads(Path('Cargo.lock').read_text())\n"
-        "args=sys.argv[1:]; identity=args[args.index('-p')+1].split('#')[0]\n"
-        "for p in lock['package']:\n"
-        "    if p.get('source','').split('#')[0] == identity:\n"
-        "        p['source']=identity+'#'+args[args.index('--precise')+1]\n"
-        "support['dump_lock'](Path('Cargo.lock'),lock)\n")
-    cargo.chmod(0o700)
+        add(lambda lab, phase=phase: lab.case('lock-edit' + phase, extra=[phase, json.dumps([PYTHON, str(SCRIPT), '--mutate', 'wrong-sha'])]))
     for fault in (None, 'checksum', 'registry'):
-        def registry_setup(p, e):
-            mutate_base(p, e, lambda lock: lock['package'].append(sentinel))
-        lab.case('registry-' + str(fault), setup=registry_setup, fault=fault,
-                 pins=[('skein', lab.new['skein'])], success=fault is None,
-                 reason='unrelated package records changed' if fault else 'prepared')
-        lab.base = saved_base
-    print('completed ' + str(lab.number) + ' cases', flush=True)
+        @add
+        def registry(lab, fault=fault):
+            def setup(p, e):
+                lab.mutate_base(p, e, lambda lock: lock['package'].append(lab.sentinel))
+            with lab.stub_cargo():
+                lab.case('registry-' + str(fault), setup=setup, fault=fault,
+                         pins=[('skein', lab.new['skein'])], success=fault is None,
+                         reason='unrelated package records changed' if fault else 'prepared')
+    return out
+
+
+def fixtures(root, evidence):
+    plan = groups(evidence)
+    workers = max(1, min(os.cpu_count() or 1, len(plan)))
+    numbers, numbering = itertools.count(1), threading.Lock()
+
+    def new_lab():
+        with numbering:
+            number = next(numbers)
+        name = 'lab-' + str(number)
+        return Lab(root / name, evidence, evidence / name)
+
+    labs = queue.SimpleQueue()
+
+    def attempt(group):
+        lab = labs.get()
+        lab.results, lab.current, saved = [], None, lab.base
+        try:
+            group(lab)
+            lab.base = saved
+            labs.put(lab)
+            return lab.results, None
+        except BaseException:
+            label = lab.current or ((lab.results[-1][0] + ', after the case') if lab.results else 'setup')
+            failure = lab.results, (label, traceback.format_exc())
+            # A failed group may leave its lab's refs or files astray: later groups get a fresh lab.
+            lab.base = saved
+            with contextlib.suppress(BaseException):
+                lab = new_lab()
+            labs.put(lab)
+            return failure
+
+    with ThreadPoolExecutor(workers) as pool:
+        for lab in pool.map(lambda _: new_lab(), range(workers)):
+            labs.put(lab)
+        futures = [pool.submit(attempt, group) for group in plan]
+        labels, failures = [], 0
+        for future in futures:
+            results, failure = future.result()
+            for label, seconds in results:
+                labels.append(label)
+                print('PASS %s (%.2f s)' % (label, seconds), flush=True)
+            if failure:
+                failures += 1
+                print('FAIL ' + failure[0] + '\n' + failure[1], flush=True)
+    # Each case's evidence files are named by its label.
+    assert len(labels) == len(set(labels)), 'duplicate case labels'
+    if failures:
+        print('repin fixtures: %d failed, %d passed' % (failures, len(labels)), flush=True)
+        sys.exit(1)
+    print('completed ' + str(len(labels)) + ' cases', flush=True)
 
 
 def main():
