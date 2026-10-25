@@ -1,0 +1,1310 @@
+#!/usr/bin/env python3
+"""Write the fleet's status page: the work in flight, and what building,
+testing and landing cost (docs/design/status-page.md).
+
+status-page [--out FILE] [--json FILE] [--no-pull]
+status-page collect
+status-page install --out FILE
+"""
+import argparse
+import concurrent.futures
+from datetime import datetime, timezone
+import html
+import json
+import math
+import os
+from pathlib import Path
+import re
+import shutil
+import signal
+import socket
+import statistics
+import subprocess
+import sys
+import tempfile
+import time
+import traceback
+
+HOUR, DAY, WEEK = 3600, 86400, 7 * 86400
+# Copied from scripts/devel/landings: SSH's options and feed()'s path, but
+# for LogLevel=QUIET, so that a refused key or host key says so.
+SSH = ['ssh', '-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
+       '-o', 'ConnectTimeout=5', '-o', 'ServerAliveInterval=5',
+       '-o', 'ServerAliveCountMax=2', '-o', 'UpdateHostKeys=no']
+# A login shell, so the collector sees the PATH every shell sees (infra.md 2).
+REMOTE = "bash -lc 'exec python3 -I - collect'"
+FEED = Path.home() / '.local/state/agents-land-set/feed.jsonl'
+# heavy's task states before release (build-infrastructure.md 3).
+LIVE = {'submitted', 'enqueuing', 'queued', 'waiting', 'launching', 'active', 'finishing', 'closing'}
+RUNNING = {'launching', 'active', 'finishing', 'closing'}
+ORDER = 'workspace package focused check.sh clippy check doc fmt other'.split()
+GROUPS = [('Tests', ['focused', 'package', 'workspace', 'doc']),
+          ('Builds and lints', ['clippy', 'check', 'fmt', 'check.sh', 'other']),
+          ('Landing', ['prebuild', 'land'])]
+STEPS = ('fmt', 'clippy', 'wasm', 'build', 'focused', 'fuzzy', 'bundle', 'browser')
+WINDOWS = (('24h', DAY, 'Last 24 hours'), ('7d', WEEK, 'Last 7 days'))
+
+
+def clock():
+    # Fixtures fix the time; the page is otherwise about now.
+    return float(os.environ.get('STATUS_NOW') or time.time())
+
+
+def workspace():
+    home = Path.home()
+    return home / ('src/rust' if (home / 'src/rust').exists() else 'src')
+
+
+def tmp_dir():
+    return Path(os.environ.get('DEV_TMP', Path(os.environ.get('DEV_ROOT', workspace())) / 'tmp')).expanduser().absolute()
+
+
+def stamp(value):
+    try:
+        moment = datetime.fromisoformat(str(value).replace('Z', '+00:00'))
+    except ValueError:
+        return None
+    return moment.timestamp() if moment.tzinfo else None
+
+
+# What the tools' files hold is checked where it is read, as landings does:
+# a field of the wrong type is a missing one.
+
+def number(value):
+    ok = isinstance(value, (int, float)) and not isinstance(value, bool)
+    return value if ok and math.isfinite(value) else None
+
+
+def text(value):
+    return value if isinstance(value, str) else ''
+
+
+def part(record, name):
+    value = record.get(name)
+    return value if isinstance(value, dict) else {}
+
+
+def short(message, limit=200):
+    """One line of an error, for the public page; the rest goes to the journal."""
+    lines = str(message).strip().splitlines()
+    line = lines[0] if lines else ''
+    return line if len(line) <= limit else line[:limit - 1] + '…'
+
+
+def mission(path, tmp):
+    """The mission a path under tmp/owners belongs to, or ''."""
+    try:
+        parts = Path(path).relative_to(tmp / 'owners').parts
+    except (ValueError, TypeError):
+        return ''
+    if not parts:
+        return ''
+    # The old layout named a milestone's directory <mission>-m<N>.
+    old = re.fullmatch(r'(.+)-m[1-9][0-9]*', parts[0])
+    return old[1] if old else parts[0]
+
+
+def kinds(command):
+    # Copied from scripts/devel/record: kinds(), without its flags.
+    segments = re.split(r'&&|\|\||[;\n]', command)
+    result = []
+    for segment in segments:
+        if 'nextest' in segment or (re.search(r'\bcargo\s+test\b', segment) and '--doc' not in segment):
+            focused = bool(re.search(r'--(?:test(?:[=\s]|$)|lib\b)', segment))
+            result.append('focused' if focused else 'package' if re.search(r'(?:^|\s)-p(?:\s|=|\S)', segment) else 'workspace')
+        elif re.search(r'\bcheck\.sh\b', segment):
+            result.append('check.sh')
+        elif re.search(r'\bcargo\s+test\b.*--doc\b', segment):
+            result.append('doc')
+        else:
+            match = re.search(r'\bcargo\s+(check|clippy|fmt)\b', segment)
+            result.append(match[1] if match else 'other')
+    return result
+
+
+def kind_of(command, label):
+    """A heavy command's kind, and the repository of a land's."""
+    match = re.fullmatch(r'land (\S+)( prebuild)?', label or '')
+    if match:
+        return ('prebuild' if match[2] else 'land'), match[1]
+    return min(kinds(command), key=ORDER.index), ''
+
+
+# What one machine holds. Each part reads what a tool already keeps; none
+# changes anything.
+
+def part_machine(tmp, now):
+    usage = shutil.disk_usage(tmp)
+    memory = {}
+    for line in Path('/proc/meminfo').read_text().splitlines():
+        key, _, value = line.partition(':')
+        if value.split():
+            memory[key] = int(value.split()[0]) * 1024
+    return {'load': os.getloadavg(), 'cpus': os.cpu_count(), 'disk_free': usage.free,
+            'disk_total': usage.total, 'mem_available': memory.get('MemAvailable'),
+            'mem_total': memory.get('MemTotal')}
+
+
+def part_heavy(tmp, now):
+    state = json.loads((tmp / 'heavy/state.json').read_text())
+    tasks = []
+    for task in part(state, 'tasks').values():
+        if not isinstance(task, dict) or task.get('state') not in LIVE:
+            continue
+        args = task.get('args') if isinstance(task.get('args'), list) else []
+        kind, repo = kind_of(' '.join(map(str, args)), text(task.get('label')))
+        tasks.append({'lane': text(task.get('lane')), 'label': text(task.get('label')),
+                      'state': task['state'], 'submitted': number(task.get('submitted')),
+                      'started': number(task.get('payload_started')), 'kind': kind, 'repo': repo,
+                      'mission': mission(task.get('repo'), tmp)})
+    return {'gate': bool(state.get('gate')), 'tasks': tasks}
+
+
+def part_rows(tmp, now):
+    """heavy.tsv's last week: end, lane, wait, run, exit, mission, kind, repo."""
+    rows = []
+    with (tmp / 'logs/heavy.tsv').open(errors='replace') as source:
+        for line in source:
+            # heavy keeps tabs and newlines out of its fields; quotes are the command's.
+            row = line.rstrip('\n').split('\t')
+            if len(row) < 10:
+                continue
+            end = stamp(row[2])
+            try:
+                wait, run = float(row[3]), float(row[4])
+            except ValueError:
+                continue
+            if end is None or end < now - WEEK:
+                continue
+            kind, repo = kind_of(row[9], row[10] if len(row) > 10 else '')
+            rows.append([end, row[1], wait, run, row[5], mission(row[7], tmp), kind, repo])
+    return rows
+
+
+def jsonlines(path, last=None):
+    try:
+        lines = path.read_text(errors='replace').splitlines()
+    except FileNotFoundError:
+        return None
+    result = []
+    for line in lines[-last:] if last else lines:
+        try:
+            value = json.loads(line)
+        except ValueError:
+            continue  # A live writer can leave an incomplete last line.
+        if isinstance(value, dict):
+            result.append(value)
+    return result
+
+
+def part_turns(tmp, now):
+    """The landing turns this machine asked for (build-infrastructure.md 8)."""
+    done, open_ = [], {}
+    for event in jsonlines(tmp / 'landing-turn/events.jsonl') or []:
+        token, at = event.get('token'), number(event.get('timestamp'))
+        if not isinstance(token, str) or at is None or at < now - WEEK:
+            continue
+        held = number(event.get('runtime_s'))
+        if event.get('event') in ('release', 'fail-open'):
+            # land goes on without the turn when its client fails open; one
+            # granted before was held as long as a released one.
+            open_.pop(token, None)
+            if event['event'] == 'release' or held is not None:
+                done.append([at, text(event.get('repository')), number(event.get('wait_s')), held])
+        elif event.get('event') in ('request', 'grant'):
+            open_[token] = {'repo': text(event.get('repository')), 'event': event['event'], 'since': at}
+    # A turn neither released nor recent was lost with its client.
+    return {'done': done, 'open': [t for t in open_.values() if t['since'] >= now - 6 * HOUR]}
+
+
+def active_units():
+    result = subprocess.run(['systemctl', '--user', 'list-units', '--plain', '--no-legend', '--no-pager',
+                             '--state=active', 'codex-*'], stdin=subprocess.DEVNULL,
+                            capture_output=True, text=True, timeout=20)
+    if result.returncode:
+        # Without the units every run would look dead.
+        raise OSError(f'systemctl --user list-units exited {result.returncode}')
+    return {line.split()[0] for line in result.stdout.splitlines() if line.split()}
+
+
+def lines_of(path):
+    """A file's lines, or none when its tool has just moved it away."""
+    try:
+        return path.read_text(errors='replace').splitlines()
+    except FileNotFoundError:
+        return []
+
+
+def part_codex(tmp, now):
+    units = active_units()
+    running = []
+    for meta_path in sorted((tmp / 'codex-run').glob('*/meta')):
+        state = meta_path.parent
+        if (state / 'ended').exists():
+            continue
+        meta = dict(line.split('=', 1) for line in lines_of(meta_path) if '=' in line)
+        if not meta:
+            continue
+        started = stamp(meta.get('started'))
+        alive = f'codex-run-{state.name}.service' in units
+        if not alive and (started is None or started < now - WEEK):
+            continue
+        running.append({'id': state.name, 'to': meta.get('to', ''), 'model': meta.get('model', ''),
+                        'effort': meta.get('effort', ''), 'started': started, 'alive': alive,
+                        'mission': mission(meta.get('task'), tmp)})
+    ended = []
+    for line in lines_of(tmp / 'codex-run/runs.tsv'):
+        row = line.split('\t')
+        if len(row) < 12:
+            continue
+        start, end = stamp(row[2]), stamp(row[3])
+        if start is None or end is None or end < now - WEEK:
+            continue
+        tokens = row[11].split('/')
+        tokens = [int(t) for t in tokens] if len(tokens) == 3 and all(t.isdigit() for t in tokens) else None
+        ended.append([start, end, row[4], row[6], row[7], tokens, mission(row[8], tmp)])
+    owners = []
+    for name_path in sorted((tmp / 'owners').glob('*/codex/name')):
+        name = ''.join(lines_of(name_path)).strip()
+        if not name:
+            continue
+        # systemd-escape for a post name: hyphens escaped, then slashes as hyphens.
+        unit = 'codex-owner-' + name.replace('-', '\\x2d').replace('/', '-') + '.service'
+        rows = [r.split('\t') for r in lines_of(name_path.parent / 'turns.tsv') if r.count('\t') >= 1]
+        last = stamp(rows[-1][1]) if rows else None
+        alive = unit in units
+        if alive or (last and last >= now - DAY):
+            owners.append({'name': name, 'alive': alive, 'last_turn': last})
+    return {'running': running, 'ended': ended, 'owners': owners}
+
+
+def part_mail(tmp, now):
+    result = []
+    for box in sorted((tmp / 'post').iterdir()):
+        new = box / 'new'
+        if not new.is_dir():
+            continue
+        times = []
+        for message in new.iterdir():
+            try:
+                if message.is_file():
+                    times.append(message.stat().st_mtime)
+            except FileNotFoundError:
+                pass  # Read and moved on meanwhile.
+        if times:
+            result.append({'name': box.name.replace('+', '/'), 'new': len(times), 'oldest': min(times)})
+    return result
+
+
+def part_sessions(tmp, now):
+    claude = shutil.which('claude') or str(Path.home() / '.local/bin/claude')
+    result = subprocess.run([claude, 'agents', '--json', '--all'], stdin=subprocess.DEVNULL,
+                            capture_output=True, text=True, timeout=30)
+    if result.returncode:
+        raise OSError(f'claude agents exited {result.returncode}')
+    live = []
+    for session in json.loads(result.stdout):
+        # A session with a process is live; the rest are history.
+        if isinstance(session, dict) and session.get('pid'):
+            started = session.get('startedAt')
+            kind = text(session.get('kind'))
+            # The launchers name background sessions, which carry a state;
+            # any other is someone's own (post reads one without a state as
+            # interactive), and its name stays off the public page.
+            own = kind != 'background' or 'state' not in session
+            name = '' if own else short(text(session.get('name')) or '?', 60)
+            live.append({'name': name, 'kind': kind,
+                         'status': text(session.get('status')) or text(session.get('state')),
+                         'started': number(started) / 1000 if number(started) else stamp(started)})
+    return live
+
+
+def part_feed(tmp, now):
+    # Only the coordinator holds the landings feed; elsewhere this is None.
+    return jsonlines(Path(os.environ.get('STATUS_FEED', FEED)), last=5000)
+
+
+PARTS = [('machine', part_machine), ('heavy', part_heavy), ('rows', part_rows),
+         ('turns', part_turns), ('codex', part_codex), ('mail', part_mail), ('sessions', part_sessions), ('feed', part_feed)]
+
+
+def collect():
+    tmp, now = tmp_dir(), clock()
+    data = {'host': socket.gethostname(), 'time': now, 'errors': []}
+    for name, part in PARTS:
+        try:
+            data[name] = part(tmp, now)
+        except Exception as error:  # One source's failure leaves the others.
+            data['errors'].append(f'{name}: {type(error).__name__}: {error}')
+    return data
+
+
+# The whole fleet.
+
+def machines(path):
+    result = []
+    for line in path.read_text().splitlines():
+        # As post reads it: what follows a # is a comment.
+        fields = line.split('#', 1)[0].split()
+        if not fields:
+            continue
+        if len(fields) != 2 or not re.fullmatch(r'[a-z][a-z0-9-]*', fields[0]) or fields[1].startswith('-'):
+            raise ValueError(f'invalid machines file line: {line!r}')
+        result.append(tuple(fields))
+    if not result:
+        raise ValueError('machines file names no machine')
+    return result
+
+
+# Why a machine was not reached, as the page says it: ssh's own words
+# name the target, which stays in the journal.
+UNREACHED = [('Connection timed out', 'connection timed out'), ('Connection refused', 'connection refused'),
+             ('Permission denied', 'key refused'), ('Host key verification failed', 'host key not accepted'),
+             ('Could not resolve', 'name not resolved'), ('No route to host', 'no route'),
+             ('Network is unreachable', 'no route')]
+
+
+def gather(target, source):
+    if target == 'local':
+        return collect()
+    # The collector is this very script, so no machine needs it installed.
+    try:
+        result = subprocess.run([*SSH, target, REMOTE], input=source, capture_output=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        raise OSError('no answer in 120 s') from None
+    if result.returncode:
+        reason = result.stderr.decode(errors='replace').strip()
+        print(f'status-page: {target}: exited {result.returncode}', *reason.splitlines(), sep='\n  ',
+              file=sys.stderr)
+        if result.returncode != 255:
+            raise OSError(f'the collector exited {result.returncode}')
+        raise OSError(next((why for words, why in UNREACHED if words in reason), 'ssh exited 255'))
+    data = json.loads(result.stdout)
+    if not isinstance(data, dict):
+        raise ValueError('the collector answered no JSON object')
+    return data
+
+
+def pull():
+    """record pull, stopped with an interrupt on timeout, so that its own
+    rollback runs and leaves the checkout whole."""
+    process = subprocess.Popen(['record', 'pull'], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, text=True)
+    try:
+        _, err = process.communicate(timeout=90)
+    except subprocess.TimeoutExpired:
+        process.send_signal(signal.SIGINT)
+        try:
+            process.communicate(timeout=15)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.communicate()
+        return 'record pull timed out'
+    if process.returncode:
+        print(f'status-page: record pull exited {process.returncode}:\n{err}', file=sys.stderr)
+        return f'record pull exited {process.returncode}'
+    return None
+
+
+def records(root):
+    # Only the missions' front matter: the page is public, and STATUS.md's notes
+    # are internal (the user, 2026-10-25).
+    if not (root / 'missions').is_dir():
+        raise FileNotFoundError(f'{root}/missions: no such directory')
+    missions = []
+    for readme in sorted((root / 'missions').glob('*/README.md')):
+        front = re.match(r'\A---\n(.*?)\n---', readme.read_text(errors='replace'), re.S)
+        fields = {}
+        for line in front[1].splitlines() if front else []:
+            key, sep, value = line.partition(':')
+            if sep:
+                fields[key.strip()] = value.strip()
+        missions.append({'name': readme.parent.name, **{k: fields.get(k, '') for k in (
+            'state', 'owner', 'machine', 'roadmap', 'started', 'ended', 'parent')}})
+    return {'missions': missions}
+
+
+def gather_all(machines_file, records_root, pulling, source):
+    errors = []
+    pairs = machines(machines_file)
+    if pulling:
+        try:
+            failed = pull()
+        except OSError as error:
+            failed = f'record pull failed: {error}'
+        if failed:
+            errors.append(f'records: {failed}')
+    fleet = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(pairs)) as pool:
+        futures = {pool.submit(gather, target, source): name for name, target in pairs}
+        for future in concurrent.futures.as_completed(futures):
+            name = futures[future]
+            try:
+                fleet[name] = future.result()
+            except Exception as error:
+                fleet[name] = {'unreachable': f'{type(error).__name__}: {error}'}
+    try:
+        recorded = records(records_root)
+    except OSError as error:
+        recorded = {'missions': []}
+        errors.append(f'records: {error}')
+    return {'time': clock(), 'machines': [name for name, _ in pairs], 'fleet': fleet,
+            'records': recorded, 'errors': errors}
+
+
+# Figures.
+
+def pct(values, q):
+    # Nearest rank, as landings' report: the smallest value at or above q of them.
+    values = sorted(v for v in values if v is not None)
+    return values[math.ceil(q * len(values)) - 1] if values else None
+
+
+def median(values):
+    values = [v for v in values if v is not None]
+    return statistics.median(values) if values else None
+
+
+def span(seconds):
+    if seconds is None:
+        return '–'
+    seconds = round(seconds)
+    if seconds < 3600:
+        return f'{seconds // 60}:{seconds % 60:02d}'
+    return f'{seconds // 3600}:{seconds % 3600 // 60:02d}:{seconds % 60:02d}'
+
+
+def hours(seconds):
+    return '–' if not seconds else f'{seconds / 3600:.1f} h'
+
+
+def ago(moment, now):
+    if not moment:
+        return '–'
+    seconds = max(0, now - moment)
+    if seconds < 90:
+        return 'just now'
+    if seconds < HOUR:
+        return f'{round(seconds / 60)} min ago'
+    if seconds < 2 * DAY:
+        return f'{int(seconds // HOUR)} h {int(seconds % HOUR // 60)} min ago'
+    return f'{int(seconds // DAY)} d ago'
+
+
+def lasted(moment, now):
+    return ago(moment, now).replace(' ago', '').replace('just now', '<1 min')
+
+
+def utc(moment, form='%m-%d %H:%MZ'):
+    return datetime.fromtimestamp(moment, timezone.utc).strftime(form) if moment else '–'
+
+
+def size(value):
+    return '–' if value is None else f'{value / 1024 ** 3:.0f} GB'
+
+
+def compact(value):
+    if value is None:
+        return '–'
+    for unit, scale in (('B', 1e9), ('M', 1e6), ('K', 1e3)):
+        if value >= scale:
+            return f'{value / scale:.1f}{unit}'
+    return str(value)
+
+
+E = html.escape
+
+
+def badge(tone, text):
+    return f'<span class="badge {tone}"><i aria-hidden="true"></i>{E(text)}</span>'
+
+
+def table(head, rows, numeric_from=1, empty='Nothing here.', wrap=()):
+    """Cells keep to one line, but those of the columns in wrap."""
+    if not rows:
+        return f'<p class="empty">{E(empty)}</p>'
+    kind = lambda i: ' class=wrap' if i in wrap else ' class=num' if i >= numeric_from else ''
+    cells = ''.join(f'<th{kind(i)}>{E(h)}</th>' for i, h in enumerate(head))
+    body = ''.join('<tr>' + ''.join(f'<td{kind(i)}>{c}</td>' for i, c in enumerate(row)) + '</tr>'
+                   for row in rows)
+    return f'<div class="scroll"><table><thead><tr>{cells}</tr></thead><tbody>{body}</tbody></table></div>'
+
+
+def feed_records(raw):
+    # As landings' read_feed: what lacks a time, set, host or token, or holds
+    # a field of the wrong type, is not an event.
+    result = []
+    for record in raw if isinstance(raw, list) else []:
+        if not isinstance(record, dict) or not all(
+                isinstance(record.get(k), str) and record[k] for k in ('time', 'set', 'host', 'token')):
+            continue
+        moment = stamp(record['time'])
+        if moment is None:
+            continue
+        record = dict(record, utc=moment)
+        record.setdefault('event', 'landed')
+        if not isinstance(record['event'], str) or any(
+                k in record and not isinstance(record[k], str) for k in ('repo', 'commit', 'reason')):
+            continue
+        result.append(record)
+    return result
+
+
+def set_runs(records):
+    runs = {}
+    for record in records:
+        runs.setdefault((record['set'], record['token']), []).append(record)
+    result = []
+    for (label, token), run in runs.items():
+        first = lambda event: next((r['utc'] for r in run if r['event'] == event), None)
+        end = next((r for r in reversed(run) if r['event'] in ('done', 'stopped')), None)
+        result.append({'set': label, 'run': run, 'waiting': first('waiting'), 'started': first('started'),
+                       'end': end, 'host': run[0]['host'],
+                       'landed': [r.get('repo', '') for r in run if r['event'] == 'landed']})
+    return result
+
+
+def in_flight(fleet):
+    """Each set's latest run, as landings' latest_runs, if it has not ended
+    and was heard from in 6 hours: a killed land-set writes no end."""
+    latest = {}
+    for run in fleet.runs:
+        if (run['waiting'] or run['started']) and run['run'][0]['utc'] >= latest.get(
+                run['set'], {'run': [{'utc': -math.inf}]})['run'][0]['utc']:
+            latest[run['set']] = run
+    return sorted((r for r in latest.values() if r['end'] is None and r['run'][-1]['utc'] >= fleet.now - 6 * HOUR),
+                  key=lambda r: r['waiting'] or r['started'])
+
+
+def steps(result):
+    gate = part(result, 'gate')
+    found = gate.get('steps') if isinstance(gate.get('steps'), dict) else None
+    row = {s: number(found.get(s)) if found else None for s in STEPS}
+    run = number(gate.get('run_s'))
+    row['other'] = (round(max(0, run - sum(v for v in row.values() if v)), 3)
+                    if found is not None and run is not None and gate.get('kind') == 'ran' else None)
+    return row
+
+
+def shaped(value, like):
+    return value if isinstance(value, type(like)) else like
+
+
+def records_of(data, path, size, times):
+    """The lists at path in a machine's data of the size its collector
+    writes, with numbers where times says: one of another version may differ."""
+    for key in path[:-1]:
+        data = shaped(data.get(key), {})
+    return [r for r in shaped(data.get(path[-1]), []) if isinstance(r, list) and len(r) == size
+            and all(number(r[i]) is not None for i in times)]
+
+
+class Fleet:
+    """The gathered data, flattened for the page's figures."""
+
+    def __init__(self, data):
+        self.now = data['time']
+        self.data = data
+        self.names = data['machines']
+        self.up = {n: d for n, d in data['fleet'].items() if 'unreachable' not in d}
+        self.alias = {text(d.get('host')): n for n, d in self.up.items()}
+        self.rows = [(n, *r) for n, d in self.up.items() for r in records_of(d, ['rows'], 8, (0, 2, 3))]
+        self.feed = feed_records(next((d['feed'] for d in self.up.values() if d.get('feed') is not None), None))
+        self.feed_seen = any(d.get('feed') is not None for d in self.up.values())
+        self.runs = set_runs(self.feed)
+        self.turns = [(n, *t) for n, d in self.up.items() for t in records_of(d, ['turns', 'done'], 4, (0,))]
+        self.codex = [(n, *r) for n, d in self.up.items() for r in records_of(d, ['codex', 'ended'], 7, (0, 1))]
+
+    def tasks(self):
+        return [(n, t) for n, d in self.up.items() for t in (d.get('heavy') or {}).get('tasks', [])]
+
+    def window(self, seconds):
+        since = self.now - seconds
+        return [r for r in self.rows if r[1] >= since]
+
+
+def kpis(fleet, shown):
+    now = fleet.now
+    tasks = fleet.tasks()
+    running = sum(t['state'] in RUNNING for _, t in tasks)
+    gates = sum(t['lane'] == 'gate' and t['state'] in RUNNING for _, t in tasks)
+    flight = in_flight(fleet)
+    landed = [r for r in fleet.runs if r['end'] and r['end']['event'] == 'done']
+    last = max(landed, key=lambda r: r['end']['utc'], default=None)
+    sessions = [s for d in fleet.up.values() for s in d.get('sessions') or []]
+    busy = sum(s['status'] in ('busy', 'working') for s in sessions)
+    codex = sum(r['alive'] for d in fleet.up.values() for r in (d.get('codex') or {}).get('running', []))
+    day = fleet.window(DAY)
+    lands = [r for r in day if r[7] == 'land']
+    tiles = [
+        ('Missions', str(shown['rows']), f'{shown["active"]} active, {shown["paused"]} paused in the record, '
+                                         f'{shown["busy"]} busy now') if shown else ('Missions', '–', 'not shown'),
+        ('Sets landing now', str(len(flight)),
+         f'last landed {ago(last["end"]["utc"], now)} ({last["set"]})' if last else 'none landed in the feed'),
+        ('Heavy commands now', str(len(tasks)), f'{running} running, {len(tasks) - running} queued'
+                                                 + (f', {gates} gate' if gates else '')),
+        ('Agents working', str(busy + codex), f'{busy} Claude busy of {len(sessions)} live, {codex} Codex runs'),
+        ('Commands, 24 h', f'{len(day):,}', f'{hours(sum(r[4] for r in day))} running, '
+                                            f'{hours(sum(r[3] for r in day))} waiting'),
+        ('Land gates, 24 h', str(len(lands)), f'{sum(r[5] != "0" for r in lands)} failed'),
+    ]
+    return '<div class="tiles">' + ''.join(
+        f'<div class="tile"><div class="label">{E(a)}</div><div class="value">{E(b)}</div>'
+        f'<div class="sub">{E(c)}</div></div>' for a, b, c in tiles) + '</div>'
+
+
+def landing_now(fleet):
+    now = fleet.now
+    rows = []
+    for run in in_flight(fleet):
+        progress = next((r for r in reversed(run['run']) if r['event'] in ('gated', 'landed')), None)
+        since = run['started'] or run['waiting']
+        rows.append([E(run['set']), badge('info', 'running') if run['started'] else badge('warning', 'waiting for lock'),
+                     E(fleet.alias.get(run['host'], run['host'])), E(lasted(since, now)),
+                     E(f'{progress["event"]} {progress.get("repo", "")}' if progress else '–')])
+    for name, task in fleet.tasks():
+        if task['kind'] in ('land', 'prebuild'):
+            since = task['started'] or task['submitted']
+            state = badge('info', 'running') if task['state'] in RUNNING else badge('warning', 'queued')
+            rows.append([E(f'land {task["repo"]}' + (' (prebuild)' if task['kind'] == 'prebuild' else '')),
+                         state, E(name), E(lasted(since, now)), E(task['mission'] or '–')])
+    for name, data in fleet.up.items():
+        for turn in (data.get('turns') or {}).get('open', []):
+            state = badge('info', 'holds the turn') if turn['event'] == 'grant' else badge('warning', 'waiting for turn')
+            rows.append([E(f'landing turn {turn["repo"]}'), state, E(name), E(lasted(turn['since'], now)), '–'])
+    out = table(['What', 'State', 'Machine', 'For', 'Progress / mission'], rows, numeric_from=9,
+                empty='Nothing is landing right now.')
+    ended = sorted((r for r in fleet.runs if r['end']), key=lambda r: r['end']['utc'], reverse=True)[:8]
+    recent = []
+    for run in ended:
+        end = run['end']
+        result = (badge('good', 'landed') if end['event'] == 'done'
+                  else badge('critical', f'stopped in {end.get("repo") or "?"}'))
+        took = end['utc'] - run['started'] if run['started'] else None
+        recent.append([E(run['set']), result, E(fleet.alias.get(run['host'], run['host'])), E(utc(end['utc'])),
+                       E(span(took)),
+                       E(', '.join(run['landed']) or '–'),
+                       E(short(end.get('reason', '')) if end['event'] == 'stopped' else '')])
+    out += '<h3>Recent set runs</h3>' + table(
+        ['Set', 'Result', 'Machine', 'Ended', 'Run', 'Landed', 'Reason'], recent, numeric_from=9, wrap=(5, 6),
+        empty='No set run in the feed yet.' if fleet.feed_seen else 'The landings feed was not reachable.')
+    return out
+
+
+def owner_mission(name):
+    match = re.fullmatch(r'o/(.+?)(?:-m[1-9][0-9]*)?', name or '')
+    return match[1] if match else ''
+
+
+def missions(fleet):
+    now = fleet.now
+    seen = {}
+
+    def entry(name, host=None, moment=None, doing=None):
+        e = seen.setdefault(name, {'machines': set(), 'last': 0, 'now': [], 'builds': 0, 'run': 0.0})
+        if host:
+            e['machines'].add(host)
+        e['last'] = max(e['last'], moment or 0)
+        if doing:
+            e['now'].append(doing)
+        return e
+
+    recorded = {m['name']: m for m in fleet.data['records']['missions']}
+    for name, m in recorded.items():
+        if m['state'] in ('active', 'paused'):
+            entry(name)
+    for host, data in fleet.up.items():
+        for task in (data.get('heavy') or {}).get('tasks', []):
+            if task['mission']:
+                entry(task['mission'], host, task['submitted'],
+                      'build' if task['state'] in RUNNING else 'queued build')
+        codex = data.get('codex') or {}
+        for run in codex.get('running', []):
+            if run['alive'] and run['mission']:
+                entry(run['mission'], host, run['started'], 'Codex run')
+        for owner in codex.get('owners', []):
+            if owner_mission(owner['name']):
+                entry(owner_mission(owner['name']), host, owner['last_turn'],
+                      'Codex owner' if owner['alive'] else None)
+        for session in data.get('sessions') or []:
+            if owner_mission(session['name']):
+                entry(owner_mission(session['name']), host, None,
+                      f'session {session["status"]}' if session['status'] else 'session')
+    # Commands alone bring in a mission the record doesn't say has ended.
+    for host, end, lane, wait, run, code, name, kind, repo in fleet.window(DAY):
+        if not name or (name not in seen and recorded.get(name, {}).get('state') in ('ended', 'abandoned')):
+            continue
+        e = entry(name, host, end)
+        e['builds'] += 1
+        e['run'] += run
+    for host, start, end, code, model, effort, tokens, name in fleet.codex:
+        if name in seen:
+            entry(name, host, end)
+    rows = []
+    for name, e in sorted(seen.items(), key=lambda kv: (not kv[1]['now'], -kv[1]['last'], kv[0])):
+        m = recorded.get(name, {})
+        state = m.get('state') or ''
+        tone = {'active': 'good', 'paused': 'warning'}.get(state, 'neutral')
+        counts = {}
+        for item in e['now']:
+            counts[item] = counts.get(item, 0) + 1
+        doing = ' '.join(badge('info', f'{n} × {k}' if n > 1 else k) for k, n in counts.items()) or '–'
+        where = sorted(e['machines']) or ([m['machine']] if m.get('machine') not in (None, '', 'unknown') else [])
+        rows.append([f'<strong>{E(name)}</strong>', badge(tone, state) if state else '<span class="muted">not recorded</span>',
+                     E(', '.join(where) or '–'), doing,
+                     E(f'{e["builds"]} · {span(e["run"])}' if e['builds'] else '–'), E(ago(e['last'], now)),
+                     E(m.get('owner') or '–')])
+    shown = {'rows': len(rows), 'busy': sum(bool(e['now']) for e in seen.values()),
+             **{s: sum(recorded.get(n, {}).get('state') == s for n in seen) for s in ('active', 'paused')}}
+    return shown, table(['Mission', 'Record', 'Machines', 'Now', 'Commands 24 h · running', 'Last activity', 'Owner'],
+                        rows, numeric_from=9, empty='No mission is active, paused or busy.')
+
+
+def machine_card(fleet, name):
+    now = fleet.now
+    data = fleet.data['fleet'].get(name, {'unreachable': 'not gathered'})
+    if 'unreachable' in data:
+        return (f'<div class="card"><h3>{E(name)} {badge("critical", "unreachable")}</h3>'
+                f'<p class="muted">{E(short(data["unreachable"]))}</p></div>')
+    info = data.get('machine') or {}
+    heavy = data.get('heavy') or {}
+    head = [badge('good', 'reachable')]
+    if heavy.get('gate'):
+        head.append(badge('info', 'gate holds the machine'))
+    free = info.get('disk_free')
+    if free is not None and free < 40 * 1024 ** 3:
+        head.append(badge('warning', 'disk low'))
+    load = info.get('load') or [0, 0, 0]
+    facts = (f'{E(data.get("host", ""))} · load {load[0]:.1f} / {info.get("cpus", "?")} CPUs · '
+             f'{size(info.get("mem_available"))} memory free · {size(free)} disk free')
+    body = []
+    tasks = heavy.get('tasks', [])
+    if tasks:
+        body.append('<h4>heavy</h4><ul>' + ''.join(
+            f'<li>{badge("info" if t["state"] in RUNNING else "warning", t["state"])} '
+            f'{E(t["lane"])} · {E(t["kind"] + (" " + t["repo"] if t["repo"] else ""))} · '
+            f'{E(t["mission"] or t["label"] or "–")} · {E(lasted(t["started"] or t["submitted"], now))}</li>'
+            for t in tasks) + '</ul>')
+    codex = data.get('codex') or {}
+    runs = codex.get('running', [])
+    if runs or codex.get('owners'):
+        items = [f'<li>{badge("info" if r["alive"] else "warning", "running" if r["alive"] else "stale")} '
+                 f'run for {E(r["to"])} · {E(r["model"])} {E(r["effort"])} · {E(lasted(r["started"], now))}</li>'
+                 for r in runs]
+        items += [f'<li>{badge("info" if o["alive"] else "neutral", "owner up" if o["alive"] else "owner down")} '
+                  f'{E(o["name"])} · last turn {E(ago(o["last_turn"], now))}</li>' for o in codex.get('owners', [])]
+        body.append('<h4>Codex</h4><ul>' + ''.join(items) + '</ul>')
+    sessions = data.get('sessions') or []
+    if sessions:
+        body.append('<h4>Claude sessions</h4><ul>' + ''.join(
+            f'<li>{badge("info" if s["status"] in ("busy", "working") else "neutral", s["status"] or "live")} '
+            f'{E(" · ".join(x for x in (s["name"], s["kind"]) if x))} · up {E(lasted(s["started"], now))}</li>'
+            for s in sessions) + '</ul>')
+    mail = data.get('mail') or []
+    if mail:
+        body.append('<h4>Unread post</h4><ul>' + ''.join(
+            f'<li>{badge("warning" if now - m["oldest"] > 900 else "neutral", str(m["new"]) + " unread")} '
+            f'{E(m["name"])} · oldest {E(ago(m["oldest"], now))}</li>' for m in mail) + '</ul>')
+    last = max((r[0] for r in data.get('rows') or []), default=None)
+    if not body:
+        body.append('<p class="muted">Idle: nothing queued, running or unread.</p>')
+    errors = data.get('errors') or []
+    if errors:
+        body.append('<p class="muted">Not read: ' + E('; '.join(errors)) + '</p>')
+    return (f'<div class="card"><h3>{E(name)} {" ".join(head)}</h3><p class="facts">{facts}<br>'
+            f'last heavy command {E(ago(last, now))}</p>{"".join(body)}</div>')
+
+
+def chart(fleet, seconds, bucket):
+    """Command time per bucket, running and waiting, spread over when it happened."""
+    now = fleet.now
+    count = int(seconds // bucket)
+    start = (now // bucket + 1) * bucket - count * bucket
+    run, wait, commands = [0.0] * count, [0.0] * count, [0] * count
+
+    def spread(series, a, b):
+        first = max(0, int((a - start) // bucket))
+        for i in range(first, min(count, int((b - start) // bucket) + 1)):
+            lo, hi = start + i * bucket, start + (i + 1) * bucket
+            series[i] += max(0.0, min(b, hi) - max(a, lo))
+
+    for host, end, lane, w, r, *_ in fleet.window(seconds + bucket):
+        spread(run, end - r, end)
+        spread(wait, end - r - w, end - r)
+        i = int((end - start) // bucket)
+        if 0 <= i < count:
+            commands[i] += 1
+    top = max((a + b for a, b in zip(run, wait)), default=0) / 3600
+    # A clean axis: 1, 2 or 5 times a power of ten, in at most five steps.
+    step = 1
+    if top > 0:
+        raw = top / 4
+        power = 10 ** math.floor(math.log10(raw))
+        step = next(m * power for m in (1, 2, 5, 10) if m * power >= raw)
+    ceiling = max(step, math.ceil(top / step) * step) if top else 1
+    width, height, left, bottom, top_pad = 960, 240, 44, 26, 10
+    plot = height - bottom - top_pad
+    slot = (width - left) / count
+    bar = min(24, slot * .7)
+    y = lambda v: top_pad + plot - v / ceiling * plot
+    parts = [f'<svg viewBox="0 0 {width} {height}" class="chart" role="img" '
+             f'aria-label="Command time per {"hour" if bucket == HOUR else f"{bucket // HOUR} hours"}, running and waiting">']
+    tick = 0.0
+    while tick <= ceiling + 1e-9:
+        parts.append(f'<line class="grid" x1="{left}" x2="{width}" y1="{y(tick):.1f}" y2="{y(tick):.1f}"/>'
+                     f'<text class="axis" x="{left - 6}" y="{y(tick) + 4:.1f}" text-anchor="end">{tick:g}</text>')
+        tick += step
+    every = max(1, round(count / 12))
+    for i in range(count):
+        x = left + i * slot + (slot - bar) / 2
+        r_h, w_h = run[i] / 3600 / ceiling * plot, wait[i] / 3600 / ceiling * plot
+        base = top_pad + plot
+        if r_h >= .5:
+            top_mark = w_h < .5
+            parts.append(column(x, base - r_h, bar, r_h, 'run', rounded=top_mark))
+        if w_h >= .5:
+            gap = 2 if r_h >= .5 else 0
+            h = max(.5, w_h - gap)
+            parts.append(column(x, base - r_h - gap - h, bar, h, 'wait', rounded=True))
+        lo = start + i * bucket
+        label = (f'{utc(lo, "%m-%d %H:00Z")}–{utc(lo + bucket, "%H:00Z")}')
+        parts.append(f'<rect class="hit" x="{left + i * slot:.1f}" y="{top_pad}" width="{slot:.1f}" height="{plot}" '
+                     f'tabindex="0" data-label="{E(label)}" data-run="{hours(run[i]) if run[i] else "0 h"}" '
+                     f'data-wait="{hours(wait[i]) if wait[i] else "0 h"}" data-commands="{commands[i]}"/>')
+        if i % every == 0:
+            text = utc(lo, '%H:00') if bucket == HOUR else utc(lo, '%a %H:00')
+            parts.append(f'<text class="axis" x="{left + i * slot + slot / 2:.1f}" y="{height - 8}" '
+                         f'text-anchor="middle">{text}</text>')
+    parts.append(f'<line class="base" x1="{left}" x2="{width}" y1="{top_pad + plot}" y2="{top_pad + plot}"/></svg>')
+    rows = [[E(utc(start + i * bucket, '%m-%d %H:00Z')), E(hours(run[i])), E(hours(wait[i])), str(commands[i])]
+            for i in range(count) if run[i] or wait[i] or commands[i]]
+    legend = ('<div class="legend"><span><i class="swatch run"></i>Running</span>'
+              '<span><i class="swatch wait"></i>Waiting in heavy’s queue</span></div>')
+    return (legend + '<div class="chartbox">' + ''.join(parts) + '<div class="tip" hidden></div></div>'
+            + '<details><summary>As a table</summary>'
+            + table(['From', 'Running', 'Waiting', 'Commands ended'], rows) + '</details>')
+
+
+def column(x, top, width, height, cls, rounded):
+    if not rounded:
+        return f'<rect class="{cls}" x="{x:.1f}" y="{top:.1f}" width="{width:.1f}" height="{height:.1f}"/>'
+    r = min(4, height, width / 2)
+    return (f'<path class="{cls}" d="M{x:.1f},{top + height:.1f} L{x:.1f},{top + r:.1f} Q{x:.1f},{top:.1f} '
+            f'{x + r:.1f},{top:.1f} L{x + width - r:.1f},{top:.1f} Q{x + width:.1f},{top:.1f} {x + width:.1f},'
+            f'{top + r:.1f} L{x + width:.1f},{top + height:.1f} Z"/>')
+
+
+def kind_table(rows):
+    out = []
+    for group, names in GROUPS:
+        for name in names:
+            mine = [r for r in rows if r[7] == name]
+            if not mine:
+                continue
+            runs, waits = [r[4] for r in mine], [r[3] for r in mine]
+            failed = sum(r[5] != '0' for r in mine)
+            label = {'land': 'land gate', 'prebuild': 'land prebuild', 'other': 'other'}.get(name, name)
+            out.append([f'<span class="muted">{E(group)}</span> {E(label)}', f'{len(mine):,}',
+                        str(failed) if failed else '–', span(median(runs)), span(pct(runs, .9)),
+                        span(median(waits)), span(pct(waits, .9)), hours(sum(runs)), hours(sum(waits))])
+    return table(['Kind', 'Commands', 'Failed', 'Run median', 'Run p90', 'Wait median', 'Wait p90',
+                  'Running', 'Waiting'], out, empty='No heavy command in this window.')
+
+
+def machine_table(fleet, rows):
+    out = []
+    for name in fleet.names:
+        mine = [r for r in rows if r[0] == name]
+        if name not in fleet.up:
+            out.append([E(name), '–', '–', '–', '–', '–', '–', badge('critical', 'unreachable')])
+            continue
+        waits = [r[3] for r in mine]
+        lands = sum(r[7] == 'land' for r in mine)
+        out.append([E(name), f'{len(mine):,}', str(sum(r[5] != '0' for r in mine) or '–'),
+                    hours(sum(r[4] for r in mine)), hours(sum(waits)), span(median(waits)), span(pct(waits, .9)),
+                    str(lands or '–')])
+    return table(['Machine', 'Commands', 'Failed', 'Running', 'Waiting', 'Wait median', 'Wait p90', 'Land gates'],
+                 out)
+
+
+def gates_table(rows):
+    out = []
+    for repo in sorted({r[8] for r in rows if r[7] in ('land', 'prebuild')}):
+        gates = [r for r in rows if r[7] == 'land' and r[8] == repo]
+        pre = [r for r in rows if r[7] == 'prebuild' and r[8] == repo]
+        runs = [r[4] for r in gates]
+        out.append([E(repo), str(len(gates)), str(sum(r[5] != '0' for r in gates) or '–'),
+                    span(median(runs)), span(pct(runs, .9)), span(median([r[3] for r in gates])),
+                    span(median([r[4] for r in pre])), span(median([r[3] for r in pre])),
+                    str(sum(r[5] != '0' for r in pre) or '–')])
+    return table(['Repository', 'Gates', 'Failed', 'Gate median', 'Gate p90', 'Gate wait', 'Prebuild median',
+                  'Prebuild wait', 'Prebuild failed'], out, empty='No land in this window.')
+
+
+def steps_table(fleet, since):
+    results = [r['result'] for r in fleet.feed if r['utc'] >= since and isinstance(r.get('result'), dict)
+               and isinstance(r['result'].get('repo'), str)]
+    out = []
+    for repo in sorted({x['repo'] for x in results}):
+        mine = [x for x in results if x['repo'] == repo]
+        ran = [x for x in mine if part(x, 'gate').get('kind') == 'ran']
+        cached = sum(part(x, 'gate').get('kind') == 'cached' for x in mine)
+        timed = [steps(x) for x in ran]
+        gate = [number(part(x, 'gate').get('run_s')) for x in ran]
+        failed = sum(any(part(x, p).get('exit') not in (None, 0) for p in ('prebuild', 'gate')) for x in mine)
+        shown = [s for s in (*STEPS, 'other') if any(t[s] is not None for t in timed)]
+        out.append([E(repo), str(len(ran)), str(cached or '–'), str(failed or '–'), span(median(gate)),
+                    span(pct(gate, .9)), E(' · '.join(f'{s} {span(median([t[s] for t in timed]))}' for s in shown) or '–')])
+    return table(['Repository', 'Gates run', 'Cached', 'Failed', 'Gate median', 'Gate p90', 'Step medians'], out,
+                 empty='No land-set result in this window.', wrap=(6,))
+
+
+def sets_table(fleet, since):
+    sets = {}
+    for run in fleet.runs:
+        moment = run['waiting'] or run['started'] or run['run'][0]['utc']
+        if moment < since:
+            continue
+        e = sets.setdefault(run['set'], {'runs': 0, 'done': 0, 'stopped': 0, 'wait': [], 'run': []})
+        e['runs'] += 1
+        if run['end']:
+            e[run['end']['event']] += 1
+        if run['waiting'] and run['started']:
+            e['wait'].append(run['started'] - run['waiting'])
+        if run['started'] and run['end']:
+            e['run'].append(run['end']['utc'] - run['started'])
+    rows = [[E(name), str(e['runs']), str(e['done'] or '–'), str(e['stopped'] or '–'), span(median(e['wait'])),
+             span(max(e['wait'], default=None)), span(median(e['run'])), span(max(e['run'], default=None))]
+            for name, e in sorted(sets.items())]
+    return table(['Set', 'Runs', 'Landed', 'Stopped', 'Lock wait median', 'Longest', 'Run median', 'Longest'],
+                 rows, empty='No set run in this window.')
+
+
+def turns_table(fleet, since):
+    turns = [t for t in fleet.turns if t[1] >= since]
+    out = []
+    for repo in sorted({t[2] for t in turns}):
+        mine = [t for t in turns if t[2] == repo]
+        waits = [t[3] for t in mine if isinstance(t[3], (int, float))]
+        held = [t[4] for t in mine if isinstance(t[4], (int, float))]
+        out.append([E(repo or '?'), str(len(mine)), span(median(waits)), span(pct(waits, .9)),
+                    span(median(held)), span(pct(held, .9))])
+    return table(['Repository', 'Turns', 'Wait median', 'Wait p90', 'Held median', 'Held p90'], out,
+                 empty='No landing turn in this window.')
+
+
+def codex_table(fleet, since):
+    runs = [r for r in fleet.codex if r[2] >= since]
+    out = []
+    for model, effort in sorted({(r[4], r[5]) for r in runs}):
+        mine = [r for r in runs if (r[4], r[5]) == (model, effort)]
+        took = [r[2] - r[1] for r in mine]
+        tokens = [r[6] for r in mine if r[6]]
+        total = [sum(t[i] for t in tokens) for i in range(3)] if tokens else [None] * 3
+        cached = f'{total[1] / total[0]:.0%}' if total[0] else '–'
+        out.append([E(f'{model} {effort}'), str(len(mine)), str(sum(r[3] != '0' for r in mine) or '–'),
+                    span(median(took)), span(pct(took, .9)), compact(total[0]), cached, compact(total[2])])
+    return table(['Model and effort', 'Runs', 'Failed', 'Median', 'p90', 'Input tokens', 'Cached', 'Output tokens'],
+                 out, empty='No codex-run run ended in this window.')
+
+
+STYLE = """
+:root{color-scheme:light;--page:#f9f9f7;--surface:#fcfcfb;--ink:#0b0b0b;--ink2:#52514e;--muted:#6f6d68;
+--grid:#e1e0d9;--axis:#c3c2b7;--ring:rgba(11,11,11,.10);--run:#2a78d6;--wait:#eb6834;--info:#2a78d6;
+--good:#0ca30c;--warning:#fab219;--critical:#d03b3b;--neutral:#898781;--code:#f0efec}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){color-scheme:dark;--page:#0d0d0d;
+--surface:#1a1a19;--ink:#f0efec;--ink2:#c3c2b7;--muted:#9a988f;--grid:#2c2c2a;--axis:#383835;
+--ring:rgba(255,255,255,.10);--run:#3987e5;--wait:#d95926;--info:#3987e5;--code:#262624}}
+:root[data-theme="dark"]{color-scheme:dark;--page:#0d0d0d;--surface:#1a1a19;--ink:#f0efec;--ink2:#c3c2b7;
+--muted:#9a988f;--grid:#2c2c2a;--axis:#383835;--ring:rgba(255,255,255,.10);--run:#3987e5;--wait:#d95926;
+--info:#3987e5;--code:#262624}
+*{box-sizing:border-box}
+body{margin:0;background:var(--page);color:var(--ink);font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:1280px;margin:0 auto;padding:20px 16px 48px}
+header{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 16px;margin-bottom:16px}
+h1{font-size:22px;margin:0;font-weight:650}
+h2{font-size:17px;margin:32px 0 10px;font-weight:650}
+h3{font-size:14px;margin:20px 0 8px;font-weight:650}
+h4{font-size:12px;margin:12px 0 4px;color:var(--ink2);font-weight:600;text-transform:uppercase;letter-spacing:.04em}
+p{margin:6px 0}
+.meta,.muted,.empty{color:var(--ink2)}
+.empty{font-style:italic}
+code{background:var(--code);padding:0 4px;border-radius:4px;font-size:12.5px;overflow-wrap:anywhere}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px}
+.tile,.card,.panel{background:var(--surface);border:1px solid var(--ring);border-radius:10px}
+.tile{padding:12px 14px}
+.tile .label{color:var(--ink2);font-size:12.5px}
+.tile .value{font-size:28px;font-weight:650;margin:2px 0}
+.tile .sub{color:var(--ink2);font-size:12px}
+.panel{padding:4px 14px 12px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:10px}
+.card{padding:4px 14px 12px}
+.card ul{margin:2px 0;padding-left:0;list-style:none}
+.card li{margin:3px 0}
+.facts{color:var(--ink2);font-size:12.5px}
+.scroll{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}
+th,td{text-align:left;padding:6px 12px 6px 0;border-bottom:1px solid var(--grid);vertical-align:top;
+white-space:nowrap}
+td.wrap{white-space:normal;min-width:220px}
+th{color:var(--ink2);font-weight:600;font-size:12.5px;white-space:nowrap}
+td.num,th.num{text-align:right}
+.badge{display:inline-flex;align-items:center;gap:5px;white-space:nowrap;font-size:12px;color:var(--ink);
+border:1px solid var(--ring);border-radius:999px;padding:0 8px 0 6px;line-height:20px}
+.badge i{width:8px;height:8px;border-radius:50%;background:var(--neutral)}
+.badge.good i{background:var(--good)}.badge.warning i{background:var(--warning)}
+.badge.critical i{background:var(--critical)}.badge.info i{background:var(--info)}
+.windows{display:flex;gap:6px;margin:6px 0 4px}
+.windows button{font:inherit;color:var(--ink);background:var(--surface);border:1px solid var(--ring);
+border-radius:999px;padding:3px 12px;cursor:pointer}
+.windows button[aria-pressed="true"]{border-color:var(--ink);font-weight:600}
+[data-window]{display:none}
+#stats[data-show="24h"] [data-window="24h"],#stats[data-show="7d"] [data-window="7d"]{display:block}
+.legend{display:flex;gap:16px;color:var(--ink2);font-size:12.5px;margin:6px 0}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.swatch{width:12px;height:12px;border-radius:3px;display:inline-block}
+.swatch.run,.chart .run{fill:var(--run);background:var(--run)}
+.swatch.wait,.chart .wait{fill:var(--wait);background:var(--wait)}
+.chartbox{position:relative}
+.chart{width:100%;height:auto;display:block}
+.chart .grid{stroke:var(--grid);stroke-width:1}
+.chart .base{stroke:var(--axis);stroke-width:1}
+.chart .axis{fill:var(--muted);font-size:11px;font-variant-numeric:tabular-nums}
+.chart .hit{fill:transparent;outline:none}
+.chart .hit:hover,.chart .hit:focus{fill:var(--ink);fill-opacity:.05}
+.tip{position:absolute;pointer-events:none;background:var(--surface);border:1px solid var(--ring);
+border-radius:8px;padding:6px 10px;font-size:12.5px;box-shadow:0 2px 8px rgba(0,0,0,.12);white-space:nowrap}
+.tip b{font-weight:650}.tip .k{display:inline-block;width:10px;height:2px;margin-right:6px;vertical-align:middle}
+details{margin:6px 0}
+summary{cursor:pointer;color:var(--ink2)}
+footer{margin-top:36px;color:var(--ink2);font-size:12.5px}
+"""
+
+SCRIPT = """
+(function(){
+  var stats=document.getElementById('stats');
+  document.querySelectorAll('.windows button').forEach(function(b){
+    b.addEventListener('click',function(){
+      stats.dataset.show=b.dataset.for;
+      document.querySelectorAll('.windows button').forEach(function(o){o.setAttribute('aria-pressed',o===b);});
+    });
+  });
+  document.querySelectorAll('.chartbox').forEach(function(box){
+    var tip=box.querySelector('.tip');
+    function line(color,value,name){
+      var row=document.createElement('div'),k=document.createElement('span'),v=document.createElement('b');
+      k.className='k';k.style.background=color;v.textContent=value;row.append(k,v,document.createTextNode(' '+name));
+      return row;
+    }
+    function show(e){
+      var t=e.target;if(!t.classList.contains('hit'))return;
+      tip.replaceChildren();
+      var head=document.createElement('div');head.textContent=t.dataset.label;
+      tip.append(head,line('var(--run)',t.dataset.run,'running'),line('var(--wait)',t.dataset.wait,'waiting'));
+      var n=document.createElement('div');n.textContent=t.dataset.commands+' commands ended';tip.append(n);
+      tip.hidden=false;
+      var r=box.getBoundingClientRect(),h=t.getBoundingClientRect();
+      var x=h.left-r.left+h.width/2-tip.offsetWidth/2;
+      tip.style.left=Math.max(0,Math.min(r.width-tip.offsetWidth,x))+'px';tip.style.top='0px';
+    }
+    box.addEventListener('pointermove',show);box.addEventListener('focusin',show);
+    box.addEventListener('pointerleave',function(){tip.hidden=true;});
+    box.addEventListener('focusout',function(){tip.hidden=true;});
+  });
+})();
+"""
+
+
+def render(data):
+    fleet = Fleet(data)
+    now = fleet.now
+    problems = list(data['errors'])
+
+    def guard(name, build, *args):
+        try:
+            return build(*args)
+        except Exception as error:  # One section's bad data leaves the rest of the page.
+            print(f'status-page: {name}:\n{traceback.format_exc()}', file=sys.stderr)
+            problems.append(f'{name}: not shown: {type(error).__name__}: {error}')
+            return '<p class="empty">Not shown this time: its data could not be read.</p>'
+
+    shown = guard('missions', missions, fleet)
+    shown, mission_table = shown if isinstance(shown, tuple) else (None, shown)
+    reached = len(fleet.up)
+    down = [n for n in fleet.names if n not in fleet.up]
+    problems += [f'{n}: {fleet.data["fleet"][n]["unreachable"]}' for n in down if n in fleet.data['fleet']]
+    problems += [f'{n}: {e}' for n, d in fleet.up.items() for e in shaped(d.get('errors'), [])]
+    if not fleet.feed_seen:
+        problems.append('landings feed: no reachable machine holds it')
+    stats = []
+    for key, seconds, title in WINDOWS:
+        since = now - seconds
+        rows = fleet.window(seconds)
+        stats.append(f'''<div data-window="{key}">
+<h3>Command time on the fleet, {E(title.lower())}</h3>
+<p class="muted">Hours of heavy command time per {"hour" if seconds == DAY else "4 hours"}, every machine together:
+running, and waiting in heavy’s queue before it.</p>
+<div class="panel">{guard("chart", chart, fleet, seconds, HOUR if seconds == DAY else 4 * HOUR)}</div>
+<h3>Builds and tests by kind</h3>
+<p class="muted">Every heavy command, by the kind <code>record runs</code> counts (records.md 5.1); land’s own
+commands are its prebuild and gate. Failed is a nonzero exit.</p>
+<div class="panel">{guard("kinds", kind_table, rows)}</div>
+<h3>By machine</h3><div class="panel">{guard("machines", machine_table, fleet, rows)}</div>
+<h3>Landing: gates by repository</h3>
+<p class="muted">Every <code>land</code> on any machine, plain or under <code>land-set</code>, from heavy’s
+rows: its prebuild in the build lane, then its gate.</p>
+<div class="panel">{guard("gates", gates_table, rows)}</div>
+<h3>Landing: gate steps under land-set</h3>
+<p class="muted">From the landings feed’s results (landing-flow.md 10): the medians of each
+<code>gate-step</code>.</p>
+<div class="panel">{guard("gate steps", steps_table, fleet, since)}</div>
+<h3>Landing: set runs</h3>
+<p class="muted">Lock wait is <code>waiting</code> to <code>started</code>; the run is <code>started</code> to
+landed or stopped.</p>
+<div class="panel">{guard("set runs", sets_table, fleet, since)}</div>
+<h3>Landing: the landing turn</h3>
+<p class="muted">How long each machine’s <code>land</code> waited for, and held, its repository’s turn.</p>
+<div class="panel">{guard("landing turns", turns_table, fleet, since)}</div>
+<h3>Codex runs</h3>
+<p class="muted">Every <code>codex-run</code> task that ended, from each machine’s <code>runs.tsv</code>.</p>
+<div class="panel">{guard("Codex runs", codex_table, fleet, since)}</div>
+</div>''')
+    return f'''<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="300">
+<meta name="robots" content="noindex">
+<title>Fabrig status</title>
+<style>{STYLE}</style>
+</head>
+<body>
+<main>
+<header><h1>Fabrig status</h1>
+<span class="meta">Written {E(utc(now, "%Y-%m-%d %H:%M UTC"))}, every 10 minutes ·
+{reached} of {len(fleet.names)} machines reached{(" · down: " + E(", ".join(down))) if down else ""}</span></header>
+{guard("tiles", kpis, fleet, shown)}
+<h2>In flight</h2>
+<h3>Landing now</h3>
+<div class="panel">{guard("landing now", landing_now, fleet)}</div>
+<h3>Missions</h3>
+<p class="muted">Missions the record holds as active or paused, any mission with something running now (a heavy
+command, a Codex run or owner, a Claude session named for it), and any the record doesn’t call ended with heavy
+commands in the last 24 hours. Last activity is its last command, run or owner turn.</p>
+<div class="panel">{mission_table}</div>
+<h3>Machines</h3>
+<div class="cards">{"".join(guard(f"card of {name}", machine_card, fleet, name) for name in fleet.names)}</div>
+<h2>Costs</h2>
+<section id="stats" data-show="24h">
+<div class="windows" role="group" aria-label="Window">
+<button type="button" data-for="24h" aria-pressed="true">Last 24 hours</button>
+<button type="button" data-for="7d" aria-pressed="false">Last 7 days</button></div>
+{"".join(stats)}
+</section>
+<footer>
+<p>Written by agents’ <code>scripts/devel/status-page</code> from what the tools already keep: heavy’s
+<code>heavy.tsv</code> and ledger, the landings feed, the landing turns, <code>codex-run</code>’s runs, post’s
+mailboxes, Claude’s sessions and the missions’ front matter in the records repository
+(docs/design/status-page.md). Times are UTC; p90 is the
+nearest rank.</p>
+{('<p>Not read this time:</p><ul>' + "".join(f"<li>{E(short(p, 300))}</li>" for p in problems) + '</ul>') if problems else ''}
+</footer>
+</main>
+<script>{SCRIPT}</script>
+</body>
+</html>
+'''
+
+
+def write(path, content, mode):
+    """Replace path whole: a reader sees the old file or the new one."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    out = tempfile.NamedTemporaryFile('w', encoding='utf-8', dir=path.parent, prefix='.' + path.name + '.',
+                                      delete=False)
+    try:
+        with out:
+            out.write(content)
+            out.flush()
+            os.fsync(out.fileno())
+        os.chmod(out.name, mode)
+        os.replace(out.name, path)
+    except BaseException:
+        Path(out.name).unlink(missing_ok=True)
+        raise
+
+
+def install(out):
+    script = Path(__file__).resolve()
+    out = Path(out).expanduser().absolute()
+    for path in (script, out):
+        if re.search(r'[\s"\'\\$%]', str(path)):
+            raise ValueError(f'{path}: a path for a unit must have no spaces, quotes, $, % or backslashes')
+    units = Path(os.environ.get('XDG_CONFIG_HOME', Path.home() / '.config')) / 'systemd/user'
+    units.mkdir(parents=True, exist_ok=True)
+    # A login shell, so the run sees the PATH and settings every shell sees (infra.md 2).
+    (units / 'status-page.service').write_text(f'''[Unit]
+Description=Write the fleet's status page (agents docs/design/status-page.md)
+
+[Service]
+Type=oneshot
+TimeoutStartSec=8min
+ExecStart=/bin/bash -lc 'exec "$$0" --out "$$1"' {script} {out}
+''')
+    (units / 'status-page.timer').write_text('''[Unit]
+Description=Write the fleet's status page every 10 minutes
+
+[Timer]
+OnCalendar=*:0/10
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+''')
+    for command in (['daemon-reload'], ['enable', '--now', 'status-page.timer']):
+        subprocess.run(['systemctl', '--user', *command], check=True, stdin=subprocess.DEVNULL)
+    print(f'status-page: installed {units}/status-page.timer, writing {out} every 10 minutes')
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument('--out', default='-', help='the page; - for stdout')
+    parser.add_argument('--json', help='also write the gathered data here')
+    parser.add_argument('--no-pull', action='store_true', help='read the records checkout as it is')
+    commands = parser.add_subparsers(dest='command')
+    commands.add_parser('collect', help="print this machine's part as JSON")
+    installer = commands.add_parser('install', help='write and start the user timer')
+    installer.add_argument('--out', dest='install_out', required=True)
+    args = parser.parse_args(sys.argv[1:])
+    if args.command == 'collect':
+        json.dump(collect(), sys.stdout)
+        return 0
+    try:
+        if args.command == 'install':
+            install(args.install_out)
+            return 0
+        # Read once, so that a fast-forward during the run sends every
+        # machine the collector that renders.
+        source = Path(__file__).read_bytes()
+        root = workspace()
+        machines_file = Path(os.environ.get('STATUS_MACHINES', tmp_dir() / 'post/machines'))
+        records_root = Path(os.environ.get('RECORDS', root / 'records')).expanduser().absolute()
+        data = gather_all(machines_file, records_root, not args.no_pull, source)
+        page = render(data)
+        if args.out == '-':
+            sys.stdout.write(page)
+        else:
+            # The web server reads it as another user.
+            write(args.out, page, 0o644)
+        if args.json:
+            # The data holds the missions' fields the page leaves out.
+            write(args.json, json.dumps(data), 0o600)
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        print(f'status-page: {error}', file=sys.stderr)
+        return 2
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

@@ -10,3 +10,4 @@ owners take them there. Owners keep the rows their work changes
 | `post.md` | yes: `post` and `codex-run` built 2026-10-24 with their fixtures (7.1); live 10-24 on hel8 and hetzner–hetzner5, a full mesh (7.2); the roles' edits landed 10-25 (7.3) | the measures (8) |
 | `cleanup.md` | partly: the rules of section 2 in the roles, 10-25; 10-25's sweep of the scripts, the ended missions' directories and the landed branches (6) | `tidy`, `land`'s mark and the calls (4, 5); the roles' edits for them and `tidy`'s first run (7) |
 | `records.md` | yes: `record` (2, 5) and `setup`'s clone; the backfill and the cleanup (9); the roles' edits and live on hel8 and hetzner–hetzner5, 10-25 (8) | `record runs` over the backfilled missions (9) |
+| `status-page.md` | yes: `status-page` and its fixture, 2026-10-25; live on hel8 at https://status.fabrig.ai | the open questions (6) |

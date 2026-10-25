@@ -1,0 +1,327 @@
+#!/usr/bin/env python3
+"""Offline status-page fixtures: every case has its own temporary directory,
+and fake ssh, claude, systemctl and record stand in for the machine's."""
+from datetime import datetime, timezone
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+
+SCRIPT = Path(__file__).resolve().with_name('status-page')
+PYTHON = sys.executable
+NOW = datetime(2026, 10, 25, 12, 0, tzinfo=timezone.utc).timestamp()
+
+
+def iso(hours_ago):
+    return datetime.fromtimestamp(NOW - hours_ago * 3600, timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+def write(path, text, mode=None, mtime=None):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    if mode:
+        path.chmod(mode)
+    if mtime:
+        os.utime(path, (mtime, mtime))
+    return path
+
+
+def tool(bin_dir, name, body):
+    write(bin_dir / name, f'#!{PYTHON}\nimport json, os, subprocess, sys\nfrom pathlib import Path\n' + body,
+          mode=0o700)
+
+
+def machine(tmp, mission='alpha-m'):
+    """A machine's tmp: heavy's rows and ledger, codex-run, an owner, mail, turns."""
+    wt = tmp / 'owners' / mission / 'm1/wt'
+    rows = [
+        ['1', 'build', iso(1), '30', '120', '0', '10.0', wt, 'L1', 'cargo nextest run -p foo --lib', 'wt'],
+        ['2', 'build', iso(2), '10', '60', '101', '10.0', wt, 'L2', 'cargo clippy --workspace -- "-D" warnings', 'wt'],
+        ['3', 'build', iso(3), '5', '90', '0', '10.0', wt, 'L3', 'bash -c cargo fmt && cargo clippy', 'land skein prebuild'],
+        ['4', 'gate', iso(3), '20', '200', '0', '10.0', wt, 'L4', 'bash -c scripts/check.sh', 'land skein'],
+        ['5', 'build', iso(200), '1', '1', '0', '10.0', wt, 'L5', 'cargo check', 'old'],
+        ['6', 'build', 'not a time', '1', '1', '0', '10.0', wt, 'L6', 'cargo check', 'bad'],
+        ['7', 'build', iso(4), '1', '1', '0', '10.0', tmp / 'owners/old-m/wt', 'L7', 'cargo check', 'old-m'],
+    ]
+    write(tmp / 'logs/heavy.tsv', ''.join('\t'.join(map(str, r)) + '\n' for r in rows) + 'short\trow\n')
+    tasks = {
+        'a': {'state': 'active', 'lane': 'build', 'label': 'wt', 'args': ['cargo', 'nextest', 'run', '--workspace'],
+              'submitted': NOW - 600, 'payload_started': NOW - 300, 'repo': str(wt)},
+        'b': {'state': 'queued', 'lane': 'gate', 'label': 'land temper', 'args': ['bash', '-c', 'scripts/check.sh'],
+              'submitted': NOW - 60, 'repo': str(wt)},
+        'c': {'state': 'released', 'lane': 'build', 'label': 'x', 'args': ['cargo', 'check'], 'repo': str(wt)},
+    }
+    write(tmp / 'heavy/state.json', json.dumps({'version': 1, 'gate': None, 'tasks': tasks}))
+    runs = tmp / 'codex-run'
+    task = tmp / 'owners' / mission / 'm1/tasks/t.md'
+    write(runs / '20261025T110000Z-aaaa/meta', f'caller=o/{mission}\nto=o/{mission}\nmodel=gpt-x\neffort=high\n'
+                                               f'task={task}\nstarted={iso(1)}\n')
+    write(runs / '20261025T090000Z-bbbb/meta', f'to=o/{mission}\ntask={task}\nstarted={iso(3)}\n')
+    write(runs / '20261025T090000Z-bbbb/ended', '')
+    # Dead without an end, and too old to show.
+    write(runs / '20261001T090000Z-cccc/meta', f'to=o/{mission}\ntask={task}\nstarted=2026-10-01T09:00:00Z\n')
+    write(runs / 'runs.tsv', '\t'.join([
+        '20261025T090000Z-bbbb', f'o/{mission}', iso(3), iso(2.5), '0', '1', 'gpt-x', 'high', str(task),
+        str(tmp / 'r.md'), 'thread', '1000/500/20', '0']) + '\n')
+    write(tmp / 'owners' / mission / 'codex/name', f'o/{mission}\n')
+    write(tmp / 'owners' / mission / 'codex/turns.tsv', f'{iso(2)}\t{iso(1.5)}\t0\t1\n')
+    write(tmp / f'post/o+{mission}/new/1', 'Id: 1\n', mtime=NOW - 3600)
+    (tmp / 'post/director/new').mkdir(parents=True)
+    turns = [dict(event='request', token='t1', repository='temper', timestamp=NOW - 7200, wait_s=0),
+             dict(event='grant', token='t1', repository='temper', timestamp=NOW - 7000, wait_s=200),
+             dict(event='release', token='t1', repository='temper', timestamp=NOW - 6500, wait_s=200, runtime_s=500),
+             dict(event='request', token='t2', repository='jig', timestamp=NOW - 120),
+             dict(event='request', token='t3', repository='hearth', timestamp=NOW - 900),
+             dict(event='fail-open', token='t3', repository='hearth', timestamp=NOW - 890, wait_s=10),
+             dict(event='request', token='t4', repository='smith', timestamp=NOW - 800),
+             dict(event='grant', token='t4', repository='smith', timestamp=NOW - 790, wait_s=10),
+             dict(event='fail-open', token='t4', repository='smith', timestamp=NOW - 740, wait_s=10, runtime_s=50)]
+    write(tmp / 'landing-turn/events.jsonl', ''.join(json.dumps(t) + '\n' for t in turns) + '{"torn')
+    return tmp
+
+
+def feed(path):
+    result = {'schema': 'land-result-v1', 'repo': 'skein', 'machine': 'beta-host',
+              'prebuild': {'wait_s': 3, 'run_s': 61, 'exit': 0},
+              'gate': {'kind': 'ran', 'wait_s': 5, 'run_s': 100, 'exit': 0,
+                       'steps': {'fmt': 4.0, 'clippy': 25.0}, 'failed_step': None}}
+    events = [dict(time=iso(5.5), set='done-m/m1', host='beta-host', token='r0', event='waiting'),
+              dict(time=iso(5.4), set='done-m/m1', host='beta-host', token='r0', event='started'),
+              dict(time=iso(8.5), set='stale-m/m1', host='beta-host', token='r3', event='waiting'),
+              dict(time=iso(8), set='stale-m/m1', host='beta-host', token='r3', event='started'),
+              dict(time=iso(5), set='done-m/m1', host='beta-host', token='r1', event='waiting'),
+              dict(time=iso(4.9), set='done-m/m1', host='beta-host', token='r1', event='started'),
+              dict(time=iso(4.5), set='done-m/m1', host='beta-host', token='r1', event='gated', repo='skein',
+                   result=result),
+              dict(time=iso(4.4), set='done-m/m1', host='beta-host', token='r1', event='landed', repo='skein'),
+              dict(time=iso(4.4), set='done-m/m1', host='beta-host', token='r1', event='done'),
+              dict(time=iso(0.2), set='alpha-m/m1', host='alpha-host', token='r2', event='waiting'),
+              dict(time=iso(0.1), set='alpha-m/m1', host='alpha-host', token='r2', event='started'),
+              dict(time=iso(0.05), set='alpha-m/m1', host='alpha-host', token='r2', event='gated', repo='skein'),
+              dict(set='no-time', host='h', token='t')]
+    write(path, ''.join(json.dumps(e) + '\n' for e in events))
+
+
+class Lab:
+    def __init__(self, root):
+        self.root = root
+        self.bin = root / 'bin'
+        self.trace = root / 'trace'
+        self.trace.mkdir()
+        self.alpha = machine(root / 'alpha/tmp')
+        self.beta = machine(root / 'beta/tmp', mission='beta-m')
+        self.records = root / 'records'
+        for name, state in (('alpha-m', 'active'), ('paused-m', 'paused'), ('old-m', 'ended')):
+            write(self.records / f'missions/{name}/README.md',
+                  f'---\nstate: {state}\nowner: o/{name}@alpha\nmachine: alpha\n---\n\nThe brief.\n')
+        write(self.records / 'STATUS.md', '# Status\n\nSECRET-STATUS-LINE\n')
+        self.machines = write(root / 'machines',
+                              'alpha local\nbeta free@beta\n# a comment\ngamma free@gamma  # out of reach\n')
+        feed(root / 'feed.jsonl')
+        tool(self.bin, 'claude', '''
+print(json.dumps([{"name": "o/alpha-m", "kind": "background", "state": "working", "status": "busy", "pid": 1,
+                   "startedAt": 1},
+                  {"name": "PRIVATE-PROMPT-TITLE", "kind": "interactive", "status": "idle", "pid": 2},
+                  {"name": "PRIVATE-OLDER-TITLE", "kind": "claude", "status": "idle", "pid": 3},
+                  {"name": "o/gone", "kind": "background", "state": "done"}]))
+''')
+        tool(self.bin, 'systemctl', '''
+with open(os.environ['FIXTURE_TRACE'] + '/systemctl', 'a') as out:
+    out.write(json.dumps(sys.argv[1:]) + '\\n')
+if 'list-units' in sys.argv:
+    print('codex-run-20261025T110000Z-aaaa.service loaded active running x')
+    print('codex-owner-o-alpha\\\\x2dm.service loaded active running y')
+''')
+        tool(self.bin, 'record', '''
+Path(os.environ['FIXTURE_TRACE'], 'record').write_text(' '.join(sys.argv[1:]))
+sys.exit(int(os.environ.get('FIXTURE_RECORD_EXIT', '0')))
+''')
+        # ssh runs the collector it is sent on beta's tree, and weird answers
+        # nonsense; gamma is out of reach.
+        tool(self.bin, 'ssh', '''
+target, command = sys.argv[-2], sys.argv[-1]
+Path(os.environ['FIXTURE_TRACE'], 'ssh-' + target).write_text(json.dumps(sys.argv[1:]))
+assert command == "bash -lc 'exec python3 -I - collect'", command
+if target == 'free@weird':
+    print(json.dumps({'host': ['weird'], 'errors': 'no', 'rows': [['x'], 'y'], 'turns': [],
+                      'heavy': {'tasks': [{'state': 'queued'}]}}))
+    sys.exit(0)
+if target != 'free@beta':
+    print('ssh: connect to host gamma port 22: Connection refused', file=sys.stderr)
+    sys.exit(255)
+env = dict(os.environ, DEV_TMP=os.environ['FIXTURE_BETA'])
+sys.exit(subprocess.run([sys.executable, '-I', '-', 'collect'], env=env, input=sys.stdin.buffer.read()).returncode)
+''')
+        self.env = dict(os.environ, HOME=str(root / 'home'), PATH=f'{self.bin}:{os.environ["PATH"]}',
+                        DEV_TMP=str(self.alpha), RECORDS=str(self.records), STATUS_MACHINES=str(self.machines),
+                        STATUS_FEED=str(root / 'no-feed'), STATUS_NOW=str(NOW), FIXTURE_TRACE=str(self.trace),
+                        FIXTURE_BETA=str(self.beta), XDG_CONFIG_HOME=str(root / 'config'))
+
+    def run(self, *args, status=0, **env):
+        result = subprocess.run([PYTHON, '-I', str(SCRIPT), *args], cwd=self.root, env=dict(self.env, **env),
+                                stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
+        assert result.returncode == status, (result.returncode, result.stdout, result.stderr)
+        return result
+
+
+def collect(lab):
+    data = json.loads(lab.run('collect', STATUS_FEED=str(lab.root / 'feed.jsonl')).stdout)
+    assert data['errors'] == [], data['errors']
+    kinds = [(r[6], r[7], r[5], r[4]) for r in data['rows']]
+    assert kinds == [('focused', '', 'alpha-m', '0'), ('clippy', '', 'alpha-m', '101'),
+                     ('prebuild', 'skein', 'alpha-m', '0'), ('land', 'skein', 'alpha-m', '0'),
+                     ('check', '', 'old-m', '0')], kinds
+    tasks = sorted((t['state'], t['kind'], t['repo'], t['mission']) for t in data['heavy']['tasks'])
+    assert tasks == [('active', 'workspace', '', 'alpha-m'), ('queued', 'land', 'temper', 'alpha-m')], tasks
+    codex = data['codex']
+    assert [(r['id'], r['alive'], r['mission']) for r in codex['running']] == [
+        ('20261025T110000Z-aaaa', True, 'alpha-m')], codex['running']
+    assert [r[2:] for r in codex['ended']] == [['0', 'gpt-x', 'high', [1000, 500, 20], 'alpha-m']], codex['ended']
+    assert [(o['name'], o['alive']) for o in codex['owners']] == [('o/alpha-m', True)], codex['owners']
+    assert [(m['name'], m['new']) for m in data['mail']] == [('o/alpha-m', 1)], data['mail']
+    assert [t[1:] for t in data['turns']['done']] == [['temper', 200, 500], ['smith', 10, 50]], data['turns']
+    assert [(t['repo'], t['event']) for t in data['turns']['open']] == [('jig', 'request')], data['turns']
+    # An interactive session is someone's own: its name stays here.
+    assert [(s['name'], s['kind']) for s in data['sessions']] == [
+        ('o/alpha-m', 'background'), ('', 'interactive'), ('', 'claude')], data['sessions']
+    assert len(data['feed']) == 13, data['feed']
+    # Elsewhere than the coordinator there is no feed, and that is no error.
+    assert json.loads(lab.run('collect').stdout)['feed'] is None
+
+
+def collect_missing(lab):
+    """A machine with none of the tools' files still answers, naming what it could not read."""
+    data = json.loads(lab.run('collect', DEV_TMP=str(lab.root / 'empty')).stdout)
+    failed = sorted(e.split(':')[0] for e in data['errors'])
+    assert failed == ['heavy', 'machine', 'mail', 'rows'], data['errors']
+    assert data['codex'] == {'running': [], 'ended': [], 'owners': []}, data['codex']
+
+
+def page(lab):
+    out, snapshot = lab.root / 'www/index.html', lab.root / 'data.json'
+    lab.run('--out', str(out), '--json', str(snapshot), STATUS_FEED=str(lab.root / 'feed.jsonl'))
+    text = out.read_text()
+    assert out.stat().st_mode & 0o777 == 0o644, oct(out.stat().st_mode)
+    assert snapshot.stat().st_mode & 0o777 == 0o600, oct(snapshot.stat().st_mode)
+    assert (lab.trace / 'record').read_text() == 'pull'
+    # Of the records, only the missions' front matter is public.
+    for secret in ('SECRET-STATUS-LINE', 'The brief.', 'PRIVATE-PROMPT-TITLE', 'PRIVATE-OLDER-TITLE', 'port 22'):
+        assert secret not in text, secret
+    assert '<meta name="robots" content="noindex">' in text
+    assert '2 of 3 machines reached' in text and 'down: gamma' in text, text[text.find('<header>'):][:500]
+    # Why, but not ssh's words, which name the target.
+    assert 'gamma: OSError: connection refused' in text
+    # In flight: each set's latest run, if heard from in 6 hours.
+    now = text[text.index('<h3>Landing now</h3>'):text.index('<h3>Recent set runs</h3>')]
+    assert 'alpha-m/m1' in now and 'done-m/m1' not in now and 'stale-m/m1' not in now, now
+    assert '<div class="label">Sets landing now</div><div class="value">1</div>' in text
+    for needle in ('alpha-m/m1', 'done-m/m1', 'beta-m', 'paused-m', 'land temper', 'landing turn jig',
+                   'o/alpha-m · last turn', '1 unread', 'Codex run', 'session busy'):
+        assert needle in text, needle
+    # Ended in the record, with commands only: history, not in flight.
+    assert '<strong>old-m</strong>' not in text
+    # The feed's hosts go by their fleet names where a machine names itself so.
+    data = json.loads(snapshot.read_text())
+    assert set(data['fleet']) == {'alpha', 'beta', 'gamma'} and 'unreachable' in data['fleet']['gamma']
+    sent = json.loads((lab.trace / 'ssh-free@beta').read_text())
+    assert {'BatchMode=yes', 'StrictHostKeyChecking=yes'} <= set(sent) and sent[-2] == 'free@beta', sent
+    assert 'fmt 0:04 · clippy 0:25' in text, 'step medians'
+
+
+def page_degraded(lab):
+    """A failing pull and an unreadable records tree still write the page."""
+    out = lab.root / 'page.html'
+    lab.run('--out', str(out), FIXTURE_RECORD_EXIT='1', RECORDS=str(lab.root / 'nowhere'))
+    text = out.read_text()
+    for needle in ('record pull exited 1', 'nowhere/missions: no such directory',
+                   'landings feed: no reachable machine holds it'):
+        assert needle in text, needle
+    (lab.trace / 'record').unlink()
+    lab.run('--no-pull', '--out', str(out))
+    assert not (lab.trace / 'record').exists(), '--no-pull must not pull'
+    write(lab.root / 'bad-machines', 'alpha local extra\n')
+    result = lab.run('--no-pull', STATUS_MACHINES=str(lab.root / 'bad-machines'), status=2)
+    assert 'invalid machines file line' in result.stderr, result.stderr
+
+
+def install(lab):
+    out = lab.root / 'www/index.html'
+    lab.run('install', '--out', str(out))
+    units = lab.root / 'config/systemd/user'
+    service = (units / 'status-page.service').read_text()
+    assert f'ExecStart=/bin/bash -lc \'exec "$$0" --out "$$1"\' {SCRIPT} {out}\n' in service, service
+    assert 'OnCalendar=*:0/10' in (units / 'status-page.timer').read_text()
+    calls = [json.loads(line) for line in (lab.trace / 'systemctl').read_text().splitlines()]
+    assert calls[-2:] == [['--user', 'daemon-reload'], ['--user', 'enable', '--now', 'status-page.timer']], calls
+    result = lab.run('install', '--out', str(lab.root / 'a b/index.html'), status=2)
+    assert 'no spaces' in result.stderr, result.stderr
+
+
+def bad_data(lab):
+    """Fields of the wrong type are dropped where they are read, markup is
+    escaped, and a section whose data is nonsense alone goes missing."""
+    events = [dict(time=iso(1), set='s/m1', host='h', token='b1', event='waiting'),
+              dict(time=iso(0.9), set='s/m1', host='h', token='b1', event='landed', repo=None),
+              dict(time=iso(0.8), set='s/m1', host='h', token='b1', event='gated', repo='skein',
+                   result={'repo': 'skein', 'gate': 'ran', 'prebuild': {'exit': 'x'}}),
+              dict(time=iso(0.7), set='s/m1', host='h', token='b2', event='gated', repo='skein',
+                   result={'repo': 'skein', 'gate': {'kind': 'ran', 'run_s': '9', 'steps': {'fmt': None}}}),
+              dict(time=iso(0.6), set='s/m1', host='h', token='b1', event='stopped', reason=None),
+              dict(time=iso(0.5), set='<b>s</b>', host='h', token='b3', event='started'),
+              ['not', 'a', 'record']]
+    write(lab.root / 'bad-feed.jsonl', ''.join(json.dumps(e) + '\n' for e in events) + 'not json\n')
+    turns = lab.alpha / 'landing-turn/events.jsonl'
+    write(turns, turns.read_text() + '\n' + json.dumps(dict(
+        event='release', token='t9', repository=None, timestamp=NOW - 60, wait_s='1', runtime_s=None)) + '\n')
+    state = json.loads((lab.alpha / 'heavy/state.json').read_text())
+    state['tasks']['d'] = {'state': 'queued', 'lane': None, 'label': '<script>alert(1)</script>',
+                           'args': 'cargo check', 'submitted': '5', 'repo': 7}
+    write(lab.alpha / 'heavy/state.json', json.dumps(state))
+    write(lab.records / 'missions/<i>evil<\\i>/README.md', '---\nstate: active\nowner: <b>o</b>\n---\n')
+    out = lab.root / 'page.html'
+    lab.run('--no-pull', '--out', str(out), STATUS_FEED=str(lab.root / 'bad-feed.jsonl'))
+    text = out.read_text()
+    assert 'not shown' not in text, text[text.find('<footer>'):]
+    for raw in ('<script>alert', '<i>evil', '<b>s</b>', '<b>o</b>'):
+        assert raw not in text, raw
+    for escaped in ('&lt;script&gt;alert(1)&lt;/script&gt;', '&lt;i&gt;evil', '&lt;b&gt;s&lt;/b&gt;'):
+        assert escaped in text, escaped
+    # weird's heavy task lacks its fields: the sections that read it say so,
+    # and the rest stand.
+    write(lab.root / 'weird-machines', 'alpha local\nweird free@weird\n')
+    lab.run('--no-pull', '--out', str(out), STATUS_MACHINES=str(lab.root / 'weird-machines'))
+    text = out.read_text()
+    for needle in ('missions: not shown: KeyError', 'card of weird: not shown', 'Not shown this time',
+                   'land gate', '<h3>alpha '):
+        assert needle in text, (needle, text[text.find('<footer>'):])
+
+
+def write_failure(lab):
+    """A page that cannot be written leaves no temporary file beside it."""
+    www = lab.root / 'www'
+    (www / 'index.html').mkdir(parents=True)
+    result = lab.run('--no-pull', '--out', str(www / 'index.html'), status=2)
+    assert 'status-page:' in result.stderr, result.stderr
+    assert [p.name for p in www.iterdir()] == ['index.html'], list(www.iterdir())
+
+
+CASES = [collect, collect_missing, page, page_degraded, bad_data, write_failure, install]
+
+
+def main():
+    failed = 0
+    for case in CASES:
+        with tempfile.TemporaryDirectory() as directory:
+            try:
+                case(Lab(Path(directory)))
+                print(f'ok    {case.__name__}')
+            except Exception as error:
+                failed += 1
+                print(f'FAIL  {case.__name__}: {type(error).__name__}: {error}')
+    return 1 if failed else 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
