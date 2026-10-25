@@ -581,8 +581,8 @@ hearth, jig, temper:
 2. Then, upstream first, the ordinary `land` runs in each repository with a
    candidate, with no arguments. Its rebase is a no-op, its gate's result is
    cached for the tree, and it amends nothing, so it pushes the candidate
-   itself, follows the local `main` and starts the after-landing tier as any
-   `land` does.
+   itself and follows the local `main`. It starts no tier after landing,
+   as no `land` does (owners.md 4.5).
 3. If `land` landed a commit other than the candidate, because a `main`
    moved between steps 1 and 2, every later repository of the set runs phase
    1 again, against what has landed, before its own push. A failure there,
@@ -618,8 +618,8 @@ that commit for downstream pins without landing it again.
 
 **`land --no-push`.** `land` takes `--no-push`: everything up to and
 including the trailers, then land's summary with `not pushed` in place of
-where it landed, and exit 0. It pushes nothing, moves no local `main` and
-starts no after-landing tier; `--docs` or `--local` with it exits 2. And
+where it landed, and exit 0. It pushes nothing and moves no local `main`;
+`--docs` or `--local` with it exits 2. And
 `land` amends the tip only when the trailers it would write differ from the
 tip's, so that landing again, on an unchanged `main`, a commit it gated
 pushes that very commit.

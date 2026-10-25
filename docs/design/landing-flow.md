@@ -31,8 +31,11 @@ and milestones are [owners.md](../../roles/owners.md).
 - **One landing per milestone.** At a milestone's end the set is
   rebased on the current mains, and the owner asks the queue to land
   it. The queue's gates are the set's only gates: optimistic (the user,
-  10-25), a failure there comes back to the set as a repair. Tasks
-  inside a milestone merge into the set's branches, not into `main`.
+  10-25), a failure there comes back to the set as a repair. They run
+  the lints and the focused and fuzzy suites, and nothing slower: the
+  browser tier and the other slow tiers are after landing's, which
+  nothing runs until the user designs how (section 4). Tasks inside a
+  milestone merge into the set's branches, not into `main`.
 - **The next milestone doesn't wait for the landing** (the user,
   10-24). It starts as soon as the set is in the queue, on top of it.
   - If the landing fails, the set is repaired beside the new
@@ -225,6 +228,10 @@ The queue is the only writer to every repository's `main`. Its tool,
      (take `main`'s lock, repin to the tuple), or a generated file that
      has a generator. Any other conflict sends the set back, for the
      owner's implementer to resolve (section 3).
+   - A gate is its repository's `scripts/check.sh`: the formatting, the
+     lints, the wasm32 ones included, and the focused and fuzzy suites
+     (the user, 10-25). The browser tier, with the bundle it serves, is
+     `scripts/browser.sh`, and no gate runs it (step 8).
    - Gates run through `heavy --gate` on a free build machine, upstream
      first. A failing skein gate stops the set before four more run, and
      each downstream gate restores its upstream's builds from the store.
@@ -250,10 +257,13 @@ The queue is the only writer to every repository's `main`. Its tool,
      wakes the keeper if it lasts (keeper.md 4.4).
 7. **Docs sets.** Markdown-only changes go through the queue too, with
    no gate, so the queue stays `main`'s only writer.
-8. **After landing.** The slow tiers that run after a landing still do.
-   A failure goes to the set's owner with the keeper's note (keeper.md
-   4.3). Paused since 10-24, on the user's word, while they design how
-   it should work (owners.md 4.5).
+8. **After landing.** The tiers too slow for a gate go in each
+   repository's `scripts/after-landing.sh`: the browser tier
+   (`scripts/browser.sh`), the process and QA tiers, the exhaustive
+   profile. Nothing runs it, on the user's word, while they design how
+   it should (owners.md 4.5): `land` and `land-set` start no tier after
+   landing. Once something does, a failure goes to the set's owner with
+   the keeper's note (keeper.md 4.3).
 
 The queue replaces today's advisory landing turn
 (build-infrastructure.md 8). Speculative runs come later, when the
@@ -418,6 +428,10 @@ mission, then flood it with four milestones at once.
   4. tests selected by the crates a set changed (nextest's `rdeps()`).
 
   Measure before adding any of them (section 9).
+- **What no gate runs.** A break that only a slow tier shows, the
+  browser tier's among them, reaches `main`, and later sets build on
+  it. Until after landing has its design (section 4, step 8), only a
+  QA pass or a task that names the tier finds it.
 - **Flakes are everyone's problem.** One flaky temper test sends a
   skein set back. Hence the single rerun, and the finding it files.
 - **Wide sets.** A milestone that reaches all five repositories runs
@@ -594,8 +608,9 @@ tool that sees it; the reports only read.
   `SECONDS` has three decimals. The names are the same in every
   repository: `fmt`, `clippy`, `wasm` (lints and checks on the browser
   target), `build` (the test binaries, `cargo nextest run --workspace
-  --no-run`), `focused`, `fuzzy`, `bundle` (what the browser tier
-  serves), `browser`. A name may come twice, and its times add. What
+  --no-run`), `focused`, `fuzzy`; and, in results from before the
+  browser tier left the gates, `bundle` (what that tier serves) and
+  `browser`. A name may come twice, and its times add. What
   no step covers is `other`: the gate's time less its steps'.
 - **`land`'s result.** Once `land` has rebased, it ends by printing one
   line, `land: result JSON`, and writes the same object to the file

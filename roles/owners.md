@@ -421,7 +421,9 @@ upstream change. Beyond that, the task file is whole, and holds:
 - done when: the focused tests that pass, with their packages and
   binaries, and for a repair the failing check's (implementer.md 2);
   what else it proves (the commit's trailers, the figures it compares).
-  The gates run every other check at landing (4.4).
+  The gates run the lints and the focused and fuzzy suites at landing
+  (4.4); the slow tiers, the browser's among them, are after landing's
+  (4.5).
 
 ### 4.4 Landing
 
@@ -484,24 +486,21 @@ departs from this section or 4.5, it wins.
   runs' landings: keep a new test well inside its budget (half of it
   is a good mark), and make a slow one cheaper rather than raise the
   budget.
-- **After landing.** A tier too slow for a repository's gate runs
-  after each of its code landings instead: when the landed tree has
-  `scripts/after-landing.sh`, `land` starts `after-landing` in the
-  background, which runs it on the landed commit through `heavy
-  --gate`, in a worktree kept for the repository under
-  `tmp/after-landing/`. A failure adds one line to
-  `tmp/director/inbox/after-landing.md`, naming the repository, the
-  commit, its branch and subject, and the log; the director sends it to
-  the owner whose landing broke the tier.
-  **Paused since 10-24 16:40Z,** on the user's word, while they design
-  how it should work. On every machine the user unit
-  `after-landing-paused` (the director's
-  `tmp/director/after-landing-pause.sh`) holds each repository's lock in
-  `tmp/after-landing/`, so that no run starts, and ends each
-  `after-landing` that `land` starts, logging the commit it skips to
-  `tmp/after-landing/paused.log`. `land` still says it queued one;
-  nothing runs. Until the pause lifts, no tier outside the gate runs on
-  `main` by itself. The director lifts it on the user's word.
+- **After landing.** A tier too slow for a repository's gate goes in
+  its `scripts/after-landing.sh`: the browser tier, the process and QA
+  tiers, the exhaustive profile (landing-flow.md 4, step 8).
+  **Nothing runs it,** on the user's word, while they design how it
+  should run: not `land` or `land-set`, which start no tier after
+  landing since 10-25, and no one by hand. `scripts/devel/after-landing`
+  stays, unused: given a commit, it runs the script through `heavy
+  --gate` in a worktree under `tmp/after-landing/`, and a failure adds
+  a line to `tmp/director/inbox/after-landing.md`. Since 10-24 16:40Z,
+  the director's transient user unit `after-landing-paused`
+  (`tmp/director/after-landing-pause.sh`) also holds each repository's
+  lock in `tmp/after-landing/` on every machine, and ends any run that
+  starts; a reboot ends the unit, not the rule. So no tier outside the
+  gate runs on `main` by itself. A task that needs one names it, such
+  as `scripts/browser.sh` (implementer.md 2).
 - **The disk floor.** Below the machine's floor, 40 GB unless
   `tmp/machine.env` says otherwise, no new implementer starts, and
   finished targets are cleared. A target grows to about 21 GB. `heavy`

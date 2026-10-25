@@ -45,9 +45,10 @@ reason. The wide checks are the landing's gates (section 2).
 
 ## 2. When a set of changes is done
 
-Optimistic (the user, 2026-10-25): the landing's gates run every wide
-check, and what fails there comes back as a repair. So, once, when the
-set's narrow tests pass:
+Optimistic (the user, 2026-10-25): the landing's gates run the wide
+checks (the lints and the focused and fuzzy suites), and what fails
+there comes back as a repair. The slow tiers are after landing's
+(owners.md 4.5). So, once, when the set's narrow tests pass:
 
 1. **Format:** `cargo fmt`, directly, not through `heavy`: it builds
    nothing.
@@ -58,14 +59,16 @@ set's narrow tests pass:
 
 Nothing else: not the fuzzy, browser or `qa` profiles, the process or
 live tiers, clippy, the wasm lints or the doc examples, and never
-`scripts/check.sh`, `land` or `land-set`. They are the gates' and the
-owner's (owners.md 4.4), and a repair's (below), unless the task names
-one.
+`scripts/check.sh`, `scripts/after-landing.sh`, `land` or `land-set`.
+They are the gates', the slow tiers' and the owner's (owners.md 4.4
+and 4.5), and a repair's (below), unless the task names one.
 
 **A repair** of what a gate found runs the failing tests alone, in
 their profile (`--profile fuzzy -E 'test(=NAME)'`), or the lint that
 failed, and the narrowest tests its fix touches: the gate's next run
-is the wide check. After a finding, it fixes it, runs the narrowest
+is the wide check. A browser test runs alone through
+`scripts/browser.sh -E 'test(=NAME)'`, which builds the bundle it
+needs first. After a finding, it fixes it, runs the narrowest
 test the fix touches, and reruns only the step the finding came from.
 
 ## 3. The queue

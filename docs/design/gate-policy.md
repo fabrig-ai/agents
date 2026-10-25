@@ -22,10 +22,12 @@ Provisional, 2026-10-22. The runtime contract for reusable gate evidence.
   accepting the result. Its cache record and `Gate-Policy` trailer carry
   the identity. Evidence without a policy is invalid. Documentation-only
   differences under `docs/` preserve evidence only under the same policy.
-- **The gate stays full.** `heavy` validates before entering the
-  payload; `scripts/check.sh` runs all of its checks and the focused,
-  fuzzy and browser suites. Deliberate wrapper overrides for direct-rustc
-  work and benchmarks remain possible.
+- **The gate stays whole.** `heavy` validates before entering the
+  payload; `scripts/check.sh` runs all of its checks and the focused and
+  fuzzy suites. The browser suite is a slow tier, outside the gate
+  (landing-flow.md 4, step 8); the policy still names Chromium, which
+  that tier uses. Deliberate wrapper overrides for direct-rustc work and
+  benchmarks remain possible.
 
 ## 2. Identity
 

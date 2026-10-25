@@ -249,8 +249,8 @@ machine's `tmp/post/` (section 5).
   re-reads the director's whole context: a trigger is only for what
   the director must act on.
 - **After-landing failures** arrive in `inbox/after-landing.md`
-  (owners.md, 4.5); while after-landing is paused (since 10-24, on the
-  user's word), none do.
+  (owners.md, 4.5); while nothing runs after-landing, on the user's
+  word, none do.
 - **Relays:** an owner waiting on another's set runs `landings wait`
   (landing-flow.md 9.1); the director reads `landings`, and relays a
   landing only to an owner that can't reach the feed.

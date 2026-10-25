@@ -291,8 +291,10 @@ sys.exit(result.returncode)
         self.assertEqual(self.git("--git-dir=" + str(origin), "rev-parse", "main").strip(), self.base)
         candidate = self.git("rev-parse", "HEAD").strip()
         # Force a different committer time: a redundant amend must change SHA.
-        self.run_command([str(self.kit / "land"), "--gate", "true"],
-                         extra={"GIT_COMMITTER_DATE": "2030-01-01T00:00:00Z"})
+        pushed = self.run_command([str(self.kit / "land"), "--gate", "true"],
+                                  extra={"GIT_COMMITTER_DATE": "2030-01-01T00:00:00Z"})
+        # Nor does a landing that pushes, until the tier's design (the user, 2026-10-25).
+        self.assertNotIn("after-landing", pushed.stderr)
         self.assertEqual(self.git("rev-parse", "HEAD").strip(), candidate)
         self.assertEqual(self.git("rev-parse", "main").strip(), candidate)
         self.assertEqual(self.git("--git-dir=" + str(origin), "rev-parse", "main").strip(), candidate)

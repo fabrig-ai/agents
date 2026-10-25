@@ -585,6 +585,8 @@ def failure(lab):
 
 
 def after_landing(lab):
+    # land starts no tier after landing, not even a tree's own script, until
+    # its design (the user, 2026-10-25).
     scripts = lab.clones['a'] / 'scripts'
     scripts.mkdir()
     script = scripts / 'after-landing.sh'
@@ -594,43 +596,11 @@ def after_landing(lab):
     git(lab.clones['a'], 'commit', '-qm', 'after tier')
     client = lab.start_land()
     lab.reached('prebuild-a-1')
-    host_lock = lab.clones['a'] / '.git/land-turn.lock'
-    with host_lock.open('r') as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            pass
-        else:
-            raise AssertionError('land released its host turn before finishing')
     lab.finish(client)
-    lab.reached('after-after-landing-1')
-    with host_lock.open('r') as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    with (lab.path / 'tmp/after-landing/temper.lock').open('r') as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            pass
-        else:
-            raise AssertionError('active after-tier released its lane lock')
-    assert any(e['event'] == 'release' for e in lab.turn_events())
-    probe = holder(lab.path / 'tmp', '7' * 32)
-    grant(probe)  # The background tier is still active; it retained no connection.
-    disconnect(probe)
-    lab.allow('after-after-landing-1')
-    lab.released('after-landing temper')
-    with (lab.path / 'tmp/after-landing/temper.lock').open('r') as lock:
-        def cleanup_ended():
-            try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                return True
-            except BlockingIOError:
-                return False
-        wait_for(cleanup_ended, 'after-landing helper cleanup')
-    return {'layer': 'actual-land', 'after_tier_active_after_release': True,
-            'parent_kept_host_turn': True, 'host_turn_not_inherited_by_after_tier': True,
-            'after_lane_held_while_active': True,
-            'transport_not_inherited_by_after_tier': True, 'after_tier_completed': True}
+    assert 'after-landing' not in (lab.path / 'a.land.txt').read_text()
+    assert not (lab.path / 'tmp/after-landing').exists(), 'land started an after-landing tier'
+    assert not list(lab.control.glob('after-*.json')), 'the after-landing script ran'
+    return {'layer': 'actual-land', 'after_tier_started': False}
 
 
 def terminated(lab):
