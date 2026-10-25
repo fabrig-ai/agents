@@ -25,9 +25,9 @@ it governs.
 - **It starts and closes its owners,** on the machines the director
   allots it, each with a brief (section 3). Placement stays the
   director's for now (README.md, section 4).
-- **It answers them:** their milestone plans and design reports
-  (owners.md 3.3's check), their questions within their briefs, their
-  milestones' ends and caps, and the relays between them.
+- **It answers them:** their milestone plans and their own design
+  reports (owners.md 3.3's check), their questions within their briefs,
+  their milestones' ends and caps, and the relays between them.
 - **It decides the lab runs:** whether what has landed warrants one, and
   when. It may judge that a milestone needs none (section 4).
 - **It judges findings** once the owner of the work has ended, and keeps

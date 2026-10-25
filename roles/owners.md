@@ -129,7 +129,7 @@ before touching its code: an owner's session doesn't load it.
   README's front matter is then the owner's to keep: its `state`, and
   at the end `ended` and `end`.
 - **Its record** is `~/src/rust/records/missions/<m>/`, each file
-  written by one writer and committed with `record commit <path>`,
+  written by its writers and committed with `record commit <path>`,
   which pushes it (records.md 2 and 3):
   - `plan.md`, the plan (section 3.1), rewritten when it changes;
   - `decisions.md`: its calls and its sub-owners', numbered, each with
@@ -239,8 +239,8 @@ before touching its code: an owner's session doesn't load it.
   (section 5): what has landed, the cause, the options (most often a
   split: what has landed as the milestone, the rest as the next) and a
   recommendation. It resumes on the answer.
-- **A milestone ends** when what it delivers has landed. The end is a
-  checkpoint:
+- **A milestone ends** when its set is in the landing queue (`land-set`
+  started). The end is a checkpoint:
   - its driver updates the repository's `docs/design/STATUS.md` (4.4),
     runs `record runs <m> <N>` for the table, and writes the end report
     in `m<N>.md`, in at most 10 lines: what the MVP now does, the
@@ -250,9 +250,9 @@ before touching its code: an owner's session doesn't load it.
   - the owner hands over to a fresh session (section 2), which starts
     the next milestone at once;
   - a QA pass on what has landed may start (4.6), beside the next
-    milestone. The ended milestone's sub-owner stays on for it: it
-    judges the pass in `qa.md` and lands its fixes, telling the owner's
-    new session, then ends.
+    milestone. The ended milestone's sub-owner stays on for its landing
+    and the pass: it judges the pass in `qa.md` and lands its fixes,
+    telling the owner's new session, which then stops it (`claude stop`).
 
 ### 3.2 Designing a milestone
 
@@ -566,11 +566,11 @@ natural point for one, beside the next milestone (3.1).
   as intended, in ordinary conditions. A security hole, lost data and
   a flake that fails gates count as on it. Anything else waits: a
   corner case, a race under load, a rare condition. Its owner sends it
-  to its product owner as one entry: what fails, where, its
-  reproduction, and why it is off the happy path. The product owner
-  keeps it in its backlog (product.md 4), Infra's the director, and its
-  test stays `#[ignore = "backlog: <why>"]` where one exists. When
-  unsure, the owner asks its product owner.
+  to its product owner (a sub-owner, through its parent) as one entry:
+  what fails, where, its reproduction, and why it is off the happy path.
+  The product owner keeps it in its backlog (product.md 4), Infra's the
+  director, and its test stays `#[ignore = "backlog: <why>"]` where one
+  exists. When unsure, the owner asks its product owner.
 - **Its tests land** like any other (section 4.4), with the pass's
   fixes, by the owner.
 

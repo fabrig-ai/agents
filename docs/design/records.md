@@ -35,7 +35,7 @@ metadata by the tools. The surveys behind it are
   every machine. `record` commits a role's files straight to `main` and
   pushes: no branch, gate or `land` (section 2).
 - **A flat tree:** `STATUS.md`, `director/`, `roadmaps/<name>/`,
-  `missions/<name>/`, each file with one writer (section 3).
+  `missions/<name>/`, each file with its writers (section 3).
 - **Written once** (section 4): the brief is the mission's README; a
   report is a file its parent is pointed to, never a copy; a decision is
   written where it is taken; git's history is the timeline, so there is
@@ -70,8 +70,9 @@ metadata by the tools. The surveys behind it are
   - Exit 0: pushed. 2: refused, with the reason. 3: committed but not
     pushed; the next `record commit` pushes it. Nothing to commit is
     exit 0 with a message.
-- **One writer per file** (section 3), so a rebase never conflicts. A
-  record is never moved or renamed once committed.
+- **A file's writers** (section 3) take turns or share one machine's
+  checkout, so a rebase never conflicts. A record is never moved or
+  renamed once committed.
 - **Reading another machine's record:** `record pull`, then the file.
 
 ## 3. The tree
@@ -88,7 +89,7 @@ metadata by the tools. The surveys behind it are
 | `missions/<m>/README.md` | its parent, then its owner | at the start; the owner keeps the front matter | the brief (section 4) |
 | `missions/<m>/plan.md` | its owner | rewritten when the plan changes | the milestones (owners.md 3.1) |
 | `missions/<m>/decisions.md` | its owner and sub-owners | appended | their calls, numbered, each with its reason |
-| `missions/<m>/m<N>.md` | the milestone's driver | at its start, its design and its end | its goal, its design report, its end report, and the table of section 5 |
+| `missions/<m>/m<N>.md` | its owner (the head), then the milestone's driver | at its start, its design and its end | its goal, its design report, its end report, and the table of section 5 |
 | `missions/<m>/qa.md` | its QA agents and its owner | at each pass | the passes, their findings and each one's disposition |
 | `missions/<m>/closing.md` | its owner | once | the closing note (owners.md 6) |
 
