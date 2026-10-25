@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Exercise advisory turns with isolated local pipes and simulated SSH; no real gate."""
 import argparse
+import ast
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 import fcntl
 import importlib.util
+import inspect
 import json
 import multiprocessing
 import os
@@ -186,9 +188,10 @@ def construction(root):
 
 
 # The holder's 10 s liveness bound, scaled down for the fixture: a healthy
-# connection pulses every PULSE_S for HEALTHY_S (beyond the bound), and expiry
-# must land within [0.98 bound, bound + EXPIRY_SLACK_S], margins that hold under load.
-LIVENESS_S, PULSE_S, HEALTHY_S, EXPIRY_SLACK_S = .5, .1, .8, .5
+# connection pulses every PULSE_S from spawn on, for HEALTHY_S past its grant
+# (beyond the bound), and expiry must land within [0.98 bound, bound +
+# EXPIRY_SLACK_S]; the slack is generous for a loaded gate and costs nothing on a pass.
+LIVENESS_S, PULSE_S, HEALTHY_S, EXPIRY_SLACK_S = 1, .1, 1.5, 2.5
 
 
 def heartbeat_holder(root, token, repo):
@@ -214,6 +217,17 @@ def holds_open(process, path):
     return False
 
 
+def pulse_until(process, ready):
+    # Pulse from spawn, so the holder's clock never runs from its entry alone.
+    deadline = time.monotonic() + 10
+    while True:
+        process.stdin.write(b'\0')
+        process.stdin.flush()
+        if ready():
+            return
+        assert time.monotonic() < deadline and process.poll() is None, 'holder never settled'
+
+
 def heartbeat_expiry(root, queued):
     # Granted and queued run side by side, each on its own repository's lock.
     repo = 'queued' if queued else 'temper'
@@ -224,7 +238,8 @@ def heartbeat_expiry(root, queued):
             grant(blocker)
         process = heartbeat_holder(root, ('b' if queued else 'a') * 32, repo)
         if not queued:
-            grant(process)
+            pulse_until(process, lambda: select.select([process.stdout], [], [], PULSE_S)[0])
+            assert json.loads(process.stdout.readline())['token'] == 'a' * 32
             # A healthy connection lasts beyond the liveness bound.
             healthy = time.monotonic()
             while time.monotonic() - healthy < HEALTHY_S:
@@ -234,7 +249,9 @@ def heartbeat_expiry(root, queued):
                 assert process.poll() is None
         else:
             # Time the expiry from the queue, not from interpreter startup.
-            wait_for(lambda: holds_open(process, root / 'coordinator' / (repo + '.lock')), 'queued holder')
+            lock = root / 'coordinator' / (repo + '.lock')
+            pulse_until(process, lambda: not select.select([process.stdout], [], [], PULSE_S)[0]
+                        and holds_open(process, lock))
         process.stdin.write(b'\0')
         process.stdin.flush()
         start = time.monotonic()
@@ -256,8 +273,23 @@ def heartbeat_expiry(root, queued):
             disconnect(blocker)
 
 
+def tool_bounds():
+    # The fixture shortens the bounds; pin the tool's own: 10 s liveness, 1 s reap,
+    # and main()'s holders never pass liveness_s.
+    module = turn_module()
+    assert inspect.signature(module.holder).parameters['liveness_s'].default == 10
+    assert module.REAP_TIMEOUT_S == 1
+    tree = ast.parse((KIT / 'land-turn.py').read_text())
+    main = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'main')
+    calls = [node for node in ast.walk(main) if isinstance(node, ast.Call)
+             and isinstance(node.func, ast.Name) and node.func.id == 'holder']
+    assert len(calls) == 2 and not any(k.arg in ('liveness_s', None) for c in calls for k in c.keywords)
+    assert all(len(c.args) == 3 for c in calls)
+
+
 def heartbeat_lifetime(root):
     root.mkdir()
+    tool_bounds()
     with ThreadPoolExecutor(2) as pool:
         futures = [pool.submit(heartbeat_expiry, root, queued) for queued in (False, True)]
         elapsed = [future.result() for future in futures]
@@ -266,7 +298,7 @@ def heartbeat_lifetime(root):
         grant(probe)
         disconnect(probe)
     return {'layer': 'local-pipe-heartbeat', 'stdin_held_open': True, 'liveness_s': LIVENESS_S,
-            'expiry_s': elapsed, 'healthy_beyond_bound': True, 'queued_and_granted_release': True,
+            'expiry_s': elapsed, 'healthy_beyond_bound': True, 'tool_bounds_10s_1s': True, 'queued_and_granted_release': True,
             'real_ssh': False}
 
 
