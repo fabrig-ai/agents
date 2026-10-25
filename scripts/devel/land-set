@@ -16,6 +16,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import tomllib
 from urllib.parse import parse_qs, quote, urlsplit
@@ -48,9 +49,10 @@ with os.fdopen(fd, 'w') as out:
 
 
 class Failure(Exception):
-    def __init__(self, status, reason):
+    def __init__(self, status, reason, result=None):
         super().__init__(reason)
         self.status = status
+        self.result = result
 
 
 def require(condition, reason, status=2):
@@ -60,7 +62,7 @@ def require(condition, reason, status=2):
 
 class Runner:
     def __init__(self):
-        self.lock = self.child = None
+        self.lock = self.child = self.results = None
         self.cancelling = False
         # Reap orphaned grandchildren too when a shell exits before its publisher.
         require(ctypes.CDLL(None).prctl(36, 1, 0, 0, 0) == 0,
@@ -93,11 +95,12 @@ class Runner:
         child.wait()
         self.cancelling = False
 
-    def run(self, root, argv, *, check=True, quiet=False, discard_stdout=False, data=None, diagnostic=False):
+    def run(self, root, argv, *, check=True, quiet=False, discard_stdout=False, data=None, diagnostic=False,
+            env=None):
         child = subprocess.Popen(argv, cwd=root, stdin=subprocess.PIPE if data else subprocess.DEVNULL,
                                  stdout=subprocess.DEVNULL if discard_stdout else subprocess.PIPE if quiet else None,
                                  stderr=subprocess.PIPE if quiet else None,
-                                 env=dict(os.environ, GIT_EDITOR='true', LAND_TURN_ACTIVE='1'),
+                                 env=dict(os.environ, GIT_EDITOR='true', LAND_TURN_ACTIVE='1', **(env or {})),
                                  close_fds=True, start_new_session=True)
         self.child = child
         try:
@@ -331,7 +334,22 @@ def repin(runner, path, name, label, landed, candidates, root, mains):
         runner.git(path, 'commit', '-m', message)
 
 
+def land(runner, path, *args, **options):
+    """Run land; return its status, its output and the land-result-v1 object it wrote, or None."""
+    target = runner.results / secrets.token_hex(8)
+    code, output = runner.run(path, ['land', *args], check=False, env=dict(LAND_RESULT=str(target)), **options)
+    try:
+        result = json.loads(target.read_text())
+        target.unlink()
+    except (OSError, ValueError):
+        result = None
+    return code, output, result if isinstance(result, dict) and result.get('schema') == 'land-result-v1' else None
+
+
 def feed(runner, fixture, record):
+    # The fixture marker without a fixture directory never reaches the real feed.
+    if not fixture and os.environ.get('HEAVY_RECOVERY_FIXTURE') == '1':
+        return
     path = str(fixture / 'feed.jsonl') if fixture else '/home/free/.local/state/agents-land-set/feed.jsonl'
     argv = ['python3', '-I', '-c', FEED, path]
     if not fixture and socket.gethostname() != COORDINATOR:
@@ -378,13 +396,14 @@ def gate_step(runner, path, name, label, landed, candidates, root, mains):
         require(not any(up in landed or up in candidates for up in UPSTREAM[name]),
                 f'{name}: no change after an upstream landed or gated; set is incomplete', 1)
         return None
-    code, _ = runner.run(path, ['land', '--no-push'], check=False)
-    require(code == 0, f'{name}: land --no-push failed ({code})', code if code > 0 else 128 - code)
-    return (runner.git(path, 'rev-parse', 'HEAD'), base)
+    code, _, result = land(runner, path, '--no-push')
+    if code:
+        raise Failure(code if code > 0 else 128 - code, f'{name}: land --no-push failed ({code})', result)
+    return (runner.git(path, 'rev-parse', 'HEAD'), base, result)
 
 
 def push_step(runner, path, name, candidate):
-    code, _ = runner.run(path, ['land'], check=False)
+    code, _, result = land(runner, path)
     commit = runner.git(path, 'rev-parse', 'HEAD')
     try:
         runner.git(path, 'fetch', 'origin')
@@ -392,7 +411,7 @@ def push_step(runner, path, name, candidate):
             found, _ = runner.run(path, ['git', 'merge-base', '--is-ancestor', published, 'origin/main'],
                                   check=False, quiet=True)
             if found == 0:
-                return published, code
+                return published, code, result
     except (Failure, OSError) as error:
         if isinstance(error, Failure) and error.status in (128 + signal.SIGINT, 128 + signal.SIGTERM):
             raise
@@ -400,7 +419,7 @@ def push_step(runner, path, name, candidate):
             raise
         print(f'land-set: warning: {name}: cannot reconcile failed land', file=sys.stderr, flush=True)
     require(code != 0, f'{name}: HEAD is not on origin/main', 1)
-    return None, code
+    return None, code, result
 
 
 def main():
@@ -411,7 +430,7 @@ def main():
     root = Path(os.environ.get('DEV_ROOT', str(Path.home() / 'src/rust')))
     tmp = Path(os.environ.get('DEV_TMP', str(root / 'tmp'))).resolve()
     lock, spec, summary, current = None, None, {}, None
-    fixture, paths, staging = None, {}, {}
+    fixture, paths, staging, failed = None, {}, {}, None
     candidates, bases, made = {}, {}, set()
     announced = cleaning = terminal = False
     token = secrets.token_hex(16)
@@ -479,7 +498,7 @@ def main():
                     summary[name] = 'skipped'
                     remove_pin_only(name)
                 else:
-                    commit, base = result
+                    commit, base, outcome = result
                     # land may itself have fetched and rebased after our repin.
                     if runner.git(path, 'merge-base', commit, 'origin/main') != base:
                         summary[name] = 'invalidated ' + commit + ' (not pushed)'
@@ -487,7 +506,7 @@ def main():
                         break
                     candidates[name], bases[name] = commit, base
                     summary[name] = 'gated ' + commit + ' (not pushed)'
-                    event('gated', repo=name, commit=commit)
+                    event('gated', repo=name, commit=commit, **(dict(result=outcome) if outcome else {}))
                     if any(name in UPSTREAM[down] for down in names[names.index(name) + 1:]):
                         ref = f'refs/heads/land-set/{token}/{name}'
                         previous = staging.get(name, (None, ''))[1]
@@ -520,8 +539,9 @@ def main():
         spec, paths = load(runner, args.setfile, root)
         names = [name for name in ORDER if name in paths]
         summary = {name: 'not reached' for name in names}
+        runner.results = Path(tempfile.mkdtemp(prefix='land-set-'))
         try:
-            code, output = runner.run(None, ['land', '--no-push', '--docs'], check=False, quiet=True, diagnostic=True)
+            code, output, _ = land(runner, None, '--no-push', '--docs', quiet=True, diagnostic=True)
         except OSError as error:
             raise Failure(2, 'land with --no-push is required on PATH') from error
         # The incompatible-flags diagnostic happens before any Git or build work.
@@ -547,16 +567,17 @@ def main():
             lock.boundary()
             current = name
             candidate = candidates[name]
-            commit, code = push_step(runner, paths[name], name, candidate)
+            commit, code, outcome = push_step(runner, paths[name], name, candidate)
             if commit:
                 landed[name] = commit
                 candidates.pop(name)
                 write_state(state, spec['set'], landed)
                 summary[name] = 'landed ' + commit
-                event('landed', repo=name, commit=commit)
+                event('landed', repo=name, commit=commit, **(dict(result=outcome) if outcome else {}))
                 if code:
                     print(f'land-set: {name}: landed {commit} despite land failing ({code})', flush=True)
-            require(code == 0, f'{name}: land failed ({code})', code if code > 0 else 128 - code)
+            if code:
+                raise Failure(code if code > 0 else 128 - code, f'{name}: land failed ({code})', outcome)
             remove_pin_only(name)
             current = None
             if commit != candidate:
@@ -565,6 +586,7 @@ def main():
         state.unlink(missing_ok=True)
     except (Failure, OSError, ValueError, KeyError, TypeError) as error:
         status = error.status if isinstance(error, Failure) else 1
+        failed = error.result if isinstance(error, Failure) else None
         reason = 'land-set: ' + str(error)
         print(reason, file=sys.stderr, flush=True)
         if current:
@@ -602,12 +624,16 @@ def main():
                 fields = dict(status=status, reason=reason.splitlines()[0][:200])
                 if current:
                     fields['repo'] = current
+                if failed:
+                    fields['result'] = failed
                 event('stopped', **fields)
             else:
                 event('done')
         if lock:
             lock.close()
         runner.lock = None
+        if runner.results:
+            shutil.rmtree(runner.results, ignore_errors=True)
         for name, result in summary.items():
             print(f'land-set: {name}: {result}', flush=True)
     return status

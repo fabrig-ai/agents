@@ -37,6 +37,10 @@
 # repository: by default formatting, clippy as the gates run it, and the
 # tests' build. Empty, there is none.
 #
+# Once it has rebased, land ends with one line on stdout, `land: result
+# JSON` (landing-flow.md, 10), and writes the same JSON to the file
+# LAND_RESULT names, when it is set.
+#
 # Exit status:
 #   0  landed
 #   2  refused: before starting, or nothing to land
@@ -98,6 +102,8 @@ common=$(git rev-parse --path-format=absolute --git-common-dir)
 repo=$(basename "$(dirname "$common")")
 lock=${LAND_LOCK:-$common/land.lock}
 [[ $lock == /* ]] || lock=$start_dir/$lock
+result_file=${LAND_RESULT:-}
+[[ -z $result_file || $result_file == /* ]] || result_file=$start_dir/$result_file
 
 # The advisory connection spans retries, before the host turn and prebuild.
 if ((!docs && !local)) && [[ $repo == temper && ${LAND_TURN_ACTIVE:-0} != 1 &&
@@ -346,10 +352,99 @@ except (OSError, UnicodeError, ValueError):
 PY
 }
 
-try=0
+# heavy's own lines in $out, for land's result.
+heard() { grep -E '^heavy: (task|receipt) ' "$out" 2>/dev/null || true; }
+
+# land's result (landing-flow.md, 10), at its exit once it has rebased: one
+# line on stdout and, when LAND_RESULT is set, the same JSON in that file.
+# Building or writing it never changes land's status or its other output.
+land_result() {
+    python3 -I -B - "$1" "${repo:-}" "${base:-}" "${tip:-}" "${tree:-}" "$((try < tries ? try : tries))" \
+        "${prebuild_heard:-}" "${gate_kind:-}" "${gate_heard:-}" "${pushed:-false}" "${result_file:-}" <<'PYRESULT' ||
+import json
+import os
+from pathlib import Path
+import re
+import socket
+import sys
+import tempfile
+
+
+def task(heard):
+    # heavy's summary of its task: its times and exit, and its log.
+    lines = [line for line in heard.splitlines() if line.startswith("heavy: task ")]
+    found = lines and re.fullmatch(r"heavy: task [0-9]+ \(\S+\) exit (-?[0-9]+), "
+                                   r"waited ([0-9]+(?:\.[0-9]+)?)s, ran ([0-9]+(?:\.[0-9]+)?)s, log (.+)",
+                                   lines[-1])
+    if not found:
+        return None, None
+    seconds = [float(found[n]) for n in (2, 3)]
+    wait, run = (int(value) if value.is_integer() else value for value in seconds)
+    return {"wait_s": wait, "run_s": run, "exit": int(found[1])}, found[4]
+
+
+def steps(log):
+    # The gate-step lines' seconds summed by name, in first-seen order, and
+    # the first step that exited nonzero.
+    sums, failed = {}, None
+    try:
+        text = Path(log).read_text(errors="replace")
+    except OSError:
+        return sums, failed
+    for line in text.splitlines():
+        step = re.fullmatch(r"gate-step (\S+) ([0-9]+(?:\.[0-9]+)?) ([0-9]+)", line.rstrip())
+        if step:
+            sums[step[1]] = round(sums.get(step[1], 0) + float(step[2]), 3)
+            if failed is None and int(step[3]):
+                failed = step[1]
+    return sums, failed
+
+
+def main():
+    status, repo, base, tip, tree, tries, prebuild, kind, heard, pushed, path = sys.argv[1:]
+    gate = None
+    if kind in ("cached", "none"):
+        gate = {"kind": kind, "receipt": None, "wait_s": 0, "run_s": 0, "exit": 0,
+                "steps": {}, "failed_step": None}
+    elif kind == "ran":
+        ran, log = task(heard)
+        if ran:
+            receipts = re.findall(r"^heavy: receipt .* token ([0-9a-f]{32})$", heard, re.MULTILINE)
+            sums, failed = steps(log)
+            gate = {"kind": "ran", "receipt": receipts[-1] if receipts else None, **ran,
+                    "steps": sums, "failed_step": failed or ("other" if ran["exit"] else None)}
+    result = {"schema": "land-result-v1", "repo": repo, "machine": socket.gethostname(),
+              "base": base or None, "commit": tip or None, "tree": tree or None,
+              "tries": int(tries), "prebuild": task(prebuild)[0], "gate": gate,
+              "pushed": pushed == "true", "exit": int(status)}
+    text = json.dumps(result, separators=(",", ":"))
+    print("land: result " + text, flush=True)
+    if path:
+        # Written whole: a reader sees the old file or the new one.
+        target = Path(path)
+        fd, temporary = tempfile.mkstemp(dir=target.parent, prefix="." + target.name + ".")
+        try:
+            with os.fdopen(fd, "w") as out:
+                out.write(text + "\n")
+            os.replace(temporary, target)
+        except BaseException:
+            os.unlink(temporary)
+            raise
+
+
+try:
+    main()
+except Exception as error:
+    print(f"land: warning: the result was not written: {type(error).__name__}", file=sys.stderr)
+PYRESULT
+        echo "land: warning: the result was not written" >&2
+}
+
+try=0 pushed=false
 while :; do
     try=$((try + 1))
     ((try <= tries)) || die 6 "main moved $tries times; giving up"
+    prebuild_heard='' gate_kind='' gate_heard=''
 
     if [[ -n ${commit:-} ]]; then candidate_check "$commit"; fi
     if ((local)); then
@@ -362,9 +457,11 @@ while :; do
         die 3 "the rebase on $(git rev-parse --short "$base") stopped on conflicts. \
 Resolve them, run git rebase --continue, then land again."
     fi
+    trap 'land_result "$?"' EXIT
     [[ $(git rev-parse HEAD) != "$base" ]] ||
         die 2 "nothing to land: the branch has no commits beyond main"
     candidate=$(git rev-parse HEAD)
+    tip=$candidate
     candidate_ref=refs/heads/$branch
     tree=$(git rev-parse "$candidate^{tree}")
     candidate_check
@@ -376,6 +473,7 @@ Resolve them, run git rebase --continue, then land again."
         summary="none (Markdown and mockups only)"
         policy="none (Markdown and mockups only)"
         gated=$tree
+        gate_kind=none
     else
         [[ $gate != scripts/check.sh || -x $gate ]] ||
             die 2 "no scripts/check.sh: give the gate with --gate (see the repository's workflow)"
@@ -386,6 +484,7 @@ Resolve them, run git rebase --continue, then land again."
         cache_dir=$tmp/gates/$repo
         cache=$cache_dir/$(gate_key "$tree")
         gated=$tree
+        gate_kind=cached
         if summary=$(cache_read "$cache"); then
             :
         elif gated=$(gated_before "$tree"); then
@@ -393,12 +492,14 @@ Resolve them, run git rebase --continue, then land again."
             echo "land: the gate passed on $gated, which differs from this tree only in docs/ Markdown" >&2
         else
             gated=$tree
+            gate_kind=ran
             out=$(mktemp)
             if [[ -n $prebuild && -f Cargo.toml ]]; then
                 if HEAVY_LABEL="land $repo prebuild" python3 -B "$kit/land-capture.py" "$out" "$kit/heavy" --tail 60 bash -c "$prebuild"; then
-                    :
+                    prebuild_heard=$(heard)
                 else
                     capture_status=$?
+                    prebuild_heard=$(heard)
                     if ((capture_status == 74)); then
                         rm -f "$out"
                         die 4 "the build capture is unavailable; nothing landed; rerun land"
@@ -415,9 +516,10 @@ Resolve them, run git rebase --continue, then land again."
             fi
             policy_recheck
             if HEAVY_LABEL="land $repo" python3 -B "$kit/land-capture.py" "$out" "$kit/heavy" --gate --tail 60 bash -c "$gate"; then
-                :
+                gate_heard=$(heard)
             else
                 capture_status=$?
+                gate_heard=$(heard)
                 if ((capture_status == 74)); then
                     rm -f "$out"
                     die 4 "the gate capture is unavailable; nothing landed; rerun land"
@@ -470,6 +572,7 @@ Resolve them, run git rebase --continue, then land again."
     land_fault before_candidate_cas
     git update-ref "$candidate_ref" "$commit" "$candidate" ||
         die 4 "candidate ref changed during amendment; rerun land"
+    tip=$commit
     candidate_check "$commit"
     land_fault before_push
     candidate_check "$commit"
@@ -503,7 +606,7 @@ Resolve them, run git rebase --continue, then land again."
         fi
         die 7 "the push failed: $err"
     fi
-    where="origin/main"
+    where="origin/main" pushed=true
     exec 9>"$lock"
     flock 9
     status=0

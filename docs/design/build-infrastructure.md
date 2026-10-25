@@ -646,9 +646,14 @@ pushes that very commit.
   first line of what the run printed for it, at most 200 characters;
 - `done`: every repository landed or skipped.
 
+`gated`, `landed` and a failed `land`'s `stopped` also carry `result`,
+the object `land` wrote to `LAND_RESULT` ([landing-flow.md](landing-flow.md)
+10), when it wrote one.
+
 Lines written before this version have no `event`; each is a `landed`. A feed
 failure warns and never fails the run. A run killed by SIGKILL leaves no last
-line.
+line. A fixture run (`HEAVY_RECOVERY_FIXTURE=1`) writes only to its fixture's
+feed, or to none: never to hetzner3's.
 
 **`landings`.** `scripts/devel/landings` reads the feed: on hetzner3
 directly, elsewhere with one fixed `tail -n 5000` over the same ssh argv.
@@ -667,6 +672,8 @@ lines are printed, but it is never in flight, and `wait` passes over it.
   once that run has `stopped`, printing its status, repository and reason; 3
   at the timeout. A set not yet in the feed is waited for. The first read
   gets its full 15 seconds, so `--timeout 0` checks the feed once.
+- `landings report [--since DATE] [--repo NAME] [--tsv]` summarizes the
+  results in the feed, per repository and per set (landing-flow.md 10).
 
 **Tests.** `scripts/devel/test-land-set` runs its cases on disposable
 repositories with `file://` origins, real Cargo and stand-ins for `heavy` and

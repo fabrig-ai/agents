@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Show the landing feed and wait for a set to finish."""
+"""Show the landing feed, wait for a set to finish, or report its costs.
+
+landings [--last N]
+landings wait SET [--timeout SECONDS]
+landings report [--since DATE] [--repo NAME] [--tsv]
+"""
 import argparse
 from datetime import datetime, timezone
 import json
@@ -7,6 +12,7 @@ import math
 import os
 from pathlib import Path
 import socket
+import statistics
 import subprocess
 import sys
 import time
@@ -62,6 +68,7 @@ def read_feed(timeout=15):
             if stamp.tzinfo is None:
                 continue
             stamp = stamp.astimezone(timezone.utc)
+            record['utc'] = stamp
             record['date'] = stamp.strftime('%m-%d')
             record['clock'] = stamp.strftime('%H:%MZ')
             record.setdefault('event', 'landed')
@@ -174,6 +181,149 @@ def wait(label, timeout, poll, unreachable):
         time.sleep(max(0, min(poll, deadline - now, last_read + unreachable - now)))
 
 
+STEPS = ('fmt', 'clippy', 'wasm', 'build', 'focused', 'fuzzy', 'bundle', 'browser')
+
+
+def since(value):
+    try:
+        stamp = datetime.fromisoformat(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError('since must be a date or an ISO time')
+    # A bare date or a time without a zone is UTC.
+    return stamp.replace(tzinfo=stamp.tzinfo or timezone.utc).astimezone(timezone.utc)
+
+
+def number(value):
+    ok = isinstance(value, (int, float)) and not isinstance(value, bool)
+    return value if ok and math.isfinite(value) else None
+
+
+def part(result, name):
+    value = result.get(name)
+    return value if isinstance(value, dict) else {}
+
+
+def costs(result):
+    """One result's times: None for what it doesn't carry."""
+    prebuild, gate = part(result, 'prebuild'), part(result, 'gate')
+    steps = gate.get('steps') if isinstance(gate.get('steps'), dict) else None
+    row = {'prebuild_wait_s': number(prebuild.get('wait_s')),
+           'prebuild_run_s': number(prebuild.get('run_s')),
+           'gate_wait_s': number(gate.get('wait_s')),
+           'gate_run_s': number(gate.get('run_s')),
+           'gate_exit': number(gate.get('exit'))}
+    for step in STEPS:
+        row[step] = number(steps.get(step)) if steps else None
+    run = row['gate_run_s']
+    # Without steps (an older gate), its whole time is no evidence for other.
+    row['other'] = (None if steps is None or run is None or gate.get('kind') != 'ran' else
+                    round(max(0, run - sum(filter(None, map(number, steps.values())))), 3))
+    return row
+
+
+def failed(result):
+    return any(part(result, name).get('exit') not in (None, 0)
+               for name in ('prebuild', 'gate'))
+
+
+def mss(value):
+    value = round(value)
+    return f'{value // 60}:{value % 60:02d}'
+
+
+def median(values, show=mss):
+    values = [v for v in values if v is not None]
+    return show(statistics.median(values)) if values else '-'
+
+
+def p90(values):
+    values = sorted(v for v in values if v is not None)
+    # Nearest rank: the smallest value at or above 90% of them.
+    return mss(values[math.ceil(.9 * len(values)) - 1]) if values else '-'
+
+
+def table(head, rows):
+    widths = [max(len(str(c)) for c in column) for column in zip(head, *rows)]
+    for row in (head, *rows):
+        print('  '.join(str(c).rjust(w) if i else str(c).ljust(w)
+                        for i, (c, w) in enumerate(zip(row, widths))).rstrip())
+
+
+def report(records, repo, tsv):
+    results = [(r, r['result']) for r in records if isinstance(r.get('result'), dict)
+               and isinstance(r['result'].get('repo'), str)]
+    if repo is not None:
+        results = [(r, x) for r, x in results if x['repo'] == repo]
+    if tsv:
+        columns = ['prebuild_wait_s', 'prebuild_run_s', 'gate_wait_s', 'gate_run_s',
+                   'gate_exit', 'failed_step', *STEPS, 'other']
+        print('\t'.join(['time', 'set', 'event', 'repo', 'machine', 'kind', *columns]))
+        for record, result in results:
+            gate = part(result, 'gate')
+            row = costs(result)
+            row['failed_step'] = gate.get('failed_step')
+            cells = [record['time'], record['set'], record['event'], result['repo'],
+                     result.get('machine'), gate.get('kind'),
+                     *(row[c] for c in columns)]
+            print('\t'.join('' if c is None else str(c) for c in cells))
+        return
+    if not results:
+        print('no results')
+    else:
+        print('gates by repository (times m:ss; medians over gates run; '
+              'a step only where it ran)')
+        rows = []
+        for name in sorted({x['repo'] for _, x in results}):
+            mine = [x for _, x in results if x['repo'] == name]
+            ran = [costs(x) for x in mine if part(x, 'gate').get('kind') == 'ran']
+            cached = sum(part(x, 'gate').get('kind') == 'cached' for x in mine)
+            bad = [x for x in mine if failed(x)]
+            col = lambda key: [r[key] for r in ran]
+            causes = {}
+            for x in bad:
+                step = part(x, 'gate').get('failed_step')
+                step = step if isinstance(step, str) else (
+                    'prebuild' if part(x, 'prebuild').get('exit') not in (None, 0) else '?')
+                causes[step] = causes.get(step, 0) + 1
+            rows.append([name, len(ran), cached, len(bad), median(col('gate_run_s')),
+                         p90(col('gate_run_s')), median(col('gate_wait_s')),
+                         median(col('prebuild_run_s')),
+                         *(median(col(step)) for step in (*STEPS, 'other')),
+                         ' '.join(f'{k}={v}' for k, v in sorted(causes.items())) or '-'])
+        table(['repo', 'ran', 'cached', 'failed', 'gate', 'p90', 'wait', 'prebuild',
+               *STEPS, 'other', 'failures'], rows)
+    runs = {}
+    for record in records:
+        runs.setdefault(record['token'], []).append(record)
+    if repo is not None:
+        runs = {k: run for k, run in runs.items() if any(
+            r.get('repo') == repo or part(r, 'result').get('repo') == repo for r in run)}
+    sets = {}
+    for run in runs.values():
+        first = lambda event: next((r['utc'] for r in run if r['event'] == event), None)
+        end, waiting, started = ending(run), first('waiting'), first('started')
+        entry = sets.setdefault(run[0]['set'], {'runs': 0, 'done': 0, 'stopped': 0,
+                                                'wait': [], 'run': []})
+        entry['runs'] += 1
+        if end:
+            entry[end['event']] += 1
+        if waiting and started:
+            entry['wait'].append((started - waiting).total_seconds())
+        if started and end:
+            entry['run'].append((end['utc'] - started).total_seconds())
+    print()
+    if not sets:
+        print('no set runs')
+        return
+    title = 'set runs' + (f' naming {repo}' if repo is not None else '')
+    print(title + ' (lock wait: waiting to started; run: started to done or stopped)')
+    longest = lambda values: mss(max(values)) if values else '-'
+    table(['set', 'runs', 'done', 'stopped', 'wait', 'longest', 'run', 'longest'],
+          [[name, e['runs'], e['done'], e['stopped'], median(e['wait']),
+            longest(e['wait']), median(e['run']), longest(e['run'])]
+           for name, e in sorted(sets.items())])
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--last', type=count, default=20)
@@ -181,6 +331,10 @@ def main():
     waiter = commands.add_parser('wait', help='wait for a set to land or stop')
     waiter.add_argument('set')
     waiter.add_argument('--timeout', type=seconds)
+    reporter = commands.add_parser('report', help='summarize gate and set costs')
+    reporter.add_argument('--since', type=since, help='UTC date or ISO time')
+    reporter.add_argument('--repo')
+    reporter.add_argument('--tsv', action='store_true', help='one row per result')
     args = parser.parse_args()
     if args.command == 'wait':
         try:
@@ -196,6 +350,11 @@ def main():
     except (OSError, subprocess.TimeoutExpired) as error:
         print(f'landings: feed unreadable: {error}', file=sys.stderr)
         return 4
+    if args.command == 'report':
+        if args.since is not None:
+            records = [r for r in records if r['utc'] >= args.since]
+        report(records, args.repo, args.tsv)
+        return 0
     show(records, args.last)
     return 0
 

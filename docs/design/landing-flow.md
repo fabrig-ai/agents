@@ -579,7 +579,63 @@ Not built yet:
 - `queue note`, and `land` as a front end;
 - `repin` for sets and stacked rebases.
 
-## 10. Open
+## 10. Metrics
+
+The user, 2026-10-25: collect what the landing flow costs, so that
+reports can be written on top of it. Each fact is written once, by the
+tool that sees it; the reports only read.
+
+- **The gate's steps.** Each project's `scripts/check.sh` wraps its
+  main commands in a `step NAME command...` helper, which prints one
+  line to stderr:
+  ```
+  gate-step NAME SECONDS EXIT
+  ```
+  `SECONDS` has three decimals. The names are the same in every
+  repository: `fmt`, `clippy`, `wasm` (lints and checks on the browser
+  target), `build` (the test binaries, `cargo nextest run --workspace
+  --no-run`), `focused`, `fuzzy`, `bundle` (what the browser tier
+  serves), `browser`. A name may come twice, and its times add. What
+  no step covers is `other`: the gate's time less its steps'.
+- **`land`'s result.** Once `land` has rebased, it ends by printing one
+  line, `land: result JSON`, and writes the same object to the file
+  `LAND_RESULT` names, when it is set:
+  ```
+  {"schema": "land-result-v1", "repo": "skein", "machine": "debian-16gb-hel1-1",
+   "base": SHA, "commit": SHA, "tree": SHA, "tries": 1,
+   "prebuild": {"wait_s": 3, "run_s": 61, "exit": 0},
+   "gate": {"kind": "ran", "receipt": TOKEN, "wait_s": 5, "run_s": 164,
+            "exit": 0, "steps": {"fmt": 4.213, "clippy": 25.3}, "failed_step": null},
+   "pushed": true, "exit": 0}
+  ```
+  - `repo` is the primary checkout's directory name (the parent of
+    `git rev-parse --git-common-dir`), `machine` the host name,
+    `commit` the tip `land` gated or took from the cache.
+  - `prebuild` and `gate` are `null` when `land` didn't reach them.
+    Their times are `heavy`'s `waited` and `ran`.
+  - `gate.kind` is `ran`, `cached` (the gate cache's result: no
+    receipt, zero times, no steps) or `none` (`--docs`).
+  - `steps` sums the gate log's `gate-step` lines by name, in their
+    order. `failed_step` is the first step that exited nonzero, else
+    `other` when the gate failed, else `null`.
+  - `exit` is `land`'s own status.
+- **The feed.** `land-set` runs each `land` with `LAND_RESULT` set, and
+  adds the object it wrote as `result` to the event it then writes:
+  `gated`, `landed`, or the `stopped` of a failed `land`.
+- **The report.** `landings report [--since DATE] [--repo NAME]
+  [--tsv]` reads the feed:
+  - per repository: gates run, cached and failed; the gate's median
+    and 90th percentile; the median queue wait and prebuild; the median
+    of each step, and of `other`; failures by step;
+  - per set: how many ended `done` and `stopped`; the wait for the lock
+    (`waiting` to `started`) and the run (`started` to its end), median
+    and longest;
+  - `--tsv`: one row per result, with raw seconds, for other scripts.
+
+Not collected yet: plain `land`s outside a set (their result line is in
+their output only), and each test's time (nextest's JUnit output).
+
+## 11. Open
 
 - **The queue's throughput,** measured: replay 10-23's milestones
   through it with the cache.
