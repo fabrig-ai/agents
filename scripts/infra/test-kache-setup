@@ -58,7 +58,9 @@ def main():
 
         # A fresh machine needs no prior config; the same version keeps its store.
         setup()
-        assert 'remote' not in tomllib.loads(config.read_text())['cache']
+        cache = tomllib.loads(config.read_text())['cache']
+        assert 'remote' not in cache
+        assert cache['cache_executables'] is True and cache['prefetch_enabled'] is False
         assert not dropin.exists()
         assert 'clean' not in trace.read_text()
 
@@ -108,7 +110,7 @@ def main():
         result = subprocess.run([moved / 'kache-setup'], env=discovery_env,
                                 capture_output=True, text=True)
         assert result.returncode == 0, (result.stdout, result.stderr)
-        print('test-kache-setup: passed (local, remote, repeat, mode, owner, removal)')
+        print('test-kache-setup: passed (local, settings, remote, repeat, mode, owner, removal)')
 
 
 if __name__ == '__main__':

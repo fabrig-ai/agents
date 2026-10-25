@@ -35,15 +35,18 @@ The landing flow built on it is [landing-flow.md](landing-flow.md);
 - **The user's decisions (10-24):** we patch kache ourselves and may
   offer it upstream later; the store is self-hosted and central; every
   build machine publishes; plain HTTP on the private network; objects
-  expire after 7 days; the store has its own disk.
+  expire after 7 days (1 day since the bucket filled on 10-24, section
+  5); the store has its own disk.
 
 ## 2. kache and its keys
 
 [kache](https://github.com/kunobi-ninja/kache) is a rustc wrapper with
 a daemon. `scripts/infra/kache-setup` points Cargo's `rustc-wrapper` at
 it in `~/.cargo/config.toml` and runs the daemon as the user unit
-`kache.service`. Build machines keep a 40 GiB local store with
-`cache_executables = true`, so linked test binaries are cached too.
+`kache.service`. Build machines keep a 40 GiB local store
+(`KACHE_MAX_GB=40` in their `tmp/machine.env`; the kit's default of 12
+is for machines that don't build) with `cache_executables = true`, so
+linked test binaries are cached too, and prefetch off (section 7).
 
 - **The key** hashes what decides a unit's output: its source files,
   the compiler and its flags, the environment it reads, and the
@@ -165,7 +168,7 @@ daemon puts it behind that machine's local store:
 | Disk | volume `kache-store`, 120 GB, ext4, at `/srv/kache-store`, delete-protected |
 | Bucket | `kache`, under kache's default prefix `artifacts` (`v3/manifests`, `v3/packs`, `v3/predictions`) |
 | Access | one read-write key, `kache-fleet` |
-| Limits | 100 GiB quota; objects expire 7 days after upload |
+| Limits | 100 GiB quota; objects expire 1 day after upload; `kache-prune.timer` holds the bucket between 70 and 80 GiB |
 
 Why each choice:
 - **Self-hosted** (the user): no third party holds our builds. The disk
@@ -193,16 +196,25 @@ Why each choice:
   Any key holder can write any entry, which is acceptable while the
   same agents run on every machine. kache's `remote_readonly` makes a
   machine read-only.
-- **7-day expiry** (the user), because kache never deletes remote
-  objects; the bucket's lifecycle rule does. The age counts from
-  upload, not from last use, so a unit still in use is compiled again
-  once a week, by the first machine that misses it, and uploaded again.
-  main moves many times a day, so a week-old unit is mostly dead. One
-  full jig build is 4.4 GB.
+- **Expiry and pruning.** kache never deletes remote objects; the
+  bucket's lifecycle rule does. The user chose 7 days, since main moves
+  many times a day and a week-old unit is mostly dead. On 10-24 the
+  bucket filled its quota within about 7 hours, at about 48 GiB per
+  active hour, so it was emptied and its expiry cut to 1 day (director
+  1021, 1026). A user timer on hetzner3, `kache-prune.timer`, checks it
+  every 5 minutes and deletes whole entries, oldest first, from above
+  80 GiB down to 70 GiB. The age counts from upload, not from last use,
+  so a unit still in use is compiled again, by the first machine that
+  misses it, once it expires or is pruned. One full jig build is 4.4 GB.
 - **Its own disk.** The store can't fill hetzner3's build disk, and
   hetzner3's builds can't starve the store. With the quota full,
   Garage refuses writes: uploads fail in the background, builds go on,
-  and sharing stalls until expiry frees space. A Hetzner volume grows
+  and sharing stalls until expiry frees space. kache keeps each entry
+  it failed to upload pinned in the local store, where no collection
+  evicts it: on 10-24 a full bucket grew local stores past their caps
+  (77 GB against 20 GiB on hetzner) until disks ran out (director 1020,
+  1041). The pruner keeps the quota from filling; releasing those pins
+  is open (section 8). A Hetzner volume grows
   without downtime but never shrinks. Garage refuses to start unless
   the volume is mounted, so a missing volume can't turn into an empty
   store on the root disk.
@@ -239,9 +251,16 @@ hetzner2 and hetzner, with the shared store:
 - **What stays local:** on each machine, 20 build-script runs (kache
   never publishes those) and 16 C files of `ring`, the cryptography
   under rustls, which kache can't key safely. They take a few seconds.
-- **Not yet measured:** temper's scale, and hit rates under owners'
-  real traffic. The rollout's day of measurement answers both (section
-  7).
+- **Under owners' traffic** (`kache stats`, the 24 h to 10-25 05:10Z):
+  52% of crates served from cache on hetzner3 to 87% on hetzner4, 11
+  to 25% of those hits from the shared store.
+- **Executables.** `cache_executables = false`, set on four builders
+  as disk relief on 10-24 (director 999, 1021, 1041), passed 15,400 of
+  hetzner's rustc runs in those 24 h through uncached, nearly all of
+  them test binaries: about 5 h of its 5.7 h of compiling, against
+  40 minutes of misses. The user had them cached again on 10-25, once
+  disks had room: one temper test binary came back in 1.1 s from an
+  empty target, against 9.0 s compiled.
 
 ## 7. Operating it
 
@@ -258,6 +277,14 @@ stopping the daemon or changing anything. It never reads the key.
   `KACHE_S3_ACCESS_KEY` and `KACHE_S3_SECRET_KEY` to the daemon.
 - The daemon ignores S3 selection variables in its environment, so the
   remote belongs in the config; the key belongs in its environment.
+- `[cache]` gets `cache_executables = true` and `prefetch_enabled =
+  false`. Prefetch plans what a build might want and downloads it ahead
+  of demand. In the 24 h to 10-25 05:10Z it downloaded 13,388 entries,
+  76 GiB, on the five builders, and 657 of them were used, all on
+  hetzner3: 1.6% of the builders' 40,875 hits, from the same Garage
+  whose uploads were timing out. Off, the daemon still checks
+  the remote for each exact key it misses and still uploads (kache's
+  `src/config.rs`, `prefetch_enabled`).
 - Without the key file, setup removes the remote section and that
   drop-in: x1, carbon, hel8 and a machine awaiting its key stay local.
 - Rerunning setup preserves the local store at the same kache version.
@@ -273,15 +300,22 @@ store or subsequent cache-related gate failures. Measure remote hits
 over the following day.
 
 Day to day:
-- **Health.** On hetzner3, `garage status` and `garage bucket info
-  kache` give size, object count and quota. On a build machine,
-  `kache stats` and `kache doctor`.
+- **Health.** On hetzner3, `garage -c ~/garage/garage.toml status` and
+  `garage -c ~/garage/garage.toml bucket info kache` give size, object
+  count and quota (the config isn't at Garage's default
+  `/etc/garage.toml`), and `kache-prune.service`'s journal the pruner's
+  last run. On a build machine, `kache stats` (`--full` for the
+  remote's transfers and their failures), `kache explain` for misses,
+  and `kache doctor`. The doctor's Remote access check fails from a
+  shell, since only the daemon's unit loads the key: the transfers in
+  `kache stats --full` say whether the remote works.
 - **When things fail:**
 
   | Failure | Effect |
   |---|---|
   | Store or network down | Misses compile locally |
-  | Quota full | No new uploads, until expiry frees space |
+  | An upload times out (30 s; large packs while hetzner3 is busy) | Another machine compiles the unit again; the entry stays pinned locally (section 5) |
+  | Quota full | No new uploads, and their entries pinned past the local cap, until the pruner or expiry frees space |
   | kache version change | That machine's local store is cleared once. Remote entries under an old key namespace are dead until they expire |
 
 - **Adding a machine:**
@@ -294,6 +328,16 @@ Day to day:
 - **Upstreaming the patch.** Its patch and build recipe live in
   `scripts/infra/kache/`; offer the patch upstream later.
 - **An alert** when the store nears its quota or stops answering.
+- **The pins of failed uploads.** kache keeps an entry pinned until its
+  upload succeeds, past the local cap. A patch could retire an upload
+  that fails for good, release its pin, and bound the retries
+  (director 1026).
+- **Upload timeouts.** Packs of 13 to 37 MB time out at 30 s while
+  hetzner3, which also builds, is busy: in the 24 h to 10-25 05:10Z
+  hetzner5 failed 3,549 of its 7,276 uploads, most of them from 15 to
+  22Z.
+  Garage on a host of its own is the user's call, on measured need
+  (director 1026).
 - **One key per machine,** so a key can be revoked, if the fleet ever
   grows beyond our own machines.
 - **x1 and carbon:** left out for now (the user). They would need a
