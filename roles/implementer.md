@@ -62,12 +62,11 @@ live tiers, clippy, the wasm lints or the doc examples, and never
 owner's (owners.md 4.4), and a repair's (below), unless the task names
 one.
 
-**A repair** of what a gate found is where another suite runs: first
-the failing check alone (the failing tests in their profile, as
-`--profile fuzzy -E 'test(=NAME)'`, or the lint that failed), then that
-whole profile or lint once it passes, then the focused suite. After a
-finding, it fixes it, runs the narrowest test the fix touches, and
-reruns only the step the finding came from.
+**A repair** of what a gate found runs the failing tests alone, in
+their profile (`--profile fuzzy -E 'test(=NAME)'`), or the lint that
+failed, and the narrowest tests its fix touches: the gate's next run
+is the wide check. After a finding, it fixes it, runs the narrowest
+test the fix touches, and reruns only the step the finding came from.
 
 ## 3. The queue
 
