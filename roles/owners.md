@@ -211,8 +211,9 @@ task: an answer, or the repair of what a gate found.
 
 - **Effort:** high for a milestone's task, medium for plain work: a
   survey, an inventory, a repin.
-- **Surveys and checks** go to Codex too, with a brief that names the
-  question and where its report goes. An investigation's report gives
+- **Surveys and checks** go to Codex too, through `codex-run task
+  --read-only`, never a bare `codex exec`, with a brief that names the
+  question and where its report goes; its post wakes the owner. An investigation's report gives
   the cause, the evidence and the fix it proposes.
 - **When the work gets hard** (two tries without the cause, conflicting
   evidence, a fix that reaches across a boundary), Opus 5.5 at xhigh
