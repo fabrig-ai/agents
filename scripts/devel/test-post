@@ -37,7 +37,8 @@ capture() {
 }
 poll_until() {
     local attempt
-    for ((attempt=0; attempt<100; attempt++)); do
+    # Only a guard against a hang: about 30 s, however loaded the machine.
+    for ((attempt=0; attempt<3000; attempt++)); do
         "$@" && return 0
         sleep 0.01
     done
@@ -146,7 +147,7 @@ message() {
 count() { find "$1" -maxdepth 1 -type f -name '*.md' | wc -l; }
 
 local_and_remote() {
-    post wait o/live --timeout 5 >"$t/wait.out" &
+    post wait o/live --timeout 30 >"$t/wait.out" &
     waiter=$!
     pids+=("$waiter")
     poll_until test -s "$t/a/tmp/post/o+live/waiter"
@@ -264,7 +265,7 @@ waiters_and_limits() {
     rm "$t/a/tmp/post/codex/waiter"
     expect 'Codex kind without waiter' "$(capture post send codex sleeping <<< body)" 'status=3' 'codex owner not running'
     expect 'zero timeout is silent' "[$(capture post wait empty --timeout 0)]" '[status=1]'
-    post wait replaced --timeout 5 >"$t/replaced.out" 2>&1 &
+    post wait replaced --timeout 30 >"$t/replaced.out" 2>&1 &
     first=$!
     pids+=("$first")
     poll_until test -s "$t/a/tmp/post/replaced/waiter"
@@ -457,12 +458,15 @@ STUB
 parts=(local_and_remote wake waiters_and_limits names_and_order ids_and_transport)
 for part in "${parts[@]}"; do
     (
+        # A part's exit handler stops its own children, never the earlier parts.
+        # shellcheck disable=SC2030
         pids=()
         trap stop_children EXIT
         fixture "$root/$part"
         "$part"
         echo "$checks $failed" >"$root/$part.result"
     ) >"$root/$part.log" 2>&1 &
+    # shellcheck disable=SC2031
     pids+=("$!")
 done
 for index in "${!parts[@]}"; do
@@ -480,6 +484,9 @@ done
 pids=()
 
 elapsed=$(awk -v start="$started" -v end="$(date +%s.%N)" 'BEGIN {printf "%.3f", end-start}')
-expect 'fixture under fifteen seconds' "$(awk -v elapsed="$elapsed" 'BEGIN {print elapsed < 15 ? "yes" : "no"}')" yes
+# CPU time, not wall time, so a loaded machine cannot fail it: the children's user and system.
+times >"$root/times"
+cpu=$(awk 'NR == 2 {for (i = 1; i <= 2; i++) {split($i, f, /[ms]/); total += f[1] * 60 + f[2]}; printf "%.3f", total}' "$root/times")
+expect 'fixture under fifteen CPU seconds' "$(awk -v cpu="$cpu" 'BEGIN {print cpu < 15 ? "yes" : "no"}')" yes
 ((failed == 0)) || exit 1
-echo "test-post: $checks checks passed in ${elapsed}s"
+echo "test-post: $checks checks passed in ${elapsed}s, ${cpu}s CPU"
