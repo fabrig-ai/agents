@@ -503,13 +503,11 @@ departs from this section or 4.5, it wins.
   landing since 10-25, and no one by hand. `scripts/devel/after-landing`
   stays, unused: given a commit, it runs the script through `heavy
   --gate` in a worktree under `tmp/after-landing/`, and a failure adds
-  a line to `tmp/director/inbox/after-landing.md`. Since 10-24 16:40Z,
-  the director's transient user unit `after-landing-paused`
-  (`tmp/director/after-landing-pause.sh`) also holds each repository's
-  lock in `tmp/after-landing/` on every machine, and ends any run that
-  starts; a reboot ends the unit, not the rule. So no tier outside the
-  gate runs on `main` by itself. A task that needs one names it, such
-  as `scripts/browser.sh` (implementer.md 2).
+  a line to `tmp/director/inbox/after-landing.md`.
+  `scripts/devel/after-landing` refuses while the pause stands. A reboot
+  does not lift the pause. So no tier outside the gate runs on `main`
+  by itself. A task that needs one names it, such as `scripts/browser.sh`
+  (implementer.md 2).
 - **The disk floor.** Below the machine's floor, 40 GB unless
   `tmp/machine.env` says otherwise, no new implementer starts, and
   finished targets are cleared. A target grows to about 21 GB. `heavy`

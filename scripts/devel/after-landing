@@ -13,6 +13,11 @@
 # `heavy --gate`, and when that fails or heavy refuses it, writes one line
 # to the director's inbox, tmp/director/inbox/after-landing.md, naming the
 # repository, the commit, its branch and subject, and the log.
+# shellcheck disable=SC2317 # The pause deliberately leaves the code below unreachable.
+# Lift the pause by deleting this guard in a landed change.
+echo "after-landing: paused on the user's word (roles/owners.md 4.5); nothing runs" >&2
+exit 2
+
 set -euo pipefail
 umask 077
 
