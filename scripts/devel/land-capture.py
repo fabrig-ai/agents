@@ -2,17 +2,22 @@
 """Forward recovery instructions while heavy waits; retain its protocol in memory."""
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 
 from recovery_message import RECOVERY_DIAGNOSTIC
 
 os.umask(0o077)
+# A terminal's Ctrl-C reaches heavy too, which cancels its task and prints
+# its summary: this capture keeps reading until heavy closes it.
+signal.signal(signal.SIGINT, signal.SIG_IGN)
 diagnostic = RECOVERY_DIAGNOSTIC.encode() + b'\n'
 capture = bytearray()
 pending = bytearray()
 child = subprocess.Popen(sys.argv[2:], stdin=subprocess.DEVNULL,
-                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                         preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL))
 while True:
     chunk = os.read(child.stdout.fileno(), 65536)
     if not chunk:

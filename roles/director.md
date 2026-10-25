@@ -417,7 +417,9 @@ is mechanical, and Codex reads what needs reading.
     `ps e`), and none runs `pueue` in any form, `status`, `log`,
     `remove` or `kill` alike: `heavy`'s own commands are the queue's
     only way in, and its output and `heavy.tsv` show it (a `pueue
-    remove` can take another owner's queued task; frux-3, 10-24);
+    remove` can take another owner's queued task; frux-3, 10-24); a
+    task is taken back with `heavy --cancel TOKEN`, from the directory
+    that submitted it (10-25);
   - an agent searches only its worktree and the paths its task names,
     never `~/.local`, `~/.config`, `/run/user` or another tool's state:
     pueue's `state.json` holds the queued tasks' environments;

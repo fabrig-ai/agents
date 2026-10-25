@@ -65,7 +65,8 @@ is queued and unclaimed. Only a successful wait return is used: a terminal
 or absent queue entry triggers cancellation under the host lock if the
 token is still unclaimed. Transport failure retries through the timer.
 The observer stops once a wrapper claims the token. Client death does not
-cancel queued work, and no task age limit is imposed. A reused numeric ID
+cancel queued work, and no task age limit is imposed; an interrupted
+client, or `heavy --cancel`, does (section 4). A reused numeric ID
 can never establish success. Completion does not wait on or remove an ID
 after token release: without a safe identity API, a queue row cannot be
 removed without risking an unrelated replacement. Completed queue rows
@@ -176,6 +177,23 @@ including when requested during a gate. These are the maintenance interfaces
 while gates run. A direct pueue pause made during a gate cannot be
 distinguished from the gate's pause and is outside this contract.
 
+`heavy --cancel TOKEN` takes back one task, queued or running, by the
+token printed at submission (10-25). A malformed or unknown token, or a
+caller whose working directory is not the task's recorded repository,
+is refused in fixed words, changing nothing. Under the host lock it marks
+an unfinished task closing, outcome `cancelled`, code 130, then releases
+it on the common path: owned scope killed and proved empty, a gate's
+holds resumed, TSV row and receipt published. It uses no queue ID; a
+queued entry that starts later finds its token released and refuses
+replay. The waiting client ends with 130 and its usual summary. The
+command exits 0 once the task is released, 1 if it had already ended
+(finishing, closing or released: its result stands), 2 on a refusal;
+past 60 seconds it leaves the release to the reconciler. It skips the
+disk floor. SIGINT or SIGTERM to a waiting client cancels its task the
+same way, between host-lock sections; a second one leaves the release to
+the reconciler and exits 130. land's capture ignores SIGINT, so Ctrl-C
+on land cancels its gate and land fails with 4.
+
 `heavy --remove-reconciler` refuses unfinished tasks, then removes only
 its own timer and service. `setup` checks recovery readiness without
 installing it; its group repairs use `heavy --repair-group` under the host
@@ -200,10 +218,10 @@ continue; release still requires the owned cgroup to be empty.
 
 `DEV_TMP/heavy/events.jsonl` records submit, wrapper start, admission,
 scope entry, phase begin/end for pause, drain, settle, payload, release
-and collection, task completion, refusal and recovery. Records include a
-unique event ID, token, timestamp, boot and queue identity, lane, label,
-repository, tree, effective safe policy ID, free disk and memory capacity,
-and the entrypoint recording the event. A contained gate sources
+and collection, task completion, cancel, refusal and recovery. Records
+include a unique event ID, token, timestamp, boot and queue identity,
+lane, label, repository, tree, effective safe policy ID, free disk and
+memory capacity, and the entrypoint recording the event. A contained gate sources
 `gate-policy.sh` and calls `gate_policy_prepare`, both at submission and
 inside the contained task. Policy errors prevent payload entry. The
 recovery fixture can
@@ -274,10 +292,13 @@ Receipt faults cover before publication, a fsynced temporary receipt before
 rename, and after atomic publication. The five-second case anchors a live
 reconciliation, then observes recovery on the subsequent periodic tick.
 Recovery fixtures also cover after-landing's helper lookup from a relocated
-kit and real Chromium 147 receipt/cache reuse. Land-entry storage and
-missing-reconciler cases require the warning on the waiting caller's
-stream before restoring the same service/ledger, with no receipt/green
-while broken. The capture write uses guarded `/dev/full` to obtain kernel
+kit and real Chromium 147 receipt/cache reuse. Cancel cases cover a
+queued task (below the disk floor, then its late entry's refused
+replay), running build and gate scopes with a `setsid` child, every
+refusal, a waiting client's SIGINT and SIGTERM, and Ctrl-C on land.
+Land-entry storage and missing-reconciler cases require the warning on
+the waiting caller's stream before restoring the same service/ledger,
+with no receipt/green while broken. The capture write uses guarded `/dev/full` to obtain kernel
 ENOSPC without consuming disk space; both prebuild and gate paths refuse
 landing after that capture failure.
 

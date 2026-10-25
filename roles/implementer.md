@@ -41,7 +41,9 @@ reason. The wide checks are the landing's gates (section 2).
 - **A failure is read** in its log, whose path `heavy` prints, before
   anything reruns. An unchanged command doesn't rerun.
 - **Inputs stay still** while a command waits or runs: no edit to what
-  it builds or tests until it reports.
+  it builds or tests until it reports. A submission to take back is
+  cancelled with `heavy --cancel TOKEN`, from the worktree that
+  submitted it, never with pueue.
 
 ## 2. When a set of changes is done
 

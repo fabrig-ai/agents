@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -31,6 +32,8 @@ CONFIG = Path(os.environ.get('PUEUE_CONFIG_PATH', str(
     Path(os.environ.get('XDG_CONFIG_HOME', str(Path.home() / '.config'))) / 'pueue/pueue.yml'))).resolve()
 PREFIX = 'skein-heavy-' + hashlib.sha256(str(BASE).encode()).hexdigest()[:12]
 CGROOT = Path('/sys/fs/cgroup')
+CANCELLED = 130  # A cancelled task's exit, as check.sh and codex-run exit on SIGINT.
+USAGE = 'usage: heavy [--gate] [--tail N] [--] command... | heavy --cancel TOKEN'
 
 
 class Refusal(Exception):
@@ -57,8 +60,10 @@ QUEUE = queue_identity()
 
 
 def run(args, **kw):
+    # A session of its own: a terminal's SIGINT reaches heavy, which defers
+    # it, and never fails a queue or systemd call midway.
     return subprocess.run([str(x) for x in args], stdin=subprocess.DEVNULL,
-                          capture_output=True, text=True, **kw)
+                          capture_output=True, text=True, start_new_session=True, **kw)
 
 
 def queue(*args):
@@ -420,6 +425,79 @@ def publish_receipt(ledger, task):
     fault('receipt_published', task['token'])
 
 
+def request_cancel(ledger, task, reason, **extra):
+    """Mark an unfinished task closing, cancelled, under the host lock.
+
+    Release then takes the common path: the reconciler kills the owned scope,
+    proves it empty, drops a gate's hold and publishes the receipt. A payload
+    that has ended keeps its result: finishing, closing and released tasks
+    are left alone. No queue ID is used: a queued entry that starts later
+    finds its token released and refuses replay.
+    """
+    if task['state'] in ('finishing', 'closing', 'released'):
+        return False
+    task.update(state='closing', outcome='cancelled', code=CANCELLED)
+    ledger.event(task, 'release_begin', outcome='cancelled')
+    ledger.event(task, 'cancel', reason=reason, **extra)
+    ledger.save()
+    return True
+
+
+def defer_interrupts():
+    """SIGINT and SIGTERM only mark the returned list; callers act on it
+    between host-lock sections, so no ledger write is cut short."""
+    received = []
+    for number in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(number, lambda signum, frame: received.append(signum))
+    return received
+
+
+def say(text, stream=None):
+    # A reader that has gone (a pipe closed by its own interrupt) cannot
+    # stop a cancellation or its release.
+    try:
+        print(text, file=stream or sys.stdout, flush=True)
+    except OSError:
+        pass
+
+
+def cancel(token):
+    received = defer_interrupts()
+    if os.environ.get('HEAVY_TASK'):
+        raise Refusal('cancel refused: inside a heavy task')
+    if not re.fullmatch(r'[0-9a-f]{32}', token):
+        raise Refusal('cancel refused: malformed token')
+    with locked() as ledger:
+        task = ledger.tasks.get(token)
+        if task is None:
+            raise Refusal('cancel refused: unknown token')
+        # Only the submitting working directory may take a task back.
+        if Path(task['repo']).resolve() != Path.cwd().resolve():
+            raise Refusal('cancel refused: the task was submitted from another directory')
+        cancelled = request_cancel(ledger, task, 'request')
+        reconcile(ledger)
+    receipt = BASE / 'receipts' / (token + '.json')
+    deadline = time.monotonic() + 60
+    while True:
+        with locked() as ledger:
+            task = ledger.tasks[token]
+            if task['state'] != 'released' or not receipt.is_file():
+                reconcile(ledger)
+        name = f"task {task.get('id', '-')} ({task['lane']})"
+        if task['state'] == 'released' and receipt.is_file():
+            break
+        if received or time.monotonic() >= deadline:
+            say(f'heavy: {"cancelled" if cancelled else "not cancelled, already ended:"} {name} '
+                f'token {token}; the reconciler completes its release', sys.stderr)
+            return CANCELLED if received else 0 if cancelled else 1
+        time.sleep(0.2)
+    if cancelled:
+        say(f"heavy: cancelled {name} token {token}, exit {task['code']}")
+        return 0
+    say(f"heavy: not cancelled, already ended: {name} token {token}, exit {task['code']}")
+    return 1
+
+
 def observer_unit(task):
     return PREFIX + '-' + task['token'] + '-observe.service'
 
@@ -738,10 +816,15 @@ def check_gate_candidate(ledger, task):
 def submit(args, lane, tail_lines):
     if os.environ.get('HEAVY_TASK'):
         raise Refusal('already inside a heavy task; run the command directly')
+    # An interrupt of the waiting client cancels its task (request_cancel).
+    received = defer_interrupts()
     commit = run(['git', 'rev-parse', 'HEAD']).stdout.strip() or 'unversioned'
     tree = run(['git', 'rev-parse', 'HEAD^{tree}']).stdout.strip() or 'unversioned'
     if lane == 'gate' and run(['git', 'rev-parse', '--is-inside-work-tree']).returncode == 0:
         commit, tree = gate_candidate()
+    if received:
+        say('heavy: interrupted; nothing was queued', sys.stderr)
+        return CANCELLED
     token = uuid.uuid4().hex
     with locked() as ledger:
         ensure_reconciler(ledger)
@@ -777,9 +860,21 @@ def submit(args, lane, tail_lines):
         task['state'] = 'queued'
         ledger.save()
         ensure_observer(task)
-    print(f"heavy: queued task {task['id']} in the {lane} lane token {token}", file=sys.stderr, flush=True)
-    warned, next_health = False, 0.0
+    say(f"heavy: queued task {task['id']} in the {lane} lane token {token}", sys.stderr)
+    warned, next_health, handled = False, 0.0, 0
     while True:
+        if received and not handled:
+            # The cancel is durable before anything is printed.
+            with locked() as ledger:
+                cancelled = request_cancel(ledger, ledger.tasks[token], 'interrupt', signal=received[0])
+                reconcile(ledger)
+            handled = len(received)
+            say(f"heavy: interrupted; {'cancelled' if cancelled else 'not cancelled, already ended:'} "
+                f"task {task['id']} ({lane}) token {token}", sys.stderr)
+        elif handled and len(received) > handled:
+            say(f"heavy: interrupted again; leaving task {task['id']} token {token} "
+                'to the reconciler', sys.stderr)
+            return CANCELLED
         if time.monotonic() >= next_health:
             failed = waiter_failure()
             if failed and not warned:
@@ -798,6 +893,8 @@ def submit(args, lane, tail_lines):
         time.sleep(0.1)
     if task.get('refusal'):
         print('heavy: ' + task['refusal'], file=sys.stderr, flush=True)
+    if task.get('outcome') == 'cancelled' and not handled:
+        print(f"heavy: cancelled task {task['id']} ({lane}) token {token}", file=sys.stderr, flush=True)
     lines = Path(task['log']).read_text(errors='replace').splitlines()
     if len(lines) > tail_lines:
         print(f"heavy: … {len(lines) - tail_lines} earlier lines in {task['log']}")
@@ -826,7 +923,8 @@ def wrapper(token):
             task = ledger.tasks[token]
             if task['state'] == 'released':
                 return task['code']
-            if not queue_available:
+            # A cancelled task still closing must never be admitted.
+            if not queue_available or task['state'] != 'waiting':
                 time.sleep(0.1)
                 continue
             if task['lane'] == 'gate':
@@ -1088,6 +1186,8 @@ def main(args):
     if len(args) == 2 and args[0] in ('--maintenance-pause', '--maintenance-resume'):
         maintenance(args[1], args[0] == '--maintenance-pause')
         return 0
+    if len(args) == 2 and args[0] == '--cancel':
+        return cancel(args[1])
     if len(args) == 2 and args[0] in ('--task', '--payload', '--observe'):
         return {'--task': wrapper, '--payload': payload, '--observe': observe}[args[0]](args[1])
     lane, tail_lines = 'build', int(os.environ.get('HEAVY_TAIL', '200'))
@@ -1100,11 +1200,11 @@ def main(args):
             args = args[1:]
             break
         elif args[0].startswith('-'):
-            raise Refusal('usage: heavy [--gate] [--tail N] [--] command...')
+            raise Refusal(USAGE)
         else:
             break
     if not args or tail_lines < 0:
-        raise Refusal('usage: heavy [--gate] [--tail N] [--] command...')
+        raise Refusal(USAGE)
     return submit(args, lane, tail_lines)
 
 

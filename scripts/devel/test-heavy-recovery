@@ -108,8 +108,8 @@ class Lab:
         self.started = time.monotonic()
         self.number = 0
 
-    def call(self, args, check=True, environment=None, **kw):
-        result = subprocess.run([str(x) for x in args], env=environment or self.env, cwd=self.repo,
+    def call(self, args, check=True, environment=None, cwd=None, **kw):
+        result = subprocess.run([str(x) for x in args], env=environment or self.env, cwd=cwd or self.repo,
                                 stdin=subprocess.DEVNULL, capture_output=True, text=True, **kw)
         if check and result.returncode:
             raise AssertionError(str(args[:2]) + ': ' + result.stdout + result.stderr)
@@ -1049,6 +1049,161 @@ def queued_client_death(lab):
     assert task['code'] == 0 and task['outcome'] == 'completed' and marker.exists()
 
 
+def cancelled(lab, label, client):
+    # A cancelled task: released with 130 through the common path, its waiting
+    # client ended with that code and its usual summary, no hold left.
+    lab.done(client, 130)
+    task = lab.released(label)
+    assert task['code'] == 130 and task['outcome'] == 'cancelled', task
+    assert lab.event(label, 'cancel') and lab.event(label, 'release_end')['code'] == 130
+    receipt = json.loads((lab.base / 'receipts' / (task['token'] + '.json')).read_text())
+    assert receipt['code'] == 130 and receipt['outcome'] == 'cancelled' and not receipt['payload_ended']
+    output = (lab.path / (label + '.client.txt')).read_text()
+    assert 'Traceback' not in output, output
+    assert f"heavy: task {task['id']} ({task['lane']}) exit 130, waited " in output, output
+    assert output.splitlines()[-1] == f"heavy: receipt {lab.base / 'receipts' / (task['token'] + '.json')} token {task['token']}"
+    row = next(row.split('\t') for row in (lab.path / 'tmp/logs/heavy.tsv').read_text().splitlines()
+               if row.split('\t')[8] == task['log'])
+    assert row[5] == '130', row
+    assert lab.state()['gate'] is None
+    return task
+
+
+def queued(lab, label):
+    return wait_for(lambda: (task if (task := lab.task(label)) and task['state'] == 'queued' and 'queued task' in
+                             (lab.path / (label + '.client.txt')).read_text() else None), label + ' queued')
+
+
+def refused_replay(lab, task, marker):
+    # The queue entry, run later, finds its token released and runs nothing.
+    lab.q('start', '--group', task['lane'])
+    lab.call(['pueue', 'wait', '--quiet', task['id']], check=False, timeout=20)
+    wait_for(lambda: any(e['source'] == '--task' and e['event'].startswith('refusal:') for e in lab.events()),
+             'late wrapper refused replay')
+    wait_for(lambda: lab.call(['systemctl', '--user', 'is-active', '--quiet', lab.prefix + '-' +
+                               task['token'] + '-observe.service'], check=False).returncode != 0, 'observer ended')
+    assert not marker.exists(), 'cancelled payload ran'
+
+
+def cancel_queued(lab):
+    lab.q('pause', '--wait', '--group', 'build')
+    marker = lab.path / 'must-not-run'
+    client = lab.start('queued-build', args=['touch', str(marker)])
+    task = queued(lab, 'queued-build')
+    # Below the disk floor: a cancel frees a slot, so it never refuses there.
+    floor = dict(lab.env, PLAN_MIN_DISK_GB='999999')
+    assert lab.call([HEAVY, 'true'], check=False, environment=floor).returncode == 2
+    result = lab.call([HEAVY, '--cancel', task['token']], environment=floor)
+    assert result.stdout == f"heavy: cancelled task {task['id']} (build) token {task['token']}, exit 130\n", result
+    task = cancelled(lab, 'queued-build', client)
+    assert not task.get('wrapper') and not task.get('payload_started')
+    again = lab.call([HEAVY, '--cancel', task['token']], check=False)
+    assert again.returncode == 1 and 'not cancelled, already ended' in again.stdout, again
+    refused_replay(lab, task, marker)
+    lab.done(lab.start('progress'))
+
+
+def cancel_running(lab, gate):
+    marker = lab.path / 'payload.json'
+    code = ('import json,os,subprocess,time\nfrom pathlib import Path\n'
+            'child=subprocess.Popen(["setsid","sleep","120"])\n'
+            'Path(' + repr(str(marker)) + ').write_text(json.dumps({"payload":os.getpid(),"child":child.pid}))\n'
+            'time.sleep(120)\n')
+    label = 'running-gate' if gate else 'running-build'
+    client = lab.start(label, gate=gate, code=code)
+    wait_for(marker.exists, 'payload running')
+    pids = json.loads(marker.read_text())
+    token = lab.task(label)['token']
+    if gate:
+        assert lab.state()['gate'] == token
+        assert json.loads(lab.q('group', '--json'))['build']['status'] != 'Running'
+    result = lab.call([HEAVY, '--cancel', token])
+    assert 'heavy: cancelled task' in result.stdout and 'exit 130' in result.stdout, result
+    task = cancelled(lab, label, client)
+    assert task['payload_started'] and task.get('cgroup')
+    assert lab.event(label, 'cancel')['source'] == '--cancel'
+    for name in ('payload', 'child'):
+        assert not live(pids[name]), ('cancel left a process of the scope', name)
+    assert json.loads(lab.q('group', '--json'))['build']['status'] == 'Running'
+    lab.done(lab.start('progress'))
+
+
+def cancel_refusals(lab):
+    proceed = lab.path / 'finish-payload'
+    client = lab.start('owned', code='from pathlib import Path; import time; p=Path(' +
+                       repr(str(proceed)) + ');\nwhile not p.exists(): time.sleep(.02)')
+    wait_for(lambda: lab.event('owned', 'payload_begin'), 'owned payload')
+    task = lab.task('owned')
+    elsewhere, below = lab.path / 'elsewhere', lab.repo / 'sub'
+    elsewhere.mkdir()
+    below.mkdir()
+    rows = [(task['token'], elsewhere, 'cancel refused: the task was submitted from another directory'),
+            (task['token'], below, 'cancel refused: the task was submitted from another directory'),
+            (os.urandom(16).hex(), lab.repo, 'cancel refused: unknown token'),
+            (task['token'].upper(), lab.repo, 'cancel refused: malformed token'),
+            ('../' + task['token'], lab.repo, 'cancel refused: malformed token')]
+    for token, directory, words in rows:
+        result = lab.call([HEAVY, '--cancel', token], check=False, cwd=directory)
+        assert result.returncode == 2 and result.stderr == 'heavy: ' + words + '\n', result
+    for args in (['--cancel'], ['--cancel', task['token'], 'extra']):
+        result = lab.call([HEAVY, *args], check=False)
+        assert result.returncode == 2 and '--cancel TOKEN' in result.stderr, result
+    after = lab.task('owned')
+    assert after['state'] == 'active' and after.get('outcome') is None and not lab.event('owned', 'cancel')
+    assert client.poll() is None
+    proceed.touch()
+    lab.done(client)
+
+
+def interrupted(lab, number, running):
+    marker = lab.path / 'payload-started'
+    if running:
+        code = ('from pathlib import Path; import time; Path(' + repr(str(marker)) + ').touch(); time.sleep(120)')
+    else:
+        lab.q('pause', '--wait', '--group', 'build')
+        code = 'from pathlib import Path; Path(' + repr(str(marker)) + ').touch()'
+    client = lab.start('interrupted', code=code)
+    if running:
+        wait_for(marker.exists, 'payload running')
+    else:
+        queued(lab, 'interrupted')
+    client.send_signal(number)
+    task = cancelled(lab, 'interrupted', client)
+    assert lab.event('interrupted', 'cancel')['reason'] == 'interrupt'
+    assert lab.event('interrupted', 'cancel')['signal'] == number
+    output = (lab.path / 'interrupted.client.txt').read_text()
+    assert 'heavy: interrupted; cancelled task' in output and 'recovery/storage failure' not in output, output
+    if running:
+        assert task['payload_started']
+    else:
+        refused_replay(lab, task, marker)
+    lab.done(lab.start('progress'))
+
+
+def land_interrupt(lab):
+    # A terminal's Ctrl-C reaches the whole foreground group: land, its
+    # capture and heavy. The gate is cancelled and nothing lands.
+    base, head = candidate(lab)
+    marker = lab.path / 'gate-running'
+    output = lab.path / 'land.client.txt'
+    with output.open('w') as stream:
+        land = subprocess.Popen([str(KIT / 'land'), '--local', '--gate', 'touch ' + str(marker) + '; sleep 120'],
+                                env=dict(lab.env, LAND_PREBUILD=''), cwd=lab.repo, start_new_session=True,
+                                stdin=subprocess.DEVNULL, stdout=stream, stderr=subprocess.STDOUT)
+    lab.clients.append(land)
+    wait_for(marker.exists, 'land gate running')
+    os.killpg(land.pid, signal.SIGINT)
+    assert land.wait(timeout=25) == 4
+    text = output.read_text()
+    assert 'Traceback' not in text and 'heavy: interrupted; cancelled task' in text, text
+    task = lab.released('land repo')
+    assert task['code'] == 130 and task['outcome'] == 'cancelled'
+    assert lab.call(['git', 'rev-parse', 'main']).stdout.strip() == base
+    assert lab.call(['git', 'rev-parse', 'HEAD']).stdout.strip() == head
+    assert not (lab.path / 'tmp/gates').exists()
+    lab.done(lab.start('progress'))
+
+
 def candidate(lab):
     base = lab.call(['git', 'rev-parse', 'main']).stdout.strip()
     lab.call(['git', 'switch', '-qc', 'candidate'])
@@ -1380,7 +1535,14 @@ def main():
              ('runtime-missing', lambda lab: policy_refusal(lab, 'missing')),
              ('policy-config-drift', lambda lab: policy_refusal(lab, 'config')),
              ('tree-drift', lambda lab: policy_refusal(lab, 'tree')),
-             ('supplied-policy', supplied_policy), ('overhead', overhead),
+             ('supplied-policy', supplied_policy),
+             ('cancel-queued', cancel_queued),
+             ('cancel-running-build', lambda lab: cancel_running(lab, False)),
+             ('cancel-running-gate', lambda lab: cancel_running(lab, True)),
+             ('cancel-refusals', cancel_refusals),
+             ('interrupt-running', lambda lab: interrupted(lab, signal.SIGINT, True)),
+             ('terminate-queued', lambda lab: interrupted(lab, signal.SIGTERM, False)),
+             ('land-interrupt', land_interrupt), ('overhead', overhead),
              ('real147-overhead', lambda lab: overhead(lab, True))]
     cases.extend(('land-diagnostic-' + ('prebuild-' if prebuild else 'gate-') + point,
                   lambda lab, point=point, prebuild=prebuild: land_diagnostic(lab, point, prebuild))
