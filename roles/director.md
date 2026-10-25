@@ -41,22 +41,22 @@ user's behalf. The roles and the departments together are
 
 ## 2. The session
 
-- **Started by the user** on hel8 in `~/src/rust`, as a background
-  session with remote control, on the 1M window:
-  `claude --bg --remote-control -n director --model 'claude-opus-5-5[1m]'
-  --effort xhigh --autocompact 500000 --dangerously-skip-permissions
-  --settings '{"env": {"POST_NAME": "director"}}' "You are the director;
-  read ~/src/rust/tmp/director/README.md and follow it."` Remote control
-  lets it push to the user's phone. Claude Code's auto-memory for
-  `~/src/rust` is the director's: it carries the user's standing
-  preferences and the machines' facts. Owners run with
-  it off (owners.md, 2).
+- **Started by the user** on hel8 with
+  `~/src/rust/agents/scripts/devel/start-director`, which holds the
+  command: a background session in `~/src/rust` named `director`, with
+  remote control, on the 1M window, at xhigh effort, with `POST_NAME`
+  `director`, told to read `tmp/director/README.md` and follow it. It
+  refuses while a director runs. Remote control lets it push to the
+  user's phone. Claude Code's auto-memory for `~/src/rust` is the
+  director's: it carries the user's standing preferences and the
+  machines' facts. Owners run with it off (owners.md, 2).
 - **Its window** is 500k since 10-23, when the user raised it from 282k:
   each compaction loses detail, and a larger window halves them, at up
   to twice a turn's cost. A new window needs a new session. At the
   first handover after the change, the director starts the next
-  session with the command above instead of clearing its context, and
-  the new session stops the old one once it has read the notes.
+  session with `start-director --handover` (which lets one running
+  director, itself, through) instead of clearing its context, and the
+  new session stops the old one once it has read the notes.
 - **Its timers** live in the session: a new session starts them, and
   they stop for a compaction or a fresh context (below):
   - a cron, `17 */2 * * *`, recurring, with the prompt "Director's

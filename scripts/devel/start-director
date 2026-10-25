@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Start the director, the factory's one coordinating session (roles/director.md 2).
+#   start-director [--handover]
+# The user runs it on hel8. It refuses while a director runs; --handover lets
+# the director start its successor, which stops the old one once it has read
+# the notes.
+set -euo pipefail
+export PATH=$HOME/.local/bin:$PATH
+
+kit=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
+workspace() {
+    local agents
+    agents=$(cd "$kit/../.." && pwd)
+    if [[ $(basename "$agents") == agents ]]; then dirname "$agents"; else echo "$HOME/src/rust"; fi
+}
+root=$(realpath -m "${DEV_ROOT:-$(workspace)}")
+
+case ${1-} in
+    '') allowed=0 ;;
+    --handover) allowed=1 ;;
+    *) echo 'usage: start-director [--handover]' >&2; exit 2 ;;
+esac
+
+# A done session still runs, idle: the live ones are those with a pid.
+live=$(claude agents --json --all | jq -r '[.[] | select(.name == "director" and .pid != null) | .id] | join(" ")')
+read -ra live_ids <<<"$live"
+if ((${#live_ids[@]} > allowed)); then
+    echo "start-director: a director runs ($live); stop it with claude stop <id>, or pass --handover from the director itself" >&2
+    exit 1
+fi
+
+cd "$root"
+exec claude --bg --remote-control -n director --model 'claude-opus-5-5[1m]' \
+    --effort xhigh --autocompact 500000 --dangerously-skip-permissions \
+    --settings '{"env": {"POST_NAME": "director"}}' \
+    "You are the director; read $root/tmp/director/README.md and follow it." </dev/null
