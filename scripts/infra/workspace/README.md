@@ -8,7 +8,8 @@ beside this file is what every agent reads.
 Clone agents, skein, smith, jig, hearth and temper from
 `git@github.com:fabrig-ai/` into `~/src/rust/`, then run
 `agents/scripts/infra/setup --fix`. It links the tools (`heavy`, `land`,
-`record`, `setup`, `post`, `codex-run`) into `~/.local/bin`, and
+`land-set`, `landings`, `repin`, `record`, `setup`, `post`, `codex-run`)
+into `~/.local/bin`, and
 `AGENTS.md`, `CLAUDE.md` and the Claude Code settings
 (`.claude/settings.json`) into the workspace, all to the agents checkout:
 a change to them reaches the machine as that checkout moves. It clones
