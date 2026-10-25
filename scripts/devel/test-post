@@ -102,18 +102,16 @@ elif [[ $# == 2 && $1 == stop ]]; then
     jq --arg id "$2" 'map(if .id == $id then del(.pid) else . end)' \
         "$FIXTURE/sessions.json" >"$FIXTURE/sessions.next"
     mv "$FIXTURE/sessions.next" "$FIXTURE/sessions.json"
-elif [[ $# == 6 && $1 == --bg && $2 == --resume && $4 == --name ]]; then
+elif [[ $# == 4 && $1 == --bg && $2 == --resume ]]; then
     [[ ! -t 0 ]]
     pwd >"$FIXTURE/resume-cwd"
-    printf '%s\n' "$3" "$6" >>"$FIXTURE/resumes"
+    printf '%s\n' "$3" "$4" >>"$FIXTURE/resumes"
     [[ ${FIXTURE_RESUME_FAIL:-0} == 0 ]] || exit 1
     # A resume is unsafe until the old process has actually gone.
     jq -e --arg id "$3" 'all(.[]; (.sessionId // .id) != $id or .pid == null)' "$FIXTURE/sessions.json" >/dev/null
     sleep "${FIXTURE_RESUME_DELAY:-0}"
     jq --arg id "$3" --arg state "${FIXTURE_RESUME_STATE:-working}" \
-        '. + [.[] | select((.sessionId // .id) == $id) |
-              .id="resumed" | .sessionId="resumed-session" | .pid=456 |
-              .state=$state | .startedAt="2027"]' \
+        'map(if (.sessionId // .id) == $id then .pid=456 | .state=$state else . end)' \
         "$FIXTURE/sessions.json" >"$FIXTURE/sessions.next"
     if [[ ${FIXTURE_NEW_SESSION:-0} == 1 ]]; then
         jq '. + [.[0] | .id="new" | .sessionId="new-session" | .pid=789 | .state="done" | .startedAt="2028"]' \
@@ -174,15 +172,15 @@ expect 'done session wakes' "$out" 'status=0' 'woken'
 expect 'resume from session directory' "$(cat "$t/resume-cwd")" "$t/session cwd"
 expect 'resume full id and prompt' "$(cat "$t/resumes")" 'full-session-id' 'Post for sleeping: run post read sleeping and act on it, then start post wait sleeping in the background, and do the same each time it ends.'
 expect 'stop by short id' "$(cat "$t/stops")" short
-expect 'stop before named resume in session cwd' "$(jq -sc --arg cwd "$t/session cwd" '
+expect 'stop before exact unflagged resume in session cwd' "$(jq -sc --arg cwd "$t/session cwd" '
     [.[] | select(.args[0] != "agents")] |
     length == 2 and .[0].args == ["stop","short"] and
-    .[1].args[0:5] == ["--bg","--resume","full-session-id","--name","sleeping"] and
+    .[1].args == ["--bg","--resume","full-session-id","Post for sleeping: run post read sleeping and act on it, then start post wait sleeping in the background, and do the same each time it ends."] and
     .[1].cwd == $cwd' "$t/claude-calls")" true
 expect 'resumed once' "$(wc -l <"$t/resumes")" 2
-expect 'wake follows new id while original stays done without pid' "$(jq -c '
-    any(.[]; .sessionId == "resumed-session" and .state == "working" and .pid != null) and
-    all(.[]; .sessionId != "full-session-id" or (.state == "done" and .pid == null))' "$t/sessions.json")" true
+expect 'wake keeps original id and only one live session' "$(jq -c '
+    any(.[]; .sessionId == "full-session-id" and .state == "working" and .pid != null) and
+    ([.[] | select(.pid != null)] | length == 1)' "$t/sessions.json")" true
 session deliberately-stopped 'done'
 jq 'map(del(.pid))' "$t/sessions.json" >"$t/stopped.json"
 mv "$t/stopped.json" "$t/sessions.json"

@@ -159,15 +159,16 @@ overwrites another.
     running `done` session again, stops it with `claude stop <short id>`
     and waits up to 10 seconds for its pid to go, then resumes it from
     its directory (a resume of a running session would start a copy),
-    `claude --bg --resume <full id> --name NAME "Post for NAME: run post
+    `claude --bg --resume <full id> "Post for NAME: run post
     read NAME and act on it, then start post wait NAME in the
-    background, and do the same each time it ends."`. A resume continues
-    the conversation under a new id, so the tool checks after 10 seconds
-    that the newest session of that name is working or blocked: `woken`,
-    or exit 3. If it's working or blocked, the message is
-    `queued`, since a resume then would start a copy (director.md 5).
-    If it's stopped, failed, interactive or absent: exit 3. A stopped
-    session was ended on purpose, and its parent decides.
+    background, and do the same each time it ends."`. The resume passes
+    no flag, since a flag starts a copy with a new id; the woken session
+    keeps its id. The tool checks after 10 seconds that the newest
+    session of that name is working or blocked: `woken`, or exit 3.
+    If it's working or blocked, the message is `queued`, since a resume
+    then would start a copy (director.md 5). If it's stopped, failed,
+    interactive or absent: exit 3. A stopped session was ended on purpose,
+    and its parent decides.
 - **At a handover** the outgoing session doesn't restart its waiter.
   The new session starts one, which replaces any that is left.
 - **Stuck mail.** The director's `probe.sh` runs `post list --older 15`

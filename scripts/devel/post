@@ -148,7 +148,7 @@ wake() (
             done
             cwd=$(jq -r '.cwd // empty' <<<"$info")
             [[ -d $cwd ]] || cwd=$root
-            if ! (cd -- "$cwd" && claude --bg --resume "$full_id" --name "$name" \
+            if ! (cd -- "$cwd" && claude --bg --resume "$full_id" \
                 "Post for $name: run post read $name and act on it, then start post wait $name in the background, and do the same each time it ends.") </dev/null >/dev/null 2>&1; then
                 unwoken 'resume failed'; return $?
             fi
