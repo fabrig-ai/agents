@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 """Offline records fixtures: two machines, scratch HOME and optional telemetry."""
+from concurrent.futures import ThreadPoolExecutor
 import csv
 import io
 import json
 import os
 import runpy
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
+import traceback
 
 SCRIPT = Path(__file__).resolve().with_name('record')
 REAL_GIT = shutil.which('git')
@@ -38,14 +41,20 @@ class Lab:
                         GIT_ALLOW_PROTOCOL='file', LC_ALL='C.UTF-8')
         # Pause one machine immediately before push; the other can win the race.
         wrapper = self.bin / 'git'
-        wrapper.write_text('#!' + sys.executable + '\nimport os,sys,time\nfrom pathlib import Path\n'
-                           "if 'push' in sys.argv and os.environ.get('PAUSE_PUSH'):\n"
-                           " p=Path(os.environ['PAUSE_PUSH'])\n"
-                           " if not p.exists():\n"
-                           "  p.touch(); until=time.monotonic()+15\n"
-                           "  while not p.with_suffix('.release').exists():\n"
-                           "   assert time.monotonic()<until; time.sleep(.02)\n"
-                           'os.execv(' + repr(REAL_GIT) + ', sys.argv)\n')
+        # A shell wrapper: a Python one costs an interpreter start-up per git
+        # call. PAUSE_PUSH names a suffixless file; its release is PAUSE_PUSH.release.
+        wrapper.write_text('#!/bin/sh\n'
+                           'if [ -n "$PAUSE_PUSH" ]; then\n'
+                           ' for arg; do [ "$arg" = push ] || continue\n'
+                           '  if [ ! -e "$PAUSE_PUSH" ]; then\n'
+                           '   : >"$PAUSE_PUSH"; until=$(($(date +%s) + 15))\n'
+                           '   while [ ! -e "$PAUSE_PUSH.release" ]; do\n'
+                           '    [ "$(date +%s)" -lt "$until" ] || exit 1; sleep .02\n'
+                           '   done\n'
+                           '  fi; break\n'
+                           ' done\n'
+                           'fi\n'
+                           'exec ' + shlex.quote(REAL_GIT) + ' "$@"\n')
         wrapper.chmod(0o700)
         self.a, self.b, self.origin = (root / name for name in ('a', 'b', 'origin.git'))
         self.a.mkdir()
@@ -314,9 +323,12 @@ def setup(lab):
     check = kit / 'infra/setup'
     check.write_text(text.replace('check "$@"', 'fix=${FIX:-0}; failed=0\nok() { :; }; fail() { echo "$*"; failed=1; }\ncheck_records\nexit "$failed"'))
     wrapper = lab.bin / 'git'
-    wrapper.write_text('#!' + sys.executable + '\nimport os,sys\n'
-                       "args=[os.environ['FIXTURE_ORIGIN'] if a=='git@github.com:fabrig-ai/records.git' else a for a in sys.argv[1:]]\n"
-                       'os.execv(' + repr(REAL_GIT) + ', ["git", *args])\n')
+    wrapper.write_text('#!/bin/sh\n'
+                       'for arg; do shift\n'
+                       ' [ "$arg" = git@github.com:fabrig-ai/records.git ] && arg=$FIXTURE_ORIGIN\n'
+                       ' set -- "$@" "$arg"\n'
+                       'done\n'
+                       'exec ' + shlex.quote(REAL_GIT) + ' "$@"\n')
     env = dict(lab.env, DEV_ROOT=str(lab.root / 'workspace'), FIXTURE_ORIGIN=str(lab.origin))
     (lab.root / 'workspace').mkdir()
     result = subprocess.run(['bash', str(check)], env=env, capture_output=True, text=True)
@@ -469,13 +481,27 @@ def telemetry(lab):
 
 
 def main():
+    # The cases share nothing (each has its own Lab, and every subprocess its
+    # own env), so they run at once on threads; results print in case order.
+    cases = (writer, refusals, different_files, name_race, conflict, offline, merged_validation, installation_failures, setup, telemetry)
     with tempfile.TemporaryDirectory(prefix='record-fixture-') as directory:
-        cases = (writer, refusals, different_files, name_race, conflict, offline, merged_validation, installation_failures, setup, telemetry)
-        for number, case in enumerate(cases):
+        def run(number, case):
             root = Path(directory) / str(number)
             root.mkdir()
             case(Lab(root))
-            print(f'ok {number + 1}: {case.__name__}', flush=True)
+        with ThreadPoolExecutor(max_workers=len(cases)) as pool:
+            futures = [pool.submit(run, number, case) for number, case in enumerate(cases)]
+            failed = 0
+            for number, (case, future) in enumerate(zip(cases, futures)):
+                error = future.exception()
+                if error is None:
+                    print(f'ok {number + 1}: {case.__name__}', flush=True)
+                else:
+                    failed += 1
+                    print(f'FAIL {number + 1}: {case.__name__}', flush=True)
+                    traceback.print_exception(error)
+    if failed:
+        sys.exit(f'{failed} of {len(cases)} isolated cases failed')
     print(f'completed {len(cases)} isolated cases')
 
 
