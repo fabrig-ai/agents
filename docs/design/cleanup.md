@@ -34,7 +34,8 @@ GitHub, and the sweep of the six machines' `tmp/` (section 6).
 - **`tidy` deletes what is done** (section 4): landed branches on
   GitHub and here, landed worktrees, ended missions' directories, old
   task and run directories, and any script in `tmp/`. `land` marks what
-  it landed, so that `tidy` never takes new work for landed work.
+  it landed, and a copy must match `main` in content as well as in
+  names, so that `tidy` never takes new work for landed work.
 - **Nobody runs it by hand** (section 5): `land` and `land-set` after
   each push, `record` after a closing note, and the director's check on
   each machine.
@@ -63,7 +64,7 @@ GitHub, and the sweep of the six machines' `tmp/` (section 6).
 
 | Path | Whose | What |
 |---|---|---|
-| `heavy/`, `logs/`, `gates/`, `landing-turn/`, `land-set/` | `heavy`, `land`, `land-set` | receipts, `heavy.tsv`, the gates' stamps, the landing turns, the sets' locks and state |
+| `heavy/`, `logs/`, `gates/`, `landing-turn/`, `land-set/` | `heavy`, `land`, `land-set`, `tidy` | receipts, `heavy.tsv`, `tidy.log` and its lock, the gates' stamps, the landing turns, the sets' locks and state |
 | `kache/`, `lab/`, `after-landing/` | their tools | the build cache's binary, the lab's store, after-landing's worktrees and locks |
 | `post/`, `codex-run/` | `post`, `codex-run` | the mailboxes, the runs and `runs.tsv` |
 | `machine.env` | `setup` | the machine's floor and limits |
@@ -81,61 +82,114 @@ GitHub, and the sweep of the six machines' `tmp/` (section 6).
 
 ## 4. tidy
 
-`scripts/devel/tidy [--dry-run] [REPO | --mission M]`, under a lock per
-machine, safe to run at any time; `--dry-run` prints what it would do.
-Every step skips what a process holds (its working directory, or a file
-it has open, is inside), and keeps, and reports, anything with work on
-no remote.
+`scripts/devel/tidy [--dry-run] [REPO... | --mission M]`, Python, under
+a lock per machine (`tmp/logs/tidy.lock`; a second run waits for it),
+safe to run at any time. `--dry-run` takes no lock, deletes nothing and
+prints what it would do. With REPO, it runs steps 1 to 3 and 7 for
+those repositories; with `--mission M`, step 4 for M; with neither,
+every step.
 
-1. **GitHub's landed branches,** of REPO or of each repository. A
-   branch goes when:
-   - it has commits off `main`, each with a twin on `main` (the same
-     author, author date and subject, which a rebase keeps and `land`'s
-     trailers leave alone): a copy of landed work; or
-   - `land` marked its name landed, and its tip is on `main`.
-   A branch with no commit off `main` and no mark stays: it is new work.
-2. **Local landed branches,** by the same rules, unless a worktree has
-   one checked out.
-3. **Landed worktrees:** a worktree whose branch carries `land`'s mark
-   at its HEAD, with no change and nothing untracked, goes with its
-   target and its branch.
+- **The repositories** are the workspace's six (`agents`, `skein`,
+  `smith`, `jig`, `hearth`, `temper`), at their primary checkouts in
+  `~/src/rust/<repo>`; `records` has no branches. `main` itself, a
+  primary checkout and a locked worktree are never touched.
+- **First, fresh references:** `git fetch --prune origin` in each
+  repository a step reads, and `record pull` before step 4. A step
+  whose fetch or pull fails is skipped, and reported.
+- **Held by a process:** a path is held when a process of the user's has
+  its working directory, or a file open, inside it (`/proc/*/cwd` and
+  `/proc/*/fd`). Every step skips what is held, and reports it.
+- **Work on no remote:** a commit on no branch of origin, a change to a
+  tracked file, or an untracked file (ignored files, such as `target/`,
+  are no work). What holds it is kept and reported.
+
+**Landed.** A branch, local or on GitHub, is landed when either holds:
+- **A copy:** it has commits off `origin/main`, each with a twin on
+  `origin/main` (the same author, author date and subject, which a
+  rebase keeps and `land`'s trailers leave alone), and it adds nothing
+  to `main`: merging it into `origin/main` (`git merge-tree
+  --write-tree`) leaves `origin/main`'s tree, or each commit's patch-id
+  equals its twin's. Names alone are not enough: an amend keeps the
+  author date and the subject, so a fix amended after its landing has a
+  twin and differs. A branch whose commits all have twins but whose
+  content differs is kept, and reported.
+- **Marked:** `land` marked it landed, and its tip is on `origin/main`.
+
+A branch with no commit off `main` and no mark stays, unreported: it is
+new work. There is no keep list: a landed branch's commits are on
+`main`, and a record names a commit, never a branch.
+
+1. **GitHub's landed branches,** of REPO or of each repository:
+   deleted with `git push origin :NAME`. One already gone is done.
+2. **Local landed branches,** unless a worktree has one checked out.
+3. **Landed worktrees:** a worktree, outside section 3's tools'
+   directories, whose branch is landed, or whose detached HEAD is on
+   `origin/main`, with no work on no remote: removed (`git worktree
+   remove`, its `target/` inside it with it), then its branch.
 4. **Ended missions' directories:** `owners/<m>/`, with its milestones'
    `owners/<m>-m<N>/`, whose README in the record says `ended` or
-   `abandoned`, once no worktree in it holds a commit on no GitHub
-   branch or an uncommitted change. One that does stays, and is
-   reported.
+   `abandoned`, once no worktree in it holds work on no remote: its
+   worktrees removed, then the directory. One that holds some stays,
+   and is reported, naming each worktree. A directory in `owners/`
+   with no README in the record is kept, and reported.
 5. **Old directories:** the director's `tasks/<t>/` and `codex-run`'s
-   run directories a week after their last change, on step 4's
-   condition. The `runs.tsv` row stays.
-6. **Scripts** in `tmp/` outside worktrees and section 3's tools
-   (section 2).
-7. **Stale references:** `git fetch --prune` in each repository it
-   touched.
+   run directories a week after their last change (the newest mtime
+   inside), on step 4's condition. The `runs.tsv` row stays.
+6. **Scripts** in `tmp/` (section 2: a name ending `.sh`, `.bash`,
+   `.py`, `.pl` or `.rb`, or a file starting with `#!`), outside any
+   Git working tree or repository (a worktree, a clone, a bare
+   repository) and section 3's tools' directories. A copied kit kept as
+   evidence is a clone, so its scripts stay with it.
+7. **Stale worktree entries:** `git worktree prune` in each repository
+   it touched.
 8. **The rest** at the top of `tmp/`, outside section 3's table:
    reported, never deleted.
 
-- **`land`'s mark.** After its push, `land` sets `branch.<name>.landed`
-  to the commit it landed, in the repository's config; `land-set` does
-  so for each branch of its set. A commit after the landing moves the
-  tip off the mark, and the branch is work again. Deleting the branch
-  drops the mark.
+- **`land`'s mark.** After a landing that pushed, or landed on the
+  local `main` (`--local`), `land` sets `branch.<name>.landed` to the
+  commit it landed, in the repository's config, which its worktrees
+  share; `--no-push` sets none. `land-set` sets it for each branch of
+  its set after that branch's push; a pin-only repository has no branch
+  of the set. A commit after the landing moves the tip off `main`, and
+  the branch is work again. Deleting the branch drops the mark.
 - **The caller's own worktree** is in use while `land` runs, its shell
   inside it, so `tidy` takes it at its next run on the machine: the
-  next landing, the mission's end or the director's check. `land`
-  clears its target at once.
-- **Its output:** a line for each thing deleted or kept, and its exit:
-  0 done, 1 something kept that needs a decision (step 4's), 2 refused.
+  next landing, the mission's end or the director's check. After the
+  landing, `land` clears its target at once: the worktree's `target/`,
+  when it is a directory inside the worktree and the worktree is not a
+  primary checkout. A target elsewhere (`CARGO_TARGET_DIR`) may be
+  shared, and stays. `land-set` does the same for each worktree of its
+  set it landed.
+- **Undoing a deletion.** Each line names the commit, and the deleting
+  machine keeps the objects until Git prunes them (two weeks):
+  `git branch NAME COMMIT`, and a push for a GitHub branch, restore
+  it.
+- **Its output:** a line for each thing deleted or kept, `tidy: deleted
+  KIND WHAT COMMIT (REASON)` or `tidy: kept KIND WHAT: REASON`, and
+  `tidy: would delete` under `--dry-run`. KIND is `github-branch`,
+  `branch`, `worktree`, `mission`, `directory`, `script` or `entry`;
+  WHAT is `REPO:NAME` for a branch, else the path. New work prints
+  nothing.
+- **Its exit:** 0 done; 1 something kept that needs a decision (step
+  4's work on no remote, an `owners/` directory with no README, a
+  branch landed in name only, an entry outside section 3); 2 refused
+  (usage, no workspace); 3 a step failed (a fetch, a push), the rest
+  done.
 
 ## 5. Who runs it
 
-- **`land` and `land-set`,** in the background after a push, for the
-  repositories they pushed. As with `after-landing`, they don't wait
-  for it; its lines go to `tmp/logs/tidy.log`.
-- **`record commit`** of a `closing.md` whose README says `ended`.
-  First it refuses (exit 2) while a worktree in the mission's directory
-  on this machine holds work on no GitHub branch, naming each: push it
-  and name it in the closing note's "what is left", or delete it. Then
-  it commits, and runs `tidy --mission M`.
+- **`land` and `land-set`,** after the push, for the repositories they
+  pushed: started detached (`setsid`, stdin from `/dev/null`), its
+  lines appended to `tmp/logs/tidy.log`. They don't wait for it, and
+  its exit changes theirs in nothing. `LAND_TIDY` names the command,
+  by default the kit's `tidy`; empty, none runs, as the fixtures set it.
+- **`record commit`** of a `missions/<m>/closing.md` whose README, as
+  committed with it or before, says `ended` or `abandoned`. First it
+  refuses (exit 2) while a worktree under `tmp/owners/<m>/` or
+  `tmp/owners/<m>-m<N>/` on this machine holds work on no remote,
+  naming each: push it and name it in the closing note's "what is
+  left", or delete it. Then it commits, and starts `tidy --mission M`
+  as `land` starts `tidy` (`RECORD_TIDY`, as `LAND_TIDY`).
 - **The director's check** (director.md 7) runs `tidy` on each machine,
   for the machines with no landing, and takes a decision on each line
   of an exit 1.
@@ -171,10 +225,14 @@ no remote.
    workspace's `AGENTS.md`, implementer.md 3 and 4, owners.md 2 and 5,
    qa.md 1, director.md 6 and 12, infra.md 1, README.md 4, records.md 6
    and 7.
-2. **Infra builds `tidy`** in `scripts/devel/`, with fixtures on
-   scratch repositories and a scratch `tmp/` (infra.md 2), `land`'s and
-   `land-set`'s mark and call, and `record`'s check and call (sections
-   4 and 5).
+2. **Infra builds `tidy`** in `scripts/devel/`, with its fixtures,
+   `test-tidy`, on scratch repositories and a scratch `tmp/` (infra.md
+   2), `land`'s and `land-set`'s mark, target and call, and `record`'s
+   check and call (sections 4 and 5). Two tasks, side by side: `tidy`
+   and `test-tidy`; the mark, the calls and `record`'s check, with
+   their fixtures. Sections 4 and 5 were completed for them on 10-25:
+   the copy's content check, the worktree rule without the mark, the
+   output and exits.
 3. **The roles' edits for the tools** land with them: owners.md 4.5
    (`land` clears the target, `tidy` the rest) and 6 (`record`'s
    check), director.md 7 (`tidy` in the check), records.md 7.
