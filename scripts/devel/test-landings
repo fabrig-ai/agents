@@ -14,7 +14,7 @@ import time
 os.umask(0o077)
 SCRIPT = Path(__file__).resolve().with_name('landings')
 PYTHON = sys.executable
-# The first read's deadline: well above the delayed stand-in's .08 s, even under load.
+# The first read's deadline, which remote_hang waits out.
 READ = '1'
 
 
@@ -61,8 +61,10 @@ class Lab:
         return result
 
     def following(self, rows, status=0, before=None):
-        with subprocess.Popen([PYTHON, '-I', str(SCRIPT), 'wait', 'fixture/m1', '--timeout', '3'],
-                              cwd=self.root, env=self.env, stdin=subprocess.DEVNULL,
+        # However late the append comes under load, an unreadable feed is not yet unreachable.
+        env = dict(self.env, LANDINGS_UNREACHABLE='30')
+        with subprocess.Popen([PYTHON, '-I', str(SCRIPT), 'wait', 'fixture/m1', '--timeout', '20'],
+                              cwd=self.root, env=env, stdin=subprocess.DEVNULL,
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as proc:
             try:
                 time.sleep(.12)
@@ -70,7 +72,7 @@ class Lab:
                 if before:
                     before()
                 self.append(*rows)
-                out, err = proc.communicate(timeout=4)
+                out, err = proc.communicate(timeout=25)
                 assert proc.returncode == status, (proc.returncode, out, err)
                 return out
             finally:
@@ -284,7 +286,8 @@ def remote_first_read(lab):
     lab.ssh("with Path(os.environ['FIXTURE_FEED']).with_suffix('.reads').open('a') as out:\n"
             "    out.write('read\\n')\n"
             "time.sleep(.08)\nsys.stdout.buffer.write(Path(os.environ['FIXTURE_FEED']).read_bytes())\n")
-    env = dict(lab.env)
+    # A first read far longer than the stand-in's delay, however slow its start-up under load.
+    env = dict(lab.env, LANDINGS_READ='10')
     del env['LANDINGS_FEED']
     reads = 0
     for timeout_value in ('0', '.01'):
@@ -318,6 +321,15 @@ def run_case(case):
         return time.monotonic() - case_start
 
 
+def read_default(lab):
+    # The fixtures shorten the first read; the tool itself must still default to 15 s.
+    tree = ast.parse(SCRIPT.read_text())
+    defaults = [ast.literal_eval(node.args[1]) for node in ast.walk(tree)
+                if isinstance(node, ast.Call) and len(node.args) == 2
+                and isinstance(node.args[0], ast.Constant) and node.args[0].value == 'LANDINGS_READ']
+    assert defaults == ['15'], defaults
+
+
 def main():
     start = time.monotonic()
     cases = (status_view, last_two, already_done, retry_commits, latest_first_line,
@@ -325,7 +337,7 @@ def main():
              appended_done, appended_stopped, absent_then_present, timeout,
              unreadable_status, unreadable_wait, unreadable_recovers,
              timeout_before_unreachable, malformed_lines, remote_command,
-             remote_failure, remote_hang, remote_first_read, invalid_arguments)
+             remote_failure, remote_hang, remote_first_read, invalid_arguments, read_default)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--case', action='append', choices=[case.__name__ for case in cases])
     selected = parser.parse_args().case
