@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
-"""Land one closed set of branches, upstream first, under a connection-held lock."""
+"""Land one closed set of branches, upstream first, under a connection-held lock.
+
+With --prove, gate the set without the lock and push no main: a later
+land-set of the set on this machine then finds each gate in the cache,
+unless a main has moved since (landing-proof.md).
+"""
 import argparse
 import ctypes
 from datetime import datetime, timezone
+import fcntl
 import json
 import math
 import os
@@ -213,8 +219,36 @@ class SetLock:
             self.lost = True
 
 
+class NoLock:
+    """A prove holds no lock: it moves no main."""
+    lost = False
+
+    def tick(self):
+        pass
+
+    def boundary(self):
+        pass
+
+    def close(self):
+        pass
+
+
 def repo_name(url):
     return url.rstrip('/').rsplit('/', 1)[-1].rsplit(':', 1)[-1].removesuffix('.git')
+
+
+def fetch(runner, path):
+    # Proves share the primaries' refs with landing runs, so a ref lock may
+    # be busy for a moment: try again, as land's fetch does.
+    for wait in (1, 2, 4):
+        if runner.run(path, ['git', 'fetch', 'origin'], check=False, quiet=True)[0] == 0:
+            return
+        deadline = time.monotonic() + wait
+        while time.monotonic() < deadline:
+            if runner.lock:
+                runner.lock.tick()
+            time.sleep(.1)
+    runner.git(path, 'fetch', 'origin')
 
 
 def validate(runner, path, name, branch=True):
@@ -224,8 +258,11 @@ def validate(runner, path, name, branch=True):
     runner.git(path, 'rev-parse', '--verify', 'HEAD^{commit}')
     require(repo_name(runner.git(path, 'remote', 'get-url', 'origin')) == name, f'{name}: wrong origin')
     if branch:
-        require(not runner.git(path, 'status', '--porcelain=v1', '--untracked-files=all',
-                               '--ignore-submodules=none'), f'{name}: worktree must be clean')
+        # No optional index lock: this runs before the set's own flock, and
+        # may meet another run of the set committing in the same worktree.
+        require(not runner.run(path, ['git', 'status', '--porcelain=v1', '--untracked-files=all',
+                                      '--ignore-submodules=none'], quiet=True,
+                               env=dict(GIT_OPTIONAL_LOCKS='0'))[1], f'{name}: worktree must be clean')
         status, ref = runner.run(path, ['git', 'symbolic-ref', '--quiet', 'HEAD'], check=False, quiet=True)
         require(status == 0 and ref != 'refs/heads/main', f'{name}: expected named branch other than main')
         for state in ('rebase-merge', 'rebase-apply', 'MERGE_HEAD'):
@@ -387,11 +424,60 @@ def write_state(path, label, landed):
     pending.replace(path)
 
 
-def gate_step(runner, path, name, label, landed, candidates, root, mains):
-    runner.git(path, 'fetch', 'origin')
+def read_proof(path, label, host):
+    """The pin-only commits a prove on this machine made, by repository."""
+    try:
+        proof = json.loads(path.read_text())
+        repos = proof['repos']
+        if (proof['schema'] != 'land-set-proof-v1' or proof['set'] != label or proof['machine'] != host
+                or not re.fullmatch('[0-9a-f]{32}', proof['token'])):
+            return None, {}
+        return proof['token'], {name: entry['commit'] for name, entry in repos.items()
+                                if entry['pin_only'] and re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}',
+                                                                      entry['commit'])}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None, {}
+
+
+def write_proof(runner, path, label, host, token, spec, paths, candidates, bases):
+    repos = {name: dict(base=bases[name], commit=commit,
+                        tree=runner.git(paths[name], 'rev-parse', commit + '^{tree}'),
+                        pin_only=spec['repos'][name] == 'pin-only')
+             for name, commit in candidates.items()}
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    pending = path.with_suffix('.tmp')
+    with pending.open('w') as out:
+        json.dump(dict(schema='land-set-proof-v1', set=label, machine=host, token=token,
+                       time=datetime.now(timezone.utc).isoformat(), repos=repos), out)
+        out.write('\n')
+        out.flush()
+        os.fsync(out.fileno())
+    pending.replace(path)
+
+
+def reuse(runner, path, proved):
+    """Take the proved commit for this repin's when they have the same parent and tree.
+
+    A pin-only repin commits afresh each run, and a new commit would make
+    every downstream pin it, and gate again. The proved commit differs
+    from it only in its dates and the gate's trailers.
+    """
+    status, _ = runner.run(path, ['git', 'cat-file', '-e', proved + '^{commit}'], check=False, quiet=True)
+    if status or runner.git(path, 'rev-parse', 'HEAD') == proved:
+        return
+    tree, parent, head_tree, head_parent = runner.git(
+        path, 'rev-parse', proved + '^{tree}', proved + '^', 'HEAD^{tree}', 'HEAD^').splitlines()
+    if (tree, parent) == (head_tree, head_parent):
+        runner.git(path, 'reset', '--soft', proved)
+
+
+def gate_step(runner, path, name, label, landed, candidates, root, mains, proved=None):
+    fetch(runner, path)
     base = runner.git(path, 'rev-parse', 'origin/main')
     rebase(runner, path, base)
     repin(runner, path, name, label, landed, candidates, root, mains)
+    if proved and runner.git(path, 'rev-parse', 'HEAD') != base:
+        reuse(runner, path, proved)
     if runner.git(path, 'rev-parse', 'HEAD') == base:
         require(not any(up in landed or up in candidates for up in UPSTREAM[name]),
                 f'{name}: no change after an upstream landed or gated; set is incomplete', 1)
@@ -405,8 +491,14 @@ def gate_step(runner, path, name, label, landed, candidates, root, mains):
 def push_step(runner, path, name, candidate):
     code, _, result = land(runner, path)
     commit = runner.git(path, 'rev-parse', 'HEAD')
+    # land's own push is the evidence: a fetch from another URL than the
+    # push's may not see it yet (configuring-3, 10-25). It holds only for a
+    # push URL that names this repository, as validate checks the fetch's.
+    if (result and result.get('pushed') is True and result.get('commit') == commit
+            and repo_name(runner.git(path, 'remote', 'get-url', '--push', 'origin')) == name):
+        return commit, code, result
     try:
-        runner.git(path, 'fetch', 'origin')
+        fetch(runner, path)
         for published in dict.fromkeys((commit, candidate)):
             found, _ = runner.run(path, ['git', 'merge-base', '--is-ancestor', published, 'origin/main'],
                                   check=False, quiet=True)
@@ -424,19 +516,24 @@ def push_step(runner, path, name, candidate):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--prove', action='store_true',
+                        help='gate the set without the set lock, and push no main')
     parser.add_argument('setfile')
     args = parser.parse_args()
+    prove = args.prove
     runner = Runner()
     root = Path(os.environ.get('DEV_ROOT', str(Path.home() / 'src/rust')))
     tmp = Path(os.environ.get('DEV_TMP', str(root / 'tmp'))).resolve()
     lock, spec, summary, current = None, None, {}, None
     fixture, paths, staging, failed = None, {}, {}, None
-    candidates, bases, made = {}, {}, set()
+    candidates, bases, made, proved, warnings = {}, {}, set(), {}, []
     announced = cleaning = terminal = False
     token = secrets.token_hex(16)
     host = re.sub('[^A-Za-z0-9_.-]', '-', socket.gethostname()).lstrip('._-')[:64] or 'local'
 
     def event(kind, **fields):
+        if prove:
+            fields['mode'] = 'prove'
         feed(runner, fixture, dict(time=datetime.now(timezone.utc).isoformat(), set=spec['set'],
                                    event=kind, host=host, token=token, **fields))
 
@@ -475,7 +572,7 @@ def main():
                 current = name
                 if name in landed:
                     path = paths[name]
-                    runner.git(path, 'fetch', 'origin')
+                    fetch(runner, path)
                     commit = landed[name]
                     code, _ = runner.run(path, ['git', 'merge-base', '--is-ancestor', commit, 'origin/main'],
                                          check=False, quiet=True)
@@ -485,15 +582,32 @@ def main():
                     continue
                 if spec['repos'][name] == 'pin-only' and name not in made:
                     primary = root / name
-                    path = tmp / 'land-set' / token / name
+                    # One path per set, not per run: the gate policy names
+                    # the gate's absolute path, so a proof's cached gates hold
+                    # only in the same worktree. The set's flock keeps it this
+                    # run's alone; a failed or killed run's leftover goes
+                    # first, with its branch.
+                    path = tmp / 'land-set' / 'worktrees' / quote(spec['set'], safe='') / name
+                    leftover = ''
+                    if path.exists():
+                        _, leftover = runner.run(path, ['git', 'symbolic-ref', '--quiet', 'HEAD'],
+                                                 check=False, quiet=True)
+                        runner.run(primary, ['git', 'worktree', 'remove', '--force', str(path)],
+                                   check=False, quiet=True)
+                        shutil.rmtree(path, ignore_errors=True)
+                    runner.git(primary, 'worktree', 'prune')
+                    if leftover.startswith('refs/heads/land-set/'):
+                        runner.run(primary, ['git', 'branch', '-D', leftover.removeprefix('refs/heads/')],
+                                   check=False, quiet=True)
                     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-                    runner.git(primary, 'fetch', 'origin')
+                    fetch(runner, primary)
                     runner.git(primary, 'worktree', 'add', '-b', f'land-set/{token}/{name}',
                                str(path), 'origin/main')
                     paths[name] = path
                     made.add(name)
                 path = paths[name]
-                result = gate_step(runner, path, name, spec['set'], landed, candidates, root, mains)
+                result = gate_step(runner, path, name, spec['set'], landed, candidates, root, mains,
+                                   proved.get(name) if spec['repos'][name] == 'pin-only' else None)
                 if result is None:
                     summary[name] = 'skipped'
                     remove_pin_only(name)
@@ -520,7 +634,7 @@ def main():
                     continue
                 lock.boundary()
                 current = name
-                runner.git(paths[name], 'fetch', 'origin')
+                fetch(runner, paths[name])
                 if runner.git(paths[name], 'rev-parse', 'origin/main') != bases[name]:
                     moved.append(index)
                 current = None
@@ -552,17 +666,39 @@ def main():
             fixture = Path(fixture).resolve()
             require(os.environ.get('HEAVY_RECOVERY_FIXTURE') == '1' and fixture != tmp
                     and fixture.is_relative_to(tmp), 'invalid fixture directory', 5)
-        announced = True
-        event('waiting')
-        lock = SetLock(tmp, fixture, token, host)
-        runner.lock = lock
-        lock.acquire()
-        event('started')
         state = tmp / 'land-set' / 'state' / (quote(spec['set'], safe='') + '.json')
+        proof = tmp / 'land-set' / 'proofs' / (quote(spec['set'], safe='') + '.json')
+        # One run of a set at a time on this machine, for its worktrees: a
+        # prove takes no set lock. The lock file is retained.
+        state.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        own = open(state.with_suffix('.lock'), 'a')
+        try:
+            fcntl.flock(own, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise Failure(2, 'another land-set run of this set is active on this machine') from None
+        announced = True
+        if prove:
+            lock = NoLock()
+            runner.lock = lock
+            proof.unlink(missing_ok=True)
+            event('proving')
+        else:
+            proof_token, proved = read_proof(proof, spec['set'], host)
+            event('waiting')
+            lock = SetLock(tmp, fixture, token, host)
+            runner.lock = lock
+            lock.acquire()
+            event('started', **(dict(proof=proof_token) if proof_token else {}))
         landed = read_state(state, spec['set'], paths)
         gates(0)
+        if prove:
+            write_proof(runner, proof, spec['set'], host, token, spec, paths, candidates, bases)
+            for name in list(made):
+                remove_pin_only(name)
+            for name, commit in candidates.items():
+                summary[name] = 'proved ' + commit + ' (not pushed)'
         for index, name in enumerate(names):
-            if name not in candidates:
+            if prove or name not in candidates:
                 continue
             lock.boundary()
             current = name
@@ -576,14 +712,21 @@ def main():
                 event('landed', repo=name, commit=commit, **(dict(result=outcome) if outcome else {}))
                 if code:
                     print(f'land-set: {name}: landed {commit} despite land failing ({code})', flush=True)
-            if code:
+            # 5 after a push: the commit landed, and only this machine's main
+            # did not follow it.
+            if code == 5 and commit:
+                summary[name] += '; the local main did not follow (5)'
+                warnings.append(f'{name}: the local main did not follow (5)')
+            elif code:
                 raise Failure(code if code > 0 else 128 - code, f'{name}: land failed ({code})', outcome)
             remove_pin_only(name)
             current = None
             if commit != candidate:
                 gates(index + 1)
         lock.boundary()
-        state.unlink(missing_ok=True)
+        if not prove:
+            state.unlink(missing_ok=True)
+            proof.unlink(missing_ok=True)
     except (Failure, OSError, ValueError, KeyError, TypeError) as error:
         status = error.status if isinstance(error, Failure) else 1
         failed = error.result if isinstance(error, Failure) else None
@@ -628,7 +771,7 @@ def main():
                     fields['result'] = failed
                 event('stopped', **fields)
             else:
-                event('done')
+                event('proved' if prove else 'done', **(dict(warnings=warnings) if warnings else {}))
         if lock:
             lock.close()
         runner.lock = None
@@ -636,6 +779,8 @@ def main():
             shutil.rmtree(runner.results, ignore_errors=True)
         for name, result in summary.items():
             print(f'land-set: {name}: {result}', flush=True)
+        if prove and not status:
+            print(f'land-set: proved; land it on {host} with land-set {args.setfile}', flush=True)
     return status
 
 

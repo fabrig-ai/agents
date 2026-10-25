@@ -184,6 +184,46 @@ def last_event(lab):
         '  queued: waiting since 2026-10-24T12:03:00+00:00 on fixture-host; last event 12:10Z']
 
 
+def proving(lab):
+    # A prove holds no lock: it shows as in flight, and never ends a landing's wait.
+    lab.append(record(event='waiting'), record(event='started', minute=1),
+               record('proved', 'proving', 'p1', 2, mode='prove'),
+               record('proved', 'proved', 'p1', 3, mode='prove'),
+               record('proving', 'proving', 'p2', 4, mode='prove'),
+               record('proving', 'gated', 'p2', 5, mode='prove', repo='jig', commit='c' * 40),
+               record('fixture/m1', 'proving', 'p3', 6, mode='prove'),
+               record('fixture/m1', 'proved', 'p3', 7, mode='prove'))
+    assert lab.run('--last', '0').stdout.splitlines() == [
+        'in flight:',
+        '  fixture/m1: running (holds set lock) since 2026-10-24T12:01:00+00:00 on fixture-host; last event 12:01Z',
+        '  proving: proving (no lock) since 2026-10-24T12:04:00+00:00 on fixture-host; last event 12:05Z; last gated jig ccccccccc']
+    lab.run('wait', 'fixture/m1', '--timeout', '0', status=3)
+    lab.run('wait', 'proved', '--timeout', '0', status=3)
+
+
+def report_proves(lab):
+    gate = lambda kind, run: dict(repo='jig', machine='fixture-host',
+                                  prebuild=dict(wait_s=0, run_s=60, exit=0) if kind == 'ran' else None,
+                                  gate=dict(kind=kind, wait_s=0, run_s=run, exit=0, steps={}))
+    lab.append(record(event='proving', token='p', minute=0, mode='prove'),
+               record(event='gated', token='p', minute=4, mode='prove', repo='jig', commit='a' * 40,
+                      result=gate('ran', 30)),
+               record(event='proved', token='p', minute=5, mode='prove'),
+               record(event='waiting', token='l', minute=10),
+               record(event='started', token='l', minute=11, proof='p'),
+               record(event='gated', token='l', minute=11, repo='jig', commit='a' * 40,
+                      result=gate('cached', 0)),
+               record(event='landed', token='l', minute=12, repo='jig', commit='a' * 40),
+               record(event='done', token='l', minute=12))
+    lines = lab.run('report').stdout.splitlines()
+    row = lambda first: next(line.split() for line in lines if line.split()[:1] == [first])
+    assert row('jig')[1:4] == ['1', '1', '0'], lines  # ran, cached, failed
+    sets = lines.index(next(line for line in lines if line.startswith('set runs')))
+    proves = lines.index(next(line for line in lines if line.startswith('proves')))
+    assert lines[sets + 2].split() == ['fixture/m1', '1', '1', '0', '1', '1:00', '1:00', '1:00', '1:00'], lines
+    assert lines[proves + 2].split() == ['fixture/m1', '1', '1', '0', '5:00', '5:00'], lines
+
+
 def event_dates(lab):
     lab.append(dict(record(event='waiting'), time='2026-10-23T12:00:00+00:00'),
                record(event='started'),
@@ -333,7 +373,7 @@ def read_default(lab):
 def main():
     start = time.monotonic()
     cases = (status_view, last_two, already_done, retry_commits, latest_first_line,
-             history_only, truncated_start, last_event, event_dates,
+             history_only, truncated_start, last_event, proving, report_proves, event_dates,
              appended_done, appended_stopped, absent_then_present, timeout,
              unreadable_status, unreadable_wait, unreadable_recovers,
              timeout_before_unreachable, malformed_lines, remote_command,

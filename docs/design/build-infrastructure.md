@@ -351,17 +351,43 @@ units. It requires no destructive cache or ledger cleanup.
 
 ## 8. Advisory landing turn
 
-`land` has an opt-in advisory turn before its host repository
-lock and build-lane prebuild. Only remote code landings whose repository
-name is `temper` enter it. `~/.config/agents-land-turn/enabled` containing
-`ssh` or `local` enables it, overriding environment mode and holder with that
-mode and the `land-turn.py` beside `land`. Removal turns off future
-ordinary invocations; without it, the `LAND_TURN=1` environment fixture
-interface below remains available. Invalid contents or read failure fail open.
-`--docs`, `--local` and other repository names bypass it even when opted
-in. The original arguments are retained across the guarded child entry.
-The gate, receipt validation, retry and fast-forward push remain land's
-protection; the advisory turn does not authorize a push.
+`land`'s opt-in advisory turn is the set lock, land-set's (section 10): a
+landing that pushes to skein, smith, hearth, jig or temper takes it before
+its host repository lock, so that every write to those `main`s is ordered
+and none moves under a set's run (landing-flow.md, 9.2). The repository is
+its checkout's directory, or a bare clone's name less `.git`; it is the
+set's by that name or by `origin`'s.
+
+- **A code landing proves first,** without the lock: `land --no-push` with
+  the same arguments and `LAND_TURN_ACTIVE=1`, its prebuild and gate
+  included. A red or a refusal never takes the lock, and its result is
+  land's. A green proof's output goes to stderr, so that stdout and
+  `LAND_RESULT` hold only the landing's.
+- **Under the lock it lands only while the proof holds:** the gate is a
+  cache hit, and the tip is the proof's commit, its trailers already in
+  place. When `main` moved meanwhile, that pass runs no build and exits
+  10 (`LAND_PROVED=1`), and land gives the lock back and proves again.
+  The third landing pass gates under the lock, so that a busy `main`
+  cannot starve a landing. Otherwise a `main` that moved during a prove
+  would make the landing gate while holding every set repository's lock;
+  a temper regate after a moved `main` took 161 s bare on an idle
+  hetzner2 (the build-efficiency session, 10-25), and longer through
+  queues.
+- **`--docs`** takes the lock for its rebase and push, with no proof.
+- **No turn:** `--local`, `--no-push`, other repositories (agents), and
+  land-set's own commands, which run with `LAND_TURN_ACTIVE=1` under the
+  lock land-set holds. `--no-push` takes no host repository lock either:
+  it moves no `main`, and a prove holding it would leave a landing under
+  the set lock waiting on that machine.
+
+`~/.config/agents-land-turn/enabled` containing `ssh` or `local` enables
+it, overriding environment mode and holder with that mode and the
+`land-turn.py` beside `land`. Removal turns off future ordinary
+invocations; without it, the `LAND_TURN=1` environment fixture interface
+below remains available. Invalid contents or read failure fail open. The
+original arguments are retained across the guarded child entry. The gate,
+receipt validation, retry and fast-forward push remain land's protection;
+the advisory turn does not authorize a push.
 
 Director 612 approves hetzner3 as the coordinator. There is one process
 per connection, a retained repository-specific flock, and no listener,
@@ -396,10 +422,9 @@ hostname `debian-16gb-hel1-3`. Every host sets the explicit coordinator
 `LAND_TURN_HOLDER`. A wrong local hostname fails open. Hetzner4 uses
 strict SSH too and fails open until the director verifies its trust and
 auth; no setup is attempted by the client.
-Set `LAND_TURN=1` for temper only after the whole fleet has moved and the
-director's explicit activation word. No activation or fleet saving is
-established by disposable acceptance. The first benefit window is the 24
-hours after activation; M4 repin is separate.
+Until every machine's kit carries the set lock, an older kit's temper
+landing takes the `temper` turn instead, which orders temper landings
+only among themselves, and its other landings take none.
 
 The SSH client sends a single zero byte immediately and every five
 seconds while queued or granted. The holder consumes these bytes and
@@ -529,8 +554,12 @@ skein, smith, hearth, jig and temper under one lock, and gates every
 repository of the set before it pushes any of them:
 
 ```text
-scripts/devel/land-set SETFILE
+scripts/devel/land-set [--prove] SETFILE
 ```
+
+With `--prove`, it runs phase 1 (below) without the lock and pushes no
+`main`; a later run of the set on the same machine then lands it
+(**Proving a set**, below).
 
 The set file is JSON with exactly two keys:
 
@@ -548,6 +577,9 @@ on a named branch other than `main`, with no rebase or merge in progress, and
 its `origin` must name its repository. A pin-only repository's primary
 checkout, `DEV_ROOT/<repo>`, must have that origin. The `land` on PATH must
 take `--no-push` (below). Every check precedes the lock; a failure exits 2.
+So does a second run of the same set on the same machine, while the first
+holds the set's file lock at `DEV_TMP/land-set/state/<URL-escaped-set-name>.lock`:
+a prove takes no set lock, and two runs would rebase the same worktrees.
 
 **The lock.** The run holds a turn named `set` from the landing turn's
 holder on hetzner3 (section 8): the `land-turn.py` beside the resolved
@@ -562,9 +594,12 @@ so a temper `land` inside it doesn't also wait for the temper turn; a plain
 
 **Phase 1, the gates.** For each repository, in the order skein, smith,
 hearth, jig, temper:
-1. A pin-only repository gets a worktree at `DEV_TMP/land-set/TOKEN/<repo>`
-   from its primary checkout, on branch `land-set/TOKEN/<repo>` at
-   `origin/main` after a fetch.
+1. A pin-only repository gets a worktree at
+   `DEV_TMP/land-set/worktrees/<set>/<repo>` from its primary checkout, on
+   branch `land-set/TOKEN/<repo>` at `origin/main` after a fetch. The path
+   is the set's, not the run's: the gate policy names the gate's absolute
+   path (gate-policy.md), so a proof's cached gates hold only in the same
+   worktree. A killed run's leftover there is removed first.
 2. Fetch, then rebase on `origin/main`. A stop whose only conflicted path is
    the root `Cargo.lock` keeps the side being rebased onto and continues; any
    other conflict aborts the rebase and exits 3.
@@ -609,11 +644,17 @@ hearth, jig, temper:
    1 again, against what has landed, before its own push. A failure there,
    the three-round bound included, leaves the set half-landed: the run
    stops with that status.
-4. Each landed commit is checked against `origin/main` after a fetch,
-   recorded (below) and written to the feed. A `land` that exits nonzero
-   after its push (its local `main` failing to follow, say) is checked the
-   same way: a candidate found on `origin/main` is recorded as landed
-   before the run stops.
+4. Each landed commit is recorded (below) and written to the feed. The
+   evidence is `land`'s result, `pushed` with the commit at the
+   worktree's tip, when `origin`'s push URL names the repository; without
+   it, the commit or the candidate found on `origin/main` after a fetch.
+   A fetch alone missed a landing on 10-25: configuring-3's clones fetch
+   from another URL than they push to, and the fetch didn't see the push
+   yet. A `land` that exits nonzero after its push is checked the same
+   way. On exit 5, the local `main` failing to follow, the run goes on,
+   and its summary and `done` say so; on any other status it stops, the
+   landing recorded. Every fetch is tried three times, 1, 2 and 4
+   seconds apart: proves share the primaries' refs with landing runs.
 5. On every exit, the run deletes the staging branches it pushed. A
    deletion that fails warns, naming the origin, the branch and its commit,
    and never changes the exit status; that branch, or one a SIGKILL left,
@@ -637,6 +678,30 @@ set completes. A rerun after the repair checks that each recorded commit is on
 its repository's `origin/main`, reports `recorded landed COMMIT`, and uses
 that commit for downstream pins without landing it again.
 
+**Proving a set.** `land-set --prove SETFILE` runs the checks and phase 1
+as above, with no lock: nothing it does moves a `main`. Its staging
+branches are pushed and deleted as a landing run's. It reads the set's
+recorded landings and writes none. On success it removes its pin-only
+worktrees and writes the proof,
+`DEV_TMP/land-set/proofs/<URL-escaped-set-name>.json`: `schema`
+(`land-set-proof-v1`), `set`, `machine`, `token`, `time`, and per
+candidate its `base`, `commit`, `tree` and `pin_only`. A prove deletes the
+set's earlier proof when it starts, and a run that lands the whole set
+deletes it at the end.
+
+The gates' evidence is `land`'s gate cache, per machine, by tree, gate and
+policy (gate-policy.md 3), so the landing run gates again only what has
+changed since: on the same machine, where no `main` moved, every step of
+its phase 1 is a no-op or a cache hit, and nothing builds. A branch's tip
+is already its candidate. A pin-only repository's repin commits afresh,
+with new dates, and every downstream would pin that new commit and gate
+again; so where the repin's commit has the proof's parent and tree, the
+run resets its branch to the proved commit, which differs from it only in
+its dates and the gate's trailers. The proof is only that pointer: the
+cache stays the evidence, and a stale or foreign proof costs a regate,
+never a wrong landing. Statuses are as above; 0 once every repository is
+proved or skipped.
+
 **`land --no-push`.** `land` takes `--no-push`: everything up to and
 including the trailers, then land's summary with `not pushed` in place of
 where it landed, and exit 0. It pushes nothing and moves no local `main`;
@@ -655,7 +720,12 @@ pushes that very commit.
 - `landed`: `repo` and `commit`;
 - `stopped`: `status`, `repo` when the run stopped in one, and `reason`, the
   first line of what the run printed for it, at most 200 characters;
-- `done`: every repository landed or skipped.
+- `done`: every repository landed or skipped, with `warnings` when a
+  `land` exited 5 after its push;
+- `proving`, then `proved`: a prove's start and its success, in place of
+  `waiting`, `started` and `done`. Every line of a prove carries `mode`,
+  `prove`; a landing run's `started` carries `proof`, the prove's
+  token, when it read a proof.
 
 `gated`, `landed` and a failed `land`'s `stopped` also carry `result`,
 the object `land` wrote to `LAND_RESULT` ([landing-flow.md](landing-flow.md)
@@ -673,6 +743,8 @@ feed exits 4 at once; `wait` keeps polling, and exits 4 after five minutes
 without a read. A run whose first line read is neither `waiting` nor
 `started` is history, from before the events or cut off by the read: its
 lines are printed, but it is never in flight, and `wait` passes over it.
+A prove's run, first line `proving`, holds no lock: it is in flight, as
+proving, but `wait` waits only for a landing run.
 - `landings [--last N]` prints the last N events (20), dated `MM-DD
   HH:MMZ`, then each set whose latest run has not ended, as waiting or
   running, since when, its last event's time, and the last repository it
@@ -685,6 +757,8 @@ lines are printed, but it is never in flight, and `wait` passes over it.
   gets its full 15 seconds, so `--timeout 0` checks the feed once.
 - `landings report [--since DATE] [--repo NAME] [--tsv]` summarizes the
   results in the feed, per repository and per set (landing-flow.md 10).
+  Proves have their own table, from `proving` to their end, and the
+  landing runs' table counts those that started from a proof.
 
 **Tests.** `scripts/devel/test-land-set` runs its cases on disposable
 repositories with `file://` origins, real Cargo and stand-ins for `heavy` and
@@ -700,8 +774,19 @@ land, and a resumed partial set. With this version it adds:
 - the staging branches, deleted on success and on failure;
 - the feed's events for each of these.
 
+With the prove, it adds:
+- a prove, then its landing, whose every gate, pin-only repositories'
+  included, is a cache hit and whose commits are the proved ones;
+- a `main` moved since the prove, gated again, its upstream not;
+- a failing prove, which writes no proof;
+- a second run of a set while a prove of it runs, refused;
+- a `land` exiting 5 after its push, after which the set lands;
+- a fetch URL lagging behind the push URL, where `land`'s result is the
+  evidence.
+
 `scripts/devel/test-landings` covers the status view, `wait` ending `done`,
-`stopped` and at its timeout, and lines with no `event`. With
+`stopped` and at its timeout, lines with no `event`, proves in flight, and
+the report's proves. With
 `HEAVY_RECOVERY_FIXTURE=1` and `LAND_SET_FIXTURE_DIR` strictly below
 `DEV_TMP`, the lock is `land-turn.py`'s local fixture holder and the feed is
 that directory's `feed.jsonl`.

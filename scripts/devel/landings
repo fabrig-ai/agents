@@ -96,27 +96,30 @@ def event_line(record):
     return ' '.join(parts)
 
 
-def latest_runs(records):
+def latest_runs(records, proves=False):
+    """Each set's latest run that lands it, or with PROVES, that proves it."""
+    starts = ('proving',) if proves else ('waiting', 'started')
     runs, latest = {}, {}
     for record in records:
         key = record['set'], record['token']
         if key not in runs:
             runs[key] = []
             # Without the start, legacy or truncated runs are history only.
-            if record['event'] in ('waiting', 'started'):
+            if record['event'] in starts:
                 latest[record['set']] = runs[key]
         runs[key].append(record)
     return latest
 
 
 def ending(run):
-    return next((r for r in reversed(run) if r['event'] in ('done', 'stopped')), None)
+    return next((r for r in reversed(run) if r['event'] in ('done', 'proved', 'stopped')), None)
 
 
 def show(records, last):
     for record in records[-last:] if last else []:
         print(event_line(record))
     active = [run for run in latest_runs(records).values() if ending(run) is None]
+    active += [run for run in latest_runs(records, proves=True).values() if ending(run) is None]
     if not active:
         print('in flight: none')
         return
@@ -124,7 +127,8 @@ def show(records, last):
     for run in active:
         started = next((r for r in run if r['event'] == 'started'), None)
         since = started or run[0]
-        state = 'running (holds set lock)' if started else 'waiting'
+        state = ('proving (no lock)' if run[0]['event'] == 'proving' else
+                 'running (holds set lock)' if started else 'waiting')
         line = f"  {run[0]['set']}: {state} since {since['time']} on {since['host']}"
         line += f"; last event {run[-1]['clock']}"
         progress = next((r for r in reversed(run) if r['event'] in ('gated', 'landed')), None)
@@ -298,30 +302,44 @@ def report(records, repo, tsv):
     if repo is not None:
         runs = {k: run for k, run in runs.items() if any(
             r.get('repo') == repo or part(r, 'result').get('repo') == repo for r in run)}
-    sets = {}
+    sets, proves = {}, {}
     for run in runs.values():
-        first = lambda event: next((r['utc'] for r in run if r['event'] == event), None)
-        end, waiting, started = ending(run), first('waiting'), first('started')
-        entry = sets.setdefault(run[0]['set'], {'runs': 0, 'done': 0, 'stopped': 0,
-                                                'wait': [], 'run': []})
+        first = lambda event: next((r for r in run if r['event'] == event), None)
+        end, waiting = ending(run), first('waiting')
+        # A prove's run is from proving to its end, and holds no lock.
+        started = first('proving') if run[0].get('mode') == 'prove' else first('started')
+        entries = proves if run[0].get('mode') == 'prove' else sets
+        entry = entries.setdefault(run[0]['set'], {'runs': 0, 'done': 0, 'proved': 0, 'stopped': 0,
+                                                   'proof': 0, 'wait': [], 'run': []})
         entry['runs'] += 1
         if end:
             entry[end['event']] += 1
+        if started and started.get('proof'):
+            entry['proof'] += 1
         if waiting and started:
-            entry['wait'].append((started - waiting).total_seconds())
+            entry['wait'].append((started['utc'] - waiting['utc']).total_seconds())
         if started and end:
-            entry['run'].append((end['utc'] - started).total_seconds())
+            entry['run'].append((end['utc'] - started['utc']).total_seconds())
     print()
-    if not sets:
+    if not sets and not proves:
         print('no set runs')
         return
-    title = 'set runs' + (f' naming {repo}' if repo is not None else '')
-    print(title + ' (lock wait: waiting to started; run: started to done or stopped)')
+    naming = f' naming {repo}' if repo is not None else ''
     longest = lambda values: mss(max(values)) if values else '-'
-    table(['set', 'runs', 'done', 'stopped', 'wait', 'longest', 'run', 'longest'],
-          [[name, e['runs'], e['done'], e['stopped'], median(e['wait']),
-            longest(e['wait']), median(e['run']), longest(e['run'])]
-           for name, e in sorted(sets.items())])
+    if sets:
+        print(f'set runs{naming} (lock wait: waiting to started; run: started to done or stopped; '
+              'proof: started from a prove)')
+        table(['set', 'runs', 'done', 'stopped', 'proof', 'wait', 'longest', 'run', 'longest'],
+              [[name, e['runs'], e['done'], e['stopped'], e['proof'], median(e['wait']),
+                longest(e['wait']), median(e['run']), longest(e['run'])]
+               for name, e in sorted(sets.items())])
+    if proves:
+        if sets:
+            print()
+        print(f'proves{naming} (no lock; run: proving to proved or stopped)')
+        table(['set', 'runs', 'proved', 'stopped', 'run', 'longest'],
+              [[name, e['runs'], e['proved'], e['stopped'], median(e['run']), longest(e['run'])]
+               for name, e in sorted(proves.items())])
 
 
 def main():

@@ -23,8 +23,6 @@ file says how it works.
   whoever started it. It never judges its findings, and never reads the
   code under test. In a milestone, [qa-milestone.md](qa-milestone.md);
   in the lab, [qa-lab.md](qa-lab.md).
-- **The keeper** ([keeper.md](keeper.md)) judges the landing queue's
-  failures, once the queue is built.
 - **Implementers** ([implementer.md](implementer.md)) are Codex runs,
   each given a task file by its owner (owners.md 4.2 and 4.3). They
   build and test narrowly while they work, and widen, lint and format

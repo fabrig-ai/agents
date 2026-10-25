@@ -71,7 +71,8 @@ live tiers, the workspace's clippy, the wasm lints or the doc examples,
 and never `scripts/check.sh`, `scripts/after-landing.sh`, `land` or
 `land-set`. They are the gates', the slow tiers' and the owner's
 (owners.md 4.4 and 4.5), and a repair's (below), unless the task names
-one.
+one: the milestone's end names `land-set --prove`, which rebases,
+repins and gates the set without pushing it (landing-flow.md 9.1).
 
 **A repair** of what a gate found runs the failing tests alone, in
 their profile (`--profile fuzzy -E 'test(=NAME)'`), or the lint that

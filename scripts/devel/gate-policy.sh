@@ -87,6 +87,13 @@ def semantic_name(name):
     ) is not None
 
 
+def recorded(name, value):
+    # A later duplicate in PATH never selects a tool, so PATH is recorded
+    # without them: a session's PATH and a login shell's then agree, and
+    # so do the gate results each caches (landing-proof.md).
+    return ":".join(dict.fromkeys(value.split(":"))) if name == "PATH" else value
+
+
 def merge(left, right):
     for key, value in right.items():
         if key in left and isinstance(left[key], dict) and isinstance(value, dict):
@@ -217,7 +224,7 @@ def main():
               "fonts": {"path": str(fonts), "files": font_files},
               "fixture_contract": "browser DejaVuSans.ttf; repository fixtures by Gate-Tree; UI bundle built by gate",
               "tools": tools, "gate_command": gate_command, "gate_executable": gate_executable, "rustc": compiler_version, "cargo": output([str(cargo), "-V"], environment),
-              "environment": {name: value for name, value in environment.items() if semantic_name(name)},
+              "environment": {name: recorded(name, value) for name, value in environment.items() if semantic_name(name)},
               "cargo_config": config_records, "implementations": implementations}
     identity = "sha256:" + hashlib.sha256(json.dumps(record, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     if any("\n" in str(path) or "\t" in str(path) for path in (runtime, fonts)):

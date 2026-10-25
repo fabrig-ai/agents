@@ -32,6 +32,7 @@ GIT_TRACED = ('lock_conflict', 'outside_snapshot', 'kit_refusal', 'closure', 're
 LAND = r'''#!{python} -IS
 import os, signal, subprocess, sys, time
 from pathlib import Path
+import hashlib, json
 args = sys.argv[1:]
 if args == ['--no-push', '--docs']:
     print('land: --no-push cannot be combined with --docs or --local', file=sys.stderr)
@@ -99,15 +100,29 @@ git('fetch', 'origin')
 git('rebase', 'origin/main')
 if os.environ.get('MOVE_AFTER_REBASE'):
     move()
+# The gate cache: one gate per tree and worktree, as land's own, whose
+# policy names the gate's absolute path.
+tree = git('rev-parse', 'HEAD^{{tree}}')
+gated = Path(os.environ['DEV_TMP']) / 'fixture-gates' / hashlib.sha256((tree + '\0' + os.getcwd()).encode()).hexdigest()
+kind = 'cached' if gated.exists() else 'ran'
+gated.parent.mkdir(exist_ok=True)
+gated.touch()
 message = git('log', '-1', '--format=%B')
 updated = subprocess.check_output(['git', 'interpret-trailers', '--if-exists', 'replace',
                                    '--trailer', 'Fixture-Landed: yes'], input=message.encode()).decode().strip()
 if updated != message:
     git('commit', '--amend', '-m', updated)
+def result(code):
+    if os.environ.get('LAND_RESULT'):
+        Path(os.environ['LAND_RESULT']).write_text(json.dumps(dict(
+            schema='land-result-v1', repo=name, commit=git('rev-parse', 'HEAD'), tree=tree,
+            gate=dict(kind=kind), pushed=phase == 'push', exit=code)))
 if phase == 'push':
     git('push', 'origin', 'HEAD:main')
     if os.environ.get('FAIL_AFTER_PUSH_REPO') == name:
+        result(5)
         sys.exit(5)
+result(0)
 '''
 
 
@@ -215,8 +230,9 @@ class Lab:
         path.write_text(json.dumps(dict(set=label, repos=names)))
         return path
 
-    def run(self, spec=None, status=0, env=None):
-        result = execute(self.root, [PYTHON, '-I', str(SCRIPT), str(spec or self.spec())],
+    def run(self, spec=None, status=0, env=None, prove=False):
+        result = execute(self.root, [PYTHON, '-I', str(SCRIPT), *(['--prove'] if prove else []),
+                                     str(spec or self.spec())],
                          dict(self.env, **(env or {})), check=False)
         assert result.returncode == status, result.stdout
         self.no_staging()
@@ -239,6 +255,18 @@ class Lab:
     def records(self, event='landed'):
         records = [json.loads(line) for line in (self.holder / 'feed.jsonl').read_text().splitlines()]
         return [r for r in records if event is None or r['event'] == event]
+
+    def worktrees(self):
+        # land-set/worktrees/SET/NAME, and any other directory beside state/
+        # and proofs/, which hold land-set's own files.
+        return [*(self.tmp / 'land-set/worktrees').glob('*/*'),
+                *(p for p in (self.tmp / 'land-set').glob('*/*')
+                  if p.parent.name not in ('state', 'proofs', 'worktrees'))]
+
+    def proof(self):
+        proofs = list((self.tmp / 'land-set/proofs').glob('*.json'))
+        assert len(proofs) <= 1, proofs
+        return json.loads(proofs[0].read_text()) if proofs else None
 
     def no_staging(self):
         for path in self.origin.values():
@@ -323,7 +351,7 @@ def success(lab):
     assert len({r['token'] for r in records}) == 1
     assert all(r['commit'] == heads[r['repo']] and r['set'] == 'fixture/m1' for r in records)
     assert all('landed ' + heads[name] in output for name in ORDER)
-    assert not any((lab.tmp / 'land-set').glob('*/*')), 'pin-only worktree retained'
+    assert not lab.worktrees(), 'pin-only worktree retained'
     assert (lab.holder / 'feed.jsonl').stat().st_mode & 0o777 == 0o600
     assert lab.holder.stat().st_mode & 0o777 == 0o700
     lab.assert_released()
@@ -356,7 +384,7 @@ def rerun(lab, advance=False):
     jig = lab.heads()['jig']
     assert jig != lab.base['jig'] and lab.heads()['temper'] == lab.base['temper']
     assert 'jig: landed ' + jig in output and 'temper: failed (4)' in output, output
-    assert len(list((lab.tmp / 'land-set').glob('*/temper'))) == 1
+    assert len(list((lab.tmp / 'land-set/worktrees').glob('*/temper'))) == 1
     states = list((lab.tmp / 'land-set/state').glob('*.json'))
     assert len(states) == 1
     state = json.loads(states[0].read_text())
@@ -406,7 +434,7 @@ def unchanged_downstream(lab):
     lab.run(spec, status=4, env=dict(FAIL_PUSH_REPO='temper'))
     # Another landing has already made the same pin. Resuming this set must
     # explicitly refuse the downstream with no change, keeping its records.
-    kept = next((lab.tmp / 'land-set').glob('*/temper'))
+    kept = next((lab.tmp / 'land-set/worktrees').glob('*/temper'))
     lab.change('temper', 'Cargo.lock', (kept / 'Cargo.lock').read_text(), lab.primary['temper'])
     lab.git(lab.primary['temper'], 'push', 'origin', 'HEAD:main')
     output = lab.run(spec, status=1)
@@ -491,11 +519,11 @@ def land_failure(lab):
     assert stopped['reason'] == 'land-set: jig: land --no-push failed (4)'
     assert 'jig: failed (4)' in output and 'temper: not reached' in output
     lab.untouched(ORDER)
-    assert len(list((lab.tmp / 'land-set').glob('*/jig'))) == 1
-    assert not list((lab.tmp / 'land-set').glob('*/hearth')), 'gated pin-only tree retained'
-    assert (next((lab.tmp / 'land-set').glob('*/jig')) / 'Cargo.lock').exists()
-    assert (next((lab.tmp / 'land-set').glob('*/jig')) / 'target/fixture').exists()
-    assert str(next((lab.tmp / 'land-set').glob('*/jig'))) in output
+    assert len(list((lab.tmp / 'land-set/worktrees').glob('*/jig'))) == 1
+    assert not list((lab.tmp / 'land-set/worktrees').glob('*/hearth')), 'gated pin-only tree retained'
+    assert (next((lab.tmp / 'land-set/worktrees').glob('*/jig')) / 'Cargo.lock').exists()
+    assert (next((lab.tmp / 'land-set/worktrees').glob('*/jig')) / 'target/fixture').exists()
+    assert str(next((lab.tmp / 'land-set/worktrees').glob('*/jig'))) in output
     lab.assert_released()
     # The failed pin-only worktree is inspectable; another set acquires immediately.
     output = lab.run(lab.spec({'temper': str(lab.work['temper'])}, 'retry/m1'))
@@ -585,7 +613,8 @@ def catch_up(lab):
 
 
 def pushed_then_failed(lab):
-    # Share the repositories for unchanged-candidate and rebased-publication cases.
+    # 5 after a push: the commit landed, and the set goes on. Share the
+    # repositories for unchanged-candidate and rebased-publication cases.
     spec = lab.spec({'jig': str(lab.work['jig']), 'temper': 'pin-only'})
     for rebased in (False, True):
         lab.change('jig', 'second.txt' if rebased else 'first.txt')
@@ -593,23 +622,117 @@ def pushed_then_failed(lab):
         env = dict(FAIL_AFTER_PUSH_REPO='jig')
         if rebased:
             env.update(MOVE_AT='push:jig', MOVE_REPO='jig')
-        output = lab.run(spec, status=5, env=env)
+        output = lab.run(spec, env=env)
         jig = lab.heads()['jig']
-        state = next((lab.tmp / 'land-set/state').glob('*.json'))
-        assert json.loads(state.read_text())['landed'] == {'jig': jig}
         events = lab.records(None)[first:]
         gated = next(r['commit'] for r in events if r['event'] == 'gated' and r['repo'] == 'jig')
         assert (gated != jig) == rebased
-        assert events[-2]['event'] == 'landed' and events[-2]['commit'] == jig
-        assert events[-1]['event'] == 'stopped' and events[-1]['status'] == 5
+        landed = [r for r in events if r['event'] == 'landed']
+        assert [r['repo'] for r in landed] == ['jig', 'temper'], events
+        assert landed[0]['commit'] == jig and landed[0]['result']['exit'] == 5
+        assert events[-1]['event'] == 'done'
         assert f'landed {jig} despite land failing (5)' in output
-        assert f'jig: landed {jig}; failed (5)' in output
-        assert not list((lab.tmp / 'land-set').glob('*/temper'))
-        output = lab.run(spec)
-        assert f'jig: recorded landed {jig}' in output
+        assert f'jig: landed {jig}; the local main did not follow (5)' in output
+        assert not list((lab.tmp / 'land-set/state').glob('*.json'))
+        assert not list((lab.tmp / 'land-set/worktrees').glob('*/temper'))
         lab.verify(('jig', 'temper'))
-        assert not state.exists()
         lab.assert_released()
+
+
+def lagging_fetch(lab):
+    """land's own push is the evidence when the fetch URL lags behind the push's."""
+    lab.change('jig')
+    mirror = lab.root / 'mirror' / 'jig.git'
+    execute(lab.root, ['git', 'clone', '-q', '--mirror', str(lab.origin['jig']), str(mirror)], lab.env)
+    lab.git(lab.work['jig'], 'remote', 'set-url', 'origin', mirror.as_uri())
+    lab.git(lab.work['jig'], 'remote', 'set-url', '--push', 'origin', lab.origin['jig'].as_uri())
+    output = lab.run(lab.spec({'jig': str(lab.work['jig']), 'temper': 'pin-only'}))
+    heads = lab.verify(('jig', 'temper'))
+    assert lab.git(mirror, 'rev-parse', 'main') == lab.base['jig'], 'the mirror caught up'
+    assert f'jig: landed {heads["jig"]}' in output, output
+    assert lab.records(None)[-1]['event'] == 'done'
+
+
+def proved(lab):
+    """A prove gates the set without the lock; landing it then gates nothing again."""
+    for name in ('skein', 'smith', 'temper'):
+        lab.change(name)
+    spec = lab.spec()
+    output = lab.run(spec, prove=True)
+    lab.untouched(ORDER)
+    events = lab.records(None)
+    assert [r['event'] for r in events] == ['proving'] + ['gated'] * 5 + ['proved'], events
+    assert all(r['mode'] == 'prove' for r in events)
+    assert all(r['result']['gate']['kind'] == 'ran' for r in events if r['event'] == 'gated')
+    assert all(f'{name}: proved ' in output for name in ORDER), output
+    assert 'land-set: proved; land it on ' in output, output
+    assert not (lab.holder / 'set.lock').exists(), 'a prove took the set lock'
+    assert not lab.worktrees(), 'pin-only worktree retained'
+    proof = lab.proof()
+    assert proof['repos'].keys() == set(ORDER) and proof['token'] == events[0]['token']
+    assert {name for name, entry in proof['repos'].items() if entry['pin_only']} == {'hearth', 'jig'}
+    output = lab.run(spec)
+    heads = lab.verify()
+    landing = lab.records(None)[len(events):]
+    assert [r['event'] for r in landing] == ['waiting', 'started'] + ['gated'] * 5 + ['landed'] * 5 + ['done']
+    assert landing[1]['proof'] == proof['token'] and 'mode' not in landing[1]
+    gated = [r for r in landing if r['event'] == 'gated']
+    # The pin-only repositories too: their repins took the proved commits.
+    assert all(r['result']['gate']['kind'] == 'cached' for r in gated), gated
+    assert {r['repo']: r['commit'] for r in gated} == {
+        name: entry['commit'] for name, entry in proof['repos'].items()} == heads
+    assert lab.proof() is None, 'a landed set kept its proof'
+    lab.assert_released()
+
+
+def proved_then_moved(lab):
+    """A main that moved since the prove gates again; its upstreams keep their proof."""
+    lab.change('jig')
+    spec = lab.spec({'jig': str(lab.work['jig']), 'temper': 'pin-only'})
+    lab.run(spec, prove=True)
+    first = len(lab.records(None))
+    lab.change('temper', 'other.txt', path=lab.primary['temper'])
+    lab.git(lab.primary['temper'], 'push', 'origin', 'HEAD:main')
+    lab.run(spec)
+    lab.verify(('jig', 'temper'))
+    gated = [r for r in lab.records(None)[first:] if r['event'] == 'gated']
+    assert {r['repo']: r['result']['gate']['kind'] for r in gated} == {'jig': 'cached', 'temper': 'ran'}
+
+
+def prove_failure(lab):
+    lab.change('skein')
+    output = lab.run(prove=True, status=4, env=dict(FAIL_REPO='jig'))
+    events = lab.records(None)
+    assert [r['event'] for r in events] == ['proving'] + ['gated'] * 3 + ['stopped'], events
+    assert events[-1]['mode'] == 'prove' and events[-1]['repo'] == 'jig'
+    assert 'jig: failed (4)' in output and 'proved; land it' not in output
+    assert lab.proof() is None
+    lab.untouched(ORDER)
+
+
+def same_set(lab):
+    """A second run of a set on this machine refuses before any work: a prove holds no lock."""
+    lab.change('temper')
+    spec = lab.spec({'temper': str(lab.work['temper'])})
+    ready, release = lab.root / 'ready', lab.root / 'release'
+    env = dict(lab.env, PAUSE_REPO='temper', PAUSE_READY=str(ready), PAUSE_RELEASE=str(release))
+    with (lab.root / 'prove.log').open('w') as out:
+        proc = subprocess.Popen([PYTHON, '-I', str(SCRIPT), '--prove', str(spec)], env=env,
+                                stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT)
+        try:
+            until(ready.exists, proc)
+            output = lab.run(spec, status=2)
+            assert 'another land-set run of this set is active on this machine' in output, output
+            assert [r['event'] for r in lab.records(None)] == ['proving']
+            release.touch()
+            assert proc.wait(timeout=HANG) == 0, (lab.root / 'prove.log').read_text()
+        finally:
+            release.touch()
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+    lab.run(spec)
+    lab.verify(('temper',))
 
 
 def outside_snapshot(lab):
@@ -818,8 +941,8 @@ def moving_bound(lab):
     assert len(lab.records('gated')) == 15
     assert lab.records('stopped')[-1]['repo'] == 'skein'
     assert all(f'{name}: invalidated ' in output for name in ORDER[1:]), output
-    assert not list((lab.tmp / 'land-set').glob('*/hearth'))
-    assert not list((lab.tmp / 'land-set').glob('*/jig'))
+    assert not list((lab.tmp / 'land-set/worktrees').glob('*/hearth'))
+    assert not list((lab.tmp / 'land-set/worktrees').glob('*/jig'))
 
 
 def kit_refusal(lab):
@@ -949,21 +1072,22 @@ def skipped(lab):
     assert all(f'{name}: skipped' in output for name in ORDER), output
     assert not lab.trace.read_text()
     assert [r['event'] for r in lab.records(None)] == ['waiting', 'started', 'done']
-    assert not any((lab.tmp / 'land-set').glob('*/*'))
+    assert not lab.worktrees()
     lab.untouched(ORDER)
 
 
 CASES = (staging_cargo, rerun, advanced_main, recorded_commit_refusal, unchanged_downstream,
          partial_set, split_source, success, moved_between_phases, moved_during_pushes,
          moved_earlier_in_second_round, regate_failure_resume, catch_up,
-         pushed_then_failed, outside_snapshot, moved_gate_base,
+         pushed_then_failed, lagging_fetch, proved, proved_then_moved, prove_failure, same_set,
+         outside_snapshot, moved_gate_base,
          interrupted_with_staging, interrupted_during_feed, interrupted_during_cleanup,
          feed_failure, cleanup_warning,
          moving_bound, kit_refusal, lock_conflict,
          other_conflict, land_failure,
          closure, concurrent, refusal, skipped)
 SLOW = ('moved_earlier_in_second_round', 'moved_between_phases', 'lock_conflict', 'land_failure',
-        'refusal', 'pushed_then_failed', 'success', 'moved_gate_base', 'moving_bound')
+        'refusal', 'pushed_then_failed', 'success', 'moved_gate_base', 'moving_bound', 'proved')
 
 
 def stop_on_signals():

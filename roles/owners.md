@@ -456,9 +456,39 @@ conflicts, left in progress; 4 a failed build, lint or gate; 9 heavy
 refused to run the build or gate, so nothing ran. The owner
 updates the repository's `docs/design/STATUS.md` rows its work changes.
 
+In skein, smith, hearth, jig and temper, a landing that pushes takes
+the set lock on hetzner3, `land-set`'s, so that nothing moves a `main`
+under a set's run: `land` first proves a code change without it, as
+`land --no-push`, then rebases, gates and pushes under it, where the
+gate is a cache hit unless `main` moved (landing-flow.md 9.2).
+
 Until the landing queue is built, landing-flow.md 9.1 says how a set
 of branches lands (`land-set`) and what owners do by hand; where it
 departs from this section or 4.5, it wins.
+
+**A failed landing** comes back to the set's owner, or to the
+sub-owner that stays on for it (3.1): `land-set`'s summary and the
+feed say where it stopped and why. There is no keeper (the user,
+2026-10-25). The owner reads the failure before anything runs again,
+in this order:
+1. where it failed: the repository, the step and the test, from the
+   log, the failing lines first;
+2. what the set changed, and whether the failing test, or a crate it
+   builds on, sits in that diff or downstream of it;
+3. what `main` changed since the set's base, in that repository and its
+   upstreams, and whether it meets the set's changes;
+4. what `land-set` did: the rebase's resolutions and the repin;
+5. the machine: a process killed, a full disk, a network failure, a
+   timeout under load;
+6. the history: has this test failed before, in the findings?
+
+When in doubt, it is the set's, and an implementer repairs it, then
+proves the set again. A flake, a test outside the set's reach whose
+failure depends on timing, is filed as a finding and the landing run
+again, once. Escalated (section 5), with where the evidence is and a
+recommendation: `main`'s fault (the test fails on `main` too, whatever
+the set); an infrastructure fault that lasts 15 minutes; a set's third
+failed landing; two missions whose sets keep breaking each other.
 
 ### 4.5 Sharing the machines
 

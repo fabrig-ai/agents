@@ -16,7 +16,10 @@
 # starts again from the rebase. Then the local main, and the checkout that
 # has it, follow. A code landing holds its repository's turn on this
 # machine from its rebase to its push, so that another landing here never
-# moves main under its gate.
+# moves main under its gate. In skein, smith, hearth, jig and temper, a
+# landing that pushes also holds the set lock on hetzner3, land-set's, a
+# code landing once it has proved its tree without it, and for as long as
+# that proof holds.
 #
 # land starts no tier after landing, not even a repository's
 # scripts/after-landing.sh: how one runs is still to be designed (the user,
@@ -51,6 +54,8 @@
 #   7  fetching or pushing failed
 #   8  another command failed
 #   9  heavy refused to run the build or gate, so nothing ran
+#  10  with LAND_PROVED=1, between land's own passes: the gate was not in
+#      the cache, so nothing ran and nothing landed
 set -euo pipefail
 umask 077
 
@@ -98,30 +103,75 @@ for state in rebase-merge rebase-apply MERGE_HEAD; do
     [[ ! -e $(git rev-parse --git-path "$state") ]] || die 2 "a rebase or merge is in progress; finish it and rerun land"
 done
 common=$(git rev-parse --path-format=absolute --git-common-dir)
-repo=$(basename "$(dirname "$common")")
+# The repository: its checkout's directory, or a bare clone's name less
+# .git, as an owner's jig.git (configuring-3, 10-25).
+if [[ $(basename "$common") == .git ]]; then
+    repo=$(basename "$(dirname "$common")")
+else
+    repo=$(basename "$common" .git)
+fi
 lock=${LAND_LOCK:-$common/land.lock}
 [[ $lock == /* ]] || lock=$start_dir/$lock
 result_file=${LAND_RESULT:-}
 [[ -z $result_file || $result_file == /* ]] || result_file=$start_dir/$result_file
 
-# The advisory connection spans retries, before the host turn and prebuild.
-if ((!docs && !local)) && [[ $repo == temper && ${LAND_TURN_ACTIVE:-0} != 1 &&
+# Every write to a set repository's main holds the set lock, land-set's
+# (landing-flow.md, 9.2), so that no main moves under a set's run. The
+# connection spans retries, before the host turn. A repository is the
+# set's by its checkout's name or by origin's.
+in_set=0
+for name in "$repo" "$(basename "$(git remote get-url origin 2>/dev/null || true)" .git)"; do
+    case $name in skein | smith | hearth | jig | temper) in_set=1 ;; esac
+done
+if ((in_set && !local && !no_push)) && [[ ${LAND_TURN_ACTIVE:-0} != 1 &&
     -f $HOME/.config/agents-land-turn/enabled ]]; then
     export LAND_TURN=1 LAND_TURN_HOLDER="$kit/land-turn.py"
     LAND_TURN_MODE=$(cat "$HOME/.config/agents-land-turn/enabled" 2>/dev/null) || LAND_TURN_MODE=invalid
     export LAND_TURN_MODE
 fi
 
-if ((!docs && !local)) && [[ $repo == temper && ${LAND_TURN:-0} == 1 &&
+if ((in_set && !local && !no_push)) && [[ ${LAND_TURN:-0} == 1 &&
     ${LAND_TURN_ACTIVE:-0} != 1 ]]; then
-    LAND_LOCK="$lock" exec python3 -I -B "$kit/land-turn.py" client "$tmp" "$repo" "$kit/land" "${original_args[@]}"
+    turn=(python3 -I -B "$kit/land-turn.py" client "$tmp" set "$kit/land" "${original_args[@]}")
+    if ((docs)); then
+        LAND_LOCK=$lock LAND_RESULT=$result_file exec "${turn[@]}"
+    fi
+    # A code landing proves its tree without the lock, as land --no-push,
+    # and lands under it only while that gate is a cache hit there: when
+    # main moved meanwhile, it gives the lock back (10) and proves again.
+    # The third landing pass gates under the lock, so that a busy main
+    # cannot starve it. A red proof, or the landing's own outcome, is
+    # land's; the others go to stderr, so that stdout and LAND_RESULT hold
+    # only the final one.
+    shown=$(mktemp)
+    for round in 1 2 3; do
+        status=0
+        LAND_TURN_ACTIVE=1 LAND_PROVED=0 LAND_RESULT=$result_file \
+            "$kit/land" --no-push "${original_args[@]}" >"$shown" || status=$?
+        if ((status == 0)); then
+            cat "$shown" >&2
+            [[ -z $result_file ]] || rm -f "$result_file"
+            echo "land: proved; landing under the set lock" >&2
+            LAND_LOCK=$lock LAND_RESULT=$result_file LAND_PROVED=$((round < 3)) \
+                "${turn[@]}" >"$shown" || status=$?
+        fi
+        if ((status != 10 || round == 3)); then
+            cat "$shown"
+            rm -f "$shown"
+            exit "$status"
+        fi
+        cat "$shown" >&2
+        [[ -z $result_file ]] || rm -f "$result_file"
+        echo "land: main moved since the proof; proving again without the lock" >&2
+    done
 fi
 
-# One code landing at a time in each repository on this machine
-# (owners.md, 4.4), from its rebase to its push: gates run one
-# at a time anyway, and a gate that passed on a base another landing moved
-# would be thrown away. Markdown and mockups landings take no turn.
-if ((!docs)); then
+# One landing at a time in each repository on this machine (owners.md,
+# 4.4), from its rebase to its push: gates run one at a time anyway, and
+# a gate that passed on a base another landing moved would be thrown
+# away. Markdown and mockups landings take no turn, and --no-push, which
+# moves no main, takes none either.
+if ((!docs && !no_push)); then
     exec 6>"$common/land-turn.lock"
     if ! flock --nonblock 6; then
         echo "land: another landing in $repo has its turn; waiting for it" >&2
@@ -501,6 +551,8 @@ Resolve them, run git rebase --continue, then land again."
         elif gated=$(gated_before "$tree"); then
             summary=$(cache_read "$cache_dir/$(gate_key "$gated")")
             echo "land: the gate passed on $gated, which differs from this tree only in docs/ Markdown" >&2
+        elif [[ ${LAND_PROVED:-0} == 1 ]]; then
+            die 10 "main moved since the proof, so its gate no longer holds; nothing landed"
         else
             gated=$tree
             gate_kind=ran

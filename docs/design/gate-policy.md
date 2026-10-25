@@ -58,7 +58,8 @@ names. Arrays concatenate and scalars from nearer configurations win.
 Inherited `PATH`, `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS`, rustdoc flags,
 compiler and wrapper selections, `RUSTUP_TOOLCHAIN`, `RUSTC_BOOTSTRAP`,
 `CARGO_BUILD_*` semantic fields,
-`CARGO_PROFILE_*` and target flag/linker/runner variables are represented.
+`CARGO_PROFILE_*` and target flag/linker/runner variables are represented,
+`PATH` without its later duplicates, which never select a tool.
 Configured wrapper, linker and runner executables are hashed when selected.
 Unavailable target commands are recorded as unavailable; Cargo determines
 whether that target needs them.
