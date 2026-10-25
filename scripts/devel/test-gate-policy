@@ -341,6 +341,66 @@ sys.exit(result.returncode)
         self.assertEqual(self.git("rev-parse", "HEAD"), before)
         self.assertEqual(self.calls(), [])
 
+    def main_checkout_follow(self, populated, local, index_error=False):
+        origin = self.root / "origin.git"
+        self.run_command(["git", "clone", "--bare", str(self.repo), str(origin)])
+        self.git("--git-dir=" + str(origin), "symbolic-ref", "HEAD", "refs/heads/main")
+        anchor = self.root / "anchor with spaces"
+        self.run_command(["git", "clone", "--no-checkout", origin.as_uri(), str(anchor)])
+        self.git("-C", str(anchor), "config", "user.email", "fixture@example.test")
+        self.git("-C", str(anchor), "config", "user.name", "fixture")
+        if populated:
+            self.git("-C", str(anchor), "reset", "--hard", "main")
+            (anchor / "code").write_text("uncommitted main changes\n")
+        else:
+            (anchor / "untracked").write_text("leave this alone\n")
+        self.assertEqual(self.git("-C", str(anchor), "symbolic-ref", "HEAD").strip(),
+                         "refs/heads/main")
+        self.assertEqual(bool(self.git("-C", str(anchor), "ls-files")), populated)
+        work = self.root / "anchor-work"
+        self.git("-C", str(anchor), "worktree", "add", str(work), "work")
+        self.repo = work
+        if index_error:
+            real_git = shutil.which("git", path=os.defpath)
+            self.script(self.bin / "git", '#!/bin/sh\nif [ "$1" = -C ] && [ "$2" = '
+                        + shlex.quote(str(anchor)) + ' ] && [ "$3" = ls-files ]; then\n'
+                        + '    exit 1\nfi\nexec ' + shlex.quote(real_git) + ' "$@"\n')
+        args = [str(self.kit / "land"), "--gate", "true"]
+        if local:
+            args.append("--local")
+        result = self.run_command(args, check=False)
+        if index_error:
+            (self.bin / "git").unlink()
+        self.assertEqual(result.returncode, 5 if populated or index_error else 0,
+                         result.stdout + result.stderr)
+        commit = self.git("rev-parse", "HEAD").strip()
+        self.assertEqual(self.git("-C", str(anchor), "rev-parse", "main").strip(),
+                         self.base if populated or index_error else commit)
+        self.assertEqual(self.git("--git-dir=" + str(origin), "rev-parse", "main").strip(),
+                         self.base if local else commit)
+        if populated:
+            self.assertIn("a checkout of main has changes", result.stderr)
+            self.assertEqual((anchor / "code").read_text(), "uncommitted main changes\n")
+        else:
+            self.assertEqual(self.git("-C", str(anchor), "ls-files"), "")
+            self.assertFalse((anchor / "code").exists())
+            self.assertEqual((anchor / "untracked").read_text(), "leave this alone\n")
+
+    def test_no_checkout_anchor_follows_pushed_landing(self):
+        self.main_checkout_follow(populated=False, local=False)
+
+    def test_no_checkout_anchor_follows_local_landing(self):
+        self.main_checkout_follow(populated=False, local=True)
+
+    def test_dirty_main_checkout_refuses_pushed_follow(self):
+        self.main_checkout_follow(populated=True, local=False)
+
+    def test_dirty_main_checkout_refuses_local_landing(self):
+        self.main_checkout_follow(populated=True, local=True)
+
+    def test_main_index_read_failure_refuses_local_landing(self):
+        self.main_checkout_follow(populated=False, local=True, index_error=True)
+
     def test_same_policy_reuses_and_propagates_runtime(self):
         self.land()
         policy = self.git("log", "-1", "--format=%(trailers:key=Gate-Policy,valueonly)").strip()

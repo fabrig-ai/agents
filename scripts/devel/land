@@ -140,9 +140,10 @@ fetch() {
 
 # Move the local main, and the checkout that has it, to $1. Returns 0 when
 # main is there or past it, 1 when a checkout of main has changes, 2 when
-# main has commits that $1 lacks. Called under the lock.
+# main has commits that $1 lacks. An empty-index anchor counts as no
+# checkout: move only the ref and leave its files alone. Called under the lock.
 follow() {
-    local commit=$1 main wt
+    local commit=$1 main wt tracked=
     main=$(git rev-parse main)
     if git merge-base --is-ancestor "$commit" "$main"; then
         return 0
@@ -150,7 +151,10 @@ follow() {
     git merge-base --is-ancestor "$main" "$commit" || return 2
     wt=$(git worktree list --porcelain | awk '
         /^worktree / { w = substr($0, 10) } $0 == "branch refs/heads/main" { print w }')
-    if [[ -z $wt ]]; then
+    if [[ -n $wt ]]; then
+        tracked=$(git -C "$wt" ls-files) || return 1
+    fi
+    if [[ -z $wt || -z $tracked ]]; then
         git update-ref refs/heads/main "$commit" "$main"
     elif [[ -n $(git -C "$wt" status --porcelain --untracked-files=no) ]]; then
         return 1
