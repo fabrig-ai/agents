@@ -16,6 +16,23 @@ import unittest
 KIT = Path(__file__).resolve().parent
 
 
+RECEIPT_FAULTS = (
+    "old_build_same_id", "missing_header", "duplicate_header", "missing_receipt_line",
+    "legacy_header", "non_gate_header", "malformed_header_token", "relative_receipt",
+    "malformed_receipt_line", "missing_receipt_file", "wrong_line_token", "wrong_token",
+    "wrong_id", "numeric_id", "wrong_lane",
+    "wrong_tree", "wrong_policy", "wrong_args", "cancelled", "failed_code", "boolean_code",
+    "payload_not_started", "payload_not_ended", "release_incomplete", "scope_not_empty",
+    "missing_duration", "duration_string", "duration_bool", "duration_negative", "duration_nan",
+    "duration_infinite", "empty_queue", "non_string_queue", "wrong_schema", "malformed_json",
+    "duplicate_field", "non_object_json", "extra_field", "mutated_log", "missing_log",
+    "wrong_log_name", "relative_log", "wrong_digest", "wrong_filename", "duplicate_receipt",
+    "output_after_receipt", "receipt_symlink", "receipt_directory", "receipt_fifo",
+    "log_symlink", "log_directory", "log_fifo",
+)
+UNREADABLE_RECEIPT_FAULTS = ("unreadable_log", "unreadable_receipt")
+
+
 class PolicyFixtures(unittest.TestCase):
     def setUp(self):
         evidence = os.environ.get("GATE_POLICY_FIXTURE_EVIDENCE")
@@ -385,33 +402,17 @@ sys.exit(result.returncode)
         self.land()
         self.assertEqual(len(self.calls()), 1)
 
-    def test_receipt_faults_refuse_before_cache_amend_or_main(self):
-        faults = (
-            "old_build_same_id", "missing_header", "duplicate_header", "missing_receipt_line",
-            "legacy_header", "non_gate_header", "malformed_header_token", "relative_receipt",
-            "malformed_receipt_line", "missing_receipt_file", "wrong_line_token", "wrong_token",
-            "wrong_id", "numeric_id", "wrong_lane",
-            "wrong_tree", "wrong_policy", "wrong_args", "cancelled", "failed_code", "boolean_code",
-            "payload_not_started", "payload_not_ended", "release_incomplete", "scope_not_empty",
-            "missing_duration", "duration_string", "duration_bool", "duration_negative", "duration_nan",
-            "duration_infinite", "empty_queue", "non_string_queue", "wrong_schema", "malformed_json",
-            "duplicate_field", "non_object_json", "extra_field", "mutated_log", "missing_log",
-            "wrong_log_name", "relative_log", "wrong_digest", "wrong_filename", "duplicate_receipt",
-            "output_after_receipt", "receipt_symlink", "receipt_directory", "receipt_fifo",
-            "log_symlink", "log_directory", "log_fifo",
-        )
-        if os.geteuid() != 0:
-            faults += ("unreadable_log", "unreadable_receipt")
+    def receipt_fault_refuses(self, fault):
+        if fault in UNREADABLE_RECEIPT_FAULTS and os.geteuid() == 0:
+            self.skipTest("root reads unreadable files")
         head = self.git("rev-parse", "HEAD").strip()
-        for fault in faults:
-            with self.subTest(fault=fault):
-                result = self.land({"FIXTURE_RECEIPT_FAULT": fault}, check=False)
-                self.assertEqual(result.returncode, 4, result.stdout + result.stderr)
-                self.assertIn("invalid gate receipt:", result.stderr)
-                self.assertIn("completion evidence was not accepted", result.stderr)
-                self.assertEqual(self.git("rev-parse", "main").strip(), self.base)
-                self.assertEqual(self.git("rev-parse", "HEAD").strip(), head)
-                self.assertFalse((self.root / "tmp/gates/repo").exists())
+        result = self.land({"FIXTURE_RECEIPT_FAULT": fault}, check=False)
+        self.assertEqual(result.returncode, 4, result.stdout + result.stderr)
+        self.assertIn("invalid gate receipt:", result.stderr)
+        self.assertIn("completion evidence was not accepted", result.stderr)
+        self.assertEqual(self.git("rev-parse", "main").strip(), self.base)
+        self.assertEqual(self.git("rev-parse", "HEAD").strip(), head)
+        self.assertFalse((self.root / "tmp/gates/repo").exists())
 
     def test_stale_valid_receipt_with_same_numeric_id_cannot_reuse(self):
         self.land()
@@ -710,15 +711,6 @@ exit 97
                 child.terminate()
                 child.wait(timeout=20)
 
-    def test_concurrent_commit_rebase_and_dirty_candidate_after_receipt(self):
-        candidate = self.git("rev-parse", "HEAD").strip()
-        for mode in ("commit", "rebase", "same-tree", "index", "worktree", "rebase-state"):
-            with self.subTest(mode=mode):
-                self.concurrent_candidate("after_receipt", mode)
-                if mode == "rebase-state":
-                    (self.repo / self.git("rev-parse", "--git-path", "rebase-merge").strip()).rmdir()
-                self.git("reset", "--hard", candidate)
-
     def test_expected_old_candidate_ref_cas_refuses_concurrent_commit(self):
         self.concurrent_candidate("before_candidate_cas", "commit")
 
@@ -739,20 +731,21 @@ exit 97
         self.git("update-ref", "refs/remotes/origin/main", self.base)
         real_git = shutil.which("git", path=os.defpath)
         proof = self.root / "explicit-push.json"
-        self.script(self.bin / "git", "#!/usr/bin/env python3\n" +
-            "import json,subprocess,sys,os\nfrom pathlib import Path\n" +
+        # Only push needs Python: land runs git dozens of times, and every
+        # other call execs the real git straight from sh.
+        push = self.root / "push-fixture.py"
+        self.script(push, "import json,subprocess,sys\nfrom pathlib import Path\n" +
             "real=" + repr(real_git) + "\n" +
-            "if sys.argv[1] == 'fetch': sys.exit(0)\n" +
-            "if sys.argv[1] == 'push':\n" +
-            "    selected=sys.argv[-1].split(':')[0]\n" +
-            "    Path('code').write_text('uncooperative late B\\n')\n" +
-            "    subprocess.run([real,'add','code'],check=True)\n" +
-            "    subprocess.run([real,'commit','-qm','late B'],check=True)\n" +
-            "    query=lambda *args: subprocess.check_output([real,*args],text=True).strip()\n" +
-            "    Path(" + repr(str(proof)) + ").write_text(json.dumps({'args':sys.argv[1:], 'commit':selected, " +
-            "'tree':query('rev-parse',selected+'^{tree}'),'candidate_B':query('rev-parse','HEAD')}))\n" +
-            "    sys.exit(0)\n" +
-            "os.execv(real,[real]+sys.argv[1:])\n")
+            "selected=sys.argv[-1].split(':')[0]\n" +
+            "Path('code').write_text('uncooperative late B\\n')\n" +
+            "subprocess.run([real,'add','code'],check=True)\n" +
+            "subprocess.run([real,'commit','-qm','late B'],check=True)\n" +
+            "query=lambda *args: subprocess.check_output([real,*args],text=True).strip()\n" +
+            "Path(" + repr(str(proof)) + ").write_text(json.dumps({'args':sys.argv[1:], 'commit':selected, " +
+            "'tree':query('rev-parse',selected+'^{tree}'),'candidate_B':query('rev-parse','HEAD')}))\n")
+        self.script(self.bin / "git", "#!/bin/sh\ncase $1 in\nfetch) exit 0 ;;\n" +
+            "push) exec python3 " + shlex.quote(str(push)) + ' "$@" ;;\nesac\n' +
+            "exec " + shlex.quote(real_git) + ' "$@"\n')
         self.run_command([str(self.kit / "land"), "--gate", "true"])
         pushed = json.loads(proof.read_text())
         self.assertEqual(pushed["tree"], original_tree)
@@ -765,6 +758,78 @@ exit 97
         self.assertEqual(self.git("log", "-1", "--format=%(trailers:key=Gate-Tree,valueonly)", pushed["commit"]).strip(), original_tree)
 
 
+# Each receipt fault is its own test, with its own fixture, so that the
+# runner below spreads them over the cores.
+for _fault in RECEIPT_FAULTS + UNREADABLE_RECEIPT_FAULTS:
+    setattr(PolicyFixtures, f"test_receipt_fault_{_fault}_refuses_before_cache_amend_or_main",
+            lambda self, fault=_fault: self.receipt_fault_refuses(fault))
+# A concurrent commit, rebase or dirty candidate after the receipt, each in
+# its own fixture.
+for _mode in ("commit", "rebase", "same-tree", "index", "worktree", "rebase-state"):
+    setattr(PolicyFixtures, f"test_concurrent_{_mode.replace('-', '_')}_candidate_after_receipt_refuses",
+            lambda self, mode=_mode: self.concurrent_candidate("after_receipt", mode))
+
+
+def run_isolated(name):
+    """Runs one test in this worker; returns its outcome and its whole output."""
+    with tempfile.TemporaryFile() as capture:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        saved = os.dup(1), os.dup(2)
+        os.dup2(capture.fileno(), 1)
+        os.dup2(capture.fileno(), 2)
+        start = time.monotonic()
+        try:
+            suite = unittest.defaultTestLoader.loadTestsFromName(name, sys.modules[__name__])
+            result = unittest.TextTestRunner(stream=sys.stderr, verbosity=2).run(suite)
+            outcome = ("ok" if not result.skipped else "skipped") if result.wasSuccessful() else "FAIL"
+        except BaseException:
+            import traceback
+            traceback.print_exc()
+            outcome = "FAIL"
+        finally:
+            sys.stdout.flush()
+            sys.stderr.flush()
+            os.dup2(saved[0], 1)
+            os.dup2(saved[1], 2)
+            os.close(saved[0])
+            os.close(saved[1])
+        elapsed = time.monotonic() - start
+        capture.seek(0)
+        return outcome, elapsed, capture.read().decode(errors="replace")
+
+
+def run_parallel():
+    """Runs every test in its own fixture over a pool of os.cpu_count() workers.
+
+    Prints one line per test in name order, a failing test's whole output,
+    and exits nonzero on any failure."""
+    from concurrent.futures import ProcessPoolExecutor
+    import multiprocessing
+    names = [f"PolicyFixtures.{name}" for name in unittest.defaultTestLoader.getTestCaseNames(PolicyFixtures)]
+    start = time.monotonic()
+    failed = 0
+    with ProcessPoolExecutor(max_workers=os.cpu_count() or 1,
+                             mp_context=multiprocessing.get_context("spawn"),
+                             initializer=os.umask, initargs=(0o077,)) as pool:
+        futures = [pool.submit(run_isolated, name) for name in names]
+        for name, future in zip(names, futures):
+            try:
+                outcome, elapsed, output = future.result()
+            except Exception as error:
+                outcome, elapsed, output = "FAIL", 0.0, f"worker failed: {error!r}\n"
+            print(f"{name} ... {outcome} ({elapsed:.1f} s)", flush=True)
+            if outcome == "FAIL":
+                failed += 1
+                print(output, end="" if output.endswith("\n") else "\n", flush=True)
+    print(f"Ran {len(names)} tests in {time.monotonic() - start:.1f} s: "
+          + (f"FAILED ({failed})" if failed else "OK"), flush=True)
+    return 1 if failed else 0
+
+
 if __name__ == "__main__":
     os.umask(0o077)
-    unittest.main(verbosity=2)
+    if len(sys.argv) > 1:
+        # A selection or unittest option runs serially, as unittest.main does.
+        unittest.main(verbosity=2)
+    sys.exit(run_parallel())
