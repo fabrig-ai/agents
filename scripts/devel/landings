@@ -133,7 +133,7 @@ def show(records, last):
         print(line)
 
 
-def wait(label, timeout, poll, unreachable):
+def wait(label, timeout, poll, unreachable, read=15):
     start = last_read = time.monotonic()
     deadline = start + timeout if timeout is not None else math.inf
     last_error = None
@@ -141,8 +141,8 @@ def wait(label, timeout, poll, unreachable):
     while True:
         now = time.monotonic()
         # Always attempt the initial read, even with --timeout 0.
-        read_limit = 15 if first_read else max(
-            .001, min(15, deadline - now, last_read + unreachable - now))
+        read_limit = read if first_read else max(
+            .001, min(read, deadline - now, last_read + unreachable - now))
         first_read = False
         try:
             records = read_feed(read_limit)
@@ -340,11 +340,12 @@ def main():
         try:
             poll = seconds(os.environ.get('LANDINGS_POLL', '30'))
             unreachable = seconds(os.environ.get('LANDINGS_UNREACHABLE', '300'))
-            if poll == 0 or unreachable == 0:
-                raise ValueError('poll and unreachable intervals must be positive')
+            read = seconds(os.environ.get('LANDINGS_READ', '15'))
+            if poll == 0 or unreachable == 0 or read == 0:
+                raise ValueError('poll, unreachable and read intervals must be positive')
         except (ValueError, argparse.ArgumentTypeError) as error:
             parser.error(str(error))
-        return wait(args.set, args.timeout, poll, unreachable)
+        return wait(args.set, args.timeout, poll, unreachable, read)
     try:
         records = read_feed()
     except (OSError, subprocess.TimeoutExpired) as error:

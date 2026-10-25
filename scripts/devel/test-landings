@@ -2,6 +2,7 @@
 """Offline landing-feed fixtures; every case has its own temporary directory."""
 import argparse
 import ast
+import concurrent.futures
 import json
 import os
 from pathlib import Path
@@ -13,6 +14,8 @@ import time
 os.umask(0o077)
 SCRIPT = Path(__file__).resolve().with_name('landings')
 PYTHON = sys.executable
+# The first read's deadline: well above the delayed stand-in's .08 s, even under load.
+READ = '1'
 
 
 def record(label='fixture/m1', event='waiting', token='run1', minute=0, **extra):
@@ -32,7 +35,7 @@ class Lab:
         self.bin = root / 'bin'
         self.bin.mkdir()
         self.env = dict(os.environ, LANDINGS_FEED=str(self.feed), LANDINGS_POLL='.02',
-                        LANDINGS_UNREACHABLE='.20', LANDINGS_FIXTURE_HOSTNAME='fixture-remote',
+                        LANDINGS_UNREACHABLE='.20', LANDINGS_READ=READ, LANDINGS_FIXTURE_HOSTNAME='fixture-remote',
                         PATH=str(self.bin) + ':' + os.environ['PATH'],
                         FIXTURE_TRACE=str(self.trace), FIXTURE_FEED=str(self.feed))
         # Even an accidental remote read can only reach this rejecting stand-in.
@@ -273,7 +276,7 @@ def remote_hang(lab):
     del env['LANDINGS_FEED']
     start = time.monotonic()
     lab.run('wait', 'fixture/m1', status=4, env=env)
-    assert time.monotonic() - start >= 15, 'initial read was cut short'
+    assert time.monotonic() - start >= float(READ), 'initial read was cut short'
 
 
 def remote_first_read(lab):
@@ -302,6 +305,17 @@ def invalid_arguments(lab):
                  ('wait', 'fixture/m1', '--timeout', '-1')):
         lab.run(*args, status=2)
     lab.run('wait', 'fixture/m1', status=2, env=dict(lab.env, LANDINGS_POLL='0'))
+    lab.run('wait', 'fixture/m1', status=2, env=dict(lab.env, LANDINGS_READ='0'))
+
+
+def run_case(case):
+    with tempfile.TemporaryDirectory(prefix='landings-fixture-') as directory:
+        lab = Lab(Path(directory))
+        case_start = time.monotonic()
+        case(lab)
+        if not case.__name__.startswith('remote_'):
+            assert not lab.trace.exists(), 'local fixture attempted ssh'
+        return time.monotonic() - case_start
 
 
 def main():
@@ -317,14 +331,11 @@ def main():
     selected = parser.parse_args().case
     if selected:
         cases = tuple(case for case in cases if case.__name__ in selected)
-    for number, case in enumerate(cases, 1):
-        with tempfile.TemporaryDirectory(prefix='landings-fixture-') as directory:
-            lab = Lab(Path(directory))
-            case_start = time.monotonic()
-            case(lab)
-            if not case.__name__.startswith('remote_'):
-                assert not lab.trace.exists(), 'local fixture attempted ssh'
-            print(f'ok {number}: {case.__name__} ({time.monotonic() - case_start:.2f}s)', flush=True)
+    # The cases share nothing but the tool, so they run at once; results print in order.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(cases)) as pool:
+        futures = [pool.submit(run_case, case) for case in cases]
+        for number, (case, future) in enumerate(zip(cases, futures), 1):
+            print(f'ok {number}: {case.__name__} ({future.result():.2f}s)', flush=True)
     print(f'completed {len(cases)} cases in {time.monotonic() - start:.2f}s', flush=True)
 
 
