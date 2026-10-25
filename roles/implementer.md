@@ -1,9 +1,8 @@
 # Implementers
 
 Provisional, 2026-10-24. How an implementer works: the Codex run that
-takes one task file from its owner ([owners.md](owners.md) 4.2 and
-4.3), in a worktree of its own, and writes, builds, tests and repairs
-until the task is done. Every implementer reads this file before its
+takes one task file, in a worktree of its own, and writes, builds,
+tests and repairs until the task is done. Every implementer reads this file before its
 task, and outside agents, section 1 of skein's `docs/foundation/`
 rules, `programming-model.md` and `testing-strategy.md`: a later
 section only where the task names it. The task holds what is
@@ -49,8 +48,8 @@ reason. The wide checks are the landing's gates (section 2).
 
 Optimistic (the user, 2026-10-25): the landing's gates run the wide
 checks (the workspace's lints and the focused and fuzzy suites), and
-what fails there comes back as a repair. The slow tiers are after
-landing's (owners.md 4.5). So, once, when the set's narrow tests pass:
+what fails there comes back as a repair. The slow tiers run after
+landing. So, once, when the set's narrow tests pass:
 
 1. **Format:** `cargo fmt`, directly, not through `heavy`: it builds
    nothing.
@@ -62,17 +61,27 @@ landing's (owners.md 4.5). So, once, when the set's narrow tests pass:
    disallowed method stopped a whole set, and forgejo-elsewhere-3's M4
    spent a land-set run and a repair on it.
 3. **The focused suite, unless the task waives it:** `heavy cargo
-   nextest run --workspace`, the default profile: every test but the
-   fuzzy ones and the tiers'. Its builds are the gate's first, from the
-   shared store.
+   nextest run --workspace --no-fail-fast`, the default profile: every
+   test but the fuzzy ones and the tiers'. Its builds are the gate's
+   first, from the shared store. `--no-fail-fast`, so that one failure
+   leaves the rest run: in a 10-25 trial a fail-fast stop left 4,690 of
+   6,552 tests unrun.
+
+**A failure the set didn't cause**, in a test its change doesn't reach
+(`rg` finds none of the changed items on its path, and its log names
+none), runs once alone, as section 1 runs a test. Passing alone, it is
+a flake: the report names it with both logs, and the suite doesn't
+rerun. Failing alone, it is a question (section 4). Why: in that trial a
+skein world's 5 ms deadline failed while two suites shared the machine,
+and passed alone and at the gate.
 
 Nothing else: not the fuzzy, browser or `qa` profiles, the process or
 live tiers, the workspace's clippy, the wasm lints or the doc examples,
 and never `scripts/check.sh`, `scripts/after-landing.sh`, `land` or
-`land-set`. They are the gates', the slow tiers' and the owner's
-(owners.md 4.4 and 4.5), and a repair's (below), unless the task names
-one: the milestone's end names `land-set --prove`, which rebases,
-repins and gates the set without pushing it (landing-flow.md 9.1).
+`land-set`. They are the gates' and the slow tiers', and a repair's
+(below), unless the task names one: a task may name `land-set --prove`,
+which rebases, repins and gates the set without pushing it
+(landing-flow.md 9.1).
 
 **A repair** of what a gate found runs the failing tests alone, in
 their profile (`--profile fuzzy -E 'test(=NAME)'`), or the lint that

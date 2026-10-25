@@ -43,9 +43,19 @@ meta_get() {
     done <"$1"
 }
 
+# Each event gains "ts", when it arrived, UTC to the millisecond, as its first
+# key, so that a run's steps can be timed; other lines pass unchanged.
+stamp() {
+    perl -MPOSIX=strftime -MTime::HiRes=time -ne 'BEGIN { $| = 1 }
+        my $t = time;
+        my $ts = strftime("%Y-%m-%dT%H:%M:%S", gmtime $t) . sprintf(".%03dZ", ($t - int $t) * 1000);
+        s/^\{(\s*\})?/defined $1 ? "{\"ts\":\"$ts\"$1" : "{\"ts\":\"$ts\","/e;
+        print'
+}
+
 # Each invocation repeats the settings, including when continuing a thread.
 turn() {
-    local event_offset stderr_offset thread delay child=''
+    local event_offset stderr_offset thread delay child='' events stamper
     printf '%s\n' "$1" >"$state/prompt"
     local -a command delays
     read -r -a delays <<<"${CODEX_RUN_RETRY_DELAYS:-120 300 900}"
@@ -67,10 +77,14 @@ turn() {
         [[ -z $thread ]] || command+=("$thread")
         command+=(-)
         run_exit=0
-        (cd "$dir" && exec "${command[@]}" <"$state/prompt") >>"$state/events.jsonl" 2>>"$state/stderr.log" &
+        exec {events}> >(stamp >>"$state/events.jsonl")
+        stamper=$!
+        (cd "$dir" && exec "${command[@]}" <"$state/prompt") 1>&"$events" 2>>"$state/stderr.log" &
         child=$!
         wait "$child" || run_exit=$?
         child=''
+        exec {events}>&-
+        wait "$stamper" || true
         tail -c "+$((event_offset + 1))" "$state/events.jsonl" >"$state/attempt.jsonl"
         tail -c "+$((stderr_offset + 1))" "$state/stderr.log" >"$state/attempt.stderr"
         if [[ ! -s $state/thread ]]; then

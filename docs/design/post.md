@@ -213,7 +213,10 @@ overwrites another.
     else can reach stdin.
   - Its command is `codex exec --json -o <run dir>/last.md`, with the
     events and stderr written to the run directory, and the thread's id
-    kept from its first event.
+    kept from its first event. Each event gains `ts` as its first key,
+    when it arrived, UTC to the millisecond, so that a run's steps can be
+    timed: Codex's own events carry no time (an implementers' trial,
+    2026-10-25).
   - Its prompt is `start.sh`'s search rule, then "Read TASK and do what
     it says. Write your report to REPORT.", so a task never lacks its
     report's path.
