@@ -260,14 +260,15 @@ machine's `tmp/post/` (section 5).
 - **Sessions** run on their machine's claude daemon, driven over ssh:
   `claude --bg` to start, `claude agents --json` to list, and `claude
   stop <id>` to stop, with the job's short `id` from that list, never
-  its `sessionId`. A resume by hand takes the full `sessionId`,
-  `claude --bg --resume <sessionId> "<message>"`, and the session is
-  checked to be working after it. Only a stopped session resumes in
-  place: a done one still runs, idle, and a resume of a running
-  session, done, blocked or working, starts a copy with a new id and
-  an invented name that acts at once, so stop it first (post's wake
-  does so for a done one). A finished session is ended with `claude
-  stop`, never by killing its waiter, which wakes it.
+  its `sessionId`. A resume by hand takes the full `sessionId` and no
+  other flag, `claude --bg --resume <sessionId> "<message>"`, and the
+  session is checked to be working after it. It continues in place
+  only a stopped session, one whose entry has no `pid`: a done one
+  still runs, idle, so stop it first and wait for its `pid` to go
+  (post's wake does so). A resume of a running session, or one with
+  any other flag (`--name`, `--model`), starts a copy with a new id
+  that acts at once. A finished session is ended with `claude stop`,
+  never by killing its waiter, which wakes it.
 
 ## 6. Answering owners
 
