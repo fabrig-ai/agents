@@ -208,6 +208,7 @@ class Lab:
                     assert not active, ('exclusive gate overlaps live scope', active)
                 else:
                     assert 'exclusive' not in active.values(), ('scope overlaps exclusive gate', active)
+                    assert lane != 'gate' or 'gate' not in active.values(), ('landing gates overlap', active)
                     assert list(active.values()).count('build') < 2 or lane != 'build', \
                         ("more than the lab queue's two builds", active)
                 active[token] = lane
@@ -802,6 +803,14 @@ def weighted(lab):
         assert not lab.event('land-gate', name), name
     assert lab.event('land-gate', 'admit')['weight'] == '10000', 'a landing first'
     assert lab.event('build', 'admit')['weight'] == '1000', "an agent's build next"
+    # Landing gates run one at a time, even past the queue's own limit.
+    lab.q('parallel', '2', '--group', 'gate')
+    first, second = lab.start('land-a', land=True, duration=1.0), lab.start('land-b', land=True, duration=0.1)
+    lab.done(first)
+    lab.done(second)
+    lab.q('parallel', '1', '--group', 'gate')
+    assert lab.event('land-a', 'payload_end')['time_ns'] < lab.event('land-b', 'payload_begin')['time_ns'] or \
+        lab.event('land-b', 'payload_end')['time_ns'] < lab.event('land-a', 'payload_begin')['time_ns'], 'one at a time'
     lab.env['HEAVY_CLASS'] = 'idle'
     lab.done(lab.start('idle', duration=0.05))
     del lab.env['HEAVY_CLASS']

@@ -971,8 +971,13 @@ def wrapper(token):
                     if ready:
                         ledger.event(task, 'drain_end')
             elif task['lane'] == 'gate':
-                # A landing's gate runs beside the builds, first by its weight.
-                ready = not ledger.data['gate']
+                # A landing's gate runs beside the builds, first by its weight,
+                # and alone among gates: two would share the machine evenly
+                # against wall-time budgets.
+                ready = not ledger.data['gate'] and not any(
+                    other['token'] != token and other['lane'] == 'gate'
+                    and other['state'] in ('launching', 'active', 'finishing', 'closing')
+                    for other in ledger.tasks.values())
             else:
                 slots = int(os.environ.get('HEAVY_BUILD_SLOTS_EFFECTIVE', '0'))
                 ready = not ledger.data['gate'] and (not slots or sum(other['lane'] == 'build' and
@@ -1002,6 +1007,9 @@ def wrapper(token):
                     '--property=KillMode=control-group', '--property=Delegate=no',
                     '--property=CPUAccounting=yes', '--property=MemoryAccounting=yes',
                     '--property=CPUWeight=' + task.get('weight', WEIGHTS['build']),
+                    # Out of memory, the kernel kills an agent's build, which
+                    # reruns, before a landing's work.
+                    '--property=OOMScoreAdjust=' + ('0' if task.get('weight') == WEIGHTS['land'] else '500'),
                     '--property=EnvironmentFile=' + str(BASE / (token + '.env')),
                     '--property=StandardOutput=append:' + task['capture'], '--property=StandardError=inherit',
                     '--working-directory=' + task['repo'], str(KIT / 'heavy'), '--payload', token],
