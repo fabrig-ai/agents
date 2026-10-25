@@ -20,6 +20,7 @@ os.umask(0o077)
 STATE = Path('/home/free/.local/state/agents-landing-turn')
 HOLDER = r'/home/free/src/rust/agents/scripts/devel/land-turn\.py'
 COORDINATOR = 'debian-16gb-hel1-3'  # hetzner3
+REAP_TIMEOUT_S = 1  # Only the fixtures shorten it.
 
 
 def identity(token, repo, holder):
@@ -58,21 +59,21 @@ def event(tmp, who, name, start, granted=None, reason=None):
         print('land-turn: private journal unavailable', file=sys.stderr, flush=True)
 
 
-def holder(directory, who, tmp, heartbeat=False):
+def holder(directory, who, tmp, heartbeat=False, liveness_s=10):
     last_input = time.monotonic()
     reason = 'connection-eof'
 
     def disconnected(delay):
         nonlocal last_input, reason
         if heartbeat:
-            remaining = max(0, 10 - (time.monotonic() - last_input))
+            remaining = max(0, liveness_s - (time.monotonic() - last_input))
             delay = remaining if delay is None else min(delay, remaining)
         if select.select([sys.stdin], [], [], delay)[0]:
             chunk = os.read(sys.stdin.fileno(), 64)
             if not heartbeat or not chunk or chunk.strip(b'\0'):
                 return True
             last_input = time.monotonic()
-        expired = heartbeat and time.monotonic() - last_input >= 10
+        expired = heartbeat and time.monotonic() - last_input >= liveness_s
         if expired:
             reason = 'connection-liveness'
         return expired
@@ -112,7 +113,7 @@ def close_transport(transport):
     transport.stdin.close()
     transport.stdout.close()
     try:
-        return transport.wait(timeout=1) == 0
+        return transport.wait(timeout=REAP_TIMEOUT_S) == 0
     except subprocess.TimeoutExpired:
         transport.kill()
         transport.wait()

@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Exercise advisory turns with isolated local pipes and simulated SSH; no real gate."""
 import argparse
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 import fcntl
 import importlib.util
 import json
+import multiprocessing
 import os
 from pathlib import Path
 import runpy
@@ -127,8 +129,11 @@ def release_visibility(root):
                 'sys.stdin.buffer.read(); ' + ending)
             return [sys.executable, '-I', '-B', '-c', code], False
 
+        # Only the transport that never exits waits out the reap bound, shortened here.
+        reap = .1 if name == 'reap-timeout' else module.REAP_TIMEOUT_S
         with (tmp / 'caller.stderr').open('w') as out:
-            with patch.object(module, 'transport_command', command), patch.object(sys, 'stderr', out):
+            with patch.object(module, 'transport_command', command), patch.object(sys, 'stderr', out), \
+                    patch.object(module, 'REAP_TIMEOUT_S', reap):
                 assert module.client(tmp, 'temper', ['sh', '-c', 'exit 17']) == 17
         rows = events(tmp)
         expected = ['request', 'grant', 'release' if name == 'healthy' else 'fail-open']
@@ -180,11 +185,18 @@ def construction(root):
             'configuration_fail_open_cases': len(rejected), 'child_status': 17, 'real_ssh': False}
 
 
-def heartbeat_holder(root, token):
+# The holder's 10 s liveness bound, scaled down for the fixture: a healthy
+# connection pulses every PULSE_S for HEALTHY_S (beyond the bound), and expiry
+# must land within [0.98 bound, bound + EXPIRY_SLACK_S], margins that hold under load.
+LIVENESS_S, PULSE_S, HEALTHY_S, EXPIRY_SLACK_S = .5, .1, .8, .5
+
+
+def heartbeat_holder(root, token, repo):
     code = ('import runpy,sys; from pathlib import Path; '
         f'm=runpy.run_path({str(KIT / "land-turn.py")!r}); '
         f'm["holder"](Path({str(root / "coordinator")!r}), '
-        f'm["identity"]({token!r}, "temper", "fixture"), Path({str(root)!r}), heartbeat=True)')
+        f'm["identity"]({token!r}, {repo!r}, "fixture"), Path({str(root)!r}), heartbeat=True, '
+        f'liveness_s={LIVENESS_S!r})')
     out = (root / (token + '.stderr')).open('w')
     process = subprocess.Popen([sys.executable, '-I', '-B', '-c', code], stdin=subprocess.PIPE,
         stdout=subprocess.PIPE, stderr=out, close_fds=True)
@@ -192,48 +204,70 @@ def heartbeat_holder(root, token):
     return process
 
 
-def heartbeat_lifetime(root):
-    root.mkdir()
-    elapsed = []
-    for queued in (False, True):
-        blocker = holder(root, '8' * 32) if queued else None
-        process = None
+def holds_open(process, path):
+    for fd in Path(f'/proc/{process.pid}/fd').iterdir():
         try:
-            if blocker:
-                grant(blocker)
-            process = heartbeat_holder(root, ('b' if queued else 'a') * 32)
-            if not queued:
-                grant(process)
-                # A healthy connection lasts beyond the 10s liveness bound.
-                for _ in range(3):
-                    process.stdin.write(b'\0')
-                    process.stdin.flush()
-                    assert not select.select([process.stdout], [], [], 5)[0]
-                    assert process.poll() is None
-            process.stdin.write(b'\0')
-            process.stdin.flush()
-            start = time.monotonic()
-            # Leave stdin OPEN: model a blackholed SSH session on the server.
-            assert process.wait(timeout=12) == 0
-            duration = time.monotonic() - start
-            assert 9.8 <= duration <= 11, duration
-            elapsed.append(duration)
-            assert not process.stdout.read()
+            if os.readlink(fd) == str(path):
+                return True
+        except OSError:  # Closed since the listing.
+            pass
+    return False
+
+
+def heartbeat_expiry(root, queued):
+    # Granted and queued run side by side, each on its own repository's lock.
+    repo = 'queued' if queued else 'temper'
+    blocker = holder(root, '8' * 32, repo) if queued else None
+    process = None
+    try:
+        if blocker:
+            grant(blocker)
+        process = heartbeat_holder(root, ('b' if queued else 'a') * 32, repo)
+        if not queued:
+            grant(process)
+            # A healthy connection lasts beyond the liveness bound.
+            healthy = time.monotonic()
+            while time.monotonic() - healthy < HEALTHY_S:
+                process.stdin.write(b'\0')
+                process.stdin.flush()
+                assert not select.select([process.stdout], [], [], PULSE_S)[0]
+                assert process.poll() is None
+        else:
+            # Time the expiry from the queue, not from interpreter startup.
+            wait_for(lambda: holds_open(process, root / 'coordinator' / (repo + '.lock')), 'queued holder')
+        process.stdin.write(b'\0')
+        process.stdin.flush()
+        start = time.monotonic()
+        # Leave stdin OPEN: model a blackholed SSH session on the server.
+        assert process.wait(timeout=10) == 0
+        duration = time.monotonic() - start
+        assert .98 * LIVENESS_S <= duration <= LIVENESS_S + EXPIRY_SLACK_S, duration
+        assert not process.stdout.read()
+        process.stdin.close()
+        process.stdout.close()
+        return duration
+    finally:
+        if process and process.poll() is None:
+            process.kill()
+            process.wait()
             process.stdin.close()
             process.stdout.close()
-        finally:
-            if process and process.poll() is None:
-                process.kill()
-                process.wait()
-                process.stdin.close()
-                process.stdout.close()
-            if blocker:
-                disconnect(blocker)
-    probe = holder(root, 'c' * 32)
-    grant(probe)
-    disconnect(probe)
-    return {'layer': 'local-pipe-heartbeat', 'stdin_held_open': True, 'expiry_s': elapsed,
-            'healthy_beyond_10s': True, 'queued_and_granted_release': True, 'real_ssh': False}
+        if blocker:
+            disconnect(blocker)
+
+
+def heartbeat_lifetime(root):
+    root.mkdir()
+    with ThreadPoolExecutor(2) as pool:
+        futures = [pool.submit(heartbeat_expiry, root, queued) for queued in (False, True)]
+        elapsed = [future.result() for future in futures]
+    for token, repo in (('c' * 32, 'temper'), ('d' * 32, 'queued')):
+        probe = holder(root, token, repo)
+        grant(probe)
+        disconnect(probe)
+    return {'layer': 'local-pipe-heartbeat', 'stdin_held_open': True, 'liveness_s': LIVENESS_S,
+            'expiry_s': elapsed, 'healthy_beyond_bound': True, 'queued_and_granted_release': True,
+            'real_ssh': False}
 
 
 def holder_validation(root):
@@ -805,12 +839,18 @@ def main():
     cases += [('ssh-killed-client-' + ('queued' if queued else 'granted'),
                lambda lab, queued=queued: simulated_ssh(lab, lambda lab: lost(lab, queued, True)))
               for queued in (True, False)]
-    for name, test in [('protocol', protocol), ('construction', construction),
+    # The lab-free cases share no state but patched globals, so each runs in
+    # its own forked process, side by side; results keep their order.
+    simple = [(name, test) for name, test in [('protocol', protocol), ('construction', construction),
                        ('release-visibility', release_visibility),
-                       ('heartbeat-lifetime', heartbeat_lifetime), ('holder-validation', holder_validation)]:
-        if not opts.case or name in opts.case:
-            results.append(dict(case=name, status='pass', **test(root / name)))
-            (root / 'results.json').write_text(json.dumps(results, indent=2) + '\n')
+                       ('heartbeat-lifetime', heartbeat_lifetime), ('holder-validation', holder_validation)]
+              if not opts.case or name in opts.case]
+    if simple:
+        with ProcessPoolExecutor(len(simple), mp_context=multiprocessing.get_context('fork')) as pool:
+            futures = [(name, pool.submit(test, root / name)) for name, test in simple]
+            for name, future in futures:
+                results.append(dict(case=name, status='pass', **future.result()))
+                (root / 'results.json').write_text(json.dumps(results, indent=2) + '\n')
     for name, test in cases:
         if opts.case and name not in opts.case:
             continue
