@@ -28,7 +28,9 @@ def main():
         for name, body in {
             'systemctl': 'echo "service $*" >>"$FIXTURE_TRACE"\n',
             'sleep': 'exit 0\n',
-            'sha256sum': '[[ $* == "-c --quiet" ]]\n',
+            # Read the digest line as the real one does: exiting first breaks
+            # setup's pipe under load.
+            'sha256sum': 'cat >/dev/null\n[[ $* == "-c --quiet" ]]\n',
             # Fault only the owner metadata, without changing real ownership.
             'stat': 'if [[ ${FIXTURE_OWNER:-} == wrong && $* == "-c %u "* ]]; then echo 999999; else exec /usr/bin/stat "$@"; fi\n',
         }.items():
@@ -103,8 +105,9 @@ def main():
         discovered.parent.mkdir(parents=True)
         shutil.copy2(artifact, discovered)
         discovery_env = {key: value for key, value in env.items() if key not in ('DEV_ROOT', 'DEV_TMP')}
-        subprocess.run([moved / 'kache-setup'], env=discovery_env, check=True,
-                       capture_output=True, text=True)
+        result = subprocess.run([moved / 'kache-setup'], env=discovery_env,
+                                capture_output=True, text=True)
+        assert result.returncode == 0, (result.stdout, result.stderr)
         print('test-kache-setup: passed (local, remote, repeat, mode, owner, removal)')
 
 
