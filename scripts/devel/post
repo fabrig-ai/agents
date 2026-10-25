@@ -144,7 +144,7 @@ wake() (
                 if ((attempt >= ${POST_STOP_WAIT:-10})); then
                     unwoken 'stop did not complete'; return $?
                 fi
-                sleep 1
+                sleep "${POST_STOP_STEP:-1}"
             done
             cwd=$(jq -r '.cwd // empty' <<<"$info")
             [[ -d $cwd ]] || cwd=$root
@@ -302,7 +302,7 @@ deliver() {
 }
 wait_mail() {
     (($#)) || usage
-    local name=$1 timeout='' holder=$$ kind=claude started=$SECONDS holder_start line delay
+    local name=$1 timeout='' holder=$$ kind=claude started=$SECONDS holder_start line delay whole
     shift
     valid_name "$name" || fail 'invalid mailbox name'
     while (($#)); do
@@ -341,8 +341,9 @@ wait_mail() {
         ) || { local code=$?; [[ -z $line ]] || echo "$line"; return "$code"; }
         if [[ -n $line ]]; then echo "$line"; return 0; fi
         [[ -z $timeout ]] || ((SECONDS - started < timeout)) || return 1
-        delay=2
-        if [[ -n $timeout ]] && ((timeout - SECONDS + started < delay)); then delay=$((timeout - SECONDS + started)); fi
+        # POST_POLL may be fractional; its whole part bounds it by the time left.
+        delay=${POST_POLL:-2}; whole=${delay%.*}
+        if [[ -n $timeout ]] && ((timeout - SECONDS + started < ${whole:-0})); then delay=$((timeout - SECONDS + started)); fi
         sleep "$delay"
     done
 }
