@@ -85,13 +85,17 @@ lifetimes, builds and landing gates alike, and waits for the load to
 settle. Persisted gate holds also block every other admission if the
 queue restarts and forgets its group pause. A landing's gate (`--land`)
 takes the same policy, candidate checks and receipt, but no hold: it
-starts beside the builds, first by its CPU weight. Builds occupy at most
-`HEAVY_BUILD_SLOTS` ledger slots (0, the default: no limit) until their
-cgroups are empty, regardless of the queue's slot accounting, and `setup`
-gives the queue's `build` group the same number. Gates of both kinds
-serialize through the queue's `gate` group. Every task builds with
-`HEAVY_BUILD_JOBS` jobs, the machine's CPU count by default, and its unit
-carries its class's `CPUWeight` (section 1).
+starts beside the builds, first by its CPU weight, and alone among
+gates, since two would split the machine against wall-time budgets.
+Every unit but a landing's also carries `OOMScoreAdjust=500`: out of
+memory, the kernel kills an agent's build, which reruns, before a
+landing's work. Builds occupy at most `HEAVY_BUILD_SLOTS` ledger slots
+(0, the default: no limit) until their cgroups are empty, regardless of
+the queue's slot accounting, and `setup` gives the queue's `build` group
+the same number. Gates of both kinds serialize through the queue's
+`gate` group. Every task builds with `HEAVY_BUILD_JOBS` jobs, the
+machine's CPU count by default, and its unit carries its class's
+`CPUWeight` (section 1).
 
 ## 3. Durable state and release
 

@@ -32,7 +32,9 @@ reason.
   errors last. Its outputs aren't the test build's, so it doesn't go
   before every run.
 - **A failure is read** in its log, whose path `heavy` prints, before
-  anything reruns. An unchanged command doesn't rerun.
+  anything reruns. An unchanged command doesn't rerun, except once after
+  exit 137: out of memory, the kernel kills an agent's build before a
+  landing's work (build-infrastructure.md, 2).
 - **Inputs stay still** while a command waits or runs: no edit to what
   it builds or tests until it reports. A submission to take back is
   cancelled with `heavy --cancel TOKEN`, from the worktree that
