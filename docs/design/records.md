@@ -230,8 +230,9 @@ The question is whether implementers build and test as
   from the same worktree, fmt or check.sh through heavy, or clippy
   after another clippy with the same `head`. Omit unestablished flags.
 
-`implementer.md`'s baseline is 741 runs from 10-22 to 10-24, whose
-commands ran 43 hours and waited 104. `record runs --all --since
+The baseline before implementer.md is 741 implementers' runs from
+10-22 to 10-24, whose commands ran 43 hours and waited 104, mostly on
+repeats. `record runs --all --since
 2026-10-25` shows whether it moved.
 
 ## 6. Caps

@@ -10,15 +10,9 @@ particular to it; where it departs from this file, it says why, and
 the task wins: a stability trial, a measurement, a profile the change
 needs.
 
-**Why.** Every build and test goes through
-`heavy`, one queue for the whole machine. Over 741 runs from 10-22 to
-10-24, implementers' commands ran for 43 hours and waited for 104:
-each command one implementer submits, every other waits behind. The
-hours went to repeats: clippy rerun 833 times on what it had already
-linted (4.2 hours running), fmt waiting 74,000 seconds to run for
-seconds, and workspace suites rerun after small fixes. So: narrow while
-working, the focused suite at most once, and nothing twice without a
-reason. The wide checks are the landing's gates (section 2).
+**Why.** Every build shares the machine's one `heavy` queue, so narrow
+while working, run the focused suite once, and nothing twice without a
+reason.
 
 ## 1. After each change
 
