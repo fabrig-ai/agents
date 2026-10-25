@@ -114,7 +114,9 @@ The commands:
     a destination that already holds it with the same text counts it
     delivered, so a lost acknowledgement never duplicates a message.
 
-  On exit 2 or 3, the sender tells its own parent.
+  On exit 2, the sender tells its own parent, or the director when
+  the parent was the recipient (owners.md 5). On exit 3 the message
+  waits, and the director's watcher reports it if it stays unread.
 - **`post deliver --from MACHINE`** is the key's forced command: it
   reads `deliver NAME` from `SSH_ORIGINAL_COMMAND` and the message from
   stdin (within 30 seconds), checks both, and that `To:` names this

@@ -295,7 +295,7 @@ code, and never decides whether a set lands: the gates do.
 - **Owners** reach the queue through three commands, and need no
   messages:
   - `queue request <set file>` (section 4);
-  - `queue wait <id>`, on the owner's detached route. It exits when the
+  - `queue wait <id>`, in a user unit (9.1). It exits when the
     set lands, comes back with the note's path, or is escalated, and its
     exit wakes the owner, on any machine. A sub-owner that stays on for
     the landing then runs `queue wait --after <id>` for the
@@ -557,10 +557,12 @@ Until the rest is built, agents do by hand what the tools don't:
   since it builds nothing, of a commit pushed to its branch.
 - **The milestone's end** follows section 3. One implementer task
   rebases and repins the set, and runs no gate: `land-set`'s are the
-  set's only gates. Then the owner runs `land-set` on its detached
-  route, and starts the next milestone on the set's branches without
-  waiting for it. A rerun after a repair takes its unchanged
-  repositories' gates from the cache, on the same machine.
+  set's only gates. Then the owner runs `land-set` detached, as a user
+  unit (`systemd-run --user --collect`, through a login shell) that
+  posts the owner its exit (`post send --as`) when it ends. It starts
+  the next milestone on the set's branches without waiting for it. A
+  rerun after a repair takes its unchanged repositories' gates from the
+  cache, on the same machine.
 - **Stacking.** Once the earlier set has landed, an implementer moves
   the new milestone with `git rebase --onto main <fork point>` in each
   repository, then repins.

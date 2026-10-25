@@ -23,7 +23,7 @@ what it reads and its own rules. The other departments are in
   skein's `programming-model.md` and `testing-strategy.md`; the
   client's designs it touches (temper's `docs/design/client/`, jig's
   `client/domain/pages.md` and `view.md`, skein's `ui.md` and
-  `ui-web.md`); and the project's testing document.
+  `ui-web.md`); and section 1 of the project's testing document.
 - **The mockups are the user's,** always: UI never draws one. They are
   the pages' design (temper's `docs/design/client/mockups/`, its
   `README.md` first, or a branch the user names): what a page's main

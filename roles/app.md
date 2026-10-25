@@ -19,7 +19,7 @@ reads and its own rules. The other departments are in
   troubleshooting, a repair that follows an existing pattern) is a
   Codex owner instead (owners.md 1).
 - **What it reads:** what owners.md's opening names, with section 1 of
-  skein's `programming-model.md` and `testing-strategy.md`, and the
+  skein's `programming-model.md`, `testing-strategy.md` and the
   project's testing document (temper's `docs/design/domain/testing.md`).
 - **A feature starts here,** as soon as its draft is in, with the
   upstream work it needs (owners.md 4.1, "Upstream first"). It waits

@@ -170,6 +170,11 @@ before touching its code: an owner's session doesn't load it.
   agents`), so that one session answers to the name, and starts the
   next milestone's sub-owner (3.1). Its children's post to `o/<name>`
   reaches it.
+- **A Codex owner** runs in the unit its parent started (director.md 4).
+  Its loop is its waiter, so it starts no `post wait`, and it keeps one
+  thread, with no handover. Its sub-owners are Codex units too,
+  `codex-run owner --effort E o/<name>-m<N> <its m<N>.md>`, each ended
+  with `systemctl --user stop codex-owner-$(systemd-escape NAME)`.
 - **Its context is the scarce thing.** It reads code through Codex
   surveys (short reports) and a Codex task's report, never its log. It
   ends its turn while implementers work, and is woken by their
@@ -519,11 +524,14 @@ departs from this section or 4.5, it wins.
   hand: take `origin/main`'s and update again.
 - **Breaking upstream.** An upstream change that breaks a downstream
   build, and a repin of a repository others also repin, wait for the
-  director's word: it orders them across owners and runs.
+  director's word: it orders them across owners and runs. In a set
+  they wait for no one's: the break lands with its downstream fix
+  (landing-flow.md 3, 9.1).
 - **The footprint.** An owner's notes list the repositories, crates and
-  protocols it changes, and the repins it needs. The director
-  orders owners whose footprints overlap, and one repin at a time per
-  repository.
+  protocols it changes, and the repins it needs. Its product owner
+  orders owners whose footprints overlap, the director across products
+  (product.md 3), and the set lock their landings (landing-flow.md
+  9.1).
 
 ### 4.6 QA passes
 
@@ -563,7 +571,8 @@ natural point for one, beside the next milestone (3.1).
   That covers an owner's pass, the external loops and an after-landing
   run alike. The happy path is the roadmaps' stories and pages, used
   as intended, in ordinary conditions. A security hole, lost data and
-  a flake that fails gates count as on it. Anything else waits: a
+  a flake that fails gates count as on it, and so does what the
+  mission's own end requires. Anything else waits: a
   corner case, a race under load, a rare condition. Its owner sends it
   to its product owner (a sub-owner, through its parent) as one entry:
   what fails, where, its reproduction, and why it is off the happy path.

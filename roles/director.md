@@ -37,7 +37,7 @@ user's behalf. The roles and the departments together are
 - **Its own spend counts** with everyone's: Claude for its judgement,
   Codex for reading and surveys, plain shell before either (section 9).
 - **It keeps the machines shared and safe:** disk, settings, and the
-  security rules every brief carries (section 10).
+  security rules every owner reads (section 10).
 
 ## 2. The session
 
@@ -201,7 +201,8 @@ machine's `tmp/post/` (section 5).
   them:
   - the front matter (records.md 3): its roadmap and feature, its
     department, its parent and owner, its machine, its model and
-    effort, `started`, and `state: active`;
+    effort, `started`, `state: active`, and `ended` and `end` as
+    `unknown`;
   - a summary, at most 60 words: what it sets out to do;
   - who it is, in a line: "o/<name>, an owner under agents'
     `roles/owners.md` and `roles/<department>.md`, which say what to
@@ -406,8 +407,8 @@ is mechanical, and Codex reads what needs reading.
 - **x1 is the user's workstation:** its load is theirs. When it has no
   margin, landings go from another machine, with the same gate and
   budgets.
-- **The security rules,** in every brief (an implementer's are
-  implementer.md 5's):
+- **The security rules,** which every owner reads and no brief
+  repeats (an implementer's are implementer.md 5's):
   - the user's classic token never goes to an implementer;
   - no probes on the project's real repositories;
   - no agent reads another process's environment (`/proc/*/environ`,
