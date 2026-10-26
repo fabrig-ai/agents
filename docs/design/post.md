@@ -181,7 +181,7 @@ overwrites another.
 ## 5. codex-run
 
 - **`codex-run task [--model M] [--effort E] [--read-only] [--to ADDR]
-  [--resume RUN] TASK DIR REPORT`** starts one run.
+  [--resume RUN] [--on-stop FILE] TASK DIR REPORT`** starts one run.
   - **It refuses at once,** with exit 2 and the reason, before anything
     starts:
     - a path that isn't absolute;
@@ -221,7 +221,18 @@ overwrites another.
     it says. Write your report to REPORT.", so a task never lacks its
     report's path.
   - `--resume RUN` continues that run's thread, with that run's
-    settings.
+    settings, but for `--on-stop`, which a run has only if its own call
+    gives it.
+  - **`--on-stop FILE`** gives the unit a stop command
+    (`ExecStop=`), which systemd runs before it signals what is left in
+    the unit: at a stop (a cap, a person, a shutdown) and after the run
+    ends on its own. It runs FILE if FILE is then a regular executable
+    file, not a link, in FILE's directory, for at most 60 seconds, its
+    output in the run directory's `on-stop.log` and its outcome in
+    `on-stop` (`exit N`, or `absent`). FILE is absolute, and need not
+    exist at the start: the session writes it once it holds something
+    to give back, such as a held login (qa-flow.md 10.3). A failing
+    FILE never fails the unit.
 - **Capacity.** A turn that fails because the model is at capacity
   resumes its thread after 2, 5 and then 15 minutes, "Go on with the
   task: the model was at capacity.", three tries at most.

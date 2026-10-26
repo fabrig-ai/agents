@@ -43,8 +43,17 @@ whose future is open (section 9).
   the director (section 6).
 - **One tool, `qa`,** in `scripts/devel/`, which names no product. Its
   record is three kinds of files in `records/qa/` (section 7).
-- **Fakes first:** passes start on the product's fake backends. A real
-  forge and a real model follow once the loop runs (the user, 10-26).
+- **Rungs, from fakes to real backends:** a product's binding names its
+  rungs, its fakes first, and the held logins each takes. The director
+  opens a repository's rung with `qa rung` once the rung below has run
+  clean, and its passes run there; the fakes stay its first rung (the
+  user, 10-26: passes climb temper's rungs to real backends now)
+  (section 10).
+- **A held login has one holder at a time.** A subscription's login
+  refreshes, so it is never copied: it rests on one machine, where the
+  passes run, and a second tool, `logins`, keeps its custody. QA's
+  passes and the director's other live runs take it in turn, and it is
+  free again only once it is back (section 10).
 
 ## 2. The marker
 
@@ -94,7 +103,9 @@ whose future is open (section 9).
     repository's tier whose verdicts are all cleared
     ([landing-flow.md](landing-flow.md) 4, step 8). Reds standing from
     older landings don't hold it back. A pass then spends no tokens
-    finding again what the tier already showed.
+    finding again what the tier already showed;
+  - the held logins of the repository's rung are granted to the
+    service, `logins take` (section 10.3).
 
   The pass takes every chosen commit that `main` holds, oldest first,
   up to the settings' `batch` (five, for now). The rest wait for the
@@ -111,8 +122,9 @@ whose future is open (section 9).
   read `roles/qa.md`, then the product's binding, `docs/design/qa.md`
   in its repository, and names the commits, the `main`, the worktree,
   a scratch directory in `tmp/qa/<pass>/`, the cap and the report's
-  path. Its wall time has a cap, the user's to set (proposed: two
-  hours). Its tokens are recorded, not capped.
+  path, and the rung with its held logins (section 10.3). Its wall time
+  has a cap, the user's to set (proposed: two hours), counted from its
+  start, once it holds its logins. Its tokens are recorded, not capped.
 - **The product's binding** is the product's: whom a pass plays, the
   deployment and its rungs, the hands it holds on the product and on
   its backends, and what makes a finding there. This document and the
@@ -144,17 +156,18 @@ whose future is open (section 9).
   5. Writes its report (section 5).
 - **Its transcript is Codex's own:** the session's rollout records
   every command and its output, so no wrapper logs the tool's calls.
-- **Backends:** the product's fakes, for now. A real forge and a real
-  model come as further rungs once passes run (the user, 10-26), each
-  named in the binding, the director opening one for the brief to name.
-  Their accounts and spend are open (section 9).
+- **Backends:** the repository's open rung, named in the binding, the
+  director opening one for the brief to name (section 10.1). A rung's
+  held logins are the service's from before the pass starts until
+  after it ends, and the session's give-back returns them whatever
+  ends it (section 10.3).
 
 ## 5. The report
 
 `records/qa/passes/<pass>.md`, at most 8 KB, `<pass>` its start and
 repository (`20261026-0915-temper`). The service writes the front
-matter: repository, `main`, commits, machine, model, effort, started,
-ended, wall time, tokens, and the outcome (`done`, `capped` or
+matter: repository, `main`, commits, rung, machine, model, effort,
+started, ended, wall time, tokens, and the outcome (`done`, `capped` or
 `failed`). It commits the file twice: at the pass's start, `running`,
 so that the pass shows in `qa passes` and its commits are taken
 wherever the record is read; and at its end, completed, with the body.
@@ -207,6 +220,7 @@ takes a repository's name where it needs one.
 | `qa passes [--running]` | lists passes, with their commits, outcome, wall time and tokens |
 | `qa findings` | lists the queue |
 | `qa triage PASS N ROUTE [--why]` | routes one finding |
+| `qa rung REPO [RUNG [--login NAME]... [--why]]` | opens a rung, or shows the open one (section 10.1) |
 | `qa watch` | runs the service (section 4) |
 
 The record is committed with `record commit`, and its rows are in
@@ -217,6 +231,7 @@ The record is committed with `record commit`, and its rows are in
 | `qa/decisions.md` | the director, through `qa decide` | appended | one item per choice: `- <time> <repo> <commit> run\|backlog <why>` |
 | `qa/passes/<pass>.md` | the pass, and `qa watch` for the front matter | at the pass's start and end | the report (section 5) |
 | `qa/triage.md` | the triager, through `qa triage` | appended | one item per finding: `- <time> <pass> <n> <route> <why>`, the route an owner's address, `backlog` or `drop` |
+| `qa/rungs.md` | the director, through `qa rung` | appended | one item per opening: `- <time> <repo> <rung> <logins> <why>`, the logins comma-separated, or `-` |
 
 Times are UTC to the second, commits full SHAs. The settings are the
 kit's: the machine, named as section 4 says, and `machine.env`'s
@@ -232,12 +247,118 @@ kit's: the machine, named as section 4 says, and `machine.env`'s
 - `roles/qa.md`, the pass's role, is short: section 4's steps and
   section 5's report.
 - `setup` installs `qa watch` on the machine the director names, as
-  the user unit `agents-qa-watch.service`.
+  the user unit `agents-qa-watch.service`, and links `logins`.
+- `director.md` gains a line for the rungs and the held logins at its
+  check: opening a rung, and reading `logins list` for saturation
+  (section 10).
 
 ## 9. Open
 
 - **Triage:** who works the findings queue (section 6).
-- **Real backends:** which accounts a pass uses on a real forge and
-  model, how they are held, and the product's own spend.
+- **Real backends' spend:** the subscriptions' use is measured by
+  `logins list`'s last day; whether passes get a cap of their own on it
+  is the user's.
 - **qa's lab:** what becomes of it (the user, 10-26).
-- **The machine:** after landing's runner's, or one of its own.
+- **The machine:** settled, where the held logins rest (section 10.2).
+
+## 10. Real backends: rungs and the held logins
+
+The user, 10-26: QA after landing climbs the product's rungs to real
+backends now, its passes taking the held login in turn with the
+director's other live runs, one at a time; if that saturates the login,
+the director says so to the user.
+
+### 10.1 Rungs
+
+- **The binding names the rungs,** lowest first: the product's fakes,
+  then each real backend in turn, and for each the held logins a pass
+  takes, by their names in `logins` (temper's `docs/design/qa.md` 3:
+  fakes; a real model, with ChatGPT's login; GitHub).
+- **The director opens a rung** for a repository: `qa rung REPO RUNG
+  [--login NAME]... [--why TEXT]`, once the rung below has run clean,
+  as the binding says, which `qa passes` shows, each pass with its
+  rung. The latest opening holds every pass started after it; going
+  back down is an opening too, when a rung's findings must be fixed
+  first or its login is short. `qa rung REPO` shows the open one.
+- **A repository with no opening** runs on its binding's first rung,
+  with no login.
+- **The fakes stay** the first rung: what a fake does better (no
+  account, no wait, no spend) holds while the rungs above wait.
+
+### 10.2 The held logins
+
+- **A held login** is a refreshing credential exported from a product
+  (a subscription's sign-in): it has one holder at a time, is never
+  copied or read, moves into a deployment by the product's import and
+  back by its export before the deployment stops. A key that doesn't
+  refresh (a GitHub App's) is not one: the director places it, as
+  director.md 10 says.
+- **It rests on one machine,** at `tmp/logins/NAME/login`, private,
+  moved there once by the director with `logins add NAME FILE`, a
+  rename, never a copy. QA's passes run on that machine: `qa watch` is
+  installed there (section 4).
+- **One holder at a time, in turn:** `logins take NAME --as HOLDER`
+  grants it when it is at rest and no taker waits ahead of HOLDER;
+  otherwise it exits 1 and HOLDER keeps its place in the queue while it
+  asks again within 15 minutes. `--wait SECONDS` waits.
+- **Free only once back:** `logins give NAME --as HOLDER` checks, by
+  `stat` alone, that the login is at its resting path, a private,
+  non-empty regular file, and only then frees it. A login not back
+  stays held by its holder, so that one left inside a dead deployment
+  is never handed on, and shows in `logins list`.
+- **Every live run takes it:** QA's passes through the service
+  (10.3); the director's other runs on it (a ladder's rung, a focused
+  story) by `logins take` before their start and `logins give` after
+  their end, each started with `codex-run task --on-stop` and a brief
+  that writes the give-back file as 10.3 says.
+- **Saturation shows in `logins list`:** each login's holder and since
+  when, its waiters, and its last 24 hours: time held, takes, longest
+  wait. The director reads it at its check; a login held most of the
+  day while passes wait is saturated, and the director tells the user.
+
+### 10.3 A pass on a rung with held logins
+
+- **The service takes before it starts:** at a check where a pass
+  could start (section 4), it takes each of the rung's logins as
+  holder `qa-watch`, in name order. One refused gives back those
+  taken, still at rest, and the pass waits for a later check, its
+  commits still chosen, the service's place in the queue kept.
+- **The brief names** the rung, each login with its resting path, and
+  the give-back file, `give-back` in the pass's scratch directory.
+- **The session borrows them:** it moves each login into its
+  deployment as the binding says, and at once writes the give-back
+  file, an executable that moves each back to its resting path by the
+  product's export. It runs that file itself before it stops its
+  deployment, and checks each path by `stat`. It never runs `logins`.
+- **A stop gives back too:** the session runs under `codex-run task
+  --on-stop` with the give-back file, so that its unit runs the file
+  before the deployment inside it is signalled: at the cap, a person's
+  stop, a shutdown, or a session that ended with its deployment up
+  ([post.md](post.md) 5).
+- **The service gives after the end,** once the run's unit is
+  inactive and its give-back done. A login not back stays the
+  service's: the pass's notice to the director names it and the
+  deployment's directories, and the service tries the give again at
+  each check, so that the login is free as soon as it is back.
+- **A login lost in a dead deployment** (one that died before its
+  export: a crash, a session that stopped its deployment first) is in
+  the deployment's state, which stays with the pass's scratch for 7
+  days. The director has it brought back, as a task of its own: the
+  deployment restarted on its directories, signed in, the login
+  exported to its resting path, as the binding says. The service's
+  next check frees it.
+
+### 10.4 The tool
+
+`scripts/devel/logins`, with its fixture, names no product. Its state
+is the machine's, in `tmp/logins/NAME/`, private: `login` at rest,
+`holder.json` while taken, `waiting.json`, the queue, and `log.tsv`,
+one line per `add`, `take` (with its wait) and `give` (with the time
+held).
+
+| Command | What it does |
+|---|---|
+| `logins add NAME FILE` | moves FILE in as NAME's login, at rest |
+| `logins take NAME --as HOLDER [--note TEXT] [--wait SECONDS]` | grants NAME in turn and prints its resting path; exit 1 while another holds it or waits first |
+| `logins give NAME --as HOLDER` | frees NAME once its login is back; exit 1, still held, if it isn't |
+| `logins list [NAME]` | each login's holder, waiters and last 24 hours |
