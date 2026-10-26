@@ -189,7 +189,8 @@ What waits on the user is a Forgejo issue on git.fabrig.ai, in
   counts the issues that carry label 1: Forgejo drops a label name it
   doesn't know and would list every open issue. The answer is `{"open":
   n}`, and nothing of an issue leaves the machine.
-- **Bounded.** Each request under 15 seconds, the whole under 30. A
+- **Bounded.** Each request under 15 seconds, the whole under 30, and
+  a redirect refused, so that the token's header never follows one. A
   refused token, a missing label, more than 20 pages or an answer of
   the wrong shape fails that source alone (section 1); the footer names
   the HTTP status or the error's kind, never a response's body.
