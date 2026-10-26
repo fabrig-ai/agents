@@ -49,7 +49,7 @@
 # Exit status:
 #   0  landed
 #   2  refused: before starting, or nothing to land
-#   3  the rebase stopped on conflicts, left for you to resolve
+#   3  the rebase stopped on conflicts land-resolve.py could not settle
 #   4  the gate failed
 #   5  the local main could not follow: with a push, the commit landed on
 #      origin/main; with --local, nothing landed
@@ -549,6 +549,19 @@ land_cleanup() {
         echo "land: warning: cleanup could not start" >&2
 }
 
+resolve_rebase() {
+    local lines status
+    while :; do
+        status=0
+        lines=$(python3 -I -B "$kit/land-resolve.py" .) || status=$?
+        if [[ -n $lines ]]; then
+            while IFS= read -r line; do echo "land: $line" >&2; done <<<"$lines"
+        fi
+        ((status == 0)) || return 1
+        GIT_EDITOR=true git rebase --continue >/dev/null && return 0
+    done
+}
+
 try=0 pushed=false
 while :; do
     try=$((try + 1))
@@ -562,7 +575,7 @@ while :; do
         fetch
         base=$(git rev-parse origin/main)
     fi
-    if ! git rebase --quiet "$base"; then
+    if ! git rebase --quiet "$base" && ! resolve_rebase; then
         die 3 "the rebase on $(git rev-parse --short "$base") stopped on conflicts. \
 Resolve them, run git rebase --continue, then land again."
     fi

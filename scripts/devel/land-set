@@ -105,10 +105,10 @@ class Runner:
         self.cancelling = False
 
     def run(self, root, argv, *, check=True, quiet=False, discard_stdout=False, data=None, diagnostic=False,
-            env=None):
+            env=None, merge_stderr=False):
         child = subprocess.Popen(argv, cwd=root, stdin=subprocess.PIPE if data else subprocess.DEVNULL,
                                  stdout=subprocess.DEVNULL if discard_stdout else subprocess.PIPE if quiet else None,
-                                 stderr=subprocess.PIPE if quiet else None,
+                                 stderr=subprocess.STDOUT if merge_stderr else subprocess.PIPE if quiet else None,
                                  env=dict(os.environ, GIT_EDITOR='true', LAND_TURN_ACTIVE='1', **(env or {})),
                                  close_fds=True, start_new_session=True)
         self.child = child
@@ -299,11 +299,22 @@ def rebase(runner, path, base):
     while status:
         conflicts = runner.git(path, 'diff', '--name-only', '--diff-filter=U').splitlines()
         require(conflicts, 'rebase failed without conflicted paths', 1)
-        if conflicts != ['Cargo.lock']:
-            runner.run(path, ['git', 'rebase', '--abort'], check=False)
-            raise Failure(3, 'rebase conflict outside Cargo.lock: ' + ', '.join(conflicts))
-        runner.git(path, 'checkout', '--ours', '--', 'Cargo.lock')
-        runner.git(path, 'add', '--', 'Cargo.lock')
+        if 'Cargo.lock' in conflicts:
+            runner.git(path, 'checkout', '--ours', '--', 'Cargo.lock')
+            runner.git(path, 'add', '--', 'Cargo.lock')
+            conflicts.remove('Cargo.lock')
+        if conflicts:
+            code, lines = runner.run(path, [sys.executable, '-I', '-B',
+                str(Path(__file__).resolve().with_name('land-resolve.py')), str(path)],
+                check=False, quiet=True, merge_stderr=True)
+            name = repo_name(runner.git(path, 'remote', 'get-url', 'origin'))
+            for line in lines.splitlines():
+                print(f'land-set: {name}: {line}', flush=True)
+            if code:
+                remaining = [line.removeprefix('stops ').split(': ', 1)[0]
+                             for line in lines.splitlines() if line.startswith('stops ')]
+                runner.run(path, ['git', 'rebase', '--abort'], check=False)
+                raise Failure(3, 'rebase conflict outside Cargo.lock: ' + ', '.join(remaining or conflicts))
         status, _ = runner.run(path, ['git', 'rebase', '--continue'], check=False)
 
 

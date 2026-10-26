@@ -657,6 +657,30 @@ def other_conflict(lab):
     lab.assert_released()
 
 
+def status_conflict(lab):
+    # A common table, then neighbouring row edits on the two tips.
+    primary = lab.primary['smith']
+    status = 'docs/design/STATUS.md'
+    (primary / status).parent.mkdir(parents=True)
+    base = ('# Status\n\n| Document | Built | Left |\n|---|---|---|\n'
+            '| `a.md` | no | all |\n| `b.md` | no | all |\n')
+    lab.change('smith', status, base, primary)
+    lab.git(primary, 'push', 'origin', 'HEAD:main')
+    lab.git(lab.work['smith'], 'merge', '--ff-only', 'main')
+    lab.change('skein')
+    lab.change('smith', status, base.replace('| `b.md` | no |', '| `b.md` | branch |'))
+    lab.change('smith', status, base.replace('| `a.md` | no |', '| `a.md` | main |'), primary)
+    lab.git(primary, 'push', 'origin', 'HEAD:main')
+    output = lab.run()
+    assert 'land-set: smith: resolved docs/design/STATUS.md in ' in output, output
+    messages = lab.git(lab.origin['smith'], 'log', '--format=%B', 'main')
+    assert ('Rebase-Resolved: docs/design/STATUS.md: table rows: '
+            'main changed `a.md`; this commit changed `b.md`') in messages, messages
+    merged = lab.git(lab.origin['smith'], 'show', 'main:' + status)
+    assert '| `a.md` | main |' in merged and '| `b.md` | branch |' in merged, merged
+    lab.verify()
+
+
 def land_failure(lab):
     lab.change('skein')
     output = lab.run(status=4, env=dict(FAIL_REPO='jig'))
@@ -1234,7 +1258,7 @@ CASES = (tidy_hooks, tidy_hooks_partial, staging_cargo, rerun, advanced_main, re
          interrupted_with_staging, interrupted_during_feed, interrupted_during_cleanup,
          feed_failure, cleanup_warning,
          moving_bound, kit_refusal, lock_conflict,
-         other_conflict, land_failure,
+         other_conflict, status_conflict, land_failure,
          closure, concurrent, refusal, skipped)
 SLOW = ('moved_earlier_in_second_round', 'moved_between_phases', 'lock_conflict', 'land_failure',
         'refusal', 'pushed_then_failed', 'success', 'moved_gate_base', 'moving_bound', 'proved')
