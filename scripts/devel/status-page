@@ -50,10 +50,15 @@ STEPS = ('fmt', 'clippy', 'wasm', 'build', 'focused', 'fuzzy', 'bundle', 'browse
 WINDOWS = (('24h', DAY, 'Last 24 hours'), ('7d', WEEK, 'Last 7 days'))
 # The front matter's public fields (status-page.md 1); a field joins only once it is.
 FRONT = ('state', 'ended', 'description')
-# The user's issues (status-page.md 2.3): the repository, its label, and where
-# a signed-in user sees them.
-ISSUES_REPO, ISSUES_LABEL = 'fabrig-ai/agents', 1
-ISSUES_LINK = 'https://git.fabrig.ai/fabrig-ai/agents/issues?state=open&labels=1'
+# The user's issues (status-page.md 2.3): each repository of fabrig-ai and its
+# waiting-on-user label's id, in the page's order.
+ISSUES = (('agents', 1), ('skein', 2), ('smith', 3), ('jig', 4), ('hearth', 5),
+          ('temper', 6), ('qa', 7))
+
+
+def issues_link(repo, label):
+    """Where a signed-in user sees a repository's open issues so labelled."""
+    return f'https://git.fabrig.ai/fabrig-ai/{repo}/issues?state=open&labels={label}'
 
 
 def clock():
@@ -321,7 +326,7 @@ def part_feed(tmp, now):
 
 
 def part_user_issues(tmp, now):
-    """The open issues waiting on the user (status-page.md 2.3): {'open': n};
+    """Counts by repository and failures by repository (status-page.md 2.3);
     None where this machine holds no token."""
     path = tmp / 'git-fabrig/status-read.token'
     try:
@@ -347,11 +352,11 @@ def part_user_issues(tmp, now):
 
     opener = urllib.request.build_opener(NoRedirect)
 
-    def ask(endpoint, shape):
+    def ask(repo, endpoint, shape):
         remaining = min(timeout, deadline - time.monotonic())
         if remaining <= 0:
             raise OSError('timed out')
-        request = urllib.request.Request(f'{base}/api/v1/repos/{ISSUES_REPO}/{endpoint}',
+        request = urllib.request.Request(f'{base}/api/v1/repos/fabrig-ai/{repo}/{endpoint}',
                                          headers={'Authorization': 'token ' + token,
                                                   'Accept': 'application/json', 'User-Agent': 'status-page'})
         answer = concurrent.futures.Future()
@@ -382,21 +387,33 @@ def part_user_issues(tmp, now):
             # HTTP parser errors can contain a raw response line, too.
             raise OSError(type(error).__name__) from None
 
-    label = ask(f'labels/{ISSUES_LABEL}', 'label answer')
-    if (not isinstance(label, dict) or type(label.get('id')) is not int or label['id'] != ISSUES_LABEL
-            or not isinstance(label.get('name'), str) or not label['name'].strip()):
-        raise ValueError('label answer')
-    name = urllib.parse.quote(label['name'], safe='')
-    count = 0
-    for page in range(1, 21):
-        issues = ask(f'issues?state=open&type=issues&labels={name}&limit=50&page={page}', 'issues answer')
-        if not isinstance(issues, list) or any(not isinstance(issue, dict) for issue in issues):
-            raise ValueError('issues answer')
-        count += sum(any(isinstance(tag, dict) and type(tag.get('id')) is int and tag['id'] == ISSUES_LABEL
-                         for tag in shaped(issue.get('labels'), [])) for issue in issues)
-        if len(issues) < 50:
-            return {'open': count}
-    raise ValueError('more than 20 pages')
+    def read(repo, label_id):
+        try:
+            label = ask(repo, f'labels/{label_id}', 'label answer')
+            if (not isinstance(label, dict) or type(label.get('id')) is not int or label['id'] != label_id
+                    or not isinstance(label.get('name'), str) or not label['name'].strip()):
+                raise ValueError('label answer')
+            name = urllib.parse.quote(label['name'], safe='')
+            count = 0
+            for page in range(1, 21):
+                issues = ask(repo, f'issues?state=open&type=issues&labels={name}&limit=50&page={page}', 'issues answer')
+                if not isinstance(issues, list) or any(not isinstance(issue, dict) for issue in issues):
+                    raise ValueError('issues answer')
+                count += sum(any(isinstance(tag, dict) and type(tag.get('id')) is int and tag['id'] == label_id
+                                 for tag in shaped(issue.get('labels'), [])) for issue in issues)
+                if len(issues) < 50:
+                    return count, None
+            raise ValueError('more than 20 pages')
+        except Exception as error:
+            return None, str(error)
+
+    result = {'open': {}, 'failed': {}}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(ISSUES)) as pool:
+        futures = [(repo, pool.submit(read, repo, label)) for repo, label in ISSUES]
+        for repo, future in futures:
+            count, failure = future.result()
+            result['open' if failure is None else 'failed'][repo] = count if failure is None else failure
+    return result
 
 
 def part_director_post(tmp, now):
@@ -1181,6 +1198,12 @@ def kpis(fleet, shown, subscribed):
     post = [p for p in post if all(number(p.get(role)) is not None for role in ('owners', 'designers'))]
     owners, designers = (sum(p[role] for p in post) for role in ('owners', 'designers'))
     issues = user_issues(fleet)
+    counts = shaped(issues.get('open'), {}) if issues else {}
+    counts = {repo: n for repo, _ in ISSUES if (n := number(counts.get(repo))) is not None}
+    issues_sub = ' · '.join(f'<a href="{E(issues_link(repo, label))}">{E(repo)} '
+                            f'{E(str(counts.get(repo, "–")))}</a>' for repo, label in ISSUES)
+    if counts and len(counts) < len(ISSUES):
+        issues_sub = E(f'{len(counts)} of {len(ISSUES)} read · ') + issues_sub
     day = fleet.window(DAY)
     lands = [r for r in day if r[7] == 'land']
     tiles = [
@@ -1193,8 +1216,7 @@ def kpis(fleet, shown, subscribed):
          E(f'{owners} from owners, {designers} from designers')) if post
         else ("Director's post, 24 h", '–', "the director's mailbox was not reached"),
         ('Land gates, 24 h', str(len(lands)), E(f'{sum(r[5] != "0" for r in lands)} failed')),
-        ('Waiting on the user', str(issues) if issues is not None else '–',
-         f'<a href="{E(ISSUES_LINK)}">open issues on git.fabrig.ai</a>'),
+        ('Waiting on the user', str(sum(counts.values())) if counts else '–', issues_sub),
         ('Subscriptions', str(subscribed['count']), E(subscribed['sub'])) if subscribed
         else ('Subscriptions', '–', 'not shown'),
     ]
@@ -1204,8 +1226,9 @@ def kpis(fleet, shown, subscribed):
 
 
 def user_issues(fleet):
-    return next((count for name in fleet.names if name in fleet.up
-                 if (count := number(shaped(fleet.up[name].get('user_issues'), {}).get('open'))) is not None), None)
+    return next((answer for name in fleet.names if name in fleet.up
+                 if (answer := shaped(fleet.up[name].get('user_issues'), {}))
+                 if any(number(shaped(answer.get('open'), {}).get(repo)) is not None for repo, _ in ISSUES)), None)
 
 
 def reason_kind(reason):
@@ -1762,7 +1785,18 @@ def render(data, samples=None):
     down = [n for n in fleet.names if n not in fleet.up]
     problems += [f'{n}: {fleet.data["fleet"][n]["unreachable"]}' for n in down if n in fleet.data['fleet']]
     problems += [f'{n}: {e}' for n, d in fleet.up.items() for e in shaped(d.get('errors'), [])]
-    if user_issues(fleet) is None and not any(
+    issues = user_issues(fleet)
+    if issues is None:
+        # With every repository failed there is no tile reading, but its reasons
+        # still belong in the footer, from the first machine holding an answer.
+        issues = next((answer for name in fleet.names if name in fleet.up
+                       if (answer := shaped(fleet.up[name].get('user_issues'), {}))
+                       if any(isinstance(shaped(answer.get('failed'), {}).get(repo), str) for repo, _ in ISSUES)), None)
+    if issues is not None:
+        failed = shaped(issues.get('failed'), {})
+        problems += [f'waiting on the user: {repo}: {text(failed.get(repo))}' for repo, _ in ISSUES
+                     if number(shaped(issues.get('open'), {}).get(repo)) is None and repo in failed]
+    if issues is None and not any(
             e.startswith('user_issues:') for d in fleet.up.values() for e in shaped(d.get('errors'), [])
             if isinstance(e, str)):
         problems.append("waiting on the user: no machine reached holds the issues' token")
