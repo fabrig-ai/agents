@@ -3,7 +3,8 @@
 issue list [--mission M] [--all]
 issue comment [--mission M] REPO#NUMBER FILE
 issue close [--mission M] REPO#NUMBER [FILE]
-issue serve [--listen HOST:PORT] [--route LOGIN]
+issue serve [--listen HOST:PORT] [--route LOGIN]...
+issue install [--listen HOST:PORT] [--route LOGIN]...
 """
 import argparse
 from dataclasses import asdict, dataclass
@@ -16,6 +17,7 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
 import socket
 import stat
 import subprocess
@@ -43,6 +45,17 @@ MACHINE = r'[a-z][a-z0-9-]*'
 ADDRESS = rf'{NAME}@{MACHINE}'
 MISSION = r'[a-z0-9][a-z0-9_-]*'
 MARKER = re.compile(r'^<!-- waiting-on-user (?:mission=(\S+)|director) -->$', re.M)
+# Copied from scripts/devel/record: SECRET.
+SECRET = re.compile(r'-----BEGIN [^\n]*PRIVATE KEY-----|(?<![\w-])(?:gh[pousr]_[A-Za-z0-9_-]{20,}|github_pat_[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9_-]{20,})|xox[abpr]-|AKIA[A-Z0-9]{16}')
+URL = re.compile(r'https?://\S+')
+PUBLIC_PATH = re.compile(r"(?:^|[ ([`'\"<])(?:~/|/)[\w.-]+|\btmp/")
+EMAIL = re.compile(r'[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}')
+POST_ADDRESS = re.compile(rf'(?<![\w/-]){ADDRESS}(?![\w-])')
+IPV4 = re.compile(r'(?<![\w.])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![\w.])')
+
+
+class Failure(Exception):
+    pass
 
 
 class Refusal(Exception):
@@ -212,20 +225,73 @@ def clean(text):
     return ''.join(' ' if unicodedata.category(c) == 'Cc' else c for c in text)
 
 
-def body_file(filename):
-    path = Path(filename)
-    # Opening nonblocking avoids hanging on a FIFO passed in place of a regular file.
-    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
-    with os.fdopen(fd, 'rb') as source:
-        need(stat.S_ISREG(os.fstat(source.fileno()).st_mode), 'body must be a regular file')
-        data = source.read(60 * 1024 + 1)
-    need(len(data) <= 60 * 1024, 'body exceeds 60 KiB')
+def checked(paths, file: str, repo: str, title: str = '') -> str:
+    """FILE's text, once it and the title are fit for an issue in REPO; raises Refusal."""
+    home, path = Path.home().resolve(), Path(os.path.realpath(file))
+    private = [home / name for name in ('.ssh', '.gnupg', '.config', '.local', '.codex')]
+    private += [Path(name) for name in ('/proc', '/run', '/sys')]
+    private += [(paths.tmp / name).resolve() for name in ('git-fabrig', 'heavy', 'post')]
+    if not path.is_relative_to(home / '.claude/jobs'):
+        private.append(home / '.claude')
+    need(not any(path.is_relative_to(base) for base in private),
+         'FILE is in a private place')
+    try:
+        # Nonblocking avoids hanging on a FIFO; fstat also checks after links resolve.
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        with os.fdopen(fd, 'rb') as source:
+            need(stat.S_ISREG(os.fstat(source.fileno()).st_mode), 'FILE must be a regular file')
+            data = source.read(60 * 1024 + 1)
+    except OSError:
+        raise Refusal('FILE must be a readable regular file') from None
+    need(len(data) <= 60 * 1024, 'FILE exceeds 60 KiB')
     try:
         text = data.decode('utf-8')
     except UnicodeError:
-        raise Refusal('body must be valid UTF-8') from None
-    need(not any(line.startswith('<!-- waiting-on-user') for line in text.splitlines()),
-         'body contains a waiting-on-user marker')
+        raise Refusal('FILE must be valid UTF-8') from None
+    secrets_in_use = []
+    for entry in (paths.tmp / 'git-fabrig').glob('*'):
+        try:
+            if entry.is_file():
+                value = entry.read_text(encoding='utf-8').strip()
+                if value:
+                    secrets_in_use.append(value)
+        except (OSError, UnicodeError):
+            continue
+    machines = []
+    if repo not in PRIVATE:
+        for line in (paths.tmp / 'post/machines').read_text(encoding='utf-8').splitlines():
+            fields = line.split('#', 1)[0].split()
+            if fields:
+                need(len(fields) == 2, 'invalid machines file')
+                machines.extend(word for word in fields if word != 'local')
+    machine = (re.compile(r'(?<!\w)(?:' + '|'.join(map(re.escape, machines)) + r')(?!\w)', re.I)
+               if machines else None)
+    for label, content in [('title', title), ('FILE', text)]:
+        def refuse(rule, offset):
+            location = label if label == 'title' else f'FILE line {content.count(chr(10), 0, offset) + 1}'
+            raise Refusal(f'{location}: {rule}')
+
+        for value in secrets_in_use:
+            offset = content.find(value)
+            if offset >= 0:
+                refuse('a forge credential may not go in an issue', offset)
+        match = SECRET.search(content)
+        if match:
+            refuse('a secret may not go in an issue', match.start())
+        offset = 0
+        for line in content.splitlines(keepends=True):
+            if label == 'FILE' and line.startswith('<!-- waiting-on-user'):
+                refuse('a waiting-on-user marker may not go in FILE', offset)
+            if repo not in PRIVATE:
+                for pattern, rule in ((PUBLIC_PATH, 'a path'), (EMAIL, 'an email address'),
+                                      (POST_ADDRESS, 'a post address'), (machine, "a machine's name")):
+                    subject = URL.sub('', line) if pattern is PUBLIC_PATH else line
+                    if pattern and pattern.search(subject):
+                        refuse(f'{rule} may not go in a public issue', offset)
+                for address in IPV4.finditer(line):
+                    if all(int(part) <= 255 for part in address[0].split('.')):
+                        refuse('an IPv4 address may not go in a public issue', offset)
+            offset += len(line)
     return text
 
 
@@ -237,12 +303,12 @@ def client(paths):
 def open_issue(paths, args):
     need(1 <= len(args.title) <= 200 and clean(args.title) == args.title,
          'title must be one line, 1 to 200 characters, without control characters')
-    text = body_file(args.file)
     asker = asking(paths, args.mission)
     repo = args.repo if args.repo is not None else repository(paths, asker)
     need(repo in REPOS, 'unknown repository')
     need(repo in PRIVATE or args.public,
          f"{repo}'s issues are public: write the text for anyone, then pass --public")
+    text = checked(paths, args.file, repo, args.title)
     who = 'by the director' if asker == 'director' else f'for the mission `{asker}`'
     body = (text.rstrip() + f'\n\n---\nAsked {who}. Your comment here '
             'reaches it by post, and it closes the issue.\n' + write_marker(asker))
@@ -292,6 +358,7 @@ def list_issues(paths, args):
 def change_issue(paths, args):
     repo, number = parse_issue(args.issue)
     asker = asking(paths, args.mission)
+    text = checked(paths, args.file, repo) if args.file is not None else None
     forge = client(paths)
     name = f'{repo}#{number}'
     issue = forge.call('GET', repo, f'issues/{number}')
@@ -300,7 +367,7 @@ def change_issue(paths, args):
     need(owner is not None, f"{name} has no asker's marker")
     need(owner == asker, f'{name} is asked by {owner}, not {asker}')
     if args.file is not None:
-        comment = forge.call('POST', repo, f'issues/{number}/comments', {'body': body_file(args.file)})
+        comment = forge.call('POST', repo, f'issues/{number}/comments', {'body': text})
         if args.command == 'comment':
             print(f"{name} {comment['html_url']}")
             return
@@ -521,20 +588,27 @@ class Hook(BaseHTTPRequestHandler):
         self.answer(204, reason)
 
 
-def serve(paths, listen, routes):
-    secret = credential(paths.tmp / 'git-fabrig/webhook.secret', 'webhook secret')
+def listener(listen):
     try:
         host, port = listen.rsplit(':', 1)
         host = host.removeprefix('[').removesuffix(']')
+        need('%' not in host, 'listener must have no scope identifier')
         address = ipaddress.ip_address(host)
         need(address.is_loopback, 'listener must be a loopback address')
+        need(re.fullmatch(r'[0-9]+', port), 'invalid listen port')
         port = int(port)
         need(0 <= port <= 65535, 'invalid listen port')
     except ValueError:
         raise Refusal('listen must be a loopback HOST:PORT') from None
+    return host, port, address.version
+
+
+def serve(paths, listen, routes):
+    host, port, version = listener(listen)
+    secret = credential(paths.tmp / 'git-fabrig/webhook.secret', 'webhook secret')
     router = Router(paths)
     class Server(ThreadingHTTPServer):
-        address_family = socket.AF_INET6 if address.version == 6 else socket.AF_INET
+        address_family = socket.AF_INET6 if version == 6 else socket.AF_INET
     with Server((host, port), Hook) as server:
         server.secret, server.router, server.routes = secret.encode(), router, routes
         worker = threading.Thread(target=router.worker, daemon=True)
@@ -545,6 +619,75 @@ def serve(paths, listen, routes):
         finally:
             router.stop.set()
             router.wake.set()
+
+
+def install(paths, listen, routes):
+    listener(listen)
+    script = Path(__file__).resolve()
+    units = (Path(os.environ.get('XDG_CONFIG_HOME', Path.home() / '.config'))
+             / 'systemd/user').expanduser().absolute()
+    secret = paths.tmp / 'git-fabrig/webhook.secret'
+    # As status-page install checks the paths written to its units.
+    for path in (script, units, secret):
+        need(not re.search(r'[\s"\'\\$%]', str(path)),
+             'a path for a unit must have no spaces, quotes, $, % or backslashes')
+    for route in routes:
+        need(re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', route), 'invalid route login')
+    if not secret.exists():
+        secret.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        secret.parent.chmod(0o700)
+        fd, temporary = tempfile.mkstemp(prefix='.webhook-', dir=secret.parent)
+        try:
+            with os.fdopen(fd, 'w') as out:
+                os.fchmod(out.fileno(), 0o600)
+                out.write(secrets.token_hex(32))
+            try:
+                os.link(temporary, secret)
+            except FileExistsError:
+                pass  # A concurrent install won; never replace its secret.
+        finally:
+            os.unlink(temporary)
+    try:
+        fd = os.open(secret, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    except OSError:
+        raise Refusal('webhook secret must be a readable regular file') from None
+    with os.fdopen(fd, 'r', encoding='utf-8') as source:
+        mode = os.fstat(source.fileno()).st_mode
+        need(stat.S_ISREG(mode), 'webhook secret must be a regular file')
+        need(stat.S_IMODE(mode) == 0o600, 'webhook secret must have mode 0600')
+        need(source.read().strip(), 'no webhook secret in its file')
+    unit = units / 'issue-router.service'
+    units.mkdir(parents=True, exist_ok=True)
+    arguments = ' '.join([str(script), '--listen', listen,
+                          *(part for route in routes for part in ('--route', route))])
+    content = f"""[Unit]
+Description=Route the user's comments on the forge's issues to their askers by post (agents docs/design/user-issues.md)
+
+[Service]
+ExecStart=/bin/bash -lc 'exec "$$0" serve "$$@"' {arguments}
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+"""
+    fd, temporary = tempfile.mkstemp(prefix='.issue-router-', dir=units)
+    try:
+        with os.fdopen(fd, 'w') as out:
+            out.write(content)
+        os.replace(temporary, unit)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+    for command in (['daemon-reload'], ['enable', unit.name], ['restart', unit.name]):
+        try:
+            result = subprocess.run(['systemctl', '--user', *command], stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError:
+            raise Failure('systemctl could not start') from None
+        if result.returncode:
+            raise Failure(f'systemctl {command[0]} exited {result.returncode}')
+    print(f'issue: installed {unit}, listening on {listen}; '
+          f"the webhook's URL http://{listen}/hook, its secret in {secret}")
 
 
 def main():
@@ -565,9 +708,10 @@ def main():
     closing.add_argument('file', nargs='?')
     for command in (opening, listing, commenting, closing):
         command.add_argument('--mission')
-    serving = sub.add_parser('serve')
-    serving.add_argument('--listen', default=LISTEN)
-    serving.add_argument('--route', action='append', default=[])
+    for name in ('serve', 'install'):
+        command = sub.add_parser(name)
+        command.add_argument('--listen', default=LISTEN)
+        command.add_argument('--route', action='append', default=[])
     args = parser.parse_args()
     try:
         paths = Paths()
@@ -577,6 +721,8 @@ def main():
             list_issues(paths, args)
         elif args.command in ('comment', 'close'):
             change_issue(paths, args)
+        elif args.command == 'install':
+            install(paths, args.listen, args.route)
         else:
             serve(paths, args.listen, args.route)
         return 0
@@ -588,6 +734,9 @@ def main():
         else:
             reason = f'cannot reach the forge: {error.message}'
         print(f'issue: {reason}', file=sys.stderr)
+        return 1
+    except Failure as error:
+        print(f'issue: {error}', file=sys.stderr)
         return 1
     except (Refusal, OSError, UnicodeError) as error:
         print(f'issue: {error}', file=sys.stderr)

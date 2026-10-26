@@ -1,15 +1,17 @@
 #!/usr/bin/env -S python3 -S
 """Offline issue fixtures, each selectable by name in a fresh Lab."""
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stdout
 from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
+import io
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
 import runpy
 import selectors
+import stat
 import subprocess
 import sys
 import threading
@@ -201,6 +203,16 @@ sys.exit(int(code.read_text()) if code.exists() else 0)
 '''
 
 
+SYSTEMCTL = r"""import json, os, sys
+from pathlib import Path
+root = Path(os.environ['ISSUE_LAB'])
+assert sys.stdin.read() == ''
+with (root / 'systemctl-calls').open('a') as out:
+    out.write(json.dumps(sys.argv[1:]) + '\n')
+sys.exit(7 if os.environ.get('FAIL_SYSTEMCTL') == sys.argv[2] else 0)
+"""
+
+
 class Lab:
     """A private workspace, records, credentials, fake post and fake Forgejo."""
     def __init__(self, root):
@@ -209,7 +221,7 @@ class Lab:
         for path in (self.home, self.tmp / 'post', self.tmp / 'git-fabrig', self.records / 'missions/fixture',
                      self.bin, self.state, root / 'posts', root / 'config'):
             path.mkdir(parents=True, exist_ok=True)
-        (self.tmp / 'post/machines').write_text('m1 local\nhel8 fixture@invalid\n')
+        (self.tmp / 'post/machines').write_text('m1 local\nhel8 fixture@invalid\nhetzner2 ssh-fixture\n')
         self.token, self.secret = 'made-up-issue-token-123', 'made-up-hook-secret-456'
         for name, value in [('agents-issues.token', self.token), ('webhook.secret', self.secret)]:
             path = self.tmp / 'git-fabrig' / name
@@ -221,6 +233,8 @@ class Lab:
         (self.bin / 'post').chmod(0o700)
         (self.bin / 'record').write_text(f'#!{sys.executable} -S\n' + RECORD)
         (self.bin / 'record').chmod(0o700)
+        (self.bin / 'systemctl').write_text(f'#!{sys.executable} -S\n' + SYSTEMCTL)
+        (self.bin / 'systemctl').chmod(0o700)
         (root / 'exits.json').write_text('{}')
         self.file = root / 'question.md'
         self.file.write_text('Which cache should we use?\n\n  \n')
@@ -423,7 +437,7 @@ def comment_and_close_take_only_the_askers_own(lab):
             lab.file.write_bytes(data)
             before = len(lab.forge.requests)
             lab.run(command, 'temper#1', lab.file, status=2)
-            assert len(lab.forge.requests) == before + 1
+            assert len(lab.forge.requests) == before
         lab.run(command, 'temper#1', lab.root, status=2)
     assert lab.forge.issues['temper'][1]['state'] == 'open'
     lab.file.write_text('valid')
@@ -624,7 +638,18 @@ def open_validates_input_and_reports_forge_failures(lab):
     output = lab.run('open', '--public', 'valid', lab.file, status=1)
     assert 'issue: the forge answered 404: missing [redacted]' in output
     assert len(output.strip().split(': ', 2)[-1]) <= 200
+    lab.forge.error = (500, {'message': 'failed ' + lab.token})
+    assert 'the forge answered 500: failed [redacted]' in lab.run(
+        'open', '--public', 'valid', lab.file, status=1)
     lab.forge.error = None
+    assert 'the forge answered 404: missing issue' in lab.run('close', 'agents#999', status=1)
+    # Reserve and release a loopback port: no real forge or network host is probed.
+    import socket
+    with socket.socket() as sock:
+        sock.bind(('127.0.0.1', 0))
+        unreachable = f'http://127.0.0.1:{sock.getsockname()[1]}'
+    assert 'cannot reach' in lab.run('open', '--public', 'valid', lab.file, status=1,
+                                   extra={'ISSUE_FORGE': unreachable})
     token = lab.tmp / 'git-fabrig/agents-issues.token'
     token.write_text('wrong')
     assert 'the forge answered 401: bad credentials' in lab.run('open', '--public', 'valid', lab.file, status=1)
@@ -633,13 +658,203 @@ def open_validates_input_and_reports_forge_failures(lab):
         assert f'no token at {token}' in lab.run('open', '--public', 'valid', lab.file, status=2)
 
 
+def open_refuses_secrets_and_private_files(lab):
+    def refused(file=lab.file, title='Question', rule=''):
+        before = len(lab.forge.requests)
+        output = lab.run('open', '--repo', 'agents', title, file, status=2)
+        assert rule in output, output
+        assert len(lab.forge.requests) == before
+
+    refused(title='Question ' + lab.token, rule='title: a forge credential')
+    for value, rule in [(lab.token, 'a forge credential'), (lab.secret, 'a forge credential'),
+                        ('ghp_' + 'a' * 30, 'a secret'), ('-----BEGIN OPENSSH PRIVATE KEY-----', 'a secret')]:
+        lab.file.write_text('Question\n\nDetail\n' + value + '\n')
+        refused(rule='FILE line 4: ' + rule)
+        # Titles share the very same checks.
+        refused(title=value, rule='title: ' + rule)
+    lab.file.write_text('A question.')
+    private = [lab.home / name / 'file' for name in ('.ssh', '.gnupg', '.config', '.local', '.codex', '.claude')]
+    private += [lab.tmp / name / 'file' for name in ('post', 'heavy', 'git-fabrig')]
+    for file in private:
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.write_text('A question.')
+        refused(file, rule='private place')
+    link = lab.root / 'linked.md'
+    link.symlink_to(private[0])
+    refused(link, rule='private place')
+    for file in ('/proc/version', '/run/no-such-issue-file', '/sys/no-such-issue-file'):
+        refused(file, rule='private place')
+    (lab.tmp / 'git-fabrig/file').unlink()
+    jobs = lab.home / '.claude/jobs/x/tmp/question.md'
+    jobs.parent.mkdir(parents=True)
+    jobs.write_text('A question.')
+    lab.run('open', '--repo', 'agents', 'Question', jobs)
+    # The jobs exception follows the resolved target, not the spelling of FILE.
+    (jobs.parent / 'linked.md').symlink_to(private[0])
+    refused(jobs.parent / 'linked.md', rule='private place')
+    fifo = lab.root / 'fifo'
+    os.mkfifo(fifo)
+    refused(fifo, rule='regular file')
+    refused(lab.root, rule='regular file')
+    refused(lab.root / 'missing', rule='regular file')
+    # t1's input-validation case already covers oversize, non-UTF-8 and markers.
+    lab.file.write_text('x' * (60 * 1024))
+    lab.run('open', '--repo', 'agents', 'Question', lab.file)
+    lab.file.write_text('Question\n<!-- waiting-on-user arbitrary -->')
+    refused(rule='FILE line 2: a waiting-on-user marker')
+    # Empty and unreadable credential entries are ignored, as are subdirectories.
+    directory = lab.tmp / 'git-fabrig'
+    (directory / 'empty').write_text('  \n')
+    (directory / 'invalid').write_bytes(b'\xff')
+    unreadable = directory / 'unreadable'
+    unreadable.write_text('cannot-read-this-fixture')
+    unreadable.chmod(0)
+    (directory / 'subdirectory').mkdir()
+    try:
+        lab.file.write_text('A question.')
+        lab.run('open', '--repo', 'agents', 'Question', lab.file)
+    finally:
+        unreadable.chmod(0o600)
+
+
+def a_public_issue_refuses_what_names_the_fleet(lab):
+    values = [('/home/free/x', 'a path'), ('~/src/rust', 'a path'), ('see tmp/owners', 'a path'),
+              ('o/x@m1', 'a post address'), ('someone@example.com', 'an email address'),
+              ('hel8', "a machine's name"), ('HETZNER2', "a machine's name"),
+              ('ssh-fixture', "a machine's name"), ('fixture@invalid', 'a post address'),
+              ('10.1.2.3', 'an IPv4 address'), ('https://hel8/status', "a machine's name"),
+              ('https://10.1.2.3/status', 'an IPv4 address'),
+              ('https://example.com/?email=someone@example.com', 'an email address')]
+    lab.forge.add('temper', body=TOOL['write_marker']('fixture'))
+    for value, rule in values:
+        lab.file.write_text('A question.\n\nDetail\n' + value + '\n')
+        for command, args in [('open', ('--public', 'Question')),
+                              ('comment', ('temper#1',)), ('close', ('temper#1',))]:
+            before = len(lab.forge.requests)
+            output = lab.run(command, *args, lab.file, status=2)
+            assert 'FILE line 4: ' + rule + ' may not go in a public issue' in output, output
+            assert len(lab.forge.requests) == before
+        before = len(lab.forge.requests)
+        assert 'title: ' + rule in lab.run('open', '--public', value, lab.file, status=2)
+        assert len(lab.forge.requests) == before
+        # The same text and title are permitted in a private repository.
+        lab.run('open', '--repo', 'agents', value, lab.file)
+    for value in ('https://git.fabrig.ai/fabrig-ai/temper/issues/3', 'and/or', '1.2.3',
+                  'user-issues', 'shel8ter', 'hel80'):
+        lab.file.write_text(value)
+        lab.run('open', '--public', value, lab.file)
+        lab.run('comment', 'temper#1', lab.file)
+    for prefix in ('', ' ', '(', '[', '`', "'", '"', '<'):
+        lab.file.write_text(prefix + '/etc/x')
+        before = len(lab.forge.requests)
+        assert 'a path may not go' in lab.run('open', '--public', 'Question', lab.file, status=2)
+        assert len(lab.forge.requests) == before
+
+
+def install_writes_the_unit_and_keeps_the_secret(lab):
+    secret = lab.tmp / 'git-fabrig/webhook.secret'
+    token = secret.with_name('agents-issues.token')
+    secret.unlink()
+    token.unlink()
+    secret.parent.rmdir()
+    for listen in ('::1%\nExecStartPost=touch proof\n#:8391', '127.0.0.1:8391\n', '[::1%scope]:8391'):
+        lab.run('install', '--listen', listen, status=2)
+        assert not secret.exists()
+        assert not (lab.root / 'config/systemd').exists()
+        assert not (lab.root / 'systemctl-calls').exists()
+    args = ('--listen', '127.0.0.1:8391', '--route', 'fabrig-director', '--route', 'proof')
+    output = lab.run('install', *args)
+    value = secret.read_text()
+    lab.secret = value
+    lab.safe(output)
+    assert len(value) == 64 and all(char in '0123456789abcdef' for char in value)
+    assert stat.S_IMODE(secret.stat().st_mode) == 0o600
+    assert stat.S_IMODE(secret.parent.stat().st_mode) == 0o700
+    unit = lab.root / 'config/systemd/user/issue-router.service'
+    expected = f'''[Unit]
+Description=Route the user's comments on the forge's issues to their askers by post (agents docs/design/user-issues.md)
+
+[Service]
+ExecStart=/bin/bash -lc 'exec "$$0" serve "$$@"' {SCRIPT} --listen 127.0.0.1:8391 --route fabrig-director --route proof
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+'''
+    assert unit.read_text() == expected, unit.read_text()
+    assert output == (f'issue: installed {unit}, listening on 127.0.0.1:8391; '
+                      f"the webhook's URL http://127.0.0.1:8391/hook, its secret in {secret}\n")
+    calls = lab.root / 'systemctl-calls'
+    expected_calls = [['--user', 'daemon-reload'], ['--user', 'enable', unit.name],
+                      ['--user', 'restart', unit.name]]
+    assert [json.loads(line) for line in calls.read_text().splitlines()] == expected_calls
+    lab.run('install', *args)
+    assert secret.read_text() == value
+    secret.chmod(0o644)
+    assert 'mode 0600' in lab.run('install', status=2)
+    secret.chmod(0o600)
+    secret.write_text('')
+    assert 'no webhook secret' in lab.run('install', status=2)
+    secret.write_text(value)
+    before = calls.read_text()
+    for listen in ('0.0.0.0:8391', 'localhost:8391', '127.0.0.1:65536', 'bad', '127.0.0.1:-1'):
+        lab.run('install', '--listen', listen, status=2)
+    lab.run('install', '--route', 'bad login', status=2)
+    lab.run('install', status=2, extra={'XDG_CONFIG_HOME': str(lab.root / 'bad path')})
+    assert calls.read_text() == before
+    assert secret.read_text() == value
+    for command, count in [('daemon-reload', 1), ('enable', 2), ('restart', 3)]:
+        calls.unlink()
+        assert f'systemctl {command} exited 7' in lab.run('install', status=1,
+                                                       extra={'FAIL_SYSTEMCTL': command})
+        assert len(calls.read_text().splitlines()) == count
+    # A competing install publishes its own secret between our creation and link.
+    secret.unlink()
+    real_link = os.link
+    raced = False
+    def publish_first(source, target):
+        nonlocal raced
+        raced = True
+        assert Path(source).read_text() != value
+        secret.write_text(value)
+        secret.chmod(0o600)
+        real_link(source, target)
+    with (patch.dict(os.environ, lab.env, clear=True),
+          patch.object(os, 'link', side_effect=publish_first), redirect_stdout(io.StringIO()) as output):
+        TOOL['install'](TOOL['Paths'](), TOOL['LISTEN'], [])
+    lab.safe(output.getvalue())
+    assert raced and secret.read_text() == value
+    assert list(secret.parent.iterdir()) == [secret]
+    before = calls.read_text()
+    secret.unlink()
+    os.mkfifo(secret, 0o600)
+    assert 'regular file' in lab.run('install', status=2)
+    secret.unlink()
+    secret.symlink_to(lab.file)
+    assert 'regular file' in lab.run('install', status=2)
+    secret.unlink()
+    secret.write_text(value)
+    assert calls.read_text() == before
+    (lab.bin / 'systemctl').unlink()
+    # A PATH restricted to this lab makes an absent systemctl deterministic.
+    with patch.dict(os.environ, dict(lab.env, PATH=str(lab.bin)), clear=True):
+        try:
+            TOOL['install'](TOOL['Paths'](), TOOL['LISTEN'], [])
+        except TOOL['Failure'] as error:
+            assert str(error) == 'systemctl could not start'
+        else:
+            assert False, 'missing systemctl was accepted'
+    assert lab.forge.requests == []
+
+
 def webhook_boundaries_reject_bad_requests(lab):
     lab.open()
     lab.run('serve', '--listen', '0.0.0.0:0', status=2)
     machines = lab.tmp / 'post/machines'
     machines.write_text('m1 elsewhere\n')
     assert 'must name one local machine' in lab.run('serve', status=2)
-    machines.write_text('m1 local\nhel8 fixture@invalid\n')
+    machines.write_text('m1 local\nhel8 fixture@invalid\nhetzner2 ssh-fixture\n')
     with lab.router() as url:
         lab.forge.hook(url, lab.secret)
         assert request(url, method='GET')[0] == 405
@@ -728,7 +943,9 @@ CASES = (open_files_an_issue_in_the_missions_repository, a_public_repository_nee
          a_user_comment_reaches_the_missions_owner, a_gone_owner_falls_back_to_its_parent,
          the_router_routes_only_the_users_comments_on_the_tools_issues, the_owner_is_found_after_a_pull,
          a_restart_resumes_the_chain_after_the_last_tried, a_redelivered_comment_posts_once,
-         open_validates_input_and_reports_forge_failures, webhook_boundaries_reject_bad_requests,
+         open_validates_input_and_reports_forge_failures, open_refuses_secrets_and_private_files,
+         a_public_issue_refuses_what_names_the_fleet, install_writes_the_unit_and_keeps_the_secret,
+         webhook_boundaries_reject_bad_requests,
          retries_restart_and_exhausted_chains_are_recorded)
 
 

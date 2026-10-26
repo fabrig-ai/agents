@@ -13,7 +13,7 @@ import sys
 import time
 
 REPOS = ('agents', 'skein', 'smith', 'jig', 'hearth', 'qa', 'temper')
-TOOLS = set('heavy logs gates landing-turn land-set kache lab after-landing post codex-run qa'.split())
+TOOLS = set('heavy logs gates landing-turn land-set kache lab after-landing post codex-run qa git-fabrig'.split())
 ALLOWED = TOOLS | {'machine.env', 'owners', 'director'}
 CONTENT = ('.', ':(exclude,glob)**/Cargo.lock')
 MARK, SIGNATURE = 'EVIDENCE.TAG', 'agents fixture evidence'
