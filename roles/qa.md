@@ -38,7 +38,9 @@ report's path.
 3. **Build and set up.** Build the product at the checkout through
    `heavy`, at background weight: `HEAVY_CLASS=background heavy
    COMMAND`, the narrowest build that gives the binaries the guide
-   needs, once. Binaries go in the scratch directory, never in
+   needs, once. Build in the checkout, whose `target/` the service keeps
+   warm between passes (no `--target-dir`, no `CARGO_TARGET_DIR`); copy
+   or install the binaries into the scratch directory, never into
    `~/.local`. Set up a deployment with the product's own commands, as
    its guide says, in a directory of the scratch, on its fake backends:
    for temper, `temper box --fake-backends` as `docs/guide/box.md`'s

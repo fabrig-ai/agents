@@ -676,6 +676,7 @@ class Watch:
 
 
 def watch(director, once, workspace):
+    os.environ['POST_NAME'] = 'qa-watch'
     # Check assignment before mkdir, locks, record pull, or any other side effect.
     need(workspace.fixture or (Path.home() / '.config/agents-qa/director').is_file(),
          "this is not the service's machine (no ~/.config/agents-qa/director)")

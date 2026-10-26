@@ -535,6 +535,7 @@ def watch_starts_a_pass_on_the_cleared_main(lab):
     text = lab.content(f'qa/passes/{state["pass"]}.md')
     assert f'commits: {b} {c}\n' in text and 'outcome: running\n' in text and f'main: {c}\n' in text
     assert 'machine: qa-fixture\n' in text
+    assert lab.git(lab.origin, 'log', '-1', '--format=%s', 'main').startswith('qa-watch:')
     assert 'waiting: 0 commits' in lab.run('passes', '--running').stdout
     assert state['pass'] in lab.run('passes', '--running').stdout
 
@@ -572,6 +573,7 @@ def watch_finishes_a_pass_with_findings(lab):
     ended = lab.end_run(report=report)
     lab.watch()
     result = lab.content(f'qa/passes/{state["pass"]}.md')
+    assert lab.git(lab.origin, 'log', '-1', '--format=%s', 'main').startswith('qa-watch:')
     assert f'machine: {socket.gethostname()}\n' in result
     for text in ('outcome: done', 'tokens: 100/20/30', 'model: gpt-6.1-sol', 'effort: high', 'ended: ' + ended, 'wall: 0:00', report.strip()):
         assert text in result, (text, result)
