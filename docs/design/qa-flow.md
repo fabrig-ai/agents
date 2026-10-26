@@ -290,12 +290,16 @@ the director says so to the user.
 - **A held login** is a refreshing credential exported from a product
   (a subscription's sign-in): it has one holder at a time, is never
   copied or read, moves into a deployment by the product's import and
-  back by its export before the deployment stops. A key that doesn't
-  refresh (a GitHub App's) is not one: the director places it, as
-  director.md 10 says.
+  back by its export before the deployment stops. A program's own login,
+  a signed-in configuration directory of the program's (Claude Code's),
+  is one too, but never moves: the deployment uses it in place, as the
+  product's binding says (temper's `protocol/credentials.md`, 3), and
+  stops using it when it stops. A key that doesn't refresh (a GitHub
+  App's) is not one: the director places it, as director.md 10 says.
 - **It rests on one machine,** at `tmp/logins/NAME/login`, private,
-  moved there once by the director with `logins add NAME FILE`, a
-  rename, never a copy. QA's passes run on that machine: `qa watch` is
+  moved there once by the director with `logins add NAME PATH`, a
+  rename, never a copy: a file, or a program's configuration
+  directory. QA's passes run on that machine: `qa watch` is
   installed there (section 4).
 - **One holder at a time, in turn:** `logins take NAME --as HOLDER`
   grants it when it is at rest and no taker waits ahead of HOLDER;
@@ -304,8 +308,11 @@ the director says so to the user.
   past it. Every change is made under one lock, and `add` refuses a
   name that has a login or a holder.
 - **Free only once back:** `logins give NAME --as HOLDER` checks, by
-  `stat` alone, that the login is at its resting path, a private,
-  non-empty regular file, and only then frees it. A login not back
+  `stat` alone, that the login is at its resting path, and only then
+  frees it: a private (0600), non-empty regular file, or a private
+  (0700) directory with at least one entry, each the user's own and no
+  link. Nothing inside a directory is read or checked: what it holds
+  is the program's. A login not back
   stays held by its holder, so that one left inside a dead deployment
   is never handed on, and shows in `logins list`.
 - **Every live run takes it:** QA's passes through the service
@@ -338,7 +345,10 @@ the director says so to the user.
   deployment as the binding says, and at once writes the give-back
   file, an executable that moves each back to its resting path by the
   product's export, safe to run twice (the second export finds the
-  file there and sends nothing). It runs that file itself before it
+  file there and sends nothing). A login used in place moves nothing:
+  the give-back has nothing to do for it, and the login is back once
+  the deployment that used it has stopped, which the unit's stop
+  ensures. It runs that file itself before it
   stops its deployment, and checks each path by `stat`. It never runs
   `logins`. A stop in the seconds between the import and the file is a
   login lost in its deployment (below).
@@ -371,7 +381,7 @@ held).
 
 | Command | What it does |
 |---|---|
-| `logins add NAME FILE` | moves FILE in as NAME's login, at rest |
+| `logins add NAME PATH` | moves PATH, a file or a program's configuration directory, in as NAME's login, at rest |
 | `logins take NAME --as HOLDER [--note TEXT] [--wait SECONDS]` | grants NAME in turn and prints its resting path; exit 1 while another holds it or waits first |
 | `logins give NAME --as HOLDER` | frees NAME once its login is back; exit 1, still held, if it isn't |
 | `logins list [NAME]` | each login's holder, waiters and last 24 hours |
