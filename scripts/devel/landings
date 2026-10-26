@@ -137,6 +137,38 @@ def stamp_record(record):
     record['clock'] = record['utc'].strftime('%H:%MZ')
 
 
+def follower(name):
+    if not isinstance(name, str):
+        return None
+    match = re.fullmatch(r'([a-z][a-z0-9-]*)(?:\.([1-9][0-9]*)of([1-9][0-9]*))?', name)
+    if match is None:
+        return None
+    repo, part, parts = match.groups()
+    if part is None:
+        return repo, 1, 1
+    part, parts = int(part), int(parts)
+    return (repo, part, parts) if 1 <= part <= parts and parts >= 2 else None
+
+
+def joined(repo, answers):
+    """A red in any split wins; clearance needs all parts of one split."""
+    splits, reds = {}, []
+    for name, answer in sorted(answers.items()):
+        repository, part, parts = follower(name)
+        if repository != repo:
+            continue
+        splits.setdefault(parts, {})[part] = answer
+        if answer is not None and answer[0] == 'red':
+            reds.append(answer)
+    if reds:
+        return 'red', [line for _, lines in reds for line in lines]
+    for parts, split in sorted(splits.items()):
+        if len(split) == parts and all(answer is not None and answer[0] == 'cleared'
+                                       for answer in split.values()):
+            return 'cleared', [line for _, answer in sorted(split.items()) for line in answer[1]]
+    return None
+
+
 def runner_record(row):
     """Validate the runner boundary before any display or wait uses its fields."""
     text = lambda value: isinstance(value, str) and bool(value)
@@ -152,7 +184,7 @@ def runner_record(row):
     if row['kind'] == 'watch':
         return (row['event'] == 'watching' and text(row.get('target'))
                 and 'name' in row and nullable(row['name']))
-    if not text(row.get('tier')):
+    if follower(row.get('tier')) is None:
         return False
     event = row['event']
     if event == 'fault':
@@ -196,21 +228,23 @@ def newest(records):
     return max(enumerate(records), key=lambda pair: (pair[1]['utc'], pair[0]))[1] if records else None
 
 
-def cleared_main(runner, repo):
-    mine = [r for r in runner if r['kind'] == 'tier' and r['tier'] == repo]
+def cleared_main(runner, repo, checkouts):
+    mine = [r for r in runner if r['kind'] == 'tier' and follower(r['tier'])[0] == repo]
     cleared = []
     for row in mine:
         if row['event'] != 'tier':
             continue
-        verdicts = [r for r in mine if r['event'] == 'verdict' and r['run'] == row['commit']]
+        verdicts = [r for r in mine if r['tier'] == row['tier']
+                    and r['event'] == 'verdict' and r['run'] == row['commit']]
         if verdicts and all(r['verdict'] == 'cleared' for r in verdicts):
             cleared.append(row)
-    latest = newest(cleared)
-    if latest is None:
-        print(f'landings: no cleared main for {repo}', file=sys.stderr)
-        return 1
-    print(latest['commit'])
-    return 0
+    for row in sorted(cleared, key=lambda r: (r['utc'], r['position']), reverse=True):
+        answer = judge(runner, checkouts, repo, row['commit'])
+        if answer is not None and answer[0] == 'cleared':
+            print(row['commit'])
+            return 0
+    print(f'landings: no cleared main for {repo}', file=sys.stderr)
+    return 1
 
 
 def show_tiers(records, set_records):
@@ -219,7 +253,10 @@ def show_tiers(records, set_records):
         print('tiers: none in the feed')
         return
     print('tiers:')
-    for repo in sorted(repos, key=lambda name: (ORDER.index(name) if name in ORDER else len(ORDER), name)):
+    def order(name):
+        repo, part, parts = follower(name)
+        return (ORDER.index(repo) if repo in ORDER else len(ORDER), repo, parts != 1, part, parts)
+    for repo in sorted(repos, key=order):
         mine = [r for r in records if r.get('tier') == repo]
         # Compare positions too: the terminal record can share a timestamp with running.
         ordered = sorted(enumerate(mine), key=lambda pair: (pair[1]['utc'], pair[0]))
@@ -256,7 +293,7 @@ def show_tiers(records, set_records):
                 # only verdict times, or ultimately the standing-red list order.
                 def landed_at(commit):
                     landed = [r['utc'] for r in set_records if r['event'] == 'landed'
-                              and r.get('repo') == repo and r.get('commit') == commit]
+                              and r.get('repo') == follower(repo)[0] and r.get('commit') == commit]
                     seen = [r['utc'] for r in verdicts if r['commit'] == commit]
                     return min(landed or seen or [state['utc']])
                 landing = min(reds, key=landed_at) if reds else None
@@ -480,17 +517,21 @@ def judge(runner, checkouts, repo, commit):
         return row['verdict'], text.splitlines()
 
     mine = [r for r in runner if r['kind'] == 'tier'
-            and (repo is None or r['tier'] == repo)]
+            and (repo is None or follower(r['tier'])[0] == repo)]
     own = {}
     for row in sorted(mine, key=lambda r: r['utc']):
         if row['event'] == 'verdict' and (
                 row['commit'].lower().startswith(commit.lower()) if repo is None
                 else row['commit'] == commit):
             own[row['tier'], row['commit']] = row
-    if own:
-        answers = [lines(row) for row in own.values()]
-        return ('red' if any(outcome == 'red' for outcome, _ in answers) else 'cleared',
-                [line for _, rendered in answers for line in rendered])
+    groups = {}
+    for (name, tip), row in own.items():
+        groups.setdefault((follower(name)[0], tip), {})[name] = lines(row)
+    answers = [joined(repository, group) for (repository, _), group in groups.items()]
+    if answers and (any(answer is not None and answer[0] == 'red' for answer in answers)
+                    or all(answer is not None for answer in answers)):
+        return ('red' if any(answer is not None and answer[0] == 'red' for answer in answers) else 'cleared',
+                [line for answer in answers if answer is not None for line in answer[1]])
     found = checkouts.find(commit, repo)
     if len(found) != 1:
         return None
@@ -506,36 +547,44 @@ def judge(runner, checkouts, repo, commit):
         return 'cleared', [f'{stamp} {repo} {commit[:9]} cleared on landing: {repo} has no tier']
     if tier is None:
         return None
-    mine = [r for r in mine if r['tier'] == repo]
-    runs = []
-    for end in mine:
-        if end['event'] != 'tier':
-            continue
-        start = newest([r for r in mine if r['event'] == 'running' and r['token'] == end['token']])
-        if start is None or checkouts.holds(repo, end['commit'], commit) is not True:
-            continue
-        if start['from'] is not None and checkouts.holds(repo, start['from'], commit) is not False:
-            continue
-        runs.append(end)
-    end = newest(runs)
-    if end is None:
-        return None
-    if end.get('baseline'):
-        return lines(dict(end, verdict='cleared', run=end['commit']), ', which holds it', commit)
-    verdicts = []
-    for row in mine:
-        if row['event'] != 'verdict' or row['token'] != end['token']:
-            continue
-        held = checkouts.holds(repo, row['commit'], commit)
-        if held is None:
+    mine = [r for r in mine if follower(r['tier'])[0] == repo]
+
+    def run_answer(records):
+        runs = []
+        for end in records:
+            if end['event'] != 'tier':
+                continue
+            start = newest([r for r in records if r['event'] == 'running' and r['token'] == end['token']])
+            if start is None or checkouts.holds(repo, end['commit'], commit) is not True:
+                continue
+            if start['from'] is not None and checkouts.holds(repo, start['from'], commit) is not False:
+                continue
+            runs.append(end)
+        end = newest(runs)
+        if end is None:
             return None
-        if held:
-            verdicts.append(row)
-    oldest = next((r for r in verdicts if all(
-        checkouts.holds(repo, other['commit'], r['commit']) is True for other in verdicts)), None)
-    if oldest is not None:
-        return lines(oldest, f", which holds it in landing {oldest['commit'][:9]}", commit)
-    return None
+        if end.get('baseline'):
+            return lines(dict(end, verdict='cleared', run=end['commit']), ', which holds it', commit)
+        verdicts = []
+        for row in records:
+            if row['event'] != 'verdict' or row['token'] != end['token']:
+                continue
+            held = checkouts.holds(repo, row['commit'], commit)
+            if held is None:
+                return None
+            if held:
+                verdicts.append(row)
+        oldest = next((r for r in verdicts if all(
+            checkouts.holds(repo, other['commit'], r['commit']) is True for other in verdicts)), None)
+        if oldest is not None:
+            return lines(oldest, f", which holds it in landing {oldest['commit'][:9]}", commit)
+        return None
+
+    answers = {}
+    for name in sorted({r['tier'] for r in mine}):
+        row = own.get((name, commit))
+        answers[name] = lines(row) if row is not None else run_answer([r for r in mine if r['tier'] == name])
+    return joined(repo, answers)
 
 
 def landing_base(row):
@@ -982,7 +1031,7 @@ def main():
         print(f'landings: feed unreadable: {error}', file=sys.stderr)
         return 4
     if args.command == 'cleared':
-        return cleared_main(runner, args.repo)
+        return cleared_main(runner, args.repo, Checkouts(workspace()))
     if args.command == 'taught':
         events = sorted([r for r in records if r['event'] == 'landed'] + lands,
                         key=lambda r: r['position'])

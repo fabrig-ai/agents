@@ -626,6 +626,164 @@ def cleared_set(lab):
     assert 'red by run' in lab.run('wait', '--cleared', 'fixture/m1', '--timeout', '0', status=1).stdout
 
 
+def part_cleared_waits_for_the_other(lab):
+    lab.repository('temper')
+    commit = lab.land('temper', 'split landing')
+    lab.append(record(event='started'), record(event='landed', repo='temper', commit=commit),
+               record(event='done'),
+               *tier_run('temper.1of2', commit, None, 1, [(commit, [])]))
+    result = lab.run('wait', '--cleared', 'fixture/m1', '--timeout', '0', status=3)
+    assert result.stdout == '' and f'no verdict for temper {commit}' in result.stderr, result
+    lab.append(*tier_run('temper.2of2', commit, None, 2, [(commit, [])]))
+    result = lab.run('wait', '--cleared', 'fixture/m1', '--timeout', '0')
+    assert result.stdout.splitlines() == [
+        f'10-26 05:01Z temper.1of2 {commit[:9]} cleared by run {commit[:9]}',
+        f'10-26 05:02Z temper.2of2 {commit[:9]} cleared by run {commit[:9]}'], result
+    assert result.stderr == '', result
+
+
+def part_red_decides_at_once(lab):
+    for name in ('temper.1of2', 'temper.2of2'):
+        lab.feed.write_text('')
+        lab.append(record(event='started'), record(event='landed', repo='temper', commit='a' * 40),
+                   record(event='done'),
+                   *tier_run(name, 'a' * 40, None, 1, [('a' * 40, ['TEST'])]))
+        result = lab.run('wait', '--cleared', 'fixture/m1', '--timeout', '0', status=1)
+        assert result.stdout == (f'10-26 05:01Z {name} aaaaaaaaa red by run aaaaaaaaa: '
+                                 'TEST; log fixture-host:/fixture/log\n'
+                                 '    first failure\n    second failure\n'), result
+        assert result.stderr == '', result
+
+
+def whole_verdict_before_the_split_stands(lab):
+    lab.repository('temper')
+    cleared = lab.land('temper', 'whole cleared')
+    red = lab.land('temper', 'whole red')
+    main = lab.advance('temper', 'split clean')
+    lab.append(*tier_run('temper', cleared, None, 1, [(cleared, [])]),
+               *tier_run('temper', red, cleared, 2, [(red, ['TEST'])]),
+               *tier_run('temper.1of2', main, None, 3, [(main, [])], baseline=True),
+               *tier_run('temper.2of2', main, None, 3, [(main, [])], baseline=True))
+    result = lab.run('wait', '--cleared', cleared[:9], '--timeout', '0')
+    assert result.stdout == f'10-26 05:01Z temper {cleared[:9]} cleared by run {cleared[:9]}\n', result
+    result = lab.run('wait', '--cleared', red[:9], '--timeout', '0', status=1)
+    assert f'temper {red[:9]} red by run {red[:9]}' in result.stdout, result
+    assert '.1of2' not in result.stdout and '.2of2' not in result.stdout, result
+
+
+def split_needs_one_complete_split(lab):
+    commit = 'a' * 40
+    lab.append(tier_record('verdict', 'temper.1of2', commit),
+               tier_record('verdict', 'temper.2of3', commit))
+    result = lab.run('wait', '--cleared', commit[:9], '--timeout', '0', status=3)
+    assert result.stdout == '' and f'no verdict for {commit[:9]}' in result.stderr, result
+
+
+def commit_target_joins_parts(lab):
+    commit = 'a' * 40
+    lab.append(tier_record('verdict', 'temper.2of2', commit),
+               tier_record('verdict', 'temper.1of2', commit))
+    result = lab.run('wait', '--cleared', commit[:9], '--timeout', '0')
+    assert result.stdout.splitlines() == [
+        '10-26 05:00Z temper.1of2 aaaaaaaaa cleared by run aaaaaaaaa',
+        '10-26 05:00Z temper.2of2 aaaaaaaaa cleared by run aaaaaaaaa'], result
+    lab.append(tier_record('verdict', 'temper.1of2', commit, 1,
+                           verdict='red', tests=['TEST'], excerpt='failed'))
+    result = lab.run('wait', '--cleared', commit[:9], '--timeout', '0', status=1)
+    assert result.stdout == ('10-26 05:01Z temper.1of2 aaaaaaaaa red by run aaaaaaaaa: '
+                             'TEST; log fixture-host:/fixture/log\n    failed\n'), result
+
+
+def cleared_main_over_two_parts(lab):
+    lab.repository('temper')
+    previous = lab.land('temper', 'both cleared')
+    main = lab.advance('temper', 'only first cleared')
+    lab.append(*tier_run('temper.1of2', previous, None, 1, [(previous, [])]),
+               *tier_run('temper.2of2', previous, None, 1, [(previous, [])]),
+               *tier_run('temper.1of2', main, previous, 2, [(main, [])]))
+    result = lab.run('cleared', 'temper')
+    assert result.stdout == previous + '\n' and result.stderr == '', result
+    lab.append(*tier_run('temper.2of2', main, previous, 3, [(main, [])]))
+    result = lab.run('cleared', 'temper')
+    assert result.stdout == main + '\n' and result.stderr == '', result
+
+
+def tiers_shown_per_part(lab):
+    old, newer = 'a' * 40, 'b' * 40
+    lab.append(tier_record(tier='temper.2of2', minute=3),
+               tier_record(tier='temper', minute=0),
+               tier_record(tier='skein', minute=1),
+               tier_record('verdict', 'temper.1of2', newer, 4, landing_set='newer/m1'),
+               tier_record('verdict', 'temper.1of2', old, 5, landing_set='older/m1'),
+               # Landing times outrank the opposite publication order of verdicts.
+               record(event='landed', repo='temper', commit=newer, minute=1),
+               record(event='landed', repo='temper', commit=old, minute=2),
+               tier_record(tier='temper.1of2', minute=6, state='red', last_green=None,
+                           reds=[dict(landing=old, tests=['old']), dict(landing=newer, tests=['new'])]),
+               tier_record('running', tier='temper.2of2', commit=newer, minute=7),
+               tier_record('fault', tier='temper.2of2', minute=8))
+    assert lab.run('--last', '0').stdout.split('tiers:\n')[1].splitlines() == [
+        '  skein: green at aaaaaaaaa (10-26 05:01Z)',
+        '  temper: green at aaaaaaaaa (10-26 05:00Z)',
+        '  temper.1of2: red at aaaaaaaaa (10-26 05:06Z): 2 tests, first red bbbbbbbbb (newer/m1)',
+        '  temper.2of2: fault since 05:08Z: lacks chromium; running on bbbbbbbbb since 05:07Z; green at aaaaaaaaa (10-26 05:03Z)']
+
+
+def parts_join_run_verdicts(lab):
+    lab.repository('temper')
+    previous = lab.advance('temper', 'previous')
+    commit = lab.land('temper', 'inside landing')
+    tip = lab.advance('temper', 'landing tip')
+    main = lab.advance('temper', 'run main')
+    # Both followers use the same run token; their verdicts must remain separate.
+    lab.append(*tier_run('temper.1of2', main, previous, 10, [(tip, []), (main, ['later'])]),
+               *tier_run('temper.2of2', main, previous, 11, [(tip, ['TEST']), (main, [])]))
+    result = lab.run('wait', '--cleared', commit[:9], '--timeout', '0', status=1)
+    assert result.stdout == (f'10-26 05:11Z temper.2of2 {commit[:9]} red by run {main[:9]}, '
+                             f'which holds it in landing {tip[:9]}: TEST; log fixture-host:/fixture/log\n'
+                             '    first failure\n    second failure\n'), result
+
+
+def part_own_verdict_combines_with_other_run(lab):
+    lab.repository('temper')
+    commit = lab.land('temper', 'part one judged')
+    main = lab.advance('temper', 'part two baseline')
+    lab.append(tier_record('verdict', 'temper.1of2', commit, 1),
+               *tier_run('temper.2of2', main, None, 2, [(main, [])], baseline=True))
+    result = lab.run('wait', '--cleared', commit[:9], '--timeout', '0')
+    assert result.stdout.splitlines() == [
+        f'10-26 05:01Z temper.1of2 {commit[:9]} cleared by run {commit[:9]}',
+        f'10-26 05:02Z temper.2of2 {commit[:9]} cleared by run {main[:9]}, which holds it; baseline'], result
+
+
+def complete_splits_prefer_smallest_and_reds_win(lab):
+    commit = 'a' * 40
+    for parts in (3, 2):
+        for part in reversed(range(1, parts + 1)):
+            lab.append(tier_record('verdict', f'temper.{part}of{parts}', commit))
+    result = lab.run('wait', '--cleared', commit[:9], '--timeout', '0')
+    assert result.stdout.splitlines() == [
+        '10-26 05:00Z temper.1of2 aaaaaaaaa cleared by run aaaaaaaaa',
+        '10-26 05:00Z temper.2of2 aaaaaaaaa cleared by run aaaaaaaaa'], result
+    lab.append(tier_record('verdict', 'temper', commit))
+    assert lab.run('wait', '--cleared', commit[:9], '--timeout', '0').stdout == (
+        '10-26 05:00Z temper aaaaaaaaa cleared by run aaaaaaaaa\n')
+    for name in ('temper.2of3', 'temper.1of2'):
+        lab.append(tier_record('verdict', name, commit, 1, verdict='red', tests=['TEST'], excerpt='failed'))
+    result = lab.run('wait', '--cleared', commit[:9], '--timeout', '0', status=1)
+    assert result.stdout.splitlines() == [
+        '10-26 05:01Z temper.1of2 aaaaaaaaa red by run aaaaaaaaa: TEST; log fixture-host:/fixture/log',
+        '    failed',
+        '10-26 05:01Z temper.2of3 aaaaaaaaa red by run aaaaaaaaa: TEST; log fixture-host:/fixture/log',
+        '    failed'], result
+
+
+def split_commit_targets_keep_repositories_apart(lab):
+    lab.append(tier_record('verdict', 'temper.1of2'), tier_record('verdict', 'jig.2of2'))
+    result = lab.run('wait', '--cleared', 'a' * 9, '--timeout', '0', status=3)
+    assert result.stdout == '' and 'no verdict for aaaaaaaaa' in result.stderr, result
+
+
 def cleared_main_is_the_newest_all_cleared_run(lab):
     x, y, z = ('a' * 40, 'b' * 40, 'c' * 40)
     lab.append(tier_record('verdict', tier='temper', commit=x),
@@ -1101,6 +1259,8 @@ def malformed_runner_records(lab):
                tier_record(tests_more=True), tier_record(flakes_more=-1))
     for value in (None, 0, 1, 'true', [], {}):
         lab.append(tier_record(baseline=value), tier_record('verdict', baseline=value))
+    for name in ('temper.0of2', 'temper.3of2', 'temper.1of1', 'temper.1of', 'Temper'):
+        lab.append(tier_record(tier=name))
     output = lab.run().stdout
     assert output == baseline, output
     assert lab.run('report').stdout == 'no results\n\nno set runs\n'
@@ -1196,6 +1356,11 @@ def main():
              timeout_before_unreachable, malformed_lines, remote_command,
              remote_failure, remote_hang, remote_first_read, invalid_arguments, read_default,
              tiers_shown, landing_set_isolation, cleared_set, cleared_main_is_the_newest_all_cleared_run,
+             part_cleared_waits_for_the_other, part_red_decides_at_once,
+             whole_verdict_before_the_split_stands, split_needs_one_complete_split,
+             commit_target_joins_parts, cleared_main_over_two_parts, tiers_shown_per_part,
+             parts_join_run_verdicts, part_own_verdict_combines_with_other_run,
+             complete_splits_prefer_smallest_and_reds_win, split_commit_targets_keep_repositories_apart,
              cleared_main_none, cleared_main_unreadable, red_set, stopped_set, waits_for_verdict, commit_target,
              resolver_red_counts_against_the_set, tip_red_still_counts_against_the_set,
              push_result_also_supplies_the_range, legacy_landing_keeps_its_tip_verdict,
