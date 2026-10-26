@@ -42,8 +42,11 @@ import hashlib, json
 phase = 'gate' if args else 'push'
 def git(*args):
     return subprocess.check_output(['git', *args]).decode().strip()
-# Every fixture worktree is named for its already-validated repository.
+# The usual worktrees are named for their already-validated repository.
+# Concurrent also uses a second worktree with a different directory name.
 name = os.path.basename(os.getcwd())
+if name not in ('skein', 'smith', 'hearth', 'jig', 'temper'):
+    name = Path(git('remote', 'get-url', 'origin')).name.removesuffix('.git')
 with open(os.environ['LAND_TRACE'], 'a') as out:
     out.write(name + '\n')
 if os.environ.get('DESCENDANT_REPO') == name:
@@ -153,8 +156,9 @@ class Lab:
             for name in ORDER:
                 primary, work = root / 'primary' / name, root / 'work' / name
                 # Only Git's administrative paths change; committed bytes do not.
-                config = primary / '.git/config'
-                config.write_text(config.read_text().replace(built.as_uri(), root.as_uri()))
+                for config in (primary / '.git/config', root / 'origins' / (name + '.git') / 'config'):
+                    config.write_text(config.read_text().replace(built.as_uri(), root.as_uri())
+                                      .replace(str(built), str(root)))
                 (work / '.git').write_text(f'gitdir: {primary}/.git/worktrees/{name}\n')
                 (primary / '.git/worktrees' / name / 'gitdir').write_text(str(work / '.git') + '\n')
         self.root = root
@@ -1068,6 +1072,7 @@ def concurrent(lab):
             assert pa.wait(timeout=HANG) == 0, (lab.root / 'a.log').read_text()
             assert pb.wait(timeout=HANG) == 0, (lab.root / 'b.log').read_text()
             assert [r['set'] for r in lab.records()] == ['first/m1', 'second/m1']
+            assert lab.trace.read_text().splitlines() == ['temper'] * 4
             assert [r['event'] for r in lab.records(None)].count('done') == 2
             assert lab.git(lab.origin['temper'], 'show', 'main:first.txt') == 'first'
             assert lab.git(lab.origin['temper'], 'show', 'main:second.txt') == 'second'
