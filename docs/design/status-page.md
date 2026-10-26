@@ -128,11 +128,12 @@ credential: not `.credentials.json`, `auth.json` nor a token.
 
 ## 3. The page
 
-- **Tiles:** missions, sets landing now, heavy commands now, agents
-  (the director, designers, owners and implementers live, and how many
-  of them are busy), land gates in the last 24 hours, what waits on the
-  user with the oldest wait, and the subscriptions with the highest use
-  among them.
+- **Tiles:** missions, sets landing now, agents (the director,
+  designers, owners and implementers live, and how many of them are
+  busy), land gates in the last 24 hours, what waits on the user with
+  the oldest wait, and the subscriptions with the highest use among
+  them. Heavy's commands now show on each machine's card alone (the
+  user, 10-26).
 - **Waiting on the user,** after the tiles: one row per item of
   `director/waiting.md`, in its order, giving since when (the time, and
   how long ago), who waits (a mission or the director), what, and the
