@@ -170,7 +170,9 @@ here. Durable know-how belongs here, not in the session's memory or in
   settings on hel8, runners, forwarders, cron and timers), and move or
   end each one, with the user's word for theirs: hetzner5 took
   dev.fabrig.ai's worker and runner with it (10-26). Then archive to a
-  kept machine what lives only there:
+  kept machine what lives only there (a redeploy saves the same), not
+  forgetting `~/.local/state/` (land-set's feed and the turn's state live
+  there on hetzner3: its redeploy of 10-26 lost the feed's history):
   branches not on GitHub as bundles, dirty worktrees' diffs,
   `tmp/owners`, `tmp/logs` (with `heavy.tsv`), `tmp/codex-run`,
   `tmp/heavy`, `tmp/post`, the transcripts and rollouts; never the
