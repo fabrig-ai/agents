@@ -119,11 +119,13 @@ def claude_answer(index=1):
 def codex_answer(index=1):
     bucket = {'limitId': 'codex', 'primary': {'usedPercent': 16, 'windowDurationMins': 300, 'resetsAt': NOW + 3600},
               'secondary': {'usedPercent': 22, 'windowDurationMins': 10080, 'resetsAt': NOW + 86400}}
-    other = {'limitId': 'sol', 'limitName': 'GPT-6.1-Sol',
+    other = {'limitId': 'sol', 'limitName': 'PRIVATE-BACKEND-NAME',
              'primary': {'usedPercent': 12, 'windowDurationMins': 10080, 'resetsAt': NOW + 172800}}
+    unsafe = {'limitId': 'PRIVATE-BUCKET-ID', 'limitName': 'PRIVATE-OTHER-NAME',
+              'primary': {'usedPercent': 7, 'windowDurationMins': 10080, 'resetsAt': NOW + 172800}}
     return {'account': {'type': 'chatgpt', 'planType': 'promax', 'email': f'PRIVATE-EMAIL-{index+1}@x.y'},
             'limits': {'accountId': f'PRIVATE-ACCOUNT-{index}', 'rateLimits': bucket,
-                       'rateLimitsByLimitId': {'sol': other, 'codex': bucket}}}
+                       'rateLimitsByLimitId': {'sol': other, 'codex': bucket, 'unsafe': unsafe}}}
 
 
 def private_absent(*outputs):
@@ -161,6 +163,10 @@ with (path / 'claude.trace').open('a') as trace:
 config = json.loads((path / 'claude.json').read_text()) if (path / 'claude.json').exists() else {}
 if sys.argv[1] != 'agents':
     key = 'auth' if sys.argv[1] == 'auth' else 'usage'
+    if key == 'usage':
+        assert sys.argv[1:] == ['-p', '/usage', '--output-format', 'json', '--no-session-persistence',
+            '--strict-mcp-config', '--tools', '', '--model', 'haiku',
+            '--settings', '{"disableAllHooks": true}'], sys.argv
     answer = config.get(key, {'object': {'loggedIn': False}})
     time.sleep(answer.get('sleep', 0))
     print(json.dumps(answer.get('object')))
@@ -427,7 +433,8 @@ def collect_subscriptions(lab):
         'subscribed', 'promax', expected_label('codex', 'PRIVATE-ACCOUNT-1', 'PRIVATE-EMAIL-2@x.y')), codex
     assert codex['limits'] == [{'name': '5 h', 'used': 16, 'resets': NOW + 3600},
                                {'name': 'week', 'used': 22, 'resets': NOW + 86400},
-                               {'name': 'GPT-6.1-Sol week', 'used': 12, 'resets': NOW + 172800}], codex
+                               {'name': 'sol week', 'used': 12, 'resets': NOW + 172800},
+                               {'name': 'other week', 'used': 7, 'resets': NOW + 172800}], codex
     assert calls(lab.alpha, 'codex') == [
         {'id': 1, 'method': 'initialize', 'params': {'clientInfo': {'name': 'status-page', 'version': '1'}}},
         {'method': 'initialized'}, {'id': 2, 'method': 'account/read', 'params': {}},
@@ -435,7 +442,7 @@ def collect_subscriptions(lab):
     trace = calls(lab.alpha, 'claude')
     assert [c['argv'] for c in trace] == [['agents', '--json', '--all'], ['auth', 'status', '--json'],
         ['-p', '/usage', '--output-format', 'json', '--no-session-persistence', '--strict-mcp-config',
-         '--tools', '', '--model', 'haiku']], trace
+         '--tools', '', '--model', 'haiku', '--settings', '{"disableAllHooks": true}']], trace
     assert all(c['TZ'] == 'UTC' for c in trace[1:]), trace
     private_absent(result.stdout, result.stderr)
 
@@ -458,6 +465,9 @@ def page_subscriptions(lab):
     assert 'highest 84% · Claude week (all models)' in page
     assert 'class="meter warning" role="img" aria-label="84% used"' in section
     assert 'in 1 h 0 min · 10-25 13:00Z' in section
+    assert 'in 1 d 0 h · 10-26 12:00Z' in section
+    assert 'in 5 d 7 h · 10-30 19:00Z' in section
+    assert 'sol week' in section and 'other week' in section
     assert data['fleet']['gamma'].get('unreachable')
 
 
@@ -467,13 +477,20 @@ def subscriptions_signed_out(lab):
     alpha = claude_answer(); del alpha['auth']['object']['orgId']; lab.claude(lab.alpha, alpha)
     page, data = subscription_page(lab)
     for needle in ('Claude · max · unidentified', 'Claude: signed out on beta', 'Codex: no subscription on beta',
-                   ', 1 signed out'):
+                   ' · signed out: beta'):
         assert needle in page, needle
     assert 'alpha, beta' not in page[page.index('<h2>Subscriptions'):page.index('<h2>In flight')]
     assert [c['argv'][0] for c in calls(lab.beta, 'claude')] == ['agents', 'auth']
     assert [c['method'] for c in calls(lab.beta, 'codex')] == ['initialize', 'initialized', 'account/read']
     assert 'claude_usage' not in page and 'codex_usage' not in page
     assert data['fleet']['beta']['claude_usage']['state'] == 'signed-out'
+    # Both CLIs signed out on beta still name that machine only once;
+    # alpha comes first even though its signed-out probe is visited last.
+    lab.codex(lab.beta, {'account': None})
+    lab.codex(lab.alpha, {'account': None})
+    page, _ = subscription_page(lab)
+    assert '<div class="sub">highest 24% · Claude week (all models) · signed out: alpha, beta</div>' in page
+    assert 'signed out: alpha, beta, beta' not in page
 
 
 def subscription_failures(lab):

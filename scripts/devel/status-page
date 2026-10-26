@@ -407,7 +407,8 @@ def part_claude_usage(tmp, now):
     if not isinstance(auth.get('subscriptionType'), str):
         return usage('no-subscription')
     code, answer = ask(['-p', '/usage', '--output-format', 'json', '--no-session-persistence',
-                        '--strict-mcp-config', '--tools', '', '--model', 'haiku'])
+                        '--strict-mcp-config', '--tools', '', '--model', 'haiku',
+                        '--settings', '{"disableAllHooks": true}'])
     if (answer.get('local_command') != 'usage' or number(answer.get('num_turns')) != 0
             or number(answer.get('total_cost_usd')) != 0):
         raise ValueError('/usage was answered by a model')
@@ -435,8 +436,9 @@ def codex_limits(answer):
             continue
         prefix = ''
         if bucket.get('limitId') != 'codex':
-            name = text(bucket.get('limitName')) or text(bucket.get('limitId'))
-            prefix = (name if re.fullmatch(r'[A-Za-z0-9 ._()\-]{1,40}', name) else '?') + ' '
+            # Backend display names are free text and may identify an account.
+            name = text(bucket.get('limitId'))
+            prefix = (name if re.fullmatch(r'[a-z0-9_.-]{1,40}', name) else 'other') + ' '
         for field in ('primary', 'secondary'):
             window = bucket.get(field)
             if not isinstance(window, dict):
@@ -739,7 +741,9 @@ def resets(moment, now):
     if moment is None:
         return '–'
     seconds = max(0, moment - now)
-    return f'in {int(seconds // HOUR)} h {int(seconds % HOUR // 60)} min · {utc(moment)}'
+    duration = (f'{int(seconds // DAY)} d {int(seconds % DAY // HOUR)} h' if seconds >= DAY
+                else f'{int(seconds // HOUR)} h {int(seconds % HOUR // 60)} min')
+    return f'in {duration} · {utc(moment)}'
 
 
 def size(value):
@@ -929,9 +933,9 @@ def subscriptions(fleet):
             if hosts:
                 out += f'<p class="muted">{cli_name[cli]}: {word} on {E(", ".join(sorted(hosts)))}</p>'
     sub = f'highest {highest[0]:g}% · {highest[1]}' if highest else 'no limits reported'
-    signed_out = sum(len(hosts) for (_, state), hosts in notes.items() if state == 'signed-out')
+    signed_out = {host for (_, state), hosts in notes.items() if state == 'signed-out' for host in hosts}
     if signed_out:
-        sub += f', {signed_out} signed out'
+        sub += ' · signed out: ' + ', '.join(sorted(signed_out))
     return {'count': len(merged), 'sub': sub}, out
 
 
