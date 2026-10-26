@@ -145,11 +145,22 @@ def a_waiter_seen_at_the_bound_keeps_its_turn(lab):
 def retaking_by_the_holder_is_idempotent(lab):
     path = lab.login()
     lab.run('take', CHATGPT, '--as', QA)
-    path.rename(lab.root / 'imported')
     before = {p.name: p.stat().st_mtime_ns for p in lab.directory().iterdir()}
     code, out, err = lab.run('take', CHATGPT, '--as', QA)
     assert (code, out, err) == (0, f'{path}\n', '')
     assert [row[1] for row in lab.log()].count('take') == 1
+    assert before == {p.name: p.stat().st_mtime_ns for p in lab.directory().iterdir()}
+
+
+def retaking_a_login_not_at_rest_is_refused(lab):
+    path = lab.login()
+    lab.run('take', CHATGPT, '--as', QA)
+    path.rename(lab.root / 'imported')
+    waiting = (lab.directory() / 'waiting.json').read_bytes()
+    before = {p.name: p.stat().st_mtime_ns for p in lab.directory().iterdir()}
+    code, out, err = lab.run('take', CHATGPT, '--as', QA)
+    assert (code, out, err) == (1, '', f'logins: {CHATGPT} is held by {QA} and not at rest\n')
+    assert (lab.directory() / 'waiting.json').read_bytes() == waiting
     assert before == {p.name: p.stat().st_mtime_ns for p in lab.directory().iterdir()}
 
 
@@ -250,7 +261,8 @@ CASES = (adds_a_login_by_moving_it, add_refuses_a_login_that_is_not_private,
          add_refuses_a_second_login_at_rest, takes_a_login_at_rest, a_second_taker_waits,
          the_first_waiter_is_served_first, a_stale_waiter_loses_its_turn,
          a_waiter_seen_at_the_bound_keeps_its_turn, retaking_by_the_holder_is_idempotent,
-         give_refuses_a_login_not_back, gives_a_login_back, give_by_another_holder_is_refused,
+         retaking_a_login_not_at_rest_is_refused, give_refuses_a_login_not_back,
+         gives_a_login_back, give_by_another_holder_is_refused,
          take_waits_until_the_login_is_given, take_without_a_login_at_rest_says_so,
          lists_holder_waiters_and_the_last_day, refuses_an_unknown_login,
          refuses_a_symlinked_state_path)

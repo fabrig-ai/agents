@@ -182,6 +182,8 @@ class Login:
     def take(self, holder, note):
         current = self.read('holder.json', None)
         if current and current['holder'] == holder:
+            need(login_check(self.path) is None,
+                 f'{self.name} is held by {holder} and not at rest', 1)
             print(self.path)
             return None
         stamp = timestamp()
