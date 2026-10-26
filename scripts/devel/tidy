@@ -472,19 +472,20 @@ class Tidy:
             if base == self.tmp:
                 dirs[:] = [d for d in dirs if d in ('owners', 'director')]
                 continue
-            if MARK in files:
-                try:
-                    marked = self.evidence(base / MARK)
-                except OSError as error:
-                    self.keep('entry', base, f'evidence mark unreadable: {error}', 3)
-                    dirs[:] = []
-                    continue
-                if marked:
-                    owners, director = self.tmp / 'owners', self.tmp / 'director'
-                    tasks = director / 'tasks'
-                    if base in (owners, director, tasks) or base.parent in (owners, tasks):
-                        self.keep('entry', base, 'evidence mark on a directory of the tmp layout; ignored', 1)
-                    else:
+            if MARK in files or MARK in dirs:
+                owners, director = self.tmp / 'owners', self.tmp / 'director'
+                tasks = director / 'tasks'
+                if base in (owners, director, tasks) or base.parent in (owners, tasks):
+                    self.keep('entry', base, 'evidence mark on a directory of the tmp layout; ignored', 1)
+                    files = [name for name in files if name != MARK]
+                elif MARK in files:
+                    try:
+                        marked = self.evidence(base / MARK)
+                    except OSError as error:
+                        self.keep('entry', base, f'evidence mark unreadable: {error}', 3)
+                        dirs[:] = []
+                        continue
+                    if marked:
                         dirs[:] = []
                         continue
             if 'registry' in dirs and any(name in files for name in ('.package-cache', '.global-cache')):

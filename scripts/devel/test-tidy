@@ -557,13 +557,20 @@ def evidence_unreadable(lab):
     run = mission / 'evidence' / 'unreadable'
     mark = lab.put(run / 'EVIDENCE.TAG', 'agents fixture evidence\ntest-tidy\n')
     cargo = lab.put(run / 'case' / 'bin' / 'cargo', '#!\n')
+    layout_mark = lab.put(mission / 'EVIDENCE.TAG', 'agents fixture evidence\ntest-tidy\n')
+    watch = lab.put(mission / 'watch.sh')
     mark.chmod(0o000)
+    layout_mark.chmod(0o000)
     try:
         text = lab.run(status=3)
         assert cargo.exists() and f'kept entry {run}: evidence mark unreadable:' in text, text
         assert f'deleted script {cargo} ' not in text, text
+        assert not watch.exists() and f'deleted script {watch} ' in text, text
+        assert f'kept entry {mission}: evidence mark on a directory of the tmp layout; ignored' in text, text
+        assert f'kept script {layout_mark}:' not in text, text
     finally:
         mark.chmod(0o600)
+        layout_mark.chmod(0o600)
 
 
 def held_file(lab):
