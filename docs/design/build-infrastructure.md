@@ -667,8 +667,8 @@ hearth, jig, temper:
    worktree. A killed run's leftover there is removed first.
 2. Fetch, then rebase on `origin/main`. A stop keeps the side being rebased
    onto for the root `Cargo.lock`, and has `land-resolve.py` settle its other
-   conflicted paths (landing-flow.md 3), as `land` does; when every path is
-   settled the rebase continues, and otherwise it aborts and exits 3.
+   conflicted paths (landing-flow.md 3), as `land` does; when every stop is
+   settled the rebase completes, and otherwise it aborts and exits 3.
 3. Repin the root lock. Each upstream of the repository has a target: this
    run's candidate of that upstream (step 5) where there is one; else its
    landed commit recorded by an earlier run of the set (below); else the
@@ -680,6 +680,9 @@ hearth, jig, temper:
    manifests. Both run directly, not through `heavy`: they build nothing. Every package of each
    upstream source must then be at its target, with one revision per source.
    A changed lock is committed as `land-set: <set>: pin <repo> to ...`.
+   Then, when step 2 took `main`'s side of generated files, `land-resolve.py`
+   rewrites them on the repinned tree; its refusal stops the run with exit
+   3, the branch back where it was before the rebase.
 4. A branch now equal to `origin/main` is skipped. A downstream with no
    change although an upstream has a candidate, or a recorded landing, fails
    explicitly, naming the downstream.

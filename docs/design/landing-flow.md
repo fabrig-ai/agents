@@ -4,8 +4,8 @@ Provisional, 2026-10-24, proposed with the user; revised 10-25 (the
 user): a set proves its gates before it takes the lock, every landing
 takes the set lock, and there is no keeper; and 10-26 (the user): there
 is no landing queue, after landing follows each `main` (4, step 8),
-and the tools settle conflicts between STATUS.md's rows (3). Built and
-live: `scripts/devel/land-set` and the
+and the tools settle conflicts between STATUS.md's rows and in generated
+files (3). Built and live: `scripts/devel/land-set` and the
 set lock (section 9). How changes reach `main` across skein, smith,
 jig, hearth and temper:
 - one set of branches per milestone;
@@ -181,13 +181,23 @@ Since 10-26 a milestone here is a mission's slice that lands (owners.md
        a row the branch added stands after the row before it there, below
        any `main` added in the same place. The same row changed on both
        sides, a row deleted on one side and changed on the other, rows
-       reordered, a malformed row, a line outside the rows, or any other
-       path stops the rebase as before, for the landing task to
+       reordered, a malformed row, a line outside the rows, or a path no
+       rule settles stops the rebase as before, for the landing task to
        resolve. A stop's paths are settled all, or none.
+     - **Generated files** (the director, 10-26, decision 1201): a path
+       the repository's `scripts/regenerate.sh` owns (below) takes
+       `main`'s side at the stop. Once the rebase is done, and in
+       `land-set` once it has repinned, since the writers read the
+       upstreams, the tool runs the script on every such path through
+       `heavy`, and commits what it rewrote as one commit, whose trailer, `Rebase-Resolved:
+       scripts/regenerate.sh rewrote PATH, ...`, names them. When the
+       script refuses or fails, or a later stop of the same rebase
+       stands, the branch goes back to where it was before the rebase,
+       and the landing stops as it would have at the first stop.
      - **Never silent.** Each path settled gives the replayed commit a
        trailer, `Rebase-Resolved: PATH: HOW`, and the tool's output a
-       `resolved` line, where HOW names the rows each side changed. The
-       gates then run on the resolved tree as on any other. A rule that
+       `resolved` line, where HOW names the rows each side changed, or
+       `main`'s side taken for the script. The gates then run on the resolved tree as on any other. A rule that
        might drop or merge meaning is no rule: another path gets one
        only where the stops show a frequent, mechanical shape.
   2. Land it: `land-set` on the machine that proved it, under the lock
@@ -207,6 +217,19 @@ Since 10-26 a milestone here is a mission's slice that lands (owners.md
   crates built on them compile (section 6.1). The browser tier, with
   the bundle it serves, is `scripts/browser.sh`, and no gate runs it
   (4, step 8).
+- **The generated files' writer** is each repository's own, as its gate
+  is, so that agents names no product: `scripts/regenerate.sh`, where
+  the repository has generated files.
+  - `--owns PATH...` exits 0 when the script writes every path, and 1
+    otherwise, building nothing.
+  - `PATH...`, from a clean worktree, rewrites them from the tree's
+    sources with their writers, and prints each path it changed. It
+    owns only files that no person edits, never a declaration: exit 3,
+    with the tree as it found it, when a writer would move anything it
+    doesn't own, a declared limit among them (the director, 10-26).
+    Exit 2 refuses before starting, and any other is a failure.
+  - The tool checks it again: a path the script changed but doesn't own
+    is a refusal.
 - **The next milestone stacks on the set.** It doesn't wait for the
   landing, just as it doesn't wait for a QA pass.
   - **Where it starts.** Its branches start from the set's heads,
