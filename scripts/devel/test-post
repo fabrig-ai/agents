@@ -85,54 +85,66 @@ fi
 cat "$FIXTURE/ack"
 exit "$code"
 STUB
+    # Refuse a call that loses the exported function, keeping real Claude
+    # unreachable even if post later launches it through another executable.
     cat >"$HOME/.local/bin/claude" <<'STUB'
 #!/usr/bin/env bash
-set -euo pipefail
-jq -nc --arg cwd "$PWD" --args '{cwd:$cwd,args:$ARGS.positional}' -- "$@" >>"$FIXTURE/claude-calls"
-if [[ $* == 'agents --json --all' ]]; then
-    cat "$FIXTURE/sessions.json"
-    if [[ -f $FIXTURE/stopping ]]; then
-        jq 'map(del(.pid))' "$FIXTURE/sessions.json" >"$FIXTURE/sessions.next"
-        mv "$FIXTURE/sessions.next" "$FIXTURE/sessions.json"
-        rm "$FIXTURE/stopping"
-    fi
-    if [[ -n ${FIXTURE_SESSION_NEXT_STATE:-}${FIXTURE_SESSION_NEXT_ID:-} ]]; then
-        jq --arg state "${FIXTURE_SESSION_NEXT_STATE:-}" --arg id "${FIXTURE_SESSION_NEXT_ID:-}" \
-            'map(if $state != "" then .state=$state else . end |
-                 if $id != "" then .sessionId=$id else . end)' \
-            "$FIXTURE/sessions.json" >"$FIXTURE/sessions.next"
-        mv "$FIXTURE/sessions.next" "$FIXTURE/sessions.json"
-    fi
-elif [[ $# == 2 && $1 == stop ]]; then
-    printf '%s\n' "$2" >>"$FIXTURE/stops"
-    [[ ${FIXTURE_STOP_FAIL:-0} == 0 ]] || exit 1
-    if [[ ${FIXTURE_STOP_PENDING:-0} == 1 ]]; then exit 0; fi
-    if [[ ${FIXTURE_STOP_DELAY:-0} == 1 ]]; then touch "$FIXTURE/stopping"; exit 0; fi
-    jq --arg id "$2" 'map(if .id == $id then del(.pid) else . end)' \
-        "$FIXTURE/sessions.json" >"$FIXTURE/sessions.next"
-    mv "$FIXTURE/sessions.next" "$FIXTURE/sessions.json"
-elif [[ $# == 4 && $1 == --bg && $2 == --resume ]]; then
-    [[ ! -t 0 ]]
-    pwd >"$FIXTURE/resume-cwd"
-    printf '%s\n' "$3" "$4" >>"$FIXTURE/resumes"
-    [[ ${FIXTURE_RESUME_FAIL:-0} == 0 ]] || exit 1
-    # A resume is unsafe until the old process has actually gone.
-    jq -e --arg id "$3" 'all(.[]; (.sessionId // .id) != $id or .pid == null)' "$FIXTURE/sessions.json" >/dev/null
-    sleep "${FIXTURE_RESUME_DELAY:-0}"
-    jq --arg id "$3" --arg state "${FIXTURE_RESUME_STATE:-working}" \
-        'map(if (.sessionId // .id) == $id then .pid=456 | .state=$state else . end)' \
-        "$FIXTURE/sessions.json" >"$FIXTURE/sessions.next"
-    if [[ ${FIXTURE_NEW_SESSION:-0} == 1 ]]; then
-        jq '. + [.[0] | .id="new" | .sessionId="new-session" | .pid=789 | .state="done" | .startedAt="2028"]' \
-            "$FIXTURE/sessions.next" >"$FIXTURE/sessions.json"
-    else
-        mv "$FIXTURE/sessions.next" "$FIXTURE/sessions.json"
-    fi
-else
-    echo "unexpected claude arguments: $*" >&2
-    exit 1
-fi
+echo 'fixture: claude must be the exported function' >&2
+exit 99
 STUB
+    # post invokes Claude directly: import the fake into its child shells
+    # without starting a fresh Bash for each query, stop or resume.
+    # shellcheck disable=SC2317
+    claude() {
+        jq -nc --arg cwd "$PWD" --args '{cwd:$cwd,args:$ARGS.positional}' -- "$@" >>"$FIXTURE/claude-calls" || return 1
+        if [[ $* == 'agents --json --all' ]]; then
+            cat "$FIXTURE/sessions.json" || return 1
+            if [[ -f $FIXTURE/stopping ]]; then
+                jq 'map(del(.pid))' "$FIXTURE/sessions.json" >"$FIXTURE/sessions.next" || return 1
+                mv "$FIXTURE/sessions.next" "$FIXTURE/sessions.json" || return 1
+                rm "$FIXTURE/stopping" || return 1
+            fi
+            if [[ -n ${FIXTURE_SESSION_NEXT_STATE:-}${FIXTURE_SESSION_NEXT_ID:-} ]]; then
+                jq --arg state "${FIXTURE_SESSION_NEXT_STATE:-}" --arg id "${FIXTURE_SESSION_NEXT_ID:-}" \
+                    'map(if $state != "" then .state=$state else . end |
+                         if $id != "" then .sessionId=$id else . end)' \
+                    "$FIXTURE/sessions.json" >"$FIXTURE/sessions.next" || return 1
+                mv "$FIXTURE/sessions.next" "$FIXTURE/sessions.json" || return 1
+            fi
+        elif [[ $# == 2 && $1 == stop ]]; then
+            printf '%s\n' "$2" >>"$FIXTURE/stops" || return 1
+            [[ ${FIXTURE_STOP_FAIL:-0} == 0 ]] || return 1
+            if [[ ${FIXTURE_STOP_PENDING:-0} == 1 ]]; then return 0; fi
+            if [[ ${FIXTURE_STOP_DELAY:-0} == 1 ]]; then touch "$FIXTURE/stopping" || return 1; return 0; fi
+            jq --arg id "$2" 'map(if .id == $id then del(.pid) else . end)' \
+                "$FIXTURE/sessions.json" >"$FIXTURE/sessions.next" || return 1
+            mv "$FIXTURE/sessions.next" "$FIXTURE/sessions.json" || return 1
+        elif [[ $# == 4 && $1 == --bg && $2 == --resume ]]; then
+            [[ ! -t 0 ]] || return 1
+            pwd >"$FIXTURE/resume-cwd" || return 1
+            printf '%s\n' "$3" "$4" >>"$FIXTURE/resumes" || return 1
+            [[ ${FIXTURE_RESUME_FAIL:-0} == 0 ]] || return 1
+            # A resume is unsafe until the old process has actually gone.
+            jq -e --arg id "$3" 'all(.[]; (.sessionId // .id) != $id or .pid == null)' "$FIXTURE/sessions.json" >/dev/null || return 1
+            if [[ -n ${FIXTURE_RESUME_BARRIER:-} ]]; then
+                # Both messages must be delivered before the winning wake can finish.
+                IFS= read -r -t 30 _ <>"$FIXTURE_RESUME_BARRIER" || return 1
+            fi
+            jq --arg id "$3" --arg state "${FIXTURE_RESUME_STATE:-working}" \
+                'map(if (.sessionId // .id) == $id then .pid=456 | .state=$state else . end)' \
+                "$FIXTURE/sessions.json" >"$FIXTURE/sessions.next" || return 1
+            if [[ ${FIXTURE_NEW_SESSION:-0} == 1 ]]; then
+                jq '. + [.[0] | .id="new" | .sessionId="new-session" | .pid=789 | .state="done" | .startedAt="2028"]' \
+                    "$FIXTURE/sessions.next" >"$FIXTURE/sessions.json" || return 1
+            else
+                mv "$FIXTURE/sessions.next" "$FIXTURE/sessions.json" || return 1
+            fi
+        else
+            echo "unexpected claude arguments: $*" >&2
+            return 1
+        fi
+    }
+    export -f claude
     chmod 700 "$HOME/.local/bin/ssh" "$HOME/.local/bin/claude"
 }
 post() { "$POST_TOOL" "$@"; }
@@ -144,7 +156,16 @@ session() {
 message() {
     printf 'Id: 20261024T213500Z-7f3a0000\nFrom: sender@%s\nTo: %s@b\nSubject: fixture\n\nbody\n' "$1" "$2"
 }
-count() { find "$1" -maxdepth 1 -type f -name '*.md' | wc -l; }
+count() (
+    shopt -s nullglob dotglob
+    local file n=0
+    for file in "$1"/*.md; do
+        [[ -f $file && ! -L $file ]] || continue
+        n=$((n + 1))
+    done
+    printf '%s\n' "$n"
+)
+concurrent_delivered() { [[ $(count "$t/a/tmp/post/concurrent/new") == 2 ]]; }
 
 local_and_remote() {
     post wait o/live --timeout 30 >"$t/wait.out" &
@@ -442,12 +463,17 @@ STUB
     expect 'resume checks newest session of name' "$(capture env FIXTURE_NEW_SESSION=1 "$POST_TOOL" send newest-name subject <<< body)" 'status=3' 'nobody will wake it: done'
     session concurrent 'done'
     : >"$t/resumes"
-    FIXTURE_RESUME_DELAY=0.05 post send concurrent first <<< body >"$t/concurrent-1" &
+    mkfifo "$t/resume-barrier"
+    exec {resume_barrier}<>"$t/resume-barrier"
+    FIXTURE_RESUME_BARRIER=$t/resume-barrier post send concurrent first <<< body >"$t/concurrent-1" &
     one=$!
     pids+=("$one")
-    FIXTURE_RESUME_DELAY=0.05 post send concurrent second <<< body >"$t/concurrent-2" &
+    FIXTURE_RESUME_BARRIER=$t/resume-barrier post send concurrent second <<< body >"$t/concurrent-2" &
     two=$!
     pids+=("$two")
+    poll_until concurrent_delivered
+    printf 'delivered\n' >&"$resume_barrier"
+    exec {resume_barrier}>&-
     wait "$one" "$two"
     pids=()
     expect 'concurrent delivery resumes once' "$(wc -l <"$t/resumes")" 2

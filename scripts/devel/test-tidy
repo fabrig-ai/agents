@@ -14,10 +14,12 @@ import case_runner
 SCRIPT = Path(__file__).resolve().with_name('tidy')
 GIT = shutil.which('git')
 REPOS = ('agents', 'skein', 'smith', 'jig', 'hearth', 'qa', 'temper')
+# Only these cases inspect the trace or inject fetch/push faults.
+GIT_TRACED = ('copies', 'fetch_failure', 'push_failure', 'order')
 
 
 class Lab:
-    def __init__(self, root, built=None):
+    def __init__(self, root, trace_git=False, built=None):
         if built is not None:
             # Copy bytes, never hardlink mutable refs, objects, index or logs.
             shutil.copytree(built, root, dirs_exist_ok=True)
@@ -48,15 +50,16 @@ class Lab:
                                'echo pull >>"$RECORDS/pulls"\nexit "${FAIL_PULL:-0}"\n')
         self.record.chmod(0o700)
         self.env['TIDY_RECORD'] = str(self.record)
-        # Trace order and fail individual operations without contacting a network.
-        wrapper = self.bin / 'git'
-        wrapper.write_text('#!/bin/sh\n'
-                           'printf "%s\\n" "$*" >>"$DEV_ROOT/git.trace"\n'
-                           'case "$*" in\n'
-                           ' *fetch*) [ -z "$FAIL_FETCH" ] || case "$*" in *"-C $DEV_ROOT/$FAIL_FETCH fetch"*) exit 7;; esac;;\n'
-                           ' *push*) [ -z "$FAIL_PUSH" ] || exit 8;;\n'
-                           'esac\nexec ' + shlex.quote(GIT) + ' "$@"\n')
-        wrapper.chmod(0o700)
+        if trace_git:
+            # Trace order and inject faults only where a case needs them.
+            wrapper = self.bin / 'git'
+            wrapper.write_text('#!/bin/sh\n'
+                               'printf "%s\\n" "$*" >>"$DEV_ROOT/git.trace"\n'
+                               'case "$*" in\n'
+                               ' *fetch*) [ -z "$FAIL_FETCH" ] || case "$*" in *"-C $DEV_ROOT/$FAIL_FETCH fetch"*) exit 7;; esac;;\n'
+                               ' *push*) [ -z "$FAIL_PUSH" ] || exit 8;;\n'
+                               'esac\nexec ' + shlex.quote(GIT) + ' "$@"\n')
+            wrapper.chmod(0o700)
         self.origins, self.primary = {}, {}
         if built is None:
             seed = root / 'seed'
@@ -676,6 +679,7 @@ def already_gone(lab):
     lab.landed()
     # Delete on the server immediately before tidy's push, after its fetch.
     wrapper = lab.bin / 'git'
+    wrapper.touch(mode=0o700)
     wrapper.write_text('#!/bin/sh\ncase "$*" in *push*)\n' +
                        shlex.quote(GIT) + ' -C "$DEV_ROOT/agents" push origin :refs/heads/done >/dev/null 2>&1\n'
                        'echo "gone" >&2; exit 1;; esac\nexec ' + shlex.quote(GIT) + ' "$@"\n')
@@ -688,6 +692,7 @@ def remote_race(lab):
     lab.landed()
     future = lab.branch('future')
     wrapper = lab.bin / 'git'
+    wrapper.touch(mode=0o700)
     wrapper.write_text('#!/bin/sh\ncase "$*" in *push*)\n' +
                        shlex.quote(GIT) + ' -C ' + shlex.quote(str(lab.origins['agents'])) +
                        ' update-ref refs/heads/done ' + future + '\n;; esac\nexec ' +
@@ -702,6 +707,7 @@ def head_race(lab):
     work = lab.wt()
     wrapper = lab.bin / 'git'
     marker = lab.root / 'moved'
+    wrapper.touch(mode=0o700)
     wrapper.write_text('#!/bin/sh\ncase "$*" in *push*)\n'
                        'if [ ! -e ' + shlex.quote(str(marker)) + ' ]; then\n'
                        ': >' + shlex.quote(str(marker)) + '\n'
@@ -717,6 +723,7 @@ def local_race(lab):
     lab.landed()
     future = lab.branch('future', remote=False)
     wrapper = lab.bin / 'git'
+    wrapper.touch(mode=0o700)
     wrapper.write_text('#!/bin/sh\ncase "$*" in *"update-ref -d refs/heads/done"*)\n' +
                        shlex.quote(GIT) + ' -C "$DEV_ROOT/agents" update-ref refs/heads/done ' +
                        future + '\n;; esac\nexec ' + shlex.quote(GIT) + ' "$@"\n')
@@ -752,6 +759,7 @@ def evidence_race(lab):
     lab.git(lab.root, 'clone', str(lab.origins['agents']), str(clone))
     wrapper = lab.bin / 'git'
     marker = lab.root / 'moved'
+    wrapper.touch(mode=0o700)
     wrapper.write_text('#!/bin/sh\ncase "$*" in *"worktree list"*)\n'
                        'if [ ! -e ' + shlex.quote(str(marker)) + ' ]; then\n'
                        ': >' + shlex.quote(str(marker)) + '\n' + shlex.quote(GIT) + ' "$@"\n'
@@ -771,6 +779,7 @@ def evidence_ref_race(lab):
     lab.git(clone, 'fetch', str(lab.a), future)
     wrapper = lab.bin / 'git'
     marker = lab.root / 'moved'
+    wrapper.touch(mode=0o700)
     wrapper.write_text('#!/bin/sh\ncase "$*" in *"for-each-ref --format=%(refname)"*)\n'
                        'if [ "$#" -eq 4 ] && [ ! -e ' + shlex.quote(str(marker)) + ' ]; then\n'
                        ': >' + shlex.quote(str(marker)) + '\n' + shlex.quote(GIT) + ' "$@"\n' +
@@ -806,6 +815,7 @@ def deletion_failure(lab):
     lab.landed('two')
     two = lab.wt('two')
     wrapper = lab.bin / 'git'
+    wrapper.touch(mode=0o700)
     wrapper.write_text('#!/bin/sh\ncase "$*" in *"worktree remove"*"/one") exit 8;; esac\n'
                        'exec ' + shlex.quote(GIT) + ' "$@"\n')
     text = lab.run('agents', status=3)
@@ -881,7 +891,7 @@ def build_baseline(directory):
 
 
 def run(case, directory, built):
-    case(Lab(directory, built))
+    case(Lab(directory, trace_git=case.__name__ in GIT_TRACED, built=built))
 
 
 if __name__ == '__main__':
