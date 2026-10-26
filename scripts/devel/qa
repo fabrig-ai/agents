@@ -78,6 +78,17 @@ class Workspace:
         self.fixture = Path(fixture).absolute() if fixture else None
         need(fixture is None or (fixture and self.fixture.is_dir()), 'QA_FIXTURE must be a directory')
 
+    def machine(self):
+        try:
+            lines = (self.root / 'tmp/post/machines').read_text().splitlines()
+        except OSError:
+            lines = []
+        for line in lines:
+            fields = line.partition('#')[0].split()
+            if len(fields) >= 2 and fields[1] == 'local':
+                return fields[0]
+        return socket.gethostname()
+
     def tool(self, name):
         default = Path('systemctl') if name == 'systemctl' else self.kit / name
         return Path(os.environ.get('QA_' + name.upper().replace('-', '_'), default)) if self.fixture else default
@@ -540,7 +551,7 @@ class Watch:
                              checkout=checkout, directory=directory, cap=cap, started=started,
                              commits='\n'.join(f'  - {c["commit"]} {c["subject"]}\n    QA: {c["qa"]}' for c in commits))
         replace(directory / 'brief.md', brief.encode())
-        fields = dict(repository=repo, main=main, commits=' '.join(state['commits']), machine=socket.gethostname(),
+        fields = dict(repository=repo, main=main, commits=' '.join(state['commits']), machine=self.workspace.machine(),
                       model='unknown', effort='unknown', started=started, ended='unknown', wall='unknown',
                       tokens='unknown', outcome='running')
         report = Pass(name, fields, f'# QA pass {name}\n')

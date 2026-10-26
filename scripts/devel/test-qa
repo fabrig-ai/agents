@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -503,6 +504,9 @@ elif name == 'post':
 
 
 def watch_starts_a_pass_on_the_cleared_main(lab):
+    machines = lab.root / 'tmp/post/machines'
+    machines.parent.mkdir()
+    machines.write_text('# ignored local\nremote elsewhere\nqa-fixture local # this machine\nlater local\n')
     b, c = lab.waiting(2)
     lab.watch()
     directory, state = lab.watch_state()
@@ -518,6 +522,7 @@ def watch_starts_a_pass_on_the_cleared_main(lab):
     assert directory.stat().st_mode & 0o777 == 0o700
     text = lab.content(f'qa/passes/{state["pass"]}.md')
     assert f'commits: {b} {c}\n' in text and 'outcome: running\n' in text and f'main: {c}\n' in text
+    assert 'machine: qa-fixture\n' in text
     assert 'waiting: 0 commits' in lab.run('passes', '--running').stdout
     assert state['pass'] in lab.run('passes', '--running').stdout
 
@@ -555,6 +560,7 @@ def watch_finishes_a_pass_with_findings(lab):
     ended = lab.end_run(report=report)
     lab.watch()
     result = lab.content(f'qa/passes/{state["pass"]}.md')
+    assert f'machine: {socket.gethostname()}\n' in result
     for text in ('outcome: done', 'tokens: 100/20/30', 'model: gpt-6.1-sol', 'effort: high', 'ended: ' + ended, 'wall: 0:00', report.strip()):
         assert text in result, (text, result)
     sent, = lab.sent()
