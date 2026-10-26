@@ -69,6 +69,38 @@ class BudgetFixtures(unittest.TestCase):
                                str(admissions), str(cpu)], stdin=subprocess.DEVNULL,
                               capture_output=True, text=True, timeout=10)
 
+    def test_unadmitted_share_under_ten_passes_quietly(self):
+        for value, rest in (('9.999', '90.001'), ('10', '90')):
+            with self.subTest(share=value):
+                result = self.share_check('rest 100 Remaining CPU\n',
+                                          f'fixture {value}\nrest {rest}\n')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertNotIn('check.sh:', result.stderr)
+
+    def test_unadmitted_share_in_headroom_passes_with_warning(self):
+        for value, rest in (('10.001', '89.999'), ('11', '89'), ('12.5', '87.5')):
+            with self.subTest(share=value):
+                result = self.share_check('rest 100 Remaining CPU\n',
+                                          f'fixture {value}\nrest {rest}\n')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                warnings = [line for line in result.stderr.splitlines()
+                            if line.startswith('check.sh:')]
+                self.assertEqual(warnings, [
+                    f'check.sh: fixture CPU share {float(value):.3f}%: past 10%, '
+                    f'add a line to {self.root / "gate-shares"} before it passes 12.5%'])
+
+    def test_unadmitted_share_past_headroom_fails(self):
+        result = self.share_check('rest 100 Remaining CPU\n', 'fixture 12.501\nrest 87.499\n')
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn('fixture CPU share 12.501%: add NAME MAX_PERCENT REASON', result.stderr)
+        self.assertNotIn('past 10%,', result.stderr)
+
+    def test_admitted_share_in_headroom_does_not_warn(self):
+        result = self.share_check('fixture 11 Exact admitted limit\nrest 100 Remaining CPU\n',
+                                  'fixture 11\nrest 89\n')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('check.sh:', result.stderr)
+
     def test_share_boundaries_and_zero_cpu(self):
         result = self.share_check('', 'small 1\nrest 9\n')
         self.assertNotIn('small CPU share', result.stderr)

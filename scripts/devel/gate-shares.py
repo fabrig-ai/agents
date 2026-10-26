@@ -1,4 +1,4 @@
-"""Print agents' suite CPU shares and require a reason for a share above 10%."""
+"""Print agents' suite CPU shares, warn above 10%, and enforce their limits."""
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 import sys
@@ -36,13 +36,16 @@ def check(admissions, measurements):
     for name, value in sorted(cpu.items(), key=lambda item: (-item[1], item[0])):
         share = value * 100 / total if total else Decimal(0)
         print(f'gate-share {name} {value:.3f} {share:.3f}%', file=sys.stderr)
-        maximum = limits.get(name, Decimal(10))
+        maximum = limits.get(name, Decimal('12.5'))
         if share > maximum:
             admission = ('add NAME MAX_PERCENT REASON' if name not in limits else
                          f'exceeds MAX_PERCENT {maximum}')
             print(f'check.sh: {name} CPU share {share:.3f}%: {admission} in {admissions}',
                   file=sys.stderr)
             failed = True
+        elif name not in limits and share > 10:
+            print(f'check.sh: {name} CPU share {share:.3f}%: past 10%, add a line to '
+                  f'{admissions} before it passes 12.5%', file=sys.stderr)
     return int(failed)
 
 

@@ -677,10 +677,12 @@ tool that sees it; the reports only read.
   readers accept both. At the end agents prints `gate-share NAME CPU
   PERCENT%` for every suite, largest CPU share first. The total is the
   sum of the suites' CPU seconds, rather than the gate's elapsed time.
-  A share above 10% fails unless `scripts/gate-shares` admits it with
-  `NAME MAX_PERCENT REASON`, one suite per line and the reason in words;
-  a share above that line's maximum also fails. The failure names the
-  suite, its share and the file, so a budget increase carries its reason
+  An unadmitted share above 10% and at most 12.5% passes with one line:
+  `check.sh: NAME CPU share N%: past 10%, add a line to scripts/gate-shares before it passes 12.5%`.
+  Above 12.5% it fails unless `scripts/gate-shares` admits it with
+  `NAME MAX_PERCENT REASON`, one suite per line and the reason in words.
+  An admitted share above that line's maximum fails, with no headroom added.
+  The failure names the suite, its share and the file, so a budget increase carries its reason
   at landing. Initial admissions use three runs of main through
   `heavy --gate`: each suite's median CPU seconds divided by their sum,
   and for each share above 10%, its share times 1.25 rounded up to a
