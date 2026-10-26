@@ -323,6 +323,10 @@ cite:
      same commit.
      - If they pass, it was a flake: the verdict names it, and the
        landing's owner files it as a finding (director.md 6).
+     - A starved pass, a real-loop run that waited for a CPU it wasn't
+       given (skein's `testing-strategy.md` 2.8), is green; the verdict
+       names it as it names a flake, so that a story starved often
+       shows (the director, 10-26).
      - If not, and the run passed over landings, it bisects over their
        tips, the commits their gates passed, from the last green: only
        there does the invariant hold. The first red landing goes back
@@ -751,6 +755,16 @@ tool that sees it; the reports only read.
   and for each share above 10%, its share times 1.25 rounded up to a
   whole percent. Blank lines and comments beginning with `#` are allowed;
   duplicate names, invalid percentages and missing reasons fail the gate.
+- **Starved passes** (the director, 10-26; skein's
+  `testing-strategy.md` 2.8). A repository whose tests may pass starved
+  keeps passing tests' output in its gate's nextest JUnit, and its
+  `scripts/check.sh` prints one line per test that passed starved:
+  ```
+  gate-starved NAME
+  ```
+  NAME is `PROFILE BINARY_ID TEST_NAME`, as after landing's
+  (build-infrastructure.md 11). The repository finds them; the tools
+  only read the lines.
 - **`land`'s result.** Once `land` has rebased, it ends by printing one
   line, `land: result JSON`, and writes the same object to the file
   `LAND_RESULT` names, when it is set:
@@ -777,6 +791,9 @@ tool that sees it; the reports only read.
     field by name and is `{}` when no line has it, also for cached and
     skipped gates. `failed_step` is the first step that exited nonzero, else
     `other` when the gate failed, else `null`.
+  - `starved` lists the gate log's `gate-starved` names, at most 50,
+    `starved_more` counting the rest; `[]` for a gate that printed none,
+    was cached or didn't run.
   - `exit` is `land`'s own status.
 - **The feed.** `land-set` runs each `land` with `LAND_RESULT` set, and
   adds the object it wrote as `result` to the event it then writes:
@@ -794,6 +811,10 @@ tool that sees it; the reports only read.
   - per set's proves: how many ended `proved` and `stopped`, and their
     run, median and longest;
   - `--tsv`: one row per result, with raw seconds, for other scripts.
+  - **Starved passes,** per repository and per test, most first: from
+    the gates' results (a set's events, and a plain `land`'s record,
+    which carries `starved` beside `taught`, section 12) and the
+    runner's runs, each counted once per gate or run.
   - **After landing's verdicts** (10-26), per repository with a tier,
     and per part: the time to a landing's verdict, median and 90th
     percentile, from its record in the feed (a set's `landed`, a plain
@@ -888,7 +909,9 @@ that a routine landing needs no post. Built 10-26 (o/landing-taught).
    "base": SHA, "commit": SHA, "taught": ["..."]}
   ```
   - `repo` is `land`'s own (section 10); `taught` and
-    `taught_more` are as above, absent when there is nothing to show.
+    `taught_more` are as above, absent when there is nothing to show;
+    `starved` and `starved_more` as in `land`'s result (section 10),
+    absent when it has none.
   - **No `set`,** so every reader of a set's runs passes over it:
     `landings`' set views, `wait` and `report`, the status page, and after
     landing's `landing_set`.

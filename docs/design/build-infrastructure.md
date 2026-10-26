@@ -938,12 +938,18 @@ green at every commit. Run from the root of a checkout:
   `target/`;
 - a script whose tier is split takes `--part K/N`, for any N ≥ 1: with
   no `--only`, it runs part K of its tier in N parts, and with `--only`
-  the part changes nothing. The split is the script's, fixed for a
-  commit and N: the parts are disjoint in the tests they run and whole
+  the part changes nothing. The split is the script's, a function of
+  the commit's files and N alone, so that every follower deals the
+  same: the parts are disjoint in the tests they run and whole
   together, a phase they need (a build) may run in several, and a part
-  with nothing in it is green. It splits by phase, weighed by the
-  phases' measured times, which it records. A NAME keeps its meaning
-  across parts.
+  with nothing in it is green. It splits by phase, weighed by times
+  measured once and written in the script, ties broken by the phases'
+  order. A NAME keeps its meaning across parts;
+- it prints `after-landing: starved NAME` per test that passed starved
+  (skein's `testing-strategy.md` 2.8: a real-loop run that waited for
+  a CPU it wasn't given passes and says so in its output), read from
+  the profile's JUnit with passing tests' output kept. A starved pass
+  is green.
 
 **The runner.** `after-landing follow REPO [--part K/N] [--origin URL]
 [--director ADDRESS] [--poll SECONDS] [--once]` follows one
@@ -958,11 +964,12 @@ It refuses, with exit 2 and deleting nothing, a clone of another
 origin, or a state it can't read. It runs only on a runner's machine,
 one with `~/.config/agents-after-landing/director` (below); anywhere
 else it exits 2. A part with no state may start from its repository's
-whole state, copied at the split without its pending posts or fault:
-its first run then bisects over the landings since the whole tier's
-last run. With none, its first run is a baseline. Either way, a
-part's range never reaches a commit whose script lacks `--part`: parts
-start from a run on a `main` whose script has it.
+whole state, copied at the split without its pending posts or fault,
+when that state's last run is on a commit whose script takes `--part`
+and no standing red of it is `*`: its first run then bisects over the
+landings since. Each part keeps the standing reds its runs confirm,
+and drops the rest at its first run. With no such state, a part's first
+run is a baseline.
 
 A pass settles the pending posts, reads `main` with `git ls-remote`,
 and when `main` moved, fetches it and runs the tier on it, M, with P the
@@ -1011,21 +1018,23 @@ None has a `set` key, so the readers of sets skip them. Each has `time`,
   live once every machine's `landings` knows them:
   - `running`: `commit` M and `from` P;
   - `verdict`: `commit` the landing, `run` M, `verdict`, `tests`,
-    `flakes`, `landing_set` (the set whose `landed` record names the
+    `flakes`, `starved`, `landing_set` (the set whose `landed` record names the
     landing, or null), `log`, and a red's `excerpt`, its failing output's
     last 60 lines, at most 8000 characters; `baseline` is true on a
     baseline run's;
   - `tier`: the run's end, with `commit` M, `state` (`green` or `red`),
     `last_green`, `reds` (each `landing` with its `tests`), `flakes`,
-    `ran_s` (heavy's seconds, rerun and probes included) and `log`;
+    `starved`, `ran_s` (heavy's seconds, rerun and probes included) and `log`;
     `baseline` is true on a baseline run's;
   - `fault`: `commit`, `reason` and `since`, when a fault starts or its
     reason changes; `recovered`, when one ends with `main` unmoved.
 - `kind` `watch`, event `watching`: `target`, a set or a commit, and
   `name`, the waiter's `POST_NAME` or null.
 
-Lists of tests stop at 50 names, with `tests_more` or `flakes_more`
-counting the rest.
+Lists of tests stop at 50 names, with `tests_more`, `flakes_more` or
+`starved_more` counting the rest. A run's `starved` are the starved
+passes of its runs at M, the first and the rerun; a reader that
+predates them ignores the key.
 
 **Its posts** go to `--director`, as `post send --as after-landing`; a
 post that `post` queued counts as sent, and one that fails is tried
@@ -1038,7 +1047,8 @@ again at the next pass:
 **`landings`.** `landings` adds a `tiers:` section, a line per
 follower, by its name: green or red at its last run, a red's standing tests and
 the landing first charged, its last green, and a run in progress or a
-fault newer than the last state. `landings wait --cleared TARGET
+fault newer than the last state. It and each verdict line below name a
+run's starved passes as they name its flakes, `starved N: TESTS`. `landings wait --cleared TARGET
 [--timeout SECONDS] [--post ADDRESS]` waits for a landing's verdict:
 TARGET is a set, whose landings are its latest run's `landed` records,
 or a commit, 7 to 40 hex digits. A `landed` event's `base` and `commit`
@@ -1078,8 +1088,8 @@ cleared it; else it waits. So a commit a whole tier judged before the
 split keeps that verdict, and a part that never runs leaves its commits
 waiting until the wait's timeout. `wait --cleared` prints a line per
 part, its follower's name where the repository's stands, and
-`landings cleared REPO` gives, under parts, the oldest of the parts'
-answers, which the newest all-cleared run of every part holds.
+`landings cleared REPO` gives, under parts, the newest commit that
+ended an all-cleared run of some part and that this join clears.
 
 Ancestry is read in the workspace's checkouts: `REPO` under `DEV_ROOT`,
 else under the directory that holds agents' checkout, for agents and the
@@ -1138,7 +1148,8 @@ their posts, an unwatched red posted and a watched one not, and its
 meeting with `landings wait --cleared` on the same feed; and a tier in
 two parts, each followed apart: `--part` passed only on runs that name
 no test, a red in one part bisected while the other clears, and a part
-started from a whole tier's copied state.
+started from a whole tier's copied state, or not, for a `*` standing;
+and a starved pass, green and recorded.
 `test-landings` covers the `tiers:` lines, `wait --cleared` on a set
 and on a commit, and `--post`; and, on scratch repositories as origins
 and checkouts, the verdicts by ancestry: a repository with no tier, a
