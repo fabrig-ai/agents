@@ -760,9 +760,10 @@ that a routine landing needs no post. Built 10-26 (o/landing-taught).
     that rebase dropped as already upstream keeps its line.
 - **Bounded, never refused.** The tools keep a landing's first 10 lines in
   each repository, each cut to 200 characters (`…` marks a cut), and count
-  the rest as `taught_more`. A trailer never stops a landing, and a feed
-  that can't be written warns, as `land-set`'s does
-  (build-infrastructure.md 10).
+  the rest as `taught_more`. A trailer never stops a landing: a read of
+  the trailers that fails, or takes over 2 seconds, teaches nothing, since
+  `land-set` makes it between its lock's pulses. A feed that can't be
+  written warns, as `land-set`'s does (build-infrastructure.md 10).
 - **A set's landing record.** Each `landed` event of `land-set`
   (build-infrastructure.md 10) carries `taught`, the list of lines, and
   `taught_more` when it left some out; neither when that repository's
@@ -788,13 +789,17 @@ that a routine landing needs no post. Built 10-26 (o/landing-taught).
     set empty writes none. Without it, only a push to a remote with a host
     (`git@host:path`, `ssh://`, `https://`) reaches hetzner3's feed, over
     `land-set`'s ssh: never a path or `file://` origin, and never a fixture
-    run's (`HEAVY_RECOVERY_FIXTURE=1`).
+    run's (`HEAVY_RECOVERY_FIXTURE=1`). A remote helper's address decides
+    (`https::https://host/...` has a host), and `ext::` never has one.
   - Its result stays out of it: plain `land`s' costs are still not
     collected (section 10).
 - **`landings` shows it.**
   - Its event list holds `land`'s records beside the sets' events, a
     record's branch where a set's name stands, and prints a landing's
-    lines under it, indented, then `(N more)` for `taught_more`.
+    lines under it, indented, then `(N more)` for `taught_more`. A control
+    character in a line, or in a `land` record's branch or repository,
+    prints as `?`, so that no record splits a line or reaches the terminal
+    as an escape.
   - `landings taught [--since TIME]`, TIME a date or an ISO time, UTC by
     default, as `report`'s: every landing in the feed since then, oldest
     first, both kinds. One line for each, its date and time, set or branch,
