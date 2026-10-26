@@ -38,12 +38,12 @@ and milestones are [owners.md](../../roles/owners.md).
   landing task (owners.md 4) rebases the set on the current mains and
   proves it: its gates run once, without the lock. Then `land-set`
   lands it, gating again under the lock only what a moved `main`
-  changed. The gates are optimistic (the
-  user, 10-25): a failure comes back to the set as a repair. They run
-  the lints and the focused and fuzzy suites, and nothing slower: the
-  browser tier and the other slow tiers are after landing's, which
-  nothing runs until the user designs how (4, step 8). Tasks inside a
-  milestone merge into the set's branches, not into `main`.
+  changed. The gates are optimistic (the user, 10-25): a failure comes
+  back to the set as a repair. They run the lints and the focused and
+  fuzzy suites, and nothing slower: the browser tier and the other slow
+  tiers are after landing's, which nothing runs until the user designs
+  how (4, step 8). Tasks inside a milestone merge into the set's
+  branches, not into `main`.
 - **The next milestone doesn't wait for the landing** (the user,
   10-24). It starts as soon as the landing does, on top of the set.
   - If the landing fails, the set is repaired beside the new
@@ -56,8 +56,8 @@ and milestones are [owners.md](../../roles/owners.md).
   owner keeps the judgement: when to rebase, which findings to fix, and
   the check of each result (section 3).
 - **The set lock orders the landings** (9.1, 9.2). `land-set` holds it
-  for its pushes to skein, smith, hearth, jig and temper, and fails
-  closed without it; `land` and `land --docs` take it on the machines
+  while it lands a set in skein, smith, hearth, jig and temper, and
+  fails closed without it; `land` and `land --docs` take it on the machines
   the landing turn enables, and fail open (build-infrastructure.md 8).
   - If `main` moved since the set was proved, by a landing or a push
     around the tools, `land-set` rebases it again and gates from the
