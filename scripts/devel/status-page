@@ -649,9 +649,10 @@ def records(root):
         fields = {}
         for line in front[1].splitlines() if front else []:
             key, sep, value = line.partition(':')
-            if sep and key.strip() in FRONT:
+            if sep and key.strip() in (*FRONT, 'started'):
                 fields[key.strip()] = value.strip()
-        missions.append({'name': readme.parent.name, **{k: fields.get(k, '') for k in FRONT}})
+        missions.append({'name': readme.parent.name, **{k: fields.get(k, '') for k in FRONT},
+                         'started': stamp(fields.get('started'))})
     waiting, unread = [], []
     path = root / 'director/waiting.md'
     try:
@@ -740,6 +741,25 @@ def ago(moment, now):
     return age(now - moment)
 
 
+def length(seconds):
+    """A span as the page reads one: '42 min', '5 h 12 min', '3 d 6 h'."""
+    seconds = max(0, seconds)
+    if seconds >= DAY:
+        return f'{int(seconds // DAY)} d {int(seconds % DAY // HOUR)} h'
+    if seconds >= HOUR:
+        return f'{int(seconds // HOUR)} h {int(seconds % HOUR // 60)} min'
+    return f'{int(seconds // 60)} min'
+
+
+def when(moment, now, text=None):
+    """A moment relative to now, with its exact UTC time on hover."""
+    if not moment:
+        return '–'
+    return (f'<time datetime="{utc(moment, "%Y-%m-%dT%H:%M:%SZ")}" '
+            f'title="{utc(moment, "%Y-%m-%d %H:%M UTC")}">'
+            f'{E(ago(moment, now) if text is None else text)}</time>')
+
+
 def age(seconds):
     seconds = max(0, seconds)
     if seconds < 90:
@@ -762,10 +782,7 @@ def utc(moment, form='%m-%d %H:%MZ'):
 def resets(moment, now):
     if moment is None:
         return '–'
-    seconds = max(0, moment - now)
-    duration = (f'{int(seconds // DAY)} d {int(seconds % DAY // HOUR)} h' if seconds >= DAY
-                else f'{int(seconds // HOUR)} h {int(seconds % HOUR // 60)} min')
-    return f'in {duration} · {utc(moment)}'
+    return 'in ' + length(moment - now)
 
 
 def size(value):
@@ -958,7 +975,8 @@ def subscriptions(fleet):
                          f'<i style="width:{max(0, min(100, used)):g}%"></i></span> {used:g}%')
                 if highest is None or used > highest[0]:
                     highest = (used, f'{cli_name[cli]} {limit["name"]}')
-            rows.append([title if i == 0 else '', E(limit['name']), meter, E(resets(limit['resets'], fleet.now))])
+            rows.append([title if i == 0 else '', E(limit['name']), meter,
+                         when(limit['resets'], fleet.now, resets(limit['resets'], fleet.now))])
     out = table(['Subscription', 'Limit', 'Used', 'Resets'], rows, numeric_from=2,
                 empty='No subscriptions found.')
     for cli in ('claude', 'codex'):
@@ -985,27 +1003,27 @@ def kpis(fleet, shown, subscribed):
     agents = f'{busy + codex} busy' + (' · ' + counts if counts else '')
     waiting = fleet.data['records'].get('waiting', [])
     known = [w['since'] for w in waiting if w['since'] is not None]
-    oldest = ('oldest ' + age(now - min(known)) if known else 'since unknown' if waiting else 'none')
+    oldest = ('oldest ' + when(min(known), now) if known else 'since unknown' if waiting else 'none')
     day = fleet.window(DAY)
     lands = [r for r in day if r[7] == 'land']
     tiles = [
-        ('Missions', str(shown['rows']), f'{shown["active"]} active, {shown["paused"]} paused in the record, '
-                                         f'{shown["busy"]} busy now') if shown else ('Missions', '–', 'not shown'),
+        ('Missions', str(shown['rows']), E(f'{shown["active"]} active, {shown["paused"]} paused in the record, '
+                                           f'{shown["busy"]} busy now')) if shown else ('Missions', '–', 'not shown'),
         ('Sets landing now', str(len(flight)),
-         f'last landed {ago(last["end"]["utc"], now)} ({last["set"]})' if last else 'none landed in the feed'),
-        ('Agents', str(len(sessions) + codex), agents),
-        ('Land gates, 24 h', str(len(lands)), f'{sum(r[5] != "0" for r in lands)} failed'),
+         f'last landed {when(last["end"]["utc"], now)} ({E(last["set"])})' if last else 'none landed in the feed'),
+        ('Agents', str(len(sessions) + codex), E(agents)),
+        ('Land gates, 24 h', str(len(lands)), E(f'{sum(r[5] != "0" for r in lands)} failed')),
         ('Waiting on the user', str(len(waiting)), oldest),
-        ('Subscriptions', str(subscribed['count']), subscribed['sub']) if subscribed
+        ('Subscriptions', str(subscribed['count']), E(subscribed['sub'])) if subscribed
         else ('Subscriptions', '–', 'not shown'),
     ]
     return '<div class="tiles">' + ''.join(
         f'<div class="tile"><div class="label">{E(a)}</div><div class="value">{E(b)}</div>'
-        f'<div class="sub">{E(c)}</div></div>' for a, b, c in tiles) + '</div>'
+        f'<div class="sub">{c}</div></div>' for a, b, c in tiles) + '</div>'
 
 
 def waiting_table(fleet):
-    rows = [[E(f'{utc(w["since"])} · {age(fleet.now - w["since"])}' if w['since'] is not None else 'unknown'),
+    rows = [[when(w['since'], fleet.now) if w['since'] is not None else 'unknown',
              E(w['who']), E(w['what']), E(w['decision'])]
             for w in fleet.data['records'].get('waiting', [])]
     return table(['Since', 'Who', 'What', 'Decision'], rows, numeric_from=9, wrap=(2,),
@@ -1033,18 +1051,19 @@ def landing_now(fleet):
         progress = next((r for r in reversed(run['run']) if r['event'] in ('gated', 'landed')), None)
         since = run['started'] or run['waiting']
         rows.append([E(run['set']), badge('info', 'running') if run['started'] else badge('warning', 'waiting for lock'),
-                     E(fleet.alias.get(run['host'], run['host'])), E(lasted(since, now)),
+                     E(fleet.alias.get(run['host'], run['host'])), when(since, now, lasted(since, now)),
                      E(f'{progress["event"]} {progress.get("repo", "")}' if progress else '–')])
     for name, task in fleet.tasks():
         if task['kind'] in ('land', 'prebuild'):
             since = task['started'] or task['submitted']
             state = badge('info', 'running') if task['state'] in RUNNING else badge('warning', 'queued')
             rows.append([E(f'land {task["repo"]}' + (' (prebuild)' if task['kind'] == 'prebuild' else '')),
-                         state, E(name), E(lasted(since, now)), E(task['mission'] or '–')])
+                         state, E(name), when(since, now, lasted(since, now)), E(task['mission'] or '–')])
     for name, data in fleet.up.items():
         for turn in (data.get('turns') or {}).get('open', []):
             state = badge('info', 'holds the turn') if turn['event'] == 'grant' else badge('warning', 'waiting for turn')
-            rows.append([E(f'landing turn {turn["repo"]}'), state, E(name), E(lasted(turn['since'], now)), '–'])
+            rows.append([E(f'landing turn {turn["repo"]}'), state, E(name),
+                         when(turn['since'], now, lasted(turn['since'], now)), '–'])
     out = table(['What', 'State', 'Machine', 'For', 'Progress / mission'], rows, numeric_from=9,
                 empty='Nothing is landing right now.')
     ended = sorted((r for r in fleet.runs if r['end']), key=lambda r: r['end']['utc'], reverse=True)[:5]
@@ -1054,7 +1073,7 @@ def landing_now(fleet):
         result = (badge('good', 'landed') if end['event'] == 'done'
                   else badge('critical', f'stopped in {end.get("repo") or "?"}'))
         took = end['utc'] - run['started'] if run['started'] else None
-        recent.append([E(run['set']), result, E(fleet.alias.get(run['host'], run['host'])), E(utc(end['utc'])),
+        recent.append([E(run['set']), result, E(fleet.alias.get(run['host'], run['host'])), when(end['utc'], now),
                        E(span(took)),
                        E(', '.join(run['landed']) or '–'),
                        E(reason_kind(end.get('reason', '')) if end['event'] == 'stopped' else '')])
@@ -1158,7 +1177,7 @@ def missions(fleet):
         doing = next((badge(tone, f'{counts[label]} × {label}' if counts[label] > 1 else label)
                       for label, tone in NOW if label in counts), '–')
         rows.append([f'<strong>{E(name)}</strong>', badge(tone, state) if state else '<span class="muted">not recorded</span>',
-                     E(description(m)), doing, E(ago(e['last'], now))])
+                     E(description(m)), doing, when(e['last'], now)])
     shown = {'rows': len(rows), 'busy': sum(bool(e['now']) for e in seen.values()),
              **{s: sum(recorded.get(n, {}).get('state') == s for n in seen) for s in ('active', 'paused')}}
     return shown, table(['Mission', 'Record', 'Description', 'Now', 'Last activity'],
@@ -1170,9 +1189,12 @@ def ended_missions(fleet):
              if m.get('state') in ('ended', 'abandoned')]
     ended = sorted((e for e in ended if e[0] is not None and fleet.now - WEEK <= e[0] <= fleet.now),
                    key=lambda e: (-e[0], e[1]))
-    rows = [[E(name), badge('neutral', m['state']), E(f'{utc(at)} · {ago(at, fleet.now)}'),
-             E(description(m))] for at, name, m in ended[:10]]
-    out = table(['Mission', 'State', 'Ended', 'Description'], rows, numeric_from=9, wrap=(3,),
+    rows = []
+    for at, name, m in ended[:10]:
+        started = number(m.get('started'))
+        duration = length(at - started) if started is not None and started <= at else '–'
+        rows.append([E(name), badge('neutral', m['state']), when(at, fleet.now), duration, E(description(m))])
+    out = table(['Mission', 'State', 'Ended', 'Duration', 'Description'], rows, numeric_from=9, wrap=(4,),
                 empty='No mission ended this week.')
     if len(ended) > 10:
         out += f'<p class="muted">and {len(ended) - 10} more this week</p>'
@@ -1203,7 +1225,8 @@ def machine_card(fleet, name):
         body.append('<h4>heavy</h4><ul>' + ''.join(
             f'<li>{badge("info" if t["state"] in RUNNING else "warning", t["state"])} '
             f'{E(t["lane"])} · {E(t["kind"] + (" " + t["repo"] if t["repo"] else ""))} · '
-            f'{E(fleet.mission(t["mission"]) or t["label"] or "–")} · {E(lasted(t["started"] or t["submitted"], now))}</li>'
+            f'{E(fleet.mission(t["mission"]) or t["label"] or "–")} · '
+            f'{when(t["started"] or t["submitted"], now, lasted(t["started"] or t["submitted"], now))}</li>'
             for t in tasks) + '</ul>')
     codex = data.get('codex') or {}
     runs = codex.get('running', [])
@@ -1233,7 +1256,7 @@ def machine_card(fleet, name):
     if errors:
         body.append('<p class="muted">Not read: ' + E('; '.join(errors)) + '</p>')
     return (f'<div class="card"><h3>{E(name)} {" ".join(head)}</h3><p class="facts">{facts}<br>'
-            f'last heavy command {E(ago(last, now))}</p>{"".join(body)}</div>')
+            f'last heavy command {when(last, now)}</p>{"".join(body)}</div>')
 
 
 def chart(fleet, seconds, bucket):

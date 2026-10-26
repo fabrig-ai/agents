@@ -23,6 +23,11 @@ def iso(hours_ago):
     return datetime.fromtimestamp(NOW - hours_ago * 3600, timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 
 
+def time_cell(moment, text):
+    title = moment[:16].replace('T', ' ') + ' UTC'
+    return f'<time datetime="{moment}" title="{title}">{text}</time>'
+
+
 def write(path, text, mode=None, mtime=None):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text)
@@ -408,13 +413,14 @@ def page_waits(lab):
     section = page[page.index('<h2>Waiting on the user</h2>'):page.index('<h2>Subscriptions')]
     assert re.findall(r'<th(?: [^>]*)?>(.*?)</th>', section) == ['Since', 'Who', 'What', 'Decision']
     assert re.findall(r'<tr><td>(.*?)</td>', section) == [
-        '10-24 20:00Z · 16 h 0 min ago', '10-22 12:00Z · 2 d ago', 'unknown'], section
+        time_cell('2026-10-24T20:00:00Z', '16 h 0 min ago'),
+        time_cell('2026-10-22T12:00:01Z', '2 d ago'), 'unknown'], section
     assert re.findall(r'<td class=wrap>(.*?)</td>', section) == [
         'Read &lt;b&gt;the proposal', 'Choose a gallery', 'Answer &amp; approve'], section
     assert re.findall(r'<td>([^<]*)</td></tr>', section) == ['1099', 'R3-12', '1124'], section
     assert section.index('director</td>') < section.index('web-look-6</td>') < section.index('alpha-m</td>')
     tile = ('<div class="label">Waiting on the user</div><div class="value">3</div>'
-            '<div class="sub">oldest 2 d ago</div>')
+            f'<div class="sub">oldest {time_cell("2026-10-22T12:00:01Z", "2 d ago")}</div>')
     assert tile in page
     assert page.index('Land gates, 24 h') < page.index(tile) < page.index('label">Subscriptions')
     assert page.index('class="tiles"') < page.index('<h2>Waiting on the user') < page.index('<h2>Subscriptions')
@@ -466,8 +472,8 @@ def records_waits(lab):
     assert len(data['waiting']) == 1 and data['unread'] == [1], data
     write(lab.records / 'director/waiting.md', heading + item.replace('unknown', '1970-01-01T00:00Z'))
     page, data = subscription_page(lab)
-    days = int(NOW // 86400)
-    assert f'01-01 00:00Z · {days} d ago' in page and f'oldest {days} d ago' in page
+    assert '<tr><td>–</td><td>director</td>' in page and '<div class="sub">oldest –</div>' in page
+    assert data['records']['waiting'][0]['since'] == 0
     # Known-token text and undecodable bytes stay out of both outputs; the footer names only lines.
     token = 'sk-' + 'A' * 20
     (lab.records / 'director/waiting.md').write_bytes(
@@ -593,9 +599,9 @@ def page_roles(lab):
     assert '<h4>Claude sessions</h4><p>director, 1 designer · 1 busy</p>' in beta, beta
     public_roles(page, lab)
     ended = page[page.index('<h3>Ended this week</h3>'):page.index('<h3>Machines</h3>')]
-    assert re.findall(r'<th(?: [^>]*)?>(.*?)</th>', ended) == ['Mission', 'State', 'Ended', 'Description']
+    assert re.findall(r'<th(?: [^>]*)?>(.*?)</th>', ended) == ['Mission', 'State', 'Ended', 'Duration', 'Description']
     assert '<b>markup</b>' not in page
-    for word in ('ended-m', '10-24 06:00Z · 30 h 0 min ago', 'Explain &lt;b&gt;markup&lt;/b&gt; safely'):
+    for word in ('ended-m', time_cell(iso(30), '30 h 0 min ago'), 'Explain &lt;b&gt;markup&lt;/b&gt; safely'):
         assert word in ended, ended
     assert 'old-ended' not in ended, ended
     assert '<div class="label">Agents</div><div class="value">8</div>' in page
@@ -605,7 +611,7 @@ def page_roles(lab):
     for word in ('owner up', 'owner down', 'last turn', 'Codex owner'):
         assert word not in page, word
     data = json.loads(raw)
-    assert all(set(m) == {'name', 'state', 'ended', 'description'}
+    assert all(set(m) == {'name', 'state', 'ended', 'description', 'started'}
                for m in data['records']['missions']), data['records']
 
     # 83 recent endings: show exactly the newest ten and count the other 73.
@@ -746,8 +752,74 @@ def page_now(lab):
     assert 'unrecorded-m' not in rows, rows.keys()
     assert f'<td class=wrap>{description}</td>' in rows['landing-m'], rows['landing-m']
     for name, last in (('set-m', '30 min ago'), ('queued-landing-m', '10 min ago')):
-        assert re.findall(r'<td[^>]*>(.*?)</td>', rows[name])[4] == last, rows[name]
+        assert re.findall(r'<td[^>]*>(.*?)</td>', rows[name])[4] == time_cell(
+            iso(.5 if name == 'set-m' else 1 / 6), last), rows[name]
     public_roles(page, lab)
+
+
+def page_times(lab):
+    """Relative times carry UTC titles; ended missions reveal only a numeric start."""
+    starts = [('long-m', iso(80), '3 d 6 h'), ('hours-m', iso(7.2), '5 h 12 min'),
+              ('short-m', iso(2.7), '42 min'), ('unknown-m', 'unknown', '–'),
+              ('later-m', iso(1), '–'), ('invalid-m', 'PRIVATE-NOT-A-TIME', '–'),
+              ('missing-m', None, '–'), ('equal-m', iso(2), '0 min')]
+    for name, started, _ in starts:
+        write(lab.records / f'missions/{name}/README.md',
+              f'---\nstate: ended\nended: {iso(2)}\ndescription: Ended {name}\n'
+              + (f'started: {started}\n' if started is not None else '') + '---\n')
+    answer = codex_answer()
+    answer['limits']['rateLimitsByLimitId']['codex']['primary']['resetsAt'] = NOW + 42 * 60
+    lab.codex(lab.alpha, answer)
+    page, data = subscription_page(lab, STATUS_FEED=str(lab.root / 'feed.jsonl'))
+
+    def section(start, end):
+        return page[page.index(start):page.index(end)]
+
+    def cells(part):
+        return [re.findall(r'<td[^>]*>(.*?)</td>', row)
+                for row in re.findall(r'<tr>.*?</tr>', part) if '<td' in row]
+
+    ended = section('<h3>Ended this week</h3>', '<h3>Machines</h3>')
+    assert re.findall(r'<th(?: [^>]*)?>(.*?)</th>', ended) == [
+        'Mission', 'State', 'Ended', 'Duration', 'Description'], ended
+    rows = {row[0]: row for row in cells(ended)}
+    for name, _, duration in starts:
+        assert rows[name][2] == time_cell(iso(2), '2 h 0 min ago'), rows[name]
+        assert rows[name][3] == duration, rows[name]
+        assert f'<td class=wrap>Ended {name}</td>' in ended, ended
+    waiting = section('<h2>Waiting on the user</h2>', '<h2>Subscriptions')
+    assert cells(waiting)[0][0] == time_cell('2026-10-24T20:00:00Z', '16 h 0 min ago'), waiting
+    subscribed = section('<h2>Subscriptions', '<h2>In flight')
+    assert any(row[3] == time_cell('2026-10-26T06:30:00Z', 'in 18 h 30 min')
+               for row in cells(subscribed)), subscribed
+    assert any(row[3] == time_cell('2026-10-25T12:42:00Z', 'in 42 min')
+               for row in cells(subscribed)), subscribed
+    recent = section('<h3>Recent set runs</h3>', '<h3>Missions</h3>')
+    assert cells(recent)[0][3] == time_cell(iso(4.4), '4 h 24 min ago'), recent
+    missions = section('<h3>Missions</h3>', '<h3>Ended this week</h3>')
+    alpha = next(row for row in cells(missions) if row[0] == '<strong>alpha-m</strong>')
+    assert alpha[4] == time_cell(iso(1 / 60), 'just now'), alpha
+    landing = section('<h3>Landing now</h3>', '<h3>Recent set runs</h3>')
+    assert cells(landing)[0][3] == time_cell(iso(.1), '6 min'), landing
+    assert any(row[3] == time_cell(iso(1 / 60), '&lt;1 min') for row in cells(landing)), landing
+    tiles = section('<div class="tiles">', '<h2>Waiting on the user</h2>')
+    assert ('<div class="label">Sets landing now</div><div class="value">1</div>'
+            f'<div class="sub">last landed {time_cell(iso(4.4), "4 h 24 min ago")} (done-m/m1)</div>') in tiles
+    assert ('<div class="label">Waiting on the user</div><div class="value">3</div>'
+            f'<div class="sub">oldest {time_cell("2026-10-22T12:00:01Z", "2 d ago")}</div>') in tiles
+    card = section('<h3>alpha ', '<h3>beta ')
+    assert f'last heavy command {time_cell(iso(.5), "30 min ago")}</p>' in card, card
+    assert f' · {time_cell(iso(5 / 60), "5 min")}</li>' in card, card
+    assert re.search(r'\dZ · |· \d\d-\d\d \d\d:\d\dZ', page) is None
+    times = re.findall(r'<time\b[^>]*>', page)
+    assert times and all(' datetime="' in tag and ' title="' in tag for tag in times), times
+    recorded = {m['name']: m for m in data['records']['missions']}
+    for name, started, _ in starts:
+        expected = (datetime.fromisoformat(started.replace('Z', '+00:00')).timestamp()
+                    if started and started.startswith('2026-') else None)
+        assert recorded[name]['started'] == expected, recorded[name]
+    public_roles(page, lab)
+    private_absent(page, json.dumps(data))
 
 
 def page_degraded(lab):
@@ -873,13 +945,14 @@ def page_subscriptions(lab):
     assert re.findall(r'<th(?: [^>]*)?>(.*?)</th>', section) == ['Subscription', 'Limit', 'Used', 'Resets']
     assert 'alpha' not in section and 'beta' not in section and 'gamma' not in section, section
     assert '84%' in section and '24%' not in section and '1%' in section and '3%' not in section, section
-    assert '10-26 06:30Z' in section and '10-26 05:30Z' not in section, section
+    assert time_cell('2026-10-26T06:30:00Z', 'in 18 h 30 min') in section
+    assert '2026-10-26T05:30:00Z' not in section, section
     assert '<div class="label">Subscriptions</div><div class="value">3</div>' in page
     assert 'highest 84% · Claude week (all models)' in page
     assert 'class="meter warning" role="img" aria-label="84% used"' in section
-    assert 'in 1 h 0 min · 10-25 13:00Z' in section
-    assert 'in 1 d 0 h · 10-26 12:00Z' in section
-    assert 'in 5 d 7 h · 10-30 19:00Z' in section
+    assert time_cell('2026-10-25T13:00:00Z', 'in 1 h 0 min') in section
+    assert time_cell('2026-10-26T12:00:00Z', 'in 1 d 0 h') in section
+    assert time_cell('2026-10-30T19:00:00Z', 'in 5 d 7 h') in section
     assert 'sol week' in section and 'other week' in section
     assert data['fleet']['gamma'].get('unreachable')
 
@@ -956,7 +1029,7 @@ def claude_resets(lab):
     assert [v['used'] for v in data['claude_usage']['limits']] == list(range(7))
 
 
-CASES = [records_waits, page_waits, collect_subscriptions, page_subscriptions, subscriptions_signed_out, subscription_failures, claude_resets, collect, collect_missing, page, reason_kind, page_recent, machine_ips, page_roles, page_role_edges, page_now, page_degraded, bad_data, write_failure, install]
+CASES = [records_waits, page_waits, collect_subscriptions, page_subscriptions, subscriptions_signed_out, subscription_failures, claude_resets, collect, collect_missing, page, reason_kind, page_recent, machine_ips, page_roles, page_role_edges, page_now, page_times, page_degraded, bad_data, write_failure, install]
 
 
 def main():
