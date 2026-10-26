@@ -4,6 +4,7 @@ import json
 import fcntl
 import os
 from pathlib import Path
+import runpy
 import shlex
 import shutil
 import signal
@@ -32,6 +33,7 @@ LAND = r'''#!{python} -IS
 import os, sys
 args = sys.argv[1:]
 assert os.environ.get('LAND_TIDY') == '', 'land-set must suppress per-branch tidy calls'
+assert os.environ.get('LAND_FEED') == '', 'land-set must write its own landing records'
 if args == ['--no-push', '--docs']:
     print('land: --no-push cannot be combined with --docs or --local', file=sys.stderr)
     sys.exit(2)
@@ -162,9 +164,9 @@ gated /= 'gate'
 kind = 'cached' if gated.exists() else 'ran'
 gated.parent.mkdir(parents=True, exist_ok=True)
 gated.touch()
-# These fixture messages have no other trailers. Keep an existing marker or
-# append the same bytes as interpret-trailers, without another Git process.
-trailer = '\n\nFixture-Landed: yes'
+# Extend the Taught case's trailer paragraph; the other messages have none.
+# Keep an existing marker without another Git process.
+trailer = ('\n' if '\nTaught:' in message else '\n\n') + 'Fixture-Landed: yes'
 assert 'Fixture-Landed:' not in message or message.endswith(trailer)
 updated = message if message.endswith(trailer) else message + trailer
 if updated != message:
@@ -503,6 +505,43 @@ def success(lab):
     assert (lab.holder / 'feed.jsonl').stat().st_mode & 0o777 == 0o600
     assert lab.holder.stat().st_mode & 0o777 == 0o700
     lab.assert_released()
+
+
+def taught(lab):
+    for name in ('skein', 'smith', 'temper'):
+        lab.change(name)
+    for name, lines in (('skein', ['skein one']), ('smith', ['smith one', 'smith two'])):
+        lab.git(lab.work[name], 'commit', '--amend', '-m',
+                'change with teaching\n\n' + '\n'.join('Taught: ' + line for line in lines))
+    lab.run()
+    lab.verify()
+    records = {r['repo']: r for r in lab.records()}
+    assert records['skein']['taught'] == ['skein one'], records
+    assert records['smith']['taught'] == ['smith one', 'smith two'], records
+    assert all('taught_more' not in r for r in records.values()), records
+    assert all('taught' not in records[name] for name in ('temper', 'hearth', 'jig')), records
+    helper = runpy.run_path(str(SCRIPT.with_name('land-feed.py')))['taught']
+    path = lab.work['skein']
+    base = lab.git(path, 'rev-parse', 'HEAD')
+    lab.git(path, 'commit', '--allow-empty', '-m',
+            'folded teaching\n\nTaught: folded\n continuation\nTaught:')
+    previous = dict(os.environ)
+    try:
+        os.environ.clear()
+        os.environ.update(lab.env)
+        assert helper(path, base, 'HEAD') == (['folded continuation'], 0)
+        assert helper(lab.root / 'missing', base, 'HEAD') == ([], 0)
+        # A stalled trailer read must finish within the remote lock's pulse margin.
+        hung = lab.root / 'hung-git'
+        hung.mkdir()
+        git = hung / 'git'
+        git.write_text('#!/bin/sh\nexec sleep 10\n')
+        git.chmod(0o700)
+        os.environ['PATH'] = str(hung) + ':' + lab.env['PATH']
+        assert helper(path, base, 'HEAD') == ([], 0)
+    finally:
+        os.environ.clear()
+        os.environ.update(previous)
 
 
 def partial_set(lab):
@@ -1378,7 +1417,7 @@ def skipped(lab):
 
 
 CASES = (tidy_hooks, tidy_hooks_partial, staging_cargo, rerun, advanced_main, recorded_commit_refusal, unchanged_downstream,
-         partial_set, split_source, success, moved_between_phases, moved_during_pushes,
+         partial_set, split_source, success, taught, moved_between_phases, moved_during_pushes,
          moved_earlier_in_second_round, regate_failure_resume, catch_up,
          pushed_then_failed, lagging_fetch, proved, proved_then_moved, prove_failure, same_set,
          outside_snapshot, moved_gate_base,

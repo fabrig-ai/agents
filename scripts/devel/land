@@ -25,6 +25,10 @@
 # $tmp/logs/tidy.log. LAND_TIDY is a shell command (default "$kit/tidy");
 # set and empty, none starts. Cleanup warnings do not change the result.
 #
+# After a push, append the landing's record, with what its commits taught,
+# to the landing feed (landing-flow.md, 12). LAND_FEED, a local path,
+# replaces hetzner3's feed; set and empty, none is written.
+#
 # land starts no tier after landing, not even a repository's
 # scripts/after-landing.sh: the runner runs it (landing-flow.md, 4, step 8).
 #
@@ -456,6 +460,13 @@ PY
 # heavy's own lines in $out, for land's result.
 heard() { grep -E '^heavy: (task|receipt) ' "$out" 2>/dev/null || true; }
 
+# The landing's record in the landing feed (landing-flow.md, 12), once its
+# push has succeeded. It never changes land's status.
+land_feed() {
+    python3 -I -S -B "$kit/land-feed.py" land "$repo" "$branch" "$base" "$1" ||
+        echo "land: warning: the landing feed was not written" >&2
+}
+
 # land's result (landing-flow.md, 10), at its exit once it has rebased: one
 # line on stdout and, when LAND_RESULT is set, the same JSON in that file.
 # Building or writing it never changes land's status or its other output.
@@ -735,6 +746,7 @@ rebase on it by hand, resolve it, then land again."
         die 7 "the push failed: $err"
     fi
     where="origin/main" pushed=true
+    land_feed "$commit"
     exec 9>"$lock"
     flock 9
     status=0

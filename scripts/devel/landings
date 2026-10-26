@@ -4,6 +4,7 @@
 landings [--last N]
 landings wait [--cleared] TARGET [--timeout SECONDS] [--post ADDRESS]
 landings cleared REPO
+landings taught [--since TIME]
 landings report [--since DATE] [--repo NAME] [--tsv]
 """
 import argparse
@@ -80,10 +81,20 @@ def read_feed(timeout=15):
             reason = result.stderr.decode(errors='replace').strip()
             raise OSError(f'ssh exited {result.returncode}: {reason}')
         data = result.stdout
-    records, runner = [], []
-    for line in data.splitlines():
+    records, runner, lands = [], [], []
+    for position, line in enumerate(data.splitlines()):
         try:
             record = json.loads(line)
+            if isinstance(record, dict):
+                record['position'] = position
+            if isinstance(record, dict) and record.get('kind') == 'land':
+                if (record.get('event') == 'landed' and all(
+                        isinstance(record.get(key), str) and record[key]
+                        for key in ('time', 'host', 'token', 'repo', 'branch', 'commit'))
+                        and ('base' not in record or isinstance(record['base'], str))):
+                    stamp_record(record)
+                    lands.append(record)
+                continue
             if isinstance(record, dict) and record.get('kind') in ('tier', 'watch'):
                 if runner_record(record):
                     stamp_record(record)
@@ -109,7 +120,7 @@ def read_feed(timeout=15):
             records.append(record)
         except (ValueError, UnicodeError, OverflowError, RecursionError):
             continue
-    return records, runner
+    return records, runner, lands
 
 
 def utc(value):
@@ -545,7 +556,8 @@ def clearance(records, runner, target, checkouts):
 
 
 def event_line(record):
-    parts = [record['date'], record['clock'], record['set'], record['event']]
+    name = record['branch'] if record.get('kind') == 'land' else record['set']
+    parts = [record['date'], record['clock'], name, record['event']]
     if record.get('repo'):
         parts.append(record['repo'])
     if record.get('commit'):
@@ -555,6 +567,19 @@ def event_line(record):
                       'reason=' + record.get('reason', '')))
     parts.append(record['host'])
     return ' '.join(parts)
+
+
+def taught_of(record):
+    lines = record.get('taught')
+    if not isinstance(lines, list) or not all(isinstance(line, str) for line in lines):
+        lines = []
+    more = record.get('taught_more')
+    return lines, more if type(more) is int and more > 0 else 0
+
+
+def taught_lines(record):
+    lines, more = taught_of(record)
+    return ['    ' + line for line in lines] + ([f'    ({more} more)'] if more else [])
 
 
 def latest_runs(records, proves=False):
@@ -576,9 +601,13 @@ def ending(run):
     return next((r for r in reversed(run) if r['event'] in ('done', 'proved', 'stopped')), None)
 
 
-def show(records, last):
-    for record in records[-last:] if last else []:
+def show(records, lands, last):
+    events = sorted([*records, *lands], key=lambda r: r['position'])
+    for record in events[-last:] if last else []:
         print(event_line(record))
+        if record['event'] == 'landed':
+            for line in taught_lines(record):
+                print(line)
     active = [run for run in latest_runs(records).values() if ending(run) is None]
     active += [run for run in latest_runs(records, proves=True).values() if ending(run) is None]
     if not active:
@@ -615,7 +644,7 @@ def wait(label, timeout, poll, unreachable, read=15, cleared=False):
         first_read = False
         checkouts.poll()
         try:
-            records, runner = read_feed(read_limit)
+            records, runner, lands = read_feed(read_limit)
         except (OSError, subprocess.TimeoutExpired) as error:
             # A final attempt with little time left must not hide the transport's reason.
             if last_error is None or not isinstance(error, subprocess.TimeoutExpired):
@@ -856,6 +885,8 @@ def main():
     waiter.add_argument('--cleared', action='store_true', help='wait for tier verdicts (default timeout: 7200s)')
     cleared = commands.add_parser('cleared', help='show the newest main with all run verdicts cleared')
     cleared.add_argument('repo')
+    teacher = commands.add_parser('taught', help='show every landing and what it taught')
+    teacher.add_argument('--since', type=since, help='UTC date or ISO time')
     reporter = commands.add_parser('report', help='summarize gate and set costs')
     reporter.add_argument('--since', type=since, help='UTC date or ISO time')
     reporter.add_argument('--repo')
@@ -873,18 +904,27 @@ def main():
         timeout = 7200 if args.cleared and args.timeout is None else args.timeout
         return wait_and_post(args.post, args.set, timeout, poll, unreachable, read, args.cleared)
     try:
-        records, runner = read_feed()
+        records, runner, lands = read_feed()
     except (OSError, subprocess.TimeoutExpired) as error:
         print(f'landings: feed unreadable: {error}', file=sys.stderr)
         return 4
     if args.command == 'cleared':
         return cleared_main(runner, args.repo)
+    if args.command == 'taught':
+        events = sorted([r for r in records if r['event'] == 'landed'] + lands,
+                        key=lambda r: r['position'])
+        for record in events:
+            if args.since is None or record['utc'] >= args.since:
+                print(event_line(record))
+                for line in taught_lines(record):
+                    print(line)
+        return 0
     if args.command == 'report':
         if args.since is not None:
             records = [r for r in records if r['utc'] >= args.since]
         report(records, args.repo, args.tsv)
         return 0
-    show(records, args.last)
+    show(records, lands, args.last)
     show_tiers(runner, records)
     return 0
 

@@ -199,6 +199,80 @@ def status_view(lab):
     assert 'in flight:' in lines and len(lines) == 12, output
 
 
+def land_record(minute=0, **extra):
+    row = dict(time=f'2026-10-24T12:{minute:02d}:00+00:00', kind='land', event='landed',
+               host='fixture-host', token='a' * 32, repo='agents', branch='landing-taught/m1',
+               base='b' * 40, commit='c' * 40)
+    row.update(extra)
+    return row
+
+
+def taught_shown(lab):
+    lab.append(record(event='started'),
+               record(event='landed', minute=1, repo='skein', commit='a' * 40,
+                      taught=['the frame limit is per connection', 'restarts read the journal first'],
+                      taught_more=3),
+               record(event='landed', minute=2, repo='smith', commit='b' * 40),
+               record(event='done', minute=3),
+               land_record(4, taught=['land writes its own record']))
+    expected = [
+        '10-24 12:00Z fixture/m1 started fixture-host',
+        '10-24 12:01Z fixture/m1 landed skein aaaaaaaaa fixture-host',
+        '    the frame limit is per connection',
+        '    restarts read the journal first',
+        '    (3 more)',
+        '10-24 12:02Z fixture/m1 landed smith bbbbbbbbb fixture-host',
+        '10-24 12:03Z fixture/m1 done fixture-host',
+        '10-24 12:04Z landing-taught/m1 landed agents ccccccccc fixture-host',
+        '    land writes its own record',
+        'in flight: none', 'tiers: none in the feed']
+    result = lab.run()
+    assert result.stdout.splitlines() == expected and result.stderr == '', result
+    # The limit counts events, independently of their taught lines.
+    assert lab.run('--last', '1').stdout.splitlines() == expected[-4:]
+    # Plain lands have no effect on a set's cost or wait views.
+    assert lab.run('wait', 'fixture/m1', '--timeout', '0').stdout.splitlines() == [expected[1], expected[5]]
+
+
+def taught_since(lab):
+    lab.append(record(event=None, repo='skein', commit='a' * 40, taught=['first landing']),
+               record(event='gated', minute=2, repo='smith', commit='b' * 40, taught=['not landed']),
+               land_record(5), tier_record(),
+               record(event='landed', minute=10, repo='smith', commit='b' * 40, taught=['last landing']))
+    expected = [
+        '10-24 12:00Z fixture/m1 landed skein aaaaaaaaa fixture-host',
+        '    first landing',
+        '10-24 12:05Z landing-taught/m1 landed agents ccccccccc fixture-host',
+        '10-24 12:10Z fixture/m1 landed smith bbbbbbbbb fixture-host',
+        '    last landing']
+    result = lab.run('taught', '--since', '2026-10-24T12:05:00+00:00')
+    assert result.stdout.splitlines() == expected[2:] and result.stderr == '', result
+    assert lab.run('taught', '--since', '2026-10-24').stdout.splitlines() == expected
+    assert lab.run('taught').stdout.splitlines() == expected
+    result = lab.run('taught', '--since', '2026-10-25')
+    assert result.stdout == result.stderr == '', result
+    lab.feed.unlink()
+    assert 'feed unreadable' in lab.run('taught', status=4).stderr
+
+
+def taught_malformed(lab):
+    lab.append(record(event='landed', repo='skein', commit='a' * 40, taught='text'),
+               land_record(1, taught=['text', 42]),
+               record(event='landed', minute=2, repo='smith', commit='b' * 40, taught_more=-1),
+               land_record(3, taught_more=True))
+    missing = land_record(4)
+    del missing['branch']
+    lab.append(missing, land_record(5, time='2026-10-24T12:05:00'),
+               land_record(6, event='gated'), land_record(7, base=1))
+    expected = [
+        '10-24 12:00Z fixture/m1 landed skein aaaaaaaaa fixture-host',
+        '10-24 12:01Z landing-taught/m1 landed agents ccccccccc fixture-host',
+        '10-24 12:02Z fixture/m1 landed smith bbbbbbbbb fixture-host',
+        '10-24 12:03Z landing-taught/m1 landed agents ccccccccc fixture-host']
+    assert lab.run('taught').stdout.splitlines() == expected
+    assert lab.run().stdout.splitlines() == expected + ['in flight: none', 'tiers: none in the feed']
+
+
 def last_two(lab):
     lab.append(*(record(event='done', token=f'run{i}', minute=i) for i in range(25)))
     assert lab.run('--last', '2').stdout.splitlines() == [
@@ -1013,7 +1087,7 @@ def remote_watch(lab):
 
 def main():
     start = time.monotonic()
-    cases = (status_view, last_two, already_done, retry_commits, latest_first_line,
+    cases = (status_view, taught_shown, taught_since, taught_malformed, last_two, already_done, retry_commits, latest_first_line,
              history_only, truncated_start, last_event, proving, report_proves, event_dates,
              appended_done, appended_stopped, absent_then_present, timeout,
              unreadable_status, unreadable_wait, unreadable_recovers,

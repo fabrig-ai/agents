@@ -29,6 +29,7 @@ import tomllib
 from urllib.parse import parse_qs, quote, urlsplit
 
 HOOKS = runpy.run_path(str(Path(__file__).resolve().with_name('tidy-hooks.py')))
+TAUGHT = runpy.run_path(str(Path(__file__).resolve().with_name('land-feed.py')))
 os.umask(0o077)
 ORDER = ('skein', 'smith', 'hearth', 'jig', 'temper')
 UPSTREAM = dict(skein=(), smith=('skein',), hearth=('skein',),
@@ -393,7 +394,7 @@ def land(runner, path, *args, **options):
     """Run land; return its status, its output and the land-result-v1 object it wrote, or None."""
     target = runner.results / secrets.token_hex(8)
     code, output = runner.run(path, ['land', *args], check=False,
-                             env=dict(LAND_RESULT=str(target), LAND_TIDY=''), **options)
+                             env=dict(LAND_RESULT=str(target), LAND_TIDY='', LAND_FEED=''), **options)
     try:
         result = json.loads(target.read_text())
         target.unlink()
@@ -733,6 +734,8 @@ def main():
             lock.boundary()
             current = name
             candidate = candidates[name]
+            lines, more = TAUGHT['taught'](paths[name], bases[name], candidate)
+            lock.boundary()
             commit, code, outcome = push_step(runner, paths[name], name, candidate)
             if commit:
                 pushed.append(name)
@@ -749,7 +752,10 @@ def main():
                 candidates.pop(name)
                 write_state(state, spec['set'], landed)
                 summary[name] = 'landed ' + commit
-                event('landed', repo=name, commit=commit, **(dict(result=outcome) if outcome else {}))
+                event('landed', repo=name, commit=commit,
+                      **(dict(taught=lines) if lines else {}),
+                      **(dict(taught_more=more) if more else {}),
+                      **(dict(result=outcome) if outcome else {}))
                 if code:
                     print(f'land-set: {name}: landed {commit} despite land failing ({code})', flush=True)
             # 5 after a push: the commit landed, and only this machine's main
