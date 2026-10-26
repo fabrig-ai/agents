@@ -6,7 +6,8 @@ takes the set lock, and there is no keeper; and 10-26 (the user): there
 is no landing queue, after landing follows each `main` (4, step 8),
 and the tools settle conflicts between STATUS.md's rows and in generated
 files (3); and 10-26 (the user): what each landing taught goes in the
-feed (12). Built and live: `scripts/devel/land-set` and the set lock
+feed (12); and 10-26 (the user): a machine without heavy lands with
+plain commands (9.2). Built and live: `scripts/devel/land-set` and the set lock
 (section 9), and since 10-26 after landing's runner (4, step 8). How
 changes reach `main` across skein, smith, jig, hearth and temper:
 - one set of branches per milestone;
@@ -648,6 +649,13 @@ once.
   So the landing proves again before it lands, `land-set --prove
   SETFILE && land-set SETFILE`: where the task's proof holds there, that
   prove is all cache hits; where it doesn't, it gates without the lock.
+- **Without heavy, a plain gate** (the user, 10-26). On a machine where
+  heavy isn't installed, a person's laptop, `land` runs its prebuild and
+  gate itself, with plain commands, and the rest of the flow, set lock,
+  proof, cache and push included, is unchanged (build-infrastructure.md
+  12). Its evidence says so, `Gate-Runner: plain`, and serves only that
+  machine's plain gates (gate-policy.md 3.2). Where heavy is installed,
+  `land` never falls back to plain: a refusal is exit 9.
 
 ## 10. Metrics
 
@@ -693,7 +701,7 @@ tool that sees it; the reports only read.
   `LAND_RESULT` names, when it is set:
   ```
   {"schema": "land-result-v1", "repo": "skein", "machine": "debian-16gb-hel1-1",
-   "base": SHA, "commit": SHA, "tree": SHA, "tries": 1,
+   "runner": "heavy", "base": SHA, "commit": SHA, "tree": SHA, "tries": 1,
    "prebuild": {"wait_s": 3, "run_s": 61, "exit": 0},
    "gate": {"kind": "ran", "receipt": TOKEN, "wait_s": 5, "run_s": 164,
             "exit": 0, "steps": {"fmt": 4.213, "clippy": 25.3}, "cpu": {}, "failed_step": null},
@@ -703,8 +711,10 @@ tool that sees it; the reports only read.
     `git rev-parse --git-common-dir`), or a bare clone's name less
     `.git`; `machine` is the host name, `commit` the tip `land` gated
     or took from the cache.
+  - `runner` is `heavy` or `plain` (9.2), `null` for `--docs`.
   - `prebuild` and `gate` are `null` when `land` didn't reach them.
-    Their times are `heavy`'s `waited` and `ran`.
+    Their times are `heavy`'s `waited` and `ran`; a plain gate's are 0
+    and `land`'s own measure, and its `receipt` is `null`.
   - `gate.kind` is `ran`, `cached` (the gate cache's result: no
     receipt, zero times, no steps) or `none` (`--docs`).
   - `steps` sums the gate log's `gate-step` lines by name, in their

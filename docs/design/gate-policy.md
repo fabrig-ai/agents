@@ -28,6 +28,10 @@ Provisional, 2026-10-22. The runtime contract for reusable gate evidence.
   (landing-flow.md 4, step 8); the policy still names Chromium, which
   that tier uses. Deliberate wrapper overrides for direct-rustc work and
   benchmarks remain possible.
+- **A plain gate says so** (the user, 10-26). On a machine without heavy
+  `land` runs the gate itself, with no containment and no receipt. Its
+  evidence names its runner, `Gate-Runner: plain`, and its cache records
+  serve only plain gates (3.2).
 
 ## 2. Identity
 
@@ -97,9 +101,10 @@ transport policy.
 
 ### 3.1 Gate completion receipts
 
-A successful heavy client exit is necessary for new evidence. Before a
-cache write, commit amendment or push, `land` also validates the gate's
-token-owned completion receipt. The gate's captured output must contain
+On a machine with heavy (build-infrastructure.md 12), a successful heavy
+client exit is necessary for new evidence. Before a cache write, commit
+amendment or push, `land` also validates the gate's token-owned
+completion receipt. The gate's captured output must contain
 exactly one submission header and exactly one receipt line:
 
 ```text
@@ -160,6 +165,38 @@ refuses with an instruction to rerun land. An uncooperative mutation after
 a check cannot substitute another tree into that explicit push object. Exact-tree and documentation-only reuse require the new cache
 format and matching policy; legitimate cached evidence needs no new heavy
 submission or rereading of historical queue logs.
+
+### 3.2 Plain gates
+
+On a machine without heavy (build-infrastructure.md 12) there is no
+containment and no receipt, and `land` itself witnesses its gate.
+
+- **What it proves:** the gate command, run by `land` as its own child
+  on this machine, exited 0 on the candidate's tree under the validated
+  policy, with a contained gate's candidate and policy checks before and
+  after it. It doesn't prove that the gate's descendants ended, nor that
+  a process other than `land` saw it end: what a person's machine can
+  say.
+- **What it records:** the same `Gate-Tree`, `Gate-Policy` and
+  `Gate-Result`, the summary from the nextest counts in the log `land`
+  wrote and the time `land` measured from the gate's start to its exit,
+  and `Gate-Runner: plain`. A contained gate's landing records
+  `Gate-Runner: heavy`; a landing from before 10-26, which has none, was
+  contained. `--docs` records no runner, as it records no policy. On a
+  retry the trailer is replaced, as the others are.
+- **The cache:** a record's filename hashes the runner, `heavy` or
+  `plain`, with the tree, gate command and policy, so plain evidence
+  serves only plain gates, and contained evidence contained gates;
+  documentation-only reuse follows the same key. The cache is per
+  machine (landing-flow.md 9.2), so a build machine never meets plain
+  evidence, and a machine that installs heavy gates again rather than
+  reuse what it gated plain. The record's three lines are unchanged.
+- **The policy is unchanged.** A plain gate prepares and validates the
+  same identity, Chromium and fonts included. The runner is how the
+  evidence was made, not the runtime it was made with, so it stays out
+  of the identity.
+- **Never a fallback.** Where heavy is installed or can't tell, a
+  refusal is `land`'s exit 9, and nothing runs plain.
 
 ## 4. Bounds and tests
 

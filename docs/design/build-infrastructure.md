@@ -5,6 +5,11 @@ owners' `heavy` commands. Runtime identity is specified by gate-policy.md.
 
 ## 1. In one page
 
+- **Optional, never a precondition** (the user, 10-26). Builds, the
+  repositories' scripts and `land` work with plain commands where heavy
+  isn't installed; there `heavy CMD` runs CMD directly. A machine has
+  heavy once `heavy --install-reconciler` has recorded it in the ledger,
+  and the build machines keep everything below, unchanged (section 12).
 - **Weights, not slots** (build-efficiency.md, 5). Every task builds as
   wide as the machine, and builds take no slot unless the machine sets
   `HEAVY_BUILD_SLOTS`. Each task's systemd unit carries a CPU weight: a
@@ -228,9 +233,10 @@ capture ignores SIGINT, so Ctrl-C on land cancels its gate and land fails
 with 4.
 
 `heavy --remove-reconciler` refuses unfinished tasks, then removes only
-its own timer and service. `setup` checks recovery readiness without
-installing it, and reports each lane's holds through `heavy
---group-held`; it neither needs nor checks a queue daemon. Tests use a
+its own timer and service. Where heavy is installed (section 12),
+`setup` checks recovery readiness without installing it, and reports
+each lane's holds through `heavy --group-held`; it neither needs nor
+checks a queue daemon. Tests use a
 distinct state directory and unit names; no live ledger or unit is
 touched.
 
@@ -364,9 +370,10 @@ always move together. There is no installed copy.
 Until 10-25 the fleet ran a frozen release of the kit, copied under
 `~/.local/share/agents-kits/`. Every machine moved to the checkout that day,
 keeping its queue, ledger and state directory, and the releases are gone. A
-new machine runs `setup --fix`, then `heavy --install-reconciler`, which
+new build machine runs `setup --fix`, then `heavy --install-reconciler`, which
 writes the reconciler's units for the checkout's helper under the host lock,
-then `setup` again.
+then `setup` again. A machine that runs no heavy, a person's laptop, stops
+after `setup --fix` (section 12).
 
 A change to `heavy`'s ledger or units must stay compatible with tasks in
 flight, because each machine takes it as its checkout moves. One that can't
@@ -1042,3 +1049,74 @@ landing older than the baseline, a commit inside a landing's range, a
 red that stays red under later clean runs, and a commit no `main`
 holds. With the real heavy and origin, fixture
 mode is also how a live run goes before the runner does.
+
+## 12. A machine without heavy
+
+The user, 10-26, on a laptop where heavy had never been installed and
+refused every build, so that `land` exited 9 for any code change: "this
+needs to work on my machine with no heavy and just simple plain commands
+or scripts (that heavy itself can build upon if appropriate)". The plain
+commands are the base, and heavy is a layer a machine adds: the build
+machines keep its queue, containment and receipts, unchanged.
+
+- **Installed is explicit.** heavy is installed on a machine when its
+  ledger records an installation, which `heavy --install-reconciler`
+  sets and `--remove-reconciler` clears (section 4). No state directory,
+  no ledger, or a ledger with no installation is a machine without heavy:
+  absent, not a failure. `heavy --installed` answers: exit 0 installed,
+  1 not, 2 when it can't tell (a ledger it can't read, or of another
+  version). It reads the snapshot without the host lock and writes
+  nothing, not even the state directory.
+- **Installed but broken still refuses.** An installed heavy whose timer
+  is inactive or whose probe fails refuses as section 4 says, and `land`
+  exits 9: a build machine whose recovery broke is repaired, never
+  quietly demoted to plain. "Can't tell" counts as installed.
+- **Where it isn't installed, heavy runs the command directly,** as it
+  runs `cargo fmt`. `heavy [--gate | --land] [--tail N] [--] command...`
+  prints `heavy: not installed here; running it directly` on stderr and
+  executes the command in the caller's directory and environment, which
+  exits with the command's status. No ledger, unit, event, TSV row,
+  receipt, disk floor or gate policy. An instruction written `heavy cargo
+  nextest run …` therefore holds on every machine. The management forms
+  are unchanged.
+- **The repositories' scripts run plain commands,** never heavy:
+  `cargo`, `scripts/check.sh`, `scripts/bundle.sh`, the proofs. A caller
+  that wants the queue runs the whole script through it, `heavy
+  scripts/proof-live.sh`. No task then waits inside another, as a build
+  submitted from inside a task does behind an exclusive gate that waits
+  for that task. The kit's own tools call the `heavy` beside them, never
+  the one on `PATH`, so that they need none there.
+- **`land` without heavy** asks `heavy --installed` once, before its
+  first rebase:
+  - 0: its build lane and gate go through heavy (sections 2 to 5), and a
+    refusal is exit 9, as before;
+  - 2: it refuses with exit 9, and nothing runs;
+  - 1: it runs its prebuild and its gate itself, each `bash -c COMMAND`
+    as its own child, into a log of its own under `DEV_TMP/logs/land/`.
+    It prints the log's last 60 lines and one summary line, `land: plain
+    gate exit N, ran S s, log PATH` (`plain build` for the prebuild), and
+    judges by the exit status. Candidate and policy checks, trailers, the
+    cache, the set lock and the exit statuses are a contained gate's;
+    what its evidence proves is gate-policy.md 3.2's.
+
+  `land-set` lands through `land`, and needs nothing of its own.
+- **`setup`** asks the same question. Installed, it checks recovery,
+  lingering and the lanes as section 4 says; not installed, it says so
+  in one `ok` line and checks none of them; can't tell, it fails. It
+  links `heavy` on `PATH` either way. kache stays optional: without its
+  wrapper `setup` warns, and the build is plain cargo.
+- **After landing's runner** is a build machine's (section 11): the
+  machine the director names for it has heavy installed, and its tiers
+  go through it.
+- **Fixtures.** `test-heavy-plain` runs the real `heavy` against
+  hand-written ledgers, with no unit installed or started: absent,
+  empty, installed and unreadable ledgers, the direct run's status,
+  streams, options, directory and environment, the disk floor skipped,
+  and an installed heavy with no reconciler still refusing.
+  `test-gate-policy` lands with a stand-in heavy that answers
+  `--installed`: plain landings, their cache and trailers, a failing
+  plain gate, a plain record never serving a contained gate nor the
+  reverse, and "can't tell" refusing. The whole path is proved on a
+  build machine in a state anyone can reproduce: `DEV_TMP` a fresh
+  directory, so no ledger, `PATH` without `~/.local/bin`, so no
+  `heavy` on it, and kache's wrapper on or off.
