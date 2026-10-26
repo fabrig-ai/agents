@@ -438,12 +438,15 @@ def meets_landings(lab):
     assert lab.verdict(three)['tests'] == ['t2']
 
 
-def paused(lab):
-    env = dict(lab.env)
+def not_runner_machine(lab):
+    home = lab.root / 'home'
+    home.mkdir()
+    env = dict(lab.env, HOME=str(home))
     del env['AFTER_LANDING_FIXTURE']
     result = call([PYTHON, '-I', '-B', SCRIPT, 'follow', 'demo'], lab.root, env, 2)
     assert result.stdout == ''
-    assert result.stderr == "after-landing: paused on the user's word; nothing runs\n"
+    assert result.stderr == ("after-landing: this is not the runner's machine "
+                             "(no ~/.config/agents-after-landing/director)\n")
     assert not (lab.root / 'tmp').exists() and not (lab.root / 'runner').exists()
     assert lab.calls() == [] and lab.posts() == [] and lab.records() == []
 
@@ -640,7 +643,7 @@ sys.exit(subprocess.run([sys.executable, *sys.argv[1:]], input=payload, text=Tru
 
 
 CASES = (polls, no_tier, flake, red, bisect, already_red, fault, unwatched_red,
-         meets_landings, paused, one_follower, refusals, multi_bisect, limits,
+         meets_landings, paused, not_runner_machine, one_follower, refusals, multi_bisect, limits,
          nested_faults, unnamed, pending_delivery, stale_watch, history_reset,
          trailers, feed_failure)
 

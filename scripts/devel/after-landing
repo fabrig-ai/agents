@@ -404,9 +404,11 @@ def pass_once(args, base, clone, state):
 
 
 def main():
-    # Going live, later and on the director's word, removes only this check.
-    if 'AFTER_LANDING_FIXTURE' not in os.environ:
-        print("after-landing: paused on the user's word; nothing runs", file=sys.stderr)
+    # The director names the runner's machine by this file (build-infrastructure.md 11).
+    if ('AFTER_LANDING_FIXTURE' not in os.environ
+            and not (Path.home() / '.config/agents-after-landing/director').is_file()):
+        print("after-landing: this is not the runner's machine "
+              "(no ~/.config/agents-after-landing/director)", file=sys.stderr)
         return 2
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='command', required=True)

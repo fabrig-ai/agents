@@ -516,12 +516,13 @@ sys.exit(result.returncode)
                 os.close(release_fd)
                 os.close(ready_fd)
 
-    def test_after_landing_paused(self):
+    def test_after_landing_needs_the_runner_machine(self):
         result = self.run_command([str(KIT / "after-landing"), "follow", "skein"], check=False)
         self.assertEqual(result.returncode, 2)
         self.assertEqual(result.stdout, "")
         self.assertEqual(result.stderr,
-                         "after-landing: paused on the user's word; nothing runs\n")
+                         "after-landing: this is not the runner's machine "
+                         "(no ~/.config/agents-after-landing/director)\n")
         self.assertFalse((self.root / "tmp/after-landing").exists())
         self.assertFalse((self.root / "tmp/director").exists())
         self.assertEqual(self.calls(), [])
