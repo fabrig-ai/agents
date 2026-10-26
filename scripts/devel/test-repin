@@ -71,7 +71,7 @@ JSON = r'''json() {
     local out='' sep='' arg
     for arg; do
         arg=${arg//\\/\\\\}; arg=${arg//\"/\\\"}
-        arg=${arg//$'\\n'/\\n}; arg=${arg//$'\t'/\\t}; arg=${arg//$'\r'/\\r}
+        arg=${arg//$'\n'/\\n}; arg=${arg//$'\t'/\\t}; arg=${arg//$'\r'/\\r}
         out+=$sep\"$arg\"; sep=', '
     done
     printf '[%s]' "$out"
