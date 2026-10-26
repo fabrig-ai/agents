@@ -18,7 +18,9 @@ from unittest.mock import patch
 from contextlib import redirect_stderr
 import io
 
+sys.dont_write_bytecode = True
 KIT = Path(__file__).resolve().parent
+from gate_policy_fixture import submission_header, completion_output
 
 
 RECEIPT_FAULTS = (
@@ -38,7 +40,7 @@ RECEIPT_FAULTS = (
 UNREADABLE_RECEIPT_FAULTS = ("unreadable_log", "unreadable_receipt")
 
 
-class PolicyFixtures(unittest.TestCase):
+class FixtureFiles(unittest.TestCase):
     def setUp(self):
         evidence = os.environ.get("GATE_POLICY_FIXTURE_EVIDENCE")
         self.temp = tempfile.TemporaryDirectory(prefix="skein-gate-policy-")
@@ -73,6 +75,11 @@ class PolicyFixtures(unittest.TestCase):
                     shutil.move(str(entry), destination / entry.name, copy_function=retain_file)
             self.addCleanup(retain)
         self.retain = bool(evidence)
+
+
+class PolicyFixtures(FixtureFiles):
+    def setUp(self):
+        super().setUp()
         self.command_serial = 0
         self.home = self.root / "home"
         self.kit = self.root / "kit"
@@ -89,15 +96,16 @@ class PolicyFixtures(unittest.TestCase):
                     "GIT_CONFIG_VALUE_1": "0"}
         for name in ("land", "tidy-hooks.py", "gate-policy.sh", "kit.sh", "land-capture.py", "recovery_message.py", "receipt_inputs.py", "land-feed.py"):
             shutil.copy(KIT / name, self.kit / name)
+        shutil.copy(KIT / "gate_policy_fixture.py", self.kit / "gate_policy_fixture.py")
         self.script(self.kit / "heavy", r'''#!/usr/bin/env python3
-import hashlib
-import json
-import json
 import os
 from pathlib import Path
 import subprocess
 import sys
 import uuid
+
+sys.dont_write_bytecode = True
+from gate_policy_fixture import submission_header, completion_output
 
 os.umask(0o077)
 args = sys.argv[1:]
@@ -114,128 +122,16 @@ with open(os.environ["FIXTURE_CALLS"], "a") as calls:
     calls.write(f'{lane} {os.environ["SKEIN_TEST_CHROMIUM"]} {os.environ["SKEIN_GATE_POLICY_ID"]}\n')
 token = uuid.uuid4().hex
 fault = os.environ.get("FIXTURE_RECEIPT_FAULT", "")
-header = f"heavy: queued task 1 in the {lane} lane token {token}"
-if fault == "legacy_header":
-    header = "heavy: queued task 1 in the gate lane"
-if fault == "non_gate_header":
-    header = f"heavy: queued task 1 in the build lane token {token}"
-if fault == "malformed_header_token":
-    header = "heavy: queued task 1 in the gate lane token malformed"
-if fault != "missing_header":
-    print(header, flush=True)
-if fault == "duplicate_header":
-    print(header, flush=True)
+print(submission_header(token, lane, fault), end="", flush=True)
 tree = subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], text=True).strip()
 result = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 if lane == "build":
     sys.stdout.buffer.write(result.stdout)
     sys.exit(result.returncode)
+head = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
 state = Path(os.environ["DEV_TMP"]) / "isolated queue"
-receipts = state / "receipts"
-logs = state / "logs with spaces"
-receipts.mkdir(parents=True, exist_ok=True)
-logs.mkdir(parents=True, exist_ok=True)
-log = logs / (token + ".log")
-log.write_bytes(result.stdout)
-receipt = dict(schema="heavy-receipt-v1", token=token, id="1", queue="isolated-fixture",
-               lane=lane, tree=tree, policy=os.environ["SKEIN_GATE_POLICY_ID"], args=args,
-               outcome="completed", code=result.returncode, payload_started=True,
-               payload_ended=True, release_complete=True, cgroup_empty=True,
-               elapsed_s=0.25, log=str(log), log_sha256=hashlib.sha256(result.stdout).hexdigest(),
-               head=subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
-               inputs=tree)
-if fault == "old_build_same_id":
-    # A queued cancellation finds an older build's successful numeric-ID row.
-    old = state / "old-build.log"
-    old.write_text("heavy: ran alone for 7s\n")
-    (state / "heavy.tsv").write_text(f"1\tbuild\told\t0\t7\t0\t0\t.\t{old}\n")
-    print(f"heavy: task 1 (build) exit 0, waited 0s, ran 7s, log {old}")
-    sys.exit(0)
-changes = {
-    "wrong_token": ("token", "f" * 32), "wrong_id": ("id", "2"), "numeric_id": ("id", 1),
-    "wrong_lane": ("lane", "build"), "wrong_tree": ("tree", "f" * 40),
-    "wrong_policy": ("policy", "sha256:" + "f" * 64), "wrong_args": ("args", ["true"]),
-    "cancelled": ("outcome", "cancelled"), "failed_code": ("code", 1),
-    "boolean_code": ("code", False), "payload_not_started": ("payload_started", False),
-    "payload_not_ended": ("payload_ended", False), "release_incomplete": ("release_complete", False),
-    "scope_not_empty": ("cgroup_empty", False), "duration_string": ("elapsed_s", "?"),
-    "duration_bool": ("elapsed_s", True), "duration_negative": ("elapsed_s", -1),
-    "duration_nan": ("elapsed_s", float("nan")), "duration_infinite": ("elapsed_s", float("inf")),
-    "empty_queue": ("queue", ""), "non_string_queue": ("queue", 1),
-    "wrong_schema": ("schema", "heavy-receipt-v0"), "wrong_log_name": ("log", str(logs / "other.log")),
-    "relative_log": ("log", token + ".log"), "wrong_digest": ("log_sha256", "0" * 64),
-    "malformed_head": ("head", "HEAD"), "non_string_inputs": ("inputs", 1),
-}
-if fault in changes:
-    key, value = changes[fault]
-    receipt[key] = value
-if fault == "missing_duration":
-    del receipt["elapsed_s"]
-if fault == "no_inputs":
-    del receipt["head"], receipt["inputs"]
-if fault == "extra_field":
-    receipt["unknown"] = True
-path = receipts / (token + ".json")
-temporary = path.with_suffix(".tmp")
-temporary.write_text(json.dumps(receipt))
-temporary.replace(path)
-if fault == "malformed_json":
-    path.write_text("{broken")
-if fault == "duplicate_field":
-    path.write_text(path.read_text()[:-1] + ', "code": 0}')
-if fault == "non_object_json":
-    path.write_text("[]")
-if fault == "receipt_symlink":
-    target = path.with_suffix(".saved")
-    path.rename(target)
-    path.symlink_to(target)
-if fault == "receipt_directory":
-    path.unlink()
-    path.mkdir()
-if fault == "receipt_fifo":
-    path.unlink()
-    os.mkfifo(path)
-if fault == "missing_receipt_file":
-    path.unlink()
-if fault == "unreadable_receipt":
-    path.chmod(0)
-if fault == "mutated_log":
-    log.write_bytes(b"mutated completed log\n")
-if fault == "missing_log":
-    log.unlink()
-if fault == "unreadable_log":
-    log.chmod(0)
-if fault == "log_symlink":
-    target = log.with_suffix(".saved")
-    log.rename(target)
-    log.symlink_to(target)
-if fault == "log_directory":
-    log.unlink()
-    log.mkdir()
-if fault == "log_fifo":
-    log.unlink()
-    os.mkfifo(log)
-if fault == "wrong_filename":
-    target = path.with_name("other.json")
-    path.rename(target)
-    path = target
-if fault == "stale_valid_receipt":
-    path = next(candidate for candidate in receipts.glob("*.json") if candidate != path)
-    token = path.stem
-sys.stdout.buffer.write(result.stdout)
-print("heavy: task 1 (gate) exit 0, waited 0s, ran 0s", flush=True)
-line_token = "f" * 32 if fault == "wrong_line_token" else token
-line = f"heavy: receipt {path} token {line_token}"
-if fault == "relative_receipt":
-    line = f"heavy: receipt {path.name} token {line_token}"
-if fault == "malformed_receipt_line":
-    line = f"heavy: receipt {path} token malformed"
-if fault != "missing_receipt_line":
-    print(line)
-if fault == "duplicate_receipt":
-    print(line)
-if fault == "output_after_receipt":
-    print("heavy: late output")
+sys.stdout.buffer.write(completion_output(state, token, args, tree, os.environ["SKEIN_GATE_POLICY_ID"],
+                                        head, result.stdout, result.returncode, fault))
 sys.exit(result.returncode)
 ''')
         for name, version in (("rustc", "rustc 1.fixture"), ("cargo", "cargo 1.fixture"),
@@ -722,9 +618,8 @@ sys.exit(result.returncode)
         self.land()
         self.assertEqual(len(self.calls()), 1)
 
-    def receipt_fault_refuses(self, fault):
-        if fault in UNREADABLE_RECEIPT_FAULTS and os.geteuid() == 0:
-            self.skipTest("root reads unreadable files")
+    def test_receipt_fault_missing_receipt_line_refuses_before_cache_amend_or_main(self):
+        fault = "missing_receipt_line"
         head = self.git("rev-parse", "HEAD").strip()
         result = self.land({"FIXTURE_RECEIPT_FAULT": fault}, check=False)
         self.assertEqual(result.returncode, 4, result.stdout + result.stderr)
@@ -1247,11 +1142,111 @@ exit 97
         self.assertEqual(self.git("log", "-1", "--format=%(trailers:key=Gate-Tree,valueonly)", pushed["commit"]).strip(), original_tree)
 
 
-# Each receipt fault is its own test, with its own fixture, so that the
-# runner below spreads them over the cores.
-for _fault in RECEIPT_FAULTS + UNREADABLE_RECEIPT_FAULTS:
-    setattr(PolicyFixtures, f"test_receipt_fault_{_fault}_refuses_before_cache_amend_or_main",
-            lambda self, fault=_fault: self.receipt_fault_refuses(fault))
+# Every former whole-landing fault keeps its refusal at the validator boundary.
+# The landing test above separately proves exit 4 and no cache/amend/main change.
+RECEIPT_REFUSALS = {
+    "old_build_same_id": "expected exactly one receipt line",
+    "missing_header": "expected exactly one queued gate header",
+    "duplicate_header": "expected exactly one queued gate header",
+    "missing_receipt_line": "expected exactly one receipt line",
+    "legacy_header": "malformed queued gate header or non-gate lane",
+    "non_gate_header": "malformed queued gate header or non-gate lane",
+    "malformed_header_token": "malformed queued gate header or non-gate lane",
+    "relative_receipt": "malformed receipt line",
+    "malformed_receipt_line": "malformed receipt line",
+    "missing_receipt_file": "receipt is missing, unreadable or a symlink",
+    "wrong_line_token": "receipt line token differs from queued gate token",
+    "wrong_token": "receipt token differs from requested gate",
+    "wrong_id": "receipt id differs from requested gate",
+    "numeric_id": "receipt id differs from requested gate",
+    "wrong_lane": "receipt lane differs from requested gate",
+    "wrong_tree": "receipt tree differs from requested gate",
+    "wrong_policy": "receipt policy differs from requested gate",
+    "wrong_args": "receipt args differs from requested gate",
+    "cancelled": "receipt outcome differs from requested gate",
+    "failed_code": "receipt code is not zero",
+    "boolean_code": "receipt code is not zero",
+    "payload_not_started": "receipt payload_started is not true",
+    "payload_not_ended": "receipt payload_ended is not true",
+    "release_incomplete": "receipt release_complete is not true",
+    "scope_not_empty": "receipt cgroup_empty is not true",
+    "missing_duration": "receipt schema fields are invalid",
+    "duration_string": "receipt elapsed_s is not numeric",
+    "duration_bool": "receipt elapsed_s is not numeric",
+    "duration_negative": "receipt elapsed_s is not finite and nonnegative",
+    "duration_nan": "receipt JSON has a non-finite number",
+    "duration_infinite": "receipt JSON has a non-finite number",
+    "empty_queue": "receipt queue identity is missing",
+    "non_string_queue": "receipt queue identity is missing",
+    "wrong_schema": "receipt schema differs from requested gate",
+    "malformed_json": "receipt JSON is malformed",
+    "duplicate_field": "receipt JSON has duplicate fields",
+    "non_object_json": "receipt schema fields are invalid",
+    "extra_field": "receipt schema fields are invalid",
+    "mutated_log": "receipt log SHA-256 differs",
+    "missing_log": "receipt log is missing, unreadable or a symlink",
+    "wrong_log_name": "receipt log path does not name the token-owned absolute log",
+    "relative_log": "receipt log path does not name the token-owned absolute log",
+    "wrong_digest": "receipt log SHA-256 differs",
+    "wrong_filename": "receipt filename differs from queued gate token",
+    "duplicate_receipt": "expected exactly one receipt line",
+    "output_after_receipt": "receipt line must be the final heavy output",
+    "receipt_symlink": "receipt is missing, unreadable or a symlink",
+    "receipt_directory": "receipt is missing, unreadable or a symlink",
+    "receipt_fifo": "receipt is not a regular file",
+    "log_symlink": "receipt log is missing, unreadable or a symlink",
+    "log_directory": "receipt log is missing, unreadable or a symlink",
+    "log_fifo": "receipt log is not a regular file",
+    "malformed_head": "receipt head is malformed",
+    "non_string_inputs": "receipt inputs is malformed",
+    "unreadable_log": "receipt log is missing, unreadable or a symlink",
+    "unreadable_receipt": "receipt is missing, unreadable or a symlink",
+}
+
+
+class ReceiptRows(FixtureFiles):
+    def test_receipt_fault_rows(self):
+        self.assertEqual(set(RECEIPT_REFUSALS), set(RECEIPT_FAULTS + UNREADABLE_RECEIPT_FAULTS))
+        # Exercise the shipped shell function, including its isolated Python
+        # invocation and exit handling. Do not copy its validation into tests.
+        land = (KIT / "land").read_text()
+        start = land.index("evidence() {\n")
+        end = land.index("\n# heavy's own lines", start)
+        evidence = land[start:end]
+        tree = "1" * 40
+        policy = "sha256:" + "2" * 64
+        token = "3" * 32
+        head = "4" * 40
+        env = {"PATH": os.defpath, "HOME": str(self.root),
+               "tree": tree, "policy": policy, "gate": "true"}
+        # A valid control must reach the same validator successfully.
+        for fault, reason in [("valid", None), *RECEIPT_REFUSALS.items()]:
+            with self.subTest(fault=fault):
+                if fault in UNREADABLE_RECEIPT_FAULTS and os.geteuid() == 0:
+                    self.skipTest("root reads unreadable files")
+                state = self.root / fault / "isolated queue"
+                output = submission_header(token, "gate", fault).encode()
+                output += completion_output(state, token, ["bash", "-c", "true"],
+                                            tree, policy, head, b"", fault=fault)
+                capture = self.root / fault / "capture"
+                capture.write_bytes(output)
+                result = subprocess.run(["bash", "-c", evidence + '\nevidence "$1"',
+                                         "fixture", str(capture)], env=env, text=True,
+                                        capture_output=True, stdin=subprocess.DEVNULL, timeout=5)
+                # Retained rows carry both the actual result and its input files.
+                if self.retain:
+                    (capture.parent / "result.json").write_text(json.dumps({
+                        "code": result.returncode, "stdout": result.stdout,
+                        "stderr": result.stderr}, indent=2) + "\n")
+                self.assertEqual(result.returncode, 1 if reason else 0, result.stdout + result.stderr)
+                if reason:
+                    self.assertEqual(result.stderr, "land: invalid gate receipt: " + reason + "\n")
+                    self.assertEqual(result.stdout, "")
+                else:
+                    self.assertEqual(result.stdout, "true passed: 0.25 s in all\n")
+                    self.assertEqual(result.stderr, "")
+
+
 # A concurrent commit, rebase or dirty candidate after the receipt, each in
 # its own fixture.
 for _mode in ("commit", "rebase", "same-tree", "index", "worktree", "rebase-state",
@@ -1297,7 +1292,9 @@ def run_parallel():
     and exits nonzero on any failure."""
     from concurrent.futures import ProcessPoolExecutor
     import multiprocessing
-    names = [f"PolicyFixtures.{name}" for name in unittest.defaultTestLoader.getTestCaseNames(PolicyFixtures)]
+    names = [f"{fixture.__name__}.{name}"
+             for fixture in (PolicyFixtures, ReceiptRows)
+             for name in unittest.defaultTestLoader.getTestCaseNames(fixture)]
     start = time.monotonic()
     failed = 0
     with ProcessPoolExecutor(max_workers=os.cpu_count() or 1,
