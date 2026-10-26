@@ -579,7 +579,7 @@ def setup(lab):
     (kit / 'devel').mkdir()
     shutil.copyfile(SCRIPT.with_name('kit.sh'), kit / 'devel/kit.sh')
     text = source.read_text()
-    assert 'for tool in heavy land land-set landings repin record setup post codex-run; do' in text
+    assert 'for tool in heavy land land-set landings after-landing repin record setup post codex-run; do' in text
     check = kit / 'infra/setup'
     check.write_text(text.replace('check "$@"', 'fix=${FIX:-0}; failed=0\nok() { :; }; fail() { echo "$*"; failed=1; }\ncheck_records\nexit "$failed"'))
     wrapper = lab.bin / 'git'
