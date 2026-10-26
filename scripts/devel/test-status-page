@@ -1197,9 +1197,10 @@ def subscription_page(lab, **env):
 
 def page_subscriptions(lab):
     page, data = subscription_page(lab)
+    public_roles(page, lab)
     section = page[page.index('<h2>Subscriptions'):page.index('<h2>In flight')]
     assert section.count('Claude · max') == 1 and section.count('Codex · promax') == 2, section
-    assert re.findall(r'<th(?: [^>]*)?>(.*?)</th>', section) == ['Subscription', 'Limit', 'Used', 'Resets', 'At this pace']
+    assert re.findall(r'<th(?: [^>]*)?>(.*?)</th>', section) == ['Subscription', 'Limit', 'Used', 'Resets', 'Rate', 'At this pace']
     assert 'alpha' not in section and 'beta' not in section and 'gamma' not in section, section
     assert '84%' in section and '24%' not in section and '1%' in section and '3%' not in section, section
     assert time_cell('2026-10-26T06:30:00Z', 'in 18 h 30 min') in section
@@ -1229,7 +1230,7 @@ def page_pace(lab):
         public_roles(page, lab)
         section = page[page.index('<h2>Subscriptions'):page.index('<h2>In flight')]
         assert re.findall(r'<th(?: [^>]*)?>(.*?)</th>', section) == [
-            'Subscription', 'Limit', 'Used', 'Resets', 'At this pace'], section
+            'Subscription', 'Limit', 'Used', 'Resets', 'Rate', 'At this pace'], section
         assert ("At this pace: when a limit fills before its reset, or what it reaches by then, "
                 "at its rise over the last hour to day of the page&#x27;s own samples.") in section
         assert ("and the subscriptions&#x27; use, which it samples itself for their pace") in page[page.index('<footer>'):]
@@ -1240,12 +1241,28 @@ def page_pace(lab):
                 continue
             if columns[0]:
                 identity = re.search(r'<code>(.*?)</code>', columns[0])[1]
-            assert len(columns) == 5, columns
-            cells[identity, columns[1]] = columns[-1]
+            assert len(columns) == 6, columns
+            cells[identity, columns[1]] = tuple(columns[-2:])
         return page, json.loads(snapshot.read_text()), cells
 
+    answer = codex_answer(2)
+    answer['limits']['rateLimitsByLimitId']['codex']['primary']['usedPercent'] = 100
+    lab.codex(lab.beta, answer)
     _, data, cells = render('--samples', str(samples))
-    assert cells and set(cells.values()) == {'–'}, cells
+    assert cells and all(rate == '–' for rate, _ in cells.values()), cells
+    full_label = data['fleet']['beta']['codex_usage']['label']
+    for (label, name), (_, pace) in cells.items():
+        if name == 'session':
+            # 18.5 h / 4 = 4 h 37 min 30 s, displayed in whole minutes.
+            expected_pace = '<span title="needs 4 h 37 min of samples, has 0 min">pace in 4 h 37 min</span>'
+        elif name == '5 h':
+            # 1 h / 4 < 30 min, so the minimum span is 30 min.
+            expected_pace = '<span title="needs 30 min of samples, has 0 min">pace in 30 min</span>'
+        else:
+            # Each week is at least a day away: 24 h / 4 = 6 h.
+            expected_pace = '<span title="needs 6 h 0 min of samples, has 0 min">pace in 6 h 0 min</span>'
+        assert pace == ('full' if (label, name) == (full_label, '5 h') else expected_pace), cells
+
     assert samples.stat().st_mode & 0o777 == 0o600
     assert samples.parent.stat().st_mode & 0o777 == 0o700
     stored = [json.loads(line) for line in samples.read_text().splitlines()]
@@ -1285,26 +1302,38 @@ def page_pace(lab):
                sample('codex', codex, '5 h', 50 / 60, 6),
                dict(sample('codex', codex, 'week', 5, 90), resets=NOW + 86400 + 7200),
                sample('codex', codex, 'week', 10 / 60, 20),
-               sample('codex', codex, 'other week', 3, 0), older, expired]
+               sample('codex', codex, 'other week', 3, 0),
+               sample('codex', codex, 'sol week', 7, 20), older, expired]
     write(samples, ''.join(json.dumps(s) + '\n' for s in history) + 'not json\n{"time": "x"}\n')
-    answer = codex_answer(2)
-    answer['limits']['rateLimitsByLimitId']['codex']['primary']['usedPercent'] = 100
-    lab.codex(lab.beta, answer)
     page, _, cells = render('--samples', str(samples))
-    # (84 - 60) / 12 = 2%/h; (100 - 84) / 2 = 8 h to full.
-    assert cells[claude, 'week (all models)'] == time_cell('2026-10-25T20:00:00Z', 'full in 8 h 0 min'), cells
-    # 6 h >= 18.5/4 h; (1 - 0) / 6 = 1/6 %/h; floor(1 + 18.5/6) = 4%.
-    assert cells[claude, 'session'] == 'lasts, 4% at reset', cells
+    # (84 - 60) / 12 = 2%/h over 12 h; (100 - 84) / 2 = 8 h to full.
+    assert cells[claude, 'week (all models)'] == (
+        '<span title="over 12 h 0 min, since 2026-10-25 00:00 UTC">2.0%/h</span>',
+        time_cell('2026-10-25T20:00:00Z', 'full in 8 h 0 min')), cells
+    # 6 h >= 18.5/4 h; (1 - 0) / 6 = 1/6 %/h -> 0.2; floor(1 + 18.5/6) = 4%.
+    assert cells[claude, 'session'] == (
+        '<span title="over 6 h 0 min, since 2026-10-25 06:00 UTC">0.2%/h</span>',
+        'lasts, 4% at reset'), cells
     # 7 h >= 24/4 = 6 h; (0 - 0) / 7 = 0%/h; 0 + 0 * 127 = 0%.
-    assert cells[claude, 'week (Fable)'] == 'lasts, 0% at reset', cells
+    assert cells[claude, 'week (Fable)'] == (
+        '<span title="over 7 h 0 min, since 2026-10-25 05:00 UTC">0.0%/h</span>',
+        'lasts, 0% at reset'), cells
     # The 3 h sample is outside the 1 h look-back; (16 - 6) / (50/60) = 12%/h; 16 + 12 = 28%.
-    assert cells[codex, '5 h'] == 'lasts, 28% at reset', cells
-    # The 5 h sample is another window; 10 min < the required 30 min.
-    assert cells[codex, 'week'] == '–', cells
-    # 3 h >= 30 min, but 3 h < 24/4 = 6 h: insufficient history for a week's pace.
-    assert cells[codex, 'other week'] == '–', cells
+    assert cells[codex, '5 h'] == (
+        '<span title="over 50 min, since 2026-10-25 11:10 UTC">12.0%/h</span>',
+        'lasts, 28% at reset'), cells
+    # The 5 h sample is another window; 24/4 h - 10 min = 5 h 50 min left.
+    assert cells[codex, 'week'] == (
+        '–', '<span title="needs 6 h 0 min of samples, has 10 min">pace in 5 h 50 min</span>'), cells
+    # 3 h >= 30 min, but 3 h < 24/4 = 6 h: another 3 h needed.
+    assert cells[codex, 'other week'] == (
+        '–', '<span title="needs 6 h 0 min of samples, has 3 h 0 min">pace in 3 h 0 min</span>'), cells
+    # 7 h >= 24/4 h; (12 - 20) / 7 < 0, so rate is clamped to 0 and use stays 12%.
+    assert cells[codex, 'sol week'] == (
+        '<span title="over 7 h 0 min, since 2026-10-25 05:00 UTC">0.0%/h</span>',
+        'lasts, 12% at reset'), cells
     # Use >= 100 is full now, without needing a rate.
-    assert cells[other_codex, '5 h'] == 'full', cells
+    assert cells[other_codex, '5 h'] == ('–', 'full'), cells
     assert 'usage samples: 2 lines not read' in page[page.index('<footer>'):]
     stored = [json.loads(line) for line in samples.read_text().splitlines()]
     assert older not in stored and expired not in stored, stored
@@ -1345,11 +1374,11 @@ def page_pace(lab):
     out.unlink()
     page, _, cells = render('--samples', str(samples), usage_samples_failure=True)
     assert 'usage samples: not kept: RuntimeError: fixture' in page[page.index('<footer>'):]
-    assert cells and set(cells.values()) == {'–'}, cells
+    assert cells and set(cells.values()) == {('–', '–')}, cells
     # Without --samples, even a full limit has no pace; no storage is created anywhere in the lab.
     before = set(lab.root.rglob('*'))
     _, _, cells = render()
-    assert set(cells.values()) == {'–'}, cells
+    assert set(cells.values()) == {('–', '–')}, cells
     assert set(lab.root.rglob('*')) == before
 
 

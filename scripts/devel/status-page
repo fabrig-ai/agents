@@ -1123,25 +1123,49 @@ def kept_samples(samples, now):
                   key=lambda s: s['time'])[-SAMPLES_KEPT:]
 
 
+def rise(samples, limit, cli, label, now):
+    """A limit's pace readings (2.2): rate and since, or needs and has."""
+    lookback = min(DAY, max(HOUR, limit['resets'] - now))
+    earlier = min((s for s in samples if s['cli'] == cli and s['label'] == label
+                   and s['limit'] == limit['name'] and abs(s['resets'] - limit['resets']) <= 600
+                   and now - lookback <= s['time'] <= now), key=lambda s: s['time'], default=None)
+    needs = max(1800, lookback / 4)
+    has = now - earlier['time'] if earlier is not None else 0
+    if has < needs:
+        return {'needs': needs, 'has': has}
+    return {'rate': (limit['used'] - earlier['used']) / has, 'since': earlier['time']}
+
+
 def pace(samples, limit, cli, label, now):
-    """A limit's full time, projected use at reset, or no pace yet (2.2)."""
+    """A limit's full time, projected use at reset, or wait for a pace (2.2)."""
     used, reset = limit['used'], limit['resets']
     if used is None or reset is None:
         return '–'
     if used >= 100:
         return 'full'
-    lookback = min(DAY, max(HOUR, reset - now))
-    earlier = min((s for s in samples if s['cli'] == cli and s['label'] == label
-                   and s['limit'] == limit['name'] and abs(s['resets'] - reset) <= 600
-                   and now - lookback <= s['time'] <= now), key=lambda s: s['time'], default=None)
-    if earlier is None or now - earlier['time'] < max(1800, lookback / 4):
-        return '–'
-    rate = (used - earlier['used']) / (now - earlier['time'])
+    reading = rise(samples, limit, cli, label, now)
+    if 'needs' in reading:
+        needs, has = reading['needs'], reading['has']
+        title = f'needs {length(needs)} of samples, has {length(has)}'
+        return f'<span title="{E(title)}">{E("pace in " + length(needs - has))}</span>'
+    rate = reading['rate']
     if rate > 0:
         full_at = now + (100 - used) / rate
         if full_at < reset:
             return when(full_at, now, 'full in ' + length(full_at - now))
     return f'lasts, {int(used + max(rate, 0) * (reset - now))}% at reset'
+
+
+def rate(samples, limit, cli, label, now):
+    """A limit's rate per hour, with its readings' span on hover (2.2)."""
+    if limit['used'] is None or limit['resets'] is None:
+        return '–'
+    reading = rise(samples, limit, cli, label, now)
+    if 'rate' not in reading:
+        return '–'
+    title = (f'over {length(now - reading["since"])}, '
+             f'since {utc(reading["since"], "%Y-%m-%d %H:%M UTC")}')
+    return f'<span title="{E(title)}">{max(0, reading["rate"] * 3600):.1f}%/h</span>'
 
 
 def subscriptions(fleet):
@@ -1168,9 +1192,11 @@ def subscriptions(fleet):
                     highest = (used, f'{cli_name[cli]} {limit["name"]}')
             rows.append([title if i == 0 else '', E(limit['name']), meter,
                          when(limit['resets'], fleet.now, resets(limit['resets'], fleet.now)),
+                         rate(fleet.samples, limit, cli, identity, fleet.now)
+                         if identity and fleet.samples is not None else '–',
                          pace(fleet.samples, limit, cli, identity, fleet.now)
                          if identity and fleet.samples is not None else '–'])
-    out = table(['Subscription', 'Limit', 'Used', 'Resets', 'At this pace'], rows, numeric_from=2,
+    out = table(['Subscription', 'Limit', 'Used', 'Resets', 'Rate', 'At this pace'], rows, numeric_from=2,
                 empty='No subscriptions found.')
     for cli in ('claude', 'codex'):
         for state, word in (('signed-out', 'signed out'), ('no-subscription', 'no subscription')):
