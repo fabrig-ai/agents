@@ -36,7 +36,9 @@ if args[:1] == ['--owns']:
                      for p in args[1:]) else 1)
 mode = os.environ.get('REGENERATE_MODE', '')
 if mode == 'refuse':
-    print('declared limit would move', file=sys.stderr)
+    print('   compiling fixture\n   finished build', file=sys.stderr)
+    print('regenerate: refused change outside figures: docs/examples/owned.json', file=sys.stderr)
+    print('  engine.memory_bytes: 850000000000000 -> 900000000000000', file=sys.stderr)
     sys.exit(3)
 values = dict(line.split() for line in Path('figures.src').read_text().splitlines() if line)
 for arg in args:
@@ -75,7 +77,9 @@ while args:
 if os.environ.get('REGENERATE_MODE') == 'heavy':
     print('fixture heavy refused', file=sys.stderr)
     sys.exit(9)
-sys.exit(subprocess.run(args, stderr=subprocess.STDOUT).returncode)
+code = subprocess.run(args, stderr=subprocess.STDOUT).returncode
+print(f'heavy: task 1 (build) exit {code}, waited 0s, ran 0s, log {os.environ["HEAVY_CALLS"]}.log')
+sys.exit(code)
 '''
 
 
@@ -324,13 +328,15 @@ def land_same_row(directory):
     assert lab.git('rev-parse', 'REBASE_HEAD').stdout.strip() == lab.branch
 
 
-def generated(directory, *, rows=False, no_change=False, script=True, stop=True):
+def generated(directory, *, rows=False, no_change=False, script=True, stop=True, extra=False):
     base = {FIGURE: 'base\n', 'figures.src': 'a base\n\nb base\n',
             'declared.json': '{}\n', 'src/lib.rs': 'base\n', 'restored.txt': 'branch original\n'}
     if script:
         base['scripts/regenerate.sh'] = REGENERATE
     main = {FIGURE: 'main\n', 'figures.src': 'a base\n\nb main\n', 'src/lib.rs': 'main\n', 'restored.txt': None}
     branch = {FIGURE: 'branch\n', 'figures.src': 'a branch\n\nb base\n'}
+    if extra:
+        base['figures/b.txt'], main['figures/b.txt'], branch['figures/b.txt'] = 'base\n', 'main\n', 'branch\n'
     if no_change:
         main['figures.src'] = 'a main\n\nb base\n'
         branch['figures.src'] = 'a base\n\nb branch\n'
@@ -384,18 +390,36 @@ def generated_no_change(directory):
 
 
 def generated_refused(directory):
-    # Writer refusal, writer failure after writing, and queue refusal all undo.
-    for mode in ('refuse', 'fail', 'heavy'):
+    # Writer refusal and writer failure after writing both undo.
+    for mode in ('refuse', 'fail'):
         sub = directory / mode
         sub.mkdir()
-        lab = generated(sub)
+        lab = generated(sub, extra=True)
         code, output = lab.resolve(env=dict(REGENERATE_MODE=mode))
         assert code == 1 and 'undid the rebase' in output, (mode, code, output)
+        verb, status = ('refused', 3) if mode == 'refuse' else ('failed', 1)
+        reason = f'scripts/regenerate.sh {verb} (exit {status})'
         if mode == 'refuse':
-            assert 'declared limit would move' in output, output
-        if mode == 'heavy':
-            assert 'fixture heavy refused' in output, output
+            reason += (': regenerate: refused change outside figures: docs/examples/owned.json; '
+                       'engine.memory_bytes: 850000000000000 -> 900000000000000')
+        reason += f' (log {lab.calls}.log)'
+        stops = [line for line in output.splitlines() if line.startswith('stops ')]
+        assert stops == [f'stops {FIGURE}, figures/b.txt: {reason}'], output
+        assert output.splitlines()[-2] == stops[0], output
+        if mode == 'refuse':
+            assert output.index('scripts/regenerate.sh: ') < output.index('heavy: queued '), output
         lab.undone()
+
+
+def heavy_refused(directory):
+    lab = generated(directory)
+    code, output = lab.resolve(env=dict(REGENERATE_MODE='heavy'))
+    assert code == 1, (code, output)
+    stops = [line for line in output.splitlines() if line.startswith('stops ')]
+    assert stops == [f'stops {FIGURE}: heavy refused to run scripts/regenerate.sh (exit 9): '
+                     'fixture heavy refused'], output
+    assert output.splitlines()[-2] == stops[0], output
+    lab.undone()
 
 
 def generated_touches_declaration(directory):
@@ -485,7 +509,10 @@ def regenerate_refused(directory):
     result = lab.run([sys.executable, '-I', '-B', str(lab.kit / 'land-resolve.py'),
                       '--regenerate', str(lab.root), lab.branch, FIGURE],
                      check=False, env=dict(REGENERATE_MODE='refuse'))
-    assert result.returncode == 1 and 'declared limit would move' in result.stdout, result
+    reason = ('scripts/regenerate.sh refused (exit 3): regenerate: refused change outside figures: '
+              'docs/examples/owned.json; engine.memory_bytes: 850000000000000 -> 900000000000000 '
+              f'(log {lab.calls}.log)')
+    assert result.returncode == 1 and f'stops {FIGURE}: {reason}\n' in result.stdout, result
     lab.undone()
 
 
@@ -502,7 +529,7 @@ def land_undone(directory):
 
 CASES = (rows_kept, row_added, added_in_one_place, same_row, deleted_and_changed, added_on_both, malformed_row,
          outside_rows, code_file, all_or_nothing, not_stopped, land_rows, land_same_row,
-         generated_kept, generated_and_rows, generated_no_change, generated_refused,
+         generated_kept, generated_and_rows, generated_no_change, generated_refused, heavy_refused,
          generated_touches_declaration, generated_then_stop, rows_then_stop, no_script,
          cargo_lock, later, regenerate_refused, land_undone)
 

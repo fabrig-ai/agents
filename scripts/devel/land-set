@@ -502,7 +502,9 @@ def gate_step(runner, path, name, label, landed, candidates, root, mains, proved
         for line in lines.splitlines():
             print(f'land-set: {name}: {line}', flush=True)
         if code:
-            raise Failure(3, 'regenerating failed: ' + lines)
+            reason = next((line.split(': ', 1)[1] for line in lines.splitlines()
+                           if line.startswith('stops ') and ': ' in line), lines)
+            raise Failure(3, 'regenerating failed: ' + reason)
     if proved and runner.git(path, 'rev-parse', 'HEAD') != base:
         reuse(runner, path, proved)
     if runner.git(path, 'rev-parse', 'HEAD') == base:

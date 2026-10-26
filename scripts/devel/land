@@ -577,8 +577,8 @@ while :; do
             die 3 "the rebase on $(git rev-parse --short "$base") stopped on conflicts. \
 Resolve them, run git rebase --continue, then land again."
         fi
-        die 3 "the rebase on $(git rev-parse --short "$base") stopped on conflicts no rule settles, and was undone: \
-rebase on it by hand, resolve them, then land again."
+        die 3 "the rebase on $(git rev-parse --short "$base") could not be settled (the lines above say why), and was undone: \
+rebase on it by hand, resolve it, then land again."
     fi
     trap 'land_result "$?"' EXIT
     candidate=$(git rev-parse HEAD)

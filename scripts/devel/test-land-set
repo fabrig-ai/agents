@@ -748,6 +748,66 @@ for path in sys.argv[1:]:
     assert calls == ['--tail 60 scripts/regenerate.sh ' + figure], calls
 
 
+def regeneration_refused(lab):
+    global SCRIPT
+    original = SCRIPT
+    kit = lab.root / 'kit'
+    kit.mkdir()
+    for name in ('land-set', 'land-resolve.py', 'tidy-hooks.py', 'land-turn.py'):
+        shutil.copy(original.with_name(name), kit / name)
+    heavy = kit / 'heavy'
+    heavy.write_text('''#!/usr/bin/env python3
+import subprocess
+import sys
+print('heavy: queued task 1 in the build lane token fixture', file=sys.stderr)
+assert sys.argv[1:3] == ['--tail', '60']
+code = subprocess.run(sys.argv[3:], stderr=subprocess.STDOUT).returncode
+print(f'heavy: task 1 (build) exit {code}, waited 0s, ran 0s, log fixture.log')
+sys.exit(code)
+''')
+    heavy.chmod(0o700)
+    primary = lab.primary['smith']
+    figure = 'figures/upstream.txt'
+    (primary / 'figures').mkdir()
+    (primary / 'scripts').mkdir()
+    writer = primary / 'scripts/regenerate.sh'
+    writer.write_text('''#!/usr/bin/env python3
+import sys
+if sys.argv[1:2] == ['--owns']:
+    sys.exit(0 if all(p == 'figures/upstream.txt' for p in sys.argv[2:]) else 1)
+print('regenerate: declared limit would move', file=sys.stderr)
+print('  memory: 1 -> 2', file=sys.stderr)
+sys.exit(3)
+''')
+    writer.chmod(0o700)
+    (primary / figure).write_text('base\n')
+    lab.git(primary, 'add', 'scripts/regenerate.sh', figure)
+    lab.git(primary, 'commit', '-m', 'generated fixture base')
+    lab.git(primary, 'push', 'origin', 'HEAD:main')
+    lab.git(lab.work['smith'], 'merge', '--ff-only', 'main')
+    lab.change('skein')
+    lab.change('smith', figure, 'branch\n')
+    tip = lab.git(lab.work['smith'], 'rev-parse', 'HEAD')
+    lab.change('smith', figure, 'main\n', primary)
+    lab.git(primary, 'push', 'origin', 'HEAD:main')
+    SCRIPT = kit / 'land-set'
+    try:
+        output = lab.run(status=3, prove=True)
+    finally:
+        SCRIPT = original
+    reason = ('land-set: regenerating failed: scripts/regenerate.sh refused (exit 3): '
+              'regenerate: declared limit would move; memory: 1 -> 2 (log fixture.log)')
+    assert reason in output.splitlines(), output
+    stopped = lab.records('stopped')[-1]
+    assert stopped['repo'] == 'smith' and stopped['status'] == 3, stopped
+    assert stopped['reason'] == reason, stopped
+    assert lab.git(lab.work['smith'], 'rev-parse', 'HEAD') == tip
+    assert not lab.git(lab.work['smith'], 'status', '--porcelain')
+    assert lab.heads()['skein'] == lab.base['skein']
+    assert 'smith: failed (3)' in output and 'temper: not reached' in output, output
+    lab.assert_released()
+
+
 def land_failure(lab):
     lab.change('skein')
     output = lab.run(status=4, env=dict(FAIL_REPO='jig'))
@@ -1325,7 +1385,7 @@ CASES = (tidy_hooks, tidy_hooks_partial, staging_cargo, rerun, advanced_main, re
          interrupted_with_staging, interrupted_during_feed, interrupted_during_cleanup,
          feed_failure, cleanup_warning,
          moving_bound, kit_refusal, lock_conflict,
-         other_conflict, status_conflict, generated_after_repin, land_failure,
+         other_conflict, status_conflict, generated_after_repin, regeneration_refused, land_failure,
          closure, concurrent, refusal, skipped)
 SLOW = ('moved_earlier_in_second_round', 'moved_between_phases', 'lock_conflict', 'land_failure',
         'refusal', 'pushed_then_failed', 'success', 'moved_gate_base', 'moving_bound', 'proved')

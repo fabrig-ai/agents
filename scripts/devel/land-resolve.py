@@ -271,20 +271,39 @@ class Repository:
         except OSError as error:
             reason = str(error)
         else:
-            for line in result.stderr.decode(errors='replace').splitlines():
-                print(line)
+            stdout = result.stdout.decode(errors='replace').splitlines()
+            stderr = result.stderr.decode(errors='replace').splitlines()
             if result.returncode:
-                # heavy tails the payload's combined log on stdout; its own
-                # refusal is on stderr. Preserve both explanations.
-                for line in result.stdout.decode(errors='replace').splitlines():
+                payload = [line for line in stdout if not line.startswith('heavy: ')]
+                for line in payload:
                     print(f'scripts/regenerate.sh: {line}')
-                lines = result.stderr.decode(errors='replace').splitlines()
-                reason = lines[-1] if lines else f'heavy or scripts/regenerate.sh failed ({result.returncode})'
+                if any(re.match(r'^heavy: task [0-9]+ ', line) for line in stdout):
+                    verb = 'refused' if result.returncode == 3 else 'failed'
+                    reason = f'scripts/regenerate.sh {verb} (exit {result.returncode})'
+                    # A diagnostic starts at the last unindented line; build
+                    # chatter before it must not bury the refusal.
+                    start = next((i for i in range(len(payload) - 1, -1, -1)
+                                  if payload[i] and not payload[i][0].isspace()), len(payload))
+                    paragraph = [line.strip() for line in payload[start:] if line.strip()][:5]
+                    if paragraph:
+                        reason += ': ' + '; '.join(paragraph)
+                else:
+                    reason = f'heavy refused to run scripts/regenerate.sh (exit {result.returncode})'
+                    if stderr:
+                        reason += ': ' + stderr[-1].strip()
+                log = next((match[1] for line in reversed(stdout)
+                            if (match := re.match(r'^heavy: task [0-9]+ .* log (.+)$', line))), None)
+                if log:
+                    reason += f' (log {log})'
+                for line in stdout:
+                    if line.startswith('heavy: '):
+                        print(line)
             else:
                 reason = None
+            for line in stderr:
+                print(line)
         if reason:
-            for path in paths:
-                print(f'stops {path}: {reason}')
+            print(f'stops {", ".join(sorted(paths))}: {reason}')
             self.undo(tip, paths)
             return 1
         # NUL records retain spaces and quoted characters; disabling renames checks
