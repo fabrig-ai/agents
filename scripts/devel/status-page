@@ -31,7 +31,7 @@ HOUR, DAY, WEEK = 3600, 86400, 7 * 86400
 SSH = ['ssh', '-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
        '-o', 'ConnectTimeout=5', '-o', 'ServerAliveInterval=5',
        '-o', 'ServerAliveCountMax=2', '-o', 'UpdateHostKeys=no']
-# A login shell, so the collector sees the PATH every shell sees (infra.md 2).
+# A login shell, so the collector sees the PATH every shell sees (agents' AGENTS.md).
 REMOTE = "bash -lc 'exec python3 -I - collect'"
 FEED = Path.home() / '.local/state/agents-land-set/feed.jsonl'
 # heavy's task states before release (build-infrastructure.md 3).
@@ -1243,7 +1243,7 @@ def install(out):
             raise ValueError(f'{path}: a path for a unit must have no spaces, quotes, $, % or backslashes')
     units = Path(os.environ.get('XDG_CONFIG_HOME', Path.home() / '.config')) / 'systemd/user'
     units.mkdir(parents=True, exist_ok=True)
-    # A login shell, so the run sees the PATH and settings every shell sees (infra.md 2).
+    # A login shell, so the run sees the PATH and settings every shell sees (agents' AGENTS.md).
     (units / 'status-page.service').write_text(f'''[Unit]
 Description=Write the fleet's status page (agents docs/design/status-page.md)
 

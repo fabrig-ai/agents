@@ -19,6 +19,6 @@ cargo's `[net] git-fetch-with-cli = true` in `~/.cargo/config.toml`).
 
 ## Work
 
-Work goes through owners: agents' `roles/owners.md`. The director
-starts them (`roles/director.md`); their notes are
-in `tmp/owners/<name>/`, and the director's in `tmp/director/`.
+Work goes through the roles in agents' `roles/README.md`: director,
+designers where needed, owners, implementers. Their notes are in
+`tmp/owners/<name>/`, and the director's in `tmp/director/`.

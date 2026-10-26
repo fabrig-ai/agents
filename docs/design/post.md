@@ -6,7 +6,7 @@ other messages, and how they start Codex and learn that a run ended:
 - `codex-run`, the one way to start Codex, which reports by post.
 
 Both are small scripts in `scripts/devel/`, under
-[infra.md](../../roles/infra.md)'s rules. They replace five channels and
+[AGENTS.md](../../AGENTS.md)'s rules. They replace five channels and
 four launchers. The survey behind this design is x1's
 `~/src/rust/tmp/comms-survey/report.md` (10-24, seven machines since
 10-16).
@@ -196,7 +196,7 @@ overwrites another.
     <id> is writing this report.`, so that a second launch on the same
     path refuses.
   - **The spawner chooses the model and the effort,** by the task
-    (owners.md 4.2): `--model`, by default gpt-6.1-sol, and `--effort`,
+    (owners.md 3): `--model`, by default gpt-6.1-sol, and `--effort`,
     medium, high or xhigh, by default high. The tool never changes
     them, as `start.sh`'s knobs did. `--read-only`
     (for surveys) runs Codex with `--sandbox read-only`, and every

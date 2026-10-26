@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Run a repository's after-landing tier on a commit land has just pushed
-# (owners.md, 4.5): the tests too slow for its gate, which would otherwise
-# break unseen on main.
+# (landing-flow.md, 4, step 8): the tests too slow for its gate, which
+# would otherwise break unseen on main.
 #
 #   after-landing GIT_COMMON_DIR COMMIT BRANCH
 #
 # Nothing runs it: land started it after each code landing until 2026-10-25,
 # when the user turned the tier off until they design how it runs
-# (owners.md, 4.5). Given a commit, it checks the commit out
+# (landing-flow.md, 4, step 8). Given a commit, it checks the commit out
 # in a detached worktree kept for the repository (tmp/after-landing/REPO,
 # with its own target, one at a time), runs the script through
 # `heavy --gate`, and when that fails or heavy refuses it, writes one line
@@ -15,7 +15,7 @@
 # repository, the commit, its branch and subject, and the log.
 # shellcheck disable=SC2317 # The pause deliberately leaves the code below unreachable.
 # Lift the pause by deleting this guard in a landed change.
-echo "after-landing: paused on the user's word (roles/owners.md 4.5); nothing runs" >&2
+echo "after-landing: paused on the user's word; nothing runs" >&2
 exit 2
 
 set -euo pipefail
@@ -46,8 +46,8 @@ report() {
         >>"$tmp/director/inbox/after-landing.md"
 }
 
-# Kept targets hold cache blocks past the cache's limit (owners.md,
-# 4.5). Stay inside this lane's physical worktree; rm does not follow
+# Kept targets hold cache blocks past the cache's limit (cleanup.md,
+# 4). Stay inside this lane's physical worktree; rm does not follow
 # links within target, and must not cross a filesystem mounted below it.
 cleanup_target() (
     cd -P -- "$wt" || exit 1

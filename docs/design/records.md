@@ -267,7 +267,7 @@ What `tmp/` may hold, and how it goes, is [cleanup.md](cleanup.md).
 
 1. **Infra builds `record`** in `scripts/devel/` (`commit`, `pull`,
    `runs`), with fixtures on a scratch repository and fake `heavy.tsv`
-   and session files, under [infra.md](../../roles/infra.md)'s rules.
+   and session files, under infra.md's rules.
    `setup` clones the checkout and links the tool. It lands unused.
 2. **The backfill** (section 9) fills the repository.
 3. **The roles' edits land:** owners.md 2 (the notes), 3.1 (the plan and

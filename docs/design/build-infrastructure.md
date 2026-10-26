@@ -336,8 +336,8 @@ One generation of the kit runs on every machine (the user, 10-25):
 `recovery_message.py`, `after-landing` and `kit.sh`, with their `test-*`
 fixtures; `scripts/infra/setup` and `kache-setup`; and the workspace files
 in `scripts/infra/workspace/`. `setup --fix` links the tools on PATH and
-the workspace files to the primary agents checkout (infra.md 2), and each
-tool finds its helpers beside it, so `heavy`, `land` and their helpers
+the workspace files to the primary agents checkout (agents' `AGENTS.md`),
+and each tool finds its helpers beside it, so `heavy`, `land` and their helpers
 always move together. There is no installed copy.
 
 Until 10-25 the fleet ran a frozen release of the kit, copied under
@@ -350,7 +350,7 @@ then `setup` again.
 A change to `heavy`'s ledger or units must stay compatible with tasks in
 flight, because each machine takes it as its checkout moves. One that can't
 lands only once every machine is drained, and its commit says so
-(infra.md 2).
+(agents' `AGENTS.md`).
 
 Never reset or replace a live queue or erase its ledger. Enqueue recovery
 uses a persisted bare numeric queue ID; it cannot prove identity after a
@@ -656,7 +656,7 @@ hearth, jig, temper:
    candidate, with no arguments. Its rebase is a no-op, its gate's result is
    cached for the tree, and it amends nothing, so it pushes the candidate
    itself and follows the local `main`. It starts no tier after landing,
-   as no `land` does (owners.md 4.5).
+   as no `land` does (landing-flow.md 4, step 8).
 3. If `land` landed a commit other than the candidate, because a `main`
    moved between steps 1 and 2, every later repository of the set runs phase
    1 again, against what has landed, before its own push. A failure there,

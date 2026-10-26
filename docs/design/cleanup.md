@@ -110,8 +110,8 @@ every step.
   to `main`: merging it into `origin/main` (`git merge-tree
   --write-tree`) leaves `origin/main`'s tree, or each commit's patch-id
   equals its twin's. Both leave out `Cargo.lock`, which a rebase takes
-  from `main` and regenerates (owners.md 4.5): on 10-26 it alone made 49
-  of hel8's copies look different. Names alone are not enough: an
+  from `main` and regenerates (landing-flow.md 3, 9.1): on 10-26 it alone
+  made 49 of hel8's copies look different. Names alone are not enough: an
   amend keeps the author date and the subject, so a fix amended after
   its landing has a twin and differs. A branch whose commits all have twins but whose
   content differs is kept, and reported.

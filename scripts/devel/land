@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Land the current branch on main (owners.md, 4.4).
+# Land the current branch on main (owners.md, 4).
 #
 #   land [--docs] [--local] [--no-push] [--gate COMMAND] [--tries N]
 #
@@ -27,7 +27,7 @@
 #
 # land starts no tier after landing, not even a repository's
 # scripts/after-landing.sh: how one runs is still to be designed (the user,
-# 2026-10-25; owners.md, 4.5).
+# 2026-10-25; landing-flow.md, 4, step 8).
 #
 # --docs   Markdown only, or the mockups under docs/design/ (a directory
 #          named mockups), which need no build or test: check that, and
@@ -170,8 +170,9 @@ if ((in_set && !local && !no_push)) && [[ ${LAND_TURN:-0} == 1 &&
     done
 fi
 
-# One landing at a time in each repository on this machine (owners.md,
-# 4.4), from its rebase to its push: gates run one at a time anyway, and
+# One landing at a time in each repository on this machine
+# (build-infrastructure.md, 8), from its rebase to its push: gates run
+# one at a time anyway, and
 # a gate that passed on a base another landing moved would be thrown
 # away. Markdown and mockups landings take no turn, and --no-push, which
 # moves no main, takes none either.
@@ -288,7 +289,7 @@ gated_before() {
     echo "$before"
 }
 
-# The build lane's pass before the gate (owners.md, 4.4).
+# The build lane's pass before the gate (build-infrastructure.md, 10).
 prebuild_command='cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings && cargo nextest run --workspace --no-run'
 prebuild=${LAND_PREBUILD-$prebuild_command}
 

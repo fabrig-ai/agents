@@ -319,6 +319,25 @@ def writer(lab):
     assert lab.git(lab.origin, 'log', '-1', '--format=%s') == 'o/fixture: o/other: did z'
 
 
+def mission_progress(lab):
+    # Missions since 10-26 need no department; older briefs remain valid.
+    name = 'missions/current/README.md'
+    lab.put(name, front().replace('department: unknown\n', ''))
+    assert 'pushed' in lab.run('commit', name)
+    assert 'department:' not in lab.git(lab.origin, 'show', 'main:' + name)
+    # The new file has the same 16 KiB cap as the older mission notes.
+    name = 'missions/current/progress.md'
+    content = 'x' * (16 * 1024)
+    lab.put(name, content)
+    assert 'pushed' in lab.run('commit', name)
+    assert lab.git(lab.origin, 'show', 'main:' + name) == content
+    old = lab.git(lab.a, 'rev-parse', 'HEAD')
+    lab.put(name, content + 'x')
+    assert name + ': cap exceeded' in lab.run('commit', name, status=2)
+    assert lab.git(lab.a, 'rev-parse', 'HEAD') == old
+    assert lab.git(lab.origin, 'show', 'main:' + name) == content
+
+
 def refusals(lab):
     cases = [('elsewhere.md', 'wrong', 'place'),
              ('director/decisions/0001Xmd', 'wrong', 'place'),
@@ -749,7 +768,7 @@ def main():
     # own env), so they run at once on threads; results print in case order.
     cases = (closing_unpublished, closing_dirty, closing_deleted_remote, closing_fetch_failure, closing_unreadable, closing_nested,
              closing_cached_output, closing_cached_worktree, closing_clean, closing_abandoned, closing_active,
-             writer, refusals, different_files, name_race, conflict, offline, merged_validation, installation_failures, setup, telemetry, milestone)
+             writer, mission_progress, refusals, different_files, name_race, conflict, offline, merged_validation, installation_failures, setup, telemetry, milestone)
     if len(sys.argv) > 1:
         cases = tuple(case for case in cases if case.__name__ in sys.argv[1:])
         assert cases, 'no cases selected'

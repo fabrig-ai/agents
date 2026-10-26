@@ -63,7 +63,7 @@ and milestones are [owners.md](../../roles/owners.md).
   - The tool does the mechanics, the order's fixed rules included.
   - A failure goes back to the set's owner, who reads it, has its
     implementer repair the set, and escalates what it can't settle
-    (owners.md 4.4).
+    (owners.md 4).
   - Directors and product owners take no part in merging: they get news
     of what landed, and escalations when merging goes wrong (the user,
     10-24).
@@ -101,6 +101,9 @@ commit of each.
 
 ## 3. Working in a set
 
+Since 10-26 a milestone here is a mission's slice that lands (owners.md
+4), and a sub-owner its owner.
+
 - **The set.** A milestone's set has a branch in every repository the
   milestone edits. It also has a pin-only branch in every repository
   downstream of the most upstream one it edits.
@@ -134,18 +137,18 @@ commit of each.
   one outside the set is involved.
 - **Rebases, repairs and QA fixes are tasks too** (the user, 10-24).
   Each goes to a Codex implementer, GPT Sol at high effort, briefed and
-  launched like any other task (owners.md 4.2, 4.3):
+  launched like any other task (owners.md 3):
   - every rebase of the set, with its conflicts and the gates after it:
     during the milestone, at its end, and a stacked milestone's onto
     `main` (below);
   - the repair of a set the queue sent back (section 4);
   - the fixes for the findings of the owner's QA pass that triage lets
-    in (owners.md 4.6).
+    in (director.md 6).
 
   None of them needs taste once the design is settled, so they go where
   other work without taste goes (owners.md 1). The milestone's owner,
   or its sub-owner, keeps the judgement: when to rebase, which findings
-  to fix, the task's brief, the check of each diff (owners.md 4.4) and
+  to fix, the task's brief, the check of each diff (owners.md 3) and
   the request to the queue.
   - **Escalation** follows the implementers' rules (implementer.md 4,
     owners.md 5): on a doubt the implementer stops, writes the
@@ -153,7 +156,7 @@ commit of each.
     improvises across a boundary. A conflict that needs a call on
     whose intent wins is such a doubt.
   - Where the work gets hard, Opus advises the owner, as for any task
-    (owners.md 4.2).
+    (owners.md 3).
 - **Rebasing during the milestone** is the owner's choice, when it needs
   something that has just landed. It follows the same steps as at the
   end.
@@ -171,7 +174,7 @@ commit of each.
   Step 1 is one implementer task (above). The owner checks its result,
   then takes steps 2 and 3.
 - **The next milestone stacks on the queued set.** It doesn't wait for
-  the landing, just as it doesn't wait for a QA pass (owners.md 3.1).
+  the landing, just as it doesn't wait for a QA pass.
   - **Where it starts.** Its branches start from the queued set's heads,
     since `main` doesn't hold the earlier milestone yet. Those heads are
     recorded as its fork point. A repository the earlier set didn't
@@ -257,9 +260,9 @@ The queue is the only writer to every repository's `main`. Its tool,
    - The landing goes into the landings feed.
 6. **Red.** The tool reruns the tests that failed, alone, once.
    - If they pass, it was a flake. The set lands, and its owner files
-     the flake as a finding (owners.md 4.4).
+     the flake as a finding (director.md 6).
    - If not, the set goes back to its owner, with the failure's log, and
-     the next set starts. The owner reads the failure (owners.md 4.4),
+     the next set starts. The owner reads the failure (owners.md 4),
      and its implementer repairs the set.
    - A fault of the infrastructure is not a red: heavy refusing the
      run, or a machine or GitHub out of reach. The tool retries it, and
@@ -270,7 +273,7 @@ The queue is the only writer to every repository's `main`. Its tool,
    repository's `scripts/after-landing.sh`: the browser tier
    (`scripts/browser.sh`), the process and QA tiers, the exhaustive
    profile. Nothing runs it, on the user's word, while they design how
-   it should (owners.md 4.5): `land` and `land-set` start no tier after
+   it should: `land` and `land-set` start no tier after
    landing. Once something does, a failure goes to the owner of the
    first landing it fails on.
 
@@ -302,7 +305,7 @@ whether a set lands: the gates do.
   hop to each failure. 10-25's stops were the tool's own faults, fixed
   in the tool, and the sets' own reds and conflicts, which their owners
   repair anyway. What the keeper would have escalated, the owner
-  escalates (owners.md 4.4).
+  escalates (owners.md 4).
 - **Owners** reach the queue through two commands, and need no
   messages:
   - `queue request <set file>` (section 4);
@@ -319,7 +322,7 @@ whether a set lands: the gates do.
   the invariant needs. `land --docs` becomes a docs request. Habits and
   scripts keep working.
 - **Directors and product owners** read the landings feed, and hear
-  of landings only in owners.md 4.4's escalations. They don't order
+  of landings only in owners.md 4's escalations. They don't order
   landings, and they don't relay them.
 - **Building and running it.** The build-infra mission, with a Codex
   owner, builds the tool. The director runs the service.
@@ -396,7 +399,7 @@ grouping missions by coupling still matters:
 
 ### 6.3 For QA and pipelining
 
-Each milestone works on its own (owners.md 3.1), and three things now
+Each milestone works on its own (owners.md 4), and three things now
 run side by side:
 - **The next milestone,** which starts when the set is queued, not when
   it lands, so time in the queue never idles an owner.
@@ -458,28 +461,28 @@ mission, then flood it with four milestones at once.
 
 ## 8. What changes when it goes live
 
-- **owners.md 3.1:**
+- **owners.md 4:**
   - A milestone hands over when its set is queued, and the next
     milestone starts then.
   - It ends when the set has landed. Its 4-hour cap runs to the
     request. The repair loop after it doesn't count against the cap
-    (the user, 10-24); owners.md 4.4's escalations bound it.
+    (the user, 10-24); owners.md 4's escalations bound it.
   - Its sub-owner stays on for the landing as well as for QA, and
     briefs and checks the implementers that repair the set and fix the
     pass's findings.
-- **owners.md 4.2:** rebases, repairs and QA fixes are implementer
+- **owners.md 3:** rebases, repairs and QA fixes are implementer
   tasks at high effort, which the launcher doesn't lower.
-- **owners.md 4.4:** tasks merge into the set's branches. The owner
+- **owners.md 4:** tasks merge into the set's branches. The owner
   checks the end-of-milestone rebase as it checks any task's diff,
   requests the milestone's landing with `queue request`, and waits on
   it with `queue wait`. The queue lands it.
-- **owners.md 4.5:**
+- **landing-flow.md 3 and 9.1; director.md 6:**
   - Repins happen inside the set, by its owner, with `scripts/devel/repin`.
   - "Breaking upstream" waits for no one's word: the break and its
     downstream fix land together.
   - The footprint stays, to plan narrow sets and to group missions, but
     no longer orders landings.
-- **owners.md 4.6:** a QA pass may start on the queued set. Its fixes
+- **QA:** a QA pass may start on the queued set. Its fixes
   are implementer tasks, and land as their own small set once the
   milestone has landed.
 - **director.md:**
@@ -573,7 +576,7 @@ Until the rest is built, agents do by hand what the tools don't:
   repository, then repins.
 - **A failure in the gates** pushes nothing to any `main`. The
   summary and the feed say where the run stopped and why. The owner
-  reads the failure (owners.md 4.4); its implementer repairs the set
+  reads the failure (owners.md 4); its implementer repairs the set
   and proves it again, and the owner runs `land-set` again.
 - **One writer.** Every landing that pushes to skein, smith, hearth,
   jig or temper takes the set lock, plain and docs landings too (9.2),
@@ -585,7 +588,7 @@ Until the rest is built, agents do by hand what the tools don't:
   `origin/main`, and reused to pin downstream repositories without
   landing them again.
 - **Order and escalation.** The set lock is the only order. An owner
-  escalates a landing as owners.md 4.4 says.
+  escalates a landing as owners.md 4 says.
 - **Landing news.** Whoever waits on a set runs `landings wait`, and
   directors read `landings`: no hashes are relayed.
 - **What `land` still does.** A docs change still lands with `land

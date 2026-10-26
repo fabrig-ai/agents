@@ -18,7 +18,7 @@ HOOKS = runpy.run_path(str(Path(__file__).resolve().with_name('tidy-hooks.py')))
 UNKNOWN = 'unknown'
 NAME = r'[a-z0-9][a-z0-9_-]*'
 SECRET = re.compile(r'-----BEGIN [^\n]*PRIVATE KEY-----|(?<![\w-])(?:gh[pousr]_[A-Za-z0-9_-]{20,}|github_pat_[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9_-]{20,})|xox[abpr]-|AKIA[A-Z0-9]{16}')
-MISSION_KEYS = 'roadmap feature department parent owner machine model effort started ended state end'.split()
+MISSION_KEYS = 'roadmap feature parent owner machine model effort started ended state end'.split()
 MILESTONE_KEYS = 'driver model effort started cap ended'.split()
 
 
@@ -73,9 +73,9 @@ def cap_for(name):
         return 128 * 1024
     if re.fullmatch(rf'roadmaps/{NAME}/README.md', name):
         return 16 * 1024
-    match = re.fullmatch(rf'missions/{NAME}/(README|plan|decisions|qa|closing|m[1-9][0-9]*)\.md', name)
+    match = re.fullmatch(rf'missions/{NAME}/(README|progress|plan|decisions|qa|closing|m[1-9][0-9]*)\.md', name)
     need(match, f'{name}: place is not in the records tree')
-    return (16 if match[1] in ('plan', 'decisions', 'qa') else 8) * 1024
+    return (16 if match[1] in ('progress', 'plan', 'decisions', 'qa') else 8) * 1024
 
 
 def runs_body(text):

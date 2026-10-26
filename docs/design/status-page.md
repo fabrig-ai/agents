@@ -19,8 +19,8 @@ serves it.
   recorded, and no tool changes for the page.
 - **Nothing to install on the fleet.** The writer pipes its own source
   to each machine over SSH, into `bash -lc 'exec python3 -I - collect'`
-  (a login shell, infra.md 2), with the options `landings` uses, so
-  that every machine runs the version that renders.
+  (a login shell, agents' `AGENTS.md`), with the options `landings` uses,
+  so that every machine runs the version that renders.
 - **One failure leaves the rest.** An unreachable machine, a source it
   cannot read, a field of the wrong type or a section whose data makes
   no sense is named in the page's footer, and everything else is still
@@ -87,8 +87,8 @@ On hel8, whose name `status.fabrig.ai` is (a CNAME of `fabrig.ai`):
   /var/www/status/index.html`, from the checkout and never a worktree,
   writes the user units `status-page.service` and `status-page.timer`
   (`OnCalendar=*:0/10`) and starts the timer. The service runs the
-  checkout's script in a login shell (infra.md 2), so that `setup`'s
-  fast-forward brings each change.
+  checkout's script in a login shell (agents' `AGENTS.md`), so that
+  `setup`'s fast-forward brings each change.
 - `/var/www/status` belongs to `free`. The page is replaced atomically,
   mode 0644, so Caddy never reads half of one; `--json` writes 0600.
 - `/etc/caddy/Caddyfile` holds:
