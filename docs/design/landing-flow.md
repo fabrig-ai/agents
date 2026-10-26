@@ -322,9 +322,9 @@ cite:
        exits, the director hears of it, and the owner closes with the
        landing uncleared in `closing.md`.
      - A red on a landing whose owner is gone goes to the director.
-   - **The lab takes a green `main`.** QA runs on the newest temper
-     `main` whose tier is green, so that no QA agent spends its tokens
-     finding again what the process tier showed.
+   - **QA takes a cleared `main`** ([qa-flow.md](qa-flow.md) 4), so
+     that no QA agent spends its tokens finding again what the tier
+     showed.
    - **Since it runs** (10-26), a mission closes once its last landing
      has cleared (owners.md 4 and 5), and the director's after-landing
      inbox is gone.

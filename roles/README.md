@@ -30,9 +30,9 @@ Claude is for taste; everything else goes to Codex.
 
 ## 2. Open questions
 
-- **Testing what landed in the lab:** who starts a QA run, and who
-  judges its findings, now that QA has no role of its own. For now, the
-  director.
+- **QA after landing:** designed in
+  [qa-flow.md](../docs/design/qa-flow.md), not built. Who triages its
+  findings is open; for now, the director.
 - **The resource watcher:** a tool that wakes an owner when CPU, memory
   or disk need it (owners.md 2), to be built.
 - **temper's drafts that read our roles:** `draft/configuring.md` and
