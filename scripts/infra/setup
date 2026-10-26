@@ -96,44 +96,10 @@ check_records() {
     fi
 }
 
-# The queue's user unit is repairable without restarting a running daemon.
-check_units() {
-    local unit=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/pueued.service
-    if ((bus)) && { ! grep -qsx 'StartLimitIntervalSec=0' "$unit" ||
-        ! grep -qsx 'Restart=always' "$unit" || ! grep -qsx 'RestartSec=5' "$unit"; }; then
-        warn "pueued's unit needs StartLimitIntervalSec=0, Restart=always and RestartSec=5 (--fix writes it)"
-        if ((fix)); then
-            mkdir -p "$(dirname "$unit")"
-            printf '%s\n' '[Unit]' 'Description=pueue daemon' 'StartLimitIntervalSec=0' '' '[Service]' \
-                "ExecStart=$(command -v pueued) --verbose" 'Restart=always' 'RestartSec=5' '' \
-                '[Install]' 'WantedBy=default.target' >"$unit"
-            systemctl --user daemon-reload
-        fi
-    fi
-    if ((!bus)); then
-        if pueue group --json >/dev/null 2>&1; then
-            ok "pueued is running (no systemd user bus: setup --fix starts it after a restart)"
-        elif ((fix)); then
-            pueued --daemonize >/dev/null 2>&1 && sleep 1
-            pueue group --json >/dev/null 2>&1 && ok "pueued started" || fail "pueued does not start"
-        else
-            fail "pueued is not running (--fix starts it)"
-        fi
-    elif systemctl --user is-active --quiet pueued; then
-        ok "pueued is running as a user service"
-        if [[ $(systemctl --user show pueued -p UnitFileState --value) != enabled ]]; then
-            if ((fix)); then systemctl --user enable --quiet pueued
-            else warn "pueued's unit is not enabled: it will not start after a reboot (--fix enables it)"; fi
-        fi
-    elif ((fix)); then
-        systemctl --user enable --quiet pueued
-        systemctl --user restart pueued && sleep 1
-        systemctl --user is-active --quiet pueued && ok "pueued started" || fail "pueued does not start"
-    else
-        fail "pueued is not running as a user service (--fix starts it)"
-    fi
+# Heavy's user units need lingering to survive logout.
+check_lingering() {
     ((!bus)) || [[ $(loginctl show-user "$USER" -p Linger --value 2>/dev/null) == yes ]] ||
-        warn "no lingering: user services stop when $USER logs out (loginctl enable-linger)"
+        warn "no lingering: heavy's reconciler, task wrappers and payloads stop when $USER logs out (loginctl enable-linger)"
 }
 
 # The tools, the workspace's files, the queue and room to work.
@@ -148,7 +114,7 @@ check_machine() {
     done
     # Tools.
     local tool
-    for tool in git jq pueue flock cargo python3 systemd-run; do
+    for tool in git jq flock cargo python3 systemd-run; do
         command -v "$tool" >/dev/null && ok "has $tool" || fail "no $tool"
     done
     cargo nextest --version >/dev/null 2>&1 && ok "has cargo-nextest" || fail "no cargo-nextest"
@@ -216,10 +182,7 @@ check_machine() {
         warn "no kache rustc-wrapper in ~/.cargo/config.toml"
     fi
 
-    # The queue: the daemon as a user service, and its two lanes. Without a
-    # systemd user bus (some containers), pueued runs on its own, and `setup
-    # --fix` starts it again after a restart.
-    check_units
+    check_lingering
     # Installation is explicit: setup never probes/installs a new recovery
     # mechanism while repairing an existing queue.
     local heavy=$home/../devel/heavy
@@ -231,40 +194,26 @@ check_machine() {
     if apt-config dump 2>/dev/null | grep -E '^Unattended-Upgrade::Automatic-Reboot "true";' >/dev/null; then
         warn 'the machine may reboot unattended (Unattended-Upgrade::Automatic-Reboot)'
     fi
-    local group want have status slots slots_source line source
-    # Builds take no slot by default: heavy orders them by CPU weight (build-infrastructure.md, 2).
+    local lane status slots slots_source line
+    # The queue is heavy's ledger (build-infrastructure.md, 2 and 4).
     read -r slots slots_source < <(machine_setting HEAVY_BUILD_SLOTS 0)
     while IFS= read -r line; do warn "machine.env: ignored line $line"; done < <(
         awk 'NF && $0 !~ /^(PLAN_MIN_MEM_GB|PLAN_MIN_DISK_GB|HEAVY_BUILD_SLOTS|HEAVY_BUILD_JOBS|KACHE_MAX_GB)=[0-9]+$/ { print NR ": " $0 }' "$tmp/machine.env" 2>/dev/null || true)
-    for group in gate build; do
-        want=1 source=default
-        [[ $group == build ]] && { want=$slots; source=$slots_source; }
-        have=$(pueue group --json 2>/dev/null | jq -r --arg g "$group" '.[$g].parallel_tasks // empty')
-        if [[ -z $have ]] && ((fix)); then
-            pueue group add "$group" >/dev/null
-            pueue parallel "$want" --group "$group" >/dev/null
-            have=$want
-        fi
-        if [[ -z $have ]]; then
-            fail "queue lane $group is missing (--fix adds it)"
-            continue
-        fi
-        if [[ $have != "$want" ]] && ((fix)); then
-            pueue parallel "$want" --group "$group" >/dev/null && have=$want
-        fi
-        [[ $have == "$want" ]] && ok "queue lane $group runs $( ((want)) && echo "$want" || echo 'every task') at once ($source)" ||
-            warn "queue lane $group runs $have at once, not $want ($source; --fix sets it)"
-        status=$(pueue group --json | jq -r --arg g "$group" '.[$g].status')
-        if [[ $status != Running ]] && ((fix)); then
-            "$heavy" --repair-group "$group" >/dev/null || true
-            status=$(pueue group --json | jq -r --arg g "$group" '.[$g].status')
-        fi
-        if [[ $status == Running ]]; then
-            ok "queue lane $group is running"
-        elif "$heavy" --group-held "$group"; then
-            ok "queue lane $group is held by heavy"
+    if [[ $slots == 0 ]]; then
+        ok "builds: every task at once ($slots_source)"
+    else
+        ok "builds: $slots at once ($slots_source)"
+    fi
+    for lane in gate build; do
+        if "$heavy" --group-held "$lane"; then
+            ok "queue lane $lane is held by heavy"
         else
-            fail "queue lane $group is $status (--fix starts it, preserving gate and maintenance holds)"
+            status=$?
+            if ((status == 1)); then
+                ok "queue lane $lane admits"
+            else
+                fail "heavy cannot report lane $lane: heavy --reconcile says why"
+            fi
         fi
     done
 

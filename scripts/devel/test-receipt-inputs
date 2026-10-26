@@ -21,7 +21,7 @@ def main():
                           GIT_CONFIG_NOSYSTEM='1', GIT_AUTHOR_NAME='Fixture',
                           GIT_AUTHOR_EMAIL='fixture@invalid', GIT_COMMITTER_NAME='Fixture',
                           GIT_COMMITTER_EMAIL='fixture@invalid')
-        for key in ('GIT_INDEX_FILE', 'GIT_DIR', 'GIT_WORK_TREE', 'PUEUE_CONFIG_PATH'):
+        for key in ('GIT_INDEX_FILE', 'GIT_DIR', 'GIT_WORK_TREE'):
             os.environ.pop(key, None)
         sys.path.insert(0, str(KIT))
         from receipt_inputs import capture
