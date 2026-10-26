@@ -161,17 +161,10 @@ finish_task() {
 launch() {
     local unit=$1 output status=0
     shift
-    local arg stop=''
     local -a envs=("--setenv=DEV_ROOT=$root") properties=()
     if [[ ${mode:-} == task && -n ${on_stop:-} ]]; then
-        # Quote for systemd.syntax; preserve dollars for bash and literal percents.
-        # shellcheck disable=SC2016
-        for arg in bash -lc 'exec "$0" "$@"' "$script" _stop "$id"; do
-            arg=${arg//\\/\\\\}; arg=${arg//\"/\\\"}
-            arg=${arg//\$/\$\$}; arg=${arg//%/%%}
-            stop+="${stop:+ }\"$arg\""
-        done
-        properties+=("--property=ExecStop=-$stop")
+        # No shell and no $: a daemon-reload doubles a transient ExecStop's $$ (systemd 257, 10-26).
+        properties+=("--property=ExecStop=-\"$script\" \"_stop\" \"$id\"")
     fi
     if [[ -v CODEX_RUN_RETRY_DELAYS ]]; then envs+=("--setenv=CODEX_RUN_RETRY_DELAYS=$CODEX_RUN_RETRY_DELAYS"); fi
     # The login shell expands these positional arguments, never the caller.
@@ -231,6 +224,9 @@ task_launch() {
     [[ -n $to ]] || refuse 'no recipient: use --to or POST_NAME'
     valid_to "$to" || refuse 'invalid recipient address'
     field "$caller" caller
+    if [[ -n $on_stop && $script == *[\$%\"\\$' \t\n']* ]]; then
+        refuse "the kit's path is unsafe in a stop command"
+    fi
     mkdir -p "$runs"
     while :; do
         id=$(date -u +%Y%m%dT%H%M%SZ)-$(od -An -N2 -tx1 /dev/urandom | tr -d ' \n')

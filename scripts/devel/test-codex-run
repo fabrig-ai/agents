@@ -65,11 +65,9 @@ assert args[:3] == ['bash', '-lc', 'exec "$0" "$@"']
 stop_args = None
 if stop is not None:
     # Only the quoted tokens our launcher emits: check syntax AND decoded argv.
-    expected = ['bash', '-lc', 'exec "$0" "$@"', args[3], '_stop', args[5]]
-    def quote(token):
-        return '"' + token.replace('\\', '\\\\').replace('"', '\\"').replace('$', '$$').replace('%', '%%') + '"'
-    assert stop == ' '.join(quote(token) for token in expected), stop
-    stop_args = [token.replace('$$', '$').replace('%%', '%') for token in shlex.split(stop)]
+    expected = [args[3], '_stop', args[5]]
+    assert stop == ' '.join('"' + token + '"' for token in expected), stop
+    stop_args = shlex.split(stop)
     assert stop_args == expected, stop_args
     (fixture / 'stop.argv').write_text(repr(stop_args))
 # Emulate exec's launch-time refusal, including a removed worker executable.
@@ -96,9 +94,7 @@ with (fixture / (unit + '.log')).open('wb') as log:
         (fixture / (unit + '.pid')).write_text(str(proc.pid) + '\n')
         status = proc.wait()
         if stop_args is not None:
-            stop_command = ['/bin/bash', '--noprofile', '--norc', '-c',
-                            'source "$HOME/.bash_profile"; exec "$0" "$@"', *stop_args[3:]]
-            subprocess.run(stop_command, env=env, stdin=subprocess.DEVNULL,
+            subprocess.run(stop_args, env=env, stdin=subprocess.DEVNULL,
                            stdout=log, stderr=log, check=True)
         (fixture / (unit + '.ended')).write_text(str(status) + '\n')
         fd = os.open(fixture / 'unit-events', os.O_WRONLY | os.O_NONBLOCK)
@@ -285,6 +281,12 @@ refusal() {
     [[ $status == 2 && $output != *$'\n'* && $before == "$(directories)" ]]
     expect "$what" "$output" 'codex-run:'
 }
+mkdir "$t/unsafe kit"
+cp "$kit/codex-run" "$t/unsafe kit/codex-run"
+output=$("$t/unsafe kit/codex-run" task --on-stop "$t/return-login" \
+    "$t/task file.md" "$t/work dir" "$t/reports/refused.md" 2>&1) && status=0 || status=$?
+[[ $status == 2 && ! -e $fake/launch.args && ! -e $DEV_ROOT/tmp/codex-run && ! -e $t/reports/refused.md ]]
+expect 'on-stop refused for an unsafe kit path' "$output" "codex-run: the kit's path is unsafe in a stop command"
 refusal 'relative on-stop refused' task --on-stop relative/file "$t/task file.md" "$t/work dir" "$t/reports/refused.md"
 refusal 'relative TASK' task relative "$t/work dir" "$t/reports/refused.md"
 refusal 'relative DIR' task "$t/task file.md" relative "$t/reports/refused.md"
