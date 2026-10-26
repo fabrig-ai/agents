@@ -1014,7 +1014,7 @@ def pace(samples, limit, cli, label, now):
     earlier = min((s for s in samples if s['cli'] == cli and s['label'] == label
                    and s['limit'] == limit['name'] and abs(s['resets'] - reset) <= 600
                    and now - lookback <= s['time'] <= now), key=lambda s: s['time'], default=None)
-    if earlier is None or now - earlier['time'] < 1800:
+    if earlier is None or now - earlier['time'] < max(1800, lookback / 4):
         return '–'
     rate = (used - earlier['used']) / (now - earlier['time'])
     if rate > 0:
