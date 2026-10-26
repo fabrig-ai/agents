@@ -903,13 +903,20 @@ that directory's `feed.jsonl`.
 
 ## 11. After landing's runner
 
-[landing-flow.md](landing-flow.md) 4, step 8 is the design: on one
-machine, a runner follows each repository's `main`, runs its slow tier
-on the newest one, reruns a red alone, bisects it over the landings it
-passed over, and writes a verdict per landing to the feed. This section
-is the tools' contract: `scripts/devel/after-landing`, each
-repository's `scripts/after-landing.sh`, the runner's records in the
-feed, and what `landings` and `setup` do with them.
+[landing-flow.md](landing-flow.md) 4, step 8 is the design: on the
+runner's machines, a follower per repository, or per part of a
+repository's tier, follows its `main`, runs its slow tier on the newest
+one, reruns a red alone, bisects it over the landings it passed over,
+and writes a verdict per landing to the feed. This section is the
+tools' contract: `scripts/devel/after-landing`, each repository's
+`scripts/after-landing.sh`, the runner's records in the feed, and what
+`landings` and `setup` do with them.
+
+**A follower's name** is its repository's, `REPO`, for a whole tier,
+and `REPO.KofN`, `temper.1of2`, for part K of N, 1 ≤ K ≤ N, N ≥ 2. It
+names the follower's lock, state, clone, logs, heavy label, unit
+instance and records, so that two followers share nothing but the
+feed and their origin.
 
 **The tier's script.** A repository with slow tiers has
 `scripts/after-landing.sh`; one without (smith and hearth today) is
@@ -923,23 +930,39 @@ green at every commit. Run from the root of a checkout:
   builds anything. NAME is opaque to the runner: for a nextest test,
   `PROFILE BINARY_ID TEST_NAME`, from the profile's JUnit; for a phase,
   its name;
-- it exits 0 green, 3 when it lacks a tool, 2 on a NAME it doesn't
-  know, and any other status red. A red with no `failed` line is the
-  whole tier's, which the runner calls `*` and reruns whole;
+- it exits 0 green, 3 when it lacks a tool, 2 on a NAME or an argument
+  it doesn't know, and any other status red. A red with no `failed`
+  line is the whole tier's, which the runner calls `*` and reruns
+  whole;
 - it reports to no one, and writes nothing outside the checkout's
-  `target/`.
+  `target/`;
+- a script whose tier is split takes `--part K/N`, for any N ≥ 1: with
+  no `--only`, it runs part K of its tier in N parts, and with `--only`
+  the part changes nothing. The split is the script's, fixed for a
+  commit and N: the parts are disjoint in the tests they run and whole
+  together, a phase they need (a build) may run in several, and a part
+  with nothing in it is green. It splits by phase, weighed by the
+  phases' measured times, which it records. A NAME keeps its meaning
+  across parts.
 
-**The runner.** `after-landing follow REPO [--origin URL] [--director
-ADDRESS] [--poll SECONDS] [--once]` follows one repository, by default
+**The runner.** `after-landing follow REPO [--part K/N] [--origin URL]
+[--director ADDRESS] [--poll SECONDS] [--once]` follows one
+repository's tier, or its part K of N, by default from
 `git@github.com:fabrig-ai/REPO.git`, with a pass every 60 seconds, or
-one with `--once`. It holds `locks/REPO.lock` for its life, so a
-second follower of REPO exits 2. Under `DEV_TMP/after-landing/` it
-keeps `runner/REPO/`, its own clone, whose `target/` stays warm between
-runs; `state/REPO.json`; and `logs/`, one log per run. It refuses, with
-exit 2 and deleting nothing, a clone of another origin, or a state it
-can't read. It runs only on the runner's machine, the one with
-`~/.config/agents-after-landing/director` (below); anywhere else it
-exits 2.
+one with `--once`. With NAME its follower's name, it holds
+`locks/NAME.lock` for its life, so a second follower of NAME on the
+machine exits 2. Under `DEV_TMP/after-landing/` it keeps `runner/NAME/`,
+its own clone, whose `target/` stays warm between runs;
+`state/NAME.json`; and `logs/`, one log per run, `NAME-COMMIT-TOKEN.log`.
+It refuses, with exit 2 and deleting nothing, a clone of another
+origin, or a state it can't read. It runs only on a runner's machine,
+one with `~/.config/agents-after-landing/director` (below); anywhere
+else it exits 2. A part with no state may start from its repository's
+whole state, copied at the split without its pending posts or fault:
+its first run then bisects over the landings since the whole tier's
+last run. With none, its first run is a baseline. Either way, a
+part's range never reaches a commit whose script lacks `--part`: parts
+start from a run on a `main` whose script has it.
 
 A pass settles the pending posts, reads `main` with `git ls-remote`,
 and when `main` moved, fetches it and runs the tier on it, M, with P the
@@ -950,7 +973,9 @@ last run's commit:
   starts `none` is a docs landing: never probed, never red.
 - **The run** is `heavy -- scripts/after-landing.sh` at
   `HEAVY_CLASS=background`, in the clone checked out at M (forced,
-  cleaned of untracked files but not of ignored ones). The script's
+  cleaned of untracked files but not of ignored ones). A part's run
+  that names no test, its first and a `*` rerun or probe, adds
+  `--part K/N`; one that names tests passes `--only` alone. The script's
   lines are read in the task's whole log, which heavy's summary line
   names, not in the tail heavy prints.
 - **A red** is rerun at M with `--only` each failed NAME. What fails
@@ -979,7 +1004,11 @@ last run's commit:
 **Its records** go in the landing feed (section 10), beside the sets'.
 None has a `set` key, so the readers of sets skip them. Each has `time`,
 `kind`, `event`, `host` and `token`, a run's token shared by its records:
-- `kind` `tier`, with `tier`, the repository:
+- `kind` `tier`, with `tier`, the follower's name: the repository, or
+  `REPO.KofN` for a part. A reader that knows no parts finds no record
+  of REPO's in a part's, so it waits on a landing rather than clear it
+  on one part; but it takes any verdict on a bare commit, so parts go
+  live once every machine's `landings` knows them:
   - `running`: `commit` M and `from` P;
   - `verdict`: `commit` the landing, `run` M, `verdict`, `tests`,
     `flakes`, `landing_set` (the set whose `landed` record names the
@@ -1007,7 +1036,7 @@ again at the next pass:
   after.
 
 **`landings`.** `landings` adds a `tiers:` section, a line per
-repository: green or red at its last run, a red's standing tests and
+follower, by its name: green or red at its last run, a red's standing tests and
 the landing first charged, its last green, and a run in progress or a
 fault newer than the last state. `landings wait --cleared TARGET
 [--timeout SECONDS] [--post ADDRESS]` waits for a landing's verdict:
@@ -1039,6 +1068,19 @@ single-commit landing, the verdict is the first of these
   another's gives it the verdict of the oldest of its landings that
   holds it.
 
+**Parts.** A repository's runner records group by split: N parts, or
+one for a whole tier's records and for those older than parts. Under a
+split, the rules above judge a commit within each part's records alone,
+its own verdict and its run's both read in that part's; no tier is
+judged once, for the commit. The commit is red once any part of any
+split has judged it red, and cleared once every part of one split has
+cleared it; else it waits. So a commit a whole tier judged before the
+split keeps that verdict, and a part that never runs leaves its commits
+waiting until the wait's timeout. `wait --cleared` prints a line per
+part, its follower's name where the repository's stands, and
+`landings cleared REPO` gives, under parts, the oldest of the parts'
+answers, which the newest all-cleared run of every part holds.
+
 Ancestry is read in the workspace's checkouts: `REPO` under `DEV_ROOT`,
 else under the directory that holds agents' checkout, for agents and the
 five repositories; a shallow checkout counts as none. A commit target's
@@ -1067,14 +1109,20 @@ the verdict, and a red's tests and excerpt:
 With `--post`, it then posts what it printed to ADDRESS, as `landings`,
 its subject the outcome.
 
-**The machine and its units.** The director names the runner's machine
-by writing its own address in `~/.config/agents-after-landing/director`
-there. On that machine `setup` checks the user unit
-`agents-after-landing@.service`, whose instance per repository (skein,
-smith, hearth, jig, temper) runs `after-landing follow REPO --director
-ADDRESS` in a login shell, restarted on failure but not after exit 2;
-`setup --fix` writes it and starts the five. Elsewhere it warns if one
-runs.
+**The machines and their units.** The director names each of the
+runner's machines by writing its own address in
+`~/.config/agents-after-landing/director` there, and what the machine
+follows in `~/.config/agents-after-landing/follow`, a follower's name
+per line; with no such file, the five repositories whole (skein, smith,
+hearth, jig, temper). A follower runs on one machine at a time, which
+only the director's files ensure. On a runner's machine `setup` checks
+the user unit `agents-after-landing@.service`, whose instance per
+follower, by its name, runs `after-landing follow REPO [--part K/N]
+--director ADDRESS` in a login shell, restarted on failure but not
+after exit 2; `setup --fix` writes it, starts the listed instances and
+stops those no longer listed. Elsewhere it warns if one runs. A
+follower off the coordinator writes the feed and reads it over the
+landing turn's ssh, as `land-set` does.
 
 **Fixtures.** `AFTER_LANDING_FIXTURE=DIR` puts the runner's every path
 and its feed under DIR, lifts the machine check, and only then lets
@@ -1087,13 +1135,20 @@ with nothing new, a repository without a tier, a flake, a red and its
 repair, a bisect over four landings with a docs one, a red already
 standing, faults (heavy refusing, a tool lacking, the origin away) and
 their posts, an unwatched red posted and a watched one not, and its
-meeting with `landings wait --cleared` on the same feed.
+meeting with `landings wait --cleared` on the same feed; and a tier in
+two parts, each followed apart: `--part` passed only on runs that name
+no test, a red in one part bisected while the other clears, and a part
+started from a whole tier's copied state.
 `test-landings` covers the `tiers:` lines, `wait --cleared` on a set
 and on a commit, and `--post`; and, on scratch repositories as origins
 and checkouts, the verdicts by ancestry: a repository with no tier, a
 landing older than the baseline, a commit inside a landing's range, a
 red that stays red under later clean runs, and a commit no `main`
-holds. With the real heavy and origin, fixture
+holds; and under parts: one part cleared and the other not yet, a red
+from either deciding at once, a commit a whole tier judged before the
+split, a part's records hidden from a reader that knows no parts,
+`landings cleared` over two parts, and the verdicts' report (landing-flow.md
+10). With the real heavy and origin, fixture
 mode is also how a live run goes before the runner does.
 
 ## 12. A machine without heavy

@@ -7,7 +7,8 @@ is no landing queue, after landing follows each `main` (4, step 8),
 and the tools settle conflicts between STATUS.md's rows and in generated
 files (3); and 10-26 (the user): what each landing taught goes in the
 feed (12); and 10-26 (the user): a machine without heavy lands with
-plain commands (9.2). Built and live: `scripts/devel/land-set` and the set lock
+plain commands (9.2); and 10-26 (the user): a tier too long for one
+run splits into parts, followed apart, temper's in two (4, step 8). Built and live: `scripts/devel/land-set` and the set lock
 (section 9), and since 10-26 after landing's runner (4, step 8). How
 changes reach `main` across skein, smith, jig, hearth and temper:
 - one set of branches per milestone;
@@ -285,15 +286,39 @@ cite:
      landings: from 10-23 to 10-25, a run after each landing on every
      machine held the exclusive lane for 21.5 hours, with 49.2 hours of
      builds behind it (build-efficiency.md 3).
-   - **One machine, warm.** A build machine the director names, where
-     `setup` installs the service. A tier's script that lacks a tool
-     there, Chromium or temper's pinned Forgejo, says so, and the
-     runner takes it as a fault, not a red: agents names no product,
-     so `setup` can't check for them. The runner keeps one worktree and target
-     per repository there and nowhere else, and runs its tiers at
-     `HEAVY_CLASS=background`, not `--gate` (build-efficiency.md 8,
-     change 5). A tier that fails only under load has a test to fix,
-     not a claim on an exclusive lane.
+   - **Its machines, warm.** Build machines the director names, one
+     by default, where `setup` installs a service per follower. A tier's
+     script that lacks a tool there, Chromium or temper's pinned
+     Forgejo, says so, and the runner takes it as a fault, not a red:
+     agents names no product, so `setup` can't check for them. Each
+     follower keeps one clone and target on its machine and nowhere
+     else, and runs its tier at `HEAVY_CLASS=background`, not `--gate`
+     (build-efficiency.md 8, change 5). A tier that fails only under
+     load has a test to fix, not a claim on an exclusive lane. The
+     runner's machines carry little else (the user, 10-26;
+     director-operations.md 8): its slow tests run one at a time at
+     background weight, and a loaded machine doubles them, which
+     heavy's waits don't show.
+   - **Parts** (the user, 10-26). A tier too long for one run is split
+     into parts, so that a verdict comes sooner and each run passes
+     over fewer landings. The repository's script owns the split
+     (`--part K/N`), by phase and by measured time: what a part runs
+     is the script's, never the runner's. Each part is a follower of
+     its own, on any of the runner's machines: it runs, reruns and
+     bisects as a whole tier does, over its own runs, and a red in one
+     part delays no other. Over a commit, a red from any part decides
+     at once, and it clears once every part has cleared it. A split
+     changes nothing else: the rerun, the bisect and their attribution,
+     the posts, and the range rule below hold per part.
+     - temper's tier is in two (10-26): the process tier with the
+       lab's tests, and the QA and browser tiers, about 7 and 9
+       minutes on a quiet machine. Whole, a run took 25 minutes at the
+       median and a verdict 46, over five landings a run (hetzner3's
+       feed, 10-26 16:31-22:15Z). A follower always busy gives a
+       verdict in about one and a half runs: about 15 minutes, over one
+       or two landings.
+     - skein's, smith's, hearth's and jig's tiers stay whole: each
+       takes 1 to 4 minutes.
    - **A red.** The runner reruns the failed tests alone, once, at the
      same commit.
      - If they pass, it was a flake: the verdict names it, and the
@@ -313,12 +338,14 @@ cite:
    - **It holds nothing up.** A red stops no landing: the gates are
      optimistic (section 1), and a flaky tier would stop everyone. The
      red landing's owner has it repaired first.
-   - **The feed** holds each repository's tier: its last green commit,
-     and its first red one with the landing and the failed tests.
-     `landings` shows it. `landings wait --cleared`, on a set or a plain
-     landing's commit, exits with its verdict: cleared, once a run on a
-     `main` that holds it has no red of its own, or red. A landing's
-     verdict is the worst over every commit in its pushed range,
+   - **The feed** holds each repository's tier, a part's apart: its
+     last green commit, and its first red one with the landing and the
+     failed tests. `landings` shows it. `landings wait --cleared`, on a
+     set or a plain landing's commit, exits with its verdict: cleared,
+     once a run on a `main` that holds it has no red of its own, in
+     every part, or red. A landing's
+     verdict is the worst over every commit in its pushed range and
+     every part of its repository's tier,
      including repins and a resolver's regenerate commits: any red is
      the landing's red, even when its tip's own verdict is cleared or
      the red commit's `landing_set` is null. Every pushed commit must
@@ -767,6 +794,14 @@ tool that sees it; the reports only read.
   - per set's proves: how many ended `proved` and `stopped`, and their
     run, median and longest;
   - `--tsv`: one row per result, with raw seconds, for other scripts.
+  - **After landing's verdicts** (10-26), per repository with a tier,
+    and per part: the time to a landing's verdict, median and 90th
+    percentile, from its record in the feed (a set's `landed`, a plain
+    `land`'s, section 12) to the runner's record that decided it (the
+    first red, else the last part's clearing); the landings per run,
+    median; the runs' `ran_s`, median and 90th percentile. A landing
+    with no record of its own, a push around the tools, counts in the
+    runs but not in the times.
 
 Not collected yet: the results of plain `land`s outside a set (their
 record in the feed, section 12, carries none; the result line is in their
@@ -782,6 +817,17 @@ output only), and each test's time (nextest's JUnit output).
   Markdown alone (landing-proof.md 7).
 - **Proving on one machine and landing on another** needs a receipt
   that the lander can read and check (landing-proof.md 7).
+- **A part past its run's share** (4, step 8): when one profile alone
+  outgrows a part, the script may split that profile's tests by
+  nextest's `--partition`, at the cost of building its binaries in each
+  part. temper's process and QA tiers run one test at a time; tests
+  that could run side by side would shorten a part more than another
+  part would.
+- **The runner's machine and class.** On a machine of the runner's
+  own, its `background` weight yields to nothing; beside CPU-heavy
+  work it yields to all of it. Which of the two, and whether the class
+  stays `background` there, is the director's to bring to the user,
+  from the verdicts' report (section 10).
 
 ## 12. What a landing taught
 
