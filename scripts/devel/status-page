@@ -1713,7 +1713,9 @@ landed or stopped.</p>
 <p class="muted">What only the user can answer or do, from <code>director/waiting.md</code> in the record.</p>
 <div class="panel">{guard("waiting on the user", waiting_table, fleet)}</div>
 <h2>Subscriptions</h2>
-<p class="muted">Distinct Claude and Codex subscriptions across the reached machines, with their current limits.</p>
+<p class="muted">Distinct Claude and Codex subscriptions across the reached machines, with their current limits.
+{E("At this pace: when a limit fills before its reset, or what it reaches by then, "
+   "at its rise over the last hour to day of the page's own samples.")}</p>
 <div class="panel">{subscription_table}</div>
 <h2>In flight</h2>
 <h3>Landing now</h3>
@@ -1737,7 +1739,8 @@ commands in the last 24 hours. Last activity is its last command or implementer 
 <footer>
 <p>Written by agents’ <code>scripts/devel/status-page</code> from what the tools already keep: heavy’s
 <code>heavy.tsv</code> and ledger, the landings feed, the landing turns, <code>codex-run</code>’s runs,
-Claude Code’s sessions and subscription, Codex CLI’s subscription, the missions’ front matter and the user’s waits in the records repository
+Claude Code’s sessions and subscription, Codex CLI’s subscription, the missions’ front matter, the user’s waits in the records repository,
+{E("and the subscriptions' use, which it samples itself for their pace")}
 (docs/design/status-page.md). Times are UTC; p90 is the
 nearest rank.</p>
 {('<p>Not read this time:</p><ul>' + "".join(f"<li>{E(short(p, 300))}</li>" for p in problems) + '</ul>') if problems else ''}

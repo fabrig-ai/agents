@@ -993,6 +993,9 @@ def page_pace(lab):
         section = page[page.index('<h2>Subscriptions'):page.index('<h2>In flight')]
         assert re.findall(r'<th(?: [^>]*)?>(.*?)</th>', section) == [
             'Subscription', 'Limit', 'Used', 'Resets', 'At this pace'], section
+        assert ("At this pace: when a limit fills before its reset, or what it reaches by then, "
+                "at its rise over the last hour to day of the page&#x27;s own samples.") in section
+        assert ("and the subscriptions&#x27; use, which it samples itself for their pace") in page[page.index('<footer>'):]
         cells, identity = {}, None
         for row in re.findall(r'<tr>.*?</tr>', section):
             columns = re.findall(r'<td[^>]*>(.*?)</td>', row)
