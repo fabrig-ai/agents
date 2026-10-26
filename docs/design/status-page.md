@@ -28,9 +28,10 @@ serves it.
   `landings`. The detail goes to the journal.
 - **Public, without the director's notes.** The page is served to
   anyone, so it holds no text from `records`' `STATUS.md` nor from a
-  mission's README beyond its front matter's state, owner and machine
-  (the user, 10-25). Only a background Claude session, which the
-  launchers name, shows its name; any other is someone's own. An
+  mission's README beyond its front matter's `state`, `ended` and
+  `description` (the user, 10-25 and 10-26). No owner, designer,
+  implementer or other session shows by name: the page counts them, and
+  a name only joins a session to its mission (the user, 10-26). An
   unreachable machine shows why in a few words (refused, timed out, key
   refused); ssh's own, which name the target, go to the journal. No
   account's email, name, organisation or id: a subscription goes by a
@@ -52,8 +53,8 @@ serves it.
 | the landing turns | `tmp/landing-turn/events.jsonl` | each turn's wait and hold, and the turns open now; a `fail-open` closes one |
 | codex-run | `tmp/codex-run/*/meta`, `runs.tsv` and the `codex-run-*` user units | the implementers running, each with its mission, and the runs that ended |
 | post | `tmp/post/*/new` | unread mail per box |
-| Claude | `claude agents --json --all` | the live sessions, busy or idle: the director, and by their names the designers (`design/<d>`) and owners (`o/<m>`) |
-| the records | `records/missions/*/README.md`, after `record pull` | each mission's front matter: its state, owner, machine and `ended` |
+| Claude | `claude agents --json --all` | the live sessions by role, busy or idle: the director, the designers (`design/<d>`) and owners (`o/<m>`) by their names, and the rest |
+| the records | `records/missions/*/README.md`, after `record pull` | each mission's front matter: its `state`, `ended` and `description` |
 | the machine | `/proc`, the disk under `tmp/` | load, free memory and disk |
 | Claude's subscription | `claude auth status --json`, `claude -p /usage` | what it is signed in to, and each limit's use and reset (2.1) |
 | Codex's subscription | `codex app-server`: `account/read`, `account/rateLimits/read` | the same (2.1) |
@@ -139,16 +140,17 @@ credential: not `.credentials.json`, `auth.json` nor a token.
   is lost the same way. Then the missions, and one card per machine
   with its heavy tasks, its implementers, its Claude sessions and its
   unread post.
-- **A mission's row:** its state in the record, its machines, what runs
-  for it now (its owner's or designer's session, busy or idle; its
-  implementers; its heavy commands), its commands in 24 hours, its last
-  activity and its owner. An owner idle on its waiters is waiting, as
-  the roles have it, not missing. The missions ended in the last 7 days
-  follow, newest first, with their `ended` time and owner: never their
-  `end`, which is prose, nor `closing.md`.
-- **An implementer,** on its machine's card: its mission (else its
-  recipient), model and effort, and how long it has run; one whose unit
-  is gone is stale.
+- **A mission's row:** its name, its state in the record, its
+  description, what runs for it now, counted (its owner's or
+  designer's session, busy or idle; its implementers; its heavy
+  commands), and its last activity. An owner idle on its waiters is
+  waiting, as the roles have it, not missing. The missions ended in the
+  last 7 days follow, newest first, with their `ended` time and
+  description: never their `end`, which is prose, nor `closing.md`.
+- **A machine's card** counts its implementers by mission and state
+  (`alpha-m: 2 running, 1 stale`; stale when the unit is gone) with
+  their models, and its Claude sessions by role and state (`director,
+  3 owners, 1 other · 2 busy`).
 - **Costs,** for the last 24 hours or 7 days: command time per hour or
   4 hours, running and waiting; each kind's medians and p90s; each
   machine's; land's gates and prebuilds per repository; land-set's gate
@@ -211,15 +213,16 @@ asked of the app-server; and no email or id, on the page or in the
 `--json` file. The roles' names: an owner's and a designer's session
 joining its mission, implementers per mission and machine, a recorded
 name ending `-m2` kept whole and an unrecorded one cut, missions ended
-within the week and before it, and no Codex owner read.
+within the week and before it, and no Codex owner read; no owner's,
+designer's, implementer's or session's name anywhere on the page, and a
+description shown. `test-record` proves `record`'s check of the
+`description` key.
 
 ## 6. Open
 
 - Mission names are public. If one ever must not be, the page needs a
   filter, or a login in front of it.
 - The roles don't point at the page yet.
-- Whether a mission's `parent` and `feature` (its repository and
-  design path) become public, and with them the missions by the chain,
-  a designer's owners beneath its mission: the user's to answer
-  (10-26). The page reads the front matter's fields from one list, so
-  either answer is a small change.
+- A mission's `parent` and `feature` stay off the page, and so does
+  the chain they would draw: the description says what a mission is
+  for (the user, 10-26).

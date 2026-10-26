@@ -108,6 +108,10 @@ and `qa.md`: their plan, decisions, milestones and QA passes.
     and path), `parent` and `owner` (addresses),
     `machine`, `model`, `effort`, `started`, `ended`, `state` (`active`,
     `paused`, `ended`, `abandoned`) and `end` (one line: why it ended);
+    and, optional, `description`: one line of at most 160 characters,
+    what the mission does in words a stranger reads, public on the
+    status page (status-page.md 1). Its parent writes it at the start,
+    and rewrites it when the mission's scope changes;
   - `m<N>.md`: `driver`, `model`, `effort`, `started`, `cap`, `ended`.
   - Times are UTC, `2026-10-24T21:54Z`; what the writer doesn't know is
     `unknown`, never a guess.
