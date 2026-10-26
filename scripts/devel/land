@@ -273,11 +273,12 @@ candidate_check() {
     [[ $head == "$candidate_ref" && $oid == "$expected" && $checked == 1 ]] ||
         die 4 "candidate HEAD or tree changed; rerun land"
     mapfile -t checks <<<"$values"
-    # --git-path emits unquoted paths. Reject ambiguous framing, including a
-    # legal newline in an administrative path, before interpreting any field.
-    ((${#checks[@]} == 4)) || die 4 "candidate merge/rebase state cannot be checked; rerun land"
+    # The effective tree is always first, independent of path framing. Keep
+    # its refusal and status's dirty refusal ahead of ambiguous state paths.
     [[ ${checks[0]} == "$tree" ]] || die 4 "candidate HEAD or tree changed; rerun land"
     ((dirty == 0)) || die 4 "candidate index/worktree changed; rerun land"
+    # --git-path emits unquoted paths; validate framing before reading a path.
+    ((${#checks[@]} == 4)) || die 4 "candidate merge/rebase state cannot be checked; rerun land"
     for state in "${checks[@]:1}"; do
         [[ ! -e $state ]] || die 4 "candidate merge/rebase state changed; rerun land"
     done

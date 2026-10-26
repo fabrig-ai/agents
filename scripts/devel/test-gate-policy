@@ -1142,6 +1142,52 @@ exit 97
         self.assertIn("candidate merge/rebase state cannot be checked; rerun land", result.stderr)
         self.assertEqual(self.git("rev-parse", "main").strip(), self.base)
 
+    def newline_primary_combined_fault(self, mode):
+        primary = self.root / "primary\nline"
+        self.repo.rename(primary)
+        self.repo = primary
+        self.linked_worktree()
+        head = self.git("rev-parse", "HEAD").strip()
+        tree = self.git("rev-parse", "HEAD^{tree}").strip()
+        real_git = shutil.which("git", path=os.defpath)
+        marker = self.root / "combined-fault-started"
+        # The first v2 status follows candidate/tree capture. Mutate there,
+        # after admission, so the newline layout cannot mask the old refusal.
+        mutation = '    printf "ungated combined fault\\n" >code\n'
+        if mode == "tree":
+            mutation += ('    head=$("$real_git" rev-parse HEAD)\n'
+                         '    parent=$("$real_git" rev-parse HEAD^)\n'
+                         '    "$real_git" add code\n'
+                         '    tree=$("$real_git" write-tree)\n'
+                         '    replacement=$("$real_git" commit-tree "$tree" -p "$parent" -m replacement)\n'
+                         '    "$real_git" replace "$head" "$replacement"\n'
+                         '    "$real_git" read-tree --reset -u HEAD\n')
+        self.script(self.bin / "git", '#!/bin/bash\nset -e\n'
+                    f'real_git={shlex.quote(real_git)}\n'
+                    f'if [[ $1 == status && $2 == --porcelain=v2 && ! -e {shlex.quote(str(marker))} ]]; then\n'
+                    + mutation + f'    : >{shlex.quote(str(marker))}\n'
+                    'fi\nexec "$real_git" "$@"\n')
+        result = self.land(check=False)
+        self.assertTrue(marker.is_file(), result.stdout + result.stderr)
+        self.assertEqual(self.git("rev-parse", "HEAD").strip(), head)
+        if mode == "tree":
+            self.assertNotEqual(self.git("rev-parse", "HEAD^{tree}").strip(), tree)
+            self.assertFalse(self.git("status", "--porcelain").strip())
+            message = "candidate HEAD or tree changed; rerun land"
+        else:
+            self.assertEqual((self.repo / "code").read_text(), "ungated combined fault\n")
+            self.assertTrue(self.git("status", "--porcelain").strip())
+            message = "candidate index/worktree changed; rerun land"
+        self.assertEqual(result.returncode, 4, result.stdout + result.stderr)
+        self.assertEqual(self.git("rev-parse", "main").strip(), self.base)
+        self.assertIn(message, result.stderr)
+
+    def test_newline_primary_changed_effective_tree_refuses_before_paths(self):
+        self.newline_primary_combined_fault("tree")
+
+    def test_newline_primary_dirty_worktree_refuses_before_paths(self):
+        self.newline_primary_combined_fault("worktree")
+
     def test_candidate_literal_detached_branch_lands(self):
         self.git("branch", "-m", "(detached)")
         self.land()
