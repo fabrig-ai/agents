@@ -834,8 +834,9 @@ that a routine landing needs no post. Built 10-26 (o/landing-taught).
   - Questions, escalations, a red verdict's repair and a mission's closing
     still post (owners.md 4, 5).
 - **Not public.** The status page shows no taught text (status-page.md
-  1): it renders no `taught` field of a set's events, and `land`'s
-  records, which have no `set`, never reach it.
+  1): it renders no `taught` field of a set's events, and counts
+  `land`'s records, which have no `set`, without showing them
+  (status-page.md 3).
 - **The tests.** On scratch feeds, with no ssh:
   - `test-land-set`: a set whose commits carry trailers in two
     repositories, each `landed` event with its own lines, none on the

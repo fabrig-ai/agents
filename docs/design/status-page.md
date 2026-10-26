@@ -64,7 +64,7 @@ serves it.
 |---|---|---|
 | heavy's rows | each machine's `tmp/logs/heavy.tsv` | the last week's commands: wait, run, exit, kind, mission |
 | heavy's ledger | `tmp/heavy/state.json` | the tasks queued and running, and whether a gate holds the machine |
-| the landings feed | the coordinator's `~/.local/state/agents-land-set/feed.jsonl` | set runs and their results' gate steps (landing-flow.md 10) |
+| the landings feed | the coordinator's `~/.local/state/agents-land-set/feed.jsonl` | set runs and their results' gate steps (landing-flow.md 10), and plain `land`s' records (landing-flow.md 12), counted alone: never their branch or `taught` |
 | the landing turns | `tmp/landing-turn/events.jsonl` | each turn's wait and hold, and the turns open now; a `fail-open` closes one |
 | codex-run | `tmp/codex-run/*/meta`, `runs.tsv` and the `codex-run-*` user units | the implementers running, each with its mission, and the runs that ended |
 | Claude | `claude agents --json --all` | the live sessions by role, busy or idle: the director, the designers (`design/<d>`) and owners (`o/<m>`) by their names, and the rest |
@@ -228,7 +228,7 @@ with its own label's id (the user, 10-26; agents' `user-issues.md`):
 
 ## 3. The page
 
-- **Tiles:** missions, sets landing now, agents (the director,
+- **Tiles:** missions, landings per hour (below), agents (the director,
   designers, owners and implementers live, and how many of them are
   busy), the director's post in the last 24 hours from owners and
   designers (`12 from owners, 3 from designers`; a dash where no
@@ -241,6 +241,14 @@ with its own label's id (the user, 10-26; agents' `user-issues.md`):
   the sub then saying how many were read; the user, 10-26), and the
   subscriptions with the highest use among them. Heavy's commands now show on each machine's card alone (the
   user, 10-26).
+- **Landings per hour** (the user, 10-26): the landings that pushed a
+  `main` in the last 6 hours, over 6, to one decimal: a set's run once,
+  at its last `landed` event, and a plain `land`'s record once. Six
+  hours moves at each write and holds enough landings to be steady; the
+  hover title gives the window and the raw counts (`87 in the last 6 h:
+  4 sets, 83 lands`), and the sub the last landing (`last landed 3 min
+  ago`, its time on hover, as in 3's Times). What is landing now stays
+  under In flight.
 - **Subscriptions,** after the tiles: a table, one row per distinct
   subscription and limit, giving its CLI, plan and label, a bar of the
   percent used, its reset (in how long), its rate (2.2), `2.0%/h`
@@ -351,7 +359,7 @@ trees for two machines and the records, a fake `ssh` that runs the
 piped collector on the second and fails the third, and fake `claude`,
 `systemctl` and `record`. It checks each source's figures, a machine
 with none of them, the page (no private text, the down machine, the
-sets in flight, mode 0644), a failing pull and a missing records tree,
+sets in flight, landings per hour from sets and plain `land`s within and before the window, mode 0644), a failing pull and a missing records tree,
 fields of the wrong type and markup in names, a machine answering
 nonsense, a page that cannot be written, and the units `install`
 writes. Fake `claude` and `codex` answer each machine from its tree:
