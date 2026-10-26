@@ -980,11 +980,16 @@ these (landing-flow.md 4, step 8):
 
 Ancestry is read in the workspace's checkouts: `REPO` under `DEV_ROOT`,
 else under the directory that holds agents' checkout, for agents and the
-five repositories. A commit target's repository is the checkout that
-has its commit. Where a commit it needs is missing, the wait fetches
-origin's `main` there, without `FETCH_HEAD`, at most once per poll. A
-landing with no checkout, or a commit no checkout has, ends only with
-its own verdict.
+five repositories; a shallow checkout counts as none. A commit target's
+repository is the checkout that has its commit, found without a fetch.
+The wait fetches origin's `main` into `refs/remotes/origin/main` alone
+(no `FETCH_HEAD`, tags, submodules or maintenance): once before it
+trusts that ref, and again, at most once per poll, where a commit it
+needs is missing; one still missing after a fetch stays missing. Each
+git call is killed with its children at its timeout, cut to the wait's
+deadline. A landing with no checkout, or a commit no checkout has, ends
+only with its own verdict; a landing whose ancestry git can't answer
+waits.
 
 It writes its `watch` record first, then exits 0 once each landing is
 cleared, 1 at the first red or on the set's `stopped`, 2 at once when a
