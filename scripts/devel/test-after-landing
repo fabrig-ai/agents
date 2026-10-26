@@ -390,6 +390,45 @@ def unwatched_red(lab):
     assert len(lab.posts()) == 1 and lab.state()['pending'] == []
 
 
+def meets_landings(lab):
+    env = dict(lab.env, LANDINGS_FEED=str(lab.root / 'feed.jsonl'), LANDINGS_POLL='.02')
+
+    def land_set(label, commit):
+        lab.append(event='started', set=label, token=label)
+        lab.append(event='landed', set=label, token=label, repo='demo', commit=commit)
+        lab.append(event='done', set=label, token=label)
+
+    def wait(label, status):
+        return call([PYTHON, '-I', '-B', SCRIPT.with_name('landings'), 'wait', '--cleared',
+                     label, '--timeout', '0.5'], lab.root, env, status)
+
+    one = lab.land()
+    lab.push()
+    land_set('demo/m1', one)
+    assert one in wait('demo/m1', 3).stderr
+    lab.run()
+    assert one[:9] + ' cleared by run' in wait('demo/m1', 0).stdout
+    two = lab.land(reds=['t1'])
+    lab.push()
+    land_set('demo/m2', two)
+    lab.run()
+    out = wait('demo/m2', 1).stdout
+    assert two[:9] + ' red by run' in out and 't1' in out and 'failure text' in out, out
+    runner_env = dict(lab.env, AFTER_LANDING_RED_GRACE='0')
+    lab.run(director=True, env=runner_env)
+    assert lab.posts() == [] and lab.state()['pending'] == []
+    out = call([PYTHON, '-I', '-B', SCRIPT.with_name('landings')], lab.root, env).stdout
+    assert f'demo: red at {two[:9]}' in out, out
+    assert f'first red {two[:9]} (demo/m2); green at {one[:9]}' in out, out
+    three = lab.land(reds=['t1', 't2'])
+    lab.push()
+    land_set('demo/m3', three)
+    lab.run(director=True, env=runner_env)
+    lab.run(director=True, env=runner_env)
+    assert len(lab.posts()) == 1 and three[:9] in lab.posts()[0]['argv'][4]
+    assert lab.verdict(three)['tests'] == ['t2']
+
+
 def paused(lab):
     env = dict(lab.env)
     del env['AFTER_LANDING_FIXTURE']
@@ -596,7 +635,7 @@ def main():
     start = time.monotonic()
     cases = {'polls': polls, 'no-tier': no_tier, 'flake': flake, 'red': red, 'bisect': bisect,
              'already-red': already_red, 'fault': fault, 'unwatched-red': unwatched_red,
-             'paused': paused, 'one-follower': one_follower, 'refusals': refusals,
+             'meets-landings': meets_landings, 'paused': paused, 'one-follower': one_follower, 'refusals': refusals,
              'multi-bisect': multi_bisect, 'limits': limits, 'nested-faults': nested_faults,
              'unnamed': unnamed, 'pending-delivery': pending_delivery, 'stale-watch': stale_watch,
              'history-reset': history_reset, 'trailers': trailers, 'feed-failure': feed_failure}
