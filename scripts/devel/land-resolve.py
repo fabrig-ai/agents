@@ -95,6 +95,8 @@ def merge_rows(base, main, branch, width):
     for key in theirs:
         if key not in ours and chosen[key] is not None:
             index = order.index(previous) + 1 if previous in order else 0
+            while index < len(order) and order[index] not in old and order[index] not in theirs:
+                index += 1
             order.insert(index, key)
         if key in order and chosen[key] is not None:
             previous = key

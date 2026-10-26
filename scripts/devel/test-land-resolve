@@ -149,6 +149,19 @@ def row_added(directory):
     assert ''.join(merged_rows) == ''.join(merged.splitlines(keepends=True)[6:])
 
 
+def added_in_one_place(directory):
+    lab = stopped(directory, STATUS + '| `d.md` | main | added |\n',
+                  STATUS + '| `e.md` | branch | added |\n')
+    code, output = lab.resolve()
+    assert code == 0, output
+    text = (lab.root / PATH).read_text()
+    assert text.endswith('| `c.md` | no | all |\n| `d.md` | main | added |\n'
+                         '| `e.md` | branch | added |\n'), text
+    message = lab.git('show', '-s', '--format=%B').stdout
+    assert (f'Rebase-Resolved: {PATH}: table rows: main added `d.md`; '
+            'this commit added `e.md`') in message, message
+
+
 def same_row(directory):
     refuses(stopped(directory, changed('b', 'main'), changed('b', 'branch')), '`b.md` changed on both sides')
 
@@ -234,7 +247,7 @@ def land_same_row(directory):
     assert lab.git('rev-parse', 'REBASE_HEAD').stdout.strip() == lab.branch
 
 
-CASES = (rows_kept, row_added, same_row, deleted_and_changed, added_on_both, malformed_row,
+CASES = (rows_kept, row_added, added_in_one_place, same_row, deleted_and_changed, added_on_both, malformed_row,
          outside_rows, code_file, all_or_nothing, not_stopped, land_rows, land_same_row)
 
 

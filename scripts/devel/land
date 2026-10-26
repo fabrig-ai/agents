@@ -549,6 +549,8 @@ land_cleanup() {
         echo "land: warning: cleanup could not start" >&2
 }
 
+# Settle each conflict stop and continue: 0 once the rebase finishes,
+# 1 when it stays stopped for a person.
 resolve_rebase() {
     local lines status
     while :; do
