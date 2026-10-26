@@ -45,6 +45,10 @@ here. Durable know-how belongs here, not in the session's memory or in
    resume: the branches, the notes' paths, "check main first"), what
    stays as decided, who is near, budgets and the machine, channels. At
    most 8 KiB: a long input stays in the owner's scratch, named by path.
+   It says that what is worth keeping from the scratch (a report, a
+   survey's data, a drafted task) goes into the record beside the
+   closing note before the README says `ended`: `tidy` deletes an ended
+   mission's scratch at once (agents-gate-speed's surveys, 10-26).
 2. **Commit it** with `record commit -m ... <path>` and read the output:
    "pushed", or the refusal to fix before anything starts.
 3. **Pull it on the machine** (`record pull` there), then start the
