@@ -20,28 +20,34 @@ ORDER = ('skein', 'smith', 'hearth', 'jig', 'temper')
 UPSTREAM = dict(skein=(), smith=('skein',), hearth=('skein',),
                 jig=('skein', 'smith'), temper=('skein', 'smith', 'jig'))
 PYTHON = sys.executable
+# Committed manifests and lockfiles are identical in every copied Lab. Git's
+# CLI rewrites this file-only prefix to that case's private origins.
+SOURCE = 'file:///land-set-fixture/origins/'
 # Guards that only catch hangs, never budgets: one generous bound, and one for a whole case.
 HANG = 60
 HEAVY = '#!/bin/sh\nexec "$@"\n'
 # Only the cases that read the argv log pay for logging each git call.
 GIT_TRACED = ('lock_conflict', 'outside_snapshot', 'kit_refusal', 'closure', 'refusal')
 LAND = r'''#!{python} -IS
-import os, signal, subprocess, sys, time
-from pathlib import Path
-import hashlib, json
+import os, sys
 args = sys.argv[1:]
 assert os.environ.get('LAND_TIDY') == '', 'land-set must suppress per-branch tidy calls'
 if args == ['--no-push', '--docs']:
     print('land: --no-push cannot be combined with --docs or --local', file=sys.stderr)
     sys.exit(2)
 assert args in ([], ['--no-push'])
+import subprocess
+from pathlib import Path
+import hashlib, json
 phase = 'gate' if args else 'push'
 def git(*args):
     return subprocess.check_output(['git', *args]).decode().strip()
-name = Path(git('remote', 'get-url', 'origin')).name.removesuffix('.git')
+# Every fixture worktree is named for its already-validated repository.
+name = os.path.basename(os.getcwd())
 with open(os.environ['LAND_TRACE'], 'a') as out:
     out.write(name + '\n')
 if os.environ.get('DESCENDANT_REPO') == name:
+    import time
     child = subprocess.Popen([sys.executable, '-c', """import os, signal, sys, time
 from pathlib import Path
 def stopped(signum, frame):
@@ -61,6 +67,7 @@ while True: time.sleep(.02)
     Path(os.environ['PAUSE_READY']).touch()
     while True: time.sleep(.02)
 if os.environ.get('PAUSE_REPO') == name:
+    import time
     Path(os.environ['PAUSE_READY']).touch()
     until = time.monotonic() + {hang}
     while not Path(os.environ['PAUSE_RELEASE']).exists():
@@ -139,14 +146,24 @@ def until(predicate, proc):
 
 
 class Lab:
-    def __init__(self, root, trace_git=False):
+    def __init__(self, root, trace_git=False, built=None):
+        if built is not None:
+            # Copy bytes, never hardlink mutable refs, indexes, objects or caches.
+            shutil.copytree(built, root, dirs_exist_ok=True)
+            for name in ORDER:
+                primary, work = root / 'primary' / name, root / 'work' / name
+                # Only Git's administrative paths change; committed bytes do not.
+                config = primary / '.git/config'
+                config.write_text(config.read_text().replace(built.as_uri(), root.as_uri()))
+                (work / '.git').write_text(f'gitdir: {primary}/.git/worktrees/{name}\n')
+                (primary / '.git/worktrees' / name / 'gitdir').write_text(str(work / '.git') + '\n')
         self.root = root
         self.trace_git = trace_git
         self.primary, self.work, self.origin, self.base = {}, {}, {}, {}
         self.bin = root / 'bin'
-        self.bin.mkdir()
+        self.bin.mkdir(exist_ok=True)
         self.tmp = root / 'tmp'
-        self.tmp.mkdir()
+        self.tmp.mkdir(exist_ok=True)
         self.holder = self.tmp / 'holder'
         self.trace = root / 'land.trace'
         self.trace.touch()
@@ -166,18 +183,26 @@ class Lab:
             self.env.pop(key, None)
         # Keep fixture maintenance out of every Git subprocess, Cargo's fetches too.
         count = int(self.env.get('GIT_CONFIG_COUNT', '0'))
-        for offset, (key, value) in enumerate((('maintenance.auto', 'false'), ('gc.auto', '0'))):
+        for offset, (key, value) in enumerate((('maintenance.auto', 'false'), ('gc.auto', '0'),
+                                               ('url.' + (root / 'origins').as_uri() + '/.insteadOf', SOURCE))):
             self.env[f'GIT_CONFIG_KEY_{count + offset}'] = key
             self.env[f'GIT_CONFIG_VALUE_{count + offset}'] = value
-        self.env['GIT_CONFIG_COUNT'] = str(count + 2)
+        self.env['GIT_CONFIG_COUNT'] = str(count + 3)
         self.env['CARGO_TARGET_DIR'] = str(root / 'cargo-target')
         # Cargo can fetch only the fixture's file:// sources; no registry dependencies exist.
         for name, body in [('heavy', HEAVY), ('land', LAND)]:
             path = self.bin / name
             path.write_text(body.format(python=PYTHON, hang=HANG))
             path.chmod(0o700)
+        if built is not None:
+            self.base = json.loads((root / 'baseline.json').read_text())
         for name in ORDER:
             path = root / 'primary' / name
+            if built is not None:
+                self.primary[name] = path
+                self.origin[name] = root / 'origins' / (name + '.git')
+                self.work[name] = root / 'work' / name
+                continue
             path.mkdir(parents=True)
             self.primary[name] = path
             self.git(path, 'init', '-b', 'main')
@@ -192,9 +217,9 @@ class Lab:
                 (sub / 'src').mkdir(parents=True)
                 manifest = f'[package]\nname="{crate}"\nversion="0.1.0"\nedition="2021"\n[dependencies]\n'
                 for up in UPSTREAM[name]:
-                    manifest += f'{up}-a={{git=' + json.dumps(self.origin[up].as_uri()) + '}\n'
+                    manifest += f'{up}-a={{git=' + json.dumps(SOURCE + up + '.git') + '}\n'
                     if name == 'temper' and up in ('skein', 'smith'):
-                        manifest += f'{up}-extra={{git=' + json.dumps(self.origin[up].as_uri()) + '}\n'
+                        manifest += f'{up}-extra={{git=' + json.dumps(SOURCE + up + '.git') + '}\n'
                 if crate == 'skein-a':
                     manifest += 'skein-b={path="../skein-b"}\n'
                 (sub / 'Cargo.toml').write_text(manifest)
@@ -1132,9 +1157,14 @@ SLOW = ('moved_earlier_in_second_round', 'moved_between_phases', 'lock_conflict'
         'refusal', 'pushed_then_failed', 'success', 'moved_gate_base', 'moving_bound', 'proved')
 
 
+def build_baseline(directory):
+    lab = Lab(directory)
+    (directory / 'baseline.json').write_text(json.dumps(lab.base))
+
+
 def run(case, directory, built):
-    case(Lab(directory, trace_git=case.__name__ in GIT_TRACED))
+    case(Lab(directory, trace_git=case.__name__ in GIT_TRACED, built=built))
 
 
 if __name__ == '__main__':
-    sys.exit(case_runner.main(__file__, CASES, run, slow=SLOW, prefix='land-set-fixture-'))
+    sys.exit(case_runner.main(__file__, CASES, run, slow=SLOW, template=build_baseline, prefix='land-set-fixture-'))
