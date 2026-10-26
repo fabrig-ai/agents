@@ -18,6 +18,9 @@ KIT = Path(__file__).resolve().parent
 SCRIPT = KIT / 'qa'
 REPOS = ('skein', 'smith', 'hearth', 'jig', 'temper')
 P = '20261026-0915-temper'
+CHATGPT = 'chatgpt'
+CLAUDE = 'claude'
+REAL = 'real-model'
 
 
 class Lab:
@@ -54,7 +57,7 @@ class Lab:
             self.env[f'GIT_CONFIG_VALUE_{count + index}'] = value
         self.env['GIT_CONFIG_COUNT'] = str(count + 4)
         self.configure(cleared={})
-        for name in ('post', 'codex-run', 'landings', 'systemctl'):
+        for name in ('post', 'codex-run', 'landings', 'systemctl', 'logins'):
             tool = root / name
             tool.write_text(f'#!{sys.executable} -S\n' + WATCH_TOOLS)
             tool.chmod(0o700)
@@ -116,7 +119,7 @@ class Lab:
 
     def pass_file(self, name=P, commits=None, outcome='done', started='2026-10-26T09:15:23Z', repo='temper', findings=3):
         commits = commits or ['a' * 40]
-        fields = dict(repository=repo, main=commits[-1], commits=' '.join(commits), machine='fixture',
+        fields = dict(repository=repo, main=commits[-1], commits=' '.join(commits), rung='-', machine='fixture',
                       model='gpt-6.1-sol', effort='high', started=started, ended='unknown',
                       wall='0:12', tokens='100/20/30', outcome=outcome)
         body = f'# QA pass {name}\n\n## Findings\n\n'
@@ -164,6 +167,13 @@ class Lab:
         self.publish('qa/decisions.md', text)
         self.configure(cleared={'temper': commits[-1]})
         return commits
+
+    def rung(self, repo, rung, *logins):
+        path = self.records / 'qa/rungs.md'
+        text = path.read_text() if path.exists() else '# QA rungs\n\n'
+        stamp = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+        text += f'- {stamp} {repo} {rung} {",".join(sorted(logins)) or "-"} fixture\n'
+        self.publish('qa/rungs.md', text)
 
     def watch(self, status=0, extra=None):
         return self.run('watch', '--director', 'director@fixture', '--once', status=status, extra=extra)
@@ -263,7 +273,7 @@ def a_pass_takes_its_commits(lab):
     lab.publish('qa/decisions.md', '# QA decisions\n\n' + ' '.join([words[0], earlier, *words[2:]]) + '\n')
     lab.pass_file(commits=[b], outcome='running', started=started)
     output = lab.run('passes', '--running').stdout
-    assert f'{P} temper running 0:12 100/20/30 {b[:9]}\n' in output
+    assert f'{P} temper - running 0:12 100/20/30 {b[:9]}\n' in output
     assert 'waiting: 0 commits chosen to run\n' in output
     assert lab.run('candidates', 'temper').stdout == 'no candidates\n'
     lab.run('decide', 'temper', b, 'run')
@@ -279,7 +289,7 @@ def findings_wait_until_triaged(lab):
     lab.pass_file(name=P + '-2', outcome='running', findings=1)
     assert lab.run('findings').stdout.splitlines() == [f'{P} {n} Problem {n}' for n in range(1, 4)]
     assert P + '-2' in lab.run('passes', '--running').stdout
-    assert f'{P} temper done' not in lab.run('passes', '--running').stdout
+    assert f'{P} temper - done' not in lab.run('passes', '--running').stdout
 
 
 def triage_routes_a_finding(lab):
@@ -470,14 +480,16 @@ def end(run, report, code=0):
 if name == 'codex-run':
     if config.get('refuse_launch'):
         sys.exit('fixture launch refused')
-    assert args[:3] == ['task', '--to', 'qa-watch'], args
+    assert args[:4] == ['task', '--to', 'qa-watch', '--on-stop'], args
+    assert Path(args[4]).is_absolute()
+    task, checkout, report = args[5:]
     runs.mkdir(parents=True, exist_ok=True)
     run = 'fixture-' + str(len(list(runs.glob('fixture-*'))) + 1)
     state = runs / run
     state.mkdir()
     started = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
-    (state / 'meta').write_text(f'model=gpt-6.1-sol\neffort=high\nstarted={started}\ntask={args[3]}\nreport={args[5]}\n')
-    Path(args[5]).write_text(f'codex-run: run {run} is writing this report.\n')
+    (state / 'meta').write_text(f'model=gpt-6.1-sol\neffort=high\nstarted={started}\ntask={task}\nreport={report}\n')
+    Path(report).write_text(f'codex-run: run {run} is writing this report.\n')
     if config.get('interrupt_launch'):
         os.kill(os.getppid(), 9)
     print(run, state)
@@ -492,11 +504,26 @@ elif name == 'landings':
 elif name == 'systemctl':
     run = args[-1].removeprefix('codex-run-')
     if args[1] == 'is-active':
-        sys.exit(3 if config.get('inactive') or (runs / run / 'ended').exists() else 0)
+        sys.exit(0 if config.get('unit_active') else 3 if config.get('inactive') or (runs / run / 'ended').exists() else 0)
     assert args[1] == 'stop', args
     if config.get('stop_failure'):
         sys.exit('fixture stop refused')
     end(run, 'codex-run: the run wrote no report and no last message; exit 143.\n', 143)
+elif name == 'logins':
+    assert args[0] in ('take', 'give') and args[2:4] == ['--as', 'qa-watch'], args
+    login = args[1]
+    if login in config.get('logins_refused', []):
+        print('fixture login refused', file=sys.stderr)
+        sys.exit(4)
+    if args[0] == 'take':
+        assert args[4:] == ['--note', 'temper'], args
+        if login in config.get('logins_busy', []):
+            print('fixture login busy', file=sys.stderr)
+            sys.exit(1)
+        print(root / 'logins' / login / 'login')
+    elif login in config.get('logins_out', []):
+        print('fixture login out', file=sys.stderr)
+        sys.exit(1)
 elif name == 'post':
     if args[0] == 'send':
         rest = args[3:] if args[1] == '--as' else args[1:]
@@ -530,10 +557,10 @@ def watch_starts_a_pass_on_the_cleared_main(lab):
     for text in (b, c, 'QA: feature 1', 'QA: feature 2', '120 minutes', str(directory / 'report.md'), str(KIT.parent.parent / 'roles/qa.md')):
         assert text in brief, (text, brief)
     call, = lab.calls('codex-run')
-    assert call == ['task', '--to', 'qa-watch', str(directory / 'brief.md'), str(checkout), str(directory / 'report.md')]
+    assert call == ['task', '--to', 'qa-watch', '--on-stop', str(directory / 'give-back'), str(directory / 'brief.md'), str(checkout), str(directory / 'report.md')]
     assert directory.stat().st_mode & 0o777 == 0o700
     text = lab.content(f'qa/passes/{state["pass"]}.md')
-    assert f'commits: {b} {c}\n' in text and 'outcome: running\n' in text and f'main: {c}\n' in text
+    assert f'commits: {b} {c}\nrung: -\n' in text and 'outcome: running\n' in text and f'main: {c}\n' in text
     assert 'machine: qa-fixture\n' in text
     assert lab.git(lab.origin, 'log', '-1', '--format=%s', 'main').startswith('qa-watch:')
     assert 'waiting: 0 commits' in lab.run('passes', '--running').stdout
@@ -757,6 +784,7 @@ def watch_reads_settings_and_stops_on_an_unreadable_feed(lab):
     assert len(lab.calls('codex-run')) == 2
     assert 'QA_BATCH must be positive' in lab.watch(status=2, extra={'QA_BATCH': '0'}).stderr
     assert 'QA_SLOTS must be' in lab.watch(status=2, extra={'QA_SLOTS': 'bad'}).stderr
+    assert 'QA_GIVE_BACK_SECONDS must be' in lab.watch(status=2, extra={'QA_GIVE_BACK_SECONDS': 'bad'}).stderr
 
 
 def watch_retries_post_and_prunes_finished_directories(lab):
@@ -839,7 +867,256 @@ def watch_start_refusal_starts_nothing_more(lab):
     assert len(lab.sent()) == 1 and 'fixture record refusal' in lab.sent()[0]['body']
 
 
-CASES = (watch_recovers_interrupted_launch_and_stop, watch_recovers_an_interrupted_start_commit,
+
+def rung_records_the_opening(lab):
+    assert lab.run('rung', 'temper', REAL, '--login', CHATGPT, '--why', 'x').stdout == f'opened: temper {REAL} {CHATGPT}\n'
+    text = lab.content('qa/rungs.md')
+    assert text.startswith('# QA rungs\n\n') and text.endswith(f' temper {REAL} {CHATGPT} x')
+    stamp = text.splitlines()[-1].split()[1]
+    assert lab.run('rung', 'temper').stdout == f'temper {REAL} {CHATGPT} since {stamp}\n'
+    assert lab.git(lab.origin, 'log', '-1', '--format=%s') == f'o/fixture: qa rung: temper {REAL}'
+    # The latest opening wins only for its repository; login order is canonical.
+    lab.run('rung', 'temper', 'next', '--login', CLAUDE, '--login', CHATGPT)
+    lab.run('rung', 'jig', 'fakes')
+    assert f'temper next {CHATGPT},{CLAUDE} since ' in lab.run('rung', 'temper').stdout
+    lab.run('rung', 'temper', 'fakes')
+    assert 'temper fakes - since ' in lab.run('rung', 'temper').stdout
+    lab.waiting(1)
+    lab.watch()
+    directory, state = lab.watch_state()
+    brief = (directory / 'brief.md').read_text()
+    assert '- Your rung: fakes, as the product' in brief and 'No held login.' in brief
+    assert state['rung'] == 'fakes' and not lab.calls('logins')
+
+
+def rung_without_an_opening_names_the_first(lab):
+    before = lab.head()
+    assert lab.run('rung', 'temper').stdout == "temper: no rung opened: the binding's first, no login\n"
+    assert lab.head() == before and not (lab.records / 'qa/rungs.md').exists()
+
+
+def rung_refuses_a_repeated_login(lab):
+    before = lab.head()
+    result = lab.run('rung', 'temper', REAL, '--login', CHATGPT, '--login', CHATGPT, status=2)
+    assert 'repeated login' in result.stderr
+    for args in [('temper', 'Bad'), ('temper', REAL, '--login', 'Bad'),
+                 ('temper', REAL, '--why', 'x\ny'), ('temper', REAL, '--why', 'x\ty'),
+                 ('unknown', REAL), ('temper', '--login', CHATGPT), ('temper', '--why', 'x')]:
+        lab.run('rung', *args, status=2)
+    assert lab.head() == before and not (lab.records / 'qa/rungs.md').exists()
+
+
+def watch_takes_the_rungs_login_before_the_pass(lab):
+    lab.rung('temper', REAL, CHATGPT)
+    lab.waiting(1)
+    lab.watch()
+    directory, state = lab.watch_state()
+    path = str(lab.root / 'logins' / CHATGPT / 'login')
+    assert lab.calls('logins') == [['take', CHATGPT, '--as', 'qa-watch', '--note', 'temper']]
+    calls = [json.loads(line)['tool'] for line in (lab.root / 'tools.jsonl').read_text().splitlines()]
+    assert calls.index('logins') < calls.index('codex-run')
+    brief = (directory / 'brief.md').read_text()
+    for text in (f'- Your rung: {REAL}, as the product', '- Held logins, taken for you by the service',
+                 f'    - {CHATGPT}: {path}', str(directory / 'give-back'), 'Never run `logins`, never read or copy a login.'):
+        assert text in brief, (text, brief)
+    assert lab.calls('codex-run')[0][3:5] == ['--on-stop', str(directory / 'give-back')]
+    assert f'commits: {state["commits"][0]}\nrung: {REAL}\n' in lab.content(f'qa/passes/{state["pass"]}.md')
+    assert state['rung'] == REAL and state['logins'] == {CHATGPT: path} and state['given'] == []
+    assert f'{state["pass"]} temper {REAL} running ' in lab.run('passes').stdout
+
+
+def watch_without_a_rung_takes_no_login(lab):
+    lab.waiting(1)
+    lab.watch()
+    directory, state = lab.watch_state()
+    assert not lab.calls('logins') and not state['logins'] and state['rung'] == '-'
+    brief = (directory / 'brief.md').read_text()
+    assert "- Your rung: the binding's first; no held login." in brief
+    assert 'Held logins,' not in brief
+
+
+def watch_waits_while_the_login_is_busy(lab):
+    lab.rung('temper', REAL, CHATGPT)
+    lab.waiting(1)
+    before = lab.head()
+    for config in [dict(logins_busy=[CHATGPT]), dict(logins_busy=[], logins_refused=[CHATGPT])]:
+        lab.configure(**config)
+        result = lab.watch()
+        assert f'temper: waiting for login {CHATGPT}:' in result.stdout
+        assert not lab.watch_states() and not lab.calls('codex-run') and lab.head() == before
+        assert 'waiting: 1 commits chosen to run' in lab.run('passes').stdout
+
+
+def watch_gives_back_the_first_when_the_second_is_busy(lab):
+    lab.rung('temper', REAL, CLAUDE, CHATGPT)
+    lab.waiting(1)
+    lab.configure(logins_busy=[CLAUDE])
+    lab.watch()
+    assert lab.calls('logins') == [['take', CHATGPT, '--as', 'qa-watch', '--note', 'temper'],
+                                 ['take', CLAUDE, '--as', 'qa-watch', '--note', 'temper'],
+                                 ['give', CHATGPT, '--as', 'qa-watch']]
+    assert not lab.watch_states() and not lab.calls('codex-run')
+    lab.configure(logins_out=[CHATGPT])
+    assert f'cannot give {CHATGPT} back' in lab.watch().stdout
+
+
+def watch_gives_the_login_after_the_unit_stops(lab):
+    lab.rung('temper', REAL, CHATGPT)
+    lab.waiting(1)
+    lab.watch()
+    lab.end_run()
+    lab.watch()
+    assert lab.calls('logins')[-1] == ['give', CHATGPT, '--as', 'qa-watch']
+    assert len(lab.calls('logins')) == 2 and not lab.sent()
+    _, state = lab.watch_state()
+    assert state['finished'] and state['given'] == [CHATGPT]
+    lab.watch()
+    assert len(lab.calls('logins')) == 2
+
+
+def watch_waits_for_the_unit_before_giving(lab):
+    lab.rung('temper', REAL, CHATGPT)
+    lab.waiting(1)
+    lab.watch()
+    lab.end_run()
+    lab.configure(unit_active=True)
+    (lab.tmp / 'machine.env').write_text('QA_GIVE_BACK_SECONDS=0\n')
+    lab.watch()
+    assert len(lab.calls('logins')) == 1
+    (lab.tmp / 'machine.env').write_text('QA_GIVE_BACK_SECONDS=90\n')
+    lab.watch(extra={'QA_GIVE_BACK_SECONDS': '0'})
+    assert len(lab.calls('logins')) == 1 and not lab.watch_state()[1]['finished']
+    lab.configure(unit_active=False)
+    lab.watch()
+    assert lab.watch_state()[1]['finished'] and lab.watch_state()[1]['given'] == [CHATGPT]
+
+
+def a_login_not_back_is_posted_and_retried(lab):
+    lab.rung('temper', REAL, CHATGPT)
+    lab.waiting(1)
+    lab.watch()
+    directory, state = lab.watch_state()
+    lab.end_run()
+    lab.configure(logins_out=[CHATGPT])
+    lab.watch()
+    sent, = lab.sent()
+    path = state['logins'][CHATGPT]
+    assert (f'Login {CHATGPT} is not back at {path}: its deployment is in {directory}; '
+            'qa watch gives it back once it is.') in sent['body']
+    assert lab.watch_state()[1]['finished'] and not lab.watch_state()[1]['given']
+    lab.configure(logins_out=[])
+    result = lab.watch()
+    assert f'{state["pass"]}: gave {CHATGPT} back' in result.stdout
+    assert lab.watch_state()[1]['given'] == [CHATGPT] and len(lab.sent()) == 1
+
+
+def watch_starts_no_pass_while_its_login_is_out(lab):
+    lab.rung('temper', REAL, CHATGPT)
+    lab.waiting(1)
+    lab.watch()
+    lab.end_run()
+    lab.configure(logins_out=[CHATGPT])
+    lab.watch()
+    _, state = lab.watch_state()
+    lab.waiting(1)
+    before = len(lab.calls('logins'))
+    result = lab.watch()
+    assert f'temper: login {CHATGPT} not back from {state["pass"]}' in result.stdout
+    assert len(lab.calls('logins')) == before + 1  # Only a retry of give, never take.
+    assert len(lab.calls('codex-run')) == 1 and len(lab.watch_states()) == 1
+
+
+def watch_keeps_a_pass_whose_login_is_out(lab):
+    lab.rung('temper', REAL, CHATGPT)
+    lab.waiting(1)
+    lab.watch()
+    lab.end_run()
+    lab.configure(logins_out=[CHATGPT])
+    lab.watch()
+    directory, state = lab.watch_state()
+    state['ended'] = (datetime.now(timezone.utc) - timedelta(days=8)).strftime('%Y-%m-%dT%H:%M:%SZ')
+    (directory / 'pass.json').write_text(json.dumps(state))
+    lab.watch()
+    assert directory.exists() and len(lab.sent()) == 1
+    lab.configure(logins_out=[])
+    lab.watch()
+    assert not directory.exists()
+
+
+def a_refused_launch_gives_the_login_back(lab):
+    lab.rung('temper', REAL, CHATGPT)
+    lab.waiting(1)
+    lab.configure(refuse_launch=True)
+    lab.watch()
+    _, state = lab.watch_state()
+    assert state['finished'] and state['given'] == [CHATGPT]
+    assert lab.calls('logins')[-1] == ['give', CHATGPT, '--as', 'qa-watch']
+    # Record refusal also gives back, and leaves custody recorded locally.
+    lab.waiting(1)
+    wrapper = lab.root / 'record-wrapper'
+    wrapper.write_text(f'#!{sys.executable} -S\nimport subprocess, sys\n'
+                       "if sys.argv[1] == 'commit':\n print('fixture record refusal', file=sys.stderr)\n sys.exit(2)\n"
+                       f'sys.exit(subprocess.run([{str(KIT / "record")!r}, *sys.argv[1:]]).returncode)\n')
+    wrapper.chmod(0o700)
+    before = lab.head()
+    lab.watch(extra={'QA_RECORD': str(wrapper)})
+    _, state = lab.watch_states()[-1]
+    assert state['finished'] and state['given'] == [CHATGPT] and lab.head() == before
+    assert len(lab.calls('codex-run')) == 1 and len(lab.calls('logins')) == 4
+    # A refused launch frees custody even when recording its failure is refused.
+    wrapper.write_text(f'#!{sys.executable} -S\nimport subprocess, sys\n'
+                       "if sys.argv[1] == 'commit' and not sys.argv[sys.argv.index('-m') + 1].endswith(' started'):\n"
+                       " print('fixture completion refusal', file=sys.stderr)\n sys.exit(2)\n"
+                       f'sys.exit(subprocess.run([{str(KIT / "record")!r}, *sys.argv[1:]]).returncode)\n')
+    lab.watch(status=2, extra={'QA_RECORD': str(wrapper)})
+    _, state = lab.watch_states()[-1]
+    assert not state['finished'] and state['given'] == [CHATGPT]
+    assert len(lab.calls('codex-run')) == 2 and len(lab.calls('logins')) == 6
+    lab.watch()
+    assert lab.watch_states()[-1][1]['finished'] and len(lab.calls('logins')) == 6
+
+
+def passes_before_rungs_still_read(lab):
+    lab.pass_file()
+    path = 'qa/passes/' + P + '.md'
+    lab.publish(path, (lab.records / path).read_text().replace('rung: -\n', ''))
+    assert f'{P} temper - done 0:12 100/20/30 aaaaaaaaa' in lab.run('passes').stdout
+
+
+def watch_caps_a_pass_holding_a_login(lab):
+    lab.rung('temper', REAL, CHATGPT)
+    lab.waiting(1)
+    lab.watch(extra={'QA_CAP_MINUTES': '0'})
+    lab.watch(extra={'QA_CAP_MINUTES': '0'})
+    _, state = lab.watch_state()
+    assert state['capped'] and not state['finished'] and len(lab.calls('logins')) == 1
+    assert ['--user', 'stop', 'codex-run-' + state['run']] in lab.calls('systemctl')
+    lab.configure(unit_active=True)
+    lab.watch(extra={'QA_GIVE_BACK_SECONDS': '0'})
+    assert not lab.watch_state()[1]['finished'] and len(lab.calls('logins')) == 1
+    lab.configure(unit_active=False)
+    lab.watch()
+    _, state = lab.watch_state()
+    assert state['finished'] and state['given'] == [CHATGPT]
+    assert 'outcome: capped' in lab.content(f'qa/passes/{state["pass"]}.md')
+
+
+CASES = (rung_records_the_opening,
+         rung_without_an_opening_names_the_first,
+         rung_refuses_a_repeated_login,
+         watch_takes_the_rungs_login_before_the_pass,
+         watch_without_a_rung_takes_no_login,
+         watch_waits_while_the_login_is_busy,
+         watch_gives_back_the_first_when_the_second_is_busy,
+         watch_gives_the_login_after_the_unit_stops,
+         watch_waits_for_the_unit_before_giving,
+         a_login_not_back_is_posted_and_retried,
+         watch_starts_no_pass_while_its_login_is_out,
+         watch_keeps_a_pass_whose_login_is_out,
+         a_refused_launch_gives_the_login_back,
+         passes_before_rungs_still_read,
+         watch_caps_a_pass_holding_a_login,
+         watch_recovers_interrupted_launch_and_stop, watch_recovers_an_interrupted_start_commit,
          watch_start_refusal_starts_nothing_more, watch_starts_a_pass_on_the_cleared_main,
          watch_waits_for_a_cleared_main_holding_the_oldest, watch_takes_a_batch,
          watch_finishes_a_pass_with_findings, watch_finishes_a_clean_pass_quietly,

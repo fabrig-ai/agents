@@ -854,6 +854,7 @@ def qa_places(lab):
     front = '---\n' + ''.join(f'{key}: unknown\n' for key in fields) + '---\n# QA pass\n'
     front = front.replace('outcome: unknown', 'outcome: running')
     for name, content in [('qa/decisions.md', '# QA decisions\n'), ('qa/triage.md', '# QA triage\n'),
+                          ('qa/rungs.md', '# QA rungs\n'),
                           ('qa/passes/20261026-0915-temper.md', front)]:
         lab.put(name, content)
         assert 'pushed' in lab.run('commit', name)
@@ -878,6 +879,7 @@ def qa_places(lab):
     lab.put('qa/decisions.md', '\n'.join(f'## {n}. heading' for n in range(101)))
     lab.run('commit', 'qa/decisions.md')  # QA logs have a byte cap, not the numbered decisions cap.
     for name, cap in [('qa/decisions.md', 128 * 1024), ('qa/triage.md', 128 * 1024),
+                      ('qa/rungs.md', 128 * 1024),
                       ('qa/passes/boundary.md', 8 * 1024)]:
         prefix = front if '/passes/' in name else ''
         lab.put(name, prefix + 'x' * (cap - len(prefix.encode())))

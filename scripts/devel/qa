@@ -4,6 +4,7 @@ qa decide REPO COMMIT... run|backlog [--why TEXT]
 qa backlog [REPO]
 qa passes [--running]
 qa findings
+qa rung REPO [RUNG [--login NAME]... [--why TEXT]]
 qa triage PASS N owner ADDRESS|backlog|drop [--why TEXT]
 qa watch --director ADDRESS [--once]
 """
@@ -25,6 +26,7 @@ import time
 os.umask(0o077)
 REPOSITORIES = ('skein', 'smith', 'hearth', 'jig', 'temper')
 NAME = r'[a-z0-9][a-z0-9_-]*'
+LOGIN = r'[a-z][a-z0-9-]*'
 SHA = r'[0-9a-f]{40}'
 PASS_KEYS = 'repository main commits machine model effort started ended wall tokens outcome'.split()
 
@@ -169,6 +171,8 @@ class Pass:
             key, sep, value = line.partition(':')
             need(sep and key not in fields and value.strip(), f'{path}: invalid front matter', 4)
             fields[key] = value.strip()
+        fields.setdefault('rung', '-')
+        need(fields['rung'] == '-' or re.fullmatch(NAME, fields['rung']), f'{path}: invalid rung', 4)
         need(all(key in fields for key in PASS_KEYS), f'{path}: incomplete front matter', 4)
         need(fields['repository'] in REPOSITORIES and fields['outcome'] in ('running', 'done', 'capped', 'failed'),
              f'{path}: invalid repository or outcome', 4)
@@ -220,8 +224,10 @@ class Record:
         if not path.exists():
             return []
         rows = []
-        pattern = (rf'- (\S+) (\S+) ({SHA}) (run|backlog)(?: (.*))?' if kind == 'decisions'
-                   else r'- (\S+) (\S+) ([1-9][0-9]*) (\S+)(?: (.*))?')
+        patterns = dict(decisions=rf'- (\S+) (\S+) ({SHA}) (run|backlog)(?: (.*))?',
+                        triage=r'- (\S+) (\S+) ([1-9][0-9]*) (\S+)(?: (.*))?',
+                        rungs=rf'- (\S+) (\S+) ({NAME}) (-|{LOGIN}(?:,{LOGIN})*)(?: (.*))?')
+        pattern = patterns[kind]
         for line in path.read_text().splitlines():
             if not line.strip() or line.startswith('#'):
                 continue
@@ -321,6 +327,35 @@ def decide(args, record, repositories):
     return
 
 
+def rung(record, repo):
+    opening = next((event for event in reversed(record.events('rungs')) if event['who'] == repo), None)
+    if opening:
+        return dict(rung=opening['item'], logins=[] if opening['route'] == '-' else opening['route'].split(','),
+                    time=opening['time'])
+    return None
+
+
+def open_rung(args, record):
+    if args.rung is None:
+        need(not args.login and not args.why, '--login and --why need a rung')
+        opening = rung(record, args.repo)
+        if opening:
+            logins = ','.join(opening['logins']) or '-'
+            stamp = opening['time'].strftime('%Y-%m-%dT%H:%M:%SZ')
+            print(f'{args.repo} {opening["rung"]} {logins} since {stamp}')
+        else:
+            print(f"{args.repo}: no rung opened: the binding's first, no login")
+        return
+    need(re.fullmatch(NAME, args.rung), 'invalid rung: expected NAME')
+    need(all(re.fullmatch(LOGIN, name) for name in args.login), 'invalid login: expected NAME')
+    need(len(args.login) == len(set(args.login)), 'repeated login')
+    logins = ','.join(sorted(args.login)) or '-'
+    name = 'qa/rungs.md'
+    text = record.append(name, f'- {timestamp()} {args.repo} {args.rung} {logins} {args.why}', '# QA rungs')
+    record.commit({name: text}, f'qa rung: {args.repo} {args.rung}')
+    print(f'opened: {args.repo} {args.rung} {logins}')
+
+
 def findings(record):
     triaged = {(r['who'], int(r['item'])) for r in record.events('triage')}
     lines = [f'{p.name} {n} {title}' for p in record.passes() if p.fields['outcome'] != 'running'
@@ -383,7 +418,7 @@ def backlog(repo, record, repositories):
 
 
 def passes(running, record, repositories):
-    lines = [f'{p.name} {p.fields["repository"]} {p.fields["outcome"]} {p.fields["wall"]} {p.fields["tokens"]} '
+    lines = [f'{p.name} {p.fields["repository"]} {p.fields["rung"]} {p.fields["outcome"]} {p.fields["wall"]} {p.fields["tokens"]} '
              + ' '.join(s[:9] for s in p.fields['commits'].split()) for p in record.passes()
              if not running or p.fields['outcome'] == 'running']
     print('\n'.join(lines) or 'no passes')
@@ -402,6 +437,7 @@ Read {agents}/roles/qa.md first: it is your role.
 - The commits to test, oldest first:
 {commits}
 - Your scratch directory: {directory}.
+{rung_brief}
 - Your wall time is capped at {cap} minutes, from {started}: past it
   your session is stopped, and your report is what the file holds
   then. Write it early and keep it current.
@@ -416,14 +452,15 @@ def log(message):
 
 def settings(workspace):
     # Same precedence and valid machine.env lines as kit.sh's machine_setting.
-    values = dict(QA_SLOTS='1', QA_BATCH='5', QA_CAP_MINUTES='120', QA_INTERVAL_SECONDS='300')
+    values = dict(QA_SLOTS='1', QA_BATCH='5', QA_CAP_MINUTES='120', QA_INTERVAL_SECONDS='300',
+                  QA_GIVE_BACK_SECONDS='90')
     path = workspace.tmp / 'machine.env'
     try:
         text = path.read_text(errors='replace')
     except OSError:
         text = ''  # kit.sh ignores an absent or unreadable machine file.
     for line in text.split('\n'):
-        match = re.fullmatch(r'(QA_SLOTS|QA_BATCH|QA_CAP_MINUTES|QA_INTERVAL_SECONDS)=([0-9]+)', line)
+        match = re.fullmatch(r'(QA_SLOTS|QA_BATCH|QA_CAP_MINUTES|QA_INTERVAL_SECONDS|QA_GIVE_BACK_SECONDS)=([0-9]+)', line)
         if match:
             values[match[1]] = match[2]
     for key in values:
@@ -458,6 +495,30 @@ class Watch:
             need(not state['run'] or re.fullmatch(r'[a-zA-Z0-9_-]+', state['run']), f'{path}: invalid run', 4)
             result.append((path.parent, state))
         return result
+
+    def outstanding(self, state):
+        return {name: path for name, path in state.get('logins', {}).items() if name not in state.get('given', [])}
+
+    def give(self, directory, state):
+        for name in self.outstanding(state):
+            result = self.call('logins', 'give', name, '--as', 'qa-watch')
+            if result.returncode == 0:
+                state.setdefault('given', []).append(name)
+                self.save(directory, state)
+                log(f'{state["pass"]}: gave {name} back')
+            else:
+                log(f'{state["pass"]}: cannot give {name} back: {result.stderr.strip()}')
+
+    def unit_stopped(self, state, seconds):
+        # qa-flow.md 10: ended precedes the unit's on-stop give-back.
+        deadline = time.monotonic() + seconds
+        while self.call('systemctl', '--user', 'is-active', '--quiet', 'codex-run-' + state['run']).returncode == 0:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                log(f'{state["pass"]}: waiting for unit to stop before giving logins back')
+                return False
+            time.sleep(min(2, remaining))
+        return True
 
     def notify(self, directory, state):
         notice = state.get('notice')
@@ -525,16 +586,20 @@ class Watch:
             self.record.commit({f'qa/passes/{name}.md': result.text()}, f'qa watch: {name} failed')
             log(f'{name}: report refused by record: {error}')
         count = len(result.findings())
+        self.give(directory, state)
         state.update(finished=True, ended=ended)
-        if outcome in ('failed', 'capped') or count:
+        missing = self.outstanding(state)
+        if outcome in ('failed', 'capped') or count or missing:
             state['notice'] = dict(subject=f'qa: pass {name} {outcome}, {count} findings', body=(
                 f'QA pass {name} on {state["repository"]} ended {outcome} after {wall}, with {count} findings: '
-                f"records' qa/passes/{name}.md; qa findings lists them.\n"))
+                f"records' qa/passes/{name}.md; qa findings lists them.\n"
+                + ''.join(f'Login {login} is not back at {path}: its deployment is in {directory}; '
+                          'qa watch gives it back once it is.\n' for login, path in missing.items())))
         self.save(directory, state)
         log(f'{name}: {outcome}, {count} findings, {wall}')
         self.notify(directory, state)
 
-    def start(self, repo, main, commits, checkout, cap):
+    def start(self, repo, main, commits, checkout, cap, rung, logins):
         started = timestamp()
         base = utc(started).strftime('%Y%m%d-%H%M-') + repo
         name, index = base, 1
@@ -544,33 +609,57 @@ class Watch:
         directory = self.directory / name
         directory.mkdir(mode=0o700)
         state = {'pass': name, 'repository': repo, 'main': main, 'commits': [c['commit'] for c in commits],
-                 'started': started, 'run': '', 'capped': False, 'finished': False}
+                 'started': started, 'run': '', 'capped': False, 'finished': False,
+                 'rung': rung, 'logins': logins, 'given': []}
+        # Persist custody before preparing the checkout or committing its start.
+        self.save(directory, state)
         git(checkout, 'checkout', '--detach', '--force', main)
         git(checkout, 'clean', '-fdq')
+        if rung == '-':
+            rung_brief = "- Your rung: the binding's first; no held login."
+        else:
+            rung_brief = (f"- Your rung: {rung}, as the product's binding names it: set your\n"
+                          '  deployment up on it.')
+            if not logins:
+                rung_brief += '\nNo held login.'
+            else:
+                rung_brief += ('\n- Held logins, taken for you by the service, each at rest at its path:\n'
+                               + '\n'.join(f'    - {name}: {path}' for name, path in logins.items())
+                               + f"\n  Move each into your deployment as the binding says. At once after,\n"
+                               f'  write {directory}/give-back: an executable that moves each back to\n'
+                               "  its path by the product's export. Run it yourself before your\n"
+                               '  deployment stops, and check each path by stat alone (a regular\n'
+                               '  file, 0600, not empty). Your unit runs it too when it stops, whatever\n'
+                               '  stops it. Never run `logins`, never read or copy a login.')
         brief = BRIEF.format(name=name, agents=Path(__file__).resolve().parents[2], repo=repo, main=main,
-                             checkout=checkout, directory=directory, cap=cap, started=started,
+                             checkout=checkout, directory=directory, cap=cap, started=started, rung_brief=rung_brief,
                              commits='\n'.join(f'  - {c["commit"]} {c["subject"]}\n    QA: {c["qa"]}' for c in commits))
         replace(directory / 'brief.md', brief.encode())
-        fields = dict(repository=repo, main=main, commits=' '.join(state['commits']), machine=self.workspace.machine(),
+        fields = dict(repository=repo, main=main, commits=' '.join(state['commits']), rung=rung, machine=self.workspace.machine(),
                       model='unknown', effort='unknown', started=started, ended='unknown', wall='unknown',
                       tokens='unknown', outcome='running')
         report = Pass(name, fields, f'# QA pass {name}\n')
-        # State precedes the commit: a restart can always find a committed start.
-        self.save(directory, state)
         try:
             self.record.commit({f'qa/passes/{name}.md': report.text()}, f'qa watch: {name} started')
         except Problem as error:
             log(f'{name}: record refused start: {error}')
+            self.give(directory, state)
+            state.update(finished=True, ended=timestamp())
+            self.save(directory, state)
             message = directory / 'post-body'
             replace(message, f'QA pass {name} could not start: {error}.\n'.encode())
             sent = self.call('post', 'send', '--as', 'qa-watch', self.director, f'qa: pass {name} refused', message)
             if sent.returncode not in (0, 3):
                 log(f'{name}: post failed: {sent.stderr.strip()}')
-            shutil.rmtree(directory)
+            if not logins:
+                shutil.rmtree(directory)
             return False
-        launch = self.call('codex-run', 'task', '--to', 'qa-watch', directory / 'brief.md', checkout, directory / 'report.md')
+        launch = self.call('codex-run', 'task', '--to', 'qa-watch', '--on-stop', directory / 'give-back',
+                           directory / 'brief.md', checkout, directory / 'report.md')
         words = launch.stdout.split()
         if launch.returncode or not words or not re.fullmatch(r'[a-zA-Z0-9_-]+', words[0]):
+            # No unit launched: a record failure must not keep resting logins held.
+            self.give(directory, state)
             self.finish(directory, state, 'codex-run refused: ' + (launch.stderr.strip() or launch.stdout.strip() or 'no run id'))
         else:
             state['run'] = words[0]
@@ -598,10 +687,14 @@ class Watch:
         with self.record.locked():
             for directory, state in self.local_passes():
                 if state['finished']:
+                    self.give(directory, state)
                     self.notify(directory, state)
                     continue
                 if not state['run']:
                     if not self.record.path(f'qa/passes/{state["pass"]}.md').exists():
+                        self.give(directory, state)
+                        if self.outstanding(state):
+                            continue
                         shutil.rmtree(directory)
                         log(f'{state["pass"]}: removed uncommitted start')
                         continue
@@ -609,6 +702,8 @@ class Watch:
                 run = state['run']
                 ended = self.runs / run / 'ended' if run else None
                 if ended and ended.exists():
+                    if self.outstanding(state) and not self.unit_stopped(state, options['QA_GIVE_BACK_SECONDS']):
+                        continue
                     self.finish(directory, state)
                 elif not run:
                     self.finish(directory, state, 'The service stopped before saving a run id.')
@@ -666,11 +761,32 @@ class Watch:
                             commits.append(dict(commit=sha, subject=subject, qa=' '.join(trailer.splitlines())))
                             if len(commits) == options['QA_BATCH']:
                                 break
-                    if not self.start(repo, main, commits, checkout, options['QA_CAP_MINUTES']):
-                        break
-                    free -= 1
+                    opening = rung(self.record, repo)
+                    names = sorted(opening['logins']) if opening else []
+                    held = [(name, state['pass']) for _, state in self.local_passes()
+                            for name in self.outstanding(state) if name in names]
+                    if held:
+                        for name, pass_name in held:
+                            log(f'{repo}: login {name} not back from {pass_name}')
+                        continue
+                    logins = {}
+                    for name in names:
+                        taken = self.call('logins', 'take', name, '--as', 'qa-watch', '--note', repo)
+                        if taken.returncode:
+                            for login in logins:
+                                given = self.call('logins', 'give', login, '--as', 'qa-watch')
+                                if given.returncode:
+                                    log(f'{repo}: cannot give {login} back: {given.stderr.strip()}')
+                            log(f'{repo}: waiting for login {name}: {taken.stderr.strip()}')
+                            break
+                        logins[name] = taken.stdout.strip()
+                    else:
+                        if not self.start(repo, main, commits, checkout, options['QA_CAP_MINUTES'],
+                                          opening['rung'] if opening else '-', logins):
+                            break
+                        free -= 1
             for directory, state in self.local_passes():
-                if state['finished'] and not state.get('notice') and (utc(timestamp()) - utc(state['ended'])).total_seconds() >= 7 * 86400:
+                if state['finished'] and not self.outstanding(state) and not state.get('notice') and (utc(timestamp()) - utc(state['ended'])).total_seconds() >= 7 * 86400:
                     shutil.rmtree(directory)
                     log(f'{state["pass"]}: pruned')
 
@@ -720,6 +836,11 @@ def main():
     decide_parser.add_argument('--why', default='')
     sub.add_parser('passes').add_argument('--running', action='store_true')
     sub.add_parser('findings')
+    rung_parser = sub.add_parser('rung')
+    rung_parser.add_argument('repo')
+    rung_parser.add_argument('rung', nargs='?')
+    rung_parser.add_argument('--login', action='append', default=[])
+    rung_parser.add_argument('--why', default='')
     triage_parser = sub.add_parser('triage')
     triage_parser.add_argument('pass_name')
     triage_parser.add_argument('number', type=int)
@@ -750,6 +871,8 @@ def main():
                 backlog(repo, record, repositories)
             elif args.command == 'passes':
                 passes(args.running, record, repositories)
+            elif args.command == 'rung':
+                open_rung(args, record)
             elif args.command == 'findings':
                 findings(record)
             elif args.command == 'triage':
