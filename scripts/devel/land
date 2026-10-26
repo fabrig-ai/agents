@@ -609,10 +609,11 @@ rebase on it by hand, resolve them, then land again."
         gated=$tree
         gate_kind=cached
         if summary=$(cache_read "$cache"); then
-            :
+            policy_recheck
         elif gated=$(gated_before "$tree"); then
             summary=$(cache_read "$cache_dir/$(gate_key "$gated")")
             echo "land: the gate passed on $gated, which differs from this tree only in docs/ Markdown" >&2
+            policy_recheck
         elif [[ ${LAND_PROVED:-0} == 1 ]]; then
             die 10 "main moved since the proof, so its gate no longer holds; nothing landed"
         else
@@ -672,7 +673,6 @@ rebase on it by hand, resolve them, then land again."
             printf 'gate-evidence-v3\n%s\n%s\n' "$policy" "$summary" >"$cache_tmp"
             mv -f "$cache_tmp" "$cache"
         fi
-        policy_recheck
     fi
 
     # Construct the amendment from the verified object, then compare-and-swap

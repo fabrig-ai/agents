@@ -666,6 +666,59 @@ sys.exit(result.returncode)
         self.assertEqual(len(self.calls()), 1)
         self.assertEqual(self.git("log", "-1", "--format=%(trailers:key=Gate-Tree,valueonly)").strip(), before)
 
+    def cached_policy_mutation(self, docs_only=False):
+        # Install the barrier in this fixture's copy before producing cached
+        # evidence: land's implementation is itself a policy input.
+        land = self.kit / "land"
+        source = land.read_text()
+        summary = r'''    printf '%s\n' "${lines[2]}"'''
+        self.assertEqual(source.count(summary), 1)
+        replacement = self.kit / "land-cache-fixture"
+        self.script(replacement, source.replace(summary, "    land_fault after_cache_read\n" + summary))
+        replacement.replace(land)
+        self.land()
+        if docs_only:
+            self.advance_main_docs()
+        else:
+            self.retry()
+        main = self.git("rev-parse", "main")
+        faults = self.root / "tmp/faults"
+        faults.mkdir()
+        (faults / "arm-after_cache_read").touch()
+        extra = {"HEAVY_RECOVERY_FIXTURE": "1", "HEAVY_FAULT_DIR": str(faults)}
+        output = self.root / "cached-policy-mutation.txt"
+        with output.open("w") as out:
+            child = subprocess.Popen([str(land), "--local", "--gate", "true"],
+                cwd=self.repo, env=self.env | extra, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT)
+        try:
+            deadline = time.monotonic() + 20
+            while not (faults / "land-after_cache_read").exists():
+                self.assertIsNone(child.poll(), output.read_text())
+                self.assertLess(time.monotonic(), deadline, "cache policy fixture barrier")
+                time.sleep(.02)
+            # A docs-only hit has already rebased onto the advanced main.
+            head = self.git("rev-parse", "HEAD")
+            (self.fonts / "DejaVuSans.ttf").write_bytes(b"changed fixture font")
+            (faults / "continue-after_cache_read").touch()
+            self.assertEqual(child.wait(timeout=20), 4, output.read_text())
+            self.assertIn("the gate policy changed; evidence was not accepted", output.read_text())
+            if docs_only:
+                self.assertIn("differs from this tree only in docs/ Markdown", output.read_text())
+            self.assertEqual(self.git("rev-parse", "HEAD"), head)
+            self.assertEqual(self.git("rev-parse", "main"), main)
+            self.assertEqual(len(self.calls()), 1)
+        finally:
+            (faults / "continue-after_cache_read").touch()
+            if child.poll() is None:
+                child.terminate()
+                child.wait(timeout=20)
+
+    def test_cached_policy_mutation_refuses_evidence(self):
+        self.cached_policy_mutation()
+
+    def test_docs_only_cached_policy_mutation_refuses_evidence(self):
+        self.cached_policy_mutation(docs_only=True)
+
     def test_docs_only_different_policy_cannot_reuse(self):
         self.land()
         self.advance_main_docs()
@@ -789,7 +842,7 @@ sys.exit(result.returncode)
         gate = 'printf "# mutation\\n" >> "$SKEIN_TEST_CHROMIUM"'
         result = self.land(check=False, gate=gate)
         self.assertEqual(result.returncode, 4, result.stdout + result.stderr)
-        self.assertIn("gate policy changed", result.stderr)
+        self.assertIn("the gate policy changed; evidence was not accepted", result.stderr)
         self.assertEqual(self.git("rev-parse", "main").strip(), self.base)
         self.assertFalse((self.root / "tmp/gates/repo").exists())
 
