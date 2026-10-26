@@ -24,15 +24,16 @@ implementers. Each answers to the one above it, by post
   each given a task file by its owner. They build and test narrowly
   while they work, and widen, lint and format once, when the task's
   changes are done.
+- **QA passes** ([qa.md](qa.md)) are Codex sessions that `qa watch`
+  starts on a cleared `main`, each testing what a batch of landed
+  commits changed for a user, through the product's own tool
+  ([qa-flow.md](../docs/design/qa-flow.md)).
 
 Designers and owners are Claude Code sessions on Opus 5.5 at xhigh.
 Claude is for taste; everything else goes to Codex.
 
 ## 2. Open questions
 
-- **QA after landing:** designed in
-  [qa-flow.md](../docs/design/qa-flow.md), not built. Who triages its
-  findings is open; for now, the director.
 - **The resource watcher:** a tool that wakes an owner when CPU, memory
   or disk need it (owners.md 2), to be built.
 - **temper's drafts that read our roles:** `draft/configuring.md` and

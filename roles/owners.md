@@ -153,6 +153,10 @@ out. The security rules are director.md 10's.
   `docs/design/STATUS.md`, and posts its parent one line: what can now
   be tried, with the commits, and what the code taught that the design
   doesn't say (a boundary that moved, a behaviour settled).
+- **The QA marker:** a landing commit whose change a user meets
+  through the product's tool carries the trailer `QA: <what a user can
+  now do>`, one line of at most 160 characters, which its landing task
+  writes ([qa-flow.md](../docs/design/qa-flow.md) 2).
 - **The verdict** (landing-flow.md 4, step 8): on a code landing's
   report, the owner starts its wait in a user unit that posts it the
   exit, `systemd-run --user --collect --quiet bash -lc 'landings wait
