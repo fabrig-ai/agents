@@ -30,6 +30,9 @@ SSH = ['ssh', '-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
 FEED = '/home/free/.local/state/agents-land-set/feed.jsonl'
 TAIL = 'tail -n 5000 ' + FEED
 ORDER = ('skein', 'smith', 'hearth', 'jig', 'temper')
+CHECKOUTS = ('agents', *ORDER)
+GIT_READ_TIMEOUT = 5
+GIT_FETCH_TIMEOUT = 30
 # Copied verbatim from land-set's FEED program.
 FEED_PROGRAM = '''import fcntl, os, stat, sys
 os.umask(0o077)
@@ -300,14 +303,170 @@ def verdict_line(row):
             print('    ' + line)
 
 
-def clearance(records, runner, target):
-    verdicts = [r for r in runner if r['kind'] == 'tier' and r['event'] == 'verdict']
-    latest = {}
-    for row in sorted(verdicts, key=lambda r: r['utc']):
-        latest[row['tier'], row['commit']] = row
+def workspace():
+    """The directory that holds the workspace's checkouts."""
+    agents = Path(__file__).resolve().parent.parent.parent
+    return Path(os.environ.get('DEV_ROOT', str(agents.parent if agents.name == 'agents'
+                                             else Path.home() / 'src/rust')))
+
+
+class Checkouts:
+    """Read ancestry without touching a worktree, branch, index or FETCH_HEAD."""
+
+    def __init__(self, root):
+        self.root = root
+        self.commits, self.ancestry, self.trees = {}, {}, {}
+        self.poll()
+
+    def poll(self):
+        self.fetched = {}
+
+    def git(self, repo, *args, timeout=GIT_READ_TIMEOUT):
+        path = self.root / repo
+        if not (path / '.git').exists():
+            return None
+        try:
+            return subprocess.run(['git', '-C', str(path), *args],
+                                  stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE, text=True, errors='replace', timeout=timeout,
+                                  env=dict(os.environ, GIT_TERMINAL_PROMPT='0'))
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+
+    def fetch(self, repo):
+        if repo not in self.fetched:
+            result = self.git(repo, 'fetch', '--quiet', '--no-write-fetch-head',
+                              'origin', 'main', timeout=GIT_FETCH_TIMEOUT)
+            self.fetched[repo] = result is not None and result.returncode == 0
+        return self.fetched[repo]
+
+    def resolve(self, repo, commit):
+        key = repo, commit.lower()
+        if key not in self.commits:
+            result = self.git(repo, 'rev-parse', '--verify', commit + '^{commit}')
+            if result is not None and result.returncode == 0:
+                self.commits[key] = result.stdout.strip()
+        return self.commits.get(key)
+
+    def find(self, commit, repo=None):
+        if not re.fullmatch(r'[0-9a-fA-F]{7,40}', commit):
+            return []
+        found = []
+        for name in (repo,) if repo in CHECKOUTS else CHECKOUTS if repo is None else ():
+            if not (self.root / name / '.git').exists():
+                continue
+            full = self.resolve(name, commit.lower())
+            if full is None and self.fetch(name):
+                full = self.resolve(name, commit.lower())
+            if full is not None:
+                found.append((name, full))
+        return found
+
+    def on_main(self, repo, commit):
+        def held():
+            result = self.git(repo, 'rev-parse', '--verify', 'refs/remotes/origin/main^{commit}')
+            if result is None or result.returncode:
+                return None
+            return self.holds(repo, result.stdout.strip(), commit)
+
+        answer = held()
+        if answer is True:
+            return True
+        if not self.fetch(repo):
+            return None
+        return held()
+
+    def holds(self, repo, main, commit):
+        if not all(re.fullmatch(r'[0-9a-fA-F]{7,40}', value) for value in (main, commit)):
+            return None
+        full = self.resolve(repo, main.lower())
+        tip = self.resolve(repo, commit.lower())
+        if full is None or tip is None:
+            if not self.fetch(repo):
+                return None
+            full = self.resolve(repo, main.lower())
+            tip = self.resolve(repo, commit.lower())
+        if full is None or tip is None:
+            return None
+        key = repo, full, tip
+        if key not in self.ancestry:
+            result = self.git(repo, 'merge-base', '--is-ancestor', tip, full)
+            if result is not None and result.returncode in (0, 1):
+                self.ancestry[key] = result.returncode == 0
+        return self.ancestry.get(key)
+
+    def has_tier(self, repo, commit):
+        key = repo, commit
+        if key not in self.trees:
+            result = self.git(repo, 'ls-tree', commit, '--', 'scripts/after-landing.sh')
+            if result is not None and result.returncode == 0:
+                self.trees[key] = bool(result.stdout.strip())
+        return self.trees.get(key)
+
+
+def judge(runner, checkouts, repo, commit):
+    """Return (outcome, lines), or None while this landing is undecided."""
+    def lines(row, suffix='', naming=None):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            verdict_line(dict(row, commit=naming or row['commit']))
+        text = out.getvalue()
+        if suffix:
+            run = 'by run ' + row['run'][:9]
+            text = text.replace(run, run + suffix, 1)
+        return row['verdict'], text.splitlines()
+
+    mine = [r for r in runner if r['kind'] == 'tier'
+            and (repo is None or r['tier'] == repo)]
+    own = newest([r for r in mine if r['event'] == 'verdict'
+                  and (r['commit'].lower().startswith(commit.lower()) if repo is None
+                       else r['commit'] == commit)])
+    if own is not None:
+        return lines(own)
+    found = checkouts.find(commit, repo)
+    if len(found) != 1:
+        return None
+    repo, commit = found[0]
+    held = checkouts.on_main(repo, commit)
+    if held is False:
+        return 'not landed', [f'landings: {repo} {commit[:9]} is not on main: wait on the commit that landed']
+    if held is None:
+        return None
+    tier = checkouts.has_tier(repo, commit)
+    if tier is False:
+        stamp = datetime.now(timezone.utc).strftime('%m-%d %H:%MZ')
+        return 'cleared', [f'{stamp} {repo} {commit[:9]} cleared on landing: {repo} has no tier']
+    if tier is None:
+        return None
+    mine = [r for r in mine if r['tier'] == repo]
+    runs = []
+    for end in mine:
+        if end['event'] != 'tier':
+            continue
+        start = newest([r for r in mine if r['event'] == 'running' and r['token'] == end['token']])
+        if start is None or checkouts.holds(repo, end['commit'], commit) is not True:
+            continue
+        if start['from'] is not None and checkouts.holds(repo, start['from'], commit) is not False:
+            continue
+        runs.append(end)
+    end = newest(runs)
+    if end is None:
+        return None
+    if end.get('baseline'):
+        return lines(dict(end, verdict='cleared', run=end['commit']), ', which holds it', commit)
+    verdicts = [r for r in mine if r['event'] == 'verdict' and r['token'] == end['token']
+                and checkouts.holds(repo, r['commit'], commit) is True]
+    oldest = next((r for r in verdicts if all(
+        checkouts.holds(repo, other['commit'], r['commit']) is True for other in verdicts)), None)
+    if oldest is not None:
+        return lines(oldest, f", which holds it in landing {oldest['commit'][:9]}", commit)
+    return None
+
+
+def clearance(records, runner, target, checkouts):
     if re.fullmatch(r'[0-9a-fA-F]{7,40}', target):
-        landings = [key for key in latest if key[1].lower().startswith(target.lower())]
-        ready = bool(landings)
+        landings = [(None, target)]
+        ready = True
     else:
         run = latest_runs(records).get(target, [])
         terminal = ending(run)
@@ -317,12 +476,21 @@ def clearance(records, runner, target):
         ready = terminal is not None and terminal['event'] == 'done'
         landings = list(dict.fromkeys((r['repo'], r['commit']) for r in run
                                      if r['event'] == 'landed' and r.get('repo') and r.get('commit'))) if ready else []
-    decided = [latest[key] for key in landings if key in latest]
-    missing = [key for key in landings if key not in latest]
-    red = any(r['verdict'] == 'red' for r in decided)
+    decided, missing = [], []
+    for repo, commit in landings:
+        answer = judge(runner, checkouts, repo, commit)
+        if answer is None:
+            found = checkouts.find(commit, repo) if repo is None else []
+            missing.append(found[0] if len(found) == 1 else (repo, commit))
+        elif answer[0] == 'not landed':
+            print('\n'.join(answer[1]), file=sys.stderr)
+            return 2, [], 'not landed'
+        else:
+            decided.append(answer)
+    red = any(outcome == 'red' for outcome, _ in decided)
     if red or (ready and not missing):
-        for row in decided:
-            verdict_line(row)
+        for _, lines in decided:
+            print('\n'.join(lines))
         return (1 if red else 0), missing, ('red' if red else 'cleared')
     return None, missing, None
 
@@ -387,6 +555,7 @@ def wait(label, timeout, poll, unreachable, read=15, cleared=False):
     last_error = None
     first_read = True
     missing = []
+    checkouts = Checkouts(workspace())
     if cleared:
         watch(label, read)
     while True:
@@ -395,6 +564,7 @@ def wait(label, timeout, poll, unreachable, read=15, cleared=False):
         read_limit = read if first_read else max(
             .001, min(read, deadline - now, last_read + unreachable - now))
         first_read = False
+        checkouts.poll()
         try:
             records, runner = read_feed(read_limit)
         except (OSError, subprocess.TimeoutExpired) as error:
@@ -409,7 +579,7 @@ def wait(label, timeout, poll, unreachable, read=15, cleared=False):
             last_read = time.monotonic()
             last_error = None
             if cleared:
-                status, missing, outcome = clearance(records, runner, label)
+                status, missing, outcome = clearance(records, runner, label, checkouts)
                 if status is not None:
                     return status, outcome
             else:
@@ -434,7 +604,8 @@ def wait(label, timeout, poll, unreachable, read=15, cleared=False):
         if now >= deadline:
             print(f'landings: timed out waiting for {label}', file=sys.stderr)
             for repo, commit in missing:
-                print(f'landings: no verdict for {repo} {commit}', file=sys.stderr)
+                name = f'{repo} {commit}' if repo is not None else commit
+                print(f'landings: no verdict for {name}', file=sys.stderr)
             return 3, 'timed out'
         time.sleep(max(0, min(poll, deadline - now, last_read + unreachable - now)))
 

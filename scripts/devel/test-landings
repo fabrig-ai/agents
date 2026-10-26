@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -43,6 +44,22 @@ def tier_record(event='tier', tier='jig', commit='a' * 40, minute=0, **extra):
     return row
 
 
+def tier_run(tier, main, start, minute, landings, baseline=False):
+    token = main[:32]
+    rows = [tier_record('running', tier, main, minute, token=token, **{'from': start})]
+    reds = []
+    for commit, tests in landings:
+        rows.append(tier_record('verdict', tier, commit, minute, token=token, run=main,
+                                verdict='red' if tests else 'cleared', tests=tests,
+                                excerpt='first failure\nsecond failure' if tests else '',
+                                baseline=baseline))
+        if tests:
+            reds.append(dict(landing=commit, tests=tests))
+    rows.append(tier_record('tier', tier, main, minute, token=token, baseline=baseline,
+                            state='red' if reds else 'green', reds=reds))
+    return rows
+
+
 class Lab:
     def __init__(self, root):
         self.root = root
@@ -51,12 +68,62 @@ class Lab:
         self.trace = root / 'ssh.json'
         self.bin = root / 'bin'
         self.bin.mkdir()
-        self.env = dict(os.environ, LANDINGS_FEED=str(self.feed), LANDINGS_POLL='.02',
+        self.workspace = root / 'workspace'
+        self.workspace.mkdir()
+        self.env = dict({key: value for key, value in os.environ.items()
+                         if not key.startswith('GIT_')},
+                        DEV_ROOT=str(self.workspace),
+                        GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL='/dev/null',
+                        GIT_AUTHOR_NAME='Fixture', GIT_AUTHOR_EMAIL='fixture@example.invalid',
+                        GIT_COMMITTER_NAME='Fixture', GIT_COMMITTER_EMAIL='fixture@example.invalid',
+                        LANDINGS_FEED=str(self.feed), LANDINGS_POLL='.02',
                         LANDINGS_UNREACHABLE='.20', LANDINGS_READ=READ, LANDINGS_FIXTURE_HOSTNAME='fixture-remote',
                         PATH=str(self.bin) + ':' + os.environ['PATH'],
                         FIXTURE_TRACE=str(self.trace), FIXTURE_FEED=str(self.feed))
         # Even an accidental remote read can only reach this rejecting stand-in.
         self.ssh("raise SystemExit('unexpected ssh in local fixture')\n")
+        self.env['GIT_SSH_COMMAND'] = str(self.bin / 'ssh')
+
+    def git(self, cwd, *args):
+        result = subprocess.run(['git', '-C', str(cwd), *map(str, args)], env=self.env,
+                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True, timeout=10)
+        assert result.returncode == 0, (args, result.stdout, result.stderr)
+        return result.stdout.strip()
+
+    def repository(self, name, tier=True):
+        origins = self.root / 'origins'
+        origins.mkdir(exist_ok=True)
+        origin = origins / (name + '.git')
+        work = self.workspace / name
+        self.git(self.root, 'init', '--quiet', '--bare', '--initial-branch=main', origin)
+        self.git(self.root, 'clone', '--quiet', origin, work)
+        if tier:
+            (work / 'scripts').mkdir()
+            (work / 'scripts/after-landing.sh').write_text('#!/bin/sh\nexit 0\n')
+        self.git(work, 'add', '.')
+        self.git(work, 'commit', '--quiet', '--allow-empty', '-m', 'initial')
+        self.git(work, 'push', '--quiet', 'origin', 'main')
+        self.git(self.root, 'clone', '--quiet', origin, self.root / ('world-' + name))
+
+    def commit(self, name, message, world=False, push=True):
+        work = self.root / ('world-' + name) if world else self.workspace / name
+        self.git(work, 'fetch', '--quiet', 'origin', 'main')
+        self.git(work, 'checkout', '--quiet', '-B', 'main' if push else 'unlanded', 'origin/main')
+        self.git(work, 'commit', '--quiet', '--allow-empty', '-m', message)
+        commit = self.git(work, 'rev-parse', 'HEAD')
+        if push:
+            self.git(work, 'push', '--quiet', 'origin', 'main')
+        return commit
+
+    def land(self, name, message):
+        return self.commit(name, message)
+
+    def advance(self, name, message):
+        return self.commit(name, message, world=True)
+
+    def unlanded(self, name, message):
+        return self.commit(name, message, push=False)
 
     def ssh(self, body):
         script = self.bin / 'ssh'
@@ -570,6 +637,103 @@ def commit_target(lab):
     lab.run('wait', '--cleared', 'A' * 9, '--timeout', '0', status=1)
 
 
+def no_tier_clears_on_landing(lab):
+    lab.repository('agents', tier=False)
+    commit = lab.land('agents', 'no tier')
+    result = lab.run('wait', '--cleared', commit[:9], '--timeout', '0')
+    assert re.fullmatch(r'\d{2}-\d{2} \d{2}:\d{2}Z ' +
+                        f'agents {commit[:9]} cleared on landing: agents has no tier\n', result.stdout), result
+    assert result.stderr == '', result
+
+
+def baseline_clears_an_older_landing(lab):
+    lab.repository('temper')
+    commit = lab.land('temper', 'older landing')
+    main = lab.advance('temper', 'baseline')
+    lab.append(record(event='started'), record(event='landed', repo='temper', commit=commit),
+               record(event='done'))
+    rows = tier_run('temper', main, None, 10, [(main, [])], baseline=True)
+    rows[-1].update(state='red', reds=[dict(landing=None, tests=['standing'])])
+    lab.append(*rows)
+    result = lab.run('wait', '--cleared', 'fixture/m1', '--timeout', '0')
+    assert result.stdout == f'10-26 05:10Z temper {commit[:9]} cleared by run {main[:9]}, which holds it; baseline\n', result
+    assert result.stderr == '', result
+
+
+def range_run(lab, red=False):
+    lab.repository('temper')
+    previous = lab.advance('temper', 'previous')
+    lab.append(*tier_run('temper', previous, None, 1, [(previous, [])], baseline=True))
+    commit = lab.land('temper', 'inside landing')
+    tip = lab.advance('temper', 'landing tip')
+    main = lab.advance('temper', 'run main')
+    lab.append(*tier_run('temper', main, previous, 10,
+                        [(tip, ['TEST'] if red else []), (main, [] if red else ['later'])]))
+    return commit, tip, main
+
+
+def commit_in_a_range_takes_its_landing_verdict(lab):
+    commit, tip, main = range_run(lab)
+    result = lab.run('wait', '--cleared', commit[:9], '--timeout', '0')
+    assert result.stdout == (f'10-26 05:10Z temper {commit[:9]} cleared by run {main[:9]}, '
+                             f'which holds it in landing {tip[:9]}\n'), result
+    assert result.stderr == '', result
+
+
+def held_in_a_red_landing_is_red(lab):
+    commit, tip, main = range_run(lab, red=True)
+    result = lab.run('wait', '--cleared', commit[:9], '--timeout', '0', status=1)
+    assert result.stdout == (f'10-26 05:10Z temper {commit[:9]} red by run {main[:9]}, '
+                             f'which holds it in landing {tip[:9]}: TEST; log fixture-host:/fixture/log\n'
+                             '    first failure\n    second failure\n'), result
+    assert result.stderr == '', result
+
+
+def own_red_stays_red_under_later_clean_runs(lab):
+    lab.repository('temper')
+    previous = lab.advance('temper', 'previous')
+    commit = lab.land('temper', 'red landing')
+    main = lab.advance('temper', 'clean run')
+    lab.append(*tier_run('temper', previous, None, 1, [(previous, [])], baseline=True),
+               *tier_run('temper', commit, previous, 10, [(commit, ['TEST'])]),
+               *tier_run('temper', main, commit, 20, [(main, [])]))
+    result = lab.run('wait', '--cleared', commit[:9], '--timeout', '0', status=1)
+    assert result.stdout == (f'10-26 05:10Z temper {commit[:9]} red by run {commit[:9]}: '
+                             'TEST; log fixture-host:/fixture/log\n'
+                             '    first failure\n    second failure\n'), result
+    assert result.stderr == '', result
+
+
+def waits_while_no_run_holds_it(lab):
+    lab.repository('temper')
+    previous = lab.advance('temper', 'baseline')
+    lab.append(*tier_run('temper', previous, None, 1, [(previous, [])], baseline=True))
+    commit = lab.land('temper', 'not run yet')
+    result = lab.run('wait', '--cleared', commit[:9], '--timeout', '0', status=3)
+    assert result.stdout == '' and result.stderr == (
+        f'landings: timed out waiting for {commit[:9]}\nlandings: no verdict for temper {commit}\n'), result
+
+
+def commit_no_main_holds_ends_the_wait(lab):
+    lab.repository('agents', tier=False)
+    commit = lab.unlanded('agents', 'never pushed')
+    git = lab.bin / 'git'
+    real_git = shutil.which('git', path=lab.env['PATH'])
+    git.write_text(f'#!{PYTHON}\nimport os, sys\n'
+                   "if sys.argv[3] == 'fetch':\n"
+                   "    os.write(2, b'origin unavailable: \\xff\\n')\n"
+                   "    raise SystemExit(1)\n"
+                   f'os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])\n')
+    git.chmod(0o700)
+    result = lab.run('wait', '--cleared', commit[:9], '--timeout', '0', status=3)
+    assert result.stdout == '' and result.stderr == (
+        f'landings: timed out waiting for {commit[:9]}\nlandings: no verdict for agents {commit}\n'), result
+    git.unlink()
+    result = lab.run('wait', '--cleared', commit[:9], '--timeout', '0', status=2)
+    assert result.stdout == '' and result.stderr == (
+        f'landings: agents {commit[:9]} is not on main: wait on the commit that landed\n'), result
+
+
 def watch_record(lab):
     lab.append(record(event='started'), record(event='done'))
     baseline = lab.run('report').stdout
@@ -708,7 +872,11 @@ def main():
              remote_failure, remote_hang, remote_first_read, invalid_arguments, read_default,
              tiers_shown, landing_set_isolation, cleared_set, cleared_main_is_the_newest_all_cleared_run,
              cleared_main_none, cleared_main_unreadable, red_set, stopped_set, waits_for_verdict, commit_target,
-             watch_record, malformed_runner_records, posted_wait, remote_watch)
+             watch_record, malformed_runner_records, posted_wait, remote_watch,
+             no_tier_clears_on_landing, baseline_clears_an_older_landing,
+             commit_in_a_range_takes_its_landing_verdict, held_in_a_red_landing_is_red,
+             own_red_stays_red_under_later_clean_runs, waits_while_no_run_holds_it,
+             commit_no_main_holds_ends_the_wait)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--case', action='append', choices=[case.__name__ for case in cases])
     selected = parser.parse_args().case

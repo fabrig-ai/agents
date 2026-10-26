@@ -439,7 +439,8 @@ def unwatched_red(lab):
 
 
 def meets_landings(lab):
-    env = dict(lab.env, LANDINGS_FEED=str(lab.root / 'feed.jsonl'), LANDINGS_POLL='.02')
+    env = dict(lab.env, LANDINGS_FEED=str(lab.root / 'feed.jsonl'), LANDINGS_POLL='.02',
+               DEV_ROOT=str(lab.root / 'workspace'))
 
     def land_set(label, commit):
         lab.append(event='started', set=label, token=label)
