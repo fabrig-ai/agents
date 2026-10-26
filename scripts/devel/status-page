@@ -944,7 +944,7 @@ def feed_records(raw):
     # a field of the wrong type, is not an event.
     result = []
     for record in raw if isinstance(raw, list) else []:
-        if not isinstance(record, dict) or not all(
+        if not isinstance(record, dict) or record.get('kind') == 'land' or not all(
                 isinstance(record.get(k), str) and record[k] for k in ('time', 'set', 'host', 'token')):
             continue
         moment = stamp(record['time'])
@@ -956,6 +956,22 @@ def feed_records(raw):
                 k in record and not isinstance(record[k], str) for k in ('repo', 'commit', 'reason')):
             continue
         result.append(record)
+    return result
+
+
+def plain_landings(raw):
+    """Plain lands' records in the feed (landing-flow.md 12), as their times
+    alone: never a branch, repository or taught line."""
+    result = []
+    for record in raw if isinstance(raw, list) else []:
+        if not isinstance(record, dict) or record.get('kind') != 'land' or record.get('event') != 'landed':
+            continue
+        if 'set' in record or not all(isinstance(record.get(k), str) and record[k]
+                                      for k in ('time', 'host', 'token')):
+            continue
+        moment = stamp(record['time'])
+        if moment is not None:
+            result.append(moment)
     return result
 
 
@@ -1021,7 +1037,9 @@ class Fleet:
         self.alias = {text(d.get('host')): n for n, d in self.up.items()}
         self.rows = [(n, *r[:5], self.mission(r[5]), *r[6:])
                      for n, d in self.up.items() for r in records_of(d, ['rows'], 8, (0, 2, 3))]
-        self.feed = feed_records(next((d['feed'] for d in self.up.values() if d.get('feed') is not None), None))
+        raw_feed = next((d['feed'] for d in self.up.values() if d.get('feed') is not None), None)
+        self.feed = feed_records(raw_feed)
+        self.lands = plain_landings(raw_feed)
         self.feed_seen = any(d.get('feed') is not None for d in self.up.values())
         self.runs = set_runs(self.feed)
         self.turns = [(n, *t) for n, d in self.up.items() for t in records_of(d, ['turns', 'done'], 4, (0,))]
@@ -1212,9 +1230,13 @@ def subscriptions(fleet):
 
 def kpis(fleet, shown, subscribed):
     now = fleet.now
-    flight = in_flight(fleet)
-    landed = [r for r in fleet.runs if r['end'] and r['end']['event'] == 'done']
-    last = max(landed, key=lambda r: r['end']['utc'], default=None)
+    landed = [max(e['utc'] for e in r['run'] if e['event'] == 'landed')
+              for r in fleet.runs if r['landed']]
+    sets = sum(now - 6 * HOUR <= t <= now for t in landed)
+    plain = sum(now - 6 * HOUR <= t <= now for t in fleet.lands)
+    last = max(landed + fleet.lands, default=None)
+    rate_title = (f'{sets + plain} in the last 6 h: {sets} set{"" if sets == 1 else "s"}, '
+                  f'{plain} land{"" if plain == 1 else "s"}') if fleet.feed_seen else None
     sessions = [s for d in fleet.up.values() for s in d.get('sessions') or []]
     busy = sum(s['status'] in ('busy', 'working') for s in sessions)
     codex = sum(r['alive'] for d in fleet.up.values() for r in (d.get('codex') or {}).get('running', []))
@@ -1235,8 +1257,9 @@ def kpis(fleet, shown, subscribed):
     tiles = [
         ('Missions', str(shown['rows']), E(f'{shown["active"]} active, {shown["paused"]} paused in the record, '
                                            f'{shown["busy"]} busy now')) if shown else ('Missions', '–', 'not shown'),
-        ('Sets landing now', str(len(flight)),
-         f'last landed {when(last["end"]["utc"], now)} ({E(last["set"])})' if last else 'none landed in the feed'),
+        ('Landings per hour', f'{(sets + plain) / 6:.1f}' if fleet.feed_seen else '–',
+         f'last landed {when(last, now)}' if fleet.feed_seen and last is not None else 'none landed in the feed',
+         rate_title),
         ('Agents', str(len(sessions) + codex), E(agents)),
         ("Director's post, 24 h", str(owners + designers),
          E(f'{owners} from owners, {designers} from designers')) if post
@@ -1247,8 +1270,9 @@ def kpis(fleet, shown, subscribed):
         else ('Subscriptions', '–', 'not shown'),
     ]
     return '<div class="tiles">' + ''.join(
-        f'<div class="tile"><div class="label">{E(a)}</div><div class="value">{E(b)}</div>'
-        f'<div class="sub">{c}</div></div>' for a, b, c in tiles) + '</div>'
+        f'<div class="tile"><div class="label">{E(a)}</div><div class="value"'
+        + (f' title="{E(title[0])}"' if title and title[0] is not None else '') + f'>{E(b)}</div>'
+        f'<div class="sub">{c}</div></div>' for a, b, c, *title in tiles) + '</div>'
 
 
 def user_issues(fleet):

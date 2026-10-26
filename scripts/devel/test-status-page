@@ -391,7 +391,8 @@ def page(lab):
     # In flight: each set's latest run, if heard from in 6 hours.
     now = text[text.index('<h3>Landing now</h3>'):text.index('<h3>Recent set runs</h3>')]
     assert 'alpha-m/m1' in now and 'done-m/m1' not in now and 'stale-m/m1' not in now, now
-    assert '<div class="label">Sets landing now</div><div class="value">1</div>' in text
+    assert ('<div class="label">Landings per hour</div><div class="value" '
+            'title="1 in the last 6 h: 1 set, 0 lands">0.2</div>') in text
     for needle in ('alpha-m/m1', 'done-m/m1', 'beta-m', 'paused-m', 'land temper', 'landing turn jig',
                    'alpha-m: 1 running · gpt-x high', 'Implementer runs',
                    '<span class="badge info"><i aria-hidden="true"></i>landing</span>'):
@@ -407,7 +408,7 @@ def page(lab):
     assert '<div class="label">Commands, 24 h</div>' not in text
     assert '<div class="label">Heavy commands now</div>' not in text
     assert re.findall(r'<div class="label">(.*?)</div>', text) == [
-        'Missions', 'Sets landing now', 'Agents', 'Director&#x27;s post, 24 h',
+        'Missions', 'Landings per hour', 'Agents', 'Director&#x27;s post, 24 h',
         'Land gates, 24 h', 'Waiting on the user', 'Subscriptions']
     data = json.loads(snapshot.read_text())
     for host, address in (('alpha', '62.238.103.124'), ('beta', '9.9.9.9')):
@@ -794,6 +795,9 @@ def page_recent(lab):
     out = lab.root / 'page.html'
     lab.run('--no-pull', '--out', str(out), STATUS_FEED=str(lab.root / 'recent.jsonl'))
     page = out.read_text()
+    assert ('<div class="label">Landings per hour</div><div class="value" '
+            'title="0 in the last 6 h: 0 sets, 0 lands">0.0</div>'
+            '<div class="sub">none landed in the feed</div>') in page
     recent = page.split('<h3>Recent set runs</h3>', 1)[1].split('<h3>Missions</h3>', 1)[0]
     assert re.findall(r'<tr><td>(.*?)</td>', recent) == [f'recent-{i}' for i in range(5)], recent
     for expected in ('land-set: rebase conflict', 'land-set: temper: land --no-push failed (4)',
@@ -802,6 +806,33 @@ def page_recent(lab):
         assert expected in recent, (expected, recent)
     for hidden in ('Cargo.lock', 'crates/temper/tests/x.rs', '/private/omitted.rs', 'old reason'):
         assert hidden not in page, hidden
+
+
+def page_landings_rate(lab):
+    events = []
+    for label, token, landings, end in (('done-m/m1', 'r1', (5, 4), 'done'),
+                                      ('stopped-m/m1', 'r2', (3,), 'stopped'),
+                                      ('old-m/m1', 'r3', (7,), 'done'),
+                                      ('empty-m/m1', 'r4', (), 'stopped')):
+        events.append(dict(time=iso(8), set=label, token=token, host='alpha-host', event='started'))
+        events.extend(dict(time=iso(t), set=label, token=token, host='alpha-host', event='landed', repo='agents')
+                      for t in landings)
+        events.append(dict(time=iso(.1), set=label, token=token, host='alpha-host', event=end))
+    for i, hours in enumerate((2, 1, .5, 6.5)):
+        events.append(dict(time=iso(hours), kind='land', event='landed', host='alpha-host', token=f'l{i}',
+                           branch='PRIVATE-BRANCH-x', taught=['PRIVATE-TAUGHT-x']))
+    events.extend([dict(time=iso(.2), kind='land', event='landed', host='alpha-host'),
+                   dict(time=iso(.2), kind='land', event='landed', host='alpha-host', token='bad', set='bad/m1')])
+    path = write(lab.root / 'landings.jsonl', ''.join(json.dumps(e) + '\n' for e in events))
+    out = lab.root / 'page.html'
+    lab.run('--no-pull', '--out', str(out), STATUS_FEED=str(path))
+    page = out.read_text()
+    assert ('<div class="label">Landings per hour</div><div class="value" '
+            'title="5 in the last 6 h: 2 sets, 3 lands">0.8</div>'
+            f'<div class="sub">last landed {time_cell(iso(.5), "30 min ago")}</div>') in page
+    assert 'Sets landing now' not in page
+    assert 'PRIVATE-' not in page
+    public_roles(page, lab)
 
 
 def machine_ips(lab):
@@ -836,6 +867,8 @@ def page_roles(lab):
     out, snapshot = lab.root / 'page.html', lab.root / 'data.json'
     lab.run('--no-pull', '--out', str(out), '--json', str(snapshot))
     page, raw = out.read_text(), snapshot.read_text()
+    assert ('<div class="label">Landings per hour</div><div class="value">–</div>'
+            '<div class="sub">none landed in the feed</div>') in page
     live = page[page.index('<h3>Missions</h3>'):page.index('<h3>Ended this week</h3>')]
     rows = {name: row for row in re.findall(r'<tr>.*?</tr>', live)
             for name in re.findall(r'<strong>(.*?)</strong>', row)}
@@ -1061,8 +1094,9 @@ def page_times(lab):
     assert cells(landing)[0][3] == time_cell(iso(.1), '6 min'), landing
     assert any(row[3] == time_cell(iso(1 / 60), '&lt;1 min') for row in cells(landing)), landing
     tiles = section('<div class="tiles">', '<h2>Subscriptions')
-    assert ('<div class="label">Sets landing now</div><div class="value">1</div>'
-            f'<div class="sub">last landed {time_cell(iso(4.4), "4 h 24 min ago")} (done-m/m1)</div>') in tiles
+    assert ('<div class="label">Landings per hour</div><div class="value" '
+            'title="1 in the last 6 h: 1 set, 0 lands">0.2</div>'
+            f'<div class="sub">last landed {time_cell(iso(4.4), "4 h 24 min ago")}</div>') in tiles
     card = section('<h3>alpha ', '<h3>beta ')
     assert f'last heavy command {time_cell(iso(.5), "30 min ago")}</p>' in card, card
     assert f' · {time_cell(iso(5 / 60), "5 min")}</li>' in card, card
@@ -1462,7 +1496,7 @@ def claude_resets(lab):
     assert [v['used'] for v in data['claude_usage']['limits']] == list(range(7))
 
 
-CASES = [page_user_issues, page_director_post, collect_subscriptions, page_subscriptions, page_pace, subscriptions_signed_out, subscription_failures, claude_resets, collect, collect_missing, page, reason_kind, page_recent, machine_ips, page_roles, page_role_edges, page_now, page_times, page_degraded, bad_data, write_failure, install]
+CASES = [page_user_issues, page_director_post, collect_subscriptions, page_subscriptions, page_pace, subscriptions_signed_out, subscription_failures, claude_resets, collect, collect_missing, page, reason_kind, page_recent, page_landings_rate, machine_ips, page_roles, page_role_edges, page_now, page_times, page_degraded, bad_data, write_failure, install]
 
 
 def run(case, directory, built):
