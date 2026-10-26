@@ -32,7 +32,8 @@ serves it.
   `description` (the user, 10-25 and 10-26). No owner, designer,
   implementer or other session shows by name: the page counts them, and
   a name only joins a session to its mission (the user, 10-26). Each
-  machine's public IP shows on its card (the user, 10-26). An
+  machine's public IP shows on its card, and `director/waiting.md`,
+  public by writing, shows whole (the user, 10-26). An
   unreachable machine shows why in a few words (refused, timed out, key
   refused); ssh's own, which name the target, go to the journal. No
   account's email, name, organisation or id: a subscription goes by a
@@ -55,6 +56,7 @@ serves it.
 | codex-run | `tmp/codex-run/*/meta`, `runs.tsv` and the `codex-run-*` user units | the implementers running, each with its mission, and the runs that ended |
 | Claude | `claude agents --json --all` | the live sessions by role, busy or idle: the director, the designers (`design/<d>`) and owners (`o/<m>`) by their names, and the rest |
 | the records | `records/missions/*/README.md`, after `record pull` | each mission's front matter: its `state`, `ended` and `description` |
+| the user's waits | `records/director/waiting.md`, after `record pull` | each item: since when, who waits, what, and its decision (records.md 3) |
 | the machine | `/proc`, the disk under `tmp/`, `ip -j -4 addr show scope global` | load, free memory and disk, and its public IPv4 addresses (the globally routable ones) |
 | Claude's subscription | `claude auth status --json`, `claude -p /usage` | what it is signed in to, and each limit's use and reset (2.1) |
 | Codex's subscription | `codex app-server`: `account/read`, `account/rateLimits/read` | the same (2.1) |
@@ -126,8 +128,15 @@ credential: not `.credentials.json`, `auth.json` nor a token.
 
 - **Tiles:** missions, sets landing now, heavy commands now, agents
   (the director, designers, owners and implementers live, and how many
-  of them are busy), land gates in the last 24 hours, and the
-  subscriptions with the highest use among them.
+  of them are busy), land gates in the last 24 hours, what waits on the
+  user with the oldest wait, and the subscriptions with the highest use
+  among them.
+- **Waiting on the user,** after the tiles: one row per item of
+  `director/waiting.md`, in its order, giving since when (the time, and
+  how long ago), who waits (a mission or the director), what, and the
+  decision that holds the detail. A line `record` would refuse is left
+  out and named in the footer; with no file, the section says nothing
+  waits.
 - **Subscriptions,** after the tiles: a table, one row per distinct
   subscription and limit, giving its CLI, plan and label, a bar of the
   percent used, and its reset (in how long, and when). Which machines
@@ -220,7 +229,9 @@ name ending `-m2` kept whole and an unrecorded one cut, missions ended
 within the week and before it, and no Codex owner read; no owner's,
 designer's, implementer's or session's name anywhere on the page, and a
 description shown. `test-record` proves `record`'s check of the
-`description` key.
+`description` key and of `director/waiting.md`. The user's waits: shown
+in order, a malformed line left out and named in the footer, a missing
+file an empty section, and the tile's count and oldest.
 
 ## 6. Open
 

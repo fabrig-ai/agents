@@ -113,8 +113,14 @@ machine's `tmp/post/` (section 5).
   pruned when done, never only appended, but for the decisions.
   - `STATUS.md`: one line per mission in progress, with its owner's
     address, its last landing, its state or blocker and its next step;
-    the director's helper sessions; then what waits on the user. A
-    mission leaves it when its closing note is committed.
+    the director's helper sessions; then a pointer to
+    `director/waiting.md`. A mission leaves it when its closing note is
+    committed.
+  - `director/waiting.md`: what waits on the user, one public line each
+    ([records.md](../docs/design/records.md) 3): since when, who waits,
+    what, and the decision holding the detail. Rewritten as items come
+    and go; the status page shows it whole, so each line is written for
+    a stranger.
   - `director/direction.md`: the vision, the user's priorities and
     standing rules, each draft and each piece of work waiting, and the
     budgets.
@@ -326,7 +332,8 @@ is mechanical, and Codex reads what needs reading.
    enrolled 0 of 56 runs in 2.5 hours, with the zero reported after one.
 5. **Next:** which work in `director/direction.md` gets an owner, and
    where (section 4). Act.
-6. **Record:** rewrite `STATUS.md`, add the decisions, commit them
+6. **Record:** rewrite `STATUS.md` and `director/waiting.md`, add the
+   decisions, commit them
    with `record commit`, and make sure the cron, the watcher and the
    waiter run.
 7. **Tidy:** `~/src/rust/agents/scripts/devel/tidy` on each machine
@@ -353,6 +360,10 @@ is mechanical, and Codex reads what needs reading.
   of question needn't go to the user again. Escalations are many at
   first, while the user hands over intent and vision, and fewer as the
   director grows autonomous.
+- **The waits:** each question to the user, and each thing only they
+  can do, is a line of `director/waiting.md` from when it is asked
+  until it is answered or dropped, and its decision holds the rest. An
+  answer removes the line in the commit that records it.
 - **The user's word** stands as given: when they decline a summary, the
   owners' reports stay in the mailboxes, unrelayed.
 - **Subscriptions:** when one is short and another has room, the
