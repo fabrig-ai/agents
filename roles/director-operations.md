@@ -95,6 +95,10 @@ here. Durable know-how belongs here, not in the session's memory or in
   in the gate lane, and come back to it.
 - **The runner's machine** (after landing's, on hetzner3) waits for its
   tier run to end before the gate lane drains: up to about twenty minutes.
+- **agents' code lands from an 8-core builder,** never from hel8 (4
+  cores), where its gate runs about 68 s against the user's 60 s (the
+  user, 10-26, agents#1's C). Markdown alone (`land --docs`) may land from
+  hel8. It holds until the gate fits hel8.
 - **hel8's checkout** feeds the status page's timer: move it after each
   page landing, and run `status-page install --out
   /var/www/status/index.html` when the units change.
