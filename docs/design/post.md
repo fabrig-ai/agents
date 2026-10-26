@@ -232,7 +232,12 @@ overwrites another.
     `on-stop` (`exit N`, or `absent`). FILE is absolute, and need not
     exist at the start: the session writes it once it holds something
     to give back, such as a held login (qa-flow.md 10.3). A failing
-    FILE never fails the unit.
+    FILE never fails the unit. The stop command is codex-run itself,
+    with no shell and no `$`: a `daemon-reload` rewrites a transient
+    unit's stop command with its `$$` doubled (systemd 257, 10-26), so
+    a kit path holding `$`, `%`, a quote, a backslash or a space is
+    refused. FILE runs outside any login shell, so it names each program
+    by its absolute path.
 - **Capacity.** A turn that fails because the model is at capacity
   resumes its thread after 2, 5 and then 15 minutes, "Go on with the
   task: the model was at capacity.", three tries at most.

@@ -64,7 +64,9 @@ makes a finding there.
    deployment as the binding says (for temper, `temper ctl import`),
    and at once write the give-back file the brief names: an executable
    that moves each login back to its path by the product's export (for
-   temper, `temper ctl DIR export N PATH`), safe to run twice. Your
+   temper, `temper ctl DIR export N PATH`), safe to run twice, every
+   program in it named by its absolute path: it runs outside your
+   shell. Your
    unit runs it when it stops, whatever stops it, so keep it right as
    you go: a second deployment that takes the login over takes the file
    over too. Never run `logins`, and never read, copy or print a login.
