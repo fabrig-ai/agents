@@ -31,7 +31,8 @@ serves it.
   mission's README beyond its front matter's `state`, `ended` and
   `description` (the user, 10-25 and 10-26). No owner, designer,
   implementer or other session shows by name: the page counts them, and
-  a name only joins a session to its mission (the user, 10-26). An
+  a name only joins a session to its mission (the user, 10-26). Each
+  machine's public IP shows on its card (the user, 10-26). An
   unreachable machine shows why in a few words (refused, timed out, key
   refused); ssh's own, which name the target, go to the journal. No
   account's email, name, organisation or id: a subscription goes by a
@@ -52,10 +53,9 @@ serves it.
 | the landings feed | the coordinator's `~/.local/state/agents-land-set/feed.jsonl` | set runs and their results' gate steps (landing-flow.md 10) |
 | the landing turns | `tmp/landing-turn/events.jsonl` | each turn's wait and hold, and the turns open now; a `fail-open` closes one |
 | codex-run | `tmp/codex-run/*/meta`, `runs.tsv` and the `codex-run-*` user units | the implementers running, each with its mission, and the runs that ended |
-| post | `tmp/post/*/new` | unread mail per box |
 | Claude | `claude agents --json --all` | the live sessions by role, busy or idle: the director, the designers (`design/<d>`) and owners (`o/<m>`) by their names, and the rest |
 | the records | `records/missions/*/README.md`, after `record pull` | each mission's front matter: its `state`, `ended` and `description` |
-| the machine | `/proc`, the disk under `tmp/` | load, free memory and disk |
+| the machine | `/proc`, the disk under `tmp/`, `ip -j -4 addr show scope global` | load, free memory and disk, and its public IPv4 addresses (the globally routable ones) |
 | Claude's subscription | `claude auth status --json`, `claude -p /usage` | what it is signed in to, and each limit's use and reset (2.1) |
 | Codex's subscription | `codex app-server`: `account/read`, `account/rateLimits/read` | the same (2.1) |
 
@@ -142,8 +142,8 @@ credential: not `.credentials.json`, `auth.json` nor a token.
   when its latest run, as `landings` finds it, has not ended and was
   heard from in 6 hours: a killed `land-set` writes no end, and a turn
   is lost the same way. Then the missions, and one card per machine
-  with its heavy tasks, its implementers, its Claude sessions and its
-  unread post.
+  with its public IP, its heavy tasks, its implementers and its Claude
+  sessions.
 - **A mission's row:** its name, its state in the record, its
   description, what runs for it now, counted (its owner's or
   designer's session, busy or idle; its implementers; its heavy
