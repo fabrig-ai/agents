@@ -36,12 +36,46 @@ if args == ['--no-push', '--docs']:
     print('land: --no-push cannot be combined with --docs or --local', file=sys.stderr)
     sys.exit(2)
 assert args in ([], ['--no-push'])
-import subprocess
+import signal
 from pathlib import Path
 import json
 phase = 'gate' if args else 'push'
 def git(*args):
-    return subprocess.check_output(['git', *args]).decode().strip()
+    # Only stdout is captured. Avoid importing subprocess on every normal land;
+    # preserve its signal defaults, error object and interrupted-child cleanup.
+    argv = ['git', *args]
+    read, write = os.pipe()
+    try:
+        child = os.posix_spawnp('git', argv, os.environ, file_actions=(
+            (os.POSIX_SPAWN_DUP2, write, 1),
+            (os.POSIX_SPAWN_CLOSE, read), (os.POSIX_SPAWN_CLOSE, write)),
+            setsigdef=tuple(getattr(signal, name) for name in ('SIGPIPE', 'SIGXFZ', 'SIGXFSZ')
+                            if hasattr(signal, name)))
+    except BaseException:
+        os.close(read)
+        raise
+    finally:
+        os.close(write)
+    try:
+        with os.fdopen(read, 'rb') as out:
+            output = out.read()
+    except BaseException:
+        try:
+            os.kill(child, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        raise
+    finally:
+        while True:
+            try:
+                _, status = os.waitpid(child, 0)
+                break
+            except InterruptedError:
+                pass
+    if status:
+        import subprocess
+        raise subprocess.CalledProcessError(os.waitstatus_to_exitcode(status), argv, output=output)
+    return output.decode().strip()
 # The usual worktrees are named for their already-validated repository.
 # Concurrent also uses a second worktree with a different directory name.
 name = os.path.basename(os.getcwd())
@@ -50,7 +84,7 @@ if name not in ('skein', 'smith', 'hearth', 'jig', 'temper'):
 with open(os.environ['LAND_TRACE'], 'a') as out:
     out.write(name + '\n')
 if os.environ.get('DESCENDANT_REPO') == name:
-    import time
+    import subprocess, time
     child = subprocess.Popen([sys.executable, '-c', """import os, signal, sys, time
 from pathlib import Path
 def stopped(signum, frame):
