@@ -1,6 +1,6 @@
 # Build infrastructure
 
-Provisional, 2026-10-22. The host admission and recovery contract for the
+Provisional, 2026-10-26. The host admission and recovery contract for the
 owners' `heavy` commands. Runtime identity is specified by gate-policy.md.
 
 ## 1. In one page
@@ -12,106 +12,118 @@ owners' `heavy` commands. Runtime identity is specified by gate-policy.md.
   1000, `HEAVY_CLASS=background` 100, `HEAVY_CLASS=idle` only idle cores.
   When the cores are contended, landing work takes them first; when they
   are not, nothing waits. `cargo fmt` builds nothing and runs at once.
-- **One exclusive gate, by choice.** `heavy --gate` still runs alone, in
-  pueue's `gate` group, one at a time: for what needs a quiet machine,
-  a kache setup or a measurement. Host admission also counts task
-  lifetimes, independently of the queue daemon's view of its wrappers.
+- **heavy is its own queue.** Its host ledger admits every task, and
+  numbers it, never reusing a number. Each task's wrapper runs as a user
+  unit of its own, which outlives the client. No queue daemon stands
+  between them: pueue's role ended on 10-26 (section 7).
+- **A lane keeps submission order.** Each lane, `build` and `gate`,
+  admits its waiting tasks oldest first, as far as it has room.
+- **One exclusive gate, by choice.** `heavy --gate` still runs alone, one
+  at a time: for what needs a quiet machine, a kache setup or a
+  measurement. Host admission counts task lifetimes in the ledger, not
+  processes.
 - **Intent precedes effects.** An exclusive gate records its token, boot
-  identity, queue identity, owned systemd unit and the groups found
-  running in a durable atomic snapshot before pausing any group. Groups
-  already paused remain paused when the gate releases.
+  identity and owned systemd unit as the ledger's gate hold, in a durable
+  atomic snapshot, before it drains the machine. Every hold, a gate's or
+  an operator's, lives in the ledger and nowhere else.
 - **Containment owns descendants.** Every payload executes in a user
   systemd service with `ExitType=cgroup`, `KillMode=control-group` and no
-  delegated subtree. Changing sessions does not escape it. PID exit and
-  queue completion trigger recovery; neither proves descendants ended.
+  delegated subtree. Changing sessions does not escape it. A wrapper's or
+  a payload's exit triggers recovery; neither proves descendants ended.
 - **Recovery is independent.** A user systemd timer reconciles the same
-  host ledger as admission and normal completion. Its approved polling
-  default is five seconds (director 586). It is not a task
-  timeout or a gate budget.
+  host ledger as admission and normal completion: it releases what ended,
+  recovers what lost its wrapper, and cancels what no wrapper claimed. Its
+  approved polling default is five seconds (director 586). It is not a
+  task timeout or a gate budget.
 - **Release is replayable.** Under the host lock, mark the task closing,
-  kill its owned cgroup, prove it empty, resume only owned holds without
-  maintenance holds, and commit one logical release outcome per token.
+  kill its owned cgroup, prove it empty, drop its gate hold, and commit
+  one logical release outcome per token.
 - **Evidence is durable and narrow.** JSONL events carry task identity,
   phases, capacity and safe policy identity. They carry no task
-  environment, output or full queue records. The eleven-column TSV remains
-  available for diagnostics; land accepts token-owned receipts.
+  environment, command or output. The eleven-column TSV remains available
+  for diagnostics; land accepts token-owned receipts.
 
 ## 2. Ownership and admission
 
-The supported queue is dedicated to `heavy`. Its groups must contain
-only tasks submitted through this admission path. Deployment requires a
-quiet migration from an older queue: arbitrary queued commands have no
-owned cgroup ledger, so their completion cannot be proved through this
-interface. Calling pueue directly to submit or restart tasks bypasses
-this contract. Unsupported containment refuses admission visibly. The helper requires
-Python 3.11 or newer and uses only its standard library.
+heavy's queue is its own: the host ledger in its state directory, and the
+user units it starts. Every task enters through `heavy`; a unit started
+by hand under heavy's prefix is outside this contract. Unsupported
+containment refuses admission visibly. The helper requires Python 3.11
+or newer and uses only its standard library.
 
 `DEV_ROOT` selects the workspace and `DEV_TMP/heavy` holds host state.
-All callers sharing a queue must share this state directory. An alternate
-queue must use a distinct state directory. The queue identity hashes the
-canonical config path, profile and endpoint-selection lines. The config
-and data directory must
-retain their identity across daemon restarts. Replacing a queue at the
-same config path requires a drained migration, rather than erasing the
-ledger. The host lock serializes admission, reconciliation and explicit
-maintenance operations.
+All callers sharing a queue share this state directory, which is the
+queue: its identity is the SHA-256 of the directory's canonical path,
+whose first twelve digits also name its units (`skein-heavy-…`). A ledger
+that records another identity belongs to an older generation, and is
+taken over only once it is drained (section 7). The host lock serializes
+admission, reconciliation and explicit maintenance operations.
 
-Submission first saves a unique token and safe context, adds a stashed
-queue entry, saves the returned ID and enqueue intent, then enqueues it. Reconciliation
-repeats a persisted enqueue intent, allowing the wrapper to claim the
-known ID if its submitter dies. A lost add response can leave an
-unactivated stashed queue entry; its released token cannot run a payload,
-and the ledger cannot remove an unknown queue ID without a safe metadata
-API. The queued wrapper
-has a PID, process start tick and boot identity; payload start is a
-separate event inside its cgroup. A client may disappear without losing
-task ownership or completion evidence.
+Submission, under the host lock, saves a unique token, the ledger's next
+task number, safe context and the task's environment file, in state
+`queued`. It then starts the wrapper, `heavy --task TOKEN`, as a
+transient user service, `PREFIX-TOKEN-wrapper.service`: collected when it
+ends, reading that environment file, in the submitting directory, with
+umask 077. Only then does the client print the task's number and token.
+A wrapper unit that fails to start releases its task, refused, before the
+client returns. The wrapper claims its token under the host lock, and
+only a `queued` one, recording its PID, process start tick and boot
+identity; payload start is a separate event inside the payload's own
+unit. The wrapper's unit belongs to the user manager, not to the client:
+a client may disappear without losing task ownership or completion
+evidence.
 
-A token-owned user service observes `pueue wait --quiet ID` while a token
-is queued and unclaimed. Only a successful wait return is used: a terminal
-or absent queue entry triggers cancellation under the host lock if the
-token is still unclaimed. Transport failure retries through the timer.
-The observer stops once a wrapper claims the token. Client death does not
-cancel queued work, and no task age limit is imposed; an interrupted
-client, or `heavy --cancel`, does (section 4). A reused numeric ID
-can never establish success. Completion does not wait on or remove an ID
-after token release: without a safe identity API, a queue row cannot be
-removed without risking an unrelated replacement. Completed queue rows
-therefore require operator retention handling on the dedicated queue.
+A token still queued whose wrapper unit is not running was never
+claimed: the reconciler cancels it, code 137 (section 4). That covers a
+client killed between saving the task and starting its unit, and a
+wrapper stopped or dead before its claim. A wrapper that starts after
+its token was cancelled refuses replay. Client death after the unit
+starts does not cancel the task, and no task age limit is imposed; an
+interrupted client, or `heavy --cancel`, does (section 4).
 
-An exclusive gate (`--gate`) saves pause intent, pauses every non-gate
-group without stopping running tasks, then drains the ledger's live
-lifetimes, builds and landing gates alike, and waits for the load to
-settle. Persisted gate holds also block every other admission if the
-queue restarts and forgets its group pause. A landing's gate (`--land`)
-takes the same policy, candidate checks and receipt, but no hold: it
-starts beside the builds, first by its CPU weight, and alone among
-gates, since two would split the machine against wall-time budgets.
-Every unit but a landing's also carries `OOMScoreAdjust=500`: out of
-memory, the kernel kills an agent's build, which reruns, before a
-landing's work. Builds occupy at most `HEAVY_BUILD_SLOTS` ledger slots
-(0, the default: no limit) until their cgroups are empty, regardless of
-the queue's slot accounting, and `setup` gives the queue's `build` group
-the same number. Gates of both kinds serialize through the queue's
-`gate` group. Every task builds with `HEAVY_BUILD_JOBS` jobs, the
-machine's CPU count by default, and its unit carries its class's
-`CPUWeight` (section 1).
+Each lane admits its waiting tasks oldest first, by task number. A task
+is admitted only while fewer older tasks of its lane are still queued or
+waiting than the lane has room for:
+- the `build` lane has room for `HEAVY_BUILD_SLOTS` live builds (0, the
+  default: no limit), and for none while a gate holds the machine or an
+  operator holds the lane;
+- the `gate` lane has room for one gate, while no other gate is live, no
+  other exclusive gate holds the machine and no operator holds the lane.
+
+Gates of both kinds therefore start in the order they were submitted.
+A build never takes room that an older build waits for: with one slot,
+builds too start in submission order, and those admitted together start
+in any order among themselves. A live task is one launching, active,
+finishing or closing: it keeps its room until its cgroup is proved
+empty.
+
+An exclusive gate (`--gate`), once its lane admits it, records itself as
+the ledger's gate hold, which blocks every other admission, then drains
+the ledger's live lifetimes, builds and landing gates alike, and waits
+for the load to settle. A landing's gate (`--land`) takes the same
+policy, candidate checks and receipt, but no hold: it starts beside the
+builds, first by its CPU weight, and alone among gates, since two would
+split the machine against wall-time budgets. Every payload unit but a
+landing's also carries `OOMScoreAdjust=500`: out of memory, the kernel
+kills an agent's build, which reruns, before a landing's work. Every
+task builds with `HEAVY_BUILD_JOBS` jobs, the machine's CPU count by
+default, and its unit carries its class's `CPUWeight` (section 1).
 
 ## 3. Durable state and release
 
-The version 1 host snapshot contains the queue identity, task records,
-current gate token, maintenance holds and resume intents, installation proof and
-an event outbox. Files are created with umask 077. Save writes a sibling
-temporary file, flushes and fsyncs it, renames it over the snapshot and
-fsyncs the directory. A leftover temporary file is never read as state.
+The version 1 host snapshot contains the queue identity, the next task
+number, task records, the current gate hold, maintenance holds,
+installation proof and an event outbox. Files are created with umask
+077. Save writes a sibling temporary file, flushes and fsyncs it, renames
+it over the snapshot and fsyncs the directory. A leftover temporary file
+is never read as state.
 
-Each task records its unique token, queue ID, boot identity, wrapper
-identity, unit name, lane, label, repository, tree, policy identity, log
-path and command. Commands are private task metadata and remain in the
-TSV for compatibility; events exclude commands and output. Task states
-are submitted, enqueuing, queued, waiting, launching, active, finishing, closing
-and released. A gate additionally records the groups found running and
-the groups found paused before its pause intent.
+Each task records its unique token, number, queue identity, boot
+identity, wrapper identity, wrapper and payload unit names, lane, label,
+repository, tree, policy identity, log path and command. Commands are
+private task metadata and remain in the TSV for compatibility; events
+exclude commands and output. Task states are queued, waiting, launching,
+active, finishing, closing and released.
 
 Admission captures both the candidate commit and its Git `HEAD^{tree}`.
 A versioned gate requires a clean index and worktree, with no merge or
@@ -138,9 +150,10 @@ marks that scope active before executing Chromium, compiler, Cargo or
 other policy version launchers. Their descendants, including detached
 helpers, belong to the same scope and its release proof. A systemd unit
 creation delayed past orphan release cannot execute policy tools or the
-requested payload. Transport environment-file removal is replayed for
-released tokens after a crash between durable release and unlink; this
-cleanup does not change a sealed log or receipt.
+requested payload. The task's environment file, written at submission for
+its wrapper's and its payload's units, is removed at release; the removal
+is replayed for released tokens after a crash between durable release
+and unlink, and does not change a sealed log or receipt.
 Unit names are unique for the token and are never reused. Finishing a
 payload kills private daemons in the same cgroup before freeing capacity.
 The shared kache daemon runs in its own active user service; heavy refuses
@@ -153,29 +166,27 @@ is independent. Masked global settings do not require kache. Refusals give
 the caller the service/override remedy without printing configuration or
 environment values. Collection connects to the existing service.
 
-Before resuming a group, recovery checks the durable maintenance holds.
-The gate remains durable through every resume until the final release
-snapshot. A crash there replays pauses and resumes under the same lock;
-no build payload can enter while that gate is held. Initially paused
-groups are excluded from the gate's resume list.
+A gate's hold is the ledger's gate token: saved before draining starts,
+and cleared in the snapshot that commits the gate's release. While it is
+set no build and no other gate is admitted, across crashes and restarts
+alike. Operator holds are separate: a gate neither sets nor clears them.
 
 ## 4. Independent recovery and maintenance
 
 `heavy --install-reconciler [INTERVAL]` probes real cgroup containment,
 including a `setsid` child, and installs an enabled user service and timer
 named from the state directory's hash. Installation is explicit. It
-changes no queue lanes, credentials, caches or runtime profile. The
-service reads a private file containing only the required queue/workspace
-configuration. Admission requires the timer to be active and a
-containment probe for the current boot. After reboot, reconciliation and
-admission repeat the probe before accepting new work. Reconciliation can
-recover old holds first. A missing user bus or unsupported systemd capability
-fails visibly.
+changes no credentials, caches or runtime profile. The service reads a
+private file containing only the required workspace configuration.
+Admission requires the timer to be active and a containment probe for the
+current boot. After reboot, reconciliation and admission repeat the probe
+before accepting new work. Reconciliation can recover old holds first. A
+missing user bus or unsupported systemd capability fails visibly.
 
-`heavy --reconcile` runs the common recovery path. The timer survives a
-killed queued wrapper and a killed submitter. It does not depend on queue
-terminal rows. A temporarily unavailable queue fails closed: the next
-timer activation retries without releasing its persisted gate hold.
+`heavy --reconcile` runs the common recovery path: it releases the tasks
+whose payload ended, recovers those whose wrapper identity ended or whose
+boot changed, and cancels the tokens no wrapper claimed (section 2). The
+timer survives a killed wrapper and a killed submitter.
 
 Existing waiting clients inspect systemd's reported recovery service and
 timer state. A failed/missing service, an inactive timer or an unreadable
@@ -184,16 +195,18 @@ waiting on reported service/timer failures, retaining task ownership;
 an unreadable snapshot returns nonzero without cancelling the task.
 Elapsed task age and delayed ticks never establish failure or a timeout.
 For storage failure, free space, restore/restart the same recovery service
-if needed, and run `heavy --reconcile` with the same queue configuration
-and `DEV_TMP`. Retain the ledger; do not delete/reset it. Reconciliation
-is replayable. Rerun land when completion is recovered with exit 137.
+if needed, and run `heavy --reconcile` with the same `DEV_TMP`. Retain
+the ledger; do not delete/reset it. Reconciliation is replayable. Rerun
+land when completion is recovered with exit 137.
 
-`heavy --maintenance-pause GROUP` saves an operator hold before applying
-it. `heavy --maintenance-resume GROUP` clears that hold and resumes only
-when no gate holds it. A resume intent remains durable until applied,
-including when requested during a gate. These are the maintenance interfaces
-while gates run. A direct pueue pause made during a gate cannot be
-distinguished from the gate's pause and is outside this contract.
+`heavy --maintenance-pause LANE`, for `build` or `gate`, saves an
+operator hold: the lane admits nothing until `heavy --maintenance-resume
+LANE` clears it, while its running tasks go on. A hold on `gate` also
+keeps an exclusive gate from taking the machine. A gate's hold and an
+operator's never clear each other. `--maintenance-resume` clears any held
+name, including one an older ledger holds for a lane that no longer
+exists. `heavy --group-held LANE` exits 0 while an operator holds LANE,
+or while a gate holds the machine and LANE is not `gate`.
 
 `heavy --cancel TOKEN` takes back one task, queued or running, by the
 token printed at submission (10-25). A malformed or unknown token, or a
@@ -201,30 +214,27 @@ caller whose working directory is not the task's recorded repository,
 is refused in fixed words, changing nothing. Under the host lock it marks
 an unfinished task closing, outcome `cancelled`, code 130, then releases
 it on the common path: owned scope killed and proved empty, a gate's
-holds resumed, TSV row and receipt published. It uses no queue ID; a
-queued entry that starts later finds its token released and refuses
-replay. The waiting client ends with 130 and its usual summary. The
-command exits 0 once the task is released, 1 if it had already ended
-(finishing, closing or released: its result stands), 2 on a refusal;
-past 60 seconds it leaves the release to the reconciler. It skips the
-disk floor. SIGINT or SIGTERM to a waiting client cancels its task the
-same way, between host-lock sections; a second one leaves the release to
-the reconciler and exits 130. land's capture ignores SIGINT, so Ctrl-C
-on land cancels its gate and land fails with 4.
+hold dropped, TSV row and receipt published. A wrapper that starts later
+finds its token released and refuses replay. The waiting client ends
+with 130 and its usual summary. The command exits 0 once the task is
+released, 1 if it had already ended (finishing, closing or released: its
+result stands), 2 on a refusal; past 60 seconds it leaves the release to
+the reconciler. It skips the disk floor. SIGINT or SIGTERM to a waiting
+client cancels its task the same way, between host-lock sections; a
+second one leaves the release to the reconciler and exits 130. land's
+capture ignores SIGINT, so Ctrl-C on land cancels its gate and land fails
+with 4.
 
 `heavy --remove-reconciler` refuses unfinished tasks, then removes only
 its own timer and service. `setup` checks recovery readiness without
-installing it; its group repairs use `heavy --repair-group` under the host
-lock, preserving gate and maintenance holds. Tests use distinct config, data, socket,
-state and unit names; no live owners' daemon or groups are touched.
+installing it, and reports each lane's holds through `heavy
+--group-held`; it neither needs nor checks a queue daemon. Tests use a
+distinct state directory and unit names; no live ledger or unit is
+touched.
 
-A pause that no ledger records has no durable owner. An empty process list
-or absence of Cargo does not authorize resuming it. Migration must be quiet:
-an operator accounts for the older queue's work and pause intent, drains
-the dedicated queue and explicitly restores groups or records maintenance
-holds before enabling admission. The root cause of incident 587 is
-unknown; the stale pause fixture demonstrates recovery of a durable owned
-hold without inferring that incident's cause.
+Every hold has one owner, the ledger, so none has to be inferred from a
+process list or restored by hand. Taking over an older generation's
+ledger is section 7's.
 
 ## 5. Events and compatibility
 
@@ -235,11 +245,13 @@ The existing GC end event records a fixed outcome and reason. Server-side GC may
 continue; release still requires the owned cgroup to be empty.
 
 `DEV_TMP/heavy/events.jsonl` records submit, wrapper start, admission,
-scope entry, phase begin/end for pause, drain, settle, payload, release
-and collection, task completion, cancel, refusal and recovery. Records
-include a unique event ID, token, timestamp, boot and queue identity,
-lane, label, repository, tree, effective safe policy ID, free disk and
-memory capacity, and the entrypoint recording the event. A contained gate sources
+scope entry, phase begin/end for drain, settle, payload, release and
+collection, task completion, cancel, unclaimed tokens, refusal, recovery
+and migration. Records include a unique event ID, token, timestamp, boot
+and queue identity, lane, label, repository, tree, effective safe policy
+ID, whether the task is an exclusive gate, free disk and memory capacity,
+and the entrypoint recording the event; admission adds the task's CPU
+weight, jobs and build slots. A contained gate sources
 `gate-policy.sh` and calls `gate_policy_prepare`, both at submission and
 inside the contained task. Policy errors prevent payload entry. The
 recovery fixture can
@@ -254,14 +266,14 @@ for the same recovery property. The snapshot retains a completed task's
 row until it is durable. Repeated reconciliation creates neither another
 release outcome nor another TSV row.
 
-The TSV columns remain queue ID, lane, UTC completion, wait seconds, run
-seconds, exit code, available memory GiB, working directory, log path,
-command and label. Queue IDs may be reused by pueue; tokens and log paths
-are the durable identities. Heavy prints its queued ID, the requested
-log tail, and its task completion summary. It never reads pueue task
-records or task logs. The phase events distinguish wrapper startup,
-drain/settle time and payload execution; TSV wait time ends at payload
-start and run time includes completion cleanup.
+The TSV columns remain task number, lane, UTC completion, wait seconds,
+run seconds, exit code, available memory GiB, working directory, log
+path, command and label. Task numbers come from the ledger and are never
+reused within it; tokens and log paths are the durable identities. Heavy
+prints its task number, the requested log tail, and its task completion
+summary. The phase events distinguish wrapper startup, drain/settle time
+and payload execution; TSV wait time ends at payload start and run time
+includes completion cleanup.
 
 After cgroup-empty proof and durable terminal release, events and TSV are
 flushed before receipt publication. Recovery seals the service's private
@@ -277,14 +289,19 @@ receipt path and token as its final output line, outside the hashed log.
 ## 6. Fault verification
 
 `scripts/devel/test-heavy-recovery --evidence NEW_DIRECTORY`
-exercises the production heavy entrypoints with disposable pueued instances and user
-systemd units. It covers killed pause intent, fsynced intent before
-rename, paused groups, setsid/private descendants, release and release
-snapshot windows, queue restart, boot identity change, pre-paused groups,
-maintenance holds during a gate, two gates with builds, journal replay and
-late systemd creation. Assertions check exclusion through cgroup release,
-progress, one release per token, private descendant death and shared
-daemon survival. The fixture uses short reconciler intervals without
+exercises the production heavy entrypoints with disposable state
+directories and user systemd units, and no queue daemon. It covers a
+killed hold intent, fsynced intent before rename, setsid/private
+descendants, release and release snapshot windows, a wrapper unit stopped
+while its payload runs, boot identity change, client death before the
+wrapper unit starts, a wrapper unit stopped before its claim, submission
+order in each lane, maintenance holds on either lane and during a gate,
+two gates with builds, journal replay, late systemd creation, the
+takeover of a drained and of an undrained older ledger, and the
+rollback. Assertions check exclusion through cgroup release,
+progress, one release per token, task numbers never reused, private
+descendant death and shared daemon survival. The fixture uses short
+reconciler intervals without
 changing production task timeouts or test-suite budgets. ENOSPC injection
 at snapshot, journal and log-sealing writes requires the same isolated
 fixture flag/path contract; it never fills the shared filesystem. These
@@ -299,19 +316,20 @@ failure. Raw artifacts
 include each case's ledger, event journal, logs, probe, descendant cgroup
 evidence and cleanup receipt.
 
-The combined cases also exercise queued cancellation with real numeric ID
-reuse and a replacement task, client death before wrapper start, terminal
-queue completion with live private descendants, receipt-publication crash,
-and real land/cache entrypoints in disposable Git repositories. The stale
-pause case uses the approved five-second interval; other recovery fixtures
-use 0.2 seconds and are labelled accelerated. Runtime, semantic policy and
+The combined cases also exercise receipt-publication crash and real
+land/cache entrypoints in disposable Git repositories. The unclaimed-token
+case runs at the approved five-second interval: it anchors a live
+reconciliation, then observes recovery on the subsequent periodic tick.
+Other recovery fixtures use 0.2 seconds and are labelled accelerated.
+Runtime, semantic policy and
 missing-runtime changes before payload refuse without cache or ref advance.
 Receipt faults cover before publication, a fsynced temporary receipt before
-rename, and after atomic publication. The five-second case anchors a live
-reconciliation, then observes recovery on the subsequent periodic tick.
+rename, and after atomic publication. The rollback case runs the previous
+generation's entrypoints, unchanged, against a drained ledger of this
+one, then section 7's way back.
 Recovery fixtures also cover after-landing's helper lookup from a relocated
 kit and real Chromium 147 receipt/cache reuse. Cancel cases cover a
-queued task (below the disk floor, then its late entry's refused
+queued task (below the disk floor, then its late wrapper's refused
 replay), running build and gate scopes with a `setsid` child, every
 refusal, a waiting client's SIGINT and SIGTERM, and Ctrl-C on land.
 Land-entry storage and missing-reconciler cases require the warning on
@@ -352,20 +370,48 @@ flight, because each machine takes it as its checkout moves. One that can't
 lands only once every machine is drained, and its commit says so
 (agents' `AGENTS.md`).
 
-Never reset or replace a live queue or erase its ledger. Enqueue recovery
-uses a persisted bare numeric queue ID; it cannot prove identity after a
-reset/replacement. Replacement requires stopping submissions and a
-complete accounting/drain, including callers, wrappers, observers,
-unfinished tokens and pause/resume intent, before changing queue identity
-or selecting a fresh state directory. Retain the retired ledger and
-evidence. A normal daemon restart keeps its config/data identity and
-ledger. After reboot restore that queue and its user services, including
-recovery and the shared kache service when selected, then reconcile with
-the same configuration and state. Resolve recovered nonzero completions
-by rerunning land.
+Until 10-26 heavy ran each wrapper as a pueue task, and its ledger's
+identity hashed pueue's configuration. The current generation takes such
+a ledger over only drained: when every task in it is released, it
+records a migration event with the old identity, sets its own, numbers
+the next task above every number in the ledger, and keeps every row and
+hold. Until then it admits nothing new, and says why (`drain first: N
+tasks from the pueue generation`), and it leaves the ledger's identity
+as it is, so that the older generation's processes still running can
+finish. It releases the older tasks on the common path: a task whose
+wrapper claimed it keeps its units and cgroup and is released when it
+ends, or recovered if its wrapper dies; a task never claimed (submitted,
+enqueuing or queued) is cancelled with 137, which its client reruns. A
+wrapper that pueue starts later for an older token finds it cancelled
+and refuses replay. The current generation never calls pueue: pueue's
+daemon, its data and its groups stay as they were, and their removal is
+a separate step on each machine. A pueue pause that the ledger doesn't
+record has no owner and does not carry over, so before the machine
+moves, the older generation's `setup` reports each lane running or held
+by heavy.
 
-Rollback is reverting the commit, under the same rule for the ledger and
-units. It requires no destructive cache or ledger cleanup.
+Never reset or replace a live queue or erase its ledger. A fresh state
+directory, or a retired ledger, requires a drained machine first: no
+caller, wrapper or unfinished token. Retain the retired ledger and
+evidence. After reboot the user manager restores the reconciler's timer,
+and the shared kache service when selected; reconciliation then recovers
+the old boot's tasks with the same configuration and state. Resolve
+recovered nonzero completions by rerunning land.
+
+Rollback is reverting the commit on a drained machine. The pueue
+generation refuses a ledger of another identity in fixed words and
+writes nothing, so the revert comes with a way back: on the drained
+machine, the ledger is retired beside itself (`state.json` renamed to
+`state.json.retired-DATE`, and kept), then `heavy --install-reconciler`
+and `setup --fix` start the pueue generation on a fresh ledger. Unit
+names, the journal, the TSV and the receipts carry over; the retired
+ledger's operator holds don't. A hold on `build` is applied again with
+the older generation's `heavy --maintenance-pause build` before the
+machine takes work; that generation cannot hold its gate lane, so a hold
+on `gate` is resolved before the rollback, or the machine stays out of
+work. pueue's daemon and groups must still be there, which is why their
+removal waits until this generation has run cleanly on that machine.
+Rollback requires no destructive cache or ledger cleanup.
 
 ## 8. Advisory landing turn
 
