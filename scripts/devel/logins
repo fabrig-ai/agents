@@ -71,17 +71,35 @@ def login_check(path):
     directory = stat.S_ISDIR(info.st_mode)
     if not stat.S_ISREG(info.st_mode) and not directory:
         return 'not a regular file or directory'
-    if info.st_uid != os.geteuid():
-        return 'not ours'
-    if stat.S_IMODE(info.st_mode) != (0o700 if directory else 0o600):
-        return 'not private'
+    descriptor = None
     if directory:
-        with os.scandir(path) as entries:
-            if next(entries, None) is None:
-                return 'empty'
-    elif info.st_size == 0:
-        return 'empty'
-    return None
+        try:
+            descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        except FileNotFoundError:
+            return 'missing'
+        except OSError as error:
+            if error.errno in (errno.ELOOP, errno.ENOTDIR):
+                return 'a link' if os.path.islink(path) else 'not a regular file or directory'
+            raise
+    try:
+        if directory:
+            info = os.fstat(descriptor)
+            if not stat.S_ISDIR(info.st_mode):
+                return 'not a regular file or directory'
+        if info.st_uid != os.geteuid():
+            return 'not ours'
+        if stat.S_IMODE(info.st_mode) != (0o700 if directory else 0o600):
+            return 'not private'
+        if directory:
+            with os.scandir(descriptor) as entries:
+                if next(entries, None) is None:
+                    return 'empty'
+        elif info.st_size == 0:
+            return 'empty'
+        return None
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
 
 
 def note_ok(value):

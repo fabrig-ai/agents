@@ -7,6 +7,7 @@ from pathlib import Path
 import stat
 import subprocess
 import sys
+import textwrap
 import time
 
 import case_runner
@@ -70,17 +71,98 @@ class Lab:
     def write(self, filename, value, name=CHATGPT):
         (self.directory(name) / filename).write_text(json.dumps(value) + '\n')
 
-    def clock(self, stamp):
-        # Fix only the fixture process's clock; the tool has no test-only environment switch.
-        driver = self.root / 'clock.py'
+    def driver(self, body):
+        driver = self.root / 'driver.py'
         driver.write_text('import importlib.machinery, importlib.util, sys\n'
                           f'loader = importlib.machinery.SourceFileLoader("logins", {str(SCRIPT)!r})\n'
                           'spec = importlib.util.spec_from_loader(loader.name, loader)\n'
                           'module = importlib.util.module_from_spec(spec)\n'
-                          'loader.exec_module(module)\n'
-                          f'module.timestamp = lambda: {stamp!r}\n'
-                          'sys.exit(module.main())\n')
+                          'loader.exec_module(module)\n' + textwrap.dedent(body))
         self.argv = [sys.executable, '-S', str(driver)]
+
+    def clock(self, stamp):
+        # Fix only the fixture process's clock; the tool has no test-only environment switch.
+        self.driver(f'module.timestamp = lambda: {stamp!r}\nsys.exit(module.main())\n')
+
+    def observe_login(self, path, replacement=None):
+        trace = self.root / 'calls.json'
+        self.driver(f'login = {str(path)!r}\nreplacement = {str(replacement) if replacement else None!r}\n'
+                    f'trace = {str(trace)!r}\n' + textwrap.dedent("""
+            import json, os
+            calls, descriptors, entries = [], {}, []
+            originals = {name: getattr(os, name) for name in ('stat', 'lstat', 'open', 'scandir')}
+            checking, swapped = False, False
+
+            def record(name, path, kwargs):
+                directory = kwargs.get('dir_fd')
+                target = descriptors.get(path, path) if isinstance(path, int) else os.fspath(path)
+                if directory is not None and not isinstance(target, int):
+                    target = os.path.join(descriptors[directory], target)
+                calls.append([name, target])
+
+            def wrap(name):
+                def call(path, *args, **kwargs):
+                    global swapped
+                    record(name, path, kwargs)
+                    result = originals[name](path, *args, **kwargs)
+                    if name == 'open':
+                        descriptors[result] = os.fspath(path)
+                    if name == 'lstat' and checking and not swapped and replacement and os.fspath(path) == login:
+                        os.rename(login, login + '-away')
+                        os.symlink(replacement, login, target_is_directory=True)
+                        swapped = True
+                    return result
+                return call
+
+            class CountedEntries:
+                def __init__(self, iterator):
+                    self.iterator = iterator
+                    self.index = len(entries)
+                    entries.append(0)
+
+                def __enter__(self):
+                    self.iterator.__enter__()
+                    return self
+
+                def __exit__(self, *args):
+                    return self.iterator.__exit__(*args)
+
+                def __iter__(self):
+                    return self
+
+                def __next__(self):
+                    entry = next(self.iterator)
+                    entries[self.index] += 1
+                    return entry
+
+            def scandir(path):
+                record('scandir', path, {})
+                return CountedEntries(originals['scandir'](path))
+
+            original_check = module.login_check
+
+            def check(path):
+                global checking
+                checking = True
+                try:
+                    return original_check(path)
+                finally:
+                    checking = False
+
+            for name in ('stat', 'lstat', 'open'):
+                setattr(os, name, wrap(name))
+            os.scandir = scandir
+            module.login_check = check
+            try:
+                status = module.main()
+            finally:
+                for name, function in originals.items():
+                    setattr(os, name, function)
+                with open(trace, 'w') as output:
+                    json.dump(dict(calls=calls, entries=entries, swapped=swapped), output)
+            sys.exit(status)
+        """))
+        return trace
 
 
 def adds_a_login_by_moving_it(lab):
@@ -154,19 +236,34 @@ def a_directory_login_not_back_stays_held(lab):
 
 
 def give_reads_nothing_inside_a_directory(lab):
+    source = lab.source_directory(entries=3)  # Multiple entries expose an exhaustive scan.
+    lab.run('add', CHATGPT, str(source))
+    path = lab.directory() / 'login'
+    lab.run('take', CHATGPT, '--as', QA)
+    trace = lab.observe_login(path)
+    assert lab.run('give', CHATGPT, '--as', QA)[0] == 0
+    evidence = json.loads(trace.read_text())
+    assert evidence['entries'] == [1]
+    assert any(operation == 'scandir' and target == str(path)
+               for operation, target in evidence['calls'])
+    assert not any(isinstance(target, str) and target.startswith(str(path) + '/')
+                   for _, target in evidence['calls'])
+    assert not (lab.directory() / 'holder.json').exists()
+    assert [row[1] for row in lab.log()] == ['add', 'take', 'give']
+
+
+def give_refuses_a_directory_replaced_by_a_link(lab):
     path = lab.directory_login()
     lab.run('take', CHATGPT, '--as', QA)
-    unreadable = path / 'entry-0'
-    unreadable.chmod(0)
-    subdirectory = path / 'unreadable-directory'
-    subdirectory.mkdir(mode=0)
-    try:
-        assert lab.run('give', CHATGPT, '--as', QA)[0] == 0
-        assert not (lab.directory() / 'holder.json').exists()
-        assert [row[1] for row in lab.log()] == ['add', 'take', 'give']
-    finally:
-        unreadable.chmod(0o600)
-        subdirectory.chmod(0o700)
+    replacement = lab.source_directory()
+    trace = lab.observe_login(path, replacement)
+    code, _, err = lab.run('give', CHATGPT, '--as', QA)
+    evidence = json.loads(trace.read_text())
+    assert evidence['swapped'] and path.is_symlink()
+    assert code == 1 and 'not back' in err and 'a link' in err
+    assert lab.read('holder.json')['holder'] == QA
+    assert evidence['entries'] == []
+    assert [row[1] for row in lab.log()] == ['add', 'take']
 
 
 def an_empty_directory_login_stays_held(lab):
@@ -375,7 +472,8 @@ def refuses_a_symlinked_state_path(lab):
 CASES = (adds_a_directory_login_by_moving_it, add_refuses_an_empty_directory,
          add_refuses_a_directory_that_is_not_private, add_refuses_a_link_to_a_directory,
          takes_and_gives_a_directory_login, a_directory_login_not_back_stays_held,
-         give_reads_nothing_inside_a_directory, an_empty_directory_login_stays_held,
+         give_reads_nothing_inside_a_directory, give_refuses_a_directory_replaced_by_a_link,
+         an_empty_directory_login_stays_held,
          adds_a_login_by_moving_it, add_refuses_a_login_that_is_not_private,
          add_refuses_a_second_login_at_rest, takes_a_login_at_rest, a_second_taker_waits,
          the_first_waiter_is_served_first, a_stale_waiter_loses_its_turn,
