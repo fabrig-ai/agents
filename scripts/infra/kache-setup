@@ -12,12 +12,13 @@
 # ~/.local/bin/kache by rename (and ~/bin/kache, an older install's path, for
 # a link to it). It points cargo's rustc-wrapper at that path, writes the
 # store's cap (the machine file's KACHE_MAX_GB, 12 unless it says otherwise)
-# and the disk floor (PLAN_MIN_DISK_GB) into kache's config, with executables
-# cached and prefetch off, and starts its daemon as a user service. A
+# and a recovery reserve above the disk floor (PLAN_MIN_DISK_GB) into
+# kache's config, with executables cached and prefetch off, and starts its daemon as a user service. A
 # user-owned 0600 store.env enables the shared S3 store; without it, setup
 # removes the remote and its service drop-in.
 # From 1.2, kache collects its own store past its
-# cap; a timer that collected the older one's is kept running. A store of
+# cap, including blobs retained by targets; a timer that collected the older
+# one's is kept running. A store of
 # another version is cleared, since its keys no longer match. Run again, it
 # changes nothing that is already right.
 set -euo pipefail
@@ -41,6 +42,10 @@ source "$kit/../devel/kit.sh"
 [[ $(uname -m) == x86_64 ]] || { echo "kache-setup: only x86_64 has a pinned release" >&2; exit 2; }
 read -r cap _ < <(machine_setting KACHE_MAX_GB 12)
 read -r floor _ < <(machine_setting PLAN_MIN_DISK_GB 40)
+# Recover while heavy can still admit work, leaving a whole cache budget
+# above its refusal floor. Even a zero-sized cache keeps a 1 GiB reserve.
+reserve=$((cap > 0 ? cap : 1))
+recovery=$((floor + reserve))
 
 # Inspect metadata only: systemd, not setup, reads the credentials.
 credentials=$HOME/.config/kache/store.env
@@ -101,12 +106,17 @@ cat >"$config.new" <<TOML
 [cache]
 ${local:+local_store = \"$local\"
 }local_max_size = "${cap}GiB"
+# The fleet caps registered blobs even when targets retain their blocks.
+# Eviction removes the cache name; target files remain usable.
+gc_evict_shared = true
+auto_gc = true
 cache_executables = true
 # Prefetch fetches what a build might want ahead of demand: in the 24 h to
 # 10-25 it downloaded 76 GiB on the five builders, of whose entries 5% were used,
 # beside uploads that timed out (build-cache.md, 7).
 prefetch_enabled = false
-auto_recover_min_free_bytes = $((floor * 1024 * 1024 * 1024))
+# Begin cache recovery before heavy reaches its admission floor.
+auto_recover_min_free_bytes = $((recovery * 1024 * 1024 * 1024))
 TOML
 if ((remote)); then
     cat >>"$config.new" <<'TOML'
@@ -173,4 +183,4 @@ if systemctl --user cat kache-gc.timer >/dev/null 2>&1; then
 fi
 sleep 2
 systemctl --user is-active --quiet kache.service || { echo "kache-setup: kache.service is not running" >&2; exit 1; }
-echo "kache-setup: $("$bin" --version) (was ${installed:-none}), store cap ${cap} GiB, disk floor ${floor} GB"
+echo "kache-setup: $("$bin" --version) (was ${installed:-none}), store cap ${cap} GiB, recovery reserve ${recovery} GiB (heavy floor ${floor} GiB)"

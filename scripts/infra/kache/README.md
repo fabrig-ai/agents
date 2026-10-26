@@ -58,3 +58,27 @@ payload 478 s, queue wait 2 s). `out/kache` reported
 dynamic interpreter. Its SHA-256, now pinned by `kache-setup` and this
 recipe, is `91fb6aa7d7ddd427e3e2732aa346ce116fbf075df0c871e1148bf309aaadafaf`.
 The director places and rolls out this artifact; it has not been installed.
+
+## Local cap rollout
+
+Setup writes `gc_evict_shared = true` and `auto_gc = true`: the budget
+includes blobs retained by target files, whose links survive eviction.
+`auto_recover_min_free_bytes` is `(PLAN_MIN_DISK_GB + KACHE_MAX_GB)` GiB
+(with at least 1 GiB above the floor), so recovery begins before heavy
+refuses work. `KACHE_MAX_GB` and `PLAN_MIN_DISK_GB` keep their defaults
+and environment/file precedence. The cap counts registered blob bytes,
+excluding the index, metadata and staging files.
+
+After landing, run `heavy --gate -- /path/to/scripts/infra/kache-setup`
+on one builder at a time, then `heavy --gate -- kache gc --json` and
+`kache stats --json`. The pinned version stays the same, so setup keeps
+the store. Shared bytes removed from the namespace may remain on disk
+until their target files go. Upload intents and recently accessed entries
+can temporarily prevent reaching the cap; inspect GC pin counts and wait
+for the pinned upload retry budget and active-use grace before sweeping
+again. This config does not retire upload intents.
+
+Rollback: revert the cap-config commit, land it, and rerun setup through
+the gate. This restores reclaimable-only budgeting and recovery at the
+heavy floor; it cannot restore evicted cache hits. No cache keys, binary,
+remote selectors or credentials change in this rollout.

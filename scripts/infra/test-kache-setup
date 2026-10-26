@@ -65,6 +65,28 @@ def main():
         assert not dropin.exists()
         assert 'clean' not in trace.read_text()
 
+        assert cache['local_max_size'] == '12GiB'
+        assert cache['auto_gc'] is True and cache['gc_evict_shared'] is True
+        assert cache['auto_recover_min_free_bytes'] == 52 * 1024**3
+
+        # Migrate an over-cap configuration without clearing a same-version store.
+        machine = root / 'machine.env'
+        machine.write_text('KACHE_MAX_GB=20\nPLAN_MIN_DISK_GB=40\n')
+        config.write_text('[cache]\nlocal_max_size = "20GiB"\ngc_evict_shared = false\n'
+                          'auto_recover_min_free_bytes = 42949672960\n')
+        setup()
+        cache = tomllib.loads(config.read_text())['cache']
+        assert cache['local_max_size'] == '20GiB'
+        assert cache['auto_gc'] is True and cache['gc_evict_shared'] is True
+        assert cache['auto_recover_min_free_bytes'] == 60 * 1024**3
+        assert 'clean' not in trace.read_text()
+        for cap, floor, reserve in [(7, 55, 62), (0, 40, 41)]:
+            setup({'KACHE_MAX_GB': str(cap), 'PLAN_MIN_DISK_GB': str(floor)})
+            cache = tomllib.loads(config.read_text())['cache']
+            assert cache['local_max_size'] == f'{cap}GiB'
+            assert cache['auto_recover_min_free_bytes'] == reserve * 1024**3
+        setup()
+
         # A key enables both config and service; setup only inspects its metadata.
         key.touch(mode=0o600)
         config.write_text('[cache]\nlocal_store = "/fixture/large-disk"\n')
@@ -113,7 +135,7 @@ def main():
         result = subprocess.run([moved / 'kache-setup'], env=discovery_env,
                                 capture_output=True, text=True)
         assert result.returncode == 0, (result.stdout, result.stderr)
-        print('test-kache-setup: passed (local, settings, remote, repeat, mode, owner, removal)')
+        print('test-kache-setup: passed (local, cap migration, recovery headroom, overrides, remote, repeat, mode, owner, removal)')
 
 
 if __name__ == '__main__':
