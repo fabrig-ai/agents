@@ -936,7 +936,10 @@ def watch_takes_the_rungs_login_before_the_pass(lab):
     assert calls.index('logins') < calls.index('codex-run')
     brief = (directory / 'brief.md').read_text()
     for text in (f'- Your rung: {REAL}, as the product', '- Held logins, taken for you by the service',
-                 f'    - {CHATGPT}: {path}', str(directory / 'give-back'), 'Never run `logins`, never read or copy a login.'):
+                 f'    - {CHATGPT}: {path}', str(directory / 'give-back'),
+                 "its path by the product's export, every program in it named by its\n"
+                 '  absolute path (it runs outside your shell).',
+                 'Never run `logins`, never read or copy a login.'):
         assert text in brief, (text, brief)
     assert lab.calls('codex-run')[0][3:5] == ['--on-stop', str(directory / 'give-back')]
     assert f'commits: {state["commits"][0]}\nrung: {REAL}\n' in lab.content(f'qa/passes/{state["pass"]}.md')

@@ -678,8 +678,9 @@ class Watch:
                                + '\n'.join(f'    - {name}: {path}' for name, path in logins.items())
                                + f"\n  Move each into your deployment as the binding says. At once after,\n"
                                f'  write {directory}/give-back: an executable that moves each back to\n'
-                               "  its path by the product's export. Run it yourself before your\n"
-                               '  deployment stops, and check each path by stat alone (a regular\n'
+                               "  its path by the product's export, every program in it named by its\n"
+                               '  absolute path (it runs outside your shell). Run it yourself before\n'
+                               '  your deployment stops, and check each path by stat alone (a regular\n'
                                '  file, 0600, not empty). Your unit runs it too when it stops, whatever\n'
                                '  stops it. Never run `logins`, never read or copy a login.')
         brief = BRIEF.format(name=name, agents=Path(__file__).resolve().parents[2], repo=repo, main=main,
