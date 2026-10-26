@@ -285,7 +285,7 @@ overwrites another.
   - owners.md: 2 (the start command's `POST_NAME`, the waiter, no
     `inbox/`), 4.2 (the launcher), 4.3 (a doubt goes in the report) and
     5 (escalation by post);
-  - product.md 2 and 5, qa.md 4, keeper.md 2 and 8, and implementer.md
+  - product.md 2 and 5, qa.md 4, and implementer.md
     wherever they name an inbox.
 - **Kept:** `watch.sh` and `probe.sh` for the machines, sessions and
   usage, with the stuck-mail trigger in place of the inbox key; `claude

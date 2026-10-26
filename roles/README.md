@@ -35,9 +35,6 @@ Claude is for taste; everything else goes to Codex.
   director.
 - **The resource watcher:** a tool that wakes an owner when CPU, memory
   or disk need it (owners.md 2), to be built.
-- **The landing flow's go-live** changes owners.md 4 and director.md
-  (landing-flow.md 8). Until then, landing-flow.md 9.1 says how sets
-  land.
 - **temper's drafts that read our roles:** `draft/configuring.md` and
   `draft/temper-on-temper.md` describe how we worked before 10-26:
   product owners, departments and milestones.

@@ -436,7 +436,7 @@ a time, with the owners who build it.
   builders, the budgets, and the other owners near its repositories. It
   answers what each brings, and breaks the ties between them.
 - **What stays the director's:** the user; machines, placement and
-  spend; security; the landing queue; what crosses drafts; starting and
+  spend; security; the landing flow; what crosses drafts; starting and
   stopping designers.
 - **One answer per question.** An owner writes to its designer only.
   The director answers a designer's owners only through it.

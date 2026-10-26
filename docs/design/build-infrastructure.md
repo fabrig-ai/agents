@@ -565,7 +565,7 @@ failure may leave its amended/rebased candidate; do not rerun it unguarded.
 
 ## 10. Landing a set
 
-`scripts/devel/land-set` is the landing flow's starting primitive
+`scripts/devel/land-set` is the landing flow's tool
 (landing-flow.md 9.1). It is a standalone Python 3.11 command, run from a
 committed agents checkout like `repin`. It lands one milestone's set across
 skein, smith, hearth, jig and temper under one lock, and gates every

@@ -175,10 +175,10 @@ build lane.
   pins, where each upstream's old and new commits differ only in
   Markdown under `docs/`, keeps its gate. It is `land`'s docs rule,
   carried through the lock.
-- **Proving on one machine and landing on another,** or a queue on
-  hetzner3 that lands for everyone, needs a receipt and its log that
-  the lander can read and check, as gate-policy.md 3.1 checks them
-  locally. Nothing needs that while the owner's machine does both.
+- **Proving on one machine and landing on another** needs a receipt
+  and its log that the lander can read and check, as gate-policy.md 3.1
+  checks them locally. Nothing needs that while the owner's machine
+  does both.
 - **Starvation.** A set whose `main` moved during its prove gates
   again under the lock. Nothing moves a `main` while it holds the lock,
   so that second run always ends.

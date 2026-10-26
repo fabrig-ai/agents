@@ -2,13 +2,14 @@
 
 Provisional, 2026-10-24, proposed with the user; revised 10-25 (the
 user): a set proves its gates before it takes the lock, every landing
-takes the set lock, and there is no keeper. Live in part since 10-24:
-`scripts/devel/land-set` is its starting primitive, and agents do the
-rest by hand until it is built (section 9.1). How changes reach `main`
-across skein, smith, jig, hearth and temper:
+takes the set lock, and there is no keeper; and 10-26 (the user): there
+is no landing queue. Built and live: `scripts/devel/land-set` and the
+set lock (section 9). How changes reach `main` across skein, smith,
+jig, hearth and temper:
 - one set of branches per milestone;
-- a landing queue that is the only writer to `main`;
-- a tool that runs the queue, and the set's owner for its failures.
+- `land-set`, which proves a set without the lock, then lands it under
+  the set lock, which every landing takes;
+- the set's owner, who runs it and has its failures repaired.
 
 It has two goals. It gets the most out of the shared build cache
 ([build-cache.md](build-cache.md)), and it leaves owners nothing to
@@ -18,13 +19,13 @@ and milestones are [owners.md](../../roles/owners.md).
 
 ## 1. In one page
 
-- **Where it stands (10-25).** Only `land-set` is built. It proves a
-  set without the lock, gating every repository, then lands it under
+- **Where it stands (10-26).** `land-set` is built and live. It proves
+  a set without the lock, gating every repository, then lands it under
   the lock, where an unchanged `main` makes each gate a cache hit
   (9.2). Every landing that pushes takes the same lock. Each step goes
-  to a feed that `landings` shows and waits on. Agents do by hand what
-  the rest of this flow will do, as section 9.1 lists, and the tools
-  come over time.
+  to a feed that `landings` shows and waits on. The owner does the rest,
+  as section 9.1 lists. The landing queue and its keeper are not the
+  design (the user, 10-25 and 10-26): sections 4 and 8 are retired.
 - **The invariant.** Every repository's `main` pins the current `main`
   of each of its upstreams. Only a landing moves a `main`, and a landing
   keeps the invariant: it moves every repository it touches, and repins
@@ -34,15 +35,15 @@ and milestones are [owners.md](../../roles/owners.md).
   same invariant inside it (section 3).
 - **One landing per milestone.** At a milestone's end the set is
   rebased on the current mains and proved: its gates run once, without
-  the lock. The owner then asks the queue to land it, which gates again
-  only what a moved `main` changed. The gates are optimistic (the user,
-  10-25): a failure comes back to the set as a repair. They run
+  the lock. The owner then runs `land-set`, which gates again under the
+  lock only what a moved `main` changed. The gates are optimistic (the
+  user, 10-25): a failure comes back to the set as a repair. They run
   the lints and the focused and fuzzy suites, and nothing slower: the
   browser tier and the other slow tiers are after landing's, which
-  nothing runs until the user designs how (section 4). Tasks inside a
+  nothing runs until the user designs how (4, step 8). Tasks inside a
   milestone merge into the set's branches, not into `main`.
 - **The next milestone doesn't wait for the landing** (the user,
-  10-24). It starts as soon as the set is in the queue, on top of it.
+  10-24). It starts as soon as the set is proved, on top of it.
   - If the landing fails, the set is repaired beside the new
     milestone, as a QA pass runs today.
   - Once the earlier milestone has landed, the new one rebases on
@@ -52,21 +53,20 @@ and milestones are [owners.md](../../roles/owners.md).
   milestone's Claude owner or sub-owner as any implementer does. The
   owner keeps the judgement: when to rebase, which findings to fix, and
   the check of each result (section 3).
-- **The queue is `main`'s only writer** (section 4).
-  - If `main` moved since the set was rebased, the queue rebases it
-    again and runs the gate of every repository the set reaches.
-  - Then it lands the whole set, or sends it back to its owner.
-  - Sets that need no gate go first, then returned sets, then the rest
-    as they came.
-- **A tool runs the queue, and no keeper watches it** (section 5; the
-  user, 10-25).
-  - The tool does the mechanics, the order's fixed rules included.
+- **The set lock is `main`'s only writer** (9.1, 9.2). `land-set`,
+  `land` and `land --docs` take it for every push to skein, smith,
+  hearth, jig or temper, so one landing at a time moves the mains.
+  - If `main` moved since the set was proved, `land-set` rebases it
+    again and gates from the most upstream repository that moved.
+  - Then it lands the whole set, or stops; a stop before its pushes
+    moves no `main` (9.1).
+- **No queue, and no keeper** (section 5; the user, 10-25 and 10-26).
+  - `land-set` does the mechanics, and the set's owner runs it.
   - A failure goes back to the set's owner, who reads it, has its
     implementer repair the set, and escalates what it can't settle
     (owners.md 4).
-  - Directors and product owners take no part in merging: they get news
-    of what landed, and escalations when merging goes wrong (the user,
-    10-24).
+  - The director takes no part in merging: it reads the feed, and
+    hears of a landing only when merging goes wrong (the user, 10-24).
 - **Why per milestone** (section 6):
   - **The cache:** a change is compiled once for the fleet, and two
     versions of the same crates coexist for at most a milestone.
@@ -127,8 +127,8 @@ Since 10-26 a milestone here is a mission's slice that lands (owners.md
   like `main`'s, moved with `scripts/devel/repin`, never with `[patch]`
   overrides to local paths.
   - The kache patch normalizes Cargo's git checkouts, not arbitrary
-    paths. A build from a path would key differently, and the queue
-    could not reuse the owner's builds. This follows from the patch's
+    paths. A build from a path would key differently, and a landing's
+    gates could not reuse the owner's builds. This follows from the patch's
     design; it was not measured.
 - **Tasks.** Implementers branch from the set's branch in their
   repository and merge back into it, after their focused tests through
@@ -141,7 +141,7 @@ Since 10-26 a milestone here is a mission's slice that lands (owners.md
   - every rebase of the set, with its conflicts and the gates after it:
     during the milestone, at its end, and a stacked milestone's onto
     `main` (below);
-  - the repair of a set the queue sent back (section 4);
+  - the repair of a set whose proof or landing failed (9.1);
   - the fixes for the findings of the owner's QA pass that triage lets
     in (director.md 6).
 
@@ -149,7 +149,7 @@ Since 10-26 a milestone here is a mission's slice that lands (owners.md
   other work without taste goes (owners.md 1). The milestone's owner,
   or its sub-owner, keeps the judgement: when to rebase, which findings
   to fix, the task's brief, the check of each diff (owners.md 3) and
-  the request to the queue.
+  the landing itself.
   - **Escalation** follows the implementers' rules (implementer.md 4,
     owners.md 5): on a doubt the implementer stops, writes the
     question as its report's first line and ends, and it never
@@ -166,109 +166,56 @@ Since 10-26 a milestone here is a mission's slice that lands (owners.md
      gate, without the lock and pushing no `main` (9.2).
      - A `Cargo.lock` conflict is never merged by hand: take `main`'s
        lock and repin to the set's tuple.
-  2. Push the set's branches and ask the queue to land it. Where no
-     `main` moved since the proof, the queue's gates are the proof's,
-     from the cache, so no test runs twice.
+  2. Land it: `land-set` on the machine that proved it, under the lock
+     (9.1). Where no `main` moved since the proof, its gates are the
+     proof's, from the cache, so no test runs twice.
   3. Start the next milestone at once (below).
 
   Step 1 is one implementer task (above). The owner checks its result,
   then takes steps 2 and 3.
-- **The next milestone stacks on the queued set.** It doesn't wait for
+- **The gates.** A gate is its repository's `scripts/check.sh`: the
+  formatting, the lints, the wasm32 ones included, and the focused and
+  fuzzy suites (the user, 10-25). `land-set` runs them through `land`,
+  upstream first, so a failing skein gate stops the set before four
+  more run, and each downstream gate restores its upstream's builds
+  from the store. With the cache, only the set's own changes and the
+  crates built on them compile (section 6.1). The browser tier, with
+  the bundle it serves, is `scripts/browser.sh`, and no gate runs it
+  (4, step 8).
+- **The next milestone stacks on the proved set.** It doesn't wait for
   the landing, just as it doesn't wait for a QA pass.
-  - **Where it starts.** Its branches start from the queued set's heads,
+  - **Where it starts.** Its branches start from the proved set's heads,
     since `main` doesn't hold the earlier milestone yet. Those heads are
     recorded as its fork point. A repository the earlier set didn't
     reach starts from `main`.
-  - **Its builds start warm,** because the queued set's gates published
-    every unit of that tuple.
-  - **Repairs.** The ended milestone's sub-owner stays on for its
-    landing, as it stays on for QA. If the queue sends the set back, the
-    sub-owner briefs an implementer with the failure, and the repair
-    loop runs beside the new milestone: repair, rebase and gates by the
-    implementer, then the sub-owner's check and a new request. A
-    returned set goes first (section 4).
-  - **No early queueing.** The new milestone can't enter the queue
-    before the earlier one has landed, since its base would hold
-    unlanded work.
+  - **Its builds start warm,** because the set's proof published every
+    unit of that tuple.
+  - **Repairs.** If the set's landing fails, its owner briefs an
+    implementer with the failure, and the repair loop runs beside the
+    new milestone: repair, rebase and proof by the implementer, then
+    the owner's check and `land-set` again.
+  - **No early landing.** The new milestone lands only after the
+    earlier one, since its branches hold the earlier one's unlanded
+    work.
   - **Rebasing on `main`.** Once the earlier milestone has landed, the
     new one rebases when its owner chooses. An implementer moves only
     the new milestone's commits onto `main` (`git rebase --onto main
     <fork point>` in each repository).
     - The earlier milestone may have changed on its way in, rebased by
-      the queue or repaired. If it landed as queued, the tuple is
+      `land-set` or repaired. If it landed as proved, the tuple is
       unchanged and the rebase rebuilds nothing.
     - The latest moment is the new milestone's own end, which rebases
       anyway.
 
 ## 4. The queue
 
-The queue is the only writer to every repository's `main`. Its tool,
-`queue`, runs on hetzner3 (section 5) and takes one set at a time.
+Retired 2026-10-26: there is no landing queue (the user). The set lock,
+which is the landing turn (build-infrastructure.md 8), orders every
+landing (9.1); `land-set`, run by the set's owner, rebases, repins,
+gates and pushes (9.1, 9.2); what a gate runs is section 3's. Only the
+queue's last step stays, at its number, which tools and documents
+cite:
 
-1. **The request.** The owner pushes the set's branches and runs `queue
-   request` with a set file: the set's name, each repository's branch,
-   head and base, and its gate receipts. The tool refuses at once, with
-   the reason, a request with any of these:
-   - a head that isn't pushed;
-   - a base that isn't on its repository's `main`, which also refuses a
-     stacked milestone queued before the earlier one has landed;
-   - a missing pin-only branch, or a lock that doesn't pin the set's
-     tuple;
-   - a receipt that doesn't check out (step 3).
-2. **The order.** It follows fixed rules:
-   1. sets that need no gate: docs sets, and sets whose base is still
-      current and whose receipts check out. Each takes seconds, and
-      landing them early saves their gates;
-   2. returned sets;
-   3. the rest, first come, first served.
-3. **Unchanged base.** If each repository's `main` is still the set's
-   base, and each candidate tree has a receipt that checks out, the set
-   lands without a new gate.
-   - Today the receipt is the gate cache of the machine that proved the
-     set, and the set lands from that machine (9.2).
-   - A queue that lands for everyone will read heavy's receipt on the
-     machine that ran the gate. It checks it as `land` does
-     (gate-policy.md 3.1): the tree, the policy, the outcome and the
-     log's digest.
-   - The tree includes the lock, and with it the tuple.
-   - Receipts are checked, never taken on an owner's word.
-4. **Moved base.** Otherwise the tool rebases each branch on its
-   current `main`, repins the set and runs every gate.
-   - It pushes the rebased branches under new names, and never forces a
-     push.
-   - It resolves only mechanical conflicts: a `Cargo.lock` conflict
-     (take `main`'s lock, repin to the tuple), or a generated file that
-     has a generator. Any other conflict sends the set back, for the
-     owner's implementer to resolve (section 3).
-   - A gate is its repository's `scripts/check.sh`: the formatting, the
-     lints, the wasm32 ones included, and the focused and fuzzy suites
-     (the user, 10-25). The browser tier, with the bundle it serves, is
-     `scripts/browser.sh`, and no gate runs it (step 8).
-   - Gates run through `heavy --land` on a free build machine, upstream
-     first. A failing skein gate stops the set before four more run, and
-     each downstream gate restores its upstream's builds from the store.
-   - With the cache, only the set's own changes and the crates built on
-     them compile here (section 6.1).
-5. **Green.** The tool pushes the mains upstream first: skein, then
-   smith and hearth, then jig, then temper.
-   - Each push is a fast-forward and is journaled, so a crash between
-     pushes resumes where it stopped.
-   - No push can be refused, because nothing else writes to `main`.
-   - The gate evidence goes in a git note on each landed commit, not in
-     a trailer. Amending skein's head after temper's lock pinned it
-     would leave temper pinning a commit that `main` never holds.
-   - The landing goes into the landings feed.
-6. **Red.** The tool reruns the tests that failed, alone, once.
-   - If they pass, it was a flake. The set lands, and its owner files
-     the flake as a finding (director.md 6).
-   - If not, the set goes back to its owner, with the failure's log, and
-     the next set starts. The owner reads the failure (owners.md 4),
-     and its implementer repairs the set.
-   - A fault of the infrastructure is not a red: heavy refusing the
-     run, or a machine or GitHub out of reach. The tool retries it, and
-     tells the set's owner if it lasts.
-7. **Docs sets.** Markdown-only changes go through the queue too, with
-   no gate, so the queue stays `main`'s only writer.
 8. **After landing.** The tiers too slow for a gate go in each
    repository's `scripts/after-landing.sh`: the browser tier
    (`scripts/browser.sh`), the process and QA tiers, the exhaustive
@@ -277,28 +224,28 @@ The queue is the only writer to every repository's `main`. Its tool,
    landing. Once something does, a failure goes to the owner of the
    first landing it fails on.
 
-The set lock is already the advisory landing turn
-(build-infrastructure.md 8). Speculative runs come later, when the
-queue backs up: testing set B on top of set A while A's gates run, and
-batching several sets.
-
 ## 5. Who does what
 
-Mechanics go to the tool, and reading a set's failure to its owner. All
+Mechanics go to the tools, and reading a set's failure to its owner. All
 code goes to the owners' implementers, and decisions about the work
 stay with owners and directors (the user, 10-24). No one decides
 whether a set lands: the gates do.
 
-- **The tool,** `queue`, is a hand-rolled script like `land` and
-  `repin`. It is deterministic and journaled, and runs as a user
-  systemd service on hetzner3.
-  - hetzner3 is already the landing turn's coordinator and hosts the
-    store. Clients reach it over the landing turn's ssh
-    (build-infrastructure.md 8).
-  - It does section 4's mechanics: checking requests and receipts, the
-    order, rebases, repins, mechanical conflicts, gates, the rerun,
-    pushes, the journal and the feed.
-  - It is tested in fixtures, like `heavy` and `land`.
+- **The tools,** `land-set`, `land` and `landings`, are hand-rolled
+  scripts in `scripts/devel/`, deterministic and tested in fixtures
+  (build-infrastructure.md 8 and 10). The set lock's holder and the
+  feed are on hetzner3, the landing turn's coordinator, which clients
+  reach over the landing turn's ssh.
+- **The owner** has an implementer prove the set, runs `land-set` in a
+  user unit that posts it the exit, and reads a failure (9.1). Its
+  implementer repairs the set while the mission's next milestone goes
+  on (section 3).
+- **No queue** (the user, 10-26). Once a set proves its gates before it
+  takes the lock (9.2), the gates run side by side on the owners'
+  machines, and the lock is held for seconds per repository where no
+  `main` moved (landing-proof.md 5). A service that ordered and gated
+  the sets would add a journal and a request protocol to what the lock
+  and the owner's unit already do.
 - **No keeper** (the user, 10-25). A Codex session woken for each
   failure would read less than the set's owner, who knows the set and
   whose implementers can build and run, and would add a session and a
@@ -306,26 +253,9 @@ whether a set lands: the gates do.
   in the tool, and the sets' own reds and conflicts, which their owners
   repair anyway. What the keeper would have escalated, the owner
   escalates (owners.md 4).
-- **Owners** reach the queue through two commands, and need no
-  messages:
-  - `queue request <set file>` (section 4);
-  - `queue wait <id>`, in a user unit (9.1). It exits when the
-    set lands or comes back with its failure, and its exit wakes the
-    owner, on any machine. A sub-owner that stays on for the landing
-    then runs `queue wait --after <id>` for the after-landing tiers.
-
-  A returned set goes to the sub-owner of the milestone that made it,
-  who has an implementer repair it (section 3) while the mission's next
-  milestone goes on.
-- **`land` stays, as a front end.** A one-repository landing becomes a
-  one-branch request, and the tool adds the downstream pin-only branches
-  the invariant needs. `land --docs` becomes a docs request. Habits and
-  scripts keep working.
-- **Directors and product owners** read the landings feed, and hear
-  of landings only in owners.md 4's escalations. They don't order
-  landings, and they don't relay them.
-- **Building and running it.** The build-infra mission, with a Codex
-  owner, builds the tool. The director runs the service.
+- **The director** reads the feed, and hears of landings only in
+  owners.md 4's escalations. It doesn't order landings, and relays one
+  only to an owner that can't reach the feed (director.md 5).
 
 ## 6. Why this shape
 
@@ -341,11 +271,11 @@ whether a set lands: the gates do.
     affordable because of the patch.
 - **Each tree is built once for the fleet.**
   - The implementers' builds publish to the shared store as they work,
-    so the queue's gate of the set is mostly hits.
+    so the set's proof is mostly hits.
   - Once a set lands, every other owner's next rebase restores the
-    queue's builds of the new `main` instead of compiling them.
+    proof's builds of the new `main` instead of compiling them.
 - **A stacked milestone starts warm.** The next milestone builds on the
-  queued set's tuple, which that set's own builds have published. If
+  proved set's tuple, which that set's own builds have published. If
   that set lands unchanged, the rebase onto `main` leaves the tuple as
   it was and rebuilds nothing.
 - **Divergence stays short.** While a set is unlanded, every crate
@@ -358,7 +288,7 @@ whether a set lands: the gates do.
     mission, about 16 hours.
 - **The cost of a change follows its ripple** (build-cache.md 2). A
   change deep in skein is the most expensive kind. Landed, its ripple is
-  built once by the queue and then shared; held on a set, it is built by
+  built once by its proof and then shared; held on a set, it is built by
   that set's machines alone. No rule needs to know this; it follows
   from landing early.
 
@@ -386,11 +316,11 @@ In this flow:
   caused them.
 - **Conflicts belong to the later set,** which resolves them at its
   rebase or when it comes back.
-- **The only order is the queue's,** set by fixed rules.
+- **The only order is the set lock's:** one landing at a time.
 - **What's left for the directors:** dispatching work, policy, machines
   and escalations.
 
-Some things stay shared, and the queue can't fix them, which is why
+Some things stay shared, and no landing order fixes them, which is why
 grouping missions by coupling still matters:
 - version counters, frozen until the first release (codec.md 5);
 - shared test-time budgets;
@@ -401,8 +331,8 @@ grouping missions by coupling still matters:
 
 Each milestone works on its own (owners.md 4), and three things now
 run side by side:
-- **The next milestone,** which starts when the set is queued, not when
-  it lands, so time in the queue never idles an owner.
+- **The next milestone,** which starts when the set is proved, not when
+  it lands, so a wait for the lock never idles an owner.
 - **The owner's QA pass, its fixes and any repair loop,** all on the
   ended milestone: implementer tasks under its sub-owner.
 - **The QA lab,** which takes the milestone from `main` as soon as it
@@ -414,8 +344,8 @@ mission, then flood it with four milestones at once.
 ### 6.4 Why not per task, or per mission
 
 - **Per task**, today's roughly 400 landings a day. Under the invariant
-  that came to about 38 hours a day of serial queue work (the 10-23
-  estimate, with warm caches): more than one queue can do.
+  that came to about 38 hours a day of gate work (the 10-23 estimate,
+  with warm caches), serial under the lock as it was then.
 - **Per mission:**
   - conflicts between missions surface at the end;
   - a set sent back carries up to four milestones of work;
@@ -423,26 +353,23 @@ mission, then flood it with four milestones at once.
     day;
   - QA is idle, then flooded;
   - divergence lasts longest (6.1).
-- **Per milestone:** about 8 to 12 hours a day of queue work, by the
-  same estimate, before the cache's savings and before reused receipts.
-  It fits, with room to spare.
+- **Per milestone:** about 8 to 12 hours a day of gate work, by the
+  same estimate, before the cache's savings, and since the proofs
+  (9.2) no longer serial. It fits, with room to spare.
 
 ## 7. Costs and risks
 
-- **Throughput.** The queue is serial, and a skein set runs five gates.
-  The levers, in order:
-  1. reused receipts;
-  2. speculative runs;
-  3. batching docs sets;
-  4. tests selected by the crates a set changed (nextest's `rdeps()`).
-
-  Measure before adding any of them (section 9).
+- **Throughput.** Landings are serial under the lock, their gates not:
+  each set proves on its owner's machine, and holds the lock for its
+  pushes where no `main` moved (landing-proof.md 5). A skein set still
+  runs five gates in its proof. The levers left are section 11's.
 - **What no gate runs.** A break that only a slow tier shows, the
   browser tier's among them, reaches `main`, and later sets build on
   it. Until after landing has its design (section 4, step 8), only a
   QA pass or a task that names the tier finds it.
-- **Flakes are everyone's problem.** One flaky temper test sends a
-  skein set back. Hence the single rerun, and the finding it files.
+- **Flakes are everyone's problem.** One flaky temper test stops a
+  skein set. The implementer runs it alone once, and a pass makes it a
+  flake that its report names (implementer.md 3).
 - **Wide sets.** A milestone that reaches all five repositories runs
   five gates. Plans should keep sets narrow; the footprint in the
   owner's notes shows when they can't.
@@ -456,63 +383,27 @@ mission, then flood it with four milestones at once.
   code compiling but lose one side's intent. The gates catch most of
   it; the owner's check of the diff and the implementer's escalation on
   a doubt catch the rest.
-- **One point of failure.** While the queue is down nothing lands, but
-  owners keep working on their sets.
+- **One point of failure.** While the set lock's holder on hetzner3 is
+  out of reach no set lands: `land-set` fails closed
+  (build-infrastructure.md 10), while a plain `land` goes on without its
+  turn (build-infrastructure.md 8). Owners keep working on their sets.
 
 ## 8. What changes when it goes live
 
-- **owners.md 4:**
-  - A milestone hands over when its set is queued, and the next
-    milestone starts then.
-  - It ends when the set has landed. Its 4-hour cap runs to the
-    request. The repair loop after it doesn't count against the cap
-    (the user, 10-24); owners.md 4's escalations bound it.
-  - Its sub-owner stays on for the landing as well as for QA, and
-    briefs and checks the implementers that repair the set and fix the
-    pass's findings.
-- **owners.md 3:** rebases, repairs and QA fixes are implementer
-  tasks at high effort, which the launcher doesn't lower.
-- **owners.md 4:** tasks merge into the set's branches. The owner
-  checks the end-of-milestone rebase as it checks any task's diff,
-  requests the milestone's landing with `queue request`, and waits on
-  it with `queue wait`. The queue lands it.
-- **landing-flow.md 3 and 9.1; director.md 6:**
-  - Repins happen inside the set, by its owner, with `scripts/devel/repin`.
-  - "Breaking upstream" waits for no one's word: the break and its
-    downstream fix land together.
-  - The footprint stays, to plan narrow sets and to group missions, but
-    no longer orders landings.
-- **QA:** a QA pass may start on the queued set. Its fixes
-  are implementer tasks, and land as their own small set once the
-  milestone has landed.
-- **director.md:**
-  - The ordering of landings and repins, and the relaying of hashes,
-    leave the director and the product owners.
-  - The landings feed replaces landing news.
-  - The director runs the queue's service.
-- **gate-policy.md 3:** gate evidence moves from trailers to git notes.
+Retired 2026-10-26: there is no go-live. The roles of 10-26 say how a
+set lands (owners.md 4), with section 9.1, and gate evidence stays in
+`land`'s trailers (gate-policy.md 3).
 
 ## 9. Building it
 
-1. **The shared store on every build machine** (build-cache.md 7),
-   under way.
-2. **The queue's tool,** as a build-infra mission (section 5). The
-   first version:
-   - serial, with sets across repositories;
-   - request and receipt checks, the order's rules, automatic rebases,
-     and mechanical lock and generated-file resolution;
-   - the rerun, journaled pushes, git-note evidence and the landings
-     feed;
-   - `queue wait`, and `land` as a front end.
-
-   Fixtures cover it as they cover `heavy`.
-3. **`scripts/devel/repin` learns sets:** one command moves every branch of
-   a set to its tuple. It also learns a stacked set's rebase: onto
-   `main` from the recorded fork point, in each repository.
-4. **A trial** with two or three missions, then everyone. owners.md and
-   director.md change then.
-5. **Later:** speculative runs, tests selected by affected crates, and
-   reuse of test results for byte-identical test binaries.
+Built and live: `land-set`, its proof and the set lock (9.1, 9.2,
+build-infrastructure.md 8 and 10), the feed and `landings`, and the
+metrics (section 10). The plan of 10-24 for the rest (the queue's
+service and order, receipts shared between machines, git-note
+evidence, a rerun of failed tests, `land` as the queue's front end,
+`repin` for sets and stacked rebases, and a trial before going live)
+was dropped with the queue on 10-26. What of it is still open is
+section 11's.
 
 ### 9.1 Where it stands
 
@@ -529,9 +420,8 @@ every machine):
 - the set lock's waits were short, 7 minutes over 10 sets: order isn't
   what hurt.
 
-The starting primitive, `scripts/devel/land-set`
-(build-infrastructure.md 10), run from an agents checkout like `repin`,
-answers the first three:
+`scripts/devel/land-set` (build-infrastructure.md 10), run from an
+agents checkout like `repin`, answers the first three:
 - **One set at a time.** It takes one set lock on hetzner3, through the
   landing turn's holder.
 - **Every gate before any push.** In each repository of the set,
@@ -552,7 +442,7 @@ answers the first three:
   among them; `landings wait <set>` exits when the set has landed or
   stopped.
 
-Until the rest is built, agents do by hand what the tools don't:
+Beside the tool, the owner and its implementers do the rest:
 - **The catch-up.** The first set after the release brings every
   `main` to the invariant: a set whose downstream repositories are all
   pin-only. What fails in it is drift, which implementers repair before
@@ -596,14 +486,6 @@ Until the rest is built, agents do by hand what the tools don't:
   with its pin-only repositories; a lone temper or hearth change may use
   either. Either way it takes the set lock, and `land` proves a code
   change first, without it (9.2).
-
-Not built yet:
-- the queue's service and order;
-- receipts shared between machines, and git-note evidence (land's
-  trailers stay);
-- the rerun of failed tests;
-- `land` as a front end;
-- `repin` for sets and stacked rebases.
 
 ### 9.2 Proving, and one writer
 
@@ -706,11 +588,9 @@ their output only), and each test's time (nextest's JUnit output).
 
 ## 11. Open
 
-- **The queue's throughput,** measured: replay 10-23's milestones
-  through it with the cache.
-- **Where the queue's gates run.** A gate pauses the other builds on
-  its machine (build-infrastructure.md 1). The queue's gates could
-  keep to one or two machines, or take whichever is free.
+- **The gates' levers,** each measured before it is added (section 10):
+  tests selected by the crates a set changed (nextest's `rdeps()`), and
+  test results reused for byte-identical test binaries.
 - **A docs landing upstream of a set** changes the commit that every
   downstream's lock pins, and the downstreams then gate again for
   Markdown alone (landing-proof.md 7).
