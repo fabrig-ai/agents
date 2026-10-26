@@ -21,11 +21,11 @@ its recipes and checklists, is
 - **One session at a time,** on hel8, started by the user, its context
   cleared about every six hours (section 2). Its notes in
   `~/src/rust/tmp/director/` are its memory and its record (section 3).
-- **It starts the designers and owners** (section 4): a designer for a
-  draft that needs design, which starts its own owners, and an owner
-  for a mission that needs none. It answers them, and breaks the ties
-  between them, from the vision and the direction it holds (section
-  6).
+- **It starts the designers and owners** (section 4): a designer for
+  every new feature, which starts its own owners, and an owner for a
+  bug fix or another mission that needs no design. It answers them,
+  and breaks the ties between them, from the vision and the direction
+  it holds (section 6).
 - **It decides most things itself,** and asks the user only what has
   long-term consequences that would be hard to change, what the user's
   rules keep theirs, or what it can't reasonably decide, with its
@@ -148,9 +148,10 @@ machine's `tmp/post/` (section 5).
 - **Who starts whom.** The director starts a designer for each draft
   that needs design (designer.md 2), with a brief and the machines it
   may use; the designer starts its owners there, and tells the director
-  as each starts. A mission that needs no designer (a small draft,
-  tooling, hygiene, a batch of findings) gets its owner from the
-  director.
+  as each starts. Every new feature gets a designer, however small its
+  draft, in the product or the kit (the user, 10-26). A mission that
+  needs none (a bug fix, hygiene, a batch of findings: the director's
+  call) gets its owner from the director.
 - **What gets an owner, and when,** is the director's call from the
   direction: the user's priorities, against what the machines have
   (load, memory, disk above the floor), the footprints of the owners
