@@ -171,12 +171,16 @@ here. Durable know-how belongs here, not in the session's memory or in
   task only on the user's word for that task.
 - **Machines:** hel8 (the director, the status page, dev.fabrig.ai and
   git.fabrig.ai; builds nothing; floor 15 GB, 4 GB memory), and the
-  builders hetzner, hetzner2, hetzner3 (Garage, land's turn coordinator,
-  after landing's runner), hetzner4 (to retire), hetzner6 (one XFS root),
-  each `free@<address>` from `tmp/post/machines`, floor 40 GB. No fixed
-  cap of owners per machine (the user, 10-26): owners are placed by
-  heavy's queue waits, memory and disk, read at each check, and moved or
-  given another machine when those show strain.
+  builders hetzner, hetzner2, hetzner3 (land's turn coordinator, after
+  landing's runner, Garage while it runs), hetzner6, each
+  `free@<address>` from `tmp/post/machines`, floor 40 GB, all on one XFS
+  root. No fixed cap of owners per machine (the user, 10-26): owners are
+  placed by heavy's queue waits, memory, disk and load, read at each
+  check (heavy's waits don't show a CPU-starved gate: a load past the
+  cores starved skein's timing tests to 2-5 ms of CPU on 10-26), and
+  moved or given another machine when those show strain. hetzner3 holds
+  after landing's runner and o/tier-flakes' CPU-heavy flake runs, and no
+  other owner's builds (the user, 10-26).
 - **Retiring a machine:** first list every live service and peer that
   names it, on every machine (WireGuard peers, the deployment's
   settings on hel8, runners, forwarders, cron and timers), and move or
@@ -194,6 +198,15 @@ here. Durable know-how belongs here, not in the session's memory or in
   machine, then the server. A redeploy keeps the same list.
 - **Disk:** a paused or ended mission's `target/` directories are the
   director's to remove once its implementers have stopped.
+  On XFS a target shares its blocks with kache's store (reflinks):
+  removing a target frees little while the store holds them, and the
+  store is what to trim (`kache stats` shows it against its cap).
+- **After a machine's memory crunch,** Claude Code may stop sessions'
+  background tasks, their post waiters among them, and tell them not to
+  restart them unasked: they go idle and deaf ("nobody will wake it").
+  Look for `post wait` processes there, and wake each idle session in
+  place (stop, then resume with a message to start its waiter by name and
+  read with `--as`).
 
 ## 9. The record
 
