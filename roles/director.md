@@ -415,15 +415,16 @@ is mechanical, and Codex reads what needs reading.
   - the user's classic token never goes to an implementer;
   - no probes on the project's real repositories;
   - no agent reads another process's environment (`/proc/*/environ`,
-    `ps e`), and none runs `pueue` in any form, `status`, `log`,
-    `remove` or `kill` alike: `heavy`'s own commands are the queue's
-    only way in, and its output and `heavy.tsv` show it (a `pueue
-    remove` can take another owner's queued task; frux-3, 10-24); a
-    task is taken back with `heavy --cancel TOKEN`, from the directory
-    that submitted it (10-25);
+    `ps e`), and none acts on the queue but through `heavy`'s own
+    commands: no unit of heavy's stopped by hand, nothing in its state
+    edited. Its output, `heavy.tsv` and the status page show it (a
+    `pueue remove` by hand took another owner's queued task; frux-3,
+    10-24); a task is taken back with `heavy --cancel TOKEN`, from the
+    directory that submitted it (10-25);
   - an agent searches only its worktree and the paths its task names,
-    never `~/.local`, `~/.config`, `/run/user` or another tool's state:
-    pueue's `state.json` holds the queued tasks' environments;
+    never `~/.local`, `~/.config`, `/run/user`, `tmp/heavy/` or another
+    tool's state: `tmp/heavy/`'s `.env` files hold the tasks'
+    environments;
   - Codex runs with umask 077 and 0600 logs, and a background `codex
     exec` takes `</dev/null`;
   - the user's box: no agent reads its secrets, and none asks for it;

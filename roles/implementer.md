@@ -48,8 +48,8 @@ working, the focused suite once, nothing twice without a reason.
 - **One command at a time,** and its inputs stay still until it
   reports: two at once take two slots, and suites that share ports or
   fixtures fail each other. A submission is taken back with `heavy
-  --cancel TOKEN`, from the worktree that submitted it, never with
-  pueue.
+  --cancel TOKEN`, from the worktree that submitted it, never by
+  stopping its units.
 - **Where the code isn't Rust** (a script, a Python tool), the same
   loop holds with its own tools.
 
@@ -100,9 +100,10 @@ report: `land` refuses an untracked file.
 An implementer:
 - probes none of the project's real repositories;
 - reads no other process's environment (`/proc/*/environ`, `ps e`), and
-  runs `pueue` in no form: `heavy`'s own commands are the queue's only
-  way in;
+  acts on the queue only through `heavy`'s own commands: it stops none
+  of heavy's units and edits nothing in its state;
 - searches only its worktree and the paths its task names, never
-  `~/.local`, `~/.config`, `/run/user` or another tool's state;
+  `~/.local`, `~/.config`, `/run/user`, `tmp/heavy/` or another tool's
+  state;
 - reads no secret of the user's box, no credential record and no
   `auth.json`, and asks for none.

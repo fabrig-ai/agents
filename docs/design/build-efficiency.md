@@ -354,7 +354,8 @@ work: 164 s per landing under today's `heavy`, 68 s under weights
 
 In order. Changes 1 to 3 landed on 10-25, each through its repositories'
 gates: 1 as two sets (skein's new crate first, then its consumers), 2 as
-one, 3 with this document. The rest are proposals.
+one, 3 with this document. 7 followed 3 on 10-26. The rest are
+proposals.
 
 | # | Change | Where | Gain | Cost or risk |
 |---|---|---|---|---|
@@ -364,6 +365,7 @@ one, 3 with this document. The rest are proposals.
 | 4 | Implementers end with the gate's exact clippy and the focused suite, once 2 is in | agents' `implementer.md` | The landing's build moves off the lock and is restored, not compiled | None measured |
 | 5 | After-landing's tiers, when they return, at `HEAVY_CLASS=background`, not `--gate` | agents | 21.5 h of exclusive holds in the traces | Timing-sensitive tiers run under load |
 | 6 | The prebuild lints the wasm targets, so the gate's first wasm clippy isn't cold | land, the landing session's | 20 s off each temper gate | None |
+| 7 | `heavy` without pueue: each wrapper a user unit of its own, task numbers and holds in the ledger alone, each lane in submission order (build-infrastructure.md, 1–7) | agents | One store of task state instead of two, no pauses to keep in step with the holds, no reused task numbers | A drained fleet to land and to roll back; waiting gates poll the ledger as waiting builds do |
 
 Not now:
 - **The store's disk:** reads are fast and the failures were explained;
@@ -372,9 +374,6 @@ Not now:
 - **A filesystem with clones** (XFS, or btrfs with compression) would
   stop the store's copies costing disk. Revisit if disk still binds
   after 1 and 2.
-- **Removing pueue:** with weights, it admits nothing; `heavy` could run
-  each task in its unit directly. A larger change to recovery code that
-  works, so it follows 3, not with it.
 
 ## 9. How it was measured
 

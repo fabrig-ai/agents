@@ -14,8 +14,8 @@ into `~/.local/bin`, and
 `AGENTS.md`, `CLAUDE.md` and the Claude Code settings
 (`.claude/settings.json`) into the workspace, all to the agents checkout:
 a change to them reaches the machine as that checkout moves. It clones
-records, sets up the queue, and names what is still missing (pueue,
-kache, jq, python3, systemd-run, cargo-nextest, heavy's reconciler, and
+records, reports heavy's lanes, and names what is still missing (kache,
+jq, python3, systemd-run, cargo-nextest, heavy's reconciler, and
 cargo's `[net] git-fetch-with-cli = true` in `~/.cargo/config.toml`).
 
 ## Work
