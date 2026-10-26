@@ -587,6 +587,7 @@ def setup(lab):
                        ' set -- "$@" "$arg"\n'
                        'done\n'
                        'exec ' + shlex.quote(REAL_GIT) + ' "$@"\n')
+    wrapper.chmod(0o700)
     env = dict(lab.env, DEV_ROOT=str(lab.root / 'workspace'), FIXTURE_ORIGIN=str(lab.origin))
     (lab.root / 'workspace').mkdir()
     result = subprocess.run(['bash', str(check)], env=env, capture_output=True, text=True)

@@ -71,7 +71,7 @@ JSON = r'''json() {
     local out='' sep='' arg
     for arg; do
         arg=${arg//\\/\\\\}; arg=${arg//\"/\\\"}
-        arg=${arg//$'\n'/\\n}; arg=${arg//$'\t'/\\t}; arg=${arg//$'\r'/\\r}
+        arg=${arg//$'\\n'/\\n}; arg=${arg//$'\t'/\\t}; arg=${arg//$'\r'/\\r}
         out+=$sep\"$arg\"; sep=', '
     done
     printf '[%s]' "$out"
@@ -95,6 +95,14 @@ exec @CARGO@ "$@"
 LAND = '''#!/bin/bash
 @JSON@: "${FIXTURE_LAND:?}"
 json "$@" > "$FIXTURE_LAND" || exit 1
+# repin adds one scoped include without replacing the fixture's entries.
+[ "$GIT_CONFIG_COUNT" -eq "$((FIXTURE_GIT_CONFIG_COUNT + 1))" ] || exit 1
+settings=$(git config --list) || exit 1
+while IFS= read -r setting; do
+    [[ $'\\n'$settings$'\\n' == *$'\\n'"$setting"$'\\n'* ]] || {
+        echo "AssertionError: fixture Git config lost at land: $setting" >&2; exit 1;
+    }
+done <<< "$FIXTURE_GIT_CONFIG"
 hooks=$(git config core.hooksPath) || exit 1
 printf '%s' "$hooks" > "$FIXTURE_LAND.hooks" || exit 1
 nested=$(mktemp -d "${FIXTURE_LAND%/*}/nested-XXXXXXXX") || exit 1
@@ -173,6 +181,12 @@ class Lab:
             self.env[f'GIT_CONFIG_KEY_{count + offset}'] = key
             self.env[f'GIT_CONFIG_VALUE_{count + offset}'] = value
         self.env['GIT_CONFIG_COUNT'] = str(count + len(settings))
+        self.env['FIXTURE_GIT_CONFIG_COUNT'] = self.env['GIT_CONFIG_COUNT']
+        expected = [key.rsplit('.', 1)[0] + '.' + key.rsplit('.', 1)[1].lower() + '=' + value
+                    for key, value in settings]
+        self.env['FIXTURE_GIT_CONFIG'] = '\n'.join(expected)
+        configured = git(root, self.env, 'config', '--list').splitlines()
+        assert all(setting in configured for setting in expected), configured
         target = root / 'cargo-target'
         target.mkdir(exist_ok=True)
         self.env['CARGO_TARGET_DIR'] = str(target)
