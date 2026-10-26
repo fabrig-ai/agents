@@ -150,9 +150,20 @@ out. The security rules are director.md 10's.
   owner escalates `main`'s own fault, an infrastructure fault that
   lasts 15 minutes, and a third failed landing.
 - **At each landing** the owner updates its rows of the repository's
-  `docs/design/STATUS.md`, and posts its parent one line: what can now
-  be tried, with the commits, and what the code taught that the design
-  doesn't say (a boundary that moved, a behaviour settled).
+  `docs/design/STATUS.md`. What the code taught that the design doesn't
+  say (a boundary that moved, a behaviour settled) goes in the landing's
+  commits as trailers, `Taught: <one line>`, each at most 200
+  characters, which its landing task writes; `land` and `land-set` copy
+  them into the feed ([landing-flow.md](../docs/design/landing-flow.md)
+  12). A landing with nothing to teach carries none.
+  - **Under the director,** the feed is the notice: the owner posts
+    nothing at a landing, and the director reads `landings taught` at its
+    check.
+  - **Under a designer,** the owner still posts it one line at each
+    landing: what can now be tried, with the commits, and what the code
+    taught. The designer adjusts the design from it.
+  - Questions and escalations (section 5), a red verdict's repair once it
+    has landed, and the closing still post.
 - **The QA marker:** a landing commit whose change a user meets
   through the product's tool carries the trailer `QA: <what a user can
   now do>`, one line of at most 160 characters, which its landing task

@@ -734,7 +734,7 @@ posted their parent at every landing (owners.md 4): of the 127 posts to
 the director from 01:40Z to 10:50Z that day, about half were landing
 notices, each a wake (decision 1252). What a landing taught now goes in
 its commit, the tools copy it into the feed, and `landings` shows it, so
-that a routine landing needs no post. Being built (10-26, o/landing-taught).
+that a routine landing needs no post. Built 10-26 (o/landing-taught).
 
 - **The trailer.** What the code taught that the design doesn't say (a
   boundary that moved, a behaviour settled) is a trailer in the landing's

@@ -266,7 +266,9 @@ machine's `tmp/post/` (section 5).
 - **Whom it answers:** the designers, and the owners it started
   itself. A designer answers its own owners as this section says,
   within its draft.
-- **A landing** updates the mission's line in `STATUS.md`.
+- **A landing** updates the mission's line in `STATUS.md`, at the
+  check: owners under the director post none (owners.md 4), and
+  `landings taught` lists each with what it taught (section 7).
 - **A question** gets an answer from the direction, recorded as a
   decision. What is small and reversible the director decides even when
   it touches another owner's files, and tells that owner.
@@ -316,8 +318,9 @@ is mechanical, and Codex reads what needs reading.
 1. **The session:** `session.sh` (section 12). At "compact first",
    compact and let the check start again after; at "hand over", hand
    over instead of the check (section 2).
-2. **Catch up:** `record pull`, `STATUS.md`, and the record's `git
-   log` since the last check.
+2. **Catch up:** `record pull`, `STATUS.md`, the record's `git log`
+   since the last check, and `landings taught --since` it: every landing
+   since, with what its code taught (landing-flow.md 12).
 3. **The report:** `check-report.sh [MINUTES]` (section 12), over the
    last 120 minutes by default, reads every machine at once. For each:
    Claude's usage, who spent what, the owners' sessions and Codex units

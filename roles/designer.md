@@ -92,6 +92,7 @@ what of the draft remains.
 - **Owners.** One to start, with a brief (owners.md 1): the parts it
   builds, its first slice, its end, its machine and implementers. A
   second where parts are independent and the machines have room. What
-  an owner's landing post says the code taught goes into the design and
+  an owner's landing post says the code taught (its `Taught:` trailers,
+  which `landings taught` lists) goes into the design and
   the next parts.
 - **The end:** the draft's design has landed and its owners have ended.
