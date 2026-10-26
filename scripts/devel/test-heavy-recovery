@@ -6,6 +6,7 @@ No global queue/cache mutations, task-record APIs, or environment dumps.
 Raw evidence is retained in --evidence (a new directory).
 """
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -100,6 +101,7 @@ class Lab:
         self.installed = False
         self.started = time.monotonic()
         self.number = 0
+        self.retired_tasks = {}
 
     def call(self, args, check=True, environment=None, cwd=None, **kw):
         result = subprocess.run([str(x) for x in args], env=environment or self.env, cwd=cwd or self.repo,
@@ -145,6 +147,26 @@ class Lab:
 
     def state(self):
         return json.loads((self.base / 'state.json').read_text())
+
+    def pueue_era(self, edit=None):
+        previous = hashlib.sha256(b'pueue-era fixture').hexdigest()
+        with (self.base / 'host.lock').open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            data = self.state()
+            data['queue'] = previous
+            data.pop('next_id', None)
+            data['resume_requests'] = []
+            for task in data['tasks'].values():
+                task['queue'] = previous
+                self.extra_units.append(task.pop('wrapper_unit'))
+                if task['lane'] == 'gate':
+                    task.update(resume=[], initially_paused=[])
+            if edit:
+                edit(data)
+            temporary = self.base / 'state.json.fixture-new'
+            temporary.write_text(json.dumps(data) + '\n')
+            temporary.replace(self.base / 'state.json')
+        return data
 
     def events(self):
         return [json.loads(line) for line in (self.base / 'events.jsonl').read_text().splitlines()]
@@ -194,13 +216,16 @@ class Lab:
         task = wait_for(lambda: self.task(label) if self.task(label).get('wrapper') else None, label + ' wrapper')
         os.kill(task['wrapper']['pid'], signal.SIGKILL)
 
-    def verify(self):
+    def verify(self, retired_tasks=None):
         events = self.events()
+        current = self.state()['tasks']
+        tasks = {**(retired_tasks or {}), **current}
         cgroup_proofs = []
         ids = [event['id'] for event in events]
         assert len(ids) == len(set(ids)), 'duplicate durable event IDs'
         submitted = [e['token'] for e in events if e['event'] == 'submit']
-        numbers = [int(self.state()['tasks'][token]['id']) for token in submitted]
+        assert set(submitted) == tasks.keys(), 'submitted tasks missing from retained ledgers'
+        numbers = [int(current[token]['id']) for token in submitted if token in current]
         assert numbers == sorted(set(numbers)), ('task numbers not unique and increasing', numbers)
         assert self.state()['next_id'] > max(numbers, default=0)
         active = {}
@@ -221,7 +246,7 @@ class Lab:
             elif name == 'release_end':
                 active.pop(token, None)
         assert not active, active
-        for task in self.state()['tasks'].values():
+        for task in tasks.values():
             assert task['state'] == 'released', task
             assert sum(e['id'] == task['token'] + ':release_end' for e in events) == 1
             assert sum(e['id'] == task['token'] + ':task_completion' for e in events) == 1
@@ -252,7 +277,7 @@ class Lab:
                                       'cgroup': task['cgroup'], 'evidence': evidence, 'verified_empty': True})
         (self.path / 'cgroup-proof.json').write_text(json.dumps(cgroup_proofs, indent=2) + '\n')
         rows = (self.path / 'tmp/logs/heavy.tsv').read_text().splitlines()
-        assert len(rows) == len(self.state()['tasks'])
+        assert len(rows) == len(tasks)
         assert all(len(row.split('\t')) == 11 for row in rows)
         assert len({row.split('\t')[8] for row in rows}) == len(rows)
         for path in [self.base / 'state.json', self.base / 'events.jsonl', self.path / 'tmp/logs/heavy.tsv']:
@@ -303,9 +328,10 @@ class Lab:
             for task in self.state()['tasks'].values():
                 if owned_wrapper(task.get('wrapper')):
                     os.kill(task['wrapper']['pid'], signal.SIGKILL)
-                for unit in (task['unit'], task['wrapper_unit']):
-                    self.call(['systemctl', '--user', 'kill', '--kill-whom=all', '--signal=KILL', unit], check=False)
-                    self.call(['systemctl', '--user', 'stop', unit], check=False)
+                for unit in (task['unit'], task.get('wrapper_unit')):
+                    if unit:
+                        self.call(['systemctl', '--user', 'kill', '--kill-whom=all', '--signal=KILL', unit], check=False)
+                        self.call(['systemctl', '--user', 'stop', unit], check=False)
                 group = task.get('cgroup')
                 path = Path('/sys/fs/cgroup') / group.lstrip('/') / 'cgroup.events' if group else None
                 empty = not path or not path.exists() or 'populated 0' in path.read_text()
@@ -343,6 +369,141 @@ def normal(lab):
     assert lab.event('gate', 'wrapper_start')['time_ns'] < lab.event('gate', 'payload_begin')['time_ns']
     lab.done(lab.start('escaped-input', code='import os; assert os.environ["FIXTURE_ESCAPED"] == ' + repr(lab.env['FIXTURE_ESCAPED'])))
 
+
+
+def migrate_drained(lab):
+    lab.done(lab.start('first'))
+    lab.done(lab.start('second'))
+    lab.done(lab.start('gate', gate=True))
+    lab.call(['systemctl', '--user', 'stop', lab.prefix + '-reconcile.timer', lab.prefix + '-reconcile.service'])
+
+    def edit(data):
+        data['tasks'][lab.task('gate')['token']]['id'] = '3639'
+        data['maintenance']['default'] = True
+
+    previous = lab.pueue_era(edit)
+    lab.call([HEAVY, '--reconcile'])
+    migrated = lab.state()
+    assert migrated['queue'] == hashlib.sha256(str(lab.base).encode()).hexdigest()
+    assert migrated['next_id'] == 3640
+    assert {key: value for key, value in migrated.items() if key not in ('queue', 'next_id')} == {
+        key: value for key, value in previous.items() if key != 'queue'}
+    migrations = [event for event in lab.events() if event['event'].startswith('migration:')]
+    assert len(migrations) == 1
+    assert migrations[0]['previous'] == previous['queue'] and migrations[0]['tasks'] == 3
+    assert migrations[0]['holds'] == ['default'] and migrations[0]['token'] == 'host'
+    lab.call(['systemctl', '--user', 'start', lab.prefix + '-reconcile.timer'])
+    lab.done(lab.start('progress'))
+    assert lab.task('progress')['id'] == '3640'
+    assert lab.held('default')
+    lab.unhold('default')
+    assert not lab.held('default')
+
+
+def migrate_undrained(lab):
+    # Keep admission's timer proof while leaving recovery to the submitting
+    # call below, rather than racing the accelerated periodic tick.
+    lab.call([HEAVY, '--install-reconciler', '60s'])
+    lab.call(['systemctl', '--user', 'start', lab.prefix + '-reconcile.service'])
+    marker = lab.path / 'finish-running'
+    running = lab.start('running', code='import time; from pathlib import Path\n'
+                        f'while not Path({str(marker)!r}).exists(): time.sleep(0.03)\n')
+    wait_for(lambda: lab.event('running', 'payload_begin'), 'running payload')
+    lab.arm('claim')
+    clients = {}
+    wrappers = {}
+    for label in ('enqueuing', 'queued'):
+        clients[label] = lab.start(label, args=['touch', str(lab.path / (label + '-must-not-run'))])
+        wrappers[label] = lab.queued(label)['wrapper_unit']
+        lab.barrier('claim', label)
+
+    def edit(data):
+        for task in data['tasks'].values():
+            task.pop('exclusive', None)
+            if task['label'] == 'enqueuing':
+                task['state'] = 'enqueuing'
+
+    previous = lab.pueue_era(edit)
+    refused = lab.call([HEAVY, 'true'], check=False, environment=dict(lab.env, HEAVY_LABEL='refused'))
+    (lab.path / 'refused.client.txt').write_text(refused.stdout + refused.stderr)
+    assert refused.returncode == 2
+    assert 'drain first: 1 task from the pueue generation' in refused.stderr, refused.stderr
+    assert lab.state()['tasks'].keys() == previous['tasks'].keys() and lab.task('refused') is None
+    assert lab.state()['queue'] == previous['queue'] and 'next_id' not in lab.state()
+    for label, client in clients.items():
+        task = lab.released(label)
+        assert task['code'] == 137 and task['outcome'] == 'cancelled' and not task.get('wrapper')
+        assert lab.event(label, 'unclaimed')['source'] == 'submit'
+        lab.done(client, 137)
+        receipt = json.loads((lab.base / 'receipts' / (task['token'] + '.json')).read_text())
+        assert receipt['queue'] == previous['queue'] and receipt['code'] == 137
+    lab.disarm('claim')
+    wait_for(lambda: sum(e['source'] == '--task' and e['event'].startswith('refusal:')
+                         for e in lab.events()) == 2, 'both older wrappers refused replay')
+    for label, unit in wrappers.items():
+        wait_for(lambda: lab.call(['systemctl', '--user', 'is-active', '--quiet', unit],
+                                 check=False).returncode != 0, label + ' wrapper ended')
+        assert not (lab.path / (label + '-must-not-run')).exists()
+        assert not lab.event(label, 'wrapper_start')
+    assert lab.task('running')['state'] == 'active' and lab.state()['queue'] == previous['queue']
+    assert not any(e['event'].startswith('migration:') for e in lab.events())
+    marker.touch()
+    lab.done(running)
+    task = lab.released('running')
+    assert task['code'] == 0
+    assert json.loads((lab.base / 'receipts' / (task['token'] + '.json')).read_text())['queue'] == previous['queue']
+    lab.call([HEAVY, '--reconcile'])
+    migrations = [e for e in lab.events() if e['event'].startswith('migration:')]
+    assert len(migrations) == 1 and migrations[0]['previous'] == previous['queue']
+    assert lab.state()['queue'] == hashlib.sha256(str(lab.base).encode()).hexdigest()
+    lab.call([HEAVY, '--install-reconciler', '0.2s'])
+    lab.done(lab.start('progress'))
+
+
+def rollback(lab):
+    lab.done(lab.start('retired'))
+    commit = '98b6ae3a7f9d46c1639c23741e9b3a37a4e3dd76'
+    available = lab.call(['git', 'cat-file', '-e', commit + '^{commit}'], cwd=KIT, check=False)
+    assert available.returncode == 0, 'rollback needs previous-generation commit ' + commit + '; missing (shallow clone?)'
+    previous = lab.path / 'previous/scripts/devel'
+    previous.mkdir(parents=True)
+    for name in ('heavy', 'heavy-recovery.py', 'kit.sh', 'gate-policy.sh', 'recovery_message.py', 'receipt_inputs.py'):
+        contents = lab.call(['git', 'show', commit + ':scripts/devel/' + name], cwd=KIT).stdout
+        (previous / name).write_text(contents)
+    old_heavy = previous / 'heavy'
+    old_heavy.chmod(0o700)
+    env = dict(lab.env, PUEUE_CONFIG_PATH=str(lab.path / 'no-pueue-config.yml'))
+    assert not Path(env['PUEUE_CONFIG_PATH']).exists()
+    lab.call(['systemctl', '--user', 'stop', lab.prefix + '-reconcile.timer', lab.prefix + '-reconcile.service'])
+    paths = (lab.base / 'state.json', lab.base / 'events.jsonl', lab.path / 'tmp/logs/heavy.tsv')
+    before = {path: path.read_bytes() for path in paths}
+    for option in ('--reconcile', '--check-recovery'):
+        refused = lab.call([old_heavy, option], check=False, environment=env)
+        (lab.path / ('previous-' + option[2:] + '.txt')).write_text(refused.stdout + refused.stderr)
+        assert refused.returncode == 2 and 'different queue identity' in refused.stderr, refused
+        assert all(path.read_bytes() == value for path, value in before.items())
+    lab.retired_tasks = lab.state()['tasks']
+    retired = lab.base / ('state.json.retired-' + time.strftime('%Y%m%dT%H%M%SZ', time.gmtime()))
+    paths[0].rename(retired)
+    lab.call([old_heavy, '--install-reconciler', '0.2s'], environment=env)
+    lab.call([old_heavy, '--check-recovery'], environment=env)
+    held = lab.call([old_heavy, '--group-held', 'build'], check=False, environment=env)
+    assert held.returncode == 1, held
+    fresh = lab.state()
+    assert not fresh['tasks'] and not fresh['maintenance'] and fresh['gate'] is None
+    lab.call(['systemctl', '--user', 'stop', lab.prefix + '-reconcile.timer', lab.prefix + '-reconcile.service'])
+    lab.call([HEAVY, '--install-reconciler', '0.2s'])
+    migrations = [e for e in lab.events() if e['event'].startswith('migration:')]
+    assert len(migrations) == 1 and migrations[0]['previous'] == fresh['queue']
+    assert migrations[0]['tasks'] == 0 and migrations[0]['holds'] == []
+    assert lab.state()['queue'] == hashlib.sha256(str(lab.base).encode()).hexdigest()
+    units = Path(lab.state()['installation']['units'])
+    service = (units / (lab.prefix + '-reconcile.service')).read_text()
+    assert str(KIT / 'heavy-recovery.py') in service and str(previous) not in service
+    lab.call([HEAVY, '--check-recovery'])
+    lab.done(lab.start('progress'))
+    assert retired.read_bytes() == before[paths[0]]
+    assert 'recovery/storage failure' not in (lab.path / 'progress.client.txt').read_text()
 
 
 def gc_clients(lab, plans):
@@ -1530,7 +1691,9 @@ def main():
     root = opts.evidence.resolve()
     root.mkdir(parents=True, exist_ok=False)
     (root / 'EVIDENCE.TAG').write_text('agents fixture evidence\ntest-heavy-recovery\n')
-    cases = [('client-before-wrapper', unclaimed_client),
+    cases = [('migrate-drained', migrate_drained), ('migrate-undrained', migrate_undrained),
+             ('rollback', rollback),
+             ('client-before-wrapper', unclaimed_client),
              ('wrapper-before-claim', wrapper_before_claim),
              ('wrapper-start-failure', wrapper_start_failure),
              ('wrapper-stopped', lambda lab: descendants(lab, 'stop')),
@@ -1599,7 +1762,7 @@ def main():
         try:
             lab.setup()
             test(lab)
-            counts = lab.verify()
+            counts = lab.verify(lab.retired_tasks)
             result.update(result='PASS', **counts)
         except BaseException as error:
             result.update(result='FAIL', error=type(error).__name__ + ': ' + str(error))

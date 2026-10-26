@@ -143,8 +143,14 @@ class Ledger:
             self.data = json.loads(self.path.read_text())
             if self.data.get('version') != 1:
                 raise Refusal('unsupported host ledger version')
-            if self.data['queue'] != QUEUE:
-                raise Refusal('state directory belongs to a different queue identity')
+            if self.data['queue'] != QUEUE and all(task['state'] == 'released' for task in self.tasks.values()):
+                previous = self.data['queue']
+                self.data['next_id'] = 1 + max((int(task['id']) for task in self.tasks.values()
+                                                if str(task.get('id', '')).isdigit()), default=0)
+                self.data['queue'] = QUEUE
+                self.event(None, 'migration:' + uuid.uuid4().hex, previous=previous,
+                           tasks=len(self.tasks), holds=sorted(self.data['maintenance']))
+                self.save()
         else:
             self.data = {'version': 1, 'queue': QUEUE, 'next_id': 1, 'tasks': {}, 'maintenance': {},
                          'gate': None, 'pending': [], 'installation': None}
@@ -205,6 +211,10 @@ def locked():
     with (BASE / 'host.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         yield Ledger()
+
+
+def older_tasks(ledger) -> list:
+    return [task for task in ledger.tasks.values() if task['state'] != 'released' and task.get('queue') != QUEUE]
 
 
 def available_memory():
@@ -745,6 +755,9 @@ def submit(args, lane, tail_lines, exclusive):
     with locked() as ledger:
         ensure_reconciler(ledger)
         reconcile(ledger)
+        if older := older_tasks(ledger):
+            n = len(older)
+            raise Refusal(f'drain first: {n} task{"" if n == 1 else "s"} from the pueue generation')
         jobs = os.environ.get('HEAVY_BUILD_JOBS_EFFECTIVE', str(len(os.sched_getaffinity(0))))
         label = os.environ.get('HEAVY_LABEL', Path.cwd().name)
         if 'next_id' not in ledger.data:
@@ -828,7 +841,7 @@ def wrapper(token):
     with locked() as ledger:
         reconcile(ledger)
         task = ledger.tasks[token]
-        if task['state'] != 'queued':
+        if not task.get('wrapper_unit') or task['state'] != 'queued':
             raise Refusal('token is not queued; refusing replay')
         task['wrapper'] = identity()
         task['boot'] = boot()
