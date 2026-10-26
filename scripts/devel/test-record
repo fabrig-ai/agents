@@ -591,6 +591,7 @@ def setup(lab):
     (kit / 'infra').mkdir(parents=True)
     (kit / 'devel').mkdir()
     shutil.copyfile(SCRIPT.with_name('kit.sh'), kit / 'devel/kit.sh')
+    shutil.copyfile(source.with_name('after-landing-units'), kit / 'infra/after-landing-units')
     text = source.read_text()
     assert 'for tool in heavy land land-set landings after-landing repin record setup post codex-run qa logins issue; do' in text
     check = kit / 'infra/setup'

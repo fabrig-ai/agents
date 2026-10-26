@@ -729,6 +729,7 @@ def setup_installs_the_service(lab):
     (kit / 'infra').mkdir(parents=True)
     (kit / 'devel').mkdir()
     shutil.copyfile(KIT / 'kit.sh', kit / 'devel/kit.sh')
+    shutil.copyfile(KIT.parent / 'infra/after-landing-units', kit / 'infra/after-landing-units')
     source = (KIT.parent / 'infra/setup').read_text()
     harness = '''fix=${FIX:-0}; failed=0; bus=${BUS:-1}
 ok() { echo "ok $*"; }; warn() { echo "warn $*"; }; fail() { echo "FAIL $*"; failed=1; }
