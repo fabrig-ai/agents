@@ -14,6 +14,11 @@ here. Durable know-how belongs here, not in the session's memory or in
   machine task goes to a Codex task the director runs (section 10), not to
   a Claude owner. An owner is for a mission whose design, names or tests
   need judgement.
+- **Every new feature gets a designer** (the user, 10-26), in the product
+  or the kit, however small its draft: a mission that adds one starts
+  under a designer, or moves under one when its work turns to features.
+  A bug fix may go straight to an owner or a Codex task, the director's
+  call.
 - **Questions to the user in chat are tracked** in the record's
   `STATUS.md`, "Asked in chat", each with its time. One unanswered at the
   first check two hours after it was asked becomes an issue (section 6).
