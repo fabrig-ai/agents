@@ -18,7 +18,7 @@ set -eu
 mkdir -p target
 printf warm > target/warm
 head=$(git rev-parse HEAD)
-count="$FIXTURE_COUNTS/$head"
+count="$FIXTURE_COUNTS/$(basename "$PWD")-$head"
 n=0
 if test -f "$count"; then n=$(cat "$count"); fi
 n=$((n + 1))
@@ -29,14 +29,23 @@ if test -s tier/lacks; then
 fi
 selected=$(mktemp "$FIXTURE_COUNTS/selected.XXXXXX")
 trap 'rm -f "$selected"' EXIT
-if test "$#" -gt 0; then
-    while test "$#" -gt 0; do
-        test "$1" = --only
-        printf '%s\n' "$2" >> "$selected"
-        shift 2
-    done
-else
-    cat tier/reds tier/flaky | sort -u > "$selected"
+part=
+named=0
+while test "$#" -gt 0; do
+    case "$1" in
+        --only) printf '%s\n' "$2" >> "$selected"; named=1 ;;
+        --part) part=${2%%/*} ;;
+        *) exit 2 ;;
+    esac
+    shift 2
+done
+if test "$named" -eq 0; then
+    cat tier/reds tier/flaky | sort -u | while IFS= read -r name; do
+        if test -z "$part"; then printf '%s\n' "$name"
+        else
+            case "$name" in "p$part."*) printf '%s\n' "$name" ;; esac
+        fi
+    done > "$selected"
 fi
 # Exact-line membership without starting grep for each selected test.
 contains() {
@@ -62,6 +71,17 @@ if test "$status" -ne 0; then
 fi
 exit "$status"
 '''
+# The old argument parser supplies a commit that cannot seed a part.
+TIER_WITHOUT_PART = (TIER[:TIER.index('part=\n')] + r'''if test "$#" -gt 0; then
+    while test "$#" -gt 0; do
+        test "$1" = --only
+        printf '%s\n' "$2" >> "$selected"
+        shift 2
+    done
+else
+    cat tier/reds tier/flaky | sort -u > "$selected"
+fi
+''' + TIER[TIER.index('# Exact-line membership'):])
 HEAVY = r'''import json, os, subprocess, sys
 from pathlib import Path
 root = Path(os.environ['AFTER_LANDING_FIXTURE'])
@@ -177,8 +197,10 @@ class Lab:
     def push(self):
         self.git(self.work, 'push', '--quiet', 'origin', 'main')
 
-    def run(self, status=0, env=None, director=False, once=True):
+    def run(self, status=0, env=None, director=False, once=True, part=None):
         argv = [PYTHON, '-I', '-B', SCRIPT, 'follow', 'demo', '--origin', self.origin]
+        if part is not None:
+            argv += ['--part', part]
         if once:
             argv.append('--once')
         if director:
@@ -191,12 +213,12 @@ class Lab:
         with (self.root / 'feed.jsonl').open('a') as out:
             out.write(json.dumps(row) + '\n')
 
-    def records(self, event=None):
-        result = [r for r in rows(self.root / 'feed.jsonl') if r.get('kind') == 'tier']
+    def records(self, event=None, tier='demo'):
+        result = [r for r in rows(self.root / 'feed.jsonl') if r.get('kind') == 'tier' and r.get('tier') == tier]
         return [r for r in result if r['event'] == event] if event else result
 
-    def state(self):
-        return json.loads((self.root / 'state/demo.json').read_text())
+    def state(self, name='demo'):
+        return json.loads((self.root / 'state' / (name + '.json')).read_text())
 
     def calls(self):
         return rows(self.root / 'calls.jsonl')
@@ -204,8 +226,8 @@ class Lab:
     def posts(self):
         return rows(self.root / 'posts.jsonl')
 
-    def verdict(self, tip):
-        return next(r for r in reversed(self.records('verdict')) if r['commit'] == tip)
+    def verdict(self, tip, tier='demo'):
+        return next(r for r in reversed(self.records('verdict', tier=tier)) if r['commit'] == tip)
 
     def green(self):
         tip = self.land()
@@ -693,10 +715,201 @@ sys.exit(subprocess.run([sys.executable, *sys.argv[1:]], input=payload, text=Tru
     assert len(lab.state()['pending']) == 1
 
 
+
+def parts_follow_apart(lab):
+    head = lab.land()
+    lab.push()
+    for k in (1, 2):
+        name = f'demo.{k}of2'
+        lab.run(part=f'{k}/2')
+        clone = lab.root / 'runner' / name
+        assert clone.is_dir() and lab.state(name)['last_run'] == head
+        records = lab.records(tier=name)
+        assert [r['event'] for r in records] == ['running', 'verdict', 'tier']
+        log = Path(records[-1]['log'])
+        assert log.is_file() and log.name.startswith(name + '-')
+        assert 'whole state: no whole state' in log.read_text()
+        call = lab.calls()[-1]
+        assert call['cwd'] == str(clone)
+        assert call['argv'] == ['--', 'scripts/after-landing.sh', '--part', f'{k}/2']
+        assert call['label'] == 'after-landing ' + name and call['cls'] == 'background'
+    assert not (lab.root / 'state/demo.json').exists()
+    assert not (lab.root / 'runner/demo').exists()
+    assert lab.records() == [] and len(lab.calls()) == 2
+    tip = lab.land()
+    lab.push()
+    lock = lab.root / 'locks/demo.1of2.lock'
+    with lock.open('a') as out:
+        fcntl.flock(out, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        result = lab.run(part='1/2', status=2)
+        assert 'another follower holds demo.1of2' in result.stderr
+        lab.run(part='2/2')
+    assert lab.state('demo.1of2')['last_run'] == head
+    assert lab.state('demo.2of2')['last_run'] == tip and len(lab.calls()) == 3
+
+
+def part_red_bisected_while_the_other_clears(lab):
+    lab.land()
+    lab.push()
+    for part in ('1/2', '2/2'):
+        lab.run(part=part)
+    one, two = lab.land(), lab.land()
+    three = lab.land(reds=['p1.t2'], landed=True)
+    four = lab.land()
+    lab.push()
+    lab.run(part='1/2')
+    calls = lab.calls()[2:]
+    assert calls[0]['head'] == calls[1]['head'] == four
+    assert calls[0]['argv'][-2:] == ['--part', '1/2']
+    assert 1 <= len(calls[2:]) <= 2
+    assert all(c['argv'] == ['--', 'scripts/after-landing.sh', '--only', 'p1.t2']
+               for c in calls[1:])
+    assert lab.state('demo.1of2')['reds'] == {'p1.t2': three}
+    verdict = lab.verdict(three, tier='demo.1of2')
+    assert verdict['verdict'] == 'red' and verdict['landing_set'] == 'demo/m1'
+    assert [lab.verdict(t, tier='demo.1of2')['tests'] for t in (one, two, three, four)] == [
+        [], [], ['p1.t2'], []]
+    before = len(lab.calls())
+    lab.run(part='2/2')
+    assert len(lab.calls()) == before + 1
+    assert lab.calls()[-1]['argv'][-2:] == ['--part', '2/2']
+    assert all(lab.verdict(t, tier='demo.2of2')['verdict'] == 'cleared'
+               for t in (one, two, three, four))
+    assert lab.state('demo.2of2')['reds'] == {} and lab.posts() == []
+    env = dict(lab.env, AFTER_LANDING_RED_GRACE='0')
+    lab.run(part='1/2', director=True, env=env)
+    assert 'after-landing: demo.1of2 red at ' in lab.posts()[0]['argv'][4]
+
+
+def part_star_rerun_passes_the_part(lab):
+    lab.land()
+    lab.push()
+    lab.run(part='1/2')
+    tip = lab.land(reds=['p1.t1'])
+    lab.push()
+    (lab.root / 'unnamed').touch()
+    lab.run(part='1/2')
+    assert lab.verdict(tip, tier='demo.1of2')['tests'] == ['*']
+    assert lab.state('demo.1of2')['reds'] == {'*': tip}
+    assert len(lab.calls()) == 3
+    assert all(c['argv'] == ['--', 'scripts/after-landing.sh', '--part', '1/2']
+               for c in lab.calls())
+
+
+def whole_red(lab):
+    green = lab.green()
+    tip = lab.land(reds=['p2.t9'], landed=True)
+    lab.push()
+    lab.run()
+    state = lab.state()
+    assert state['reds'] == {'p2.t9': tip} and len(state['pending']) == 1
+    state['fault'] = dict(since=datetime.now(timezone.utc).isoformat(), reason='whole fault',
+                          commit=tip, posted=False)
+    path = lab.root / 'state/demo.json'
+    path.write_text(json.dumps(state) + '\n')
+    return green, tip, path.read_bytes()
+
+
+def part_from_whole_state(lab):
+    green, previous, original = whole_red(lab)
+    one, two = lab.land(), lab.land()
+    lab.push()
+    for k in (1, 2):
+        name = f'demo.{k}of2'
+        lab.run(part=f'{k}/2')
+        records = lab.records(tier=name)
+        assert lab.records('running', tier=name)[0]['from'] == previous
+        assert not any(r.get('baseline') for r in records)
+        assert [r['commit'] for r in lab.records('verdict', tier=name)] == [one, two]
+        assert all(r['verdict'] == 'cleared' for r in lab.records('verdict', tier=name))
+        state = lab.state(name)
+        assert state['reds'] == ({'p2.t9': previous} if k == 2 else {})
+        assert state['last_green'] == (green if k == 2 else two)
+        assert state['pending'] == [] and state['fault'] is None
+        assert 'starting from whole state at ' + previous in Path(records[-1]['log']).read_text()
+    assert (lab.root / 'state/demo.json').read_bytes() == original
+    assert lab.posts() == []
+
+
+def part_from_whole_state_at_main(lab):
+    green, previous, original = whole_red(lab)
+    before = lab.calls()
+    lab.run(part='2/2')
+    state = lab.state('demo.2of2')
+    assert state['last_run'] == previous and state['last_green'] == green
+    assert state['reds'] == {'p2.t9': previous} and state['pending'] == [] and state['fault'] is None
+    assert lab.records(tier='demo.2of2') == [] and lab.calls() == before
+    assert (lab.root / 'state/demo.json').read_bytes() == original
+    # A part's own fault survives seeding until the unchanged-main branch recovers it.
+    path = lab.root / 'state/demo.1of2.json'
+    own = lab.state()
+    own.update(last_run=None, last_green=None, reds={},
+               pending=[dict(own['pending'][0], tests=['own pending'])])
+    own['fault']['reason'] = 'part fault'
+    path.write_text(json.dumps(own))
+    lab.run(part='1/2')
+    recovered = lab.records(tier='demo.1of2')
+    assert len(recovered) == 1 and recovered[0]['event'] == 'recovered'
+    assert recovered[0]['since'] == own['fault']['since']
+    assert lab.state('demo.1of2')['fault'] is None and lab.calls() == before
+    assert lab.state('demo.1of2')['pending'] == own['pending']
+    assert (lab.root / 'state/demo.json').read_bytes() == original
+
+
+def part_not_from_whole_state(lab):
+    for row in ('star', 'old_script', 'another_origin', 'absent', 'unreadable',
+                'never_run', 'missing_object'):
+        root = lab.root / row
+        root.mkdir()
+        sub = Lab(root)
+        if row == 'old_script':
+            (sub.work / 'scripts/after-landing.sh').write_text(TIER_WITHOUT_PART)
+        head = sub.green()
+        path = root / 'state/demo.json'
+        state = sub.state()
+        if row == 'star':
+            state['reds'] = {'*': head}
+        elif row == 'another_origin':
+            state['origin'] = 'another-origin'
+        elif row == 'never_run':
+            state.update(last_run=None, last_green=None)
+        elif row == 'missing_object':
+            state['last_run'] = 'f' * 40
+        if row == 'absent':
+            path.unlink()
+        elif row == 'unreadable':
+            path.write_text('bad json')
+        else:
+            path.write_text(json.dumps(state))
+        original = path.read_bytes() if path.exists() else None
+        # Main's script supports parts even when the previous whole run did not.
+        (sub.work / 'scripts/after-landing.sh').write_text(TIER)
+        tip = sub.land()
+        sub.push()
+        sub.run(part='1/2')
+        records = sub.records(tier='demo.1of2')
+        assert records[0]['event'] == 'running' and records[0]['from'] is None, row
+        assert all(r['baseline'] is True for r in records if r['event'] in ('verdict', 'tier')), row
+        assert sub.state('demo.1of2')['last_run'] == tip, row
+        assert (path.read_bytes() if path.exists() else None) == original, row
+        assert len(sub.calls()) == 2, row
+        assert 'whole state: ' in Path(records[-1]['log']).read_text(), row
+
+
+def part_refusals(lab):
+    for part in ('1/1', '0/2', '3/2', '2', 'a/b', '01/2', '1/02', '-1/2', '1/0'):
+        result = lab.run(part=part, status=2)
+        assert '--part' in result.stderr, part
+        assert all(not (lab.root / name).exists() for name in ('runner', 'state', 'locks')), part
+        assert lab.calls() == [] and lab.records() == [] and lab.posts() == [], part
+
+
 CASES = (polls, no_tier, flake, red, bisect, baseline, already_red, fault, unwatched_red,
          meets_landings, not_runner_machine, one_follower, refusals, multi_bisect, limits,
          nested_faults, unnamed, pending_delivery, stale_watch, history_reset,
-         trailers, feed_failure)
+         trailers, feed_failure, parts_follow_apart, part_red_bisected_while_the_other_clears,
+         part_star_rerun_passes_the_part, part_from_whole_state, part_from_whole_state_at_main,
+         part_not_from_whole_state, part_refusals)
 
 
 def run(case, directory, built):

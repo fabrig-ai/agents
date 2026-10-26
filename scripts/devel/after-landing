@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Follow one origin main, attribute its slow-tier reds, and write the landing feed."""
+"""Follow one origin main, attribute its slow-tier reds, and write the landing feed.
+
+With --part K/N, follow that part alone under the name REPO.KofN.
+"""
 import argparse
 import copy
 from datetime import datetime, timezone
@@ -97,9 +100,9 @@ def read_feed(fixture):
     return rows
 
 
-def emit(fixture, token, repo, event, **fields):
+def emit(fixture, token, name, event, **fields):
     row = dict(time=now(), kind='tier', event=event, host=socket.gethostname(),
-               token=token, tier=repo, **fields)
+               token=token, tier=name, **fields)
     for key in ('tests', 'flakes'):
         if key in row and len(row[key]) > 50:
             row[key + '_more'] = len(row[key]) - 50
@@ -209,7 +212,7 @@ def settle(args, base, state, rows):
             state['pending'].remove(item)
         elif args.director and (stamp(now()) - stamp(item['time'])).total_seconds() >= args.red_grace:
             label = item['set'] if item['set'] is not None else 'no set'
-            subject = f"after-landing: {args.repo} red at {item['commit'][:9]} ({label}): {len(item['tests'])} tests"
+            subject = f"after-landing: {args.name} red at {item['commit'][:9]} ({label}): {len(item['tests'])} tests"
             if not post(args, base, subject, '\n'.join([
                 'tests: ' + ', '.join(item['tests']), 'run: ' + item['run'],
                 'log: ' + item['log'], item['excerpt']])):
@@ -217,7 +220,7 @@ def settle(args, base, state, rows):
             state['pending'].remove(item)
         else:
             continue
-        save_state(base / 'state' / (args.repo + '.json'), state)
+        save_state(base / 'state' / (args.name + '.json'), state)
 
 
 def post_fault(args, base, state, log):
@@ -226,7 +229,7 @@ def post_fault(args, base, state, log):
         return
     age = (stamp(now()) - stamp(fault['since'])).total_seconds()
     if age >= args.fault_post:
-        subject = f"after-landing: {args.repo} fault for {int(age // 60)} minutes: {fault['reason']}"
+        subject = f"after-landing: {args.name} fault for {int(age // 60)} minutes: {fault['reason']}"
         fault['posted'] = post(args, base, subject, f"{fault['reason']}\nmain: {fault['commit']}\nlog: {log}")
 
 
@@ -234,13 +237,13 @@ def fault(args, base, state, token, commit, reason, log):
     previous = state['fault']
     since = previous['since'] if previous else now()
     if not previous or previous['reason'] != reason:
-        emit(args.fixture, token, args.repo, 'fault', commit=commit, reason=reason, since=since)
+        emit(args.fixture, token, args.name, 'fault', commit=commit, reason=reason, since=since)
     state['fault'] = dict(since=since, reason=reason, commit=commit,
                           posted=previous['posted'] if previous else False)
     # Persist before delivery so a failed post cannot restart the fault clock.
-    save_state(base / 'state' / (args.repo + '.json'), state)
+    save_state(base / 'state' / (args.name + '.json'), state)
     post_fault(args, base, state, log)
-    save_state(base / 'state' / (args.repo + '.json'), state)
+    save_state(base / 'state' / (args.name + '.json'), state)
 
 
 def tips(clone, previous, main):
@@ -261,13 +264,15 @@ def run_tier(args, clone, commit, only, log):
     git(clone, 'clean', '-ffdq')
     if not (clone / 'scripts/after-landing.sh').is_file():
         return dict(red=set(), fault=None, excerpt='', ran=0)
-    env = dict(os.environ, HEAVY_CLASS='background', HEAVY_LABEL='after-landing ' + args.repo)
+    env = dict(os.environ, HEAVY_CLASS='background', HEAVY_LABEL='after-landing ' + args.name)
     env.pop('CARGO_TARGET_DIR', None)
     executable = (os.environ.get('AFTER_LANDING_HEAVY', str(KIT / 'heavy'))
                   if args.fixture else str(KIT / 'heavy'))
     argv = [executable, '--', 'scripts/after-landing.sh']
     for test in sorted(only - {'*'}):
         argv += ['--only', test]
+    if not only - {'*'} and args.part is not None:
+        argv += ['--part', f'{args.part[0]}/{args.part[1]}']
     result = command(argv, cwd=clone, env=env)
     with log.open('a') as out:
         out.write(f'\ncommit {commit}; only {sorted(only)}\n' + result.stdout)
@@ -289,22 +294,43 @@ def run_tier(args, clone, commit, only, log):
                 excerpt='\n'.join(payload.splitlines()[-60:])[-8000:])
 
 
+def whole_state(args, base, clone):
+    path = base / 'state' / (args.repo + '.json')
+    if not path.exists() and not path.is_symlink():
+        return None, 'no whole state'
+    try:
+        state = read_state(path, args.origin)
+    except ValueError as error:
+        return None, str(error)
+    previous = state['last_run']
+    if previous is None:
+        return None, 'whole state has never run'
+    if command(['git', 'cat-file', '-e', previous + '^{commit}'], cwd=clone).returncode:
+        return None, 'whole last run is not in the clone'
+    if '*' in state['reds']:
+        return None, 'whole state has an unnamed standing red'
+    if command(['git', 'grep', '-q', '-F', '-e', '--part', previous, '--',
+                'scripts/after-landing.sh'], cwd=clone).returncode:
+        return None, 'whole last run has no --part script'
+    return state, 'starting from whole state at ' + previous
+
+
 def pass_once(args, base, clone, state):
-    state_path = base / 'state' / (args.repo + '.json')
+    state_path = base / 'state' / (args.name + '.json')
     rows = read_feed(args.fixture)
     settle(args, base, state, rows)
     token = uuid.uuid4().hex
     remote = command(['git', 'ls-remote', args.origin, 'refs/heads/main'])
     fields = remote.stdout.split()
     main = fields[0] if not remote.returncode and fields and sha(fields[0]) else None
-    log = base / 'logs' / f'{args.repo}-{(main or "unknown")[:9]}-{token[:8]}.log'
+    log = base / 'logs' / f'{args.name}-{(main or "unknown")[:9]}-{token[:8]}.log'
     if main is None:
         log.write_text(remote.stdout)
         fault(args, base, state, token, None, 'origin out of reach', log)
         return
     if main == state['last_run']:
         if state['fault'] is not None:
-            emit(args.fixture, token, args.repo, 'recovered', commit=main, since=state['fault']['since'])
+            emit(args.fixture, token, args.name, 'recovered', commit=main, since=state['fault']['since'])
             state['fault'] = None
             save_state(state_path, state)
         return
@@ -319,9 +345,22 @@ def pass_once(args, base, clone, state):
     if result.returncode or command(['git', 'cat-file', '-e', main + '^{commit}'], cwd=clone).returncode:
         fault(args, base, state, token, main, 'origin out of reach', log)
         return
+    if args.part is not None and state['last_run'] is None:
+        whole, reason = whole_state(args, base, clone)
+        with log.open('a') as out:
+            out.write('whole state: ' + reason + '\n')
+        if whole is not None:
+            state.update((key, whole[key]) for key in ('last_run', 'last_green', 'reds'))
+            save_state(state_path, state)
+            if main == state['last_run']:
+                if state['fault'] is not None:
+                    emit(args.fixture, token, args.name, 'recovered', commit=main, since=state['fault']['since'])
+                    state['fault'] = None
+                    save_state(state_path, state)
+                return
     landings, docs, baseline = tips(clone, state['last_run'], main)
     baseline_fields = {'baseline': True} if baseline else {}
-    emit(args.fixture, token, args.repo, 'running', commit=main, **{'from': state['last_run']})
+    emit(args.fixture, token, args.name, 'running', commit=main, **{'from': state['last_run']})
     ran = 0
 
     def run(commit, only):
@@ -379,7 +418,7 @@ def pass_once(args, base, clone, state):
                       tests=tests, flakes=flakes, landing_set=label, log=str(log), **baseline_fields)
         if tests:
             fields['excerpt'] = excerpts[tests[0]]
-        row = emit(args.fixture, token, args.repo, 'verdict', **fields)
+        row = emit(args.fixture, token, args.name, 'verdict', **fields)
         if tests and not watched(row, rows):
             state['pending'].append(dict(commit=tip, set=label, time=row['time'], tests=tests,
                                          run=main, log=str(log), excerpt=fields['excerpt']))
@@ -397,7 +436,7 @@ def pass_once(args, base, clone, state):
             group['tests_more'] = len(tests) - 50
         groups.append(group)
     try:
-        emit(args.fixture, token, args.repo, 'tier', commit=main, state='red' if reds else 'green',
+        emit(args.fixture, token, args.name, 'tier', commit=main, state='red' if reds else 'green',
              last_green=state['last_green'], reds=groups, flakes=flakes, ran_s=ran, log=str(log),
              **baseline_fields)
     except Exception:
@@ -418,6 +457,7 @@ def main():
     sub = parser.add_subparsers(dest='command', required=True)
     follow = sub.add_parser('follow')
     follow.add_argument('repo')
+    follow.add_argument('--part', metavar='K/N', help='follow part K of N of the tier alone')
     follow.add_argument('--origin')
     follow.add_argument('--director')
     follow.add_argument('--poll', type=seconds, default=60)
@@ -425,6 +465,17 @@ def main():
     args = parser.parse_args()
     if not re.fullmatch(r'[a-z][a-z0-9-]*', args.repo):
         parser.error('REPO must match [a-z][a-z0-9-]*')
+    if args.part is not None:
+        if not re.fullmatch(r'[1-9][0-9]*/[1-9][0-9]*', args.part):
+            parser.error('--part must be K/N, with 1 <= K <= N and N >= 2')
+        try:
+            k, n = map(int, args.part.split('/'))
+        except ValueError:
+            parser.error('--part numbers are too large')
+        if not 1 <= k <= n or n < 2:
+            parser.error('--part must be K/N, with 1 <= K <= N and N >= 2')
+        args.part = (k, n)
+    args.name = args.repo if args.part is None else f'{args.repo}.{args.part[0]}of{args.part[1]}'
     args.origin = args.origin or f'git@github.com:fabrig-ai/{args.repo}.git'
     fixture = os.environ.get('AFTER_LANDING_FIXTURE')
     args.fixture = Path(fixture).resolve() if fixture else None
@@ -436,8 +487,8 @@ def main():
     base = args.fixture or Path(os.environ.get('DEV_TMP', str(root / 'tmp'))) / 'after-landing'
     args.fault_post = seconds(os.environ.get('AFTER_LANDING_FAULT_POST', '900'))
     args.red_grace = seconds(os.environ.get('AFTER_LANDING_RED_GRACE', '900'))
-    state_path = base / 'state' / (args.repo + '.json')
-    clone = base / 'runner' / args.repo
+    state_path = base / 'state' / (args.name + '.json')
+    clone = base / 'runner' / args.name
     try:
         # Refuse state and alien directories without replacing either.
         state = read_state(state_path, args.origin)
@@ -450,11 +501,11 @@ def main():
         parser.error(str(error))
     for name in ('runner', 'state', 'logs', 'locks'):
         (base / name).mkdir(parents=True, exist_ok=True)
-    with (base / 'locks' / (args.repo + '.lock')).open('a') as lock:
+    with (base / 'locks' / (args.name + '.lock')).open('a') as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            parser.error(f'another follower holds {args.repo}')
+            parser.error(f'another follower holds {args.name}')
         # State may have advanced between validation and acquiring the lock.
         state = read_state(state_path, args.origin)
         while True:
