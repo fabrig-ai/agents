@@ -70,7 +70,7 @@ credential: not `.credentials.json`, `auth.json` nor a token.
 
 | CLI | Who | Limits |
 |---|---|---|
-| Claude Code | `claude auth status --json`: `loggedIn`, `authMethod`, `orgId`, `email`, `subscriptionType` | `claude -p /usage --output-format json --no-session-persistence --strict-mcp-config --tools "" --model haiku`, under `TZ=UTC`: the `result`'s lines `Current <limit>: <n>% used · resets <when>` |
+| Claude Code | `claude auth status --json`: `loggedIn`, `authMethod`, `orgId`, `email`, `subscriptionType` | `claude -p /usage --output-format json --no-session-persistence --strict-mcp-config --tools "" --model haiku --settings '{"disableAllHooks": true}'`, under `TZ=UTC`: the `result`'s lines `Current <limit>: <n>% used · resets <when>` |
 | Codex | `codex app-server` on stdio, after `initialize`: `account/read`'s `account` (`type`, `email`, `planType`) | `account/rateLimits/read`, `excludeResetCreditDetails`: its `accountId`, and each bucket's (`rateLimitsByLimitId`, else `rateLimits`) `primary` and `secondary` windows: `usedPercent`, `windowDurationMins`, `resetsAt` |
 
 - **A probe's answer** is one of four: a subscription, with its label,
@@ -83,32 +83,40 @@ credential: not `.credentials.json`, `auth.json` nor a token.
   name, the account's id (Claude's `orgId`, Codex's `accountId`) and
   its email, joined by NUL bytes. The collector computes it: the email
   and the id never leave the machine, in the page, the `--json` file or
-  the journal. The id is known to no outsider, so no guessed email can
-  be checked against a label. A subscription without both has no
-  label, and shows with its machine alone, as unidentified.
+  the journal. The id is published nowhere, so a guessed email can't
+  be checked against a label by someone who doesn't already hold the
+  account's id. A subscription without both has no label, and shows
+  with its machine alone, as unidentified.
 - **A limit** has a name, the percent used and its reset, a time.
   Claude's name is the line's `<limit>` (`session`, `week (all
   models)`, `week (Fable)`), letters, digits, spaces and brackets only;
   its `<when>` (`Oct 30, 7pm`, `Oct 26, 5:30am`, or a time alone for
-  today) is UTC, in the year that puts it next after the probe. Codex's
+  today) is UTC: the first such time no more than an hour before the
+  probe, so that a reset read as it passes stays in its year. Codex's
   name is its window's length (`5 h`, `week`, else in minutes, hours or
-  days), after the bucket's `limitName` or `limitId` when that isn't
-  `codex`. A reset that cannot be read leaves the use.
+  days), after the bucket's `limitId` when that isn't `codex`: a
+  lowercase slug, else `other`, and never the backend's `limitName`,
+  free text that could name an account. A reset that cannot be read
+  leaves the use.
 - **Merged on the page:** the machines whose probes carry one CLI's
   label share that subscription. Each of its limits is the reading with
   the latest reset, then the highest use: a later reset is a newer
   window, and within one window use only grows.
-- **Cheap.** The probes run beside the collector's other sources, each
-  command under its own timeout of 30 s, and the Codex app-server,
-  with what it started, ends with the exchange. `/usage` must be
-  answered by Claude Code itself (`local_command` `usage`, `num_turns`
-  0, `total_cost_usd` 0), or the probe fails and the footer says so:
-  a version that sends it to a model is seen within one run, and the
-  smallest model with no tools or MCP servers keeps that slip cheap.
-  No session is kept, so neither `claude agents` nor `record runs`
-  sees a probe. The app-server is asked nothing that changes the
-  account: never `account/rateLimitResetCredit/consume`, never with
-  `refreshToken`.
+- **Cheap.** The probes run beside the collector's other sources:
+  each Claude command under a timeout of 30 s, and the whole Codex
+  exchange under one, after which the app-server and what it started
+  are ended. `/usage` must be answered by Claude Code itself
+  (`local_command` `usage`, `num_turns` 0, `total_cost_usd` 0), or the
+  probe fails and the footer says so. No flag stops a print run before
+  its first request (`--max-turns 0` doesn't), so a version that sends
+  `/usage` to a model would spend at each run until the footer is
+  read: the smallest model, with no tools, MCP servers or hooks, keeps
+  that to a fraction of a cent a probe. No session is kept, so neither
+  `claude agents` nor `record runs` sees a probe. The app-server is
+  asked nothing that changes the account: never
+  `account/rateLimitResetCredit/consume`, never with `refreshToken`. A
+  token either CLI refreshes on its own is its own business, as in any
+  session on that machine.
 
 ## 3. The page
 
