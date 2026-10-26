@@ -305,7 +305,10 @@ with its own label's id (the user, 10-26; agents' `user-issues.md`):
   charts' hours show as clock times. An ended mission's duration reads
   `42 min`, `5 h 12 min` or `3 d 6 h`, as a reset's does.
 - The page reloads itself every 5 minutes, carries `noindex`, and works
-  in light and dark. Every chart has a table beside it.
+  in light and dark. Every chart has a table beside it. A link out of
+  the page (git.fabrig.ai's issues) opens a new tab, `target="_blank"
+  rel="noopener noreferrer"`, so that the page stays open (the user,
+  10-26).
 
 ## 4. Serving
 
