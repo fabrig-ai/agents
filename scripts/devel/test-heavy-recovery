@@ -1536,6 +1536,7 @@ def main():
     opts = parser.parse_args()
     root = opts.evidence.resolve()
     root.mkdir(parents=True, exist_ok=False)
+    (root / 'EVIDENCE.TAG').write_text('agents fixture evidence\ntest-heavy-recovery\n')
     cases = [('gc-build', gc_build), ('gc-budget', gc_budget), ('gc-gate', gc_gate), ('gc-errors', gc_errors),
              ('normal', normal), ('unsupported', unsupported), ('configured-kache', configured_kache),
              ('enospc-snapshot', lambda lab: storage_failure(lab, 'snapshot')),
