@@ -788,7 +788,8 @@ pushes that very commit.
 - `waiting`: the lock is requested;
 - `started`: the lock is granted;
 - `gated`: `repo` and `commit`, a candidate (phase 1, step 5);
-- `landed`: `repo` and `commit`;
+- `landed`: `repo` and `commit`, and `taught` with `taught_more`, what
+  that repository's commits taught (landing-flow.md 12);
 - `stopped`: `status`, `repo` when the run stopped in one, and `reason`, the
   first line of what the run printed for it, at most 200 characters;
 - `done`: every repository landed or skipped, with `warnings` when a
@@ -801,6 +802,10 @@ pushes that very commit.
 `gated`, `landed` and a failed `land`'s `stopped` also carry `result`,
 the object `land` wrote to `LAND_RESULT` ([landing-flow.md](landing-flow.md)
 10), when it wrote one.
+
+A plain `land` that pushes appends its own line, `kind` `land`, with no
+`set` (landing-flow.md 12); `land-set` runs its `land`s with `LAND_FEED`
+empty, so that they write none.
 
 Lines written before this version have no `event`; each is a `landed`. A feed
 failure warns and never fails the run. A run killed by SIGKILL leaves no last
@@ -826,6 +831,9 @@ proving, but `wait` waits only for a landing run.
   once that run has `stopped`, printing its status, repository and reason; 3
   at the timeout. A set not yet in the feed is waited for. The first read
   gets its full 15 seconds, so `--timeout 0` checks the feed once.
+- `landings taught [--since TIME]` lists every landing since TIME, a
+  set's per repository and plain `land`'s, each with what it taught
+  (landing-flow.md 12).
 - `landings report [--since DATE] [--repo NAME] [--tsv]` summarizes the
   results in the feed, per repository and per set (landing-flow.md 10).
   Proves have their own table, from `proving` to their end, and the

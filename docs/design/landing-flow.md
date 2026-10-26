@@ -5,7 +5,8 @@ user): a set proves its gates before it takes the lock, every landing
 takes the set lock, and there is no keeper; and 10-26 (the user): there
 is no landing queue, after landing follows each `main` (4, step 8),
 and the tools settle conflicts between STATUS.md's rows and in generated
-files (3). Built and live: `scripts/devel/land-set` and the set lock
+files (3); and 10-26 (the user): what each landing taught goes in the
+feed (12). Built and live: `scripts/devel/land-set` and the set lock
 (section 9), and since 10-26 after landing's runner (4, step 8). How
 changes reach `main` across skein, smith, jig, hearth and temper:
 - one set of branches per milestone;
@@ -80,6 +81,9 @@ and milestones are [owners.md](../../roles/owners.md).
   - **Coordination:** owners neither wait on nor relay for each other.
   - **QA:** the lab takes each milestone as soon as it lands and its
     tier is green, while the next one is being built (the user).
+- **What a landing taught** goes in its commit, as `Taught:` trailers,
+  which `land` and `land-set` copy into the feed and `landings taught`
+  lists, so that a routine landing posts no one (section 12).
 - **What goes away:**
   - repin slots, and the director's calls on repin and landing order;
   - landing hashes relayed between owners;
@@ -707,8 +711,9 @@ tool that sees it; the reports only read.
     run, median and longest;
   - `--tsv`: one row per result, with raw seconds, for other scripts.
 
-Not collected yet: plain `land`s outside a set (their result line is in
-their output only), and each test's time (nextest's JUnit output).
+Not collected yet: the results of plain `land`s outside a set (their
+record in the feed, section 12, carries none; the result line is in their
+output only), and each test's time (nextest's JUnit output).
 
 ## 11. Open
 
@@ -720,3 +725,100 @@ their output only), and each test's time (nextest's JUnit output).
   Markdown alone (landing-proof.md 7).
 - **Proving on one machine and landing on another** needs a receipt
   that the lander can read and check (landing-proof.md 7).
+
+## 12. What a landing taught
+
+The user, 10-26: "re landing notices: can't we include in the feed the
+'what each landing post says the code taught' bit of info?". Owners
+posted their parent at every landing (owners.md 4): of the 127 posts to
+the director from 01:40Z to 10:50Z that day, about half were landing
+notices, each a wake (decision 1252). What a landing taught now goes in
+its commit, the tools copy it into the feed, and `landings` shows it, so
+that a routine landing needs no post. Being built (10-26, o/landing-taught).
+
+- **The trailer.** What the code taught that the design doesn't say (a
+  boundary that moved, a behaviour settled) is a trailer in the landing's
+  commit message, `Taught: <one line>`, of at most 200 characters; a
+  landing that taught several things carries a few, one each. It stands
+  in the message's last paragraph with the others: `QA:`
+  ([qa-flow.md](qa-flow.md) 2), `Co-Authored-By:`, the gate's. The
+  landing task writes it from its owner's words, as it writes `QA:`. A
+  landing with nothing to teach carries none.
+- **Written once, in git, and copied.** The feed holds a copy, at the
+  landing's time, so that a reader catching up needs neither a checkout
+  nor a commit's date: a set proved at 10:00 and landed at 10:30 keeps its
+  10:00 commits.
+- **Whose lines.** A landing's lines are the `Taught:` values of every
+  commit it brings to that repository's `main`, oldest first, unfolded and
+  stripped, an empty one dropped.
+  - `land`: from the `main` its last pass rebased on to the commit it
+    pushed.
+  - `land-set`: in each repository, the set's own commits, from the base
+    its candidate was gated on to that candidate. A repin's commit carries
+    none, and a rebase under the lock (9.2) changes no message.
+- **Bounded, never refused.** The tools keep a landing's first 10 lines in
+  each repository, each cut to 200 characters (`…` marks a cut), and count
+  the rest as `taught_more`. A trailer never stops a landing, and a feed
+  that can't be written warns, as `land-set`'s does
+  (build-infrastructure.md 10).
+- **A set's landing record.** Each `landed` event of `land-set`
+  (build-infrastructure.md 10) carries `taught`, the list of lines, and
+  `taught_more` when it left some out; neither when that repository's
+  commits taught nothing. A set teaches per repository.
+- **`land`'s own record.** Before this, a plain `land` reached the feed
+  only inside a set. Now a `land` that pushes, `--docs` included, appends
+  one line once its push has succeeded, whether or not its local `main`
+  follows:
+  ```
+  {"time": ISO, "kind": "land", "event": "landed", "host": NAME,
+   "token": HEX32, "repo": "agents", "branch": "landing-taught/m1",
+   "base": SHA, "commit": SHA, "taught": ["..."]}
+  ```
+  - `repo` is `land`'s own (section 10); `taught` and
+    `taught_more` are as above, absent when there is nothing to show.
+  - **No `set`,** so every reader of a set's runs passes over it:
+    `landings`' set views, `wait` and `report`, the status page, and after
+    landing's `landing_set`.
+  - **Inside a set, none:** `land-set` sets `LAND_FEED` empty for the
+    `land`s it runs, as it sets `LAND_TIDY`, and records each landing
+    itself. `--local` and `--no-push` push nothing, and write none.
+  - **Fixtures.** `LAND_FEED`, a local path, replaces hetzner3's feed, and
+    set empty writes none. Without it, only a push to a remote with a host
+    (`git@host:path`, `ssh://`, `https://`) reaches hetzner3's feed, over
+    `land-set`'s ssh: never a path or `file://` origin, and never a fixture
+    run's (`HEAVY_RECOVERY_FIXTURE=1`).
+  - Its result stays out of it: plain `land`s' costs are still not
+    collected (section 10).
+- **`landings` shows it.**
+  - Its event list holds `land`'s records beside the sets' events, a
+    record's branch where a set's name stands, and prints a landing's
+    lines under it, indented, then `(N more)` for `taught_more`.
+  - `landings taught [--since TIME]`, TIME a date or an ISO time, UTC by
+    default, as `report`'s: every landing in the feed since then, oldest
+    first, both kinds. One line for each, its date and time, set or branch,
+    repository, commit and machine, then its lines indented under it; a
+    landing that taught nothing is its line alone.
+- **Who reads it.**
+  - **The director,** at its check, `landings taught --since` its last
+    one (director.md 7): an owner under the director posts nothing at a
+    landing, and its trailer is the notice (owners.md 4).
+  - **A designer** still hears from its owners at each landing, since it
+    adjusts the design from them (designer.md 4); their landings may carry
+    the trailer too.
+  - Questions, escalations, a red verdict's repair and a mission's closing
+    still post (owners.md 4, 5).
+- **Not public.** The status page shows no taught text (status-page.md
+  1): it renders no `taught` field of a set's events, and `land`'s
+  records, which have no `set`, never reach it.
+- **The tests.** On scratch feeds, with no ssh:
+  - `test-land-set`: a set whose commits carry trailers in two
+    repositories, each `landed` event with its own lines, none on the
+    pin-only one, and the `land`s it runs given `LAND_FEED` empty;
+  - `test-landings`: a set's `landed` and a `land` record shown with their
+    lines and `taught_more`, a landing without them shown alone,
+    `taught --since`, and records with a malformed `taught` shown without
+    it;
+  - `test-land-resolve`, whose lab runs the real `land`: a push to a
+    `file://` origin with `LAND_FEED`, its record with its lines, one
+    without trailers with none, and one without `LAND_FEED`, which writes
+    nothing.
