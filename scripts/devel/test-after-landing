@@ -8,8 +8,8 @@ import os
 from pathlib import Path
 import subprocess
 import sys
-import tempfile
-import time
+
+import case_runner
 
 SCRIPT = Path(__file__).resolve().with_name('after-landing')
 PYTHON = sys.executable
@@ -38,10 +38,17 @@ if test "$#" -gt 0; then
 else
     cat tier/reds tier/flaky | sort -u > "$selected"
 fi
+# Exact-line membership without starting grep for each selected test.
+contains() {
+    while IFS= read -r candidate || test -n "$candidate"; do
+        if test "$candidate" = "$1"; then return 0; fi
+    done < "$2"
+    return 1
+}
 status=0
 while IFS= read -r name; do
     test -n "$name" || continue
-    if grep -Fxq "$name" tier/reds || { test "$n" -eq 1 && grep -Fxq "$name" tier/flaky; }; then
+    if contains "$name" tier/reds || { test "$n" -eq 1 && contains "$name" tier/flaky; }; then
         printf 'after-landing: failed %s\n' "$name"
         printf 'failure text for %s\nstack detail\n' "$name"
         status=1
@@ -122,9 +129,10 @@ class Lab:
         self.origin.parent.mkdir()
         self.git(None, 'init', '--bare', '--quiet', '--initial-branch=main', self.origin)
         self.git(None, 'clone', '--quiet', self.origin, self.work)
+        # These standalone fakes use only the standard library; skip site setup.
         for name, body in (('heavy', HEAVY), ('post', POST)):
             path = root / name
-            path.write_text(f'#!{PYTHON}\n' + body)
+            path.write_text(f'#!{PYTHON} -S\n' + body)
             path.chmod(0o700)
         # Any accidental transport is rejected locally, even with inherited ssh settings.
         bin_dir = root / 'bin'
@@ -400,12 +408,13 @@ def meets_landings(lab):
 
     def wait(label, status):
         return call([PYTHON, '-I', '-B', SCRIPT.with_name('landings'), 'wait', '--cleared',
-                     label, '--timeout', '0.5'], lab.root, env, status)
+                     label, '--timeout', '0'], lab.root, env, status)
 
     one = lab.land()
     lab.push()
     land_set('demo/m1', one)
-    assert one in wait('demo/m1', 3).stderr
+    missing = wait('demo/m1', 3).stderr
+    assert one in missing and 'timed out waiting for demo/m1' in missing
     lab.run()
     assert one[:9] + ' cleared by run' in wait('demo/m1', 0).stdout
     two = lab.land(reds=['t1'])
@@ -613,7 +622,7 @@ def feed_failure(lab):
     lab.push()
     # Reject just the final summary append, after verdicts and the state write.
     shim = lab.root / 'bin/python3'
-    shim.write_text(f'#!{PYTHON}\n' + """import json, os, subprocess, sys
+    shim.write_text(f'#!{PYTHON} -S\n' + """import json, os, subprocess, sys
 from pathlib import Path
 payload = sys.stdin.read()
 if json.loads(payload)['event'] == 'tier':
@@ -630,26 +639,29 @@ sys.exit(subprocess.run([sys.executable, *sys.argv[1:]], input=payload, text=Tru
     assert len(lab.state()['pending']) == 1
 
 
-def main():
-    os.umask(0o077)
-    start = time.monotonic()
-    cases = {'polls': polls, 'no-tier': no_tier, 'flake': flake, 'red': red, 'bisect': bisect,
-             'already-red': already_red, 'fault': fault, 'unwatched-red': unwatched_red,
-             'meets-landings': meets_landings, 'paused': paused, 'one-follower': one_follower, 'refusals': refusals,
-             'multi-bisect': multi_bisect, 'limits': limits, 'nested-faults': nested_faults,
-             'unnamed': unnamed, 'pending-delivery': pending_delivery, 'stale-watch': stale_watch,
-             'history-reset': history_reset, 'trailers': trailers, 'feed-failure': feed_failure}
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--case', action='append', choices=cases)
-    selected = parser.parse_args().case or list(cases)
-    for number, name in enumerate(selected, 1):
-        case_start = time.monotonic()
-        with tempfile.TemporaryDirectory(prefix='after-landing-fixture-') as directory:
-            lab = Lab(Path(directory))
-            cases[name](lab)
-        print(f'ok {number}: {name} ({time.monotonic() - case_start:.2f}s)', flush=True)
-    print(f'completed {len(selected)} cases in {time.monotonic() - start:.2f}s', flush=True)
+CASES = (polls, no_tier, flake, red, bisect, already_red, fault, unwatched_red,
+         meets_landings, paused, one_follower, refusals, multi_bisect, limits,
+         nested_faults, unnamed, pending_delivery, stale_watch, history_reset,
+         trailers, feed_failure)
+
+
+def run(case, directory, built):
+    case(Lab(directory))
 
 
 if __name__ == '__main__':
-    main()
+    os.umask(0o077)
+    if sys.argv[1:2] != ['--one']:
+        # Keep the old repeated --case spelling and hyphenated names, while
+        # accepting the shared runner's bare function names as well.
+        names = {case.__name__ for case in CASES}
+        choices = sorted(names | {name.replace('_', '-') for name in names})
+        parser = argparse.ArgumentParser(description=__doc__)
+        parser.add_argument('cases', nargs='*', metavar='CASE')
+        parser.add_argument('--case', action='append', choices=choices, default=[])
+        args = parser.parse_args()
+        for name in args.cases:
+            if name not in choices:
+                parser.error(f'unknown case {name!r}; choose: ' + ' '.join(choices))
+        sys.argv[1:] = [name.replace('-', '_') for name in args.cases + args.case]
+    sys.exit(case_runner.main(__file__, CASES, run, prefix='after-landing-fixture-'))
