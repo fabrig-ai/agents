@@ -183,6 +183,9 @@ alike. Operator holds are separate: a gate neither sets nor clears them.
 `heavy --install-reconciler [INTERVAL]` probes real cgroup containment,
 including a `setsid` child, and installs an enabled user service and timer
 named from the state directory's hash. Installation is explicit. It
+records the installation in the ledger before it writes or enables a unit,
+so that one cut short leaves heavy installed and refusing, until it is run
+again, rather than absent (section 12). It
 changes no credentials, caches or runtime profile. The service reads a
 private file containing only the required workspace configuration.
 Admission requires the timer to be active and a containment probe for the
@@ -575,7 +578,7 @@ Current consumers pin solely in Cargo.lock; selected `?rev=` sources refuse.
 The command starts with `git show BASE:Cargo.lock`, never another consumer's
 lock or a whole-lock regeneration, and never rewrites a manifest. For each
 selected source it passes `cargo update --precise FULL_SHA -p
-PACKAGE_SELECTOR` through the `heavy` on PATH, selecting one unambiguous
+PACKAGE_SELECTOR` through the `heavy` beside it (section 12), selecting one unambiguous
 package and checking every package from that source afterward. A manifest
 constraint Cargo cannot honor refuses; there is no automatic manifest fix or
 network API probe.
@@ -592,7 +595,7 @@ takes skein's branch). The whole lock is checked once the last pin is in, as
 it is after each generator and check. So a source others name goes last
 (`--pin jig=... --pin skein=...`); in the other order the run refuses.
 
-Generators and checks run through the heavy on PATH, in the consumer root.
+Generators and checks run through the heavy beside it, in the consumer root.
 Only Cargo.lock and explicitly named generated regular files may change.
 The allowlist rejects absolute paths, traversal, `.git`, directories, prefixes,
 symlinks and manifest/lock aliases (all TOML and lock outputs refuse).
@@ -1063,10 +1066,11 @@ machines keep its queue, containment and receipts, unchanged.
   ledger records an installation, which `heavy --install-reconciler`
   sets and `--remove-reconciler` clears (section 4). No state directory,
   no ledger, or a ledger with no installation is a machine without heavy:
-  absent, not a failure. `heavy --installed` answers: exit 0 installed,
-  1 not, 2 when it can't tell (a ledger it can't read, or of another
-  version). It reads the snapshot without the host lock and writes
-  nothing, not even the state directory.
+  absent, not a failure. An installation cut short is recorded already,
+  so it is installed and refusing (section 4). `heavy --installed`
+  answers: exit 0 installed, 1 not, 2 when it can't tell (a ledger it
+  can't read, or of another version). It reads the snapshot without the
+  host lock and writes nothing, not even the state directory.
 - **Installed but broken still refuses.** An installed heavy whose timer
   is inactive or whose probe fails refuses as section 4 says, and `land`
   exits 9: a build machine whose recovery broke is repaired, never
@@ -1079,13 +1083,17 @@ machines keep its queue, containment and receipts, unchanged.
   receipt, disk floor or gate policy. An instruction written `heavy cargo
   nextest run …` therefore holds on every machine. The management forms
   are unchanged.
-- **The repositories' scripts run plain commands,** never heavy:
-  `cargo`, `scripts/check.sh`, `scripts/bundle.sh`, the proofs. A caller
-  that wants the queue runs the whole script through it, `heavy
-  scripts/proof-live.sh`. No task then waits inside another, as a build
-  submitted from inside a task does behind an exclusive gate that waits
-  for that task. The kit's own tools call the `heavy` beside them, never
-  the one on `PATH`, so that they need none there.
+- **The repositories' scripts never need heavy.** `scripts/check.sh`,
+  `scripts/bundle.sh` and the like run plain commands, and a caller that
+  wants the queue runs the whole script through it, `heavy
+  scripts/bundle.sh`. A script that can't run inside a task queues its
+  own builds instead: one a person drives, whose prompts must show as
+  they come (the live proofs), or one that builds, then works for long
+  after (the lab's judges). It runs each build through `heavy` where
+  `heavy` is on `PATH`, and plainly where it isn't, and its caller runs
+  it directly, since heavy refuses a task inside a task. The kit's own
+  tools (`land`, `repin`, after landing's runner) call the `heavy` beside
+  them, never the one on `PATH`, so that they need none there.
 - **`land` without heavy** asks `heavy --installed` once, before its
   first rebase:
   - 0: its build lane and gate go through heavy (sections 2 to 5), and a
