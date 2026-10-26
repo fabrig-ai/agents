@@ -175,7 +175,7 @@ def land(root, base):
         require(run(root, ['git', 'config', '--path', 'core.hooksPath'], env=env).decode().strip()
                 == str(target), 'temporary push guard configuration was overridden')
         print('repin: land ["land"]', flush=True)
-        run(root, ['land'], capture=False, env=env)
+        run(root, [str(Path(__file__).resolve().parent / 'land')], capture=False, env=env)
         print('repin: land passed', flush=True)
 
 
@@ -237,7 +237,7 @@ def main():
 
     def phase(label, argv, pending=False):
         print('repin: ' + label + ' ' + json.dumps(['heavy', *argv]), flush=True)
-        result = subprocess.run(['heavy', *argv], cwd=root, stdin=subprocess.DEVNULL)
+        result = subprocess.run([str(Path(__file__).resolve().parent / 'heavy'), *argv], cwd=root, stdin=subprocess.DEVNULL)
         scope(root, branch, base, allowed, local_main=local_main)
         if not pending:
             validate_lock(baseline, tomllib.loads((root / 'Cargo.lock').read_text()), completed)
