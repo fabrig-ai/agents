@@ -17,6 +17,8 @@ UNKNOWN = 'unknown'
 NAME = r'[a-z0-9][a-z0-9_-]*'
 SECRET = re.compile(r'-----BEGIN [^\n]*PRIVATE KEY-----|(?<![\w-])(?:gh[pousr]_[A-Za-z0-9_-]{20,}|github_pat_[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9_-]{20,})|xox[abpr]-|AKIA[A-Z0-9]{16}')
 MISSION_KEYS = 'roadmap feature parent owner machine model effort started ended state end'.split()
+# The repositories whose issues may block a mission (user-issues.md 2.1).
+ISSUE_REPOS = 'agents skein smith jig hearth temper qa'.split()
 MILESTONE_KEYS = 'driver model effort started cap ended'.split()
 QA_KEYS = 'repository main commits machine model effort started ended wall tokens outcome'.split()
 
@@ -122,6 +124,19 @@ def validate(name, content):
                  f'{name}: front matter description exceeds 65 characters')
             need(fields['state'] in ('active', 'paused', 'ended', 'abandoned', UNKNOWN),
                  f'{name}: front matter state invalid')
+            if 'blocked' in fields:
+                need(re.fullmatch(r'[a-z0-9][a-z0-9_-]*#[1-9][0-9]*(?: [a-z0-9][a-z0-9_-]*#[1-9][0-9]*)*', fields['blocked']),
+                     f'{name}: front matter blocked must be REPO#N references separated by spaces')
+                seen = set()
+                for reference in fields['blocked'].split(' '):
+                    repo = reference.split('#')[0]
+                    need(repo in ISSUE_REPOS,
+                         f'{name}: front matter blocked names another repository: {repo}')
+                    need(reference not in seen,
+                         f'{name}: front matter blocked names {reference} twice')
+                    seen.add(reference)
+                need(fields['state'] in ('active', 'paused'),
+                     f'{name}: front matter blocked needs state active or paused')
             body = re.sub(r'(?m)^#{1,6}[ \t].*(?:\n|$)', '', text[front.end():]).strip()
             summary = re.split(r'\n[ \t]*\n', body, maxsplit=1)[0]
             need(summary, f'{name}: summary missing')

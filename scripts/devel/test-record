@@ -368,6 +368,42 @@ def mission_progress(lab):
     assert lab.git(lab.origin, 'show', 'main:' + name) == content
 
 
+def mission_blocked(lab):
+    """A README's blocked names the seven repositories' issues while the
+    mission is active or paused (records.md 3); record refuses the rest."""
+    for mission, edit in (
+            ('active', 'state: active\nblocked: temper#9'),
+            ('paused', 'state: paused\nblocked: agents#1 skein#2 smith#3 jig#4 hearth#5 temper#60 qa#7')):
+        name = f'missions/{mission}/README.md'
+        content = front().replace('state: unknown', edit)
+        lab.put(name, content)
+        assert 'pushed' in lab.run('commit', name)
+        assert lab.git(lab.origin, 'show', 'main:' + name) == content.strip()
+
+    form = 'must be REPO#N references separated by spaces'
+    cases = [('state: active\nblocked: ' + value, form) for value in (
+        'temper#09', 'temper#0', 'temper 9', 'temper#', '#9',
+        'temper#9,agents#11', 'temper#9  agents#11')]
+    cases += [
+        ('state: active\nblocked: forge#3', 'names another repository: forge'),
+        ('state: active\nblocked: temper#9 agents#11 temper#9', 'names temper#9 twice')]
+    cases += [('state: ' + state + '\nblocked: temper#9', 'needs state active or paused')
+              for state in ('ended', 'abandoned', 'unknown')]
+
+    def refused(edit, reason):
+        name = 'missions/refused/README.md'
+        path = lab.put(name, front().replace('state: unknown', edit))
+        old = lab.git(lab.a, 'rev-parse', 'HEAD')
+        remote = lab.git(lab.origin, 'rev-parse', 'main')
+        assert name + ': front matter blocked ' + reason in lab.run('commit', name, status=2)
+        assert lab.git(lab.a, 'rev-parse', 'HEAD') == old
+        assert lab.git(lab.origin, 'rev-parse', 'main') == remote
+        path.unlink()
+
+    for edit, reason in cases:
+        refused(edit, reason)
+
+
 def refusals(lab):
     cases = [('elsewhere.md', 'wrong', 'place'),
              ('director/decisions/0001Xmd', 'wrong', 'place'),
@@ -896,7 +932,7 @@ def main():
     # own env), so they run at once on threads; results print in case order.
     cases = (qa_places, closing_unpublished, closing_dirty, closing_deleted_remote, closing_fetch_failure, closing_unreadable, closing_nested,
              closing_cached_output, closing_cached_worktree, closing_clean, closing_abandoned, closing_active,
-             writer, mission_progress, refusals, different_files, name_race, conflict, offline, merged_validation, installation_failures, setup, mission_runs, telemetry, milestone)
+             writer, mission_progress, mission_blocked, refusals, different_files, name_race, conflict, offline, merged_validation, installation_failures, setup, mission_runs, telemetry, milestone)
     if len(sys.argv) > 1:
         cases = tuple(case for case in cases if case.__name__ in sys.argv[1:])
         assert cases, 'no cases selected'
