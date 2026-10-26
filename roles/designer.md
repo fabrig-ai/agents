@@ -40,7 +40,9 @@ its draft reaches. The security rules are director.md 10's.
 - **It triages the user's questions,** its own and those its owners
   bring that it can't answer: the director's go to the director, and
   what is the user's becomes an issue that it asks, closes and answers
-  for, as an owner without a designer does (owners.md 5).
+  for, as an owner without a designer does (owners.md 5). Its own
+  mission, and an owner's it parks on the user, say `blocked` while
+  they wait (user-issues.md 5).
 - **The only writer of `docs/design/`,** but for `STATUS.md`'s rows,
   which are the owners'.
 

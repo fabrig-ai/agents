@@ -203,7 +203,11 @@ out. The security rules are director.md 10's.
   post; the owner acts on it, then closes the issue, `issue close
   REPO#N`, even when nothing is due. An answer that sets a rule beyond
   the mission goes to the director too. `progress.md` names the open
-  issues, and the closing note any left open.
+  issues, and the closing note any left open. While the mission can go
+  no further without an answer, its README says so, `blocked:
+  temper#9` ([user-issues.md](../docs/design/user-issues.md) 5), until
+  it goes on; an owner with a designer names the issue its designer
+  asked.
 - **A mission closes once its last landing has cleared.** With no
   verdict in 2 hours (the wait's exit 3: the runner is at fault), the
   owner tells the director, and closes with the landing uncleared,
