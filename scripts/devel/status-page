@@ -49,6 +49,12 @@ STEPS = ('fmt', 'clippy', 'wasm', 'build', 'focused', 'fuzzy', 'bundle', 'browse
 WINDOWS = (('24h', DAY, 'Last 24 hours'), ('7d', WEEK, 'Last 7 days'))
 # The front matter's public fields (status-page.md 1); a field joins only once it is.
 FRONT = ('state', 'ended', 'description')
+# An item of director/waiting.md, as record checks it (records.md 3).
+WAIT = re.compile(r'- (unknown|[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}(?::[0-9]{2})?Z)'
+                  r' · ([a-z0-9][a-z0-9_-]*) · ([^·/]{1,160}) · ((?:R[0-9]+-)?[0-9]+)')
+
+# Keep the writer's known-secret refusal when someone edits the checkout directly.
+SECRET = re.compile(r'-----BEGIN [^\n]*PRIVATE KEY-----|(?<![\w-])(?:gh[pousr]_[A-Za-z0-9_-]{20,}|github_pat_[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9_-]{20,})|xox[abpr]-|AKIA[A-Z0-9]{16}')
 
 
 def clock():
@@ -631,8 +637,10 @@ def pull():
 
 
 def records(root):
-    # Only the missions' front matter: the page is public, and STATUS.md's notes
-    # are internal (the user, 2026-10-25).
+    """Public missions and waits: {'missions': [...], 'waiting': [...], 'unread': [...]}.
+
+    STATUS.md and the missions' bodies are internal; waits are public by writing.
+    """
     if not (root / 'missions').is_dir():
         raise FileNotFoundError(f'{root}/missions: no such directory')
     missions = []
@@ -644,7 +652,32 @@ def records(root):
             if sep and key.strip() in FRONT:
                 fields[key.strip()] = value.strip()
         missions.append({'name': readme.parent.name, **{k: fields.get(k, '') for k in FRONT}})
-    return {'missions': missions}
+    waiting, unread = [], []
+    path = root / 'director/waiting.md'
+    try:
+        lines = path.read_bytes().splitlines()
+    except FileNotFoundError:
+        lines = []
+    for number, raw in enumerate(lines, 1):
+        try:
+            line = raw.decode('utf-8')
+        except UnicodeDecodeError:
+            unread.append(number)
+            continue
+        if number == 1:
+            if line != '# Waiting on the user':
+                unread.append(number)
+            continue
+        if not line.strip():
+            continue
+        item = WAIT.fullmatch(line)
+        since = stamp(item[1]) if item and item[1] != 'unknown' else None
+        if (not item or (item[1] != 'unknown' and since is None)
+                or SECRET.search(line) or len(waiting) >= 40):
+            unread.append(number)
+            continue
+        waiting.append(dict(since=since, who=item[2], what=item[3], decision=item[4]))
+    return {'missions': missions, 'waiting': waiting, 'unread': unread}
 
 
 def gather_all(machines_file, records_root, pulling, source):
@@ -669,7 +702,7 @@ def gather_all(machines_file, records_root, pulling, source):
     try:
         recorded = records(records_root)
     except OSError as error:
-        recorded = {'missions': []}
+        recorded = {'missions': [], 'waiting': [], 'unread': []}
         errors.append(f'records: {error}')
     return {'time': clock(), 'machines': [name for name, _ in pairs], 'fleet': fleet,
             'records': recorded, 'errors': errors}
@@ -704,7 +737,11 @@ def hours(seconds):
 def ago(moment, now):
     if not moment:
         return '–'
-    seconds = max(0, now - moment)
+    return age(now - moment)
+
+
+def age(seconds):
+    seconds = max(0, seconds)
     if seconds < 90:
         return 'just now'
     if seconds < HOUR:
@@ -719,7 +756,7 @@ def lasted(moment, now):
 
 
 def utc(moment, form='%m-%d %H:%MZ'):
-    return datetime.fromtimestamp(moment, timezone.utc).strftime(form) if moment else '–'
+    return datetime.fromtimestamp(moment, timezone.utc).strftime(form) if moment is not None else '–'
 
 
 def resets(moment, now):
@@ -949,6 +986,9 @@ def kpis(fleet, shown, subscribed):
     codex = sum(r['alive'] for d in fleet.up.values() for r in (d.get('codex') or {}).get('running', []))
     counts = role_counts(sessions, codex)
     agents = f'{busy + codex} busy' + (' · ' + counts if counts else '')
+    waiting = fleet.data['records'].get('waiting', [])
+    known = [w['since'] for w in waiting if w['since'] is not None]
+    oldest = ('oldest ' + age(now - min(known)) if known else 'since unknown' if waiting else 'none')
     day = fleet.window(DAY)
     lands = [r for r in day if r[7] == 'land']
     tiles = [
@@ -960,12 +1000,21 @@ def kpis(fleet, shown, subscribed):
                                                  + (f', {gates} gate' if gates else '')),
         ('Agents', str(len(sessions) + codex), agents),
         ('Land gates, 24 h', str(len(lands)), f'{sum(r[5] != "0" for r in lands)} failed'),
+        ('Waiting on the user', str(len(waiting)), oldest),
         ('Subscriptions', str(subscribed['count']), subscribed['sub']) if subscribed
         else ('Subscriptions', '–', 'not shown'),
     ]
     return '<div class="tiles">' + ''.join(
         f'<div class="tile"><div class="label">{E(a)}</div><div class="value">{E(b)}</div>'
         f'<div class="sub">{E(c)}</div></div>' for a, b, c in tiles) + '</div>'
+
+
+def waiting_table(fleet):
+    rows = [[E(f'{utc(w["since"])} · {age(fleet.now - w["since"])}' if w['since'] is not None else 'unknown'),
+             E(w['who']), E(w['what']), E(w['decision'])]
+            for w in fleet.data['records'].get('waiting', [])]
+    return table(['Since', 'Who', 'What', 'Decision'], rows, numeric_from=9, wrap=(2,),
+                 empty='Nothing waits on the user.')
 
 
 def reason_kind(reason):
@@ -1486,6 +1535,7 @@ def render(data):
     fleet = Fleet(data)
     now = fleet.now
     problems = list(data['errors'])
+    problems += [f'waiting.md: line {n} not read' for n in data['records'].get('unread', [])]
 
     def guard(name, build, *args):
         try:
@@ -1554,6 +1604,9 @@ landed or stopped.</p>
 <span class="meta">Written {E(utc(now, "%Y-%m-%d %H:%M UTC"))}, every 10 minutes ·
 {reached} of {len(fleet.names)} machines reached{(" · down: " + E(", ".join(down))) if down else ""}</span></header>
 {guard("tiles", kpis, fleet, shown, subscribed)}
+<h2>Waiting on the user</h2>
+<p class="muted">What only the user can answer or do, from <code>director/waiting.md</code> in the record.</p>
+<div class="panel">{guard("waiting on the user", waiting_table, fleet)}</div>
 <h2>Subscriptions</h2>
 <p class="muted">Distinct Claude and Codex subscriptions across the reached machines, with their current limits.</p>
 <div class="panel">{subscription_table}</div>
@@ -1579,7 +1632,7 @@ commands in the last 24 hours. Last activity is its last command or implementer 
 <footer>
 <p>Written by agents’ <code>scripts/devel/status-page</code> from what the tools already keep: heavy’s
 <code>heavy.tsv</code> and ledger, the landings feed, the landing turns, <code>codex-run</code>’s runs,
-Claude Code’s sessions and subscription, Codex CLI’s subscription and the missions’ front matter in the records repository
+Claude Code’s sessions and subscription, Codex CLI’s subscription, the missions’ front matter and the user’s waits in the records repository
 (docs/design/status-page.md). Times are UTC; p90 is the
 nearest rank.</p>
 {('<p>Not read this time:</p><ul>' + "".join(f"<li>{E(short(p, 300))}</li>" for p in problems) + '</ul>') if problems else ''}
