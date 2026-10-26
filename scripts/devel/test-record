@@ -289,8 +289,8 @@ def writer(lab):
     assert 'pushed' in lab.run('commit', '-m', 'brief', 'missions/first/README.md')
     assert lab.git(lab.origin, 'log', '-1', '--format=%s') == 'o/fixture: brief'
     lab.run('commit', 'missions/first/README.md')
-    # Optional description: exactly 60 characters commits, including Unicode.
-    described = front().replace('state: unknown', 'state: active\ndescription: ' + 'é' * 60)
+    # Optional description: exactly 65 characters commits, including Unicode.
+    described = front().replace('state: unknown', 'state: active\ndescription: ' + 'é' * 65)
     lab.put('missions/described/README.md', described)
     assert 'pushed' in lab.run('commit', 'missions/described/README.md')
     assert lab.git(lab.origin, 'show', 'main:missions/described/README.md') == described.strip()
@@ -361,7 +361,7 @@ def refusals(lab):
              ('missions/x/README.md', 'no front matter', 'front matter'),
              ('STATUS.md', 'x' * 16385, 'cap'),
              ('missions/x/README.md', front().replace('state: unknown',
-              'state: active\ndescription: ' + 'x' * 61), 'front matter description exceeds 60 characters'),
+              'state: active\ndescription: ' + 'x' * 66), 'front matter description exceeds 65 characters'),
              ('missions/x/README.md', front() + ' '.join(['word'] * 61), 'summary'),
              ('director/decisions/0001.md', '\n'.join(f'## {i}. call' for i in range(101)), '100 decisions'),
              ('missions/x/README.md', front().replace('started: unknown', 'started: yesterday'), 'UTC')]

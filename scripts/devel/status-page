@@ -1100,6 +1100,14 @@ def description(record):
     return '' if value == 'unknown' else value
 
 
+# What runs for a mission now: the first of these that holds wins its Now
+# cell (status-page.md 3), running before waiting, nearest main first.
+NOW = (('landing', 'info'), ('build', 'info'), ('implementer', 'info'),
+       ('owner busy', 'info'), ('designer busy', 'info'),
+       ('queued landing', 'warning'), ('queued build', 'warning'),
+       ('owner idle', 'neutral'), ('designer idle', 'neutral'))
+
+
 def missions(fleet):
     now = fleet.now
     seen = {}
@@ -1119,8 +1127,8 @@ def missions(fleet):
         for task in (data.get('heavy') or {}).get('tasks', []):
             name = fleet.mission(task['mission'])
             if name:
-                entry(name, task['submitted'],
-                      'build' if task['state'] in RUNNING else 'queued build')
+                label = 'landing' if task['kind'] in ('land', 'prebuild') else 'build'
+                entry(name, task['submitted'], label if task['state'] in RUNNING else f'queued {label}')
         codex = data.get('codex') or {}
         for run in codex.get('running', []):
             name = fleet.mission(run['mission'])
@@ -1132,6 +1140,10 @@ def missions(fleet):
             if name:
                 status = 'busy' if session['status'] in ('busy', 'working') else 'idle'
                 entry(name, None, f'{role} {status}')
+    for run in in_flight(fleet):
+        name = run['set'].split('/', 1)[0]
+        if name in recorded:
+            entry(name, doing='landing' if run['started'] else 'queued landing')
     # Commands alone bring in a mission the record doesn't say has ended.
     for host, end, lane, wait, run, code, name, kind, repo in fleet.window(DAY):
         if not name or (name not in seen and recorded.get(name, {}).get('state') in ('ended', 'abandoned')):
@@ -1148,7 +1160,8 @@ def missions(fleet):
         counts = {}
         for item in e['now']:
             counts[item] = counts.get(item, 0) + 1
-        doing = ' '.join(badge('info', f'{n} × {k}' if n > 1 else k) for k, n in counts.items()) or '–'
+        doing = next((badge(tone, f'{counts[label]} × {label}' if counts[label] > 1 else label)
+                      for label, tone in NOW if label in counts), '–')
         rows.append([f'<strong>{E(name)}</strong>', badge(tone, state) if state else '<span class="muted">not recorded</span>',
                      E(description(m)), doing, E(ago(e['last'], now))])
     shown = {'rows': len(rows), 'busy': sum(bool(e['now']) for e in seen.values()),
@@ -1615,7 +1628,7 @@ landed or stopped.</p>
 <div class="panel">{guard("landing now", landing_now, fleet)}</div>
 <h3>Missions</h3>
 <p class="muted">Missions the record holds as active or paused, any mission with something running now (a heavy
-command, an implementer, its owner’s or designer’s session), and any the record doesn’t call ended with heavy
+command, a set landing, an implementer, its owner’s or designer’s session), and any the record doesn’t call ended with heavy
 commands in the last 24 hours. Last activity is its last command or implementer run.</p>
 <div class="panel">{mission_table}</div>
 <h3>Ended this week</h3>

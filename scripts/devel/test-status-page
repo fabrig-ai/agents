@@ -379,7 +379,8 @@ def page(lab):
     assert 'alpha-m/m1' in now and 'done-m/m1' not in now and 'stale-m/m1' not in now, now
     assert '<div class="label">Sets landing now</div><div class="value">1</div>' in text
     for needle in ('alpha-m/m1', 'done-m/m1', 'beta-m', 'paused-m', 'land temper', 'landing turn jig',
-                   'alpha-m: 1 running · gpt-x high', 'Implementer runs', 'owner busy'):
+                   'alpha-m: 1 running · gpt-x high', 'Implementer runs',
+                   '<span class="badge info"><i aria-hidden="true"></i>landing</span>'):
         assert needle in text, needle
     # Ended in the record, with commands only: history, not in flight.
     assert '<strong>old-m</strong>' not in text
@@ -571,10 +572,12 @@ def page_roles(lab):
             for name in re.findall(r'<strong>(.*?)</strong>', row)}
     assert {'alpha-m', 'alpha-m2', 'legacy', 'paused-m', 'beta-d'} <= rows.keys(), rows.keys()
     assert 'legacy-m3' not in rows and 'alpha' not in rows, rows.keys()
-    for name, badges in (('alpha-m', ('owner busy', 'implementer')),
-                         ('paused-m', ('owner idle',)), ('beta-d', ('designer busy',))):
-        for word in badges:
-            assert word in rows[name], rows[name]
+    for name, tone, label in (('alpha-m', 'info', 'build'), ('alpha-m2', 'info', 'implementer'),
+                              ('legacy', '', '–'), ('paused-m', 'neutral', 'owner idle'),
+                              ('beta-d', 'info', 'designer busy')):
+        cell = re.findall(r'<td[^>]*>(.*?)</td>', rows[name])[3]
+        expected = f'<span class="badge {tone}"><i aria-hidden="true"></i>{label}</span>' if tone else label
+        assert cell == expected, (name, cell)
     assert "<td class=wrap>Probe the fleet&#x27;s subscriptions</td>" in rows['alpha-m'], rows['alpha-m']
     for name in ('beta-d', 'paused-m'):
         assert '<td class=wrap></td>' in rows[name], rows[name]
@@ -650,10 +653,11 @@ def page_role_edges(lab):
     live = page[page.index('<h3>Missions</h3>'):page.index('<h3>Ended this week</h3>')]
     rows = {name: row for row in re.findall(r'<tr>.*?</tr>', live)
             for name in re.findall(r'<strong>(.*?)</strong>', row)}
-    assert 'owner idle' in rows['ended-m'], rows['ended-m']
-    assert 'owner idle' in rows['alpha-m2'], rows['alpha-m2']
-    assert 'designer busy' in rows['legacy'] and 'queued build' in rows['legacy'], rows['legacy']
-    assert '2 × implementer' in rows['alpha-m'], rows['alpha-m']
+    for name, tone, label in (('ended-m', 'neutral', 'owner idle'),
+                              ('alpha-m2', 'neutral', 'owner idle'),
+                              ('legacy', 'info', 'designer busy'), ('alpha-m', 'info', 'build')):
+        cell = re.findall(r'<td[^>]*>(.*?)</td>', rows[name])[3]
+        assert cell == f'<span class="badge {tone}"><i aria-hidden="true"></i>{label}</span>', (name, cell)
     assert '6 min ago' in rows['legacy'], rows['legacy']
     landing = page[page.index('<h3>Landing now</h3>'):page.index('<h3>Recent set runs</h3>')]
     assert 'legacy-m3' not in live + landing, 'mission labels resolve on the page'
@@ -678,6 +682,69 @@ def page_role_edges(lab):
     page = out.read_text()
     assert 'No mission ended this week.' in page
     assert '<div class="label">Agents</div><div class="value">0</div><div class="sub">0 busy</div>' in page
+
+
+def page_now(lab):
+    """Each rank beats the next; a set joins only its recorded mission."""
+    expected = [('landing-m', 'info', 'landing'), ('set-m', 'info', 'landing'),
+                ('build-m', 'info', '2 × build'), ('implementer-m', 'info', '2 × implementer'),
+                ('owner-m', 'info', 'owner busy'), ('designer-m', 'info', 'designer busy'),
+                ('queued-landing-m', 'warning', 'queued landing'),
+                ('queued-build-m', 'warning', 'queued build'),
+                ('owner-idle-m', 'neutral', 'owner idle'),
+                ('designer-idle-m', 'neutral', 'designer idle'), ('quiet-m', '', '–')]
+    description = 'é' * 65
+    for name, _, _ in expected:
+        write(lab.records / f'missions/{name}/README.md',
+              f'---\nstate: active\nowner: o/{name}@alpha\n'
+              f'description: {description if name == "landing-m" else "unknown"}\n---\n')
+    tasks = {}
+    for name, state, label in (('landing-m', 'active', 'land agents'),
+                                ('landing-m', 'active', 'build'),
+                                ('build-m', 'active', 'build'), ('build-m', 'active', 'build'),
+                                ('designer-m', 'queued', 'land agents prebuild'),
+                                ('queued-landing-m', 'queued', 'build'),
+                                ('queued-build-m', 'queued', 'build')):
+        tasks[str(len(tasks))] = dict(state=state, lane='gate' if label == 'land agents' else 'build',
+                                     label=label, args=['cargo', 'check'], submitted=NOW - 600,
+                                     payload_started=NOW - 300 if state == 'active' else None,
+                                     repo=str(lab.alpha / 'owners' / name / 'wt'))
+    write(lab.alpha / 'heavy/state.json', json.dumps(dict(version=1, gate=None, tasks=tasks)))
+    units = []
+    for i, name in enumerate(('set-m', 'build-m', 'implementer-m', 'implementer-m')):
+        run = f'now-{i}'
+        write(lab.alpha / f'codex-run/{run}/meta',
+              f'to=o/{name}\nmodel=gpt-x\neffort=high\nstarted={iso(.5)}\n'
+              f'task={lab.alpha}/owners/{name}/t.md\n')
+        units.append(f'codex-run-{run}.service loaded active running x')
+    tool(lab.bin, 'systemctl', 'print(' + repr('\n'.join(units)) + ')\n')
+    answer = claude_answer()
+    answer['agents'] = [dict(name=name, kind='background', state=state, pid=i + 1)
+                        for i, (name, state) in enumerate((('o/implementer-m', 'busy'),
+                            ('o/owner-m', 'busy'), ('design/owner-m', 'busy'),
+                            ('design/designer-m', 'busy'), ('o/queued-build-m', 'idle'),
+                            ('o/owner-idle-m', 'idle'), ('design/owner-idle-m', 'idle'),
+                            ('design/designer-idle-m', 'idle')))]
+    lab.claude(lab.alpha, answer)
+    events = [dict(time=iso(.2), set=f'{name}/m1', host='alpha-host', token=name, event=event)
+              for name, event in (('set-m', 'started'), ('queued-landing-m', 'waiting'),
+                                  ('unrecorded-m', 'started'))]
+    feed_path = write(lab.root / 'now.jsonl', ''.join(json.dumps(e) + '\n' for e in events))
+    out = lab.root / 'page.html'
+    lab.run('--no-pull', '--out', str(out), STATUS_FEED=str(feed_path))
+    page = out.read_text()
+    live = page[page.index('<h3>Missions</h3>'):page.index('<h3>Ended this week</h3>')]
+    rows = {name: row for row in re.findall(r'<tr>.*?</tr>', live)
+            for name in re.findall(r'<strong>(.*?)</strong>', row)}
+    for name, tone, label in expected:
+        cell = re.findall(r'<td[^>]*>(.*?)</td>', rows[name])[3]
+        badge = f'<span class="badge {tone}"><i aria-hidden="true"></i>{label}</span>' if tone else label
+        assert cell == badge, (name, cell)
+    assert 'unrecorded-m' not in rows, rows.keys()
+    assert f'<td class=wrap>{description}</td>' in rows['landing-m'], rows['landing-m']
+    for name, last in (('set-m', '30 min ago'), ('queued-landing-m', '10 min ago')):
+        assert re.findall(r'<td[^>]*>(.*?)</td>', rows[name])[4] == last, rows[name]
+    public_roles(page, lab)
 
 
 def page_degraded(lab):
@@ -886,7 +953,7 @@ def claude_resets(lab):
     assert [v['used'] for v in data['claude_usage']['limits']] == list(range(7))
 
 
-CASES = [records_waits, page_waits, collect_subscriptions, page_subscriptions, subscriptions_signed_out, subscription_failures, claude_resets, collect, collect_missing, page, reason_kind, page_recent, machine_ips, page_roles, page_role_edges, page_degraded, bad_data, write_failure, install]
+CASES = [records_waits, page_waits, collect_subscriptions, page_subscriptions, subscriptions_signed_out, subscription_failures, claude_resets, collect, collect_missing, page, reason_kind, page_recent, machine_ips, page_roles, page_role_edges, page_now, page_degraded, bad_data, write_failure, install]
 
 
 def main():
