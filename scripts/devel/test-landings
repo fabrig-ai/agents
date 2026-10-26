@@ -575,6 +575,51 @@ def malformed_runner_records(lab):
     assert lab.run('report').stdout == 'no results\n\nno set runs\n'
 
 
+def posted_wait(lab):
+    post = lab.bin / 'post'
+    post.write_text(f'#!{PYTHON}\n' + r'''import json, os, sys
+from pathlib import Path
+assert sys.argv[1:5] == ['send', '--as', 'landings', 'owner@fixture'], sys.argv
+with Path(os.environ['FIXTURE_FEED']).with_suffix('.posts').open('a') as out:
+    out.write(json.dumps(dict(subject=sys.argv[5], body=Path(sys.argv[6]).read_text())) + '\n')
+sys.exit(int(os.environ.get('FIXTURE_POST_EXIT', '0')))
+''')
+    post.chmod(0o700)
+    landed_set(lab)
+    lab.append(tier_record('verdict'), tier_record('verdict', tier='temper', commit='b' * 40))
+    scenarios = [('cleared', 0), ('red', 1), ('timed out', 3), ('stopped', 1), ('feed unreadable', 4)]
+    for index, (outcome, status) in enumerate(scenarios):
+        if outcome == 'red':
+            lab.append(tier_record('verdict', minute=1, verdict='red', tests=['regression'], excerpt='failure detail'))
+        elif outcome == 'timed out':
+            lab.feed.write_text('')
+        elif outcome == 'stopped':
+            lab.append(record(event='started'), record(event='stopped', reason='fixture stop'))
+        elif outcome == 'feed unreadable':
+            lab.feed.unlink()
+        timeout = '1' if outcome == 'feed unreadable' else '0'
+        # Ordinary wait can fail to read without a watch recreating the absent file.
+        cleared = [] if outcome == 'feed unreadable' else ['--cleared']
+        result = lab.run('wait', *cleared, 'fixture/m1', '--timeout', timeout,
+                         '--post', 'owner@fixture', status=status)
+        posts = [json.loads(line) for line in lab.feed.with_suffix('.posts').read_text().splitlines()]
+        assert len(posts) == index + 1, posts
+        assert posts[-1] == dict(subject=f'landings: fixture/m1 {outcome}',
+                                 body=result.stdout + result.stderr), (posts, result)
+    # An undelivered post warns without changing the wait exit; queued exit 3 succeeds.
+    lab.feed.touch()
+    for code in ('2', '3'):
+        result = lab.run('wait', 'absent', '--timeout', '0', '--post', 'owner@fixture', status=3,
+                         env=dict(lab.env, FIXTURE_POST_EXIT=code))
+        assert ('warning: post failed' in result.stderr) == (code == '2'), result
+    post.unlink()
+    # A missing executable is also a warning and leaves the wait's status intact.
+    post.write_text('#!/missing/fixture-interpreter\n')
+    post.chmod(0o700)
+    result = lab.run('wait', 'absent', '--timeout', '0', '--post', 'owner@fixture', status=3)
+    assert 'warning: post failed' in result.stderr, result
+
+
 def remote_watch(lab):
     landed_set(lab)
     lab.append(tier_record('verdict'), tier_record('verdict', tier='temper', commit='b' * 40))
@@ -615,7 +660,7 @@ def main():
              timeout_before_unreachable, malformed_lines, remote_command,
              remote_failure, remote_hang, remote_first_read, invalid_arguments, read_default,
              tiers_shown, landing_set_isolation, cleared_set, red_set, stopped_set, waits_for_verdict, commit_target,
-             watch_record, malformed_runner_records, remote_watch)
+             watch_record, malformed_runner_records, posted_wait, remote_watch)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--case', action='append', choices=[case.__name__ for case in cases])
     selected = parser.parse_args().case

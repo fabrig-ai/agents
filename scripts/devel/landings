@@ -2,10 +2,12 @@
 """Show the landing feed, wait for a set to finish, or report its costs.
 
 landings [--last N]
-landings wait [--cleared] TARGET [--timeout SECONDS]
+landings wait [--cleared] TARGET [--timeout SECONDS] [--post ADDRESS]
 landings report [--since DATE] [--repo NAME] [--tsv]
 """
 import argparse
+from contextlib import redirect_stdout, redirect_stderr
+import io
 from datetime import datetime, timezone
 import json
 import math
@@ -19,6 +21,7 @@ import statistics
 import subprocess
 import sys
 import time
+import tempfile
 
 os.umask(0o077)
 # Copied from scripts/devel/land-set: COORDINATOR, SSH and feed()'s path.
@@ -284,7 +287,7 @@ def clearance(records, runner, target):
         terminal = ending(run)
         if terminal is not None and terminal['event'] == 'stopped':
             print(event_line(terminal))
-            return 1, []
+            return 1, [], 'stopped'
         ready = terminal is not None and terminal['event'] == 'done'
         landings = list(dict.fromkeys((r['repo'], r['commit']) for r in run
                                      if r['event'] == 'landed' and r.get('repo') and r.get('commit'))) if ready else []
@@ -294,8 +297,8 @@ def clearance(records, runner, target):
     if red or (ready and not missing):
         for row in decided:
             verdict_line(row)
-        return (1 if red else 0), missing
-    return None, missing
+        return (1 if red else 0), missing, ('red' if red else 'cleared')
+    return None, missing, None
 
 
 def event_line(record):
@@ -375,21 +378,21 @@ def wait(label, timeout, poll, unreachable, read=15, cleared=False):
             now = time.monotonic()
             if now >= last_read + unreachable and last_read + unreachable <= deadline:
                 print(f'landings: feed unreadable: {last_error}', file=sys.stderr)
-                return 4
+                return 4, 'feed unreadable'
         else:
             last_read = time.monotonic()
             last_error = None
             if cleared:
-                status, missing = clearance(records, runner, label)
+                status, missing, outcome = clearance(records, runner, label)
                 if status is not None:
-                    return status
+                    return status, outcome
             else:
                 run = latest_runs(records).get(label, [])
                 terminal = ending(run)
                 if terminal is not None:
                     if terminal['event'] == 'stopped':
                         print(event_line(terminal))
-                        return 1
+                        return 1, 'stopped'
                     previous_done = -1
                     for index, record in enumerate(records):
                         if record is terminal:
@@ -400,14 +403,39 @@ def wait(label, timeout, poll, unreachable, read=15, cleared=False):
                     for record in records[previous_done + 1:end]:
                         if record['set'] == label and record['event'] == 'landed':
                             print(event_line(record))
-                    return 0
+                    return 0, 'cleared'
         now = time.monotonic()
         if now >= deadline:
             print(f'landings: timed out waiting for {label}', file=sys.stderr)
             for repo, commit in missing:
                 print(f'landings: no verdict for {repo} {commit}', file=sys.stderr)
-            return 3
+            return 3, 'timed out'
         time.sleep(max(0, min(poll, deadline - now, last_read + unreachable - now)))
+
+
+def wait_and_post(address, label, *args):
+    if address is None:
+        return wait(label, *args)[0]
+    out, err = io.StringIO(), io.StringIO()
+    with redirect_stdout(out), redirect_stderr(err):
+        status, outcome = wait(label, *args)
+    stdout, stderr = out.getvalue(), err.getvalue()
+    print(stdout, end='')
+    print(stderr, end='', file=sys.stderr)
+    try:
+        with tempfile.TemporaryDirectory(prefix='landings-post-') as directory:
+            body = Path(directory) / 'body'
+            body.write_text(stdout + stderr)
+            result = subprocess.run(['post', 'send', '--as', 'landings', address,
+                                     f'landings: {label} {outcome}', str(body)],
+                                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, text=True)
+            if result.returncode not in (0, 3):
+                raise OSError(result.stderr.strip() or result.stdout.strip()
+                              or f'exit {result.returncode}')
+    except OSError as error:
+        print(f'landings: warning: post failed: {error}', file=sys.stderr)
+    return status
 
 
 STEPS = ('fmt', 'clippy', 'wasm', 'build', 'focused', 'fuzzy', 'bundle', 'browser')
@@ -574,6 +602,7 @@ def main():
     waiter = commands.add_parser('wait', help='wait for a set to land or stop')
     waiter.add_argument('set')
     waiter.add_argument('--timeout', type=seconds)
+    waiter.add_argument('--post', metavar='ADDRESS', help='post the wait output and outcome')
     waiter.add_argument('--cleared', action='store_true', help='wait for tier verdicts (default timeout: 7200s)')
     reporter = commands.add_parser('report', help='summarize gate and set costs')
     reporter.add_argument('--since', type=since, help='UTC date or ISO time')
@@ -590,7 +619,7 @@ def main():
         except (ValueError, argparse.ArgumentTypeError) as error:
             parser.error(str(error))
         timeout = 7200 if args.cleared and args.timeout is None else args.timeout
-        return wait(args.set, timeout, poll, unreachable, read, args.cleared)
+        return wait_and_post(args.post, args.set, timeout, poll, unreachable, read, args.cleared)
     try:
         records, runner = read_feed()
     except (OSError, subprocess.TimeoutExpired) as error:
