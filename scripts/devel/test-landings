@@ -125,6 +125,15 @@ class Lab:
     def unlanded(self, name, message):
         return self.commit(name, message, push=False)
 
+    def standin_git(self, body):
+        real = shutil.which('git', path=self.env['PATH'])
+        script = self.bin / 'git'
+        script.write_text(f'#!{PYTHON}\nimport json, os, subprocess, sys, time\nfrom pathlib import Path\n'
+                          f'with Path({str(self.root / "git.jsonl")!r}).open("a") as out:\n'
+                          '    out.write(json.dumps(sys.argv[1:]) + "\\n")\n' + body +
+                          f'os.execv({real!r}, [{real!r}, *sys.argv[1:]])\n')
+        script.chmod(0o700)
+
     def ssh(self, body):
         script = self.bin / 'ssh'
         script.write_text(f'#!{PYTHON}\nimport json, os, sys, time\nfrom pathlib import Path\n'
@@ -717,21 +726,156 @@ def waits_while_no_run_holds_it(lab):
 def commit_no_main_holds_ends_the_wait(lab):
     lab.repository('agents', tier=False)
     commit = lab.unlanded('agents', 'never pushed')
-    git = lab.bin / 'git'
-    real_git = shutil.which('git', path=lab.env['PATH'])
-    git.write_text(f'#!{PYTHON}\nimport os, sys\n'
-                   "if sys.argv[3] == 'fetch':\n"
-                   "    os.write(2, b'origin unavailable: \\xff\\n')\n"
-                   "    raise SystemExit(1)\n"
-                   f'os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])\n')
-    git.chmod(0o700)
-    result = lab.run('wait', '--cleared', commit[:9], '--timeout', '0', status=3)
-    assert result.stdout == '' and result.stderr == (
-        f'landings: timed out waiting for {commit[:9]}\nlandings: no verdict for agents {commit}\n'), result
-    git.unlink()
     result = lab.run('wait', '--cleared', commit[:9], '--timeout', '0', status=2)
     assert result.stdout == '' and result.stderr == (
         f'landings: agents {commit[:9]} is not on main: wait on the commit that landed\n'), result
+
+
+def failed_fetch_leaves_the_landing_undecided(lab):
+    lab.repository('agents', tier=False)
+    commit = lab.unlanded('agents', 'unavailable origin')
+    lab.standin_git("if sys.argv[3] == 'fetch':\n"
+                    "    os.write(2, b'origin unavailable: \\xff\\n')\n"
+                    "    raise SystemExit(1)\n")
+    result = lab.run('wait', '--cleared', commit[:9], '--timeout', '0', status=3)
+    assert result.stdout == '' and result.stderr == (
+        f'landings: timed out waiting for {commit[:9]}\nlandings: no verdict for agents {commit}\n'), result
+
+
+def fetch_touches_only_origin_main(lab):
+    lab.repository('temper')
+    commit = lab.land('temper', 'older landing')
+    main = lab.advance('temper', 'baseline')
+    world = lab.root / 'world-temper'
+    lab.git(world, 'branch', 'other')
+    lab.git(world, 'tag', 'unrelated-tag')
+    lab.git(world, 'push', '--quiet', 'origin', 'other', 'refs/tags/unrelated-tag')
+    work = lab.workspace / 'temper'
+    fetch_head = work / '.git/FETCH_HEAD'
+    fetch_head.unlink()
+    # Other real scratch checkouts make accidental discovery fetches visible.
+    lab.repository('agents', tier=False)
+    lab.standin_git('')
+    lab.append(*tier_run('temper', main, None, 10, [(main, [])], baseline=True))
+    result = lab.run('wait', '--cleared', commit[:9], '--timeout', '0')
+    assert result.stdout == f'10-26 05:10Z temper {commit[:9]} cleared by run {main[:9]}, which holds it; baseline\n', result
+    assert result.stderr == '', result
+    assert lab.git(work, 'rev-parse', '--verify', main) == main
+    assert lab.git(work, 'for-each-ref', '--format=%(refname)',
+                   'refs/remotes/origin/other', 'refs/tags') == ''
+    assert not fetch_head.exists()
+    calls = [json.loads(line) for line in (lab.root / 'git.jsonl').read_text().splitlines()]
+    fetches = [argv for argv in calls if argv[2] == 'fetch']
+    assert fetches == [['-C', str(work), 'fetch', '--quiet', '--no-write-fetch-head',
+                        '--no-tags', '--no-recurse-submodules', '--no-auto-maintenance',
+                        'origin', '+refs/heads/main:refs/remotes/origin/main']], fetches
+
+
+def stale_tracking_ref_is_fetched_first(lab):
+    lab.repository('agents', tier=False)
+    commit = lab.unlanded('agents', 'stale tracking main')
+    lab.git(lab.workspace / 'agents', 'update-ref', 'refs/remotes/origin/main', commit)
+    result = lab.run('wait', '--cleared', commit[:9], '--timeout', '0', status=2)
+    assert result.stdout == '' and result.stderr == (
+        f'landings: agents {commit[:9]} is not on main: wait on the commit that landed\n'), result
+
+
+def unknown_ancestry_leaves_the_landing_undecided(lab):
+    commit, tip, main = range_run(lab)
+    lab.append(tier_record('verdict', 'temper', 'f' * 40, 10, token=main[:32], run=main))
+    lab.standin_git('')
+    result = lab.run('wait', '--cleared', commit[:9], '--timeout', '.5', status=3)
+    assert result.stdout == '' and result.stderr == (
+        f'landings: timed out waiting for {commit[:9]}\nlandings: no verdict for temper {commit}\n'), result
+    calls = [json.loads(line) for line in (lab.root / 'git.jsonl').read_text().splitlines()]
+    assert sum(argv[2] == 'fetch' for argv in calls) == 1, calls
+    assert sum(argv[2:] == ['rev-parse', '--verify', 'f' * 40 + '^{commit}']
+               for argv in calls) == 2, calls
+
+
+def prefix_in_two_landings_counts_each(lab):
+    one, two = 'abcdef123' + '1' * 31, 'abcdef123' + '2' * 31
+    lab.append(tier_record('verdict', 'jig', one, 1, verdict='red', tests=['TEST'], excerpt='failed'),
+               tier_record('verdict', 'temper', two, 2))
+    result = lab.run('wait', '--cleared', 'ABCDEF123', '--timeout', '0', status=1)
+    assert result.stdout == (
+        '10-26 05:01Z jig abcdef123 red by run abcdef123: TEST; log fixture-host:/fixture/log\n'
+        '    failed\n10-26 05:02Z temper abcdef123 cleared by run abcdef123\n'), result
+    assert result.stderr == '', result
+
+
+def shallow_checkout_is_no_checkout(lab):
+    lab.repository('agents', tier=False)
+    commit = lab.land('agents', 'shallow main')
+    work = lab.workspace / 'agents'
+    shutil.rmtree(work)
+    lab.git(lab.root, 'clone', '--quiet', '--depth', '1',
+            (lab.root / 'origins/agents.git').as_uri(), work)
+    result = lab.run('wait', '--cleared', commit[:9], '--timeout', '0', status=3)
+    assert result.stdout == '' and result.stderr == (
+        f'landings: timed out waiting for {commit[:9]}\nlandings: no verdict for {commit[:9]}\n'), result
+
+
+# A timeout-zero fetch gets the 5-second read floor; leave room for process startup.
+HUNG_FETCH_LIMIT = 15
+
+
+def hung_fetch_ends_at_the_timeout(lab):
+    lab.repository('temper')
+    commit = lab.land('temper', 'older landing')
+    main = lab.advance('temper', 'baseline')
+    lab.append(*tier_run('temper', main, None, 10, [(main, [])], baseline=True))
+    pid_file = lab.root / 'child.pid'
+    parent_file = lab.root / 'parent.pid'
+    child = (f'from pathlib import Path; import os, time; '
+             f'Path({str(pid_file)!r}).write_text(str(os.getpid())); time.sleep(60)')
+    lab.standin_git("if sys.argv[3] == 'fetch':\n"
+                    f'    Path({str(parent_file)!r}).write_text(str(os.getpid()))\n'
+                    f'    subprocess.Popen([sys.executable, "-c", {child!r}])\n'
+                    '    time.sleep(60)\n')
+    start = time.monotonic()
+    try:
+        result = lab.run('wait', '--cleared', commit[:9], '--timeout', '0', status=3)
+        assert time.monotonic() - start < HUNG_FETCH_LIMIT
+        assert result.stdout == '' and result.stderr == (
+            f'landings: timed out waiting for {commit[:9]}\nlandings: no verdict for temper {commit}\n'), result
+        for path in (pid_file, parent_file):
+            pid = int(path.read_text())
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                continue
+            raise AssertionError(f'stand-in process {pid} survived the timeout')
+    finally:
+        if parent_file.exists():
+            try:
+                os.killpg(int(parent_file.read_text()), 9)
+            except ProcessLookupError:
+                pass
+
+
+def run_without_its_start_judges_nothing(lab):
+    lab.repository('temper')
+    commit = lab.land('temper', 'older landing')
+    main = lab.advance('temper', 'baseline')
+    lab.append(record(event='started'), record(event='landed', repo='temper', commit=commit),
+               record(event='done'),
+               *tier_run('temper', main, None, 10, [(main, [])], baseline=True)[1:])
+    result = lab.run('wait', '--cleared', 'fixture/m1', '--timeout', '0', status=3)
+    assert result.stdout == '' and result.stderr == (
+        f'landings: timed out waiting for fixture/m1\nlandings: no verdict for temper {commit}\n'), result
+
+
+def posted_not_landed(lab):
+    lab.repository('agents', tier=False)
+    commit = lab.unlanded('agents', 'never pushed')
+    post_standin(lab)
+    result = lab.run('wait', '--cleared', commit[:9], '--timeout', '0',
+                     '--post', 'owner@fixture', status=2)
+    body = f'landings: agents {commit[:9]} is not on main: wait on the commit that landed\n'
+    assert result.stdout == '' and result.stderr == body, result
+    posts = [json.loads(line) for line in lab.feed.with_suffix('.posts').read_text().splitlines()]
+    assert posts == [dict(subject=f'landings: {commit[:9]} not landed', body=body)], posts
 
 
 def watch_record(lab):
@@ -786,7 +930,7 @@ def malformed_runner_records(lab):
     assert lab.run('report').stdout == 'no results\n\nno set runs\n'
 
 
-def posted_wait(lab):
+def post_standin(lab):
     post = lab.bin / 'post'
     post.write_text(f'#!{PYTHON}\n' + r'''import json, os, sys
 from pathlib import Path
@@ -796,6 +940,11 @@ with Path(os.environ['FIXTURE_FEED']).with_suffix('.posts').open('a') as out:
 sys.exit(int(os.environ.get('FIXTURE_POST_EXIT', '0')))
 ''')
     post.chmod(0o700)
+    return post
+
+
+def posted_wait(lab):
+    post = post_standin(lab)
     landed_set(lab)
     lab.append(tier_record('verdict'), tier_record('verdict', tier='temper', commit='b' * 40))
     scenarios = [('cleared', 0), ('red', 1), ('timed out', 3), ('stopped', 1), ('feed unreadable', 4)]
@@ -876,7 +1025,11 @@ def main():
              no_tier_clears_on_landing, baseline_clears_an_older_landing,
              commit_in_a_range_takes_its_landing_verdict, held_in_a_red_landing_is_red,
              own_red_stays_red_under_later_clean_runs, waits_while_no_run_holds_it,
-             commit_no_main_holds_ends_the_wait)
+             commit_no_main_holds_ends_the_wait, failed_fetch_leaves_the_landing_undecided,
+             fetch_touches_only_origin_main, stale_tracking_ref_is_fetched_first,
+             unknown_ancestry_leaves_the_landing_undecided, prefix_in_two_landings_counts_each,
+             shallow_checkout_is_no_checkout, hung_fetch_ends_at_the_timeout,
+             run_without_its_start_judges_nothing, posted_not_landed)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--case', action='append', choices=[case.__name__ for case in cases])
     selected = parser.parse_args().case
