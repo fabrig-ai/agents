@@ -157,7 +157,7 @@ def runner_record(row):
         return False
     if event == 'verdict':
         return (text(row.get('run')) and row.get('verdict') in ('cleared', 'red')
-                and strings(row.get('tests')) and 'set' in row and nullable(row['set'])
+                and strings(row.get('tests')) and 'landing_set' in row and nullable(row['landing_set'])
                 and (row['verdict'] != 'red' or isinstance(row.get('excerpt'), str))
                 and ('excerpt' not in row or isinstance(row['excerpt'], str)))
     return (row.get('state') in ('green', 'red') and 'last_green' in row
@@ -220,11 +220,11 @@ def show_tiers(records, set_records):
                     seen = [r['utc'] for r in verdicts if r['commit'] == commit]
                     return min(landed or seen or [state['utc']])
                 landing = min(reds, key=landed_at) if reds else None
-                named = newest([r for r in verdicts if r['commit'] == landing and r['set']])
+                named = newest([r for r in verdicts if r['commit'] == landing and r['landing_set']])
                 if landing:
                     line += f", first red {landing[:9]}"
                     if named:
-                        line += f" ({named['set']})"
+                        line += f" ({named['landing_set']})"
                 if state['last_green']:
                     line += f"; green at {state['last_green'][:9]}"
                     green = newest([r for r in mine if r['event'] == 'tier'

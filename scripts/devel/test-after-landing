@@ -211,6 +211,7 @@ def polls(lab):
     assert [r['event'] for r in records] == ['running', 'verdict', 'tier']
     assert records[0]['commit'] == head and records[0]['from'] is None
     assert lab.verdict(head)['verdict'] == 'cleared' and records[-1]['state'] == 'green'
+    assert all('set' not in r for r in records)
     assert len({r['token'] for r in records}) == 1
     first = lab.calls()[0]
     assert first['cls'] == 'background' and first['label'] == 'after-landing demo'
@@ -264,7 +265,7 @@ def red(lab):
     verdict = lab.verdict(one)
     assert verdict['verdict'] == 'red' and verdict['tests'] == ['t1']
     assert 'attempt 2' in verdict['excerpt']
-    assert 'failure text' in verdict['excerpt'] and verdict['set'] == 'demo/m1'
+    assert 'failure text' in verdict['excerpt'] and verdict['landing_set'] == 'demo/m1'
     assert len(verdict['excerpt']) <= 8000 and len(verdict['excerpt'].splitlines()) <= 60
     assert lab.records('tier')[-1]['reds'] == [dict(landing=one, tests=['t1'])]
     two = lab.land()
@@ -522,7 +523,7 @@ def pending_delivery(lab):
     lab.append(kind='watch', event='watching', target=two[:9])
     lab.run()  # A watcher claims the pending verdict even without a director argument.
     assert lab.state()['pending'] == [] and len(lab.posts()) == 1
-    assert lab.verdict(tip)['set'] == 'demo/m1'
+    assert lab.verdict(tip)['landing_set'] == 'demo/m1'
 
 
 def stale_watch(lab):

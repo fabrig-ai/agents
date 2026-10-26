@@ -168,7 +168,7 @@ def watched(item, rows):
         target = row.get('target')
         if not isinstance(target, str):
             continue
-        if target != item['set'] and not (re.fullmatch(r'[0-9a-f]{7,40}', target)
+        if target != item.get('landing_set', item.get('set')) and not (re.fullmatch(r'[0-9a-f]{7,40}', target)
                                                and item['commit'].startswith(target)):
             continue
         try:
@@ -373,7 +373,7 @@ def pass_once(args, base, clone, state):
         label = next((row.get('set') for row in reversed(rows) if row.get('event') == 'landed'
                       and row.get('repo') == args.repo and row.get('commit') == tip), None)
         fields = dict(commit=tip, run=main, verdict='red' if tests else 'cleared',
-                      tests=tests, flakes=flakes, set=label, log=str(log))
+                      tests=tests, flakes=flakes, landing_set=label, log=str(log))
         if tests:
             fields['excerpt'] = excerpts[tests[0]]
         row = emit(args.fixture, token, args.repo, 'verdict', **fields)

@@ -34,7 +34,7 @@ def tier_record(event='tier', tier='jig', commit='a' * 40, minute=0, **extra):
     fields = {
         'tier': dict(state='green', last_green=commit, reds=[], flakes=[], ran_s=1.5, log='/fixture/log'),
         'running': {'from': None},
-        'verdict': dict(run=commit, verdict='cleared', tests=[], flakes=[], set=None, log='/fixture/log'),
+        'verdict': dict(run=commit, verdict='cleared', tests=[], flakes=[], landing_set=None, log='/fixture/log'),
         'fault': dict(reason='lacks chromium', since=row['time']),
         'recovered': dict(since=row['time']),
     }
@@ -403,7 +403,7 @@ def tiers_shown(lab):
                tier_record('running', commit='9f8e7d6c5' + '0' * 31, minute=20),
                tier_record(tier='temper', commit='7e8f9a0b1' + '0' * 31, minute=0),
                tier_record('verdict', tier='temper', commit='0a1b2c3d4' + '0' * 31, minute=29,
-                           verdict='red', tests=['case one', 'case two'], excerpt='failed', set='case-5/m3'),
+                           verdict='red', tests=['case one', 'case two'], excerpt='failed', landing_set='case-5/m3'),
                tier_record(tier='temper', commit='3c4d5e6f7' + '0' * 31, minute=31, state='red',
                            last_green='7e8f9a0b1' + '0' * 31,
                            reds=[dict(landing='0a1b2c3d4' + '0' * 31, tests=['case one', 'case two'])]),
@@ -433,13 +433,22 @@ def tiers_shown(lab):
     # Verdict publication can be reversed; the landing timestamps decide oldest.
     lab.append(record(event='landed', repo='jig', commit='b' * 40, minute=1),
                record(event='landed', repo='jig', commit='c' * 40, minute=2),
-               tier_record('verdict', commit='c' * 40, minute=23, set='later/m1'),
+               tier_record('verdict', commit='c' * 40, minute=23, landing_set='later/m1'),
                tier_record('verdict', commit='b' * 40, minute=24),
-               tier_record('verdict', commit='b' * 40, minute=25, set='earlier/m1'),
+               tier_record('verdict', commit='b' * 40, minute=25, landing_set='earlier/m1'),
                tier_record(minute=26, state='red', last_green=None,
                            reds=[dict(landing='c' * 40, tests=['later']),
                                  dict(landing='b' * 40, tests=['earlier'])]))
     assert '2 tests, first red bbbbbbbbb (earlier/m1)' in lab.run('--last', '0').stdout
+
+
+def landing_set_isolation(lab):
+    landed_set(lab)
+    before = lab.run().stdout.split('tiers:')[0]
+    report = lab.run('report').stdout
+    lab.append(tier_record('verdict', landing_set='fixture/m1'))
+    assert lab.run().stdout.split('tiers:')[0] == before
+    assert lab.run('report').stdout == report
 
 
 def cleared_set(lab):
@@ -605,7 +614,7 @@ def main():
              unreadable_status, unreadable_wait, unreadable_recovers,
              timeout_before_unreachable, malformed_lines, remote_command,
              remote_failure, remote_hang, remote_first_read, invalid_arguments, read_default,
-             tiers_shown, cleared_set, red_set, stopped_set, waits_for_verdict, commit_target,
+             tiers_shown, landing_set_isolation, cleared_set, red_set, stopped_set, waits_for_verdict, commit_target,
              watch_record, malformed_runner_records, remote_watch)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--case', action='append', choices=[case.__name__ for case in cases])
