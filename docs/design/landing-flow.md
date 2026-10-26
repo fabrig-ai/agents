@@ -241,8 +241,10 @@ cite:
      machine held the exclusive lane for 21.5 hours, with 49.2 hours of
      builds behind it (build-efficiency.md 3).
    - **One machine, warm.** A build machine the director names, where
-     `setup` checks what the tiers need: Chromium, and the pinned
-     Forgejo and its runner. The runner keeps one worktree and target
+     `setup` installs the service. A tier's script that lacks a tool
+     there, Chromium or temper's pinned Forgejo, says so, and the
+     runner takes it as a fault, not a red: agents names no product,
+     so `setup` can't check for them. The runner keeps one worktree and target
      per repository there and nowhere else, and runs its tiers at
      `HEAVY_CLASS=background`, not `--gate` (build-efficiency.md 8,
      change 5). A tier that fails only under load has a test to fix,
