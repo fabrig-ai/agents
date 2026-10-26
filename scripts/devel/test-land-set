@@ -196,7 +196,11 @@ class Lab:
             self.env[f'GIT_CONFIG_KEY_{count + offset}'] = key
             self.env[f'GIT_CONFIG_VALUE_{count + offset}'] = value
         self.env['GIT_CONFIG_COUNT'] = str(count + len(settings))
-        self.env['CARGO_TARGET_DIR'] = str(root / 'cargo-target')
+        # Metadata/update do not create target, so Cargo otherwise cannot save
+        # .rustc_info.json and repeats both compiler probes on the next call.
+        target = root / 'cargo-target'
+        target.mkdir(exist_ok=True)
+        self.env['CARGO_TARGET_DIR'] = str(target)
         # Resolve rustup proxies once, in this same /tmp toolchain context.
         # Real Cargo and rustc still run; repeated proxy startup buys nothing.
         toolchain = root / 'toolchain.json'
