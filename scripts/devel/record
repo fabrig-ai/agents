@@ -136,8 +136,8 @@ def validate(name, content):
                 except ValueError as error:
                     raise Refusal(f'{name}: front matter {key} is not a time') from error
         if name.endswith('/README.md'):
-            need(len(fields.get('description', '')) <= 160,
-                 f'{name}: front matter description exceeds 160 characters')
+            need(len(fields.get('description', '')) <= 60,
+                 f'{name}: front matter description exceeds 60 characters')
             need(fields['state'] in ('active', 'paused', 'ended', 'abandoned', UNKNOWN),
                  f'{name}: front matter state invalid')
             body = re.sub(r'(?m)^#{1,6}[ \t].*(?:\n|$)', '', text[front.end():]).strip()
