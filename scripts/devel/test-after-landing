@@ -213,6 +213,20 @@ class Lab:
         with (self.root / 'feed.jsonl').open('a') as out:
             out.write(json.dumps(row) + '\n')
 
+    def land_set(self, label, commit):
+        self.append(event='started', set=label, token=label)
+        self.append(event='landed', set=label, token=label, repo='demo', commit=commit)
+        self.append(event='done', set=label, token=label)
+
+    def landings(self, *args, status=0):
+        env = dict(self.env, LANDINGS_FEED=str(self.root / 'feed.jsonl'), LANDINGS_POLL='.02',
+                   DEV_ROOT=str(self.root / 'workspace'))
+        return call([PYTHON, '-I', '-B', SCRIPT.with_name('landings'), *args],
+                    self.root, env, status)
+
+    def wait(self, label, status):
+        return self.landings('wait', '--cleared', label, '--timeout', '0', status=status)
+
     def records(self, event=None, tier='demo'):
         result = [r for r in rows(self.root / 'feed.jsonl') if r.get('kind') == 'tier' and r.get('tier') == tier]
         return [r for r in result if r['event'] == event] if event else result
@@ -461,44 +475,73 @@ def unwatched_red(lab):
 
 
 def meets_landings(lab):
-    env = dict(lab.env, LANDINGS_FEED=str(lab.root / 'feed.jsonl'), LANDINGS_POLL='.02',
-               DEV_ROOT=str(lab.root / 'workspace'))
-
-    def land_set(label, commit):
-        lab.append(event='started', set=label, token=label)
-        lab.append(event='landed', set=label, token=label, repo='demo', commit=commit)
-        lab.append(event='done', set=label, token=label)
-
-    def wait(label, status):
-        return call([PYTHON, '-I', '-B', SCRIPT.with_name('landings'), 'wait', '--cleared',
-                     label, '--timeout', '0'], lab.root, env, status)
-
     one = lab.land()
     lab.push()
-    land_set('demo/m1', one)
-    missing = wait('demo/m1', 3).stderr
+    lab.land_set('demo/m1', one)
+    missing = lab.wait('demo/m1', 3).stderr
     assert one in missing and 'timed out waiting for demo/m1' in missing
     lab.run()
-    assert one[:9] + ' cleared by run' in wait('demo/m1', 0).stdout
+    assert one[:9] + ' cleared by run' in lab.wait('demo/m1', 0).stdout
     two = lab.land(reds=['t1'])
     lab.push()
-    land_set('demo/m2', two)
+    lab.land_set('demo/m2', two)
     lab.run()
-    out = wait('demo/m2', 1).stdout
+    out = lab.wait('demo/m2', 1).stdout
     assert two[:9] + ' red by run' in out and 't1' in out and 'failure text' in out, out
     runner_env = dict(lab.env, AFTER_LANDING_RED_GRACE='0')
     lab.run(director=True, env=runner_env)
     assert lab.posts() == [] and lab.state()['pending'] == []
-    out = call([PYTHON, '-I', '-B', SCRIPT.with_name('landings')], lab.root, env).stdout
+    out = lab.landings().stdout
     assert f'demo: red at {two[:9]}' in out, out
     assert f'first red {two[:9]} (demo/m2); green at {one[:9]}' in out, out
     three = lab.land(reds=['t1', 't2'])
     lab.push()
-    land_set('demo/m3', three)
+    lab.land_set('demo/m3', three)
     lab.run(director=True, env=runner_env)
     lab.run(director=True, env=runner_env)
     assert len(lab.posts()) == 1 and three[:9] in lab.posts()[0]['argv'][4]
     assert lab.verdict(three)['tests'] == ['t2']
+
+
+def parts_meet_landings(lab):
+    head = lab.land()
+    lab.push()
+    workspace = lab.root / 'workspace'
+    workspace.mkdir()
+    lab.git(workspace, 'clone', '--quiet', lab.origin, workspace / 'demo')
+    for part in ('1/2', '2/2'):
+        lab.run(part=part)
+        assert lab.verdict(head, tier='demo.' + part.replace('/', 'of'))['verdict'] == 'cleared'
+
+    one = lab.land()
+    lab.push()
+    lab.land_set('demo/m1', one)
+    lab.run(part='1/2')
+    missing = lab.wait('demo/m1', 3).stderr
+    assert one in missing and 'timed out waiting for demo/m1' in missing, missing
+    lab.run(part='2/2')
+    lines = lab.wait('demo/m1', 0).stdout.splitlines()
+    assert len(lines) == 2, lines
+    for line, name in zip(lines, ('demo.1of2', 'demo.2of2')):
+        assert f'{name} {one[:9]} cleared by run {one[:9]}' in line, lines
+
+    two = lab.land(reds=['p2.t1'])
+    lab.push()
+    lab.land_set('demo/m2', two)
+    lab.run(part='2/2')
+    assert lab.state('demo.1of2')['last_run'] == one
+    assert not any(r['commit'] == two for r in lab.records(tier='demo.1of2'))
+    out = lab.wait('demo/m2', 1).stdout
+    assert f'demo.2of2 {two[:9]} red by run {two[:9]}: p2.t1' in out, out
+    excerpt = lab.verdict(two, tier='demo.2of2')['excerpt']
+    assert 'failure text at end for excerpt, attempt 2' in excerpt, excerpt
+    assert '\n'.join('    ' + line for line in excerpt.splitlines()) in out, out
+    out = lab.landings().stdout
+    tiers = out.split('tiers:\n', 1)[1].splitlines()
+    assert len(tiers) == 2, out
+    assert f'demo.1of2: green at {one[:9]}' in tiers[0], out
+    assert f'demo.2of2: red at {two[:9]}' in tiers[1], out
+    assert f'first red {two[:9]} (demo/m2)' in tiers[1], out
 
 
 def not_runner_machine(lab):
@@ -905,8 +948,8 @@ def part_refusals(lab):
 
 
 CASES = (polls, no_tier, flake, red, bisect, baseline, already_red, fault, unwatched_red,
-         meets_landings, not_runner_machine, one_follower, refusals, multi_bisect, limits,
-         nested_faults, unnamed, pending_delivery, stale_watch, history_reset,
+         meets_landings, parts_meet_landings, not_runner_machine, one_follower, refusals,
+         multi_bisect, limits, nested_faults, unnamed, pending_delivery, stale_watch, history_reset,
          trailers, feed_failure, parts_follow_apart, part_red_bisected_while_the_other_clears,
          part_star_rerun_passes_the_part, part_from_whole_state, part_from_whole_state_at_main,
          part_not_from_whole_state, part_refusals)
