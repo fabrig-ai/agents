@@ -42,6 +42,12 @@ source "$kit/../devel/kit.sh"
 [[ $(uname -m) == x86_64 ]] || { echo "kache-setup: only x86_64 has a pinned release" >&2; exit 2; }
 read -r cap _ < <(machine_setting KACHE_MAX_GB 12)
 read -r floor _ < <(machine_setting PLAN_MIN_DISK_GB 40)
+read -r local_only _ < <(machine_setting KACHE_LOCAL_ONLY 0)
+case $local_only in
+    1 | true) local_only=true ;;
+    0 | false) local_only=false ;;
+    *) echo "kache-setup: KACHE_LOCAL_ONLY must be 0, 1, false or true" >&2; exit 2 ;;
+esac
 # Recover while heavy can still admit work, leaving a whole cache budget
 # above its refusal floor. Even a zero-sized cache keeps a 1 GiB reserve.
 reserve=$((cap > 0 ? cap : 1))
@@ -110,6 +116,9 @@ ${local:+local_store = \"$local\"
 # Eviction removes the cache name; target files remain usable.
 gc_evict_shared = true
 auto_gc = true
+# Preserve the remote selectors while a machine runs without remote I/O
+# or durable upload pins (for example, while Garage is stopped).
+local_only = $local_only
 cache_executables = true
 # Prefetch fetches what a build might want ahead of demand: in the 24 h to
 # 10-25 it downloaded 76 GiB on the five builders, of whose entries 5% were used,
@@ -183,4 +192,4 @@ if systemctl --user cat kache-gc.timer >/dev/null 2>&1; then
 fi
 sleep 2
 systemctl --user is-active --quiet kache.service || { echo "kache-setup: kache.service is not running" >&2; exit 1; }
-echo "kache-setup: $("$bin" --version) (was ${installed:-none}), store cap ${cap} GiB, recovery reserve ${recovery} GiB (heavy floor ${floor} GiB)"
+echo "kache-setup: $("$bin" --version) (was ${installed:-none}), store cap ${cap} GiB, local-only $local_only, recovery reserve ${recovery} GiB (heavy floor ${floor} GiB)"

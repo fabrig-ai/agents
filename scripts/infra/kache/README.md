@@ -82,3 +82,14 @@ Rollback: revert the cap-config commit, land it, and rerun setup through
 the gate. This restores reclaimable-only budgeting and recovery at the
 heavy floor; it cannot restore evicted cache hits. No cache keys, binary,
 remote selectors or credentials change in this rollout.
+
+During a remote outage, set `KACHE_LOCAL_ONLY=1` in each builder's
+`tmp/machine.env` and rerun setup through the gate. The default is 0;
+environment values 0/1/false/true override the file. Setup writes
+`cache.local_only`, retaining the remote selectors and credential drop-in
+for later recovery. Kache then retires replayed upload intents itself
+without remote I/O and stops creating new ones, so upload pins cannot
+hold the namespace above its cap. After Garage is intentionally restored,
+set the machine key to 0 and rerun setup through the gate. Ordinary upload
+pins can again temporarily exceed the size cap in remote-enabled mode.
+The stopped Garage service and its settings are outside this rollout.

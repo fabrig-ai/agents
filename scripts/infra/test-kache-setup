@@ -25,6 +25,7 @@ def main():
                    PATH=str(stubs) + ':/usr/bin:/bin', FIXTURE_TRACE=str(trace))
         env.pop('KACHE_MAX_GB', None)
         env.pop('PLAN_MIN_DISK_GB', None)
+        env.pop('KACHE_LOCAL_ONLY', None)
         for name, body in {
             'systemctl': 'echo "service $*" >>"$FIXTURE_TRACE"\n',
             'sleep': 'exit 0\n',
@@ -65,17 +66,19 @@ def main():
         assert not dropin.exists()
         assert 'clean' not in trace.read_text()
 
+        assert cache['local_only'] is False
         assert cache['local_max_size'] == '12GiB'
         assert cache['auto_gc'] is True and cache['gc_evict_shared'] is True
         assert cache['auto_recover_min_free_bytes'] == 52 * 1024**3
 
         # Migrate an over-cap configuration without clearing a same-version store.
         machine = root / 'machine.env'
-        machine.write_text('KACHE_MAX_GB=20\nPLAN_MIN_DISK_GB=40\n')
+        machine.write_text('KACHE_MAX_GB=20\nPLAN_MIN_DISK_GB=40\nKACHE_LOCAL_ONLY=1\n')
         config.write_text('[cache]\nlocal_max_size = "20GiB"\ngc_evict_shared = false\n'
                           'auto_recover_min_free_bytes = 42949672960\n')
         setup()
         cache = tomllib.loads(config.read_text())['cache']
+        assert cache['local_only'] is True
         assert cache['local_max_size'] == '20GiB'
         assert cache['auto_gc'] is True and cache['gc_evict_shared'] is True
         assert cache['auto_recover_min_free_bytes'] == 60 * 1024**3
@@ -87,12 +90,25 @@ def main():
             assert cache['auto_recover_min_free_bytes'] == reserve * 1024**3
         setup()
 
+        for setting, expected in [('0', False), ('false', False), ('1', True), ('true', True)]:
+            setup({'KACHE_LOCAL_ONLY': setting})
+            assert tomllib.loads(config.read_text())['cache']['local_only'] is expected
+        calls = trace.read_bytes()
+        before_local = config.read_bytes()
+        rejected = subprocess.run([KIT / 'kache-setup'],
+                                  env=env | {'KACHE_LOCAL_ONLY': 'invalid'},
+                                  capture_output=True, text=True)
+        assert rejected.returncode == 2 and 'KACHE_LOCAL_ONLY' in rejected.stderr
+        assert trace.read_bytes() == calls and config.read_bytes() == before_local
+        setup()
+
         # A key enables both config and service; setup only inspects its metadata.
         key.touch(mode=0o600)
         config.write_text('[cache]\nlocal_store = "/fixture/large-disk"\n')
         setup()
         cache = tomllib.loads(config.read_text())['cache']
         assert cache['local_store'] == '/fixture/large-disk'
+        assert cache['local_only'] is True
         assert cache['remote_upload_max_bytes'] == 67108864
         assert cache['remote'] == dict(type='s3', bucket='kache',
                                       endpoint='http://10.80.0.13:3900',
@@ -135,7 +151,7 @@ def main():
         result = subprocess.run([moved / 'kache-setup'], env=discovery_env,
                                 capture_output=True, text=True)
         assert result.returncode == 0, (result.stdout, result.stderr)
-        print('test-kache-setup: passed (local, cap migration, recovery headroom, overrides, remote, repeat, mode, owner, removal)')
+        print('test-kache-setup: passed (local, cap migration, recovery headroom, overrides, offline mode, invalid mode, remote, repeat, mode, owner, removal)')
 
 
 if __name__ == '__main__':
