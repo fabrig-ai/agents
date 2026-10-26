@@ -34,7 +34,7 @@ printf 'Own the fixture tasks.\n' >"$t/brief.md"
 printf 'export PATH=%q:/usr/bin:/bin\n' "$t/bin" >"$HOME/.bash_profile"
 cat >"$t/bin/systemd-run" <<'FAKE'
 #!/usr/bin/python3
-import os, pathlib, signal, subprocess, sys
+import os, pathlib, shlex, signal, subprocess, sys
 args = sys.argv[1:]
 fixture = pathlib.Path(os.environ['DEV_ROOT']).resolve() / 'fake'
 (fixture / 'launch.args').write_bytes(b'\0'.join(os.fsencode(a) for a in args) + b'\0')
@@ -42,6 +42,7 @@ if (fixture / 'launch-fail').exists():
     sys.exit('fixture launch failed')
 env = {'HOME': os.environ['HOME'], 'PATH': '/usr/bin:/bin'}
 unit = ''
+stop = None
 assert '--service-type=exec' in args
 while args:
     arg = args.pop(0)
@@ -49,6 +50,10 @@ while args:
         continue
     if arg == '--unit':
         unit = args.pop(0)
+    elif arg.startswith('--property='):
+        assert stop is None and arg.startswith('--property=ExecStop=-'), arg
+        stop = arg[len('--property=ExecStop=-'):]
+        (fixture / 'stop.property').write_text(stop)
     elif arg.startswith('--setenv='):
         key, value = arg[len('--setenv='):].split('=', 1)
         assert key in ('DEV_ROOT', 'CODEX_RUN_RETRY_DELAYS'), key
@@ -57,6 +62,16 @@ while args:
         args.insert(0, arg)
         break
 assert args[:3] == ['bash', '-lc', 'exec "$0" "$@"']
+stop_args = None
+if stop is not None:
+    # Only the quoted tokens our launcher emits: check syntax AND decoded argv.
+    expected = ['bash', '-lc', 'exec "$0" "$@"', args[3], '_stop', args[5]]
+    def quote(token):
+        return '"' + token.replace('\\', '\\\\').replace('"', '\\"').replace('$', '$$').replace('%', '%%') + '"'
+    assert stop == ' '.join(quote(token) for token in expected), stop
+    stop_args = [token.replace('$$', '$').replace('%%', '%') for token in shlex.split(stop)]
+    assert stop_args == expected, stop_args
+    (fixture / 'stop.argv').write_text(repr(stop_args))
 # Emulate exec's launch-time refusal, including a removed worker executable.
 if (fixture / 'missing-executable').exists():
     args[3] = str(fixture / 'missing-worker')
@@ -80,6 +95,11 @@ with (fixture / (unit + '.log')).open('wb') as log:
                                 stdout=log, stderr=log, start_new_session=True)
         (fixture / (unit + '.pid')).write_text(str(proc.pid) + '\n')
         status = proc.wait()
+        if stop_args is not None:
+            stop_command = ['/bin/bash', '--noprofile', '--norc', '-c',
+                            'source "$HOME/.bash_profile"; exec "$0" "$@"', *stop_args[3:]]
+            subprocess.run(stop_command, env=env, stdin=subprocess.DEVNULL,
+                           stdout=log, stderr=log, check=True)
         (fixture / (unit + '.ended')).write_text(str(status) + '\n')
         fd = os.open(fixture / 'unit-events', os.O_WRONLY | os.O_NONBLOCK)
         os.write(fd, (unit + '\n').encode())
@@ -107,6 +127,14 @@ with (fake / 'codex.calls').open('a') as out:
                           'home': os.environ.get('HOME'), 'post_name': os.environ.get('POST_NAME'),
                           'unwanted': os.environ.get('CODEX_RUN_FIXTURE_UNWANTED')}) + '\n')
 scenario = (fake / 'scenario').read_text().strip()
+if scenario in ('on-stop', 'on-stop-failure'):
+    meta = dict(line.split('=', 1) for line in (state / 'meta').read_text().splitlines())
+    hook = pathlib.Path(meta['on_stop'])
+    hook.write_text('#!/bin/bash\npwd >"$DEV_ROOT/fake/stop.cwd"\n'
+                    'echo returned >>"$DEV_ROOT/fake/returned"\n'
+                    'echo hook-out\necho hook-err >&2\n'
+                    + ('exit 3\n' if scenario == 'on-stop-failure' else ''))
+    hook.chmod(0o700)
 if scenario == 'pause':
     import time
     (state / 'worker.pid').write_text(str(os.getppid()))
@@ -256,6 +284,7 @@ refusal() {
     [[ $status == 2 && $output != *$'\n'* && $before == "$(directories)" ]]
     expect "$what" "$output" 'codex-run:'
 }
+refusal 'relative on-stop refused' task --on-stop relative/file "$t/task file.md" "$t/work dir" "$t/reports/refused.md"
 refusal 'relative TASK' task relative "$t/work dir" "$t/reports/refused.md"
 refusal 'relative DIR' task "$t/task file.md" relative "$t/reports/refused.md"
 refusal 'relative REPORT' task "$t/task file.md" "$t/work dir" relative
@@ -326,6 +355,8 @@ start_task() {
 row() { awk -F'\t' -v id="$id" '$1 == id { print }' "$DEV_ROOT/tmp/codex-run/runs.tsv"; }
 start_task success
 success_id=$id
+expect 'no on-stop, no stop property' "[$(tr '\0' '\n' <"$fake/launch.args" | sed -n '/^--property/p')]" '[]'
+[[ ! -f $state/on-stop ]]
 expect 'success report' "$(cat "$report")" 'Fixture task completed.'
 json_expect 'each event is stamped when it arrived, first' \
     'length > 0 and all(.[]; (keys_unsorted[0] == "ts") and
@@ -343,6 +374,22 @@ json_expect 'task defaults, stdin prompt and clean unit environment' \
 expect 'task cwd' "$(jq -r .cwd "$fake/codex.calls")" "$t/work dir"
 [[ $(stat -c %a "$state") == 700 && $(stat -c %a "$state/meta") == 600 && $(stat -c %a "$report") == 600 ]]
 checks=$((checks + 1))
+
+start_task on-stop --on-stop "$t/return-login"
+stop_id=$id
+expect 'on-stop runs after the session ends' "$(cat "$fake/returned"),$(cat "$state/on-stop"),$(cat "$fake/stop.cwd")" "returned,exit 0,$t"
+expect 'on-stop appends stdout and stderr' "$(cat "$state/on-stop.log")" hook-out hook-err
+expect 'meta records on_stop' "$(cat "$state/meta")" "on_stop=$t/return-login"
+start_task success --resume "$stop_id"
+expect 'resume does not inherit on-stop' "$(sed -n '/^on_stop=/p' "$state/meta"),$(test ! -f "$state/on-stop" && echo none)" 'on_stop=,none'
+start_task success --on-stop "$t/not-written"
+expect 'absent on-stop runs nothing' "$(cat "$state/on-stop"),$(wc -l <"$fake/returned")" 'absent,1'
+start_task on-stop-failure --on-stop "$t/failing-hook"
+expect 'failing on-stop records its exit' "$(cat "$state/on-stop")" 'exit 3'
+expect 'failing on-stop keeps normal row' "$(row)" $'\t0\t1\t' $'\t30/6/8\t0'
+json_expect 'failing on-stop keeps normal post' 'length == 1 and (.[0].args[4] | contains(" ok: "))' "$fake/post.calls"
+start_task on-stop --on-stop "$t/work dir/return login"
+expect 'on-stop with a space in its path' "$(cat "$state/on-stop"),$(cat "$fake/stop.cwd")" "exit 0,$t/work dir"
 
 start_task no-report --to director@hel8
 expect 'fallback also saved in run directory' "$(cmp -s "$report" "$state/report.md" && echo same)" same
@@ -513,7 +560,7 @@ printf '1\n0\n1\n4\n' >"$fake/wait-codes"
 printf 'From: director\nSubject: next task\n\nRead this fixture message.\n' >"$fake/read-text"
 : >"$fake/post.calls"
 : >"$fake/codex.calls"
-output=$("$kit/codex-run" owner --model owner-model --effort xhigh o/fixture "$t/brief.md")
+output=$(on_stop="$t/return-login" "$kit/codex-run" owner --model owner-model --effort xhigh o/fixture "$t/brief.md")
 expect 'owner prints unit name' "$output" 'codex-owner-o-fixture'
 wait_unit codex-owner-o-fixture
 expect 'owner loop ends normally' "$(cat "$fake/codex-owner-o-fixture.ended")" 0
