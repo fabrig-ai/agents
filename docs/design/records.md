@@ -90,6 +90,9 @@ metadata by the tools. The surveys behind it are
 | `missions/<m>/README.md` | its parent, then its owner or designer | at the start; the writer keeps the front matter | the brief (section 4) |
 | `missions/<m>/progress.md` | its owner or designer | rewritten | the state, what is in flight, and the decisions with their reasons (owners.md 2) |
 | `missions/<m>/closing.md` | its owner or designer | once | the closing note (owners.md 5) |
+| `qa/decisions.md` | the director, through `qa decide` | appended | one item per choice of a commit for QA ([qa-flow.md](qa-flow.md) 7) |
+| `qa/passes/<pass>.md` | `qa watch` and the pass | at the pass's start and end | a QA pass's report, its front matter `qa watch`'s (qa-flow.md 5) |
+| `qa/triage.md` | the triager, through `qa triage` | appended | one item per routed finding (qa-flow.md 6) |
 
 Missions before 10-26 also hold `plan.md`, `decisions.md`, `m<N>.md`
 and `qa.md`: their plan, decisions, milestones and QA passes.
@@ -257,6 +260,8 @@ largest useful files and far below their journals.
 | `progress.md`; before 10-26, `plan.md`, a mission's `decisions.md`, `qa.md` | 16 KiB each |
 | `m<N>.md` | 8 KiB, and 4 KiB of table |
 | `closing.md` | 8 KiB |
+| `qa/passes/<pass>.md` | 8 KiB |
+| `qa/decisions.md`, `qa/triage.md` | 128 KiB each |
 | a mission's files together | 128 KiB |
 | `STATUS.md`, a roadmap's README | 16 KiB each |
 | `director/waiting.md` | 8 KiB, 40 items |
