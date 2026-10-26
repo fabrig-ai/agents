@@ -10,9 +10,8 @@ import re
 import runpy
 import subprocess
 import sys
-import tempfile
 import time
-from unittest.mock import patch
+import case_runner
 
 SCRIPT = Path(__file__).resolve().with_name('status-page')
 PYTHON = sys.executable
@@ -39,7 +38,7 @@ def write(path, text, mode=None, mtime=None):
 
 
 def tool(bin_dir, name, body):
-    write(bin_dir / name, f'#!{PYTHON}\nimport json, os, subprocess, sys, time\nfrom pathlib import Path\n' + body,
+    write(bin_dir / name, f'#!{PYTHON}\nimport json, os, sys\nfrom pathlib import Path\n' + body,
           mode=0o700)
 
 
@@ -208,6 +207,7 @@ if isinstance(config, dict):
 print(json.dumps(config))
 ''')
         tool(self.bin, 'claude', '''
+import time
 path = Path(os.environ['DEV_TMP']).parent
 with (path / 'claude.trace').open('a') as trace:
     trace.write(json.dumps({'argv': sys.argv[1:], 'TZ': os.environ.get('TZ')}) + '\\n')
@@ -229,7 +229,7 @@ print(json.dumps(config.get("agents", [{"name": "o/alpha-m", "kind": "background
                   {"name": "o/gone", "kind": "background", "state": "done"}])))
 ''')
         tool(self.bin, 'codex', '''
-import signal
+import signal, subprocess, time
 assert sys.argv[1:] == ['app-server'], sys.argv
 path = Path(os.environ['DEV_TMP']).parent
 config = json.loads((path / 'codex.json').read_text()) if (path / 'codex.json').exists() else {}
@@ -286,6 +286,7 @@ sys.exit(int(os.environ.get('FIXTURE_RECORD_EXIT', '0')))
         # ssh runs the collector it is sent on beta's tree, and weird answers
         # nonsense; gamma is out of reach.
         tool(self.bin, 'ssh', '''
+import subprocess
 target, command = sys.argv[-2], sys.argv[-1]
 Path(os.environ['FIXTURE_TRACE'], 'ssh-' + target).write_text(json.dumps(sys.argv[1:]))
 assert command == "bash -lc 'exec python3 -I - collect'", command
@@ -547,6 +548,8 @@ def page_recent(lab):
 
 
 def machine_ips(lab):
+    from unittest.mock import patch
+
     build = runpy.run_path(str(SCRIPT))['part_machine']
     # The optional probe's missing binary and timeout leave the other figures.
     for error in (FileNotFoundError('no ip'), subprocess.TimeoutExpired('ip', 10)):
@@ -1032,23 +1035,15 @@ def claude_resets(lab):
 CASES = [records_waits, page_waits, collect_subscriptions, page_subscriptions, subscriptions_signed_out, subscription_failures, claude_resets, collect, collect_missing, page, reason_kind, page_recent, machine_ips, page_roles, page_role_edges, page_now, page_times, page_degraded, bad_data, write_failure, install]
 
 
-def main():
-    selected = sys.argv[1:] or [case.__name__ for case in CASES]
-    unknown = set(selected) - {case.__name__ for case in CASES}
-    if unknown:
-        print('Unknown cases: ' + ', '.join(sorted(unknown)), file=sys.stderr)
-        return 2
-    failed = 0
-    for case in (case for case in CASES if case.__name__ in selected):
-        with tempfile.TemporaryDirectory() as directory:
-            try:
-                case(Lab(Path(directory)))
-                print(f'ok    {case.__name__}')
-            except Exception as error:
-                failed += 1
-                print(f'FAIL  {case.__name__}: {type(error).__name__}: {error}')
-    return 1 if failed else 0
+def run(case, directory, built):
+    case(Lab(directory))
 
 
 if __name__ == '__main__':
-    sys.exit(main())
+    names = {case.__name__ for case in CASES}
+    if sys.argv[1:2] != ['--one']:
+        unknown = set(sys.argv[1:]) - names
+        if unknown:
+            print('Unknown cases: ' + ', '.join(sorted(unknown)), file=sys.stderr)
+            sys.exit(2)
+    sys.exit(case_runner.main(__file__, CASES, run, prefix='status-page-fixture-'))
