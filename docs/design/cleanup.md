@@ -66,7 +66,7 @@ GitHub, and the sweep of the six machines' `tmp/` (section 6).
 | Path | Whose | What |
 |---|---|---|
 | `heavy/`, `logs/`, `gates/`, `landing-turn/`, `land-set/` | `heavy`, `land`, `land-set`, `tidy` | receipts, `heavy.tsv`, `tidy.log` and its lock, the gates' stamps, the landing turns, the sets' locks and state |
-| `kache/`, `lab/`, `after-landing/` | their tools | the build cache's binary, the lab's store, after-landing's worktrees and locks |
+| `kache/`, `lab/`, `after-landing/` | their tools | the build cache's binary, the lab's store, the runner's clones, state, logs and locks |
 | `post/`, `codex-run/` | `post`, `codex-run` | the mailboxes, the runs and `runs.tsv` |
 | `machine.env` | `setup` | the machine's floor and limits |
 | `owners/<m>/` | a mission's owner | its notes, handover, tasks and reports, its worktrees (`m<N>/`) and evidence, until the mission ends |

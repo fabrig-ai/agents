@@ -327,8 +327,8 @@ Receipt faults cover before publication, a fsynced temporary receipt before
 rename, and after atomic publication. The rollback case runs the previous
 generation's entrypoints, unchanged, against a drained ledger of this
 one, then section 7's way back.
-Recovery fixtures also cover after-landing's helper lookup from a relocated
-kit and real Chromium 147 receipt/cache reuse. Cancel cases cover a
+Recovery fixtures also cover real Chromium 147 receipt/cache reuse.
+`test-after-landing` proves the runner with stand-ins for heavy and post. Cancel cases cover a
 queued task (below the disk floor, then its late wrapper's refused
 replay), running build and gate scopes with a `setsid` child, every
 refusal, a waiting client's SIGINT and SIGTERM, and Ctrl-C on land.
@@ -351,8 +351,9 @@ part of this recovery fixture.
 One generation of the kit runs on every machine (the user, 10-25):
 `scripts/devel/`'s `heavy`, `heavy-recovery.py`, `land`, `land-capture.py`,
 `land-turn.py`, `gate-policy.sh`, `receipt_inputs.py`,
-`recovery_message.py`, `after-landing` and `kit.sh`, with their `test-*`
-fixtures; `scripts/infra/setup` and `kache-setup`; and the workspace files
+`recovery_message.py` and `kit.sh`, with their `test-*` fixtures;
+`after-landing`, proved by `test-after-landing` with stand-ins for heavy
+and post; `scripts/infra/setup` and `kache-setup`; and the workspace files
 in `scripts/infra/workspace/`. `setup --fix` links the tools on PATH and
 the workspace files to the primary agents checkout (agents' `AGENTS.md`),
 and each tool finds its helpers beside it, so `heavy`, `land` and their helpers

@@ -26,8 +26,7 @@
 # set and empty, none starts. Cleanup warnings do not change the result.
 #
 # land starts no tier after landing, not even a repository's
-# scripts/after-landing.sh: how one runs is still to be designed (the user,
-# 2026-10-25; landing-flow.md, 4, step 8).
+# scripts/after-landing.sh: the runner runs it (landing-flow.md, 4, step 8).
 #
 # --docs   Markdown only, or the mockups under docs/design/ (a directory
 #          named mockups), which need no build or test: check that, and
