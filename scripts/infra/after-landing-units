@@ -1,0 +1,143 @@
+# shellcheck shell=bash
+# shellcheck disable=SC2154 # setup supplies fix and bus
+# shellcheck disable=SC2015 # ok and warn always succeed
+# Sourced by setup: its caller supplies ok, warn and fail, and HOME.
+
+# Only the machine named by the director installs the runner's units.
+check_after_landing() {
+    local address_file=$HOME/.config/agents-after-landing/director
+    local unit_dir=$HOME/.config/systemd/user unit=agents-after-landing@.service
+    local director expected sibling follower name k n line=0
+    local follow_file=$HOME/.config/agents-after-landing/follow
+    local running enabled service _load active rest
+    local -a followers=(skein smith hearth jig temper) lines=() unlisted=()
+    local -A followed=() seen=()
+    local -a addresses=()
+    if [[ ! -e $address_file && ! -L $address_file ]]; then
+        ok "after-landing: not this machine's runner"
+        if systemctl --user is-active --quiet 'agents-after-landing@*.service' 2>/dev/null; then
+            warn 'after-landing: runner services active on an unassigned machine'
+        fi
+        return
+    fi
+    if ! mapfile -t addresses < "$address_file" || ((${#addresses[@]} != 1)) ||
+        [[ ! ${addresses[0]} =~ ^[A-Za-z0-9/_+.-]+@[A-Za-z0-9._-]+$ ]]; then
+        fail "after-landing: $address_file must hold one director address (NAME@MACHINE)"
+        return
+    fi
+    director=${addresses[0]}
+    if [[ -e $follow_file || -L $follow_file ]]; then
+        if [[ ! -f $follow_file || ! -r $follow_file ]] || ! mapfile -t lines < "$follow_file"; then
+            fail "after-landing: cannot read $follow_file"
+            return
+        fi
+        followers=()
+        for name in "${lines[@]}"; do
+            line=$((line + 1))
+            [[ $name =~ ^[[:space:]]*(#.*)?$ ]] && continue
+            if [[ ! $name =~ ^[a-z][a-z0-9-]*(\.([1-9][0-9]*)of([1-9][0-9]*))?$ ]]; then
+                fail "after-landing: $follow_file line $line: $name is not a follower's name"
+                return
+            fi
+            k=${BASH_REMATCH[2]} n=${BASH_REMATCH[3]}
+            # Compare decimal strings without imposing the shell's integer limit.
+            if [[ -n $k ]] && { [[ $n == 1 ]] || ((${#k} > ${#n})) ||
+                { ((${#k} == ${#n})) && [[ $k > $n ]]; }; }; then
+                fail "after-landing: $follow_file line $line: $name is not a follower's name"
+                return
+            fi
+            if [[ -v followed[$name] ]]; then
+                fail "after-landing: $follow_file line $line: $name is not a follower's name"
+                return
+            fi
+            followed[$name]=1
+            followers+=("$name")
+        done
+    else
+        for name in "${followers[@]}"; do followed[$name]=1; done
+    fi
+    # Systemd turns $$ into $ and %%%% into %% before bash expands the part.
+    expected=$(cat <<UNIT
+[Unit]
+Description=after landing's runner for %i (agents' landing-flow.md 4, step 8)
+
+[Service]
+Type=exec
+ExecStart=/bin/bash -lc 'case "\$1" in *.*) repo=\$\${1%%%%.*}; part=\$\${1#*.}; exec after-landing follow "\$\$repo" --part "\$\${part/of//}" --director "\$2";; *) exec after-landing follow "\$1" --director "\$2";; esac' after-landing %i $director
+Restart=on-failure
+RestartSec=60
+RestartPreventExitStatus=2
+
+[Install]
+WantedBy=default.target
+UNIT
+)
+    if cmp -s "$unit_dir/$unit" <(printf '%s\n' "$expected"); then
+        ok "after-landing: $unit is current"
+    elif ((!fix)); then
+        fail "after-landing: $unit is missing or differs (--fix writes it)"
+    fi
+    if ((!bus)); then
+        fail 'after-landing: no user bus; cannot check or start runner services'
+        return
+    fi
+    # list-units includes stopped loaded units; list-unit-files also finds
+    # enabled instances that are currently stopped. Only these two sets count.
+    if ! running=$(systemctl --user list-units --all --plain --no-legend 'agents-after-landing@*') ||
+        ! enabled=$(systemctl --user list-unit-files --plain --no-legend 'agents-after-landing@*'); then
+        fail 'after-landing: cannot list runner services'
+        return
+    fi
+    while read -r service _load active rest; do
+        [[ -n $service && $active != inactive && $active != failed ]] || continue
+        [[ $service == agents-after-landing@?*.service ]] || continue
+        follower=${service#agents-after-landing@}
+        follower=${follower%.service}
+        [[ -v followed[$follower] || -v seen[$follower] ]] && continue
+        seen[$follower]=1
+        unlisted+=("$follower")
+    done <<< "$running"
+    while read -r service active rest; do
+        [[ $active == enabled || $active == enabled-runtime ]] || continue
+        [[ $service == agents-after-landing@?*.service ]] || continue
+        follower=${service#agents-after-landing@}
+        follower=${follower%.service}
+        [[ -v followed[$follower] || -v seen[$follower] ]] && continue
+        seen[$follower]=1
+        unlisted+=("$follower")
+    done <<< "$enabled"
+    if ((fix)); then
+        if ! mkdir -p "$unit_dir" || ! sibling=$(mktemp "$unit_dir/$unit.XXXXXX"); then
+            fail "after-landing: cannot prepare $unit_dir/$unit"
+            return
+        fi
+        if ! printf '%s\n' "$expected" > "$sibling" || ! mv -f "$sibling" "$unit_dir/$unit"; then
+            rm -f "$sibling"
+            fail "after-landing: cannot write $unit_dir/$unit"
+            return
+        fi
+        if ! systemctl --user daemon-reload; then
+            fail 'after-landing: user daemon-reload failed'
+            return
+        fi
+    fi
+    for follower in "${unlisted[@]}"; do
+        if ((!fix)); then
+            fail "after-landing: $follower runs but is not followed here (--fix stops it)"
+        elif systemctl --user disable --now "agents-after-landing@$follower"; then
+            ok "after-landing: $follower stopped: not followed here"
+        else
+            fail "after-landing: cannot stop agents-after-landing@$follower (--fix stops it)"
+        fi
+    done
+    for follower in "${followers[@]}"; do
+        if ((fix)) && ! systemctl --user enable --now "agents-after-landing@$follower"; then
+            fail "after-landing: cannot start agents-after-landing@$follower (--fix starts it)"
+        elif systemctl --user is-enabled --quiet "agents-after-landing@$follower" &&
+            systemctl --user is-active --quiet "agents-after-landing@$follower"; then
+            ok "after-landing: $follower enabled and active"
+        else
+            fail "after-landing: $follower must be enabled and active (--fix starts it)"
+        fi
+    done
+}
