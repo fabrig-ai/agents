@@ -43,7 +43,7 @@ class Lab:
         wrapper.write_text('#!/bin/sh\n'
                            'printf "%s\\n" "$*" >>"$DEV_ROOT/git.trace"\n'
                            'case "$*" in\n'
-                           ' *fetch*) [ -z "$FAIL_FETCH" ] || case "$*" in *"$FAIL_FETCH"*) exit 7;; esac;;\n'
+                           ' *fetch*) [ -z "$FAIL_FETCH" ] || case "$*" in *"-C $DEV_ROOT/$FAIL_FETCH fetch"*) exit 7;; esac;;\n'
                            ' *push*) [ -z "$FAIL_PUSH" ] || exit 8;;\n'
                            'esac\nexec ' + shlex.quote(GIT) + ' "$@"\n')
         wrapper.chmod(0o700)
