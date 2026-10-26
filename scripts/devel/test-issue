@@ -1,6 +1,7 @@
 #!/usr/bin/env -S python3 -S
 """Offline issue fixtures, each selectable by name in a fresh Lab."""
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -24,7 +25,8 @@ os.umask(0o077)
 sys.dont_write_bytecode = True
 SCRIPT = Path(__file__).resolve().with_name('issue')
 TOOL = runpy.run_path(str(SCRIPT))
-REPO = 'fabrig-ai/agents'
+REPOS = TOOL['REPOS']
+OWNER = TOOL['OWNER']
 OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
@@ -41,10 +43,11 @@ def request(url, body=None, headers=None, method=None):
 class Forge:
     """An in-process Forgejo, including signed comment webhooks."""
     def __init__(self, token: str):
-        self.token, self.requests, self.issues = token, [], {}
+        self.token, self.requests = token, []
+        self.issues = {repo: {} for repo in REPOS}
         self.serial, self.last, self.target = 0, None, None
-        self.labels = [{'id': 2, 'name': 'other'}, {'id': 37, 'name': 'waiting-on-user'}]
-        self.error = None
+        self.labels = {repo: [{'id': n, 'name': 'waiting-on-user'}] for n, repo in enumerate(REPOS, 1)}
+        self.error, self.error_route = None, None
         forge = self
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, *args):
@@ -54,6 +57,9 @@ class Forge:
                 self.handle_api()
 
             def do_POST(self):
+                self.handle_api()
+
+            def do_PATCH(self):
                 self.handle_api()
 
             def handle_api(self):
@@ -67,19 +73,46 @@ class Forge:
                 status, result = 200, None
                 if not authorized:
                     status, result = 401, {'message': 'bad credentials'}
-                elif forge.error:
+                elif forge.error and (forge.error_route is None or forge.error_route == (self.command, parsed.path)):
                     status, result = forge.error
-                elif self.command == 'GET' and parsed.path == f'/api/v1/repos/{REPO}/labels':
-                    page = int(query.get('page', ['1'])[0])
-                    result = forge.labels[(page - 1) * 50:page * 50]
-                elif self.command == 'POST' and parsed.path == f'/api/v1/repos/{REPO}/issues':
-                    number = len(forge.issues) + 1
-                    result = dict(body, number=number, html_url=f'{forge.url}/{REPO}/issues/{number}',
-                                  state='open', user={'login': 'fabrig-agents'})
-                    forge.issues[number] = result
-                    status = 201
                 else:
-                    status, result = 404, {'message': 'unknown route'}
+                    parts = parsed.path.split('/')
+                    repo = parts[5] if len(parts) > 6 and parts[:5] == ['', 'api', 'v1', 'repos', OWNER] else None
+                    tail = '/'.join(parts[6:])
+                    if repo not in REPOS:
+                        status, result = 404, {'message': 'unknown repository'}
+                    elif self.command == 'GET' and tail == 'labels':
+                        page = int(query.get('page', ['1'])[0])
+                        result = forge.labels[repo][(page - 1) * 50:page * 50]
+                    elif self.command == 'POST' and tail == 'issues':
+                        result = forge.add(repo, **body)
+                        status = 201
+                    elif self.command == 'GET' and tail == 'issues':
+                        assert query['state'] == ['open'] and query['type'] == ['issues']
+                        assert query['labels'] == ['waiting-on-user'] and query['limit'] == ['50']
+                        rows = [r for r in forge.issues[repo].values() if r['state'] == 'open'
+                                and not r.get('pull_request') and forge.labels[repo][0]['id'] in r['labels']]
+                        page = int(query['page'][0])
+                        result = sorted(rows, key=lambda r: -r['number'])[(page - 1) * 50:page * 50]
+                    elif tail.startswith('issues/'):
+                        number = int(parts[7])
+                        issue = forge.issues[repo].get(number)
+                        if issue is None:
+                            status, result = 404, {'message': 'missing issue'}
+                        elif self.command == 'GET' and len(parts) == 8:
+                            result = issue
+                        elif self.command == 'POST' and parts[8:] == ['comments']:
+                            comments = issue.setdefault('comments', [])
+                            result = dict(body, html_url=issue['html_url'] + f'#issuecomment-{len(comments) + 1}')
+                            comments.append(result)
+                            status = 201
+                        elif self.command == 'PATCH' and len(parts) == 8:
+                            issue.update(body)
+                            result = issue
+                        else:
+                            status, result = 404, {'message': 'unknown route'}
+                    else:
+                        status, result = 404, {'message': 'unknown route'}
                 data = json.dumps(result).encode()
                 self.send_response(status)
                 self.send_header('Content-Type', 'application/json')
@@ -91,16 +124,26 @@ class Forge:
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
 
+    def add(self, repo, **fields):
+        number = len(self.issues[repo]) + 1
+        row = dict(number=number, html_url=f'{self.url}/{OWNER}/{repo}/issues/{number}',
+                   state='open', user={'login': 'fabrig-agents'},
+                   created_at=(datetime.now(timezone.utc) - timedelta(minutes=45)).isoformat(),
+                   labels=[REPOS.index(repo) + 1], title='Choose', body='No marker')
+        row.update(fields)
+        self.issues[repo][number] = row
+        return row
+
     def hook(self, url: str, secret: str):
         self.target, self.secret = url, secret
 
     def comment(self, number: int, author: str, text: str, *, secret: str | None = None,
-                event: str = 'issue_comment') -> int:
+                event: str = 'issue_comment', repo='temper') -> int:
         self.serial += 1
-        self.last = dict(action='created', issue=dict(self.issues[number]),
-                         comment=dict(id=self.serial, html_url=f'{self.url}/{REPO}/issues/{number}#issuecomment-{self.serial}',
+        self.last = dict(action='created', issue=dict(self.issues[repo][number]),
+                         comment=dict(id=self.serial, html_url=f'{self.url}/{OWNER}/{repo}/issues/{number}#issuecomment-{self.serial}',
                                       body=text, user={'login': author}),
-                         repository={'full_name': REPO}, sender={'login': author}, is_pull=False)
+                         repository={'full_name': f'{OWNER}/{repo}'}, sender={'login': author}, is_pull=False)
         return self.emit(self.last, secret=secret, event=event)
 
     def emit(self, payload, *, secret=None, event='issue_comment', gitea=False):
@@ -131,10 +174,30 @@ policy = json.loads((root / 'exits.json').read_text())
 code, line = policy.get(address, [0, 'fixture-id waiting'])
 path = root / 'posts' / (str(time.time_ns()) + '.json')
 staged = path.with_suffix('.tmp')
-staged.write_text(json.dumps(dict(argv=args, stdin=sys.stdin.read())))
+progress = {p.name: json.loads(p.read_text())['tried']
+            for p in (root / 'state/issue-router/new').glob('*.json')}
+staged.write_text(json.dumps(dict(argv=args, stdin=sys.stdin.read(), progress=progress)))
 staged.rename(path)
 print(line)
 sys.exit(code)
+'''
+
+
+RECORD = '''import json, os, sys
+from pathlib import Path
+root = Path(os.environ['ISSUE_LAB'])
+assert sys.argv[1:] == ['pull']
+assert sys.stdin.read() == ''
+with (root / 'record-calls').open('a') as log:
+    log.write('pull\\n')
+policy = root / 'pull.json'
+if policy.exists():
+    for mission, owner in json.loads(policy.read_text()).items():
+        path = Path(os.environ['RECORDS']) / 'missions' / mission / 'README.md'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('---\\nowner: ' + owner + '\\nparent: unknown\\n---\\n')
+code = root / 'pull-exit'
+sys.exit(int(code.read_text()) if code.exists() else 0)
 '''
 
 
@@ -152,9 +215,12 @@ class Lab:
             path = self.tmp / 'git-fabrig' / name
             path.write_text(value + '\n')
             path.chmod(0o600)
-        (self.records / 'missions/fixture/README.md').write_text('---\nparent: director@hel8\n---\nFixture.\n')
+        for mission, repo in [('fixture', 'temper'), ('tooling', 'agents')]:
+            self.readme(mission, repo=repo)
         (self.bin / 'post').write_text(f'#!{sys.executable} -S\n' + POST)
         (self.bin / 'post').chmod(0o700)
+        (self.bin / 'record').write_text(f'#!{sys.executable} -S\n' + RECORD)
+        (self.bin / 'record').chmod(0o700)
         (root / 'exits.json').write_text('{}')
         self.file = root / 'question.md'
         self.file.write_text('Which cache should we use?\n\n  \n')
@@ -164,6 +230,11 @@ class Lab:
                         XDG_STATE_HOME=str(self.state), XDG_CONFIG_HOME=str(root / 'config'),
                         ISSUE_FORGE=self.forge.url, ISSUE_LAB=str(root), LC_ALL='C.UTF-8')
         self.spool = self.state / 'issue-router'
+
+    def readme(self, mission, repo='agents', owner='o/fixture@m1', parent='director@hel8'):
+        path = self.records / 'missions' / mission / 'README.md'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f'---\nfeature: {repo} docs/x.md\nowner: {owner}\nparent: {parent}\n---\nFixture.\n')
 
     def safe(self, value):
         for secret in (self.token, self.secret):
@@ -180,11 +251,11 @@ class Lab:
         return output
 
     @contextmanager
-    def router(self):
+    def router(self, *args):
         log = self.root / f'router-{len(self.logs)}.log'
         self.logs.append(log)
         with log.open('w') as err:
-            proc = subprocess.Popen([str(SCRIPT), 'serve', '--listen', '127.0.0.1:0'], env=self.env,
+            proc = subprocess.Popen([str(SCRIPT), 'serve', '--listen', '127.0.0.1:0', *args], env=self.env,
                                     stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=err, text=True)
             try:
                 with selectors.DefaultSelector() as poll:
@@ -223,8 +294,8 @@ class Lab:
             assert time.monotonic() < until, (count, paths)
             time.sleep(.02)
 
-    def settled(self, comment, state='done'):
-        path = self.spool / state / f'{comment}.json'
+    def settled(self, comment, state='done', repo='temper'):
+        path = self.spool / state / f'{repo}-{comment}.json'
         until = time.monotonic() + 10
         while not path.exists():
             assert time.monotonic() < until, path
@@ -232,7 +303,7 @@ class Lab:
         return json.loads(path.read_text())
 
     def open(self):
-        return self.run('open', 'Pick a cache server', self.file)
+        return self.run('open', '--public', 'Pick a cache server', self.file)
 
     def close(self):
         self.forge.close()
@@ -241,74 +312,271 @@ class Lab:
             self.safe(path.read_text())
 
 
-def open_files_an_issue_with_its_label_and_asker(lab):
-    assert lab.open() == f'#1 {lab.forge.url}/{REPO}/issues/1\n'
-    issue = lab.forge.issues[1]
-    assert issue['title'] == 'Pick a cache server' and issue['labels'] == [37], issue
+def open_files_an_issue_in_the_missions_repository(lab):
+    output = lab.run('open', 'Pick a cache server', lab.file, extra={'POST_NAME': 'o/tooling'})
+    assert output == f'agents#1 {lab.forge.url}/{OWNER}/agents/issues/1\n'
+    issue = lab.forge.issues['agents'][1]
+    assert issue['title'] == 'Pick a cache server' and issue['labels'] == [1], issue
     assert issue['body'] == ('Which cache should we use?\n\n---\n'
-                             'Asked by `o/fixture@m1` for the mission `fixture`. Your comment here '
+                             'Asked for the mission `tooling`. Your comment here '
                              'reaches it by post, and it closes the issue.\n'
-                             '<!-- waiting-on-user asker=o/fixture@m1 mission=fixture parent=director@hel8 -->')
+                             '<!-- waiting-on-user mission=tooling -->')
+    assert all(word not in issue['body'] for word in ('@', 'm1', 'hel8'))
     assert len(lab.forge.requests) == 2
     assert all(row['authorized'] for row in lab.forge.requests)
-    lab.safe(lab.forge.requests)
+
+
+def a_public_repository_needs_the_askers_word(lab):
+    assert "issue: temper's issues are public: write the text for anyone, then pass --public" in lab.run(
+        'open', 'Question', lab.file, status=2)
+    assert lab.forge.requests == []
+    assert lab.open() == f'temper#1 {lab.forge.url}/{OWNER}/temper/issues/1 public\n'
+    assert lab.forge.issues['temper'][1]['labels'] == [6]
+    assert lab.run('open', '--repo', 'qa', 'Question', lab.file).startswith('qa#1 ')
+    lab.run('open', '--repo', 'nope', 'Question', lab.file, status=2)
+    for repo in ('skein', 'smith', 'jig', 'hearth'):
+        before = len(lab.forge.requests)
+        lab.run('open', '--repo', repo, 'Question', lab.file, status=2)
+        assert len(lab.forge.requests) == before
+        assert lab.run('open', '--repo', repo, '--public', 'Question', lab.file).endswith(' public\n')
+        assert lab.forge.issues[repo][1]['labels'] == [REPOS.index(repo) + 1]
 
 
 def open_names_who_asks(lab):
-    lab.run('open', '--as', 'director', 'Director asks', lab.file)
-    body = lab.forge.issues[1]['body']
-    assert body.endswith('<!-- waiting-on-user asker=director@m1 -->')
-    assert 'for the mission' not in body
-    lab.run('open', '--as', 'o/x@hetzner5', '--mission', 'other', 'Other asks', lab.file)
-    assert lab.forge.issues[2]['body'].endswith('<!-- waiting-on-user asker=o/x@hetzner5 mission=other -->')
+    lab.run('open', 'Director asks', lab.file, extra={'POST_NAME': 'director'})
+    assert lab.forge.issues['agents'][1]['body'].endswith('<!-- waiting-on-user director -->')
+    lab.run('open', '--mission', 'other', 'Other asks', lab.file)
+    assert lab.forge.issues['agents'][2]['body'].endswith('<!-- waiting-on-user mission=other -->')
+    lab.run('open', 'Question', lab.file, status=2, extra={'POST_NAME': ''})
+    lab.run('open', '--mission', 'Bad', 'Question', lab.file, status=2)
+    lab.run('open', 'Question', lab.file, status=2, extra={'POST_NAME': 'fixture'})
+    lab.run('open', '--as', 'director', 'Question', lab.file, status=2)
+    for feature in ('unknown', 'none', 'not-a-repo'):
+        lab.readme('fallback', repo=feature)
+        assert lab.run('open', '--mission', 'fallback', 'Question', lab.file).startswith('agents#')
+    lab.run('open', 'Designer asks', lab.file, extra={'POST_NAME': 'design/under_score'})
+    assert lab.forge.issues['agents'][6]['body'].endswith('mission=under_score -->')
+    read = TOOL['read_marker']
+    assert read('<!-- waiting-on-user mission=fixture -->\n<!-- waiting-on-user director -->') == 'director'
+    assert read('<!-- waiting-on-user mission=fixture -->\n<!-- waiting-on-user mission=Bad -->') is None
+    assert read('<!-- waiting-on-user asker=o/fixture@m1 -->') is None
 
 
-def a_user_comment_reaches_the_asker_by_post(lab):
+def list_shows_the_askers_open_issues(lab):
+    marker = TOOL['write_marker']
+    lab.forge.add('agents', body=marker('fixture'))
+    lab.forge.add('agents', body=marker('tooling'))
+    lab.forge.add('agents', body=marker('fixture'), state='closed')
+    lab.forge.add('temper', body=marker('fixture'))
+    lab.forge.add('temper')
+    lab.forge.add('temper', labels=[])
+    lab.forge.add('temper', pull_request={'url': 'pull'})
+    rows = [line.split('\t') for line in lab.run('list').splitlines()]
+    assert [row[0] for row in rows] == ['agents#1', 'temper#1'], rows
+    assert all(row[1:4] == ['45m', 'fixture', 'Choose'] and row[4].startswith(lab.forge.url) for row in rows)
+    rows = [line.split('\t') for line in lab.run('list', '--all').splitlines()]
+    assert [row[0] for row in rows] == ['agents#1', 'agents#2', 'temper#1', 'temper#2']
+    assert rows[-1][2] == '-'
+    assert lab.run('list', '--mission', 'tooling').startswith('agents#2\t')
+    assert lab.run('list', '--mission', 'absent') == ''
+    for repo in REPOS:
+        lab.forge.issues[repo].clear()
+    for _ in range(51):
+        lab.forge.add('qa')
+    assert len(lab.run('list', '--all').splitlines()) == 51
+    assert lab.forge.requests[-1]['query']['page'] == ['2']
+    now = datetime.now(timezone.utc)
+    for minutes, expected in [(0, '0m'), (119, '119m'), (120, '2h'), (2879, '47h'), (2880, '2d')]:
+        assert TOOL['age']((now - timedelta(minutes=minutes)).isoformat(), now) == expected
+
+
+def comment_and_close_take_only_the_askers_own(lab):
+    marker = TOOL['write_marker']
+    lab.forge.add('agents', body=marker('tooling'))
+    lab.forge.add('agents')
+    lab.forge.add('agents', body=marker('fixture'))
+    lab.forge.add('agents', body=marker('fixture'), pull_request={'url': 'pull'})
+    for command in ('comment', 'close'):
+        for number in (1, 2, 4):
+            before = len(lab.forge.requests)
+            output = lab.run(command, f'agents#{number}', lab.file, status=2)
+            assert len(lab.forge.requests) == before + 1
+            assert lab.forge.requests[-1]['method'] == 'GET'
+            assert ('asked by tooling, not fixture' if number == 1 else "has no asker's marker" if number == 2 else 'pull request') in output
+        for bad in ('agents#x', 'nope#1', 'agents#0', 'agents#-1', '#1', 'agents#١', 'agents#' + '9' * 5000):
+            before = len(lab.forge.requests)
+            lab.run(command, bad, lab.file, status=2)
+            assert len(lab.forge.requests) == before
+    assert lab.run('comment', 'agents#3', lab.file) == f'agents#3 {lab.forge.url}/{OWNER}/agents/issues/3#issuecomment-1\n'
+    assert lab.run('close', 'agents#3', lab.file) == 'agents#3 closed\n'
+    own = lab.forge.issues['agents'][3]
+    assert [c['body'] for c in own['comments']] == [lab.file.read_text()] * 2
+    assert own['state'] == 'closed'
+    before = len(lab.forge.requests)
+    assert lab.run('close', 'agents#3') == 'agents#3 was closed already\n'
+    assert len(lab.forge.requests) == before + 1
+    assert lab.run('close', '--mission', 'tooling', 'agents#1') == 'agents#1 closed\n'
+    lab.forge.add('temper', body=marker('fixture'))
+    lab.run('comment', 'temper#1', lab.file)
+    for command in ('comment', 'close'):
+        for data in (b'\xff', b'x' * (60 * 1024 + 1), b'<!-- waiting-on-user director -->'):
+            lab.file.write_bytes(data)
+            before = len(lab.forge.requests)
+            lab.run(command, 'temper#1', lab.file, status=2)
+            assert len(lab.forge.requests) == before + 1
+        lab.run(command, 'temper#1', lab.root, status=2)
+    assert lab.forge.issues['temper'][1]['state'] == 'open'
+    lab.file.write_text('valid')
+    lab.forge.error = (500, {'message': 'comment failed'})
+    lab.forge.error_route = ('POST', f'/api/v1/repos/{OWNER}/temper/issues/1/comments')
+    before = len(lab.forge.requests)
+    lab.run('close', 'temper#1', lab.file, status=1)
+    assert [r['method'] for r in lab.forge.requests[before:]] == ['GET', 'POST']
+    assert lab.forge.issues['temper'][1]['state'] == 'open'
+    lab.forge.error_route = ('PATCH', f'/api/v1/repos/{OWNER}/temper/issues/1')
+    before = len(lab.forge.requests)
+    lab.run('close', 'temper#1', status=1)
+    assert [r['method'] for r in lab.forge.requests[before:]] == ['GET', 'PATCH']
+    assert lab.forge.issues['temper'][1]['state'] == 'open'
+
+
+def a_user_comment_reaches_the_missions_owner(lab):
     lab.open()
     with lab.router() as url:
         lab.forge.hook(url, lab.secret)
         assert lab.forge.comment(1, 'free', 'Try the second cache.\nKeep the first as spare.') == 204
         sent, = lab.posts(1)
-        assert sent['argv'] == ['send', '--as', 'issues', 'o/fixture@m1', '#1 free replied: Pick a cache server']
-        assert sent['stdin'] == (f'free on #1, {lab.forge.last["comment"]["html_url"]}:\n\n'
+        assert sent['argv'] == ['send', '--as', 'issues', 'o/fixture@m1', 'temper#1 free replied: Pick a cache server']
+        assert sent['stdin'] == (f'free on temper#1, {lab.forge.last["comment"]["html_url"]}:\n\n'
                                  'Try the second cache.\nKeep the first as spare.\n\n'
-                                 'Answer there with `issue comment 1 FILE`, and close it with `issue close 1` once done.\n')
+                                 'Answer there with `issue comment temper#1 FILE`, and close it with `issue close temper#1` once done.\n')
         row = lab.settled(1)
         assert row['attempts'] == 0 and row['received'].endswith('Z')
+        assert row['tried'] == [dict(recipient='o/fixture@m1', exit=0, line='fixture-id waiting')]
         assert not list((lab.spool / 'new').iterdir())
     assert 'Try the second cache' not in lab.logs[0].read_text()
 
 
-def a_gone_asker_falls_back_to_its_parent(lab):
+def a_gone_owner_falls_back_to_its_parent(lab):
     lab.open()
     lab.exits('o/fixture@m1', 3, 'queued, nobody will wake it: stopped')
     with lab.router() as url:
         lab.forge.hook(url, lab.secret)
         assert lab.forge.comment(1, 'free', 'Use the second.') == 204
         sent = lab.posts(2)
-        lab.settled(1)
+        row = lab.settled(1)
         assert [p['argv'][3] for p in sent] == ['o/fixture@m1', 'director@hel8']
+        assert [r['exit'] for r in row['tried']] == [3, 0]
+        assert sent[1]['progress']['temper-1.json'] == row['tried'][:1]
         assert sent[1]['stdin'].splitlines()[0] == ('For o/fixture@m1, whom post could not wake: '
                                                    'queued, nobody will wake it: stopped.')
         assert len(lab.posts(0)) == 2
+        lab.readme('fixture', repo='temper', owner='unknown')
+        lab.exits('director@hel8', 3, 'parent stopped')
+        assert lab.forge.comment(1, 'free', 'Another answer') == 204
+        lab.settled(2)
+        sent = lab.posts(4)
+        assert [p['argv'][3] for p in sent[2:]] == ['director@hel8', 'director@m1']
+        assert sent[-1]['stdin'].startswith('For fixture, whom post could not wake: parent stopped.')
 
 
-def the_router_routes_only_signed_comments_of_people(lab):
+def the_router_routes_only_the_users_comments_on_the_tools_issues(lab):
     lab.open()
     with lab.router() as url:
         lab.forge.hook(url, lab.secret)
-        for bot in ('fabrig-agents', 'fabrig-director'):
-            assert lab.forge.comment(1, bot, 'ignored') == 204
+        for author in ('fabrig-agents', 'fabrig-director', 'mallory'):
+            assert lab.forge.comment(1, author, 'ignored') == 204
+        lab.forge.issues['temper'][1]['user']['login'] = 'mallory'
+        assert lab.forge.comment(1, 'free', 'forged marker') == 204
+        lab.forge.issues['temper'][1]['user']['login'] = 'fabrig-agents'
+        payload = dict(lab.forge.last, repository={'full_name': 'fabrig-ai/elsewhere'})
+        assert lab.forge.emit(payload) == 204
         assert lab.forge.comment(1, 'free', 'wrong signature', secret='wrong') == 403
         assert lab.forge.comment(1, 'free', 'other event', event='issues') == 204
-        body = lab.forge.issues[1]['body']
-        lab.forge.issues[1]['body'] = 'No marker.'
+        body = lab.forge.issues['temper'][1]['body']
+        lab.forge.issues['temper'][1]['body'] = 'No marker.'
         assert lab.forge.comment(1, 'free', 'no asker') == 204
-        lab.forge.issues[1]['body'] = body
+        lab.forge.issues['temper'][1]['body'] = body
         assert lab.posts(0) == []
         assert lab.forge.comment(1, 'free', 'The answer.') == 204
         lab.settled(lab.forge.serial)
         assert len(lab.posts(1)) == 1
+    with lab.router('--route', 'fabrig-director', '--route', 'proof') as url:
+        lab.forge.hook(url, lab.secret)
+        assert lab.forge.comment(1, 'fabrig-agents', 'ignored') == 204
+        assert lab.forge.comment(1, 'fabrig-director', 'proof') == 204
+        lab.settled(lab.forge.serial)
+        assert lab.forge.comment(1, 'proof', 'proof') == 204
+        lab.settled(lab.forge.serial)
+        assert len(lab.posts(3)) == 3
+
+
+def the_owner_is_found_after_a_pull(lab):
+    lab.run('open', '--mission', 'late', 'Question', lab.file)
+    (lab.root / 'pull.json').write_text(json.dumps({'late': 'o/late@m2'}))
+    with lab.router() as url:
+        lab.forge.hook(url, lab.secret)
+        assert lab.forge.comment(1, 'free', 'Answer', repo='agents') == 204
+        lab.settled(1, repo='agents')
+        assert lab.posts(1)[0]['argv'][3] == 'o/late@m2'
+        assert (lab.root / 'record-calls').read_text() == 'pull\n'
+        lab.run('open', '--mission', 'missing', 'Question', lab.file)
+        (lab.root / 'pull-exit').write_text('7')
+        assert lab.forge.comment(2, 'free', 'Answer', repo='agents') == 204
+        lab.settled(2, repo='agents')
+        assert lab.posts(2)[1]['argv'][3] == 'director@m1'
+        assert (lab.root / 'record-calls').read_text() == 'pull\npull\n'
+    assert 'record pull exited 7' in lab.logs[0].read_text()
+    for owner, parent, expected in [('unknown', 'unknown', ['director@m1']),
+                                     ('unknown', 'director@hel8', ['director@hel8', 'director@m1']),
+                                     ('director@m1', 'director@m1', ['director@m1'])]:
+        lab.readme('chain', owner=owner, parent=parent)
+        with patch.dict(os.environ, lab.env, clear=True):
+            assert TOOL['chain'](TOOL['Paths'](), 'chain') == expected
+    with patch.dict(os.environ, lab.env, clear=True):
+        assert TOOL['chain'](TOOL['Paths'](), 'director') == ['director@m1']
+
+
+def a_restart_resumes_the_chain_after_the_last_tried(lab):
+    with patch.dict(os.environ, lab.env, clear=True):
+        router = TOOL['Router'](TOOL['Paths']())
+        item = TOOL['Reply'](1, 1, 'Question', 'http://127.0.0.1/comment', 'free', 'Answer', 'fixture', 'temper')
+        router.enqueue(item)
+        path = lab.spool / 'new/temper-1.json'
+        row = json.loads(path.read_text())
+        row['tried'] = [dict(recipient='o/fixture@m1', exit=3, line='stopped')]
+        TOOL['atomic_json'](lab.spool / 'tmp', path, row)
+    with lab.router():
+        row = lab.settled(1)
+    sent, = lab.posts(1)
+    assert sent['argv'][3] == 'director@hel8'
+    assert sent['stdin'].startswith('For o/fixture@m1, whom post could not wake: stopped.')
+    assert [r['recipient'] for r in row['tried']] == ['o/fixture@m1', 'director@hel8']
+    # A transient parent failure retries the parent, without repeating the owner.
+    with patch.dict(os.environ, lab.env, clear=True):
+        item = TOOL['Reply'](2, 1, 'Question', 'http://127.0.0.1/comment', 'free', 'Answer', 'fixture', 'temper')
+        router.enqueue(item)
+        path = lab.spool / 'new/temper-2.json'
+        row = json.loads(path.read_text())
+        row['attempts'] = 1
+        row['tried'] = [dict(recipient='o/fixture@m1', exit=3, line='stopped'),
+                        dict(recipient='director@hel8', exit=7, line='temporary')]
+        TOOL['atomic_json'](lab.spool / 'tmp', path, row)
+    with lab.router():
+        row = lab.settled(2)
+    assert lab.posts(2)[-1]['argv'][3] == 'director@hel8'
+    assert [r['exit'] for r in row['tried']] == [3, 7, 0]
+    # A saved success is finalized without calling post again.
+    with patch.dict(os.environ, lab.env, clear=True):
+        item = TOOL['Reply'](3, 1, 'Question', 'http://127.0.0.1/comment', 'free', 'Answer', 'fixture', 'temper')
+        router.enqueue(item)
+        path = lab.spool / 'new/temper-3.json'
+        row = json.loads(path.read_text())
+        row['tried'] = [dict(recipient='o/fixture@m1', exit=0, line='waiting')]
+        TOOL['atomic_json'](lab.spool / 'tmp', path, row)
+    with lab.router():
+        lab.settled(3)
+        assert len(lab.posts(0)) == 2
 
 
 def a_redelivered_comment_posts_once(lab):
@@ -325,41 +593,53 @@ def a_redelivered_comment_posts_once(lab):
         lab.forge.hook(url, lab.secret)
         assert lab.forge.redeliver() == 204
         assert len(lab.posts(0)) == 1
+        # The same comment id in another repository is a different delivery.
+        lab.run('open', '--mission', 'tooling', 'Other repository', lab.file)
+        lab.forge.serial = 0
+        assert lab.forge.comment(1, 'free', 'Another answer', repo='agents') == 204
+        lab.settled(1, repo='agents')
+        assert len(lab.posts(2)) == 2
+        assert lab.forge.redeliver() == 204
+        assert len(lab.posts(0)) == 2
 
 
 def open_validates_input_and_reports_forge_failures(lab):
     for title in ('', 'x' * 201, 'line\nbreak', 'control\x7f'):
         lab.run('open', title, lab.file, status=2)
     lab.run('open', 'valid', lab.file, status=2, extra={'POST_NAME': ''})
-    lab.run('open', '--as', '../bad', 'valid', lab.file, status=2)
     lab.run('open', '--mission', '../bad', 'valid', lab.file, status=2)
+    lab.run('open', '--mission', 'Bad', 'valid', lab.file, status=2)
     lab.run('open', 'valid', lab.root, status=2)
     for data in (b'\xff', b'x' * (60 * 1024 + 1), b'<!-- waiting-on-user spoof -->'):
         lab.file.write_bytes(data)
-        lab.run('open', 'valid', lab.file, status=2)
+        lab.run('open', '--public', 'valid', lab.file, status=2)
     lab.file.write_text('A question.')
     assert lab.forge.requests == []
-    lab.forge.labels = [{'id': n + 100, 'name': f'other-{n}'} for n in range(50)] + lab.forge.labels
+    lab.forge.labels['temper'] = [{'id': n + 100, 'name': f'other-{n}'} for n in range(50)] + lab.forge.labels['temper']
     lab.open()
     assert [r['query']['page'] for r in lab.forge.requests[:2]] == [['1'], ['2']]
-    lab.forge.labels = []
-    assert f'issue: no label waiting-on-user on {REPO}' in lab.run('open', 'valid', lab.file, status=1)
+    lab.forge.labels['temper'] = []
+    assert 'issue: no label waiting-on-user on fabrig-ai/temper' in lab.run('open', '--public', 'valid', lab.file, status=1)
     lab.forge.error = (404, {'message': 'missing ' + lab.token + 'x' * 300})
-    output = lab.run('open', 'valid', lab.file, status=1)
+    output = lab.run('open', '--public', 'valid', lab.file, status=1)
     assert 'issue: the forge answered 404: missing [redacted]' in output
     assert len(output.strip().split(': ', 2)[-1]) <= 200
     lab.forge.error = None
     token = lab.tmp / 'git-fabrig/agents-issues.token'
     token.write_text('wrong')
-    assert 'the forge answered 401: bad credentials' in lab.run('open', 'valid', lab.file, status=1)
+    assert 'the forge answered 401: bad credentials' in lab.run('open', '--public', 'valid', lab.file, status=1)
     for remove in (False, True):
         token.unlink() if remove else token.write_text('  ')
-        assert f'no token at {token}' in lab.run('open', 'valid', lab.file, status=2)
+        assert f'no token at {token}' in lab.run('open', '--public', 'valid', lab.file, status=2)
 
 
 def webhook_boundaries_reject_bad_requests(lab):
     lab.open()
     lab.run('serve', '--listen', '0.0.0.0:0', status=2)
+    machines = lab.tmp / 'post/machines'
+    machines.write_text('m1 elsewhere\n')
+    assert 'must name one local machine' in lab.run('serve', status=2)
+    machines.write_text('m1 local\nhel8 fixture@invalid\n')
     with lab.router() as url:
         lab.forge.hook(url, lab.secret)
         assert request(url, method='GET')[0] == 405
@@ -389,16 +669,16 @@ def retries_restart_and_exhausted_chains_are_recorded(lab):
     # Exercise worker retries through real child posts, without waiting 60 seconds.
     with patch.dict(os.environ, lab.env, clear=True):
         router = TOOL['Router'](TOOL['Paths']())
-        asker = TOOL['Asker']('o/fixture@m1', 'fixture', 'director@hel8')
+        asker = 'fixture'
         item = TOOL['Reply'](1, 1, 'Cache\nchoice', 'http://127.0.0.1/comment', 'free',
-                             '\n'.join('x' * 400 for _ in range(14)), asker)
-        lab.exits(asker.address, 7, 'temporary failure')
+                             '\n'.join('x' * 400 for _ in range(14)), asker, 'temper')
+        lab.exits('o/fixture@m1', 7, 'temporary failure')
         assert router.enqueue(item) == 'spooled'
         worker = threading.Thread(target=router.worker)
         worker.start()
         try:
             for attempt in range(1, 6):
-                path = lab.spool / ('failed' if attempt == 5 else 'new') / '1.json'
+                path = lab.spool / ('failed' if attempt == 5 else 'new') / 'temper-1.json'
                 until = time.monotonic() + 10
                 while True:
                     if path.exists() and json.loads(path.read_text())['attempts'] == attempt:
@@ -414,10 +694,10 @@ def retries_restart_and_exhausted_chains_are_recorded(lab):
             worker.join(timeout=5)
             assert not worker.is_alive()
         # A startup worker discovers a reply spooled before the server starts.
-        lab.exits(asker.address, 3, 'queued but stopped')
+        lab.exits('o/fixture@m1', 3, 'queued but stopped')
         lab.exits('director@hel8', 2, 'no route')
         lab.exits('director@m1', 3, 'queued but stopped')
-        router.enqueue(TOOL['Reply'](2, 1, item.title, item.url, item.author, item.text, asker))
+        router.enqueue(TOOL['Reply'](2, 1, item.title, item.url, item.author, item.text, asker, 'temper'))
     with lab.router():
         lab.settled(2)
     sent = lab.posts(8)
@@ -429,18 +709,25 @@ def retries_restart_and_exhausted_chains_are_recorded(lab):
     with patch.dict(os.environ, lab.env, clear=True):
         router = TOOL['Router'](TOOL['Paths']())
         lab.exits('director@m1', 2, 'not delivered')
-        assert router.deliver(item) == 'failed'
+        failed = TOOL['Reply'](3, 1, item.title, item.url, item.author, item.text, asker, 'temper')
+        router.enqueue(failed)
+        path = lab.spool / 'new/temper-3.json'
+        assert router.deliver(failed, json.loads(path.read_text()), path) == 'failed'
         # Each address is tried once even when asker, parent and director coincide.
         lab.exits('director@m1', 0, 'waiting')
-        duplicate = TOOL['Reply'](3, 1, 'title', item.url, 'free', 'answer',
-                                   TOOL['Asker']('director@m1', None, 'director@m1'))
-        assert router.deliver(duplicate) == 'done'
+        lab.readme('duplicate', owner='director@m1', parent='director@m1')
+        duplicate = TOOL['Reply'](4, 1, 'title', item.url, 'free', 'answer', 'duplicate', 'temper')
+        router.enqueue(duplicate)
+        path = lab.spool / 'new/temper-4.json'
+        assert router.deliver(duplicate, json.loads(path.read_text()), path) == 'done'
     assert len(lab.posts(12)) == 12
 
 
-CASES = (open_files_an_issue_with_its_label_and_asker, open_names_who_asks,
-         a_user_comment_reaches_the_asker_by_post, a_gone_asker_falls_back_to_its_parent,
-         the_router_routes_only_signed_comments_of_people, a_redelivered_comment_posts_once,
+CASES = (open_files_an_issue_in_the_missions_repository, a_public_repository_needs_the_askers_word,
+         open_names_who_asks, list_shows_the_askers_open_issues, comment_and_close_take_only_the_askers_own,
+         a_user_comment_reaches_the_missions_owner, a_gone_owner_falls_back_to_its_parent,
+         the_router_routes_only_the_users_comments_on_the_tools_issues, the_owner_is_found_after_a_pull,
+         a_restart_resumes_the_chain_after_the_last_tried, a_redelivered_comment_posts_once,
          open_validates_input_and_reports_forge_failures, webhook_boundaries_reject_bad_requests,
          retries_restart_and_exhausted_chains_are_recorded)
 

@@ -1,10 +1,9 @@
 #!/usr/bin/env -S python3 -S
-"""issue open [--as WHO] [--mission M] TITLE FILE
-issue list [--as WHO] [--all]
-issue comment [--as WHO] NUMBER FILE
-issue close [--as WHO] NUMBER [FILE]
-issue serve [--listen HOST:PORT]
-issue install [--listen HOST:PORT]
+"""issue open [--mission M] [--repo R] [--public] TITLE FILE
+issue list [--mission M] [--all]
+issue comment [--mission M] REPO#NUMBER FILE
+issue close [--mission M] REPO#NUMBER [FILE]
+issue serve [--listen HOST:PORT] [--route LOGIN]
 """
 import argparse
 from dataclasses import asdict, dataclass
@@ -30,17 +29,20 @@ import urllib.request
 
 os.umask(0o077)
 FORGE = 'https://git.fabrig.ai'  # ISSUE_FORGE overrides it (fixtures).
-REPO = 'fabrig-ai/agents'  # The repository whose issues are routed.
+OWNER = 'fabrig-ai'
+REPOS = ('agents', 'skein', 'smith', 'jig', 'hearth', 'temper', 'qa')
+PRIVATE = ('agents', 'qa')
 LABEL = 'waiting-on-user'  # The label applied to each new question.
-BOTS = ('fabrig-agents', 'fabrig-director')  # Their comments are never routed.
+TOOL = 'fabrig-agents'
+PEOPLE = ('free',)
 SENDER = 'issues'  # The router's post name.
 LISTEN = '127.0.0.1:8391'  # The default loopback webhook listener.
 # Copied from scripts/devel/post: name_pattern, machine_pattern, valid_address.
 NAME = r'[a-z][a-z0-9-]*(/[a-z0-9][a-z0-9-]*)*'
 MACHINE = r'[a-z][a-z0-9-]*'
 ADDRESS = rf'{NAME}@{MACHINE}'
-MISSION = r'[a-z0-9][a-z0-9-]*'
-MARKER = re.compile(r'^<!-- waiting-on-user asker=(\S+)(?: mission=(\S+))?(?: parent=(\S+))? -->$', re.M)
+MISSION = r'[a-z0-9][a-z0-9_-]*'
+MARKER = re.compile(r'^<!-- waiting-on-user (?:mission=(\S+)|director) -->$', re.M)
 
 
 class Refusal(Exception):
@@ -88,54 +90,76 @@ def credential(path, kind):
     return value
 
 
-@dataclass(frozen=True)
-class Asker:
-    address: str
-    mission: str | None
-    parent: str | None
+def asking(paths, mission):
+    if mission is None:
+        name = os.environ.get('POST_NAME', '')
+        mission = name if name == 'director' else name.partition('/')[2]
+        need(mission, 'set POST_NAME or pass --mission')
+    need(re.fullmatch(MISSION, mission), 'invalid mission')
+    return mission
 
 
-def asking(paths, who, mission):
-    who = who if who is not None else os.environ.get('POST_NAME')
-    need(who, 'set POST_NAME or pass --as')
-    need(re.fullmatch(ADDRESS if '@' in who else NAME, who), 'invalid asker name or address')
-    name = who.split('@', 1)[0]
-    address = who if '@' in who else f'{who}@{paths.machine()}'
-    if mission is None and '/' in name:
-        mission = name.split('/', 1)[1]
-    need(mission is None or re.fullmatch(MISSION, mission), 'invalid mission')
-    parent = None
-    if mission:
-        path = paths.records / 'missions' / mission / 'README.md'
-        if path.exists():
-            front = re.match(r'\A---\n(.*?)\n---(?:\n|$)', path.read_text(encoding='utf-8'), re.S)
-            if front:
-                for line in front[1].splitlines():
-                    key, sep, value = line.partition(':')
-                    if sep and key == 'parent' and re.fullmatch(ADDRESS, value.strip()):
-                        parent = value.strip()
-    return Asker(address, mission, parent)
+def front_matter(paths, mission):
+    try:
+        text = (paths.records / 'missions' / mission / 'README.md').read_text(encoding='utf-8')
+    except FileNotFoundError:
+        return None
+    front = re.match(r'\A---\n(.*?)\n---(?:\n|$)', text, re.S)
+    return dict(line.split(':', 1) for line in front[1].splitlines() if ':' in line) if front else {}
+
+
+def repository(paths, asker):
+    front = front_matter(paths, asker) if asker != 'director' else None
+    feature = (front or {}).get('feature', '').split()
+    return feature[0] if feature and feature[0] in REPOS else 'agents'
+
+
+def chain(paths, asker: str) -> list[str]:
+    """The mission's owner and parent, then this machine's director, each once."""
+    recipients = []
+    if asker != 'director':
+        front = front_matter(paths, asker)
+        if front is None:
+            try:
+                pulled = subprocess.run(['record', 'pull'], stdin=subprocess.DEVNULL,
+                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+                if pulled.returncode:
+                    print(f'issue: record pull exited {pulled.returncode}', file=sys.stderr, flush=True)
+            except (OSError, subprocess.TimeoutExpired):
+                print('issue: record pull failed', file=sys.stderr, flush=True)
+            front = front_matter(paths, asker)
+        for key in ('owner', 'parent'):
+            address = (front or {}).get(key, '').strip()
+            if re.fullmatch(ADDRESS, address):
+                recipients.append(address)
+    recipients.append(f'director@{paths.machine()}')
+    return list(dict.fromkeys(recipients))
 
 
 def write_marker(asker):
-    values = f'asker={asker.address}'
-    if asker.mission:
-        values += f' mission={asker.mission}'
-    if asker.parent:
-        values += f' parent={asker.parent}'
-    return f'<!-- waiting-on-user {values} -->'
+    return f'<!-- waiting-on-user {"director" if asker == "director" else "mission=" + asker} -->'
 
 
-def read_marker(body) -> Asker | None:
+def read_marker(body) -> str | None:
     matches = list(MARKER.finditer(body))
     if not matches:
         return None
-    address, mission, parent = matches[-1].groups()
-    if not re.fullmatch(ADDRESS, address) or (mission is not None and not re.fullmatch(MISSION, mission)):
-        return None
-    if parent is not None and not re.fullmatch(ADDRESS, parent):
-        return None
-    return Asker(address, mission, parent)
+    mission = matches[-1][1]
+    if mission is None:
+        return 'director'
+    return mission if re.fullmatch(MISSION, mission) else None
+
+
+def parse_issue(text) -> tuple[str, int]:
+    match = re.fullmatch(r'([a-z]+)#([0-9]+)', text)
+    why = 'use REPO#NUMBER with a known repository and positive decimal number'
+    need(match and match[1] in REPOS, why)
+    try:
+        number = int(match[2])
+    except ValueError:
+        raise Refusal(why) from None
+    need(number > 0, why)
+    return match[1], number
 
 
 class ForgeError(Exception):
@@ -154,9 +178,10 @@ class Forge:
         self.base, self.token = base.rstrip('/'), token
         self.opener = urllib.request.build_opener(NoRedirect)
 
-    def call(self, method: str, path: str, body=None, query=None):
-        """One JSON call under /api/v1/repos/REPO; raises ForgeError(status, message)."""
-        url = f'{self.base}/api/v1/repos/{REPO}/{path}'
+    def call(self, method, repo, path, body=None, query=None):
+        """One JSON call in a workspace repository; raises ForgeError."""
+        need(repo in REPOS, 'unknown repository')
+        url = f'{self.base}/api/v1/repos/{OWNER}/{repo}/{path}'
         if query:
             url += '?' + urllib.parse.urlencode(query)
         request = urllib.request.Request(url, method=method,
@@ -187,10 +212,8 @@ def clean(text):
     return ''.join(' ' if unicodedata.category(c) == 'Cc' else c for c in text)
 
 
-def open_issue(paths, args):
-    need(1 <= len(args.title) <= 200 and clean(args.title) == args.title,
-         'title must be one line, 1 to 200 characters, without control characters')
-    path = Path(args.file)
+def body_file(filename):
+    path = Path(filename)
     # Opening nonblocking avoids hanging on a FIFO passed in place of a regular file.
     fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
     with os.fdopen(fd, 'rb') as source:
@@ -203,23 +226,88 @@ def open_issue(paths, args):
         raise Refusal('body must be valid UTF-8') from None
     need(not any(line.startswith('<!-- waiting-on-user') for line in text.splitlines()),
          'body contains a waiting-on-user marker')
-    asker = asking(paths, args.who, args.mission)
-    mission = f' for the mission `{asker.mission}`' if asker.mission else ''
-    body = (text.rstrip() + f'\n\n---\nAsked by `{asker.address}`{mission}. Your comment here '
+    return text
+
+
+def client(paths):
+    return Forge(os.environ.get('ISSUE_FORGE', FORGE),
+                 credential(paths.tmp / 'git-fabrig/agents-issues.token', 'token'))
+
+
+def open_issue(paths, args):
+    need(1 <= len(args.title) <= 200 and clean(args.title) == args.title,
+         'title must be one line, 1 to 200 characters, without control characters')
+    text = body_file(args.file)
+    asker = asking(paths, args.mission)
+    repo = args.repo if args.repo is not None else repository(paths, asker)
+    need(repo in REPOS, 'unknown repository')
+    need(repo in PRIVATE or args.public,
+         f"{repo}'s issues are public: write the text for anyone, then pass --public")
+    who = 'by the director' if asker == 'director' else f'for the mission `{asker}`'
+    body = (text.rstrip() + f'\n\n---\nAsked {who}. Your comment here '
             'reaches it by post, and it closes the issue.\n' + write_marker(asker))
-    forge = Forge(os.environ.get('ISSUE_FORGE', FORGE),
-                  credential(paths.tmp / 'git-fabrig/agents-issues.token', 'token'))
+    forge = client(paths)
     page, label = 1, None
     while True:
-        labels = forge.call('GET', 'labels', query={'limit': 50, 'page': page})
+        labels = forge.call('GET', repo, 'labels', query={'limit': 50, 'page': page})
         label = next((row['id'] for row in labels if row['name'] == LABEL), None)
         if label is not None or len(labels) < 50:
             break
         page += 1
     if label is None:
-        raise ForgeError(200, f'no label {LABEL} on {REPO}')
-    issue = forge.call('POST', 'issues', {'title': args.title, 'body': body, 'labels': [label]})
-    print(f"#{issue['number']} {issue['html_url']}")
+        raise ForgeError(200, f'no label {LABEL} on {OWNER}/{repo}')
+    issue = forge.call('POST', repo, 'issues', {'title': args.title, 'body': body, 'labels': [label]})
+    suffix = '' if repo in PRIVATE else ' public'
+    print(f"{repo}#{issue['number']} {issue['html_url']}{suffix}")
+
+
+def age(created, now):
+    minutes = max(0, int((now - datetime.fromisoformat(created.replace('Z', '+00:00'))).total_seconds() // 60))
+    if minutes < 120:
+        return f'{minutes}m'
+    if minutes < 2880:
+        return f'{minutes // 60}h'
+    return f'{minutes // 1440}d'
+
+
+def list_issues(paths, args):
+    asker = asking(paths, args.mission)
+    forge, now = client(paths), datetime.now(timezone.utc)
+    for repo in REPOS:
+        rows, page = [], 1
+        while True:
+            batch = forge.call('GET', repo, 'issues', query={
+                'state': 'open', 'type': 'issues', 'labels': LABEL, 'limit': 50, 'page': page})
+            rows.extend(batch)
+            if len(batch) < 50:
+                break
+            page += 1
+        for row in sorted(rows, key=lambda r: r['number']):
+            owner = read_marker(row.get('body') or '')
+            if args.all or owner == asker:
+                print('\t'.join((f"{repo}#{row['number']}", age(row['created_at'], now),
+                                  owner or '-', clean(row['title']), row['html_url'])))
+
+
+def change_issue(paths, args):
+    repo, number = parse_issue(args.issue)
+    asker = asking(paths, args.mission)
+    forge = client(paths)
+    name = f'{repo}#{number}'
+    issue = forge.call('GET', repo, f'issues/{number}')
+    need(not issue.get('pull_request'), f'{name} is a pull request')
+    owner = read_marker(issue.get('body') or '')
+    need(owner is not None, f"{name} has no asker's marker")
+    need(owner == asker, f'{name} is asked by {owner}, not {asker}')
+    if args.file is not None:
+        comment = forge.call('POST', repo, f'issues/{number}/comments', {'body': body_file(args.file)})
+        if args.command == 'comment':
+            print(f"{name} {comment['html_url']}")
+            return
+    closed = issue['state'] == 'closed'
+    if not closed:
+        forge.call('PATCH', repo, f'issues/{number}', {'state': 'closed'})
+    print(f'{name} ' + ('was closed already' if closed else 'closed'))
 
 
 @dataclass(frozen=True)
@@ -230,10 +318,11 @@ class Reply:
     url: str
     author: str
     text: str
-    asker: Asker
+    asker: str
+    repo: str
 
 
-def reply(event: str, payload: dict) -> Reply | str:
+def reply(event: str, payload: dict, routes=()) -> Reply | str:
     """The comment to route, or why there is none. Bad fields raise ValueError."""
     if not isinstance(payload, dict):
         raise ValueError('payload must be an object')
@@ -244,8 +333,9 @@ def reply(event: str, payload: dict) -> Reply | str:
         repository = payload['repository']['full_name']
         issue, comment = payload['issue'], payload['comment']
         number, title, body = issue['number'], issue['title'], issue['body']
+        opener = issue['user']['login']
         ident, url, text, author = comment['id'], comment['html_url'], comment['body'], comment['user']['login']
-        if not all(isinstance(v, str) for v in (action, repository, title, body, url, text, author)):
+        if not all(isinstance(v, str) for v in (action, repository, title, body, url, text, author, opener)):
             raise ValueError('invalid text field')
         if type(is_pull) is not bool or any(type(v) is not int or v <= 0 for v in (number, ident)):
             raise ValueError('invalid comment fields')
@@ -255,29 +345,32 @@ def reply(event: str, payload: dict) -> Reply | str:
         return 'not created'
     if is_pull:
         return 'pull request'
-    if repository != REPO:
+    repo = repository.removeprefix(OWNER + '/')
+    if repository != f'{OWNER}/{repo}' or repo not in REPOS:
         return 'another repository'
-    if author in BOTS:
-        return 'bot comment'
+    if author not in (*PEOPLE, *routes):
+        return 'comment author not allowed'
+    if opener != TOOL:
+        return 'issue author not trusted'
     asker = read_marker(body)
     if asker is None:
         return 'no asker marker'
-    return Reply(ident, number, title, url, author, text, asker)
+    return Reply(ident, number, title, url, author, text, asker, repo)
 
 
-def post_body(item, fallback=None):
+def post_body(item, fallback=None, owner=None):
     lines = item.text.splitlines()
-    result = [f'{clean(item.author)} on #{item.number}, {clean(item.url)}:', '',
+    result = [f'{clean(item.author)} on {item.repo}#{item.number}, {clean(item.url)}:', '',
               *(clean(line)[:300] for line in lines[:10])]
     if len(lines) > 10:
         result.append(f'[… {len(lines) - 10} more lines on the issue.]')
     # At most 15 lines, including the fallback prefix and the final instructions.
     if fallback is None and len(result) < 14:
         result.append('')
-    result.append(f'Answer there with `issue comment {item.number} FILE`, '
-                  f'and close it with `issue close {item.number}` once done.')
+    result.append(f'Answer there with `issue comment {item.repo}#{item.number} FILE`, '
+                  f'and close it with `issue close {item.repo}#{item.number}` once done.')
     if fallback is not None:
-        result.insert(0, f'For {item.asker.address}, whom post could not wake: {clean(fallback)[:300]}.')
+        result.insert(0, f'For {owner or item.asker}, whom post could not wake: {clean(fallback)[:300]}.')
     return '\n'.join(result) + '\n'
 
 
@@ -295,32 +388,43 @@ def atomic_json(directory, destination, row):
 
 class Router:
     def __init__(self, paths):
-        self.spool, self.machine = paths.spool, paths.machine()
+        self.paths, self.spool = paths, paths.spool
+        paths.machine()  # Refuse an invalid local configuration before accepting webhooks.
         for name in ('tmp', 'new', 'done', 'failed'):
             (self.spool / name).mkdir(parents=True, exist_ok=True, mode=0o700)
         self.lock, self.wake, self.stop = threading.Lock(), threading.Event(), threading.Event()
 
     def enqueue(self, item):
-        name = f'{item.comment}.json'
+        name = f'{item.repo}-{item.comment}.json'
         with self.lock:
             if any((self.spool / state / name).exists() for state in ('new', 'done', 'failed')):
                 return 'redelivery'
-            row = dict(asdict(item), attempts=0,
+            row = dict(asdict(item), attempts=0, tried=[],
                        received=datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'))
             atomic_json(self.spool / 'tmp', self.spool / 'new' / name, row)
         self.wake.set()
         return 'spooled'
 
-    def deliver(self, item):
-        recipients = dict.fromkeys((item.asker.address, item.asker.parent, f'director@{self.machine}'))
-        fallback, code = None, 2
-        subject = clean(f'#{item.number} {item.author} replied: {item.title}')[:200]
+    def deliver(self, item, row, path):
+        tried = row['tried']
+        if any(attempt['exit'] == 0 for attempt in tried):
+            return 'done'
+        recipients = chain(self.paths, item.asker)
+        completed = [attempt for attempt in tried if attempt['exit'] in (2, 3)]
+        skipped = {attempt['recipient'] for attempt in completed}
+        fallback = completed[-1]['line'] if completed else None
+        front = front_matter(self.paths, item.asker) if item.asker != 'director' else None
+        owner = (front or {}).get('owner', '').strip()
+        if not re.fullmatch(ADDRESS, owner):
+            owner = item.asker
+        code = completed[-1]['exit'] if completed else 2
+        subject = clean(f'{item.repo}#{item.number} {item.author} replied: {item.title}')[:200]
         for recipient in recipients:
-            if recipient is None:
+            if recipient in skipped:
                 continue
             try:
                 sent = subprocess.run(['post', 'send', '--as', SENDER, recipient, subject],
-                                      input=post_body(item, fallback), text=True, errors='replace',
+                                      input=post_body(item, fallback, owner), text=True, errors='replace',
                                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=600)
                 code = sent.returncode
                 lines = sent.stdout.strip().splitlines()
@@ -329,7 +433,10 @@ class Router:
                 code, last = 'timeout', 'post timed out'
             except OSError:
                 code, last = 'unavailable', 'post could not start'
-            print(f'issue: #{item.number} comment {item.comment} to {recipient}: post {code}',
+            tried.append(dict(recipient=recipient, exit=code, line=clean(last)[:300]))
+            with self.lock:
+                atomic_json(self.spool / 'tmp', path, row)
+            print(f'issue: {item.repo}#{item.number} comment {item.comment} to {recipient}: post {code}',
                   file=sys.stderr, flush=True)
             if code == 0:
                 return 'done'
@@ -346,9 +453,8 @@ class Router:
                     break
                 try:
                     row = json.loads(path.read_text())
-                    item = Reply(**{key: row[key] for key in ('comment', 'number', 'title', 'url', 'author', 'text')},
-                                 asker=Asker(**row['asker']))
-                    outcome = self.deliver(item)
+                    item = Reply(**{key: row[key] for key in ('comment', 'number', 'title', 'url', 'author', 'text', 'asker', 'repo')})
+                    outcome = self.deliver(item, row, path)
                     if outcome == 'retry':
                         row['attempts'] += 1
                         with self.lock:
@@ -358,7 +464,7 @@ class Router:
                         outcome = 'failed'
                     with self.lock:
                         os.replace(path, self.spool / outcome / path.name)
-                except (OSError, ValueError, KeyError, TypeError):
+                except (Refusal, OSError, ValueError, KeyError, TypeError):
                     # Leave unreadable state for repair; never log its contents.
                     print(f'issue: spool file {path.name}: cannot process', file=sys.stderr, flush=True)
             self.wake.wait(60)
@@ -403,7 +509,7 @@ class Hook(BaseHTTPRequestHandler):
             return self.answer(403, 'signature refused')
         try:
             event = self.headers.get('X-Forgejo-Event', self.headers.get('X-Gitea-Event', ''))
-            item = reply(event, json.loads(body))
+            item = reply(event, json.loads(body), self.server.routes)
         except (ValueError, UnicodeError, RecursionError):
             return self.answer(400, 'invalid payload')
         if isinstance(item, str):
@@ -415,7 +521,7 @@ class Hook(BaseHTTPRequestHandler):
         self.answer(204, reason)
 
 
-def serve(paths, listen):
+def serve(paths, listen, routes):
     secret = credential(paths.tmp / 'git-fabrig/webhook.secret', 'webhook secret')
     try:
         host, port = listen.rsplit(':', 1)
@@ -430,7 +536,7 @@ def serve(paths, listen):
     class Server(ThreadingHTTPServer):
         address_family = socket.AF_INET6 if address.version == 6 else socket.AF_INET
     with Server((host, port), Hook) as server:
-        server.secret, server.router = secret.encode(), router
+        server.secret, server.router, server.routes = secret.encode(), router, routes
         worker = threading.Thread(target=router.worker, daemon=True)
         worker.start()
         print(f'issue: listening on {host}:{server.server_port}', flush=True)
@@ -445,19 +551,34 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest='command', required=True)
     opening = sub.add_parser('open')
-    opening.add_argument('--as', dest='who')
-    opening.add_argument('--mission')
+    opening.add_argument('--repo')
+    opening.add_argument('--public', action='store_true')
     opening.add_argument('title')
     opening.add_argument('file')
+    listing = sub.add_parser('list')
+    listing.add_argument('--all', action='store_true')
+    commenting = sub.add_parser('comment')
+    commenting.add_argument('issue')
+    commenting.add_argument('file')
+    closing = sub.add_parser('close')
+    closing.add_argument('issue')
+    closing.add_argument('file', nargs='?')
+    for command in (opening, listing, commenting, closing):
+        command.add_argument('--mission')
     serving = sub.add_parser('serve')
     serving.add_argument('--listen', default=LISTEN)
+    serving.add_argument('--route', action='append', default=[])
     args = parser.parse_args()
     try:
         paths = Paths()
         if args.command == 'open':
             open_issue(paths, args)
+        elif args.command == 'list':
+            list_issues(paths, args)
+        elif args.command in ('comment', 'close'):
+            change_issue(paths, args)
         else:
-            serve(paths, args.listen)
+            serve(paths, args.listen, args.route)
         return 0
     except ForgeError as error:
         if error.status == 200 and error.message.startswith('no label '):
