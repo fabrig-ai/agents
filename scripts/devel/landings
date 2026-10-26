@@ -3,6 +3,7 @@
 
 landings [--last N]
 landings wait [--cleared] TARGET [--timeout SECONDS] [--post ADDRESS]
+landings cleared REPO
 landings report [--since DATE] [--repo NAME] [--tsv]
 """
 import argparse
@@ -177,6 +178,23 @@ def more_counts(row):
 def newest(records):
     # Feed position breaks ties between records written in the same instant.
     return max(enumerate(records), key=lambda pair: (pair[1]['utc'], pair[0]))[1] if records else None
+
+
+def cleared_main(runner, repo):
+    mine = [r for r in runner if r['kind'] == 'tier' and r['tier'] == repo]
+    cleared = []
+    for row in mine:
+        if row['event'] != 'tier':
+            continue
+        verdicts = [r for r in mine if r['event'] == 'verdict' and r['run'] == row['commit']]
+        if verdicts and all(r['verdict'] == 'cleared' for r in verdicts):
+            cleared.append(row)
+    latest = newest(cleared)
+    if latest is None:
+        print(f'landings: no cleared main for {repo}', file=sys.stderr)
+        return 1
+    print(latest['commit'])
+    return 0
 
 
 def show_tiers(records, set_records):
@@ -616,6 +634,8 @@ def main():
     waiter.add_argument('--timeout', type=seconds)
     waiter.add_argument('--post', metavar='ADDRESS', help='post the wait output and outcome')
     waiter.add_argument('--cleared', action='store_true', help='wait for tier verdicts (default timeout: 7200s)')
+    cleared = commands.add_parser('cleared', help='show the newest main with all run verdicts cleared')
+    cleared.add_argument('repo')
     reporter = commands.add_parser('report', help='summarize gate and set costs')
     reporter.add_argument('--since', type=since, help='UTC date or ISO time')
     reporter.add_argument('--repo')
@@ -637,6 +657,8 @@ def main():
     except (OSError, subprocess.TimeoutExpired) as error:
         print(f'landings: feed unreadable: {error}', file=sys.stderr)
         return 4
+    if args.command == 'cleared':
+        return cleared_main(runner, args.repo)
     if args.command == 'report':
         if args.since is not None:
             records = [r for r in records if r['utc'] >= args.since]

@@ -467,6 +467,50 @@ def cleared_set(lab):
     assert 'red by run' in lab.run('wait', '--cleared', 'fixture/m1', '--timeout', '0', status=1).stdout
 
 
+def cleared_main_is_the_newest_all_cleared_run(lab):
+    x, y, z = ('a' * 40, 'b' * 40, 'c' * 40)
+    lab.append(tier_record('verdict', tier='temper', commit=x),
+               tier_record(tier='temper', commit=x, minute=1),
+               tier_record('verdict', tier='temper', commit=x, run=y, minute=2),
+               tier_record('verdict', tier='temper', commit=y, minute=2,
+                           verdict='red', tests=['regression'], excerpt='failed'),
+               tier_record(tier='temper', commit=y, minute=3, state='red'))
+    result = lab.run('cleared', 'temper')
+    assert result.stdout == x + '\n' and result.stderr == '', result
+    # Standing reds charged to an older run do not make Z's own verdicts red.
+    lab.append(tier_record('verdict', tier='temper', commit=z, minute=4, baseline=True),
+               tier_record('verdict', tier='temper', commit='d' * 40, run=z, minute=4),
+               tier_record(tier='temper', commit=z, minute=5, state='red',
+                           reds=[dict(landing=y, tests=['standing'])]),
+               tier_record('verdict', commit='e' * 40, minute=6),
+               tier_record(commit='e' * 40, minute=7))
+    assert lab.run('cleared', 'temper').stdout == z + '\n'
+    # Later feed positions cannot outrank newer timestamps, but break time ties.
+    lab.append(tier_record(tier='temper', commit=x, minute=0))
+    assert lab.run('cleared', 'temper').stdout == z + '\n'
+    lab.append(tier_record(tier='temper', commit=x, minute=5))
+    assert lab.run('cleared', 'temper').stdout == x + '\n'
+    # A completed run without verdicts and a verdict without an end are ineligible.
+    lab.append(tier_record(tier='temper', commit='f' * 40, minute=8),
+               tier_record('verdict', tier='temper', commit='0' * 40, minute=9))
+    assert lab.run('cleared', 'temper').stdout == x + '\n'
+
+
+def cleared_main_none(lab):
+    for rows in ((), (tier_record('verdict', tier='temper', verdict='red',
+                                 tests=['regression'], excerpt='failed'),
+                      tier_record(tier='temper', minute=1, state='red'))):
+        lab.append(*rows)
+        result = lab.run('cleared', 'temper', status=1)
+        assert result.stdout == '' and result.stderr == 'landings: no cleared main for temper\n', result
+
+
+def cleared_main_unreadable(lab):
+    lab.feed.unlink()
+    result = lab.run('cleared', 'temper', status=4)
+    assert result.stdout == '' and 'landings: feed unreadable:' in result.stderr, result
+
+
 def red_set(lab):
     landed_set(lab)
     lab.append(tier_record('verdict', tier='temper', commit='b' * 40),
@@ -662,7 +706,8 @@ def main():
              unreadable_status, unreadable_wait, unreadable_recovers,
              timeout_before_unreachable, malformed_lines, remote_command,
              remote_failure, remote_hang, remote_first_read, invalid_arguments, read_default,
-             tiers_shown, landing_set_isolation, cleared_set, red_set, stopped_set, waits_for_verdict, commit_target,
+             tiers_shown, landing_set_isolation, cleared_set, cleared_main_is_the_newest_all_cleared_run,
+             cleared_main_none, cleared_main_unreadable, red_set, stopped_set, waits_for_verdict, commit_target,
              watch_record, malformed_runner_records, posted_wait, remote_watch)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--case', action='append', choices=[case.__name__ for case in cases])

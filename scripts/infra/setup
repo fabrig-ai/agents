@@ -190,7 +190,7 @@ check_machine() {
     cargo nextest --version >/dev/null 2>&1 && ok "has cargo-nextest" || fail "no cargo-nextest"
     # The tools link to this checkout.
     local bin=$HOME/.local/bin home=$kit target
-    for tool in heavy land land-set landings after-landing repin record setup post codex-run; do
+    for tool in heavy land land-set landings after-landing repin record setup post codex-run qa; do
         target=$home/../devel/$tool
         [[ $tool != setup ]] || target=$home/setup
         target=$(readlink -f "$target")
@@ -269,7 +269,7 @@ check_machine() {
     # The queue is heavy's ledger (build-infrastructure.md, 2 and 4).
     read -r slots slots_source < <(machine_setting HEAVY_BUILD_SLOTS 0)
     while IFS= read -r line; do warn "machine.env: ignored line $line"; done < <(
-        awk 'NF && $0 !~ /^(PLAN_MIN_MEM_GB|PLAN_MIN_DISK_GB|HEAVY_BUILD_SLOTS|HEAVY_BUILD_JOBS|KACHE_MAX_GB)=[0-9]+$/ { print NR ": " $0 }' "$tmp/machine.env" 2>/dev/null || true)
+        awk 'NF && $0 !~ /^(PLAN_MIN_MEM_GB|PLAN_MIN_DISK_GB|HEAVY_BUILD_SLOTS|HEAVY_BUILD_JOBS|KACHE_MAX_GB|QA_SLOTS|QA_BATCH|QA_CAP_MINUTES|QA_INTERVAL_SECONDS)=[0-9]+$/ { print NR ": " $0 }' "$tmp/machine.env" 2>/dev/null || true)
     if [[ $slots == 0 ]]; then
         ok "builds: every task at once ($slots_source)"
     else

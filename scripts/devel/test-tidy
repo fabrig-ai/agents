@@ -626,6 +626,19 @@ def symlinks(lab):
     assert task.exists()
 
 
+def qa_is_a_tools_entry(lab):
+    qa = lab.tmp / 'qa'
+    repo = qa / 'repos' / 'temper'
+    run = qa / '20261026-0915-temper'
+    files = [lab.put(repo / 'keep.py'), lab.put(run / 'report.md')]
+    stamp = time.time() - 8 * 86400
+    for path in (*files, repo, run):
+        os.utime(path, (stamp, stamp))
+    text = lab.run()
+    assert repo.is_dir() and run.is_dir() and all(p.exists() for p in files), text
+    assert str(qa) not in text, text
+
+
 def unknown(lab):
     path = lab.put(lab.tmp / 'unexpected')
     text = lab.run(status=1)
@@ -880,7 +893,7 @@ CASES = (copies, lockfile_conflicts, lockfile_tree, lockfile_patches, lockfile_s
          amended, conflict_copy, marks, patch_fallback, worktrees, dirty, detached, outside_worktrees, missions,
          mission_work, evidence, mission_clone_worktrees, old_directories, old_work, scripts, held_file,
          script_boundaries, cargo_home_scripts, fixture_evidence, evidence_marks, evidence_unreadable,
-         enclosing_git, symlinks, unknown, dry_run, scope, fetch_failure, push_failure,
+         enclosing_git, symlinks, qa_is_a_tools_entry, unknown, dry_run, scope, fetch_failure, push_failure,
          already_gone, remote_race, head_race, local_race, nested_repositories, evidence_race,
          evidence_ref_race, evidence_stash,
          stale, deletion_failure, order, lock, usage, empty_tmp)
