@@ -21,6 +21,7 @@ import socket
 import subprocess
 import sys
 import time
+import unicodedata
 
 os.umask(0o077)
 # Copied from scripts/devel/land-set: COORDINATOR, SSH and feed()'s path.
@@ -555,11 +556,16 @@ def clearance(records, runner, target, checkouts):
     return None, missing, None
 
 
+def display_text(value):
+    return ''.join('?' if unicodedata.category(char) == 'Cc' else char for char in value)
+
+
 def event_line(record):
-    name = record['branch'] if record.get('kind') == 'land' else record['set']
+    plain = record.get('kind') == 'land'
+    name = display_text(record['branch']) if plain else record['set']
     parts = [record['date'], record['clock'], name, record['event']]
     if record.get('repo'):
-        parts.append(record['repo'])
+        parts.append(display_text(record['repo']) if plain else record['repo'])
     if record.get('commit'):
         parts.append(record['commit'][:9])
     if record['event'] == 'stopped':
@@ -579,7 +585,7 @@ def taught_of(record):
 
 def taught_lines(record):
     lines, more = taught_of(record)
-    return ['    ' + line for line in lines] + ([f'    ({more} more)'] if more else [])
+    return ['    ' + display_text(line) for line in lines] + ([f'    ({more} more)'] if more else [])
 
 
 def latest_runs(records, proves=False):

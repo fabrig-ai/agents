@@ -264,11 +264,17 @@ def taught_malformed(lab):
     del missing['branch']
     lab.append(missing, land_record(5, time='2026-10-24T12:05:00'),
                land_record(6, event='gated'), land_record(7, base=1))
+    controls = ''.join(chr(code) for code in (*range(32), *range(127, 160)))
+    lab.append(land_record(8, branch='bad\nbranch', repo='bad\t\x7f\x85repo',
+                           taught=['clear\x1b[2Jscreen', controls + ' café']))
     expected = [
         '10-24 12:00Z fixture/m1 landed skein aaaaaaaaa fixture-host',
         '10-24 12:01Z landing-taught/m1 landed agents ccccccccc fixture-host',
         '10-24 12:02Z fixture/m1 landed smith bbbbbbbbb fixture-host',
-        '10-24 12:03Z landing-taught/m1 landed agents ccccccccc fixture-host']
+        '10-24 12:03Z landing-taught/m1 landed agents ccccccccc fixture-host',
+        '10-24 12:08Z bad?branch landed bad???repo ccccccccc fixture-host',
+        '    clear?[2Jscreen',
+        '    ' + '?' * 65 + ' café']
     assert lab.run('taught').stdout.splitlines() == expected
     assert lab.run().stdout.splitlines() == expected + ['in flight: none', 'tiers: none in the feed']
 
