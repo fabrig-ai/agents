@@ -2,7 +2,7 @@
 """Show the landing feed, wait for a set to finish, or report its costs.
 
 landings [--last N]
-landings wait SET [--timeout SECONDS]
+landings wait [--cleared] TARGET [--timeout SECONDS]
 landings report [--since DATE] [--repo NAME] [--tsv]
 """
 import argparse
@@ -11,6 +11,9 @@ import json
 import math
 import os
 from pathlib import Path
+import re
+import secrets
+import shlex
 import socket
 import statistics
 import subprocess
@@ -26,6 +29,22 @@ SSH = ['ssh', '-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
        '-o', 'LogLevel=QUIET', 'free@2.29.124.199']
 FEED = '/home/free/.local/state/agents-land-set/feed.jsonl'
 TAIL = 'tail -n 5000 ' + FEED
+ORDER = ('skein', 'smith', 'hearth', 'jig', 'temper')
+# Copied verbatim from land-set's FEED program.
+FEED_PROGRAM = '''import fcntl, os, pathlib, stat, sys
+os.umask(0o077)
+p = pathlib.Path(sys.argv[1])
+p.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+os.chmod(p.parent, 0o700)
+fd = os.open(p, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+with os.fdopen(fd, 'w') as out:
+    if not stat.S_ISREG(os.fstat(out.fileno()).st_mode):
+        raise ValueError('invalid feed')
+    os.fchmod(out.fileno(), 0o600)
+    fcntl.flock(out, fcntl.LOCK_EX)
+    out.write(sys.stdin.read())
+    out.flush()
+'''
 
 
 def seconds(value):
@@ -56,10 +75,15 @@ def read_feed(timeout=15):
             reason = result.stderr.decode(errors='replace').strip()
             raise OSError(f'ssh exited {result.returncode}: {reason}')
         data = result.stdout
-    records = []
+    records, runner = [], []
     for line in data.splitlines():
         try:
             record = json.loads(line)
+            if isinstance(record, dict) and record.get('kind') in ('tier', 'watch'):
+                if runner_record(record):
+                    stamp_record(record)
+                    runner.append(record)
+                continue
             if not isinstance(record, dict) or not all(
                     isinstance(record.get(key), str) and record[key]
                     for key in ('time', 'set', 'host', 'token')):
@@ -80,7 +104,191 @@ def read_feed(timeout=15):
             records.append(record)
         except (ValueError, UnicodeError, OverflowError, RecursionError):
             continue
-    return records
+    return records, runner
+
+
+def utc(value):
+    stamp = datetime.fromisoformat(value)
+    if stamp.tzinfo is None:
+        raise ValueError('time lacks a zone')
+    return stamp.astimezone(timezone.utc)
+
+
+def stamp_record(record):
+    record['utc'] = utc(record['time'])
+    record['date'] = record['utc'].strftime('%m-%d')
+    record['clock'] = record['utc'].strftime('%H:%MZ')
+
+
+def runner_record(row):
+    """Validate the runner boundary before any display or wait uses its fields."""
+    text = lambda value: isinstance(value, str) and bool(value)
+    nullable = lambda value: value is None or text(value)
+    strings = lambda value: isinstance(value, list) and all(text(v) for v in value)
+    if not all(text(row.get(k)) for k in ('time', 'event', 'host', 'token')):
+        return False
+    if not re.fullmatch(r'[0-9a-fA-F]{32}', row['token']):
+        return False
+    utc(row['time'])
+    if not more_counts(row):
+        return False
+    if row['kind'] == 'watch':
+        return (row['event'] == 'watching' and text(row.get('target'))
+                and 'name' in row and nullable(row['name']))
+    if not text(row.get('tier')):
+        return False
+    event = row['event']
+    if event == 'fault':
+        if not ('commit' in row and nullable(row['commit'])
+                and text(row.get('reason')) and text(row.get('since'))):
+            return False
+        utc(row['since'])
+        return True
+    if not text(row.get('commit')):
+        return False
+    if event == 'running':
+        return 'from' in row and nullable(row['from'])
+    if event not in ('tier', 'verdict') or not strings(row.get('flakes')) or not text(row.get('log')):
+        return False
+    if event == 'verdict':
+        return (text(row.get('run')) and row.get('verdict') in ('cleared', 'red')
+                and strings(row.get('tests')) and 'set' in row and nullable(row['set'])
+                and (row['verdict'] != 'red' or isinstance(row.get('excerpt'), str))
+                and ('excerpt' not in row or isinstance(row['excerpt'], str)))
+    return (row.get('state') in ('green', 'red') and 'last_green' in row
+            and nullable(row['last_green']) and number(row.get('ran_s')) is not None
+            and row['ran_s'] >= 0 and isinstance(row.get('reds'), list)
+            and all(isinstance(red, dict) and 'landing' in red and nullable(red['landing'])
+                    and strings(red.get('tests')) and more_counts(red) for red in row['reds']))
+
+
+def more_counts(row):
+    return all(key not in row or (type(row[key]) is int and row[key] >= 0)
+               for key in ('tests_more', 'flakes_more'))
+
+
+def newest(records):
+    # Feed position breaks ties between records written in the same instant.
+    return max(enumerate(records), key=lambda pair: (pair[1]['utc'], pair[0]))[1] if records else None
+
+
+def show_tiers(records, set_records):
+    repos = {r['tier'] for r in records if r['kind'] == 'tier'}
+    if not repos:
+        print('tiers: none in the feed')
+        return
+    print('tiers:')
+    for repo in sorted(repos, key=lambda name: (ORDER.index(name) if name in ORDER else len(ORDER), name)):
+        mine = [r for r in records if r.get('tier') == repo]
+        # Compare positions too: the terminal record can share a timestamp with running.
+        ordered = sorted(enumerate(mine), key=lambda pair: (pair[1]['utc'], pair[0]))
+        state = running = fault = None
+        for _, row in ordered:
+            if row['event'] == 'tier':
+                state, running, fault = row, None, None
+            elif row['event'] == 'running':
+                running, fault = row, None
+            elif row['event'] == 'fault':
+                fault = row
+        parts = []
+        if fault:
+            clock = utc(fault['since']).strftime('%H:%MZ')
+            parts.append(f"fault since {clock}: {fault['reason']}")
+        if running:
+            parts.append(f"running on {running['commit'][:9]} since {running['clock']}")
+        if state:
+            line = f"{state['state']} at {state['commit'][:9]} ({state['date']} {state['clock']})"
+            if state['state'] == 'red':
+                tests = sum(len(red['tests']) + red.get('tests_more', 0)
+                            for red in state['reds']) + state.get('tests_more', 0)
+                line += f": {tests} tests"
+                reds = [red['landing'] for red in state['reds'] if red['landing'] is not None]
+                verdicts = [r for r in mine if r['event'] == 'verdict' and r['commit'] in reds]
+                # A verdict can be reissued or published out of landing order.
+                # Prefer the landing's own timestamp; a truncated feed may leave
+                # only verdict times, or ultimately the standing-red list order.
+                def landed_at(commit):
+                    landed = [r['utc'] for r in set_records if r['event'] == 'landed'
+                              and r.get('repo') == repo and r.get('commit') == commit]
+                    seen = [r['utc'] for r in verdicts if r['commit'] == commit]
+                    return min(landed or seen or [state['utc']])
+                landing = min(reds, key=landed_at) if reds else None
+                named = newest([r for r in verdicts if r['commit'] == landing and r['set']])
+                if landing:
+                    line += f", first red {landing[:9]}"
+                    if named:
+                        line += f" ({named['set']})"
+                if state['last_green']:
+                    line += f"; green at {state['last_green'][:9]}"
+                    green = newest([r for r in mine if r['event'] == 'tier'
+                                    and r['state'] == 'green' and r['commit'] == state['last_green']])
+                    if green:
+                        line += f" ({green['date']} {green['clock']})"
+            parts.append(line)
+        print(f"  {repo}: " + ('; '.join(parts) or 'no completed run'))
+
+
+def watch(target, timeout):
+    row = dict(time=datetime.now(timezone.utc).isoformat(), kind='watch', event='watching',
+               host=socket.gethostname(), token=secrets.token_hex(16), target=target,
+               name=os.environ.get('POST_NAME') or None)
+    local = os.environ.get('LANDINGS_FEED')
+    host = os.environ.get('LANDINGS_FIXTURE_HOSTNAME', socket.gethostname())
+    argv = ['python3', '-I', '-c', FEED_PROGRAM, local if local is not None else FEED]
+    if local is None and host != COORDINATOR:
+        argv = [*SSH, shlex.join(argv)]
+    try:
+        result = subprocess.run(argv, input=(json.dumps(row) + '\n').encode(),
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+        if result.returncode:
+            raise OSError(result.stderr.decode(errors='replace').strip() or f'exit {result.returncode}')
+    except (OSError, subprocess.TimeoutExpired) as error:
+        print(f'landings: warning: feed append failed: {error}', file=sys.stderr)
+
+
+def verdict_line(row):
+    line = (f"{row['date']} {row['clock']} {row['tier']} {row['commit'][:9]} "
+            f"{row['verdict']} by run {row['run'][:9]}")
+    if row['verdict'] == 'red':
+        line += ': ' + '; '.join(row['tests'])
+        if row.get('tests_more'):
+            line += f"; {row['tests_more']} more tests"
+        line += f"; log {row['host']}:{row['log']}"
+    if row['flakes']:
+        line += '; flakes: ' + '; '.join(row['flakes'])
+    if row.get('flakes_more'):
+        line += f"; {row['flakes_more']} more flakes"
+    print(line)
+    if row['verdict'] == 'red':
+        for line in row['excerpt'].splitlines():
+            print('    ' + line)
+
+
+def clearance(records, runner, target):
+    verdicts = [r for r in runner if r['kind'] == 'tier' and r['event'] == 'verdict']
+    latest = {}
+    for row in sorted(verdicts, key=lambda r: r['utc']):
+        latest[row['tier'], row['commit']] = row
+    if re.fullmatch(r'[0-9a-fA-F]{7,40}', target):
+        landings = [key for key in latest if key[1].lower().startswith(target.lower())]
+        ready = bool(landings)
+    else:
+        run = latest_runs(records).get(target, [])
+        terminal = ending(run)
+        if terminal is not None and terminal['event'] == 'stopped':
+            print(event_line(terminal))
+            return 1, []
+        ready = terminal is not None and terminal['event'] == 'done'
+        landings = list(dict.fromkeys((r['repo'], r['commit']) for r in run
+                                     if r['event'] == 'landed' and r.get('repo') and r.get('commit'))) if ready else []
+    decided = [latest[key] for key in landings if key in latest]
+    missing = [key for key in landings if key not in latest]
+    red = any(r['verdict'] == 'red' for r in decided)
+    if red or (ready and not missing):
+        for row in decided:
+            verdict_line(row)
+        return (1 if red else 0), missing
+    return None, missing
 
 
 def event_line(record):
@@ -122,8 +330,8 @@ def show(records, last):
     active += [run for run in latest_runs(records, proves=True).values() if ending(run) is None]
     if not active:
         print('in flight: none')
-        return
-    print('in flight:')
+    else:
+        print('in flight:')
     for run in active:
         started = next((r for r in run if r['event'] == 'started'), None)
         since = started or run[0]
@@ -137,11 +345,14 @@ def show(records, last):
         print(line)
 
 
-def wait(label, timeout, poll, unreachable, read=15):
+def wait(label, timeout, poll, unreachable, read=15, cleared=False):
     start = last_read = time.monotonic()
     deadline = start + timeout if timeout is not None else math.inf
     last_error = None
     first_read = True
+    missing = []
+    if cleared:
+        watch(label, read)
     while True:
         now = time.monotonic()
         # Always attempt the initial read, even with --timeout 0.
@@ -149,7 +360,7 @@ def wait(label, timeout, poll, unreachable, read=15):
             .001, min(read, deadline - now, last_read + unreachable - now))
         first_read = False
         try:
-            records = read_feed(read_limit)
+            records, runner = read_feed(read_limit)
         except (OSError, subprocess.TimeoutExpired) as error:
             # A final attempt with little time left must not hide the transport's reason.
             if last_error is None or not isinstance(error, subprocess.TimeoutExpired):
@@ -161,26 +372,33 @@ def wait(label, timeout, poll, unreachable, read=15):
         else:
             last_read = time.monotonic()
             last_error = None
-            run = latest_runs(records).get(label, [])
-            terminal = ending(run)
-            if terminal is not None:
-                if terminal['event'] == 'stopped':
-                    print(event_line(terminal))
-                    return 1
-                previous_done = -1
-                for index, record in enumerate(records):
-                    if record is terminal:
-                        end = index
-                        break
-                    if record['set'] == label and record['event'] == 'done':
-                        previous_done = index
-                for record in records[previous_done + 1:end]:
-                    if record['set'] == label and record['event'] == 'landed':
-                        print(event_line(record))
-                return 0
+            if cleared:
+                status, missing = clearance(records, runner, label)
+                if status is not None:
+                    return status
+            else:
+                run = latest_runs(records).get(label, [])
+                terminal = ending(run)
+                if terminal is not None:
+                    if terminal['event'] == 'stopped':
+                        print(event_line(terminal))
+                        return 1
+                    previous_done = -1
+                    for index, record in enumerate(records):
+                        if record is terminal:
+                            end = index
+                            break
+                        if record['set'] == label and record['event'] == 'done':
+                            previous_done = index
+                    for record in records[previous_done + 1:end]:
+                        if record['set'] == label and record['event'] == 'landed':
+                            print(event_line(record))
+                    return 0
         now = time.monotonic()
         if now >= deadline:
             print(f'landings: timed out waiting for {label}', file=sys.stderr)
+            for repo, commit in missing:
+                print(f'landings: no verdict for {repo} {commit}', file=sys.stderr)
             return 3
         time.sleep(max(0, min(poll, deadline - now, last_read + unreachable - now)))
 
@@ -349,6 +567,7 @@ def main():
     waiter = commands.add_parser('wait', help='wait for a set to land or stop')
     waiter.add_argument('set')
     waiter.add_argument('--timeout', type=seconds)
+    waiter.add_argument('--cleared', action='store_true', help='wait for tier verdicts (default timeout: 7200s)')
     reporter = commands.add_parser('report', help='summarize gate and set costs')
     reporter.add_argument('--since', type=since, help='UTC date or ISO time')
     reporter.add_argument('--repo')
@@ -363,9 +582,10 @@ def main():
                 raise ValueError('poll, unreachable and read intervals must be positive')
         except (ValueError, argparse.ArgumentTypeError) as error:
             parser.error(str(error))
-        return wait(args.set, args.timeout, poll, unreachable, read)
+        timeout = 7200 if args.cleared and args.timeout is None else args.timeout
+        return wait(args.set, timeout, poll, unreachable, read, args.cleared)
     try:
-        records = read_feed()
+        records, runner = read_feed()
     except (OSError, subprocess.TimeoutExpired) as error:
         print(f'landings: feed unreadable: {error}', file=sys.stderr)
         return 4
@@ -375,6 +595,7 @@ def main():
         report(records, args.repo, args.tsv)
         return 0
     show(records, args.last)
+    show_tiers(runner, records)
     return 0
 
 
