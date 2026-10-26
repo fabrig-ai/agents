@@ -242,8 +242,9 @@ machine's `tmp/post/` (section 5).
   real changes; `hw.log` takes its hardware samples, and `usage.log` the
   subscriptions' week. Each wake re-reads the director's whole context:
   a trigger is only for what the director must act on.
-- **After-landing failures** arrive in `inbox/after-landing.md`;
-  while nothing runs after-landing, on the user's word, none do.
+- **After landing's runner** posts the director a red that nobody waits
+  on, and a fault of its own that lasts 15 minutes (landing-flow.md 4,
+  step 8); `landings` shows each tier. The inbox is gone.
 - **Relays:** an owner waiting on another's set runs `landings wait`
   (landing-flow.md 9.1); the director reads `landings`, and relays a
   landing only to an owner that can't reach the feed.

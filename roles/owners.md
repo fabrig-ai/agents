@@ -153,6 +153,13 @@ out. The security rules are director.md 10's.
   `docs/design/STATUS.md`, and posts its parent one line: what can now
   be tried, with the commits, and what the code taught that the design
   doesn't say (a boundary that moved, a behaviour settled).
+- **The verdict** (landing-flow.md 4, step 8): on a code landing's
+  report, the owner starts its wait in a user unit that posts it the
+  exit, `systemd-run --user --collect --quiet bash -lc 'landings wait
+  --cleared TARGET --post o/<m>'`, TARGET the set, or a plain landing's
+  commit. A red comes back as a failed landing does, for a repair; a
+  cleared verdict that names flakes, each filed with the director as a
+  finding.
 - **Cleanup is `tidy`'s** ([cleanup.md](../docs/design/cleanup.md) 4):
   `land` runs it after each landing, and the owner may run `tidy
   --mission <m>` at its end. Nothing is deleted by hand.
@@ -166,6 +173,10 @@ out. The security rules are director.md 10's.
   reverse: a stored format, an interface between repositories, a budget
   (budgets are the user's). A tool the kit lacks is such a question. An
   owner never asks the user.
+- **A mission closes once its last landing has cleared.** With no
+  verdict in 2 hours (the wait's exit 3: the runner is at fault), the
+  owner tells the director, and closes with the landing uncleared,
+  which `closing.md` says.
 - **The closing note,** `closing.md`, at most half a page: what landed,
   with its commits; the decisions that matter, with their reasons; what
   is left; what went well and what didn't in this process. The owner

@@ -5,9 +5,9 @@ user): a set proves its gates before it takes the lock, every landing
 takes the set lock, and there is no keeper; and 10-26 (the user): there
 is no landing queue, after landing follows each `main` (4, step 8),
 and the tools settle conflicts between STATUS.md's rows and in generated
-files (3). Built and live: `scripts/devel/land-set` and the
-set lock (section 9). How changes reach `main` across skein, smith,
-jig, hearth and temper:
+files (3). Built and live: `scripts/devel/land-set` and the set lock
+(section 9), and since 10-26 after landing's runner (4, step 8). How
+changes reach `main` across skein, smith, jig, hearth and temper:
 - one set of branches per milestone;
 - `land-set`, which proves a set without the lock, then lands it under
   the set lock, which orders the landings;
@@ -268,10 +268,9 @@ cite:
    go in each repository's `scripts/after-landing.sh`: the browser tier
    (`scripts/browser.sh`), the process and QA tiers, the exhaustive
    profile. The script runs them and exits nonzero with the failed
-   tests' names, and reports to no one. The rest is the runner's, on
-   today's `scripts/devel/after-landing`. It is not built yet: until it
-   is (section 9), nothing runs a tier, and `scripts/devel/after-landing`
-   refuses.
+   tests' names, and reports to no one. The rest is the runner's,
+   `scripts/devel/after-landing`, live on hetzner3 since 10-26; its
+   contract is build-infrastructure.md 11.
    - **It follows the mains, not the landings.** A user service polls
      each repository's `main` on origin, so it sees every writer, a
      plain `land` and a push around the tools included. When a `main`
@@ -326,9 +325,9 @@ cite:
    - **The lab takes a green `main`.** QA runs on the newest temper
      `main` whose tier is green, so that no QA agent spends its tokens
      finding again what the process tier showed.
-   - **When it runs,** owners.md 5 and director.md change: a mission
-     closes once its last landing has cleared, and the director's
-     after-landing inbox goes.
+   - **Since it runs** (10-26), a mission closes once its last landing
+     has cleared (owners.md 4 and 5), and the director's after-landing
+     inbox is gone.
 
 ## 5. Who does what
 
@@ -475,8 +474,7 @@ mission, then flood it with four milestones at once.
 - **What no gate runs.** A break that only a slow tier shows, the
   browser tier's among them, reaches `main`, and later sets build on
   it until the runner's verdict, about one tier run later, and longer
-  when the runner is behind. Until the runner is built (section 4,
-  step 8), only a QA pass or a task that names the tier finds it.
+  when the runner is behind.
 - **The runner's machine.** While it is down, no `main` is checked
   after landing, and an owner at its mission's end waits out its 2
   hours.
@@ -511,14 +509,9 @@ set lands (owners.md 4), with section 9.1, and gate evidence stays in
 ## 9. Building it
 
 Built and live: `land-set`, its proof and the set lock (9.1, 9.2,
-build-infrastructure.md 8 and 10), the feed and `landings`, and the
-metrics (section 10). Still to build is after landing's runner (4,
-step 8), on today's `scripts/devel/after-landing`:
-- the service that follows the mains, the rerun and the bisect;
-- the tiers' status in the feed, and `landings wait --cleared`;
-- the pause's guard taken out;
-- each repository's `scripts/after-landing.sh` reporting to no one:
-  temper's writes the director's inbox today.
+build-infrastructure.md 8 and 10), the feed and `landings`, the metrics
+(section 10), and since 10-26 after landing's runner (4, step 8;
+build-infrastructure.md 11), on hetzner3.
 
 What is open is section 11's.
 
