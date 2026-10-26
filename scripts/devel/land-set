@@ -147,7 +147,7 @@ class SetLock:
         self.who = dict(token=token, repository='set', holder=host)
         self.heartbeat = not fixture and socket.gethostname() != COORDINATOR
         if fixture:
-            argv = [sys.executable, '-I', '-S', '-B', str(Path(__file__).resolve().with_name('land-turn.py')),
+            argv = [sys.executable, '-I', '-B', str(Path(__file__).resolve().with_name('land-turn.py')),
                     'holder', str(fixture), token, 'set', host, str(fixture)]
         else:
             land = shutil.which('land')
@@ -155,7 +155,7 @@ class SetLock:
             holder = Path(land).resolve().with_name('land-turn.py')
             require(re.fullmatch(HOLDER, str(holder)), 'invalid holder path', 5)
             mode = 'ssh' if self.heartbeat else 'local'
-            argv = ['python3', '-I', '-S', '-B', str(holder), 'connection-holder', token, 'set', host, mode]
+            argv = ['python3', '-I', '-B', str(holder), 'connection-holder', token, 'set', host, mode]
             if self.heartbeat:
                 argv = [*SSH, shlex.join(argv)]
         self.argv = argv

@@ -135,7 +135,7 @@ fi
 
 if ((in_set && !local && !no_push)) && [[ ${LAND_TURN:-0} == 1 &&
     ${LAND_TURN_ACTIVE:-0} != 1 ]]; then
-    turn=(python3 -I -S -B "$kit/land-turn.py" client "$tmp" set "$kit/land" "${original_args[@]}")
+    turn=(python3 -I -B "$kit/land-turn.py" client "$tmp" set "$kit/land" "${original_args[@]}")
     if ((docs)); then
         LAND_LOCK=$lock LAND_RESULT=$result_file exec "${turn[@]}"
     fi
