@@ -845,15 +845,23 @@ def page_degraded(lab):
 
 def install(lab):
     out = lab.root / 'www/index.html'
-    lab.run('install', '--out', str(out))
+    state = lab.root / 'state'
+    lab.run('install', '--out', str(out), XDG_STATE_HOME=str(state))
     units = lab.root / 'config/systemd/user'
     service = (units / 'status-page.service').read_text()
-    assert f'ExecStart=/bin/bash -lc \'exec "$$0" --out "$$1"\' {SCRIPT} {out}\n' in service, service
+    assert (f'ExecStart=/bin/bash -lc \'exec "$$0" --out "$$1" --samples "$$2"\' '
+            f'{SCRIPT} {out} {state}/status-page/usage.jsonl\n') in service, service
     assert 'OnCalendar=*:0/10' in (units / 'status-page.timer').read_text()
     calls = [json.loads(line) for line in (lab.trace / 'systemctl').read_text().splitlines()]
     assert calls[-2:] == [['--user', 'daemon-reload'], ['--user', 'enable', '--now', 'status-page.timer']], calls
     result = lab.run('install', '--out', str(lab.root / 'a b/index.html'), status=2)
     assert 'no spaces' in result.stderr, result.stderr
+    result = lab.run('install', '--out', str(out), XDG_STATE_HOME=str(lab.root / 'a b'), status=2)
+    assert 'no spaces' in result.stderr, result.stderr
+    # With XDG_STATE_HOME unset, install uses the fixture's HOME alone.
+    lab.env.pop('XDG_STATE_HOME', None)
+    lab.run('install', '--out', str(out))
+    assert f'{lab.env["HOME"]}/.local/state/status-page/usage.jsonl' in (units / 'status-page.service').read_text()
 
 
 def bad_data(lab):
@@ -947,7 +955,7 @@ def page_subscriptions(lab):
     page, data = subscription_page(lab)
     section = page[page.index('<h2>Subscriptions'):page.index('<h2>In flight')]
     assert section.count('Claude · max') == 1 and section.count('Codex · promax') == 2, section
-    assert re.findall(r'<th(?: [^>]*)?>(.*?)</th>', section) == ['Subscription', 'Limit', 'Used', 'Resets']
+    assert re.findall(r'<th(?: [^>]*)?>(.*?)</th>', section) == ['Subscription', 'Limit', 'Used', 'Resets', 'At this pace']
     assert 'alpha' not in section and 'beta' not in section and 'gamma' not in section, section
     assert '84%' in section and '24%' not in section and '1%' in section and '3%' not in section, section
     assert time_cell('2026-10-26T06:30:00Z', 'in 18 h 30 min') in section
@@ -960,6 +968,130 @@ def page_subscriptions(lab):
     assert time_cell('2026-10-30T19:00:00Z', 'in 5 d 7 h') in section
     assert 'sol week' in section and 'other week' in section
     assert data['fleet']['gamma'].get('unreachable')
+
+
+def page_pace(lab):
+    samples = lab.root / 'samples/usage.jsonl'
+    out, snapshot = lab.root / 'page.html', lab.root / 'data.json'
+
+    def render(*args):
+        result = lab.run('--no-pull', '--out', str(out), '--json', str(snapshot), *args)
+        page = out.read_text()
+        private_absent(page, snapshot.read_text(), result.stderr)
+        public_roles(page, lab)
+        section = page[page.index('<h2>Subscriptions'):page.index('<h2>In flight')]
+        assert re.findall(r'<th(?: [^>]*)?>(.*?)</th>', section) == [
+            'Subscription', 'Limit', 'Used', 'Resets', 'At this pace'], section
+        cells, identity = {}, None
+        for row in re.findall(r'<tr>.*?</tr>', section):
+            columns = re.findall(r'<td[^>]*>(.*?)</td>', row)
+            if not columns:
+                continue
+            if columns[0]:
+                identity = re.search(r'<code>(.*?)</code>', columns[0])[1]
+            assert len(columns) == 5, columns
+            cells[identity, columns[1]] = columns[-1]
+        return page, json.loads(snapshot.read_text()), cells
+
+    _, data, cells = render('--samples', str(samples))
+    assert cells and set(cells.values()) == {'–'}, cells
+    assert samples.stat().st_mode & 0o777 == 0o600
+    assert samples.parent.stat().st_mode & 0o777 == 0o700
+    stored = [json.loads(line) for line in samples.read_text().splitlines()]
+    expected = {}
+    for host in data['fleet'].values():
+        for cli in ('claude', 'codex'):
+            probe = host.get(cli + '_usage', {})
+            if not probe.get('label'):
+                continue
+            for limit in probe['limits']:
+                if limit['used'] is None or limit['resets'] is None:
+                    continue
+                key = cli, probe['label'], limit['name']
+                previous = expected.get(key)
+                if previous is None or (limit['resets'], limit['used']) > (previous['resets'], previous['used']):
+                    expected[key] = dict(time=NOW, cli=cli, label=probe['label'], limit=limit['name'],
+                                         used=limit['used'], resets=limit['resets'])
+    assert len(stored) == len(expected) == len(cells), stored
+    assert all(set(s) == {'time', 'cli', 'label', 'limit', 'used', 'resets'} for s in stored)
+    assert {(s['cli'], s['label'], s['limit']): s for s in stored} == expected
+    private_absent(samples.read_text())
+    for name in data['machines']:
+        assert name not in samples.read_text(), name
+    claude = data['fleet']['alpha']['claude_usage']['label']
+    codex = data['fleet']['alpha']['codex_usage']['label']
+    other_codex = data['fleet']['beta']['codex_usage']['label']
+
+    def sample(cli, label, limit, hours, used):
+        return dict(expected[cli, label, limit], time=NOW - hours * 3600, used=used)
+
+    older = sample('codex', codex, 'sol week', 25, 2)
+    expired = dict(sample('codex', codex, 'sol week', 1, 3), resets=NOW - 1)
+    history = [sample('claude', claude, 'week (all models)', 12, 60),
+               sample('claude', claude, 'session', 2, 0),
+               sample('claude', claude, 'week (Fable)', 2, 0),
+               sample('codex', codex, '5 h', 3, 0),
+               sample('codex', codex, '5 h', 50 / 60, 6),
+               dict(sample('codex', codex, 'week', 5, 90), resets=NOW + 86400 + 7200),
+               sample('codex', codex, 'week', 10 / 60, 20), older, expired]
+    write(samples, ''.join(json.dumps(s) + '\n' for s in history) + 'not json\n{"time": "x"}\n')
+    answer = codex_answer(2)
+    answer['limits']['rateLimitsByLimitId']['codex']['primary']['usedPercent'] = 100
+    lab.codex(lab.beta, answer)
+    page, _, cells = render('--samples', str(samples))
+    # (84 - 60) / 12 = 2%/h; (100 - 84) / 2 = 8 h to full.
+    assert cells[claude, 'week (all models)'] == time_cell('2026-10-25T20:00:00Z', 'full in 8 h 0 min'), cells
+    # (1 - 0) / 2 = 0.5%/h; floor(1 + 0.5 * 18.5) = 10%.
+    assert cells[claude, 'session'] == 'lasts, 10% at reset', cells
+    # (0 - 0) / 2 = 0%/h; 0 + 0 * 127 = 0%.
+    assert cells[claude, 'week (Fable)'] == 'lasts, 0% at reset', cells
+    # The 3 h sample is outside the 1 h look-back; (16 - 6) / (50/60) = 12%/h; 16 + 12 = 28%.
+    assert cells[codex, '5 h'] == 'lasts, 28% at reset', cells
+    # The 5 h sample is another window; 10 min < the required 30 min.
+    assert cells[codex, 'week'] == '–', cells
+    # Use >= 100 is full now, without needing a rate.
+    assert cells[other_codex, '5 h'] == 'full', cells
+    assert 'usage samples: 2 lines not read' in page[page.index('<footer>'):]
+    stored = [json.loads(line) for line in samples.read_text().splitlines()]
+    assert older not in stored and expired not in stored, stored
+
+    # 6,000 old readings plus 11 current ones: keep the newest 5,000, in time order.
+    history = [sample('codex', codex, 'sol week', i / 6000 * 24, 10) for i in range(1, 6001)]
+    write(samples, ''.join(json.dumps(s) + '\n' for s in history))
+    render('--samples', str(samples))
+    stored = [json.loads(line) for line in samples.read_text().splitlines()]
+    current = [s for s in stored if s['time'] == NOW]
+    assert len(current) == len(expected)
+    assert len(stored) == 5000, len(stored)
+    assert stored == sorted(history + current, key=lambda s: s['time'])[-5000:]
+    assert samples.stat().st_mode & 0o777 == 0o600
+
+    # An existing directory's permissions stay as the caller chose them.
+    samples.parent.chmod(0o750)
+    render('--samples', str(samples))
+    assert samples.parent.stat().st_mode & 0o777 == 0o750
+    blocked = write(lab.root / 'regular-file', 'not a directory') / 'usage.jsonl'
+    page, _, _ = render('--samples', str(blocked))
+    assert 'usage samples:' in page[page.index('<footer>'):]
+    # A directory in place of the file also exercises atomic replacement's cleanup.
+    directory = lab.root / 'not-a-samples-file'
+    directory.mkdir()
+    page, _, _ = render('--samples', str(directory))
+    assert 'usage samples:' in page[page.index('<footer>'):]
+    assert not list(lab.root.glob('.not-a-samples-file.*'))
+    # Wrong numeric shapes and oversized JSON numbers are dropped, without losing good readings.
+    good = expected['codex', codex, 'sol week']
+    bad = [dict(good, used=True), dict(good, used=float('inf')), dict(good, time=10 ** 400),
+           dict(good, machine='PRIVATE-HOST'), dict(good, label='not-a-label')]
+    write(samples, ''.join(json.dumps(s) + '\n' for s in [*bad, good]) + '[' * 2000 + '0' + ']' * 2000 + '\n')
+    page, _, _ = render('--samples', str(samples))
+    assert 'usage samples: 6 lines not read' in page[page.index('<footer>'):]
+    private_absent(samples.read_text())
+    # Without --samples, even a full limit has no pace; no storage is created anywhere in the lab.
+    before = set(lab.root.rglob('*'))
+    _, _, cells = render()
+    assert set(cells.values()) == {'–'}, cells
+    assert set(lab.root.rglob('*')) == before
 
 
 def subscriptions_signed_out(lab):
@@ -1034,7 +1166,7 @@ def claude_resets(lab):
     assert [v['used'] for v in data['claude_usage']['limits']] == list(range(7))
 
 
-CASES = [records_waits, page_waits, collect_subscriptions, page_subscriptions, subscriptions_signed_out, subscription_failures, claude_resets, collect, collect_missing, page, reason_kind, page_recent, machine_ips, page_roles, page_role_edges, page_now, page_times, page_degraded, bad_data, write_failure, install]
+CASES = [records_waits, page_waits, collect_subscriptions, page_subscriptions, page_pace, subscriptions_signed_out, subscription_failures, claude_resets, collect, collect_missing, page, reason_kind, page_recent, machine_ips, page_roles, page_role_edges, page_now, page_times, page_degraded, bad_data, write_failure, install]
 
 
 def run(case, directory, built):

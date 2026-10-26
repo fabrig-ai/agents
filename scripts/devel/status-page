@@ -2,7 +2,7 @@
 """Write the fleet's status page: the work in flight, and what building,
 testing and landing cost (docs/design/status-page.md).
 
-status-page [--out FILE] [--json FILE] [--no-pull]
+status-page [--out FILE] [--json FILE] [--samples FILE] [--no-pull]
 status-page collect
 status-page install --out FILE
 """
@@ -26,6 +26,7 @@ import time
 import traceback
 
 HOUR, DAY, WEEK = 3600, 86400, 7 * 86400
+SAMPLES_KEPT = 5000
 # Copied from scripts/devel/landings: SSH's options and feed()'s path, but
 # for LogLevel=QUIET, so that a refused key or host key says so.
 SSH = ['ssh', '-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
@@ -892,6 +893,7 @@ class Fleet:
 
     def __init__(self, data):
         self.now = data['time']
+        self.samples = None
         self.data = data
         self.names = data['machines']
         self.up = {n: d for n, d in data['fleet'].items() if 'unreachable' not in d}
@@ -938,8 +940,8 @@ def subscription_data(raw):
             'label': identity if re.fullmatch('[0-9a-f]{8}', identity) else '', 'limits': limits}
 
 
-def subscriptions(fleet):
-    """Each distinct subscription's limits, then machines with none."""
+def merged_subscriptions(fleet):
+    """Each distinct subscription as 2.1 merges it, and the machines with none."""
     merged, notes = {}, {}
     for host, cli, probe in fleet.usage:
         if probe['state'] in ('signed-out', 'no-subscription'):
@@ -958,6 +960,73 @@ def subscriptions(fleet):
                               v['used'] if v['used'] is not None else -math.inf)
             if previous is None or rank(limit) > rank(previous):
                 group['limits'][limit['name']] = limit
+    return merged, notes
+
+
+def usage_samples(fleet):
+    """One sample per limit with a use and reset, of each labelled subscription."""
+    merged, _ = merged_subscriptions(fleet)
+    return [dict(time=fleet.now, cli=cli, label=label, limit=limit['name'],
+                 used=limit['used'], resets=limit['resets'])
+            for (cli, label, _), group in merged.items() if label
+            for limit in group['limits'].values() if limit['used'] is not None and limit['resets'] is not None]
+
+
+def read_samples(path):
+    """The file's samples and how many lines held none; a missing file has none."""
+    samples, dropped = [], 0
+    try:
+        source = Path(path).open(encoding='utf-8')
+    except FileNotFoundError:
+        return samples, dropped
+    with source:
+        for line in source:
+            try:
+                sample = json.loads(line)
+                valid = (isinstance(sample, dict)
+                         and set(sample) == {'time', 'cli', 'label', 'limit', 'used', 'resets'}
+                         and all(number(sample[k]) is not None for k in ('time', 'used', 'resets'))
+                         and sample['cli'] in ('claude', 'codex')
+                         and re.fullmatch('[0-9a-f]{8}', text(sample['label'])) and text(sample['limit']))
+            except (ValueError, OverflowError, RecursionError):
+                valid = False
+            if valid:
+                samples.append(sample)
+            else:
+                dropped += 1
+    return samples, dropped
+
+
+def kept_samples(samples, now):
+    """Unexpired samples at most a day old, newest SAMPLES_KEPT, oldest first."""
+    return sorted((s for s in samples if s['resets'] >= now and s['time'] >= now - DAY),
+                  key=lambda s: s['time'])[-SAMPLES_KEPT:]
+
+
+def pace(samples, limit, cli, label, now):
+    """A limit's full time, projected use at reset, or no pace yet (2.2)."""
+    used, reset = limit['used'], limit['resets']
+    if used is None or reset is None:
+        return '–'
+    if used >= 100:
+        return 'full'
+    lookback = min(DAY, max(HOUR, reset - now))
+    earlier = min((s for s in samples if s['cli'] == cli and s['label'] == label
+                   and s['limit'] == limit['name'] and abs(s['resets'] - reset) <= 600
+                   and now - lookback <= s['time'] <= now), key=lambda s: s['time'], default=None)
+    if earlier is None or now - earlier['time'] < 1800:
+        return '–'
+    rate = (used - earlier['used']) / (now - earlier['time'])
+    if rate > 0:
+        full_at = now + (100 - used) / rate
+        if full_at < reset:
+            return when(full_at, now, 'full in ' + length(full_at - now))
+    return f'lasts, {int(used + max(rate, 0) * (reset - now))}% at reset'
+
+
+def subscriptions(fleet):
+    """Each distinct subscription's limits, then machines with none."""
+    merged, notes = merged_subscriptions(fleet)
     rows, highest = [], None
     cli_name = {'claude': 'Claude', 'codex': 'Codex'}
     order = lambda key: (key[0] != 'claude', not bool(key[1]), key[1], key[2])
@@ -978,8 +1047,10 @@ def subscriptions(fleet):
                 if highest is None or used > highest[0]:
                     highest = (used, f'{cli_name[cli]} {limit["name"]}')
             rows.append([title if i == 0 else '', E(limit['name']), meter,
-                         when(limit['resets'], fleet.now, resets(limit['resets'], fleet.now))])
-    out = table(['Subscription', 'Limit', 'Used', 'Resets'], rows, numeric_from=2,
+                         when(limit['resets'], fleet.now, resets(limit['resets'], fleet.now)),
+                         pace(fleet.samples, limit, cli, identity, fleet.now)
+                         if identity and fleet.samples is not None else '–'])
+    out = table(['Subscription', 'Limit', 'Used', 'Resets', 'At this pace'], rows, numeric_from=2,
                 empty='No subscriptions found.')
     for cli in ('claude', 'codex'):
         for state, word in (('signed-out', 'signed out'), ('no-subscription', 'no subscription')):
@@ -1564,8 +1635,9 @@ SCRIPT = """
 """
 
 
-def render(data):
+def render(data, samples=None):
     fleet = Fleet(data)
+    fleet.samples = samples
     now = fleet.now
     problems = list(data['errors'])
     problems += [f'waiting.md: line {n} not read' for n in data['records'].get('unread', [])]
@@ -1700,7 +1772,9 @@ def write(path, content, mode):
 def install(out):
     script = Path(__file__).resolve()
     out = Path(out).expanduser().absolute()
-    for path in (script, out):
+    samples = (Path(os.environ.get('XDG_STATE_HOME', Path.home() / '.local/state'))
+               / 'status-page/usage.jsonl').expanduser().absolute()
+    for path in (script, out, samples):
         if re.search(r'[\s"\'\\$%]', str(path)):
             raise ValueError(f'{path}: a path for a unit must have no spaces, quotes, $, % or backslashes')
     units = Path(os.environ.get('XDG_CONFIG_HOME', Path.home() / '.config')) / 'systemd/user'
@@ -1712,7 +1786,7 @@ Description=Write the fleet's status page (agents docs/design/status-page.md)
 [Service]
 Type=oneshot
 TimeoutStartSec=8min
-ExecStart=/bin/bash -lc 'exec "$$0" --out "$$1"' {script} {out}
+ExecStart=/bin/bash -lc 'exec "$$0" --out "$$1" --samples "$$2"' {script} {out} {samples}
 ''')
     (units / 'status-page.timer').write_text('''[Unit]
 Description=Write the fleet's status page every 10 minutes
@@ -1733,6 +1807,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--out', default='-', help='the page; - for stdout')
     parser.add_argument('--json', help='also write the gathered data here')
+    parser.add_argument('--samples', help='keep subscription usage samples here for their pace')
     parser.add_argument('--no-pull', action='store_true', help='read the records checkout as it is')
     commands = parser.add_subparsers(dest='command')
     commands.add_parser('collect', help="print this machine's part as JSON")
@@ -1753,7 +1828,22 @@ def main():
         machines_file = Path(os.environ.get('STATUS_MACHINES', tmp_dir() / 'post/machines'))
         records_root = Path(os.environ.get('RECORDS', root / 'records')).expanduser().absolute()
         data = gather_all(machines_file, records_root, not args.no_pull, source)
-        page = render(data)
+        kept = None
+        if args.samples:
+            stored, dropped = [], 0
+            try:
+                stored, dropped = read_samples(args.samples)
+            except (OSError, ValueError) as error:
+                data['errors'].append(f'usage samples: {error}')
+            if dropped:
+                data['errors'].append(f'usage samples: {dropped} lines not read')
+            kept = kept_samples(stored + usage_samples(Fleet(data)), data['time'])
+            try:
+                Path(args.samples).parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                write(args.samples, ''.join(json.dumps(s) + '\n' for s in kept), 0o600)
+            except (OSError, ValueError) as error:
+                data['errors'].append(f'usage samples: {error}')
+        page = render(data, kept)
         if args.out == '-':
             sys.stdout.write(page)
         else:
