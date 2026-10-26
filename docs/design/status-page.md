@@ -156,8 +156,11 @@ could use the status script itself for sampling)" (the user, 10-26).
   has a new reset). The look-back is as long as what is left of the
   window, at least an hour and at most a day: a session's pace is its
   last hour or so, a week's its last day, and a window near its end is
-  judged on as long as it has left. A pace needs its two readings at
-  least 30 minutes apart.
+  judged on as long as it has left. A pace needs its two readings a
+  quarter of the look-back apart, and at least 30 minutes: a use read
+  in whole points moves too little in less, so that a week shows its
+  pace once it has 6 hours of samples, and a session after about an
+  hour.
 - **At this pace** the limit is either full before its reset, at `now
   + (100 − used) / pace`, or lasts to it, at `used + pace × (reset −
   now)` then, rounded down; a pace of zero or less lasts at its use.
@@ -294,7 +297,7 @@ answered by a model, a probe that times out and one that answers
 nonsense, each named in the footer while the rest stands; the methods
 asked of the app-server; and no email or id, on the page or in the
 `--json` file. The pace: a limit full before its reset, one that
-lasts, one at 100, one without two samples 30 minutes apart, a new
+lasts, one at 100, one without two samples far enough apart, a new
 window's samples kept apart from the old one's by their reset, the
 look-back as long as the time left within its bounds, samples pruned
 past their reset and past a day, a line of the wrong shape dropped and
