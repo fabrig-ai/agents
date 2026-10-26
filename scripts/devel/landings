@@ -34,11 +34,12 @@ FEED = '/home/free/.local/state/agents-land-set/feed.jsonl'
 TAIL = 'tail -n 5000 ' + FEED
 ORDER = ('skein', 'smith', 'hearth', 'jig', 'temper')
 # Copied verbatim from land-set's FEED program.
-FEED_PROGRAM = '''import fcntl, os, pathlib, stat, sys
+FEED_PROGRAM = '''import fcntl, os, stat, sys
 os.umask(0o077)
-p = pathlib.Path(sys.argv[1])
-p.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-os.chmod(p.parent, 0o700)
+p = sys.argv[1]
+parent = os.path.dirname(p)
+os.makedirs(parent, mode=0o700, exist_ok=True)
+os.chmod(parent, 0o700)
 fd = os.open(p, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
 with os.fdopen(fd, 'w') as out:
     if not stat.S_ISREG(os.fstat(out.fileno()).st_mode):
