@@ -152,8 +152,11 @@ class Lab:
                             ('ended-m', 'ended'), ('old-ended', 'ended')):
             owner = 'design/beta-d@beta' if name == 'beta-d' else f'o/{name}@alpha'
             ended = f'ended: {iso(30 if name == "ended-m" else 240)}\n' if name in ('ended-m', 'old-ended') else ''
+            description = ("description: Probe the fleet's subscriptions\n" if name == 'alpha-m' else
+                           'description: Explain <b>markup</b> safely\n' if name == 'ended-m' else
+                           'description: unknown\n' if name == 'paused-m' else '')
             write(self.records / f'missions/{name}/README.md',
-                  f'---\nstate: {state}\nowner: {owner}\nmachine: alpha\n{ended}'
+                  f'---\nstate: {state}\nowner: {owner}\nmachine: alpha\n{ended}{description}'
                   'parent: PRIVATE-PARENT\nroadmap: PRIVATE-ROADMAP\nstarted: PRIVATE-STARTED\n'
                   'end: PRIVATE-END-PROSE\n---\n\nThe brief.\n')
         rows = self.alpha / 'logs/heavy.tsv'
@@ -355,7 +358,7 @@ def page(lab):
     assert 'alpha-m/m1' in now and 'done-m/m1' not in now and 'stale-m/m1' not in now, now
     assert '<div class="label">Sets landing now</div><div class="value">1</div>' in text
     for needle in ('alpha-m/m1', 'done-m/m1', 'beta-m', 'paused-m', 'land temper', 'landing turn jig',
-                   'implementer for alpha-m', '1 unread', 'Implementer runs', 'owner busy'):
+                   'alpha-m: 1 running · gpt-x high', '1 unread', 'Implementer runs', 'owner busy'):
         assert needle in text, needle
     # Ended in the record, with commands only: history, not in flight.
     assert '<strong>old-m</strong>' not in text
@@ -365,6 +368,26 @@ def page(lab):
     sent = json.loads((lab.trace / 'ssh-free@beta').read_text())
     assert {'BatchMode=yes', 'StrictHostKeyChecking=yes'} <= set(sent) and sent[-2] == 'free@beta', sent
     assert 'fmt 0:04 · clippy 0:25' in text, 'step medians'
+    public_roles(text, lab)
+
+
+def public_roles(page, lab):
+    """No identity from sessions, runs, mailboxes or records reaches the page."""
+    for word in ('o/alpha-m', 'o/paused-m', 'design/beta-d', 'PRIVATE-PROMPT-TITLE',
+                 'PRIVATE-OLDER-TITLE', 'o/recipient'):
+        assert word not in page, word
+    for readme in (lab.records / 'missions').glob('*/README.md'):
+        owner = re.search(r'^owner: (.+)$', readme.read_text(), re.M)
+        assert not owner or owner[1] not in page, owner[1] if owner else ''
+    for tmp in (lab.alpha, lab.beta):
+        for meta in (tmp / 'codex-run').glob('*/meta'):
+            recipient = re.search(r'^to=(.+)$', meta.read_text(), re.M)
+            assert not recipient or recipient[1] not in page, recipient[1] if recipient else ''
+    live = page[page.index('<h3>Missions</h3>'):page.index('<h3>Ended this week</h3>')]
+    assert re.findall(r'<th(?: [^>]*)?>(.*?)</th>', live) == [
+        'Mission', 'Record', 'Description', 'Now', 'Last activity'], live
+    for header in ('Owner', 'Machines', 'Commands 24 h'):
+        assert header not in live, header
 
 
 def page_roles(lab):
@@ -380,11 +403,21 @@ def page_roles(lab):
                          ('paused-m', ('owner idle',)), ('beta-d', ('designer busy',))):
         for word in badges:
             assert word in rows[name], rows[name]
-    assert '1 · 0:10' in rows['alpha-m2'] and '1 · 0:10' in rows['legacy'], rows
+    assert "<td class=wrap>Probe the fleet&#x27;s subscriptions</td>" in rows['alpha-m'], rows['alpha-m']
+    for name in ('beta-d', 'paused-m'):
+        assert '<td class=wrap></td>' in rows[name], rows[name]
+    assert len(re.findall('<td', rows['alpha-m'])) == 5, rows['alpha-m']
     card = page[page.index('<h3>alpha '):page.index('<h3>beta ')]
-    assert '<h4>Implementers</h4>' in card and 'implementer for alpha-m2' in card, card
+    assert '<h4>Implementers</h4><ul><li>alpha-m: 1 running · gpt-x high</li>' in card, card
+    assert '<li>alpha-m2: 1 running · gpt-x high</li>' in card, card
+    assert '<h4>Claude sessions</h4><p>2 owners, 1 other · 1 busy</p>' in card, card
+    beta = page[page.index('<h3>beta '):page.index('<h3>gamma ')]
+    assert '<h4>Claude sessions</h4><p>director, 1 designer · 1 busy</p>' in beta, beta
+    public_roles(page, lab)
     ended = page[page.index('<h3>Ended this week</h3>'):page.index('<h3>Machines</h3>')]
-    for word in ('ended-m', '10-24 06:00Z · 30 h 0 min ago', 'o/ended-m@alpha'):
+    assert re.findall(r'<th(?: [^>]*)?>(.*?)</th>', ended) == ['Mission', 'State', 'Ended', 'Description']
+    assert '<b>markup</b>' not in page
+    for word in ('ended-m', '10-24 06:00Z · 30 h 0 min ago', 'Explain &lt;b&gt;markup&lt;/b&gt; safely'):
         assert word in ended, ended
     assert 'old-ended' not in ended, ended
     assert '<div class="label">Agents</div><div class="value">8</div>' in page
@@ -394,8 +427,19 @@ def page_roles(lab):
     for word in ('owner up', 'owner down', 'last turn', 'Codex owner'):
         assert word not in page, word
     data = json.loads(raw)
-    assert all(set(m) == {'name', 'state', 'owner', 'machine', 'ended'}
+    assert all(set(m) == {'name', 'state', 'ended', 'description'}
                for m in data['records']['missions']), data['records']
+
+    # 83 recent endings: show exactly the newest ten and count the other 73.
+    for i in range(82):
+        write(lab.records / f'missions/recent-{i:02}/README.md',
+              f'---\nstate: ended\nended: {iso(i / 100)}\ndescription: Ending {i}\n---\n')
+    lab.run('--no-pull', '--out', str(out))
+    page = out.read_text()
+    ended = page[page.index('<h3>Ended this week</h3>'):page.index('<h3>Machines</h3>')]
+    names = re.findall(r'<tr><td>(.*?)</td>', ended)
+    assert names == [f'recent-{i:02}' for i in range(10)], names
+    assert '<p class="muted">and 73 more this week</p>' in ended, ended
 
 
 def page_role_edges(lab):
@@ -413,10 +457,14 @@ def page_role_edges(lab):
     lab.claude(lab.alpha, answer)
     # Two alive implementers for one mission, plus a recent stale one with no mission.
     write(lab.alpha / 'codex-run/20261025T113000Z-dddd/meta',
-          f'to=o/alpha-m\nmodel=gpt-x\neffort=high\nstarted={iso(.5)}\n'
+          f'to=o/alpha-m\nmodel=gpt-y\neffort=low\nstarted={iso(.5)}\n'
           f'task={lab.alpha}/owners/alpha-m/t.md\n')
     write(lab.alpha / 'codex-run/stale/meta',
           f'to=o/recipient\nmodel=gpt-x\neffort=low\nstarted={iso(2)}\n')
+    write(lab.alpha / 'codex-run/stale-mission/meta',
+          f'to=o/stale-recipient\nstarted={iso(2)}\ntask={lab.alpha}/owners/alpha-m/t.md\n')
+    meta = lab.beta / 'codex-run/20261025T110000Z-aaaa/meta'
+    write(meta, meta.read_text().replace(f'task={lab.beta}/owners/beta-m/m1/tasks/t.md', 'task=/outside/t.md'))
     # Both heavy's ledger and ended runs carry raw milestone names too.
     state = json.loads((lab.alpha / 'heavy/state.json').read_text())
     state['tasks']['b']['repo'] = str(lab.alpha / 'owners/legacy-m3/wt')
@@ -437,7 +485,11 @@ def page_role_edges(lab):
     assert '6 min ago' in rows['legacy'], rows['legacy']
     landing = page[page.index('<h3>Landing now</h3>'):page.index('<h3>Recent set runs</h3>')]
     assert 'legacy-m3' not in live + landing, 'mission labels resolve on the page'
-    assert 'stale</span> implementer for o/recipient' in page, 'fallback recipient'
+    assert '<li>no mission: 1 stale · gpt-x low</li>' in page
+    assert '<li>alpha-m: 2 running · gpt-x high, gpt-y low</li>' in page
+    assert '<li>alpha-m: 1 stale</li>' in page
+    assert '<li>no mission: 1 running · gpt-x high</li>' in page
+    public_roles(page, lab)
     assert '<div class="label">Agents</div><div class="value">8</div>' in page
     assert '<div class="sub">5 busy · director, 2 designers, 2 owners, 3 implementers</div>' in page
     ended = page[page.index('<h3>Ended this week</h3>'):page.index('<h3>Machines</h3>')]

@@ -47,7 +47,7 @@ GROUPS = [('Tests', ['focused', 'package', 'workspace', 'doc']),
 STEPS = ('fmt', 'clippy', 'wasm', 'build', 'focused', 'fuzzy', 'bundle', 'browser')
 WINDOWS = (('24h', DAY, 'Last 24 hours'), ('7d', WEEK, 'Last 7 days'))
 # The front matter's public fields (status-page.md 1); a field joins only once it is.
-FRONT = ('state', 'owner', 'machine', 'ended')
+FRONT = ('state', 'ended', 'description')
 
 
 def clock():
@@ -950,19 +950,8 @@ def kpis(fleet, shown, subscribed):
     sessions = [s for d in fleet.up.values() for s in d.get('sessions') or []]
     busy = sum(s['status'] in ('busy', 'working') for s in sessions)
     codex = sum(r['alive'] for d in fleet.up.values() for r in (d.get('codex') or {}).get('running', []))
-    roles = {}
-    for session in sessions:
-        role, _ = session_role(session['name'])
-        role = role or 'other'
-        roles[role] = roles.get(role, 0) + 1
-    roles['implementer'] = codex
-    counts = []
-    for role in ('director', 'designer', 'owner', 'implementer', 'other'):
-        count = roles.get(role, 0)
-        if count:
-            counts.append('director' if role == 'director' and count == 1 else
-                          f'{count} {role}' + ('s' if count > 1 and role != 'other' else ''))
-    agents = f'{busy + codex} busy' + (' · ' + ', '.join(counts) if counts else '')
+    counts = role_counts(sessions, codex)
+    agents = f'{busy + codex} busy' + (' · ' + counts if counts else '')
     day = fleet.window(DAY)
     lands = [r for r in day if r[7] == 'land']
     tiles = [
@@ -1033,14 +1022,32 @@ def session_role(name):
     return '', ''
 
 
+def role_counts(sessions, implementers=0):
+    roles = {'implementer': implementers}
+    for session in sessions:
+        role, _ = session_role(session['name'])
+        role = role or 'other'
+        roles[role] = roles.get(role, 0) + 1
+    counts = []
+    for role in ('director', 'designer', 'owner', 'implementer', 'other'):
+        count = roles.get(role, 0)
+        if count:
+            counts.append('director' if role == 'director' and count == 1 else
+                          f'{count} {role}' + ('s' if count > 1 and role != 'other' else ''))
+    return ', '.join(counts)
+
+
+def description(record):
+    value = text(record.get('description'))
+    return '' if value == 'unknown' else value
+
+
 def missions(fleet):
     now = fleet.now
     seen = {}
 
-    def entry(name, host=None, moment=None, doing=None):
-        e = seen.setdefault(name, {'machines': set(), 'last': 0, 'now': [], 'builds': 0, 'run': 0.0})
-        if host:
-            e['machines'].add(host)
+    def entry(name, moment=None, doing=None):
+        e = seen.setdefault(name, {'last': 0, 'now': []})
         e['last'] = max(e['last'], moment or 0)
         if doing:
             e['now'].append(doing)
@@ -1054,29 +1061,27 @@ def missions(fleet):
         for task in (data.get('heavy') or {}).get('tasks', []):
             name = fleet.mission(task['mission'])
             if name:
-                entry(name, host, task['submitted'],
+                entry(name, task['submitted'],
                       'build' if task['state'] in RUNNING else 'queued build')
         codex = data.get('codex') or {}
         for run in codex.get('running', []):
             name = fleet.mission(run['mission'])
             if run['alive'] and name:
-                entry(name, host, run['started'], 'implementer')
+                entry(name, run['started'], 'implementer')
         for session in data.get('sessions') or []:
             role, raw = session_role(session['name'])
             name = fleet.mission(raw)
             if name:
                 status = 'busy' if session['status'] in ('busy', 'working') else 'idle'
-                entry(name, host, None, f'{role} {status}')
+                entry(name, None, f'{role} {status}')
     # Commands alone bring in a mission the record doesn't say has ended.
     for host, end, lane, wait, run, code, name, kind, repo in fleet.window(DAY):
         if not name or (name not in seen and recorded.get(name, {}).get('state') in ('ended', 'abandoned')):
             continue
-        e = entry(name, host, end)
-        e['builds'] += 1
-        e['run'] += run
+        entry(name, end)
     for host, start, end, code, model, effort, tokens, name in fleet.codex:
         if name in seen:
-            entry(name, host, end)
+            entry(name, end)
     rows = []
     for name, e in sorted(seen.items(), key=lambda kv: (not kv[1]['now'], -kv[1]['last'], kv[0])):
         m = recorded.get(name, {})
@@ -1086,15 +1091,12 @@ def missions(fleet):
         for item in e['now']:
             counts[item] = counts.get(item, 0) + 1
         doing = ' '.join(badge('info', f'{n} × {k}' if n > 1 else k) for k, n in counts.items()) or '–'
-        where = sorted(e['machines']) or ([m['machine']] if m.get('machine') not in (None, '', 'unknown') else [])
         rows.append([f'<strong>{E(name)}</strong>', badge(tone, state) if state else '<span class="muted">not recorded</span>',
-                     E(', '.join(where) or '–'), doing,
-                     E(f'{e["builds"]} · {span(e["run"])}' if e['builds'] else '–'), E(ago(e['last'], now)),
-                     E(m.get('owner') or '–')])
+                     E(description(m)), doing, E(ago(e['last'], now))])
     shown = {'rows': len(rows), 'busy': sum(bool(e['now']) for e in seen.values()),
              **{s: sum(recorded.get(n, {}).get('state') == s for n in seen) for s in ('active', 'paused')}}
-    return shown, table(['Mission', 'Record', 'Machines', 'Now', 'Commands 24 h · running', 'Last activity', 'Owner'],
-                        rows, numeric_from=9, empty='No mission is active, paused or busy.')
+    return shown, table(['Mission', 'Record', 'Description', 'Now', 'Last activity'],
+                        rows, numeric_from=9, wrap=(2,), empty='No mission is active, paused or busy.')
 
 
 def ended_missions(fleet):
@@ -1103,9 +1105,12 @@ def ended_missions(fleet):
     ended = sorted((e for e in ended if e[0] is not None and fleet.now - WEEK <= e[0] <= fleet.now),
                    key=lambda e: (-e[0], e[1]))
     rows = [[E(name), badge('neutral', m['state']), E(f'{utc(at)} · {ago(at, fleet.now)}'),
-             E(m.get('owner') or '–')] for at, name, m in ended]
-    return table(['Mission', 'State', 'Ended', 'Owner'], rows, numeric_from=9,
-                 empty='No mission ended this week.')
+             E(description(m))] for at, name, m in ended[:10]]
+    out = table(['Mission', 'State', 'Ended', 'Description'], rows, numeric_from=9, wrap=(3,),
+                empty='No mission ended this week.')
+    if len(ended) > 10:
+        out += f'<p class="muted">and {len(ended) - 10} more this week</p>'
+    return out
 
 
 def machine_card(fleet, name):
@@ -1136,22 +1141,30 @@ def machine_card(fleet, name):
     codex = data.get('codex') or {}
     runs = codex.get('running', [])
     if runs:
-        items = [f'<li>{badge("info" if r["alive"] else "warning", "running" if r["alive"] else "stale")} '
-                 f'implementer for {E(fleet.mission(r["mission"]) or r["to"])} · '
-                 f'{E(r["model"])} {E(r["effort"])} · {E(lasted(r["started"], now))}</li>'
-                 for r in runs]
+        groups = {}
+        for run in runs:
+            mission = fleet.mission(run['mission']) or 'no mission'
+            state = 'running' if run['alive'] else 'stale'
+            group = groups.setdefault((mission, state), {'count': 0, 'models': set()})
+            group['count'] += 1
+            model = ' '.join(x for x in (run['model'], run['effort']) if x)
+            if model:
+                group['models'].add(model)
+        items = []
+        for (mission, state), group in sorted(groups.items()):
+            models = ' · ' + ', '.join(sorted(group['models'])) if group['models'] else ''
+            items.append(f'<li>{E(mission)}: {group["count"]} {state}{E(models)}</li>')
         body.append('<h4>Implementers</h4><ul>' + ''.join(items) + '</ul>')
     sessions = data.get('sessions') or []
     if sessions:
-        body.append('<h4>Claude sessions</h4><ul>' + ''.join(
-            f'<li>{badge("info" if s["status"] in ("busy", "working") else "neutral", s["status"] or "live")} '
-            f'{E(" · ".join(x for x in (s["name"], s["kind"]) if x))} · up {E(lasted(s["started"], now))}</li>'
-            for s in sessions) + '</ul>')
+        busy = sum(s['status'] in ('busy', 'working') for s in sessions)
+        body.append(f'<h4>Claude sessions</h4><p>{E(role_counts(sessions))} · {busy} busy</p>')
     mail = data.get('mail') or []
     if mail:
-        body.append('<h4>Unread post</h4><ul>' + ''.join(
-            f'<li>{badge("warning" if now - m["oldest"] > 900 else "neutral", str(m["new"]) + " unread")} '
-            f'{E(m["name"])} · oldest {E(ago(m["oldest"], now))}</li>' for m in mail) + '</ul>')
+        count, oldest = sum(m['new'] for m in mail), min(m['oldest'] for m in mail)
+        body.append('<h4>Unread post</h4><p>'
+                    + badge('warning' if now - oldest > 900 else 'neutral', f'{count} unread')
+                    + f' · oldest {E(ago(oldest, now))}</p>')
     last = max((r[0] for r in data.get('rows') or []), default=None)
     if not body:
         body.append('<p class="muted">Idle: nothing queued, running or unread.</p>')
@@ -1655,7 +1668,7 @@ def main():
             # The web server reads it as another user.
             write(args.out, page, 0o644)
         if args.json:
-            # The snapshot holds only the collector's public fields.
+            # This private snapshot retains names used to join sessions to missions.
             write(args.json, json.dumps(data), 0o600)
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         print(f'status-page: {error}', file=sys.stderr)
