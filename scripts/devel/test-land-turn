@@ -838,6 +838,7 @@ def main():
     opts = parser.parse_args()
     root = opts.evidence.resolve()
     root.mkdir(parents=True, exist_ok=False)
+    (root / 'EVIDENCE.TAG').write_text('agents fixture evidence\ntest-land-turn\n')
     results = []
     cases = [('serialization', serialization), ('invocation-lock', invocation_lock), ('stale', stale), ('unavailable', unavailable),
              ('local-unavailable', lambda lab: unavailable(lab, True)),

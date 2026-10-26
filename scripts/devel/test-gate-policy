@@ -47,6 +47,8 @@ class PolicyFixtures(unittest.TestCase):
             destination = Path(evidence).resolve() / self._testMethodName
             destination.parent.mkdir(parents=True, exist_ok=True)
             self.assertFalse(destination.exists())
+            destination.mkdir(mode=0o700)
+            (destination / "EVIDENCE.TAG").write_text("agents fixture evidence\ntest-gate-policy\n")
             # Execute below /tmp so host ancestor Cargo configs cannot mask
             # the fixture's own config. Retain the complete execution directory.
             def retain():
@@ -66,7 +68,8 @@ class PolicyFixtures(unittest.TestCase):
                         if Path(target).exists():
                             os.chmod(target, mode)
                     return target
-                shutil.move(str(self.root), destination, copy_function=retain_file)
+                for entry in self.root.iterdir():
+                    shutil.move(str(entry), destination / entry.name, copy_function=retain_file)
             self.addCleanup(retain)
         self.retain = bool(evidence)
         self.command_serial = 0

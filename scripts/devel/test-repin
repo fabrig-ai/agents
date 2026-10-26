@@ -609,6 +609,7 @@ def main():
     parser.add_argument('--evidence', type=Path, required=True)
     args = parser.parse_args()
     args.evidence.mkdir(mode=0o700)
+    (args.evidence / 'EVIDENCE.TAG').write_text('agents fixture evidence\ntest-repin\n')
     with tempfile.TemporaryDirectory(prefix='repin-fixture-', dir=args.evidence) as directory:
         fixtures(Path(directory), args.evidence.resolve())
 
