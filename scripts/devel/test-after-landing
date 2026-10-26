@@ -40,7 +40,7 @@ while test "$#" -gt 0; do
     shift 2
 done
 if test "$named" -eq 0; then
-    cat tier/reds tier/flaky | sort -u | while IFS= read -r name; do
+    cat tier/reds tier/flaky tier/starved | sort -u | while IFS= read -r name; do
         if test -z "$part"; then printf '%s\n' "$name"
         else
             case "$name" in "p$part."*) printf '%s\n' "$name" ;; esac
@@ -61,6 +61,8 @@ while IFS= read -r name; do
         printf 'after-landing: failed %s\n' "$name"
         printf 'failure text for %s\nstack detail\n' "$name"
         status=1
+    elif contains "$name" tier/starved; then
+        printf 'after-landing: starved %s\n' "$name"
     fi
 done < "$selected"
 # Contract lines deliberately precede heavy's short tail.
@@ -79,7 +81,7 @@ TIER_WITHOUT_PART = (TIER[:TIER.index('part=\n')] + r'''if test "$#" -gt 0; then
         shift 2
     done
 else
-    cat tier/reds tier/flaky | sort -u > "$selected"
+    cat tier/reds tier/flaky tier/starved | sort -u > "$selected"
 fi
 ''' + TIER[TIER.index('# Exact-line membership'):])
 HEAVY = r'''import json, os, subprocess, sys
@@ -169,16 +171,16 @@ class Lab:
         script.write_text(TIER)
         script.chmod(0o700)
         (self.work / '.gitignore').write_text('target/\n')
-        for name in ('reds', 'flaky', 'lacks'):
+        for name in ('reds', 'flaky', 'lacks', 'starved'):
             (self.work / 'tier' / name).write_text('')
         self.serial = 0
 
     def git(self, cwd, *args):
         return call(['git', *args], cwd or self.root, self.env).stdout.strip()
 
-    def land(self, reds=None, flaky=None, lacks=None, docs=False, landed=False, trailer=True, body=''):
+    def land(self, reds=None, flaky=None, lacks=None, starved=None, docs=False, landed=False, trailer=True, body=''):
         self.serial += 1
-        for name, value in (('reds', reds), ('flaky', flaky), ('lacks', lacks)):
+        for name, value in (('reds', reds), ('flaky', flaky), ('lacks', lacks), ('starved', starved)):
             if value is not None:
                 (self.work / 'tier' / name).write_text(''.join(test + '\n' for test in value))
         (self.work / 'story.md').write_text(str(self.serial))
@@ -297,10 +299,52 @@ def flake(lab):
     lab.run()
     verdict = lab.verdict(head)
     assert verdict['verdict'] == 'cleared' and verdict['flakes'] == ['t1']
+    assert verdict['starved'] == [] and lab.records('tier')[-1]['starved'] == []
     assert lab.calls()[-1]['argv'][-2:] == ['--only', 't1']
     assert lab.records('tier')[-1]['state'] == 'green'
     assert lab.records('tier')[-1]['ran_s'] == 2.5
     assert lab.state()['reds'] == {} and lab.posts() == []
+
+
+def starved_pass(lab):
+    lab.green()
+    before = len(lab.calls())
+    head = lab.land(starved=['t5', 't5'])
+    lab.push()
+    lab.run()
+    verdict = lab.verdict(head)
+    assert verdict['verdict'] == 'cleared' and verdict['starved'] == ['t5'], verdict
+    tier = lab.records('tier')[-1]
+    assert tier['state'] == 'green' and tier['starved'] == ['t5'], tier
+    assert len(lab.calls()) == before + 1
+    # A part selects only its own starved passes; --only ignores the part.
+    head = lab.land(starved=['p1.t5', 'p2.t6'])
+    lab.push()
+    for part, name in (('1/2', 'p1.t5'), ('2/2', 'p2.t6')):
+        lab.run(part=part)
+        tier = lab.records('tier', tier='demo.' + part.replace('/', 'of'))[-1]
+        assert tier['state'] == 'green' and tier['starved'] == [name], tier
+
+
+def starved_with_a_rerun(lab):
+    lab.green()
+    # t2 passes starved only at the older commit used by the bisect probe.
+    old = lab.land(starved=['t2'])
+    head = lab.land(reds=['t2'], flaky=['t1', 't6'], starved=['t6', 't5'])
+    lab.push()
+    lab.run()
+    assert [call['head'] for call in lab.calls()[-3:]] == [head, head, old]
+    assert lab.calls()[-2]['argv'][-6:] == ['--only', 't1', '--only', 't2', '--only', 't6']
+    for tip in (old, head):
+        verdict = lab.verdict(tip)
+        assert verdict['starved'] == ['t5', 't6'], verdict
+        assert verdict['flakes'] == ['t1', 't6'], verdict
+    assert lab.verdict(old)['verdict'] == 'cleared'
+    assert lab.verdict(head)['verdict'] == 'red'
+    tier = lab.records('tier')[-1]
+    assert tier['state'] == 'red' and tier['starved'] == ['t5', 't6'], tier
+    log = Path(tier['log']).read_text()
+    assert 'after-landing: starved t2\n' in log
 
 
 def red(lab):
@@ -621,6 +665,11 @@ def limits(lab):
     verdict = lab.verdict(flake_tip)
     assert verdict['flakes'] == tests[:50] and verdict['flakes_more'] == 5
     assert lab.records('tier')[-1]['state'] == 'green'
+    starved_tip = lab.land(flaky=[], starved=tests)
+    lab.push()
+    lab.run()
+    for row in (lab.verdict(starved_tip), lab.records('tier')[-1]):
+        assert row['starved'] == tests[:50] and row['starved_more'] == 5, row
 
 
 
@@ -947,7 +996,7 @@ def part_refusals(lab):
         assert lab.calls() == [] and lab.records() == [] and lab.posts() == [], part
 
 
-CASES = (polls, no_tier, flake, red, bisect, baseline, already_red, fault, unwatched_red,
+CASES = (polls, no_tier, flake, starved_pass, starved_with_a_rerun, red, bisect, baseline, already_red, fault, unwatched_red,
          meets_landings, parts_meet_landings, not_runner_machine, one_follower, refusals,
          multi_bisect, limits, nested_faults, unnamed, pending_delivery, stale_watch, history_reset,
          trailers, feed_failure, parts_follow_apart, part_red_bisected_while_the_other_clears,

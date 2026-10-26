@@ -581,6 +581,50 @@ def land_feed(directory):
     assert rows[-1]['commit'] == lab.git('rev-parse', 'origin/main').stdout.strip(), rows
 
 
+def land_feed_starved(directory):
+    lab = feed_lab(directory, 'starved gate\n\nTaught: passing still records starvation')
+    feed = directory / 'feed.jsonl'
+    log = directory / 'gate log with spaces.log'
+    log.write_text('gate-starved real bin z\ngate-starved fuzzy bin a\n'
+                   'gate-starved real bin z\n')
+    # Run land's own feed call with a known gate log, without a real gate.
+    source = (lab.kit / 'land').read_text()
+    function = 'land_feed() {' + source.split('land_feed() {', 1)[1].split('\n}', 1)[0] + '\n}'
+    log_assignment = next(line.strip() for line in source.splitlines()
+                          if line.strip().startswith('gate_log=$(sed '))
+    shell = ('kit=$1 repo=repo branch=branch base=$2 gate_log=$4 gate_heard=$5\n'
+             + 'if test -n "$gate_heard"; then\n' + log_assignment + '\nfi\n'
+             + function + '\nland_feed "$3"')
+    base = lab.git('rev-parse', 'main').stdout.strip()
+    tip = lab.git('rev-parse', 'HEAD').stdout.strip()
+
+    def append(path, heard=''):
+        result = lab.run(['bash', '-c', shell, 'fixture', str(lab.kit), base, tip, str(path), heard],
+                         env=dict(LAND_FEED=str(feed)))
+        assert not result.stderr, result
+        return json.loads(feed.read_text().splitlines()[-1])
+
+    heard = (f'heavy: task 1 (gate) exit 0, waited 2s, ran 12s, log {log}\n'
+             'heavy: receipt fixture token ' + 'a' * 32)
+    row = append('', heard)
+    assert row['taught'] == ['passing still records starvation'], row
+    assert row['starved'] == ['real bin z', 'fuzzy bin a'], row
+    assert 'starved_more' not in row, row
+    names = [f'test {n}' for n in range(55)]
+    log.write_text(''.join(f'gate-starved {name}\n' for name in names + names))
+    row = append(log)
+    assert row['starved'] == names[:50] and row['starved_more'] == 5, row
+    log.write_text('gate-step fmt 1.000 0\n')
+    row = append(log)
+    assert 'starved' not in row and 'starved_more' not in row, row
+    row = append(directory / 'missing.log')
+    assert 'starved' not in row and 'starved_more' not in row, row
+    # A cached or skipped gate supplies no log even when an old one exists.
+    log.write_text('gate-starved stale\n')
+    row = append('')
+    assert 'starved' not in row and 'starved_more' not in row, row
+
+
 def land_feed_none(directory):
     hosted = runpy.run_path(str(SCRIPT.with_name('land-feed.py')))['hosted']
     for url in ('git@github.com:fabrig-ai/agents.git', 'ssh://git@host/repo.git',
@@ -599,6 +643,7 @@ def land_feed_none(directory):
     assert 'land: warning' not in result.stderr, result
     row = json.loads(feed.read_text())
     assert 'taught' not in row and 'taught_more' not in row, row
+    assert 'starved' not in row and 'starved_more' not in row, row
     bin_dir = directory / 'bin'
     bin_dir.mkdir()
     marker = directory / 'ssh-called'
@@ -631,7 +676,7 @@ CASES = (rows_kept, row_added, added_in_one_place, same_row, deleted_and_changed
          outside_rows, code_file, all_or_nothing, not_stopped, land_rows, land_same_row,
          generated_kept, generated_and_rows, generated_no_change, generated_refused, heavy_refused,
          generated_touches_declaration, generated_then_stop, rows_then_stop, no_script,
-         cargo_lock, later, regenerate_refused, land_undone, land_feed, land_feed_none)
+         cargo_lock, later, regenerate_refused, land_undone, land_feed, land_feed_starved, land_feed_none)
 
 
 def run(case, directory, built):

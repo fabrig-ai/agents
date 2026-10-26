@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """What a landing taught, and a plain land's record in the landing feed.
 
-land-feed.py land REPO BRANCH BASE COMMIT
+land-feed.py land REPO BRANCH BASE COMMIT [GATE_LOG]
   From the worktree that pushed: append the landing's record to the feed
-  (landing-flow.md, 12). Exit 0 when written, or when no feed is due; 1,
-  with one line on stderr, when the append failed.
+  (landing-flow.md, 12), with starved passes from GATE_LOG when given.
+  Exit 0 when written, or when no feed is due; 1, with one line on stderr,
+  when the append failed.
 """
 from datetime import datetime, timezone
+from pathlib import Path
 import json
 import os
 import re
@@ -63,6 +65,16 @@ def taught(path, base, tip):
             for line in lines[:LIMIT]], max(0, len(lines) - LIMIT)
 
 
+def starved(log):
+    """Unique gate-starved names in log order, bounded like land's result."""
+    try:
+        text = Path(log).read_text(errors='replace')
+    except OSError:
+        return [], 0
+    names = list(dict.fromkeys(re.findall(r'^gate-starved (.+)$', text, re.M)))
+    return names[:50], max(0, len(names) - 50)
+
+
 def hosted(url):
     """Whether a push URL, including a remote-helper address, names a host."""
     while match := re.match(r'^([^/:\[\]]+)::', url):
@@ -91,15 +103,15 @@ def remote_host():
 
 
 def main():
-    if len(sys.argv) != 6 or sys.argv[1] != 'land':
-        print('usage: land-feed.py land REPO BRANCH BASE COMMIT', file=sys.stderr)
+    if len(sys.argv) not in (6, 7) or sys.argv[1] != 'land':
+        print('usage: land-feed.py land REPO BRANCH BASE COMMIT [GATE_LOG]', file=sys.stderr)
         return 1
     local = os.environ.get('LAND_FEED')
     if local == '':
         return 0
     if local is None and (os.environ.get('HEAVY_RECOVERY_FIXTURE') == '1' or not remote_host()):
         return 0
-    repo, branch, base, commit = sys.argv[2:]
+    repo, branch, base, commit = sys.argv[2:6]
     lines, more = taught('.', base, commit)
     host = re.sub('[^A-Za-z0-9_.-]', '-', socket.gethostname()).lstrip('._-')[:64] or 'local'
     record = dict(time=datetime.now(timezone.utc).isoformat(), kind='land', event='landed',
@@ -109,6 +121,12 @@ def main():
         record['taught'] = lines
     if more:
         record['taught_more'] = more
+    if len(sys.argv) == 7:
+        names, more = starved(sys.argv[6])
+        if names:
+            record['starved'] = names
+        if more:
+            record['starved_more'] = more
     # The same subprocess bounds flock and writing on local and remote paths.
     argv = ['python3', '-I', '-S', '-c', FEED, os.path.abspath(local) if local is not None else FEED_PATH]
     if local is None and socket.gethostname() != COORDINATOR:

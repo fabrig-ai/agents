@@ -118,7 +118,7 @@ class BudgetFixtures(unittest.TestCase):
                 self.assertEqual(result.returncode, 1, result.stderr)
                 self.assertIn('expected NAME MAX_PERCENT REASON', result.stderr)
 
-    def land_result(self, lines, kind='ran', status=0):
+    def land_result(self, lines, kind='ran', status=0, runner='heavy'):
         # Run land's exact embedded result writer, without a Git or queue fixture.
         source = (KIT / 'land').read_text()
         source = source.split("<<'PYRESULT' ||\n", 1)[1].split('\nPYRESULT', 1)[0]
@@ -126,15 +126,46 @@ class BudgetFixtures(unittest.TestCase):
         log.write_text(lines)
         target = self.root / 'result.json'
         heard = f'heavy: task 1 (gate) exit {status}, waited 2s, ran 12s, log {log}'
-        args = [str(status), 'agents', 'base', 'tip', 'tree', '1', '', kind, heard, 'false', str(target), 'heavy']
+        if runner == 'plain':
+            heard = f'land: plain gate exit {status}, ran 12.000 s, log {log}'
+        args = [str(status), 'agents', 'base', 'tip', 'tree', '1', '', kind, heard, 'false', str(target), runner]
         result = subprocess.run([sys.executable, '-I', '-S', '-B', '-c', source, *args],
                                 stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stderr, '')
         value = json.loads(result.stdout.removeprefix('land: result '))
         self.assertEqual(json.loads(target.read_text()), value)
-        self.assertEqual(value['runner'], 'heavy')
+        self.assertEqual(value['runner'], runner)
         return value
+
+    def test_starved_names_are_ordered_and_unique(self):
+        result = self.land_result('gate-starved fuzzy bin z\n'
+                                  'gate-step fmt 1.000 0\n'
+                                  'gate-starved real bin a\n'
+                                  'gate-starved fuzzy bin z\n'
+                                  'prefix gate-starved ignored\n'
+                                  'gate-starved \n')
+        self.assertEqual(result['starved'], ['fuzzy bin z', 'real bin a'])
+        self.assertNotIn('starved_more', result)
+        plain = self.land_result('gate-starved real bin z\n', runner='plain')
+        self.assertEqual(plain['starved'], ['real bin z'])
+        self.assertEqual(result['exit'], 0)
+        self.assertEqual(result['gate']['exit'], 0)
+        self.assertEqual(self.land_result('gate-starved test\n', status=7)['starved'], ['test'])
+
+    def test_starved_names_are_bounded(self):
+        names = [f'test {n}' for n in range(55)]
+        result = self.land_result(''.join(f'gate-starved {name}\n' for name in names + names))
+        self.assertEqual(result['starved'], names[:50])
+        self.assertEqual(result['starved_more'], 5)
+
+    def test_starved_empty_cached_and_skipped(self):
+        self.assertEqual(self.land_result('')['starved'], [])
+        for kind in ('cached', 'none', ''):
+            result = self.land_result('gate-starved stale\n', kind=kind)
+            self.assertEqual(result['starved'], [])
+            self.assertNotIn('starved_more', result)
+
 
     def report(self, result):
         # landings reads result JSON rather than raw gate-step lines.

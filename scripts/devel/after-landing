@@ -103,7 +103,7 @@ def read_feed(fixture):
 def emit(fixture, token, name, event, **fields):
     row = dict(time=now(), kind='tier', event=event, host=socket.gethostname(),
                token=token, tier=name, **fields)
-    for key in ('tests', 'flakes'):
+    for key in ('tests', 'flakes', 'starved'):
         if key in row and len(row[key]) > 50:
             row[key + '_more'] = len(row[key]) - 50
             row[key] = row[key][:50]
@@ -263,7 +263,7 @@ def run_tier(args, clone, commit, only, log):
     git(clone, 'checkout', '--quiet', '--force', '--detach', commit)
     git(clone, 'clean', '-ffdq')
     if not (clone / 'scripts/after-landing.sh').is_file():
-        return dict(red=set(), fault=None, excerpt='', ran=0)
+        return dict(red=set(), starved=set(), fault=None, excerpt='', ran=0)
     env = dict(os.environ, HEAVY_CLASS='background', HEAVY_LABEL='after-landing ' + args.name)
     env.pop('CARGO_TARGET_DIR', None)
     executable = (os.environ.get('AFTER_LANDING_HEAVY', str(KIT / 'heavy'))
@@ -280,17 +280,18 @@ def run_tier(args, clone, commit, only, log):
     if not matches:
         reason = next((line for line in result.stdout.splitlines() if line.startswith('heavy: ')),
                       'heavy: no task result')
-        return dict(fault=reason, red=set(), excerpt='', ran=0)
+        return dict(fault=reason, red=set(), starved=set(), excerpt='', ran=0)
     summary = matches[-1]
     # The heavy tail is not the payload: contract lines can be outside its tail.
     payload = Path(summary[3]).read_text(errors='replace')
     with log.open('a') as out:
         out.write(payload)
     failed = set(re.findall(r'^after-landing: failed (.+)$', payload, re.M))
+    starved = set(re.findall(r'^after-landing: starved (.+)$', payload, re.M))
     lacks = sorted(set(re.findall(r'^after-landing: lacks (.+)$', payload, re.M)))
     reason = 'lacks ' + ', '.join(lacks) if result.returncode == 3 and lacks else None
     red = (failed or {'*'}) if result.returncode and not reason else set()
-    return dict(red=red, fault=reason, ran=float(summary[2]),
+    return dict(red=red, starved=starved, fault=reason, ran=float(summary[2]),
                 excerpt='\n'.join(payload.splitlines()[-60:])[-8000:])
 
 
@@ -374,11 +375,13 @@ def pass_once(args, base, clone, state):
     first = run(main, set())
     if first['fault']:
         return
+    starved = first['starved']
     confirmed, flakes = set(), set()
     if first['red']:
         retry = run(main, first['red'])
         if retry['fault']:
             return
+        starved |= retry['starved']
         if retry['red']:
             confirmed = (first['red'] if '*' in first['red'] or '*' in retry['red']
                          else first['red'] & retry['red'])
@@ -409,13 +412,14 @@ def pass_once(args, base, clone, state):
     # Restore M after probes; the warm target remains ignored throughout.
     git(clone, 'checkout', '--quiet', '--force', '--detach', main)
     flakes = sorted(flakes)
+    starved = sorted(starved)
     previous_state = copy.deepcopy(state)
     for tip in landings:
         tests = sorted(test for test in new if reds[test] == tip)
         label = next((row.get('set') for row in reversed(rows) if row.get('event') == 'landed'
                       and row.get('repo') == args.repo and row.get('commit') == tip), None)
         fields = dict(commit=tip, run=main, verdict='red' if tests else 'cleared',
-                      tests=tests, flakes=flakes, landing_set=label, log=str(log), **baseline_fields)
+                      tests=tests, flakes=flakes, starved=starved, landing_set=label, log=str(log), **baseline_fields)
         if tests:
             fields['excerpt'] = excerpts[tests[0]]
         row = emit(args.fixture, token, args.name, 'verdict', **fields)
@@ -437,7 +441,7 @@ def pass_once(args, base, clone, state):
         groups.append(group)
     try:
         emit(args.fixture, token, args.name, 'tier', commit=main, state='red' if reds else 'green',
-             last_green=state['last_green'], reds=groups, flakes=flakes, ran_s=ran, log=str(log),
+             last_green=state['last_green'], reds=groups, flakes=flakes, starved=starved, ran_s=ran, log=str(log),
              **baseline_fields)
     except Exception:
         # A failed final append must not make the restart skip this main.

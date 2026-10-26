@@ -513,7 +513,9 @@ heard() { grep -E '^heavy: (task|receipt) ' "$out" 2>/dev/null || true; }
 # The landing's record in the landing feed (landing-flow.md, 12), once its
 # push has succeeded. It never changes land's status.
 land_feed() {
-    python3 -I -S -B "$kit/land-feed.py" land "$repo" "$branch" "$base" "$1" ||
+    local logs=()
+    if [[ -n ${gate_log:-} ]]; then logs=("$gate_log"); fi
+    python3 -I -S -B "$kit/land-feed.py" land "$repo" "$branch" "$base" "$1" "${logs[@]}" ||
         echo "land: warning: the landing feed was not written" >&2
 }
 
@@ -548,14 +550,17 @@ def task(heard):
 
 def steps(log):
     # The gate-step lines' seconds summed by name, in first-seen order, and
-    # CPU seconds where present, and the first step that exited nonzero.
-    sums, cpu, failed = {}, {}, None
+    # CPU seconds where present, the first failed step, and starved passes.
+    sums, cpu, failed, starved = {}, {}, None, {}
     try:
         from pathlib import Path
         text = Path(log).read_text(errors="replace")
     except OSError:
-        return sums, cpu, failed
+        return sums, cpu, failed, list(starved)
     for line in text.splitlines():
+        match = re.fullmatch(r"gate-starved (.+)", line)
+        if match:
+            starved[match[1]] = None
         step = re.fullmatch(r"gate-step (\S+) ([0-9]+(?:\.[0-9]+)?) ([0-9]+)(?: ([0-9]+(?:\.[0-9]+)?))?", line.rstrip())
         if step:
             sums[step[1]] = round(sums.get(step[1], 0) + float(step[2]), 3)
@@ -563,12 +568,13 @@ def steps(log):
                 cpu[step[1]] = round(cpu.get(step[1], 0) + float(step[4]), 3)
             if failed is None and int(step[3]):
                 failed = step[1]
-    return sums, cpu, failed
+    return sums, cpu, failed, list(starved)
 
 
 def main():
     status, repo, base, tip, tree, tries, prebuild, kind, heard, pushed, path, runner = sys.argv[1:]
     gate = None
+    starved = []
     if kind in ("cached", "none"):
         gate = {"kind": kind, "receipt": None, "wait_s": 0, "run_s": 0, "exit": 0,
                 "steps": {}, "cpu": {}, "failed_step": None}
@@ -576,14 +582,16 @@ def main():
         ran, log = task(heard)
         if ran:
             receipts = re.findall(r"^heavy: receipt .* token ([0-9a-f]{32})$", heard, re.MULTILINE)
-            sums, cpu, failed = steps(log)
+            sums, cpu, failed, starved = steps(log)
             gate = {"kind": "ran", "receipt": receipts[-1] if receipts else None, **ran,
                     "steps": sums, "cpu": cpu, "failed_step": failed or ("other" if ran["exit"] else None)}
     result = {"schema": "land-result-v1", "repo": repo, "machine": socket.gethostname(),
               "runner": runner or None,
               "base": base or None, "commit": tip or None, "tree": tree or None,
               "tries": int(tries), "prebuild": task(prebuild)[0], "gate": gate,
-              "pushed": pushed == "true", "exit": int(status)}
+              "pushed": pushed == "true", "exit": int(status), "starved": starved[:50]}
+    if len(starved) > 50:
+        result["starved_more"] = len(starved) - 50
     text = json.dumps(result, separators=(",", ":"))
     print("land: result " + text, flush=True)
     if path:
@@ -630,7 +638,7 @@ try=0 pushed=false
 while :; do
     try=$((try + 1))
     ((try <= tries)) || die 6 "main moved $tries times; giving up"
-    prebuild_heard='' gate_kind='' gate_heard=''
+    prebuild_heard='' gate_kind='' gate_heard='' gate_log=''
 
     if [[ -n ${commit:-} ]]; then candidate_check "$commit"; fi
     if ((local)); then
@@ -719,6 +727,7 @@ rebase on it by hand, resolve it, then land again."
                 status=0
                 plain_run gate "$gate" || status=$?
                 gate_heard=$plain_heard
+                gate_log=$plain_log
                 ((status == 0)) || die 4 "the gate failed on $(git rev-parse --short HEAD)"
             else
                 if HEAVY_LABEL="land $repo" python3 -S -B "$kit/land-capture.py" "$out" "$kit/heavy" --land --tail 60 bash -c "$gate"; then
@@ -740,6 +749,7 @@ rebase on it by hand, resolve it, then land again."
                     die 4 "the gate failed on $(git rev-parse --short HEAD)"
                 fi
                 cat "$out"
+                gate_log=$(sed -nE 's/^heavy: task [0-9]+ \([^)]*\) exit -?[0-9]+, waited [0-9.]+s, ran [0-9.]+s, log //p' <<<"$gate_heard" | tail -n1)
             fi
             land_fault after_receipt
             candidate_check
