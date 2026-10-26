@@ -117,7 +117,7 @@ and `qa.md`: their plan, decisions, milestones and QA passes.
     status page (status-page.md 1). Its parent writes it at the start,
     and rewrites it when the mission's scope changes;
     and, optional, `blocked`: the user's issues the mission waits on
-    and can go no further without, `REPO#N` separated by spaces
+    and can go no further without, `REPO#N` one space apart
     (`temper#9`, `temper#9 agents#11`), REPO one of the seven
     repositories of [user-issues.md](user-issues.md) 2.1 and N an
     issue's number, without a leading zero. Present only
