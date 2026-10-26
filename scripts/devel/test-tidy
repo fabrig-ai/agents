@@ -1,0 +1,680 @@
+#!/usr/bin/env python3
+"""Isolated, offline tidy fixtures; select cases by name."""
+import fcntl
+import os
+from pathlib import Path
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import traceback
+
+SCRIPT = Path(__file__).resolve().with_name('tidy')
+GIT = shutil.which('git')
+REPOS = ('agents', 'skein', 'smith', 'jig', 'hearth', 'temper')
+
+
+class Lab:
+    def __init__(self, root):
+        self.root = root
+        self.workspace = root / 'workspace'
+        self.tmp = self.workspace / 'tmp'
+        self.records = self.workspace / 'records'
+        self.bin = root / 'bin'
+        for path in (self.tmp, self.records, self.bin, root / 'home'):
+            path.mkdir(parents=True)
+        self.env = dict(PATH=str(self.bin) + ':' + os.environ['PATH'], HOME=str(root / 'home'),
+                        DEV_ROOT=str(self.workspace), DEV_TMP=str(self.tmp), RECORDS=str(self.records),
+                        GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1',
+                        GIT_AUTHOR_NAME='Fixture', GIT_AUTHOR_EMAIL='fixture@invalid',
+                        GIT_COMMITTER_NAME='Fixture', GIT_COMMITTER_EMAIL='fixture@invalid',
+                        GIT_AUTHOR_DATE='2026-10-01T12:00:00+00:00',
+                        GIT_COMMITTER_DATE='2026-10-01T12:00:00+00:00',
+                        GIT_ALLOW_PROTOCOL='file', LC_ALL='C.UTF-8')
+        self.record = self.bin / 'record'
+        self.record.write_text('#!/bin/sh\n[ "$1" = pull ] || exit 9\n'
+                               'echo pull >>"$RECORDS/pulls"\nexit "${FAIL_PULL:-0}"\n')
+        self.record.chmod(0o700)
+        self.env['TIDY_RECORD'] = str(self.record)
+        # Trace order and fail individual operations without contacting a network.
+        wrapper = self.bin / 'git'
+        wrapper.write_text('#!/bin/sh\n'
+                           'printf "%s\\n" "$*" >>"$DEV_ROOT/git.trace"\n'
+                           'case "$*" in\n'
+                           ' *fetch*) [ -z "$FAIL_FETCH" ] || case "$*" in *"$FAIL_FETCH"*) exit 7;; esac;;\n'
+                           ' *push*) [ -z "$FAIL_PUSH" ] || exit 8;;\n'
+                           'esac\nexec ' + shlex.quote(GIT) + ' "$@"\n')
+        wrapper.chmod(0o700)
+        self.origins, self.primary = {}, {}
+        seed = root / 'seed'
+        seed.mkdir()
+        self.git(seed, 'init', '-b', 'main')
+        self.put(seed / 'file', 'base\n')
+        self.put(seed / '.gitignore', 'target/\n')
+        self.commit(seed, 'baseline')
+        for name in REPOS:
+            origin, primary = root / f'{name}.git', self.workspace / name
+            self.git(root, 'clone', '--bare', str(seed), str(origin))
+            self.git(root, 'clone', str(origin), str(primary))
+            self.origins[name], self.primary[name] = origin, primary
+        self.git(root, 'clone', '--bare', str(seed), str(root / 'records.git'))
+        self.git(root, 'clone', str(root / 'records.git'), str(self.records))
+        self.a = self.primary['agents']
+        self.base = self.git(self.a, 'rev-parse', 'HEAD')
+
+    def git(self, path, *args, check=True):
+        result = subprocess.run([GIT, '-C', str(path), *args], env=self.env, text=True,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
+        assert not check or result.returncode == 0, (args, result.stdout, result.stderr)
+        return result.stdout.strip() if check else result
+
+    def put(self, path, text='fixture\n'):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+        return path
+
+    def commit(self, path, subject):
+        self.git(path, 'add', '.')
+        self.git(path, 'commit', '-m', subject)
+        return self.git(path, 'rev-parse', 'HEAD')
+
+    def branch(self, name, repo='agents', remote=True):
+        path = self.primary[repo]
+        self.git(path, 'checkout', '-b', name, 'main')
+        self.put(path / name, name + '\n')
+        oid = self.commit(path, name)
+        if remote:
+            self.git(path, 'push', 'origin', f'HEAD:{name}')
+        self.git(path, 'checkout', 'main')
+        return oid
+
+    def landed(self, name='done', repo='agents', remote=True):
+        oid = self.branch(name, repo, remote)
+        path = self.primary[repo]
+        self.git(path, 'merge', '--ff-only', name)
+        self.git(path, 'push', 'origin', 'main')
+        self.git(path, 'config', f'branch.{name}.landed', oid)
+        return oid
+
+    def wt(self, name='done', path=None, repo='agents'):
+        path = path or self.tmp / 'owners' / 'active' / name
+        self.git(self.primary[repo], 'worktree', 'add', str(path), name)
+        return path
+
+    def readme(self, mission, state):
+        self.put(self.records / 'missions' / mission / 'README.md',
+                 f'---\nstate: {state}\nended: 2026-10-01\n---\n\nMission.\n')
+        path = self.tmp / 'owners' / mission
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def run(self, *args, status=0, extra=None):
+        result = subprocess.run([sys.executable, '-I', str(SCRIPT), *args], cwd=self.root,
+                                env=dict(self.env, **(extra or {})), text=True,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
+        assert result.returncode == status, (args, result.returncode, result.stdout, result.stderr)
+        return result.stdout + result.stderr
+
+    def exists(self, name, repo='agents', remote=False):
+        path = self.origins[repo] if remote else self.primary[repo]
+        return self.git(path, 'show-ref', '--verify', f'refs/heads/{name}', check=False).returncode == 0
+
+
+def copies(lab):
+    old = lab.branch('copy')
+    lab.put(lab.a / 'other', 'advance\n')
+    lab.commit(lab.a, 'advance')
+    lab.git(lab.a, 'cherry-pick', old)
+    lab.git(lab.a, 'push', 'origin', 'main')
+    text = lab.run('agents')
+    assert f'deleted github-branch agents:copy {old}' in text, text
+    assert f'deleted branch agents:copy {old}' in text, text
+    assert not lab.exists('copy') and not lab.exists('copy', remote=True)
+    trace = (lab.workspace / 'git.trace').read_text().splitlines()
+    assert sum(' log --format=' in line and line.endswith('origin/main') for line in trace) == 1
+
+
+def amended(lab):
+    old = lab.branch('amended')
+    lab.git(lab.a, 'merge', '--ff-only', 'amended')
+    lab.git(lab.a, 'push', 'origin', 'main')
+    lab.git(lab.a, 'checkout', 'amended')
+    lab.put(lab.a / 'amended', 'different content\n')
+    new = lab.commit(lab.a, 'temporary')
+    lab.git(lab.a, 'reset', '--soft', old)
+    lab.git(lab.a, 'commit', '--amend', '--no-edit')
+    assert lab.git(lab.a, 'rev-parse', 'HEAD') != new
+    lab.git(lab.a, 'push', '--force', 'origin', 'amended')
+    lab.git(lab.a, 'checkout', 'main')
+    work = lab.wt('amended')
+    text = lab.run('agents', status=1)
+    assert text.count('content differs') == 2, text
+    assert lab.exists('amended') and lab.exists('amended', remote=True)
+    assert work.exists() and f'kept worktree {work}' in text
+
+
+def conflict_copy(lab):
+    lab.git(lab.a, 'checkout', '-b', 'conflict')
+    lab.put(lab.a / 'file', 'branch resolution\n')
+    old = lab.commit(lab.a, 'conflicting change')
+    lab.git(lab.a, 'push', 'origin', 'conflict')
+    lab.git(lab.a, 'checkout', 'main')
+    lab.put(lab.a / 'file', 'main change\n')
+    lab.commit(lab.a, 'advance')
+    result = lab.git(lab.a, 'cherry-pick', old, check=False)
+    assert result.returncode == 1
+    lab.put(lab.a / 'file', 'branch resolution\n')
+    lab.git(lab.a, 'add', 'file')
+    lab.git(lab.a, 'cherry-pick', '--continue')
+    landed = lab.git(lab.a, 'rev-parse', 'HEAD')
+    def patch(oid):
+        diff = subprocess.check_output([GIT, '-C', str(lab.a), 'show', oid], env=lab.env)
+        return subprocess.check_output([GIT, 'patch-id', '--stable'], input=diff, env=lab.env).split()[0]
+    assert patch(old) != patch(landed)
+    lab.git(lab.a, 'push', 'origin', 'main')
+    text = lab.run('agents')
+    assert 'deleted branch agents:conflict' in text, text
+    assert not lab.exists('conflict') and not lab.exists('conflict', remote=True)
+
+
+def marks(lab):
+    oid = lab.landed()
+    lab.git(lab.a, 'branch', 'new', 'main')
+    lab.git(lab.a, 'branch', 'after', 'main')
+    lab.git(lab.a, 'config', 'branch.after.landed', oid)
+    lab.git(lab.a, 'checkout', 'after')
+    lab.put(lab.a / 'after', 'new work\n')
+    lab.commit(lab.a, 'after landing')
+    lab.git(lab.a, 'push', 'origin', 'after')
+    lab.git(lab.a, 'checkout', 'main')
+    text = lab.run('agents')
+    assert 'deleted branch agents:done' in text and 'landed mark' in text, text
+    assert 'agents:new' not in text and 'agents:after' not in text, text
+    assert lab.exists('new') and lab.exists('after') and lab.exists('after', remote=True)
+    assert lab.git(lab.a, 'config', '--get', 'branch.done.landed', check=False).returncode == 1
+
+
+def patch_fallback(lab):
+    old = lab.branch('patch')
+    lab.put(lab.a / 'advance')
+    lab.commit(lab.a, 'advance')
+    lab.git(lab.a, 'cherry-pick', old)
+    lab.put(lab.a / 'patch', 'changed again on main\n')
+    lab.commit(lab.a, 'later work')
+    lab.git(lab.a, 'push', 'origin', 'main')
+    merged = lab.git(lab.a, 'merge-tree', '--write-tree', 'main', old, check=False)
+    assert merged.returncode == 1
+    text = lab.run('agents')
+    assert 'deleted branch agents:patch' in text and not lab.exists('patch'), text
+
+
+def worktrees(lab):
+    oid = lab.landed()
+    work = lab.wt()
+    lab.put(work / 'target' / 'ignored', 'build\n')
+    text = lab.run('agents')
+    assert not work.exists() and not lab.exists('done')
+    assert f'deleted worktree {work} {oid}' in text, text
+    assert lab.a.exists()
+
+
+def dirty(lab):
+    for name in ('untracked', 'tracked', 'locked', 'held'):
+        oid = lab.landed(name)
+        work = lab.wt(name)
+        if name == 'untracked':
+            lab.put(work / 'loose')
+        elif name == 'tracked':
+            lab.put(work / 'file', 'modified\n')
+        elif name == 'locked':
+            lab.git(lab.a, 'worktree', 'lock', str(work))
+        else:
+            process = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], cwd=work,
+                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            text = lab.run('agents')
+            assert f'kept worktree {work}:' in text, (name, text)
+            assert work.exists() and lab.exists(name)
+        finally:
+            if name == 'held':
+                process.terminate()
+                process.wait(timeout=5)
+        # Leave this worktree for subsequent runs: each remains guarded.
+        if name == 'held':
+            lab.git(lab.a, 'worktree', 'lock', str(work))
+    lab.git(lab.a, 'config', 'branch.main.landed', oid)
+    assert lab.a.exists() and 'primary checkout' in lab.run('agents')
+
+
+def detached(lab):
+    work = lab.tmp / 'owners' / 'active' / 'detached'
+    lab.git(lab.a, 'worktree', 'add', '--detach', str(work), lab.base)
+    text = lab.run('agents')
+    assert not work.exists() and 'detached HEAD' in text, text
+    protected = lab.tmp / 'after-landing' / 'protected'
+    lab.git(lab.a, 'worktree', 'add', '--detach', str(protected), lab.base)
+    assert 'tool directory' in lab.run('agents') and protected.exists()
+
+
+def missions(lab):
+    ended = lab.readme('ended', 'ended')
+    milestone = lab.tmp / 'owners' / 'ended-m1'
+    milestone.mkdir()
+    paused = lab.readme('paused', 'paused')
+    lab.branch('backed-up')
+    work = lab.wt('backed-up', ended / 'm1' / 'work')
+    text = lab.run('--mission', 'ended')
+    assert not ended.exists() and not milestone.exists() and not work.exists(), text
+    assert paused.exists() and (lab.records / 'pulls').read_text() == 'pull\n'
+    abandoned = lab.readme('abandoned', 'abandoned')
+    assert 'mission abandoned' in lab.run('--mission', 'abandoned') and not abandoned.exists()
+
+
+def mission_work(lab):
+    ended = lab.readme('ended', 'ended')
+    lab.branch('private', remote=False)
+    work = lab.wt('private', ended / 'work')
+    text = lab.run('--mission', 'ended', status=1)
+    assert 'commit on no origin branch' in text and str(work) in text, text
+    assert work.exists() and ended.exists()
+    missing = lab.tmp / 'owners' / 'missing'
+    missing.mkdir()
+    assert 'no README' in lab.run('--mission', 'missing', status=1)
+    assert missing.exists()
+    assert 'record pull failed' in lab.run('--mission', 'ended', status=3, extra={'FAIL_PULL': '1'})
+    assert ended.exists()
+
+
+def evidence(lab):
+    ended = lab.readme('ended', 'ended')
+    clone = ended / 'copy'
+    lab.git(lab.root, 'clone', str(lab.origins['agents']), str(clone))
+    lab.git(clone, 'checkout', '-b', 'private')
+    lab.put(clone / 'private')
+    lab.commit(clone, 'private evidence')
+    lab.git(clone, 'checkout', 'main')
+    text = lab.run('--mission', 'ended', status=1)
+    assert 'commit on no origin branch' in text and clone.exists(), text
+    lab.git(clone, 'push', 'origin', 'private')
+    external = lab.root / 'outside-work'
+    lab.git(clone, 'worktree', 'add', str(external), 'private')
+    text = lab.run('--mission', 'ended', status=1)
+    assert 'worktree outside directory' in text and external.exists(), text
+    lab.git(clone, 'worktree', 'remove', str(external))
+    text = lab.run('--mission', 'ended')
+    assert not clone.exists() and not ended.exists(), text
+
+
+def mission_clone_worktrees(lab):
+    ended = lab.readme('ended', 'ended')
+    clone = ended / 'copy'
+    lab.git(lab.root, 'clone', str(lab.origins['agents']), str(clone))
+    for name in ('one', 'two'):
+        lab.git(clone, 'branch', name)
+        lab.git(clone, 'worktree', 'add', str(ended / name), name)
+    text = lab.run('--mission', 'ended')
+    assert not ended.exists() and text.count('deleted worktree') == 2, text
+
+
+def old_directories(lab):
+    old = lab.tmp / 'director' / 'tasks' / 'old'
+    young = old.with_name('young')
+    nested = old.with_name('nested')
+    run = lab.tmp / 'codex-run' / 'old-run'
+    for path in (old, young, nested, run):
+        lab.put(path / 'sub' / 'note', 'evidence\n')
+    stamp = time.time() - 8 * 86400
+    for parent in (old, nested, run):
+        for base, dirs, files in os.walk(parent, topdown=False):
+            for name in files:
+                os.utime(Path(base) / name, (stamp, stamp))
+            os.utime(base, (stamp, stamp))
+    os.utime(nested / 'sub' / 'note', None)
+    rows = lab.put(lab.tmp / 'codex-run' / 'runs.tsv', 'row stays\n')
+    text = lab.run()
+    assert not old.exists() and not run.exists(), text
+    assert young.exists() and nested.exists() and rows.read_text() == 'row stays\n'
+
+
+def old_work(lab):
+    path = lab.tmp / 'director' / 'tasks' / 'old'
+    lab.branch('private', remote=False)
+    work = lab.wt('private', path / 'work')
+    stamp = time.time() - 8 * 86400
+    for base, dirs, files in os.walk(path, topdown=False):
+        for name in files:
+            os.utime(Path(base) / name, (stamp, stamp))
+        os.utime(base, (stamp, stamp))
+    text = lab.run(status=1)
+    assert path.exists() and work.exists() and 'commit on no origin branch' in text, text
+
+
+def scripts(lab):
+    mission = lab.readme('paused', 'paused')
+    py = lab.put(mission / 'scratch.py')
+    shebang = lab.put(mission / 'runner', '#!/bin/fake\n')
+    plain = lab.put(mission / 'notes')
+    clone = mission / 'copy'
+    lab.git(lab.root, 'clone', str(lab.origins['agents']), str(clone))
+    cloned_script = lab.put(clone / 'keep.py')
+    lab.branch('work')
+    work = lab.wt('work', mission / 'work')
+    work_script = lab.put(work / 'keep.py')
+    bare = mission / 'bare.git'
+    lab.git(lab.root, 'clone', '--bare', str(lab.origins['agents']), str(bare))
+    bare_script = lab.put(bare / 'hooks' / 'keep.py')
+    tool_script = lab.put(lab.tmp / 'codex-run' / 'run' / 'keep.py')
+    external = lab.put(lab.root / 'external.py')
+    (mission / 'link.py').symlink_to(external)
+    outside = lab.root / 'outside'
+    outside.mkdir()
+    outside_script = lab.put(outside / 'keep.py')
+    (mission / 'linked').symlink_to(outside, target_is_directory=True)
+    text = lab.run()
+    assert not py.exists() and not shebang.exists(), text
+    assert all(p.exists() for p in (plain, cloned_script, work_script, tool_script,
+                                    bare_script, external, outside_script))
+
+
+def held_file(lab):
+    mission = lab.readme('paused', 'paused')
+    script = lab.put(mission / 'held.py')
+    # Inherited descriptor proves open files count even with cwd elsewhere.
+    with script.open() as source:
+        process = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], cwd=lab.root,
+                                   pass_fds=(source.fileno(),), stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL)
+        try:
+            text = lab.run()
+            assert script.exists() and f'kept script {script}: held by process' in text, text
+        finally:
+            process.terminate()
+            process.wait(timeout=5)
+
+
+def enclosing_git(lab):
+    scratch = lab.a / 'scratch'
+    script = lab.put(scratch / 'director' / 'keep.py')
+    text = lab.run(extra={'DEV_TMP': str(scratch)})
+    assert script.exists() and 'deleted script' not in text, text
+
+
+def symlinks(lab):
+    outside = lab.root / 'outside'
+    task = outside / 'tasks' / 'old'
+    lab.put(task / 'evidence')
+    stamp = time.time() - 8 * 86400
+    for base, dirs, files in os.walk(outside, topdown=False):
+        for name in files:
+            os.utime(Path(base) / name, (stamp, stamp))
+        os.utime(base, (stamp, stamp))
+    (lab.tmp / 'director').symlink_to(outside, target_is_directory=True)
+    lab.run()
+    assert task.exists()
+
+
+def unknown(lab):
+    path = lab.put(lab.tmp / 'unexpected')
+    text = lab.run(status=1)
+    assert f'kept entry {path}: outside the tmp layout' in text, text
+    assert path.exists()
+
+
+def dry_run(lab):
+    lab.landed()
+    lab.readme('active', 'active')
+    work = lab.wt()
+    mission = lab.readme('ended', 'ended')
+    script = lab.put(lab.tmp / 'director' / 'probe.py')
+    text = lab.run('--dry-run')
+    assert 'would delete' in text and 'tidy: deleted' not in text, text
+    assert work.exists() and mission.exists() and script.exists()
+    assert lab.exists('done') and lab.exists('done', remote=True)
+    assert not (lab.tmp / 'logs' / 'tidy.lock').exists()
+
+
+def scope(lab):
+    lab.landed('agents-done')
+    lab.landed('smith-done', repo='smith')
+    mission = lab.readme('ended', 'ended')
+    script = lab.put(lab.tmp / 'director' / 'probe.py')
+    text = lab.run('agents')
+    assert 'smith:' not in text and not lab.exists('agents-done')
+    assert lab.exists('smith-done', repo='smith') and lab.exists('smith-done', repo='smith', remote=True)
+    assert mission.exists() and script.exists() and not (lab.records / 'pulls').exists()
+    text = lab.run('--mission', 'ended')
+    assert not mission.exists() and script.exists() and lab.exists('smith-done', repo='smith')
+
+
+def fetch_failure(lab):
+    lab.landed()
+    lab.landed('smith-done', repo='smith')
+    text = lab.run('agents', 'smith', status=3, extra={'FAIL_FETCH': 'agents'})
+    assert 'fetch failed' in text and 'deleted branch smith:smith-done' in text, text
+    assert lab.exists('done') and lab.exists('done', remote=True)
+    assert not lab.exists('smith-done', repo='smith')
+
+
+def push_failure(lab):
+    lab.landed()
+    text = lab.run('agents', status=3, extra={'FAIL_PUSH': '1'})
+    assert 'kept github-branch agents:done' in text and 'deleted branch agents:done' in text, text
+    assert lab.exists('done', remote=True) and not lab.exists('done')
+
+
+def already_gone(lab):
+    lab.landed()
+    # Delete on the server immediately before tidy's push, after its fetch.
+    wrapper = lab.bin / 'git'
+    wrapper.write_text('#!/bin/sh\ncase "$*" in *push*)\n' +
+                       shlex.quote(GIT) + ' -C "$DEV_ROOT/agents" push origin :refs/heads/done >/dev/null 2>&1\n'
+                       'echo "gone" >&2; exit 1;; esac\nexec ' + shlex.quote(GIT) + ' "$@"\n')
+    text = lab.run('agents')
+    assert 'deleted github-branch agents:done' in text, text
+    assert not lab.exists('done', remote=True)
+
+
+def remote_race(lab):
+    lab.landed()
+    future = lab.branch('future')
+    wrapper = lab.bin / 'git'
+    wrapper.write_text('#!/bin/sh\ncase "$*" in *push*)\n' +
+                       shlex.quote(GIT) + ' -C ' + shlex.quote(str(lab.origins['agents'])) +
+                       ' update-ref refs/heads/done ' + future + '\n;; esac\nexec ' +
+                       shlex.quote(GIT) + ' "$@"\n')
+    text = lab.run('agents', status=3)
+    assert 'kept github-branch agents:done' in text, text
+    assert lab.git(lab.origins['agents'], 'rev-parse', 'done') == future
+
+
+def head_race(lab):
+    lab.landed()
+    work = lab.wt()
+    wrapper = lab.bin / 'git'
+    marker = lab.root / 'moved'
+    wrapper.write_text('#!/bin/sh\ncase "$*" in *push*)\n'
+                       'if [ ! -e ' + shlex.quote(str(marker)) + ' ]; then\n'
+                       ': >' + shlex.quote(str(marker)) + '\n'
+                       'echo new >' + shlex.quote(str(work / 'new')) + '\n' +
+                       shlex.quote(GIT) + ' -C ' + shlex.quote(str(work)) + ' add new\n' +
+                       shlex.quote(GIT) + ' -C ' + shlex.quote(str(work)) + ' commit -m new >/dev/null\n'
+                       'fi;; esac\nexec ' + shlex.quote(GIT) + ' "$@"\n')
+    text = lab.run('agents')
+    assert work.exists() and 'HEAD moved during tidy' in text, text
+
+
+def local_race(lab):
+    lab.landed()
+    future = lab.branch('future', remote=False)
+    wrapper = lab.bin / 'git'
+    wrapper.write_text('#!/bin/sh\ncase "$*" in *"update-ref -d refs/heads/done"*)\n' +
+                       shlex.quote(GIT) + ' -C "$DEV_ROOT/agents" update-ref refs/heads/done ' +
+                       future + '\n;; esac\nexec ' + shlex.quote(GIT) + ' "$@"\n')
+    text = lab.run('agents', status=3)
+    assert 'kept branch agents:done' in text and lab.git(lab.a, 'rev-parse', 'done') == future, text
+
+
+def nested_repositories(lab):
+    ended = lab.readme('ended', 'ended')
+    clone = ended / 'copy'
+    lab.git(lab.root, 'clone', str(lab.origins['agents']), str(clone))
+    lab.put(clone / '.gitignore', 'target/\nobjects/\n')
+    lab.commit(clone, 'ignore evidence')
+    lab.git(clone, 'push', 'origin', 'main')
+    nested = clone / 'objects' / 'private'
+    lab.git(lab.root, 'clone', str(lab.origins['agents']), str(nested))
+    lab.put(nested / 'private')
+    lab.commit(nested, 'private work')
+    text = lab.run('--mission', 'ended', status=1)
+    assert nested.exists() and 'commit on no origin branch' in text, text
+    lab.git(lab.a, 'fetch', 'origin')
+    lab.git(lab.a, 'reset', '--hard', 'origin/main')
+    lab.landed()
+    work = lab.wt()
+    lab.git(lab.root, 'clone', str(lab.origins['agents']), str(work / 'target' / 'copy'))
+    text = lab.run('agents')
+    assert work.exists() and 'nested Git repository' in text, text
+
+
+def evidence_race(lab):
+    ended = lab.readme('ended', 'ended')
+    clone = ended / 'copy'
+    lab.git(lab.root, 'clone', str(lab.origins['agents']), str(clone))
+    wrapper = lab.bin / 'git'
+    marker = lab.root / 'moved'
+    wrapper.write_text('#!/bin/sh\ncase "$*" in *"worktree list"*)\n'
+                       'if [ ! -e ' + shlex.quote(str(marker)) + ' ]; then\n'
+                       ': >' + shlex.quote(str(marker)) + '\n' + shlex.quote(GIT) + ' "$@"\n'
+                       'echo new >' + shlex.quote(str(clone / 'new')) + '\n' +
+                       shlex.quote(GIT) + ' -C ' + shlex.quote(str(clone)) + ' add new\n' +
+                       shlex.quote(GIT) + ' -C ' + shlex.quote(str(clone)) + ' commit -m new >/dev/null\n'
+                       'exit 0\nfi;; esac\nexec ' + shlex.quote(GIT) + ' "$@"\n')
+    text = lab.run('--mission', 'ended', status=1)
+    assert clone.exists() and 'HEAD moved during tidy' in text, text
+
+
+def evidence_ref_race(lab):
+    ended = lab.readme('ended', 'ended')
+    clone = ended / 'copy'
+    lab.git(lab.root, 'clone', str(lab.origins['agents']), str(clone))
+    future = lab.branch('private', remote=False)
+    lab.git(clone, 'fetch', str(lab.a), future)
+    wrapper = lab.bin / 'git'
+    marker = lab.root / 'moved'
+    wrapper.write_text('#!/bin/sh\ncase "$*" in *"for-each-ref --format=%(refname)"*)\n'
+                       'if [ "$#" -eq 4 ] && [ ! -e ' + shlex.quote(str(marker)) + ' ]; then\n'
+                       ': >' + shlex.quote(str(marker)) + '\n' + shlex.quote(GIT) + ' "$@"\n' +
+                       shlex.quote(GIT) + ' -C ' + shlex.quote(str(clone)) +
+                       ' update-ref refs/heads/private ' + future + '\nexit 0\nfi;; esac\nexec ' +
+                       shlex.quote(GIT) + ' "$@"\n')
+    text = lab.run('--mission', 'ended', status=1)
+    assert clone.exists() and 'repository refs moved during tidy' in text, text
+
+
+def evidence_stash(lab):
+    ended = lab.readme('ended', 'ended')
+    clone = ended / 'copy'
+    lab.git(lab.root, 'clone', str(lab.origins['agents']), str(clone))
+    lab.put(clone / 'file', 'saved private work\n')
+    lab.git(clone, 'stash', 'push')
+    text = lab.run('--mission', 'ended', status=1)
+    assert clone.exists() and 'commit on no origin branch' in text, text
+
+
+def stale(lab):
+    lab.branch('stale')
+    work = lab.wt('stale')
+    shutil.rmtree(work)
+    text = lab.run('agents')
+    assert f'deleted worktree {work}' in text and 'stale entry' in text, text
+    assert str(work) not in lab.git(lab.a, 'worktree', 'list')
+
+
+def deletion_failure(lab):
+    lab.landed('one')
+    one = lab.wt('one')
+    lab.landed('two')
+    two = lab.wt('two')
+    wrapper = lab.bin / 'git'
+    wrapper.write_text('#!/bin/sh\ncase "$*" in *"worktree remove"*"/one") exit 8;; esac\n'
+                       'exec ' + shlex.quote(GIT) + ' "$@"\n')
+    text = lab.run('agents', status=3)
+    assert one.exists() and lab.exists('one') and not two.exists() and not lab.exists('two'), text
+    assert f'kept worktree {one}' in text and f'deleted worktree {two}' in text, text
+
+
+def order(lab):
+    lab.landed()
+    ended = lab.readme('ended', 'ended')
+    clone = ended / 'copy'
+    lab.git(lab.root, 'clone', str(lab.origins['agents']), str(clone))
+    lab.run()
+    trace = (lab.workspace / 'git.trace').read_text().splitlines()
+    first_delete = next(i for i, line in enumerate(trace) if ' push ' in line)
+    assert all(' fetch ' not in line for line in trace[first_delete:]), trace
+    assert any(str(clone) in line and ' fetch ' in line for line in trace[:first_delete]), trace
+
+
+def lock(lab):
+    lock = lab.tmp / 'logs' / 'tidy.lock'
+    lock.parent.mkdir()
+    lab.landed()
+    with lock.open('a') as source:
+        fcntl.flock(source, fcntl.LOCK_EX)
+        process = subprocess.Popen([sys.executable, '-I', str(SCRIPT), 'agents'], cwd=lab.root,
+                                   env=lab.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            time.sleep(.15)
+            assert process.poll() is None and lab.exists('done')
+            # A preview never waits for the held machine lock.
+            assert 'would delete' in lab.run('--dry-run', 'agents')
+            fcntl.flock(source, fcntl.LOCK_UN)
+            stdout, stderr = process.communicate(timeout=10)
+            assert process.returncode == 0 and 'deleted branch agents:done' in stdout, (stdout, stderr)
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+
+
+def usage(lab):
+    lab.run('bogus', status=2)
+    lab.run('--mission', '../outside', status=2)
+    lab.run('--mission', 'ended', 'agents', status=2)
+    lab.run('agents', status=2, extra={'DEV_ROOT': str(lab.root / 'missing')})
+
+
+def empty_tmp(lab):
+    shutil.rmtree(lab.tmp)
+    assert lab.run('--dry-run') == '' and not lab.tmp.exists()
+
+
+def main():
+    cases = (copies, amended, conflict_copy, marks, patch_fallback, worktrees, dirty, detached, missions,
+             mission_work, evidence, mission_clone_worktrees, old_directories, old_work, scripts, held_file,
+             enclosing_git, symlinks, unknown, dry_run, scope, fetch_failure, push_failure,
+             already_gone, remote_race, head_race, local_race, nested_repositories, evidence_race,
+             evidence_ref_race, evidence_stash,
+             stale, deletion_failure, order, lock, usage, empty_tmp)
+    names = {case.__name__: case for case in cases}
+    if any(name not in names for name in sys.argv[1:]):
+        sys.exit('unknown case; choose: ' + ' '.join(names))
+    selected = [names[name] for name in sys.argv[1:]] if len(sys.argv) > 1 else cases
+    failures = 0
+    for case in selected:
+        with tempfile.TemporaryDirectory(prefix='tidy-fixture-') as directory:
+            try:
+                case(Lab(Path(directory)))
+                print(f'ok: {case.__name__}', flush=True)
+            except Exception:
+                failures += 1
+                print(f'FAIL: {case.__name__}', flush=True)
+                traceback.print_exc()
+    print(f'completed {len(selected)} isolated cases; {failures} failed')
+    return bool(failures)
+
+
+if __name__ == '__main__':
+    sys.exit(main())

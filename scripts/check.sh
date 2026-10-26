@@ -82,6 +82,7 @@ suite test-land-set scripts/devel/test-land-set
 suite test-landings scripts/devel/test-landings
 suite test-codex-run scripts/devel/test-codex-run
 suite test-record scripts/devel/test-record
+suite test-tidy scripts/devel/test-tidy
 suite test-receipt-inputs scripts/devel/test-receipt-inputs
 suite test-repin scripts/devel/test-repin --evidence "$scratch/repin"
 suite test-kache-setup env DEV_TMP="$scratch" scripts/infra/test-kache-setup

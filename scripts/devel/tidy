@@ -1,0 +1,572 @@
+#!/usr/bin/env python3
+"""Collect landed work and expired scratch, keeping anything uncertain."""
+import argparse
+from collections import defaultdict
+import fcntl
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import time
+
+REPOS = ('agents', 'skein', 'smith', 'jig', 'hearth', 'temper')
+TOOLS = set('heavy logs gates landing-turn land-set kache lab after-landing post codex-run'.split())
+ALLOWED = TOOLS | {'machine.env', 'owners', 'director'}
+
+
+class Failure(Exception):
+    pass
+
+
+def command(argv, data=None):
+    result = subprocess.run([str(a) for a in argv], input=data, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, env=dict(os.environ, GIT_TERMINAL_PROMPT='0'))
+    return result
+
+
+def git(path, *args, data=None, check=True):
+    result = command(['git', '-C', path, *args], data)
+    if check and result.returncode:
+        raise Failure(result.stderr.decode(errors='replace').strip() or 'git failed')
+    return result
+
+
+def out(path, *args):
+    return git(path, *args).stdout.decode(errors='surrogateescape').strip()
+
+
+def inside(path, parent):
+    return path == parent or parent in path.parents
+
+
+def bare(dirs, files):
+    return 'HEAD' in files and 'objects' in dirs and ('refs' in dirs or 'packed-refs' in files)
+
+
+def repository(dirs, files):
+    return '.git' in dirs or '.git' in files or bare(dirs, files)
+
+
+def worktree_list(path):
+    result = []
+    for block in git(path, 'worktree', 'list', '--porcelain', '-z').stdout.split(b'\0\0'):
+        fields = {}
+        for item in block.split(b'\0'):
+            if item:
+                key, _, value = os.fsdecode(item).partition(' ')
+                fields[key] = value
+        if 'worktree' in fields:
+            fields['path'] = Path(fields['worktree']).absolute()
+            result.append(fields)
+    return result
+
+
+def held(path):
+    # Read links only, never another process's environment or file contents.
+    for proc in Path('/proc').iterdir():
+        if not proc.name.isdigit():
+            continue
+        try:
+            if proc.stat().st_uid != os.getuid():
+                continue
+            links = [proc / 'cwd']
+            try:
+                links.extend((proc / 'fd').iterdir())
+            except (FileNotFoundError, PermissionError):
+                pass
+            for link in links:
+                try:
+                    target = os.readlink(link)
+                    if target.startswith('/') and inside(Path(target.removesuffix(' (deleted)')), path):
+                        return f'held by process {proc.name}'
+                except (FileNotFoundError, PermissionError):
+                    pass
+        except (FileNotFoundError, PermissionError):
+            pass
+    return ''
+
+
+class Repository:
+    def __init__(self, path, name):
+        self.path, self.name = path, name
+        self.ready = False
+        self.twins = None
+        self.patches = {}
+        self.answers = {}
+        self.worktrees = []
+        self.local, self.remote = {}, {}
+        self.saved_refs = {}
+
+    def evidence_refs(self):
+        return dict(row.split('\0') for row in out(
+            self.path, 'for-each-ref', '--format=%(refname)%00%(objectname)').splitlines()
+                    if not row.startswith('refs/remotes/origin/'))
+
+    def fetch(self):
+        git(self.path, 'fetch', '--prune', 'origin')
+        refs = out(self.path, 'for-each-ref', '--format=%(refname)%00%(objectname)',
+                   'refs/heads/', 'refs/remotes/origin/')
+        for line in refs.splitlines():
+            name, oid = line.split('\0')
+            if name.startswith('refs/heads/'):
+                self.local[name[len('refs/heads/'):]] = oid
+            elif name != 'refs/remotes/origin/HEAD':
+                self.remote[name[len('refs/remotes/origin/'):]] = oid
+        self.worktrees = worktree_list(self.path)
+        if self.worktrees:
+            self.path = self.worktrees[0]['path']
+        self.saved_refs = self.evidence_refs()
+        self.ready = True
+
+    def on_main(self, oid):
+        if 'main' not in self.remote:
+            raise Failure('origin/main is missing')
+        result = git(self.path, 'merge-base', '--is-ancestor', oid, self.remote['main'], check=False)
+        if result.returncode not in (0, 1):
+            raise Failure('cannot test ancestry')
+        return result.returncode == 0
+
+    def patch(self, oid):
+        if oid not in self.patches:
+            diff = git(self.path, 'show', '--pretty=format:', '--no-ext-diff', '--no-textconv', oid).stdout
+            result = git(self.path, 'patch-id', '--stable', data=diff).stdout.split()
+            self.patches[oid] = result[0] if result else None
+        return self.patches[oid]
+
+    def landed(self, name, oid):
+        mark = git(self.path, 'config', '--get', f'branch.{name}.landed', check=False)
+        key = (oid, mark.stdout)
+        if key in self.answers:
+            return self.answers[key]
+        if mark.returncode == 0 and mark.stdout.strip() and self.on_main(oid):
+            answer = ('landed mark; tip on origin/main', False)
+        else:
+            if self.twins is None:
+                self.twins = defaultdict(list)
+                for row in out(self.path, 'log', '--format=%H%x00%ae%x00%aI%x00%s', 'origin/main').splitlines():
+                    commit, *identity = row.split('\0')
+                    self.twins[tuple(identity)].append(commit)
+            commits = []
+            for row in out(self.path, 'log', '--format=%H%x00%ae%x00%aI%x00%s', f'origin/main..{oid}').splitlines():
+                commit, *identity = row.split('\0')
+                if tuple(identity) not in self.twins:
+                    self.answers[key] = ('', False)
+                    return self.answers[key]
+                commits.append((commit, self.twins[tuple(identity)]))
+            answer = ('', False)
+            if commits:
+                merged = git(self.path, 'merge-tree', '--write-tree', self.remote['main'], oid, check=False)
+                if merged.returncode not in (0, 1):
+                    raise Failure(merged.stderr.decode(errors='replace').strip() or 'merge-tree failed')
+                tree = out(self.path, 'rev-parse', f'{self.remote["main"]}^{{tree}}')
+                same_tree = merged.returncode == 0 and merged.stdout.splitlines()[0].decode() == tree
+                if same_tree or all(self.patch(c) and any(self.patch(c) == self.patch(t) for t in twins)
+                                    for c, twins in commits):
+                    answer = ('copy on origin/main', False)
+                else:
+                    answer = ('twins on origin/main but content differs', True)
+        self.answers[key] = answer
+        return answer
+
+    def work(self, path, oid):
+        if out(path, 'status', '--porcelain', '--untracked-files=all', '--ignore-submodules=none'):
+            return 'tracked changes or untracked files'
+        if not self.remote or out(self.path, 'rev-list', '-1', oid, '--not', *self.remote.values()):
+            return 'commit on no origin branch'
+        return ''
+
+
+class Tidy:
+    def __init__(self, args, root, tmp, records):
+        self.args, self.root, self.tmp, self.records = args, root, tmp, records
+        self.status = 0
+        self.repos = []
+        self.by_common = {}
+        self.directories = []
+
+    def keep(self, kind, what, reason, status=0):
+        self.status = max(self.status, status)
+        reason = ' '.join(str(reason).splitlines())
+        print(f'tidy: kept {kind} {what}: {reason}', flush=True)
+
+    def delete(self, kind, what, commit, reason, action):
+        if not self.args.dry_run:
+            try:
+                action()
+            except (Failure, OSError) as error:
+                self.keep(kind, what, str(error), 3)
+                return False
+        verb = 'would delete' if self.args.dry_run else 'deleted'
+        print(f'tidy: {verb} {kind} {what} {commit or "-"} ({reason})', flush=True)
+        return True
+
+    def protected(self, path):
+        return any(inside(path, self.tmp / name) for name in TOOLS)
+
+    def load(self, path, name):
+        common = out(path, 'rev-parse', '--path-format=absolute', '--git-common-dir')
+        if common not in self.by_common:
+            repo = Repository(path, name)
+            self.by_common[common] = repo
+            try:
+                repo.fetch()
+            except (Failure, OSError) as error:
+                self.keep('entry', path, f'fetch failed; repository skipped: {error}', 3)
+        return self.by_common[common]
+
+    def branch(self, repo, name, oid, remote=False):
+        kind = 'github-branch' if remote else 'branch'
+        what = f'{repo.name}:{name}'
+        try:
+            reason, differs = repo.landed(name, oid)
+            if differs:
+                self.keep(kind, what, reason, 1)
+            elif reason:
+                ref = out(repo.path, 'rev-parse', '--path-format=absolute', '--git-path', f'refs/heads/{name}')
+                busy = held(Path(ref).absolute()) if not remote else ''
+                if busy:
+                    self.keep(kind, what, busy)
+                    return
+                def remove():
+                    if remote:
+                        result = git(repo.path, 'push', f'--force-with-lease=refs/heads/{name}:{oid}',
+                                     'origin', f':refs/heads/{name}', check=False)
+                        if result.returncode:
+                            # A concurrent deletion is success; a failed query is not.
+                            remaining = git(repo.path, 'ls-remote', '--exit-code', '--heads', 'origin',
+                                            f'refs/heads/{name}', check=False)
+                            if remaining.returncode != 2:
+                                raise Failure(result.stderr.decode(errors='replace').strip())
+                    else:
+                        if any(w.get('branch') == f'refs/heads/{name}' for w in worktree_list(repo.path)):
+                            raise Failure('branch checked out during tidy')
+                        git(repo.path, 'update-ref', '-d', f'refs/heads/{name}', oid)
+                        config = git(repo.path, 'config', '--remove-section', f'branch.{name}', check=False)
+                        if config.returncode and b'no such section' not in config.stderr:
+                            self.keep(kind, what, f'deleted {oid}; branch config cleanup failed', 3)
+                self.delete(kind, what, oid, reason, remove)
+        except (Failure, OSError) as error:
+            self.keep(kind, what, str(error), 3)
+
+    def worktree_guard(self, repo, wt):
+        path = wt['path']
+        if path == repo.path or wt is repo.worktrees[0]:
+            return 'primary checkout'
+        if 'locked' in wt:
+            return 'locked worktree'
+        if self.protected(path):
+            return 'tool directory'
+        if path.is_symlink():
+            return 'symlink'
+        if out(path, 'rev-parse', 'HEAD') != wt['HEAD']:
+            return 'HEAD moved during tidy'
+        guard = held(path) or repo.work(path, wt['HEAD'])
+        if guard:
+            return guard
+        for base, dirs, files in self.scan(path):
+            if base != path and repository(dirs, files):
+                return f'nested Git repository {base}; kept'
+        return ''
+
+    def remove_worktree(self, repo, wt, reason):
+        path = wt['path']
+        guard = self.worktree_guard(repo, wt)
+        if guard:
+            self.keep('worktree', path, guard)
+            return False
+        return self.delete('worktree', path, wt['HEAD'], reason,
+                           lambda: git(repo.path, 'worktree', 'remove', '--force', str(path)))
+
+    def worktrees(self, repo):
+        for wt in repo.worktrees:
+            if 'HEAD' not in wt or not wt['path'].exists():
+                continue
+            name = wt.get('branch', '').removeprefix('refs/heads/')
+            try:
+                if name:
+                    reason, differs = repo.landed(name, wt['HEAD'])
+                    if differs:
+                        self.keep('worktree', wt['path'], reason, 1)
+                        continue
+                else:
+                    reason = 'detached HEAD on origin/main' if repo.on_main(wt['HEAD']) else ''
+                if not reason:
+                    continue
+                guard = self.worktree_guard(repo, wt)
+                if guard:
+                    self.keep('worktree', wt['path'], guard)
+                elif self.remove_worktree(repo, wt, reason) and name:
+                    self.branch(repo, name, wt['HEAD'])
+            except (Failure, OSError) as error:
+                self.keep('worktree', wt['path'], str(error), 3)
+
+    def scan(self, path, include_git=False, onerror=None):
+        # Never follow links into another owner's directory.
+        def fail(error):
+            raise error
+        for base, dirs, files in os.walk(path, followlinks=False, onerror=onerror or fail):
+            base = Path(base)
+            yield base, dirs, files
+            dirs[:] = [d for d in dirs if not (base / d).is_symlink() and (include_git or d != '.git')]
+
+    def prefetch(self, path):
+        if path.is_symlink():
+            return
+        for base, dirs, files in self.scan(path):
+            if repository(dirs, files):
+                self.load(base, str(base))
+                if bare(dirs, files):
+                    dirs[:] = []
+
+    def directory(self, path, kind, reason):
+        try:
+            if path.is_symlink():
+                self.keep(kind, path, 'symlink; needs a decision', 1)
+                return
+            busy = held(path)
+            if busy:
+                self.keep(kind, path, busy)
+                return
+            found, blocked = {}, False
+            for repo in self.by_common.values():
+                for wt in repo.worktrees:
+                    if 'HEAD' in wt and inside(wt['path'], path) and wt['path'].exists():
+                        found[wt['path']] = (repo, wt)
+            for base, dirs, files in self.scan(path):
+                if repository(dirs, files):
+                    common = out(base, 'rev-parse', '--path-format=absolute', '--git-common-dir')
+                    repo = self.by_common.get(common)
+                    if repo is None:
+                        self.keep('directory', base, 'repository appeared after fetch; kept', 1)
+                        blocked = True
+                        continue
+                    if not repo.ready:
+                        blocked = True
+                        continue
+                    if base not in found:
+                        wt = next((w for w in repo.worktrees if w['path'] == base), None)
+                        if wt is not None and 'HEAD' in wt:
+                            found[base] = (repo, wt)
+                    # Removing a clone removes all its refs and its worktrees' shared metadata.
+                    if inside(repo.path, path):
+                        if repo.evidence_refs() != repo.saved_refs:
+                            self.keep('directory', base, 'repository refs moved during tidy', 1)
+                            blocked = True
+                        if not repo.remote or any(out(repo.path, 'rev-list', '-1', tip, '--not',
+                                                      *repo.remote.values()) for tip in repo.saved_refs.values()):
+                            self.keep('directory', base, 'commit on no origin branch', 1)
+                            blocked = True
+                        if any(not inside(w['path'], path) for w in repo.worktrees):
+                            self.keep('directory', base, 'repository has a worktree outside directory', 1)
+                            blocked = True
+                    if bare(dirs, files):
+                        dirs[:] = []
+            for work, (repo, wt) in sorted(found.items()):
+                if not repo.ready:
+                    blocked = True
+                    continue
+                guard = self.worktree_guard(repo, wt)
+                # A standalone clone is evidence, but a workspace primary never goes.
+                if guard == 'primary checkout' and repo not in self.repos and inside(repo.path, path):
+                    guard = ('HEAD moved during tidy' if out(work, 'rev-parse', 'HEAD') != wt['HEAD']
+                             else held(work) or repo.work(work, wt['HEAD']))
+                if guard:
+                    self.keep('worktree', work, guard, 1)
+                    blocked = True
+            if blocked:
+                self.keep(kind, path, 'worktree or repository needs attention', 1)
+                return
+            for work, (repo, wt) in sorted(found.items(), key=lambda item: len(item[0].parts), reverse=True):
+                if wt is repo.worktrees[0]:
+                    continue  # A clone is removed with the containing directory.
+                if not self.remove_worktree(repo, wt, reason):
+                    return
+            self.delete(kind, path, '', reason, lambda: shutil.rmtree(path))
+        except (Failure, OSError) as error:
+            self.keep(kind, path, str(error), 3)
+
+    def mission(self, path):
+        if not path.is_dir() and not path.is_symlink():
+            if not self.args.mission:
+                self.keep('entry', path, 'not a mission directory', 1)
+            return
+        name = path.name
+        readme = self.records / 'missions' / name / 'README.md'
+        if not readme.is_file():
+            name = re.sub(r'-m[0-9]+$', '', name)
+            readme = self.records / 'missions' / name / 'README.md'
+        if self.args.mission and name != self.args.mission:
+            return
+        if not readme.is_file() or any(p.is_symlink() for p in (readme, readme.parent, readme.parent.parent)):
+            self.keep('mission', path, 'no README in record', 1)
+            return
+        front = readme.read_text().split('---', 2)
+        state = re.search(r'^state:\s*(ended|abandoned)\s*$', front[1], re.M) if len(front) == 3 and not front[0] else None
+        if state:
+            self.directories.append((path, 'mission', f'mission {state[1]}'))
+
+    def missions(self):
+        owners = self.tmp / 'owners'
+        if not owners.is_dir() or owners.is_symlink():
+            return
+        pull = command([os.environ.get('TIDY_RECORD', str(Path(__file__).resolve().with_name('record'))), 'pull'])
+        if pull.returncode:
+            self.keep('mission', self.tmp / 'owners', 'record pull failed; missions skipped: ' +
+                      pull.stderr.decode(errors='replace').strip(), 3)
+            return
+        for path in sorted(owners.iterdir()):
+            try:
+                self.mission(path)
+            except (Failure, OSError, UnicodeError) as error:
+                self.keep('mission', path, str(error), 3)
+
+    def old(self):
+        for parent in (self.tmp / 'director' / 'tasks', self.tmp / 'codex-run'):
+            if not parent.is_dir() or any(p.is_symlink() for p in (parent, parent.parent)):
+                continue
+            for path in sorted(parent.iterdir()):
+                if not path.is_dir() or path.is_symlink():
+                    continue
+                try:
+                    newest = path.stat().st_mtime
+                    for base, dirs, files in self.scan(path, include_git=True):
+                        newest = max(newest, base.stat().st_mtime,
+                                     *((base / n).lstat().st_mtime for n in dirs + files))
+                    if time.time() - newest > 7 * 86400:
+                        self.directories.append((path, 'directory', 'last change over a week ago'))
+                except (Failure, OSError) as error:
+                    self.keep('directory', path, str(error), 3)
+
+    def scripts(self):
+        if not self.tmp.is_dir():
+            return
+        enclosing = git(self.tmp, 'rev-parse', '--is-inside-work-tree', '--is-bare-repository', check=False)
+        if enclosing.returncode == 0 and b'true' in enclosing.stdout.splitlines():
+            return
+        for base, dirs, files in self.scan(self.tmp, onerror=lambda e: self.keep('entry', e.filename, str(e), 3)):
+            if base == self.tmp:
+                dirs[:] = [d for d in dirs if d not in TOOLS]
+            if repository(dirs, files):
+                dirs[:] = []
+                continue
+            for name in sorted(files):
+                path = base / name
+                try:
+                    if path.is_symlink() or not path.is_file():
+                        continue
+                    with path.open('rb') as source:
+                        script = path.suffix in ('.sh', '.bash', '.py', '.pl', '.rb') or source.read(2) == b'#!'
+                    if script:
+                        busy = held(path)
+                        if busy:
+                            self.keep('script', path, busy)
+                        else:
+                            self.delete('script', path, '', 'script outside Git and tool directories', path.unlink)
+                except OSError as error:
+                    self.keep('script', path, str(error), 3)
+
+    def step(self, action):
+        try:
+            action()
+        except (Failure, OSError) as error:
+            self.keep('entry', self.tmp, f'{action.__name__} failed: {error}', 3)
+
+    def run(self):
+        # All workspace fetches precede deletion; their origin tips remain our backup snapshot.
+        for name in (self.args.repos or REPOS):
+            if self.args.mission:
+                break
+            try:
+                self.repos.append(self.load(self.root / name, name))
+            except (Failure, OSError) as error:
+                self.keep('entry', self.root / name, str(error), 3)
+        if not self.args.repos:
+            self.step(self.missions)
+            if not self.args.mission:
+                self.step(self.old)
+            for path, kind, _ in self.directories:
+                try:
+                    self.prefetch(path)
+                except (Failure, OSError) as error:
+                    self.keep(kind, path, f'prefetch failed: {error}', 3)
+        for remote in (True, False):
+            for repo in self.repos:
+                if not repo.ready:
+                    continue
+                checked = {wt.get('branch', '').removeprefix('refs/heads/') for wt in repo.worktrees}
+                for name, oid in sorted((repo.remote if remote else repo.local).items()):
+                    if name != 'main' and (remote or name not in checked):
+                        self.branch(repo, name, oid, remote)
+        for repo in self.repos:
+            if repo.ready:
+                self.worktrees(repo)
+        for path, kind, reason in self.directories:
+            self.directory(path, kind, reason)
+        if not self.args.repos and not self.args.mission:
+            self.step(self.scripts)
+        if not self.args.mission:
+            for repo in list(self.by_common.values()):
+                if not repo.ready or not repo.path.exists():
+                    continue
+                try:
+                    stale = [wt for wt in repo.worktrees if 'prunable' in wt]
+                    busy = [(wt, held(wt['path'])) for wt in stale]
+                    if any(reason for _, reason in busy):
+                        for wt, reason in busy:
+                            self.keep('worktree', wt['path'], reason or 'prune skipped; another stale entry is held')
+                        continue
+                    if self.args.dry_run:
+                        for wt in stale:
+                            self.delete('worktree', wt['path'], wt.get('HEAD'), 'stale entry', lambda: None)
+                    else:
+                        git(repo.path, 'worktree', 'prune')
+                        remaining = {wt['path'] for wt in worktree_list(repo.path)}
+                        for wt in stale:
+                            if wt['path'] not in remaining:
+                                self.delete('worktree', wt['path'], wt.get('HEAD'), 'stale entry', lambda: None)
+                except (Failure, OSError) as error:
+                    self.keep('entry', repo.path, f'worktree prune failed: {error}', 3)
+        if not self.args.repos and not self.args.mission and self.tmp.exists():
+            for path in sorted(self.tmp.iterdir()):
+                if path.name not in ALLOWED:
+                    self.keep('entry', path, 'outside the tmp layout', 1)
+        return self.status
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--dry-run', action='store_true')
+    parser.add_argument('--mission')
+    parser.add_argument('repos', nargs='*', metavar='REPO')
+    args = parser.parse_args()
+    if (args.mission and args.repos) or any(name not in REPOS for name in args.repos):
+        parser.error('choose repository names or --mission M')
+    if args.mission and not re.fullmatch(r'[a-z0-9][a-z0-9_-]*', args.mission):
+        parser.error('invalid mission name')
+    args.repos = list(dict.fromkeys(args.repos))
+    kit = Path(__file__).resolve().parents[2]
+    default = kit.parent if kit.name == 'agents' else Path.home() / 'src/rust'
+    root = Path(os.environ.get('DEV_ROOT', default)).expanduser().resolve()
+    tmp = Path(os.environ.get('DEV_TMP', root / 'tmp')).expanduser().resolve()
+    workspace = Path.home() / ('src/rust' if (Path.home() / 'src/rust').exists() else 'src')
+    records = Path(os.environ.get('RECORDS', workspace / 'records')).expanduser().absolute()
+    if not root.is_dir() or not any((root / name / '.git').exists() for name in REPOS):
+        print('tidy: no workspace', file=sys.stderr)
+        return 2
+    tidy = Tidy(args, root, tmp, records)
+    try:
+        if args.dry_run:
+            return tidy.run()
+        (tmp / 'logs').mkdir(parents=True, exist_ok=True)
+        with (tmp / 'logs' / 'tidy.lock').open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            return tidy.run()
+    except (Failure, OSError, ValueError) as error:
+        tidy.keep('entry', tmp, str(error), 3)
+        return tidy.status
+
+
+if __name__ == '__main__':
+    sys.exit(main())
