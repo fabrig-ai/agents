@@ -5,17 +5,22 @@ qa backlog [REPO]
 qa passes [--running]
 qa findings
 qa triage PASS N owner ADDRESS|backlog|drop [--why TEXT]
+qa watch --director ADDRESS [--once]
 """
 import argparse
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import fcntl
+import json
 import os
 from pathlib import Path
 import re
+import shutil
+import socket
 import subprocess
 import sys
 import tempfile
+import time
 
 os.umask(0o077)
 REPOSITORIES = ('skein', 'smith', 'hearth', 'jig', 'temper')
@@ -74,7 +79,8 @@ class Workspace:
         need(fixture is None or (fixture and self.fixture.is_dir()), 'QA_FIXTURE must be a directory')
 
     def tool(self, name):
-        return Path(os.environ.get('QA_' + name.upper(), self.kit / name)) if self.fixture else self.kit / name
+        default = Path('systemctl') if name == 'systemctl' else self.kit / name
+        return Path(os.environ.get('QA_' + name.upper().replace('-', '_'), default)) if self.fixture else default
 
     def origin(self, repo):
         need(repo in REPOSITORIES, f'unknown repository: {repo}')
@@ -169,8 +175,15 @@ class Pass:
 
 
 class Record:
-    def __init__(self, workspace):
+    def __init__(self, workspace, logger=None):
         self.workspace, self.root = workspace, workspace.records
+        self.logger = logger
+
+    def warn(self, message):
+        if self.logger:
+            self.logger("warning: " + message)
+        else:
+            print("qa: warning: " + message, file=sys.stderr)
 
     @contextmanager
     def locked(self):
@@ -180,7 +193,7 @@ class Record:
             fcntl.flock(lock, fcntl.LOCK_EX)
             result = command([self.workspace.tool('record'), 'pull'])
             if result.returncode:
-                print('qa: warning: record pull failed: ' + result.stderr.strip(), file=sys.stderr)
+                self.warn('record pull failed: ' + result.stderr.strip())
             yield self
 
     def path(self, name):
@@ -231,7 +244,7 @@ class Record:
             need(result.returncode in (0, 3), result.stderr.strip() or 'record commit failed',
                  2 if result.returncode == 2 else 1)
             if result.returncode == 3:
-                print('qa: warning: ' + result.stderr.strip(), file=sys.stderr)
+                self.warn(result.stderr.strip())
         except BaseException:
             for name, old in before.items():
                 path = self.path(name)
@@ -284,78 +297,404 @@ def show_commits(repositories, selected):
         yield cache[repo][sha], event
 
 
-def run(args, workspace, record, repositories):
-    why = getattr(args, 'why', '') or ''
-    need(not any(c in why for c in '\n\r\t'), '--why must not contain a newline or tab')
-    repo = getattr(args, 'repo', None)
-    if repo:
-        workspace.origin(repo)
-    if args.command == 'decide':
-        need(len(args.choices) >= 2 and args.choices[-1] in ('run', 'backlog'), 'decide needs COMMIT... run|backlog')
-        shas = repositories.resolve(repo, args.choices[:-1])
-        route = args.choices[-1]
-        name = 'qa/decisions.md'
-        text = record.append(name, '\n'.join(f'- {timestamp()} {repo} {sha} {route} {why}' for sha in shas), '# QA decisions')
-        record.commit({name: text}, f'qa decide: {repo} ' + ' '.join(s[:9] for s in shas) + ' ' + route)
-        for sha in shas:
-            print(f'decided: {repo} {sha[:9]} {route}')
-        return
-    passes = record.passes()
-    if args.command in ('findings', 'triage'):
-        if args.command == 'findings':
-            triaged = {(r['who'], int(r['item'])) for r in record.events('triage')}
-            lines = [f'{p.name} {n} {title}' for p in passes if p.fields['outcome'] != 'running'
-                     for n, title in p.findings() if (p.name, n) not in triaged]
-            print('\n'.join(lines) or 'no findings waiting')
-            return
-        report = next((p for p in passes if p.name == args.pass_name), None)
-        need(report, f'unknown pass: {args.pass_name}')
-        need(report.fields['outcome'] != 'running', f'pass is running: {report.name}')
-        title = dict(report.findings()).get(args.number)
-        need(title is not None, f'pass has no finding {args.number}')
-        need(args.route in (['backlog'], ['drop']) or (len(args.route) == 2 and args.route[0] == 'owner'), 'route must be owner ADDRESS, backlog or drop')
-        route = args.route[-1]
-        if args.route[0] == 'owner':
-            need(re.fullmatch(r'[a-z][a-z0-9-]*(/[a-z0-9][a-z0-9-]*)*@[a-z][a-z0-9-]*', route), 'invalid owner address: expected NAME@MACHINE')
-            body = (f'QA pass {report.name} on {report.fields["repository"]} found this, and the director routes it to you.\n'
-                    f"The report is records' qa/passes/{report.name}.md, finding {args.number}: record pull, then read it.\n")
-            with tempfile.NamedTemporaryFile(mode='w', dir=workspace.tmp) as message:
-                message.write(body + (why + '\n' if why else ''))
-                message.flush()
-                sent = command([workspace.tool('post'), 'send', route, f'QA finding {report.name} {args.number}: {title}', message.name])
-            need(sent.returncode in (0, 3), 'post send failed: ' + sent.stderr.strip())
-            if sent.returncode == 3:
-                print('qa: warning: message queued; nobody will wake its reader', file=sys.stderr)
-        name = 'qa/triage.md'
-        changes = {name: record.append(name, f'- {timestamp()} {report.name} {args.number} {route} {why}', '# QA triage')}
-        if route == 'backlog':
-            name = 'director/backlog.md'
-            changes[name] = record.append(name, f"- QA pass {report.name}, finding {args.number}: {title}. Source/repro: records' qa/passes/{report.name}.md, finding {args.number}.")
-        record.commit(changes, f'qa triage: {report.name} {args.number} {route}')
-        print(f'triaged: {report.name} {args.number} {route}')
-        return
-    current = states(record.events('decisions'), passes)
-    if args.command == 'candidates':
-        candidates = [c for r in ([repo] if repo else REPOSITORIES) for c in repositories.commits(r)
-                      if c['qa'] and (r, c['commit']) not in current]
-        candidates.sort(key=lambda c: c['seconds'])  # stable for equal commit times
-        print('\n'.join(first_line(c) + '\n  QA: ' + c['qa'] for c in candidates) or 'no candidates')
-        return
-    route = 'backlog' if args.command == 'backlog' else 'run'
-    chosen = sorted([(r, sha, event) for (r, sha), event in current.items()
-                     if event['route'] == route and (not repo or repo == r)], key=lambda row: row[2]['time'])
-    if args.command == 'passes':
-        lines = [f'{p.name} {p.fields["repository"]} {p.fields["outcome"]} {p.fields["wall"]} {p.fields["tokens"]} '
-                 + ' '.join(s[:9] for s in p.fields['commits'].split()) for p in passes
-                 if not args.running or p.fields['outcome'] == 'running']
-        print('\n'.join(lines) or 'no passes')
-        print(f'waiting: {len(chosen)} commits chosen to run')
-    elif not chosen:
+def decide(args, record, repositories):
+    repo, why = args.repo, args.why
+    need(len(args.choices) >= 2 and args.choices[-1] in ('run', 'backlog'), 'decide needs COMMIT... run|backlog')
+    shas = repositories.resolve(repo, args.choices[:-1])
+    route = args.choices[-1]
+    name = 'qa/decisions.md'
+    text = record.append(name, '\n'.join(f'- {timestamp()} {repo} {sha} {route} {why}' for sha in shas), '# QA decisions')
+    record.commit({name: text}, f'qa decide: {repo} ' + ' '.join(s[:9] for s in shas) + ' ' + route)
+    for sha in shas:
+        print(f'decided: {repo} {sha[:9]} {route}')
+    return
+
+
+def findings(record):
+    triaged = {(r['who'], int(r['item'])) for r in record.events('triage')}
+    lines = [f'{p.name} {n} {title}' for p in record.passes() if p.fields['outcome'] != 'running'
+             for n, title in p.findings() if (p.name, n) not in triaged]
+    print('\n'.join(lines) or 'no findings waiting')
+
+
+def triage(args, workspace, record):
+    why, passes = args.why, record.passes()
+    report = next((p for p in passes if p.name == args.pass_name), None)
+    need(report, f'unknown pass: {args.pass_name}')
+    need(report.fields['outcome'] != 'running', f'pass is running: {report.name}')
+    title = dict(report.findings()).get(args.number)
+    need(title is not None, f'pass has no finding {args.number}')
+    need(args.route in (['backlog'], ['drop']) or (len(args.route) == 2 and args.route[0] == 'owner'), 'route must be owner ADDRESS, backlog or drop')
+    route = args.route[-1]
+    if args.route[0] == 'owner':
+        need(re.fullmatch(r'[a-z][a-z0-9-]*(/[a-z0-9][a-z0-9-]*)*@[a-z][a-z0-9-]*', route), 'invalid owner address: expected NAME@MACHINE')
+        body = (f'QA pass {report.name} on {report.fields["repository"]} found this, and the director routes it to you.\n'
+                f"The report is records' qa/passes/{report.name}.md, finding {args.number}: record pull, then read it.\n")
+        with tempfile.NamedTemporaryFile(mode='w', dir=workspace.tmp) as message:
+            message.write(body + (why + '\n' if why else ''))
+            message.flush()
+            sent = command([workspace.tool('post'), 'send', route, f'QA finding {report.name} {args.number}: {title}', message.name])
+        need(sent.returncode in (0, 3), 'post send failed: ' + sent.stderr.strip())
+        if sent.returncode == 3:
+            print('qa: warning: message queued; nobody will wake its reader', file=sys.stderr)
+    name = 'qa/triage.md'
+    changes = {name: record.append(name, f'- {timestamp()} {report.name} {args.number} {route} {why}', '# QA triage')}
+    if route == 'backlog':
+        name = 'director/backlog.md'
+        changes[name] = record.append(name, f"- QA pass {report.name}, finding {args.number}: {title}. Source/repro: records' qa/passes/{report.name}.md, finding {args.number}.")
+    record.commit(changes, f'qa triage: {report.name} {args.number} {route}')
+    print(f'triaged: {report.name} {args.number} {route}')
+    return
+
+
+def chosen(record, route, repo=None):
+    current = states(record.events('decisions'), record.passes())
+    return sorted([(r, sha, event) for (r, sha), event in current.items()
+                   if event['route'] == route and (not repo or repo == r)], key=lambda row: row[2]['time'])
+
+
+def candidates(repo, record, repositories):
+    current = states(record.events('decisions'), record.passes())
+    commits = [c for r in ([repo] if repo else REPOSITORIES) for c in repositories.commits(r)
+               if c['qa'] and (r, c['commit']) not in current]
+    commits.sort(key=lambda c: c['seconds'])
+    print('\n'.join(first_line(c) + '\n  QA: ' + c['qa'] for c in commits) or 'no candidates')
+
+
+def backlog(repo, record, repositories):
+    selected = chosen(record, 'backlog', repo)
+    if not selected:
         print('no commits kept for later')
-    for commit, event in show_commits(repositories, chosen):
+    for commit, event in show_commits(repositories, selected):
         print(first_line(commit))
-        if args.command == 'backlog' and event['why']:
+        if event['why']:
             print('  why: ' + event['why'])
+
+
+def passes(running, record, repositories):
+    lines = [f'{p.name} {p.fields["repository"]} {p.fields["outcome"]} {p.fields["wall"]} {p.fields["tokens"]} '
+             + ' '.join(s[:9] for s in p.fields['commits'].split()) for p in record.passes()
+             if not running or p.fields['outcome'] == 'running']
+    print('\n'.join(lines) or 'no passes')
+    selected = chosen(record, 'run')
+    print(f'waiting: {len(selected)} commits chosen to run')
+    for commit, _ in show_commits(repositories, selected):
+        print(first_line(commit))
+
+
+BRIEF = '''# QA pass {name}
+
+Read {agents}/roles/qa.md first: it is your role.
+
+- Repository: {repo}, at main {main}, checked out in {checkout}, your
+  working directory. Leave its tracked files as they are.
+- The commits to test, oldest first:
+{commits}
+- Your scratch directory: {directory}.
+- Your wall time is capped at {cap} minutes, from {started}: past it
+  your session is stopped, and your report is what the file holds
+  then. Write it early and keep it current.
+- Your report: {directory}/report.md, at most 7 KiB.
+'''
+
+
+def log(message):
+    for line in str(message).splitlines():
+        print('qa watch: ' + line, flush=True)
+
+
+def settings(workspace):
+    # Same precedence and valid machine.env lines as kit.sh's machine_setting.
+    values = dict(QA_SLOTS='1', QA_BATCH='5', QA_CAP_MINUTES='120', QA_INTERVAL_SECONDS='300')
+    path = workspace.tmp / 'machine.env'
+    try:
+        text = path.read_text(errors='replace')
+    except OSError:
+        text = ''  # kit.sh ignores an absent or unreadable machine file.
+    for line in text.split('\n'):
+        match = re.fullmatch(r'(QA_SLOTS|QA_BATCH|QA_CAP_MINUTES|QA_INTERVAL_SECONDS)=([0-9]+)', line)
+        if match:
+            values[match[1]] = match[2]
+    for key in values:
+        value = os.environ.get(key, values[key])
+        need(re.fullmatch(r'[0-9]+', value), f'{key} must be a nonnegative integer')
+        values[key] = int(value)
+    need(values['QA_BATCH'] > 0, 'QA_BATCH must be positive')
+    return values
+
+
+class Watch:
+    def __init__(self, workspace, director):
+        self.workspace, self.director = workspace, director
+        self.directory = workspace.tmp / 'qa'
+        self.runs = workspace.root / 'tmp/codex-run'
+        self.record = Record(workspace, log)
+        self.repositories = Repositories(workspace)
+
+    def call(self, tool, *args):
+        return command([self.workspace.tool(tool), *args])
+
+    def save(self, directory, state):
+        replace(directory / 'pass.json', (json.dumps(state, indent=2) + '\n').encode())
+
+    def local_passes(self):
+        result = []
+        for path in sorted(self.directory.glob('*/pass.json')):
+            need(not path.is_symlink() and not path.parent.is_symlink(), f'{path}: symlink refused', 4)
+            state = json.loads(path.read_text())
+            need(state['pass'] == path.parent.name and re.fullmatch(NAME, state['pass'])
+                 and state['repository'] in REPOSITORIES, f'{path}: invalid pass', 4)
+            need(not state['run'] or re.fullmatch(r'[a-zA-Z0-9_-]+', state['run']), f'{path}: invalid run', 4)
+            result.append((path.parent, state))
+        return result
+
+    def notify(self, directory, state):
+        notice = state.get('notice')
+        if not notice:
+            return
+        message = directory / 'post-body'
+        replace(message, notice['body'].encode())
+        sent = self.call('post', 'send', '--as', 'qa-watch', self.director, notice['subject'], message)
+        if sent.returncode in (0, 3):
+            state.pop('notice')
+            self.save(directory, state)
+            log(f'{state["pass"]}: posted director')
+        else:
+            log(f'{state["pass"]}: post failed: {sent.stderr.strip() or sent.stdout.strip()}')
+
+    def facts(self, run):
+        model = effort = ended = tokens = 'unknown'
+        exit_code = 'unknown'
+        if run:
+            meta = self.runs / run / 'meta'
+            if meta.exists():
+                fields = dict(line.split('=', 1) for line in meta.read_text().splitlines() if '=' in line)
+                model, effort = fields.get('model', model), fields.get('effort', effort)
+            rows = self.runs / 'runs.tsv'
+            if rows.exists():
+                for line in rows.read_text().splitlines():
+                    row = line.split('\t')
+                    if len(row) >= 13 and row[0] == run:
+                        ended, exit_code, model, effort, tokens = row[3], row[4], row[6], row[7], row[11]
+        return dict(ended=ended, exit=exit_code, model=model, effort=effort, tokens=tokens)
+
+    def finish(self, directory, state, failure=None):
+        name = state['pass']
+        report_path = directory / 'report.md'
+        report = report_path.read_text(errors='replace') if report_path.exists() else ''
+        facts = self.facts(state['run'])
+        outcome = ('capped' if state['capped'] else 'failed' if failure or facts['exit'] != '0'
+                   or not report.strip() or report.startswith('codex-run: the run wrote no report') else 'done')
+        if failure:
+            report = failure + '\n' + report
+        path = self.record.path(f'qa/passes/{name}.md')
+        result = Pass.read(path)
+        ended = facts['ended'] if facts['ended'] != 'unknown' else timestamp()
+        minutes = max(0, int((utc(ended) - utc(state['started'])).total_seconds()) // 60)
+        wall = f'{minutes // 60}:{minutes % 60:02}'
+        result.fields.update(ended=ended, wall=wall, tokens=facts['tokens'], model=facts['model'],
+                             effort=facts['effort'], outcome=outcome)
+        result.body = f'# QA pass {name}\n\n' + report
+        if len(result.text().encode()) > 8192:
+            suffix = f'\n(Cut at 8 KiB: the report was {len(report.encode())} bytes.)\n'
+            result.body = f'# QA pass {name}\n\n'
+            budget = 8192 - len((result.text() + suffix).encode())
+            prefix = report.encode()[:max(0, budget)]
+            # A long first line contributes nothing; no partial UTF-8 or partial line.
+            prefix = prefix[:prefix.rfind(b'\n') + 1]
+            result.body += prefix.decode() + suffix
+        try:
+            self.record.commit({f'qa/passes/{name}.md': result.text()}, f'qa watch: {name} {outcome}')
+        except Problem as error:
+            if error.code != 2:
+                raise
+            outcome = 'failed'
+            result.fields['outcome'] = outcome
+            result.body = f'# QA pass {name}\n\nThe report was refused by record: {error}.\n'
+            self.record.commit({f'qa/passes/{name}.md': result.text()}, f'qa watch: {name} failed')
+            log(f'{name}: report refused by record: {error}')
+        count = len(result.findings())
+        state.update(finished=True, ended=ended)
+        if outcome in ('failed', 'capped') or count:
+            state['notice'] = dict(subject=f'qa: pass {name} {outcome}, {count} findings', body=(
+                f'QA pass {name} on {state["repository"]} ended {outcome} after {wall}, with {count} findings: '
+                f"records' qa/passes/{name}.md; qa findings lists them.\n"))
+        self.save(directory, state)
+        log(f'{name}: {outcome}, {count} findings, {wall}')
+        self.notify(directory, state)
+
+    def start(self, repo, main, commits, checkout, cap):
+        started = timestamp()
+        base = utc(started).strftime('%Y%m%d-%H%M-') + repo
+        name, index = base, 1
+        while (self.directory / name).exists() or self.record.path(f'qa/passes/{name}.md').exists():
+            index += 1
+            name = base + '-' + str(index)
+        directory = self.directory / name
+        directory.mkdir(mode=0o700)
+        state = {'pass': name, 'repository': repo, 'main': main, 'commits': [c['commit'] for c in commits],
+                 'started': started, 'run': '', 'capped': False, 'finished': False}
+        git(checkout, 'checkout', '--detach', '--force', main)
+        git(checkout, 'clean', '-fdq')
+        brief = BRIEF.format(name=name, agents=Path(__file__).resolve().parents[2], repo=repo, main=main,
+                             checkout=checkout, directory=directory, cap=cap, started=started,
+                             commits='\n'.join(f'  - {c["commit"]} {c["subject"]}\n    QA: {c["qa"]}' for c in commits))
+        replace(directory / 'brief.md', brief.encode())
+        fields = dict(repository=repo, main=main, commits=' '.join(state['commits']), machine=socket.gethostname(),
+                      model='unknown', effort='unknown', started=started, ended='unknown', wall='unknown',
+                      tokens='unknown', outcome='running')
+        report = Pass(name, fields, f'# QA pass {name}\n')
+        # State precedes the commit: a restart can always find a committed start.
+        self.save(directory, state)
+        try:
+            self.record.commit({f'qa/passes/{name}.md': report.text()}, f'qa watch: {name} started')
+        except Problem as error:
+            log(f'{name}: record refused start: {error}')
+            message = directory / 'post-body'
+            replace(message, f'QA pass {name} could not start: {error}.\n'.encode())
+            sent = self.call('post', 'send', '--as', 'qa-watch', self.director, f'qa: pass {name} refused', message)
+            if sent.returncode not in (0, 3):
+                log(f'{name}: post failed: {sent.stderr.strip()}')
+            shutil.rmtree(directory)
+            return False
+        launch = self.call('codex-run', 'task', '--to', 'qa-watch', directory / 'brief.md', checkout, directory / 'report.md')
+        words = launch.stdout.split()
+        if launch.returncode or not words or not re.fullmatch(r'[a-zA-Z0-9_-]+', words[0]):
+            self.finish(directory, state, 'codex-run refused: ' + (launch.stderr.strip() or launch.stdout.strip() or 'no run id'))
+        else:
+            state['run'] = words[0]
+            self.save(directory, state)
+            log(f'{name}: started run {state["run"]} at {main}')
+        return True
+
+    def recover_run(self, directory, state):
+        # codex-run writes meta before launching its unit. Recover an acknowledged
+        # launch even if this service died before saving the returned id.
+        matches = []
+        for path in self.runs.glob('*/meta'):
+            fields = dict(line.split('=', 1) for line in path.read_text().splitlines() if '=' in line)
+            if fields.get('task') == str(directory / 'brief.md') and fields.get('report') == str(directory / 'report.md'):
+                need(re.fullmatch(r'[a-zA-Z0-9_-]+', path.parent.name), 'invalid recovered run', 4)
+                matches.append(path.parent.name)
+        need(len(matches) <= 1, f'{state["pass"]}: multiple runs for one brief', 4)
+        if matches:
+            state['run'] = matches[0]
+            self.save(directory, state)
+            log(f'{state["pass"]}: recovered run {state["run"]}')
+
+    def check(self, options):
+        log('checking')
+        with self.record.locked():
+            for directory, state in self.local_passes():
+                if state['finished']:
+                    self.notify(directory, state)
+                    continue
+                if not state['run']:
+                    if not self.record.path(f'qa/passes/{state["pass"]}.md').exists():
+                        shutil.rmtree(directory)
+                        log(f'{state["pass"]}: removed uncommitted start')
+                        continue
+                    self.recover_run(directory, state)
+                run = state['run']
+                ended = self.runs / run / 'ended' if run else None
+                if ended and ended.exists():
+                    self.finish(directory, state)
+                elif not run:
+                    self.finish(directory, state, 'The service stopped before saving a run id.')
+                elif self.call('systemctl', '--user', 'is-active', '--quiet', 'codex-run-' + run).returncode:
+                    self.finish(directory, state, None if ended.exists() else 'The run unit vanished without its end.')
+                elif state['capped'] or (utc(timestamp()) - utc(state['started'])).total_seconds() >= options['QA_CAP_MINUTES'] * 60:
+                    state['capped'] = True
+                    self.save(directory, state)
+                    stopped = self.call('systemctl', '--user', 'stop', 'codex-run-' + run)
+                    if stopped.returncode:
+                        state['capped'] = False
+                        self.save(directory, state)
+                        log(f'{state["pass"]}: stop failed: {stopped.stderr.strip()}')
+                    else:
+                        log(f'{state["pass"]}: capped run {run}')
+            running = [s for _, s in self.local_passes() if not s['finished']]
+            free = max(0, options['QA_SLOTS'] - len(running))
+            busy = {s['repository'] for s in running}
+            # Preflight every source before any launch: an unreadable feed starts none.
+            waiting = chosen(self.record, 'run')
+            repos = list(dict.fromkeys(r for r, _, _ in waiting if r not in busy)) if free else []
+            cleared = {}
+            for repo in repos:
+                result = self.call('landings', 'cleared', repo)
+                if result.returncode == 1:
+                    log(f'{repo}: no cleared main')
+                    continue
+                if result.returncode:
+                    log(f'{repo}: cannot read cleared main: {result.stderr.strip() or result.stdout.strip()}')
+                    cleared = {}
+                    break
+                main = result.stdout.strip()
+                need(re.fullmatch(SHA, main), f'{repo}: invalid cleared main', 4)
+                cleared[repo] = main
+            for repo, main in cleared.items():
+                if not free:
+                    break
+                with self.repositories.fetched(repo) as checkout:
+                    order = git(checkout, 'rev-list', '--reverse', 'origin/main').splitlines()
+                    selected = {sha for r, sha, _ in waiting if r == repo}
+                    need(selected <= set(order), f'{repo}: waiting commit missing from origin/main', 4)
+                    selected = [sha for sha in order if sha in selected]
+                    def holds(sha):
+                        result = git(checkout, 'merge-base', '--is-ancestor', sha, main, check=False)
+                        need(result.returncode in (0, 1), f'{repo}: cannot read cleared commit {main}', 4)
+                        return result.returncode == 0
+                    if not holds(selected[0]):
+                        log(f'{repo}: cleared main does not hold oldest waiting commit')
+                        continue
+                    commits = []
+                    for sha in selected:
+                        if holds(sha):
+                            subject = git(checkout, 'show', '-s', '--format=%s', sha)
+                            trailer = git(checkout, 'show', '-s', '--format=%(trailers:key=QA,valueonly)', sha)
+                            commits.append(dict(commit=sha, subject=subject, qa=' '.join(trailer.splitlines())))
+                            if len(commits) == options['QA_BATCH']:
+                                break
+                    if not self.start(repo, main, commits, checkout, options['QA_CAP_MINUTES']):
+                        break
+                    free -= 1
+            for directory, state in self.local_passes():
+                if state['finished'] and not state.get('notice') and (utc(timestamp()) - utc(state['ended'])).total_seconds() >= 7 * 86400:
+                    shutil.rmtree(directory)
+                    log(f'{state["pass"]}: pruned')
+
+
+def watch(director, once, workspace):
+    # Check assignment before mkdir, locks, record pull, or any other side effect.
+    need(workspace.fixture or (Path.home() / '.config/agents-qa/director').is_file(),
+         "this is not the service's machine (no ~/.config/agents-qa/director)")
+    need(re.fullmatch(r'[a-z][a-z0-9-]*(/[a-z0-9][a-z0-9-]*)*@[a-z][a-z0-9-]*', director),
+         'invalid director address: expected NAME@MACHINE')
+    service = Watch(workspace, director)
+    service.directory.mkdir(parents=True, exist_ok=True)
+    with (service.directory / 'watch.lock').open('a') as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise Problem('another service runs') from None
+        while True:
+            options = settings(workspace)
+            service.check(options)
+            if once:
+                return 0
+            interval = options['QA_INTERVAL_SECONDS']
+            waited = service.call('post', 'wait', 'qa-watch', '--timeout', str(interval), '--holder', str(os.getpid()), '--kind', 'codex')
+            if waited.returncode == 0:
+                read = service.call('post', 'read', 'qa-watch')
+                log(read.stdout)
+                if read.returncode:
+                    log('post read failed: ' + read.stderr.strip())
+            elif waited.returncode == 4:
+                log('another waiter took qa-watch')
+                return 2
+            elif waited.returncode != 1:
+                log('post wait failed: ' + (waited.stderr.strip() or waited.stdout.strip()))
+                time.sleep(interval)
 
 
 def main():
@@ -363,24 +702,46 @@ def main():
     sub = parser.add_subparsers(dest='command', required=True)
     for name in ('candidates', 'backlog'):
         sub.add_parser(name).add_argument('repo', nargs='?')
-    decide = sub.add_parser('decide')
-    decide.add_argument('repo')
-    decide.add_argument('choices', nargs='+')
-    decide.add_argument('--why', default='')
+    decide_parser = sub.add_parser('decide')
+    decide_parser.add_argument('repo')
+    decide_parser.add_argument('choices', nargs='+')
+    decide_parser.add_argument('--why', default='')
     sub.add_parser('passes').add_argument('--running', action='store_true')
     sub.add_parser('findings')
-    triage = sub.add_parser('triage')
-    triage.add_argument('pass_name')
-    triage.add_argument('number', type=int)
-    triage.add_argument('route', nargs='+')
-    triage.add_argument('--why', default='')
+    triage_parser = sub.add_parser('triage')
+    triage_parser.add_argument('pass_name')
+    triage_parser.add_argument('number', type=int)
+    triage_parser.add_argument('route', nargs='+')
+    triage_parser.add_argument('--why', default='')
+    service = sub.add_parser('watch')
+    service.add_argument('--director', required=True)
+    service.add_argument('--once', action='store_true')
     args = parser.parse_args()
     try:
         workspace = Workspace()
+        if args.command == 'watch':
+            return watch(args.director, args.once, workspace)
+        why = getattr(args, 'why', '') or ''
+        need(not any(c in why for c in '\n\r\t'), '--why must not contain a newline or tab')
+        repo = getattr(args, 'repo', None)
+        if repo:
+            workspace.origin(repo)
         workspace.tmp.mkdir(parents=True, exist_ok=True)
         record = Record(workspace)
         with record.locked():
-            run(args, workspace, record, Repositories(workspace))
+            repositories = Repositories(workspace)
+            if args.command == 'candidates':
+                candidates(repo, record, repositories)
+            elif args.command == 'decide':
+                decide(args, record, repositories)
+            elif args.command == 'backlog':
+                backlog(repo, record, repositories)
+            elif args.command == 'passes':
+                passes(args.running, record, repositories)
+            elif args.command == 'findings':
+                findings(record)
+            elif args.command == 'triage':
+                triage(args, workspace, record)
         return 0
     except Problem as error:
         print(f'qa: {error}', file=sys.stderr)

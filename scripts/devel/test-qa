@@ -1,10 +1,12 @@
 #!/usr/bin/env -S python3 -S
 """Offline QA fixtures, each selectable by name in a fresh Lab."""
 from datetime import datetime, timedelta, timezone
+import fcntl
 import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -44,11 +46,12 @@ class Lab:
             self.env[f'GIT_CONFIG_KEY_{count + index}'] = key
             self.env[f'GIT_CONFIG_VALUE_{count + index}'] = value
         self.env['GIT_CONFIG_COUNT'] = str(count + 4)
-        self.post.write_text(f'#!{sys.executable} -S\nimport json, os, sys\nfrom pathlib import Path\n'
-                             "with Path(os.environ['QA_POST_LOG']).open('a') as log:\n"
-                             " log.write(json.dumps(dict(args=sys.argv[1:], body=Path(sys.argv[4]).read_text())) + '\\n')\n"
-                             "sys.exit(int(os.environ['QA_POST_STATUS']))\n")
-        self.post.chmod(0o700)
+        self.configure(cleared={})
+        for name in ('post', 'codex-run', 'landings', 'systemctl'):
+            tool = root / name
+            tool.write_text(f'#!{sys.executable} -S\n' + WATCH_TOOLS)
+            tool.chmod(0o700)
+            self.env['QA_' + name.upper().replace('-', '_')] = str(tool)
         self.git(self.records, 'init', '-b', 'main')
         self.put('STATUS.md', '# Status\n')
         self.put('director/backlog.md', '# Backlog\n')
@@ -131,6 +134,47 @@ class Lab:
 
     def sent(self):
         return [json.loads(line) for line in self.post_log.read_text().splitlines()] if self.post_log.exists() else []
+
+
+    def configure(self, **values):
+        path = self.root / 'tools.json'
+        config = json.loads(path.read_text()) if path.exists() else {}
+        config.update(values)
+        path.write_text(json.dumps(config))
+
+    def calls(self, tool):
+        path = self.root / 'tools.jsonl'
+        return [row['args'] for row in map(json.loads, path.read_text().splitlines()) if row['tool'] == tool] if path.exists() else []
+
+    def waiting(self, count):
+        commits = [self.commit(f'feature {self.serial + 1}', f'feature {self.serial + 1}') for _ in range(count)]
+        self.run('decide', 'temper', *commits, 'run')
+        self.configure(cleared={'temper': commits[-1]})
+        return commits
+
+    def watch(self, status=0, extra=None):
+        return self.run('watch', '--director', 'director@fixture', '--once', status=status, extra=extra)
+
+    def watch_states(self):
+        return [(path.parent, json.loads(path.read_text())) for path in sorted((self.tmp / 'qa').glob('*/pass.json'))]
+
+    def watch_state(self):
+        state, = self.watch_states()
+        return state
+
+    def end_run(self, state=None, report='## Findings\nNone.\n', code=0):
+        state = state or self.watch_state()[1]
+        directory = self.tmp / 'qa' / state['pass']
+        (directory / 'report.md').write_text(report)
+        run = self.tmp / 'codex-run' / state['run']
+        meta = dict(line.split('=', 1) for line in (run / 'meta').read_text().splitlines())
+        ended = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+        row = [state['run'], 'qa-watch', state['started'], ended, str(code), '1', meta['model'], meta['effort'],
+               str(directory / 'brief.md'), str(directory / 'report.md'), 'thread', '100/20/30', '0']
+        with (self.tmp / 'codex-run/runs.tsv').open('a') as out:
+            out.write('\t'.join(row) + '\n')
+        (run / 'ended').touch()
+        return ended
 
 
 def candidates_are_marked_commits_oldest_first(lab):
@@ -389,8 +433,397 @@ def fixture_overrides_are_gated(lab):
                                          'git@github.com:fabrig-ai/temper.git']
 
 
+WATCH_TOOLS = r'''import json, os, sys
+from pathlib import Path
+from datetime import datetime, timezone
+root = Path(os.environ['QA_FIXTURE'])
+args = sys.argv[1:]
+name = Path(sys.argv[0]).name
+with (root / 'tools.jsonl').open('a') as log:
+    log.write(json.dumps(dict(tool=name, args=args)) + '\n')
+config = json.loads((root / 'tools.json').read_text())
+runs = root / 'tmp/codex-run'
+
+def end(run, report, code=0):
+    state = runs / run
+    meta = dict(line.split('=', 1) for line in (state / 'meta').read_text().splitlines())
+    Path(meta['report']).write_text(report)
+    ended = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    row = [run, 'qa-watch', meta['started'], ended, str(code), '1', meta['model'], meta['effort'], meta['task'], meta['report'], 'thread', '100/20/30', '0']
+    with (runs / 'runs.tsv').open('a') as out:
+        out.write('\t'.join(row) + '\n')
+    (state / 'ended').touch()
+
+if name == 'codex-run':
+    if config.get('refuse_launch'):
+        sys.exit('fixture launch refused')
+    assert args[:3] == ['task', '--to', 'qa-watch'], args
+    runs.mkdir(parents=True, exist_ok=True)
+    run = 'fixture-' + str(len(list(runs.glob('fixture-*'))) + 1)
+    state = runs / run
+    state.mkdir()
+    started = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    (state / 'meta').write_text(f'model=gpt-6.1-sol\neffort=high\nstarted={started}\ntask={args[3]}\nreport={args[5]}\n')
+    Path(args[5]).write_text(f'codex-run: run {run} is writing this report.\n')
+    if config.get('interrupt_launch'):
+        os.kill(os.getppid(), 9)
+    print(run, state)
+elif name == 'landings':
+    assert args[0] == 'cleared'
+    value = config['cleared'].get(args[1], 1)
+    if isinstance(value, int):
+        if value == 4:
+            print('fixture feed unreadable', file=sys.stderr)
+        sys.exit(value)
+    print(value)
+elif name == 'systemctl':
+    run = args[-1].removeprefix('codex-run-')
+    if args[1] == 'is-active':
+        sys.exit(3 if config.get('inactive') or (runs / run / 'ended').exists() else 0)
+    assert args[1] == 'stop', args
+    if config.get('stop_failure'):
+        sys.exit('fixture stop refused')
+    end(run, 'codex-run: the run wrote no report and no last message; exit 143.\n', 143)
+elif name == 'post':
+    if args[0] == 'send':
+        rest = args[3:] if args[1] == '--as' else args[1:]
+        with Path(os.environ['QA_POST_LOG']).open('a') as log:
+            log.write(json.dumps(dict(args=['send', *rest], body=Path(rest[2]).read_text())) + '\n')
+        sys.exit(int(os.environ['QA_POST_STATUS']))
+    if args[0] == 'wait':
+        waits = root / 'waits'
+        index = int(waits.read_text()) if waits.exists() else 0
+        waits.write_text(str(index + 1))
+        if index == 0 and config.get('wait_settings'):
+            (root / 'tmp/machine.env').write_text(config['wait_settings'])
+        sys.exit(config.get('wait', [4])[index])
+    assert args == ['read', 'qa-watch']
+    print('fixture end mail')
+'''
+
+
+def watch_starts_a_pass_on_the_cleared_main(lab):
+    b, c = lab.waiting(2)
+    lab.watch()
+    directory, state = lab.watch_state()
+    assert state['commits'] == [b, c] and state['main'] == c and not state['finished']
+    checkout = lab.tmp / 'qa/repos/temper'
+    assert lab.git(checkout, 'rev-parse', 'HEAD') == c
+    assert lab.git(checkout, 'branch', '--show-current') == ''
+    brief = (directory / 'brief.md').read_text()
+    for text in (b, c, 'QA: feature 1', 'QA: feature 2', '120 minutes', str(directory / 'report.md'), str(KIT.parent.parent / 'roles/qa.md')):
+        assert text in brief, (text, brief)
+    call, = lab.calls('codex-run')
+    assert call == ['task', '--to', 'qa-watch', str(directory / 'brief.md'), str(checkout), str(directory / 'report.md')]
+    assert directory.stat().st_mode & 0o777 == 0o700
+    text = lab.content(f'qa/passes/{state["pass"]}.md')
+    assert f'commits: {b} {c}\n' in text and 'outcome: running\n' in text and f'main: {c}\n' in text
+    assert 'waiting: 0 commits' in lab.run('passes', '--running').stdout
+    assert state['pass'] in lab.run('passes', '--running').stdout
+
+
+def watch_waits_for_a_cleared_main_holding_the_oldest(lab):
+    baseline = lab.git(lab.products['temper'], 'rev-parse', 'HEAD')
+    lab.waiting(1)
+    for value in (baseline, 1):
+        lab.configure(cleared={'temper': value})
+        before = lab.head()
+        lab.watch()
+        assert not lab.calls('codex-run') and lab.head() == before
+
+
+def watch_takes_a_batch(lab):
+    commits = lab.waiting(3)
+    lab.watch(extra={'QA_BATCH': '2'})
+    _, state = lab.watch_state()
+    assert state['commits'] == commits[:2]
+    lab.watch(extra={'QA_BATCH': '2'})
+    assert len(lab.calls('codex-run')) == 1
+    lab.end_run()
+    lab.watch(extra={'QA_BATCH': '2'})
+    assert len(lab.calls('codex-run')) == 2
+    running = [(d, s) for d, s in lab.watch_states() if not s['finished']]
+    assert len(running) == 1 and running[0][1]['commits'] == commits[2:]
+    assert running[0][1]['pass'].endswith('-2')
+
+
+def watch_finishes_a_pass_with_findings(lab):
+    lab.waiting(1)
+    lab.watch()
+    directory, state = lab.watch_state()
+    report = '## Cases\nPassed.\n\n## Findings\n\n### 1. First\nReproduce.\n\n### 2. Second\nReproduce.\n'
+    ended = lab.end_run(report=report)
+    lab.watch()
+    result = lab.content(f'qa/passes/{state["pass"]}.md')
+    for text in ('outcome: done', 'tokens: 100/20/30', 'model: gpt-6.1-sol', 'effort: high', 'ended: ' + ended, 'wall: 0:00', report.strip()):
+        assert text in result, (text, result)
+    sent, = lab.sent()
+    assert sent['args'][1] == 'director@fixture' and sent['args'][2] == f'qa: pass {state["pass"]} done, 2 findings'
+    assert sent['body'] == (f'QA pass {state["pass"]} on temper ended done after 0:00, with 2 findings: '
+                            f"records' qa/passes/{state['pass']}.md; qa findings lists them.\n")
+    assert lab.run('findings').stdout.splitlines() == [f'{state["pass"]} 1 First', f'{state["pass"]} 2 Second']
+    assert json.loads((directory / 'pass.json').read_text())['ended'] == ended
+    lab.watch()
+    assert len(lab.sent()) == 1
+
+
+def watch_finishes_a_clean_pass_quietly(lab):
+    lab.waiting(1)
+    lab.watch()
+    _, state = lab.watch_state()
+    lab.end_run()
+    lab.watch()
+    assert 'outcome: done' in lab.content(f'qa/passes/{state["pass"]}.md') and not lab.sent()
+
+
+def watch_caps_a_long_pass(lab):
+    lab.waiting(1)
+    lab.watch(extra={'QA_CAP_MINUTES': '0'})
+    lab.watch(extra={'QA_CAP_MINUTES': '0'})
+    directory, state = lab.watch_state()
+    assert state['capped'] and not state['finished']
+    assert ['--user', 'stop', 'codex-run-' + state['run']] in lab.calls('systemctl')
+    lab.watch(extra={'QA_CAP_MINUTES': '0'})
+    assert 'outcome: capped' in lab.content(f'qa/passes/{state["pass"]}.md')
+    assert len(lab.sent()) == 1 and 'capped, 0 findings' in lab.sent()[0]['args'][2]
+    assert json.loads((directory / 'pass.json').read_text())['finished']
+
+
+def watch_fails_without_a_report(lab):
+    lab.waiting(1)
+    lab.watch()
+    _, state = lab.watch_state()
+    lab.end_run(report='codex-run: the run wrote no report; its last message follows.\n', code=1)
+    lab.watch()
+    assert 'outcome: failed' in lab.content(f'qa/passes/{state["pass"]}.md')
+    assert len(lab.sent()) == 1 and 'failed, 0 findings' in lab.sent()[0]['args'][2]
+
+
+def watch_fails_when_the_unit_vanished(lab):
+    lab.waiting(1)
+    lab.watch()
+    _, state = lab.watch_state()
+    lab.configure(inactive=True)
+    lab.watch()
+    text = lab.content(f'qa/passes/{state["pass"]}.md')
+    assert 'outcome: failed' in text and 'unit vanished' in text and 'tokens: unknown' in text
+    assert 'model: gpt-6.1-sol' in text and 'effort: high' in text
+    assert len(lab.sent()) == 1
+
+
+def watch_cuts_a_long_report(lab):
+    lab.waiting(1)
+    lab.watch()
+    _, state = lab.watch_state()
+    report = ('Some multibyte text: é.\n' * 1100)
+    lab.end_run(report=report)
+    lab.watch()
+    text = lab.content(f'qa/passes/{state["pass"]}.md')
+    assert len(text.encode()) <= 8192 and text.endswith(f'(Cut at 8 KiB: the report was {len(report.encode())} bytes.)')
+    assert 'outcome: done' in text and 'Some multibyte text: é.\n\n(Cut' in text
+
+
+def watch_loops_on_its_mailbox(lab):
+    lab.configure(wait=[0, 4])
+    result = lab.run('watch', '--director', 'director@fixture', status=2, extra={'QA_INTERVAL_SECONDS': '7'})
+    assert result.stdout.count('qa watch: checking\n') == 2 and 'qa watch: fixture end mail' in result.stdout
+    waits = [args for args in lab.calls('post') if args[0] == 'wait']
+    assert len(waits) == 2 and waits[0] == waits[1]
+    args = waits[0]
+    assert args[:5] == ['wait', 'qa-watch', '--timeout', '7', '--holder']
+    assert args[5].isdigit() and args[6:] == ['--kind', 'codex']
+    assert ['read', 'qa-watch'] in lab.calls('post')
+    (lab.root / 'waits').unlink()
+    (lab.tmp / 'machine.env').write_text('QA_INTERVAL_SECONDS=2\n')
+    lab.configure(wait=[1, 4], wait_settings='QA_INTERVAL_SECONDS=9\n')
+    lab.run('watch', '--director', 'director@fixture', status=2)
+    waits = [args for args in lab.calls('post') if args[0] == 'wait']
+    assert [args[3] for args in waits[-2:]] == ['2', '9']
+    (lab.root / 'waits').unlink()
+    lab.configure(wait=[2, 4])
+    result = lab.run('watch', '--director', 'director@fixture', status=2, extra={'QA_INTERVAL_SECONDS': '0'})
+    assert result.stdout.count('qa watch: checking\n') == 2 and 'post wait failed' in result.stdout
+
+
+def watch_runs_once_per_machine(lab):
+    directory = lab.tmp / 'qa'
+    directory.mkdir()
+    with (directory / 'watch.lock').open('w') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        assert 'qa: another service runs' in lab.watch(status=2).stderr
+    env = dict(lab.env)
+    del env['QA_FIXTURE']
+    untouched = lab.root / 'untouched'
+    env['DEV_TMP'] = str(untouched)
+    result = subprocess.run([str(SCRIPT), 'watch', '--director', 'director@fixture', '--once'], env=env, capture_output=True, text=True, timeout=20)
+    assert result.returncode == 2 and result.stderr == "qa: this is not the service's machine (no ~/.config/agents-qa/director)\n"
+    assert not untouched.exists() and not lab.calls('post')
+
+
+def setup_installs_the_service(lab):
+    kit = lab.root / 'kit/scripts'
+    (kit / 'infra').mkdir(parents=True)
+    (kit / 'devel').mkdir()
+    shutil.copyfile(KIT / 'kit.sh', kit / 'devel/kit.sh')
+    source = (KIT.parent / 'infra/setup').read_text()
+    harness = '''fix=${FIX:-0}; failed=0; bus=${BUS:-1}
+ok() { echo "ok $*"; }; warn() { echo "warn $*"; }; fail() { echo "FAIL $*"; failed=1; }
+check_qa_watch
+exit "$failed"'''
+    check = kit / 'infra/setup'
+    check.write_text(source.replace('check "$@"', harness))
+    binary = lab.root / 'bin'
+    binary.mkdir()
+    ctl = binary / 'systemctl'
+    ctl.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$HOME/systemctl.calls"\n'
+                   'case "$2" in\nis-active|is-enabled) test -f "$HOME/enabled";;\n'
+                   'enable) touch "$HOME/enabled";;\n*) exit 0;;\nesac\n')
+    ctl.chmod(0o700)
+    env = dict(lab.env, PATH=str(binary) + ':' + lab.env['PATH'])
+    def run(status=0, **extra):
+        result = subprocess.run(['bash', str(check)], env=dict(env, **extra), capture_output=True, text=True, timeout=20)
+        assert result.returncode == status, (result.stdout, result.stderr)
+        return result.stdout
+    assert 'ok' in run()
+    marker = lab.home / '.config/agents-qa/director'
+    marker.parent.mkdir(parents=True)
+    marker.write_text('director@fixture\n')
+    assert 'missing or differs' in run(1)
+    run(FIX='1')
+    unit = lab.home / '.config/systemd/user/agents-qa-watch.service'
+    text = unit.read_text()
+    assert '''ExecStart=/bin/bash -lc 'exec qa watch --director "$1"' qa-watch director@fixture''' in text
+    assert 'RestartPreventExitStatus=2' in text and 'WantedBy=default.target' in text
+    assert '--user enable --now agents-qa-watch.service' in (lab.home / 'systemctl.calls').read_text()
+    assert 'current' in run() and 'enabled and active' in run()
+    marker.unlink()
+    assert 'warn' in run()
+    for address in ('bad address', 'Director@fixture', 'x_y@fixture'):
+        marker.write_text(address + '\n')
+        assert 'one director address' in run(1, FIX='1')
+
+
+def watch_refusals_are_recorded(lab):
+    lab.waiting(1)
+    lab.configure(refuse_launch=True)
+    lab.watch()
+    _, state = lab.watch_state()
+    text = lab.content(f'qa/passes/{state["pass"]}.md')
+    assert 'outcome: failed' in text and 'fixture launch refused' in text and len(lab.sent()) == 1
+    lab.configure(refuse_launch=False)
+    lab.waiting(1)
+    lab.watch()
+    directory, state = next((d, s) for d, s in lab.watch_states() if not s['finished'])
+    lab.end_run(state, report='## Findings\n### 1. Secret\n' + 'sk-' + 'a' * 30 + '\n')
+    lab.watch()
+    text = lab.content(f'qa/passes/{state["pass"]}.md')
+    assert 'outcome: failed' in text and 'The report was refused by record:' in text and 'sk-' not in text
+    assert len(lab.sent()) == 2 and 'failed, 0 findings' in lab.sent()[-1]['args'][2]
+
+
+def watch_reads_settings_and_stops_on_an_unreadable_feed(lab):
+    lab.waiting(1)
+    jig = lab.commit('jig marked', 'jig feature', repo='jig')
+    lab.run('decide', 'jig', jig, 'run')
+    lab.configure(cleared={'temper': lab.git(lab.products['temper'], 'rev-parse', 'HEAD'), 'jig': 4})
+    (lab.tmp / 'machine.env').write_text('QA_SLOTS=2\nQA_BATCH=3\nQA_SLOTS=garbage\nQA_BATCH=1\n')
+    before = lab.head()
+    assert 'cannot read cleared main' in lab.watch().stdout
+    assert not lab.calls('codex-run') and lab.head() == before
+    lab.configure(cleared={'temper': lab.git(lab.products['temper'], 'rev-parse', 'HEAD'), 'jig': jig})
+    lab.watch(extra={'QA_SLOTS': '0'})
+    assert not lab.calls('codex-run')
+    lab.watch()
+    assert len(lab.calls('codex-run')) == 2
+    assert 'QA_BATCH must be positive' in lab.watch(status=2, extra={'QA_BATCH': '0'}).stderr
+    assert 'QA_SLOTS must be' in lab.watch(status=2, extra={'QA_SLOTS': 'bad'}).stderr
+
+
+def watch_retries_post_and_prunes_finished_directories(lab):
+    lab.waiting(1)
+    lab.watch()
+    directory, state = lab.watch_state()
+    lab.end_run(report='## Findings\n### 1. Found\n')
+    lab.watch(extra={'QA_POST_STATUS': '2'})
+    state = json.loads((directory / 'pass.json').read_text())
+    assert state['finished'] and state.get('notice')
+    state['ended'] = (datetime.now(timezone.utc) - timedelta(days=8)).strftime('%Y-%m-%dT%H:%M:%SZ')
+    (directory / 'pass.json').write_text(json.dumps(state))
+    lab.watch(extra={'QA_POST_STATUS': '2'})
+    assert directory.exists()
+    lab.watch(extra={'QA_POST_STATUS': '3'})
+    assert not directory.exists() and len(lab.sent()) == 3
+    assert 'outcome: done' in lab.content(f'qa/passes/{state["pass"]}.md')
+
+
+def watch_recovers_interrupted_launch_and_stop(lab):
+    lab.waiting(1)
+    lab.configure(interrupt_launch=True)
+    lab.watch(status=-9)
+    directory, state = lab.watch_state()
+    assert state['run'] == '' and not state['finished']
+    assert 'outcome: running' in lab.content(f'qa/passes/{state["pass"]}.md')
+    lab.configure(interrupt_launch=False)
+    lab.watch()
+    state = json.loads((directory / 'pass.json').read_text())
+    assert state['run'] == 'fixture-1' and not state['finished'] and len(lab.calls('codex-run')) == 1
+    # A stop intent persisted immediately before an interruption is retried,
+    # even if the cap has since been increased.
+    state['capped'] = True
+    (directory / 'pass.json').write_text(json.dumps(state))
+    lab.watch(extra={'QA_CAP_MINUTES': '999'})
+    assert ['--user', 'stop', 'codex-run-fixture-1'] in lab.calls('systemctl')
+    lab.watch()
+    assert 'outcome: capped' in lab.content(f'qa/passes/{state["pass"]}.md')
+
+
+def watch_recovers_an_interrupted_start_commit(lab):
+    lab.waiting(1)
+    wrapper = lab.root / 'record-wrapper'
+    wrapper.write_text(f'#!{sys.executable} -S\nimport os, signal, subprocess, sys\n'
+                       f'result = subprocess.run([{str(KIT / "record")!r}, *sys.argv[1:]])\n'
+                       "if result.returncode in (0, 3) and 'commit' in sys.argv and sys.argv[sys.argv.index('-m') + 1].endswith(' started'):\n"
+                       ' os.kill(os.getppid(), signal.SIGKILL)\n'
+                       'sys.exit(result.returncode)\n')
+    wrapper.chmod(0o700)
+    lab.watch(status=-9, extra={'QA_RECORD': str(wrapper)})
+    directory, state = lab.watch_state()
+    assert state['run'] == '' and 'outcome: running' in lab.content(f'qa/passes/{state["pass"]}.md')
+    lab.watch()
+    assert 'outcome: failed' in lab.content(f'qa/passes/{state["pass"]}.md')
+    assert json.loads((directory / 'pass.json').read_text())['finished']
+    assert len(lab.sent()) == 1 and not lab.calls('codex-run')
+    # The same pending state without a committed record is safe to discard.
+    pending = dict(state, **{'pass': state['pass'] + '-2'})
+    orphan = lab.tmp / 'qa' / pending['pass']
+    orphan.mkdir()
+    (orphan / 'pass.json').write_text(json.dumps(pending))
+    lab.watch()
+    assert not orphan.exists()
+
+
+def watch_start_refusal_starts_nothing_more(lab):
+    lab.waiting(1)
+    jig = lab.commit('jig marked', 'jig feature', repo='jig')
+    lab.run('decide', 'jig', jig, 'run')
+    lab.configure(cleared={'temper': lab.git(lab.products['temper'], 'rev-parse', 'HEAD'), 'jig': jig})
+    wrapper = lab.root / 'record-wrapper'
+    wrapper.write_text(f'#!{sys.executable} -S\nimport subprocess, sys\n'
+                       "if sys.argv[1] == 'commit':\n print('fixture record refusal', file=sys.stderr)\n sys.exit(2)\n"
+                       f'sys.exit(subprocess.run([{str(KIT / "record")!r}, *sys.argv[1:]]).returncode)\n')
+    wrapper.chmod(0o700)
+    before = lab.head()
+    result = lab.watch(extra={'QA_RECORD': str(wrapper), 'QA_SLOTS': '2'})
+    assert 'fixture record refusal' in result.stdout
+    assert not lab.watch_states() and not lab.calls('codex-run') and lab.head() == before
+    assert len(lab.sent()) == 1 and 'fixture record refusal' in lab.sent()[0]['body']
+
+
+
 def main():
-    cases = (candidates_are_marked_commits_oldest_first, deciding_records_the_choice,
+    cases = (watch_recovers_interrupted_launch_and_stop, watch_recovers_an_interrupted_start_commit, watch_start_refusal_starts_nothing_more,
+             watch_starts_a_pass_on_the_cleared_main, watch_waits_for_a_cleared_main_holding_the_oldest, watch_takes_a_batch, watch_finishes_a_pass_with_findings, watch_finishes_a_clean_pass_quietly, watch_caps_a_long_pass, watch_fails_without_a_report, watch_fails_when_the_unit_vanished, watch_cuts_a_long_report, watch_loops_on_its_mailbox, watch_runs_once_per_machine, setup_installs_the_service, watch_refusals_are_recorded, watch_reads_settings_and_stops_on_an_unreadable_feed, watch_retries_post_and_prunes_finished_directories,
+             candidates_are_marked_commits_oldest_first, deciding_records_the_choice,
              decide_refuses_what_is_not_eligible, the_latest_decision_wins, a_pass_takes_its_commits,
              findings_wait_until_triaged, triage_routes_a_finding, triage_refuses_and_writes_nothing,
              record_refusal_leaves_both_files, repository_failures_are_read_errors,

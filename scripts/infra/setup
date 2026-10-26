@@ -172,6 +172,74 @@ UNIT
     done
 }
 
+# Only the machine named by the director installs QA's service.
+check_qa_watch() {
+    local address_file=$HOME/.config/agents-qa/director
+    local unit_dir=$HOME/.config/systemd/user unit=agents-qa-watch.service
+    local director expected sibling
+    local -a addresses=()
+    if [[ ! -e $address_file && ! -L $address_file ]]; then
+        ok "qa watch: not this machine's runner"
+        if systemctl --user is-active --quiet "$unit" 2>/dev/null; then
+            warn 'qa watch: service active on an unassigned machine'
+        fi
+        return
+    fi
+    if ! mapfile -t addresses < "$address_file" || ((${#addresses[@]} != 1)) ||
+        [[ ! ${addresses[0]} =~ ^[a-z][a-z0-9-]*(/[a-z0-9][a-z0-9-]*)*@[a-z][a-z0-9-]*$ ]]; then
+        fail "qa watch: $address_file must hold one director address (NAME@MACHINE)"
+        return
+    fi
+    director=${addresses[0]}
+    expected=$(cat <<UNIT
+[Unit]
+Description=QA after landing's service (agents' qa-flow.md 4)
+
+[Service]
+Type=exec
+ExecStart=/bin/bash -lc 'exec qa watch --director "\$1"' qa-watch $director
+Restart=on-failure
+RestartSec=60
+RestartPreventExitStatus=2
+
+[Install]
+WantedBy=default.target
+UNIT
+)
+    if cmp -s "$unit_dir/$unit" <(printf '%s\n' "$expected"); then
+        ok "qa watch: $unit is current"
+    elif ((!fix)); then
+        fail "qa watch: $unit is missing or differs (--fix writes it)"
+    fi
+    if ((!bus)); then
+        fail 'qa watch: no user bus; cannot check or start service'
+        return
+    fi
+    if ((fix)); then
+        if ! mkdir -p "$unit_dir" || ! sibling=$(mktemp "$unit_dir/$unit.XXXXXX"); then
+            fail "qa watch: cannot prepare $unit_dir/$unit"
+            return
+        fi
+        if ! printf '%s\n' "$expected" > "$sibling" || ! mv -f "$sibling" "$unit_dir/$unit"; then
+            rm -f "$sibling"
+            fail "qa watch: cannot write $unit_dir/$unit"
+            return
+        fi
+        if ! systemctl --user daemon-reload; then
+            fail 'qa watch: user daemon-reload failed'
+            return
+        fi
+    fi
+    if ((fix)) && ! systemctl --user enable --now "$unit"; then
+        fail "qa watch: cannot start $unit (--fix starts it)"
+    elif systemctl --user is-enabled --quiet "$unit" &&
+        systemctl --user is-active --quiet "$unit"; then
+        ok "qa watch: $unit enabled and active"
+    else
+        fail "qa watch: $unit must be enabled and active (--fix starts it)"
+    fi
+}
+
 # The tools, the workspace's files, the queue and room to work.
 check_machine() {
     # Instructions and tools come from agents alone.
@@ -253,6 +321,7 @@ check_machine() {
     fi
 
     check_after_landing
+    check_qa_watch
     check_lingering
     # Installation is explicit: setup never probes/installs a new recovery
     # mechanism while repairing an existing queue.
