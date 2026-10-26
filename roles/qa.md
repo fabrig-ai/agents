@@ -38,13 +38,13 @@ report's path.
 3. **Build and set up.** Build the product at the checkout through
    `heavy`, at background weight: `HEAVY_CLASS=background heavy
    COMMAND`, the narrowest build that gives the binaries the guide
-   needs, once. Install into the scratch directory, never into
-   `~/.local` (for temper, `scripts/install.sh SCRATCH/install`). Set up
-   a deployment with the product's own commands, as its guide says, in
-   a directory of the scratch, on its fake backends: for temper, `temper
-   box --fake-backends` and `temper ctl`'s sign-in. Cases that don't
-   disturb each other share one deployment; a case that would disturb
-   others gets a fresh one.
+   needs, once. Binaries go in the scratch directory, never in
+   `~/.local`. Set up a deployment with the product's own commands, as
+   its guide says, in a directory of the scratch, on its fake backends:
+   for temper, `temper box --fake-backends` as `docs/guide/box.md`'s
+   last section says, then `temper ctl`'s sign-in with the link it
+   prints. Cases that don't disturb each other share one deployment; a
+   case that would disturb others gets a fresh one.
 4. **Drive each case through the tool alone,** and check its outcome
    through the tool. Where the tool can't show an outcome (a branch on
    the forge), you may read the backend, and say so in the report: the
