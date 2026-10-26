@@ -735,6 +735,13 @@ def pull():
     return None
 
 
+def references(value):
+    """The issue references of a README's blocked, others dropped (status-page.md 2)."""
+    repos = '|'.join(repo for repo, _ in ISSUES)
+    return list(dict.fromkeys(word for word in value.split()
+                              if re.fullmatch(rf'({repos})#[1-9][0-9]*', word)))
+
+
 def records(root):
     """Public missions: {'missions': [...]}; no STATUS.md or mission bodies."""
     if not (root / 'missions').is_dir():
@@ -745,10 +752,11 @@ def records(root):
         fields = {}
         for line in front[1].splitlines() if front else []:
             key, sep, value = line.partition(':')
-            if sep and key.strip() in (*FRONT, 'started'):
+            if sep and key.strip() in (*FRONT, 'started', 'blocked'):
                 fields[key.strip()] = value.strip()
         missions.append({'name': readme.parent.name, **{k: fields.get(k, '') for k in FRONT},
-                         'started': stamp(fields.get('started'))})
+                         'started': stamp(fields.get('started')),
+                         'blocked': references(fields.get('blocked', ''))})
     return {'missions': missions}
 
 
@@ -774,7 +782,7 @@ def gather_all(machines_file, records_root, pulling, source):
     try:
         recorded = records(records_root)
     except OSError as error:
-        recorded = {'missions': []}
+        recorded = None
         errors.append(f'records: {error}')
     return {'time': clock(), 'machines': [name for name, _ in pairs], 'fleet': fleet,
             'records': recorded, 'errors': errors}
@@ -983,7 +991,8 @@ class Fleet:
         self.data = data
         self.names = data['machines']
         self.up = {n: d for n, d in data['fleet'].items() if 'unreachable' not in d}
-        self.recorded = {m['name']: m for m in data['records']['missions']}
+        self.records_read = data['records'] is not None
+        self.recorded = {m['name']: m for m in (data['records'] or {}).get('missions', [])}
         self.alias = {text(d.get('host')): n for n, d in self.up.items()}
         self.rows = [(n, *r[:5], self.mission(r[5]), *r[6:])
                      for n, d in self.up.items() for r in records_of(d, ['rows'], 8, (0, 2, 3))]
@@ -1199,6 +1208,13 @@ def kpis(fleet, shown, subscribed):
                             f'{E(str(counts.get(repo, "–")))}</a>' for repo, label in ISSUES)
     if counts and len(counts) < len(ISSUES):
         issues_sub = E(f'{len(counts)} of {len(ISSUES)} read · ') + issues_sub
+    waiting = blocked(fleet)
+    if waiting:
+        title = '; '.join(f'{name}: {", ".join(refs)}' for name, refs in waiting)
+        blocked_sub = f'<span title="{E(title)}">{len(waiting)} blocked</span>'
+    else:
+        blocked_sub = '– blocked' if waiting is None else '0 blocked'
+    issues_sub = blocked_sub + ' · ' + issues_sub
     day = fleet.window(DAY)
     lands = [r for r in day if r[7] == 'land']
     tiles = [
@@ -1223,6 +1239,16 @@ def user_issues(fleet):
     return next((answer for name in fleet.names if name in fleet.up
                  if (answer := shaped(fleet.up[name].get('user_issues'), {}))
                  if any(number(shaped(answer.get('open'), {}).get(repo)) is not None for repo, _ in ISSUES)), None)
+
+
+def blocked(fleet):
+    """The missions the record holds active or paused whose blocked names
+    an issue, as (name, references), by name (status-page.md 3); None
+    where the record was not read."""
+    if not fleet.records_read:
+        return None
+    return [(name, mission['blocked']) for name, mission in sorted(fleet.recorded.items())
+            if mission['state'] in ('active', 'paused') and mission['blocked']]
 
 
 def reason_kind(reason):

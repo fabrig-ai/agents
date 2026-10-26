@@ -496,16 +496,18 @@ def forgejo(answers, label_barrier=None):
         thread.join()
 
 
+def links(counts):
+    repos = (('agents', 1), ('skein', 2), ('smith', 3), ('jig', 4), ('hearth', 5), ('temper', 6), ('qa', 7))
+    return ' · '.join(f'<a href="https://git.fabrig.ai/fabrig-ai/{repo}/issues?state=open&amp;labels={tag}" '
+                      f'target="_blank" rel="noopener noreferrer">{repo} {counts.get(repo, "–")}</a>'
+                      for repo, tag in repos)
+
+
 def page_user_issues(lab):
     token = 'fixture-token-0123456789'
     token_file = write(lab.alpha / 'git-fabrig/status-read.token', token + '\n', mode=0o600)
     repos = (('agents', 1), ('skein', 2), ('smith', 3), ('jig', 4), ('hearth', 5), ('temper', 6), ('qa', 7))
     label = (200, {'id': 1, 'name': 'waiting-on-user'}, 0)
-
-    def links(counts):
-        return ' · '.join(f'<a href="https://git.fabrig.ai/fabrig-ai/{repo}/issues?state=open&amp;labels={tag}" '
-                          f'target="_blank" rel="noopener noreferrer">{repo} {counts.get(repo, "–")}</a>'
-                          for repo, tag in repos)
 
     def issue(index, tag):
         return {'title': f'PRIVATE-TITLE-{index}', 'body': f'PRIVATE-BODY-{index}',
@@ -519,7 +521,7 @@ def page_user_issues(lab):
         result = lab.run('--no-pull', '--out', str(out), '--json', str(snapshot),
                          STATUS_FORGEJO=base, STATUS_ISSUES_TIMEOUT='1')
         page = out.read_text()
-        sub = (f'{len(counts)} of 7 read · ' if counts and len(counts) < 7 else '') + links(counts)
+        sub = '0 blocked · ' + (f'{len(counts)} of 7 read · ' if counts and len(counts) < 7 else '') + links(counts)
         assert (f'<div class="label">Waiting on the user</div><div class="value">{value}</div>'
                 f'<div class="sub">{sub}</div>') in page
         anchors = re.findall(r'<a [^>]*>', page)
@@ -694,11 +696,46 @@ def page_user_issues(lab):
                                          'failed': {repo: 'HTTP 404' for repo, _ in repos if repo != 'qa'}}
     page = module['render'](data)
     assert '<div class="label">Waiting on the user</div><div class="value">1</div>' in page
-    assert '<div class="sub">1 of 7 read · ' + links({'qa': 1}) + '</div>' in page
+    assert '<div class="sub">0 blocked · 1 of 7 read · ' + links({'qa': 1}) + '</div>' in page
     footer = page.split('<footer>', 1)[1]
     assert footer.count('waiting on the user:') == 6 and 'HTTP 401' not in footer
     public_roles(page, lab)
     private_absent(page)
+
+
+def page_blocked(lab):
+    """The missions active or paused whose blocked names an issue lead the
+    Waiting on the user tile's sub, by name with their issues on hover
+    (status-page.md 3); the record's other words reach nothing."""
+    tile = '<div class="label">Waiting on the user</div><div class="value">–</div><div class="sub">'
+    page, _ = subscription_page(lab)
+    assert tile + '0 blocked · ' + links({}) + '</div>' in page
+
+    def blocking(name, value):
+        readme = lab.records / f'missions/{name}/README.md'
+        write(readme, readme.read_text().replace('---\n', f'---\nblocked: {value}\n', 1))
+
+    blocking('alpha-m', 'temper#9 PRIVATE-WORD agents#11 temper#9')
+    blocking('paused-m', 'qa#2')
+    blocking('old-m', 'temper#4')
+    blocking('beta-d', 'forge#3 temper#09 temper#0 PRIVATE-OTHER')
+    page, data = subscription_page(lab)
+    assert (tile + '<span title="alpha-m: temper#9, agents#11; paused-m: qa#2">2 blocked</span> · '
+            + links({}) + '</div>') in page
+    recorded = {m['name']: m['blocked'] for m in data['records']['missions']}
+    for name, refs in (('alpha-m', ['temper#9', 'agents#11']), ('paused-m', ['qa#2']),
+                       ('old-m', ['temper#4']), ('beta-d', []), ('alpha-m2', [])):
+        assert recorded[name] == refs, recorded
+    for word in ('forge#3', 'temper#09', 'temper#0'):
+        assert word not in page and word not in json.dumps(data), word
+    assert 'temper#4' not in page
+    public_roles(page, lab)
+
+    page, data = subscription_page(lab, RECORDS=str(lab.root / 'nowhere'))
+    assert tile + '– blocked · ' + links({}) + '</div>' in page
+    assert data['records'] is None, data['records']
+    footer = page[page.index('<footer>'):]
+    assert 'records:' in footer and 'nowhere/missions: no such directory' in footer, footer
 
 
 def public_roles(page, lab):
@@ -861,7 +898,7 @@ def page_roles(lab):
     for word in ('owner up', 'owner down', 'last turn', 'Codex owner'):
         assert word not in page, word
     data = json.loads(raw)
-    assert all(set(m) == {'name', 'state', 'ended', 'description', 'started'}
+    assert all(set(m) == {'name', 'state', 'ended', 'description', 'started', 'blocked'}
                for m in data['records']['missions']), data['records']
 
     # 83 recent endings: show exactly the newest ten and count the other 73.
@@ -1453,7 +1490,7 @@ def claude_resets(lab):
     assert [v['used'] for v in data['claude_usage']['limits']] == list(range(7))
 
 
-CASES = [page_user_issues, director_mailbox_unread, collect_subscriptions, page_subscriptions, page_pace, subscriptions_signed_out, subscription_failures, claude_resets, collect, collect_missing, page, reason_kind, page_recent, page_landings_rate, machine_ips, page_roles, page_role_edges, page_now, page_times, page_degraded, bad_data, write_failure, install]
+CASES = [page_user_issues, page_blocked, director_mailbox_unread, collect_subscriptions, page_subscriptions, page_pace, subscriptions_signed_out, subscription_failures, claude_resets, collect, collect_missing, page, reason_kind, page_recent, page_landings_rate, machine_ips, page_roles, page_role_edges, page_now, page_times, page_degraded, bad_data, write_failure, install]
 
 
 def run(case, directory, built):
