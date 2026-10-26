@@ -513,7 +513,10 @@ def page_director_post(lab):
             assert 'secret-' not in output
             private_absent(output)
         footer = page[page.index('<footer>'):]
-        assert 'director_post' not in footer and label not in footer and "director's post" not in footer
+        assert 'director_post' not in footer and label not in footer
+        phrase = 'the director&#x27;s post, counted by its headers,'
+        assert phrase in footer
+        assert footer.index('the user’s waits') < footer.index(phrase) < footer.index('and the subscriptions&#x27; use')
         public_roles(page, lab)
         return data
 

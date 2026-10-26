@@ -1797,6 +1797,7 @@ commands in the last 24 hours. Last activity is its last command or implementer 
 <p>Written by agents’ <code>scripts/devel/status-page</code> from what the tools already keep: heavy’s
 <code>heavy.tsv</code> and ledger, the landings feed, the landing turns, <code>codex-run</code>’s runs,
 Claude Code’s sessions and subscription, Codex CLI’s subscription, the missions’ front matter, the user’s waits in the records repository,
+{E("the director's post, counted by its headers,")}
 {E("and the subscriptions' use, which it samples itself for their pace")}
 (docs/design/status-page.md). Times are UTC; p90 is the
 nearest rank.</p>
