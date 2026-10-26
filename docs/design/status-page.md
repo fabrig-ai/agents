@@ -39,7 +39,8 @@ serves it.
   implementer or other session shows by name: the page counts them, and
   a name only joins a session to its mission (the user, 10-26). Each
   machine's public IP shows on its card, and `director/waiting.md`,
-  public by writing, shows whole (the user, 10-26). An
+  public by writing, shows whole (the user, 10-26). The director's
+  post shows as a count alone: no sender, subject or body. An
   unreachable machine shows why in a few words (refused, timed out, key
   refused); ssh's own, which name the target, go to the journal. No
   account's email, name, organisation or id: a subscription goes by a
@@ -63,6 +64,7 @@ serves it.
 | Claude | `claude agents --json --all` | the live sessions by role, busy or idle: the director, the designers (`design/<d>`) and owners (`o/<m>`) by their names, and the rest |
 | the records | `records/missions/*/README.md`, after `record pull` | each mission's front matter: its `state`, `ended` and `description`, and its `started` read as a time (anything else is unknown) |
 | the user's waits | `records/director/waiting.md`, after `record pull` | each item: since when, who waits, what, and its decision (records.md 3) |
+| the director's post | `tmp/post/director/new/` and `cur/` (post.md 3), on whichever machine holds them | how many messages owners (`o/…`) and designers (`design/…`) sent the director in the last 24 hours, by each one's `Id` stamp: its `Id` and `From` headers alone, of the files changed within the day |
 | the machine | `/proc`, the disk under `tmp/`, `ip -j -4 addr show scope global` | load, free memory and disk, and its public IPv4 addresses (the globally routable ones) |
 | Claude's subscription | `claude auth status --json`, `claude -p /usage` | what it is signed in to, and each limit's use and reset (2.1) |
 | Codex's subscription | `codex app-server`: `account/read`, `account/rateLimits/read` | the same (2.1) |
@@ -170,7 +172,10 @@ could use the status script itself for sampling)" (the user, 10-26).
 
 - **Tiles:** missions, sets landing now, agents (the director,
   designers, owners and implementers live, and how many of them are
-  busy), land gates in the last 24 hours, what waits on the user with
+  busy), the director's post in the last 24 hours from owners and
+  designers (`12 from owners, 3 from designers`; a dash where no
+  machine reached holds the director's mailbox; the user, 10-26), land
+  gates in the last 24 hours, what waits on the user with
   the oldest wait, and the subscriptions with the highest use among
   them. Heavy's commands now show on each machine's card alone (the
   user, 10-26).
@@ -296,7 +301,13 @@ an unidentified one; resets read across a year's end; a `/usage`
 answered by a model, a probe that times out and one that answers
 nonsense, each named in the footer while the rest stands; the methods
 asked of the app-server; and no email or id, on the page or in the
-`--json` file. The pace: a limit full before its reset, one that
+`--json` file. The director's post: messages from owners and
+designers within the day counted, by role; older ones, other senders
+(`codex-run`, `qa-watch`, the user) and a file without an `Id` or a
+`From` not; a machine without the mailbox adding nothing and naming
+nothing in the footer, and the tile's dash with none reached; no
+sender, subject or body on the page or in the `--json` file. The
+pace: a limit full before its reset, one that
 lasts, one at 100, one without two samples far enough apart, a new
 window's samples kept apart from the old one's by their reset, the
 look-back as long as the time left within its bounds, samples pruned
