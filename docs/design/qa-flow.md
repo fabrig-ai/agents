@@ -300,7 +300,9 @@ the director says so to the user.
 - **One holder at a time, in turn:** `logins take NAME --as HOLDER`
   grants it when it is at rest and no taker waits ahead of HOLDER;
   otherwise it exits 1 and HOLDER keeps its place in the queue while it
-  asks again within 15 minutes. `--wait SECONDS` waits.
+  asks again within 15 minutes. `--wait SECONDS` waits, and exits 1
+  past it. Every change is made under one lock, and `add` refuses a
+  name that has a login or a holder.
 - **Free only once back:** `logins give NAME --as HOLDER` checks, by
   `stat` alone, that the login is at its resting path, a private,
   non-empty regular file, and only then frees it. A login not back
@@ -310,7 +312,9 @@ the director says so to the user.
   (10.3); the director's other runs on it (a ladder's rung, a focused
   story) by `logins take` before their start and `logins give` after
   their end, each started with `codex-run task --on-stop` and a brief
-  that writes the give-back file as 10.3 says.
+  that writes the give-back file as 10.3 says. The director is their
+  holder: it gives at the run's end post, and a give refused is its own
+  to recover, as 10.3's last point says.
 - **Saturation shows in `logins list`:** each login's holder and since
   when, its waiters, and its last 24 hours: time held, takes, longest
   wait. The director reads it at its check; a login held most of the
@@ -322,14 +326,22 @@ the director says so to the user.
   could start (section 4), it takes each of the rung's logins as
   holder `qa-watch`, in name order. One refused gives back those
   taken, still at rest, and the pass waits for a later check, its
-  commits still chosen, the service's place in the queue kept.
+  commits still chosen, the service's place in the queue kept. A login
+  is held from the pass's start, its build and plan included: minutes,
+  where a session taking it itself would wait inside its cap.
+- **Nothing held without a pass:** at each check the service gives
+  back every rung's login it holds that no pass of its own still holds,
+  so that a crash between a take and a pass's start strands nothing.
 - **The brief names** the rung, each login with its resting path, and
   the give-back file, `give-back` in the pass's scratch directory.
 - **The session borrows them:** it moves each login into its
   deployment as the binding says, and at once writes the give-back
   file, an executable that moves each back to its resting path by the
-  product's export. It runs that file itself before it stops its
-  deployment, and checks each path by `stat`. It never runs `logins`.
+  product's export, safe to run twice (the second export finds the
+  file there and sends nothing). It runs that file itself before it
+  stops its deployment, and checks each path by `stat`. It never runs
+  `logins`. A stop in the seconds between the import and the file is a
+  login lost in its deployment (below).
 - **A stop gives back too:** the session runs under `codex-run task
   --on-stop` with the give-back file, so that its unit runs the file
   before the deployment inside it is signalled: at the cap, a person's
@@ -339,11 +351,12 @@ the director says so to the user.
   inactive and its give-back done. A login not back stays the
   service's: the pass's notice to the director names it and the
   deployment's directories, and the service tries the give again at
-  each check, so that the login is free as soon as it is back.
+  each check, so that the login is free as soon as it is back. It
+  keeps that pass's scratch until then, past its 7 days.
 - **A login lost in a dead deployment** (one that died before its
   export: a crash, a session that stopped its deployment first) is in
-  the deployment's state, which stays with the pass's scratch for 7
-  days. The director has it brought back, as a task of its own: the
+  the deployment's state, kept with the pass's scratch. The director
+  has it brought back, as a task of its own: the
   deployment restarted on its directories, signed in, the login
   exported to its resting path, as the binding says. The service's
   next check frees it.
