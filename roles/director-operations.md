@@ -161,8 +161,10 @@ here. Durable know-how belongs here, not in the session's memory or in
   git.fabrig.ai; builds nothing; floor 15 GB, 4 GB memory), and the
   builders hetzner, hetzner2, hetzner3 (Garage, land's turn coordinator,
   after landing's runner), hetzner4 (to retire), hetzner6 (one XFS root),
-  each `free@<address>` from `tmp/post/machines`, floor 40 GB. At most two
-  building owners each.
+  each `free@<address>` from `tmp/post/machines`, floor 40 GB. No fixed
+  cap of owners per machine (the user, 10-26): owners are placed by
+  heavy's queue waits, memory and disk, read at each check, and moved or
+  given another machine when those show strain.
 - **Retiring a machine:** archive to a kept machine what lives only there:
   branches not on GitHub as bundles, dirty worktrees' diffs,
   `tmp/owners`, `tmp/logs` (with `heavy.tsv`), `tmp/codex-run`,
