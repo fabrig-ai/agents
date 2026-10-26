@@ -153,14 +153,16 @@ class Lab:
         if built is not None:
             # Copy bytes, never hardlink mutable refs, indexes, objects or caches.
             shutil.copytree(built, root, dirs_exist_ok=True)
+            configs = list(root.glob('cargo/git/checkouts/*/*/.git/config'))
             for name in ORDER:
                 primary, work = root / 'primary' / name, root / 'work' / name
                 # Only Git's administrative paths change; committed bytes do not.
-                for config in (primary / '.git/config', root / 'origins' / (name + '.git') / 'config'):
-                    config.write_text(config.read_text().replace(built.as_uri(), root.as_uri())
-                                      .replace(str(built), str(root)))
+                configs.extend((primary / '.git/config', root / 'origins' / (name + '.git') / 'config'))
                 (work / '.git').write_text(f'gitdir: {primary}/.git/worktrees/{name}\n')
                 (primary / '.git/worktrees' / name / 'gitdir').write_text(str(work / '.git') + '\n')
+            for config in configs:
+                config.write_text(config.read_text().replace(built.as_uri(), root.as_uri())
+                                  .replace(str(built), str(root)))
         self.root = root
         self.trace_git = trace_git
         self.primary, self.work, self.origin, self.base = {}, {}, {}, {}
@@ -187,12 +189,31 @@ class Lab:
             self.env.pop(key, None)
         # Keep fixture maintenance out of every Git subprocess, Cargo's fetches too.
         count = int(self.env.get('GIT_CONFIG_COUNT', '0'))
-        for offset, (key, value) in enumerate((('maintenance.auto', 'false'), ('gc.auto', '0'),
-                                               ('url.' + (root / 'origins').as_uri() + '/.insteadOf', SOURCE))):
+        settings = (('maintenance.auto', 'false'), ('gc.auto', '0'),
+                    ('fetch.autoMaintenance', 'false'), ('receive.autogc', 'false'),
+                    ('url.' + (root / 'origins').as_uri() + '/.insteadOf', SOURCE))
+        for offset, (key, value) in enumerate(settings):
             self.env[f'GIT_CONFIG_KEY_{count + offset}'] = key
             self.env[f'GIT_CONFIG_VALUE_{count + offset}'] = value
-        self.env['GIT_CONFIG_COUNT'] = str(count + 3)
+        self.env['GIT_CONFIG_COUNT'] = str(count + len(settings))
         self.env['CARGO_TARGET_DIR'] = str(root / 'cargo-target')
+        # Resolve rustup proxies once, in this same /tmp toolchain context.
+        # Real Cargo and rustc still run; repeated proxy startup buys nothing.
+        toolchain = root / 'toolchain.json'
+        if built is None:
+            tools = {}
+            for tool in ('cargo', 'rustc'):
+                executable = shutil.which(tool)
+                if Path(executable).resolve().name == 'rustup':
+                    executable = execute(root, ['rustup', 'which', tool], self.env).stdout.strip()
+                tools[tool] = executable
+            toolchain.write_text(json.dumps(tools))
+        else:
+            tools = json.loads(toolchain.read_text())
+        self.env.setdefault('RUSTC', tools['rustc'])
+        cargo = self.bin / 'cargo'
+        cargo.write_text('#!/bin/sh\nexec ' + shlex.quote(tools['cargo']) + ' "$@"\n')
+        cargo.chmod(0o700)
         # Cargo can fetch only the fixture's file:// sources; no registry dependencies exist.
         for name, body in [('heavy', HEAVY), ('land', LAND)]:
             path = self.bin / name
