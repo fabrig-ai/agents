@@ -1,0 +1,479 @@
+#!/usr/bin/env -S python3 -S
+"""issue open [--as WHO] [--mission M] TITLE FILE
+issue list [--as WHO] [--all]
+issue comment [--as WHO] NUMBER FILE
+issue close [--as WHO] NUMBER [FILE]
+issue serve [--listen HOST:PORT]
+issue install [--listen HOST:PORT]
+"""
+import argparse
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
+import hashlib
+import hmac
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import ipaddress
+import json
+import os
+from pathlib import Path
+import re
+import socket
+import stat
+import subprocess
+import sys
+import tempfile
+import threading
+import unicodedata
+import urllib.error
+import urllib.parse
+import urllib.request
+
+os.umask(0o077)
+FORGE = 'https://git.fabrig.ai'  # ISSUE_FORGE overrides it (fixtures).
+REPO = 'fabrig-ai/agents'  # The repository whose issues are routed.
+LABEL = 'waiting-on-user'  # The label applied to each new question.
+BOTS = ('fabrig-agents', 'fabrig-director')  # Their comments are never routed.
+SENDER = 'issues'  # The router's post name.
+LISTEN = '127.0.0.1:8391'  # The default loopback webhook listener.
+# Copied from scripts/devel/post: name_pattern, machine_pattern, valid_address.
+NAME = r'[a-z][a-z0-9-]*(/[a-z0-9][a-z0-9-]*)*'
+MACHINE = r'[a-z][a-z0-9-]*'
+ADDRESS = rf'{NAME}@{MACHINE}'
+MISSION = r'[a-z0-9][a-z0-9-]*'
+MARKER = re.compile(r'^<!-- waiting-on-user asker=(\S+)(?: mission=(\S+))?(?: parent=(\S+))? -->$', re.M)
+
+
+class Refusal(Exception):
+    pass
+
+
+def need(ok, why):
+    if not ok:
+        raise Refusal(why)
+
+
+def workspace():
+    # As scripts/devel/status-page finds the workspace.
+    home = Path.home()
+    return home / ('src/rust' if (home / 'src/rust').exists() else 'src')
+
+
+class Paths:
+    def __init__(self):
+        self.root = Path(os.environ.get('DEV_ROOT', workspace())).expanduser().absolute()
+        self.tmp = Path(os.environ.get('DEV_TMP', self.root / 'tmp')).expanduser().absolute()
+        self.records = Path(os.environ.get('RECORDS', self.root / 'records')).expanduser().absolute()
+        self.spool = Path(os.environ.get('XDG_STATE_HOME', Path.home() / '.local/state')) / 'issue-router'
+
+    def machine(self):
+        names = []
+        for line in (self.tmp / 'post/machines').read_text().splitlines():
+            fields = line.split('#', 1)[0].split()
+            if not fields:
+                continue
+            need(len(fields) == 2 and re.fullmatch(MACHINE, fields[0])
+                 and not fields[1].startswith('-'), 'invalid machines file')
+            if fields[1] == 'local':
+                names.append(fields[0])
+        need(len(names) == 1, 'machines file must name one local machine')
+        return names[0]
+
+
+def credential(path, kind):
+    try:
+        value = path.read_text(encoding='utf-8').strip()
+    except (OSError, UnicodeError):
+        value = ''
+    need(value, f'no {kind} at {path}')
+    return value
+
+
+@dataclass(frozen=True)
+class Asker:
+    address: str
+    mission: str | None
+    parent: str | None
+
+
+def asking(paths, who, mission):
+    who = who if who is not None else os.environ.get('POST_NAME')
+    need(who, 'set POST_NAME or pass --as')
+    need(re.fullmatch(ADDRESS if '@' in who else NAME, who), 'invalid asker name or address')
+    name = who.split('@', 1)[0]
+    address = who if '@' in who else f'{who}@{paths.machine()}'
+    if mission is None and '/' in name:
+        mission = name.split('/', 1)[1]
+    need(mission is None or re.fullmatch(MISSION, mission), 'invalid mission')
+    parent = None
+    if mission:
+        path = paths.records / 'missions' / mission / 'README.md'
+        if path.exists():
+            front = re.match(r'\A---\n(.*?)\n---(?:\n|$)', path.read_text(encoding='utf-8'), re.S)
+            if front:
+                for line in front[1].splitlines():
+                    key, sep, value = line.partition(':')
+                    if sep and key == 'parent' and re.fullmatch(ADDRESS, value.strip()):
+                        parent = value.strip()
+    return Asker(address, mission, parent)
+
+
+def write_marker(asker):
+    values = f'asker={asker.address}'
+    if asker.mission:
+        values += f' mission={asker.mission}'
+    if asker.parent:
+        values += f' parent={asker.parent}'
+    return f'<!-- waiting-on-user {values} -->'
+
+
+def read_marker(body) -> Asker | None:
+    matches = list(MARKER.finditer(body))
+    if not matches:
+        return None
+    address, mission, parent = matches[-1].groups()
+    if not re.fullmatch(ADDRESS, address) or (mission is not None and not re.fullmatch(MISSION, mission)):
+        return None
+    if parent is not None and not re.fullmatch(ADDRESS, parent):
+        return None
+    return Asker(address, mission, parent)
+
+
+class ForgeError(Exception):
+    def __init__(self, status, message):
+        self.status, self.message = status, message
+        super().__init__(message)
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+class Forge:
+    def __init__(self, base: str, token: str):
+        self.base, self.token = base.rstrip('/'), token
+        self.opener = urllib.request.build_opener(NoRedirect)
+
+    def call(self, method: str, path: str, body=None, query=None):
+        """One JSON call under /api/v1/repos/REPO; raises ForgeError(status, message)."""
+        url = f'{self.base}/api/v1/repos/{REPO}/{path}'
+        if query:
+            url += '?' + urllib.parse.urlencode(query)
+        request = urllib.request.Request(url, method=method,
+                                         data=None if body is None else json.dumps(body).encode(),
+                                         headers={'Authorization': 'token ' + self.token,
+                                                  'Accept': 'application/json',
+                                                  'Content-Type': 'application/json',
+                                                  'User-Agent': 'agents-issue'})
+        try:
+            with self.opener.open(request, timeout=30) as response:
+                return json.load(response)
+        except urllib.error.HTTPError as error:
+            try:
+                message = json.load(error).get('message', error.reason)
+            except (ValueError, AttributeError, UnicodeError):
+                message = error.reason
+            raise ForgeError(error.code, self.safe(message)) from None
+        except (urllib.error.URLError, OSError) as error:
+            raise ForgeError(0, self.safe(getattr(error, 'reason', error))) from None
+        except (ValueError, UnicodeError):
+            raise ForgeError(0, 'invalid JSON response') from None
+
+    def safe(self, message):
+        return clean(str(message).replace(self.token, '[redacted]'))[:200]
+
+
+def clean(text):
+    return ''.join(' ' if unicodedata.category(c) == 'Cc' else c for c in text)
+
+
+def open_issue(paths, args):
+    need(1 <= len(args.title) <= 200 and clean(args.title) == args.title,
+         'title must be one line, 1 to 200 characters, without control characters')
+    path = Path(args.file)
+    # Opening nonblocking avoids hanging on a FIFO passed in place of a regular file.
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    with os.fdopen(fd, 'rb') as source:
+        need(stat.S_ISREG(os.fstat(source.fileno()).st_mode), 'body must be a regular file')
+        data = source.read(60 * 1024 + 1)
+    need(len(data) <= 60 * 1024, 'body exceeds 60 KiB')
+    try:
+        text = data.decode('utf-8')
+    except UnicodeError:
+        raise Refusal('body must be valid UTF-8') from None
+    need(not any(line.startswith('<!-- waiting-on-user') for line in text.splitlines()),
+         'body contains a waiting-on-user marker')
+    asker = asking(paths, args.who, args.mission)
+    mission = f' for the mission `{asker.mission}`' if asker.mission else ''
+    body = (text.rstrip() + f'\n\n---\nAsked by `{asker.address}`{mission}. Your comment here '
+            'reaches it by post, and it closes the issue.\n' + write_marker(asker))
+    forge = Forge(os.environ.get('ISSUE_FORGE', FORGE),
+                  credential(paths.tmp / 'git-fabrig/agents-issues.token', 'token'))
+    page, label = 1, None
+    while True:
+        labels = forge.call('GET', 'labels', query={'limit': 50, 'page': page})
+        label = next((row['id'] for row in labels if row['name'] == LABEL), None)
+        if label is not None or len(labels) < 50:
+            break
+        page += 1
+    if label is None:
+        raise ForgeError(200, f'no label {LABEL} on {REPO}')
+    issue = forge.call('POST', 'issues', {'title': args.title, 'body': body, 'labels': [label]})
+    print(f"#{issue['number']} {issue['html_url']}")
+
+
+@dataclass(frozen=True)
+class Reply:
+    comment: int
+    number: int
+    title: str
+    url: str
+    author: str
+    text: str
+    asker: Asker
+
+
+def reply(event: str, payload: dict) -> Reply | str:
+    """The comment to route, or why there is none. Bad fields raise ValueError."""
+    if not isinstance(payload, dict):
+        raise ValueError('payload must be an object')
+    if event != 'issue_comment':
+        return 'not an issue comment'
+    try:
+        action, is_pull = payload['action'], payload['is_pull']
+        repository = payload['repository']['full_name']
+        issue, comment = payload['issue'], payload['comment']
+        number, title, body = issue['number'], issue['title'], issue['body']
+        ident, url, text, author = comment['id'], comment['html_url'], comment['body'], comment['user']['login']
+        if not all(isinstance(v, str) for v in (action, repository, title, body, url, text, author)):
+            raise ValueError('invalid text field')
+        if type(is_pull) is not bool or any(type(v) is not int or v <= 0 for v in (number, ident)):
+            raise ValueError('invalid comment fields')
+    except (KeyError, TypeError):
+        raise ValueError('missing comment field') from None
+    if action != 'created':
+        return 'not created'
+    if is_pull:
+        return 'pull request'
+    if repository != REPO:
+        return 'another repository'
+    if author in BOTS:
+        return 'bot comment'
+    asker = read_marker(body)
+    if asker is None:
+        return 'no asker marker'
+    return Reply(ident, number, title, url, author, text, asker)
+
+
+def post_body(item, fallback=None):
+    lines = item.text.splitlines()
+    result = [f'{clean(item.author)} on #{item.number}, {clean(item.url)}:', '',
+              *(clean(line)[:300] for line in lines[:10])]
+    if len(lines) > 10:
+        result.append(f'[… {len(lines) - 10} more lines on the issue.]')
+    # At most 15 lines, including the fallback prefix and the final instructions.
+    if fallback is None and len(result) < 14:
+        result.append('')
+    result.append(f'Answer there with `issue comment {item.number} FILE`, '
+                  f'and close it with `issue close {item.number}` once done.')
+    if fallback is not None:
+        result.insert(0, f'For {item.asker.address}, whom post could not wake: {clean(fallback)[:300]}.')
+    return '\n'.join(result) + '\n'
+
+
+def atomic_json(directory, destination, row):
+    name = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=directory, delete=False) as target:
+            name = target.name
+            target.write((json.dumps(row) + '\n').encode())
+        os.replace(name, destination)
+    finally:
+        if name and os.path.exists(name):
+            os.unlink(name)
+
+
+class Router:
+    def __init__(self, paths):
+        self.spool, self.machine = paths.spool, paths.machine()
+        for name in ('tmp', 'new', 'done', 'failed'):
+            (self.spool / name).mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.lock, self.wake, self.stop = threading.Lock(), threading.Event(), threading.Event()
+
+    def enqueue(self, item):
+        name = f'{item.comment}.json'
+        with self.lock:
+            if any((self.spool / state / name).exists() for state in ('new', 'done', 'failed')):
+                return 'redelivery'
+            row = dict(asdict(item), attempts=0,
+                       received=datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'))
+            atomic_json(self.spool / 'tmp', self.spool / 'new' / name, row)
+        self.wake.set()
+        return 'spooled'
+
+    def deliver(self, item):
+        recipients = dict.fromkeys((item.asker.address, item.asker.parent, f'director@{self.machine}'))
+        fallback, code = None, 2
+        subject = clean(f'#{item.number} {item.author} replied: {item.title}')[:200]
+        for recipient in recipients:
+            if recipient is None:
+                continue
+            try:
+                sent = subprocess.run(['post', 'send', '--as', SENDER, recipient, subject],
+                                      input=post_body(item, fallback), text=True, errors='replace',
+                                      stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=600)
+                code = sent.returncode
+                lines = sent.stdout.strip().splitlines()
+                last = lines[-1] if lines else f'post exited {code}'
+            except subprocess.TimeoutExpired:
+                code, last = 'timeout', 'post timed out'
+            except OSError:
+                code, last = 'unavailable', 'post could not start'
+            print(f'issue: #{item.number} comment {item.comment} to {recipient}: post {code}',
+                  file=sys.stderr, flush=True)
+            if code == 0:
+                return 'done'
+            if code not in (2, 3):
+                return 'retry'
+            fallback = last
+        return 'done' if code == 3 else 'failed'
+
+    def worker(self):
+        while not self.stop.is_set():
+            self.wake.clear()
+            for path in sorted((self.spool / 'new').glob('*.json'), key=lambda p: (p.stat().st_mtime_ns, p.name)):
+                if self.stop.is_set():
+                    break
+                try:
+                    row = json.loads(path.read_text())
+                    item = Reply(**{key: row[key] for key in ('comment', 'number', 'title', 'url', 'author', 'text')},
+                                 asker=Asker(**row['asker']))
+                    outcome = self.deliver(item)
+                    if outcome == 'retry':
+                        row['attempts'] += 1
+                        with self.lock:
+                            atomic_json(self.spool / 'tmp', path, row)
+                        if row['attempts'] < 5:
+                            continue
+                        outcome = 'failed'
+                    with self.lock:
+                        os.replace(path, self.spool / outcome / path.name)
+                except (OSError, ValueError, KeyError, TypeError):
+                    # Leave unreadable state for repair; never log its contents.
+                    print(f'issue: spool file {path.name}: cannot process', file=sys.stderr, flush=True)
+            self.wake.wait(60)
+
+
+class Hook(BaseHTTPRequestHandler):
+    def log_message(self, format, *args):
+        pass
+
+    def answer(self, status, reason):
+        self.send_response(status)
+        self.send_header('Content-Length', '0')
+        self.end_headers()
+        print(f'issue: request {status}: {reason}', file=sys.stderr, flush=True)
+
+    def __getattr__(self, name):
+        if name.startswith('do_'):
+            return lambda: self.answer(405, 'method refused')
+        raise AttributeError(name)
+
+    def do_POST(self):
+        if self.path != '/hook':
+            return self.answer(404, 'path refused')
+        try:
+            length = int(self.headers.get('Content-Length', ''))
+            if length < 0:
+                raise ValueError
+        except ValueError:
+            return self.answer(400, 'invalid content length')
+        if length > 1024 * 1024:
+            return self.answer(413, 'body too large')
+        self.connection.settimeout(5)
+        try:
+            body = self.rfile.read(length)
+        except OSError:
+            return self.answer(400, 'incomplete body')
+        if len(body) != length:
+            return self.answer(400, 'incomplete body')
+        signature = self.headers.get('X-Forgejo-Signature', self.headers.get('X-Gitea-Signature', ''))
+        expected = hmac.new(self.server.secret, body, hashlib.sha256).hexdigest()
+        if not re.fullmatch('[0-9a-f]{64}', signature) or not hmac.compare_digest(signature, expected):
+            return self.answer(403, 'signature refused')
+        try:
+            event = self.headers.get('X-Forgejo-Event', self.headers.get('X-Gitea-Event', ''))
+            item = reply(event, json.loads(body))
+        except (ValueError, UnicodeError, RecursionError):
+            return self.answer(400, 'invalid payload')
+        if isinstance(item, str):
+            return self.answer(204, item)
+        try:
+            reason = self.server.router.enqueue(item)
+        except OSError:
+            return self.answer(500, 'cannot spool')
+        self.answer(204, reason)
+
+
+def serve(paths, listen):
+    secret = credential(paths.tmp / 'git-fabrig/webhook.secret', 'webhook secret')
+    try:
+        host, port = listen.rsplit(':', 1)
+        host = host.removeprefix('[').removesuffix(']')
+        address = ipaddress.ip_address(host)
+        need(address.is_loopback, 'listener must be a loopback address')
+        port = int(port)
+        need(0 <= port <= 65535, 'invalid listen port')
+    except ValueError:
+        raise Refusal('listen must be a loopback HOST:PORT') from None
+    router = Router(paths)
+    class Server(ThreadingHTTPServer):
+        address_family = socket.AF_INET6 if address.version == 6 else socket.AF_INET
+    with Server((host, port), Hook) as server:
+        server.secret, server.router = secret.encode(), router
+        worker = threading.Thread(target=router.worker, daemon=True)
+        worker.start()
+        print(f'issue: listening on {host}:{server.server_port}', flush=True)
+        try:
+            server.serve_forever()
+        finally:
+            router.stop.set()
+            router.wake.set()
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = parser.add_subparsers(dest='command', required=True)
+    opening = sub.add_parser('open')
+    opening.add_argument('--as', dest='who')
+    opening.add_argument('--mission')
+    opening.add_argument('title')
+    opening.add_argument('file')
+    serving = sub.add_parser('serve')
+    serving.add_argument('--listen', default=LISTEN)
+    args = parser.parse_args()
+    try:
+        paths = Paths()
+        if args.command == 'open':
+            open_issue(paths, args)
+        else:
+            serve(paths, args.listen)
+        return 0
+    except ForgeError as error:
+        if error.status == 200 and error.message.startswith('no label '):
+            reason = error.message
+        elif error.status:
+            reason = f'the forge answered {error.status}: {error.message}'
+        else:
+            reason = f'cannot reach the forge: {error.message}'
+        print(f'issue: {reason}', file=sys.stderr)
+        return 1
+    except (Refusal, OSError, UnicodeError) as error:
+        print(f'issue: {error}', file=sys.stderr)
+        return 2
+    except KeyboardInterrupt:
+        return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
