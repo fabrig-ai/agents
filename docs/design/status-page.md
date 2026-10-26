@@ -14,9 +14,14 @@ serves it.
   generates an HTML status/dashboard page from those records … all
   in-flight work and their status plus statistics about
   build/test/landing times" (the user, 10-25).
-- **It reads and never writes.** Each machine's part is read from the
-  files and commands its tools keep (section 2). Nothing new is
-  recorded, and no tool changes for the page.
+- **It reads and never writes,** but for one file. Each machine's part
+  is read from the files and commands its tools keep (section 2), and
+  no tool changes for the page. The one thing it records is the
+  subscriptions' use, sampled as each page is written on hel8, for
+  their pace (2.2): a small file outside the web root, mode 0600,
+  holding no identity beyond a subscription's label, and pruned as its
+  samples stop counting (the user, 10-26). Only a run given that file
+  writes it.
 - **Nothing to install on the fleet.** The writer pipes its own source
   to each machine over SSH, into `bash -lc 'exec python3 -I - collect'`
   (a login shell, agents' `AGENTS.md`), with the options `landings` uses,
@@ -127,6 +132,37 @@ credential: not `.credentials.json`, `auth.json` nor a token.
   token either CLI refreshes on its own is its own business, as in any
   session on that machine.
 
+### 2.2 Pace
+
+"When the subscription would reach limit at the current pace (we
+could use the status script itself for sampling)" (the user, 10-26).
+
+- **The samples.** A run given `--samples FILE` adds to it, as it
+  writes the page, one sample per limit of each labelled subscription
+  as merged (2.1) that has a use and a reset: a JSON line `{"time",
+  "cli", "label", "limit", "used", "resets"}`, times in seconds since
+  the epoch. A subscription without a label has no samples, since
+  nothing joins its readings.
+- **Kept** while it can still count: a sample whose reset has passed,
+  or older than a day, is dropped, and the file keeps at most 5,000
+  lines, the newest. It is rewritten whole and replaced atomically,
+  mode 0600, in a directory made 0700 when missing. A line of the wrong shape is
+  dropped and counted in the footer; a file that cannot be read or
+  written is named there, and the page is written all the same.
+- **The current pace** of a limit is the rise in its use from the
+  oldest sample of its window in the look-back to now, over the time
+  between them. Its window's samples share its CLI, label and limit,
+  with a reset within 10 minutes of the current one's (a new window
+  has a new reset). The look-back is as long as what is left of the
+  window, at least an hour and at most a day: a session's pace is its
+  last hour or so, a week's its last day, and a window near its end is
+  judged on as long as it has left. A pace needs its two readings at
+  least 30 minutes apart.
+- **At this pace** the limit is either full before its reset, at `now
+  + (100 − used) / pace`, or lasts to it, at `used + pace × (reset −
+  now)` then, rounded down; a pace of zero or less lasts at its use.
+  A use of 100 or more is full now.
+
 ## 3. The page
 
 - **Tiles:** missions, sets landing now, agents (the director,
@@ -143,7 +179,9 @@ credential: not `.credentials.json`, `auth.json` nor a token.
   waits.
 - **Subscriptions,** after the tiles: a table, one row per distinct
   subscription and limit, giving its CLI, plan and label, a bar of the
-  percent used, and its reset (in how long). Which machines
+  percent used, its reset (in how long), and at this pace (2.2):
+  `full in 2 h 5 min`, the time on hover, `lasts, 64% at reset`,
+  `full`, or a dash with no pace yet. Which machines
   share it the page doesn't say (the user, 10-26). The machines signed out, with no subscription, or with an
   unidentified one follow, by CLI. A machine not reached adds nothing.
 - **In flight:** what is landing (set runs, `land`'s prebuilds and
@@ -216,7 +254,10 @@ On hel8, whose name `status.fabrig.ai` is (a CNAME of `fabrig.ai`):
   writes the user units `status-page.service` and `status-page.timer`
   (`OnCalendar=*:0/10`) and starts the timer. The service runs the
   checkout's script in a login shell (agents' `AGENTS.md`), so that
-  `setup`'s fast-forward brings each change.
+  `setup`'s fast-forward brings each change. It runs the page with
+  `--samples ~/.local/state/status-page/usage.jsonl` (2.2), under
+  `XDG_STATE_HOME` when that is set; `install` again rewrites the
+  units.
 - `/var/www/status` belongs to `free`. The page is replaced atomically,
   mode 0644, so Caddy never reads half of one; `--json` writes 0600.
 - `/etc/caddy/Caddyfile` holds:
@@ -230,7 +271,8 @@ On hel8, whose name `status.fabrig.ai` is (a CNAME of `fabrig.ai`):
   ```
 
 To take it down: `systemctl --user disable --now status-page.timer`,
-remove the two units from `~/.config/systemd/user/`, then the Caddy
+remove the two units from `~/.config/systemd/user/` and
+`~/.local/state/status-page/`, then the Caddy
 block (`/etc/caddy/Caddyfile.pre-status-page` is the file before it)
 and `systemctl reload caddy`.
 
@@ -251,7 +293,15 @@ an unidentified one; resets read across a year's end; a `/usage`
 answered by a model, a probe that times out and one that answers
 nonsense, each named in the footer while the rest stands; the methods
 asked of the app-server; and no email or id, on the page or in the
-`--json` file. The roles' names: an owner's and a designer's session
+`--json` file. The pace: a limit full before its reset, one that
+lasts, one at 100, one without two samples 30 minutes apart, a new
+window's samples kept apart from the old one's by their reset, the
+look-back as long as the time left within its bounds, samples pruned
+past their reset and past a day, a line of the wrong shape dropped and
+counted, a samples file that cannot be written named in the footer
+with the page still written, no file written without `--samples`, the
+file 0600 holding labels alone, and `install`'s unit passing it. The
+roles' names: an owner's and a designer's session
 joining its mission, implementers per mission and machine, a recorded
 name ending `-m2` kept whole and an unrecorded one cut, missions ended
 within the week and before it, and no Codex owner read; no owner's,
