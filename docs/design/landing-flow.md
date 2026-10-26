@@ -310,7 +310,20 @@ cite:
      and its first red one with the landing and the failed tests.
      `landings` shows it. `landings wait --cleared`, on a set or a plain
      landing's commit, exits with its verdict: cleared, once a run on a
-     `main` that holds it has no red of its own, or red.
+     `main` that holds it has no red of its own, or red. "Holds" is
+     ancestry, not an exact match, so that every landing gets a
+     verdict, and the wait says which of these gave it:
+     - its own, where the runner judged the landing's commit;
+     - else, in a repository with no tier script, cleared once its
+       `main` holds the commit: agents, which the runner doesn't
+       follow, and smith and hearth, whose runs have nothing to run;
+     - else, that of the run whose range holds it. A baseline clears
+       it, since its reds stand on no landing: a landing older than its
+       repository's first run is judged by that run. Any other run
+       gives it the verdict of the run's first landing that holds it.
+
+     A commit that no `main` holds is no landing: the wait ends at
+     once, and says so.
    - **The owner waits for the verdict** (the user, 10-26). On the
      landing task's report, it starts the wait in a user unit that
      posts it the exit. During the mission the owner is on anyway, and

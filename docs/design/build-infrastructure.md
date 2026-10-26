@@ -966,12 +966,40 @@ the landing first charged, its last green, and a run in progress or a
 fault newer than the last state. `landings wait --cleared TARGET
 [--timeout SECONDS] [--post ADDRESS]` waits for a landing's verdict:
 TARGET is a set, whose landings are its latest run's `landed` records,
-or a commit, 7 to 40 hex digits. It writes its `watch` record first,
-then exits 0 once each landing has a cleared verdict, 1 at the first red
-or on the set's `stopped`, 3 at the timeout, 2 hours by default, and 4
-when the feed is unreadable, as `wait` does. It prints each verdict, and
-a red's tests and excerpt. With `--post`, it then posts what it printed
-to ADDRESS, as `landings`, its subject the outcome.
+or a commit, 7 to 40 hex digits. A landing's verdict is the first of
+these (landing-flow.md 4, step 8):
+- its own: the newest `verdict` record on its commit, of its
+  repository, or of any for a commit target;
+- no tier: its commit's tree has no `scripts/after-landing.sh`, and
+  origin's `main` holds the commit: cleared;
+- the run's: of the repository's runs that ended (a `tier` record, P
+  from the `running` record of its token), the newest whose M holds the
+  commit and whose P, if any, doesn't. A baseline's clears it;
+  another's gives it the verdict of the oldest of its landings that
+  holds it.
+
+Ancestry is read in the workspace's checkouts: `REPO` under `DEV_ROOT`,
+else under the directory that holds agents' checkout, for agents and the
+five repositories. A commit target's repository is the checkout that
+has its commit. Where a commit it needs is missing, the wait fetches
+origin's `main` there, without `FETCH_HEAD`, at most once per poll. A
+landing with no checkout, or a commit no checkout has, ends only with
+its own verdict.
+
+It writes its `watch` record first, then exits 0 once each landing is
+cleared, 1 at the first red or on the set's `stopped`, 2 at once when a
+landing's commit is not on its repository's `main` after a fetch, 3 at
+the timeout, 2 hours by default, and 4 when the feed is unreadable, as
+`wait` does. It prints a line per landing that says which rule gave
+the verdict, and a red's tests and excerpt:
+
+    10-26 07:30Z temper 1234567ab cleared by run 89abcdef0
+    10-26 07:52Z agents 2345678bc cleared on landing: agents has no tier
+    10-26 06:49Z temper d87b0f9dc cleared by run 7ca307b29, which holds it; baseline
+    10-26 08:10Z temper 3456789cd red by run 89abcdef0, which holds it in landing 456789abc: TEST; log HOST:PATH
+
+With `--post`, it then posts what it printed to ADDRESS, as `landings`,
+its subject the outcome.
 
 **The machine and its units.** The director names the runner's machine
 by writing its own address in `~/.config/agents-after-landing/director`
@@ -995,5 +1023,9 @@ standing, faults (heavy refusing, a tool lacking, the origin away) and
 their posts, an unwatched red posted and a watched one not, and its
 meeting with `landings wait --cleared` on the same feed.
 `test-landings` covers the `tiers:` lines, `wait --cleared` on a set
-and on a commit, and `--post`. With the real heavy and origin, fixture
+and on a commit, and `--post`; and, on scratch repositories as origins
+and checkouts, the verdicts by ancestry: a repository with no tier, a
+landing older than the baseline, a commit inside a landing's range, a
+red that stays red under later clean runs, and a commit no `main`
+holds. With the real heavy and origin, fixture
 mode is also how a live run goes before the runner does.
