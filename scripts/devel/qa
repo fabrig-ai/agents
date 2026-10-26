@@ -509,6 +509,37 @@ class Watch:
             else:
                 log(f'{state["pass"]}: cannot give {name} back: {result.stderr.strip()}')
 
+    def give_strays(self, passes):
+        # qa-flow.md 10: a take can survive a crash before pass.json is saved.
+        held = {name for _, state in passes for name in self.outstanding(state)}
+        names = {name for event in self.record.events('rungs') for name in event['route'].split(',') if name != '-'}
+        path = self.directory / 'strays.json'
+        need(not path.is_symlink(), f'{path}: symlink refused', 4)
+        strays = json.loads(path.read_text()) if path.exists() else {}
+        need(isinstance(strays, dict), f'{path}: invalid strays', 4)
+        for name in sorted(names - held):
+            result = self.call('logins', 'give', name, '--as', 'qa-watch')
+            if result.returncode == 0:
+                log(f'gave back {name}: held without a pass')
+                if name in strays:
+                    strays.pop(name)
+                    replace(path, (json.dumps(strays, indent=2) + '\n').encode())
+            elif result.returncode == 1:
+                log(f'{name} is out with no pass: {result.stderr.strip()}')
+                if name not in strays:
+                    message = self.directory / 'stray-post-body'
+                    replace(message, (f'Login {name} is out with no QA pass holding it.\n'
+                                      'Read logins list on this machine to recover it.\n').encode())
+                    sent = self.call('post', 'send', '--as', 'qa-watch', self.director,
+                                     f'qa: login {name} out with no pass', message)
+                    if sent.returncode in (0, 3):
+                        strays[name] = timestamp()
+                        replace(path, (json.dumps(strays, indent=2) + '\n').encode())
+                    else:
+                        log(f'{name}: post failed: {sent.stderr.strip() or sent.stdout.strip()}')
+            elif result.returncode != 2:
+                log(f'{name}: cannot give stray login back: {result.stderr.strip()}')
+
     def unit_stopped(self, state, seconds):
         # qa-flow.md 10: ended precedes the unit's on-stop give-back.
         deadline = time.monotonic() + seconds
@@ -685,7 +716,9 @@ class Watch:
     def check(self, options):
         log('checking')
         with self.record.locked():
-            for directory, state in self.local_passes():
+            passes = self.local_passes()
+            self.give_strays(passes)
+            for directory, state in passes:
                 if state['finished']:
                     self.give(directory, state)
                     self.notify(directory, state)

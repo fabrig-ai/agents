@@ -520,10 +520,17 @@ elif name == 'logins':
         if login in config.get('logins_busy', []):
             print('fixture login busy', file=sys.stderr)
             sys.exit(1)
+        config['logins_held'] = sorted(set(config.get('logins_held', [])) | {login})
+        (root / 'tools.json').write_text(json.dumps(config))
         print(root / 'logins' / login / 'login')
     elif login in config.get('logins_out', []):
         print('fixture login out', file=sys.stderr)
         sys.exit(1)
+    elif login in config.get('logins_held', []):
+        config['logins_held'].remove(login)
+        (root / 'tools.json').write_text(json.dumps(config))
+    else:
+        sys.exit(2)
 elif name == 'post':
     if args[0] == 'send':
         rest = args[3:] if args[1] == '--as' else args[1:]
@@ -886,7 +893,8 @@ def rung_records_the_opening(lab):
     directory, state = lab.watch_state()
     brief = (directory / 'brief.md').read_text()
     assert '- Your rung: fakes, as the product' in brief and 'No held login.' in brief
-    assert state['rung'] == 'fakes' and not lab.calls('logins')
+    assert state['rung'] == 'fakes'
+    assert lab.calls('logins') == [['give', name, '--as', 'qa-watch'] for name in (CHATGPT, CLAUDE)]
 
 
 def rung_without_an_opening_names_the_first(lab):
@@ -912,7 +920,8 @@ def watch_takes_the_rungs_login_before_the_pass(lab):
     lab.watch()
     directory, state = lab.watch_state()
     path = str(lab.root / 'logins' / CHATGPT / 'login')
-    assert lab.calls('logins') == [['take', CHATGPT, '--as', 'qa-watch', '--note', 'temper']]
+    assert lab.calls('logins') == [['give', CHATGPT, '--as', 'qa-watch'],
+                                 ['take', CHATGPT, '--as', 'qa-watch', '--note', 'temper']]
     calls = [json.loads(line)['tool'] for line in (lab.root / 'tools.jsonl').read_text().splitlines()]
     assert calls.index('logins') < calls.index('codex-run')
     brief = (directory / 'brief.md').read_text()
@@ -952,12 +961,16 @@ def watch_gives_back_the_first_when_the_second_is_busy(lab):
     lab.waiting(1)
     lab.configure(logins_busy=[CLAUDE])
     lab.watch()
-    assert lab.calls('logins') == [['take', CHATGPT, '--as', 'qa-watch', '--note', 'temper'],
+    assert lab.calls('logins') == [['give', CHATGPT, '--as', 'qa-watch'],
+                                 ['give', CLAUDE, '--as', 'qa-watch'],
+                                 ['take', CHATGPT, '--as', 'qa-watch', '--note', 'temper'],
                                  ['take', CLAUDE, '--as', 'qa-watch', '--note', 'temper'],
                                  ['give', CHATGPT, '--as', 'qa-watch']]
     assert not lab.watch_states() and not lab.calls('codex-run')
     lab.configure(logins_out=[CHATGPT])
-    assert f'cannot give {CHATGPT} back' in lab.watch().stdout
+    result = lab.watch()
+    assert f'{CHATGPT} is out with no pass:' in result.stdout
+    assert f'cannot give {CHATGPT} back' in result.stdout
 
 
 def watch_gives_the_login_after_the_unit_stops(lab):
@@ -967,11 +980,12 @@ def watch_gives_the_login_after_the_unit_stops(lab):
     lab.end_run()
     lab.watch()
     assert lab.calls('logins')[-1] == ['give', CHATGPT, '--as', 'qa-watch']
-    assert len(lab.calls('logins')) == 2 and not lab.sent()
+    assert len(lab.calls('logins')) == 3 and not lab.sent()
     _, state = lab.watch_state()
     assert state['finished'] and state['given'] == [CHATGPT]
     lab.watch()
-    assert len(lab.calls('logins')) == 2
+    assert len(lab.calls('logins')) == 4
+    assert lab.calls('logins')[-1] == ['give', CHATGPT, '--as', 'qa-watch']
 
 
 def watch_waits_for_the_unit_before_giving(lab):
@@ -982,10 +996,10 @@ def watch_waits_for_the_unit_before_giving(lab):
     lab.configure(unit_active=True)
     (lab.tmp / 'machine.env').write_text('QA_GIVE_BACK_SECONDS=0\n')
     lab.watch()
-    assert len(lab.calls('logins')) == 1
+    assert len(lab.calls('logins')) == 2
     (lab.tmp / 'machine.env').write_text('QA_GIVE_BACK_SECONDS=90\n')
     lab.watch(extra={'QA_GIVE_BACK_SECONDS': '0'})
-    assert len(lab.calls('logins')) == 1 and not lab.watch_state()[1]['finished']
+    assert len(lab.calls('logins')) == 2 and not lab.watch_state()[1]['finished']
     lab.configure(unit_active=False)
     lab.watch()
     assert lab.watch_state()[1]['finished'] and lab.watch_state()[1]['given'] == [CHATGPT]
@@ -1062,7 +1076,7 @@ def a_refused_launch_gives_the_login_back(lab):
     lab.watch(extra={'QA_RECORD': str(wrapper)})
     _, state = lab.watch_states()[-1]
     assert state['finished'] and state['given'] == [CHATGPT] and lab.head() == before
-    assert len(lab.calls('codex-run')) == 1 and len(lab.calls('logins')) == 4
+    assert len(lab.calls('codex-run')) == 1 and len(lab.calls('logins')) == 6
     # A refused launch frees custody even when recording its failure is refused.
     wrapper.write_text(f'#!{sys.executable} -S\nimport subprocess, sys\n'
                        "if sys.argv[1] == 'commit' and not sys.argv[sys.argv.index('-m') + 1].endswith(' started'):\n"
@@ -1071,9 +1085,9 @@ def a_refused_launch_gives_the_login_back(lab):
     lab.watch(status=2, extra={'QA_RECORD': str(wrapper)})
     _, state = lab.watch_states()[-1]
     assert not state['finished'] and state['given'] == [CHATGPT]
-    assert len(lab.calls('codex-run')) == 2 and len(lab.calls('logins')) == 6
+    assert len(lab.calls('codex-run')) == 2 and len(lab.calls('logins')) == 9
     lab.watch()
-    assert lab.watch_states()[-1][1]['finished'] and len(lab.calls('logins')) == 6
+    assert lab.watch_states()[-1][1]['finished'] and len(lab.calls('logins')) == 10
 
 
 def passes_before_rungs_still_read(lab):
@@ -1089,11 +1103,11 @@ def watch_caps_a_pass_holding_a_login(lab):
     lab.watch(extra={'QA_CAP_MINUTES': '0'})
     lab.watch(extra={'QA_CAP_MINUTES': '0'})
     _, state = lab.watch_state()
-    assert state['capped'] and not state['finished'] and len(lab.calls('logins')) == 1
+    assert state['capped'] and not state['finished'] and len(lab.calls('logins')) == 2
     assert ['--user', 'stop', 'codex-run-' + state['run']] in lab.calls('systemctl')
     lab.configure(unit_active=True)
     lab.watch(extra={'QA_GIVE_BACK_SECONDS': '0'})
-    assert not lab.watch_state()[1]['finished'] and len(lab.calls('logins')) == 1
+    assert not lab.watch_state()[1]['finished'] and len(lab.calls('logins')) == 2
     lab.configure(unit_active=False)
     lab.watch()
     _, state = lab.watch_state()
@@ -1101,7 +1115,76 @@ def watch_caps_a_pass_holding_a_login(lab):
     assert 'outcome: capped' in lab.content(f'qa/passes/{state["pass"]}.md')
 
 
-CASES = (rung_records_the_opening,
+def watch_gives_back_a_login_held_without_a_pass(lab):
+    lab.rung('temper', REAL, CHATGPT)
+    lab.configure(logins_held=[CHATGPT])
+    lab.waiting(1)
+    result = lab.watch()
+    assert f'gave back {CHATGPT}: held without a pass' in result.stdout
+    assert lab.calls('logins')[:2] == [['give', CHATGPT, '--as', 'qa-watch'],
+                                    ['take', CHATGPT, '--as', 'qa-watch', '--note', 'temper']]
+    assert not lab.sent()
+    lab.end_run()
+    lab.watch()
+    # Lowering the rung must not hide a login taken under its earlier opening.
+    lab.rung('temper', 'fakes')
+    lab.configure(logins_held=[CHATGPT])
+    result = lab.watch()
+    assert f'gave back {CHATGPT}: held without a pass' in result.stdout
+    assert json.loads((lab.root / 'tools.json').read_text())['logins_held'] == []
+    before = len(lab.calls('logins'))
+    result = lab.watch()
+    assert len(lab.calls('logins')) == before + 1 and result.stdout == 'qa watch: checking\n'
+
+
+def watch_posts_once_for_a_login_out_with_no_pass(lab):
+    lab.rung('temper', REAL, CHATGPT)
+    lab.configure(logins_out=[CHATGPT])
+    for _ in range(2):
+        assert f'{CHATGPT} is out with no pass: fixture login out' in lab.watch().stdout
+    sent, = lab.sent()
+    assert sent['args'][1:3] == ['director@fixture', f'qa: login {CHATGPT} out with no pass']
+    assert CHATGPT in sent['body'] and 'logins list' in sent['body']
+    path = lab.tmp / 'qa/strays.json'
+    strays = json.loads(path.read_text())
+    assert list(strays) == [CHATGPT]
+    datetime.strptime(strays[CHATGPT], '%Y-%m-%dT%H:%M:%SZ')
+    lab.configure(logins_out=[], logins_held=[CHATGPT])
+    assert f'gave back {CHATGPT}: held without a pass' in lab.watch().stdout
+    assert json.loads(path.read_text()) == {} and len(lab.sent()) == 1
+    lab.configure(logins_out=[CHATGPT])
+    lab.watch(extra={'QA_POST_STATUS': '2'})
+    assert json.loads(path.read_text()) == {}  # A failed post is retried.
+    lab.watch(extra={'QA_POST_STATUS': '3'})
+    assert CHATGPT in json.loads(path.read_text())
+    lab.watch()
+    assert len(lab.sent()) == 3  # First notice, failed attempt, successful retry.
+    lab.configure(logins_out=[], logins_refused=[CHATGPT])
+    assert f'{CHATGPT}: cannot give stray login back: fixture login refused' in lab.watch().stdout
+
+
+def watch_leaves_a_login_its_pass_holds(lab):
+    lab.rung('temper', REAL, CHATGPT)
+    lab.waiting(1)
+    lab.watch()
+    before = len(lab.calls('logins'))
+    lab.watch()
+    assert len(lab.calls('logins')) == before  # A running pass protects its login too.
+    lab.end_run()
+    lab.configure(logins_out=[CHATGPT])
+    lab.watch()
+    assert lab.watch_state()[1]['finished'] and not lab.watch_state()[1]['given']
+    before = len(lab.calls('logins'))
+    result = lab.watch()
+    assert lab.calls('logins')[before:] == [['give', CHATGPT, '--as', 'qa-watch']]
+    assert f'{CHATGPT} is out with no pass' not in result.stdout and len(lab.sent()) == 1
+    assert not (lab.tmp / 'qa/strays.json').exists()
+
+
+CASES = (watch_gives_back_a_login_held_without_a_pass,
+         watch_posts_once_for_a_login_out_with_no_pass,
+         watch_leaves_a_login_its_pass_holds,
+         rung_records_the_opening,
          rung_without_an_opening_names_the_first,
          rung_refuses_a_repeated_login,
          watch_takes_the_rungs_login_before_the_pass,
