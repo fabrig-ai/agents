@@ -5,7 +5,9 @@ and how: the session that knows where the work stands and where it goes
 next, and that runs the designers ([designer.md](designer.md)) and
 owners ([owners.md](owners.md)) on the user's behalf. The roles
 together are [README.md](README.md). What it is doing now is in its
-notes (section 3), never here.
+notes (section 3), never here. How it goes about its work day to day,
+its recipes and checklists, is
+[director-operations.md](director-operations.md), the director's own.
 
 ## 1. In one page
 
@@ -113,14 +115,9 @@ machine's `tmp/post/` (section 5).
   pruned when done, never only appended, but for the decisions.
   - `STATUS.md`: one line per mission in progress, with its owner's
     address, its last landing, its state or blocker and its next step;
-    the director's helper sessions; then a pointer to
-    `director/waiting.md`. A mission leaves it when its closing note is
-    committed.
-  - `director/waiting.md`: what waits on the user, one public line each
-    ([records.md](../docs/design/records.md) 3): since when, who waits,
-    what, and the decision holding the detail. Rewritten as items come
-    and go; the status page shows it whole, so each line is written for
-    a stranger.
+    the director's helper sessions; then a pointer to the open issues
+    that wait on the user (section 8). A mission leaves it when its
+    closing note is committed.
   - `director/direction.md`: the vision, the user's priorities and
     standing rules, each draft and each piece of work waiting, and the
     budgets.
@@ -342,8 +339,7 @@ is mechanical, and Codex reads what needs reading.
    passes`, and `qa decide` on each marked commit, `run` or `backlog`,
    from the user's QA priorities in `direction.md` and the passes'
    capacity and spend ([qa-flow.md](../docs/design/qa-flow.md) 3).
-6. **Record:** rewrite `STATUS.md` and `director/waiting.md`, add the
-   decisions, commit them
+6. **Record:** rewrite `STATUS.md`, add the decisions, commit them
    with `record commit`, and make sure the cron, the watcher and the
    waiter run.
 7. **Tidy:** `~/src/rust/agents/scripts/devel/tidy` on each machine
@@ -361,19 +357,26 @@ is mechanical, and Codex reads what needs reading.
   sign-ins and credentials, subscriptions), what more machines or
   seats the pace needs, and what the director can't reasonably decide
   (owners.md, 5).
-- **How:** a push, with the recommendation first so that "yes" answers
-  it. A longer matter goes as a note in `for-user/`, sent as a file.
-  Before telling the user something an owner said, check it against the
-  owner's report. Before re-scoping on a remark of the user's, re-read
-  the draft, and ask when the two disagree.
+- **How:** an issue on the forge, `issue open --mission director TITLE
+  FILE`, in the repository it concerns, the recommendation first so
+  that "yes" answers it; its detail in the issue
+  ([user-issues.md](../docs/design/user-issues.md) 5). While the user
+  is in the chat, a question may go there, and becomes an issue if it
+  is unanswered two hours later (director-operations.md 6). A push only
+  for one that can't wait, naming it. Before telling the user something an
+  owner said, check it against the owner's report. Before re-scoping on
+  a remark of the user's, re-read the draft, and ask when the two
+  disagree.
 - **Learning:** each answer goes into `direction.md`, so the same kind
   of question needn't go to the user again. Escalations are many at
   first, while the user hands over intent and vision, and fewer as the
   director grows autonomous.
-- **The waits:** each question to the user, and each thing only they
-  can do, is a line of `director/waiting.md` from when it is asked
-  until it is answered or dropped, and its decision holds the rest. An
-  answer removes the line in the commit that records it.
+- **The waits** are the open issues labelled `waiting-on-user`, the
+  director's, its designers' and its owners', each closed by its asker
+  once acted on (`issue list --all` shows them; the status page links
+  to them). The director is not told of new ones (the user, 10-26). Its
+  own answers go to it by post, and into its decisions as they are acted
+  on; `director/waiting.md` retired on 10-26.
 - **The user's word** stands as given: when they decline a summary, the
   owners' reports stay in the mailboxes, unrelayed.
 - **Subscriptions:** when one is short and another has room, the
