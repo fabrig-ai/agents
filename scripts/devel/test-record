@@ -872,10 +872,50 @@ def milestone(lab):
     assert len([line for line in landings.splitlines() if line.startswith('| m4/')]) == 5, landings
 
 
+def qa_places(lab):
+    fields = 'repository main commits machine model effort started ended wall tokens outcome'.split()
+    front = '---\n' + ''.join(f'{key}: unknown\n' for key in fields) + '---\n# QA pass\n'
+    front = front.replace('outcome: unknown', 'outcome: running')
+    for name, content in [('qa/decisions.md', '# QA decisions\n'), ('qa/triage.md', '# QA triage\n'),
+                          ('qa/passes/20261026-0915-temper.md', front)]:
+        lab.put(name, content)
+        assert 'pushed' in lab.run('commit', name)
+        assert lab.git(lab.origin, 'show', 'main:' + name) == content.strip()
+    name = 'qa/passes/20261026-0915-temper.md'
+    for content, reason in [('# no metadata\n', 'front matter missing'),
+                            (front.replace('outcome: running', 'outcome: skipped'), 'outcome invalid'),
+                            (front + 'x' * 8192, 'cap exceeded'),
+                            (front.replace('started: unknown', 'started: yesterday'), 'UTC'),
+                            (front.replace('ended: unknown', 'ended: 2026-02-30T09:00Z'), 'not a time'),
+                            (front.replace('machine: unknown\n', ''), 'requires'),
+                            (front.replace('wall: unknown', 'wall: unknown\nwall: 0:01'), 'unique')]:
+        old = lab.git(lab.origin, 'rev-parse', 'main')
+        lab.put(name, content)
+        assert reason in lab.run('commit', name, status=2)
+        assert lab.git(lab.origin, 'rev-parse', 'main') == old
+    for outcome in ('done', 'capped', 'failed'):
+        lab.put(name, front.replace('outcome: running', 'outcome: ' + outcome))
+        lab.run('commit', name)
+    lab.put(name, front + '\n## Runs\n\n' + 'x' * 5000)
+    lab.run('commit', name)  # The mission-only Runs cap does not apply to a QA report.
+    lab.put('qa/decisions.md', '\n'.join(f'## {n}. heading' for n in range(101)))
+    lab.run('commit', 'qa/decisions.md')  # QA logs have a byte cap, not the numbered decisions cap.
+    for name, cap in [('qa/decisions.md', 128 * 1024), ('qa/triage.md', 128 * 1024),
+                      ('qa/passes/boundary.md', 8 * 1024)]:
+        prefix = front if '/passes/' in name else ''
+        lab.put(name, prefix + 'x' * (cap - len(prefix.encode())))
+        lab.run('commit', name)
+        lab.put(name, prefix + 'x' * (cap - len(prefix.encode()) + 1))
+        assert 'cap exceeded' in lab.run('commit', name, status=2)
+    for name in ('qa/other.md', 'qa/passes/Bad.md', 'qa/passes/nested/pass.md'):
+        lab.put(name, front)
+        assert 'place' in lab.run('commit', name, status=2)
+
+
 def main():
     # The cases share nothing (each has its own Lab, and every subprocess its
     # own env), so they run at once on threads; results print in case order.
-    cases = (closing_unpublished, closing_dirty, closing_deleted_remote, closing_fetch_failure, closing_unreadable, closing_nested,
+    cases = (qa_places, closing_unpublished, closing_dirty, closing_deleted_remote, closing_fetch_failure, closing_unreadable, closing_nested,
              closing_cached_output, closing_cached_worktree, closing_clean, closing_abandoned, closing_active,
              writer, mission_progress, refusals, different_files, name_race, conflict, offline, merged_validation, installation_failures, setup, mission_runs, telemetry, milestone)
     if len(sys.argv) > 1:

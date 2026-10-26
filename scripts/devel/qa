@@ -1,0 +1,394 @@
+#!/usr/bin/env -S python3 -S
+"""qa candidates [REPO]
+qa decide REPO COMMIT... run|backlog [--why TEXT]
+qa backlog [REPO]
+qa passes [--running]
+qa findings
+qa triage PASS N owner ADDRESS|backlog|drop [--why TEXT]
+"""
+import argparse
+from contextlib import contextmanager
+from datetime import datetime, timezone
+import fcntl
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+
+os.umask(0o077)
+REPOSITORIES = ('skein', 'smith', 'hearth', 'jig', 'temper')
+NAME = r'[a-z0-9][a-z0-9_-]*'
+SHA = r'[0-9a-f]{40}'
+PASS_KEYS = 'repository main commits machine model effort started ended wall tokens outcome'.split()
+
+
+class Problem(Exception):
+    def __init__(self, why, code=2):
+        super().__init__(why)
+        self.code = code
+
+
+def need(ok, why, code=2):
+    if not ok:
+        raise Problem(why, code)
+
+
+def command(argv, cwd=None):
+    return subprocess.run([str(a) for a in argv], cwd=cwd, stdin=subprocess.DEVNULL,
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                          env=dict(os.environ, GIT_TERMINAL_PROMPT='0'))
+
+
+def git(root, *args, check=True):
+    result = command(['git', '-C', root, *args])
+    if check:
+        need(result.returncode == 0, result.stderr.strip() or 'git failed', 4)
+    return result.stdout.strip() if check else result
+
+
+def timestamp():
+    return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+def utc(value):
+    if value == 'unknown':
+        return datetime.min.replace(tzinfo=timezone.utc)
+    need(re.fullmatch(r'\d{4}-\d\d-\d\dT\d\d:\d\d(?::\d\d)?Z', value),
+         f'invalid UTC time: {value}', 4)
+    return datetime.fromisoformat(value.replace('Z', '+00:00'))
+
+
+class Workspace:
+    def __init__(self):
+        self.kit = Path(__file__).resolve().parent
+        agents = self.kit.parent.parent
+        self.root = Path(os.environ.get('DEV_ROOT', agents.parent if agents.name == 'agents'
+                                        else Path.home() / 'src/rust')).expanduser().absolute()
+        self.tmp = Path(os.environ.get('DEV_TMP', self.root / 'tmp')).expanduser().absolute()
+        record_workspace = Path.home() / ('src/rust' if (Path.home() / 'src/rust').exists() else 'src')
+        self.records = Path(os.environ.get('RECORDS', record_workspace / 'records')).expanduser().absolute()
+        fixture = os.environ.get('QA_FIXTURE')
+        self.fixture = Path(fixture).absolute() if fixture else None
+        need(fixture is None or (fixture and self.fixture.is_dir()), 'QA_FIXTURE must be a directory')
+
+    def tool(self, name):
+        return Path(os.environ.get('QA_' + name.upper(), self.kit / name)) if self.fixture else self.kit / name
+
+    def origin(self, repo):
+        need(repo in REPOSITORIES, f'unknown repository: {repo}')
+        return str(self.fixture / 'origins' / (repo + '.git')) if self.fixture else f'git@github.com:fabrig-ai/{repo}.git'
+
+
+class Repositories:
+    def __init__(self, workspace):
+        self.workspace = workspace
+
+    @contextmanager
+    def fetched(self, repo):
+        origin = self.workspace.origin(repo)
+        parent = self.workspace.tmp / 'qa/repos'
+        parent.mkdir(parents=True, exist_ok=True)
+        root = parent / repo
+        with (parent / (repo + '.lock')).open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            need(not root.is_symlink(), f'{root}: symlink refused', 4)
+            if not root.exists():
+                # A failed clone leaves no half-built repository at the shared path.
+                with tempfile.TemporaryDirectory(prefix=repo + '-', dir=parent) as directory:
+                    clone = Path(directory) / 'repo'
+                    result = command(['git', 'clone', '--filter=blob:none', '--no-checkout', origin, clone])
+                    need(result.returncode == 0, f'cannot clone {repo}: {result.stderr.strip()}', 4)
+                    clone.rename(root)
+            need(git(root, 'config', '--get', 'remote.origin.url') == origin,
+                 f'{root}: unexpected origin', 4)
+            result = git(root, 'fetch', '--quiet', 'origin', '+refs/heads/*:refs/remotes/origin/*', check=False)
+            need(result.returncode == 0, f'cannot fetch {repo}: {result.stderr.strip()}', 4)
+            yield root
+
+    def commits(self, repo):
+        with self.fetched(repo) as root:
+            # NULs frame each commit; unit separators preserve multi-line trailer values.
+            text = git(root, 'log', '--reverse', '--format=%H%x1f%cs%x1f%ct%x1f%s%x1f%(trailers:key=QA,valueonly)%x00', 'origin/main')
+        result = []
+        for row in text.split('\0'):
+            if row.strip():
+                sha, date, seconds, subject, trailer = row.lstrip('\n').split('\x1f', 4)
+                result.append(dict(repository=repo, commit=sha, short=sha[:9], date=date,
+                                   subject=subject, seconds=int(seconds), qa=' '.join(trailer.splitlines()).strip()))
+        return result
+
+    def resolve(self, repo, prefixes):
+        with self.fetched(repo) as root:
+            commits = []
+            for prefix in prefixes:
+                need(re.fullmatch(r'[0-9a-fA-F]{7,40}', prefix), f'commit needs 7 to 40 hex digits: {prefix}')
+                matches = git(root, 'rev-parse', '--disambiguate=' + prefix.lower()).splitlines()
+                matches = [sha for sha in matches if git(root, 'cat-file', '-t', sha) == 'commit']
+                need(matches, f'commit not found: {prefix}')
+                need(len(matches) == 1, f'ambiguous commit: {prefix}')
+                sha = matches[0]
+                need(git(root, 'merge-base', '--is-ancestor', sha, 'origin/main', check=False).returncode == 0,
+                     f'commit not on origin/main: {prefix}')
+                trailer = git(root, 'show', '-s', '--format=%(trailers:key=QA,valueonly)', sha)
+                need(trailer, f'commit has no QA: trailer: {prefix}')
+                if sha not in commits:
+                    commits.append(sha)
+            return commits
+
+
+class Pass:
+    def __init__(self, name, fields, body):
+        self.name, self.fields, self.body = name, fields, body
+
+    @classmethod
+    def read(cls, path):
+        text = path.read_text()
+        front = re.match(r'\A---\n(.*?)\n---(?:\n|$)', text, re.S)
+        need(front, f'{path}: front matter missing', 4)
+        fields = {}
+        for line in front[1].splitlines():
+            key, sep, value = line.partition(':')
+            need(sep and key not in fields and value.strip(), f'{path}: invalid front matter', 4)
+            fields[key] = value.strip()
+        need(all(key in fields for key in PASS_KEYS), f'{path}: incomplete front matter', 4)
+        need(fields['repository'] in REPOSITORIES and fields['outcome'] in ('running', 'done', 'capped', 'failed'),
+             f'{path}: invalid repository or outcome', 4)
+        need(all(re.fullmatch(SHA, sha) for sha in fields['commits'].split()), f'{path}: invalid commits', 4)
+        utc(fields['started'])
+        utc(fields['ended'])
+        return cls(path.stem, fields, text[front.end():])
+
+    def text(self):
+        return '---\n' + ''.join(f'{key}: {value}\n' for key, value in self.fields.items()) + '---\n' + self.body
+
+    def findings(self):
+        section = re.search(r'^## Findings[ \t]*\n(.*?)(?=^##[ \t]+|\Z)', self.body, re.M | re.S)
+        return sorted((int(n), title) for n, title in re.findall(r'^### ([1-9][0-9]*)\. (.+)$', section[1], re.M)) if section else []
+
+
+class Record:
+    def __init__(self, workspace):
+        self.workspace, self.root = workspace, workspace.records
+
+    @contextmanager
+    def locked(self):
+        common = Path(git(self.root, 'rev-parse', '--path-format=absolute', '--git-common-dir'))
+        # Separate from record.lock: record's subprocess must acquire that itself.
+        with (common / 'qa.lock').open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            result = command([self.workspace.tool('record'), 'pull'])
+            if result.returncode:
+                print('qa: warning: record pull failed: ' + result.stderr.strip(), file=sys.stderr)
+            yield self
+
+    def path(self, name):
+        path = self.root / name
+        for part in (path, *path.parents):
+            if part == self.root:
+                break
+            need(not part.is_symlink(), f'{name}: symlink refused')
+        return path
+
+    def events(self, kind):
+        path = self.path('qa/' + kind + '.md')
+        if not path.exists():
+            return []
+        rows = []
+        pattern = (rf'- (\S+) (\S+) ({SHA}) (run|backlog)(?: (.*))?' if kind == 'decisions'
+                   else r'- (\S+) (\S+) ([1-9][0-9]*) (\S+)(?: (.*))?')
+        for line in path.read_text().splitlines():
+            if not line.strip() or line.startswith('#'):
+                continue
+            match = re.fullmatch(pattern, line)
+            need(match, f'{path}: invalid event line', 4)
+            stamp, who, item, route, why = match.groups()
+            rows.append(dict(time=utc(stamp), who=who, item=item, route=route, why=why or ''))
+        return rows
+
+    def passes(self):
+        directory = self.path('qa/passes')
+        result = []
+        for path in sorted(directory.glob('*.md')):
+            need(re.fullmatch(NAME, path.stem), f'{path}: invalid pass name', 4)
+            result.append(Pass.read(self.path('qa/passes/' + path.name)))
+        return sorted(result, key=lambda p: (utc(p.fields['started']), p.name))
+
+    def append(self, name, line, heading=None):
+        path = self.path(name)
+        text = path.read_text() if path.exists() else (heading + '\n\n' if heading else '')
+        return text + ('' if not text or text.endswith('\n') else '\n') + line + '\n'
+
+    def commit(self, changes, message):
+        before = {}
+        try:
+            for name, text in changes.items():
+                path = self.path(name)
+                before[name] = (path.read_bytes(), path.stat().st_mode) if path.exists() else None
+                replace(path, text.encode(), before[name][1] if before[name] else 0o600)
+            result = command([self.workspace.tool('record'), 'commit', '-m', message, *changes])
+            need(result.returncode in (0, 3), result.stderr.strip() or 'record commit failed',
+                 2 if result.returncode == 2 else 1)
+            if result.returncode == 3:
+                print('qa: warning: ' + result.stderr.strip(), file=sys.stderr)
+        except BaseException:
+            for name, old in before.items():
+                path = self.path(name)
+                if old is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    replace(path, *old)
+            raise
+
+
+def replace(path, data, mode=0o600):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as target:
+        temporary = Path(target.name)
+        try:
+            target.write(data)
+            target.flush()
+            os.chmod(temporary, mode)
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
+def states(decisions, passes):
+    """Latest event wins; at equal times a pass takes precedence."""
+    result, keys = {}, {}
+    for index, event in enumerate(decisions):
+        identity = event['who'], event['item']
+        key = event['time'], 0, index
+        if identity not in keys or key > keys[identity]:
+            keys[identity], result[identity] = key, event
+    for index, report in enumerate(passes):
+        key = utc(report.fields['started']), 1, index
+        for sha in report.fields['commits'].split():
+            identity = report.fields['repository'], sha
+            if identity not in keys or key > keys[identity]:
+                keys[identity] = key
+                result[identity] = dict(time=key[0], route='taken', pass_name=report.name)
+    return result
+
+
+def first_line(commit):
+    return '{repository} {short} {date} {subject}'.format(**commit)
+
+
+def show_commits(repositories, selected):
+    cache = {repo: {c['commit']: c for c in repositories.commits(repo)} for repo in dict.fromkeys(r for r, _, _ in selected)}
+    for repo, sha, event in selected:
+        need(sha in cache[repo], f'{repo} {sha}: recorded commit is not on origin/main', 4)
+        yield cache[repo][sha], event
+
+
+def run(args, workspace, record, repositories):
+    why = getattr(args, 'why', '') or ''
+    need(not any(c in why for c in '\n\r\t'), '--why must not contain a newline or tab')
+    repo = getattr(args, 'repo', None)
+    if repo:
+        workspace.origin(repo)
+    if args.command == 'decide':
+        need(len(args.choices) >= 2 and args.choices[-1] in ('run', 'backlog'), 'decide needs COMMIT... run|backlog')
+        shas = repositories.resolve(repo, args.choices[:-1])
+        route = args.choices[-1]
+        name = 'qa/decisions.md'
+        text = record.append(name, '\n'.join(f'- {timestamp()} {repo} {sha} {route} {why}' for sha in shas), '# QA decisions')
+        record.commit({name: text}, f'qa decide: {repo} ' + ' '.join(s[:9] for s in shas) + ' ' + route)
+        for sha in shas:
+            print(f'decided: {repo} {sha[:9]} {route}')
+        return
+    passes = record.passes()
+    if args.command in ('findings', 'triage'):
+        if args.command == 'findings':
+            triaged = {(r['who'], int(r['item'])) for r in record.events('triage')}
+            lines = [f'{p.name} {n} {title}' for p in passes if p.fields['outcome'] != 'running'
+                     for n, title in p.findings() if (p.name, n) not in triaged]
+            print('\n'.join(lines) or 'no findings waiting')
+            return
+        report = next((p for p in passes if p.name == args.pass_name), None)
+        need(report, f'unknown pass: {args.pass_name}')
+        need(report.fields['outcome'] != 'running', f'pass is running: {report.name}')
+        title = dict(report.findings()).get(args.number)
+        need(title is not None, f'pass has no finding {args.number}')
+        need(args.route in (['backlog'], ['drop']) or (len(args.route) == 2 and args.route[0] == 'owner'), 'route must be owner ADDRESS, backlog or drop')
+        route = args.route[-1]
+        if args.route[0] == 'owner':
+            need(re.fullmatch(r'[a-z][a-z0-9-]*(/[a-z0-9][a-z0-9-]*)*@[a-z][a-z0-9-]*', route), 'invalid owner address: expected NAME@MACHINE')
+            body = (f'QA pass {report.name} on {report.fields["repository"]} found this, and the director routes it to you.\n'
+                    f"The report is records' qa/passes/{report.name}.md, finding {args.number}: record pull, then read it.\n")
+            with tempfile.NamedTemporaryFile(mode='w', dir=workspace.tmp) as message:
+                message.write(body + (why + '\n' if why else ''))
+                message.flush()
+                sent = command([workspace.tool('post'), 'send', route, f'QA finding {report.name} {args.number}: {title}', message.name])
+            need(sent.returncode in (0, 3), 'post send failed: ' + sent.stderr.strip())
+            if sent.returncode == 3:
+                print('qa: warning: message queued; nobody will wake its reader', file=sys.stderr)
+        name = 'qa/triage.md'
+        changes = {name: record.append(name, f'- {timestamp()} {report.name} {args.number} {route} {why}', '# QA triage')}
+        if route == 'backlog':
+            name = 'director/backlog.md'
+            changes[name] = record.append(name, f"- QA pass {report.name}, finding {args.number}: {title}. Source/repro: records' qa/passes/{report.name}.md, finding {args.number}.")
+        record.commit(changes, f'qa triage: {report.name} {args.number} {route}')
+        print(f'triaged: {report.name} {args.number} {route}')
+        return
+    current = states(record.events('decisions'), passes)
+    if args.command == 'candidates':
+        candidates = [c for r in ([repo] if repo else REPOSITORIES) for c in repositories.commits(r)
+                      if c['qa'] and (r, c['commit']) not in current]
+        candidates.sort(key=lambda c: c['seconds'])  # stable for equal commit times
+        print('\n'.join(first_line(c) + '\n  QA: ' + c['qa'] for c in candidates) or 'no candidates')
+        return
+    route = 'backlog' if args.command == 'backlog' else 'run'
+    chosen = sorted([(r, sha, event) for (r, sha), event in current.items()
+                     if event['route'] == route and (not repo or repo == r)], key=lambda row: row[2]['time'])
+    if args.command == 'passes':
+        lines = [f'{p.name} {p.fields["repository"]} {p.fields["outcome"]} {p.fields["wall"]} {p.fields["tokens"]} '
+                 + ' '.join(s[:9] for s in p.fields['commits'].split()) for p in passes
+                 if not args.running or p.fields['outcome'] == 'running']
+        print('\n'.join(lines) or 'no passes')
+        print(f'waiting: {len(chosen)} commits chosen to run')
+    elif not chosen:
+        print('no commits kept for later')
+    for commit, event in show_commits(repositories, chosen):
+        print(first_line(commit))
+        if args.command == 'backlog' and event['why']:
+            print('  why: ' + event['why'])
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = parser.add_subparsers(dest='command', required=True)
+    for name in ('candidates', 'backlog'):
+        sub.add_parser(name).add_argument('repo', nargs='?')
+    decide = sub.add_parser('decide')
+    decide.add_argument('repo')
+    decide.add_argument('choices', nargs='+')
+    decide.add_argument('--why', default='')
+    sub.add_parser('passes').add_argument('--running', action='store_true')
+    sub.add_parser('findings')
+    triage = sub.add_parser('triage')
+    triage.add_argument('pass_name')
+    triage.add_argument('number', type=int)
+    triage.add_argument('route', nargs='+')
+    triage.add_argument('--why', default='')
+    args = parser.parse_args()
+    try:
+        workspace = Workspace()
+        workspace.tmp.mkdir(parents=True, exist_ok=True)
+        record = Record(workspace)
+        with record.locked():
+            run(args, workspace, record, Repositories(workspace))
+        return 0
+    except Problem as error:
+        print(f'qa: {error}', file=sys.stderr)
+        return error.code
+    except (OSError, ValueError, UnicodeError) as error:
+        print(f'qa: {error}', file=sys.stderr)
+        return 4
+
+
+if __name__ == '__main__':
+    sys.exit(main())

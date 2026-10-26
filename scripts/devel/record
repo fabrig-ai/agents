@@ -20,6 +20,7 @@ WAIT = re.compile(rf'- ([^·]+) · ({NAME}) · ([^·/]+) · ((?:R[0-9]+-)?[0-9]+
 SECRET = re.compile(r'-----BEGIN [^\n]*PRIVATE KEY-----|(?<![\w-])(?:gh[pousr]_[A-Za-z0-9_-]{20,}|github_pat_[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9_-]{20,})|xox[abpr]-|AKIA[A-Z0-9]{16}')
 MISSION_KEYS = 'roadmap feature parent owner machine model effort started ended state end'.split()
 MILESTONE_KEYS = 'driver model effort started cap ended'.split()
+QA_KEYS = 'repository main commits machine model effort started ended wall tokens outcome'.split()
 
 
 class Refusal(Exception):
@@ -65,6 +66,10 @@ def blocked(path, root):
 
 
 def cap_for(name):
+    if name in ('qa/decisions.md', 'qa/triage.md'):
+        return 128 * 1024
+    if re.fullmatch(rf'qa/passes/{NAME}\.md', name):
+        return 8 * 1024
     if name == 'director/waiting.md':
         return 8 * 1024
     if name == 'STATUS.md':
@@ -111,10 +116,11 @@ def validate(name, content):
     need(not SECRET.search(text), f'{name}: secret refused')
     if name == 'director/waiting.md':
         waiting(name, text)
-    if '/decisions/' in name or name.endswith('/decisions.md'):
+    if not name.startswith('qa/') and ('/decisions/' in name or name.endswith('/decisions.md')):
         count = len(re.findall(r'^## (?:R[0-9]+-)?[0-9]+(?:\b|\.)', text, re.M))
         need(count <= 100, f'{name}: more than 100 decisions')
-    if name.startswith('missions/') and (name.endswith('/README.md') or re.search(r'/m[0-9]+\.md$', name)):
+    qa_pass = name.startswith('qa/passes/')
+    if qa_pass or (name.startswith('missions/') and (name.endswith('/README.md') or re.search(r'/m[0-9]+\.md$', name))):
         front = re.match(r'\A---\n(.*?)\n---(?:\n|$)', text, re.S)
         need(front, f'{name}: front matter missing')
         fields = {}
@@ -123,7 +129,7 @@ def validate(name, content):
             need(sep and re.fullmatch('[a-z]+', key) and value.strip() and key not in fields,
                  f'{name}: front matter must be unique key: value lines')
             fields[key] = value.strip()
-        keys = MISSION_KEYS if name.endswith('/README.md') else MILESTONE_KEYS
+        keys = QA_KEYS if qa_pass else MISSION_KEYS if name.endswith('/README.md') else MILESTONE_KEYS
         need(all(k in fields for k in keys), f'{name}: front matter requires {", ".join(keys)}')
         for key in ('started', 'ended'):
             if fields[key] != UNKNOWN:
@@ -133,6 +139,9 @@ def validate(name, content):
                     datetime.fromisoformat(fields[key].replace('Z', '+00:00'))
                 except ValueError as error:
                     raise Refusal(f'{name}: front matter {key} is not a time') from error
+        if qa_pass:
+            need(fields['outcome'] in ('running', 'done', 'capped', 'failed'),
+                 f'{name}: front matter outcome invalid')
         if name.endswith('/README.md'):
             need(len(fields.get('description', '')) <= 65,
                  f'{name}: front matter description exceeds 65 characters')
@@ -142,8 +151,9 @@ def validate(name, content):
             summary = re.split(r'\n[ \t]*\n', body, maxsplit=1)[0]
             need(summary, f'{name}: summary missing')
             need(len(summary.split()) <= 60, f'{name}: summary exceeds 60 words')
-        runs = runs_body(text)
-        need(not runs or len(runs[1].encode()) <= 4096, f'{name}: Runs table cap exceeded')
+        if not qa_pass:
+            runs = runs_body(text)
+            need(not runs or len(runs[1].encode()) <= 4096, f'{name}: Runs table cap exceeded')
 
 
 def entries(root, tree):
