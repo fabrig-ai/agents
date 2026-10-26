@@ -582,6 +582,17 @@ def land_feed(directory):
 
 
 def land_feed_none(directory):
+    hosted = runpy.run_path(str(SCRIPT.with_name('land-feed.py')))['hosted']
+    for url in ('git@github.com:fabrig-ai/agents.git', 'ssh://git@host/repo.git',
+                'https://host/repo.git', 'https::https://host/repo.git',
+                'git@[::1]:repo.git', 'ssh://git@[::1]/repo.git'):
+        assert hosted(url), url
+    for url in ('/scratch/origin.git', 'file:///scratch/origin.git', './origin.git',
+                'ext::git-receive-pack /scratch/origin.git',
+                'https::file:///scratch/origin.git', 'custom_helper::/scratch/origin.git',
+                'ext::ssh host git-receive-pack repo.git',
+                'ext::git-receive-pack /scratch/\norigin.git'):
+        assert not hosted(url), url
     lab = feed_lab(directory, 'no teaching')
     feed = directory / 'feed.jsonl'
     result = lab.run([str(lab.kit / 'land'), '--docs'], env=dict(LAND_FEED=str(feed)))

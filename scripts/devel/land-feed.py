@@ -63,19 +63,30 @@ def taught(path, base, tip):
             for line in lines[:LIMIT]], max(0, len(lines) - LIMIT)
 
 
+def hosted(url):
+    """Whether a push URL, including a remote-helper address, names a host."""
+    while match := re.match(r'^([^/:\[\]]+)::', url):
+        if match[1] == 'ext':
+            return False
+        url = url[match.end():]
+    if url.startswith('file:'):
+        return False
+    try:
+        if '://' in url:
+            return bool(urlsplit(url).hostname)
+    except ValueError:
+        return False
+    return bool(re.match(r'^(?:[^/@:]+@)?(?:\[[^]]+\]|[^/:]+):.+', url))
+
+
 def remote_host():
     """Only an origin with a host can cause a default feed append."""
     try:
         result = subprocess.run(['git', 'remote', 'get-url', '--push', 'origin'],
                                 check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 timeout=30)
-        url = result.stdout.decode(errors='replace').strip()
-        if url.startswith('file:'):
-            return False
-        if '://' in url:
-            return bool(urlsplit(url).hostname)
-        return bool(re.match(r'^(?:[^/@:]+@)?(?:\[[^]]+\]|[^/:]+):.+', url))
-    except (OSError, ValueError, subprocess.SubprocessError):
+        return hosted(result.stdout.decode(errors='replace').strip())
+    except (OSError, subprocess.SubprocessError):
         return False
 
 
