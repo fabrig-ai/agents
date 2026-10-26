@@ -234,17 +234,44 @@ cache_read() {
     printf '%s\n' "${lines[2]}"
 }
 
+# HEAD's expected commit pins its tree: candidate derives tree, and the
+# amendment is checked against tree before commit is ever an expected HEAD.
+# Resolve the worktree's state paths once per candidate, not per boundary.
 candidate_check() {
-    local expected=${1:-$candidate} current dirty state
-    current=$(git rev-parse HEAD) || die 4 "candidate HEAD is unavailable; rerun land"
-    [[ $(git symbolic-ref --quiet HEAD) == "$candidate_ref" && $current == "$expected" &&
-        $(git rev-parse 'HEAD^{tree}') == "$tree" ]] ||
+    local expected=${1:-$candidate} status line oid='' head='' dirty=0 state current
+    if ! status=$(git status --porcelain=v2 --branch --no-ahead-behind \
+        --untracked-files=normal --ignore-submodules=none); then
+        # Preserve the earlier HEAD/ref refusal when status itself cannot run.
+        current=$(git rev-parse HEAD) || die 4 "candidate HEAD is unavailable; rerun land"
+        [[ $(git symbolic-ref --quiet HEAD) == "$candidate_ref" && $current == "$expected" &&
+            $(git rev-parse 'HEAD^{tree}') == "$tree" ]] ||
+            die 4 "candidate HEAD or tree changed; rerun land"
+        die 4 "candidate index/worktree cannot be checked; rerun land"
+    fi
+    while IFS= read -r line; do
+        case $line in
+        '# branch.oid '*) oid=${line#\# branch.oid } ;;
+        '# branch.head '*) head=${line#\# branch.head } ;;
+        '#'*) ;;
+        *) dirty=1 ;;
+        esac
+    done <<<"$status"
+    [[ -n $oid && $oid != '(initial)' ]] || die 4 "candidate HEAD is unavailable; rerun land"
+    if [[ $head == '(detached)' ]]; then
+        head=''
+        # Git also permits this literal branch name. Only that ambiguous
+        # header needs symbolic-ref to distinguish it from a detached HEAD.
+        if [[ $candidate_ref == 'refs/heads/(detached)' ]]; then
+            head=$(git symbolic-ref --quiet HEAD || true)
+        fi
+    else
+        head=refs/heads/$head
+    fi
+    [[ $head == "$candidate_ref" && $oid == "$expected" ]] ||
         die 4 "candidate HEAD or tree changed; rerun land"
-    dirty=$(git status --porcelain --untracked-files=normal --ignore-submodules=none) || die 4 "candidate index/worktree cannot be checked; rerun land"
-    [[ -z $dirty ]] || die 4 "candidate index/worktree changed; rerun land"
-    for state in rebase-merge rebase-apply MERGE_HEAD; do
-        [[ ! -e $(git rev-parse --git-path "$state") ]] ||
-            die 4 "candidate merge/rebase state changed; rerun land"
+    ((dirty == 0)) || die 4 "candidate index/worktree changed; rerun land"
+    for state in "${candidate_states[@]}"; do
+        [[ ! -e $state ]] || die 4 "candidate merge/rebase state changed; rerun land"
     done
 }
 
@@ -531,12 +558,15 @@ while :; do
 Resolve them, run git rebase --continue, then land again."
     fi
     trap 'land_result "$?"' EXIT
-    [[ $(git rev-parse HEAD) != "$base" ]] ||
-        die 2 "nothing to land: the branch has no commits beyond main"
     candidate=$(git rev-parse HEAD)
+    [[ $candidate != "$base" ]] ||
+        die 2 "nothing to land: the branch has no commits beyond main"
     tip=$candidate
     candidate_ref=refs/heads/$branch
     tree=$(git rev-parse "$candidate^{tree}")
+    state_paths=$(git rev-parse --git-path rebase-merge --git-path rebase-apply --git-path MERGE_HEAD) ||
+        die 4 "candidate merge/rebase state cannot be checked; rerun land"
+    mapfile -t candidate_states <<<"$state_paths"
     candidate_check
     if ((docs)); then
         others=$(git diff --no-renames --name-only "$base" "$candidate" |
@@ -628,18 +658,21 @@ Resolve them, run git rebase --continue, then land again."
     # Construct the amendment from the verified object, then compare-and-swap
     # its branch. A concurrent HEAD can never supply the tree being pushed.
     candidate_check
-    message=$(git log -1 --format=%B "$candidate" |
+    original_message=$(git log -1 --format=%B "$candidate")
+    message=$(printf '%s\n' "$original_message" |
         git interpret-trailers --if-exists replace \
             --trailer "Gate-Tree: $gated" --trailer "Gate-Result: $summary" \
             --trailer "Gate-Policy: $policy")
     commit=$candidate
-    if [[ $message != "$(git log -1 --format=%B "$candidate")" ]]; then
-        read -r -a parents <<<"$(git show -s --format=%P "$candidate")"
+    if [[ $message != "$original_message" ]]; then
+        metadata=$(git show -s --format='%P%n%an%n%ae%n%aI' "$candidate")
+        mapfile -t author_parent <<<"$metadata"
+        read -r -a parents <<<"${author_parent[0]}"
         parent_args=()
         for parent in "${parents[@]}"; do parent_args+=(-p "$parent"); done
-        commit=$(GIT_AUTHOR_NAME="$(git show -s --format=%an "$candidate")" \
-            GIT_AUTHOR_EMAIL="$(git show -s --format=%ae "$candidate")" \
-            GIT_AUTHOR_DATE="$(git show -s --format=%aI "$candidate")" \
+        commit=$(GIT_AUTHOR_NAME="${author_parent[1]}" \
+            GIT_AUTHOR_EMAIL="${author_parent[2]}" \
+            GIT_AUTHOR_DATE="${author_parent[3]}" \
             git commit-tree "$tree" "${parent_args[@]}" <<<"$message")
     fi
     [[ $(git rev-parse "$commit^{tree}") == "$tree" ]] || die 4 "amended tree differs; rerun land"
