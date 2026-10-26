@@ -236,6 +236,8 @@ config = json.loads((path / 'codex.json').read_text()) if (path / 'codex.json').
 if config.get('close_stdin'):
     call = json.loads(sys.stdin.readline())
     sys.stdin.close()
+    # CPython's standard stream leaves fd 0 open: close the RPC reader itself.
+    os.close(0)
     (path / 'codex.pid').write_text(str(os.getpid()))
     print(json.dumps({'id': call['id'], 'result': {}}), flush=True)
     time.sleep(60)
@@ -1012,7 +1014,7 @@ def subscription_failures(lab):
     assert 'Codex account/read returned an error' in result.stdout
     lab.codex(lab.alpha, {'close_stdin': True})
     result = lab.run('collect', STATUS_PROBE_TIMEOUT='1')
-    assert 'codex_usage:' in result.stdout
+    assert 'codex_usage: BrokenPipeError:' in result.stdout, result.stdout
     gone(lab.alpha.parent / 'codex.pid')
 
 
