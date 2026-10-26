@@ -972,18 +972,30 @@ def concurrent(lab):
 
 
 def weighted(lab):
-    # A landing's gate runs beside a build, first by its CPU weight: it
+    # A landing's gate runs beside builds, first by its CPU weight: it
     # neither pauses nor drains the builds, nor waits for the load to settle.
-    build = lab.start('build', duration=6)
-    wait_for(lambda: lab.event('build', 'payload_begin'), 'build running')
-    lab.done(lab.start('land-gate', land=True, duration=0.1))
-    lab.done(build)
-    assert lab.event('land-gate', 'payload_begin')['time_ns'] < lab.event('build', 'payload_end')['time_ns'], \
-        'the gate ran while the build did'
+    complete = lab.path / 'complete-weighted'
+    code = ('from pathlib import Path; import time\nwhile not Path(' + repr(str(complete)) +
+            ').exists(): time.sleep(.02)')
+    labels = ('build', 'land temper prebuild')
+    builds = [lab.start(label, code=code) for label in labels]
+    wait_for(lambda: all(lab.event(label, 'payload_begin') for label in labels), 'builds running')
+    gate = lab.start('land-gate', land=True, code=code)
+    wait_for(lambda: lab.event('land-gate', 'payload_begin'), 'gate running beside builds')
+    for label, score in [('land-gate', '0'), *((label, '500') for label in labels)]:
+        configured = lab.call(['systemctl', '--user', 'show', '--property=OOMScoreAdjust', '--value',
+                               lab.task(label)['unit']]).stdout.strip()
+        assert configured == score, (label, configured, score)
+    complete.touch()
+    lab.done(gate)
+    for label, build in zip(labels, builds):
+        lab.done(build)
+        assert lab.event('land-gate', 'payload_begin')['time_ns'] < lab.event(label, 'payload_end')['time_ns'], \
+            'the gate ran while the build did'
+        assert lab.event(label, 'admit')['weight'] == '1000', 'every build next, whatever its label'
     for name in ('pause_begin', 'drain_begin', 'settle_begin'):
         assert not lab.event('land-gate', name), name
     assert lab.event('land-gate', 'admit')['weight'] == '10000', 'a landing first'
-    assert lab.event('build', 'admit')['weight'] == '1000', "an agent's build next"
     # Landing gates run one at a time.
     first, second = lab.start('land-a', land=True, duration=1.0), lab.start('land-b', land=True, duration=0.1)
     lab.done(first)

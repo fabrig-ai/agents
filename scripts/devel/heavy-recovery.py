@@ -735,11 +735,13 @@ def check_gate_candidate(ledger, task):
     return valid
 
 
-def weight(lane, label):
+def weight(lane):
     chosen = os.environ.get('HEAVY_CLASS', '')
     if chosen in WEIGHTS:
         return WEIGHTS[chosen]
-    if lane == 'gate' or label.startswith('land '):
+    # Labels never raise a weight: a landing's prebuild beside a gate is
+    # still a build (decision 1210).
+    if lane == 'gate':
         return WEIGHTS['land']
     return WEIGHTS['build']
 
@@ -771,7 +773,7 @@ def submit(args, lane, tail_lines, exclusive):
         number = ledger.data['next_id']
         ledger.data['next_id'] = number + 1
         task = {'token': token, 'id': str(number), 'wrapper_unit': wrapper_unit(token), 'lane': lane,
-                'exclusive': exclusive, 'weight': weight(lane, label),
+                'exclusive': exclusive, 'weight': weight(lane),
                 'args': args, 'label': label,
                 'repo': str(Path.cwd()), 'tree': tree, 'commit': commit, 'policy': os.environ.get('SKEIN_GATE_POLICY_ID', 'gate-policy-unavailable') if lane == 'gate' else 'build-' + jobs,
                 'boot': boot(), 'queue': QUEUE, 'unit': PREFIX + '-' + token + '.service',
