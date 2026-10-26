@@ -73,27 +73,37 @@ whose future is open (section 9).
   - `run` sends the commits to the next pass;
   - `backlog` keeps them for later, and `qa backlog` lists them.
 
-  The latest decision on a commit wins, until a pass has taken it.
+  The latest decision on a commit wins, until a pass has taken it. A
+  decision after that chooses it again, for a pass that was capped or
+  failed: a commit's state is its latest event, decision or pass.
 
 ## 4. The pass
 
 - **The service, `qa watch`,** is a user unit on the machine the
-  director names, and checks every five minutes. It starts a pass when
-  all of these hold:
+  director names, by writing its own address in
+  `~/.config/agents-qa/director` there, as for after landing's runner.
+  It checks every five minutes, and at once when a pass ends: its loop
+  is the waiter of the mailbox `qa-watch`, where each pass's `codex-run`
+  posts its end. It starts a pass when all of these hold:
   - a slot is free: one, for now (the settings' `slots`);
   - commits chosen to run are in no pass;
-  - the newest `main` that after landing has cleared (`landings`,
-    [landing-flow.md](landing-flow.md) 4, step 8) holds the oldest of
-    those commits. A pass then spends no tokens finding again what the
-    tier already showed.
+  - the newest `main` that after landing has cleared holds the oldest
+    of those commits: `landings cleared REPO`, the newest run of the
+    repository's tier whose verdicts are all cleared
+    ([landing-flow.md](landing-flow.md) 4, step 8). Reds standing from
+    older landings don't hold it back. A pass then spends no tokens
+    finding again what the tier already showed.
 
   The pass takes every chosen commit that `main` holds, oldest first,
   up to the settings' `batch` (five, for now). The rest wait for the
-  next pass.
-- **Its checkout:** one worktree per repository on that machine, kept
-  with its target as after landing's are. The service checks it out,
-  detached, at the pass's `main`. The pass builds through `heavy` at
-  `HEAVY_CLASS=background`.
+  next pass. A pass covers one repository: chosen commits of several
+  make a pass each, in turn, the repository with the oldest decision
+  first.
+- **Its checkout:** one clone per repository on that machine,
+  `tmp/qa/repos/<repo>/`, kept with its target as after landing's are.
+  The service checks it out, detached, at the pass's `main`. The pass
+  builds through `heavy` at `HEAVY_CLASS=background`. The service
+  deletes a pass's scratch directory 7 days after it ends.
 - **The session:** Codex at `codex-run`'s defaults, started by
   `codex-run task` with a brief the service writes. The brief says to
   read `roles/qa.md`, and names the commits, the `main`, the worktree,
@@ -127,10 +137,15 @@ whose future is open (section 9).
 
 ## 5. The report
 
-`records/qa/passes/<pass>.md`, at most 8 KB. The service writes the
-front matter: repository, `main`, commits, machine, model, effort,
-started, ended, wall time, tokens, and the outcome (`done`, `capped`
-or `failed`). The pass writes the body:
+`records/qa/passes/<pass>.md`, at most 8 KB, `<pass>` its start and
+repository (`20261026-0915-temper`). The service writes the front
+matter: repository, `main`, commits, machine, model, effort, started,
+ended, wall time, tokens, and the outcome (`done`, `capped` or
+`failed`). It commits the file twice: at the pass's start, `running`,
+so that the pass shows in `qa passes` and its commits are taken
+wherever the record is read; and at its end, completed, with the body.
+The pass writes the body, in [roles/qa.md](../../roles/qa.md) 3's
+shape; past the cap, the service cuts it and says so:
 
 - **Cases:** for each commit, one line per case: what it tried, what it
   expected, what it saw, and `ok` or a finding's number.
@@ -180,17 +195,19 @@ takes a repository's name where it needs one.
 | `qa triage PASS N ROUTE [--why]` | routes one finding |
 | `qa watch` | runs the service (section 4) |
 
-The record is committed with `record commit`. Once the tool is built,
-these rows join [records.md](records.md) 3's table:
+The record is committed with `record commit`, and its rows are in
+[records.md](records.md) 3's table:
 
 | Path | Writer | Written | Holds |
 |---|---|---|---|
-| `qa/decisions.md` | the director, through `qa decide` | appended | one line per choice: `<time> <repo> <commit> run\|backlog <why>` |
-| `qa/passes/<pass>.md` | the pass, and `qa watch` for the front matter | once | the report (section 5) |
-| `qa/triage.md` | the triager, through `qa triage` | appended | one line per finding: `<time> <pass> <n> <route> <why>` |
+| `qa/decisions.md` | the director, through `qa decide` | appended | one item per choice: `- <time> <repo> <commit> run\|backlog <why>` |
+| `qa/passes/<pass>.md` | the pass, and `qa watch` for the front matter | at the pass's start and end | the report (section 5) |
+| `qa/triage.md` | the triager, through `qa triage` | appended | one item per finding: `- <time> <pass> <n> <route> <why>`, the route an owner's address, `backlog` or `drop` |
 
-The settings, in the kit's: the machine, `slots`, `batch`, the wall
-cap and the interval.
+Times are UTC to the second, commits full SHAs. The settings are the
+kit's: the machine, named as section 4 says, and `machine.env`'s
+`QA_SLOTS` (1), `QA_BATCH` (5), `QA_CAP_MINUTES` (120) and
+`QA_INTERVAL_SECONDS` (300).
 
 ## 8. When it runs
 
@@ -200,7 +217,8 @@ cap and the interval.
   `roles/README.md`.
 - `roles/qa.md`, the pass's role, is short: section 4's steps and
   section 5's report.
-- `setup` installs `qa watch` on the machine the director names.
+- `setup` installs `qa watch` on the machine the director names, as
+  the user unit `agents-qa-watch.service`.
 
 ## 9. Open
 
