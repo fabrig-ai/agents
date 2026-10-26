@@ -2,12 +2,14 @@
 """Offline status-page fixtures: every case has its own temporary directory,
 and fake ssh, claude, systemctl and record stand in for the machine's."""
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 
 SCRIPT = Path(__file__).resolve().with_name('status-page')
 PYTHON = sys.executable
@@ -29,7 +31,7 @@ def write(path, text, mode=None, mtime=None):
 
 
 def tool(bin_dir, name, body):
-    write(bin_dir / name, f'#!{PYTHON}\nimport json, os, subprocess, sys\nfrom pathlib import Path\n' + body,
+    write(bin_dir / name, f'#!{PYTHON}\nimport json, os, subprocess, sys, time\nfrom pathlib import Path\n' + body,
           mode=0o700)
 
 
@@ -104,6 +106,35 @@ def feed(path):
     write(path, ''.join(json.dumps(e) + '\n' for e in events))
 
 
+def claude_answer(index=1):
+    session = '3% used · resets Oct 26, 5:30am (UTC)' if index == 1 else '1% used · resets Oct 26, 6:30am (UTC)'
+    return {'auth': {'object': {'loggedIn': True, 'subscriptionType': 'max',
+                              'orgId': 'PRIVATE-ORG-1', 'orgName': 'PRIVATE-ORG-NAME', 'email': 'PRIVATE-EMAIL-1@x.y'}},
+            'usage': {'object': {'local_command': 'usage', 'num_turns': 0, 'total_cost_usd': 0,
+                                 'is_error': False, 'result': 'You are using a subscription\nCurrent session: ' + session
+                                 + f'\nCurrent week (all models): {24 if index == 1 else 84}% used · resets Oct 30, 7pm (UTC)'
+                                 + '\nCurrent week (Fable): 0% used · resets Oct 30, 7pm (UTC)'}}}
+
+
+def codex_answer(index=1):
+    bucket = {'limitId': 'codex', 'primary': {'usedPercent': 16, 'windowDurationMins': 300, 'resetsAt': NOW + 3600},
+              'secondary': {'usedPercent': 22, 'windowDurationMins': 10080, 'resetsAt': NOW + 86400}}
+    other = {'limitId': 'sol', 'limitName': 'GPT-6.1-Sol',
+             'primary': {'usedPercent': 12, 'windowDurationMins': 10080, 'resetsAt': NOW + 172800}}
+    return {'account': {'type': 'chatgpt', 'planType': 'promax', 'email': f'PRIVATE-EMAIL-{index+1}@x.y'},
+            'limits': {'accountId': f'PRIVATE-ACCOUNT-{index}', 'rateLimits': bucket,
+                       'rateLimitsByLimitId': {'sol': other, 'codex': bucket}}}
+
+
+def private_absent(*outputs):
+    for output in outputs:
+        assert 'PRIVATE-' not in output, 'private text escaped the probe'
+
+
+def calls(tmp, cli):
+    return [json.loads(line) for line in (tmp.parent / (cli + '.trace')).read_text().splitlines()]
+
+
 class Lab:
     def __init__(self, root):
         self.root = root
@@ -120,12 +151,66 @@ class Lab:
         self.machines = write(root / 'machines',
                               'alpha local\nbeta free@beta\n# a comment\ngamma free@gamma  # out of reach\n')
         feed(root / 'feed.jsonl')
+        for tmp, index in ((self.alpha, 1), (self.beta, 2)):
+            self.claude(tmp, claude_answer(index))
+            self.codex(tmp, codex_answer(index))
         tool(self.bin, 'claude', '''
+path = Path(os.environ['DEV_TMP']).parent
+with (path / 'claude.trace').open('a') as trace:
+    trace.write(json.dumps({'argv': sys.argv[1:], 'TZ': os.environ.get('TZ')}) + '\\n')
+config = json.loads((path / 'claude.json').read_text()) if (path / 'claude.json').exists() else {}
+if sys.argv[1] != 'agents':
+    key = 'auth' if sys.argv[1] == 'auth' else 'usage'
+    answer = config.get(key, {'object': {'loggedIn': False}})
+    time.sleep(answer.get('sleep', 0))
+    print(json.dumps(answer.get('object')))
+    sys.exit(answer.get('exit', 0))
 print(json.dumps([{"name": "o/alpha-m", "kind": "background", "state": "working", "status": "busy", "pid": 1,
                    "startedAt": 1},
                   {"name": "PRIVATE-PROMPT-TITLE", "kind": "interactive", "status": "idle", "pid": 2},
                   {"name": "PRIVATE-OLDER-TITLE", "kind": "claude", "status": "idle", "pid": 3},
                   {"name": "o/gone", "kind": "background", "state": "done"}]))
+''')
+        tool(self.bin, 'codex', '''
+import signal
+assert sys.argv[1:] == ['app-server'], sys.argv
+path = Path(os.environ['DEV_TMP']).parent
+config = json.loads((path / 'codex.json').read_text()) if (path / 'codex.json').exists() else {}
+if config.get('close_stdin'):
+    call = json.loads(sys.stdin.readline())
+    sys.stdin.close()
+    print(json.dumps({'id': call['id'], 'result': {}}), flush=True)
+    (path / 'codex.pid').write_text(str(os.getpid()))
+    time.sleep(60)
+for line in sys.stdin:
+    call = json.loads(line)
+    with (path / 'codex.trace').open('a') as trace:
+        trace.write(json.dumps(call) + '\\n')
+    if call['method'] == 'initialized':
+        continue
+    if config.get('hang') == call['method']:
+        if config.get('ignore_term'):
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            signal.signal(signal.SIGCHLD, signal.SIG_IGN)
+            helper = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])
+            (path / 'codex.helper').write_text(str(helper.pid))
+        (path / 'codex.pid').write_text(str(os.getpid()))
+        time.sleep(60)
+    print(json.dumps({'method': 'fixture/notification'}), flush=True)
+    if 'non_object' in config:
+        print(json.dumps(config['non_object']), flush=True)
+        continue
+    if call['method'] == 'initialize':
+        answer = {}
+    elif call['method'] == 'account/read':
+        answer = {'account': config.get('account')}
+    else:
+        assert call['method'] == 'account/rateLimits/read', call
+        answer = config.get('limits', {})
+    response = {'id': call['id'], 'result': answer}
+    if config.get('error') == call['method']:
+        response = {'id': call['id'], 'error': {'message': 'PRIVATE-ERROR'}}
+    print(json.dumps(response), flush=True)
 ''')
         tool(self.bin, 'systemctl', '''
 with open(os.environ['FIXTURE_TRACE'] + '/systemctl', 'a') as out:
@@ -159,8 +244,22 @@ sys.exit(subprocess.run([sys.executable, '-I', '-', 'collect'], env=env, input=s
                         STATUS_FEED=str(root / 'no-feed'), STATUS_NOW=str(NOW), FIXTURE_TRACE=str(self.trace),
                         FIXTURE_BETA=str(self.beta), XDG_CONFIG_HOME=str(root / 'config'))
 
-    def run(self, *args, status=0, **env):
-        result = subprocess.run([PYTHON, '-I', str(SCRIPT), *args], cwd=self.root, env=dict(self.env, **env),
+    def claude(self, tmp, answer):
+        write(tmp.parent / 'claude.json', json.dumps(answer))
+
+    def codex(self, tmp, answer):
+        write(tmp.parent / 'codex.json', json.dumps(answer))
+
+    def run(self, *args, status=0, disk_unavailable=False, **env):
+        command = [PYTHON, '-I', str(SCRIPT), *args]
+        if disk_unavailable:
+            # Leave a valid cwd for the CLIs, while keeping this case's
+            # original unavailable-machine-source failure independent of them.
+            code = ("import runpy, sys; from unittest.mock import patch; "
+                    "mock = patch('shutil.disk_usage', side_effect=OSError('fixture disk unavailable')); "
+                    "mock.start(); runpy.run_path(sys.argv.pop(1), run_name='__main__')")
+            command = [PYTHON, '-I', '-c', code, str(SCRIPT), *args]
+        result = subprocess.run(command, cwd=self.root, env=dict(self.env, **env),
                                 stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
         assert result.returncode == status, (result.returncode, result.stdout, result.stderr)
         return result
@@ -193,10 +292,12 @@ def collect(lab):
 
 def collect_missing(lab):
     """A machine with none of the tools' files still answers, naming what it could not read."""
-    data = json.loads(lab.run('collect', DEV_TMP=str(lab.root / 'empty')).stdout)
+    (lab.root / 'empty').mkdir()
+    data = json.loads(lab.run('collect', DEV_TMP=str(lab.root / 'empty'), disk_unavailable=True).stdout)
     failed = sorted(e.split(':')[0] for e in data['errors'])
     assert failed == ['heavy', 'machine', 'mail', 'rows'], data['errors']
     assert data['codex'] == {'running': [], 'ended': [], 'owners': []}, data['codex']
+    assert data['claude_usage']['state'] == data['codex_usage']['state'] == 'signed-out'
 
 
 def page(lab):
@@ -307,12 +408,134 @@ def write_failure(lab):
     assert [p.name for p in www.iterdir()] == ['index.html'], list(www.iterdir())
 
 
-CASES = [collect, collect_missing, page, page_degraded, bad_data, write_failure, install]
+def collect_subscriptions(lab):
+    answer = claude_answer(); answer['auth']['exit'] = 1; lab.claude(lab.alpha, answer)
+    result = lab.run('collect')
+    data = json.loads(result.stdout)
+    assert data['errors'] == [], data['errors']
+    expected_label = lambda cli, identity, email: hashlib.sha256('\0'.join((cli, identity, email)).encode()).hexdigest()[:8]
+    claude = data['claude_usage']
+    assert (claude['state'], claude['plan'], claude['label']) == (
+        'subscribed', 'max', expected_label('claude', 'PRIVATE-ORG-1', 'PRIVATE-EMAIL-1@x.y')), claude
+    assert claude['limits'] == [
+        {'name': 'session', 'used': 3, 'resets': datetime(2026, 10, 26, 5, 30, tzinfo=timezone.utc).timestamp()},
+        {'name': 'week (all models)', 'used': 24, 'resets': datetime(2026, 10, 30, 19, tzinfo=timezone.utc).timestamp()},
+        {'name': 'week (Fable)', 'used': 0, 'resets': datetime(2026, 10, 30, 19, tzinfo=timezone.utc).timestamp()}], claude
+    codex = data['codex_usage']
+    assert (codex['state'], codex['plan'], codex['label']) == (
+        'subscribed', 'promax', expected_label('codex', 'PRIVATE-ACCOUNT-1', 'PRIVATE-EMAIL-2@x.y')), codex
+    assert codex['limits'] == [{'name': '5 h', 'used': 16, 'resets': NOW + 3600},
+                               {'name': 'week', 'used': 22, 'resets': NOW + 86400},
+                               {'name': 'GPT-6.1-Sol week', 'used': 12, 'resets': NOW + 172800}], codex
+    assert calls(lab.alpha, 'codex') == [
+        {'id': 1, 'method': 'initialize', 'params': {'clientInfo': {'name': 'status-page', 'version': '1'}}},
+        {'method': 'initialized'}, {'id': 2, 'method': 'account/read', 'params': {}},
+        {'id': 3, 'method': 'account/rateLimits/read', 'params': {'excludeResetCreditDetails': True}}]
+    trace = calls(lab.alpha, 'claude')
+    assert [c['argv'] for c in trace] == [['agents', '--json', '--all'], ['auth', 'status', '--json'],
+        ['-p', '/usage', '--output-format', 'json', '--no-session-persistence', '--strict-mcp-config',
+         '--tools', '', '--model', 'haiku']], trace
+    assert all(c['TZ'] == 'UTC' for c in trace[1:]), trace
+    private_absent(result.stdout, result.stderr)
+
+
+def subscription_page(lab, **env):
+    out, snapshot = lab.root / 'page.html', lab.root / 'data.json'
+    result = lab.run('--no-pull', '--out', str(out), '--json', str(snapshot), **env)
+    private_absent(out.read_text(), snapshot.read_text(), result.stderr)
+    return out.read_text(), json.loads(snapshot.read_text())
+
+
+def page_subscriptions(lab):
+    page, data = subscription_page(lab)
+    section = page[page.index('<h2>Subscriptions'):page.index('<h2>In flight')]
+    assert section.count('Claude · max') == 1 and section.count('Codex · promax') == 2, section
+    assert 'alpha, beta' in section and 'gamma' not in section, section
+    assert '84%' in section and '24%' not in section and '1%' in section and '3%' not in section, section
+    assert '10-26 06:30Z' in section and '10-26 05:30Z' not in section, section
+    assert '<div class="label">Subscriptions</div><div class="value">3</div>' in page
+    assert 'highest 84% · Claude week (all models)' in page
+    assert 'class="meter warning" role="img" aria-label="84% used"' in section
+    assert 'in 1 h 0 min · 10-25 13:00Z' in section
+    assert data['fleet']['gamma'].get('unreachable')
+
+
+def subscriptions_signed_out(lab):
+    lab.claude(lab.beta, {'auth': {'object': {'loggedIn': False}, 'exit': 1}})
+    lab.codex(lab.beta, {'account': {'type': 'apiKey'}})
+    alpha = claude_answer(); del alpha['auth']['object']['orgId']; lab.claude(lab.alpha, alpha)
+    page, data = subscription_page(lab)
+    for needle in ('Claude · max · unidentified', 'Claude: signed out on beta', 'Codex: no subscription on beta',
+                   ', 1 signed out'):
+        assert needle in page, needle
+    assert 'alpha, beta' not in page[page.index('<h2>Subscriptions'):page.index('<h2>In flight')]
+    assert [c['argv'][0] for c in calls(lab.beta, 'claude')] == ['agents', 'auth']
+    assert [c['method'] for c in calls(lab.beta, 'codex')] == ['initialize', 'initialized', 'account/read']
+    assert 'claude_usage' not in page and 'codex_usage' not in page
+    assert data['fleet']['beta']['claude_usage']['state'] == 'signed-out'
+
+
+def subscription_failures(lab):
+    answer = claude_answer(); answer['usage']['object'].update(num_turns=1, total_cost_usd=.02)
+    lab.claude(lab.alpha, answer)
+    lab.codex(lab.beta, {'hang': 'initialize', 'ignore_term': True})
+    start = time.monotonic()
+    page, data = subscription_page(lab, STATUS_PROBE_TIMEOUT='1')
+    assert time.monotonic() - start < 9
+    for needle in ('/usage was answered by a model', 'beta: codex_usage:', 'land temper', '<h3>alpha '):
+        assert needle in page, needle
+    def gone(path):
+        try:
+            os.kill(int(path.read_text()), 0)
+        except ProcessLookupError:
+            return
+        raise AssertionError('probe process survived: ' + path.name)
+
+    gone(lab.beta.parent / 'codex.pid')
+    gone(lab.beta.parent / 'codex.helper')
+    answer = claude_answer(); answer['usage']['object']['result'] = 'No limits here'
+    lab.claude(lab.alpha, answer); lab.codex(lab.alpha, {'non_object': []})
+    result = lab.run('collect'); data = json.loads(result.stdout)
+    assert [e.split(':')[0] for e in data['errors']] == ['claude_usage', 'codex_usage'], data['errors']
+    assert 'no Current limit line' in data['errors'][0] and 'no JSON object' in data['errors'][1]
+    assert 'sessions' in data and 'heavy' in data
+    # RPC error details may contain account text; only a fixed description escapes.
+    lab.codex(lab.alpha, {'error': 'account/read'})
+    result = lab.run('collect'); private_absent(result.stdout, result.stderr)
+    assert 'Codex account/read returned an error' in result.stdout
+    lab.codex(lab.alpha, {'close_stdin': True})
+    result = lab.run('collect', STATUS_PROBE_TIMEOUT='1')
+    assert 'codex_usage:' in result.stdout
+    gone(lab.alpha.parent / 'codex.pid')
+
+
+def claude_resets(lab):
+    answer = claude_answer()
+    forms = ['Jan 2, 7pm (UTC)', '9pm', '7:30pm', '6:30pm (UTC)', 'Oct 26, 5:30am', 'soon', '9pm (CET)']
+    answer['usage']['object']['result'] = '\n'.join(f'Current limit {i}: {i}% used · resets {form}'
+                                                           for i, form in enumerate(forms))
+    lab.claude(lab.alpha, answer)
+    now = datetime(2026, 12, 31, 20, tzinfo=timezone.utc).timestamp()
+    data = json.loads(lab.run('collect', STATUS_NOW=str(now)).stdout)
+    expected = [(2027, 1, 2, 19, 0), (2026, 12, 31, 21, 0), (2026, 12, 31, 19, 30),
+                (2027, 1, 1, 18, 30), (2027, 10, 26, 5, 30)]
+    assert data['errors'] == [], data['errors']
+    assert [v['resets'] for v in data['claude_usage']['limits']] == [
+        datetime(*parts, tzinfo=timezone.utc).timestamp() for parts in expected] + [None, None], data
+    assert [v['used'] for v in data['claude_usage']['limits']] == list(range(7))
+
+
+CASES = [collect_subscriptions, page_subscriptions, subscriptions_signed_out, subscription_failures, claude_resets, collect, collect_missing, page, page_degraded, bad_data, write_failure, install]
 
 
 def main():
+    selected = sys.argv[1:] or [case.__name__ for case in CASES]
+    unknown = set(selected) - {case.__name__ for case in CASES}
+    if unknown:
+        print('Unknown cases: ' + ', '.join(sorted(unknown)), file=sys.stderr)
+        return 2
     failed = 0
-    for case in CASES:
+    for case in (case for case in CASES if case.__name__ in selected):
         with tempfile.TemporaryDirectory() as directory:
             try:
                 case(Lab(Path(directory)))

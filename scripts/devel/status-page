@@ -8,13 +8,15 @@ status-page install --out FILE
 """
 import argparse
 import concurrent.futures
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+import hashlib
 import html
 import json
 import math
 import os
 from pathlib import Path
 import re
+import selectors
 import shutil
 import signal
 import socket
@@ -22,6 +24,7 @@ import statistics
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import traceback
 
@@ -297,7 +300,7 @@ def part_mail(tmp, now):
 
 
 def part_sessions(tmp, now):
-    claude = shutil.which('claude') or str(Path.home() / '.local/bin/claude')
+    claude = claude_cli() or str(Path.home() / '.local/bin/claude')
     result = subprocess.run([claude, 'agents', '--json', '--all'], stdin=subprocess.DEVNULL,
                             capture_output=True, text=True, timeout=30)
     if result.returncode:
@@ -324,18 +327,251 @@ def part_feed(tmp, now):
     return jsonlines(Path(os.environ.get('STATUS_FEED', FEED)), last=5000)
 
 
+def probe_timeout():
+    return float(os.environ.get('STATUS_PROBE_TIMEOUT') or 30)
+
+
+def label(cli, account, email):
+    """No account text leaves the machine, even in an error."""
+    if not isinstance(account, str) or not isinstance(email, str):
+        return ''
+    return hashlib.sha256('\0'.join((cli, account, email)).encode()).hexdigest()[:8]
+
+
+def plan(value):
+    return value if re.fullmatch(r'[a-z0-9_]{1,40}', text(value)) else ''
+
+
+def usage(state, plan_word='', identity='', limits=None):
+    return {'state': state, 'plan': plan(plan_word), 'label': identity, 'limits': limits or []}
+
+
+def claude_cli():
+    found = shutil.which('claude')
+    fallback = Path.home() / '.local/bin/claude'
+    return found or (str(fallback) if fallback.is_file() and os.access(fallback, os.X_OK) else None)
+
+
+def claude_reset(value, now):
+    # Month words are English regardless of the machine's locale.
+    match = re.fullmatch(r'(?:(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) ([0-9]{1,2}), )?'
+                         r'([0-9]{1,2})(?::([0-9]{2}))?(am|pm)(?: \(UTC\))?', value)
+    if not match:
+        return None
+    month, day, hour, minute, half = match.groups()
+    hour, minute = int(hour), int(minute or 0)
+    if not 1 <= hour <= 12 or minute > 59:
+        return None
+    hour = hour % 12 + (12 if half == 'pm' else 0)
+    today = datetime.fromtimestamp(now, timezone.utc)
+    threshold = now - HOUR
+    if month:
+        month = 'Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec'.split().index(month) + 1
+        for year in range(today.year, today.year + 9):
+            try:
+                candidate = datetime(year, month, int(day), hour, minute, tzinfo=timezone.utc).timestamp()
+            except ValueError:
+                continue
+            if candidate >= threshold:
+                return candidate
+        return None
+    candidate = today.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if candidate.timestamp() < threshold:
+        candidate += timedelta(days=1)
+    return candidate.timestamp()
+
+
+def part_claude_usage(tmp, now):
+    """What Claude Code is signed in to here, and each limit's use."""
+    cli = claude_cli()
+    if not cli:
+        return usage('absent')
+
+    def ask(args):
+        result = subprocess.run([cli, *args], stdin=subprocess.DEVNULL, cwd=tmp,
+                                capture_output=True, text=True, timeout=probe_timeout(),
+                                env=dict(os.environ, TZ='UTC'))
+        try:
+            answer = json.loads(result.stdout)
+        except ValueError:
+            raise ValueError('Claude answered invalid JSON') from None
+        if not isinstance(answer, dict):
+            raise ValueError('Claude answered no JSON object')
+        return result.returncode, answer
+
+    code, auth = ask(['auth', 'status', '--json'])
+    if not isinstance(auth.get('loggedIn'), bool):
+        raise ValueError('Claude auth lacks loggedIn')
+    if not auth['loggedIn']:
+        return usage('signed-out')
+    if not isinstance(auth.get('subscriptionType'), str):
+        return usage('no-subscription')
+    code, answer = ask(['-p', '/usage', '--output-format', 'json', '--no-session-persistence',
+                        '--strict-mcp-config', '--tools', '', '--model', 'haiku'])
+    if (answer.get('local_command') != 'usage' or number(answer.get('num_turns')) != 0
+            or number(answer.get('total_cost_usd')) != 0):
+        raise ValueError('/usage was answered by a model')
+    if code or answer.get('is_error'):
+        raise ValueError('Claude /usage failed')
+    limits = []
+    for line in text(answer.get('result')).splitlines():
+        match = re.fullmatch(r'Current ([A-Za-z0-9 ()\[\]]{1,40}): ([0-9]+(?:\.[0-9]+)?)% used'
+                             r'(?: · resets (.*))?', line)
+        if match:
+            name, used, reset = match.groups()
+            limits.append({'name': name,
+                           'used': number(float(used)), 'resets': claude_reset(reset, now) if reset else None})
+    if not limits:
+        raise ValueError('Claude /usage has no Current limit line')
+    return usage('subscribed', auth['subscriptionType'], label('claude', auth.get('orgId'), auth.get('email')), limits)
+
+
+def codex_limits(answer):
+    buckets = part(answer, 'rateLimitsByLimitId')
+    buckets = [buckets[k] for k in sorted(buckets)] if buckets else [part(answer, 'rateLimits')]
+    limits = []
+    for bucket in buckets:
+        if not isinstance(bucket, dict):
+            continue
+        prefix = ''
+        if bucket.get('limitId') != 'codex':
+            name = text(bucket.get('limitName')) or text(bucket.get('limitId'))
+            prefix = (name if re.fullmatch(r'[A-Za-z0-9 ._()\-]{1,40}', name) else '?') + ' '
+        for field in ('primary', 'secondary'):
+            window = bucket.get(field)
+            if not isinstance(window, dict):
+                continue
+            minutes = number(window.get('windowDurationMins'))
+            name = '?'
+            if minutes is not None and minutes > 0 and minutes == int(minutes):
+                minutes = int(minutes)
+                name = ('week' if minutes == 10080 else f'{minutes // 1440} d' if minutes % 1440 == 0
+                        else f'{minutes // 60} h' if minutes % 60 == 0 else f'{minutes} min')
+            limits.append({'name': prefix + name, 'used': number(window.get('usedPercent')),
+                           'resets': number(window.get('resetsAt'))})
+    return limits
+
+
+def end_probe(process):
+    # The server can exit before its helpers: always address the whole group.
+    try:
+        process.stdin.close()
+    except OSError:
+        pass  # A closed reader must not prevent reaping the process group.
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    deadline = time.monotonic() + 5
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        pass
+    while time.monotonic() < deadline:
+        try:
+            os.killpg(process.pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(.02)
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    process.wait()
+    process.stdout.close()
+
+
+def part_codex_usage(tmp, now):
+    """One read-only RPC exchange, with a deadline covering all answers."""
+    cli = shutil.which('codex')
+    if not cli:
+        return usage('absent')
+    deadline = time.monotonic() + probe_timeout()
+    process = subprocess.Popen([cli, 'app-server'], cwd=tmp, start_new_session=True,
+                               stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    buffer = b''
+    try:
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stdout, selectors.EVENT_READ)
+
+            def send(message):
+                process.stdin.write((json.dumps(message) + '\n').encode())
+                process.stdin.flush()
+
+            def ask(identity, method, params):
+                nonlocal buffer
+                send({'id': identity, 'method': method, 'params': params})
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError('Codex app-server timed out')
+                    if b'\n' not in buffer:
+                        if not selector.select(remaining):
+                            raise TimeoutError('Codex app-server timed out')
+                        chunk = os.read(process.stdout.fileno(), 65536)
+                        if not chunk:
+                            raise ValueError('Codex app-server closed before answering')
+                        buffer += chunk
+                        continue
+                    line, buffer = buffer.split(b'\n', 1)
+                    try:
+                        answer = json.loads(line)
+                    except ValueError:
+                        raise ValueError('Codex app-server answered invalid JSON') from None
+                    if not isinstance(answer, dict):
+                        raise ValueError('Codex app-server answered no JSON object')
+                    if 'id' not in answer:
+                        continue
+                    if answer['id'] != identity:
+                        raise ValueError('Codex app-server answered an unexpected id')
+                    if 'error' in answer:
+                        raise ValueError(f'Codex {method} returned an error')
+                    if not isinstance(answer.get('result'), dict):
+                        raise ValueError(f'Codex {method} answered no result object')
+                    return answer['result']
+
+            ask(1, 'initialize', {'clientInfo': {'name': 'status-page', 'version': '1'}})
+            send({'method': 'initialized'})
+            account = ask(2, 'account/read', {}).get('account')
+            if account is None:
+                return usage('signed-out')
+            if not isinstance(account, dict):
+                raise ValueError('Codex account is no object')
+            if account.get('type') != 'chatgpt':
+                return usage('no-subscription')
+            answer = ask(3, 'account/rateLimits/read', {'excludeResetCreditDetails': True})
+            return usage('subscribed', account.get('planType'),
+                         label('codex', answer.get('accountId'), account.get('email')), codex_limits(answer))
+    finally:
+        end_probe(process)
+
+
 PARTS = [('machine', part_machine), ('heavy', part_heavy), ('rows', part_rows),
-         ('turns', part_turns), ('codex', part_codex), ('mail', part_mail), ('sessions', part_sessions), ('feed', part_feed)]
+         ('turns', part_turns), ('codex', part_codex), ('mail', part_mail), ('sessions', part_sessions),
+         ('feed', part_feed), ('claude_usage', part_claude_usage), ('codex_usage', part_codex_usage)]
 
 
 def collect():
     tmp, now = tmp_dir(), clock()
     data = {'host': socket.gethostname(), 'time': now, 'errors': []}
-    for name, part in PARTS:
+    sessions_read = threading.Event()
+
+    def read(name, build):
+        if name == 'claude_usage':
+            sessions_read.wait()
         try:
-            data[name] = part(tmp, now)
-        except Exception as error:  # One source's failure leaves the others.
-            data['errors'].append(f'{name}: {type(error).__name__}: {error}')
+            return build(tmp, now)
+        finally:
+            if name == 'sessions':
+                sessions_read.set()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(PARTS)) as pool:
+        futures = [(name, pool.submit(read, name, build)) for name, build in PARTS]
+        for name, future in futures:
+            try:
+                data[name] = future.result()
+            except Exception as error:  # One source's failure leaves the others.
+                data['errors'].append(f'{name}: {type(error).__name__}: {error}')
     return data
 
 
@@ -499,6 +735,13 @@ def utc(moment, form='%m-%d %H:%MZ'):
     return datetime.fromtimestamp(moment, timezone.utc).strftime(form) if moment else '–'
 
 
+def resets(moment, now):
+    if moment is None:
+        return '–'
+    seconds = max(0, moment - now)
+    return f'in {int(seconds // HOUR)} h {int(seconds % HOUR // 60)} min · {utc(moment)}'
+
+
 def size(value):
     return '–' if value is None else f'{value / 1024 ** 3:.0f} GB'
 
@@ -613,6 +856,8 @@ class Fleet:
         self.feed_seen = any(d.get('feed') is not None for d in self.up.values())
         self.runs = set_runs(self.feed)
         self.turns = [(n, *t) for n, d in self.up.items() for t in records_of(d, ['turns', 'done'], 4, (0,))]
+        self.usage = [(n, cli, subscription_data(d.get(cli + '_usage')))
+                      for cli in ('claude', 'codex') for n, d in sorted(self.up.items())]
         self.codex = [(n, *r) for n, d in self.up.items() for r in records_of(d, ['codex', 'ended'], 7, (0, 1))]
 
     def tasks(self):
@@ -623,7 +868,74 @@ class Fleet:
         return [r for r in self.rows if r[1] >= since]
 
 
-def kpis(fleet, shown):
+def subscription_data(raw):
+    raw = shaped(raw, {})
+    limits = []
+    for limit in shaped(raw.get('limits'), []):
+        if isinstance(limit, dict) and text(limit.get('name')):
+            limits.append({'name': limit['name'], 'used': number(limit.get('used')),
+                           'resets': number(limit.get('resets'))})
+    identity = text(raw.get('label'))
+    return {'state': text(raw.get('state')), 'plan': text(raw.get('plan')),
+            'label': identity if re.fullmatch('[0-9a-f]{8}', identity) else '', 'limits': limits}
+
+
+def subscriptions(fleet):
+    """Each distinct subscription's limits, then machines with none."""
+    merged, notes = {}, {}
+    for host, cli, probe in fleet.usage:
+        if probe['state'] in ('signed-out', 'no-subscription'):
+            notes.setdefault((cli, probe['state']), []).append(host)
+        if probe['state'] != 'subscribed':
+            continue
+        identity = probe['label']
+        group = merged.setdefault((cli, identity, '' if identity else host),
+                                  {'machines': [], 'plans': set(), 'limits': {}})
+        group['machines'].append(host)
+        if probe['plan']:
+            group['plans'].add(probe['plan'])
+        for limit in probe['limits']:
+            previous = group['limits'].get(limit['name'])
+            rank = lambda v: (v['resets'] if v['resets'] is not None else -math.inf,
+                              v['used'] if v['used'] is not None else -math.inf)
+            if previous is None or rank(limit) > rank(previous):
+                group['limits'][limit['name']] = limit
+    rows, highest = [], None
+    cli_name = {'claude': 'Claude', 'codex': 'Codex'}
+    order = lambda key: (key[0] != 'claude', not bool(key[1]), key[1], key[2])
+    for key in sorted(merged, key=order):
+        cli, identity, _ = key
+        group = merged[key]
+        title = E(cli_name[cli])
+        if group['plans']:
+            title += ' · ' + E(', '.join(sorted(group['plans'])))
+        title += f' · <code>{E(identity)}</code>' if identity else ' · unidentified'
+        for i, limit in enumerate(list(group['limits'].values()) or [dict(name='–', used=None, resets=None)]):
+            used = limit['used']
+            meter = '–'
+            if used is not None:
+                tone = 'critical' if used >= 95 else 'warning' if used >= 80 else 'info'
+                meter = (f'<span class="meter {tone}" role="img" aria-label="{used:g}% used">'
+                         f'<i style="width:{max(0, min(100, used)):g}%"></i></span> {used:g}%')
+                if highest is None or used > highest[0]:
+                    highest = (used, f'{cli_name[cli]} {limit["name"]}')
+            rows.append([title if i == 0 else '', E(', '.join(sorted(group['machines']))) if i == 0 else '',
+                         E(limit['name']), meter, E(resets(limit['resets'], fleet.now))])
+    out = table(['Subscription', 'Machines', 'Limit', 'Used', 'Resets'], rows, numeric_from=3,
+                empty='No subscriptions found.')
+    for cli in ('claude', 'codex'):
+        for state, word in (('signed-out', 'signed out'), ('no-subscription', 'no subscription')):
+            hosts = notes.get((cli, state), [])
+            if hosts:
+                out += f'<p class="muted">{cli_name[cli]}: {word} on {E(", ".join(sorted(hosts)))}</p>'
+    sub = f'highest {highest[0]:g}% · {highest[1]}' if highest else 'no limits reported'
+    signed_out = sum(len(hosts) for (_, state), hosts in notes.items() if state == 'signed-out')
+    if signed_out:
+        sub += f', {signed_out} signed out'
+    return {'count': len(merged), 'sub': sub}, out
+
+
+def kpis(fleet, shown, subscribed):
     now = fleet.now
     tasks = fleet.tasks()
     running = sum(t['state'] in RUNNING for _, t in tasks)
@@ -647,6 +959,8 @@ def kpis(fleet, shown):
         ('Commands, 24 h', f'{len(day):,}', f'{hours(sum(r[4] for r in day))} running, '
                                             f'{hours(sum(r[3] for r in day))} waiting'),
         ('Land gates, 24 h', str(len(lands)), f'{sum(r[5] != "0" for r in lands)} failed'),
+        ('Subscriptions', str(subscribed['count']), subscribed['sub']) if subscribed
+        else ('Subscriptions', '–', 'not shown'),
     ]
     return '<div class="tiles">' + ''.join(
         f'<div class="tile"><div class="label">{E(a)}</div><div class="value">{E(b)}</div>'
@@ -1054,6 +1368,9 @@ border:1px solid var(--ring);border-radius:999px;padding:0 8px 0 6px;line-height
 .badge i{width:8px;height:8px;border-radius:50%;background:var(--neutral)}
 .badge.good i{background:var(--good)}.badge.warning i{background:var(--warning)}
 .badge.critical i{background:var(--critical)}.badge.info i{background:var(--info)}
+.meter{display:inline-block;width:80px;height:8px;background:var(--grid);border-radius:4px;overflow:hidden}
+.meter i{display:block;height:100%;background:var(--info)}
+.meter.warning i{background:var(--warning)}.meter.critical i{background:var(--critical)}
 .windows{display:flex;gap:6px;margin:6px 0 4px}
 .windows button{font:inherit;color:var(--ink);background:var(--surface);border:1px solid var(--ring);
 border-radius:999px;padding:3px 12px;cursor:pointer}
@@ -1130,6 +1447,8 @@ def render(data):
 
     shown = guard('missions', missions, fleet)
     shown, mission_table = shown if isinstance(shown, tuple) else (None, shown)
+    subscribed = guard('subscriptions', subscriptions, fleet)
+    subscribed, subscription_table = subscribed if isinstance(subscribed, tuple) else (None, subscribed)
     reached = len(fleet.up)
     down = [n for n in fleet.names if n not in fleet.up]
     problems += [f'{n}: {fleet.data["fleet"][n]["unreachable"]}' for n in down if n in fleet.data['fleet']]
@@ -1184,7 +1503,10 @@ landed or stopped.</p>
 <header><h1>Fabrig status</h1>
 <span class="meta">Written {E(utc(now, "%Y-%m-%d %H:%M UTC"))}, every 10 minutes ·
 {reached} of {len(fleet.names)} machines reached{(" · down: " + E(", ".join(down))) if down else ""}</span></header>
-{guard("tiles", kpis, fleet, shown)}
+{guard("tiles", kpis, fleet, shown, subscribed)}
+<h2>Subscriptions</h2>
+<p class="muted">Distinct Claude and Codex subscriptions across the reached machines, with their current limits.</p>
+<div class="panel">{subscription_table}</div>
 <h2>In flight</h2>
 <h3>Landing now</h3>
 <div class="panel">{guard("landing now", landing_now, fleet)}</div>
@@ -1205,7 +1527,7 @@ commands in the last 24 hours. Last activity is its last command, run or owner t
 <footer>
 <p>Written by agents’ <code>scripts/devel/status-page</code> from what the tools already keep: heavy’s
 <code>heavy.tsv</code> and ledger, the landings feed, the landing turns, <code>codex-run</code>’s runs, post’s
-mailboxes, Claude’s sessions and the missions’ front matter in the records repository
+mailboxes, Claude Code’s sessions and subscription, Codex CLI’s subscription and the missions’ front matter in the records repository
 (docs/design/status-page.md). Times are UTC; p90 is the
 nearest rank.</p>
 {('<p>Not read this time:</p><ul>' + "".join(f"<li>{E(short(p, 300))}</li>" for p in problems) + '</ul>') if problems else ''}
