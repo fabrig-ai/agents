@@ -683,7 +683,9 @@ def relative_worktree(cwd, tmp):
 
 
 def markdown_groups(ss, rows, runs, who, tmp):
-    runs = [r for r in runs if r['who'] == who]
+    def selected(attribution):
+        return attribution[0] == who[0] and (who[1] is None or attribution[1] == who[1])
+    runs = [r for r in runs if selected(r['who'])]
     counts, times, flags = {}, {}, {}
     for run in runs:
         for key, count in run['kinds'].items():
@@ -706,7 +708,7 @@ def markdown_groups(ss, rows, runs, who, tmp):
     summary += '.'
     grouped = {}
     for session in ss:
-        if session['who'] == who:
+        if selected(session['who']):
             grouped.setdefault((session['kind'], session['model'], session['effort']), []).append(session)
     session_rows = []
     for key, group in grouped.items():
@@ -730,7 +732,7 @@ def markdown_groups(ss, rows, runs, who, tmp):
         ('Sessions', ['kind', 'model', 'effort', 'sessions', 'wall (h:mm)', 'in (M)', 'cached (%)', 'out (k)'], session_rows),
         ('Implementer runs', ['run', 'commands', 'ran (min)', 'waited (min)', 'focused', 'package', 'workspace', 'clippy', 'check.sh', 'other', 'repeats', 'flags'], run_rows),
         ('Landings', ['worktree', 'gate (m:ss)', 'result', 'queue wait (m:ss)'],
-         [(r['run'], [relative_worktree(r['cwd'], tmp), clock_time(r['run']), r['code'], clock_time(r['wait'])]) for r in rows if r['who'] == who and r['lane'] == 'gate'])]
+         [(r['run'], [relative_worktree(r['cwd'], tmp), clock_time(r['run']), r['code'], clock_time(r['wait'])]) for r in rows if selected(r['who']) and r['lane'] == 'gate'])]
 
 
 def table(headers, rows):
@@ -751,7 +753,8 @@ def runs(root, tmp, args):
         return 0
     need(args.mission and re.fullmatch(NAME, args.mission), 'runs needs a mission or --all')
     need(not args.number or re.fullmatch('[1-9][0-9]*', args.number), 'invalid milestone')
-    who = args.mission, args.number or ''
+    # No number selects the whole mission, including legacy milestone attributions.
+    who = args.mission, args.number
     name = f'missions/{args.mission}/' + (f'm{args.number}.md' if args.number else 'README.md')
     path = safe(root, name)
     text = path.read_text()

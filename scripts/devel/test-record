@@ -542,6 +542,53 @@ def setup(lab):
     assert result.returncode == 0 and (records / 'uncommitted').read_text() == 'keep'
 
 
+def mission_runs(lab):
+    # No milestone directory: owner() attributes this modern layout to 1.
+    lab.put('missions/current/README.md', front().replace('department: unknown\n', ''))
+    cwd = str(lab.tmp / 'owners/current/wt/task')
+    Path(cwd).mkdir(parents=True)
+    def rollout(cwd, sid):
+        path = lab.home / f'.codex/sessions/date/rollout-{sid}.jsonl'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        rows = [dict(type='session_meta', payload=dict(cwd=cwd, id=sid, timestamp='2026-10-26T00:00:00Z')),
+                dict(type='turn_context', timestamp='2026-10-26T00:00:01Z', payload=dict(model='fixture-model', effort='high')),
+                dict(type='event_msg', timestamp='2026-10-26T00:02:00Z', payload=dict(type='agent_message'))]
+        path.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+    rollout(cwd, 'current')
+    log = lab.tmp / 'logs/heavy.tsv'
+    log.parent.mkdir()
+    def command(number, cwd, lane, text):
+        with log.open('a') as source:
+            csv.writer(source, delimiter='\t').writerow([
+                number, lane, '2026-10-26T00:01:00Z', 6, 30, 0, 8,
+                cwd, cwd + f'/{number}.log', text, 'fixture'])
+    command(1, cwd, 'build', 'cargo nextest run -p pkg --lib')
+    command(2, cwd, 'gate', 'cargo clippy -p pkg')
+    lab.run('runs', 'current')
+    text = (lab.a / 'missions/current/README.md').read_text()
+    assert 'Implementers: 1 runs, 2 commands' in text, text
+    assert '| Codex | fixture-model | high | 1 |' in text
+    assert '| wt/task | 2 | 1.0 | 0.2 | 1 / 0.5 |' in text
+    assert '| wt/task | 0:30 | 0 | 0:06 |' in text
+
+    # Adding a milestone changes the root attribution to ''; include both it
+    # and explicit milestones, while numbered reports retain their selection.
+    second = str(lab.tmp / 'owners/current/m2/wt/task')
+    Path(second).mkdir(parents=True)
+    lab.put('missions/current/m2.md', front(True))
+    rollout(second, 'second')
+    command(3, second, 'build', 'cargo check -p pkg')
+    lab.run('runs', 'current')
+    text = (lab.a / 'missions/current/README.md').read_text()
+    assert 'Implementers: 2 runs, 3 commands' in text, text
+    assert '| Codex | fixture-model | high | 2 |' in text
+    assert '| m2/wt/task | 1 |' in text and '| wt/task | 2 |' in text
+    lab.run('runs', 'current', '2')
+    text = (lab.a / 'missions/current/m2.md').read_text()
+    assert 'Implementers: 1 runs, 1 commands' in text, text
+    assert '| m2/wt/task | 1 |' in text and '| wt/task |' not in text
+
+
 def telemetry(lab):
     cwd = str(lab.tmp / 'owners/demo/m1/wt/task')
     Path(cwd).mkdir(parents=True)
@@ -618,11 +665,11 @@ def telemetry(lab):
     assert 'old\t1\t' in output and 'split\t2\t' in output
     shutil.rmtree(lab.tmp / 'heavy/receipts')
     assert '\tunknown\t' in lab.run('runs', '--all')
-    # Modern mission's own sessions go in its README.
+    # The README includes both the mission's own and its milestone sessions.
     lab.put('missions/demo/README.md', front())
     jl(lab.home / '.codex/sessions/date/rollout-owner.jsonl', rollout(str(lab.tmp / 'owners/demo/codex'), 'owner'))
     lab.run('runs', 'demo')
-    assert '| Codex | model-as-run | high | 1 |' in (lab.a / 'missions/demo/README.md').read_text()
+    assert '| Codex | model-as-run | high | 2 |' in (lab.a / 'missions/demo/README.md').read_text()
 
     # Arbitrary tilde text in a first prompt must not invoke user lookup.
     jl(lab.home / '.claude/projects/fake/unrelated.jsonl', [dict(type='user', message=dict(content='~not-a-user/path'))])
@@ -768,7 +815,7 @@ def main():
     # own env), so they run at once on threads; results print in case order.
     cases = (closing_unpublished, closing_dirty, closing_deleted_remote, closing_fetch_failure, closing_unreadable, closing_nested,
              closing_cached_output, closing_cached_worktree, closing_clean, closing_abandoned, closing_active,
-             writer, mission_progress, refusals, different_files, name_race, conflict, offline, merged_validation, installation_failures, setup, telemetry, milestone)
+             writer, mission_progress, refusals, different_files, name_race, conflict, offline, merged_validation, installation_failures, setup, mission_runs, telemetry, milestone)
     if len(sys.argv) > 1:
         cases = tuple(case for case in cases if case.__name__ in sys.argv[1:])
         assert cases, 'no cases selected'
