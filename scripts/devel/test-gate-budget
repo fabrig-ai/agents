@@ -126,13 +126,14 @@ class BudgetFixtures(unittest.TestCase):
         log.write_text(lines)
         target = self.root / 'result.json'
         heard = f'heavy: task 1 (gate) exit {status}, waited 2s, ran 12s, log {log}'
-        args = [str(status), 'agents', 'base', 'tip', 'tree', '1', '', kind, heard, 'false', str(target)]
+        args = [str(status), 'agents', 'base', 'tip', 'tree', '1', '', kind, heard, 'false', str(target), 'heavy']
         result = subprocess.run([sys.executable, '-I', '-S', '-B', '-c', source, *args],
                                 stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stderr, '')
         value = json.loads(result.stdout.removeprefix('land: result '))
         self.assertEqual(json.loads(target.read_text()), value)
+        self.assertEqual(value['runner'], 'heavy')
         return value
 
     def report(self, result):
