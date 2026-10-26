@@ -1,0 +1,147 @@
+#!/usr/bin/env python3
+"""Offline gate CPU budgets and compatibility of landing metrics readers."""
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import unittest
+
+KIT = Path(__file__).resolve().parent
+
+
+class BudgetFixtures(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='gate-budget-')
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+
+    def gate(self, admission):
+        scripts = self.root / 'scripts'
+        devel = scripts / 'devel'
+        devel.mkdir(parents=True)
+        (devel / 'gate-shares.py').write_bytes((KIT / 'gate-shares.py').read_bytes())
+        (scripts / 'gate-shares').write_text('ballast 100 Fixtures supply the remaining gate CPU\n' + admission)
+        # Exercise the actual timing, logging and share check with two suites.
+        # process_time burns CPU in a child, so sleeping cannot satisfy this test.
+        workload = devel / 'workload.py'
+        workload.write_text('import sys, time\n'
+                            'until = time.process_time() + float(sys.argv[1])\n'
+                            'while time.process_time() < until: pass\n')
+        source = (KIT.parent / 'check.sh').read_text()
+        first = source.index('\nsuite shellcheck ')
+        last = source.index('\nfailed=()', first)
+        source = (source[:first] + '\nsuite fixture python3 scripts/devel/workload.py .12\n'
+                  'suite ballast python3 scripts/devel/workload.py .48\n' + source[last:])
+        (scripts / 'check.sh').write_text(source)
+        result = subprocess.run(['bash', 'scripts/check.sh'], cwd=self.root,
+                                stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
+        self.assertRegex(result.stderr, r'(?m)^gate-step fixture [0-9]+\.[0-9]{3} 0 [0-9]+\.[0-9]{3}$')
+        rows = [line.split() for line in result.stderr.splitlines() if line.startswith('gate-share ')]
+        self.assertEqual([row[1] for row in rows], ['ballast', 'fixture'])
+        cpu = {row[1]: float(row[2]) for row in rows}
+        self.assertGreaterEqual(cpu['fixture'], .10)
+        self.assertGreaterEqual(cpu['ballast'], .46)
+        self.assertAlmostEqual(sum(float(row[3][:-1]) for row in rows), 100, places=2)
+        return result
+
+    def test_unadmitted_share_fails(self):
+        result = self.gate('')
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertRegex(result.stderr, r'fixture CPU share [0-9.]+%: add NAME MAX_PERCENT REASON in scripts/gate-shares')
+
+    def test_admitted_share_passes(self):
+        result = self.gate('fixture 40 Proves suite and child CPU accounting\n')
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_share_past_admitted_maximum_fails(self):
+        result = self.gate('fixture 11 Proves the existing admission remains bounded\n')
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertRegex(result.stderr, r'fixture CPU share [0-9.]+%: exceeds MAX_PERCENT 11 in scripts/gate-shares')
+
+    def share_check(self, text, measurements):
+        admissions = self.root / 'gate-shares'
+        admissions.write_text(text)
+        cpu = self.root / 'cpu'
+        cpu.write_text(measurements)
+        return subprocess.run([sys.executable, '-I', '-S', '-B', str(KIT / 'gate-shares.py'),
+                               str(admissions), str(cpu)], stdin=subprocess.DEVNULL,
+                              capture_output=True, text=True, timeout=10)
+
+    def test_share_boundaries_and_zero_cpu(self):
+        result = self.share_check('', 'small 1\nrest 9\n')
+        self.assertNotIn('small CPU share', result.stderr)
+        result = self.share_check('rest 90 Proves the exact admitted boundary\n', 'small 1\nrest 9\n')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        result = self.share_check('', 'fixture 0\n')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('gate-share fixture 0.000 0.000%', result.stderr)
+
+    def test_invalid_admissions_fail(self):
+        for text in ('fixture 20\n', 'fixture NaN reason\n', 'fixture 101 reason\n',
+                     'fixture 0 reason\n', 'fixture 20 reason\nfixture 30 another reason\n'):
+            with self.subTest(text=text):
+                result = self.share_check(text, 'fixture 1\n')
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn('expected NAME MAX_PERCENT REASON', result.stderr)
+
+    def land_result(self, lines, kind='ran', status=0):
+        # Run land's exact embedded result writer, without a Git or queue fixture.
+        source = (KIT / 'land').read_text()
+        source = source.split("<<'PYRESULT' ||\n", 1)[1].split('\nPYRESULT', 1)[0]
+        log = self.root / 'gate.log'
+        log.write_text(lines)
+        target = self.root / 'result.json'
+        heard = f'heavy: task 1 (gate) exit {status}, waited 2s, ran 12s, log {log}'
+        args = [str(status), 'agents', 'base', 'tip', 'tree', '1', '', kind, heard, 'false', str(target)]
+        result = subprocess.run([sys.executable, '-I', '-S', '-B', '-c', source, *args],
+                                stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, '')
+        value = json.loads(result.stdout.removeprefix('land: result '))
+        self.assertEqual(json.loads(target.read_text()), value)
+        return value
+
+    def report(self, result):
+        # landings reads result JSON rather than raw gate-step lines.
+        feed = self.root / 'feed.jsonl'
+        row = dict(time='2026-10-26T12:00:00+00:00', set='fixture/m1', token='fixture',
+                   host='fixture', event='gated', repo='agents', commit='a' * 40, result=result)
+        feed.write_text(json.dumps(row) + '\n')
+        env = dict(os.environ, LANDINGS_FEED=str(feed))
+        output = subprocess.run([sys.executable, '-I', '-S', '-B', str(KIT / 'landings'), 'report', '--tsv'],
+                                stdin=subprocess.DEVNULL, env=env, capture_output=True, text=True, timeout=10)
+        self.assertEqual(output.returncode, 0, output.stderr)
+        return output.stdout
+
+    def test_four_field_steps_and_report(self):
+        result = self.land_result('gate-step fmt 1.250 0\ngate-step fmt 2.000 0\n'
+                                  'gate-step fuzzy 3.000 7\n', status=7)
+        self.assertEqual(result['gate']['steps'], {'fmt': 3.25, 'fuzzy': 3})
+        self.assertEqual(result['gate']['cpu'], {})
+        self.assertEqual(result['gate']['failed_step'], 'fuzzy')
+        self.assertIn('\t3.25\t', self.report(result))
+
+    def test_five_field_steps_and_report(self):
+        old = self.land_result('gate-step fmt 1.250 0\ngate-step fmt 2.000 0\n'
+                               'gate-step fuzzy 3.000 7\n', status=7)
+        new = self.land_result('gate-step fmt 1.250 0 0.500\ngate-step fmt 2.000 0 0.750\n'
+                               'gate-step fuzzy 3.000 7 6.000\n', status=7)
+        self.assertEqual(new['gate']['steps'], old['gate']['steps'])
+        self.assertEqual(new['gate']['cpu'], {'fmt': 1.25, 'fuzzy': 6})
+        self.assertEqual(new['gate']['failed_step'], 'fuzzy')
+        self.assertEqual(self.report(new), self.report(old))
+
+    def test_mixed_steps_and_unrun_gates(self):
+        result = self.land_result('gate-step fmt 1.000 0\ngate-step fmt 2.000 0 3.000\n'
+                                  'gate-step fuzzy 1.000 5 0.000\ngate-step build 2.000 6\n', status=5)
+        self.assertEqual(result['gate']['steps'], {'fmt': 3, 'fuzzy': 1, 'build': 2})
+        self.assertEqual(result['gate']['cpu'], {'fmt': 3, 'fuzzy': 0})
+        self.assertEqual(result['gate']['failed_step'], 'fuzzy')
+        for kind in ('cached', 'none'):
+            self.assertEqual(self.land_result('', kind=kind)['gate']['cpu'], {})
+
+
+if __name__ == '__main__':
+    unittest.main(verbosity=2)

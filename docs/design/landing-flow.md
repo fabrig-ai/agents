@@ -671,6 +671,21 @@ tool that sees it; the reports only read.
   own gate is the exception: its steps are its suites (`test-land-set`,
   `shellcheck` and the rest), they run side by side, and their times
   add up to more than the gate's, so its `other` means nothing.
+  agents alone adds a fifth field, `gate-step NAME SECONDS EXIT CPU`:
+  `CPU` is the suite's user plus system CPU seconds, including its
+  children, with three decimals. Other repositories keep four fields;
+  readers accept both. At the end agents prints `gate-share NAME CPU
+  PERCENT%` for every suite, largest CPU share first. The total is the
+  sum of the suites' CPU seconds, rather than the gate's elapsed time.
+  A share above 10% fails unless `scripts/gate-shares` admits it with
+  `NAME MAX_PERCENT REASON`, one suite per line and the reason in words;
+  a share above that line's maximum also fails. The failure names the
+  suite, its share and the file, so a budget increase carries its reason
+  at landing. Initial admissions use three runs of main through
+  `heavy --gate`: each suite's median CPU seconds divided by their sum,
+  and for each share above 10%, its share times 1.25 rounded up to a
+  whole percent. Blank lines and comments beginning with `#` are allowed;
+  duplicate names, invalid percentages and missing reasons fail the gate.
 - **`land`'s result.** Once `land` has rebased, it ends by printing one
   line, `land: result JSON`, and writes the same object to the file
   `LAND_RESULT` names, when it is set:
@@ -679,7 +694,7 @@ tool that sees it; the reports only read.
    "base": SHA, "commit": SHA, "tree": SHA, "tries": 1,
    "prebuild": {"wait_s": 3, "run_s": 61, "exit": 0},
    "gate": {"kind": "ran", "receipt": TOKEN, "wait_s": 5, "run_s": 164,
-            "exit": 0, "steps": {"fmt": 4.213, "clippy": 25.3}, "failed_step": null},
+            "exit": 0, "steps": {"fmt": 4.213, "clippy": 25.3}, "cpu": {}, "failed_step": null},
    "pushed": true, "exit": 0}
   ```
   - `repo` is the primary checkout's directory name (the parent of
@@ -691,7 +706,9 @@ tool that sees it; the reports only read.
   - `gate.kind` is `ran`, `cached` (the gate cache's result: no
     receipt, zero times, no steps) or `none` (`--docs`).
   - `steps` sums the gate log's `gate-step` lines by name, in their
-    order. `failed_step` is the first step that exited nonzero, else
+    order, accepting both four and five fields. `gate.cpu` sums the fifth
+    field by name and is `{}` when no line has it, also for cached and
+    skipped gates. `failed_step` is the first step that exited nonzero, else
     `other` when the gate failed, else `null`.
   - `exit` is `land`'s own status.
 - **The feed.** `land-set` runs each `land` with `LAND_RESULT` set, and

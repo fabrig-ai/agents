@@ -899,6 +899,8 @@ printf '%s\\n' "$before"
         script = self.repo / "scripts/check.sh"
         script.parent.mkdir()
         shutil.copy(KIT.parent / "check.sh", script)
+        (script.parent / "devel").mkdir()
+        shutil.copy(KIT / "gate-shares.py", script.parent / "devel/gate-shares.py")
         self.script(self.repo / "scripts/devel/gate-policy.sh", "#!/bin/sh\nexit 91\n")
         self.script(self.bin / "shellcheck", "#!/bin/sh\nexit 0\n")
         self.script(self.repo / "scripts/devel/test-post",
@@ -908,7 +910,7 @@ printf '%s\\n' "$before"
             "SKEIN_GATE_POLICY_HELPER": str(self.kit / "gate-policy.sh")})
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("fixture: checks reached", result.stdout)
-        self.assertRegex(result.stderr, r"(?m)^gate-step test-post [0-9.]+ 73$")
+        self.assertRegex(result.stderr, r"(?m)^gate-step test-post [0-9.]+ 73 [0-9]+\.[0-9]{3}$")
         self.assertNotIn("gate_policy_prepare", script.read_text())
 
     def test_configured_path_and_inactive_target_commands(self):

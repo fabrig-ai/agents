@@ -495,20 +495,22 @@ def task(heard):
 
 def steps(log):
     # The gate-step lines' seconds summed by name, in first-seen order, and
-    # the first step that exited nonzero.
-    sums, failed = {}, None
+    # CPU seconds where present, and the first step that exited nonzero.
+    sums, cpu, failed = {}, {}, None
     try:
         from pathlib import Path
         text = Path(log).read_text(errors="replace")
     except OSError:
-        return sums, failed
+        return sums, cpu, failed
     for line in text.splitlines():
-        step = re.fullmatch(r"gate-step (\S+) ([0-9]+(?:\.[0-9]+)?) ([0-9]+)", line.rstrip())
+        step = re.fullmatch(r"gate-step (\S+) ([0-9]+(?:\.[0-9]+)?) ([0-9]+)(?: ([0-9]+(?:\.[0-9]+)?))?", line.rstrip())
         if step:
             sums[step[1]] = round(sums.get(step[1], 0) + float(step[2]), 3)
+            if step[4] is not None:
+                cpu[step[1]] = round(cpu.get(step[1], 0) + float(step[4]), 3)
             if failed is None and int(step[3]):
                 failed = step[1]
-    return sums, failed
+    return sums, cpu, failed
 
 
 def main():
@@ -516,14 +518,14 @@ def main():
     gate = None
     if kind in ("cached", "none"):
         gate = {"kind": kind, "receipt": None, "wait_s": 0, "run_s": 0, "exit": 0,
-                "steps": {}, "failed_step": None}
+                "steps": {}, "cpu": {}, "failed_step": None}
     elif kind == "ran":
         ran, log = task(heard)
         if ran:
             receipts = re.findall(r"^heavy: receipt .* token ([0-9a-f]{32})$", heard, re.MULTILINE)
-            sums, failed = steps(log)
+            sums, cpu, failed = steps(log)
             gate = {"kind": "ran", "receipt": receipts[-1] if receipts else None, **ran,
-                    "steps": sums, "failed_step": failed or ("other" if ran["exit"] else None)}
+                    "steps": sums, "cpu": cpu, "failed_step": failed or ("other" if ran["exit"] else None)}
     result = {"schema": "land-result-v1", "repo": repo, "machine": socket.gethostname(),
               "base": base or None, "commit": tip or None, "tree": tree or None,
               "tries": int(tries), "prebuild": task(prebuild)[0], "gate": gate,

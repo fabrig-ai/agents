@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Run shellcheck and the tools' isolated, offline self-tests, side by side.
 set -eu
+# Timing and its machine-readable decimals do not depend on the caller's locale.
+export LC_ALL=C
 # Job control gives each suite a process group of its own, to stop whole,
 # and keeps SIGINT, which background jobs would otherwise ignore, for the
 # fixtures that send it.
@@ -48,7 +50,7 @@ trap 'stop 130' INT
 trap 'stop 143' TERM
 
 # Each suite runs as a job of its own into its own log. The logs print
-# whole, in this order, each followed by its `gate-step NAME SECONDS EXIT`
+# whole, in this order, each followed by its `gate-step NAME SECONDS EXIT CPU`
 # line on stderr (landing-flow.md, 10).
 suite() {
     local name=$1
@@ -57,7 +59,10 @@ suite() {
     (
         start=$(date +%s%N)
         status=0
-        "$@" >"$scratch/$name.log" 2>&1 </dev/null || status=$?
+        # Bash's time includes the command (also a shell function) and its
+        # waited-for children, while keeping their stderr in the suite log.
+        TIMEFORMAT='%3U %3S'
+        { time "$@" >"$scratch/$name.log" 2>&1 </dev/null; } 2>"$scratch/$name.time" || status=$?
         echo $((($(date +%s%N) - start) / 1000000)) >"$scratch/$name.ms"
         exit "$status"
     ) &
@@ -77,6 +82,7 @@ shellcheck_tools() {
 }
 
 suite shellcheck shellcheck_tools
+suite test-gate-budget scripts/devel/test-gate-budget
 suite test-post scripts/devel/test-post
 suite test-land-set scripts/devel/test-land-set
 suite test-land-resolve scripts/devel/test-land-resolve
@@ -108,9 +114,13 @@ for i in "${!names[@]}"; do
     # A log cut off mid-line must not swallow its gate-step line.
     [[ ! -s $log || -z $(tail -c1 "$log") ]] || echo
     ms=$(cat "$scratch/$name.ms" 2>/dev/null) || ms=0
-    printf 'gate-step %s %d.%03d %d\n' "$name" $((ms / 1000)) $((ms % 1000)) "$status" >&2
+    cpu=$(awk '{printf "%.3f", $1 + $2}' "$scratch/$name.time")
+    printf '%s %s\n' "$name" "$cpu" >>"$scratch/cpu"
+    printf 'gate-step %s %d.%03d %d %s\n' "$name" $((ms / 1000)) $((ms % 1000)) "$status" "$cpu" >&2
     ((status == 0)) || failed+=("$name")
 done
+share_failed=0
+python3 -I -S -B scripts/devel/gate-shares.py scripts/gate-shares "$scratch/cpu" || share_failed=1
 if ((${#failed[@]})); then
     # land shows the gate's last lines: they end with the failures' own.
     for name in "${failed[@]}"; do
@@ -118,5 +128,9 @@ if ((${#failed[@]})); then
         tail -n 40 "$scratch/$name.log"
     done
     echo "check.sh: failed: ${failed[*]}" >&2
+    exit 1
+fi
+if ((share_failed)); then
+    echo "check.sh: failed: gate-shares" >&2
     exit 1
 fi
