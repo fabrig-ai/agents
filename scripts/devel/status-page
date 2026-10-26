@@ -19,7 +19,6 @@ import selectors
 import shutil
 import signal
 import socket
-import stat
 import subprocess
 import sys
 import threading
@@ -416,55 +415,6 @@ def part_user_issues(tmp, now):
     return result
 
 
-def part_director_post(tmp, now):
-    """Owners' and designers' messages in the last day, by headers alone;
-    None where this machine holds no director's mailbox (status-page.md 2)."""
-    mailbox = tmp / 'post/director'
-    if not mailbox.is_dir():
-        return None
-    counts = {'owners': 0, 'designers': 0}
-    for folder in ('new', 'cur'):
-        try:
-            paths = list((mailbox / folder).iterdir())
-        except OSError:
-            continue
-        for path in paths:
-            try:
-                info = path.lstat()
-                if not stat.S_ISREG(info.st_mode) or not now - DAY <= info.st_mtime <= now:
-                    continue
-                headers, remaining = {}, 4096
-                # Unbuffered reads stop at the blank line, without fetching a body.
-                with path.open('rb', buffering=0) as source:
-                    while remaining:
-                        line = source.readline(remaining)
-                        remaining -= len(line)
-                        if line in (b'\n', b'\r\n'):
-                            break
-                        if not line or not line.endswith(b'\n'):
-                            break
-                        key, sep, value = line.decode('utf-8').rstrip('\r\n').partition(':')
-                        if sep and key in ('Id', 'From'):
-                            if key in headers:
-                                break
-                            headers[key] = value.strip()
-                    else:
-                        continue
-                    if line not in (b'\n', b'\r\n'):
-                        continue
-                identity = re.fullmatch(r'([0-9]{8}T[0-9]{6}Z)-[^\s]+', headers.get('Id', ''))
-                sender = re.fullmatch(r'(o|design)/[a-z0-9][a-z0-9-]*@[a-z][a-z0-9-]*',
-                                      headers.get('From', ''))
-                if not identity or not sender:
-                    continue
-                sent = datetime.strptime(identity[1], '%Y%m%dT%H%M%SZ').replace(tzinfo=timezone.utc).timestamp()
-                if now - DAY <= sent <= now:
-                    counts['owners' if sender[1] == 'o' else 'designers'] += 1
-            except (OSError, UnicodeError, ValueError):
-                pass  # A vanished, unreadable or malformed message adds nothing.
-    return counts
-
-
 def probe_timeout():
     return float(os.environ.get('STATUS_PROBE_TIMEOUT') or 30)
 
@@ -690,7 +640,7 @@ def part_codex_usage(tmp, now):
 
 PARTS = [('machine', part_machine), ('heavy', part_heavy), ('rows', part_rows),
          ('turns', part_turns), ('codex', part_codex), ('sessions', part_sessions),
-         ('feed', part_feed), ('director_post', part_director_post), ('user_issues', part_user_issues),
+         ('feed', part_feed), ('user_issues', part_user_issues),
          ('claude_usage', part_claude_usage), ('codex_usage', part_codex_usage)]
 
 
@@ -1242,9 +1192,6 @@ def kpis(fleet, shown, subscribed):
     codex = sum(r['alive'] for d in fleet.up.values() for r in (d.get('codex') or {}).get('running', []))
     counts = role_counts(sessions, codex)
     agents = f'{busy + codex} busy' + (' · ' + counts if counts else '')
-    post = [shaped(d.get('director_post'), {}) for d in fleet.up.values()]
-    post = [p for p in post if all(number(p.get(role)) is not None for role in ('owners', 'designers'))]
-    owners, designers = (sum(p[role] for p in post) for role in ('owners', 'designers'))
     issues = user_issues(fleet)
     counts = shaped(issues.get('open'), {}) if issues else {}
     counts = {repo: n for repo, _ in ISSUES if (n := number(counts.get(repo))) is not None}
@@ -1261,9 +1208,6 @@ def kpis(fleet, shown, subscribed):
          f'last landed {when(last, now)}' if fleet.feed_seen and last is not None else 'none landed in the feed',
          rate_title),
         ('Agents', str(len(sessions) + codex), E(agents)),
-        ("Director's post, 24 h", str(owners + designers),
-         E(f'{owners} from owners, {designers} from designers')) if post
-        else ("Director's post, 24 h", '–', "the director's mailbox was not reached"),
         ('Land gates, 24 h', str(len(lands)), E(f'{sum(r[5] != "0" for r in lands)} failed')),
         ('Waiting on the user', str(sum(counts.values())) if counts else '–', issues_sub),
         ('Subscriptions', str(subscribed['count']), E(subscribed['sub'])) if subscribed
@@ -1929,7 +1873,6 @@ commands in the last 24 hours. Last activity is its last command or implementer 
 <p>Written by agents’ <code>scripts/devel/status-page</code> from what the tools already keep: heavy’s
 <code>heavy.tsv</code> and ledger, the landings feed, the landing turns, <code>codex-run</code>’s runs,
 Claude Code’s sessions and subscription, Codex CLI’s subscription, the missions’ front matter, the open issues waiting on the user on git.fabrig.ai,
-{E("the director's post, counted by its headers,")}
 {E("and the subscriptions' use, which it samples itself for their pace")}
 (docs/design/status-page.md). Times are UTC; p90 is the
 nearest rank.</p>
