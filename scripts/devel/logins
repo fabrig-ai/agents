@@ -1,0 +1,325 @@
+#!/usr/bin/env -S python3 -S
+"""logins add NAME FILE
+logins take NAME --as HOLDER [--note TEXT] [--wait SECONDS]
+logins give NAME --as HOLDER
+logins list [NAME]
+"""
+import argparse
+from contextlib import contextmanager
+from datetime import datetime, timezone
+import errno
+import fcntl
+import json
+import math
+import os
+from pathlib import Path
+import re
+import stat
+import sys
+import tempfile
+import time
+
+os.umask(0o077)
+NAME = r'[a-z][a-z0-9-]*'
+HOLDER = r'[a-z][a-z0-9-]*(/[a-z0-9][a-z0-9-]*)*'
+STALE_SECONDS = 900
+STATE_FILES = ('login', 'holder.json', 'waiting.json', 'log.tsv', 'lock')
+
+
+class Problem(Exception):
+    def __init__(self, why, code=2):
+        super().__init__(why)
+        self.code = code
+
+
+def need(ok, why, code=2):
+    if not ok:
+        raise Problem(why, code)
+
+
+def timestamp():
+    return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+def utc(value):
+    need(isinstance(value, str) and re.fullmatch(r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ', value),
+         f'invalid UTC time: {value}', 4)
+    return datetime.fromisoformat(value.replace('Z', '+00:00'))
+
+
+def replace(path, data, mode=0o600):
+    with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as target:
+        temporary = Path(target.name)
+        try:
+            target.write(data)
+            target.flush()
+            os.chmod(temporary, mode)
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
+def login_check(path):
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return 'missing'
+    if stat.S_ISLNK(info.st_mode):
+        return 'a link'
+    if not stat.S_ISREG(info.st_mode):
+        return 'not a regular file'
+    if info.st_uid != os.geteuid():
+        return 'not ours'
+    if stat.S_IMODE(info.st_mode) != 0o600:
+        return 'not private'
+    if info.st_size == 0:
+        return 'empty'
+    return None
+
+
+def note_ok(value):
+    return isinstance(value, str) and len(value) <= 120 and not any(c in value for c in '\t\n\r')
+
+
+def duration(seconds):
+    minutes = max(0, int(seconds)) // 60
+    return f'{minutes // 60}:{minutes % 60:02}'
+
+
+def elapsed(now, since):
+    return max(0, int((now - utc(since)).total_seconds()))
+
+
+class Workspace:
+    def __init__(self):
+        self.kit = Path(__file__).resolve().parent
+        agents = self.kit.parent.parent
+        self.root = Path(os.environ.get('DEV_ROOT', agents.parent if agents.name == 'agents'
+                                        else Path.home() / 'src/rust')).expanduser().absolute()
+        self.tmp = Path(os.environ.get('DEV_TMP', self.root / 'tmp')).expanduser().absolute()
+        self.logins = self.tmp / 'logins'
+        self.safe(self.tmp)
+        self.safe(self.logins)
+
+    @staticmethod
+    def safe(path):
+        need(not path.is_symlink(), f'{path}: symlink refused', 4)
+        return path
+
+    def directory(self, name):
+        self.safe(self.logins)
+        path = self.safe(self.logins / name)
+        if path.exists():
+            need(path.is_dir() and stat.S_IMODE(path.stat().st_mode) == 0o700,
+                 f'{path}: expected a private directory (0700)', 4)
+        for filename in STATE_FILES:
+            target = self.safe(path / filename)
+            if filename != 'login' and target.exists():
+                info = target.stat()
+                need(stat.S_ISREG(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o600,
+                     f'{target}: expected a private regular file (0600)', 4)
+        return path
+
+    @contextmanager
+    def locked(self, name, create=False, readonly=False):
+        directory = self.directory(name)
+        if create:
+            directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        need(directory.exists(), f'unknown login: {name}')
+        need(directory.is_dir(), f'{directory}: not a directory', 4)
+        with (directory / 'lock').open('r' if readonly else 'a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            self.directory(name)
+            yield Login(name, directory)
+
+
+class Login:
+    def __init__(self, name, directory):
+        self.name, self.directory = name, directory
+        self.path = directory / 'login'
+
+    def read(self, filename, default):
+        path = self.directory / filename
+        if not path.exists():
+            return default
+        value = json.loads(path.read_text())
+        rows = value if filename == 'waiting.json' else [value]
+        need(isinstance(rows, list), f'{path}: invalid state', 4)
+        keys = {'holder', 'note', 'since'} | ({'seen'} if filename == 'waiting.json' else set())
+        for row in rows:
+            need(isinstance(row, dict) and set(row) == keys, f'{path}: invalid state', 4)
+            need(isinstance(row['holder'], str) and re.fullmatch(HOLDER, row['holder'])
+                 and note_ok(row['note']), f'{path}: invalid holder or note', 4)
+            utc(row['since'])
+            if 'seen' in row:
+                utc(row['seen'])
+        need(len({row['holder'] for row in rows}) == len(rows), f'{path}: duplicate holder', 4)
+        return value
+
+    def write(self, filename, value):
+        replace(self.directory / filename, (json.dumps(value) + '\n').encode())
+
+    def event_text(self, stamp, event, holder='', seconds=0, note=''):
+        path = self.directory / 'log.tsv'
+        previous = path.read_text() if path.exists() else ''
+        return (previous + f'{stamp}\t{event}\t{holder}\t{seconds}\t{note}\n').encode()
+
+    def add(self, source):
+        need(not self.path.exists() and self.read('holder.json', None) is None,
+             f'{self.name} already has a login or holder', 1)
+        reason = login_check(source)
+        need(reason is None, f'{source}: {reason}', 1)
+        event = self.event_text(timestamp(), 'add')
+        try:
+            os.rename(source, self.path)
+        except OSError as error:
+            if error.errno == errno.EXDEV:
+                raise Problem('move it on the same filesystem', 1) from None
+            raise
+        replace(self.directory / 'log.tsv', event)
+        print(f'added: {self.name} at {self.path}')
+
+    def take(self, holder, note):
+        current = self.read('holder.json', None)
+        if current and current['holder'] == holder:
+            print(self.path)
+            return None
+        stamp = timestamp()
+        now = utc(stamp)
+        waiting = [row for row in self.read('waiting.json', [])
+                   if (now - utc(row['seen'])).total_seconds() <= STALE_SECONDS]
+        entry = next((row for row in waiting if row['holder'] == holder), None)
+        if entry is None:
+            entry = dict(holder=holder, note=note, since=stamp, seen=stamp)
+            waiting.append(entry)
+        entry['seen'] = stamp
+        if not current and login_check(self.path) is None and waiting[0] is entry:
+            event = self.event_text(stamp, 'take', holder, elapsed(now, entry['since']), entry['note'])
+            # qa-flow.md 10: custody begins before the caller can move the login.
+            self.write('holder.json', dict(holder=holder, note=entry['note'], since=stamp))
+            self.write('waiting.json', waiting[1:])
+            replace(self.directory / 'log.tsv', event)
+            print(self.path)
+            return None
+        self.write('waiting.json', waiting)
+        if current:
+            return f'{self.name} held by {current["holder"]} since {current["since"]}'
+        if login_check(self.path) is not None:
+            return f'{self.name} is not at rest and held by nobody'
+        return f'{self.name} waits for {waiting[0]["holder"]} first'
+
+    def give(self, holder):
+        current = self.read('holder.json', None)
+        need(current is not None, f'{self.name} is not held')
+        need(current['holder'] == holder, f'{self.name} is held by {current["holder"]}')
+        reason = login_check(self.path)
+        need(reason is None, f'{self.name} is not back at {self.path}: {reason}', 1)
+        stamp = timestamp()
+        seconds = elapsed(utc(stamp), current['since'])
+        event = self.event_text(stamp, 'give', holder, seconds, current['note'])
+        # qa-flow.md 10: a lost login keeps its holder until it is really back.
+        (self.directory / 'holder.json').unlink()
+        replace(self.directory / 'log.tsv', event)
+        print(f'given: {self.name} by {holder} after {duration(seconds)}')
+
+    def show(self):
+        current = self.read('holder.json', None)
+        waiting = self.read('waiting.json', [])
+        now = utc(timestamp())
+        at_rest = self.path.exists()
+        state = 'at rest' if at_rest else 'missing'
+        held = elapsed(now, current['since']) if current else 0
+        if current:
+            note = f' ({current["note"]})' if current['note'] else ''
+            state = (f'held by {current["holder"]}{note} since {current["since"]}, '
+                     f'{duration(held)}, ' + ('at rest' if at_rest else 'not at rest'))
+        takes, longest = 0, 0
+        path = self.directory / 'log.tsv'
+        for line in path.read_text().splitlines() if path.exists() else []:
+            fields = line.split('\t')
+            need(len(fields) == 5, f'{path}: invalid event', 4)
+            stamp, event, holder, seconds, note = fields
+            need(event in ('add', 'take', 'give') and seconds.isdecimal()
+                 and (not holder or re.fullmatch(HOLDER, holder)) and note_ok(note),
+                 f'{path}: invalid event', 4)
+            age = (now - utc(stamp)).total_seconds()
+            if 0 <= age <= 86400:
+                if event == 'give':
+                    held += int(seconds)
+                elif event == 'take':
+                    takes += 1
+                    longest = max(longest, int(seconds))
+        print(f'{self.name}: {state}')
+        for row in waiting:
+            print(f'  waiting: {row["holder"]} since {row["since"]}')
+        print(f'  last 24 hours: held {duration(held)}, {takes} takes, longest wait {duration(longest)}')
+
+
+def seconds(value):
+    result = float(value)
+    if not math.isfinite(result) or result < 0:
+        raise argparse.ArgumentTypeError('seconds must be finite and nonnegative')
+    return result
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = parser.add_subparsers(dest='command', required=True)
+    add = sub.add_parser('add')
+    add.add_argument('name')
+    add.add_argument('file', type=Path)
+    take = sub.add_parser('take')
+    take.add_argument('name')
+    take.add_argument('--as', dest='holder', required=True)
+    take.add_argument('--note', default='')
+    take.add_argument('--wait', type=seconds)
+    give = sub.add_parser('give')
+    give.add_argument('name')
+    give.add_argument('--as', dest='holder', required=True)
+    sub.add_parser('list').add_argument('name', nargs='?')
+    args = parser.parse_args()
+    try:
+        if args.name is not None:
+            need(re.fullmatch(NAME, args.name), 'invalid login name')
+        if hasattr(args, 'holder'):
+            need(re.fullmatch(HOLDER, args.holder), 'invalid holder name')
+        if args.command == 'take':
+            need(note_ok(args.note), '--note needs at most 120 characters and no newline or tab')
+        workspace = Workspace()
+        if args.command == 'list':
+            names = [args.name] if args.name else sorted(path.name for path in workspace.logins.iterdir()) if workspace.logins.exists() else []
+            for name in names:
+                need(re.fullmatch(NAME, name), f'invalid login name: {name}', 4)
+                with workspace.locked(name, readonly=True) as login:
+                    login.show()
+        elif args.command == 'add':
+            reason = login_check(args.file)
+            need(reason is None, f'{args.file}: {reason}', 1)
+            with workspace.locked(args.name, create=True) as login:
+                login.add(args.file)
+        elif args.command == 'give':
+            with workspace.locked(args.name) as login:
+                login.give(args.holder)
+        else:
+            poll = float(os.environ.get('LOGINS_POLL_SECONDS', '5'))
+            need(math.isfinite(poll) and poll > 0, 'LOGINS_POLL_SECONDS must be finite and positive')
+            deadline = time.monotonic() + (args.wait or 0)
+            while True:
+                with workspace.locked(args.name) as login:
+                    reason = login.take(args.holder, args.note)
+                if reason is None:
+                    break
+                remaining = deadline - time.monotonic()
+                need(args.wait is not None and remaining > 0, reason, 1)
+                time.sleep(min(poll, remaining))
+        return 0
+    except Problem as error:
+        print(f'logins: {error}', file=sys.stderr)
+        return error.code
+    except (OSError, ValueError, UnicodeError) as error:
+        print(f'logins: {error}', file=sys.stderr)
+        return 4
+
+
+if __name__ == '__main__':
+    sys.exit(main())
