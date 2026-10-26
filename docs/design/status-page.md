@@ -40,9 +40,9 @@ serves it.
   a name only joins a session to its mission (the user, 10-26). Each
   machine's public IP shows on its card (the user, 10-26). The
   director's post shows as a count alone: no sender, subject or body.
-  What waits on the user shows as a count of open issues and a link to
-  them, which only a signed-in user can follow: no title, body or
-  author (the user, 10-26). An
+  What waits on the user shows as counts of open issues and links to
+  them, which only a signed-in user can follow into a private
+  repository: no title, body or author (the user, 10-26). An
   unreachable machine shows why in a few words (refused, timed out, key
   refused); ssh's own, which name the target, go to the journal. No
   account's email, name, organisation or id: a subscription goes by a
@@ -69,7 +69,7 @@ serves it.
 | codex-run | `tmp/codex-run/*/meta`, `runs.tsv` and the `codex-run-*` user units | the implementers running, each with its mission, and the runs that ended |
 | Claude | `claude agents --json --all` | the live sessions by role, busy or idle: the director, the designers (`design/<d>`) and owners (`o/<m>`) by their names, and the rest |
 | the records | `records/missions/*/README.md`, after `record pull` | each mission's front matter: its `state`, `ended` and `description`, and its `started` read as a time (anything else is unknown) |
-| the user's issues | git.fabrig.ai's API (Forgejo), from the machine holding `tmp/git-fabrig/status-read.token` (hel8), a read token for issues and repositories | how many open issues of `fabrig-ai/agents` carry its label 1, `waiting-on-user` (2.3) |
+| the user's issues | git.fabrig.ai's API (Forgejo), from the machine holding `tmp/git-fabrig/status-read.token` (hel8), a read token for issues and repositories | how many open issues of seven `fabrig-ai` repositories carry their `waiting-on-user` label (2.3) |
 | the director's post | `tmp/post/director/new/` and `cur/` (post.md 3), on whichever machine holds them | how many messages owners (`o/…`) and designers (`design/…`) sent the director in the last 24 hours, by each one's `Id` stamp: its `Id` and `From` headers alone, of the files changed within the day |
 | the machine | `/proc`, the disk under `tmp/`, `ip -j -4 addr show scope global` | load, free memory and disk, and its public IPv4 addresses (the globally routable ones) |
 | Claude's subscription | `claude auth status --json`, `claude -p /usage` | what it is signed in to, and each limit's use and reset (2.1) |
@@ -176,27 +176,43 @@ could use the status script itself for sampling)" (the user, 10-26).
 
 ### 2.3 The user's issues
 
-What waits on the user is a Forgejo issue on git.fabrig.ai, in
-`fabrig-ai/agents`, labelled `waiting-on-user`, label 1 (the user,
-10-26).
+What waits on the user is a Forgejo issue on git.fabrig.ai labelled
+`waiting-on-user`, in any of seven repositories of `fabrig-ai`, each
+with its own label's id (the user, 10-26; agents' `user-issues.md`):
+
+| Repository | Label |
+|---|---|
+| `agents` | 1 |
+| `skein` | 2 |
+| `smith` | 3 |
+| `jig` | 4 |
+| `hearth` | 5 |
+| `temper` | 6 |
+| `qa` | 7 |
 
 - **The count.** The collector of a machine holding
   `tmp/git-fabrig/status-read.token` (mode 0600, refused if others can
-  read it) asks the API, with `Authorization: token <it>`: first
-  `GET /api/v1/repos/fabrig-ai/agents/labels/1` for the label's name,
-  then `GET /api/v1/repos/fabrig-ai/agents/issues?state=open&type=issues&labels=<name>&limit=50`,
+  read it) asks the API for the seven repositories at once, with
+  `Authorization: token <it>`: first
+  `GET /api/v1/repos/fabrig-ai/<repo>/labels/<id>` for the label's
+  name, then
+  `GET /api/v1/repos/fabrig-ai/<repo>/issues?state=open&type=issues&labels=<name>&limit=50`,
   page by page until a page holds fewer than 50, at most 20 pages. It
-  counts the issues that carry label 1: Forgejo drops a label name it
-  doesn't know and would list every open issue. The answer is `{"open":
-  n}`, and nothing of an issue leaves the machine.
-- **Bounded.** Each request under 15 seconds, the whole under 30, and
-  a redirect refused, so that the token's header never follows one. A
-  refused token, a missing label, more than 20 pages or an answer of
-  the wrong shape fails that source alone (section 1); the footer names
-  the HTTP status or the error's kind, never a response's body.
+  counts the issues that carry the label's id: Forgejo drops a label
+  name it doesn't know and would list every open issue. The answer is
+  `{"open": {"agents": n, …}, "failed": {"temper": "HTTP 404"}}`: the
+  repositories it read, and why each other could not be; nothing of an
+  issue leaves the machine.
+- **Bounded.** Each request under 15 seconds, all of them under 30,
+  and a redirect refused, so that the token's header never follows
+  one. A repository whose label is missing, whose token is refused,
+  with more than 20 pages or an answer of the wrong shape fails alone,
+  named in `failed` by the HTTP status or the error's kind, never a
+  response's body. A token file others can read, or one that holds no
+  token, fails the source whole (section 1).
 - **Where.** The first machine reached, in the machines file's order,
-  whose answer is a count gives the tile; with none, the tile is a dash
-  and the footer says that no machine reached holds the token.
+  whose answer holds a count gives the tile; with none, the tile is a
+  dash and the footer says that no machine reached holds the token.
 
 ## 3. The page
 
@@ -206,10 +222,12 @@ What waits on the user is a Forgejo issue on git.fabrig.ai, in
   designers (`12 from owners, 3 from designers`; a dash where no
   machine reached holds the director's mailbox; the user, 10-26), land
   gates in the last 24 hours, what waits on the user (the open issues
-  so labelled, the sub a link to them,
-  `https://git.fabrig.ai/fabrig-ai/agents/issues?state=open&labels=1`;
-  a dash where they can't be read, named in the footer; the user,
-  10-26), and the subscriptions with the highest use among them. Heavy's commands now show on each machine's card alone (the
+  so labelled in the seven repositories, in all; the sub each
+  repository's count as a link to its issues,
+  `https://git.fabrig.ai/fabrig-ai/<repo>/issues?state=open&labels=<id>`,
+  in 2.3's order; a repository not read a dash, named in the footer,
+  the sub then saying how many were read; the user, 10-26), and the
+  subscriptions with the highest use among them. Heavy's commands now show on each machine's card alone (the
   user, 10-26).
 - **Subscriptions,** after the tiles: a table, one row per distinct
   subscription and limit, giving its CLI, plan and label, a bar of the
@@ -355,8 +373,11 @@ holds a clock time beside it, and an ended mission's duration in days,
 hours and minutes, with a dash for a `started` unknown, not a time or
 after `ended`, whose text reaches neither the page nor the `--json`
 file. `test-record` proves `record`'s check of the `description` key.
-The user's issues, from a fake Forgejo: the label's name asked, then
-its open issues counted, those without label 1 left out; the token in
+The user's issues, from a fake Forgejo: for each of the seven
+repositories its label's name asked, then its open issues counted,
+those without its label left out, and the sum in the tile; one
+repository failing alone, its dash and footer line beside the others'
+counts and the sum of those read; the token in
 the requests' `Authorization` header and nowhere on the page, in the
 `--json` file, the footer or the collector's arguments; a token file
 others can read refused; a refused token, a missing label, a timeout
