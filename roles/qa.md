@@ -16,8 +16,11 @@ makes a finding there.
 - **A plan before anything runs,** in the scratch directory: for each
   commit, the happy path, then two to four tricky cases, each with the
   outcome it expects (section 2).
-- **The product's own commands set it up,** as its binding says, on its
-  fake backends, the binding's first rung, for now.
+- **The product's own commands set it up,** as its binding says, on the
+  rung the brief names: its fakes, or a real backend.
+- **A held login is borrowed:** moved into the deployment, and moved
+  back to its path by the give-back file before the deployment stops,
+  whatever stops it (section 2, step 3; qa-flow.md 10.3).
 - **It works as the product's users' agents do:** the product's tool for
   the product (for temper, `temper ctl`, whose `help` is temper's guide
   for agents), and tools of its own for the systems the product works
@@ -47,12 +50,24 @@ makes a finding there.
    warm between passes (no `--target-dir`, no `CARGO_TARGET_DIR`); copy
    or install the binaries into the scratch directory, never into
    `~/.local`. Set up a deployment with the product's own commands, as
-   its binding says, in a directory of the scratch, on its fake backends:
-   for temper, `temper box --fake-backends` as `docs/guide/box.md`'s
-   last section says, `temper ctl`'s sign-in with the link it prints,
-   and the forge's hands from the files the box names (temper's
-   `docs/design/qa.md`, 4). Cases that don't disturb each other share
-   one deployment; a case that would disturb others gets a fresh one.
+   its binding says for the brief's rung, in a directory of the
+   scratch: for temper's fakes, `temper box --fake-backends` as
+   `docs/guide/box.md`'s section on them says; for its real ones, the
+   guide's walk from empty directories. Then `temper ctl`'s sign-in
+   with the link it prints, and the forge's hands from the files the box
+   names (temper's `docs/design/qa.md`, 4). Cases that don't disturb
+   each other share one deployment; a case that would disturb others
+   gets a fresh one.
+
+   **A held login,** when the brief names one, the service has taken
+   for you: it rests at the path the brief gives. Move it into your
+   deployment as the binding says (for temper, `temper ctl import`),
+   and at once write the give-back file the brief names: an executable
+   that moves each login back to its path by the product's export (for
+   temper, `temper ctl DIR export N PATH`), safe to run twice. Your
+   unit runs it when it stops, whatever stops it, so keep it right as
+   you go: a second deployment that takes the login over takes the file
+   over too. Never run `logins`, and never read, copy or print a login.
 4. **Drive each case as the product's users' agents do,** and check its
    outcome on both sides: the product's account through its tool, and
    the backend's through the tools the binding names. A finding is the
@@ -64,7 +79,11 @@ makes a finding there.
    not through its store, its HTTP API, or a fake's internals; and act
    on a backend only as a case's plan says, with the hands the binding
    gives.
-5. **Report** (section 3), then stop every deployment you started.
+5. **Report** (section 3). Then give each held login back: run the
+   give-back file, and check each path by `stat` alone (a regular file,
+   `0600`, not empty). Then stop every deployment you started. A login
+   not back is the report's first line, with what the export said, and
+   its deployment stays as it is for the service to report.
 
 ## 3. The report
 
@@ -111,6 +130,6 @@ Saw: <...>
   ([implementer.md](implementer.md) 5), and the product's deployment
   uses its fakes alone, unless the brief names a real rung: then its
   accounts are used by path, never read, and given back before the
-  deployment stops.
+  deployment stops (section 2, steps 3 and 5).
 - **Builds** go through `heavy` at background weight, never `--gate`,
   and nothing runs a repository's gate or after landing's tier.

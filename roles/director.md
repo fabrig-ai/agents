@@ -339,6 +339,15 @@ is mechanical, and Codex reads what needs reading.
    passes`, and `qa decide` on each marked commit, `run` or `backlog`,
    from the user's QA priorities in `direction.md` and the passes'
    capacity and spend ([qa-flow.md](../docs/design/qa-flow.md) 3).
+   The rungs: `qa rung REPO RUNG --login NAME` opens a repository's next
+   rung once the one below has run clean, as its binding says, and
+   lowers it when its findings or its login hold it (qa-flow.md 10.1).
+   The held logins: `logins list` on their machine; one held most of
+   the day while passes wait is saturated, and the user hears of it;
+   one not back after a pass gets a recovery task (qa-flow.md 10.3).
+   The director's own live runs on a held login take it with `logins
+   take`, start with `codex-run task --on-stop`, and give it at their
+   end (qa-flow.md 10.2).
 6. **Record:** rewrite `STATUS.md`, add the decisions, commit them
    with `record commit`, and make sure the cron, the watcher and the
    waiter run.
