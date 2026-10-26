@@ -11,6 +11,7 @@ import concurrent.futures
 from datetime import datetime, timedelta, timezone
 import hashlib
 import html
+import ipaddress
 import json
 import math
 import os
@@ -143,7 +144,22 @@ def part_machine(tmp, now):
         key, _, value = line.partition(':')
         if value.split():
             memory[key] = int(value.split()[0]) * 1024
-    return {'load': os.getloadavg(), 'cpus': os.cpu_count(), 'disk_free': usage.free,
+    ips = []
+    try:
+        result = subprocess.run(['ip', '-j', '-4', 'addr', 'show', 'scope', 'global'],
+                                stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
+        if result.returncode == 0:
+            for interface in shaped(json.loads(result.stdout), []):
+                for address in shaped(shaped(interface, {}).get('addr_info'), []):
+                    try:
+                        ip = ipaddress.ip_address(text(shaped(address, {}).get('local')))
+                    except ValueError:
+                        continue
+                    if ip.version == 4 and ip.is_global:
+                        ips.append(str(ip))
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        pass  # The optional IP probe must not hide load, memory or disk.
+    return {'ips': ips, 'load': os.getloadavg(), 'cpus': os.cpu_count(), 'disk_free': usage.free,
             'disk_total': usage.total, 'mem_available': memory.get('MemAvailable'),
             'mem_total': memory.get('MemTotal')}
 
@@ -267,24 +283,6 @@ def part_codex(tmp, now):
         tokens = [int(t) for t in tokens] if len(tokens) == 3 and all(t.isdigit() for t in tokens) else None
         ended.append([start, end, row[4], row[6], row[7], tokens, mission(row[8], tmp)])
     return {'running': running, 'ended': ended}
-
-
-def part_mail(tmp, now):
-    result = []
-    for box in sorted((tmp / 'post').iterdir()):
-        new = box / 'new'
-        if not new.is_dir():
-            continue
-        times = []
-        for message in new.iterdir():
-            try:
-                if message.is_file():
-                    times.append(message.stat().st_mtime)
-            except FileNotFoundError:
-                pass  # Read and moved on meanwhile.
-        if times:
-            result.append({'name': box.name.replace('+', '/'), 'new': len(times), 'oldest': min(times)})
-    return result
 
 
 def part_sessions(tmp, now):
@@ -537,7 +535,7 @@ def part_codex_usage(tmp, now):
 
 
 PARTS = [('machine', part_machine), ('heavy', part_heavy), ('rows', part_rows),
-         ('turns', part_turns), ('codex', part_codex), ('mail', part_mail), ('sessions', part_sessions),
+         ('turns', part_turns), ('codex', part_codex), ('sessions', part_sessions),
          ('feed', part_feed), ('claude_usage', part_claude_usage), ('codex_usage', part_codex_usage)]
 
 
@@ -923,9 +921,8 @@ def subscriptions(fleet):
                          f'<i style="width:{max(0, min(100, used)):g}%"></i></span> {used:g}%')
                 if highest is None or used > highest[0]:
                     highest = (used, f'{cli_name[cli]} {limit["name"]}')
-            rows.append([title if i == 0 else '', E(', '.join(sorted(group['machines']))) if i == 0 else '',
-                         E(limit['name']), meter, E(resets(limit['resets'], fleet.now))])
-    out = table(['Subscription', 'Machines', 'Limit', 'Used', 'Resets'], rows, numeric_from=3,
+            rows.append([title if i == 0 else '', E(limit['name']), meter, E(resets(limit['resets'], fleet.now))])
+    out = table(['Subscription', 'Limit', 'Used', 'Resets'], rows, numeric_from=2,
                 empty='No subscriptions found.')
     for cli in ('claude', 'codex'):
         for state, word in (('signed-out', 'signed out'), ('no-subscription', 'no subscription')):
@@ -962,8 +959,6 @@ def kpis(fleet, shown, subscribed):
         ('Heavy commands now', str(len(tasks)), f'{running} running, {len(tasks) - running} queued'
                                                  + (f', {gates} gate' if gates else '')),
         ('Agents', str(len(sessions) + codex), agents),
-        ('Commands, 24 h', f'{len(day):,}', f'{hours(sum(r[4] for r in day))} running, '
-                                            f'{hours(sum(r[3] for r in day))} waiting'),
         ('Land gates, 24 h', str(len(lands)), f'{sum(r[5] != "0" for r in lands)} failed'),
         ('Subscriptions', str(subscribed['count']), subscribed['sub']) if subscribed
         else ('Subscriptions', '–', 'not shown'),
@@ -971,6 +966,20 @@ def kpis(fleet, shown, subscribed):
     return '<div class="tiles">' + ''.join(
         f'<div class="tile"><div class="label">{E(a)}</div><div class="value">{E(b)}</div>'
         f'<div class="sub">{E(c)}</div></div>' for a, b, c in tiles) + '</div>'
+
+
+def reason_kind(reason):
+    """'land-set:', the repository where it names one, and the first clause, before a colon
+    or an ' outside …' (status-page.md 3): no path or file name."""
+    reason = short(text(reason))
+    prefix = ''
+    if reason.startswith('land-set: '):
+        prefix, reason = 'land-set: ', reason[len('land-set: '):]
+        repo = re.match(r'[a-z][a-z0-9_-]*: ', reason)
+        if repo:
+            prefix += repo[0]
+            reason = reason[repo.end():]
+    return prefix + re.split(r':| outside\b', reason, maxsplit=1)[0].strip()
 
 
 def landing_now(fleet):
@@ -994,7 +1003,7 @@ def landing_now(fleet):
             rows.append([E(f'landing turn {turn["repo"]}'), state, E(name), E(lasted(turn['since'], now)), '–'])
     out = table(['What', 'State', 'Machine', 'For', 'Progress / mission'], rows, numeric_from=9,
                 empty='Nothing is landing right now.')
-    ended = sorted((r for r in fleet.runs if r['end']), key=lambda r: r['end']['utc'], reverse=True)[:8]
+    ended = sorted((r for r in fleet.runs if r['end']), key=lambda r: r['end']['utc'], reverse=True)[:5]
     recent = []
     for run in ended:
         end = run['end']
@@ -1004,7 +1013,7 @@ def landing_now(fleet):
         recent.append([E(run['set']), result, E(fleet.alias.get(run['host'], run['host'])), E(utc(end['utc'])),
                        E(span(took)),
                        E(', '.join(run['landed']) or '–'),
-                       E(short(end.get('reason', '')) if end['event'] == 'stopped' else '')])
+                       E(reason_kind(end.get('reason', '')) if end['event'] == 'stopped' else '')])
     out += '<h3>Recent set runs</h3>' + table(
         ['Set', 'Result', 'Machine', 'Ended', 'Run', 'Landed', 'Reason'], recent, numeric_from=9, wrap=(5, 6),
         empty='No set run in the feed yet.' if fleet.feed_seen else 'The landings feed was not reachable.')
@@ -1128,7 +1137,8 @@ def machine_card(fleet, name):
     if free is not None and free < 40 * 1024 ** 3:
         head.append(badge('warning', 'disk low'))
     load = info.get('load') or [0, 0, 0]
-    facts = (f'{E(data.get("host", ""))} · load {load[0]:.1f} / {info.get("cpus", "?")} CPUs · '
+    ips = ''.join(f'{E(ip)} · ' for ip in shaped(info.get('ips'), []))
+    facts = (f'{E(data.get("host", ""))} · {ips}load {load[0]:.1f} / {info.get("cpus", "?")} CPUs · '
              f'{size(info.get("mem_available"))} memory free · {size(free)} disk free')
     body = []
     tasks = heavy.get('tasks', [])
@@ -1159,15 +1169,9 @@ def machine_card(fleet, name):
     if sessions:
         busy = sum(s['status'] in ('busy', 'working') for s in sessions)
         body.append(f'<h4>Claude sessions</h4><p>{E(role_counts(sessions))} · {busy} busy</p>')
-    mail = data.get('mail') or []
-    if mail:
-        count, oldest = sum(m['new'] for m in mail), min(m['oldest'] for m in mail)
-        body.append('<h4>Unread post</h4><p>'
-                    + badge('warning' if now - oldest > 900 else 'neutral', f'{count} unread')
-                    + f' · oldest {E(ago(oldest, now))}</p>')
     last = max((r[0] for r in data.get('rows') or []), default=None)
     if not body:
-        body.append('<p class="muted">Idle: nothing queued, running or unread.</p>')
+        body.append('<p class="muted">Idle: nothing queued or running.</p>')
     errors = data.get('errors') or []
     if errors:
         body.append('<p class="muted">Not read: ' + E('; '.join(errors)) + '</p>')
@@ -1574,8 +1578,8 @@ commands in the last 24 hours. Last activity is its last command or implementer 
 </section>
 <footer>
 <p>Written by agents’ <code>scripts/devel/status-page</code> from what the tools already keep: heavy’s
-<code>heavy.tsv</code> and ledger, the landings feed, the landing turns, <code>codex-run</code>’s runs, post’s
-mailboxes, Claude Code’s sessions and subscription, Codex CLI’s subscription and the missions’ front matter in the records repository
+<code>heavy.tsv</code> and ledger, the landings feed, the landing turns, <code>codex-run</code>’s runs,
+Claude Code’s sessions and subscription, Codex CLI’s subscription and the missions’ front matter in the records repository
 (docs/design/status-page.md). Times are UTC; p90 is the
 nearest rank.</p>
 {('<p>Not read this time:</p><ul>' + "".join(f"<li>{E(short(p, 300))}</li>" for p in problems) + '</ul>') if problems else ''}

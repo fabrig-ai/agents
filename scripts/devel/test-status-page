@@ -7,10 +7,12 @@ import json
 import os
 from pathlib import Path
 import re
+import runpy
 import subprocess
 import sys
 import tempfile
 import time
+from unittest.mock import patch
 
 SCRIPT = Path(__file__).resolve().with_name('status-page')
 PYTHON = sys.executable
@@ -48,6 +50,9 @@ def machine(tmp, mission='alpha-m'):
         ['6', 'build', 'not a time', '1', '1', '0', '10.0', wt, 'L6', 'cargo check', 'bad'],
         ['7', 'build', iso(4), '1', '1', '0', '10.0', tmp / 'owners/old-m/wt', 'L7', 'cargo check', 'old-m'],
     ]
+    write(tmp.parent / 'ip.json', json.dumps([{'addr_info': [
+        {'family': 'inet', 'local': '62.238.103.124' if mission == 'alpha-m' else '9.9.9.9'},
+        {'family': 'inet', 'local': '10.88.0.5'}, {'family': 'inet', 'local': '127.0.0.2'}]}]))
     write(tmp / 'logs/heavy.tsv', ''.join('\t'.join(map(str, r)) + '\n' for r in rows) + 'short\trow\n')
     tasks = {
         'a': {'state': 'active', 'lane': 'build', 'label': 'wt', 'args': ['cargo', 'nextest', 'run', '--workspace'],
@@ -182,6 +187,15 @@ class Lab:
                                  dict(name='director', kind='background', state='idle', pid=2)])
             self.claude(tmp, answer)
             self.codex(tmp, codex_answer(index))
+        tool(self.bin, 'ip', '''
+assert sys.argv[1:] == ['-j', '-4', 'addr', 'show', 'scope', 'global'], sys.argv
+path = Path(os.environ['DEV_TMP']).parent / 'ip.json'
+config = json.loads(path.read_text()) if path.exists() else []
+if isinstance(config, dict):
+    print(config.get('stdout', '[]'))
+    sys.exit(config.get('exit', 0))
+print(json.dumps(config))
+''')
         tool(self.bin, 'claude', '''
 path = Path(os.environ['DEV_TMP']).parent
 with (path / 'claude.trace').open('a') as trace:
@@ -318,7 +332,8 @@ def collect(lab):
     assert set(codex) == {'running', 'ended'}, codex
     units = [json.loads(line) for line in (lab.trace / 'systemctl').read_text().splitlines()]
     assert units[0][-1] == 'codex-run-*', units
-    assert [(m['name'], m['new']) for m in data['mail']] == [('o/alpha-m', 1)], data['mail']
+    assert 'mail' not in data
+    assert data['machine']['ips'] == ['62.238.103.124'], data['machine']
     assert [t[1:] for t in data['turns']['done']] == [['temper', 200, 500], ['smith', 10, 50]], data['turns']
     assert [(t['repo'], t['event']) for t in data['turns']['open']] == [('jig', 'request')], data['turns']
     # An interactive session is someone's own: its name stays here.
@@ -334,7 +349,7 @@ def collect_missing(lab):
     (lab.root / 'empty').mkdir()
     data = json.loads(lab.run('collect', DEV_TMP=str(lab.root / 'empty'), disk_unavailable=True).stdout)
     failed = sorted(e.split(':')[0] for e in data['errors'])
-    assert failed == ['heavy', 'machine', 'mail', 'rows'], data['errors']
+    assert failed == ['heavy', 'machine', 'rows'], data['errors']
     assert data['codex'] == {'running': [], 'ended': []}, data['codex']
     assert data['claude_usage']['state'] == data['codex_usage']['state'] == 'signed-out'
 
@@ -358,7 +373,7 @@ def page(lab):
     assert 'alpha-m/m1' in now and 'done-m/m1' not in now and 'stale-m/m1' not in now, now
     assert '<div class="label">Sets landing now</div><div class="value">1</div>' in text
     for needle in ('alpha-m/m1', 'done-m/m1', 'beta-m', 'paused-m', 'land temper', 'landing turn jig',
-                   'alpha-m: 1 running · gpt-x high', '1 unread', 'Implementer runs', 'owner busy'):
+                   'alpha-m: 1 running · gpt-x high', 'Implementer runs', 'owner busy'):
         assert needle in text, needle
     # Ended in the record, with commands only: history, not in flight.
     assert '<strong>old-m</strong>' not in text
@@ -368,6 +383,13 @@ def page(lab):
     sent = json.loads((lab.trace / 'ssh-free@beta').read_text())
     assert {'BatchMode=yes', 'StrictHostKeyChecking=yes'} <= set(sent) and sent[-2] == 'free@beta', sent
     assert 'fmt 0:04 · clippy 0:25' in text, 'step medians'
+    assert 'unread' not in text.lower()
+    assert '<div class="label">Commands, 24 h</div>' not in text
+    data = json.loads(snapshot.read_text())
+    for host, address in (('alpha', '62.238.103.124'), ('beta', '9.9.9.9')):
+        assert f'{data["fleet"][host]["host"]} · {address} · load' in text
+    for address in ('10.88.0.5', '127.0.0.2'):
+        assert address not in text, address
     public_roles(text, lab)
 
 
@@ -388,6 +410,74 @@ def public_roles(page, lab):
         'Mission', 'Record', 'Description', 'Now', 'Last activity'], live
     for header in ('Owner', 'Machines', 'Commands 24 h'):
         assert header not in live, header
+
+
+def reason_kind(lab):
+    kind = runpy.run_path(str(SCRIPT))['reason_kind']
+    examples = [
+        ('land-set: rebase conflict outside Cargo.lock: crates/temper/tests/x.rs', 'land-set: rebase conflict'),
+        ('land-set: temper: land --no-push failed (4)', 'land-set: temper: land --no-push failed (4)'),
+        ('land-set: jig: HEAD is not on origin/main', 'land-set: jig: HEAD is not on origin/main'),
+        ('land-set: temper: main kept moving after three gate rounds',
+         'land-set: temper: main kept moving after three gate rounds'),
+        ('rebase conflict outside Cargo.lock: crates/temper/tests/x.rs', 'rebase conflict'),
+        ('failed: /private/file.rs', 'failed'),
+        ('land-set: temper: rebase conflict: /private/file.rs', 'land-set: temper: rebase conflict'),
+    ]
+    for reason, expected in examples:
+        assert kind(reason) == expected, (reason, kind(reason), expected)
+
+
+def page_recent(lab):
+    # Seven ended runs in scrambled feed order: show only the latest five.
+    reasons = ['land-set: rebase conflict outside Cargo.lock: crates/temper/tests/x.rs',
+               'land-set: temper: land --no-push failed (4)',
+               'land-set: jig: HEAD is not on origin/main',
+               'land-set: temper: main kept moving after three gate rounds',
+               'rebase conflict outside Cargo.lock: crates/temper/tests/x.rs']
+    events = []
+    for i in (6, 2, 5, 0, 4, 1, 3):
+        events.append(dict(time=iso(i + .2), set=f'recent-{i}', token=f'r{i}', host='alpha-host', event='started'))
+        events.append(dict(time=iso(i + .1), set=f'recent-{i}', token=f'r{i}', host='alpha-host', event='stopped',
+                           repo='temper', reason=reasons[i] if i < 5 else 'old reason: /private/omitted.rs'))
+    write(lab.root / 'recent.jsonl', ''.join(json.dumps(e) + '\n' for e in events))
+    out = lab.root / 'page.html'
+    lab.run('--no-pull', '--out', str(out), STATUS_FEED=str(lab.root / 'recent.jsonl'))
+    page = out.read_text()
+    recent = page.split('<h3>Recent set runs</h3>', 1)[1].split('<h3>Missions</h3>', 1)[0]
+    assert re.findall(r'<tr><td>(.*?)</td>', recent) == [f'recent-{i}' for i in range(5)], recent
+    for expected in ('land-set: rebase conflict', 'land-set: temper: land --no-push failed (4)',
+                     'land-set: jig: HEAD is not on origin/main',
+                     'land-set: temper: main kept moving after three gate rounds'):
+        assert expected in recent, (expected, recent)
+    for hidden in ('Cargo.lock', 'crates/temper/tests/x.rs', '/private/omitted.rs', 'old reason'):
+        assert hidden not in page, hidden
+
+
+def machine_ips(lab):
+    build = runpy.run_path(str(SCRIPT))['part_machine']
+    # The optional probe's missing binary and timeout leave the other figures.
+    for error in (FileNotFoundError('no ip'), subprocess.TimeoutExpired('ip', 10)):
+        with patch('subprocess.run', side_effect=error) as run:
+            info = build(lab.alpha, NOW)
+        assert info['ips'] == [] and info['disk_free'] > 0 and info['cpus'] > 0, info
+        assert run.call_args.kwargs['stdin'] == subprocess.DEVNULL
+        assert run.call_args.kwargs['timeout'] == 10
+    # Interface/address shape checks and per-address filtering keep global IPv4 order.
+    addresses = [{'addr_info': [{'local': '8.8.4.4'}, {'local': None}, {'local': '2001:4860:4860::8888'},
+                               {'local': '62.238.103.124'}, {'local': '10.80.0.15'}]}, None, {'addr_info': 'bad'}]
+    write(lab.alpha.parent / 'ip.json', json.dumps(addresses))
+    data = json.loads(lab.run('collect').stdout)
+    assert data['errors'] == [] and data['machine']['ips'] == ['8.8.4.4', '62.238.103.124'], data['machine']
+    # Exit failure and malformed JSON both produce a card without IPs, not a lost part.
+    write(lab.alpha.parent / 'ip.json', json.dumps({'exit': 1}))
+    write(lab.beta.parent / 'ip.json', json.dumps({'stdout': 'not json'}))
+    page, data = subscription_page(lab)
+    for host in ('alpha', 'beta'):
+        assert data['fleet'][host]['machine']['ips'] == [], data['fleet'][host]['machine']
+        assert data['fleet'][host]['errors'] == [], data['fleet'][host]['errors']
+        assert f'{data["fleet"][host]["host"]} · load' in page
+    assert '62.238.103.124' not in page and '9.9.9.9' not in page
 
 
 def page_roles(lab):
@@ -628,7 +718,8 @@ def page_subscriptions(lab):
     page, data = subscription_page(lab)
     section = page[page.index('<h2>Subscriptions'):page.index('<h2>In flight')]
     assert section.count('Claude · max') == 1 and section.count('Codex · promax') == 2, section
-    assert 'alpha, beta' in section and 'gamma' not in section, section
+    assert re.findall(r'<th(?: [^>]*)?>(.*?)</th>', section) == ['Subscription', 'Limit', 'Used', 'Resets']
+    assert 'alpha' not in section and 'beta' not in section and 'gamma' not in section, section
     assert '84%' in section and '24%' not in section and '1%' in section and '3%' not in section, section
     assert '10-26 06:30Z' in section and '10-26 05:30Z' not in section, section
     assert '<div class="label">Subscriptions</div><div class="value">3</div>' in page
@@ -713,7 +804,7 @@ def claude_resets(lab):
     assert [v['used'] for v in data['claude_usage']['limits']] == list(range(7))
 
 
-CASES = [collect_subscriptions, page_subscriptions, subscriptions_signed_out, subscription_failures, claude_resets, collect, collect_missing, page, page_roles, page_role_edges, page_degraded, bad_data, write_failure, install]
+CASES = [collect_subscriptions, page_subscriptions, subscriptions_signed_out, subscription_failures, claude_resets, collect, collect_missing, page, reason_kind, page_recent, machine_ips, page_roles, page_role_edges, page_degraded, bad_data, write_failure, install]
 
 
 def main():
