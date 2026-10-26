@@ -39,7 +39,7 @@ serves it.
   implementer or other session shows by name: the page counts them, and
   a name only joins a session to its mission (the user, 10-26). Each
   machine's public IP shows on its card (the user, 10-26). The
-  director's post shows as a count alone: no sender, subject or body.
+  director's post is not read (the user, 10-26).
   What waits on the user shows as counts of open issues and links to
   them, which only a signed-in user can follow into a private
   repository: no title, body or author (the user, 10-26). An
@@ -70,7 +70,6 @@ serves it.
 | Claude | `claude agents --json --all` | the live sessions by role, busy or idle: the director, the designers (`design/<d>`) and owners (`o/<m>`) by their names, and the rest |
 | the records | `records/missions/*/README.md`, after `record pull` | each mission's front matter: its `state`, `ended` and `description`, and its `started` read as a time (anything else is unknown) |
 | the user's issues | git.fabrig.ai's API (Forgejo), from the machine holding `tmp/git-fabrig/status-read.token` (hel8), a read token for issues and repositories | how many open issues of seven `fabrig-ai` repositories carry their `waiting-on-user` label (2.3) |
-| the director's post | `tmp/post/director/new/` and `cur/` (post.md 3), on whichever machine holds them | how many messages owners (`o/…`) and designers (`design/…`) sent the director in the last 24 hours, by each one's `Id` stamp: its `Id` and `From` headers alone, of the files changed within the day |
 | the machine | `/proc`, the disk under `tmp/`, `ip -j -4 addr show scope global` | load, free memory and disk, and its public IPv4 addresses (the globally routable ones) |
 | Claude's subscription | `claude auth status --json`, `claude -p /usage` | what it is signed in to, and each limit's use and reset (2.1) |
 | Codex's subscription | `codex app-server`: `account/read`, `account/rateLimits/read` | the same (2.1) |
@@ -230,17 +229,14 @@ with its own label's id (the user, 10-26; agents' `user-issues.md`):
 
 - **Tiles:** missions, landings per hour (below), agents (the director,
   designers, owners and implementers live, and how many of them are
-  busy), the director's post in the last 24 hours from owners and
-  designers (`12 from owners, 3 from designers`; a dash where no
-  machine reached holds the director's mailbox; the user, 10-26), land
-  gates in the last 24 hours, what waits on the user (the open issues
+  busy), land gates in the last 24 hours, what waits on the user (the open issues
   so labelled in the seven repositories, in all; the sub each
   repository's count as a link to its issues,
   `https://git.fabrig.ai/fabrig-ai/<repo>/issues?state=open&labels=<id>`,
   in 2.3's order; a repository not read a dash, named in the footer,
   the sub then saying how many were read; the user, 10-26), and the
   subscriptions with the highest use among them. Heavy's commands now show on each machine's card alone (the
-  user, 10-26).
+  user, 10-26), and the director's post has no tile (the user, 10-26).
 - **Landings per hour** (the user, 10-26): the landings that pushed a
   `main` in the last 6 hours, over 6, to one decimal: a set's run once,
   at its last `landed` event, and a plain `land`'s record once. Six
@@ -369,12 +365,8 @@ an unidentified one; resets read across a year's end; a `/usage`
 answered by a model, a probe that times out and one that answers
 nonsense, each named in the footer while the rest stands; the methods
 asked of the app-server; and no email or id, on the page or in the
-`--json` file. The director's post: messages from owners and
-designers within the day counted, by role; older ones, other senders
-(`codex-run`, `qa-watch`, the user) and a file without an `Id` or a
-`From` not; a machine without the mailbox adding nothing and naming
-nothing in the footer, and the tile's dash with none reached; no
-sender, subject or body on the page or in the `--json` file. The
+`--json` file. A machine holding the director's mailbox adds nothing
+of it to the page, the `--json` file or the footer. The
 pace: a limit full before its reset, one that
 lasts, one at 100, one whose samples don't yet span enough saying how
 long it waits and what it needs, each pace's rate per hour with its
