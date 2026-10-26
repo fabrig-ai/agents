@@ -102,6 +102,76 @@ check_lingering() {
         warn "no lingering: heavy's reconciler, task wrappers and payloads stop when $USER logs out (loginctl enable-linger)"
 }
 
+# Only the machine named by the director installs the paused runner's units.
+check_after_landing() {
+    local address_file=$HOME/.config/agents-after-landing/director
+    local unit_dir=$HOME/.config/systemd/user unit=agents-after-landing@.service
+    local director expected sibling repo
+    local -a addresses=()
+    if [[ ! -e $address_file && ! -L $address_file ]]; then
+        ok "after-landing: not this machine's runner"
+        if systemctl --user is-active --quiet 'agents-after-landing@*.service' 2>/dev/null; then
+            warn 'after-landing: runner services active on an unassigned machine'
+        fi
+        return
+    fi
+    if ! mapfile -t addresses < "$address_file" || ((${#addresses[@]} != 1)) ||
+        [[ ! ${addresses[0]} =~ ^[A-Za-z0-9/_+.-]+@[A-Za-z0-9._-]+$ ]]; then
+        fail "after-landing: $address_file must hold one director address (NAME@MACHINE)"
+        return
+    fi
+    director=${addresses[0]}
+    expected=$(cat <<UNIT
+[Unit]
+Description=after landing's runner for %i (agents' landing-flow.md 4, step 8)
+
+[Service]
+Type=exec
+ExecStart=/bin/bash -lc 'exec after-landing follow "\$1" --director "\$2"' after-landing %i $director
+Restart=on-failure
+RestartSec=60
+RestartPreventExitStatus=2
+
+[Install]
+WantedBy=default.target
+UNIT
+)
+    if cmp -s "$unit_dir/$unit" <(printf '%s\n' "$expected"); then
+        ok "after-landing: $unit is current"
+    elif ((!fix)); then
+        fail "after-landing: $unit is missing or differs (--fix writes it)"
+    fi
+    if ((!bus)); then
+        fail 'after-landing: no user bus; cannot check or start runner services'
+        return
+    fi
+    if ((fix)); then
+        if ! mkdir -p "$unit_dir" || ! sibling=$(mktemp "$unit_dir/$unit.XXXXXX"); then
+            fail "after-landing: cannot prepare $unit_dir/$unit"
+            return
+        fi
+        if ! printf '%s\n' "$expected" > "$sibling" || ! mv -f "$sibling" "$unit_dir/$unit"; then
+            rm -f "$sibling"
+            fail "after-landing: cannot write $unit_dir/$unit"
+            return
+        fi
+        if ! systemctl --user daemon-reload; then
+            fail 'after-landing: user daemon-reload failed'
+            return
+        fi
+    fi
+    for repo in skein smith hearth jig temper; do
+        if ((fix)) && ! systemctl --user enable --now "agents-after-landing@$repo"; then
+            fail "after-landing: cannot start agents-after-landing@$repo (--fix starts it)"
+        elif systemctl --user is-enabled --quiet "agents-after-landing@$repo" &&
+            systemctl --user is-active --quiet "agents-after-landing@$repo"; then
+            ok "after-landing: $repo enabled and active"
+        else
+            fail "after-landing: $repo must be enabled and active (--fix starts it)"
+        fi
+    done
+}
+
 # The tools, the workspace's files, the queue and room to work.
 check_machine() {
     # Instructions and tools come from agents alone.
@@ -120,7 +190,7 @@ check_machine() {
     cargo nextest --version >/dev/null 2>&1 && ok "has cargo-nextest" || fail "no cargo-nextest"
     # The tools link to this checkout.
     local bin=$HOME/.local/bin home=$kit target
-    for tool in heavy land land-set landings repin record setup post codex-run; do
+    for tool in heavy land land-set landings after-landing repin record setup post codex-run; do
         target=$home/../devel/$tool
         [[ $tool != setup ]] || target=$home/setup
         target=$(readlink -f "$target")
@@ -182,6 +252,7 @@ check_machine() {
         warn "no kache rustc-wrapper in ~/.cargo/config.toml"
     fi
 
+    check_after_landing
     check_lingering
     # Installation is explicit: setup never probes/installs a new recovery
     # mechanism while repairing an existing queue.
