@@ -28,11 +28,13 @@ whose future is open (section 9).
   newest `main` that after landing has cleared. Commits chosen while a
   pass runs batch into the next one (section 4).
 - **A pass is a Codex session.** It builds the product at that `main`,
-  sets up a deployment with the product's own commands, and drives it
-  only through the tool its users' agents use: `temper ctl`, for
-  temper. For each commit it tests the happy path and two to four tricky
-  cases it picks, writing down what it expects before running each
-  (section 4).
+  sets up a deployment with the product's own commands, and works with
+  it as its users' agents do: the product's tool for the product
+  (`temper ctl`, for temper), and tools of its own for the systems the
+  product works with (`curl`, for temper's forges). The product's
+  binding, its `docs/design/qa.md`, says how. For each commit it tests
+  the happy path and two to four tricky cases it picks, writing down
+  what it expects before running each (section 4).
 - **Its report** gives each case's outcome, each finding with the
   commands that reproduce it, and what in the pass a helper could
   automate (section 5).
@@ -106,10 +108,16 @@ whose future is open (section 9).
   deletes a pass's scratch directory 7 days after it ends.
 - **The session:** Codex at `codex-run`'s defaults, started by
   `codex-run task` with a brief the service writes. The brief says to
-  read `roles/qa.md`, and names the commits, the `main`, the worktree,
+  read `roles/qa.md`, then the product's binding, `docs/design/qa.md`
+  in its repository, and names the commits, the `main`, the worktree,
   a scratch directory in `tmp/qa/<pass>/`, the cap and the report's
   path. Its wall time has a cap, the user's to set (proposed: two
   hours). Its tokens are recorded, not capped.
+- **The product's binding** is the product's: whom a pass plays, the
+  deployment and its rungs, the hands it holds on the product and on
+  its backends, and what makes a finding there. This document and the
+  role name no product; the binding is where a product says what they
+  leave to it.
 - **What it does:**
   1. Reads each commit's diff and the designs the commit touches.
   2. Writes its plan in the scratch directory before running anything.
@@ -117,23 +125,29 @@ whose future is open (section 9).
      picks (errors, retries, odd input, a thing done twice or two at
      once), each with the outcome it expects.
   3. Builds the product and sets up a deployment with the product's
-     own commands, as the product's guide says: for temper, `temper
-     box` on a scratch directory and `temper ctl`'s sign-in. Cases that
-     don't disturb each other share one deployment. A case that would
-     disturb others gets a fresh one.
-  4. Drives each case through the product's tool alone: for temper,
-     `temper ctl`, whose `help` is temper's guide for agents. It checks
-     outcomes through the tool too. Where the tool can't show one, for
-     example a branch on the forge, it may read the backend and says so
-     in its report: the tool's not showing it is a finding in itself.
-     It never acts on the product any other way: not through its store,
-     its HTTP API, or a fake's internals.
+     own commands, as its binding says: for temper, `temper box` on a
+     scratch directory, `temper ctl`'s sign-in, and the forge's hands
+     from the files the box names. Cases that don't disturb each other
+     share one deployment. A case that would disturb others gets a
+     fresh one.
+  4. Works each case as the product's users' agents do: the product
+     through its tool (for temper, `temper ctl`, whose `help` is
+     temper's guide for agents), its backends through tools of the
+     pass's own (the user, 10-26: the product is agnostic about how its
+     users reach other systems, and our passes choose `curl`). It checks
+     each outcome on both sides. A finding is the product not saying
+     where to look, the two disagreeing, the product stale past its
+     bound, a guide that doesn't get the pass there, or the product's
+     words wrong; having read the backend is none. It never acts on the
+     product any other way: not through its store, its HTTP API, or a
+     fake's internals.
   5. Writes its report (section 5).
 - **Its transcript is Codex's own:** the session's rollout records
   every command and its output, so no wrapper logs the tool's calls.
 - **Backends:** the product's fakes, for now. A real forge and a real
-  model come as a second set once passes run (the user, 10-26). Their
-  accounts and spend are open (section 9).
+  model come as further rungs once passes run (the user, 10-26), each
+  named in the binding, the director opening one for the brief to name.
+  Their accounts and spend are open (section 9).
 
 ## 5. The report
 

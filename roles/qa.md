@@ -7,18 +7,23 @@ its users' agents do ([qa-flow.md](../docs/design/qa-flow.md) 4 and
 5). It reads this file, then its brief, which names the repository,
 the commits with their `QA:` trailers, the `main` and its checkout (its
 working directory), its scratch directory, its wall cap and its
-report's path.
+report's path; then the product's binding, `docs/design/qa.md` in its
+repository, which says how a pass sets it up, whom it plays and what
+makes a finding there.
 
 ## 1. In one page
 
 - **A plan before anything runs,** in the scratch directory: for each
   commit, the happy path, then two to four tricky cases, each with the
   outcome it expects (section 2).
-- **The product's own commands set it up,** as its guide says, on the
-  product's fake backends.
-- **The product's tool alone drives it:** the tool its users' agents
-  use, for temper `temper ctl`, whose `help` is temper's guide for
-  agents. Outcomes are checked through it too.
+- **The product's own commands set it up,** as its binding says, on its
+  fake backends, the binding's first rung, for now.
+- **It works as the product's users' agents do:** the product's tool for
+  the product (for temper, `temper ctl`, whose `help` is temper's guide
+  for agents), and tools of its own for the systems the product works
+  with, as the binding names them (for temper's forges, `curl`).
+  Outcomes are checked on both sides: what the product says, and what
+  the backend shows.
 - **The report** gives each case's outcome, each finding with the
   commands that reproduce it, what a helper could automate, and what
   was blocked (section 3).
@@ -28,8 +33,8 @@ report's path.
 ## 2. The steps
 
 1. **Read** each commit's diff (`git show`), its trailer, and the
-   designs it touches; then the product's guide: for temper,
-   `docs/guide/`, and `temper ctl help` once it is built.
+   designs it touches; then the product's binding and its guide: for
+   temper, `docs/design/qa.md`, `docs/guide/` and `temper ctl help`.
 2. **Plan,** in `plan.md` in the scratch directory, before running
    anything. For each commit: the happy path, then two to four tricky
    cases you pick (an error, a retry, odd input, a thing done twice or
@@ -42,17 +47,23 @@ report's path.
    warm between passes (no `--target-dir`, no `CARGO_TARGET_DIR`); copy
    or install the binaries into the scratch directory, never into
    `~/.local`. Set up a deployment with the product's own commands, as
-   its guide says, in a directory of the scratch, on its fake backends:
+   its binding says, in a directory of the scratch, on its fake backends:
    for temper, `temper box --fake-backends` as `docs/guide/box.md`'s
-   last section says, then `temper ctl`'s sign-in with the link it
-   prints. Cases that don't disturb each other share one deployment; a
-   case that would disturb others gets a fresh one.
-4. **Drive each case through the tool alone,** and check its outcome
-   through the tool. Where the tool can't show an outcome (a branch on
-   the forge), you may read the backend, and say so in the report: the
-   tool's not showing it is a finding in itself. Never act on the
-   product any other way: not through its store, its HTTP API, or a
-   fake's internals.
+   last section says, `temper ctl`'s sign-in with the link it prints,
+   and the forge's hands from the files the box names (temper's
+   `docs/design/qa.md`, 4). Cases that don't disturb each other share
+   one deployment; a case that would disturb others gets a fresh one.
+4. **Drive each case as the product's users' agents do,** and check its
+   outcome on both sides: the product's account through its tool, and
+   the backend's through the tools the binding names. A finding is the
+   product not saying where to look, the two accounts disagreeing, the
+   product stale past its bound, a guide that doesn't get you there, or
+   the product's words wrong (temper's binding, 6); having read the
+   backend is none. What the product's `STATUS.md` lists as not yet
+   built goes under Blocked. Never act on the product any other way:
+   not through its store, its HTTP API, or a fake's internals; and act
+   on a backend only as a case's plan says, with the hands the binding
+   gives.
 5. **Report** (section 3), then stop every deployment you started.
 
 ## 3. The report
@@ -66,8 +77,8 @@ which the tools read:
 ## Cases
 
 ### <short commit> <its subject>
-- <what it tried>: expected <...>; saw <...>; ok
-- <what it tried>: expected <...>; saw <...>; finding 1
+- <what it tried>: expected <...>; saw <the product's account>; <the backend's>; ok
+- <what it tried>: expected <...>; saw <the product's account>; <the backend's>; finding 1
 
 ## Findings
 
@@ -98,6 +109,8 @@ Saw: <...>
   throwaway scripts; nothing goes elsewhere in `~/src/rust/tmp/`.
 - **The security rules** are an implementer's
   ([implementer.md](implementer.md) 5), and the product's deployment
-  uses its fakes alone: no real forge, model or account.
+  uses its fakes alone, unless the brief names a real rung: then its
+  accounts are used by path, never read, and given back before the
+  deployment stops.
 - **Builds** go through `heavy` at background weight, never `--gate`,
   and nothing runs a repository's gate or after landing's tier.
