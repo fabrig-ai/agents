@@ -543,6 +543,8 @@ def storage_failure(lab, point):
                      repr(str(proceed)) + ');\nwhile not p.exists(): time.sleep(.02)')
     wait_for(lambda: lab.event('storage-gate', 'payload_begin'), 'storage gate entered')
     token = lab.task('storage-gate')['token']
+    # A hold query replays the outbox; inspect the snapshot during ENOSPC.
+    assert lab.held('build')
     injection = lab.faults / ('enospc-' + point)
     injection.touch()
     proceed.touch()
@@ -556,7 +558,6 @@ def storage_failure(lab, point):
     assert not receipt.exists(), 'storage failure published success'
     if point != 'seal':
         assert lab.state()['gate'] == token, 'unpersisted completion lost its hold'
-        assert lab.held('build')
     assert all(text in output.read_text() for text in ('Free space', 'SAME recovery service',
                'heavy --reconcile', 'SAME queue', 'RETAIN', '137'))
     # Restore the same service, queue and ledger; no replacement/reset occurs.
@@ -606,6 +607,8 @@ def land_diagnostic(lab, point, prebuild=False):
     wait_for(lambda: lab.event(label, 'payload_begin'), 'land payload entered')
     task = lab.task(label)
     token = task['token']
+    if not prebuild and point != 'seal':
+        assert not lab.held('build')
     # This faults the capture write with a real kernel ENOSPC (/dev/full).
     # Its warning must already reach the waiting caller before that write.
     (lab.faults / 'enospc-land-capture').touch()
@@ -626,7 +629,6 @@ def land_diagnostic(lab, point, prebuild=False):
     elif not prebuild and point != 'seal':
         # A landing's gate holds nothing: the builds go on beside it.
         assert lab.state()['gate'] is None
-        assert not lab.held('build')
     assert lab.call(['git', 'rev-parse', 'main']).stdout.strip() == base
     assert not (lab.path / 'tmp/gates').exists()
     if point == 'missing':
