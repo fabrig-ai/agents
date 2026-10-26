@@ -338,7 +338,8 @@ def detached(lab):
     assert not work.exists() and 'detached HEAD' in text, text
     protected = lab.tmp / 'after-landing' / 'protected'
     lab.git(lab.a, 'worktree', 'add', '--detach', str(protected), lab.base)
-    assert 'tool directory' in lab.run('agents') and protected.exists()
+    assert lab.run('agents') == ''
+    assert protected.exists()
 
 
 def outside_worktrees(lab):

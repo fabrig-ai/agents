@@ -291,6 +291,8 @@ class Tidy:
         for wt in repo.worktrees:
             if self.tmp not in wt['path'].parents or 'HEAD' not in wt:
                 continue
+            if self.protected(wt['path']):
+                continue
             name = wt.get('branch', '').removeprefix('refs/heads/')
             try:
                 if self.tmp not in wt['path'].resolve().parents or not wt['path'].exists():
