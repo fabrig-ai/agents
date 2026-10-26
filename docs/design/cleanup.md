@@ -68,6 +68,7 @@ GitHub, and the sweep of the six machines' `tmp/` (section 6).
 | `heavy/`, `logs/`, `gates/`, `landing-turn/`, `land-set/` | `heavy`, `land`, `land-set`, `tidy` | receipts, `heavy.tsv`, `tidy.log` and its lock, the gates' stamps, the landing turns, the sets' locks and state |
 | `kache/`, `lab/`, `after-landing/` | their tools | the build cache's binary, the lab's store, the runner's clones, state, logs and locks |
 | `post/`, `codex-run/` | `post`, `codex-run` | the mailboxes, the runs and `runs.tsv` |
+| `git-fabrig/` | the director, `issue` | the forge's tokens, which the director copies, 0600 in a 0700 directory; on hel8 the router's webhook secret ([user-issues.md](user-issues.md) 3.2, 4) |
 | `qa/` | `qa` | its clones of the repositories (`repos/`), the QA passes' scratch directories, which `qa watch` deletes 7 days after their end, and the service's lock ([qa-flow.md](qa-flow.md) 4) |
 | `machine.env` | `setup` | the machine's floor and limits |
 | `owners/<m>/` | a mission's owner | its notes, handover, tasks and reports, its worktrees (`m<N>/`) and evidence, until the mission ends |
