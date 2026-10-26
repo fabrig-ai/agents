@@ -8,8 +8,10 @@ owners' `heavy` commands. Runtime identity is specified by gate-policy.md.
 - **Weights, not slots** (build-efficiency.md, 5). Every task builds as
   wide as the machine, and builds take no slot unless the machine sets
   `HEAVY_BUILD_SLOTS`. Each task's systemd unit carries a CPU weight: a
-  landing's prebuild and gate (`heavy --land`) 10000, an agent's builds
-  1000, `HEAVY_CLASS=background` 100, `HEAVY_CLASS=idle` only idle cores.
+  landing's gate (`heavy --land`) 10000; an agent's builds, and a
+  landing's prebuild and regeneration, 1000 (the director, 10-26,
+  decision 1210); `HEAVY_CLASS=background` 100, `HEAVY_CLASS=idle` only
+  idle cores.
   When the cores are contended, landing work takes them first; when they
   are not, nothing waits. `cargo fmt` builds nothing and runs at once.
 - **heavy is its own queue.** Its host ledger admits every task, and

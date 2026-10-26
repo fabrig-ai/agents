@@ -57,8 +57,8 @@ The classes, highest first, as `heavy` weights them
 
 | Class | Weight | What | Why there |
 |---|---|---|---|
-| Landing | 10000 | A prove's or a landing's prebuild and gate (`heavy --land`, or a `land ...` label) | Every landing of the fleet waits on it, and its gate is timed against wall-time budgets |
-| Build | 1000 | An agent's builds: narrow steps and end steps | An agent waits on each |
+| Landing | 10000 | A prove's or a landing's gate (`heavy --land`) | Every landing of the fleet waits on it, and its gate is timed against wall-time budgets |
+| Build | 1000 | An agent's builds: narrow steps and end steps; a landing's prebuild and regeneration | An agent waits on each. A prebuild at 10000, a whole temper build, took a gate beside it below its 30 s budget on hetzner6 (the director, 10-26, decision 1210) |
 | Background | 100 | After-landing's tiers, when they run again (`HEAVY_CLASS=background`) | Long and throughput-bound; slower costs little |
 | Idle | idle | Warming a new `main`, speculative work (`HEAVY_CLASS=idle`) | Worth doing only on otherwise idle cores |
 
