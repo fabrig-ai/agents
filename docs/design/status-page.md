@@ -29,7 +29,8 @@ serves it.
 - **Public, without the director's notes.** The page is served to
   anyone, so it holds no text from `records`' `STATUS.md` nor from a
   mission's README beyond its front matter's `state`, `ended` and
-  `description` (the user, 10-25 and 10-26). No owner, designer,
+  `description`, and its `started` as a time alone, for a duration
+  (the user, 10-25 and 10-26). No owner, designer,
   implementer or other session shows by name: the page counts them, and
   a name only joins a session to its mission (the user, 10-26). Each
   machine's public IP shows on its card, and `director/waiting.md`,
@@ -55,7 +56,7 @@ serves it.
 | the landing turns | `tmp/landing-turn/events.jsonl` | each turn's wait and hold, and the turns open now; a `fail-open` closes one |
 | codex-run | `tmp/codex-run/*/meta`, `runs.tsv` and the `codex-run-*` user units | the implementers running, each with its mission, and the runs that ended |
 | Claude | `claude agents --json --all` | the live sessions by role, busy or idle: the director, the designers (`design/<d>`) and owners (`o/<m>`) by their names, and the rest |
-| the records | `records/missions/*/README.md`, after `record pull` | each mission's front matter: its `state`, `ended` and `description` |
+| the records | `records/missions/*/README.md`, after `record pull` | each mission's front matter: its `state`, `ended` and `description`, and its `started` read as a time (anything else is unknown) |
 | the user's waits | `records/director/waiting.md`, after `record pull` | each item: since when, who waits, what, and its decision (records.md 3) |
 | the machine | `/proc`, the disk under `tmp/`, `ip -j -4 addr show scope global` | load, free memory and disk, and its public IPv4 addresses (the globally routable ones) |
 | Claude's subscription | `claude auth status --json`, `claude -p /usage` | what it is signed in to, and each limit's use and reset (2.1) |
@@ -135,14 +136,14 @@ credential: not `.credentials.json`, `auth.json` nor a token.
   them. Heavy's commands now show on each machine's card alone (the
   user, 10-26).
 - **Waiting on the user,** after the tiles: one row per item of
-  `director/waiting.md`, in its order, giving since when (the time, and
-  how long ago), who waits (a mission or the director), what, and the
+  `director/waiting.md`, in its order, giving since when (how long
+  ago), who waits (a mission or the director), what, and the
   decision that holds the detail. A line `record` would refuse is left
   out and named in the footer; with no file, the section says nothing
   waits.
 - **Subscriptions,** after the tiles: a table, one row per distinct
   subscription and limit, giving its CLI, plan and label, a bar of the
-  percent used, and its reset (in how long, and when). Which machines
+  percent used, and its reset (in how long). Which machines
   share it the page doesn't say (the user, 10-26). The machines signed out, with no subscription, or with an
   unidentified one follow, by CLI. A machine not reached adds nothing.
 - **In flight:** what is landing (set runs, `land`'s prebuilds and
@@ -160,8 +161,9 @@ credential: not `.credentials.json`, `auth.json` nor a token.
   description, what runs for it now, and its last activity. An owner
   idle on its waiters is waiting, as the roles have it, not missing.
   The missions ended in the last 7 days follow, newest first, with
-  their `ended` time and description: never their `end`, which is
-  prose, nor `closing.md`.
+  their `ended` time, their duration (`ended` less `started`, a dash
+  where `started` is unknown or later) and their description: never
+  their `end`, which is prose, nor `closing.md`.
 - **What runs for a mission now** is one label, the first of these
   that holds, with how many hold where several do (`2 × build`), so
   that the description keeps the room (the user, 10-26). What is
@@ -192,6 +194,13 @@ credential: not `.credentials.json`, `auth.json` nor a token.
   anything runs for it now, or when it has commands in the last 24
   hours and the record doesn't say it ended. Directories under
   `tmp/owners/` alone bring in nothing: the sweeps touch ended ones.
+- **Times** show relative to the page's writing (`11 min ago`, `in 2 h
+  19 min`, or how long something has run), each with its exact UTC
+  time in its hover title (`2026-10-26 03:49 UTC`), so that a cell
+  holds one of them (the user, 10-26): in the tiles, the tables and
+  the machine cards. Only the time the page was written and the
+  charts' hours show as clock times. An ended mission's duration reads
+  `42 min`, `5 h 12 min` or `3 d 6 h`, as a reset's does.
 - The page reloads itself every 5 minutes, carries `noindex`, and works
   in light and dark. Every chart has a table beside it.
 
@@ -250,7 +259,12 @@ designer's, implementer's or session's name anywhere on the page, and a
 description shown. What runs: one label per mission, each rank of
 section 3 over the next with its count, a set joining its mission by
 name and an unrecorded set's prefix bringing in none, and a description
-of 65 characters shown whole. `test-record` proves `record`'s check of the
+of 65 characters shown whole. Times: each relative time in a tile,
+table or card carries its exact UTC time as its hover title, no cell
+holds a clock time beside it, and an ended mission's duration in days,
+hours and minutes, with a dash for a `started` unknown, not a time or
+after `ended`, whose text reaches neither the page nor the `--json`
+file. `test-record` proves `record`'s check of the
 `description` key and of `director/waiting.md`. The user's waits: shown
 in order, a malformed line left out and named in the footer, a missing
 file an empty section, and the tile's count and oldest.
