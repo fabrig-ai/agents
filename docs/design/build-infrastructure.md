@@ -1108,6 +1108,11 @@ machines keep its queue, containment and receipts, unchanged.
     what its evidence proves is gate-policy.md 3.2's.
 
   `land-set` lands through `land`, and needs nothing of its own.
+- **Plain takes the machine as it finds it.** A plain run has no CPU
+  weight of heavy's: on a machine busy with heavy's builds (weight 1000)
+  it gets a session's share, and a suite's own global timeout can cut
+  it. Plain is for machines without heavy, where nothing outranks it; a
+  build machine gates through heavy.
 - **`setup`** asks the same question. Installed, it checks recovery,
   lingering and the lanes as section 4 says; not installed, it says so
   in one `ok` line and checks none of them; can't tell, it fails. It
