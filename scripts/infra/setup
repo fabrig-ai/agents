@@ -322,15 +322,22 @@ check_machine() {
 
     check_after_landing
     check_qa_watch
-    check_lingering
     # Installation is explicit: setup never probes/installs a new recovery
     # mechanism while repairing an existing queue.
-    local heavy=$home/../devel/heavy
-    if "$heavy" --check-recovery >/dev/null 2>&1; then
-        ok "heavy's independent reconciler and containment proof are ready"
-    else
-        fail "heavy recovery is not ready: heavy --install-reconciler"
-    fi
+    local heavy=$home/../devel/heavy installed_status=0
+    "$heavy" --installed >/dev/null 2>&1 || installed_status=$?
+    case $installed_status in
+        0)
+            check_lingering
+            if "$heavy" --check-recovery >/dev/null 2>&1; then
+                ok "heavy's independent reconciler and containment proof are ready"
+            else
+                fail "heavy recovery is not ready: heavy --install-reconciler"
+            fi
+            ;;
+        1) ok "heavy is not installed: builds and gates run plain (build-infrastructure.md 12)" ;;
+        *) fail "heavy cannot tell whether it is installed: heavy --installed says why" ;;
+    esac
     if apt-config dump 2>/dev/null | grep -E '^Unattended-Upgrade::Automatic-Reboot "true";' >/dev/null; then
         warn 'the machine may reboot unattended (Unattended-Upgrade::Automatic-Reboot)'
     fi
@@ -339,23 +346,25 @@ check_machine() {
     read -r slots slots_source < <(machine_setting HEAVY_BUILD_SLOTS 0)
     while IFS= read -r line; do warn "machine.env: ignored line $line"; done < <(
         awk 'NF && $0 !~ /^(PLAN_MIN_MEM_GB|PLAN_MIN_DISK_GB|HEAVY_BUILD_SLOTS|HEAVY_BUILD_JOBS|KACHE_MAX_GB|QA_SLOTS|QA_BATCH|QA_CAP_MINUTES|QA_INTERVAL_SECONDS)=[0-9]+$/ { print NR ": " $0 }' "$tmp/machine.env" 2>/dev/null || true)
-    if [[ $slots == 0 ]]; then
-        ok "builds: every task at once ($slots_source)"
-    else
-        ok "builds: $slots at once ($slots_source)"
-    fi
-    for lane in gate build; do
-        if "$heavy" --group-held "$lane"; then
-            ok "queue lane $lane is held by heavy"
+    if ((installed_status == 0)); then
+        if [[ $slots == 0 ]]; then
+            ok "builds: every task at once ($slots_source)"
         else
-            status=$?
-            if ((status == 1)); then
-                ok "queue lane $lane admits"
-            else
-                fail "heavy cannot report lane $lane: heavy --reconcile says why"
-            fi
+            ok "builds: $slots at once ($slots_source)"
         fi
-    done
+        for lane in gate build; do
+            if "$heavy" --group-held "$lane"; then
+                ok "queue lane $lane is held by heavy"
+            else
+                status=$?
+                if ((status == 1)); then
+                    ok "queue lane $lane admits"
+                else
+                    fail "heavy cannot report lane $lane: heavy --reconcile says why"
+                fi
+            fi
+        done
+    fi
 
     # Room to work.
     local disk mem disk_min disk_source mem_min mem_source
