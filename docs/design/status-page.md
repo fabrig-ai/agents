@@ -34,8 +34,9 @@ serves it.
 - **Public, without the director's notes.** The page is served to
   anyone, so it holds no text from `records`' `STATUS.md` nor from a
   mission's README beyond its front matter's `state`, `ended` and
-  `description`, and its `started` as a time alone, for a duration
-  (the user, 10-25 and 10-26). No owner, designer,
+  `description`, its `started` as a time alone, for a duration
+  (the user, 10-25 and 10-26), and its `blocked` as the references
+  of issues alone (`temper#9`). No owner, designer,
   implementer or other session shows by name: the page counts them, and
   a name only joins a session to its mission (the user, 10-26). Each
   machine's public IP shows on its card (the user, 10-26). The
@@ -68,7 +69,7 @@ serves it.
 | the landing turns | `tmp/landing-turn/events.jsonl` | each turn's wait and hold, and the turns open now; a `fail-open` closes one |
 | codex-run | `tmp/codex-run/*/meta`, `runs.tsv` and the `codex-run-*` user units | the implementers running, each with its mission, and the runs that ended |
 | Claude | `claude agents --json --all` | the live sessions by role, busy or idle: the director, the designers (`design/<d>`) and owners (`o/<m>`) by their names, and the rest |
-| the records | `records/missions/*/README.md`, after `record pull` | each mission's front matter: its `state`, `ended` and `description`, and its `started` read as a time (anything else is unknown) |
+| the records | `records/missions/*/README.md`, after `record pull` | each mission's front matter: its `state`, `ended` and `description`, its `started` read as a time (anything else is unknown), and its `blocked` read as the seven repositories' issue references, `<repo>#<n>`, n without a leading zero (records.md 3; any other word is dropped) |
 | the user's issues | git.fabrig.ai's API (Forgejo), from the machine holding `tmp/git-fabrig/status-read.token` (hel8), a read token for issues and repositories | how many open issues of seven `fabrig-ai` repositories carry their `waiting-on-user` label (2.3) |
 | the machine | `/proc`, the disk under `tmp/`, `ip -j -4 addr show scope global` | load, free memory and disk, and its public IPv4 addresses (the globally routable ones) |
 | Claude's subscription | `claude auth status --json`, `claude -p /usage` | what it is signed in to, and each limit's use and reset (2.1) |
@@ -234,9 +235,20 @@ with its own label's id (the user, 10-26; agents' `user-issues.md`):
   repository's count as a link to its issues,
   `https://git.fabrig.ai/fabrig-ai/<repo>/issues?state=open&labels=<id>`,
   in 2.3's order; a repository not read a dash, named in the footer,
-  the sub then saying how many were read; the user, 10-26), and the
+  the sub then saying how many were read; the user, 10-26; and the
+  missions blocked on the user, below), and the
   subscriptions with the highest use among them. Heavy's commands now show on each machine's card alone (the
   user, 10-26), and the director's post has no tile (the user, 10-26).
+- **Blocked on the user** ("a "blocked" count for owners or designers
+  blocked on me (taken from records)", the user, 10-26): the missions
+  the record holds `active` or `paused` whose `blocked` names an issue
+  (records.md 3), each an owner's or a designer's. The count leads the
+  Waiting on the user tile's sub, `2 blocked ·` before the
+  repositories' counts, its hover title each such mission by name with
+  its issues (`configuring-docs: temper#9; ladder: agents#11`);
+  `0 blocked` with none, and `– blocked` where the record was not
+  read. It is the record's word, independent of the issues' source: a
+  dash in the tile's value leaves it.
 - **Landings per hour** (the user, 10-26): the landings that pushed a
   `main` in the last 6 hours, over 6, to one decimal: a set's run once,
   at its last `landed` event, and a plain `land`'s record once. Six
@@ -401,7 +413,18 @@ the requests' `Authorization` header and nowhere on the page, in the
 others can read refused; a refused token, a missing label, a timeout
 and an answer of the wrong shape each a dash named in the footer while
 the rest stands; a machine without the token adding nothing; and no
-title, body or author on the page.
+title, body or author on the page. Blocked on the user: an `active`
+and a `paused` mission with `blocked` counted, and named with their
+issues in the hover title, by name; an `ended` one (written past
+`record`) and one whose `blocked` holds no reference of the seven
+repositories not; a word of `blocked` other than a reference on
+neither the page nor the `--json` file; `0 blocked` with none, `–
+blocked` without the records tree, and the count beside the tile's
+dash when no machine holds the token. `test-record` proves `record`'s
+check of `blocked`: the seven repositories' references taken, one or
+several; another form (`temper#09`, `temper#0`, `temper 9`), another
+repository and an issue named twice refused, and so is `blocked` beside a `state` of `ended`, `abandoned`
+or `unknown`.
 
 ## 6. Open
 
@@ -411,3 +434,10 @@ title, body or author on the page.
 - A mission's `parent` and `feature` stay off the page, and so does
   the chain they would draw: the description says what a mission is
   for (the user, 10-26).
+- The blocked count trusts the record: a `blocked` naming only closed
+  issues still counts until its writer removes it. If that goes stale
+  in practice, the issues' collector could return the open issues'
+  numbers, which name nothing, and the page count only the missions
+  blocked on one of them.
+- A blocked mission's row under the missions doesn't say so; the
+  tile's hover names it.

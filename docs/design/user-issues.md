@@ -36,7 +36,8 @@ carried back to each owner.
   or when the question no longer stands, even with nothing to do.
 - **The director is not told** of new issues, for now (the user,
   10-26). The status page shows a link to the open labelled issues, and
-  their count, where it showed the waits.
+  their count, where it showed the waits, and how many missions are
+  blocked on them, from the record (section 5).
 - **Nothing private reaches an issue:** a bot account whose token can
   only write issues; a tool that refuses a secret, a file from a
   private place, and in a public repository what names the fleet
@@ -243,6 +244,16 @@ is exit 2 and names the rule, never the text:
   director's `direction.md` (director.md 8). A mission that closes with
   an issue still open names it in its closing note, and its parent
   closes it, or keeps it with `--mission`.
+- **Blocked on the user:** a mission that can go no further without
+  the user's answer names the issues it waits on in its README's
+  front matter, `blocked: temper#9` ([records.md](records.md) 3), and
+  removes the line as it goes on, the answer read or the question
+  gone. An issue it can work beside blocks nothing: an issue is a
+  question, and a mission is blocked only when nothing of its end is
+  left to do without it. An owner with a designer names the issue its
+  designer asked; a parent that parks a mission on the user, its
+  session stopped, writes the line in its stead. The status page counts
+  these missions beside the open issues (status-page.md 3).
 
 ## 6. Going live
 

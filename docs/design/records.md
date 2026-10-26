@@ -116,6 +116,19 @@ and `qa.md`: their plan, decisions, milestones and QA passes.
     what the mission does in words a stranger reads, public on the
     status page (status-page.md 1). Its parent writes it at the start,
     and rewrites it when the mission's scope changes;
+    and, optional, `blocked`: the user's issues the mission waits on
+    and can go no further without, `REPO#N` separated by spaces
+    (`temper#9`, `temper#9 agents#11`), REPO one of the seven
+    repositories of [user-issues.md](user-issues.md) 2.1 and N an
+    issue's number, without a leading zero. Present only
+    while the mission so waits, whatever its `state`: an owner idle on
+    its waiter (`active`) and a mission parked (`paused`) alike. Its
+    owner or designer writes it, and its parent for a mission it parks
+    (user-issues.md 5). `record` refuses another form, another
+    repository, an issue named twice, and `blocked` beside a `state`
+    other than `active` or `paused`, so that a closing removes it.
+    Public on the status page, as a count and the issues' references
+    (status-page.md 3);
   - `m<N>.md`: `driver`, `model`, `effort`, `started`, `cap`, `ended`.
   - Times are UTC, `2026-10-24T21:54Z`; what the writer doesn't know is
     `unknown`, never a guess.
