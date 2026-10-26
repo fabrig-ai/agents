@@ -56,8 +56,9 @@ what of the draft remains.
   contracts, not history. No task reports, spikes, benchmark figures,
   line numbers in code, or who was told what. A testing document states
   the worlds, the stories and what they prove, not how a run goes.
-- **Nothing of how we work:** no roles, owners, tasks, tools or
-  landings. The process is an implementation detail of the project.
+- **Nothing of how we work,** in a project's design: no roles,
+  owners, tasks, tools or landings. The process is an implementation
+  detail of the project; only agents' own designs describe it.
 - **One document per area.** A part changes in place the document that
   owns its area, and adds one for an area that has none. A document
   grown wild is rewritten from scratch.

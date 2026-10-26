@@ -14,7 +14,8 @@ file, it says why, and the task wins.
   public types and signatures, what crosses a boundary, and the tests'
   shape. Inside them the choices are the implementer's, and the report
   names those that matter.
-- **Done** is the task's acceptance criteria: its tests, passing.
+- **Done** is the task's acceptance criteria, its tests passing, in
+  commits on the task's branch, which the report names.
 - **Not its own:** `docs/design/`, the designer's (what the code taught
   goes in the report), and `docs/design/draft/`, the user's.
 - **The log:** every 30 minutes, if the task runs that long, 3 or 4
@@ -55,7 +56,9 @@ working, the focused suite once, nothing twice without a reason.
 ## 3. When the task's changes are done
 
 The landing's gates run the wide checks, and what fails there comes
-back as a repair. So, once, when the narrow tests pass:
+back as a repair. So, once, when the narrow tests pass (for Rust;
+other code takes the same steps with its own formatter and linter, and
+its focused fixtures where the task names them):
 
 1. **Format:** `cargo fmt`, directly: it builds nothing.
 2. **Clippy on the changed packages:** `heavy cargo clippy -p PKG

@@ -95,8 +95,9 @@ out. The security rules are director.md 10's.
   fixed where, how upstream changes are pushed and pinned, what not to
   touch. It grows when a question shows a gap.
 - **The goal is no questions.** A question means the task left
-  something open: the owner answers, resumes the run (`codex-run task
-  --resume RUN`), and closes the gap in `common.md` or the next tasks.
+  something open: the owner answers in a short task file, resumes the
+  run with it (`codex-run task --resume RUN TASK WORKTREE REPORT`, a
+  fresh report), and closes the gap in `common.md` or the next tasks.
 - **Tasks grow.** The first are small and certain, later ones bigger
   as the owner understands more. A later task may refactor what an
   earlier one built, when the owner finds a better design.
@@ -149,9 +150,9 @@ out. The security rules are director.md 10's.
   owner escalates `main`'s own fault, an infrastructure fault that
   lasts 15 minutes, and a third failed landing.
 - **At each landing** the owner updates its rows of the repository's
-  `docs/design/STATUS.md`, and posts its designer one line: what can
-  now be tried, with the commits, and what the code taught that the
-  design doesn't say (a boundary that moved, a behaviour settled).
+  `docs/design/STATUS.md`, and posts its parent one line: what can now
+  be tried, with the commits, and what the code taught that the design
+  doesn't say (a boundary that moved, a behaviour settled).
 - **Cleanup is `tidy`'s** ([cleanup.md](../docs/design/cleanup.md) 4):
   `land` runs it after each landing, and the owner may run `tidy
   --mission <m>` at its end. Nothing is deleted by hand.
