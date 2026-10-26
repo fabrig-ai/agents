@@ -136,6 +136,25 @@ def durable_append(path, lines):
     sync_dir(path.parent)
 
 
+def installed():
+    # Atomic ledger snapshots need no host lock (build-infrastructure.md 12).
+    try:
+        snapshot = (BASE / 'state.json').read_text()
+    except FileNotFoundError:
+        return False
+    except (OSError, UnicodeError):
+        raise Refusal('cannot tell whether heavy is installed: cannot read host ledger') from None
+    try:
+        data = json.loads(snapshot)
+    except ValueError:
+        raise Refusal('cannot tell whether heavy is installed: cannot parse host ledger') from None
+    if not isinstance(data, dict):
+        raise Refusal('cannot tell whether heavy is installed: cannot parse host ledger')
+    if data.get('version') != 1:
+        raise Refusal('cannot tell whether heavy is installed: unsupported host ledger version')
+    return data.get('installation') is not None
+
+
 class Ledger:
     def __init__(self):
         self.path = BASE / 'state.json'
@@ -1061,6 +1080,8 @@ def payload(token):
 
 
 def main(args):
+    if args == ['--installed']:
+        return 0 if installed() else 1
     if len(args) == 2 and args[0] == '--group-held':
         with locked() as ledger:
             return 0 if args[1] in ledger.data['maintenance'] or (
@@ -1085,11 +1106,11 @@ def main(args):
             reconcile(ledger)
             if any(task['state'] != 'released' for task in ledger.tasks.values()):
                 raise Refusal('cannot remove reconciler with unfinished tasks')
-            installed = ledger.data['installation']
+            installation = ledger.data['installation']
             run(['systemctl', '--user', 'disable', '--now', PREFIX + '-reconcile.timer'], check=True)
             run(['systemctl', '--user', 'stop', PREFIX + '-reconcile.service'])
             for suffix in ('.service', '.timer'):
-                (Path(installed['units']) / (PREFIX + '-reconcile' + suffix)).unlink(missing_ok=True)
+                (Path(installation['units']) / (PREFIX + '-reconcile' + suffix)).unlink(missing_ok=True)
             run(['systemctl', '--user', 'daemon-reload'], check=True)
             ledger.data['installation'] = None
             ledger.save()
@@ -1133,9 +1154,10 @@ if __name__ == '__main__':
         # Record fixed categories, never arbitrary subprocess text or caller
         # arguments. Wrong-queue/corrupt-state refusals cannot use that ledger.
         try:
-            with locked() as refused:
-                refused.event(None, 'refusal:' + uuid.uuid4().hex, reason=type(error).__name__)
-                refused.save()
+            if sys.argv[1:] != ['--installed']:
+                with locked() as refused:
+                    refused.event(None, 'refusal:' + uuid.uuid4().hex, reason=type(error).__name__)
+                    refused.save()
         except (Refusal, ValueError, OSError):
             pass
         print('heavy: ' + str(error), file=sys.stderr)

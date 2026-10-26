@@ -44,30 +44,43 @@ prepare_gate_policy() {
 case ${1:-} in
     # The Python payload guard must precede every policy executable. These
     # skip the disk floor: --cancel above all must work below it.
-    --payload|--task|--reconcile|--install-reconciler|--remove-reconciler|--maintenance-pause|--maintenance-resume|--check-recovery|--group-held|--record-refusal|--cancel) ;;
+    --payload|--task|--reconcile|--install-reconciler|--remove-reconciler|--maintenance-pause|--maintenance-resume|--installed|--check-recovery|--group-held|--record-refusal|--cancel) ;;
     *)
-        disk_floor heavy || {
-            python3 -B "$kit/heavy-recovery.py" --record-refusal disk-floor || true
-            exit 2
-        }
-        # Preparation at submission preserves the policy helper selection in
-        # the queue; contained entry validates it again before payload start.
-        pending_tail=0 command=()
+        pending_tail=0 gate_policy=0 valid_command=1 command=()
         for argument in "$@"; do
             if ((pending_tail)); then pending_tail=0; continue; fi
             if ((${#command[@]})); then command+=("$argument"); continue; fi
             case $argument in
-                --gate | --land) prepare_gate_policy "" ;;
+                --gate | --land) gate_policy=1 ;;
                 --tail) pending_tail=1 ;;
                 --) command=(--) ;;
-                -*) ;;
+                -*) valid_command=0 ;;
                 *) command=("$argument") ;;
             esac
         done
         [[ ${command[0]:-} != -- ]] || command=("${command[@]:1}")
+        if ((${#command[@]} && valid_command && !pending_tail)); then
+            installed_status=0
+            python3 -B "$kit/heavy-recovery.py" --installed >/dev/null 2>&1 || installed_status=$?
+        else
+            exec python3 -B "$kit/heavy-recovery.py" "$@"
+        fi
+        if ((installed_status != 1)); then
+            disk_floor heavy || {
+                python3 -B "$kit/heavy-recovery.py" --record-refusal disk-floor || true
+                exit 2
+            }
+            # Preparation at submission preserves the policy helper selection in
+            # the queue; contained entry validates it again before payload start.
+            if ((gate_policy)); then prepare_gate_policy ""; fi
+        fi
         # cargo fmt builds nothing: it runs at once, outside the queue.
         if [[ ${command[0]:-} == cargo && ${command[1]:-} == fmt ]]; then
             echo 'heavy: cargo fmt builds nothing; running it directly' >&2
+            exec "${command[@]}"
+        fi
+        if ((installed_status == 1)); then
+            echo 'heavy: not installed here; running it directly' >&2
             exec "${command[@]}"
         fi
         ;;
