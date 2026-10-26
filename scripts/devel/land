@@ -4,9 +4,10 @@
 #   land [--docs] [--local] [--no-push] [--gate COMMAND] [--tries N]
 #
 # From a clean worktree on the branch to land: rebase it on origin/main,
-# build it and run its lints in the build lane, run the repository's gate
-# through `heavy --land`, record the gate's evidence in the tip commit's
-# trailers, and push the tip to origin's main. The build lane's pass leaves
+# build it, run its lints and the repository's gate through heavy where
+# installed, and run them plain elsewhere (build-infrastructure.md 12).
+# Record the gate's evidence in the tip commit's trailers, and push the tip
+# to origin's main. The build lane's pass leaves
 # the gate's own build and lints nothing to redo, so the gate, first by its
 # CPU weight beside the machine's builds, runs only the suites, and a tree
 # that does not build or lint never reaches it.
@@ -60,7 +61,8 @@
 #   6  main kept moving, or its ref stayed locked
 #   7  fetching or pushing failed
 #   8  another command failed
-#   9  heavy refused to run the build or gate, so nothing ran
+#   9  heavy is installed, or can't tell, and refused to run the build or
+#      gate, so nothing ran
 #  10  with LAND_PROVED=1, between land's own passes: the gate was not in
 #      the cache, so nothing ran and nothing landed
 set -euo pipefail
@@ -121,6 +123,20 @@ lock=${LAND_LOCK:-$common/land.lock}
 [[ $lock == /* ]] || lock=$start_dir/$lock
 result_file=${LAND_RESULT:-}
 [[ -z $result_file || $result_file == /* ]] || result_file=$start_dir/$result_file
+
+# heavy is optional (build-infrastructure.md 12): where it isn't
+# installed, land runs its build and gate itself.
+runner=
+if ((!docs)); then
+    status=0
+    "$kit/heavy" --installed || status=$?
+    case $status in
+    0) runner=heavy ;;
+    1) runner=plain
+       echo "land: heavy is not installed here; the build and gate run plain" >&2 ;;
+    *) die 9 "heavy cannot tell whether it is installed (its reason above), so nothing ran; land again once that is put right" ;;
+    esac
+fi
 
 # Every write to a set repository's main holds the set lock, land-set's
 # (landing-flow.md, 9.2), so that no main moves under a set's run. The
@@ -221,9 +237,9 @@ follow() {
     fi
 }
 
-# A result holds for one tree, gate command and effective runtime policy.
+# A result holds for one tree, gate command, effective runtime policy and runner.
 gate_key() {
-    printf '%s\0%s\0%s\0' "$1" "$gate" "$policy" | sha256sum | cut -c1-64
+    printf '%s\0%s\0%s\0%s\0' "$1" "$gate" "$policy" "$runner" | sha256sum | cut -c1-64
 }
 
 cache_read() {
@@ -332,11 +348,35 @@ gated_before() {
 prebuild_command='cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings && cargo nextest run --workspace --no-run'
 prebuild=${LAND_PREBUILD-$prebuild_command}
 
-# A successful heavy client is necessary, but its token-owned receipt is
-# the completion evidence (gate-policy.md, 3). Keep validation in land so
-# its implementation is included in the policy identity.
+# A plain run (build-infrastructure.md 12): land's own child, with its
+# own log and elapsed time. Keep the summary for land's result as well.
+plain_run() { # KIND COMMAND
+    local kind=$1 command=$2 started ended elapsed status=0
+    # Called under ||: guard infrastructure failures explicitly as well.
+    mkdir -p "$tmp/logs/land" || die 4 "cannot create the plain $kind log directory"
+    plain_log=$(mktemp "$tmp/logs/land/$repo-$kind.XXXXXX.log") ||
+        die 4 "cannot create the plain $kind log"
+    if ! started=$(date +%s%N) || [[ ! $started =~ ^[0-9]+$ ]]; then
+        die 4 "cannot measure the plain $kind start; nothing ran"
+    fi
+    bash -c "$command" </dev/null >"$plain_log" 2>&1 || status=$?
+    if ! ended=$(date +%s%N) || [[ ! $ended =~ ^[0-9]+$ ]]; then
+        die 4 "cannot measure the plain $kind end; evidence was not accepted"
+    fi
+    elapsed=$((ended - started))
+    ((elapsed >= 0)) || die 4 "the clock moved backwards; plain $kind evidence was not accepted"
+    printf -v plain_seconds '%d.%03d' "$((elapsed / 1000000000))" "$((elapsed % 1000000000 / 1000000))"
+    tail -n 60 "$plain_log" || die 4 "cannot read the plain $kind log"
+    plain_heard="land: plain $kind exit $status, ran $plain_seconds s, log $plain_log"
+    echo "$plain_heard"
+    return "$status"
+}
+
+# Heavy's token-owned receipt is its completion evidence (gate-policy.md
+# 3); plain gates use land's own log and timing (3.2). Keep validation and
+# the shared summary here so they are included in the policy identity.
 evidence() {
-    python3 -I -S -B - "$1" "$tree" "$policy" "$gate" <<'PY'
+    python3 -I -S -B - "$tree" "$policy" "$gate" "$@" <<'PY'
 from decimal import Decimal
 import hashlib
 import json
@@ -377,8 +417,7 @@ def invalid_constant(value):
     raise ValueError("receipt JSON has a non-finite number")
 
 
-def main():
-    output, tree, policy, command = sys.argv[1:]
+def receipt_evidence(output, tree, policy, command):
     lines = Path(output).read_text().splitlines()
     headers = [line for line in lines if line.startswith("heavy: queued task ")]
     receipts = [line for line in lines if line.startswith("heavy: receipt ")]
@@ -436,7 +475,18 @@ def main():
             "receipt log_sha256 is malformed")
     contents = read_regular(log, "receipt log")
     require(hashlib.sha256(contents).hexdigest() == digest.lower(), "receipt log SHA-256 differs")
-    # Summarize the bytes whose digest was checked, without reopening the log.
+    return contents, elapsed
+
+
+def main():
+    tree, policy, command, mode, path, *seconds = sys.argv[1:]
+    if mode == "receipt":
+        contents, elapsed = receipt_evidence(path, tree, policy, command)
+    else:
+        contents = read_regular(path, "plain log")
+        elapsed = Decimal(seconds[0])
+        require(elapsed.is_finite() and elapsed >= 0, "plain elapsed time is invalid")
+    # Both runners summarize the selected bytes without reopening the log.
     text = re.sub(r"\x1b\[[0-9;]*m", "", contents.decode("utf-8", errors="replace"))
     summaries = re.findall(r"^ *Summary \[ *([0-9]+(?:\.[0-9]+)?)s\] [0-9]+ tests? run: ([0-9]+) passed.*$",
                            text, re.MULTILINE)
@@ -472,7 +522,7 @@ land_feed() {
 # Building or writing it never changes land's status or its other output.
 land_result() {
     python3 -I -S -B - "$1" "${repo:-}" "${base:-}" "${tip:-}" "${tree:-}" "$((try < tries ? try : tries))" \
-        "${prebuild_heard:-}" "${gate_kind:-}" "${gate_heard:-}" "${pushed:-false}" "${result_file:-}" <<'PYRESULT' ||
+        "${prebuild_heard:-}" "${gate_kind:-}" "${gate_heard:-}" "${pushed:-false}" "${result_file:-}" "$2" <<'PYRESULT' ||
 import json
 import os
 import re
@@ -487,6 +537,9 @@ def task(heard):
                                    r"waited ([0-9]+(?:\.[0-9]+)?)s, ran ([0-9]+(?:\.[0-9]+)?)s, log (.+)",
                                    lines[-1])
     if not found:
+        plain = re.fullmatch(r"land: plain (?:build|gate) exit ([0-9]+), ran ([0-9]+\.[0-9]+) s, log (.+)", heard)
+        if plain:
+            return {"wait_s": 0, "run_s": float(plain[2]), "exit": int(plain[1])}, plain[3]
         return None, None
     seconds = [float(found[n]) for n in (2, 3)]
     wait, run = (int(value) if value.is_integer() else value for value in seconds)
@@ -514,7 +567,7 @@ def steps(log):
 
 
 def main():
-    status, repo, base, tip, tree, tries, prebuild, kind, heard, pushed, path = sys.argv[1:]
+    status, repo, base, tip, tree, tries, prebuild, kind, heard, pushed, path, runner = sys.argv[1:]
     gate = None
     if kind in ("cached", "none"):
         gate = {"kind": kind, "receipt": None, "wait_s": 0, "run_s": 0, "exit": 0,
@@ -527,6 +580,7 @@ def main():
             gate = {"kind": "ran", "receipt": receipts[-1] if receipts else None, **ran,
                     "steps": sums, "cpu": cpu, "failed_step": failed or ("other" if ran["exit"] else None)}
     result = {"schema": "land-result-v1", "repo": repo, "machine": socket.gethostname(),
+              "runner": runner or None,
               "base": base or None, "commit": tip or None, "tree": tree or None,
               "tries": int(tries), "prebuild": task(prebuild)[0], "gate": gate,
               "pushed": pushed == "true", "exit": int(status)}
@@ -593,7 +647,7 @@ Resolve them, run git rebase --continue, then land again."
         die 3 "the rebase on $(git rev-parse --short "$base") could not be settled (the lines above say why), and was undone: \
 rebase on it by hand, resolve it, then land again."
     fi
-    trap 'land_result "$?"' EXIT
+    trap 'land_result "$?" "$runner"' EXIT
     candidate=$(git rev-parse HEAD)
     [[ $candidate != "$base" ]] ||
         die 2 "nothing to land: the branch has no commits beyond main"
@@ -631,53 +685,72 @@ rebase on it by hand, resolve it, then land again."
         else
             gated=$tree
             gate_kind=ran
-            out=$(mktemp)
+            if [[ $runner == heavy ]]; then out=$(mktemp); fi
             if [[ -n $prebuild && -f Cargo.toml ]]; then
-                if HEAVY_LABEL="land $repo prebuild" python3 -S -B "$kit/land-capture.py" "$out" "$kit/heavy" --tail 60 bash -c "$prebuild"; then
-                    prebuild_heard=$(heard)
+                if [[ $runner == plain ]]; then
+                    status=0
+                    plain_run build "$prebuild" || status=$?
+                    prebuild_heard=$plain_heard
+                    ((status == 0)) || die 4 "the build or its lints failed on $(git rev-parse --short HEAD), plainly; the gate did not run"
+                else
+                    if HEAVY_LABEL="land $repo prebuild" python3 -S -B "$kit/land-capture.py" "$out" "$kit/heavy" --tail 60 bash -c "$prebuild"; then
+                        prebuild_heard=$(heard)
+                    else
+                        capture_status=$?
+                        prebuild_heard=$(heard)
+                        if ((capture_status == 74)); then
+                            rm -f "$out"
+                            die 4 "the build capture is unavailable; nothing landed; rerun land"
+                        fi
+                        cat "$out"
+                        if ! grep -qE '^heavy: (queued )?task [0-9]+ ' "$out"; then
+                            rm -f "$out"
+                            die 9 "heavy refused to run the build on $(git rev-parse --short HEAD), so nothing ran (its reason above); land again once that is put right"
+                        fi
+                        rm -f "$out"
+                        die 4 "the build or its lints failed on $(git rev-parse --short HEAD), in the build lane; the gate did not run"
+                    fi
+                    grep '^heavy: task ' "$out" | tail -n1 >&2 || true
+                fi
+            fi
+            policy_recheck
+            if [[ $runner == plain ]]; then
+                status=0
+                plain_run gate "$gate" || status=$?
+                gate_heard=$plain_heard
+                ((status == 0)) || die 4 "the gate failed on $(git rev-parse --short HEAD)"
+            else
+                if HEAVY_LABEL="land $repo" python3 -S -B "$kit/land-capture.py" "$out" "$kit/heavy" --land --tail 60 bash -c "$gate"; then
+                    gate_heard=$(heard)
                 else
                     capture_status=$?
-                    prebuild_heard=$(heard)
+                    gate_heard=$(heard)
                     if ((capture_status == 74)); then
                         rm -f "$out"
-                        die 4 "the build capture is unavailable; nothing landed; rerun land"
+                        die 4 "the gate capture is unavailable; nothing landed; rerun land"
                     fi
                     cat "$out"
                     if ! grep -qE '^heavy: (queued )?task [0-9]+ ' "$out"; then
                         rm -f "$out"
-                        die 9 "heavy refused to run the build on $(git rev-parse --short HEAD), so nothing ran (its reason above); land again once that is put right"
+                        die 9 "heavy refused to run the gate on $(git rev-parse --short HEAD), so nothing ran (its reason above); land again once that is put right"
                     fi
                     rm -f "$out"
-                    die 4 "the build or its lints failed on $(git rev-parse --short HEAD), in the build lane; the gate did not run"
-                fi
-                grep '^heavy: task ' "$out" | tail -n1 >&2 || true
-            fi
-            policy_recheck
-            if HEAVY_LABEL="land $repo" python3 -S -B "$kit/land-capture.py" "$out" "$kit/heavy" --land --tail 60 bash -c "$gate"; then
-                gate_heard=$(heard)
-            else
-                capture_status=$?
-                gate_heard=$(heard)
-                if ((capture_status == 74)); then
-                    rm -f "$out"
-                    die 4 "the gate capture is unavailable; nothing landed; rerun land"
+                    die 4 "the gate failed on $(git rev-parse --short HEAD)"
                 fi
                 cat "$out"
-                if ! grep -qE '^heavy: (queued )?task [0-9]+ ' "$out"; then
-                    rm -f "$out"
-                    die 9 "heavy refused to run the gate on $(git rev-parse --short HEAD), so nothing ran (its reason above); land again once that is put right"
-                fi
-                rm -f "$out"
-                die 4 "the gate failed on $(git rev-parse --short HEAD)"
             fi
-            cat "$out"
             land_fault after_receipt
             candidate_check
-            if ! summary=$(evidence "$out"); then
+            if [[ $runner == plain ]]; then
+                summary=$(evidence plain "$plain_log" "$plain_seconds") ||
+                    die 4 "the plain gate evidence was not accepted; nothing landed"
+            else
+                if ! summary=$(evidence receipt "$out"); then
+                    rm -f "$out"
+                    die 4 "the gate completion evidence was not accepted; nothing landed"
+                fi
                 rm -f "$out"
-                die 4 "the gate completion evidence was not accepted; nothing landed"
             fi
-            rm -f "$out"
             policy_recheck
             candidate_check
             mkdir -p "$(dirname "$cache")"
@@ -692,10 +765,12 @@ rebase on it by hand, resolve it, then land again."
     # its branch. A concurrent HEAD can never supply the tree being pushed.
     candidate_check
     original_message=$(git log -1 --format=%B "$candidate")
+    runner_trailer=()
+    if ((!docs)); then runner_trailer=(--trailer "Gate-Runner: $runner"); fi
     message=$(printf '%s\n' "$original_message" |
         git interpret-trailers --if-exists replace \
             --trailer "Gate-Tree: $gated" --trailer "Gate-Result: $summary" \
-            --trailer "Gate-Policy: $policy")
+            --trailer "Gate-Policy: $policy" "${runner_trailer[@]}")
     commit=$candidate
     if [[ $message != "$original_message" ]]; then
         metadata=$(git show -s --format='%P%n%an%n%ae%n%aI' "$candidate")

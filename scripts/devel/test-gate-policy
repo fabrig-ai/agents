@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import runpy
+import re
 import select
 import shutil
 import shlex
@@ -109,6 +110,13 @@ from gate_policy_fixture import submission_header, completion_output
 
 os.umask(0o077)
 args = sys.argv[1:]
+if args == ["--installed"]:
+    with open(os.environ["FIXTURE_CALLS"], "a") as calls:
+        calls.write("installed\n")
+    status = int(os.environ.get("FIXTURE_HEAVY_INSTALLED", "0"))
+    if status == 2:
+        print("heavy: cannot tell whether heavy is installed: fixture", file=sys.stderr)
+    sys.exit(status)
 lane = "build"
 while args:
     if args[0] in ("--gate", "--land"):
@@ -120,6 +128,9 @@ while args:
         break
 with open(os.environ["FIXTURE_CALLS"], "a") as calls:
     calls.write(f'{lane} {os.environ["SKEIN_TEST_CHROMIUM"]} {os.environ["SKEIN_GATE_POLICY_ID"]}\n')
+if lane == "gate" and os.environ.get("FIXTURE_HEAVY_REFUSE") == "1":
+    print("heavy: refused for the fixture", file=sys.stderr)
+    sys.exit(2)
 token = uuid.uuid4().hex
 fault = os.environ.get("FIXTURE_RECEIPT_FAULT", "")
 print(submission_header(token, lane, fault), end="", flush=True)
@@ -190,9 +201,42 @@ sys.exit(result.returncode)
     def retry(self):
         self.git("update-ref", "refs/heads/main", self.base)
 
-    def calls(self):
+    def all_calls(self):
         path = self.root / "calls"
         return path.read_text().splitlines() if path.exists() else []
+
+    def calls(self):
+        return [line for line in self.all_calls() if line != "installed"]
+
+    def installed_calls(self):
+        return [line for line in self.all_calls() if line == "installed"]
+
+    def evidence_gate(self):
+        path = self.bin / "fixture-gate"
+        self.script(path, r'''#!/usr/bin/env python3
+import os
+from pathlib import Path
+import sys
+print("Summary [ 1.234s] 3 tests run: 3 passed, 0 skipped")
+print("gate-step fixture 1.234 0 0.5")
+with (Path(os.environ["DEV_ROOT"]) / "gate-marker").open("a") as marker:
+    marker.write(os.environ["SKEIN_GATE_POLICY_ID"] + " " + os.environ["SKEIN_TEST_CHROMIUM"] + "\n")
+sys.exit(int(os.environ.get("FIXTURE_GATE_EXIT", "0")))
+''')
+        return str(path)
+
+    def marker_lines(self):
+        return (self.root / "gate-marker").read_text().splitlines()
+
+    def cargo_candidate(self):
+        (self.repo / "Cargo.toml").write_text("# plain prebuild fixture\n")
+        self.git("add", "Cargo.toml")
+        self.git("commit", "-qm", "prebuild")
+
+    def assert_no_plain_evidence(self, result):
+        self.assertEqual(self.git("rev-parse", "main").strip(), self.base)
+        self.assertFalse((self.root / "tmp/gates/repo").exists())
+        self.assertEqual(self.result_json(result)["exit"], 4)
 
     def advance_main_docs(self):
         self.git("switch", "-qc", "docs-main", self.base)
@@ -230,6 +274,163 @@ sys.exit(result.returncode)
         self.script(path, '#!/bin/sh\nprintf "%s\\n" "$@" > "$DEV_ROOT/tidy.args"\n'
                     'echo tidy-output\necho tidy-error >&2\n')
         return shlex.quote(str(path))
+
+    def test_plain_landing_runs_gate_and_records_runner(self):
+        result = self.land({"FIXTURE_HEAVY_INSTALLED": "1"}, gate=self.evidence_gate())
+        trailers = self.git("log", "-1", "--format=%B")
+        self.assertIn("Gate-Runner: plain", trailers)
+        self.assertRegex(trailers, r"Gate-Result: .* passed: 3 tests / 1.234 s; [0-9]+\.[0-9]{3} s in all")
+        self.assertEqual(self.calls(), [])
+        self.assertEqual(len(self.installed_calls()), 1)
+        line = next(line for line in result.stdout.splitlines() if line.startswith("land: plain gate "))
+        found = re.fullmatch(r"land: plain gate exit 0, ran ([0-9]+\.[0-9]{3}) s, log (.+)", line)
+        self.assertIsNotNone(found)
+        log = Path(found[2])
+        self.assertEqual(log.parent, self.root / "tmp/logs/land")
+        self.assertEqual(log.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(log.parent.stat().st_mode & 0o777, 0o700)
+        record = self.result_json(result)
+        self.assertEqual(record["runner"], "plain")
+        self.assertEqual(record["gate"]["kind"], "ran")
+        self.assertIsNone(record["gate"]["receipt"])
+        self.assertEqual(record["gate"]["wait_s"], 0)
+        self.assertEqual(record["gate"]["run_s"], float(found[1]))
+        self.assertEqual(record["gate"]["steps"], {"fixture": 1.234})
+        self.assertEqual(record["gate"]["cpu"], {"fixture": 0.5})
+        policy = self.git("log", "-1", "--format=%(trailers:key=Gate-Policy,valueonly)").strip()
+        self.assertEqual(self.marker_lines(), [policy + " " + str(self.runtime)])
+
+    def test_plain_failed_gate_exits_4(self):
+        result = self.land({"FIXTURE_HEAVY_INSTALLED": "1", "FIXTURE_GATE_EXIT": "3"},
+                           check=False, gate=self.evidence_gate())
+        self.assertEqual(result.returncode, 4, result.stdout + result.stderr)
+        self.assert_no_plain_evidence(result)
+        self.assertIn("3 tests run: 3 passed", result.stdout)
+        self.assertIn("land: plain gate exit 3", result.stdout)
+        self.assertEqual(self.result_json(result)["gate"]["exit"], 3)
+        # Measurement failures must never turn a successful child into
+        # evidence with an invented zero duration (plain_run runs under ||).
+        for phase in ("start", "end"):
+            with self.subTest(timing_failure=phase):
+                (self.root / "gate-marker").unlink(missing_ok=True)
+                self.script(self.bin / "date", "#!/bin/sh\n" + (
+                    "exit 1\n" if phase == "start" else
+                    'if [ -e "$DEV_ROOT/date-started" ]; then exit 1; fi\n'
+                    'touch "$DEV_ROOT/date-started"\nexec /bin/date "$@"\n'))
+                result = self.land({"FIXTURE_HEAVY_INSTALLED": "1"},
+                                   check=False, gate=str(self.bin / "fixture-gate"))
+                self.assertEqual(result.returncode, 4, result.stdout + result.stderr)
+                self.assertIn("cannot measure the plain gate " + phase, result.stderr)
+                self.assert_no_plain_evidence(result)
+                marker = self.root / "gate-marker"
+                self.assertEqual(marker.exists(), phase == "end")
+
+    def test_plain_prebuild_failure_stops_before_gate(self):
+        self.cargo_candidate()
+        result = self.land({"FIXTURE_HEAVY_INSTALLED": "1", "LAND_PREBUILD": "exit 5"},
+                           check=False, gate=self.evidence_gate())
+        self.assertEqual(result.returncode, 4, result.stdout + result.stderr)
+        self.assert_no_plain_evidence(result)
+        self.assertFalse((self.root / "gate-marker").exists())
+        self.assertIn("plainly; the gate did not run", result.stderr)
+        self.assertEqual(self.result_json(result)["prebuild"]["exit"], 5)
+
+    def test_plain_prebuild_then_gate(self):
+        self.cargo_candidate()
+        result = self.land({"FIXTURE_HEAVY_INSTALLED": "1", "LAND_PREBUILD": "true"}, gate=self.evidence_gate())
+        record = self.result_json(result)
+        self.assertEqual(record["prebuild"], {"wait_s": 0, "run_s": record["prebuild"]["run_s"], "exit": 0})
+        self.assertGreaterEqual(record["prebuild"]["run_s"], 0)
+        self.assertIn("land: plain build exit 0", result.stdout)
+        self.assertEqual(len(self.marker_lines()), 1)
+        self.assertEqual(self.calls(), [])
+
+    def test_plain_record_serves_the_next_plain_gate(self):
+        gate = self.evidence_gate()
+        self.land({"FIXTURE_HEAVY_INSTALLED": "1"}, gate=gate)
+        self.retry()
+        result = self.land({"FIXTURE_HEAVY_INSTALLED": "1"}, gate=gate)
+        self.assertEqual(self.result_json(result)["gate"]["kind"], "cached")
+        self.assertEqual(len(self.marker_lines()), 1)
+        self.assertEqual(len(self.installed_calls()), 2)
+
+    def test_plain_record_never_serves_a_contained_gate(self):
+        gate = self.evidence_gate()
+        self.land({"FIXTURE_HEAVY_INSTALLED": "1"}, gate=gate)
+        self.retry()
+        result = self.land(gate=gate)
+        self.assertIn("heavy: receipt ", result.stdout)
+        self.assertEqual([line.split()[0] for line in self.calls()], ["gate"])
+        self.assertEqual(len(self.marker_lines()), 2)
+        self.assertEqual(self.git("log", "-1", "--format=%(trailers:key=Gate-Runner,valueonly)").strip(), "heavy")
+
+    def test_contained_record_never_serves_a_plain_gate(self):
+        gate = self.evidence_gate()
+        self.land(gate=gate)
+        self.retry()
+        result = self.land({"FIXTURE_HEAVY_INSTALLED": "1"}, gate=gate)
+        self.assertEqual(self.result_json(result)["gate"]["kind"], "ran")
+        self.assertEqual(len(self.calls()), 1)
+        self.assertEqual(len(self.marker_lines()), 2)
+        self.assertEqual(self.git("log", "-1", "--format=%(trailers:key=Gate-Runner,valueonly)").strip(), "plain")
+
+    def test_plain_docs_only_reuse(self):
+        gate = self.evidence_gate()
+        self.land({"FIXTURE_HEAVY_INSTALLED": "1"}, gate=gate)
+        before = self.git("rev-parse", "HEAD^{tree}").strip()
+        self.advance_main_docs()
+        result = self.land({"FIXTURE_HEAVY_INSTALLED": "1"}, gate=gate)
+        self.assertIn("differs from this tree only in docs/ Markdown", result.stderr)
+        self.assertEqual(self.result_json(result)["gate"]["kind"], "cached")
+        self.assertEqual(len(self.marker_lines()), 1)
+        self.assertEqual(self.calls(), [])
+        self.assertEqual(self.git("log", "-1", "--format=%(trailers:key=Gate-Tree,valueonly)").strip(), before)
+
+    def test_plain_candidate_mutation_during_gate_refuses(self):
+        gate = self.evidence_gate() + '; printf "changed\\n" >> code'
+        result = self.land({"FIXTURE_HEAVY_INSTALLED": "1"}, check=False, gate=gate)
+        self.assertEqual(result.returncode, 4, result.stdout + result.stderr)
+        self.assertIn("candidate index/worktree changed", result.stderr)
+        self.assert_no_plain_evidence(result)
+
+    def test_cannot_tell_refuses_with_9(self):
+        before = self.git("rev-parse", "HEAD").strip()
+        result = self.land({"FIXTURE_HEAVY_INSTALLED": "2"}, check=False, gate=self.evidence_gate())
+        self.assertEqual(result.returncode, 9, result.stdout + result.stderr)
+        self.assertIn("heavy cannot tell whether it is installed", result.stderr)
+        self.assertEqual(self.git("rev-parse", "HEAD").strip(), before)
+        self.assertEqual(self.git("rev-parse", "main").strip(), self.base)
+        self.assertFalse((self.root / "gate-marker").exists())
+        self.assertEqual(self.calls(), [])
+        self.assertEqual(len(self.installed_calls()), 1)
+
+    def test_installed_refusal_never_falls_back_to_plain(self):
+        result = self.land({"FIXTURE_HEAVY_REFUSE": "1"}, check=False, gate=self.evidence_gate())
+        self.assertEqual(result.returncode, 9, result.stdout + result.stderr)
+        self.assertIn("heavy: refused for the fixture", result.stdout + result.stderr)
+        self.assertFalse((self.root / "gate-marker").exists())
+        self.assertNotIn("land: plain", result.stdout)
+        self.assertEqual(self.result_json(result)["runner"], "heavy")
+        self.assertEqual(self.git("rev-parse", "main").strip(), self.base)
+        self.assertFalse((self.root / "tmp/gates/repo").exists())
+
+    def test_contained_landing_records_heavy_runner(self):
+        result = self.land(gate=self.evidence_gate())
+        self.assertEqual(self.result_json(result)["runner"], "heavy")
+        self.assertEqual(self.git("log", "-1", "--format=%(trailers:key=Gate-Runner,valueonly)").strip(), "heavy")
+        self.assertEqual(len(self.installed_calls()), 1)
+
+    def test_docs_landing_records_no_runner(self):
+        self.git("reset", "--hard", self.base)
+        (self.repo / "notes.md").write_text("documentation\n")
+        self.git("add", "notes.md")
+        self.git("commit", "-qm", "docs")
+        result = self.run_command([str(self.kit / "land"), "--local", "--docs"],
+                                  extra={"FIXTURE_HEAVY_INSTALLED": "1"})
+        self.assertEqual(self.git("log", "-1", "--format=%(trailers:key=Gate-Runner,valueonly)").strip(), "")
+        self.assertIsNone(self.result_json(result)["runner"])
+        self.assertEqual(self.installed_calls(), [])
+        self.assertEqual(self.calls(), [])
 
     def test_landed_mark_push(self):
         origin = self.root / "origin.git"
@@ -1230,7 +1431,7 @@ class ReceiptRows(FixtureFiles):
                                             tree, policy, head, b"", fault=fault)
                 capture = self.root / fault / "capture"
                 capture.write_bytes(output)
-                result = subprocess.run(["bash", "-c", evidence + '\nevidence "$1"',
+                result = subprocess.run(["bash", "-c", evidence + '\nevidence receipt "$1"',
                                          "fixture", str(capture)], env=env, text=True,
                                         capture_output=True, stdin=subprocess.DEVNULL, timeout=5)
                 # Retained rows carry both the actual result and its input files.
