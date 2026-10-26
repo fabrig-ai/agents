@@ -11,6 +11,10 @@ repository builds on it. The user's drafts go in `docs/design/draft/`.
   lands: `~/.local/bin` links to the primary checkout. Its commit says
   what a machine must do after it lands (a `setup --fix`, a `heavy
   --gate -- kache-setup`).
+- **Disk space is checked before work:** heavy checks the machine floor
+  (40 GB, or `PLAN_MIN_DISK_GB` in `tmp/machine.env`, environment first)
+  at submission and again before the payload starts. A landing refuses
+  below it before its prebuild, and checks again for its gate.
 - **The gate,** `scripts/check.sh`, runs the tools' fixtures. A change
   comes with its fixture, and a fixture never touches a machine's live
   queue, store or settings. A change to the roles or the designs alone

@@ -670,6 +670,13 @@ once.
   So the landing proves again before it lands, `land-set --prove
   SETFILE && land-set SETFILE`: where the task's proof holds there, that
   prove is all cache hits; where it doesn't, it gates without the lock.
+- **Check space before the prebuild.** Where heavy is installed, its
+  40 GB floor (or the machine's `PLAN_MIN_DISK_GB`) applies at submission
+  and again just before each payload starts, including after a queue wait.
+  Below it, `land` exits 9 with heavy's usual disk diagnostic and runs no
+  prebuild. The gate checks again because the prebuild may use the room.
+  `land-set` gets the same checks through `land`; plain machines keep
+  plain execution (build-infrastructure.md 2, 12).
 - **Without heavy, a plain gate** (the user, 10-26). On a machine where
   heavy isn't installed, a person's laptop, `land` runs its prebuild and
   gate itself, with plain commands, and the rest of the flow, set lock,

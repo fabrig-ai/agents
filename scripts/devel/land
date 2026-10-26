@@ -703,7 +703,8 @@ rebase on it by hand, resolve it, then land again."
                             die 4 "the build capture is unavailable; nothing landed; rerun land"
                         fi
                         cat "$out"
-                        if ! grep -qE '^heavy: (queued )?task [0-9]+ ' "$out"; then
+                        if ! grep -qE '^heavy: (queued )?task [0-9]+ ' "$out" ||
+                        grep -qx 'heavy: disk floor refused before payload start' "$out"; then
                             rm -f "$out"
                             die 9 "heavy refused to run the build on $(git rev-parse --short HEAD), so nothing ran (its reason above); land again once that is put right"
                         fi
@@ -730,7 +731,8 @@ rebase on it by hand, resolve it, then land again."
                         die 4 "the gate capture is unavailable; nothing landed; rerun land"
                     fi
                     cat "$out"
-                    if ! grep -qE '^heavy: (queued )?task [0-9]+ ' "$out"; then
+                    if ! grep -qE '^heavy: (queued )?task [0-9]+ ' "$out" ||
+                        grep -qx 'heavy: disk floor refused before payload start' "$out"; then
                         rm -f "$out"
                         die 9 "heavy refused to run the gate on $(git rev-parse --short HEAD), so nothing ran (its reason above); land again once that is put right"
                     fi

@@ -116,6 +116,27 @@ kills an agent's build, which reruns, before a landing's work. Every
 task builds with `HEAVY_BUILD_JOBS` jobs, the machine's CPU count by
 default, and its unit carries its class's `CPUWeight` (section 1).
 
+The disk floor is 40 GB by default, overridden by `PLAN_MIN_DISK_GB` in
+`DEV_TMP/machine.env`, with the environment taking precedence. Installed
+heavy checks it at submission and again inside the owned cgroup immediately
+before the requested command starts, after any lane wait or gate settling.
+A below-floor landing therefore starts no prebuild, even when space fell
+while that prebuild waited. The refusal keeps heavy's exit 2, its free-space,
+floor and largest-directories diagnostic, and land's exit 9. The gate keeps
+both checks: a prebuild can itself consume the remaining room. Cancellation,
+recovery and plain execution still skip the floor. A queued refusal releases
+through the usual ledger and receipt path, with no payload-start evidence.
+
+The current target size is measurable with `du`, but it is occupied space,
+not an estimate of the next build's additional space: warm targets reuse
+files and clean targets predict nothing. Adding that whole size to the floor
+would reject useful warm builds and scan large targets at every landing.
+Keep the floor check; no target-size reservation is added.
+
+This change adds no ledger or unit format and needs no setup or state
+migration. The director rolls out the kit; reverting the change restores
+submission-only checking without editing state.
+
 ## 3. Durable state and release
 
 The version 1 host snapshot contains the queue identity, the next task

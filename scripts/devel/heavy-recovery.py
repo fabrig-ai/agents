@@ -1013,6 +1013,25 @@ def prepare_payload_policy(token):
     return True
 
 
+def payload_disk_floor(token):
+    # Submission may have waited for room in its lane. Check again inside
+    # the owned cgroup, outside the host lock, just before command start.
+    result = run(['bash', '-c', 'set -euo pipefail; root=$1; tmp=$2; '
+                  'source "$3"; disk_floor heavy',
+                  'heavy-disk-floor', ROOT, TMP, KIT / 'kit.sh'])
+    if not result.returncode:
+        return True
+    print(result.stderr, end='', flush=True)
+    with locked() as ledger:
+        task = ledger.tasks[token]
+        if task['state'] == 'active':
+            task.update(state='finishing', code=2, outcome='refused',
+                        refusal='disk floor refused before payload start')
+            ledger.event(task, 'refusal', reason='disk-floor')
+            ledger.save()
+    return False
+
+
 def payload(token):
     with locked() as ledger:
         task = ledger.tasks[token]
@@ -1042,6 +1061,8 @@ def payload(token):
             time.sleep(min(5, max(0, settle - (time.monotonic() - start))))
         phase(token, 'settle_end')
         fault('settled', token)
+    if not payload_disk_floor(token):
+        return 2
     with locked() as ledger:
         task = ledger.tasks[token]
         if task['state'] != 'active':

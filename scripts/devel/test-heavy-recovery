@@ -13,6 +13,7 @@ import os
 import runpy
 from pathlib import Path
 import signal
+import shlex
 import shutil
 import statistics
 import subprocess
@@ -806,6 +807,59 @@ def missing_reconciler(lab):
     lab.call(['systemctl', '--user', 'start', lab.prefix + '-reconcile.timer'])
     proceed.touch()
     lab.done(gate)
+
+
+def land_disk_floor(lab, mode='queued', machine=False):
+    # df is the only stand-in: real land/heavy, disposable units and ledger.
+    available = lab.path / 'available-gb'
+    available.write_text('100')
+    df = lab.path / 'fixture-bin/df'
+    df.write_text('#!/bin/sh\nprintf "Avail\\n%sG\\n" "$(cat ' + shlex.quote(str(available)) + ')"\n')
+    df.chmod(0o700)
+    lab.env.pop('PLAN_MIN_DISK_GB')
+    if machine:
+        (lab.path / 'tmp/machine.env').write_text('PLAN_MIN_DISK_GB=60\n')
+    (lab.repo / 'Cargo.toml').write_text('# disk floor prebuild fixture\n')
+    lab.call(['git', 'add', 'Cargo.toml'])
+    lab.call(['git', 'commit', '-qm', 'prebuild fixture'])
+    base, head = candidate(lab)
+    prebuilt, gated = lab.path / 'prebuilt', lab.path / 'gated'
+    command = 'touch ' + shlex.quote(str(prebuilt))
+    if mode == 'consumed':
+        command += '; echo 5 > ' + shlex.quote(str(available))
+    if mode == 'initial':
+        available.write_text('5')
+    queued = mode in ('queued', 'gate-queued')
+    lane = 'gate' if mode == 'gate-queued' else 'build'
+    if queued:
+        lab.hold(lane)
+    output = lab.path / 'land.client.txt'
+    with output.open('w') as stream:
+        client = subprocess.Popen([str(KIT / 'land'), '--local', '--gate', 'touch ' + shlex.quote(str(gated))],
+            env=dict(lab.env, LAND_PREBUILD='' if lane == 'gate' else command), cwd=lab.repo,
+            stdin=subprocess.DEVNULL, stdout=stream, stderr=subprocess.STDOUT)
+    lab.clients.append(client)
+    label = 'land repo' if lane == 'gate' else 'land repo prebuild'
+    if queued:
+        wait_for(lambda: (task := lab.task(label)) and task['state'] == 'waiting',
+                 'prebuild waiting')
+        available.write_text('5')
+        lab.unhold(lane)
+    lab.done(client, 9)
+    assert prebuilt.exists() == (mode == 'consumed'), 'below-floor prebuild ran'
+    assert not gated.exists(), 'below-floor gate ran'
+    text = output.read_text()
+    floor, source = (60, 'machine.env') if machine else (40, 'default')
+    assert f'5 GB free on {lab.path}, below the disk floor of {floor} GB ({source})' in text, text
+    assert lab.call(['git', 'rev-parse', 'main']).stdout.strip() == base
+    assert lab.call(['git', 'rev-parse', 'HEAD']).stdout.strip() == head
+    assert not (lab.path / 'tmp/gates').exists()
+    if queued:
+        task = lab.task(label)
+        assert task['code'] == 2 and task['outcome'] == 'refused'
+        assert not task.get('payload_started') and not task.get('payload_ended')
+    available.write_text('100')
+    lab.done(lab.start('progress'))
 
 
 def land_diagnostic(lab, point, prebuild=False):
@@ -1730,6 +1784,11 @@ def main():
              ('maintenance-gate', maintenance_gate),
              ('unclaimed-5s', lambda lab: unclaimed_client(lab, True)),
              ('gc-build', gc_build), ('gc-budget', gc_budget), ('gc-gate', gc_gate), ('gc-errors', gc_errors),
+             ('land-floor-queued', land_disk_floor),
+             ('land-floor-machine', lambda lab: land_disk_floor(lab, machine=True)),
+             ('land-floor-initial', lambda lab: land_disk_floor(lab, 'initial')),
+             ('land-floor-gate-queued', lambda lab: land_disk_floor(lab, 'gate-queued')),
+             ('land-floor-consumed', lambda lab: land_disk_floor(lab, 'consumed')),
              ('normal', normal), ('unsupported', unsupported), ('configured-kache', configured_kache),
              ('enospc-snapshot', lambda lab: storage_failure(lab, 'snapshot')),
              ('enospc-journal', lambda lab: storage_failure(lab, 'journal')),
