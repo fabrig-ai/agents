@@ -143,14 +143,7 @@ class Ledger:
             self.data = json.loads(self.path.read_text())
             if self.data.get('version') != 1:
                 raise Refusal('unsupported host ledger version')
-            if self.data['queue'] != QUEUE and all(task['state'] == 'released' for task in self.tasks.values()):
-                previous = self.data['queue']
-                self.data['next_id'] = 1 + max((int(task['id']) for task in self.tasks.values()
-                                                if str(task.get('id', '')).isdigit()), default=0)
-                self.data['queue'] = QUEUE
-                self.event(None, 'migration:' + uuid.uuid4().hex, previous=previous,
-                           tasks=len(self.tasks), holds=sorted(self.data['maintenance']))
-                self.save()
+            take_over(self)
         else:
             self.data = {'version': 1, 'queue': QUEUE, 'next_id': 1, 'tasks': {}, 'maintenance': {},
                          'gate': None, 'pending': [], 'installation': None}
@@ -211,6 +204,17 @@ def locked():
     with (BASE / 'host.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         yield Ledger()
+
+
+def take_over(ledger):
+    if ledger.data['queue'] != QUEUE and all(task['state'] == 'released' for task in ledger.tasks.values()):
+        previous = ledger.data['queue']
+        ledger.data['next_id'] = 1 + max((int(task['id']) for task in ledger.tasks.values()
+                                         if str(task.get('id', '')).isdigit()), default=0)
+        ledger.data['queue'] = QUEUE
+        ledger.event(None, 'migration:' + uuid.uuid4().hex, previous=previous,
+                     tasks=len(ledger.tasks), holds=sorted(ledger.data['maintenance']))
+        ledger.save()
 
 
 def older_tasks(ledger) -> list:
@@ -538,6 +542,7 @@ def reconcile(ledger):
             ledger.data['gate'] = None
         finish(ledger, task)
         publish_receipt(ledger, task)
+    take_over(ledger)
 
 
 def probe_containment():

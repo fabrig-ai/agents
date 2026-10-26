@@ -460,6 +460,64 @@ def migrate_undrained(lab):
     lab.done(lab.start('progress'))
 
 
+def migrate_on_submit(lab):
+    lab.call([HEAVY, '--install-reconciler', '60s'])
+    lab.call(['systemctl', '--user', 'start', lab.prefix + '-reconcile.service'])
+    lab.done(lab.start('released'))
+    lab.arm('claim')
+    clients = {}
+    wrappers = {}
+    for label in ('enqueuing', 'queued'):
+        clients[label] = lab.start(label, args=['touch', str(lab.path / (label + '-must-not-run'))])
+        wrappers[label] = lab.queued(label)['wrapper_unit']
+        lab.barrier('claim', label)
+
+    def edit(data):
+        for task in data['tasks'].values():
+            if task['label'] == 'enqueuing':
+                task['state'] = 'enqueuing'
+
+    previous = lab.pueue_era(edit)
+    # Only the older wrappers wait at claim; the new submission must finish
+    # before those wrappers are let through to refuse replay.
+    faults = lab.env.pop('HEAVY_FAULT_DIR')
+    try:
+        lab.done(lab.start('progress'))
+    finally:
+        lab.env['HEAVY_FAULT_DIR'] = faults
+    assert 'drain first' not in (lab.path / 'progress.client.txt').read_text()
+    events = lab.events()
+    migrations = [event for event in events if event['event'].startswith('migration:')]
+    assert len(migrations) == 1, 'submission did not take over the drained ledger'
+    migration = migrations[0]
+    submitted = lab.event('progress', 'submit')
+    assert migration['source'] == submitted['source'] == '--'
+    assert migration['previous'] == previous['queue']
+    assert migration['tasks'] == 3 and migration['holds'] == []
+    assert events.index(migration) < events.index(submitted)
+    state = lab.state()
+    queue = hashlib.sha256(str(lab.base).encode()).hexdigest()
+    assert state['queue'] == queue and lab.task('progress')['queue'] == queue
+    assert int(lab.task('progress')['id']) > max(int(task['id']) for task in previous['tasks'].values())
+    for label, client in clients.items():
+        assert events.index(lab.event(label, 'unclaimed')) < events.index(migration)
+        assert lab.event(label, 'unclaimed')['source'] == submitted['source']
+        task = lab.released(label)
+        assert task['code'] == 137 and task['outcome'] == 'cancelled' and not task.get('wrapper')
+        lab.done(client, 137)
+        receipt = json.loads((lab.base / 'receipts' / (task['token'] + '.json')).read_text())
+        assert receipt['queue'] == previous['queue'] and receipt['code'] == 137
+    lab.disarm('claim')
+    wait_for(lambda: sum(e['source'] == '--task' and e['event'].startswith('refusal:')
+                         for e in lab.events()) == 2, 'both older wrappers refused replay')
+    for label, unit in wrappers.items():
+        wait_for(lambda: lab.call(['systemctl', '--user', 'is-active', '--quiet', unit],
+                                 check=False).returncode != 0, label + ' wrapper ended')
+        assert not (lab.path / (label + '-must-not-run')).exists()
+        assert not lab.event(label, 'wrapper_start')
+    lab.call([HEAVY, '--install-reconciler', '0.2s'])
+
+
 def rollback(lab):
     lab.done(lab.start('retired'))
     commit = '98b6ae3a7f9d46c1639c23741e9b3a37a4e3dd76'
@@ -1691,7 +1749,8 @@ def main():
     root = opts.evidence.resolve()
     root.mkdir(parents=True, exist_ok=False)
     (root / 'EVIDENCE.TAG').write_text('agents fixture evidence\ntest-heavy-recovery\n')
-    cases = [('migrate-drained', migrate_drained), ('migrate-undrained', migrate_undrained),
+    cases = [('migrate-on-submit', migrate_on_submit),
+             ('migrate-drained', migrate_drained), ('migrate-undrained', migrate_undrained),
              ('rollback', rollback),
              ('client-before-wrapper', unclaimed_client),
              ('wrapper-before-claim', wrapper_before_claim),
