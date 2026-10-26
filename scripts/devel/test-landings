@@ -36,6 +36,7 @@ def tier_record(event='tier', tier='jig', commit='a' * 40, minute=0, **extra):
         'running': {'from': None},
         'verdict': dict(run=commit, verdict='cleared', tests=[], flakes=[], set=None, log='/fixture/log'),
         'fault': dict(reason='lacks chromium', since=row['time']),
+        'recovered': dict(since=row['time']),
     }
     row.update(fields.get(event, {}))
     row.update(extra)
@@ -416,6 +417,9 @@ def tiers_shown(lab):
         '  jig: running on 9f8e7d6c5 since 05:20Z; green at 4d5e6f7a8 (10-26 05:01Z)',
         '  temper: red at 3c4d5e6f7 (10-26 05:31Z): 2 tests, first red 0a1b2c3d4 (case-5/m3); green at 7e8f9a0b1 (10-26 05:00Z)']
     assert lab.run('report').stdout == baseline
+    lab.append(tier_record('recovered', tier='hearth', minute=3))
+    assert 'hearth: red at aaaaaaaaa' in lab.run('--last', '0').stdout
+    assert 'hearth: fault' not in lab.run('--last', '0').stdout
     # Timestamps, then feed order, decide which state supersedes another.
     lab.append(tier_record('fault', minute=3), tier_record(minute=21))
     assert 'jig: green at aaaaaaaaa (10-26 05:21Z)' in lab.run('--last', '0').stdout

@@ -146,6 +146,11 @@ def runner_record(row):
         return True
     if not text(row.get('commit')):
         return False
+    if event == 'recovered':
+        if not text(row.get('since')):
+            return False
+        utc(row['since'])
+        return True
     if event == 'running':
         return 'from' in row and nullable(row['from'])
     if event not in ('tier', 'verdict') or not strings(row.get('flakes')) or not text(row.get('log')):
@@ -190,6 +195,8 @@ def show_tiers(records, set_records):
                 running, fault = row, None
             elif row['event'] == 'fault':
                 fault = row
+            elif row['event'] == 'recovered':
+                fault = None
         parts = []
         if fault:
             clock = utc(fault['since']).strftime('%H:%MZ')

@@ -51,7 +51,7 @@ done < "$selected"
 i=0
 while test "$i" -lt 70; do printf 'payload detail %s\n' "$i"; i=$((i + 1)); done
 if test "$status" -ne 0; then
-    printf 'failure text at end for excerpt\n'
+    printf 'failure text at end for excerpt, attempt %s\n' "$n"
 fi
 exit "$status"
 '''
@@ -84,9 +84,10 @@ POST = r'''import json, os, sys
 from pathlib import Path
 root = Path(os.environ['AFTER_LANDING_FIXTURE'])
 if (root / 'post-refuse').exists():
-    sys.exit(1)
+    sys.exit(int((root / 'post-refuse').read_text() or '1'))
 with (root / 'posts.jsonl').open('a') as out:
     out.write(json.dumps(dict(argv=sys.argv[1:], body=Path(sys.argv[4]).read_text())) + '\n')
+sys.exit(int((root / 'post-exit').read_text()) if (root / 'post-exit').exists() else 0)
 '''
 
 
@@ -262,6 +263,7 @@ def red(lab):
     lab.run()
     verdict = lab.verdict(one)
     assert verdict['verdict'] == 'red' and verdict['tests'] == ['t1']
+    assert 'attempt 2' in verdict['excerpt']
     assert 'failure text' in verdict['excerpt'] and verdict['set'] == 'demo/m1'
     assert len(verdict['excerpt']) <= 8000 and len(verdict['excerpt'].splitlines()) <= 60
     assert lab.records('tier')[-1]['reds'] == [dict(landing=one, tests=['t1'])]
@@ -311,6 +313,19 @@ def already_red(lab):
 
 def fault(lab):
     green = lab.green()
+    hidden = lab.origin.with_name('hidden.git')
+    lab.origin.rename(hidden)
+    lab.run()
+    since = lab.state()['fault']['since']
+    hidden.rename(lab.origin)
+    before = lab.records()
+    lab.run()
+    assert len(lab.calls()) == 1 and lab.state()['fault'] is None
+    assert lab.records()[:-1] == before
+    assert lab.records('recovered') == [lab.records()[-1]]
+    assert lab.records()[-1]['commit'] == green and lab.records()[-1]['since'] == since
+    lab.run()
+    assert len(lab.records('recovered')) == 1
     tip = lab.land()
     lab.push()
     (lab.root / 'refuse').touch()
@@ -318,10 +333,16 @@ def fault(lab):
     assert lab.records('fault')[-1]['reason'] == 'heavy: below the disk floor'
     assert lab.state()['last_run'] == green and len(lab.records('verdict')) == 1
     lab.run()
-    assert len(lab.records('fault')) == 1
+    assert len(lab.records('fault')) == 2
     env = dict(lab.env, AFTER_LANDING_FAULT_POST='0')
+    (lab.root / 'post-refuse').write_text('2')
+    assert 'warning: post failed' in lab.run(director=True, env=env).stderr
+    assert not lab.state()['fault']['posted']
+    (lab.root / 'post-refuse').unlink()
+    (lab.root / 'post-exit').write_text('3')
     lab.run(director=True, env=env)
     lab.run(director=True, env=env)
+    assert lab.state()['fault']['posted']
     assert len(lab.posts()) == 1 and 'fault for 0 minutes' in lab.posts()[0]['argv'][2]
     assert tip in lab.posts()[0]['body'] and 'log:' in lab.posts()[0]['body']
     (lab.root / 'refuse').unlink()
@@ -336,7 +357,7 @@ def fault(lab):
     lab.origin.rename(hidden)
     lab.run()
     assert lab.records('fault')[-1]['reason'] == 'origin out of reach'
-    assert lab.state()['last_run'] == tip and len(lab.records('fault')) == 3
+    assert lab.state()['last_run'] == tip and len(lab.records('fault')) == 4
 
 
 def unwatched_red(lab):
@@ -484,9 +505,14 @@ def pending_delivery(lab):
     assert len(lab.state()['pending']) == 1
     env = dict(lab.env, AFTER_LANDING_RED_GRACE='0')
     (lab.root / 'post-refuse').touch()
-    lab.run(status=1, director=True, env=env)
+    two = lab.land(reds=['t1'])
+    lab.push()
+    result = lab.run(director=True, env=env)
+    assert 'warning: post failed' in result.stderr
+    assert lab.state()['last_run'] == two
     assert len(lab.state()['pending']) == 1 and lab.posts() == []
     (lab.root / 'post-refuse').unlink()
+    (lab.root / 'post-exit').write_text('3')
     lab.run(director=True, env=env)
     assert len(lab.posts()) == 1 and lab.state()['pending'] == []
     two = lab.land(reds=['t1', 't2'], landed=True)

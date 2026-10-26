@@ -181,17 +181,26 @@ def watched(item, rows):
 
 
 def post(args, base, subject, body):
-    fd, filename = tempfile.mkstemp(prefix='post-', dir=base / 'logs')
+    filename = None
     try:
+        fd, filename = tempfile.mkstemp(prefix='post-', dir=base / 'logs')
         with os.fdopen(fd, 'w') as out:
             out.write(body + '\n')
         executable = (os.environ.get('AFTER_LANDING_POST', str(KIT / 'post'))
                       if args.fixture else str(KIT / 'post'))
         result = command([executable, 'send', args.director, subject, filename])
-        if result.returncode:
-            raise RuntimeError('post failed: ' + result.stdout)
+        if result.returncode not in (0, 3):
+            raise OSError(result.stdout.strip() or f'exit {result.returncode}')
+        return True
+    except OSError as error:
+        print(f'after-landing: warning: post failed: {error}', file=sys.stderr)
+        return False
     finally:
-        os.unlink(filename)
+        if filename is not None:
+            try:
+                os.unlink(filename)
+            except OSError as error:
+                print(f'after-landing: warning: post cleanup failed: {error}', file=sys.stderr)
 
 
 def settle(args, base, state, rows):
@@ -201,9 +210,10 @@ def settle(args, base, state, rows):
         elif args.director and (stamp(now()) - stamp(item['time'])).total_seconds() >= args.red_grace:
             label = item['set'] if item['set'] is not None else 'no set'
             subject = f"after-landing: {args.repo} red at {item['commit'][:9]} ({label}): {len(item['tests'])} tests"
-            post(args, base, subject, '\n'.join([
+            if not post(args, base, subject, '\n'.join([
                 'tests: ' + ', '.join(item['tests']), 'run: ' + item['run'],
-                'log: ' + item['log'], item['excerpt']]))
+                'log: ' + item['log'], item['excerpt']])):
+                continue
             state['pending'].remove(item)
         else:
             continue
@@ -217,8 +227,7 @@ def post_fault(args, base, state, log):
     age = (stamp(now()) - stamp(fault['since'])).total_seconds()
     if age >= args.fault_post:
         subject = f"after-landing: {args.repo} fault for {int(age // 60)} minutes: {fault['reason']}"
-        post(args, base, subject, f"{fault['reason']}\nmain: {fault['commit']}\nlog: {log}")
-        fault['posted'] = True
+        fault['posted'] = post(args, base, subject, f"{fault['reason']}\nmain: {fault['commit']}\nlog: {log}")
 
 
 def fault(args, base, state, token, commit, reason, log):
@@ -291,7 +300,11 @@ def pass_once(args, base, clone, state):
         log.write_text(remote.stdout)
         fault(args, base, state, token, None, 'origin out of reach', log)
         return
-    if main == state['last_run'] and state['fault'] is None:
+    if main == state['last_run']:
+        if state['fault'] is not None:
+            emit(args.fixture, token, args.repo, 'recovered', commit=main, since=state['fault']['since'])
+            state['fault'] = None
+            save_state(state_path, state)
         return
     if not clone.exists():
         result = command(['git', 'clone', '--quiet', '--no-checkout', '--', args.origin, clone])
@@ -333,7 +346,7 @@ def pass_once(args, base, clone, state):
     # Docs cannot own a red. If only a docs tip is known, retain an unattributed tier red.
     candidates = [tip for tip in landings if tip not in docs]
     intervals = {test: [0, len(candidates) - 1] for test in new}
-    excerpts = {test: first['excerpt'] for test in new}
+    excerpts = {test: retry['excerpt'] for test in new}
     while any(lo < hi for lo, hi in intervals.values()):
         test = next(test for test, (lo, hi) in intervals.items() if lo < hi)
         lo, hi = intervals[test]
