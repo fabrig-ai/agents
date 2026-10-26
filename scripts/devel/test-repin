@@ -151,8 +151,10 @@ class Lab:
         self.root, self.evidence, self.private, self.number = root, evidence, private, 0
         self.results, self.current = [], None
         if built is not None:
-            # Every worker owns its Git stores, Cargo caches and refs.
-            shutil.copytree(built, root, symlinks=True)
+            # Native copying avoids contention between Python copy loops.
+            # Every worker owns its Git stores, Cargo caches and refs; no hardlinks.
+            subprocess.run(['cp', '-R', '--preserve=mode,timestamps', '--reflink=auto',
+                            '--', str(built) + '/.', str(root)], check=True)
             configs = [root / 'consumer/.git/config', *root.glob('*.git/config'),
                        *root.glob('*-source/.git/config'),
                        *root.glob('cargo/git/checkouts/*/*/.git/config'),
