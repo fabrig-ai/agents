@@ -1201,6 +1201,8 @@ SLOW = ('moved_earlier_in_second_round', 'moved_between_phases', 'lock_conflict'
 
 def build_baseline(directory):
     lab = Lab(directory)
+    # Cache the compiler's target probe too, once, before copying Cargo's cache.
+    execute(lab.primary['temper'], ['cargo', 'metadata', '--format-version', '1'], lab.env)
     (directory / 'baseline.json').write_text(json.dumps(lab.base))
 
 
