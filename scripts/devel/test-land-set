@@ -148,6 +148,7 @@ if not os.environ.get('MOVE_AFTER_REBASE'):
     move()
 git('fetch', 'origin')
 git('rebase', 'origin/main')
+base = git('rev-parse', 'origin/main')
 if os.environ.get('MOVE_AFTER_REBASE'):
     move()
 # The gate cache: one gate per tree and worktree, as land's own, whose
@@ -173,9 +174,11 @@ if updated != message:
     git('commit', '--amend', '-m', updated)
     commit = git('rev-parse', 'HEAD')
 def result(code):
+    if phase == 'push' and os.environ.get('DROP_PUSH_RESULT_REPO') == name:
+        return
     if os.environ.get('LAND_RESULT'):
         Path(os.environ['LAND_RESULT']).write_text(json.dumps(dict(
-            schema='land-result-v1', repo=name, commit=commit, tree=tree,
+            schema='land-result-v1', repo=name, base=base, commit=commit, tree=tree,
             gate=dict(kind=kind), pushed=phase == 'push', exit=code)))
 if phase == 'push':
     git('push', 'origin', 'HEAD:main')
@@ -968,6 +971,9 @@ def pushed_then_failed(lab):
         landed = [r for r in events if r['event'] == 'landed']
         assert [r['repo'] for r in landed] == ['jig', 'temper'], events
         assert landed[0]['commit'] == jig and landed[0]['result']['exit'] == 5
+        assert landed[0]['base'] == landed[0]['result']['base']
+        expected_base = lab.git(lab.primary['jig'], 'rev-parse', jig + '^')
+        assert landed[0]['base'] == expected_base, landed[0]
         assert events[-1]['event'] == 'done'
         assert f'landed {jig} despite land failing (5)' in output
         assert f'jig: landed {jig}; the local main did not follow (5)' in output
@@ -975,6 +981,20 @@ def pushed_then_failed(lab):
         assert not list((lab.tmp / 'land-set/worktrees').glob('*/temper'))
         lab.verify(('jig', 'temper'))
         lab.assert_released()
+
+
+def push_without_result_marks_unknown_range(lab):
+    lab.change('jig')
+    spec = lab.spec({'jig': str(lab.work['jig']), 'temper': 'pin-only'})
+    lab.run(spec, env=dict(FAIL_AFTER_PUSH_REPO='jig', DROP_PUSH_RESULT_REPO='jig',
+                           MOVE_AT='push:jig', MOVE_REPO='jig'))
+    landed = next(row for row in lab.records('landed') if row['repo'] == 'jig')
+    assert landed['commit'] == lab.heads()['jig'], landed
+    assert 'base' in landed and landed['base'] is None, landed
+    assert 'result' not in landed, landed
+    assert lab.records(None)[-1]['event'] == 'done'
+    lab.verify(('jig', 'temper'))
+    lab.assert_released()
 
 
 def lagging_fetch(lab):
@@ -1420,7 +1440,8 @@ def skipped(lab):
 CASES = (tidy_hooks, tidy_hooks_partial, staging_cargo, rerun, advanced_main, recorded_commit_refusal, unchanged_downstream,
          partial_set, split_source, success, taught, moved_between_phases, moved_during_pushes,
          moved_earlier_in_second_round, regate_failure_resume, catch_up,
-         pushed_then_failed, lagging_fetch, proved, proved_then_moved, prove_failure, same_set,
+         pushed_then_failed, push_without_result_marks_unknown_range, lagging_fetch,
+         proved, proved_then_moved, prove_failure, same_set,
          outside_snapshot, moved_gate_base,
          interrupted_with_staging, interrupted_during_feed, interrupted_during_cleanup,
          feed_failure, cleanup_warning,

@@ -304,7 +304,9 @@ cite:
        to its owner with the log, and an implementer repairs it
        (section 3).
      - A test already red on `main` counts against the landing that
-       first failed it, and against no later one.
+       first failed it, and against no later one. A commit's first
+       landing is the landing whose pushed range holds it: the main
+       rebased onto, exclusive, through the pushed tip, inclusive.
      - heavy refusing the run, a full disk, a missing tool or origin
        out of reach is a fault of the infrastructure, not a red. The
        runner retries, and posts the director if it lasts 15 minutes.
@@ -315,7 +317,13 @@ cite:
      and its first red one with the landing and the failed tests.
      `landings` shows it. `landings wait --cleared`, on a set or a plain
      landing's commit, exits with its verdict: cleared, once a run on a
-     `main` that holds it has no red of its own, or red. "Holds" is
+     `main` that holds it has no red of its own, or red. A landing's
+     verdict is the worst over every commit in its pushed range,
+     including repins and a resolver's regenerate commits: any red is
+     the landing's red, even when its tip's own verdict is cleared or
+     the red commit's `landing_set` is null. Every pushed commit must
+     be decided before the landing clears. Older events without a
+     range keep the single-commit judgement below. "Holds" is
      ancestry, not an exact match, so that every landing gets a
      verdict, and the wait says which of these gave it:
      - its own, where the runner judged the landing's commit;
@@ -796,7 +804,14 @@ that a routine landing needs no post. Built 10-26 (o/landing-taught).
 - **A set's landing record.** Each `landed` event of `land-set`
   (build-infrastructure.md 10) carries `taught`, the list of lines, and
   `taught_more` when it left some out; neither when that repository's
-  commits taught nothing. A set teaches per repository.
+  commits taught nothing. A set teaches per repository. It also carries
+  `base`, the main the successful push rebased onto, and `commit`, its
+  actual pushed tip: its range is (base, commit], per repository. This
+  is the push's range even if main moved after the candidate was gated.
+  The same pair in a matching pushed `result` also supplies a range.
+  If publication is recovered without that result, `base` is null:
+  the new range is unknown and stays pending, never judged by its tip
+  alone as an old record without a range would be.
 - **`land`'s own record.** Before this, a plain `land` reached the feed
   only inside a set. Now a `land` that pushes, `--docs` included, appends
   one line once its push has succeeded, whether or not its local `main`
@@ -822,6 +837,16 @@ that a routine landing needs no post. Built 10-26 (o/landing-taught).
     (`https::https://host/...` has a host), and `ext::` never has one.
   - Its result stays out of it: plain `land`s' costs are still not
     collected (section 10).
+- **Verdicts cover the push.** For a set or a plain landing, the
+  landing's verdict is the worst over every commit in (base, commit],
+  whoever made it: its own commits, repins and the resolver's
+  regenerate commits. A red charged to any one is this landing's red;
+  a cleared tip cannot override it. All must clear before the landing
+  clears. The first landing of a failing commit is the one whose range
+  holds it; later landings inherit no blame for an existing failure.
+  `landings` shows this judgement and `wait --cleared` uses it, on a
+  set or its tip. No past feed record is rewritten; an older record
+  without a range keeps its former single-commit judgement.
 - **`landings` shows it.**
   - Its event list holds `land`'s records beside the sets' events, a
     record's branch where a set's name stands, and prints a landing's

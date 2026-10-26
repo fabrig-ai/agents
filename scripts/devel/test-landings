@@ -225,11 +225,12 @@ def taught_shown(lab):
         '10-24 12:03Z fixture/m1 done fixture-host',
         '10-24 12:04Z landing-taught/m1 landed agents ccccccccc fixture-host',
         '    land writes its own record',
+        '    verdict pending over pushed range',
         'in flight: none', 'tiers: none in the feed']
     result = lab.run()
     assert result.stdout.splitlines() == expected and result.stderr == '', result
     # The limit counts events, independently of their taught lines.
-    assert lab.run('--last', '1').stdout.splitlines() == expected[-4:]
+    assert lab.run('--last', '1').stdout.splitlines() == expected[-5:]
     # Plain lands have no effect on a set's cost or wait views.
     assert lab.run('wait', 'fixture/m1', '--timeout', '0').stdout.splitlines() == [expected[1], expected[5]]
 
@@ -276,7 +277,9 @@ def taught_malformed(lab):
         '    clear?[2Jscreen',
         '    ' + '?' * 65 + ' café']
     assert lab.run('taught').stdout.splitlines() == expected
-    assert lab.run().stdout.splitlines() == expected + ['in flight: none', 'tiers: none in the feed']
+    pending = '    verdict pending over pushed range'
+    status = [*expected[:2], pending, *expected[2:4], pending, *expected[4:], pending]
+    assert lab.run().stdout.splitlines() == status + ['in flight: none', 'tiers: none in the feed']
 
 
 def last_two(lab):
@@ -680,6 +683,99 @@ def red_set(lab):
     landed_set(lab)
     lab.append(tier_record('verdict', verdict='red', tests=['*'], excerpt='crash'))
     lab.run('wait', '--cleared', 'fixture/m1', '--timeout', '0', status=1)
+
+
+def pushed_range(lab, resolver_tests=(), tip_tests=(), field='base'):
+    lab.repository('temper')
+    base = lab.git(lab.workspace / 'temper', 'rev-parse', 'HEAD')
+    resolver = lab.land('temper', 'regenerate.sh: rewrite files after the rebase')
+    tip = lab.land('temper', 'set landing')
+    extra = ({'base': base} if field == 'base' else
+             {'result': dict(base=base, commit=tip, pushed=True)} if field == 'result' else {})
+    lab.append(record(event='started'),
+               record(event='landed', repo='temper', commit=tip, **extra), record(event='done'),
+               *tier_run('temper', tip, base, 10, [(resolver, list(resolver_tests)), (tip, list(tip_tests))]))
+    return base, resolver, tip
+
+
+def resolver_red_counts_against_the_set(lab):
+    base, resolver, tip = pushed_range(lab, resolver_tests=['resolver regression'])
+    result = lab.run('wait', '--cleared', 'fixture/m1', '--timeout', '0', status=1)
+    assert f'temper {tip[:9]} red over pushed range {base[:9]}..{tip[:9]}' in result.stdout, result
+    assert f'temper {resolver[:9]} red by run {tip[:9]}: resolver regression' in result.stdout, result
+    assert 'first failure\n    second failure' in result.stdout, result
+    # Status and a commit-prefix wait use the same range as a set wait.
+    assert f'{tip[:9]} red over pushed range' in lab.run().stdout
+    lab.run('wait', '--cleared', tip[:9], '--timeout', '0', status=1)
+    # A later clean landing never clears this landing's own red.
+    later = lab.advance('temper', 'later clean landing')
+    lab.append(*tier_run('temper', later, tip, 20, [(later, [])]))
+    lab.run('wait', '--cleared', 'fixture/m1', '--timeout', '0', status=1)
+
+
+def tip_red_still_counts_against_the_set(lab):
+    _, _, tip = pushed_range(lab, tip_tests=['tip regression'])
+    result = lab.run('wait', '--cleared', 'fixture/m1', '--timeout', '0', status=1)
+    assert f'temper {tip[:9]} red by run {tip[:9]}: tip regression' in result.stdout, result
+
+
+def push_result_also_supplies_the_range(lab):
+    pushed_range(lab, resolver_tests=['resolver regression'], field='result')
+    lab.run('wait', '--cleared', 'fixture/m1', '--timeout', '0', status=1)
+
+
+def legacy_landing_keeps_its_tip_verdict(lab):
+    _, resolver, tip = pushed_range(lab, resolver_tests=['resolver regression'], field=None)
+    result = lab.run('wait', '--cleared', 'fixture/m1', '--timeout', '0')
+    assert f'temper {tip[:9]} cleared by run {tip[:9]}' in result.stdout, result
+    assert resolver[:9] not in result.stdout, result
+
+
+def plain_landing_uses_its_range(lab):
+    base, _, tip = pushed_range(lab, resolver_tests=['resolver regression'], field=None)
+    lab.append(dict(time='2026-10-26T05:00:00+00:00', kind='land', event='landed',
+                    host='fixture-host', token='plain', repo='temper', branch='plain', base=base, commit=tip))
+    lab.run('wait', '--cleared', tip[:9], '--timeout', '0', status=1)
+    assert f'{tip[:9]} red over pushed range' in lab.run().stdout
+
+
+def range_excludes_an_inherited_red(lab):
+    base, _, tip = pushed_range(lab)
+    # The tier can stay red on the exclusive base, while this landing clears.
+    lab.append(tier_record('verdict', tier='temper', commit=base, minute=20,
+                           verdict='red', tests=['inherited'], excerpt='old failure'),
+               tier_record(tier='temper', commit=tip, minute=20, state='red', last_green=None,
+                           reds=[dict(landing=base, tests=['inherited'])]))
+    result = lab.run('wait', '--cleared', 'fixture/m1', '--timeout', '0')
+    assert f'temper {tip[:9]} cleared by run' in result.stdout, result
+    assert 'inherited' not in result.stdout, result
+
+
+def range_waits_for_every_pushed_commit(lab):
+    _, resolver, _ = pushed_range(lab)
+    rows = [json.loads(line) for line in lab.feed.read_text().splitlines()]
+    # An own cleared tip alone cannot decide an unjudged resolver commit.
+    rows = [row for row in rows if row.get('kind') != 'tier'
+            or (row.get('event') == 'verdict' and row.get('commit') != resolver)]
+    lab.feed.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+    lab.run('wait', '--cleared', 'fixture/m1', '--timeout', '0', status=3)
+    assert 'verdict pending over pushed range' in lab.run().stdout
+
+
+def range_without_checkout_stays_pending(lab):
+    pushed_range(lab)
+    lab.env['DEV_ROOT'] = str(lab.root / 'absent')
+    lab.run('wait', '--cleared', 'fixture/m1', '--timeout', '0', status=3)
+
+
+def unknown_push_range_never_uses_tip_clearance(lab):
+    _, _, tip = pushed_range(lab)
+    rows = [json.loads(line) for line in lab.feed.read_text().splitlines()]
+    next(row for row in rows if row.get('event') == 'landed')['base'] = None
+    lab.feed.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+    lab.run('wait', '--cleared', 'fixture/m1', '--timeout', '0', status=3)
+    lab.run('wait', '--cleared', tip[:9], '--timeout', '0', status=3)
+    assert 'verdict pending over pushed range' in lab.run().stdout
 
 
 def stopped_set(lab):
@@ -1101,6 +1197,11 @@ def main():
              remote_failure, remote_hang, remote_first_read, invalid_arguments, read_default,
              tiers_shown, landing_set_isolation, cleared_set, cleared_main_is_the_newest_all_cleared_run,
              cleared_main_none, cleared_main_unreadable, red_set, stopped_set, waits_for_verdict, commit_target,
+             resolver_red_counts_against_the_set, tip_red_still_counts_against_the_set,
+             push_result_also_supplies_the_range, legacy_landing_keeps_its_tip_verdict,
+             plain_landing_uses_its_range, range_excludes_an_inherited_red,
+             range_waits_for_every_pushed_commit, range_without_checkout_stays_pending,
+             unknown_push_range_never_uses_tip_clearance,
              watch_record, malformed_runner_records, posted_wait, remote_watch,
              no_tier_clears_on_landing, baseline_clears_an_older_landing,
              commit_in_a_range_takes_its_landing_verdict, held_in_a_red_landing_is_red,

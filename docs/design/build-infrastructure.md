@@ -947,6 +947,13 @@ last run's commit:
   and P unchanged, so the next pass tries again.
 - **The verdicts:** one per landing in (P, M], `red` with the new
   tests charged to it, else `cleared`, each naming the run's flakes.
+  These are per-commit verdicts. A tool landing owns every commit in
+  its pushed range (base, tip], including repins and resolver commits,
+  and its verdict is the worst over that range. A red charged to any
+  such commit belongs to that landing, even with `landing_set` null
+  and the tip cleared. A commit's first landing is the landing whose
+  range holds it; an existing failure still counts against that first
+  landing alone.
 
 **Its records** go in the landing feed (section 10), beside the sets'.
 None has a `set` key, so the readers of sets skip them. Each has `time`,
@@ -984,8 +991,23 @@ the landing first charged, its last green, and a run in progress or a
 fault newer than the last state. `landings wait --cleared TARGET
 [--timeout SECONDS] [--post ADDRESS]` waits for a landing's verdict:
 TARGET is a set, whose landings are its latest run's `landed` records,
-or a commit, 7 to 40 hex digits. A landing's verdict is the first of
-these (landing-flow.md 4, step 8):
+or a commit, 7 to 40 hex digits. A `landed` event's `base` and `commit`
+record its actual pushed range, (base, commit], for that repository;
+the same pair in a matching `result` with `pushed: true` also suffices.
+The base is the main its successful push rebased onto, even after a
+rebase under the lock, never an earlier gate's base. `landings` displays
+the landing's worst verdict over every commit in this range, and
+`wait --cleared` uses it for a set or a recorded tip. A red decides
+immediately; clearance requires every pushed commit to clear. A missing
+checkout, missing range objects or unknown ancestry leaves the range
+pending. The exclusive base and older commits contribute no reds.
+If `land-set` recovers a publication without its matching push result,
+it writes `base: null` to mark an unknown new range; set waits, tip
+waits and status all leave it pending rather than using tip clearance.
+Past feed events are never rewritten; an older event without a range
+keeps its former judgement. For each pushed commit, or a legacy
+single-commit landing, the verdict is the first of these
+(landing-flow.md 4, step 8):
 - its own: the newest `verdict` record on its commit, of its
   repository, or of any for a commit target;
 - no tier: its commit's tree has no `scripts/after-landing.sh`, and
@@ -1006,8 +1028,8 @@ trusts that ref, and again, at most once per poll, where a commit it
 needs is missing; one still missing after a fetch stays missing. Each
 git call is killed with its children at its timeout, cut to the wait's
 deadline. A landing with no checkout, or a commit no checkout has, ends
-only with its own verdict; a landing whose ancestry git can't answer
-waits.
+only with its own verdict under the legacy single-commit judgement;
+a recorded range whose ancestry git can't answer waits.
 
 It writes its `watch` record first, then exits 0 once each landing is
 cleared, 1 at the first red or on the set's `stopped`, 2 at once when a

@@ -329,7 +329,7 @@ class Checkouts:
     def __init__(self, root, deadline=math.inf):
         self.root = root
         self.deadline = deadline
-        self.commits, self.ancestry, self.trees = {}, {}, {}
+        self.commits, self.ancestry, self.trees, self.ranges = {}, {}, {}, {}
         self.missing, self.confirmed, self.landed = set(), set(), set()
         self.checkouts = {}
         self.poll()
@@ -452,6 +452,20 @@ class Checkouts:
                 self.trees[key] = bool(result.stdout.strip())
         return self.trees.get(key)
 
+    def pushed_commits(self, repo, base, tip):
+        if repo not in CHECKOUTS:
+            return None
+        key = repo, base, tip
+        if key not in self.ranges:
+            if not self.available(repo) or self.holds(repo, tip, base) is not True:
+                return None
+            result = self.git(repo, 'rev-list', '--reverse', base + '..' + tip)
+            if result is not None and result.returncode == 0:
+                commits = result.stdout.splitlines()
+                if commits:
+                    self.ranges[key] = commits
+        return self.ranges.get(key)
+
 
 def judge(runner, checkouts, repo, commit):
     """Return (outcome, lines), or None while this landing is undecided."""
@@ -524,9 +538,54 @@ def judge(runner, checkouts, repo, commit):
     return None
 
 
-def clearance(records, runner, target, checkouts):
+def landing_base(row):
+    """The actual push's base; never the earlier candidate's gate base."""
+    base = row.get('base')
+    if 'base' not in row:
+        result = row.get('result')
+        if (isinstance(result, dict) and result.get('pushed') is True
+                and result.get('commit') == row.get('commit')):
+            base = result.get('base')
+    return base if isinstance(base, str) and re.fullmatch(r'[0-9a-fA-F]{40}', base) else None
+
+
+def has_landing_range(row):
+    # Explicit null means a new publication whose push result was lost.
+    return 'base' in row or landing_base(row) is not None
+
+
+def judge_landing(row, runner, checkouts):
+    repo, tip = row.get('repo'), row['commit']
+    base = landing_base(row)
+    if base is None:
+        return None if has_landing_range(row) else judge(runner, checkouts, repo, tip)
+    commits = checkouts.pushed_commits(repo, base, tip)
+    if commits is None:
+        return None
+    answers = [judge(runner, checkouts, repo, commit) for commit in commits]
+    reds = [answer for answer in answers if answer is not None and answer[0] == 'red']
+    span = f'pushed range {base[:9]}..{tip[:9]}'
+    if reds:
+        # A red decides even while another pushed commit has no verdict yet.
+        details = [line for _, lines in reds for line in lines]
+        return 'red', [f'{repo} {tip[:9]} red over {span}', *details]
+    if any(answer is None for answer in answers):
+        return None
+    unlanded = next((answer for answer in answers if answer[0] == 'not landed'), None)
+    if unlanded is not None:
+        return unlanded
+    # All pushed commits cleared. Show the tip's explanation once.
+    answer = answers[commits.index(checkouts.need(repo, tip))]
+    return 'cleared', [answer[1][0] + '; ' + span, *answer[1][1:]]
+
+
+def clearance(records, runner, target, checkouts, lands=()):
     if re.fullmatch(r'[0-9a-fA-F]{7,40}', target):
-        landings = [(None, target)]
+        landings = [r for r in [*records, *lands] if r['event'] == 'landed'
+                    and r.get('commit', '').lower().startswith(target.lower())
+                    and has_landing_range(r)]
+        if not landings:
+            landings = [dict(repo=None, commit=target)]
         ready = True
     else:
         run = latest_runs(records).get(target, [])
@@ -535,11 +594,12 @@ def clearance(records, runner, target, checkouts):
             print(event_line(terminal))
             return 1, [], 'stopped'
         ready = terminal is not None and terminal['event'] == 'done'
-        landings = list(dict.fromkeys((r['repo'], r['commit']) for r in run
-                                     if r['event'] == 'landed' and r.get('repo') and r.get('commit'))) if ready else []
+        landings = list({(r['repo'], r['commit']): r for r in run
+                         if r['event'] == 'landed' and r.get('repo') and r.get('commit')}.values()) if ready else []
     decided, missing = [], []
-    for repo, commit in landings:
-        answer = judge(runner, checkouts, repo, commit)
+    for row in landings:
+        repo, commit = row.get('repo'), row['commit']
+        answer = judge_landing(row, runner, checkouts)
         if answer is None:
             found = checkouts.find(commit, repo) if repo is None else []
             missing.append(found[0] if len(found) == 1 else (repo, commit))
@@ -607,13 +667,20 @@ def ending(run):
     return next((r for r in reversed(run) if r['event'] in ('done', 'proved', 'stopped')), None)
 
 
-def show(records, lands, last):
+def show(records, lands, last, runner, checkouts):
     events = sorted([*records, *lands], key=lambda r: r['position'])
     for record in events[-last:] if last else []:
         print(event_line(record))
         if record['event'] == 'landed':
             for line in taught_lines(record):
                 print(line)
+            if has_landing_range(record):
+                answer = judge_landing(record, runner, checkouts)
+                if answer is None:
+                    print('    verdict pending over pushed range')
+                else:
+                    for line in answer[1]:
+                        print('    ' + line)
     active = [run for run in latest_runs(records).values() if ending(run) is None]
     active += [run for run in latest_runs(records, proves=True).values() if ending(run) is None]
     if not active:
@@ -663,7 +730,7 @@ def wait(label, timeout, poll, unreachable, read=15, cleared=False):
             last_read = time.monotonic()
             last_error = None
             if cleared:
-                status, missing, outcome = clearance(records, runner, label, checkouts)
+                status, missing, outcome = clearance(records, runner, label, checkouts, lands)
                 if status is not None:
                     return status, outcome
             else:
@@ -930,7 +997,7 @@ def main():
             records = [r for r in records if r['utc'] >= args.since]
         report(records, args.repo, args.tsv)
         return 0
-    show(records, lands, args.last)
+    show(records, lands, args.last, runner, Checkouts(workspace()))
     show_tiers(runner, records)
     return 0
 

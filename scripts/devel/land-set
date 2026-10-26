@@ -752,7 +752,11 @@ def main():
                 candidates.pop(name)
                 write_state(state, spec['set'], landed)
                 summary[name] = 'landed ' + commit
-                event('landed', repo=name, commit=commit,
+                # Reconciliation can find a publication whose result was lost.
+                # Null marks an unknown new range, never a legacy tip-only event.
+                base = (outcome.get('base') if outcome and outcome.get('pushed') is True
+                        and outcome.get('commit') == commit else None)
+                event('landed', repo=name, base=base, commit=commit,
                       **(dict(taught=lines) if lines else {}),
                       **(dict(taught_more=more) if more else {}),
                       **(dict(result=outcome) if outcome else {}))
