@@ -74,6 +74,7 @@ class Runner:
     def __init__(self):
         self.lock = self.child = self.results = None
         self.cancelling = False
+        self.pin_packages = {}
         # Reap orphaned grandchildren too when a shell exits before its publisher.
         require(ctypes.CDLL(None).prctl(36, 1, 0, 0, 0) == 0,
                 'cannot become child subreaper', 1)  # PR_SET_CHILD_SUBREAPER (Linux)
@@ -323,7 +324,27 @@ def rebase(runner, path, base):
     return tip, generated
 
 
-def repin(runner, path, name, label, landed, candidates, root, mains):
+def pin_packages(runner, path, commit):
+    """Seed even crates first introduced at this pin, before Cargo resolves."""
+    key = (str(path), commit)
+    if key not in runner.pin_packages:
+        code, text = runner.run(path, ['git', 'show', commit + ':Cargo.lock'],
+                                check=False, quiet=True)
+        if code:
+            # An upstream outside the set may have advanced beyond this
+            # machine's refs. Fetch only into this run's disposable repository.
+            scratch = Path(tempfile.mkdtemp(dir=runner.results, prefix='pin-'))
+            runner.git(scratch, 'init', '--bare', '--quiet')
+            origin = runner.git(path, 'remote', 'get-url', 'origin')
+            if '://' not in origin and not re.match(r'[^/]+:', origin):
+                origin = str((path / origin).resolve())
+            runner.git(scratch, 'fetch', '--quiet', '--depth=1', origin, commit)
+            text = runner.git(scratch, 'show', commit + ':Cargo.lock')
+        runner.pin_packages[key] = [p for p in tomllib.loads(text)['package'] if 'source' not in p]
+    return runner.pin_packages[key]
+
+
+def repin(runner, path, name, label, landed, candidates, root, mains, paths):
     pins = {}
     for up in reversed(UPSTREAM[name]):
         commit = candidates.get(up) or landed.get(up)
@@ -356,19 +377,72 @@ def repin(runner, path, name, label, landed, candidates, root, mains):
         return {identity: next(iter(revisions)) for identity, revisions in found.items()}
 
     sources()
-    # Sources whose packages depend on other upstream sources go first.
+    records = packages()
     targets = pins
     for up, commit in targets.items():
-        records = [p for p in packages() if p.get('source', '').startswith('git+')
+        matches = [p for p in records if p.get('source', '').startswith('git+')
                    and repo_name(urlsplit(p['source'][4:].split('#')[0]).path) == up]
-        identities = {p['source'].rsplit('#', 1)[0] for p in records}
+        identities = {p['source'].rsplit('#', 1)[0] for p in matches}
         require(len(identities) == 1, f'{name}: absent or ambiguous source {up}', 1)
         identity = next(iter(identities))
         selected[identity] = commit
         require('rev' not in parse_qs(urlsplit(identity[4:]).query), f'{name}: rev constraint on {up}', 1)
-        selector = identity + '#' + records[0]['name'] + '@' + records[0]['version']
-        status, _ = runner.run(path, ['cargo', 'update', '--precise', commit, '-p', selector], check=False)
-        require(status == 0, f'{name}: repin failed ({status})', 1)
+
+    # Cargo accepts only one --precise value. Seed the complete tuple before
+    # resolving, including new crates/versions. Drop the old selected packages
+    # and their incoming lock edges: even at the new revision those edges can
+    # otherwise keep a dependency locked to a version that no longer exists.
+    lockfile = path / 'Cargo.lock'
+    text = lockfile.read_text()
+    by_name = {}
+    for p in records:
+        by_name.setdefault(p['name'], []).append(p)
+
+    def selected_package(p):
+        return p.get('source', '').rsplit('#', 1)[0] in selected
+
+    def keep_package(match):
+        p = tomllib.loads(match[0])['package'][0]
+        if selected_package(p):
+            return ''
+        replacements = {}
+        for dep in p.get('dependencies', []):
+            parts = re.fullmatch(r'([^ ]+)(?: ([^ ]+))?(?: \((.+)\))?', dep)
+            require(parts, f'{name}: invalid lock dependency {dep}', 1)
+            package, version, source = parts.groups()
+            matches = [item for item in by_name.get(package, [])
+                       if (not version or item['version'] == version)
+                       and (not source or item.get('source') == source)]
+            if len(matches) > 1 and version and not source:
+                matches = [item for item in matches if 'source' not in item]
+            require(len(matches) == 1, f'{name}: ambiguous lock dependency {dep}', 1)
+            target = matches[0]
+            # Qualify retained edges before adding possibly colliding names.
+            qualified = target['name'] + ' ' + target['version']
+            if 'source' in target:
+                qualified += ' (' + target['source'] + ')'
+            replacements[json.dumps(dep)] = (None if selected_package(target)
+                                             else json.dumps(qualified))
+
+        def dependency(line):
+            value = replacements.get(line[2], line[2])
+            return '' if value is None else line[1] + value + line[3] + '\n'
+
+        return re.sub(r'(?m)^([ \t]+)("(?:[^"\\]|\\.)*")(,?)\n', dependency, match[0])
+
+    text = re.sub(r'(?ms)^\[\[package\]\]\n.*?(?=^\[|\Z)', keep_package, text)
+    for identity, commit in selected.items():
+        up = repo_name(urlsplit(identity[4:]).path)
+        upstream = paths.get(up, root / up)
+        if not upstream.exists():  # A landed pin-only worktree has been removed.
+            upstream = root / up
+        for p in pin_packages(runner, upstream, commit):
+            # Cargo reads dependency edges from these commits, then prunes
+            # unused seed records. Unselected package records stay locked.
+            text += ('\n[[package]]\nname = ' + json.dumps(p['name'])
+                     + '\nversion = ' + json.dumps(p['version'])
+                     + '\nsource = ' + json.dumps(identity + '#' + commit) + '\n')
+    lockfile.write_text(text)
 
     def verify():
         found = sources()
@@ -491,11 +565,11 @@ def reuse(runner, path, proved):
         runner.git(path, 'reset', '--soft', proved)
 
 
-def gate_step(runner, path, name, label, landed, candidates, root, mains, proved=None):
+def gate_step(runner, path, name, label, landed, candidates, root, mains, paths, proved=None):
     fetch(runner, path)
     base = runner.git(path, 'rev-parse', 'origin/main')
     tip, generated = rebase(runner, path, base)
-    repin(runner, path, name, label, landed, candidates, root, mains)
+    repin(runner, path, name, label, landed, candidates, root, mains, paths)
     if generated:
         code, lines = runner.run(path, [sys.executable, '-I', '-B',
             str(Path(__file__).resolve().with_name('land-resolve.py')), '--regenerate',
@@ -637,7 +711,7 @@ def main():
                     paths[name] = path
                     made.add(name)
                 path = paths[name]
-                result = gate_step(runner, path, name, spec['set'], landed, candidates, root, mains,
+                result = gate_step(runner, path, name, spec['set'], landed, candidates, root, mains, paths,
                                    proved.get(name) if spec['repos'][name] == 'pin-only' else None)
                 if result is None:
                     summary[name] = 'skipped'

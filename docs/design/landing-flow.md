@@ -571,6 +571,19 @@ agents checkout like `repin`, answers the first three:
 - **The invariant, set by set.** Each repository it lands pins every
   upstream to this run's commit where the set has one, and to that
   upstream's current `main` otherwise (section 2).
+  It validates every selected source, then replaces their package records
+  together in `Cargo.lock` with package identities from those commits' own
+  locks. Incoming lock edges to those sources are removed, so an old
+  version cannot survive a pin move; retained edges are qualified before
+  seed names can collide with them. One `cargo metadata` resolve reads
+  their dependency edges and drops unused seed records, then the tool
+  checks the whole tuple again. Candidate locks come from the supplied
+  worktrees; an uncached external commit is fetched into disposable
+  storage, without changing the primary's refs. Cargo accepts only one
+  `--precise` value: separate updates can unlock an
+  upstream and search its `main` for a crate first added in this set.
+  Manifests and source identities stay as they are; absent or ambiguous
+  sources, revision constraints and split revisions still refuse.
 - **Pin-only repositories.** It refuses a set without them, and makes
   their branches itself when the set file says `pin-only`.
 - **The feed.** Each run's steps go into a feed on hetzner3: waiting,

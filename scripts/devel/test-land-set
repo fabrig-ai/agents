@@ -489,6 +489,39 @@ def staging_cargo(lab):
     lab.git(lab.work['skein'], 'push', 'origin', ':' + ref)
 
 
+def tuple_new_crate(lab):
+    """A staged downstream names a crate absent from the upstream main."""
+    skein = lab.work['skein']
+    manifest = skein / 'Cargo.toml'
+    text = manifest.read_text().replace('members=[', 'members=["skein-new", ')
+    (skein / 'skein-new/src').mkdir(parents=True)
+    lab.change('skein', 'skein-new/Cargo.toml',
+               '[package]\nname="skein-new"\nversion="0.1.0"\nedition="2021"\n')
+    lab.change('skein', 'skein-new/src/lib.rs', 'pub fn value() -> u8 { 42 }\n')
+    lab.change('skein', 'Cargo.toml', text)
+    for name in ('smith', 'temper'):
+        manifest = lab.work[name] / (name + '-a/Cargo.toml')
+        lab.change(name, name + '-a/Cargo.toml', manifest.read_text()
+                   + 'skein-new={git=' + json.dumps(SOURCE + 'skein.git') + '}\n')
+    # Jig starts from main's lock, with neither smith's new dependency nor
+    # skein-new. Updating smith alone resolves skein from main and fails.
+    assert 'skein-new' not in lab.git(lab.origin['skein'], 'show', 'main:Cargo.toml')
+    lab.run(prove=True)
+    lab.untouched(ORDER)
+    proof = lab.proof()
+    lab.run()
+    heads = lab.verify()
+    for name in ('smith', 'jig', 'temper'):
+        lock = tomllib.loads(lab.git(lab.origin[name], 'show', 'main:Cargo.lock'))
+        added = [p for p in lock['package'] if p['name'] == 'skein-new']
+        assert len(added) == 1 and added[0]['source'].endswith('#' + heads['skein']), added
+    events = lab.records(None)
+    assert [r['event'] for r in events] == (['proving'] + ['gated'] * 5 + ['proved']
+        + ['waiting', 'started'] + ['gated'] * 5 + ['landed'] * 5 + ['done']), events
+    assert events[8]['proof'] == proof['token'], events
+    assert all(r['result']['gate']['kind'] == 'cached' for r in events[9:14]), events
+
+
 def success(lab):
     (lab.bin / 'heavy').write_text('#!/bin/sh\nexit 93\n')
     for name in ('skein', 'smith', 'temper'):
@@ -666,6 +699,83 @@ def split_source(lab):
         assert not lab.trace.read_text(), 'invalid lock reached land'
         lab.untouched(ORDER)
         lab.assert_released()
+
+
+def tuple_explicit_worktrees(lab):
+    """A fully explicit set needs no primary checkout at DEV_ROOT."""
+    lab.env['DEV_ROOT'] = str(lab.root / 'absent-primaries')
+    lab.change('skein')
+    lab.run(lab.spec({name: str(lab.work[name]) for name in ORDER}))
+    lab.verify()
+
+
+def tuple_external_source(lab):
+    """A stale external primary with a relative origin is read without ref writes."""
+    primaries = lab.root / 'stale-primaries'
+    primaries.mkdir()
+    stale = primaries / 'skein'
+    execute(lab.root, ['git', 'clone', str(lab.origin['skein']), str(stale)], lab.env)
+    lab.git(stale, 'remote', 'set-url', 'origin', os.path.relpath(lab.origin['skein'], stale))
+    before = lab.git(stale, 'show-ref')
+    for name in ORDER[1:]:
+        (primaries / name).symlink_to(lab.primary[name], target_is_directory=True)
+    lab.change('skein', path=lab.primary['skein'])
+    lab.git(lab.primary['skein'], 'push', 'origin', 'HEAD:main')
+    lab.change('jig')
+    lab.env['DEV_ROOT'] = str(primaries)
+    lab.run(lab.spec({'jig': str(lab.work['jig']), 'temper': 'pin-only'}))
+    lab.verify(('jig', 'temper'))
+    assert lab.git(stale, 'show-ref') == before, 'pin seeding changed the stale primary refs'
+
+
+def tuple_package_collision(lab):
+    """Version bumps and unused seeds cannot make old lock edges ambiguous."""
+    smith = lab.work['smith']
+    local = smith / 'local-extra'
+    (local / 'src').mkdir(parents=True)
+    (local / 'src/lib.rs').write_text('')
+    (local / 'Cargo.toml').write_text('[package]\nname="skein-extra"\nversion="0.1.0"\nedition="2021"\n')
+    manifest = smith / 'Cargo.toml'
+    manifest.write_text(manifest.read_text().replace('members=[', 'members=["local-extra", '))
+    manifest = smith / 'smith-a/Cargo.toml'
+    manifest.write_text(manifest.read_text() + 'skein-extra={path="../local-extra"}\n')
+    execute(smith, ['cargo', 'generate-lockfile'], lab.env)
+    lab.git(smith, 'add', '.')
+    lab.git(smith, 'commit', '-m', 'local package with an upstream name')
+    manifest = lab.work['skein'] / 'skein-b/Cargo.toml'
+    lab.change('skein', 'skein-b/Cargo.toml', manifest.read_text().replace('0.1.0', '0.2.0'))
+    lab.run()
+    lab.verify()
+    lock = tomllib.loads(lab.git(lab.origin['smith'], 'show', 'main:Cargo.lock'))
+    extra = [p for p in lock['package'] if p['name'] == 'skein-extra']
+    assert len(extra) == 1 and 'source' not in extra[0], extra
+    versions = {p['version'] for p in lock['package'] if p['name'] == 'skein-b'}
+    assert versions == {'0.2.0'}, versions
+
+
+def tuple_source_refusal(lab):
+    """Validate every source before changing lock bytes or invoking Cargo."""
+    path = lab.work['smith']
+    original = (path / 'Cargo.lock').read_text()
+    identity = 'git+' + SOURCE + 'skein.git'
+    variants = (
+        (original.replace(identity, identity.replace('skein.git', 'other.git')), 'absent or ambiguous'),
+        (original + '\n[[package]]\nname="other"\nversion="0.1.0"\nsource='
+         + json.dumps(identity + '?branch=other#' + lab.base['skein']) + '\n', 'absent or ambiguous'),
+        (original.replace(identity, identity + '?rev=' + lab.base['skein']), 'rev constraint'),
+    )
+    cargo = lab.bin / 'cargo'
+    cargo.write_text('#!/bin/sh\necho unexpected Cargo resolve >&2\nexit 98\n')
+    cargo.chmod(0o700)
+    spec = lab.spec({'smith': str(path), 'jig': 'pin-only', 'temper': 'pin-only'})
+    for text, reason in variants:
+        lab.change('smith', 'Cargo.lock', text)
+        output = lab.run(spec, status=1)
+        assert reason in output and 'unexpected Cargo resolve' not in output, output
+        assert (path / 'Cargo.lock').read_text() == text
+        assert not lab.git(path, 'status', '--porcelain')
+        assert not lab.trace.read_text()
+        lab.untouched(ORDER)
 
 
 def lock_conflict(lab):
@@ -1438,7 +1548,7 @@ def skipped(lab):
 
 
 CASES = (tidy_hooks, tidy_hooks_partial, staging_cargo, rerun, advanced_main, recorded_commit_refusal, unchanged_downstream,
-         partial_set, split_source, success, taught, moved_between_phases, moved_during_pushes,
+         partial_set, split_source, tuple_explicit_worktrees, tuple_external_source, tuple_package_collision, tuple_source_refusal, tuple_new_crate, success, taught, moved_between_phases, moved_during_pushes,
          moved_earlier_in_second_round, regate_failure_resume, catch_up,
          pushed_then_failed, push_without_result_marks_unknown_range, lagging_fetch,
          proved, proved_then_moved, prove_failure, same_set,
