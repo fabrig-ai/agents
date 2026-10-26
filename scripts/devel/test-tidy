@@ -819,4 +819,7 @@ def run(case, directory, built):
 
 
 if __name__ == '__main__':
+    names = {case.__name__ for case in CASES}
+    if sys.argv[1:2] != ['--one'] and any(name not in names for name in sys.argv[1:]):
+        sys.exit('unknown case; choose: ' + ' '.join(case.__name__ for case in CASES))
     sys.exit(case_runner.main(__file__, CASES, run, template=build_baseline, prefix='tidy-fixture-'))

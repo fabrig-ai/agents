@@ -90,8 +90,6 @@ def main(suite, cases, run, slow=(), template=None, timeout=180, prefix='fixture
         if len(args) not in (2, 4) or args[1] not in names or (len(args) == 4 and args[2] != '--built'):
             sys.exit('expected --one NAME [--built DIR]')
         return run_one(names[args[1]], run, Path(args[3]) if len(args) == 4 else None, prefix)
-    if any(name not in names for name in args):
-        sys.exit('unknown case; choose: ' + ' '.join(names))
     if args:
         cases = tuple(case for case in cases if case.__name__ in args)
     assert cases, 'no cases selected'
