@@ -295,27 +295,31 @@ def load(runner, filename, root):
 
 
 def rebase(runner, path, base):
+    tip = runner.git(path, 'rev-parse', 'HEAD')
     status, _ = runner.run(path, ['git', 'rebase', base], check=False)
-    while status:
-        conflicts = runner.git(path, 'diff', '--name-only', '--diff-filter=U').splitlines()
-        require(conflicts, 'rebase failed without conflicted paths', 1)
-        if 'Cargo.lock' in conflicts:
-            runner.git(path, 'checkout', '--ours', '--', 'Cargo.lock')
-            runner.git(path, 'add', '--', 'Cargo.lock')
-            conflicts.remove('Cargo.lock')
-        if conflicts:
-            code, lines = runner.run(path, [sys.executable, '-I', '-B',
-                str(Path(__file__).resolve().with_name('land-resolve.py')), str(path)],
-                check=False, quiet=True, merge_stderr=True)
-            name = repo_name(runner.git(path, 'remote', 'get-url', 'origin'))
-            for line in lines.splitlines():
-                print(f'land-set: {name}: {line}', flush=True)
-            if code:
-                remaining = [line.removeprefix('stops ').split(': ', 1)[0]
-                             for line in lines.splitlines() if line.startswith('stops ')]
+    if not status:
+        return tip, []
+    conflicts = runner.git(path, 'diff', '--name-only', '--diff-filter=U').splitlines()
+    require(conflicts, 'rebase failed without conflicted paths', 1)
+    code, lines = runner.run(path, [sys.executable, '-I', '-B',
+        str(Path(__file__).resolve().with_name('land-resolve.py')), '--cargo-lock', '--later', str(path)],
+        check=False, quiet=True, merge_stderr=True)
+    name = repo_name(runner.git(path, 'remote', 'get-url', 'origin'))
+    generated = []
+    for line in lines.splitlines():
+        if line.startswith('regenerate '):
+            generated.append(line.removeprefix('regenerate '))
+        else:
+            print(f'land-set: {name}: {line}', flush=True)
+    if code:
+        remaining = [line.removeprefix('stops ').split(': ', 1)[0]
+                     for line in lines.splitlines() if line.startswith('stops ')]
+        for state in ('rebase-merge', 'rebase-apply'):
+            if Path(runner.git(path, 'rev-parse', '--path-format=absolute', '--git-path', state)).is_dir():
                 runner.run(path, ['git', 'rebase', '--abort'], check=False)
-                raise Failure(3, 'rebase conflict outside Cargo.lock: ' + ', '.join(remaining or conflicts))
-        status, _ = runner.run(path, ['git', 'rebase', '--continue'], check=False)
+                break
+        raise Failure(3, 'rebase conflict that no rule settles: ' + ', '.join(remaining or conflicts))
+    return tip, generated
 
 
 def repin(runner, path, name, label, landed, candidates, root, mains):
@@ -489,8 +493,16 @@ def reuse(runner, path, proved):
 def gate_step(runner, path, name, label, landed, candidates, root, mains, proved=None):
     fetch(runner, path)
     base = runner.git(path, 'rev-parse', 'origin/main')
-    rebase(runner, path, base)
+    tip, generated = rebase(runner, path, base)
     repin(runner, path, name, label, landed, candidates, root, mains)
+    if generated:
+        code, lines = runner.run(path, [sys.executable, '-I', '-B',
+            str(Path(__file__).resolve().with_name('land-resolve.py')), '--regenerate',
+            str(path), tip, *generated], check=False, quiet=True, merge_stderr=True)
+        for line in lines.splitlines():
+            print(f'land-set: {name}: {line}', flush=True)
+        if code:
+            raise Failure(3, 'regenerating failed: ' + lines)
     if proved and runner.git(path, 'rev-parse', 'HEAD') != base:
         reuse(runner, path, proved)
     if runner.git(path, 'rev-parse', 'HEAD') == base:

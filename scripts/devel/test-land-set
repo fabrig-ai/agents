@@ -638,7 +638,8 @@ def lock_conflict(lab):
     assert 'CONFLICT' in output, output
     lab.verify()
     commands = lab.git_commands()
-    assert ['checkout', '--ours', '--', 'Cargo.lock'] in commands
+    messages = lab.git(lab.origin['smith'], 'log', '--format=%B', 'main')
+    assert "Rebase-Resolved: Cargo.lock: main's side, for the repin" in messages, messages
     assert ['rebase', '--abort'] not in commands
 
 
@@ -679,6 +680,70 @@ def status_conflict(lab):
     merged = lab.git(lab.origin['smith'], 'show', 'main:' + status)
     assert '| `a.md` | main |' in merged and '| `b.md` | branch |' in merged, merged
     lab.verify()
+
+
+def generated_after_repin(lab):
+    global SCRIPT
+    original = SCRIPT
+    kit = lab.root / 'kit'
+    kit.mkdir()
+    for name in ('land-set', 'land-resolve.py', 'tidy-hooks.py', 'land-turn.py'):
+        shutil.copy(original.with_name(name), kit / name)
+    heavy = kit / 'heavy'
+    heavy.write_text('''#!/bin/sh
+printf '%s\\n' "$*" >> "$DEV_TMP/regenerate.calls"
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --) shift; break ;;
+        --tail) shift 2 ;;
+        -*) shift ;;
+        *) break ;;
+    esac
+done
+exec "$@"
+''')
+    heavy.chmod(0o700)
+    primary = lab.primary['smith']
+    figure = 'figures/upstream.txt'
+    (primary / 'figures').mkdir()
+    (primary / 'scripts').mkdir()
+    writer = primary / 'scripts/regenerate.sh'
+    writer.write_text('''#!/usr/bin/env python3
+from pathlib import Path
+import sys
+import tomllib
+if sys.argv[1:2] == ['--owns']:
+    sys.exit(0 if all(p == 'figures/upstream.txt' for p in sys.argv[2:]) else 1)
+lock = tomllib.loads(Path('Cargo.lock').read_text())
+pins = {p['source'].rsplit('#', 1)[1] for p in lock['package']
+        if p.get('source', '').split('#')[0].endswith('/skein.git')}
+assert len(pins) == 1
+for path in sys.argv[1:]:
+    Path(path).write_text(next(iter(pins)) + '\\n')
+''')
+    writer.chmod(0o700)
+    (primary / figure).write_text('base\n')
+    lab.git(primary, 'add', 'scripts/regenerate.sh', figure)
+    lab.git(primary, 'commit', '-m', 'generated fixture base')
+    lab.git(primary, 'push', 'origin', 'HEAD:main')
+    lab.git(lab.work['smith'], 'merge', '--ff-only', 'main')
+    lab.change('skein')
+    lab.change('smith', figure, 'branch\n')
+    lab.change('smith', figure, 'main\n', primary)
+    lab.git(primary, 'push', 'origin', 'HEAD:main')
+    SCRIPT = kit / 'land-set'
+    try:
+        output = lab.run()
+    finally:
+        SCRIPT = original
+    assert 'land-set: smith: regenerated ' + figure + ' in ' in output, output
+    heads = lab.verify()
+    rewritten = lab.git(lab.origin['smith'], 'show', 'main:' + figure)
+    assert rewritten == heads['skein'], (rewritten, heads['skein'])
+    messages = lab.git(lab.origin['smith'], 'log', '--format=%B', 'main')
+    assert 'Rebase-Resolved: scripts/regenerate.sh rewrote ' + figure in messages, messages
+    calls = (lab.tmp / 'regenerate.calls').read_text().splitlines()
+    assert calls == ['--land --tail 60 scripts/regenerate.sh ' + figure], calls
 
 
 def land_failure(lab):
@@ -1258,7 +1323,7 @@ CASES = (tidy_hooks, tidy_hooks_partial, staging_cargo, rerun, advanced_main, re
          interrupted_with_staging, interrupted_during_feed, interrupted_during_cleanup,
          feed_failure, cleanup_warning,
          moving_bound, kit_refusal, lock_conflict,
-         other_conflict, status_conflict, land_failure,
+         other_conflict, status_conflict, generated_after_repin, land_failure,
          closure, concurrent, refusal, skipped)
 SLOW = ('moved_earlier_in_second_round', 'moved_between_phases', 'lock_conflict', 'land_failure',
         'refusal', 'pushed_then_failed', 'success', 'moved_gate_base', 'moving_bound', 'proved')

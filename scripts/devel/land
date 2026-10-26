@@ -49,7 +49,7 @@
 # Exit status:
 #   0  landed
 #   2  refused: before starting, or nothing to land
-#   3  the rebase stopped on conflicts land-resolve.py could not settle
+#   3  the rebase stopped on conflicts no rule settles, left stopped or undone
 #   4  the gate failed
 #   5  the local main could not follow: with a push, the commit landed on
 #      origin/main; with --local, nothing landed
@@ -549,19 +549,14 @@ land_cleanup() {
         echo "land: warning: cleanup could not start" >&2
 }
 
-# Settle each conflict stop and continue: 0 once the rebase finishes,
-# 1 when it stays stopped for a person.
+# The resolver finishes the rebase, or leaves it stopped or undone.
 resolve_rebase() {
-    local lines status
-    while :; do
-        status=0
-        lines=$(python3 -I -B "$kit/land-resolve.py" .) || status=$?
-        if [[ -n $lines ]]; then
-            while IFS= read -r line; do echo "land: $line" >&2; done <<<"$lines"
-        fi
-        ((status == 0)) || return 1
-        GIT_EDITOR=true git rebase --continue >/dev/null && return 0
-    done
+    local lines status=0
+    lines=$(python3 -I -B "$kit/land-resolve.py" .) || status=$?
+    if [[ -n $lines ]]; then
+        while IFS= read -r line; do echo "land: $line" >&2; done <<<"$lines"
+    fi
+    return "$status"
 }
 
 try=0 pushed=false
@@ -578,8 +573,12 @@ while :; do
         base=$(git rev-parse origin/main)
     fi
     if ! git rebase --quiet "$base" && ! resolve_rebase; then
-        die 3 "the rebase on $(git rev-parse --short "$base") stopped on conflicts. \
+        if [[ -d $(git rev-parse --git-path rebase-merge) || -d $(git rev-parse --git-path rebase-apply) ]]; then
+            die 3 "the rebase on $(git rev-parse --short "$base") stopped on conflicts. \
 Resolve them, run git rebase --continue, then land again."
+        fi
+        die 3 "the rebase on $(git rev-parse --short "$base") stopped on conflicts no rule settles, and was undone: \
+rebase on it by hand, resolve them, then land again."
     fi
     trap 'land_result "$?"' EXIT
     candidate=$(git rev-parse HEAD)

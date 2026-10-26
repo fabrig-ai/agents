@@ -1,12 +1,20 @@
 #!/usr/bin/env python3
-"""Settle a stopped rebase's mechanical conflicts, or none of them.
+"""Finish a stopped rebase whose every stop a rule settles (landing-flow.md, 3).
 
-  python3 -I -B land-resolve.py WORKTREE
+  python3 -I -B land-resolve.py [--cargo-lock] [--later] WORKTREE
+  python3 -I -B land-resolve.py --regenerate WORKTREE TIP PATH...
 
-Read the index's three stages, never conflict markers in the worktree.
-Exit 0 after committing every resolution, 1 for conflicts left to a person,
-2 when no rebase is stopped on conflicts or Git fails (landing-flow.md, 3).
+Each settled stop is committed with Rebase-Resolved trailers before continuing.
+Generated files take main's side, then scripts/regenerate.sh rewrites them through
+heavy once the rebase finishes. --cargo-lock takes main's root lock for a repin;
+--later prints `regenerate PATH` lines instead, for --regenerate after repinning.
+
+Exit 0: done. 1: a stop no rule settles (left stopped), or regeneration refused.
+After taking main's side of a generated file, either failure undoes the whole
+rebase. --regenerate likewise restores TIP on refusal. Exit 2: no rebase stopped
+on conflicts, or Git failed.
 """
+import argparse
 import os
 from pathlib import Path
 import re
@@ -200,20 +208,111 @@ def table_rows(base, main, branch):
 RULES = {'docs/design/STATUS.md': table_rows}
 
 
-def resolve(worktree):
-    def git(*args, data=None, env=None):
-        result = subprocess.run(['git', '-C', str(worktree), *args], input=data,
+class Repository:
+    def __init__(self, worktree):
+        self.worktree = worktree
+        self.script = worktree / 'scripts/regenerate.sh'
+
+    def git(self, *args, data=None, env=None):
+        result = subprocess.run(['git', '-C', str(self.worktree), *args], input=data,
                                 capture_output=True, env=env)
         if result.returncode:
             raise RuntimeError(result.stderr.decode(errors='replace').strip())
         return result.stdout
 
-    def value(*args):
-        return git(*args).decode().strip()
+    def value(self, *args):
+        return self.git(*args).decode().strip()
 
-    if not any(Path(value('rev-parse', '--path-format=absolute', '--git-path', state)).is_dir()
-               for state in ('rebase-merge', 'rebase-apply')):
-        raise RuntimeError('no rebase stopped on conflicts')
+    def rebasing(self):
+        return any(Path(self.value('rev-parse', '--path-format=absolute', '--git-path', state)).is_dir()
+                   for state in ('rebase-merge', 'rebase-apply'))
+
+    def owns(self, paths):
+        if not self.script.is_file() or not os.access(self.script, os.X_OK):
+            return False
+        try:
+            result = subprocess.run([str(self.script), '--owns', *paths], cwd=self.worktree,
+                                    capture_output=True, check=False)
+        except OSError as error:
+            print(f'scripts/regenerate.sh --owns: {error}')
+            return False
+        # Keep the repository's explanation, even when --owns declines a rule.
+        for line in (result.stdout + result.stderr).decode(errors='replace').splitlines():
+            print(f'scripts/regenerate.sh --owns: {line}')
+        return result.returncode == 0
+
+    def undo(self, tip, paths):
+        if self.rebasing():
+            self.git('rebase', '--abort')
+        else:
+            # Remove before reset: TIP may track a path that main had deleted.
+            untracked = self.git('ls-files', '--others', '--exclude-standard', '-z').split(b'\0')
+            for name in filter(None, untracked):
+                path = self.worktree / os.fsdecode(name)
+                if path.is_symlink() or path.is_file():
+                    path.unlink()
+                elif path.is_dir():
+                    shutil.rmtree(path)
+                parent = path.parent
+                while parent != self.worktree and parent.is_dir() and not any(parent.iterdir()):
+                    parent.rmdir()
+                    parent = parent.parent
+            self.git('reset', '--hard', tip)
+        print("undid the rebase: it had taken main's side of " + ', '.join(sorted(paths)))
+
+    def regenerate(self, tip, paths):
+        common = Path(self.value('rev-parse', '--path-format=absolute', '--git-common-dir'))
+        name = common.parent.name if common.name == '.git' else common.name.removesuffix('.git')
+        try:
+            result = subprocess.run([str(Path(__file__).resolve().with_name('heavy')),
+                '--land', '--tail', '60', 'scripts/regenerate.sh', *paths], cwd=self.worktree,
+                capture_output=True, check=False,
+                env=dict(os.environ, HEAVY_LABEL=f'land {name} regenerate'))
+        except OSError as error:
+            reason = str(error)
+        else:
+            if result.returncode:
+                # heavy tails the payload's combined log on stdout; its own
+                # refusal is on stderr. Preserve both explanations.
+                for line in result.stdout.decode(errors='replace').splitlines():
+                    print(f'scripts/regenerate.sh: {line}')
+                lines = result.stderr.decode(errors='replace').splitlines()
+                reason = lines[-1] if lines else f'heavy or scripts/regenerate.sh failed ({result.returncode})'
+            else:
+                reason = None
+        if reason:
+            for path in paths:
+                print(f'stops {path}: {reason}')
+            self.undo(tip, paths)
+            return 1
+        # NUL records retain spaces and quoted characters; disabling renames checks
+        # both the removed and added path of a rename against the writer's contract.
+        status = self.git('-c', 'status.renames=false', 'status', '--porcelain', '-z',
+                          '--untracked-files=all')
+        changed = sorted({os.fsdecode(entry[3:]) for entry in status.split(b'\0') if entry})
+        if not changed:
+            return 0
+        if not self.owns(changed):
+            for path in changed:
+                print(f'stops {path}: scripts/regenerate.sh changed a path it does not own')
+            self.undo(tip, paths)
+            return 1
+        before = self.value('rev-parse', '--short', 'HEAD')
+        message = (f'regenerate.sh: rewrite {len(changed)} files after the rebase on {before}\n\n'
+                   'Rebase-Resolved: scripts/regenerate.sh rewrote ' + ', '.join(changed) + '\n')
+        self.git('add', '-A', '--', *changed)
+        identity, timestamp, zone = self.value('var', 'GIT_COMMITTER_IDENT').rsplit(' ', 2)
+        name, email = identity.rsplit(' <', 1)
+        self.git('-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgSign=false',
+                 'commit', '--quiet', '--cleanup=verbatim', '-F', '-', data=message.encode(),
+                 env=dict(os.environ, GIT_AUTHOR_NAME=name, GIT_AUTHOR_EMAIL=email.removesuffix('>'),
+                          GIT_AUTHOR_DATE=timestamp + ' ' + zone))
+        print('regenerated ' + ', '.join(changed) + ' in ' + self.value('rev-parse', '--short', 'HEAD'))
+        return 0
+
+
+def settle(repo, cargo_lock):
+    worktree, git, value = repo.worktree, repo.git, repo.value
     entries = {}
     for entry in git('ls-files', '-u', '-z').split(b'\0'):
         if entry:
@@ -226,23 +325,30 @@ def resolve(worktree):
     results, stops = {}, []
     for path, stages in entries.items():
         try:
-            if path not in RULES:
-                raise Stop('no rule for it')
             modes = {mode for mode, _ in stages.values()}
             if set(stages) != {'1', '2', '3'} or len(modes) != 1 or not modes <= {'100644', '100755'}:
                 raise Stop('not a content conflict')
-            try:
-                texts = [git('cat-file', 'blob', stages[str(n)][1]).decode() for n in (1, 2, 3)]
-            except UnicodeError:
-                raise Stop('not a UTF-8 table') from None
-            text, how = RULES[path](*texts)
-            results[path] = (text.encode(), how, stages['2'][0])
+            if path == 'Cargo.lock' and cargo_lock:
+                results[path] = (git('cat-file', 'blob', stages['2'][1]),
+                                 "main's side, for the repin", stages['2'][0])
+            elif path in RULES:
+                try:
+                    texts = [git('cat-file', 'blob', stages[str(n)][1]).decode() for n in (1, 2, 3)]
+                except UnicodeError:
+                    raise Stop('not a UTF-8 table') from None
+                text, how = RULES[path](*texts)
+                results[path] = (text.encode(), how, stages['2'][0])
+            elif repo.owns([path]):
+                results[path] = (git('cat-file', 'blob', stages['2'][1]),
+                                 "main's side, for scripts/regenerate.sh", stages['2'][0])
+            else:
+                raise Stop('no rule for it')
         except Stop as error:
             stops.append((path, str(error)))
     if stops:
         for path, reason in stops:
             print(f'stops {path}: {reason}')
-        return 1
+        return 1, []
     # Preview in a private index, including callers' already-staged clean paths.
     with tempfile.TemporaryDirectory(prefix='land-resolve-index-') as directory:
         index = Path(directory) / 'index'
@@ -251,10 +357,11 @@ def resolve(worktree):
         for path, (contents, _, mode) in results.items():
             oid = git('hash-object', '-w', '--stdin', data=contents).decode().strip()
             git('update-index', '--add', '--cacheinfo', mode, oid, path, env=env)
-        if git('write-tree', env=env).strip() == git('rev-parse', 'HEAD^{tree}').strip():
+        if (all(path in RULES for path in results)
+                and git('write-tree', env=env).strip() == git('rev-parse', 'HEAD^{tree}').strip()):
             for path in results:
                 print(f'stops {path}: the resolution leaves nothing to commit')
-            return 1
+            return 1, []
     message = git('show', '-s', '--format=%B', stopped)
     trailers = [arg for path, (_, how, _) in results.items()
                 for arg in ('--trailer', f'Rebase-Resolved: {path}: {how}')]
@@ -263,21 +370,61 @@ def resolve(worktree):
     for path, (contents, _, _) in results.items():
         (worktree / path).write_bytes(contents)
         git('add', '--', path)
-    git('-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgSign=false', 'commit', '--quiet',
+    git('-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgSign=false', 'commit', '--quiet', '--allow-empty',
         '--cleanup=verbatim', '-F', '-', data=message,
         env=dict(os.environ, GIT_AUTHOR_NAME=author[0], GIT_AUTHOR_EMAIL=author[1], GIT_AUTHOR_DATE=author[2]))
     commit = value('rev-parse', '--short', 'HEAD')
     subject = value('show', '-s', '--format=%s', stopped)
     for path, (_, how, _) in results.items():
         print(f'resolved {path} in {commit} ({subject}): {how}')
-    return 0
+    generated = [path for path, (_, how, _) in results.items()
+                 if how == "main's side, for scripts/regenerate.sh"]
+    return 0, generated
+
+
+def resolve(worktree, cargo_lock=False, later=False):
+    repo = Repository(worktree)
+    if not repo.rebasing():
+        raise RuntimeError('no rebase stopped on conflicts')
+    original = Path(repo.value('rev-parse', '--path-format=absolute', '--git-path', 'rebase-merge/orig-head'))
+    tip = original.read_text().strip() if original.is_file() else repo.value('rev-parse', 'ORIG_HEAD')
+    generated = set()
+    while repo.rebasing():
+        code, paths = settle(repo, cargo_lock)
+        if code:
+            if generated:
+                repo.undo(tip, generated)
+            return code
+        generated.update(paths)
+        continued = subprocess.run(['git', '-C', str(worktree), '-c', 'core.hooksPath=/dev/null',
+                                    'rebase', '--continue'], capture_output=True,
+                                   env=dict(os.environ, GIT_EDITOR='true', GIT_SEQUENCE_EDITOR='true'))
+        if continued.returncode and (not repo.rebasing() or not repo.git('ls-files', '-u')):
+            raise RuntimeError(continued.stderr.decode(errors='replace').strip())
+    paths = sorted(generated)
+    if later:
+        for path in paths:
+            print(f'regenerate {path}')
+        return 0
+    return repo.regenerate(tip, paths) if paths else 0
 
 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--cargo-lock', action='store_true')
+    parser.add_argument('--later', action='store_true')
+    parser.add_argument('--regenerate', action='store_true')
+    parser.add_argument('worktree', type=Path)
+    parser.add_argument('remaining', nargs='*')
+    args = parser.parse_args()
+    if ((args.regenerate and (args.cargo_lock or args.later or len(args.remaining) < 2))
+            or (not args.regenerate and args.remaining)):
+        parser.error('expected [--cargo-lock] [--later] WORKTREE or --regenerate WORKTREE TIP PATH...')
     try:
-        if len(sys.argv) != 2:
-            raise RuntimeError('usage: land-resolve.py WORKTREE')
-        sys.exit(resolve(Path(sys.argv[1]).resolve()))
+        worktree = args.worktree.resolve()
+        if args.regenerate:
+            sys.exit(Repository(worktree).regenerate(args.remaining[0], sorted(set(args.remaining[1:]))))
+        sys.exit(resolve(worktree, args.cargo_lock, args.later))
     except (OSError, UnicodeError, RuntimeError) as error:
         print(f'land-resolve: {error}', file=sys.stderr)
         sys.exit(2)
