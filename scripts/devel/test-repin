@@ -22,6 +22,8 @@ os.umask(0o077)
 SCRIPT = Path(__file__).resolve()
 REPIN = SCRIPT.with_name('repin')
 PYTHON = sys.executable
+# Stable committed identities let copied Labs keep all committed bytes unchanged.
+SOURCE = 'file:///repin-fixture/'
 
 
 def execute(root, argv, env, check=True):
@@ -88,7 +90,7 @@ exit "$status"
 CARGO = '''#!/bin/bash
 [ "${FIXTURE_INSIDE_HEAVY-}" = 1 ] || { echo 'AssertionError: raw cargo bypassed heavy' >&2; exit 1; }
 case ${1-} in generate-lockfile|update) ;; *) echo 'AssertionError: fixture cannot compile' >&2; exit 1;; esac
-exec -a "$0" @CARGO@ "$@"
+exec @CARGO@ "$@"
 '''
 LAND = '''#!/bin/bash
 @JSON@: "${FIXTURE_LAND:?}"
@@ -128,34 +130,75 @@ STUB_CARGO = ('#!' + PYTHON + '\nimport json, sys, tomllib\nfrom pathlib import 
     "support['dump_lock'](Path('Cargo.lock'),lock)\n")
 
 
-def stand_in(body):
+def stand_in(body, cargo):
     mutate_command = shlex.join([PYTHON, str(SCRIPT), '--mutate'])
     return (body.replace('@JSON@', JSON).replace('@MUTATE@', mutate_command)
-            .replace('@CARGO@', shlex.quote(shutil.which('cargo'))))
+            .replace('@CARGO@', shlex.quote(cargo)))
 
 
 class Lab:
     """One worker's repositories; its cases run one at a time, since they share its refs."""
 
-    def __init__(self, root, evidence, private):
+    def __init__(self, root, evidence, private, built=None):
         self.root, self.evidence, self.private, self.number = root, evidence, private, 0
         self.results, self.current = [], None
-        root.mkdir()
+        if built is not None:
+            # Every worker owns its Git stores, Cargo caches and refs.
+            shutil.copytree(built, root, symlinks=True)
+            configs = [root / 'consumer/.git/config', *root.glob('*.git/config'),
+                       *root.glob('*-source/.git/config'),
+                       *root.glob('cargo/git/checkouts/*/*/.git/config'),
+                       *root.glob('cargo/git/db/*/config')]
+            for config in configs:
+                config.write_text(config.read_text().replace(built.as_uri(), root.as_uri())
+                                  .replace(str(built), str(root)))
+        else:
+            root.mkdir()
         private.mkdir()
         self.bin = root / 'bin'
-        self.bin.mkdir()
+        self.bin.mkdir(exist_ok=True)
         self.env = dict(os.environ, PATH=str(self.bin) + ':/usr/bin:/bin', LAND_TIDY='',
                         CARGO_HOME=str(root / 'cargo'), GIT_CONFIG_GLOBAL='/dev/null',
                         GIT_CONFIG_NOSYSTEM='1', GIT_ALLOW_PROTOCOL='file', GIT_AUTHOR_NAME='Fixture',
                         GIT_AUTHOR_EMAIL='fixture@invalid', GIT_COMMITTER_NAME='Fixture',
-                        GIT_COMMITTER_EMAIL='fixture@invalid', CARGO_NET_OFFLINE='false')
+                        GIT_COMMITTER_EMAIL='fixture@invalid', CARGO_NET_OFFLINE='false',
+                        CARGO_NET_GIT_FETCH_WITH_CLI='true')
         self.env.pop('RUSTC_WRAPPER', None)
         self.env.pop('RUSTC_WORKSPACE_WRAPPER', None)
-        (self.bin / 'rustc').symlink_to(shutil.which('rustc'))
+        count = int(self.env.get('GIT_CONFIG_COUNT', '0'))
+        settings = (('maintenance.auto', 'false'), ('gc.auto', '0'),
+                    ('fetch.autoMaintenance', 'false'), ('receive.autogc', 'false'),
+                    ('url.' + root.as_uri() + '/.insteadOf', SOURCE))
+        for offset, (key, value) in enumerate(settings):
+            self.env[f'GIT_CONFIG_KEY_{count + offset}'] = key
+            self.env[f'GIT_CONFIG_VALUE_{count + offset}'] = value
+        self.env['GIT_CONFIG_COUNT'] = str(count + len(settings))
+        target = root / 'cargo-target'
+        target.mkdir(exist_ok=True)
+        self.env['CARGO_TARGET_DIR'] = str(target)
+        toolchain = root / 'toolchain.json'
+        if built is None:
+            tools = {}
+            for tool in ('cargo', 'rustc'):
+                executable = shutil.which(tool)
+                if Path(executable).resolve().name == 'rustup':
+                    executable = execute(root, [shutil.which('rustup'), 'which', tool], self.env).stdout.strip()
+                tools[tool] = executable
+            toolchain.write_text(json.dumps(tools))
+        else:
+            tools = json.loads(toolchain.read_text())
+        self.env.setdefault('RUSTC', tools['rustc'])
         for name, body in [('cargo', CARGO), ('heavy', HEAVY), ('land', LAND)]:
             path = self.bin / name
-            path.write_text(stand_in(body))
+            path.write_text(stand_in(body, tools['cargo']))
             path.chmod(0o700)
+        self.primary, self.origin = root / 'consumer', root / 'consumer.git'
+        if built is not None:
+            for key, value in json.loads((root / 'baseline.json').read_text()).items():
+                setattr(self, key, value)
+            self.env.update(FIXTURE_TRACE=str(private / 'initial-heavy.jsonl'),
+                            FIXTURE_LAND=str(private / 'unused-land.json'))
+            return
         self.old, self.new, self.urls = {}, {}, {}
         for name, crates in [('skein', ['skein-a', 'skein-b']), ('smith', ['smith-a'])]:
             repo = root / (name + '-source')
@@ -178,7 +221,7 @@ class Lab:
             git(bare, self.env, 'update-ref', 'refs/heads/next', self.new[name])
             # Start consumers at the first commit; precise updates fetch the second object.
             git(bare, self.env, 'update-ref', 'refs/heads/main', self.old[name])
-            self.urls[name] = bare.as_uri()
+            self.urls[name] = SOURCE + name + '.git'
         # A third source whose newer commit names a skein crate without a rev: updating it alone
         # moves skein's packages toward skein's branch, which then runs ahead of the pinned commit.
         skein = root / 'skein-source'
@@ -211,7 +254,7 @@ class Lab:
         execute(root, ['git', 'clone', '--bare', str(jig), str(bare)], self.env)
         git(bare, self.env, 'update-ref', 'refs/heads/next', self.new['jig'])
         git(bare, self.env, 'update-ref', 'refs/heads/main', self.old['jig'])
-        self.urls['jig'] = bare.as_uri()
+        self.urls['jig'] = SOURCE + 'jig.git'
         primary = self.primary = root / 'consumer'
         primary.mkdir()
         git(primary, self.env, 'init', '-b', 'main')
@@ -554,14 +597,18 @@ def groups(evidence):
 
 def fixtures(root, evidence):
     plan = groups(evidence)
-    workers = max(1, min(os.cpu_count() or 1, len(plan)))
+    workers = min(len(os.sched_getaffinity(0)), len(plan))
+    built = root / 'baseline'
+    baseline = Lab(built, evidence, evidence / 'baseline')
+    (built / 'baseline.json').write_text(json.dumps({key: getattr(baseline, key)
+        for key in ('old', 'new', 'urls', 'with_c', 'ahead', 'base', 'sentinel')}))
     numbers, numbering = itertools.count(1), threading.Lock()
 
     def new_lab():
         with numbering:
             number = next(numbers)
         name = 'lab-' + str(number)
-        return Lab(root / name, evidence, evidence / name)
+        return Lab(root / name, evidence, evidence / name, built=built)
 
     labs = queue.SimpleQueue()
 

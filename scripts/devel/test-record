@@ -29,13 +29,19 @@ def front(milestone=False):
 
 
 class Lab:
-    def __init__(self, root):
+    def __init__(self, root, built=None):
+        if built is not None:
+            # Mutable refs, indexes and objects are copied, never hardlinked.
+            shutil.copytree(built, root, dirs_exist_ok=True, symlinks=True)
+            for name in ('a/.git/config', 'b/.git/config', 'origin.git/config'):
+                config = root / name
+                config.write_text(config.read_text().replace(str(built), str(root)))
         self.root = root
         self.home = root / 'home'
         self.tmp = root / 'tmp'
         self.bin = root / 'bin'
         for path in (self.home, self.tmp, self.bin):
-            path.mkdir()
+            path.mkdir(exist_ok=True)
         self.env = dict(PATH=str(self.bin) + ':' + os.environ['PATH'], HOME=str(self.home),
                         DEV_TMP=str(self.tmp), USER='fixture', POST_NAME='o/fixture',
                         RECORD_TIDY='',
@@ -43,8 +49,21 @@ class Lab:
                         GIT_AUTHOR_NAME='Fixture', GIT_AUTHOR_EMAIL='fixture@invalid',
                         GIT_COMMITTER_NAME='Fixture', GIT_COMMITTER_EMAIL='fixture@invalid',
                         GIT_ALLOW_PROTOCOL='file', LC_ALL='C.UTF-8')
+        # Preserve command-scope settings while appending fixture-only policy.
+        self.env.update({key: value for key, value in os.environ.items()
+                         if key == 'GIT_CONFIG_COUNT' or key.startswith(('GIT_CONFIG_KEY_', 'GIT_CONFIG_VALUE_'))})
+        count = int(self.env.get('GIT_CONFIG_COUNT', '0'))
+        settings = (('maintenance.auto', 'false'), ('gc.auto', '0'),
+                    ('fetch.autoMaintenance', 'false'), ('receive.autogc', 'false'))
+        for offset, (key, value) in enumerate(settings):
+            self.env[f'GIT_CONFIG_KEY_{count + offset}'] = key
+            self.env[f'GIT_CONFIG_VALUE_{count + offset}'] = value
+        self.env['GIT_CONFIG_COUNT'] = str(count + len(settings))
+        # Only racing commands need a wrapper; ordinary Git goes straight through.
+        self.pause_bin = root / 'pause-bin'
+        self.pause_bin.mkdir(exist_ok=True)
         # Pause one machine immediately before push; the other can win the race.
-        wrapper = self.bin / 'git'
+        wrapper = self.pause_bin / 'git'
         # A shell wrapper: a Python one costs an interpreter start-up per git
         # call. PAUSE_PUSH names a suffixless file; its release is PAUSE_PUSH.release.
         wrapper.write_text('#!/bin/sh\n'
@@ -61,6 +80,8 @@ class Lab:
                            'exec ' + shlex.quote(REAL_GIT) + ' "$@"\n')
         wrapper.chmod(0o700)
         self.a, self.b, self.origin = (root / name for name in ('a', 'b', 'origin.git'))
+        if built is not None:
+            return
         self.a.mkdir()
         self.git(self.a, 'init', '-b', 'main')
         self.put('STATUS.md', 'base\n')
@@ -95,7 +116,8 @@ class Lab:
         self.put(name, first)
         self.put(name, second, self.b)
         pause = self.root / 'pause'
-        env = dict(self.env, RECORDS=str(self.a), PAUSE_PUSH=str(pause))
+        env = dict(self.env, RECORDS=str(self.a), PAUSE_PUSH=str(pause),
+                   PATH=str(self.pause_bin) + ':' + self.env['PATH'])
         process = subprocess.Popen([sys.executable, '-I', str(SCRIPT), 'commit', name], env=env,
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
@@ -430,7 +452,8 @@ def different_files(lab):
     pause = lab.root / 'pause'
     with (lab.root / 'log').open('w') as output:
         process = subprocess.Popen([sys.executable, '-I', str(SCRIPT), 'commit', 'STATUS.md'],
-                                   env=dict(lab.env, RECORDS=str(lab.a), PAUSE_PUSH=str(pause)),
+                                   env=dict(lab.env, RECORDS=str(lab.a), PAUSE_PUSH=str(pause),
+                                            PATH=str(lab.pause_bin) + ':' + lab.env['PATH']),
                                    stdout=output, stderr=output)
         try:
             until = time.monotonic() + 15
@@ -856,15 +879,20 @@ def main():
         cases = tuple(case for case in cases if case.__name__ in sys.argv[1:])
         assert cases, 'no cases selected'
     with tempfile.TemporaryDirectory(prefix='record-fixture-') as directory:
+        built = Path(directory) / 'baseline'
+        built.mkdir()
+        Lab(built)
         def run(number, case):
             root = Path(directory) / str(number)
             root.mkdir()
-            case(Lab(root))
-        with ThreadPoolExecutor(max_workers=len(cases)) as pool:
-            futures = [pool.submit(run, number, case) for number, case in enumerate(cases)]
+            case(Lab(root, built=built))
+        with ThreadPoolExecutor(max_workers=min(len(cases), len(os.sched_getaffinity(0)))) as pool:
+            slow = (refusals, writer, offline, installation_failures, merged_validation)
+            futures = {case: pool.submit(run, number, case)
+                       for number, case in sorted(enumerate(cases), key=lambda item: item[1] not in slow)}
             failed = 0
-            for number, (case, future) in enumerate(zip(cases, futures)):
-                error = future.exception()
+            for number, case in enumerate(cases):
+                error = futures[case].exception()
                 if error is None:
                     print(f'ok {number + 1}: {case.__name__}', flush=True)
                 else:
