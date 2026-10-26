@@ -319,17 +319,6 @@ def writer(lab):
     assert 'pushed' in lab.run('commit', 'missions/described/README.md')
     assert lab.git(lab.origin, 'show', 'main:missions/described/README.md') == described.strip()
     assert 'description:' not in lab.git(lab.origin, 'show', 'main:missions/first/README.md')
-    # Public waits accept minute/second UTC, unknown, Unicode and both decisions.
-    waits = ('# Waiting on the user\n\n'
-             '- 2026-10-24T20:00Z · director · Read <b>the proposal · 1099\n'
-             '- unknown · web-look_6 · ' + 'é' * 160 + ' · R3-12\n')
-    lab.put('director/waiting.md', waits)
-    assert 'pushed' in lab.run('commit', 'director/waiting.md')
-    assert lab.git(lab.origin, 'show', 'main:director/waiting.md') == waits.strip()
-    waits = '# Waiting on the user\n' + '- 2026-10-24T20:00:01Z · m · Answer · 1\n' * 40
-    lab.put('director/waiting.md', waits)
-    assert 'pushed' in lab.run('commit', 'director/waiting.md')
-    assert lab.git(lab.origin, 'show', 'main:director/waiting.md') == waits.strip()
     # An unrelated staged version and its later unstaged edit both survive.
     lab.put('director/backlog.md', 'staged\n')
     lab.git(lab.a, 'add', 'director/backlog.md')
@@ -389,30 +378,18 @@ def refusals(lab):
              ('missions/x/README.md', front() + ' '.join(['word'] * 61), 'summary'),
              ('director/decisions/0001.md', '\n'.join(f'## {i}. call' for i in range(101)), '100 decisions'),
              ('missions/x/README.md', front().replace('started: unknown', 'started: yesterday'), 'UTC')]
-    heading = '# Waiting on the user\n\n'
-    item = '- unknown · director · Answer · 1099\n'
-    waits = [('', 'heading missing'),
-             ('\n' + heading, 'heading missing'),
-             (heading + 'PRIVATE-NOT-AN-ITEM\n', 'line 3 is not an item'),
-             (heading + item.replace('Answer', 'é' * 161), 'line 3: what exceeds 160 characters'),
-             (heading + item.replace('unknown', '2026-02-30T20:00Z'), 'line 3: since is not a time'),
-             (heading + item.replace('unknown', 'yesterday'), 'line 3: since is not a time'),
-             (heading + item * 41, 'more than 40 items'),
-             (heading + '\n' * 8192, 'cap exceeded')]
-    for old, new in [('director', 'Director'), ('1099', 'R3-x'), ('Answer', ''),
-                     ('Answer', 'a/b'), ('Answer', 'a · b'), (' · ', ' | ')]:
-        waits.append((heading + item.replace(old, new), 'line 3 is not an item'))
-    waits.append((heading + item.replace('Answer', 'sk-' + 'A' * 20), 'secret refused'))
-    cases += [('director/waiting.md', content, 'director/waiting.md: ' + reason)
-              for content, reason in waits]
+    cases.append(('director/waiting.md', 'arbitrary content\n',
+                  'director/waiting.md: retired: what waits on the user is a forge issue (user-issues.md)'))
     cases.append(('director/other.md', 'wrong', 'place'))
     secrets = ['-----BEGIN RSA PRIVATE KEY-----', *[prefix + 'A' * 20 for prefix in ('ghp_', 'gho_', 'ghu_', 'ghs_', 'ghr_', 'github_pat_')], 'sk-' + 'A' * 20, 'xoxb-fake', 'xoxa-fake', 'xoxp-fake', 'xoxr-fake', 'AKIA' + 'A' * 16]
     cases += [('STATUS.md', secret, 'secret') for secret in secrets]
     for name, content, reason in cases:
         path = lab.put(name, content)
         old = lab.git(lab.a, 'rev-parse', 'HEAD')
+        remote = lab.git(lab.origin, 'rev-parse', 'main')
         assert reason in lab.run('commit', name, status=2)
         assert lab.git(lab.a, 'rev-parse', 'HEAD') == old
+        assert lab.git(lab.origin, 'rev-parse', 'main') == remote
         path.unlink()
     # Path traversal, symlinks and deletions are refused.
     assert 'place' in lab.run('commit', '../escape.md', status=2)
