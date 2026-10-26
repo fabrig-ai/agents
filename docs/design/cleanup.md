@@ -245,4 +245,13 @@ new work. There is no keep list: a landed branch's commits are on
 3. **The roles' edits for the tools** landed with them: owners.md 4.5
    (`land` clears the target, `tidy` the rest) and 6 (`record`'s
    check), director.md 7 (`tidy` in the check), records.md 7.
-4. **`tidy`'s first run** on each machine finishes section 6's sweep.
+4. **`tidy`'s first run** on each machine finishes section 6's sweep:
+   done 10-26 on the seven machines, each kit moved to `main` first. It
+   deleted 83 GitHub branches, 12 local ones, 26 worktrees, 63 ended
+   missions' directories and 203 scripts. The 37 GitHub branches and 18
+   local ones it kept as differing were earlier rounds that later ones
+   replaced, and went on the user's word, each machine's in a bundle
+   in its `~/.cache/cleanup-20261026/`. What it still reports goes to
+   the director's check: `owners/` directories with no README, ended
+   missions whose evidence repositories have no remote, and the
+   entries outside section 3's table.
