@@ -977,7 +977,33 @@ exit 97
         self.assertEqual(len(self.calls()), 2)
 
     def candidate_mutation(self, mode):
-        if mode == "same-tree":
+        if mode == "replacement":
+            head = self.git("rev-parse", "HEAD").strip()
+            message = self.git("log", "-1", "--format=%B")
+            parents = self.git("show", "-s", "--format=%P").split()
+            (self.repo / "code").write_text("ungated replacement\n")
+            self.git("add", "code")
+            replacement_tree = self.git("write-tree").strip()
+            arguments = ["commit-tree", replacement_tree, "-m", message]
+            for parent in parents:
+                arguments += ["-p", parent]
+            replacement = self.git(*arguments).strip()
+            self.git("replace", head, replacement)
+            self.git("read-tree", "--reset", "-u", "HEAD")
+            self.assertEqual(self.git("rev-parse", "HEAD").strip(), head)
+            self.assertNotEqual(self.git("rev-parse", "HEAD^{tree}").strip(), self.captured_tree)
+            self.assertFalse(self.git("status", "--porcelain").strip())
+        elif mode == "relocated-merge-state":
+            moved = self.root / "moved-primary"
+            self.primary.rename(moved)
+            self.run_command(["git", "-C", str(moved), "worktree", "repair"])
+            state = Path(self.git("rev-parse", "--git-path", "MERGE_HEAD").strip())
+            self.assertNotEqual(state, self.captured_merge_state)
+            self.assertFalse(self.captured_merge_state.exists())
+            state.write_text(self.git("rev-parse", "HEAD"))
+            self.assertTrue(state.is_file())
+            self.assertFalse(self.git("status", "--porcelain").strip())
+        elif mode == "same-tree":
             self.git("commit", "--allow-empty", "-qm", "same tree B")
         elif mode == "rebase":
             self.git("switch", "-qc", "concurrent-base", self.base)
@@ -1006,6 +1032,8 @@ exit 97
             (self.repo / "untracked").write_text("ungated file\n")
         elif mode == "status-error":
             (self.root / "fail-status").touch()
+        elif mode == "tree-error":
+            (self.root / "fail-tree").touch()
         else:
             (self.repo / "code").write_text("ungated B\n")
             if mode in ("commit", "index"):
@@ -1014,6 +1042,12 @@ exit 97
                 self.git("commit", "-qm", "ungated B")
 
     def concurrent_candidate(self, point, mode):
+        if mode == "relocated-merge-state":
+            self.primary = self.linked_worktree()
+            self.env["LAND_LOCK"] = str(self.root / "stable-land.lock")
+            self.captured_merge_state = Path(self.git("rev-parse", "--git-path", "MERGE_HEAD").strip())
+        if mode == "replacement":
+            self.captured_tree = self.git("rev-parse", "HEAD^{tree}").strip()
         faults = self.root / "tmp/faults"
         faults.mkdir(parents=True, exist_ok=True)
         (faults / ("continue-" + point)).unlink(missing_ok=True)
@@ -1027,6 +1061,11 @@ exit 97
             real_git = shutil.which("git", path=os.defpath)
             self.script(self.bin / "git", '#!/bin/bash\n'
                         f'if [[ $1 == status && -e {shlex.quote(str(self.root / "fail-status"))} ]]; then exit 128; fi\n'
+                        f'exec {shlex.quote(real_git)} "$@"\n')
+        elif mode == "tree-error":
+            real_git = shutil.which("git", path=os.defpath)
+            self.script(self.bin / "git", '#!/bin/bash\n'
+                        f'if [[ $1 == rev-parse && $2 == "HEAD^{{tree}}" && -e {shlex.quote(str(self.root / "fail-tree"))} ]]; then exit 128; fi\n'
                         f'exec {shlex.quote(real_git)} "$@"\n')
         with output.open("w") as out:
             child = subprocess.Popen([str(self.kit / "land"), "--local", "--gate", "true"],
@@ -1043,7 +1082,7 @@ exit 97
             self.assertEqual(child.wait(timeout=20), 4, output.read_text())
             reason = ("candidate HEAD is unavailable" if mode == "head-unavailable" else
                       "candidate index/worktree cannot be checked" if mode == "status-error" else
-                      "candidate merge/rebase state changed" if mode in ("rebase-state", "rebase-apply-state", "merge-state") else
+                      "candidate merge/rebase state changed" if mode in ("rebase-state", "rebase-apply-state", "merge-state", "relocated-merge-state") else
                       "candidate index/worktree changed" if mode in ("index", "worktree", "untracked") else
                       "candidate ref changed during amendment" if point == "before_candidate_cas" else
                       "candidate HEAD or tree changed")
@@ -1052,7 +1091,11 @@ exit 97
             self.assertEqual((current.returncode, current.stdout), (changed.returncode, changed.stdout))
             self.assertEqual(self.git("rev-parse", "main").strip(), self.base)
             log_target = original if mode == "head-unavailable" else "HEAD"
-            self.assertFalse(self.git("log", "-1", "--format=%(trailers:key=Gate-Tree,valueonly)", log_target).strip())
+            trailer = self.git("log", "-1", "--format=%(trailers:key=Gate-Tree,valueonly)", log_target).strip()
+            if mode == "replacement":
+                self.assertEqual(trailer, self.captured_tree)
+            else:
+                self.assertFalse(trailer)
             if point == "after_receipt":
                 self.assertFalse((self.root / "tmp/gates").exists())
             print(f"consumer {point}/{mode}: PASS", file=sys.stderr)
@@ -1067,6 +1110,37 @@ exit 97
 
     def test_candidate_drift_before_push_refuses(self):
         self.concurrent_candidate("before_push", "commit")
+
+    def test_replacement_tree_before_push_refuses(self):
+        self.concurrent_candidate("before_push", "replacement")
+
+    def test_relocated_primary_merge_state_after_receipt_refuses(self):
+        self.concurrent_candidate("after_receipt", "relocated-merge-state")
+
+    def test_newline_primary_merge_state_after_admission_refuses(self):
+        primary = self.root / "primary\nline"
+        self.repo.rename(primary)
+        self.repo = primary
+        self.linked_worktree()
+        # Leave main without a checkout so a buggy candidate check cannot be
+        # masked later by parsing a newline-bearing worktree-list entry.
+        self.run_command(["git", "-C", str(primary), "switch", "--detach", "-q", "main"])
+        real_git = shutil.which("git", path=os.defpath)
+        marker = self.root / "merge-started"
+        self.script(self.bin / "git", '#!/bin/bash\n'
+                    'if [[ $1 == rebase ]]; then\n'
+                    f'    {shlex.quote(real_git)} "$@" || exit $?\n'
+                    f'    state=$({shlex.quote(real_git)} rev-parse --git-path MERGE_HEAD) || exit $?\n'
+                    f'    {shlex.quote(real_git)} rev-parse HEAD >"$state" || exit $?\n'
+                    f'    : >{shlex.quote(str(marker))}\n'
+                    '    exit 0\nfi\n'
+                    f'exec {shlex.quote(real_git)} "$@"\n')
+        result = self.land(check=False)
+        self.assertTrue(marker.is_file(), result.stdout + result.stderr)
+        self.assertTrue(Path(self.git("rev-parse", "--git-path", "MERGE_HEAD").strip()).is_file())
+        self.assertEqual(result.returncode, 4, result.stdout + result.stderr)
+        self.assertIn("candidate merge/rebase state cannot be checked; rerun land", result.stderr)
+        self.assertEqual(self.git("rev-parse", "main").strip(), self.base)
 
     def test_candidate_literal_detached_branch_lands(self):
         self.git("branch", "-m", "(detached)")
@@ -1132,7 +1206,7 @@ for _fault in RECEIPT_FAULTS + UNREADABLE_RECEIPT_FAULTS:
 # its own fixture.
 for _mode in ("commit", "rebase", "same-tree", "index", "worktree", "rebase-state",
               "rebase-apply-state", "merge-state", "ref", "detached", "head-unavailable",
-              "untracked", "status-error"):
+              "untracked", "status-error", "tree-error"):
     setattr(PolicyFixtures, f"test_concurrent_{_mode.replace('-', '_')}_candidate_after_receipt_refuses",
             lambda self, mode=_mode: self.concurrent_candidate("after_receipt", mode))
 

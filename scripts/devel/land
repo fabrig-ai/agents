@@ -234,11 +234,11 @@ cache_read() {
     printf '%s\n' "${lines[2]}"
 }
 
-# HEAD's expected commit pins its tree: candidate derives tree, and the
-# amendment is checked against tree before commit is ever an expected HEAD.
-# Resolve the worktree's state paths once per candidate, not per boundary.
+# Recheck the effective tree (replacement refs can change it without moving
+# HEAD) and the worktree's current administrative paths at every boundary.
 candidate_check() {
-    local expected=${1:-$candidate} status line oid='' head='' dirty=0 state current
+    local expected=${1:-$candidate} status line oid='' head='' dirty=0 state current values checked=0
+    local checks=()
     if ! status=$(git status --porcelain=v2 --branch --no-ahead-behind \
         --untracked-files=normal --ignore-submodules=none); then
         # Preserve the earlier HEAD/ref refusal when status itself cannot run.
@@ -256,6 +256,9 @@ candidate_check() {
         *) dirty=1 ;;
         esac
     done <<<"$status"
+    if values=$(git rev-parse 'HEAD^{tree}' --git-path rebase-merge --git-path rebase-apply --git-path MERGE_HEAD); then
+        checked=1
+    fi
     [[ -n $oid && $oid != '(initial)' ]] || die 4 "candidate HEAD is unavailable; rerun land"
     if [[ $head == '(detached)' ]]; then
         head=''
@@ -267,10 +270,15 @@ candidate_check() {
     else
         head=refs/heads/$head
     fi
-    [[ $head == "$candidate_ref" && $oid == "$expected" ]] ||
+    [[ $head == "$candidate_ref" && $oid == "$expected" && $checked == 1 ]] ||
         die 4 "candidate HEAD or tree changed; rerun land"
+    mapfile -t checks <<<"$values"
+    # --git-path emits unquoted paths. Reject ambiguous framing, including a
+    # legal newline in an administrative path, before interpreting any field.
+    ((${#checks[@]} == 4)) || die 4 "candidate merge/rebase state cannot be checked; rerun land"
+    [[ ${checks[0]} == "$tree" ]] || die 4 "candidate HEAD or tree changed; rerun land"
     ((dirty == 0)) || die 4 "candidate index/worktree changed; rerun land"
-    for state in "${candidate_states[@]}"; do
+    for state in "${checks[@]:1}"; do
         [[ ! -e $state ]] || die 4 "candidate merge/rebase state changed; rerun land"
     done
 }
@@ -564,9 +572,6 @@ Resolve them, run git rebase --continue, then land again."
     tip=$candidate
     candidate_ref=refs/heads/$branch
     tree=$(git rev-parse "$candidate^{tree}")
-    state_paths=$(git rev-parse --git-path rebase-merge --git-path rebase-apply --git-path MERGE_HEAD) ||
-        die 4 "candidate merge/rebase state cannot be checked; rerun land"
-    mapfile -t candidate_states <<<"$state_paths"
     candidate_check
     if ((docs)); then
         others=$(git diff --no-renames --name-only "$base" "$candidate" |
