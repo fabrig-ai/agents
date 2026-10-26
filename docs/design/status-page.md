@@ -126,15 +126,19 @@ credential: not `.credentials.json`, `auth.json` nor a token.
 
 - **Tiles:** missions, sets landing now, heavy commands now, agents
   (the director, designers, owners and implementers live, and how many
-  of them are busy), commands and land gates in the last 24 hours, and
-  the subscriptions with the highest use among them.
+  of them are busy), land gates in the last 24 hours, and the
+  subscriptions with the highest use among them.
 - **Subscriptions,** after the tiles: a table, one row per distinct
-  subscription and limit, giving its CLI, plan and label, its
-  machines, a bar of the percent used, and its reset (in how long, and
-  when). The machines signed out, with no subscription, or with an
+  subscription and limit, giving its CLI, plan and label, a bar of the
+  percent used, and its reset (in how long, and when). Which machines
+  share it the page doesn't say (the user, 10-26). The machines signed out, with no subscription, or with an
   unidentified one follow, by CLI. A machine not reached adds nothing.
 - **In flight:** what is landing (set runs, `land`'s prebuilds and
-  gates, landing turns) and the last eight set runs. A set is in flight
+  gates, landing turns) and the last five set runs, each stopped one's
+  reason cut to its kind: `land-set:`, the repository where it names
+  one, and the first clause, before a colon or an `outside …`
+  (`land-set: rebase conflict`, `land-set: temper: land --no-push
+  failed (4)`), so that no path or file name shows. A set is in flight
   when its latest run, as `landings` finds it, has not ended and was
   heard from in 6 hours: a killed `land-set` writes no end, and a turn
   is lost the same way. Then the missions, and one card per machine
