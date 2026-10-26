@@ -963,10 +963,11 @@ its own clone, whose `target/` stays warm between runs;
 It refuses, with exit 2 and deleting nothing, a clone of another
 origin, or a state it can't read. It runs only on a runner's machine,
 one with `~/.config/agents-after-landing/director` (below); anywhere
-else it exits 2. A part with no state may start from its repository's
-whole state, copied at the split without its pending posts or fault,
-when that state's last run is on a commit whose script takes `--part`
-and no standing red of it is `*`: its first run then bisects over the
+else it exits 2. A part with no state starts from its repository's
+whole state on its machine, `state/REPO.json`, which it reads itself
+at its first start, without the pending posts or fault, when that
+state's last run is on a commit whose script takes `--part` and no
+standing red of it is `*`: its first run then bisects over the
 landings since. Each part keeps the standing reds its runs confirm,
 and drops the rest at its first run. With no such state, a part's first
 run is a baseline.
