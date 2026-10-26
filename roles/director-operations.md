@@ -9,6 +9,11 @@ here. Durable know-how belongs here, not in the session's memory or in
 
 ## 1. In one page
 
+- **Codex does the work; Claude only where taste is the point.** A
+  survey, a cleanup, a migration, an investigation, a record chore or a
+  machine task goes to a Codex task the director runs (section 10), not to
+  a Claude owner. An owner is for a mission whose design, names or tests
+  need judgement.
 - **Questions to the user in chat are tracked** in the record's
   `STATUS.md`, "Asked in chat", each with its time. One unanswered at the
   first check two hours after it was asked becomes an issue (section 6).
@@ -172,3 +177,23 @@ here. Durable know-how belongs here, not in the session's memory or in
   superseded, each with its reason in a decision.
 - **No git in a primary checkout** (agents' AGENTS.md): read origin's
   state through a fresh clone or a worktree, never `git fetch` there.
+
+
+## 10. Codex first
+
+- **The rule** (the user, 10-26: "offload to codex as much as possible"):
+  the director spends Claude on judgement (answers, briefs, choices,
+  reviews of what is public) and hands everything else to Codex. Before
+  starting a Claude owner, ask whether the mission needs taste: a design,
+  names, an interface, test worlds. If it is reading, sorting, moving,
+  measuring, repairing a machine or filing, it is a Codex task.
+- **A Codex task:** a brief in `tmp/director/briefs/t-<name>.md` (the
+  goal in the user's words, the sources by path, what it may and may not
+  touch, the rules: no credential read, no `pueue`, no scripts in
+  `~/src/rust/tmp/`, background commands with `</dev/null`), a work
+  directory `tmp/<name>/` (0700) with a one-line README, then `codex-run
+  task --effort high --to director@hel8 BRIEF DIR DIR/report.md` from
+  hel8. Not `--read-only`: its sandbox blocks ssh and the report. Its end
+  comes by post; read the report, act, record a decision.
+- **Examples from 10-26:** hetzner6's redeploy, hetzner5's retirement, the
+  gate-timeout investigation, the findings' cleanup.
