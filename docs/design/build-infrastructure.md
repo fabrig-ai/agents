@@ -918,6 +918,10 @@ last run's commit:
   a new one is bisected over the landings in (P, M), halving, each probe
   `--only` the tests still undecided, so that each is charged to the
   first landing where it fails. With one landing, it is that one.
+- **A baseline.** A run with no landings before M (the first, or one
+  after a history rewrite) has no range to bisect: its reds stand,
+  charged to no landing, and M is cleared of them, its records marked
+  `baseline`.
 - **A fault** is heavy refusing (no summary line), exit 3 with `lacks`
   lines, or the origin out of reach. It ends the run with no verdict
   and P unchanged, so the next pass tries again.
@@ -932,10 +936,12 @@ None has a `set` key, so the readers of sets skip them. Each has `time`,
   - `verdict`: `commit` the landing, `run` M, `verdict`, `tests`,
     `flakes`, `landing_set` (the set whose `landed` record names the
     landing, or null), `log`, and a red's `excerpt`, its failing output's
-    last 60 lines, at most 8000 characters;
+    last 60 lines, at most 8000 characters; `baseline` is true on a
+    baseline run's;
   - `tier`: the run's end, with `commit` M, `state` (`green` or `red`),
     `last_green`, `reds` (each `landing` with its `tests`), `flakes`,
     `ran_s` (heavy's seconds, rerun and probes included) and `log`;
+    `baseline` is true on a baseline run's;
   - `fault`: `commit`, `reason` and `since`, when a fault starts or its
     reason changes; `recovered`, when one ends with `main` unmoved.
 - `kind` `watch`, event `watching`: `target`, a set or a commit, and
