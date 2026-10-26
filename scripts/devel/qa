@@ -520,7 +520,8 @@ class Watch:
         for name in sorted(names - held):
             result = self.call('logins', 'give', name, '--as', 'qa-watch')
             if result.returncode == 0:
-                log(f'gave back {name}: held without a pass')
+                if result.stdout.strip() != f'already free: {name}':
+                    log(f'gave back {name}: held without a pass')
                 if name in strays:
                     strays.pop(name)
                     replace(path, (json.dumps(strays, indent=2) + '\n').encode())
@@ -540,16 +541,35 @@ class Watch:
             elif result.returncode != 2:
                 log(f'{name}: cannot give stray login back: {result.stderr.strip()}')
 
+    def unit_status(self, state):
+        # qa-flow.md 10: deactivating still runs the unit's give-back.
+        result = self.call('systemctl', '--user', 'show', '--property=LoadState',
+                           '--property=ActiveState', '--', 'codex-run-' + state['run'])
+        fields = dict(line.split('=', 1) for line in result.stdout.splitlines() if '=' in line)
+        if result.returncode == 0 and set(fields) == {'LoadState', 'ActiveState'}:
+            load, active = fields['LoadState'], fields['ActiveState']
+            if (load == 'loaded' and active in ('inactive', 'failed')
+                    or load == 'not-found' and active == 'inactive'):
+                return 'stopped'
+            if load == 'loaded' and active in ('activating', 'active', 'reloading', 'deactivating'):
+                return 'busy'
+        log(f'{state["pass"]}: cannot establish unit state; keeping logins held')
+        return 'unknown'
+
     def unit_stopped(self, state, seconds):
         # qa-flow.md 10: ended precedes the unit's on-stop give-back.
         deadline = time.monotonic() + seconds
-        while self.call('systemctl', '--user', 'is-active', '--quiet', 'codex-run-' + state['run']).returncode == 0:
+        while True:
+            status = self.unit_status(state)
+            if status == 'stopped':
+                return True
+            if status == 'unknown':
+                return False
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 log(f'{state["pass"]}: waiting for unit to stop before giving logins back')
                 return False
             time.sleep(min(2, remaining))
-        return True
 
     def notify(self, directory, state):
         notice = state.get('notice')
@@ -740,9 +760,15 @@ class Watch:
                     self.finish(directory, state)
                 elif not run:
                     self.finish(directory, state, 'The service stopped before saving a run id.')
-                elif self.call('systemctl', '--user', 'is-active', '--quiet', 'codex-run-' + run).returncode:
-                    self.finish(directory, state, None if ended.exists() else 'The run unit vanished without its end.')
-                elif state['capped'] or (utc(timestamp()) - utc(state['started'])).total_seconds() >= options['QA_CAP_MINUTES'] * 60:
+                else:
+                    status = self.unit_status(state)
+                    if status == 'unknown':
+                        continue
+                    if status == 'stopped':
+                        self.finish(directory, state, None if ended.exists() else 'The run unit vanished without its end.')
+                        continue
+                    if not (state['capped'] or (utc(timestamp()) - utc(state['started'])).total_seconds() >= options['QA_CAP_MINUTES'] * 60):
+                        continue
                     state['capped'] = True
                     self.save(directory, state)
                     stopped = self.call('systemctl', '--user', 'stop', 'codex-run-' + run)

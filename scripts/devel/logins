@@ -212,10 +212,14 @@ class Login:
 
     def give(self, holder):
         current = self.read('holder.json', None)
-        need(current is not None, f'{self.name} is not held')
-        need(current['holder'] == holder, f'{self.name} is held by {current["holder"]}')
+        if current is not None:
+            need(current['holder'] == holder, f'{self.name} is held by {current["holder"]}')
         reason = login_check(self.path)
         need(reason is None, f'{self.name} is not back at {self.path}: {reason}', 1)
+        # qa-flow.md 10: retry a give whose caller died before saving its result.
+        if current is None:
+            print(f'already free: {self.name}')
+            return
         stamp = timestamp()
         seconds = elapsed(utc(stamp), current['since'])
         event = self.event_text(stamp, 'give', holder, seconds, current['note'])

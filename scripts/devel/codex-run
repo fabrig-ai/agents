@@ -272,7 +272,7 @@ task_stop() {
     local state=$runs/$1 f status=0
     f=$(meta_get "$state/meta" on_stop)
     if [[ -f $f && ! -L $f && -x $f ]]; then
-        (cd -- "$(dirname -- "$f")" && timeout "$ON_STOP_SECONDS" "$f") \
+        (cd -- "$(dirname -- "$f")" && timeout --signal=KILL "$ON_STOP_SECONDS" "$f") \
             </dev/null >>"$state/on-stop.log" 2>&1 || status=$?
         printf 'exit %s\n' "$status" >"$state/on-stop"
     else

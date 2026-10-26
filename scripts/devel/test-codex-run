@@ -127,13 +127,14 @@ with (fake / 'codex.calls').open('a') as out:
                           'home': os.environ.get('HOME'), 'post_name': os.environ.get('POST_NAME'),
                           'unwanted': os.environ.get('CODEX_RUN_FIXTURE_UNWANTED')}) + '\n')
 scenario = (fake / 'scenario').read_text().strip()
-if scenario in ('on-stop', 'on-stop-failure'):
+if scenario in ('on-stop', 'on-stop-failure', 'on-stop-timeout'):
     meta = dict(line.split('=', 1) for line in (state / 'meta').read_text().splitlines())
     hook = pathlib.Path(meta['on_stop'])
     hook.write_text('#!/bin/bash\npwd >"$DEV_ROOT/fake/stop.cwd"\n'
                     'echo returned >>"$DEV_ROOT/fake/returned"\n'
                     'echo hook-out\necho hook-err >&2\n'
-                    + ('exit 3\n' if scenario == 'on-stop-failure' else ''))
+                    + ('exit 3\n' if scenario == 'on-stop-failure' else
+                       'trap \"\" TERM\nwhile :; do sleep 1; done\n' if scenario == 'on-stop-timeout' else ''))
     hook.chmod(0o700)
 if scenario == 'pause':
     import time
@@ -390,6 +391,16 @@ expect 'failing on-stop keeps normal row' "$(row)" $'\t0\t1\t' $'\t30/6/8\t0'
 json_expect 'failing on-stop keeps normal post' 'length == 1 and (.[0].args[4] | contains(" ok: "))' "$fake/post.calls"
 start_task on-stop --on-stop "$t/work dir/return login"
 expect 'on-stop with a space in its path' "$(cat "$state/on-stop"),$(cat "$fake/stop.cwd")" "exit 0,$t/work dir"
+
+# Exercise a TERM-ignoring callback with a one-second private bound.
+sed 's/^ON_STOP_SECONDS=60$/ON_STOP_SECONDS=1/' "$kit/codex-run" >"$kit/codex-run.new"
+chmod +x "$kit/codex-run.new"
+mv "$kit/codex-run.new" "$kit/codex-run"
+start_task on-stop-timeout --on-stop "$t/ignores-term"
+expect 'on-stop cannot ignore its deadline' "$(cat "$state/on-stop")" 'exit 137'
+expect 'timed-out on-stop keeps normal row' "$(row)" $'\t0\t1\t'
+cp "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/codex-run" "$kit/codex-run.new"
+mv "$kit/codex-run.new" "$kit/codex-run"
 
 start_task no-report --to director@hel8
 expect 'fallback also saved in run directory' "$(cmp -s "$report" "$state/report.md" && echo same)" same
