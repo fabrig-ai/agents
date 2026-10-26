@@ -2,11 +2,10 @@
 
 Provisional, 2026-10-21, revised 2026-10-24. What the director does
 and how: the session that knows where the work stands and where it goes
-next, and that runs the product owners of [product.md](product.md) and
-Infra's owners ([owners.md](owners.md), [infra.md](infra.md)) on the
-user's behalf. The roles and the departments together are
-[README.md](README.md). What it is doing now is in its notes (section
-3), never here.
+next, and that runs the designers ([designer.md](designer.md)) and
+owners ([owners.md](owners.md)) on the user's behalf. The roles
+together are [README.md](README.md). What it is doing now is in its
+notes (section 3), never here.
 
 ## 1. In one page
 
@@ -20,12 +19,11 @@ user's behalf. The roles and the departments together are
 - **One session at a time,** on hel8, started by the user, its context
   cleared about every six hours (section 2). Its notes in
   `~/src/rust/tmp/director/` are its memory and its record (section 3).
-- **It coordinates the product owners** (section 11): it gives each its
-  features and its machines, answers what they bring, and breaks the
-  ties between them, from the vision and the direction it holds. They
-  start their features' owners; the director starts the product owners,
-  and Infra's owners, one per mission (section 4), and answers those
-  owners itself (section 6).
+- **It starts the designers and owners** (section 4): a designer for a
+  draft that needs design, which starts its own owners, and an owner
+  for a mission that needs none. It answers them, and breaks the ties
+  between them, from the vision and the direction it holds (section
+  6).
 - **It decides most things itself,** and asks the user only what has
   long-term consequences that would be hard to change, what the user's
   rules keep theirs, or what it can't reasonably decide, with its
@@ -114,7 +112,7 @@ machine's `tmp/post/` (section 5).
   commit`. Each file is short and true: rewritten when things change,
   pruned when done, never only appended, but for the decisions.
   - `STATUS.md`: one line per mission in progress, with its owner's
-    address, its milestone, its state or blocker and its next step;
+    address, its last landing, its state or blocker and its next step;
     the director's helper sessions; then what waits on the user. A
     mission leaves it when its closing note is committed.
   - `director/direction.md`: the vision, the user's priorities and
@@ -124,14 +122,13 @@ machine's `tmp/post/` (section 5).
     to a file: the call, its reason, what it changes. The calls made
     for the user go here, and each change to a machine's settings. A
     call that answers a report cites the report's path.
-  - `director/backlog.md`: the findings that triage keeps waiting and
-    no roadmap holds (owners.md 4.6), each with its source and
-    reproduction.
+  - `director/backlog.md`: the findings no mission has taken yet, each
+    with its source and reproduction.
   Git's history is the timeline: there is no log.
 - **Its notes** are scratch: `README.md`, the entry point, which points
   here; `notes/decisions-live.md`, a digest of the decisions that still
   bind; and `notes/handover.md` while it exists (section 2).
-- **Folders:** `briefs/` (product owners' and helpers'), `for-user/`
+- **Folders:** `briefs/` (helpers'), `for-user/`
   (notes sent to the user), `archive/` (the notes from before the
   record: decisions, log, owners, the old channels' messages).
 - **Stamps** come from `date -u +%H:%MZ`, run before stamping anything.
@@ -145,12 +142,12 @@ machine's `tmp/post/` (section 5).
 
 ## 4. Starting an owner
 
-- **Who starts whom.** The director starts the product owners
-  (product.md 2), one or more features each, with a brief and the
-  machines they may use, and Infra's owners. A product owner starts its
-  features' owners and lab runs on those machines, as this section
-  says, and tells the director as each starts. Each owner belongs to a
-  department (README.md, section 2), which its brief names.
+- **Who starts whom.** The director starts a designer for each draft
+  that needs design (designer.md 2), with a brief and the machines it
+  may use; the designer starts its owners there, and tells the director
+  as each starts. A mission that needs no designer (a small draft,
+  tooling, hygiene, a batch of findings) gets its owner from the
+  director.
 - **What gets an owner, and when,** is the director's call from the
   direction: the user's priorities, against what the machines have
   (load, memory, disk above the floor), the footprints of the owners
@@ -169,58 +166,45 @@ machine's `tmp/post/` (section 5).
   hold. A machine is free once the main missions are staffed. The
   user's inputs for it are in. Its landings stay off a running main
   mission's files, a soft rule weighed by what the conflicts would cost
-  to resolve. It yields to the main roadmap at a milestone's end. Its
+  to resolve. It yields to the main roadmap at its next landing. Its
   order is priority, not a gate: a mission that needs nothing earlier
   may run first.
-- **Missions** (owners.md 1 and 3.1). A feature's product owner, or
-  the director for Infra, cuts each draft into missions of at most four
-  milestones, one department each, each ending where something works
-  on its own, and starts a fresh owner for each, the next one's brief
-  carrying the last one's notes and closing note. A fresh owner is
-  named after its mission, `o/<m>`, never after the one before:
-  `codex-run owner` resumes the thread its name's state holds. No
+- **Missions.** A designer, or the director where there is none, cuts
+  a draft into missions, each with an end where something works and can
+  be tried (owners.md 4), and starts a fresh owner for each, the next
+  one's brief carrying the last one's closing note. A fresh owner is
+  named after its mission, `o/<m>`, never after the one before. No
   owner stays on past its mission: recurring work (hygiene, findings)
-  waits in the product owner's or the director's notes until there is a
-  mission's worth, then gets one, `o/<area>-<what>`.
-- **Claude or Codex,** by department (README.md, section 2; owners.md
-  1): Claude for App and UI unless the part needs little taste, Codex
-  for Infra and QA. A Claude owner is started on its
-  machine as owners.md 2 says, over ssh for another machine, at the
-  effort the part's difficulty asks. A Codex owner, or a QA agent, runs
-  on its machine through `codex-run owner --effort EFFORT NAME BRIEF`,
-  as a systemd user unit (agents' `docs/design/post.md` 5). Between
-  turns its thread rests until post comes or an hour passes. Its parent
-  ends it once its closing note is in: `systemctl --user stop
-  codex-owner-$(systemd-escape NAME)`. It takes taste from an Opus 5.5
-  xhigh one-shot, and brings its design report and its significant
-  decisions to its parent: public APIs, a test's world or a suite's
-  organization, new harnesses, design text, kit behaviour that others
-  feel, budgets.
+  waits in the director's notes until there is a mission's worth, then
+  gets one, `o/<area>-<what>`.
+- **Designers and owners** are Claude Code sessions on Opus 5.5 at
+  xhigh, started on their machine as owners.md 2 says, over ssh for
+  another machine.
 - **The brief** is the mission's README in the record,
   `missions/<m>/README.md` (records.md 4), committed, and pulled on the
   owner's machine (`record pull`), before the owner starts on it
   (owners.md 2). It holds what is particular to the
   mission, in this order; the roles hold the rest, and no brief repeats
   them:
-  - the front matter (records.md 3): its roadmap and feature, its
-    department, its parent and owner, its machine, its model and
-    effort, `started`, `state: active`, and `ended` and `end` as
+  - the front matter (records.md 3): its roadmap and feature,
+    its parent and owner, its machine, its model
+    and effort, `started`, `state: active`, and `ended` and `end` as
     `unknown`;
   - a summary, at most 60 words: what it sets out to do;
   - who it is, in a line: "o/<name>, an owner under agents'
-    `roles/owners.md` and `roles/<department>.md`, which say what to
-    read" (a QA agent: `roles/qa.md` and its kind's file);
+    `roles/owners.md`, which says what to read" (a designer:
+    `roles/designer.md`);
   - its mission: the draft with its commit, the part of it this
     mission reaches and its end, what the draft names, what is adopted
     and what is left open, and for a later mission the record of the
     one before;
   - why it matters, in the user's words where there are some;
-  - how to start, where it departs from owners.md 3.1: the draft's
-    milestones, the report in parts where that is faster;
+  - for an owner, the first slice to land, where its designer has
+    picked one;
   - who is near: the other owners' footprints;
   - its budgets, and its machine: cores, memory, disk and floor, who
-    else builds there, how many implementers at once, where it lands
-    from;
+    else builds there, how many implementers at once (and, for a
+    designer, owners), where it lands from;
   - its own name and its parent's address, for post (section 5).
 - **The record:** the README, and the mission's line in `STATUS.md`.
   `record runs` gives its cost (records.md 5).
@@ -251,9 +235,8 @@ machine's `tmp/post/` (section 5).
   real changes; `hw.log` takes its hardware samples, and `usage.log` the
   subscriptions' week. Each wake re-reads the director's whole context:
   a trigger is only for what the director must act on.
-- **After-landing failures** arrive in `inbox/after-landing.md`
-  (owners.md, 4.5); while nothing runs after-landing, on the user's
-  word, none do.
+- **After-landing failures** arrive in `inbox/after-landing.md`;
+  while nothing runs after-landing, on the user's word, none do.
 - **Relays:** an owner waiting on another's set runs `landings wait`
   (landing-flow.md 9.1); the director reads `landings`, and relays a
   landing only to an owner that can't reach the feed.
@@ -272,33 +255,26 @@ machine's `tmp/post/` (section 5).
 
 ## 6. Answering owners
 
-- **Whom it answers:** Infra's owners, the product owners, and what a
-  product owner brings it from its owners (product.md 1). A product
-  owner answers its own owners as this section says, within its
-  features.
-- **A plan or a design report** gets owners.md 3.3's brief check, and
-  a green light or the amendments. A milestone's end updates the
-  mission's line in `STATUS.md`, or in a product owner's README
-  (records.md 4), its new session among it (owners.md 2).
-- **A milestone at its cap** waits, paused (owners.md 3.1), for an
-  answer decided like any question's: a split, more time, or a change
-  of course. Whether the user hears of it is section 8's call.
+- **Whom it answers:** the designers, and the owners it started
+  itself. A designer answers its own owners as this section says,
+  within its draft.
+- **A landing** updates the mission's line in `STATUS.md`.
 - **A question** gets an answer from the direction, recorded as a
   decision. What is small and reversible the director decides even when
   it touches another owner's files, and tells that owner.
-- **A tool asked for** (owners.md 5): an Infra mission, or declined
+- **A tool asked for** (owners.md 5): a mission in agents, or declined
   with the reason. Neither the director nor any role builds one beside
   the kit ([cleanup.md](../docs/design/cleanup.md) 2).
-- **A finding** is triaged (owners.md 4.6). One on v0.1.0's happy path
-  goes to the owner of what it names. Any other goes to the backlog of
-  the product owner whose feature it names (product.md 4), or, where no
-  product holds it, to `director/backlog.md`, where a later mission takes
-  it, chosen from the direction.
-- **Footprints.** It orders the owners whose footprints overlap
-  (owners.md, 4.5): who lands first. The second to land rebases, and
-  keeps the other's values. A diff to a file that another owner holds
-  goes, through the owner's parent, to whoever orders the two
-  (product.md 3).
+- **A finding** on v0.1.0's happy path (the roadmaps' stories and
+  pages, used as intended; a security hole, lost data and a flake that
+  fails gates count as on it) goes to the owner of what it names, or
+  its designer. Any other goes to `director/backlog.md`, where a later
+  mission takes it, chosen from the direction.
+- **Footprints.** It orders the owners whose footprints overlap: who
+  lands first. The second to land rebases, and keeps the other's
+  values. A diff to a file that another owner holds goes, through the
+  owner's parent, to whoever orders the two: their designer, or the
+  director.
 - **Repins,** one at a time per repository. Compatible adaptations
   ride one ordered repin, and each owner adapts the downstream code to
   its own change. An upstream change that breaks a downstream build
@@ -318,7 +294,7 @@ machine's `tmp/post/` (section 5).
   on the user's word, owner by owner, through its channel, and the
   director then relays what it waits on from others.
 - **Closing notes** feed the director's comparison across owners
-  (owners.md, 6): what in owners.md pays and what to change, with each
+  (owners.md 5): what in the roles pays and what to change, with each
   mission's cost from `record runs --all`.
 
 ## 7. The check
@@ -389,7 +365,7 @@ is mechanical, and Codex reads what needs reading.
 - **Claude for its judgement,** Codex for the rest (owners.md, 1).
   Surveys, status reads, file reading, investigations and mechanical
   reviews go to Codex (`codex-run task --read-only --effort <effort>
-  TASK DIR REPORT`, owners.md 4.2), at medium or high by the task. A
+  TASK DIR REPORT`, owners.md 3), at medium or high by the task. A
   Claude sub-agent only where taste is the point, on Opus.
 - **Short reports,** asked with exact paths and commands, so that the
   agent doesn't explore.
@@ -416,7 +392,9 @@ is mechanical, and Codex reads what needs reading.
   - the kit's tools (`land`, `heavy`, `after-landing`, `setup`) may
     change to save tokens, as an owner's work, where quality and
     outcomes don't suffer.
-- **The disk floor** (owners.md, 4.5) is watched at each check.
+- **The disk floor,** 40 GB unless a machine's `tmp/machine.env` says
+  otherwise, below which `heavy` queues nothing, is watched at each
+  check.
 - **x1 is the user's workstation:** its load is theirs. When it has no
   margin, landings go from another machine, with the same gate and
   budgets.
@@ -446,28 +424,23 @@ is mechanical, and Codex reads what needs reading.
     them, no credential record and no `auth.json`, and never sends a
     browser's final address.
 
-## 11. Product owners
+## 11. Designers
 
-The sub-director pilot of 10-23 gave one roadmap's daily flow to each
-of two sessions, and halved the median time from an owner's entry to
-its answer (6.0 to 3.0 minutes). On 10-24 the user made the role a
-standing one, in charge of features rather than roadmaps: the product
-owner, [product.md](product.md). The pilot's `d/roadmap-2` and
-`d/roadmap-3` carry on under it.
+On 10-26 the designer ([designer.md](designer.md)) replaced the product
+owners of 10-24 and the departments: one draft each, designed a part at
+a time, with the owners who build it.
 
-- **The director is their coordinator.** It gives each product owner
-  its features and the machines it may use, with a brief that holds
-  what its owners' briefs need of the director (section 4): the user's
-  words on each draft, each machine's cores, memory, disk and builders,
-  the budgets, and the other products' owners near its features. It
-  answers what each brings, and it breaks the ties between them, from
-  the vision, the goals and the direction it holds.
-- **What stays the director's** is product.md 1's list: the user;
-  machines, placement and spend; security; Infra and the landing queue;
-  what crosses products; starting and stopping product owners.
-- **One answer per question.** An owner writes to its product owner
-  only. The director answers a product owner's owners only through it.
-- **A feature's end:** the product owner's closing note folds into the
+- **The director gives each its draft and machines,** with a brief
+  that holds what its owners' briefs need of the director (section 4):
+  the user's words on the draft, each machine's cores, memory, disk and
+  builders, the budgets, and the other owners near its repositories. It
+  answers what each brings, and breaks the ties between them.
+- **What stays the director's:** the user; machines, placement and
+  spend; security; the landing queue; what crosses drafts; starting and
+  stopping designers.
+- **One answer per question.** An owner writes to its designer only.
+  The director answers a designer's owners only through it.
+- **A draft's end:** the designer's closing note folds into the
   director's comparison across owners (section 6).
 
 ## 12. Open questions
@@ -477,7 +450,7 @@ owner, [product.md](product.md). The pilot's `d/roadmap-2` and
   lived untracked in `tmp/director/`, and were gone by 10-25, when every
   script left `tmp/` ([cleanup.md](../docs/design/cleanup.md) 2 and 6).
   Where sections 2, 5 and 7 name one, the director does its step by
-  hand, until Infra builds what it needs into this repository's
+  hand, until a mission builds what it needs into this repository's
   `scripts/`. Which ones, and in what shape, is open: the director asks
   for them as for any tool (section 6). A session can't clear itself,
   so the six-hour clear waits for its tool: until then a context only

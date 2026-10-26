@@ -83,15 +83,15 @@ metadata by the tools. The surveys behind it are
 | `director/direction.md` | the director | rewritten | the vision, the priorities, the standing rules, the drafts and what waits |
 | `director/decisions/NNNN.md` | the director | appended | its numbered calls, 100 to a file (`0001.md` holds 1 to 100) |
 | `director/backlog.md` | the director | entries added and removed | findings owned by no roadmap |
-| `roadmaps/<r>/README.md` | its product owner | rewritten | the goal, the product owner, each feature with its draft, its missions and their state, and each feature's closing note |
-| `roadmaps/<r>/decisions/NNNN.md` | its product owner | appended | its numbered calls, `R<n>-` |
-| `roadmaps/<r>/backlog.md` | its product owner | entries added and removed | the findings triage keeps waiting (owners.md 4.6) |
-| `missions/<m>/README.md` | its parent, then its owner | at the start; the owner keeps the front matter | the brief (section 4) |
-| `missions/<m>/plan.md` | its owner | rewritten when the plan changes | the milestones (owners.md 3.1) |
-| `missions/<m>/decisions.md` | its owner and sub-owners | appended | their calls, numbered, each with its reason |
-| `missions/<m>/m<N>.md` | its owner (the head), then the milestone's driver | at its start, its design and its end | its goal, its design report, its end report, and the table of section 5 |
-| `missions/<m>/qa.md` | its QA agents and its owner | at each pass | the passes, their findings and each one's disposition |
-| `missions/<m>/closing.md` | its owner | once | the closing note (owners.md 6) |
+| `roadmaps/<r>/README.md` | the director | rewritten | the goal, each draft with its missions and their state, and each draft's closing note |
+| `roadmaps/<r>/decisions/NNNN.md` | the director | appended | the roadmap's numbered calls, `R<n>-`; closed since 10-26 |
+| `roadmaps/<r>/backlog.md` | the director | entries added and removed | the roadmap's findings no mission has taken |
+| `missions/<m>/README.md` | its parent, then its owner or designer | at the start; the writer keeps the front matter | the brief (section 4) |
+| `missions/<m>/progress.md` | its owner or designer | rewritten | the state, what is in flight, and the decisions with their reasons (owners.md 2) |
+| `missions/<m>/closing.md` | its owner or designer | once | the closing note (owners.md 5) |
+
+Missions before 10-26 also hold `plan.md`, `decisions.md`, `m<N>.md`
+and `qa.md`: their plan, decisions, milestones and QA passes.
 
 - **Names.** A mission's name is its own for good: `record` refuses a
   new README in a directory that has one, including a lost push race
@@ -105,7 +105,7 @@ metadata by the tools. The surveys behind it are
 - **Front matter,** `key: value` lines between `---` lines, which
   `record` checks:
   - a mission's README: `roadmap`, `feature` (the draft's repository
-    and path), `department`, `parent` and `owner` (addresses),
+    and path), `parent` and `owner` (addresses),
     `machine`, `model`, `effort`, `started`, `ended`, `state` (`active`,
     `paused`, `ended`, `abandoned`) and `end` (one line: why it ended);
   - `m<N>.md`: `driver`, `model`, `effort`, `started`, `cap`, `ended`.
@@ -122,28 +122,19 @@ metadata by the tools. The surveys behind it are
   brief repeats them. The owner is started with "Read
   `~/src/rust/records/missions/<m>/README.md` and do what it says.", a
   sub-owner with its `m<N>.md`, whose head says what to read.
-- **A report is a file.** The plan report is `plan.md`; a milestone's
-  design report (at most 15 lines, owners.md 3.3) and end report (at
-  most 10, owners.md 3.1) are sections of `m<N>.md`; the closing note
-  is `closing.md`. The writer commits it with `record`, then tells its
-  parent in one line, by post or today's channel, naming the file and
-  the commit. The parent reads the file and copies nothing into its
-  own notes; its answer, if it decides something, is a decision.
-- **A decision is written where it is taken:** an owner's in its
-  mission's `decisions.md`, a product owner's in its roadmap's, the
-  director's in `director/`. A call that answers a report cites the
-  report's path. The message that carries the answer is transport, not
-  record.
-- **QA:** the QA agent writes its pass in `qa.md`: what it tested,
-  against which commits, and each finding with its reproduction (qa.md
-  3). The owner adds each finding's disposition: fixed in a commit, sent
-  to the backlog, or not a defect. A finding sent to the backlog goes to
-  the roadmap's `backlog.md`, by its product owner.
+- **A report is a file.** The closing note is `closing.md`. The writer
+  commits it with `record`, then tells its parent in one line, by
+  post, naming the file and the commit. The parent reads the file and
+  copies nothing into its own notes; its answer, if it decides
+  something, is a decision.
+- **A decision is written where it is taken:** an owner's or a
+  designer's in its mission's `progress.md`, the director's in
+  `director/`. A call that answers a report cites the report's path.
+  The message that carries the answer is transport, not record.
 - **`STATUS.md`** is the director's: one line per mission in progress,
-  with its owner's address, its milestone, its state or blocker and its
-  next step; then what waits on the user. A mission leaves it when its
-  closing note is committed. Product owners keep their roadmap's
-  README instead of a copy of the same lines.
+  with its owner's address, its last landing, its state or blocker and
+  its next step; then what waits on the user. A mission leaves it when
+  its closing note is committed.
 - **No ledger and no log.** Who wrote what, and when, is git's history:
   `git log -- missions/<m>` is a mission's timeline, `git log --
   roadmaps/<r>` a roadmap's. What a ledger recorded besides is section
@@ -156,6 +147,9 @@ metadata by the tools. The surveys behind it are
 
 ## 5. The metadata
 
+- **Since 10-26 missions have no milestones:** `record runs <m>`
+  writes the mission's table, in its README, before its closing note.
+  The milestones below are the missions' before then.
 - **The paths name the work.** A mission's scratch is
   `tmp/owners/<m>/`, a milestone's tasks and worktrees
   `tmp/owners/<m>/m<N>/`. A session belongs to the record its first
@@ -245,7 +239,7 @@ largest useful files and far below their journals.
 | File | Cap |
 |---|---|
 | a mission's README | 8 KiB, its summary 60 words |
-| `plan.md`, a mission's `decisions.md`, `qa.md` | 16 KiB each |
+| `progress.md`; before 10-26, `plan.md`, a mission's `decisions.md`, `qa.md` | 16 KiB each |
 | `m<N>.md` | 8 KiB, and 4 KiB of table |
 | `closing.md` | 8 KiB |
 | a mission's files together | 128 KiB |
@@ -257,9 +251,8 @@ largest useful files and far below their journals.
 
 What `tmp/` may hold, and how it goes, is [cleanup.md](cleanup.md).
 
-- **An owner's `tmp/owners/<m>/`:** `notes.md` (its state, its open
-  questions and its footprint: no decisions, no plan), `handover.md`,
-  its implementers' tasks and reports, `codex/`, the worktrees and the
+- **An owner's or designer's `tmp/owners/<m>/`:** `common.md`, its
+  implementers' tasks, reports and logs, the worktrees and the
   evidence. None of it is record: `tidy` deletes the directory once
   `closing.md` is committed and its work is on a remote
   ([cleanup.md](cleanup.md) 4 and 5).
