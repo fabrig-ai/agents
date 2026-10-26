@@ -1,0 +1,588 @@
+#!/usr/bin/env python3
+"""Offline runner stories: each case owns its origin, feed, queue stand-in and posts."""
+import argparse
+from datetime import datetime, timedelta, timezone
+import fcntl
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import time
+
+SCRIPT = Path(__file__).resolve().with_name('after-landing')
+PYTHON = sys.executable
+TIER = r'''#!/bin/sh
+set -eu
+mkdir -p target
+printf warm > target/warm
+head=$(git rev-parse HEAD)
+count="$FIXTURE_COUNTS/$head"
+n=0
+if test -f "$count"; then n=$(cat "$count"); fi
+n=$((n + 1))
+printf '%s' "$n" > "$count"
+if test -s tier/lacks; then
+    while IFS= read -r name; do printf 'after-landing: lacks %s\n' "$name"; done < tier/lacks
+    exit 3
+fi
+selected=$(mktemp "$FIXTURE_COUNTS/selected.XXXXXX")
+trap 'rm -f "$selected"' EXIT
+if test "$#" -gt 0; then
+    while test "$#" -gt 0; do
+        test "$1" = --only
+        printf '%s\n' "$2" >> "$selected"
+        shift 2
+    done
+else
+    cat tier/reds tier/flaky | sort -u > "$selected"
+fi
+status=0
+while IFS= read -r name; do
+    test -n "$name" || continue
+    if grep -Fxq "$name" tier/reds || { test "$n" -eq 1 && grep -Fxq "$name" tier/flaky; }; then
+        printf 'after-landing: failed %s\n' "$name"
+        printf 'failure text for %s\nstack detail\n' "$name"
+        status=1
+    fi
+done < "$selected"
+# Contract lines deliberately precede heavy's short tail.
+i=0
+while test "$i" -lt 70; do printf 'payload detail %s\n' "$i"; i=$((i + 1)); done
+if test "$status" -ne 0; then
+    printf 'failure text at end for excerpt\n'
+fi
+exit "$status"
+'''
+HEAVY = r'''import json, os, subprocess, sys
+from pathlib import Path
+root = Path(os.environ['AFTER_LANDING_FIXTURE'])
+head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+row = dict(argv=sys.argv[1:], cwd=os.getcwd(), head=head, cls=os.environ.get('HEAVY_CLASS'),
+           label=os.environ.get('HEAVY_LABEL'), target=os.environ.get('CARGO_TARGET_DIR'),
+           warm=Path('target/warm').exists())
+with (root / 'calls.jsonl').open('a') as out:
+    out.write(json.dumps(row) + '\n')
+if ((root / 'refuse').exists() or
+        ((root / 'refuse-call').exists() and
+         int((root / 'refuse-call').read_text()) == len((root / 'calls.jsonl').read_text().splitlines()))):
+    print('heavy: below the disk floor')
+    sys.exit(2)
+number = len((root / 'calls.jsonl').read_text().splitlines())
+log = root / ('payload-' + str(number) + '.log')
+with log.open('w') as out:
+    result = subprocess.run(sys.argv[2:], stdout=out, stderr=subprocess.STDOUT)
+if (root / 'unnamed').exists():
+    log.write_text('unnamed phase failed\n')
+print('heavy: queued task %d in the build lane token fixture' % number, file=sys.stderr)
+print('\n'.join(log.read_text().splitlines()[-2:]))
+print('heavy: task %d (build) exit %d, waited 0s, ran 1.25s, log %s' % (number, result.returncode, log))
+sys.exit(result.returncode)
+'''
+POST = r'''import json, os, sys
+from pathlib import Path
+root = Path(os.environ['AFTER_LANDING_FIXTURE'])
+if (root / 'post-refuse').exists():
+    sys.exit(1)
+with (root / 'posts.jsonl').open('a') as out:
+    out.write(json.dumps(dict(argv=sys.argv[1:], body=Path(sys.argv[4]).read_text())) + '\n')
+'''
+
+
+def call(argv, cwd, env, status=0):
+    result = subprocess.run([str(arg) for arg in argv], cwd=cwd, env=env,
+                            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True, timeout=30)
+    assert result.returncode == status, (argv, result.returncode, result.stdout, result.stderr)
+    return result
+
+
+def rows(path):
+    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+
+class Lab:
+    def __init__(self, root):
+        self.root = root
+        self.origin = root / 'origin/demo.git'
+        self.work = root / 'work'
+        self.env = dict({key: value for key, value in os.environ.items()
+                         if not key.startswith('GIT_')}, AFTER_LANDING_FIXTURE=str(root),
+                        AFTER_LANDING_HEAVY=str(root / 'heavy'), AFTER_LANDING_POST=str(root / 'post'),
+                        FIXTURE_COUNTS=str(root / 'counts'), DEV_TMP=str(root / 'tmp'),
+                        AFTER_LANDING_RED_GRACE='900', AFTER_LANDING_FAULT_POST='900',
+                        CARGO_TARGET_DIR='/must-not-reach-heavy',
+                        GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL='/dev/null',
+                        GIT_AUTHOR_NAME='Fixture', GIT_AUTHOR_EMAIL='fixture@example.invalid',
+                        GIT_COMMITTER_NAME='Fixture', GIT_COMMITTER_EMAIL='fixture@example.invalid')
+        (root / 'counts').mkdir()
+        self.origin.parent.mkdir()
+        self.git(None, 'init', '--bare', '--quiet', '--initial-branch=main', self.origin)
+        self.git(None, 'clone', '--quiet', self.origin, self.work)
+        for name, body in (('heavy', HEAVY), ('post', POST)):
+            path = root / name
+            path.write_text(f'#!{PYTHON}\n' + body)
+            path.chmod(0o700)
+        # Any accidental transport is rejected locally, even with inherited ssh settings.
+        bin_dir = root / 'bin'
+        bin_dir.mkdir()
+        ssh = bin_dir / 'ssh'
+        ssh.write_text('#!/bin/sh\necho unexpected-ssh >&2\nexit 99\n')
+        ssh.chmod(0o700)
+        self.env['PATH'] = str(bin_dir) + ':' + self.env['PATH']
+        self.env['GIT_SSH_COMMAND'] = str(ssh)
+        (root / 'feed.jsonl').touch()
+        (self.work / 'scripts').mkdir()
+        (self.work / 'tier').mkdir()
+        script = self.work / 'scripts/after-landing.sh'
+        script.write_text(TIER)
+        script.chmod(0o700)
+        (self.work / '.gitignore').write_text('target/\n')
+        for name in ('reds', 'flaky', 'lacks'):
+            (self.work / 'tier' / name).write_text('')
+        self.serial = 0
+
+    def git(self, cwd, *args):
+        return call(['git', *args], cwd or self.root, self.env).stdout.strip()
+
+    def land(self, reds=None, flaky=None, lacks=None, docs=False, landed=False, trailer=True, body=''):
+        self.serial += 1
+        for name, value in (('reds', reds), ('flaky', flaky), ('lacks', lacks)):
+            if value is not None:
+                (self.work / 'tier' / name).write_text(''.join(test + '\n' for test in value))
+        (self.work / 'story.md').write_text(str(self.serial))
+        self.git(self.work, 'add', '.')
+        tree = self.git(self.work, 'write-tree')
+        message = f'landing {self.serial}' + ('\n\n' + body if body else '')
+        if trailer:
+            result = 'none (Markdown and mockups only)' if docs else 'pass fixture'
+            message += f'\n\nGate-Tree: {tree}\nGate-Result: {result}\nGate-Policy: sha256:fixture'
+        self.git(self.work, 'commit', '--quiet', '-m', message)
+        commit = self.git(self.work, 'rev-parse', 'HEAD')
+        if landed:
+            self.append(event='landed', repo='demo', commit=commit, set='demo/m1')
+        return commit
+
+    def push(self):
+        self.git(self.work, 'push', '--quiet', 'origin', 'main')
+
+    def run(self, status=0, env=None, director=False, once=True):
+        argv = [PYTHON, '-I', '-B', SCRIPT, 'follow', 'demo', '--origin', self.origin]
+        if once:
+            argv.append('--once')
+        if director:
+            argv += ['--director', 'director@x']
+        return call(argv, self.root, env or self.env, status)
+
+    def append(self, **fields):
+        row = dict(time=datetime.now(timezone.utc).isoformat(), host='fixture', token='fixture')
+        row.update(fields)
+        with (self.root / 'feed.jsonl').open('a') as out:
+            out.write(json.dumps(row) + '\n')
+
+    def records(self, event=None):
+        result = [r for r in rows(self.root / 'feed.jsonl') if r.get('kind') == 'tier']
+        return [r for r in result if r['event'] == event] if event else result
+
+    def state(self):
+        return json.loads((self.root / 'state/demo.json').read_text())
+
+    def calls(self):
+        return rows(self.root / 'calls.jsonl')
+
+    def posts(self):
+        return rows(self.root / 'posts.jsonl')
+
+    def verdict(self, tip):
+        return next(r for r in reversed(self.records('verdict')) if r['commit'] == tip)
+
+    def green(self):
+        tip = self.land()
+        self.push()
+        self.run()
+        return tip
+
+
+def polls(lab):
+    head = lab.green()
+    records = lab.records()
+    assert [r['event'] for r in records] == ['running', 'verdict', 'tier']
+    assert records[0]['commit'] == head and records[0]['from'] is None
+    assert lab.verdict(head)['verdict'] == 'cleared' and records[-1]['state'] == 'green'
+    assert len({r['token'] for r in records}) == 1
+    first = lab.calls()[0]
+    assert first['cls'] == 'background' and first['label'] == 'after-landing demo'
+    assert first['argv'] == ['--', 'scripts/after-landing.sh'] and first['target'] is None
+    assert first['cwd'] == str(lab.root / 'runner/demo') and first['head'] == head
+    state_file = lab.root / 'state/demo.json'
+    modified = state_file.stat().st_mtime_ns
+    lab.run()
+    assert state_file.stat().st_mtime_ns == modified, 'unchanged main wrote state'
+    assert lab.records() == records and len(lab.calls()) == 1
+    one, two = lab.land(), lab.land()
+    lab.push()
+    lab.run()
+    assert len(lab.calls()) == 2 and lab.calls()[-1]['head'] == two
+    assert lab.calls()[-1]['warm'], 'ignored target was not kept warm'
+    assert [r['commit'] for r in lab.records('verdict')] == [head, one, two]
+    assert all(r['verdict'] == 'cleared' for r in lab.records('verdict'))
+    assert lab.state()['last_run'] == two and lab.state()['last_green'] == two
+
+
+def no_tier(lab):
+    (lab.work / 'scripts/after-landing.sh').unlink()
+    one = lab.green()
+    two, three = lab.land(), lab.land()
+    lab.push()
+    lab.run()
+    assert [r['commit'] for r in lab.records('verdict')] == [one, two, three]
+    assert all(r['verdict'] == 'cleared' for r in lab.records('verdict'))
+    assert lab.state()['last_green'] == three and lab.calls() == [] and lab.posts() == []
+    assert lab.records('tier')[-1]['ran_s'] == 0
+
+
+def flake(lab):
+    lab.green()
+    head = lab.land(flaky=['t1'])
+    lab.push()
+    lab.run()
+    verdict = lab.verdict(head)
+    assert verdict['verdict'] == 'cleared' and verdict['flakes'] == ['t1']
+    assert lab.calls()[-1]['argv'][-2:] == ['--only', 't1']
+    assert lab.records('tier')[-1]['state'] == 'green'
+    assert lab.records('tier')[-1]['ran_s'] == 2.5
+    assert lab.state()['reds'] == {} and lab.posts() == []
+
+
+def red(lab):
+    lab.green()
+    one = lab.land(reds=['t1'], landed=True)
+    lab.push()
+    lab.run()
+    verdict = lab.verdict(one)
+    assert verdict['verdict'] == 'red' and verdict['tests'] == ['t1']
+    assert 'failure text' in verdict['excerpt'] and verdict['set'] == 'demo/m1'
+    assert len(verdict['excerpt']) <= 8000 and len(verdict['excerpt'].splitlines()) <= 60
+    assert lab.records('tier')[-1]['reds'] == [dict(landing=one, tests=['t1'])]
+    two = lab.land()
+    lab.push()
+    lab.run()
+    assert lab.verdict(two)['verdict'] == 'cleared'
+    assert lab.records('tier')[-1]['state'] == 'red' and lab.state()['reds'] == {'t1': one}
+    three = lab.land(reds=[])
+    lab.push()
+    lab.run()
+    assert lab.verdict(three)['verdict'] == 'cleared'
+    assert lab.records('tier')[-1]['state'] == 'green' and lab.state()['last_green'] == three
+    assert len(lab.calls()) == 6 and lab.posts() == []
+
+
+def bisect(lab):
+    lab.green()
+    one = lab.land()
+    docs = lab.land(docs=True)
+    two = lab.land(reds=['t2'])
+    three = lab.land()
+    lab.push()
+    lab.run()
+    calls = lab.calls()[1:]
+    assert calls[0]['head'] == calls[1]['head'] == three
+    assert 1 <= len(calls[2:]) <= 2 and all(c['head'] != docs for c in calls[2:])
+    assert all(c['argv'][-2:] == ['--only', 't2'] for c in calls[1:])
+    assert [(lab.verdict(t)['verdict'], lab.verdict(t)['tests']) for t in (one, docs, two, three)] == [
+        ('cleared', []), ('cleared', []), ('red', ['t2']), ('cleared', [])]
+    assert lab.state()['reds'] == {'t2': two} and lab.posts() == []
+    assert lab.git(lab.root / 'runner/demo', 'rev-parse', 'HEAD') == three
+
+
+def already_red(lab):
+    one = lab.land(reds=['t1'])
+    lab.push()
+    lab.run()
+    two = lab.land(reds=['t1', 't2'])
+    lab.push()
+    lab.run()
+    assert lab.verdict(two)['tests'] == ['t2']
+    assert lab.state()['reds'] == {'t1': one, 't2': two}
+    assert lab.records('tier')[-1]['reds'] == [dict(landing=one, tests=['t1']), dict(landing=two, tests=['t2'])]
+    assert len(lab.calls()) == 4 and lab.posts() == []
+
+
+def fault(lab):
+    green = lab.green()
+    tip = lab.land()
+    lab.push()
+    (lab.root / 'refuse').touch()
+    lab.run()
+    assert lab.records('fault')[-1]['reason'] == 'heavy: below the disk floor'
+    assert lab.state()['last_run'] == green and len(lab.records('verdict')) == 1
+    lab.run()
+    assert len(lab.records('fault')) == 1
+    env = dict(lab.env, AFTER_LANDING_FAULT_POST='0')
+    lab.run(director=True, env=env)
+    lab.run(director=True, env=env)
+    assert len(lab.posts()) == 1 and 'fault for 0 minutes' in lab.posts()[0]['argv'][2]
+    assert tip in lab.posts()[0]['body'] and 'log:' in lab.posts()[0]['body']
+    (lab.root / 'refuse').unlink()
+    lab.run()
+    assert lab.state()['last_run'] == tip and lab.state()['fault'] is None
+    lacks = lab.land(lacks=['Chromium', 'Forgejo'])
+    lab.push()
+    lab.run()
+    assert lab.records('fault')[-1]['reason'] == 'lacks Chromium, Forgejo'
+    assert lab.state()['last_run'] == tip and not any(r['commit'] == lacks for r in lab.records('verdict'))
+    hidden = lab.origin.with_name('hidden.git')
+    lab.origin.rename(hidden)
+    lab.run()
+    assert lab.records('fault')[-1]['reason'] == 'origin out of reach'
+    assert lab.state()['last_run'] == tip and len(lab.records('fault')) == 3
+
+
+def unwatched_red(lab):
+    tip = lab.land(reds=['t1'], landed=True)
+    lab.push()
+    env = dict(lab.env, AFTER_LANDING_RED_GRACE='0')
+    lab.run(director=True, env=env)
+    assert not lab.posts() and len(lab.state()['pending']) == 1
+    lab.run(director=True, env=env)
+    lab.run(director=True, env=env)
+    assert len(lab.posts()) == 1 and lab.state()['pending'] == []
+    post = lab.posts()[0]
+    assert post['argv'][0:2] == ['send', 'director@x']
+    assert f'red at {tip[:9]} (demo/m1): 1 tests' in post['argv'][2]
+    assert 't1' in post['body'] and tip in post['body'] and 'failure text' in post['body']
+    lab.append(kind='watch', event='watching', target='demo/m1')
+    two = lab.land(reds=['t1', 't2'], landed=True)
+    lab.push()
+    lab.run(director=True, env=env)
+    lab.run(director=True, env=env)
+    assert lab.verdict(two)['tests'] == ['t2'] and len(lab.posts()) == 1
+    assert lab.state()['pending'] == []
+    three = lab.land(reds=['t1', 't2', 't3'])
+    lab.push()
+    lab.run(director=True, env=env)
+    lab.append(kind='watch', event='watching', target=three[:7])
+    lab.run(director=True, env=env)
+    assert len(lab.posts()) == 1 and lab.state()['pending'] == []
+
+
+def paused(lab):
+    env = dict(lab.env)
+    del env['AFTER_LANDING_FIXTURE']
+    result = call([PYTHON, '-I', '-B', SCRIPT, 'follow', 'demo'], lab.root, env, 2)
+    assert result.stdout == ''
+    assert result.stderr == "after-landing: paused on the user's word; nothing runs\n"
+    assert not (lab.root / 'tmp').exists() and not (lab.root / 'runner').exists()
+    assert lab.calls() == [] and lab.posts() == [] and lab.records() == []
+
+
+def one_follower(lab):
+    lab.land()
+    lab.push()
+    lock = lab.root / 'locks/demo.lock'
+    lock.parent.mkdir()
+    with lock.open('a') as out:
+        fcntl.flock(out, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        result = lab.run(status=2)
+        assert 'another follower' in result.stderr
+    assert not (lab.root / 'runner/demo').exists()
+    assert lab.calls() == [] and lab.posts() == [] and lab.records() == []
+
+
+def refusals(lab):
+    # Refuse alien checkout and state without deleting or repairing user evidence.
+    head = lab.green()
+    clone = lab.root / 'runner/demo'
+    lab.git(clone, 'remote', 'set-url', 'origin', str(lab.root / 'elsewhere.git'))
+    assert str(clone) in lab.run(status=2).stderr
+    lab.git(clone, 'remote', 'set-url', 'origin', str(lab.origin))
+    state = lab.root / 'state/demo.json'
+    original = state.read_text()
+    for content in ('bad json', '{}', original.replace(str(lab.origin), 'another-origin')):
+        state.write_text(content)
+        assert str(state) in lab.run(status=2).stderr
+        assert state.read_text() == content
+    state.write_text(original)
+    missing = dict(lab.env, AFTER_LANDING_FIXTURE=str(lab.root / 'missing'))
+    lab.run(status=2, env=missing)
+    assert not (lab.root / 'missing').exists()
+    assert lab.state()['last_run'] == head and len(lab.calls()) == 1
+    assert lab.posts() == []
+
+
+def multi_bisect(lab):
+    lab.green()
+    one = lab.land(reds=['t1'])
+    two = lab.land(reds=['t1', 't2'])
+    three = lab.land(reds=['t1', 't2', 't3'])
+    docs = lab.land(docs=True)
+    lab.push()
+    lab.run()
+    assert lab.state()['reds'] == {'t1': one, 't2': two, 't3': three}
+    assert lab.verdict(docs)['verdict'] == 'cleared'
+    assert all(c['head'] != docs for c in lab.calls()[3:])
+    assert lab.records('tier')[-1]['ran_s'] == 5.0
+
+
+def limits(lab):
+    tests = [f't{i:02}' for i in range(55)]
+    tip = lab.land(reds=tests)
+    lab.push()
+    lab.run()
+    verdict = lab.verdict(tip)
+    assert verdict['tests'] == tests[:50] and verdict['tests_more'] == 5
+    assert lab.records('tier')[-1]['reds'] == [dict(landing=tip, tests=tests[:50], tests_more=5)]
+    assert len(lab.state()['reds']) == 55
+    flake_tip = lab.land(reds=[], flaky=tests)
+    lab.push()
+    lab.run()
+    verdict = lab.verdict(flake_tip)
+    assert verdict['flakes'] == tests[:50] and verdict['flakes_more'] == 5
+    assert lab.records('tier')[-1]['state'] == 'green'
+
+
+
+def nested_faults(lab):
+    green = lab.green()
+    one = lab.land(reds=['t1'])
+    lab.push()
+    refuse = lab.root / 'refuse-call'
+    refuse.write_text('3')  # Main fails, rerun cannot start.
+    lab.run()
+    assert lab.state()['last_run'] == green and lab.state()['reds'] == {}
+    assert len(lab.records('verdict')) == 1 and len(lab.records('fault')) == 1
+    refuse.unlink()
+    two = lab.land(reds=['t1', 't2'])
+    three = lab.land()
+    lab.push()
+    refuse.write_text('6')  # Main and rerun fail, first bisect probe cannot start.
+    lab.run()
+    assert lab.state()['last_run'] == green and lab.state()['reds'] == {}
+    assert len(lab.records('verdict')) == 1 and len(lab.records('fault')) == 1
+    refuse.unlink()
+    lab.run()
+    assert lab.state()['last_run'] == three and lab.state()['reds'] == {'t1': one, 't2': two}
+    assert lab.state()['fault'] is None
+
+
+def unnamed(lab):
+    lab.green()
+    tip = lab.land(reds=['t1'])
+    lab.push()
+    (lab.root / 'unnamed').touch()
+    lab.run()
+    assert lab.verdict(tip)['tests'] == ['*'] and lab.state()['reds'] == {'*': tip}
+    assert lab.calls()[-1]['argv'] == ['--', 'scripts/after-landing.sh']
+    assert 'unnamed phase failed' in lab.verdict(tip)['excerpt']
+
+
+def pending_delivery(lab):
+    tip = lab.land(reds=['t1'], landed=True)
+    lab.push()
+    lab.run()  # Queue even when there is no director yet.
+    assert len(lab.state()['pending']) == 1
+    env = dict(lab.env, AFTER_LANDING_RED_GRACE='0')
+    (lab.root / 'post-refuse').touch()
+    lab.run(status=1, director=True, env=env)
+    assert len(lab.state()['pending']) == 1 and lab.posts() == []
+    (lab.root / 'post-refuse').unlink()
+    lab.run(director=True, env=env)
+    assert len(lab.posts()) == 1 and lab.state()['pending'] == []
+    two = lab.land(reds=['t1', 't2'], landed=True)
+    lab.push()
+    lab.run(director=True)
+    assert len(lab.state()['pending']) == 1
+    lab.append(kind='watch', event='watching', target=two[:9])
+    lab.run()  # A watcher claims the pending verdict even without a director argument.
+    assert lab.state()['pending'] == [] and len(lab.posts()) == 1
+    assert lab.verdict(tip)['set'] == 'demo/m1'
+
+
+def stale_watch(lab):
+    tip = lab.land(reds=['t1'], landed=True)
+    lab.push()
+    old = datetime.now(timezone.utc) - timedelta(hours=3)
+    lab.append(kind='watch', event='watching', target='demo/m1', time=old.isoformat())
+    lab.run(director=True)
+    assert len(lab.state()['pending']) == 1
+    lab.run(director=True, env=dict(lab.env, AFTER_LANDING_RED_GRACE='0'))
+    assert len(lab.posts()) == 1 and tip in lab.posts()[0]['body']
+
+
+def history_reset(lab):
+    first = lab.green()
+    # A push around the landing tools is still the main tip.
+    tip = lab.land(trailer=False)
+    lab.push()
+    lab.run()
+    assert lab.verdict(tip)['verdict'] == 'cleared'
+    lab.git(lab.work, 'checkout', '--quiet', '--orphan', 'replacement')
+    replacement = lab.land(reds=['t1'])
+    lab.git(lab.work, 'push', '--quiet', '--force', 'origin', 'HEAD:main')
+    lab.run()
+    assert lab.state()['last_run'] == replacement
+    assert lab.state()['reds'] == {'t1': replacement}
+    assert [r['commit'] for r in lab.records('verdict')] == [first, tip, replacement]
+
+
+
+def trailers(lab):
+    lab.green()
+    ignored = lab.land(trailer=False, body='Gate-Tree: quoted example\nordinary body text')
+    one = lab.land(reds=['t1'], body='Gate-Result: none (quoted example)\nordinary body text')
+    docs = lab.land(docs=True)
+    lab.push()
+    lab.run()
+    assert not any(r['commit'] == ignored for r in lab.records('verdict'))
+    assert lab.verdict(one)['tests'] == ['t1'] and lab.verdict(one)['verdict'] == 'red'
+    assert lab.verdict(docs)['verdict'] == 'cleared'
+    assert lab.state()['reds'] == {'t1': one}
+
+
+def feed_failure(lab):
+    green = lab.green()
+    tip = lab.land(reds=['t1'])
+    lab.push()
+    # Reject just the final summary append, after verdicts and the state write.
+    shim = lab.root / 'bin/python3'
+    shim.write_text(f'#!{PYTHON}\n' + """import json, os, subprocess, sys
+from pathlib import Path
+payload = sys.stdin.read()
+if json.loads(payload)['event'] == 'tier':
+    sys.exit(1)
+sys.exit(subprocess.run([sys.executable, *sys.argv[1:]], input=payload, text=True).returncode)
+""")
+    shim.chmod(0o700)
+    lab.run(status=1)
+    assert lab.state()['last_run'] == green and lab.state()['reds'] == {}
+    shim.unlink()
+    lab.run()
+    assert lab.state()['last_run'] == tip and lab.state()['reds'] == {'t1': tip}
+    assert lab.records('tier')[-1]['commit'] == tip and lab.records('tier')[-1]['state'] == 'red'
+    assert len(lab.state()['pending']) == 1
+
+
+def main():
+    os.umask(0o077)
+    start = time.monotonic()
+    cases = {'polls': polls, 'no-tier': no_tier, 'flake': flake, 'red': red, 'bisect': bisect,
+             'already-red': already_red, 'fault': fault, 'unwatched-red': unwatched_red,
+             'paused': paused, 'one-follower': one_follower, 'refusals': refusals,
+             'multi-bisect': multi_bisect, 'limits': limits, 'nested-faults': nested_faults,
+             'unnamed': unnamed, 'pending-delivery': pending_delivery, 'stale-watch': stale_watch,
+             'history-reset': history_reset, 'trailers': trailers, 'feed-failure': feed_failure}
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--case', action='append', choices=cases)
+    selected = parser.parse_args().case or list(cases)
+    for number, name in enumerate(selected, 1):
+        case_start = time.monotonic()
+        with tempfile.TemporaryDirectory(prefix='after-landing-fixture-') as directory:
+            lab = Lab(Path(directory))
+            cases[name](lab)
+        print(f'ok {number}: {name} ({time.monotonic() - case_start:.2f}s)', flush=True)
+    print(f'completed {len(selected)} cases in {time.monotonic() - start:.2f}s', flush=True)
+
+
+if __name__ == '__main__':
+    main()

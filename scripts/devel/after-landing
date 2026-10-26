@@ -1,99 +1,454 @@
-#!/usr/bin/env bash
-# Run a repository's after-landing tier on a commit land has just pushed
-# (landing-flow.md, 4, step 8): the tests too slow for its gate, which
-# would otherwise break unseen on main.
-#
-#   after-landing GIT_COMMON_DIR COMMIT BRANCH
-#
-# Nothing runs it: land started it after each code landing until 2026-10-25,
-# when the user turned the tier off until they design how it runs
-# (landing-flow.md, 4, step 8). Given a commit, it checks the commit out
-# in a detached worktree kept for the repository (tmp/after-landing/REPO,
-# with its own target, one at a time), runs the script through
-# `heavy --gate`, and when that fails or heavy refuses it, writes one line
-# to the director's inbox, tmp/director/inbox/after-landing.md, naming the
-# repository, the commit, its branch and subject, and the log.
-# shellcheck disable=SC2317 # The pause deliberately leaves the code below unreachable.
-# Lift the pause by deleting this guard in a landed change.
-echo "after-landing: paused on the user's word; nothing runs" >&2
-exit 2
+#!/usr/bin/env python3
+"""Follow one origin main, attribute its slow-tier reds, and write the landing feed."""
+import argparse
+import copy
+from datetime import datetime, timezone
+import fcntl
+import json
+import math
+import os
+from pathlib import Path
+import re
+import shlex
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+import uuid
 
-set -euo pipefail
-umask 077
+KIT = Path(__file__).resolve().parent
+COORDINATOR = 'debian-16gb-hel1-3'
+SSH = ['ssh', '-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
+       '-o', 'ConnectTimeout=5', '-o', 'ServerAliveInterval=5',
+       '-o', 'ServerAliveCountMax=2', '-o', 'UpdateHostKeys=no',
+       '-o', 'LogLevel=QUIET', 'free@2.29.124.199']
+FEED_PATH = '/home/free/.local/state/agents-land-set/feed.jsonl'
+# Same append program and transport as land-set; records enter only on stdin.
+FEED = '''import fcntl, os, pathlib, stat, sys
+os.umask(0o077)
+p = pathlib.Path(sys.argv[1])
+p.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+os.chmod(p.parent, 0o700)
+fd = os.open(p, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+with os.fdopen(fd, 'w') as out:
+    if not stat.S_ISREG(os.fstat(out.fileno()).st_mode):
+        raise ValueError('invalid feed')
+    os.fchmod(out.fileno(), 0o600)
+    fcntl.flock(out, fcntl.LOCK_EX)
+    out.write(sys.stdin.read())
+    out.flush()
+'''
+SHA = re.compile(r'[0-9a-f]{40}')
+SUMMARY = re.compile(r'^heavy: task \d+ \([^\n)]+\) exit (-?\d+), waited [0-9.]+s, ran ([0-9.]+)s, log (.+)$', re.M)
 
-kit=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
-# The workspace, as land finds it.
-workspace() {
-    local agents
-    agents=$(cd "$kit/../.." && pwd)
-    if [[ $(basename "$agents") == agents ]]; then dirname "$agents"; else echo "$HOME/src/rust"; fi
-}
-root=${DEV_ROOT:-$(workspace)}
-tmp=${DEV_TMP:-$root/tmp}
 
-(($# == 3)) || { echo "usage: after-landing GIT_COMMON_DIR COMMIT BRANCH" >&2; exit 2; }
-common=$1 commit=$2 branch=$3
-repo=$(basename "$(dirname "$common")")
-dir=$tmp/after-landing
-wt=$dir/$repo
-mkdir -p "$dir" "$tmp/director/inbox"
-log=$dir/$repo-$(git --git-dir="$common" rev-parse --short "$commit").log
-subject=$(git --git-dir="$common" log -1 --format=%s "$commit")
+def now():
+    return datetime.now(timezone.utc).isoformat()
 
-report() {
-    printf '%s after-landing: %s %s (%s, "%s") %s; log %s\n' \
-        "$(date -u +%Y-%m-%dT%H:%MZ)" "$repo" "${commit:0:10}" "$branch" "$subject" "$1" "$log" \
-        >>"$tmp/director/inbox/after-landing.md"
-}
 
-# Kept targets hold cache blocks past the cache's limit (cleanup.md,
-# 4). Stay inside this lane's physical worktree; rm does not follow
-# links within target, and must not cross a filesystem mounted below it.
-cleanup_target() (
-    cd -P -- "$wt" || exit 1
-    if [[ $PWD != "$wt" || -L target || ( -e target && ! -d target ) ]]; then
-        echo "after-landing: refusing unsafe target cleanup: $wt/target" >&2
-        exit 1
-    fi
-    rm -rf --one-file-system -- target || exit 1
-    if command -v kache >/dev/null; then kache gc >/dev/null 2>&1 || true; fi
-)
+def stamp(value):
+    result = datetime.fromisoformat(value)
+    if result.tzinfo is None:
+        raise ValueError('time needs a timezone')
+    return result
 
-# One at a time per repository: they share the worktree and its target.
-exec 7>"$dir/$repo.lock"
-flock 7
-{
-    if [[ -d $wt ]]; then
-        git -C "$wt" checkout --quiet --detach "$commit"
-    else
-        git --git-dir="$common" worktree add --quiet --detach "$wt" "$commit"
-    fi
-} >"$log" 2>&1 || { report "could not be checked out"; exit 1; }
 
-bytes=$(wc -c <"$log")
-status=0
-(
-    cd "$wt" || exit 1
-    # This worktree and tier have their own validated policy.
-    unset SKEIN_GATE_POLICY_ID SKEIN_GATE_POLICY_HELPER
-    export SKEIN_GATE_COMMAND=scripts/after-landing.sh
-    HEAVY_LABEL="after-landing $repo" "$kit/heavy" --gate -- scripts/after-landing.sh
-) >>"$log" 2>&1 || status=$?
-if ((status != 0)); then
-    out=$(tail -c "+$((bytes + 1))" "$log")
-    if grep -qE '^heavy: (queued )?task [0-9]+ ' <<<"$out"; then
-        report "failed (exit $status)"
-    else
-        reason=$(sed -n '/^heavy: /{p;q;}' <<<"$out")
-        report "was refused by heavy, so nothing ran: $reason"
-    fi
-fi
-# Descriptor 7 still holds the lane lock through cleanup, including when
-# heavy failed or refused the attempt. Its status takes precedence.
-cleanup_status=0
-cleanup_target >>"$log" 2>&1 || cleanup_status=$?
-if ((cleanup_status != 0)); then
-    report "target cleanup failed (exit $cleanup_status)"
-    ((status != 0)) || status=$cleanup_status
-fi
-exit "$status"
+def seconds(value):
+    number = float(value)
+    if not math.isfinite(number) or number < 0:
+        raise argparse.ArgumentTypeError('seconds must be finite and nonnegative')
+    return number
+
+
+def command(argv, cwd=None, env=None):
+    return subprocess.run([str(arg) for arg in argv], cwd=cwd, env=env,
+                          stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                          stderr=subprocess.STDOUT, text=True, errors='replace')
+
+
+def git(clone, *args):
+    result = command(['git', *args], cwd=clone)
+    if result.returncode:
+        raise RuntimeError(result.stdout.strip())
+    return result.stdout.strip()
+
+
+def read_feed(fixture):
+    path = fixture / 'feed.jsonl' if fixture else Path(FEED_PATH)
+    if fixture or socket.gethostname() == COORDINATOR:
+        try:
+            data = path.read_text()
+        except FileNotFoundError:
+            data = ''
+    else:
+        result = command([*SSH, 'tail -n 5000 ' + FEED_PATH])
+        if result.returncode:
+            raise RuntimeError('feed read failed: ' + result.stdout)
+        data = result.stdout
+    rows = []
+    for line in data.splitlines():
+        try:
+            row = json.loads(line)
+            if isinstance(row, dict):
+                rows.append(row)
+        except ValueError:
+            pass
+    return rows
+
+
+def emit(fixture, token, repo, event, **fields):
+    row = dict(time=now(), kind='tier', event=event, host=socket.gethostname(),
+               token=token, tier=repo, **fields)
+    for key in ('tests', 'flakes'):
+        if key in row and len(row[key]) > 50:
+            row[key + '_more'] = len(row[key]) - 50
+            row[key] = row[key][:50]
+    argv = ['python3', '-I', '-c', FEED,
+            str(fixture / 'feed.jsonl') if fixture else FEED_PATH]
+    if not fixture and socket.gethostname() != COORDINATOR:
+        argv = [*SSH, shlex.join(argv)]
+    result = subprocess.run(argv, input=json.dumps(row) + '\n', text=True,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if result.returncode:
+        raise RuntimeError('feed append failed: ' + result.stderr.strip())
+    return row
+
+
+def sha(value):
+    return isinstance(value, str) and SHA.fullmatch(value) is not None
+
+
+def read_state(path, origin):
+    if not path.exists() and not path.is_symlink():
+        return dict(schema='after-landing-state-v1', origin=origin, last_run=None,
+                    last_green=None, reds={}, fault=None, pending=[])
+    try:
+        state = json.loads(path.read_text())
+        assert state['schema'] == 'after-landing-state-v1' and state['origin'] == origin
+        assert all(state[key] is None or sha(state[key]) for key in ('last_run', 'last_green'))
+        assert isinstance(state['reds'], dict)
+        assert all(isinstance(test, str) and (tip is None or sha(tip))
+                   for test, tip in state['reds'].items())
+        fault = state['fault']
+        if fault is not None:
+            stamp(fault['since'])
+            assert isinstance(fault['reason'], str) and isinstance(fault['posted'], bool)
+            assert fault['commit'] is None or sha(fault['commit'])
+        assert isinstance(state['pending'], list)
+        for item in state['pending']:
+            assert sha(item['commit']) and sha(item['run'])
+            assert item['set'] is None or isinstance(item['set'], str)
+            assert isinstance(item['tests'], list) and all(isinstance(t, str) for t in item['tests'])
+            assert isinstance(item['log'], str) and isinstance(item['excerpt'], str)
+            stamp(item['time'])
+        return state
+    except (OSError, ValueError, KeyError, TypeError, AssertionError) as error:
+        raise ValueError(f'refusing unreadable state or another origin: {path}') from error
+
+
+def save_state(path, state):
+    fd, sibling = tempfile.mkstemp(prefix=path.name + '.', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'w') as out:
+            json.dump(state, out, sort_keys=True)
+            out.write('\n')
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(sibling, path)
+    finally:
+        if os.path.exists(sibling):
+            os.unlink(sibling)
+
+
+def watched(item, rows):
+    for row in rows:
+        if row.get('kind') != 'watch' or row.get('event') != 'watching':
+            continue
+        target = row.get('target')
+        if not isinstance(target, str):
+            continue
+        if target != item['set'] and not (re.fullmatch(r'[0-9a-f]{7,40}', target)
+                                               and item['commit'].startswith(target)):
+            continue
+        try:
+            # Later watches also claim a pending verdict during the grace period.
+            if (stamp(item['time']) - stamp(row['time'])).total_seconds() <= 7200:
+                return True
+        except (KeyError, TypeError, ValueError):
+            continue
+    return False
+
+
+def post(args, base, subject, body):
+    fd, filename = tempfile.mkstemp(prefix='post-', dir=base / 'logs')
+    try:
+        with os.fdopen(fd, 'w') as out:
+            out.write(body + '\n')
+        executable = (os.environ.get('AFTER_LANDING_POST', str(KIT / 'post'))
+                      if args.fixture else str(KIT / 'post'))
+        result = command([executable, 'send', args.director, subject, filename])
+        if result.returncode:
+            raise RuntimeError('post failed: ' + result.stdout)
+    finally:
+        os.unlink(filename)
+
+
+def settle(args, base, state, rows):
+    for item in list(state['pending']):
+        if watched(item, rows):
+            state['pending'].remove(item)
+        elif args.director and (stamp(now()) - stamp(item['time'])).total_seconds() >= args.red_grace:
+            label = item['set'] if item['set'] is not None else 'no set'
+            subject = f"after-landing: {args.repo} red at {item['commit'][:9]} ({label}): {len(item['tests'])} tests"
+            post(args, base, subject, '\n'.join([
+                'tests: ' + ', '.join(item['tests']), 'run: ' + item['run'],
+                'log: ' + item['log'], item['excerpt']]))
+            state['pending'].remove(item)
+        else:
+            continue
+        save_state(base / 'state' / (args.repo + '.json'), state)
+
+
+def post_fault(args, base, state, log):
+    fault = state['fault']
+    if not args.director or not fault or fault['posted']:
+        return
+    age = (stamp(now()) - stamp(fault['since'])).total_seconds()
+    if age >= args.fault_post:
+        subject = f"after-landing: {args.repo} fault for {int(age // 60)} minutes: {fault['reason']}"
+        post(args, base, subject, f"{fault['reason']}\nmain: {fault['commit']}\nlog: {log}")
+        fault['posted'] = True
+
+
+def fault(args, base, state, token, commit, reason, log):
+    previous = state['fault']
+    since = previous['since'] if previous else now()
+    if not previous or previous['reason'] != reason:
+        emit(args.fixture, token, args.repo, 'fault', commit=commit, reason=reason, since=since)
+    state['fault'] = dict(since=since, reason=reason, commit=commit,
+                          posted=previous['posted'] if previous else False)
+    # Persist before delivery so a failed post cannot restart the fault clock.
+    save_state(base / 'state' / (args.repo + '.json'), state)
+    post_fault(args, base, state, log)
+    save_state(base / 'state' / (args.repo + '.json'), state)
+
+
+def tips(clone, previous, main):
+    commits = [main]
+    if previous and previous != main and command(['git', 'merge-base', '--is-ancestor', previous, main], cwd=clone).returncode == 0:
+        history = git(clone, 'rev-list', '--first-parent', '--reverse', f'{previous}..{main}').splitlines()
+        commits = [tip for tip in history if tip == main or
+                   git(clone, 'show', '-s', '--format=%(trailers:key=Gate-Tree,valueonly)', tip)]
+    docs = {tip for tip in commits if git(
+        clone, 'show', '-s', '--format=%(trailers:key=Gate-Result,valueonly)', tip).startswith('none')}
+    return commits, docs
+
+
+def run_tier(args, clone, commit, only, log):
+    git(clone, 'checkout', '--quiet', '--force', '--detach', commit)
+    git(clone, 'clean', '-ffdq')
+    if not (clone / 'scripts/after-landing.sh').is_file():
+        return dict(red=set(), fault=None, excerpt='', ran=0)
+    env = dict(os.environ, HEAVY_CLASS='background', HEAVY_LABEL='after-landing ' + args.repo)
+    env.pop('CARGO_TARGET_DIR', None)
+    executable = (os.environ.get('AFTER_LANDING_HEAVY', str(KIT / 'heavy'))
+                  if args.fixture else str(KIT / 'heavy'))
+    argv = [executable, '--', 'scripts/after-landing.sh']
+    for test in sorted(only - {'*'}):
+        argv += ['--only', test]
+    result = command(argv, cwd=clone, env=env)
+    with log.open('a') as out:
+        out.write(f'\ncommit {commit}; only {sorted(only)}\n' + result.stdout)
+    matches = list(SUMMARY.finditer(result.stdout))
+    if not matches:
+        reason = next((line for line in result.stdout.splitlines() if line.startswith('heavy: ')),
+                      'heavy: no task result')
+        return dict(fault=reason, red=set(), excerpt='', ran=0)
+    summary = matches[-1]
+    # The heavy tail is not the payload: contract lines can be outside its tail.
+    payload = Path(summary[3]).read_text(errors='replace')
+    with log.open('a') as out:
+        out.write(payload)
+    failed = set(re.findall(r'^after-landing: failed (.+)$', payload, re.M))
+    lacks = sorted(set(re.findall(r'^after-landing: lacks (.+)$', payload, re.M)))
+    reason = 'lacks ' + ', '.join(lacks) if result.returncode == 3 and lacks else None
+    red = (failed or {'*'}) if result.returncode and not reason else set()
+    return dict(red=red, fault=reason, ran=float(summary[2]),
+                excerpt='\n'.join(payload.splitlines()[-60:])[-8000:])
+
+
+def pass_once(args, base, clone, state):
+    state_path = base / 'state' / (args.repo + '.json')
+    rows = read_feed(args.fixture)
+    settle(args, base, state, rows)
+    token = uuid.uuid4().hex
+    remote = command(['git', 'ls-remote', args.origin, 'refs/heads/main'])
+    fields = remote.stdout.split()
+    main = fields[0] if not remote.returncode and fields and sha(fields[0]) else None
+    log = base / 'logs' / f'{args.repo}-{(main or "unknown")[:9]}-{token[:8]}.log'
+    if main is None:
+        log.write_text(remote.stdout)
+        fault(args, base, state, token, None, 'origin out of reach', log)
+        return
+    if main == state['last_run'] and state['fault'] is None:
+        return
+    if not clone.exists():
+        result = command(['git', 'clone', '--quiet', '--no-checkout', '--', args.origin, clone])
+        if result.returncode:
+            log.write_text(result.stdout)
+            fault(args, base, state, token, main, 'origin out of reach', log)
+            return
+    result = command(['git', 'fetch', '--quiet', 'origin', 'main'], cwd=clone)
+    log.write_text(result.stdout)
+    if result.returncode or command(['git', 'cat-file', '-e', main + '^{commit}'], cwd=clone).returncode:
+        fault(args, base, state, token, main, 'origin out of reach', log)
+        return
+    landings, docs = tips(clone, state['last_run'], main)
+    emit(args.fixture, token, args.repo, 'running', commit=main, **{'from': state['last_run']})
+    ran = 0
+
+    def run(commit, only):
+        nonlocal ran
+        result = run_tier(args, clone, commit, only, log)
+        ran += result['ran']
+        if result['fault']:
+            fault(args, base, state, token, main, result['fault'], log)
+        return result
+
+    first = run(main, set())
+    if first['fault']:
+        return
+    confirmed, flakes = set(), set()
+    if first['red']:
+        retry = run(main, first['red'])
+        if retry['fault']:
+            return
+        if retry['red']:
+            confirmed = (first['red'] if '*' in first['red'] or '*' in retry['red']
+                         else first['red'] & retry['red'])
+        flakes = first['red'] - confirmed
+    reds = {test: tip for test, tip in state['reds'].items() if test in confirmed}
+    new = confirmed - reds.keys()
+    # Docs cannot own a red. If only a docs tip is known, retain an unattributed tier red.
+    candidates = [tip for tip in landings if tip not in docs]
+    intervals = {test: [0, len(candidates) - 1] for test in new}
+    excerpts = {test: first['excerpt'] for test in new}
+    while any(lo < hi for lo, hi in intervals.values()):
+        test = next(test for test, (lo, hi) in intervals.items() if lo < hi)
+        lo, hi = intervals[test]
+        mid = (lo + hi) // 2
+        group = {name for name, (left, right) in intervals.items()
+                 if left < right and (left + right) // 2 == mid}
+        probe = run(candidates[mid], group)
+        if probe['fault']:
+            return
+        for name in group:
+            if name in probe['red'] or '*' in probe['red']:
+                intervals[name][1] = mid
+                excerpts[name] = probe['excerpt']
+            else:
+                intervals[name][0] = mid + 1
+    for test, (lo, _) in intervals.items():
+        reds[test] = candidates[lo] if candidates else None
+    # Restore M after probes; the warm target remains ignored throughout.
+    git(clone, 'checkout', '--quiet', '--force', '--detach', main)
+    flakes = sorted(flakes)
+    previous_state = copy.deepcopy(state)
+    for tip in landings:
+        tests = sorted(test for test in new if reds[test] == tip)
+        label = next((row.get('set') for row in reversed(rows) if row.get('event') == 'landed'
+                      and row.get('repo') == args.repo and row.get('commit') == tip), None)
+        fields = dict(commit=tip, run=main, verdict='red' if tests else 'cleared',
+                      tests=tests, flakes=flakes, set=label, log=str(log))
+        if tests:
+            fields['excerpt'] = excerpts[tests[0]]
+        row = emit(args.fixture, token, args.repo, 'verdict', **fields)
+        if tests and not watched(row, rows):
+            state['pending'].append(dict(commit=tip, set=label, time=row['time'], tests=tests,
+                                         run=main, log=str(log), excerpt=fields['excerpt']))
+    state.update(last_run=main, reds=reds, fault=None)
+    if not reds:
+        state['last_green'] = main
+    save_state(state_path, state)
+    grouped = {}
+    for test, tip in sorted(reds.items()):
+        grouped.setdefault(tip, []).append(test)
+    groups = []
+    for tip, tests in grouped.items():
+        group = dict(landing=tip, tests=tests[:50])
+        if len(tests) > 50:
+            group['tests_more'] = len(tests) - 50
+        groups.append(group)
+    try:
+        emit(args.fixture, token, args.repo, 'tier', commit=main, state='red' if reds else 'green',
+             last_green=state['last_green'], reds=groups, flakes=flakes, ran_s=ran, log=str(log))
+    except Exception:
+        # A failed final append must not make the restart skip this main.
+        # Earlier verdicts can repeat on retry, with a new run token.
+        save_state(state_path, previous_state)
+        raise
+
+
+def main():
+    # Going live, later and on the director's word, removes only this check.
+    if 'AFTER_LANDING_FIXTURE' not in os.environ:
+        print("after-landing: paused on the user's word; nothing runs", file=sys.stderr)
+        return 2
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest='command', required=True)
+    follow = sub.add_parser('follow')
+    follow.add_argument('repo')
+    follow.add_argument('--origin')
+    follow.add_argument('--director')
+    follow.add_argument('--poll', type=seconds, default=60)
+    follow.add_argument('--once', action='store_true')
+    args = parser.parse_args()
+    if not re.fullmatch(r'[a-z][a-z0-9-]*', args.repo):
+        parser.error('REPO must match [a-z][a-z0-9-]*')
+    args.origin = args.origin or f'git@github.com:fabrig-ai/{args.repo}.git'
+    fixture = os.environ.get('AFTER_LANDING_FIXTURE')
+    args.fixture = Path(fixture).resolve() if fixture else None
+    if fixture is not None and (not fixture or not args.fixture.is_dir()):
+        parser.error('AFTER_LANDING_FIXTURE must be an existing directory')
+    agents = KIT.parent.parent
+    root = Path(os.environ.get('DEV_ROOT', str(agents.parent if agents.name == 'agents'
+                                             else Path.home() / 'src/rust')))
+    base = args.fixture or Path(os.environ.get('DEV_TMP', str(root / 'tmp'))) / 'after-landing'
+    args.fault_post = seconds(os.environ.get('AFTER_LANDING_FAULT_POST', '900'))
+    args.red_grace = seconds(os.environ.get('AFTER_LANDING_RED_GRACE', '900'))
+    state_path = base / 'state' / (args.repo + '.json')
+    clone = base / 'runner' / args.repo
+    try:
+        # Refuse state and alien directories without replacing either.
+        state = read_state(state_path, args.origin)
+        if clone.exists() or clone.is_symlink():
+            remote = command(['git', 'config', '--get', 'remote.origin.url'], cwd=clone) if clone.is_dir() else None
+            if (clone.is_symlink() or not (clone / '.git').is_dir() or remote is None
+                    or remote.returncode or remote.stdout.strip() != args.origin):
+                raise ValueError(f'refusing runner that is not a clone of {args.origin}: {clone}')
+    except (ValueError, RuntimeError) as error:
+        parser.error(str(error))
+    for name in ('runner', 'state', 'logs', 'locks'):
+        (base / name).mkdir(parents=True, exist_ok=True)
+    with (base / 'locks' / (args.repo + '.lock')).open('a') as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            parser.error(f'another follower holds {args.repo}')
+        # State may have advanced between validation and acquiring the lock.
+        state = read_state(state_path, args.origin)
+        while True:
+            pass_once(args, base, clone, state)
+            if args.once:
+                return 0
+            time.sleep(args.poll)
+
+
+if __name__ == '__main__':
+    os.umask(0o077)
+    try:
+        sys.exit(main())
+    except Exception as error:
+        print(f'after-landing: {error}', file=sys.stderr)
+        sys.exit(1)

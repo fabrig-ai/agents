@@ -80,6 +80,7 @@ suite shellcheck shellcheck_tools
 suite test-post scripts/devel/test-post
 suite test-land-set scripts/devel/test-land-set
 suite test-landings scripts/devel/test-landings
+suite test-after-landing scripts/devel/test-after-landing
 suite test-codex-run scripts/devel/test-codex-run
 suite test-record scripts/devel/test-record
 suite test-tidy scripts/devel/test-tidy
