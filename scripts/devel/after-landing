@@ -245,13 +245,15 @@ def fault(args, base, state, token, commit, reason, log):
 
 def tips(clone, previous, main):
     commits = [main]
+    baseline = True
     if previous and previous != main and command(['git', 'merge-base', '--is-ancestor', previous, main], cwd=clone).returncode == 0:
+        baseline = False
         history = git(clone, 'rev-list', '--first-parent', '--reverse', f'{previous}..{main}').splitlines()
         commits = [tip for tip in history if tip == main or
                    git(clone, 'show', '-s', '--format=%(trailers:key=Gate-Tree,valueonly)', tip)]
     docs = {tip for tip in commits if git(
         clone, 'show', '-s', '--format=%(trailers:key=Gate-Result,valueonly)', tip).startswith('none')}
-    return commits, docs
+    return commits, docs, baseline
 
 
 def run_tier(args, clone, commit, only, log):
@@ -317,7 +319,8 @@ def pass_once(args, base, clone, state):
     if result.returncode or command(['git', 'cat-file', '-e', main + '^{commit}'], cwd=clone).returncode:
         fault(args, base, state, token, main, 'origin out of reach', log)
         return
-    landings, docs = tips(clone, state['last_run'], main)
+    landings, docs, baseline = tips(clone, state['last_run'], main)
+    baseline_fields = {'baseline': True} if baseline else {}
     emit(args.fixture, token, args.repo, 'running', commit=main, **{'from': state['last_run']})
     ran = 0
 
@@ -343,8 +346,8 @@ def pass_once(args, base, clone, state):
         flakes = first['red'] - confirmed
     reds = {test: tip for test, tip in state['reds'].items() if test in confirmed}
     new = confirmed - reds.keys()
-    # Docs cannot own a red. If only a docs tip is known, retain an unattributed tier red.
-    candidates = [tip for tip in landings if tip not in docs]
+    # A baseline has no range to bisect; docs cannot own a red either.
+    candidates = [] if baseline else [tip for tip in landings if tip not in docs]
     intervals = {test: [0, len(candidates) - 1] for test in new}
     excerpts = {test: retry['excerpt'] for test in new}
     while any(lo < hi for lo, hi in intervals.values()):
@@ -373,7 +376,7 @@ def pass_once(args, base, clone, state):
         label = next((row.get('set') for row in reversed(rows) if row.get('event') == 'landed'
                       and row.get('repo') == args.repo and row.get('commit') == tip), None)
         fields = dict(commit=tip, run=main, verdict='red' if tests else 'cleared',
-                      tests=tests, flakes=flakes, landing_set=label, log=str(log))
+                      tests=tests, flakes=flakes, landing_set=label, log=str(log), **baseline_fields)
         if tests:
             fields['excerpt'] = excerpts[tests[0]]
         row = emit(args.fixture, token, args.repo, 'verdict', **fields)
@@ -395,7 +398,8 @@ def pass_once(args, base, clone, state):
         groups.append(group)
     try:
         emit(args.fixture, token, args.repo, 'tier', commit=main, state='red' if reds else 'green',
-             last_green=state['last_green'], reds=groups, flakes=flakes, ran_s=ran, log=str(log))
+             last_green=state['last_green'], reds=groups, flakes=flakes, ran_s=ran, log=str(log),
+             **baseline_fields)
     except Exception:
         # A failed final append must not make the restart skip this main.
         # Earlier verdicts can repeat on retry, with a new run token.

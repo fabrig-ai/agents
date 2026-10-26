@@ -413,7 +413,7 @@ def tiers_shown(lab):
     assert lab.run('--last', '0').stdout.splitlines() == [
         'in flight: none', 'tiers:',
         '  skein: green at 1a2b3c4d5 (10-26 05:12Z)',
-        '  hearth: fault since 05:02Z: lacks chromium; red at aaaaaaaaa (10-26 05:01Z): 1 tests',
+        '  hearth: fault since 05:02Z: lacks chromium; red at aaaaaaaaa (10-26 05:01Z): 1 tests, 1 standing since the first run',
         '  jig: running on 9f8e7d6c5 since 05:20Z; green at 4d5e6f7a8 (10-26 05:01Z)',
         '  temper: red at 3c4d5e6f7 (10-26 05:31Z): 2 tests, first red 0a1b2c3d4 (case-5/m3); green at 7e8f9a0b1 (10-26 05:00Z)']
     assert lab.run('report').stdout == baseline
@@ -429,7 +429,7 @@ def tiers_shown(lab):
     assert lines[-2].startswith('  alpha: fault') and lines[-1].startswith('  zebra: running'), lines
     lab.append(tier_record(minute=22, state='red', last_green=None,
                            reds=[dict(landing=None, tests=['first'], tests_more=50)]))
-    assert '51 tests' in lab.run('--last', '0').stdout
+    assert '51 tests, 51 standing since the first run' in lab.run('--last', '0').stdout
     # Verdict publication can be reversed; the landing timestamps decide oldest.
     lab.append(record(event='landed', repo='jig', commit='b' * 40, minute=1),
                record(event='landed', repo='jig', commit='c' * 40, minute=2),
@@ -438,8 +438,9 @@ def tiers_shown(lab):
                tier_record('verdict', commit='b' * 40, minute=25, landing_set='earlier/m1'),
                tier_record(minute=26, state='red', last_green=None,
                            reds=[dict(landing='c' * 40, tests=['later']),
-                                 dict(landing='b' * 40, tests=['earlier'])]))
-    assert '2 tests, first red bbbbbbbbb (earlier/m1)' in lab.run('--last', '0').stdout
+                                 dict(landing='b' * 40, tests=['earlier']),
+                                 dict(landing=None, tests=['baseline'], tests_more=14)]))
+    assert '17 tests, 15 standing since the first run, first red bbbbbbbbb (earlier/m1)' in lab.run('--last', '0').stdout
 
 
 def landing_set_isolation(lab):
@@ -453,13 +454,13 @@ def landing_set_isolation(lab):
 
 def cleared_set(lab):
     landed_set(lab)
-    lab.append(tier_record('verdict'),
-               tier_record('verdict', tier='temper', commit='b' * 40,
+    lab.append(tier_record('verdict', baseline=False),
+               tier_record('verdict', tier='temper', commit='b' * 40, baseline=True,
                            flakes=['process temper::process tests::slow']))
     out = lab.run('wait', '--cleared', 'fixture/m1', '--timeout', '0').stdout
     assert out.splitlines() == [
         '10-26 05:00Z jig aaaaaaaaa cleared by run aaaaaaaaa',
-        '10-26 05:00Z temper bbbbbbbbb cleared by run bbbbbbbbb; flakes: process temper::process tests::slow'], out
+        '10-26 05:00Z temper bbbbbbbbb cleared by run bbbbbbbbb; flakes: process temper::process tests::slow; baseline'], out
     # A newer red of the same landing wins, but unrelated tiers do not.
     lab.append(tier_record('verdict', tier='other', verdict='red', tests=['unrelated'], excerpt='x'),
                tier_record('verdict', minute=1, verdict='red', tests=['regression'], excerpt='failed'))
@@ -570,6 +571,8 @@ def malformed_runner_records(lab):
                tier_record('verdict', verdict='red'), tier_record('running', **{'from': 1}),
                tier_record('fault', since='bad'), tier_record(time='2026-10-26T05:00:00'),
                tier_record(tests_more=True), tier_record(flakes_more=-1))
+    for value in (None, 0, 1, 'true', [], {}):
+        lab.append(tier_record(baseline=value), tier_record('verdict', baseline=value))
     output = lab.run().stdout
     assert output == baseline, output
     assert lab.run('report').stdout == 'no results\n\nno set runs\n'

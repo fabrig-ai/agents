@@ -155,6 +155,8 @@ def runner_record(row):
         return 'from' in row and nullable(row['from'])
     if event not in ('tier', 'verdict') or not strings(row.get('flakes')) or not text(row.get('log')):
         return False
+    if 'baseline' in row and not isinstance(row['baseline'], bool):
+        return False
     if event == 'verdict':
         return (text(row.get('run')) and row.get('verdict') in ('cleared', 'red')
                 and strings(row.get('tests')) and 'landing_set' in row and nullable(row['landing_set'])
@@ -209,6 +211,10 @@ def show_tiers(records, set_records):
                 tests = sum(len(red['tests']) + red.get('tests_more', 0)
                             for red in state['reds']) + state.get('tests_more', 0)
                 line += f": {tests} tests"
+                standing = sum(len(red['tests']) + red.get('tests_more', 0)
+                               for red in state['reds'] if red['landing'] is None)
+                if standing:
+                    line += f", {standing} standing since the first run"
                 reds = [red['landing'] for red in state['reds'] if red['landing'] is not None]
                 verdicts = [r for r in mine if r['event'] == 'verdict' and r['commit'] in reds]
                 # A verdict can be reissued or published out of landing order.
@@ -268,6 +274,8 @@ def verdict_line(row):
         line += '; flakes: ' + '; '.join(row['flakes'])
     if row.get('flakes_more'):
         line += f"; {row['flakes_more']} more flakes"
+    if row.get('baseline'):
+        line += '; baseline'
     print(line)
     if row['verdict'] == 'red':
         for line in row['excerpt'].splitlines():

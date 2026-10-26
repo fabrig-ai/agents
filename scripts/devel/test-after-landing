@@ -220,6 +220,7 @@ def polls(lab):
     assert [r['event'] for r in records] == ['running', 'verdict', 'tier']
     assert records[0]['commit'] == head and records[0]['from'] is None
     assert lab.verdict(head)['verdict'] == 'cleared' and records[-1]['state'] == 'green'
+    assert lab.verdict(head)['baseline'] is True and records[-1]['baseline'] is True
     assert all('set' not in r for r in records)
     assert len({r['token'] for r in records}) == 1
     first = lab.calls()[0]
@@ -290,6 +291,43 @@ def red(lab):
     assert len(lab.calls()) == 6 and lab.posts() == []
 
 
+def baseline(lab):
+    head = lab.land(reds=['t1'], flaky=['flake'])
+    lab.push()
+    env = dict(lab.env, AFTER_LANDING_RED_GRACE='0')
+    lab.run(director=True, env=env)
+    verdict = lab.verdict(head)
+    assert verdict['verdict'] == 'cleared' and verdict['tests'] == []
+    assert verdict['baseline'] is True and verdict['flakes'] == ['flake']
+    tier = lab.records('tier')[-1]
+    assert tier['state'] == 'red' and tier['baseline'] is True
+    assert tier['reds'] == [dict(landing=None, tests=['t1'])]
+    assert tier['flakes'] == ['flake'] and tier['last_green'] is None
+    assert lab.state()['reds'] == {'t1': None} and lab.state()['pending'] == []
+    assert all('baseline' not in row for row in lab.records() if row['event'] not in ('verdict', 'tier'))
+    assert len(lab.calls()) == 2 and all(call['head'] == head for call in lab.calls())
+    lab.run(director=True, env=env)
+    assert lab.posts() == [] and lab.state()['pending'] == []
+    one = lab.land(reds=['t1', 't2'], flaky=[])
+    lab.push()
+    lab.run()
+    verdict = lab.verdict(one)
+    assert verdict['verdict'] == 'red' and verdict['tests'] == ['t2'] and 'baseline' not in verdict
+    tier = lab.records('tier')[-1]
+    assert 'baseline' not in tier
+    assert tier['reds'] == [dict(landing=None, tests=['t1']), dict(landing=one, tests=['t2'])]
+    assert lab.state()['reds'] == {'t1': None, 't2': one}
+    two = lab.land(reds=[])
+    lab.push()
+    lab.run()
+    verdict = lab.verdict(two)
+    assert verdict['verdict'] == 'cleared' and verdict['tests'] == [] and 'baseline' not in verdict
+    tier = lab.records('tier')[-1]
+    assert tier['state'] == 'green' and tier['reds'] == [] and 'baseline' not in tier
+    assert lab.state()['reds'] == {} and lab.state()['last_green'] == two
+    assert len(lab.calls()) == 5 and lab.posts() == []
+
+
 def bisect(lab):
     lab.green()
     one = lab.land()
@@ -309,6 +347,7 @@ def bisect(lab):
 
 
 def already_red(lab):
+    lab.green()
     one = lab.land(reds=['t1'])
     lab.push()
     lab.run()
@@ -318,7 +357,7 @@ def already_red(lab):
     assert lab.verdict(two)['tests'] == ['t2']
     assert lab.state()['reds'] == {'t1': one, 't2': two}
     assert lab.records('tier')[-1]['reds'] == [dict(landing=one, tests=['t1']), dict(landing=two, tests=['t2'])]
-    assert len(lab.calls()) == 4 and lab.posts() == []
+    assert len(lab.calls()) == 5 and lab.posts() == []
 
 
 def fault(lab):
@@ -371,6 +410,7 @@ def fault(lab):
 
 
 def unwatched_red(lab):
+    lab.green()
     tip = lab.land(reds=['t1'], landed=True)
     lab.push()
     env = dict(lab.env, AFTER_LANDING_RED_GRACE='0')
@@ -500,6 +540,7 @@ def multi_bisect(lab):
 
 
 def limits(lab):
+    lab.green()
     tests = [f't{i:02}' for i in range(55)]
     tip = lab.land(reds=tests)
     lab.push()
@@ -552,6 +593,7 @@ def unnamed(lab):
 
 
 def pending_delivery(lab):
+    lab.green()
     tip = lab.land(reds=['t1'], landed=True)
     lab.push()
     lab.run()  # Queue even when there is no director yet.
@@ -579,6 +621,7 @@ def pending_delivery(lab):
 
 
 def stale_watch(lab):
+    lab.green()
     tip = lab.land(reds=['t1'], landed=True)
     lab.push()
     old = datetime.now(timezone.utc) - timedelta(hours=3)
@@ -592,16 +635,23 @@ def stale_watch(lab):
 def history_reset(lab):
     first = lab.green()
     # A push around the landing tools is still the main tip.
-    tip = lab.land(trailer=False)
+    tip = lab.land(reds=['standing'], trailer=False)
     lab.push()
     lab.run()
-    assert lab.verdict(tip)['verdict'] == 'cleared'
+    assert lab.verdict(tip)['verdict'] == 'red' and lab.verdict(tip)['tests'] == ['standing']
     lab.git(lab.work, 'checkout', '--quiet', '--orphan', 'replacement')
-    replacement = lab.land(reds=['t1'])
+    replacement = lab.land(reds=['standing', 't1'])
     lab.git(lab.work, 'push', '--quiet', '--force', 'origin', 'HEAD:main')
     lab.run()
     assert lab.state()['last_run'] == replacement
-    assert lab.state()['reds'] == {'t1': replacement}
+    assert lab.state()['reds'] == {'standing': tip, 't1': None}
+    verdict = lab.verdict(replacement)
+    assert verdict['verdict'] == 'cleared' and verdict['tests'] == [] and verdict['baseline'] is True
+    tier = lab.records('tier')[-1]
+    assert tier['baseline'] is True and tier['reds'] == [
+        dict(landing=tip, tests=['standing']), dict(landing=None, tests=['t1'])]
+    assert len(lab.calls()) == 5 and lab.posts() == []
+    assert [item['commit'] for item in lab.state()['pending']] == [tip]
     assert [r['commit'] for r in lab.records('verdict')] == [first, tip, replacement]
 
 
@@ -642,8 +692,8 @@ sys.exit(subprocess.run([sys.executable, *sys.argv[1:]], input=payload, text=Tru
     assert len(lab.state()['pending']) == 1
 
 
-CASES = (polls, no_tier, flake, red, bisect, already_red, fault, unwatched_red,
-         meets_landings, paused, not_runner_machine, one_follower, refusals, multi_bisect, limits,
+CASES = (polls, no_tier, flake, red, bisect, baseline, already_red, fault, unwatched_red,
+         meets_landings, not_runner_machine, one_follower, refusals, multi_bisect, limits,
          nested_faults, unnamed, pending_delivery, stale_watch, history_reset,
          trailers, feed_failure)
 
