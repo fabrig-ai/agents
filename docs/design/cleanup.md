@@ -109,9 +109,11 @@ every step.
   rebase keeps and `land`'s trailers leave alone), and it adds nothing
   to `main`: merging it into `origin/main` (`git merge-tree
   --write-tree`) leaves `origin/main`'s tree, or each commit's patch-id
-  equals its twin's. Names alone are not enough: an amend keeps the
-  author date and the subject, so a fix amended after its landing has a
-  twin and differs. A branch whose commits all have twins but whose
+  equals its twin's. Both leave out `Cargo.lock`, which a rebase takes
+  from `main` and regenerates (owners.md 4.5): on 10-26 it alone made 49
+  of hel8's copies look different. Names alone are not enough: an
+  amend keeps the author date and the subject, so a fix amended after
+  its landing has a twin and differs. A branch whose commits all have twins but whose
   content differs is kept, and reported.
 - **Marked:** `land` marked it landed, and its tip is on `origin/main`.
 
@@ -122,10 +124,12 @@ new work. There is no keep list: a landed branch's commits are on
 1. **GitHub's landed branches,** of REPO or of each repository:
    deleted with `git push origin :NAME`. One already gone is done.
 2. **Local landed branches,** unless a worktree has one checked out.
-3. **Landed worktrees:** a worktree, outside section 3's tools'
-   directories, whose branch is landed, or whose detached HEAD is on
+3. **Landed worktrees:** a worktree under `tmp/`, outside section 3's
+   tools' directories, whose branch is landed, or whose detached HEAD is on
    `origin/main`, with no work on no remote: removed (`git worktree
-   remove`, its `target/` inside it with it), then its branch.
+   remove`, its `target/` inside it with it), then its branch. A
+   worktree elsewhere is a session's or the user's (`~/.claude/jobs/`,
+   a repository's `.claude/worktrees/`), and stays, unreported.
 4. **Ended missions' directories:** `owners/<m>/`, with its milestones'
    `owners/<m>-m<N>/`, whose README in the record says `ended` or
    `abandoned`, once no worktree in it holds work on no remote: its
@@ -135,10 +139,13 @@ new work. There is no keep list: a landed branch's commits are on
 5. **Old directories:** the director's `tasks/<t>/` and `codex-run`'s
    run directories a week after their last change (the newest mtime
    inside), on step 4's condition. The `runs.tsv` row stays.
-6. **Scripts** in `tmp/` (section 2: a name ending `.sh`, `.bash`,
-   `.py`, `.pl` or `.rb`, or a file starting with `#!`), outside any
-   Git working tree or repository (a worktree, a clone, a bare
-   repository) and section 3's tools' directories. A copied kit kept as
+6. **Scripts** in `tmp/owners/` and `tmp/director/` (section 2: a
+   name ending `.sh`, `.bash`, `.py`, `.pl` or `.rb`, or a file
+   starting with `#!`), outside any Git working tree or repository (a
+   worktree, a clone, a bare repository), a Cargo target (a directory
+   holding `CACHEDIR.TAG`) and a Cargo home's `registry/` and `git/`.
+   An entry outside section 3's table is step 8's, whole: on 10-26 a
+   Cargo registry copy in one held 2,995 such files. A copied kit kept as
    evidence is a clone, so its scripts stay with it.
 7. **Stale worktree entries:** `git worktree prune` in each repository
    it touched.
@@ -225,15 +232,17 @@ new work. There is no keep list: a landed branch's commits are on
    workspace's `AGENTS.md`, implementer.md 3 and 4, owners.md 2 and 5,
    qa.md 1, director.md 6 and 12, infra.md 1, README.md 4, records.md 6
    and 7.
-2. **Infra builds `tidy`** in `scripts/devel/`, with its fixtures,
+2. **`tidy` is built,** 10-26, in `scripts/devel/`, with its fixtures,
    `test-tidy`, on scratch repositories and a scratch `tmp/` (infra.md
    2), `land`'s and `land-set`'s mark, target and call, and `record`'s
    check and call (sections 4 and 5). Two tasks, side by side: `tidy`
    and `test-tidy`; the mark, the calls and `record`'s check, with
    their fixtures. Sections 4 and 5 were completed for them on 10-25:
    the copy's content check, the worktree rule without the mark, the
-   output and exits.
-3. **The roles' edits for the tools** land with them: owners.md 4.5
+   output and exits; and on 10-26 after a dry run on hel8: `Cargo.lock`
+   out of the content check, worktrees and scripts only where agents
+   write.
+3. **The roles' edits for the tools** landed with them: owners.md 4.5
    (`land` clears the target, `tidy` the rest) and 6 (`record`'s
    check), director.md 7 (`tidy` in the check), records.md 7.
 4. **`tidy`'s first run** on each machine finishes section 6's sweep.

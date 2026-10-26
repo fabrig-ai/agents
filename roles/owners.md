@@ -494,8 +494,9 @@ failed landing; two missions whose sets keep breaking each other.
 
 - **Worktrees** under `tmp/owners/<m>/m<N>/`, the milestone's, so that
   `record runs` finds their builds (records.md 5), one per implementer,
-  never a primary checkout. A worktree's `target/` is cleared when done
-  with, as soon as its branch lands: the build cache's limit leaves out
+  never a primary checkout. `land` clears a worktree's `target/` as
+  soon as its branch lands, and `tidy` removes the worktree at its next
+  run ([cleanup.md](../docs/design/cleanup.md) 4): the build cache's limit leaves out
   the entries a target shares blocks with (cloned or linked, since
   evicting them frees nothing), so a kept target holds its entries on
   the disk past the limit until it goes and the cache is next collected.
@@ -654,6 +655,10 @@ record, in at most half a page:
 - what went well and what didn't, in this process.
 
 It commits the note with the README's `state`, `ended` and `end` set,
-points its parent to it, and the owner's session ends. The director
+points its parent to it, and the owner's session ends. `record commit`
+refuses the note while a worktree in the mission's directory holds work
+on no remote, naming each: push it and name it under what is left, or
+delete it. Then `tidy` deletes the directory
+([cleanup.md](../docs/design/cleanup.md) 5). The director
 compares the notes across owners, to judge what in this file pays and
 what to change.

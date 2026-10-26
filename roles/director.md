@@ -352,7 +352,13 @@ is mechanical, and Codex reads what needs reading.
 6. **Record:** rewrite `STATUS.md`, add the decisions, commit them
    with `record commit`, and make sure the cron, the watcher and the
    waiter run.
-7. **Push the user** only for what needs them.
+7. **Tidy:** `~/src/rust/agents/scripts/devel/tidy` on each machine
+   with no landing since the last check
+   ([cleanup.md](../docs/design/cleanup.md) 5), and a decision on each
+   line of an exit 1: a branch kept as differing, a mission's work on
+   no remote, a directory with no README, an entry outside cleanup.md
+   3.
+8. **Push the user** only for what needs them.
 
 ## 8. The user
 

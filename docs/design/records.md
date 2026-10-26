@@ -260,9 +260,9 @@ What `tmp/` may hold, and how it goes, is [cleanup.md](cleanup.md).
 - **An owner's `tmp/owners/<m>/`:** `notes.md` (its state, its open
   questions and its footprint: no decisions, no plan), `handover.md`,
   its implementers' tasks and reports, `codex/`, the worktrees and the
-  evidence. None of it is record: the directory may go once
-  `closing.md` is committed and its branches have landed or been
-  pushed.
+  evidence. None of it is record: `tidy` deletes the directory once
+  `closing.md` is committed and its work is on a remote
+  ([cleanup.md](cleanup.md) 4 and 5).
 - **The director's and product owners' `tmp/director/`:** their
   notes, messages, handovers and helper tasks, and no scripts
   ([cleanup.md](cleanup.md) 2). `direction.md`,
