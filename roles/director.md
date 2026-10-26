@@ -278,6 +278,9 @@ machine's `tmp/post/` (section 5).
   fails gates count as on it) goes to the owner of what it names, or
   its designer. Any other goes to `director/backlog.md`, where a later
   mission takes it, chosen from the direction.
+- **QA's findings** wait in `qa findings` until the director routes
+  each, by the rule above, with `qa triage`, at its check
+  ([qa-flow.md](../docs/design/qa-flow.md) 6).
 - **Footprints.** It orders the owners whose footprints overlap: who
   lands first. The second to land rebases, and keeps the other's
   values. A diff to a file that another owner holds goes, through the
@@ -332,7 +335,10 @@ is mechanical, and Codex reads what needs reading.
    hour gets a fix at once, never a watch: on 10-23 a spend experiment
    enrolled 0 of 56 runs in 2.5 hours, with the zero reported after one.
 5. **Next:** which work in `director/direction.md` gets an owner, and
-   where (section 4). Act.
+   where (section 4). Act. Then QA's choice: `qa candidates` and `qa
+   passes`, and `qa decide` on each marked commit, `run` or `backlog`,
+   from the user's QA priorities in `direction.md` and the passes'
+   capacity and spend ([qa-flow.md](../docs/design/qa-flow.md) 3).
 6. **Record:** rewrite `STATUS.md` and `director/waiting.md`, add the
    decisions, commit them
    with `record commit`, and make sure the cron, the watcher and the
