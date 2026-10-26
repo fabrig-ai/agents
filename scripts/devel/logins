@@ -1,5 +1,7 @@
 #!/usr/bin/env -S python3 -S
-"""logins add NAME FILE
+"""A login is a private file or a program's configuration directory.
+
+logins add NAME PATH
 logins take NAME --as HOLDER [--note TEXT] [--wait SECONDS]
 logins give NAME --as HOLDER
 logins list [NAME]
@@ -66,13 +68,18 @@ def login_check(path):
         return 'missing'
     if stat.S_ISLNK(info.st_mode):
         return 'a link'
-    if not stat.S_ISREG(info.st_mode):
-        return 'not a regular file'
+    directory = stat.S_ISDIR(info.st_mode)
+    if not stat.S_ISREG(info.st_mode) and not directory:
+        return 'not a regular file or directory'
     if info.st_uid != os.geteuid():
         return 'not ours'
-    if stat.S_IMODE(info.st_mode) != 0o600:
+    if stat.S_IMODE(info.st_mode) != (0o700 if directory else 0o600):
         return 'not private'
-    if info.st_size == 0:
+    if directory:
+        with os.scandir(path) as entries:
+            if next(entries, None) is None:
+                return 'empty'
+    elif info.st_size == 0:
         return 'empty'
     return None
 
@@ -232,7 +239,7 @@ class Login:
         current = self.read('holder.json', None)
         waiting = self.read('waiting.json', [])
         now = utc(timestamp())
-        at_rest = self.path.exists()
+        at_rest = login_check(self.path) is None
         state = 'at rest' if at_rest else 'missing'
         held = elapsed(now, current['since']) if current else 0
         if current:
@@ -273,7 +280,7 @@ def main():
     sub = parser.add_subparsers(dest='command', required=True)
     add = sub.add_parser('add')
     add.add_argument('name')
-    add.add_argument('file', type=Path)
+    add.add_argument('path', type=Path, help="private file or program's configuration directory")
     take = sub.add_parser('take')
     take.add_argument('name')
     take.add_argument('--as', dest='holder', required=True)
@@ -299,10 +306,10 @@ def main():
                 with workspace.locked(name, readonly=True) as login:
                     login.show()
         elif args.command == 'add':
-            reason = login_check(args.file)
-            need(reason is None, f'{args.file}: {reason}', 1)
+            reason = login_check(args.path)
+            need(reason is None, f'{args.path}: {reason}', 1)
             with workspace.locked(args.name, create=True) as login:
-                login.add(args.file)
+                login.add(args.path)
         elif args.command == 'give':
             with workspace.locked(args.name) as login:
                 login.give(args.holder)

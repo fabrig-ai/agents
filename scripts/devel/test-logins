@@ -41,6 +41,19 @@ class Lab:
         path.chmod(mode)
         return path
 
+    def source_directory(self, mode=0o700, entries=1):
+        self.serial += 1
+        path = self.root / f'dummy-directory-{self.serial}'
+        path.mkdir()
+        for entry in range(entries):
+            (path / f'entry-{entry}').write_bytes(b'dummy fixture configuration\n')
+        path.chmod(mode)
+        return path
+
+    def directory_login(self):
+        self.run('add', CHATGPT, str(self.source_directory()))
+        return self.directory() / 'login'
+
     def login(self, name=CHATGPT):
         self.run('add', name, str(self.source()))
         return self.directory(name) / 'login'
@@ -79,6 +92,94 @@ def adds_a_login_by_moving_it(lab):
     assert stat.S_IMODE(lab.directory().stat().st_mode) == 0o700
     assert all(stat.S_IMODE(p.stat().st_mode) == 0o600 for p in lab.directory().iterdir())
     assert [row[1] for row in lab.log()] == ['add']
+
+
+def adds_a_directory_login_by_moving_it(lab):
+    source = lab.source_directory()
+    entries = {p.name: p.read_bytes() for p in source.iterdir()}
+    code, out, err = lab.run('add', CHATGPT, str(source))
+    path = lab.directory() / 'login'
+    assert (code, out, err) == (0, f'added: {CHATGPT} at {path}\n', '')
+    assert not source.exists() and path.is_dir()
+    assert stat.S_IMODE(path.stat().st_mode) == 0o700
+    assert {p.name: p.read_bytes() for p in path.iterdir()} == entries
+    assert [row[1] for row in lab.log()] == ['add']
+
+
+def add_refuses_an_empty_directory(lab):
+    source = lab.source_directory(entries=0)
+    code, _, err = lab.run('add', CHATGPT, str(source))
+    assert code == 1 and 'empty' in err and source.is_dir()
+
+
+def add_refuses_a_directory_that_is_not_private(lab):
+    source = lab.source_directory(mode=0o755)
+    code, _, err = lab.run('add', CHATGPT, str(source))
+    assert code == 1 and 'not private' in err and source.is_dir()
+
+
+def add_refuses_a_link_to_a_directory(lab):
+    target = lab.source_directory()
+    source = lab.root / 'linked-directory'
+    source.symlink_to(target, target_is_directory=True)
+    code, _, err = lab.run('add', CHATGPT, str(source))
+    assert code == 1 and 'a link' in err and source.is_symlink() and target.is_dir()
+
+
+def takes_and_gives_a_directory_login(lab):
+    path = lab.directory_login()
+    assert lab.run('take', CHATGPT, '--as', QA) == (0, f'{path}\n', '')
+    assert lab.read('holder.json')['holder'] == QA
+    assert lab.run('take', CHATGPT, '--as', QA) == (0, f'{path}\n', '')
+    code, out, err = lab.run('list', CHATGPT)
+    assert code == 0 and 'held by qa-watch' in out and ', at rest\n' in out and not err
+    assert lab.run('give', CHATGPT, '--as', QA)[0] == 0
+    assert not (lab.directory() / 'holder.json').exists()
+    assert [row[1] for row in lab.log()] == ['add', 'take', 'give']
+
+
+def a_directory_login_not_back_stays_held(lab):
+    path = lab.directory_login()
+    lab.run('take', CHATGPT, '--as', QA)
+    away = path.rename(lab.root / 'imported')
+    code, _, err = lab.run('give', CHATGPT, '--as', QA)
+    assert code == 1 and 'not back' in err and 'missing' in err
+    assert lab.read('holder.json')['holder'] == QA
+    code, out, err = lab.run('list', CHATGPT)
+    assert code == 0 and 'held by qa-watch' in out and 'not at rest' in out and not err
+    away.rename(path)
+    assert lab.run('give', CHATGPT, '--as', QA)[0] == 0
+    assert not (lab.directory() / 'holder.json').exists()
+    assert [row[1] for row in lab.log()] == ['add', 'take', 'give']
+
+
+def give_reads_nothing_inside_a_directory(lab):
+    path = lab.directory_login()
+    lab.run('take', CHATGPT, '--as', QA)
+    unreadable = path / 'entry-0'
+    unreadable.chmod(0)
+    subdirectory = path / 'unreadable-directory'
+    subdirectory.mkdir(mode=0)
+    try:
+        assert lab.run('give', CHATGPT, '--as', QA)[0] == 0
+        assert not (lab.directory() / 'holder.json').exists()
+        assert [row[1] for row in lab.log()] == ['add', 'take', 'give']
+    finally:
+        unreadable.chmod(0o600)
+        subdirectory.chmod(0o700)
+
+
+def an_empty_directory_login_stays_held(lab):
+    path = lab.directory_login()
+    lab.run('take', CHATGPT, '--as', QA)
+    (path / 'entry-0').unlink()
+    code, _, err = lab.run('give', CHATGPT, '--as', QA)
+    assert code == 1 and 'empty' in err
+    assert lab.read('holder.json')['holder'] == QA
+    assert lab.run('take', CHATGPT, '--as', QA)[0] == 1
+    code, out, err = lab.run('list', CHATGPT)
+    assert code == 0 and 'held by qa-watch' in out and 'not at rest' in out and not err
+    assert [row[1] for row in lab.log()] == ['add', 'take']
 
 
 def add_refuses_a_login_that_is_not_private(lab):
@@ -271,7 +372,11 @@ def refuses_a_symlinked_state_path(lab):
     assert not tuple(target.iterdir())
 
 
-CASES = (adds_a_login_by_moving_it, add_refuses_a_login_that_is_not_private,
+CASES = (adds_a_directory_login_by_moving_it, add_refuses_an_empty_directory,
+         add_refuses_a_directory_that_is_not_private, add_refuses_a_link_to_a_directory,
+         takes_and_gives_a_directory_login, a_directory_login_not_back_stays_held,
+         give_reads_nothing_inside_a_directory, an_empty_directory_login_stays_held,
+         adds_a_login_by_moving_it, add_refuses_a_login_that_is_not_private,
          add_refuses_a_second_login_at_rest, takes_a_login_at_rest, a_second_taker_waits,
          the_first_waiter_is_served_first, a_stale_waiter_loses_its_turn,
          a_waiter_seen_at_the_bound_keeps_its_turn, retaking_by_the_holder_is_idempotent,
