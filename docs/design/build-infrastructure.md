@@ -859,3 +859,133 @@ the report's proves. With
 `HEAVY_RECOVERY_FIXTURE=1` and `LAND_SET_FIXTURE_DIR` strictly below
 `DEV_TMP`, the lock is `land-turn.py`'s local fixture holder and the feed is
 that directory's `feed.jsonl`.
+
+## 11. After landing's runner
+
+[landing-flow.md](landing-flow.md) 4, step 8 is the design: on one
+machine, a runner follows each repository's `main`, runs its slow tier
+on the newest one, reruns a red alone, bisects it over the landings it
+passed over, and writes a verdict per landing to the feed. This section
+is the tools' contract: `scripts/devel/after-landing`, each
+repository's `scripts/after-landing.sh`, the runner's records in the
+feed, and what `landings` and `setup` do with them.
+
+**The tier's script.** A repository with slow tiers has
+`scripts/after-landing.sh`; one without (smith and hearth today) is
+green at every commit. Run from the root of a checkout:
+- with no argument it runs every tier; `--only NAME`, repeatable, runs
+  those alone. A NAME it printed is valid for `--only` at any commit, and
+  one gone at that commit passes;
+- it prints `after-landing: failed NAME` per failed test, or per failed
+  phase that names no test (a build, a crash), and `after-landing:
+  lacks WHAT` per tool it needs and doesn't find, checked before it
+  builds anything. NAME is opaque to the runner: for a nextest test,
+  `PROFILE BINARY_ID TEST_NAME`, from the profile's JUnit; for a phase,
+  its name;
+- it exits 0 green, 3 when it lacks a tool, 2 on a NAME it doesn't
+  know, and any other status red. A red with no `failed` line is the
+  whole tier's, which the runner calls `*` and reruns whole;
+- it reports to no one, and writes nothing outside the checkout's
+  `target/`.
+
+**The runner.** `after-landing follow REPO [--origin URL] [--director
+ADDRESS] [--poll SECONDS] [--once]` follows one repository, by default
+`git@github.com:fabrig-ai/REPO.git`, with a pass every 60 seconds, or
+one with `--once`. It holds `locks/REPO.lock` for its life, so a
+second follower of REPO exits 2. Under `DEV_TMP/after-landing/` it
+keeps `runner/REPO/`, its own clone, whose `target/` stays warm between
+runs; `state/REPO.json`; and `logs/`, one log per run. It refuses, with
+exit 2 and deleting nothing, a clone of another origin, or a state it
+can't read. It runs only on the runner's machine, the one with
+`~/.config/agents-after-landing/director` (below); anywhere else it
+exits 2.
+
+A pass settles the pending posts, reads `main` with `git ls-remote`,
+and when `main` moved, fetches it and runs the tier on it, M, with P the
+last run's commit:
+- **The landings** in (P, M] are the first-parent commits with a
+  `Gate-Tree:` trailer, which `land` and `land-set` push, and M itself;
+  only M when P is null or not an ancestor. One whose `Gate-Result:`
+  starts `none` is a docs landing: never probed, never red.
+- **The run** is `heavy -- scripts/after-landing.sh` at
+  `HEAVY_CLASS=background`, in the clone checked out at M (forced,
+  cleaned of untracked files but not of ignored ones). The script's
+  lines are read in the task's whole log, which heavy's summary line
+  names, not in the tail heavy prints.
+- **A red** is rerun at M with `--only` each failed NAME. What fails
+  again is confirmed; the rest are flakes. A confirmed test already
+  among the tier's standing reds keeps the landing it was charged to;
+  a new one is bisected over the landings in (P, M), halving, each probe
+  `--only` the tests still undecided, so that each is charged to the
+  first landing where it fails. With one landing, it is that one.
+- **A fault** is heavy refusing (no summary line), exit 3 with `lacks`
+  lines, or the origin out of reach. It ends the run with no verdict
+  and P unchanged, so the next pass tries again.
+- **The verdicts:** one per landing in (P, M], `red` with the new
+  tests charged to it, else `cleared`, each naming the run's flakes.
+
+**Its records** go in the landing feed (section 10), beside the sets'.
+None has a `set` key, so the readers of sets skip them. Each has `time`,
+`kind`, `event`, `host` and `token`, a run's token shared by its records:
+- `kind` `tier`, with `tier`, the repository:
+  - `running`: `commit` M and `from` P;
+  - `verdict`: `commit` the landing, `run` M, `verdict`, `tests`,
+    `flakes`, `landing_set` (the set whose `landed` record names the
+    landing, or null), `log`, and a red's `excerpt`, its failing output's
+    last 60 lines, at most 8000 characters;
+  - `tier`: the run's end, with `commit` M, `state` (`green` or `red`),
+    `last_green`, `reds` (each `landing` with its `tests`), `flakes`,
+    `ran_s` (heavy's seconds, rerun and probes included) and `log`;
+  - `fault`: `commit`, `reason` and `since`, when a fault starts or its
+    reason changes; `recovered`, when one ends with `main` unmoved.
+- `kind` `watch`, event `watching`: `target`, a set or a commit, and
+  `name`, the waiter's `POST_NAME` or null.
+
+Lists of tests stop at 50 names, with `tests_more` or `flakes_more`
+counting the rest.
+
+**Its posts** go to `--director`, as `post send --as after-landing`; a
+post that `post` queued counts as sent, and one that fails is tried
+again at the next pass:
+- a fault 15 minutes old, once per fault;
+- a red nobody waits on: no `watch` record names its set or a prefix of
+  its commit within the 2 hours before it, nor within the 15 minutes
+  after.
+
+**`landings`.** `landings` adds a `tiers:` section, a line per
+repository: green or red at its last run, a red's standing tests and
+the landing first charged, its last green, and a run in progress or a
+fault newer than the last state. `landings wait --cleared TARGET
+[--timeout SECONDS] [--post ADDRESS]` waits for a landing's verdict:
+TARGET is a set, whose landings are its latest run's `landed` records,
+or a commit, 7 to 40 hex digits. It writes its `watch` record first,
+then exits 0 once each landing has a cleared verdict, 1 at the first red
+or on the set's `stopped`, 3 at the timeout, 2 hours by default, and 4
+when the feed is unreadable, as `wait` does. It prints each verdict, and
+a red's tests and excerpt. With `--post`, it then posts what it printed
+to ADDRESS, as `landings`, its subject the outcome.
+
+**The machine and its units.** The director names the runner's machine
+by writing its own address in `~/.config/agents-after-landing/director`
+there. On that machine `setup` checks the user unit
+`agents-after-landing@.service`, whose instance per repository (skein,
+smith, hearth, jig, temper) runs `after-landing follow REPO --director
+ADDRESS` in a login shell, restarted on failure but not after exit 2;
+`setup --fix` writes it and starts the five. Elsewhere it warns if one
+runs.
+
+**Fixtures.** `AFTER_LANDING_FIXTURE=DIR` puts the runner's every path
+and its feed under DIR, lifts the machine check, and only then lets
+`AFTER_LANDING_HEAVY` and `AFTER_LANDING_POST` replace `heavy` and
+`post`; `AFTER_LANDING_FAULT_POST` and `AFTER_LANDING_RED_GRACE` replace
+the 15 minutes. `scripts/devel/test-after-landing` runs the runner on
+bare repositories as origins, with stand-ins for heavy and post and a
+tier script that fails what the commit names: a green run and a pass
+with nothing new, a repository without a tier, a flake, a red and its
+repair, a bisect over four landings with a docs one, a red already
+standing, faults (heavy refusing, a tool lacking, the origin away) and
+their posts, an unwatched red posted and a watched one not, and its
+meeting with `landings wait --cleared` on the same feed.
+`test-landings` covers the `tiers:` lines, `wait --cleared` on a set
+and on a commit, and `--post`. With the real heavy and origin, fixture
+mode is also how a live run goes before the runner does.
