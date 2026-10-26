@@ -3,7 +3,8 @@
 Provisional, 2026-10-24, proposed with the user; revised 10-25 (the
 user): a set proves its gates before it takes the lock, every landing
 takes the set lock, and there is no keeper; and 10-26 (the user): there
-is no landing queue. Built and live: `scripts/devel/land-set` and the
+is no landing queue, and after landing follows each `main` (4, step
+8). Built and live: `scripts/devel/land-set` and the
 set lock (section 9). How changes reach `main` across skein, smith,
 jig, hearth and temper:
 - one set of branches per milestone;
@@ -41,9 +42,9 @@ and milestones are [owners.md](../../roles/owners.md).
   changed. The gates are optimistic (the user, 10-25): a failure comes
   back to the set as a repair. They run the lints and the focused and
   fuzzy suites, and nothing slower: the browser tier and the other slow
-  tiers are after landing's, which nothing runs until the user designs
-  how (4, step 8). Tasks inside a milestone merge into the set's
-  branches, not into `main`.
+  tiers are after landing's, a runner that follows each `main` and
+  sends a red back to the landing that caused it (4, step 8). Tasks
+  inside a milestone merge into the set's branches, not into `main`.
 - **The next milestone doesn't wait for the landing** (the user,
   10-24). It starts as soon as the landing does, on top of the set.
   - If the landing fails, the set is repaired beside the new
@@ -76,8 +77,8 @@ and milestones are [owners.md](../../roles/owners.md).
   - **The cache:** a change is compiled once for the fleet, and two
     versions of the same crates coexist for at most a milestone.
   - **Coordination:** owners neither wait on nor relay for each other.
-  - **QA:** the lab takes each milestone as soon as it lands, while the
-    next one is being built (the user).
+  - **QA:** the lab takes each milestone as soon as it lands and its
+    tier is green, while the next one is being built (the user).
 - **What goes away:**
   - repin slots, and the director's calls on repin and landing order;
   - landing hashes relayed between owners;
@@ -222,13 +223,69 @@ gates and pushes (9.1, 9.2); what a gate runs is section 3's. Only the
 queue's last step stays, at its number, which tools and documents
 cite:
 
-8. **After landing.** The tiers too slow for a gate go in each
-   repository's `scripts/after-landing.sh`: the browser tier
+8. **After landing** (the user, 10-26). The tiers too slow for a gate
+   go in each repository's `scripts/after-landing.sh`: the browser tier
    (`scripts/browser.sh`), the process and QA tiers, the exhaustive
-   profile. Nothing runs it, on the user's word, while they design how
-   it should: `land` and `land-set` start no tier after
-   landing. Once something does, a failure goes to the owner of the
-   first landing it fails on.
+   profile. The script runs them and exits nonzero with the failed
+   tests' names, and reports to no one. The rest is the runner's, on
+   today's `scripts/devel/after-landing`. It is not built yet: until it
+   is (section 9), nothing runs a tier, and `scripts/devel/after-landing`
+   refuses.
+   - **It follows the mains, not the landings.** A user service polls
+     each repository's `main` on origin, so it sees every writer, a
+     plain `land` and a push around the tools included. When a `main`
+     moves, it runs that repository's tier on it, one run per
+     repository at a time; when a run ends, the next takes the newest
+     `main`. Its cost is then one machine's, whatever the rate of
+     landings: from 10-23 to 10-25, a run after each landing on every
+     machine held the exclusive lane for 21.5 hours, with 49.2 hours of
+     builds behind it (build-efficiency.md 3).
+   - **One machine, warm.** A build machine the director names, where
+     `setup` checks what the tiers need: Chromium, and the pinned
+     Forgejo and its runner. The runner keeps one worktree and target
+     per repository there and nowhere else, and runs its tiers at
+     `HEAVY_CLASS=background`, not `--gate` (build-efficiency.md 8,
+     change 5). A tier that fails only under load has a test to fix,
+     not a claim on an exclusive lane.
+   - **A red.** The runner reruns the failed tests alone, once, at the
+     same commit.
+     - If they pass, it was a flake: the verdict names it, and the
+       landing's owner files it as a finding (director.md 6).
+     - If not, and the run passed over landings, it bisects over their
+       tips, the commits their gates passed, from the last green: only
+       there does the invariant hold. The first red landing goes back
+       to its owner with the log, and an implementer repairs it
+       (section 3).
+     - A test already red on `main` counts against the landing that
+       first failed it, and against no later one.
+     - heavy refusing the run, a full disk, a missing tool or origin
+       out of reach is a fault of the infrastructure, not a red. The
+       runner retries, and posts the director if it lasts 15 minutes.
+   - **It holds nothing up.** A red stops no landing: the gates are
+     optimistic (section 1), and a flaky tier would stop everyone. The
+     red landing's owner has it repaired first.
+   - **The feed** holds each repository's tier: its last green commit,
+     and its first red one with the landing and the failed tests.
+     `landings` shows it. `landings wait --cleared`, on a set or a plain
+     landing's commit, exits with its verdict: cleared, once a run on a
+     `main` that holds it has no red of its own, or red.
+   - **The owner waits for the verdict** (the user, 10-26). On the
+     landing task's report, it starts the wait in a user unit that
+     posts it the exit. During the mission the owner is on anyway, and
+     a red comes back like a failed landing. A mission closes only once
+     its last landing has cleared, about one tier run after it lands. A
+     new owner would read less than the landing's own, and add a session
+     and a hop, as a keeper would (section 5).
+     - With no verdict in 2 hours, the runner is at fault: the wait
+       exits, the director hears of it, and the owner closes with the
+       landing uncleared in `closing.md`.
+     - A red on a landing whose owner is gone goes to the director.
+   - **The lab takes a green `main`.** QA runs on the newest temper
+     `main` whose tier is green, so that no QA agent spends its tokens
+     finding again what the process tier showed.
+   - **When it runs,** owners.md 5 and director.md change: a mission
+     closes once its last landing has cleared, and the director's
+     after-landing inbox goes.
 
 ## 5. Who does what
 
@@ -242,6 +299,9 @@ whether a set lands: the gates do.
   (build-infrastructure.md 8 and 10). The set lock's holder and the
   feed are on hetzner3, the landing turn's coordinator, which clients
   reach over the landing turn's ssh.
+- **The runner,** `after-landing`, follows the mains on one machine, as
+  a user service the director runs (4, step 8). It writes the feed, and
+  pushes nothing.
 - **The owner** decides when a set lands, starts the landing task that
   proves and lands it, and reads its outcome (owners.md 4, 9.1). An
   implementer repairs a set that fails, while the mission's next
@@ -342,7 +402,7 @@ run side by side:
 - **The owner's QA pass, its fixes and any repair loop,** all on the
   ended milestone: implementer tasks under its sub-owner.
 - **The QA lab,** which takes the milestone from `main` as soon as it
-  lands.
+  lands and its tier is green (4, step 8).
 
 Landing per mission would leave the lab idle for the length of a
 mission, then flood it with four milestones at once.
@@ -371,8 +431,12 @@ mission, then flood it with four milestones at once.
   runs five gates in its proof. The levers left are section 11's.
 - **What no gate runs.** A break that only a slow tier shows, the
   browser tier's among them, reaches `main`, and later sets build on
-  it. Until after landing has its design (section 4, step 8), only a
-  QA pass or a task that names the tier finds it.
+  it until the runner's verdict, about one tier run later, and longer
+  when the runner is behind. Until the runner is built (section 4,
+  step 8), only a QA pass or a task that names the tier finds it.
+- **The runner's machine.** While it is down, no `main` is checked
+  after landing, and an owner at its mission's end waits out its 2
+  hours.
 - **Flakes are everyone's problem.** One flaky temper test stops a
   skein set. A failure the set's changes don't reach runs once alone
   (implementer.md 3): passing alone, it is a flake that the report
@@ -405,8 +469,15 @@ set lands (owners.md 4), with section 9.1, and gate evidence stays in
 
 Built and live: `land-set`, its proof and the set lock (9.1, 9.2,
 build-infrastructure.md 8 and 10), the feed and `landings`, and the
-metrics (section 10). Nothing else is to be built; what is open is
-section 11's.
+metrics (section 10). Still to build is after landing's runner (4,
+step 8), on today's `scripts/devel/after-landing`:
+- the service that follows the mains, the rerun and the bisect;
+- the tiers' status in the feed, and `landings wait --cleared`;
+- the pause's guard taken out;
+- each repository's `scripts/after-landing.sh` reporting to no one:
+  temper's writes the director's inbox today.
+
+What is open is section 11's.
 
 ### 9.1 Where it stands
 
