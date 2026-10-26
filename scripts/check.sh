@@ -94,6 +94,7 @@ suite test-qa scripts/devel/test-qa
 suite test-issue scripts/devel/test-issue
 suite test-tidy scripts/devel/test-tidy
 suite test-receipt-inputs scripts/devel/test-receipt-inputs
+suite test-heavy-plain scripts/devel/test-heavy-plain
 suite test-repin scripts/devel/test-repin --evidence "$scratch/repin"
 suite test-kache-setup env DEV_TMP="$scratch" scripts/infra/test-kache-setup
 suite test-gate-policy scripts/devel/test-gate-policy

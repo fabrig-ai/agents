@@ -1,0 +1,124 @@
+#!/usr/bin/env python3
+"""Heavy's optional installation and plain execution in disposable trees."""
+import hashlib
+import json
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+import unittest
+
+
+KIT = Path(__file__).resolve().parent
+PLAIN = 'heavy: not installed here; running it directly\n'
+
+
+class Plain(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='agents-heavy-plain-')
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.home = self.root / 'home'
+        self.bin = self.root / 'bin'
+        self.cwd = self.root / 'caller'
+        self.tmp = self.root / 'tmp'
+        for path in (self.home, self.bin, self.cwd, self.tmp):
+            path.mkdir()
+        self.state = self.tmp / 'heavy' / 'state.json'
+        self.env = {'PATH': str(self.bin) + ':' + os.defpath, 'HOME': str(self.home),
+                    'DEV_ROOT': str(self.root), 'DEV_TMP': str(self.tmp)}
+
+    def heavy(self, *args, extra=None):
+        return subprocess.run([str(KIT / 'heavy'), *args], cwd=self.cwd,
+                              env=self.env | (extra or {}), text=True, capture_output=True,
+                              stdin=subprocess.DEVNULL, timeout=10)
+
+    def ledger(self, installation=None, version=1):
+        self.state.parent.mkdir(exist_ok=True)
+        self.state.write_text(json.dumps({
+            'version': version, 'queue': hashlib.sha256(str(self.state.parent).encode()).hexdigest(),
+            'next_id': 1, 'tasks': {}, 'maintenance': {}, 'gate': None, 'pending': [],
+            'installation': installation}))
+
+    def installation(self):
+        return {'boot': Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
+                'interval': '5s', 'probe': [], 'units': str(self.home / 'units')}
+
+    def assert_query(self, status, stderr=''):
+        before = (self.state.read_bytes(), self.state.stat().st_mtime_ns)
+        entries = sorted(self.root.rglob('*'))
+        result = self.heavy('--installed')
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (status, '', stderr))
+        self.assertEqual((self.state.read_bytes(), self.state.stat().st_mtime_ns), before)
+        self.assertEqual(sorted(self.root.rglob('*')), entries)
+
+    def assert_no_state(self):
+        self.assertFalse(self.state.parent.exists())
+        self.assertFalse((self.tmp / 'logs').exists())
+
+    def test_no_state_directory_is_not_installed(self):
+        result = self.heavy('--installed')
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (1, '', ''))
+        self.assert_no_state()
+        self.state.parent.mkdir()
+        result = self.heavy('--installed')
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (1, '', ''))
+        self.assertEqual(list(self.state.parent.iterdir()), [])
+
+    def test_ledger_without_installation_is_not_installed(self):
+        self.ledger()
+        self.assert_query(1)
+
+    def test_ledger_with_installation_is_installed(self):
+        self.ledger(self.installation())
+        self.assert_query(0)
+
+    def test_unreadable_ledger_cannot_tell(self):
+        self.ledger()
+        self.state.write_text('invalid JSON containing private path contents')
+        self.assert_query(2, 'heavy: cannot tell whether heavy is installed: cannot parse host ledger\n')
+        self.ledger(version=2)
+        self.assert_query(2, 'heavy: cannot tell whether heavy is installed: unsupported host ledger version\n')
+
+    def test_not_installed_runs_the_command_directly(self):
+        result = self.heavy('sh', '-c', 'echo out; echo err >&2; exit 7')
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (7, 'out\n', PLAIN + 'err\n'))
+        self.assert_no_state()
+
+    def test_not_installed_strips_heavy_options(self):
+        for lane in ('--gate', '--land'):
+            for tail in ('5', '-0', ' 5 ', '1_0'):
+                with self.subTest(lane=lane, tail=tail):
+                    result = self.heavy(lane, '--tail', tail, '--', 'printf', '%s', 'x')
+                    self.assertEqual((result.returncode, result.stdout, result.stderr), (0, 'x', PLAIN))
+                    self.assert_no_state()
+
+    def test_not_installed_runs_in_the_callers_directory_and_environment(self):
+        result = self.heavy('sh', '-c', 'pwd; printf "%s\\n" "$PLAIN_VALUE"',
+                            extra={'PLAIN_VALUE': 'from caller'})
+        self.assertEqual((result.returncode, result.stdout, result.stderr),
+                         (0, str(self.cwd) + '\nfrom caller\n', PLAIN))
+        self.assert_no_state()
+
+    def test_not_installed_skips_the_disk_floor(self):
+        (self.tmp / 'machine.env').write_text('PLAN_MIN_DISK_GB=999999999\n')
+        result = self.heavy('printf', '%s', 'x')
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (0, 'x', PLAIN))
+        self.assert_no_state()
+
+    def test_installed_but_broken_still_refuses(self):
+        self.ledger(self.installation())
+        result = self.heavy('true', extra={'PLAN_MIN_DISK_GB': '0'})
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn('heavy: independent reconciler timer is not active', result.stderr)
+        self.assertNotIn('running it directly', result.stderr)
+
+    def test_empty_command_is_refused(self):
+        result = self.heavy('--gate')
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn('heavy: usage: heavy ', result.stderr)
+        self.assertNotIn('running it directly', result.stderr)
+
+
+if __name__ == '__main__':
+    unittest.main()
