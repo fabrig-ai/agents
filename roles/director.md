@@ -195,8 +195,8 @@ machine's `tmp/post/` (section 5).
   - the front matter (records.md 3): its roadmap and feature,
     its parent and owner, its machine, its model
     and effort, `started`, `state: active`, `ended` and `end` as
-    `unknown`, and its `description`, one public line (rewritten when
-    the scope changes);
+    `unknown`, and its `description`, one public line of at most 60
+    characters (rewritten when the scope changes);
   - a summary, at most 60 words: what it sets out to do;
   - who it is, in a line: "o/<name>, an owner under agents'
     `roles/owners.md`, which says what to read" (a designer:
