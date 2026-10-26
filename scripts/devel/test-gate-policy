@@ -87,7 +87,7 @@ class PolicyFixtures(unittest.TestCase):
                     "GIT_CONFIG_COUNT": "2", "GIT_CONFIG_KEY_0": "maintenance.auto",
                     "GIT_CONFIG_VALUE_0": "false", "GIT_CONFIG_KEY_1": "gc.auto",
                     "GIT_CONFIG_VALUE_1": "0"}
-        for name in ("land", "tidy-hooks.py", "gate-policy.sh", "kit.sh", "land-capture.py", "recovery_message.py", "receipt_inputs.py"):
+        for name in ("land", "tidy-hooks.py", "gate-policy.sh", "kit.sh", "land-capture.py", "recovery_message.py", "receipt_inputs.py", "land-feed.py"):
             shutil.copy(KIT / name, self.kit / name)
         self.script(self.kit / "heavy", r'''#!/usr/bin/env python3
 import hashlib
@@ -276,6 +276,7 @@ sys.exit(result.returncode)
             (self.root / f"command-{self.command_serial:04}.json").write_text(json.dumps({
                 "args": [str(arg) for arg in args], "code": result.returncode,
                 "stdout": result.stdout, "stderr": result.stderr}, indent=2) + "\n")
+        self.assertNotIn("land: warning: the landing feed was not written", result.stderr)
         if check:
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return result

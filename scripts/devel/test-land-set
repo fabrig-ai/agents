@@ -726,7 +726,7 @@ def generated_after_repin(lab):
     original = SCRIPT
     kit = lab.root / 'kit'
     kit.mkdir()
-    for name in ('land-set', 'land-resolve.py', 'tidy-hooks.py', 'land-turn.py'):
+    for name in ('land-set', 'land-resolve.py', 'tidy-hooks.py', 'land-turn.py', 'land-feed.py'):
         shutil.copy(original.with_name(name), kit / name)
     heavy = kit / 'heavy'
     heavy.write_text('''#!/bin/sh
@@ -792,7 +792,7 @@ def regeneration_refused(lab):
     original = SCRIPT
     kit = lab.root / 'kit'
     kit.mkdir()
-    for name in ('land-set', 'land-resolve.py', 'tidy-hooks.py', 'land-turn.py'):
+    for name in ('land-set', 'land-resolve.py', 'tidy-hooks.py', 'land-turn.py', 'land-feed.py'):
         shutil.copy(original.with_name(name), kit / name)
     heavy = kit / 'heavy'
     heavy.write_text('''#!/usr/bin/env python3
@@ -1372,7 +1372,8 @@ def refusal(lab):
     kit.mkdir()
     script = kit / 'land-set'
     shutil.copyfile(SCRIPT, script)
-    shutil.copyfile(SCRIPT.with_name('tidy-hooks.py'), kit / 'tidy-hooks.py')
+    for name in ('tidy-hooks.py', 'land-feed.py'):
+        shutil.copyfile(SCRIPT.with_name(name), kit / name)
     holder = kit / 'land-turn.py'
     for response in ('', 'not-json\n', '{}\n', 'x' * 513 + '\n'):
         holder.write_text('import sys\nsys.stdout.write(' + repr(response) + ')\nsys.stdout.flush()\n')
