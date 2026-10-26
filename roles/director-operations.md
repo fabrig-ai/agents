@@ -165,7 +165,12 @@ here. Durable know-how belongs here, not in the session's memory or in
   cap of owners per machine (the user, 10-26): owners are placed by
   heavy's queue waits, memory and disk, read at each check, and moved or
   given another machine when those show strain.
-- **Retiring a machine:** archive to a kept machine what lives only there:
+- **Retiring a machine:** first list every live service and peer that
+  names it, on every machine (WireGuard peers, the deployment's
+  settings on hel8, runners, forwarders, cron and timers), and move or
+  end each one, with the user's word for theirs: hetzner5 took
+  dev.fabrig.ai's worker and runner with it (10-26). Then archive to a
+  kept machine what lives only there:
   branches not on GitHub as bundles, dirty worktrees' diffs,
   `tmp/owners`, `tmp/logs` (with `heavy.tsv`), `tmp/codex-run`,
   `tmp/heavy`, `tmp/post`, the transcripts and rollouts; never the
