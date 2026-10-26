@@ -33,9 +33,10 @@ GitHub, and the sweep of the six machines' `tmp/` (section 6).
   is deleted.
 - **`tidy` deletes what is done** (section 4): landed branches on
   GitHub and here, landed worktrees, ended missions' directories, old
-  task and run directories, and any script in `tmp/`. `land` marks what
-  it landed, and a copy must match `main` in content as well as in
-  names, so that `tidy` never takes new work for landed work.
+  task and run directories, and any script in `tmp/` but a fixture's
+  marked evidence. `land` marks what it landed, and a copy must match
+  `main` in content as well as in names, so that `tidy` never takes new
+  work for landed work.
 - **Nobody runs it by hand** (section 5): `land` and `land-set` after
   each push, `record` after a closing note, and the director's check on
   each machine.
@@ -79,6 +80,18 @@ GitHub, and the sweep of the six machines' `tmp/` (section 6).
   paths in records.md and post.md are history.
 - **A copy is evidence while its work runs:** a copied kit, a toolchain
   built for one test, a fixture's tree. It goes with its directory.
+- **A fixture marks its evidence.** A fixture that keeps its run in a
+  directory its caller names (`--evidence DIR`,
+  `GATE_POLICY_FIXTURE_EVIDENCE`) writes `EVIDENCE.TAG` in each
+  directory it creates there, as it creates it and before anything else
+  goes in: its first line `agents fixture evidence`, its second the
+  fixture's name. Its fakes, payloads and copied kits are scripts, and
+  stay with it until its directory goes (section 4, steps 4 and 5).
+  Only a fixture writes the mark, as only Cargo writes a target's
+  `CACHEDIR.TAG`: written by hand, it is a script in `tmp/` by another
+  name (section 2). A mark on a directory of this table (`owners/`, a
+  mission's `owners/<m>/`, `director/`, `director/tasks/`, a task's
+  `tasks/<t>/`) is no fixture's, since none creates those.
 
 ## 4. tidy
 
@@ -147,6 +160,12 @@ new work. There is no keep list: a landed branch's commits are on
    An entry outside section 3's table is step 8's, whole: on 10-26 a
    Cargo registry copy in one held 2,995 such files. A copied kit kept as
    evidence is a clone, so its scripts stay with it.
+   - **A fixture's evidence,** a directory holding section 3's mark (a
+     regular file whose first line is the mark's), is skipped whole, as a
+     Cargo target is. A mark that is not one (another first line, a
+     symlink, a directory) leaves its tree swept. A mark on a directory
+     of section 3's table is ignored and reported; one tidy cannot read
+     keeps its tree, and is reported.
 7. **Stale worktree entries:** `git worktree prune` in each repository
    it touched.
 8. **The rest** at the top of `tmp/`, outside section 3's table:
@@ -179,9 +198,10 @@ new work. There is no keep list: a landed branch's commits are on
   nothing.
 - **Its exit:** 0 done; 1 something kept that needs a decision (step
   4's work on no remote, an `owners/` directory with no README, a
-  branch landed in name only, an entry outside section 3); 2 refused
-  (usage, no workspace); 3 a step failed (a fetch, a push), the rest
-  done.
+  branch landed in name only, an entry outside section 3, an evidence
+  mark on a directory of section 3's table); 2 refused (usage, no
+  workspace); 3 a step failed (a fetch, a push, an evidence mark it
+  cannot read), the rest done.
 
 ## 5. Who runs it
 
@@ -255,3 +275,11 @@ new work. There is no keep list: a landed branch's commits are on
    the director's check: `owners/` directories with no README, ended
    missions whose evidence repositories have no remote, and the
    entries outside section 3's table.
+5. **The evidence mark,** 10-26 (sections 3 and 4, step 6): the
+   director's `tidy` on hetzner2 took 106 files `test-heavy-recovery`
+   had written into an active mission's `--evidence` directories, its
+   `fixture-bin/` fakes and payloads, as scripts outside Git. A
+   directory's name could not tell them from an agent's scratch, and the
+   lab's layout belongs to the fixture, so the fixtures mark their
+   directories, and `tidy` reads the mark. Directories made before the
+   mark carry none, and their scripts go at the next run.
