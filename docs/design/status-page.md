@@ -173,6 +173,18 @@ could use the status script itself for sampling)" (the user, 10-26).
   + (100 − used) / pace`, or lasts to it, at `used + pace × (reset −
   now)` then, rounded down; a pace of zero or less lasts at its use.
   A use of 100 or more is full now.
+- **The rate** is that pace per hour, beside it: `2.0%/h`, to one
+  decimal, `0.0%/h` for none or a fall; its hover title the readings'
+  span and its start (`over 5 h 12 min, since 2026-10-26 06:20 UTC`), a
+  moving average as the look-back slides (the user, 10-26). A dash
+  where there is no pace.
+- **No pace yet.** Where a run keeps samples but its window's readings
+  don't yet span enough, the pace says how long it still waits for
+  them, at most: `pace in 2 h 10 min`, the span it needs (a quarter of
+  the look-back, and 30 minutes) less the one it has, its hover title
+  both (`needs 6 h of samples, has 3 h 50 min`); the look-back shrinks
+  as the reset nears, so the pace may come sooner (the user asked why
+  a week shows a dash, 10-26). Without samples, a dash.
 
 ### 2.3 The user's issues
 
@@ -231,9 +243,10 @@ with its own label's id (the user, 10-26; agents' `user-issues.md`):
   user, 10-26).
 - **Subscriptions,** after the tiles: a table, one row per distinct
   subscription and limit, giving its CLI, plan and label, a bar of the
-  percent used, its reset (in how long), and at this pace (2.2):
-  `full in 2 h 5 min`, the time on hover, `lasts, 64% at reset`,
-  `full`, or a dash with no pace yet. Which machines
+  percent used, its reset (in how long), its rate (2.2), `2.0%/h`
+  with its span on hover, and at this pace: `full in 2 h 5 min`, the
+  time on hover, `lasts, 64% at reset`, `full`, `pace in 2 h 10 min`
+  while its samples gather, or a dash without them. Which machines
   share it the page doesn't say (the user, 10-26). The machines signed out, with no subscription, or with an
   unidentified one follow, by CLI. A machine not reached adds nothing.
 - **In flight:** what is landing (set runs, `land`'s prebuilds and
@@ -352,7 +365,9 @@ designers within the day counted, by role; older ones, other senders
 nothing in the footer, and the tile's dash with none reached; no
 sender, subject or body on the page or in the `--json` file. The
 pace: a limit full before its reset, one that
-lasts, one at 100, one without two samples far enough apart, a new
+lasts, one at 100, one whose samples don't yet span enough saying how
+long it waits and what it needs, each pace's rate per hour with its
+span on hover and a dash beside no pace, a new
 window's samples kept apart from the old one's by their reset, the
 look-back as long as the time left within its bounds, samples pruned
 past their reset and past a day, a line of the wrong shape dropped and
