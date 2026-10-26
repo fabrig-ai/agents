@@ -7,9 +7,9 @@ import shlex
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
-import traceback
+
+import case_runner
 
 SCRIPT = Path(__file__).resolve().with_name('tidy')
 GIT = shutil.which('git')
@@ -17,14 +17,24 @@ REPOS = ('agents', 'skein', 'smith', 'jig', 'hearth', 'temper')
 
 
 class Lab:
-    def __init__(self, root):
+    def __init__(self, root, built=None):
+        if built is not None:
+            # Copy bytes, never hardlink mutable refs, objects, index or logs.
+            shutil.copytree(built, root, dirs_exist_ok=True)
+            # Clones record their source both in config and in clone reflogs.
+            for config in root.rglob('config'):
+                config.write_text(config.read_text().replace(str(built), str(root)))
+            for log in root.rglob('logs'):
+                for path in log.rglob('*'):
+                    if path.is_file():
+                        path.write_text(path.read_text().replace(str(built), str(root)))
         self.root = root
         self.workspace = root / 'workspace'
         self.tmp = self.workspace / 'tmp'
         self.records = self.workspace / 'records'
         self.bin = root / 'bin'
         for path in (self.tmp, self.records, self.bin, root / 'home'):
-            path.mkdir(parents=True)
+            path.mkdir(parents=True, exist_ok=True)
         self.env = dict(PATH=str(self.bin) + ':' + os.environ['PATH'], HOME=str(root / 'home'),
                         DEV_ROOT=str(self.workspace), DEV_TMP=str(self.tmp), RECORDS=str(self.records),
                         GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1',
@@ -48,19 +58,22 @@ class Lab:
                            'esac\nexec ' + shlex.quote(GIT) + ' "$@"\n')
         wrapper.chmod(0o700)
         self.origins, self.primary = {}, {}
-        seed = root / 'seed'
-        seed.mkdir()
-        self.git(seed, 'init', '-b', 'main')
-        self.put(seed / 'file', 'base\n')
-        self.put(seed / '.gitignore', 'target/\n')
-        self.commit(seed, 'baseline')
+        if built is None:
+            seed = root / 'seed'
+            seed.mkdir()
+            self.git(seed, 'init', '-b', 'main')
+            self.put(seed / 'file', 'base\n')
+            self.put(seed / '.gitignore', 'target/\n')
+            self.commit(seed, 'baseline')
         for name in REPOS:
             origin, primary = root / f'{name}.git', self.workspace / name
-            self.git(root, 'clone', '--bare', str(seed), str(origin))
-            self.git(root, 'clone', str(origin), str(primary))
+            if built is None:
+                self.git(root, 'clone', '--bare', str(seed), str(origin))
+                self.git(root, 'clone', str(origin), str(primary))
             self.origins[name], self.primary[name] = origin, primary
-        self.git(root, 'clone', '--bare', str(seed), str(root / 'records.git'))
-        self.git(root, 'clone', str(root / 'records.git'), str(self.records))
+        if built is None:
+            self.git(root, 'clone', '--bare', str(seed), str(root / 'records.git'))
+            self.git(root, 'clone', str(root / 'records.git'), str(self.records))
         self.a = self.primary['agents']
         self.base = self.git(self.a, 'rev-parse', 'HEAD')
 
@@ -821,7 +834,14 @@ def lock(lab):
         process = subprocess.Popen([sys.executable, '-I', str(SCRIPT), 'agents'], cwd=lab.root,
                                    env=lab.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
-            time.sleep(.15)
+            inode = str(os.fstat(source.fileno()).st_ino)
+            deadline = time.monotonic() + 5
+            while True:
+                blocked = [line.split() for line in Path('/proc/locks').read_text().splitlines() if '->' in line]
+                if any(row[5] == str(process.pid) and row[6].rsplit(':', 1)[-1] == inode for row in blocked):
+                    break
+                assert process.poll() is None and time.monotonic() < deadline, 'child did not block on tidy.lock'
+                time.sleep(.01)
             assert process.poll() is None and lab.exists('done')
             # A preview never waits for the held machine lock.
             assert 'would delete' in lab.run('--dry-run', 'agents')
@@ -846,32 +866,23 @@ def empty_tmp(lab):
     assert lab.run('--dry-run') == '' and not lab.tmp.exists()
 
 
-def main():
-    cases = (copies, lockfile_conflicts, lockfile_tree, lockfile_patches, lockfile_source,
-             amended, conflict_copy, marks, patch_fallback, worktrees, dirty, detached, outside_worktrees, missions,
-             mission_work, evidence, mission_clone_worktrees, old_directories, old_work, scripts, held_file,
-             script_boundaries, cargo_home_scripts, fixture_evidence, evidence_marks, evidence_unreadable,
-             enclosing_git, symlinks, unknown, dry_run, scope, fetch_failure, push_failure,
-             already_gone, remote_race, head_race, local_race, nested_repositories, evidence_race,
-             evidence_ref_race, evidence_stash,
-             stale, deletion_failure, order, lock, usage, empty_tmp)
-    names = {case.__name__: case for case in cases}
-    if any(name not in names for name in sys.argv[1:]):
-        sys.exit('unknown case; choose: ' + ' '.join(names))
-    selected = [names[name] for name in sys.argv[1:]] if len(sys.argv) > 1 else cases
-    failures = 0
-    for case in selected:
-        with tempfile.TemporaryDirectory(prefix='tidy-fixture-') as directory:
-            try:
-                case(Lab(Path(directory)))
-                print(f'ok: {case.__name__}', flush=True)
-            except Exception:
-                failures += 1
-                print(f'FAIL: {case.__name__}', flush=True)
-                traceback.print_exc()
-    print(f'completed {len(selected)} isolated cases; {failures} failed')
-    return bool(failures)
+CASES = (copies, lockfile_conflicts, lockfile_tree, lockfile_patches, lockfile_source,
+         amended, conflict_copy, marks, patch_fallback, worktrees, dirty, detached, outside_worktrees, missions,
+         mission_work, evidence, mission_clone_worktrees, old_directories, old_work, scripts, held_file,
+         script_boundaries, cargo_home_scripts, fixture_evidence, evidence_marks, evidence_unreadable,
+         enclosing_git, symlinks, unknown, dry_run, scope, fetch_failure, push_failure,
+         already_gone, remote_race, head_race, local_race, nested_repositories, evidence_race,
+         evidence_ref_race, evidence_stash,
+         stale, deletion_failure, order, lock, usage, empty_tmp)
+
+
+def build_baseline(directory):
+    Lab(directory)
+
+
+def run(case, directory, built):
+    case(Lab(directory, built))
 
 
 if __name__ == '__main__':
-    sys.exit(main())
+    sys.exit(case_runner.main(__file__, CASES, run, template=build_baseline, prefix='tidy-fixture-'))
