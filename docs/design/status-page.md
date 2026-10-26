@@ -66,8 +66,10 @@ A command's kind is `record runs`' (records.md 5.1): `land <repo>` and
 rest by the cargo command. A command's mission is its working
 directory's under `tmp/owners/`, and a session's its name's: the name
 whole when the record holds a mission so named, else without an old
-milestone's `-m<N>`. The collector sends names whole, and the page,
-which has the record, decides.
+milestone's `-m<N>`. A set's mission is its name before the first `/`
+(`web-look-6/set-1`), only when the record holds a mission so named:
+`land-set`'s worktrees lie outside `tmp/owners/`. The collector sends
+names whole, and the page, which has the record, decides.
 
 ### 2.1 Subscriptions
 
@@ -154,12 +156,28 @@ credential: not `.credentials.json`, `auth.json` nor a token.
   with its public IP, its heavy tasks, its implementers and its Claude
   sessions.
 - **A mission's row:** its name, its state in the record, its
-  description, what runs for it now, counted (its owner's or
-  designer's session, busy or idle; its implementers; its heavy
-  commands), and its last activity. An owner idle on its waiters is
-  waiting, as the roles have it, not missing. The missions ended in the
-  last 7 days follow, newest first, with their `ended` time and
-  description: never their `end`, which is prose, nor `closing.md`.
+  description, what runs for it now, and its last activity. An owner
+  idle on its waiters is waiting, as the roles have it, not missing.
+  The missions ended in the last 7 days follow, newest first, with
+  their `ended` time and description: never their `end`, which is
+  prose, nor `closing.md`.
+- **What runs for a mission now** is one label, the first of these
+  that holds, with how many hold where several do (`2 × build`), so
+  that the description keeps the room (the user, 10-26). What is
+  running comes before what waits, and within each the stage nearest
+  `main` first:
+  1. `landing`: a set of its in flight and started, or its land gate
+     or prebuild running in heavy;
+  2. `build`: another heavy command of its running;
+  3. `implementer`: an implementer of its alive;
+  4. `owner busy`, then `designer busy`: its session busy;
+  5. `queued landing`: a set of its waiting for the lock, or its land
+     gate or prebuild queued;
+  6. `queued build`: another heavy command of its queued;
+  7. `owner idle`, then `designer idle`.
+
+  The running ones take the info tone, the queued the warning tone and
+  the idle the neutral one; with none, a dash.
 - **A machine's card** counts its implementers by mission and state
   (`alpha-m: 2 running, 1 stale`; stale when the unit is gone) with
   their models, and its Claude sessions by role and state (`director,
@@ -228,7 +246,10 @@ joining its mission, implementers per mission and machine, a recorded
 name ending `-m2` kept whole and an unrecorded one cut, missions ended
 within the week and before it, and no Codex owner read; no owner's,
 designer's, implementer's or session's name anywhere on the page, and a
-description shown. `test-record` proves `record`'s check of the
+description shown. What runs: one label per mission, each rank of
+section 3 over the next with its count, a set joining its mission by
+name and an unrecorded set's prefix bringing in none, and a description
+of 65 characters shown whole. `test-record` proves `record`'s check of the
 `description` key and of `director/waiting.md`. The user's waits: shown
 in order, a malformed line left out and named in the footer, a missing
 file an empty section, and the tile's count and oldest.
