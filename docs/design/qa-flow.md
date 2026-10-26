@@ -311,8 +311,10 @@ the director says so to the user.
   `stat` alone, that the login is at its resting path, and only then
   frees it: a private (0600), non-empty regular file, or a private
   (0700) directory with at least one entry, each the user's own and no
-  link. Nothing inside a directory is read or checked: what it holds
-  is the program's. A login not back
+  link. A directory is checked through one descriptor opened without
+  following a link, so that a link swapped in after the check is never
+  taken for it. Nothing inside a directory is read or checked: what it
+  holds is the program's. A login not back
   stays held by its holder, so that one left inside a dead deployment
   is never handed on, and shows in `logins list`.
 - **Every live run takes it:** QA's passes through the service
