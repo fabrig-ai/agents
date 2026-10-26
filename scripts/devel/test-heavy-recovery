@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Fault the production heavy entrypoints against disposable pueued instances.
+"""Fault the production heavy entrypoints against disposable state directories and units.
+No queue daemon is needed.
 
 No global queue/cache mutations, task-record APIs, or environment dumps.
 Raw evidence is retained in --evidence (a new directory).
@@ -58,28 +59,21 @@ class Lab:
         self.path.mkdir()
         self.repo = self.path / 'repo'
         self.repo.mkdir()
-        self.queue_dir = self.path / 'queue'
-        self.queue_dir.mkdir()
-        # sockaddr_un has a small fixed path limit, independent of the data
-        # directory. The random evidence directory gives this socket ownership.
-        self.socket = Path('/tmp/skein-hr-' + hashlib.sha256(str(self.path).encode()).hexdigest()[:24] + '.sock')
-        assert not self.socket.exists(), self.socket
-        (self.path / 'socket-path.txt').write_text(str(self.socket) + '\n')
-        self.config = self.path / 'pueue.yml'
-        self.config.write_text('shared:\n  pueue_directory: ' + str(self.queue_dir) + '\n'
-            '  runtime_directory: ' + str(self.queue_dir) + '\n  use_unix_socket: true\n'
-            '  unix_socket_path: ' + str(self.socket) + '\n')
         (self.path / 'tmp').mkdir()
         self.boot = self.path / 'tmp/boot-id'
         self.boot.write_text(Path('/proc/sys/kernel/random/boot_id').read_text())
         self.faults = self.path / 'tmp/faults'
         self.faults.mkdir()
         self.env = dict(os.environ)
-        for key in ('HEAVY_TASK', 'DEV_ROOT', 'DEV_TMP', 'PUEUE_CONFIG_PATH', 'PUEUE_PROFILE',
+        for key in ('HEAVY_TASK', 'DEV_ROOT', 'DEV_TMP',
                     'HEAVY_FAULT_DIR', 'HEAVY_BOOT_ID_FILE', 'RUSTC_WRAPPER'):
             self.env.pop(key, None)
+        # The old queue daemon is gone; discard its inherited selection.
+        for key in tuple(self.env):
+            if key.startswith('P' + 'UEUE_'):
+                self.env.pop(key)
         self.env.update(DEV_ROOT=str(self.path), DEV_TMP=str(self.path / 'tmp'), LAND_TIDY='',
-                        PUEUE_CONFIG_PATH=str(self.config), HEAVY_SETTLE='0',
+                        HEAVY_BUILD_SLOTS='2', HEAVY_SETTLE='0',
                         HEAVY_BOOT_ID_FILE=str(self.boot), HEAVY_FAULT_DIR=str(self.faults), HEAVY_RECOVERY_FIXTURE='1')
         cache_bin = self.path / 'fixture-bin'
         cache_bin.mkdir()
@@ -103,7 +97,6 @@ class Lab:
         self.prefix = 'skein-heavy-' + hashlib.sha256(str(self.base).encode()).hexdigest()[:12]
         self.clients = []
         self.extra_units = []
-        self.daemon = None
         self.installed = False
         self.started = time.monotonic()
         self.number = 0
@@ -115,17 +108,30 @@ class Lab:
             raise AssertionError(str(args[:2]) + ': ' + result.stdout + result.stderr)
         return result
 
-    def q(self, *args):
-        assert args[0] not in ('status', 'log', 'env')
-        return self.call(['pueue', *args]).stdout
+    def hold(self, lane):
+        self.call([HEAVY, '--maintenance-pause', lane])
 
-    def start_daemon(self):
-        out = (self.path / ('daemon-' + str(time.time_ns()) + '.txt')).open('w')
-        self.daemon = subprocess.Popen(['pueued', '--config', str(self.config)], env=self.env,
-                stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT)
-        out.close()
-        wait_for(lambda: self.call(['pueue', 'group', '--json'], check=False).returncode == 0,
-                 'disposable daemon ready')
+    def unhold(self, lane):
+        self.call([HEAVY, '--maintenance-resume', lane])
+
+    def held(self, lane):
+        result = self.call([HEAVY, '--group-held', lane], check=False)
+        assert result.returncode in (0, 1), result.stderr
+        return result.returncode == 0
+
+    def waiting(self, label):
+        return self.await_state(label, 'waiting')
+
+    def queued(self, label):
+        return self.await_state(label, 'queued')
+
+    def await_state(self, label, state):
+        return wait_for(lambda: (task if (task := self.task(label)) and task['state'] == state and
+                        'queued task' in (self.path / (label + '.client.txt')).read_text() else None),
+                        label + ' ' + state)
+
+    def wrapper_unit(self, label):
+        return self.task(label)['wrapper_unit']
 
     def setup(self):
         self.call(['git', 'init', '-q', '-b', 'main'])
@@ -133,10 +139,6 @@ class Lab:
         self.call(['git', 'config', 'user.email', 'fixture@localhost'])
         self.call(['git', '-c', 'user.name=fixture', '-c', 'user.email=fixture@localhost',
                    'commit', '-q', '--allow-empty', '-m', 'Recovery fixture'])
-        self.start_daemon()
-        for group in ('build', 'gate'):
-            self.q('group', 'add', group)
-            self.q('parallel', '2' if group == 'build' else '1', '--group', group)
         install = self.call([HEAVY, '--install-reconciler', '0.2s'])
         (self.path / 'installation.txt').write_text(install.stdout + install.stderr)
         self.installed = True
@@ -197,6 +199,10 @@ class Lab:
         cgroup_proofs = []
         ids = [event['id'] for event in events]
         assert len(ids) == len(set(ids)), 'duplicate durable event IDs'
+        submitted = [e['token'] for e in events if e['event'] == 'submit']
+        numbers = [int(self.state()['tasks'][token]['id']) for token in submitted]
+        assert numbers == sorted(set(numbers)), ('task numbers not unique and increasing', numbers)
+        assert self.state()['next_id'] > max(numbers, default=0)
         active = {}
         for event in events:
             name, token = event['event'], event['token']
@@ -209,8 +215,8 @@ class Lab:
                 else:
                     assert 'exclusive' not in active.values(), ('scope overlaps exclusive gate', active)
                     assert lane != 'gate' or 'gate' not in active.values(), ('landing gates overlap', active)
-                    assert list(active.values()).count('build') < 2 or lane != 'build', \
-                        ("more than the lab queue's two builds", active)
+                    assert list(active.values()).count('build') < int(self.env['HEAVY_BUILD_SLOTS']) or lane != 'build', \
+                        ("more builds than the lab permits", active)
                 active[token] = lane
             elif name == 'release_end':
                 active.pop(token, None)
@@ -268,13 +274,9 @@ class Lab:
             for task in self.state()['tasks'].values():
                 if task['state'] != 'released' and owned_wrapper(task.get('wrapper')):
                     os.kill(task['wrapper']['pid'], signal.SIGKILL)
-                if task['state'] != 'released' and not task.get('wrapper'):
-                    # Unstarted disposable queue entries have no cgroup/holds.
-                    # Let the queue run them rather than infer completion.
-                    try:
-                        self.q('start', '--group', task['lane'])
-                    except AssertionError:
-                        pass
+                for unit in (task['unit'], task.get('wrapper_unit')):
+                    if unit:
+                        self.call(['systemctl', '--user', 'stop', unit], check=False)
             for _ in range(4):
                 self.call([HEAVY, '--reconcile'], check=False)
                 time.sleep(0.1)
@@ -301,7 +303,7 @@ class Lab:
             for task in self.state()['tasks'].values():
                 if owned_wrapper(task.get('wrapper')):
                     os.kill(task['wrapper']['pid'], signal.SIGKILL)
-                for unit in (task['unit'], self.prefix + '-' + task['token'] + '-observe.service'):
+                for unit in (task['unit'], task['wrapper_unit']):
                     self.call(['systemctl', '--user', 'kill', '--kill-whom=all', '--signal=KILL', unit], check=False)
                     self.call(['systemctl', '--user', 'stop', unit], check=False)
                 group = task.get('cgroup')
@@ -311,12 +313,6 @@ class Lab:
                 scope_proofs.append({'unit': task['unit'], 'empty': empty})
         for unit in self.extra_units:
             self.call(['systemctl', '--user', 'stop', unit], check=False)
-        if self.daemon and self.daemon.poll() is None:
-            self.q('shutdown')
-            self.daemon.wait(timeout=10)
-        if not self.daemon or self.daemon.poll() is not None:
-            self.socket.unlink(missing_ok=True)
-            shutil.rmtree(self.queue_dir)
         for private_env in self.base.glob('*.env'):
             private_env.unlink()
         owned = self.call(['systemctl', '--user', 'list-units', '--all', '--plain', '--no-legend',
@@ -324,15 +320,15 @@ class Lab:
         # Inactive/failed unit records carry no processes; reset only our names.
         self.call(['systemctl', '--user', 'reset-failed', self.prefix + '*'], check=False)
         units = Path(self.env.get('XDG_CONFIG_HOME', str(Path.home() / '.config'))) / 'systemd/user'
-        remaining_files = [str(path) for path in units.rglob(self.prefix + '*')]
+        remaining_files = [str(units / (self.prefix + '-reconcile' + suffix))
+                           for suffix in ('.service', '.timer')
+                           if (units / (self.prefix + '-reconcile' + suffix)).exists()]
         live_wrappers = [task['wrapper']['pid'] for task in self.state()['tasks'].values()
                          if owned_wrapper(task.get('wrapper'))] if (self.base / 'state.json').exists() else []
-        (self.path / 'cleanup.json').write_text(json.dumps({'queue_pid': self.daemon.pid if self.daemon else None,
-            'queue_ended': not self.daemon or self.daemon.poll() is not None,
-            'socket_removed': not self.socket.exists(),
+        (self.path / 'cleanup.json').write_text(json.dumps({
             'owned_unit_listing': owned, 'prefix': self.prefix, 'retained': str(self.path),
             'scope_proofs': scope_proofs, 'live_wrappers': live_wrappers,
-            'unit_files_remaining': remaining_files, 'queue_data_removed': not self.queue_dir.exists(),
+            'unit_files_remaining': remaining_files,
             'private_environment_files_removed': not list(self.base.glob('*.env'))}, indent=2) + '\n')
         assert not remaining_files and not live_wrappers
 
@@ -465,7 +461,6 @@ def gc_errors(lab):
         assert 'discard-optional-output' not in Path(lab.task(label)['log']).read_text()
     # Isolate PATH: Python can continue searching after any exec failure.
     assert shutil.which('kache', path='/usr/bin:/bin') is None
-    (lab.path / 'fixture-bin/pueue').symlink_to(shutil.which('pueue'))
     lab.env['PATH'] = str(lab.path / 'fixture-bin') + ':/usr/bin:/bin'
     (lab.path / 'fixture-bin/kache').write_text('invalid executable\n')
     lab.done(lab.start('execution-error', code='raise SystemExit(7)'), 7)
@@ -484,15 +479,6 @@ def unsupported(lab):
     result = lab.call([HEAVY, '--install-reconciler'], check=False, environment=env)
     assert result.returncode == 2 and 'unsupported' in result.stderr
     (lab.path / 'unsupported.txt').write_text(result.stdout + result.stderr)
-    # Changing endpoint selection cannot borrow an installed queue's ledger.
-    config = lab.config.read_text()
-    try:
-        lab.config.write_text(config.replace(str(lab.socket), str(lab.socket) + '-other'))
-        result = lab.call([HEAVY, '--reconcile'], check=False)
-        assert result.returncode == 2 and 'different queue identity' in result.stderr
-        (lab.path / 'queue-mismatch.txt').write_text(result.stdout + result.stderr)
-    finally:
-        lab.config.write_text(config)
     lab.done(lab.start('progress'))
 
 
@@ -570,7 +556,7 @@ def storage_failure(lab, point):
     assert not receipt.exists(), 'storage failure published success'
     if point != 'seal':
         assert lab.state()['gate'] == token, 'unpersisted completion lost its hold'
-        assert json.loads(lab.q('group', '--json'))['build']['status'] != 'Running'
+        assert lab.held('build')
     assert all(text in output.read_text() for text in ('Free space', 'SAME recovery service',
                'heavy --reconcile', 'SAME queue', 'RETAIN', '137'))
     # Restore the same service, queue and ledger; no replacement/reset occurs.
@@ -640,7 +626,7 @@ def land_diagnostic(lab, point, prebuild=False):
     elif not prebuild and point != 'seal':
         # A landing's gate holds nothing: the builds go on beside it.
         assert lab.state()['gate'] is None
-        assert json.loads(lab.q('group', '--json'))['build']['status'] == 'Running'
+        assert not lab.held('build')
     assert lab.call(['git', 'rev-parse', 'main']).stdout.strip() == base
     assert not (lab.path / 'tmp/gates').exists()
     if point == 'missing':
@@ -676,7 +662,7 @@ def kill_at(lab, point):
     lab.disarm(point)
     lab.released('gate')
     if gate.pid != pid:
-        lab.done(gate, 137 if point in ('intent', 'intent_fsynced', 'paused') else 0)
+        lab.done(gate, 137 if point in ('intent', 'intent_fsynced') else 0)
     build = lab.start('progress')
     lab.done(build)
 
@@ -713,30 +699,14 @@ def descendants(lab, action='kill'):
     (lab.path / 'shared.json').write_text(json.dumps({'pid': shared, 'cgroup': shared_cgroup}))
     if action == 'boot':
         lab.boot.write_text('fixture-next-boot\n')
-    elif action == 'restart':
-        waiting = lab.start('queued-before-restart')
-        wait_for(lambda: lab.task('queued-before-restart') and 'queued task' in
-                 (lab.path / 'queued-before-restart.client.txt').read_text(), 'build queued behind gate')
-        # Keep the orphan scope alive across restart, then deliberately lose
-        # the queue's group pause. Durable admission must still exclude it.
-        timer = lab.prefix + '-reconcile.timer'
-        lab.call(['systemctl', '--user', 'stop', timer])
-        lab.call(['systemctl', '--user', 'stop', lab.prefix + '-reconcile.service'])
-        lab.q('shutdown')
-        lab.daemon.wait(timeout=10)
-        assert live(evidence['child']) and live(evidence['private'])
-        lab.start_daemon()
-        lab.q('start', '--group', 'build')
-        lab.call(['systemctl', '--user', 'start', timer])
     elif action == 'kill':
         # With the submitter gone too, only the independently installed timer
         # can recover the orphan and release its holds.
         gate.kill()
         gate.wait(timeout=5)
         lab.kill_wrapper('gate')
-    elif action == 'queue-kill':
-        # This fixture owns the still-running entry and has not reused its ID.
-        lab.q('kill', lab.task('gate')['id'])
+    elif action == 'stop':
+        lab.call(['systemctl', '--user', 'stop', lab.wrapper_unit('gate')])
     lab.released('gate')
     lab.done(gate, -9 if action == 'kill' else (0 if action == 'normal' else 137))
     if action == 'kill':
@@ -746,17 +716,9 @@ def descendants(lab, action='kill'):
     assert live(int(shared)), 'shared daemon was killed'
     (lab.path / 'shared-after.json').write_text(json.dumps({'pid': shared,
         'cgroup': Path(f'/proc/{shared}/cgroup').read_text(), 'live': live(int(shared))}))
-    if action == 'restart':
-        lab.done(waiting)
+    assert not lab.held('build')
     if action == 'boot':
         wait_for(lambda: lab.state()['installation']['boot'] == 'fixture-next-boot', 'new boot containment probe')
-    lab.done(lab.start('progress'))
-
-
-def prepaused(lab):
-    lab.q('pause', '--wait', '--group', 'default')
-    lab.done(lab.start('gate', gate=True))
-    assert json.loads(lab.q('group', '--json'))['default']['status'] != 'Running'
     lab.done(lab.start('progress'))
 
 
@@ -767,15 +729,13 @@ def maintenance(lab):
     wait_for(lambda: lab.event('gate', 'payload_begin'), 'gate payload')
     lab.call([HEAVY, '--maintenance-pause', 'build'])
     lab.call([HEAVY, '--group-held', 'build'])
-    lab.call([HEAVY, '--repair-group', 'build'])
     build = lab.start('waiting')
     marker.touch()
     lab.done(gate)
     assert 'build' in lab.state()['maintenance']
-    assert json.loads(lab.q('group', '--json'))['build']['status'] != 'Running'
+    assert lab.held('build')
     assert not lab.event('waiting', 'payload_begin')
-    lab.call([HEAVY, '--repair-group', 'build'])
-    assert json.loads(lab.q('group', '--json'))['build']['status'] != 'Running'
+    assert lab.held('build')
     lab.call([HEAVY, '--maintenance-resume', 'build'])
     assert lab.call([HEAVY, '--group-held', 'build'], check=False).returncode == 1
     lab.done(build)
@@ -803,12 +763,10 @@ def weighted(lab):
         assert not lab.event('land-gate', name), name
     assert lab.event('land-gate', 'admit')['weight'] == '10000', 'a landing first'
     assert lab.event('build', 'admit')['weight'] == '1000', "an agent's build next"
-    # Landing gates run one at a time, even past the queue's own limit.
-    lab.q('parallel', '2', '--group', 'gate')
+    # Landing gates run one at a time.
     first, second = lab.start('land-a', land=True, duration=1.0), lab.start('land-b', land=True, duration=0.1)
     lab.done(first)
     lab.done(second)
-    lab.q('parallel', '1', '--group', 'gate')
     assert lab.event('land-a', 'payload_end')['time_ns'] < lab.event('land-b', 'payload_begin')['time_ns'] or \
         lab.event('land-b', 'payload_end')['time_ns'] < lab.event('land-a', 'payload_begin')['time_ns'], 'one at a time'
     lab.env['HEAVY_CLASS'] = 'idle'
@@ -865,12 +823,23 @@ def late_launch(lab, release_crash=False):
     shim.mkdir()
     real = lab.call(['which', 'systemd-run']).stdout.strip()
     marker, proceed = lab.path / 'launch-waiting', lab.path / 'launch-continue'
-    script = shim / 'systemd-run'
-    script.write_text('#!/usr/bin/env python3\nimport os,time,sys\nfrom pathlib import Path\n'
-        'if "--payload" not in sys.argv: os.execv(' + repr(real) + ', [' + repr(real) + '] + sys.argv[1:])\n'
+    # The delayed request belongs to an independent fixture unit: losing the
+    # production wrapper must not kill it before the late creation attempt.
+    delayed_unit = lab.prefix + '-late-launcher.service'
+    lab.extra_units.append(delayed_unit)
+    attempted, completed = lab.path / 'launch-attempted', lab.path / 'launch-completed'
+    delayed = lab.path / 'delayed-launch.py'
+    delayed.write_text('import json,os,subprocess,sys,time\nfrom pathlib import Path\n'
         'Path(' + repr(str(marker)) + ').write_text(str(os.getpid()))\n'
         'while not Path(' + repr(str(proceed)) + ').exists(): time.sleep(.02)\n'
-        'os.execv(' + repr(real) + ', [' + repr(real) + '] + __import__("sys").argv[1:])\n')
+        'Path(' + repr(str(attempted)) + ').write_text(str(time.time_ns()))\n'
+        'result=subprocess.run([' + repr(real) + ']+sys.argv[1:])\n'
+        'Path(' + repr(str(completed)) + ').write_text(json.dumps({"code":result.returncode}))\n')
+    script = shim / 'systemd-run'
+    script.write_text('#!/usr/bin/env python3\nimport os,sys\n'
+        'if "--payload" not in sys.argv: os.execv(' + repr(real) + ', [' + repr(real) + '] + sys.argv[1:])\n'
+        'os.execv(' + repr(real) + ', [' + repr(real) + ', "--user", "--quiet", "--wait", "--collect", '
+        '"--unit=' + delayed_unit + '", ' + repr(sys.executable) + ', ' + repr(str(delayed)) + '] + sys.argv[1:])\n')
     script.chmod(0o700)
     lab.env['PATH'] = str(shim) + ':' + lab.env['PATH']
     marker_payload = lab.path / 'must-not-run'
@@ -888,7 +857,11 @@ def late_launch(lab, release_crash=False):
         assert transport.exists(), 'crash must retain the delayed launch environment'
     else:
         lab.released('gate')
+    assert live(int(marker.read_text())), 'fixture lost its delayed request with the wrapper'
     proceed.touch()
+    wait_for(completed.exists, 'late creation attempted and completed')
+    assert int(attempted.read_text()) > lab.event('gate', 'release_end')['time_ns']
+    assert json.loads(completed.read_text())['code'] != 0
     wait_for(lambda: not live(int(marker.read_text())), 'late launcher ended')
     if release_crash:
         assert not policy_marker.exists() and not helper_marker.exists(), 'late launch executed policy tools'
@@ -937,127 +910,151 @@ def policy_helper_descendants(lab):
         'helper': child, 'owned_cgroup': task['cgroup'], 'helper_ended': True}, indent=2) + '\n')
 
 
-def cancelled_reused_id(lab):
-    lab.done(lab.start('old-build'))
-    old = lab.task('old-build')
-    lab.q('reset', '--force')
-    for group in ('build', 'gate'):
-        if group not in json.loads(lab.q('group', '--json')):
-            lab.q('group', 'add', group)
-        lab.q('parallel', '2' if group == 'build' else '1', '--group', group)
-    lab.q('pause', '--wait', '--group', 'gate')
-    lab.call(['git', 'switch', '-qc', 'candidate'])
-    (lab.repo / 'code').write_text('candidate\n')
-    lab.call(['git', 'add', 'code'])
-    lab.call(['git', 'commit', '-qm', 'candidate'])
-    head = lab.call(['git', 'rev-parse', 'HEAD']).stdout.strip()
-    main = lab.call(['git', 'rev-parse', 'main']).stdout.strip()
-    marker = lab.path / 'cancelled-payload-must-not-run'
-    output = lab.path / 'land.client.txt'
-    with output.open('w') as out:
-        land = subprocess.Popen([str(KIT / 'land'), '--local', '--gate', 'touch ' + str(marker)],
-                                env=dict(lab.env, LAND_PREBUILD=''), cwd=lab.repo,
-                                stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT)
-    lab.clients.append(land)
-    task = wait_for(lambda: lab.task('land repo'), 'land gate submission')
-    wait_for(lambda: lab.task('land repo')['state'] == 'queued', 'land queued token')
-    task = lab.task('land repo')
-    assert task['id'] == old['id'], 'fixture must reuse the old successful build ID'
-    assert task['state'] == 'queued' and not task.get('wrapper')
-    lab.arm('queue_observed')
-    # This known, never-started entry is still owned by the fixture. No other
-    # submitter uses this daemon. Remove is the explicit cancellation fault.
-    lab.q('remove', task['id'])
-    observer = lab.barrier('queue_observed', 'land repo')
-    lab.q('reset', '--force')
-    for group in ('build', 'gate'):
-        if group not in json.loads(lab.q('group', '--json')):
-            lab.q('group', 'add', group)
-        lab.q('parallel', '2' if group == 'build' else '1', '--group', group)
-    proceed = lab.path / 'finish-unrelated'
-    unrelated = lab.start('unrelated', code='from pathlib import Path; import time; p=Path(' +
-                          repr(str(proceed)) + ');\nwhile not p.exists(): time.sleep(.02)')
-    wait_for(lambda: lab.event('unrelated', 'payload_begin'), 'unrelated new task')
-    assert lab.task('unrelated')['id'] == task['id']
-    lab.disarm('queue_observed')
-    lab.done(land, 4)
-    cancelled = lab.released('land repo')
-    receipt = json.loads((lab.base / 'receipts' / (task['token'] + '.json')).read_text())
-    assert receipt['outcome'] == 'cancelled' and receipt['code'] != 0
-    assert not receipt['payload_started'] and not receipt['payload_ended']
-    assert receipt['token'] != old['token'] and not marker.exists()
-    assert lab.task('unrelated')['state'] == 'active' and unrelated.poll() is None
-    late = lab.call([HEAVY, '--task', task['token']], check=False)
-    assert late.returncode == 2 and not marker.exists()
-    assert lab.call(['git', 'rev-parse', 'HEAD']).stdout.strip() == head
-    assert lab.call(['git', 'rev-parse', 'main']).stdout.strip() == main
-    assert not (lab.path / 'tmp/gates').exists()
-    assert not lab.call(['git', 'log', '-1', '--format=%(trailers:key=Gate-Tree,valueonly)']).stdout.strip()
-    (lab.path / 'cancellation-proof.json').write_text(json.dumps({
-        'reused_id': task['id'], 'old_build_token': old['token'], 'cancelled_token': task['token'],
-        'unrelated_token': lab.task('unrelated')['token'], 'observer_pid': observer,
-        'land_exit': land.returncode, 'head_unchanged': True, 'main_unchanged': True,
-        'no_cache_or_trailer': True, 'late_wrapper_exit': late.returncode,
-        'unrelated_unharmed': True}, indent=2) + '\n')
-    proceed.touch()
-    lab.done(unrelated)
-    lab.q('start', '--group', 'gate')
+def unclaimed_client(lab, periodic=False):
+    # A client lost after durable submission cannot leave an unowned token.
+    anchor = {}
+    if periodic:
+        lab.call([HEAVY, '--install-reconciler', '5s'])
+        lab.call(['systemctl', '--user', 'start', lab.prefix + '-reconcile.service'])
+        for key, unit, prop in (
+                ('last_inactive_usec', '-reconcile.service', 'InactiveEnterTimestampMonotonic'),
+                ('next_elapse_usec', '-reconcile.timer', 'NextElapseUSecMonotonic')):
+            anchor[key] = lab.call(['systemctl', '--user', 'show', lab.prefix + unit,
+                                   '--property=' + prop, '--value']).stdout.strip()
+    lab.arm('wrapper_intent')
+    client = lab.start('unclaimed')
+    pid = lab.barrier('wrapper_intent', 'unclaimed')
+    assert pid == client.pid
+    task = lab.task('unclaimed')
+    assert (lab.base / (task['token'] + '.env')).exists()
+    killed_ns = time.time_ns()
+    client.kill()
+    lab.done(client, -9)
+    lab.disarm('wrapper_intent')
+    # Observe files only: no heavy call may trigger the recovery we measure.
+    task = lab.released('unclaimed')
+    event = lab.event('unclaimed', 'unclaimed')
+    assert task['code'] == 137 and task['outcome'] == 'cancelled' and not task.get('wrapper')
+    assert event['source'] == '--reconcile' and event['time_ns'] > killed_ns
+    receipt = lab.base / 'receipts' / (task['token'] + '.json')
+    wait_for(receipt.exists, 'unclaimed receipt')
+    assert json.loads(receipt.read_text())['code'] == 137
+    assert not (lab.base / (task['token'] + '.env')).exists()
+    props = lab.call(['systemctl', '--user', 'show', task['wrapper_unit'], '--property=LoadState']).stdout
+    assert 'LoadState=not-found' in props
+    if periodic:
+        assert lab.state()['installation']['interval'] == '5s'
+        assert event['time_ns'] - killed_ns < 15e9
+        activation = int(lab.call(['systemctl', '--user', 'show', lab.prefix + '-reconcile.service',
+                                  '--property=ExecMainStartTimestampMonotonic', '--value']).stdout.strip())
+        assert activation >= int(anchor['last_inactive_usec']) + 4_900_000
+        anchor.update(recovery_activation_usec=activation, periodic_activation=True,
+                      killed_ns=killed_ns, recovery_ns=event['time_ns'], source=event['source'],
+                      interval='5s', no_heavy_call_after_kill=True)
+        (lab.path / 'periodic-proof.json').write_text(json.dumps(anchor, indent=2) + '\n')
+    lab.done(lab.start('progress'))
 
 
-def stale_pause(lab):
-    lab.call([HEAVY, '--install-reconciler', '5s'])
-    lab.q('pause', '--wait', '--group', 'default')
-    lab.q('group', 'add', 'operator-held')
-    lab.call([HEAVY, '--maintenance-pause', 'operator-held'])
-    marker = lab.path / 'finish-gate'
-    lab.arm('payload_finished')
-    gate = lab.start('gate', gate=True, code='from pathlib import Path; import time; p=Path(' +
-                     repr(str(marker)) + ');\nwhile not p.exists(): time.sleep(.02)')
-    wait_for(lambda: lab.event('gate', 'payload_begin'), 'stale-pause gate')
-    lab.call(['systemctl', '--user', 'stop', lab.prefix + '-reconcile.timer'])
-    lab.call(['systemctl', '--user', 'stop', lab.prefix + '-reconcile.service'])
-    # Submission requires the active timer; queue this build before stopping
-    # it again to construct the recorded stale-pause state deterministically.
-    lab.call(['systemctl', '--user', 'start', lab.prefix + '-reconcile.timer'])
-    build = lab.start('waiting-build')
-    wait_for(lambda: lab.task('waiting-build') and lab.task('waiting-build')['state'] == 'queued', 'queued build')
-    lab.call(['systemctl', '--user', 'stop', lab.prefix + '-reconcile.timer'])
-    lab.call(['systemctl', '--user', 'stop', lab.prefix + '-reconcile.service'])
-    # Anchor a completed reconciliation while the wrapper/payload are live.
-    # The next recovery must come from the five-second periodic activation,
-    # rather than the immediate OnBootSec activation when a timer starts.
-    lab.call(['systemctl', '--user', 'start', lab.prefix + '-reconcile.timer'])
-    lab.call(['systemctl', '--user', 'start', lab.prefix + '-reconcile.service'])
-    inactive = lab.call(['systemctl', '--user', 'show', lab.prefix + '-reconcile.service',
-                         '--property=InactiveEnterTimestampMonotonic', '--value']).stdout.strip()
-    scheduled = lab.call(['systemctl', '--user', 'show', lab.prefix + '-reconcile.timer',
-                          '--property=NextElapseUSecMonotonic', '--value']).stdout.strip()
-    marker.touch()
-    pid = lab.barrier('payload_finished', 'gate')
-    os.kill(pid, signal.SIGKILL)
-    lab.kill_wrapper('gate')
-    lab.disarm('payload_finished')
-    groups = json.loads(lab.q('group', '--json'))
-    assert groups['build']['status'] != 'Running' and groups['gate']['status'] == 'Running'
-    assert lab.state()['gate'] == lab.task('gate')['token'] and not lab.event('waiting-build', 'payload_begin')
-    start = time.monotonic()
-    lab.released('gate')
-    elapsed = time.monotonic() - start
-    lab.done(gate, 137)
-    lab.done(build)
-    assert lab.event('gate', 'release_end')['source'] == '--reconcile'
-    assert lab.state()['installation']['interval'] == '5s'
-    groups_after = json.loads(lab.q('group', '--json'))
-    assert groups_after['build']['status'] == 'Running'
-    assert groups_after['default']['status'] != 'Running'
-    assert groups_after['operator-held']['status'] != 'Running'
-    (lab.path / 'stale-pause-proof.json').write_text(json.dumps({
-        'interval': '5s', 'recovery_seconds_single_sample': elapsed,
-        'last_reconcile_inactive_monotonic_usec': inactive,
-        'next_timer_elapse_monotonic_usec': scheduled, 'periodic_activation': True,
-        'before': groups, 'after': groups_after, 'release_source': '--reconcile',
-        'incident_root_cause': 'UNKNOWN', 'owned_hold_recovered': True,
-        'unowned_and_maintenance_pauses_preserved': True}, indent=2) + '\n')
+def wrapper_start_failure(lab):
+    # Both a rejected transient start and an exec error release synchronously.
+    shim = lab.path / 'failed-launch-bin'
+    shim.mkdir()
+    launcher = shim / 'systemd-run'
+    for name in ('bash', 'python3', 'readlink', 'dirname', 'basename', 'nproc',
+                 'awk', 'df', 'tail', 'tr', 'git', 'systemctl'):
+        (shim / name).symlink_to(shutil.which(name))
+    previous = lab.env['PATH']
+    lab.env['PATH'] = str(shim) + ':' + previous
+    marker = lab.path / 'must-not-run'
+    for label, content in (('rejected-start', '#!/bin/sh\nexit 71\n'),
+                           ('exec-error', 'invalid executable\n')):
+        launcher.write_text(content)
+        launcher.chmod(0o700)
+        if label == 'exec-error':
+            lab.env['PATH'] = str(shim)
+        result = lab.call([HEAVY, 'touch', marker], check=False,
+                          environment=dict(lab.env, HEAVY_LABEL=label))
+        (lab.path / (label + '.refusal.txt')).write_text(result.stdout + result.stderr)
+        assert result.returncode == 2 and result.stderr == 'heavy: cannot start the task wrapper unit\n', result
+        task = lab.task(label)
+        assert task['state'] == 'released' and task['outcome'] == 'refused' and task['code'] == 2
+        assert lab.event(label, 'refusal')['reason'] == 'cannot start the task wrapper unit'
+        assert not task.get('wrapper') and not marker.exists()
+        receipt = json.loads((lab.base / 'receipts' / (task['token'] + '.json')).read_text())
+        assert receipt['outcome'] == 'refused' and receipt['code'] == 2
+        assert not (lab.base / (task['token'] + '.env')).exists()
+    lab.env['PATH'] = previous
+    # An older same-identity snapshot can lack the allocator, never its IDs.
+    state = lab.state()
+    state.pop('next_id')
+    (lab.base / 'state.json').write_text(json.dumps(state))
+    lab.done(lab.start('progress'))
+    assert int(lab.task('progress')['id']) == 3
+
+
+def wrapper_before_claim(lab):
+    # A live unit owns an unclaimed token only until the unit stops.
+    lab.arm('claim')
+    client = lab.start('unclaimed')
+    lab.barrier('claim', 'unclaimed')
+    lab.queued('unclaimed')
+    assert lab.call(['systemctl', '--user', 'show', lab.wrapper_unit('unclaimed'),
+                     '--property=StandardError', '--value']).stdout.strip() == 'journal'
+    lab.call(['systemctl', '--user', 'stop', lab.wrapper_unit('unclaimed')])
+    lab.disarm('claim')
+    task = lab.released('unclaimed')
+    assert task['code'] == 137 and task['outcome'] == 'cancelled' and not task.get('wrapper')
+    assert lab.event('unclaimed', 'unclaimed')
+    lab.done(client, 137)
+    output = (lab.path / 'unclaimed.client.txt').read_text()
+    assert f"heavy: task {task['id']} (build) exit 137," in output
+    assert output.splitlines()[-1] == f"heavy: receipt {lab.base / 'receipts' / (task['token'] + '.json')} token {task['token']}"
+    lab.done(lab.start('progress'))
+
+
+def lane_order(lab, lane):
+    # Hold admission until every wrapper waits, then prove FIFO payload entry.
+    if lane == 'build':
+        lab.env['HEAVY_BUILD_SLOTS'] = '1'
+    lab.hold(lane)
+    labels = [lane + '-' + str(i) for i in range(4)]
+    clients = []
+    for i, label in enumerate(labels):
+        clients.append(lab.start(label, gate=lane == 'gate' and i < 3,
+                                 land=lane == 'gate' and i == 3, duration=.15))
+        lab.waiting(label)
+        assert not lab.event(label, 'admit') and not lab.event(label, 'drain_begin')
+    lab.unhold(lane)
+    for client in clients:
+        lab.done(client)
+    assert [e['label'] for e in lab.events() if e['event'] == 'payload_begin'] == labels
+    for previous, following in zip(labels, labels[1:]):
+        assert lab.event(previous, 'release_end')['time_ns'] < lab.event(following, 'scope_enter')['time_ns']
+
+
+def maintenance_gate(lab):
+    # Holding gate admission leaves builds free and prevents exclusive drain.
+    lab.hold('gate')
+    first = lab.start('exclusive', gate=True)
+    lab.waiting('exclusive')
+    second = lab.start('landing', land=True)
+    lab.waiting('landing')
+    lab.done(lab.start('build'))
+    assert lab.held('gate')
+    for label in ('exclusive', 'landing'):
+        assert not lab.event(label, 'drain_begin') and not lab.event(label, 'admit')
+    lab.unhold('gate')
+    lab.done(first)
+    lab.done(second)
+    assert lab.event('exclusive', 'release_end')['time_ns'] < lab.event('landing', 'payload_begin')['time_ns']
+    refused = lab.call([HEAVY, '--maintenance-pause', 'default'], check=False)
+    assert refused.returncode == 2 and refused.stderr == 'heavy: maintenance requires a lane: build or gate\n'
+    # No unfinished tokens remain; model an operator hold from an older lane.
+    state = lab.state()
+    state['maintenance']['default'] = True
+    (lab.base / 'state.json').write_text(json.dumps(state))
+    lab.unhold('default')
+    assert 'default' not in lab.state()['maintenance'] and not lab.held('default')
 
 
 def publication_crash(lab, point='receipt_ready'):
@@ -1083,14 +1080,13 @@ def publication_crash(lab, point='receipt_ready'):
 
 
 def queued_client_death(lab):
-    lab.q('pause', '--wait', '--group', 'gate')
+    lab.hold('gate')
     marker = lab.path / 'legitimate-payload'
     gate = lab.start('gate', gate=True, args=['touch', str(marker)])
-    wait_for(lambda: lab.task('gate') if lab.task('gate') and lab.task('gate')['state'] == 'queued' else None,
-             'legitimate queued gate')
+    lab.waiting('gate')
     gate.kill()
     gate.wait(timeout=5)
-    lab.q('start', '--group', 'gate')
+    lab.unhold('gate')
     task = lab.released('gate')
     assert task['code'] == 0 and task['outcome'] == 'completed' and marker.exists()
 
@@ -1115,27 +1111,21 @@ def cancelled(lab, label, client):
     return task
 
 
-def queued(lab, label):
-    return wait_for(lambda: (task if (task := lab.task(label)) and task['state'] == 'queued' and 'queued task' in
-                             (lab.path / (label + '.client.txt')).read_text() else None), label + ' queued')
-
-
 def refused_replay(lab, task, marker):
-    # The queue entry, run later, finds its token released and runs nothing.
-    lab.q('start', '--group', task['lane'])
-    lab.call(['pueue', 'wait', '--quiet', task['id']], check=False, timeout=20)
+    # The wrapper, let past its claim barrier, must refuse the released token.
+    lab.disarm('claim')
     wait_for(lambda: any(e['source'] == '--task' and e['event'].startswith('refusal:') for e in lab.events()),
              'late wrapper refused replay')
-    wait_for(lambda: lab.call(['systemctl', '--user', 'is-active', '--quiet', lab.prefix + '-' +
-                               task['token'] + '-observe.service'], check=False).returncode != 0, 'observer ended')
+    wait_for(lambda: lab.call(['systemctl', '--user', 'is-active', '--quiet', task['wrapper_unit']],
+                             check=False).returncode != 0, 'wrapper ended')
     assert not marker.exists(), 'cancelled payload ran'
 
 
 def cancel_queued(lab):
-    lab.q('pause', '--wait', '--group', 'build')
+    lab.arm('claim')
     marker = lab.path / 'must-not-run'
     client = lab.start('queued-build', args=['touch', str(marker)])
-    task = queued(lab, 'queued-build')
+    task = lab.queued('queued-build')
     # Below the disk floor: a cancel frees a slot, so it never refuses there.
     floor = dict(lab.env, PLAN_MIN_DISK_GB='999999')
     assert lab.call([HEAVY, 'true'], check=False, environment=floor).returncode == 2
@@ -1162,7 +1152,7 @@ def cancel_running(lab, gate):
     token = lab.task(label)['token']
     if gate:
         assert lab.state()['gate'] == token
-        assert json.loads(lab.q('group', '--json'))['build']['status'] != 'Running'
+        assert lab.held('build')
     result = lab.call([HEAVY, '--cancel', token])
     assert 'heavy: cancelled task' in result.stdout and 'exit 130' in result.stdout, result
     task = cancelled(lab, label, client)
@@ -1170,7 +1160,7 @@ def cancel_running(lab, gate):
     assert lab.event(label, 'cancel')['source'] == '--cancel'
     for name in ('payload', 'child'):
         assert not live(pids[name]), ('cancel left a process of the scope', name)
-    assert json.loads(lab.q('group', '--json'))['build']['status'] == 'Running'
+    assert not lab.held('build')
     lab.done(lab.start('progress'))
 
 
@@ -1206,13 +1196,13 @@ def interrupted(lab, number, running):
     if running:
         code = ('from pathlib import Path; import time; Path(' + repr(str(marker)) + ').touch(); time.sleep(120)')
     else:
-        lab.q('pause', '--wait', '--group', 'build')
+        lab.arm('claim')
         code = 'from pathlib import Path; Path(' + repr(str(marker)) + ').touch()'
     client = lab.start('interrupted', code=code)
     if running:
         wait_for(marker.exists, 'payload running')
     else:
-        queued(lab, 'interrupted')
+        lab.queued('interrupted')
     client.send_signal(number)
     task = cancelled(lab, 'interrupted', client)
     assert lab.event('interrupted', 'cancel')['reason'] == 'interrupt'
@@ -1445,11 +1435,12 @@ def policy_refusal(lab, mode):
     if mode == 'config':
         lab.env['CARGO_HOME'] = str(lab.path / 'cargo-home')
         Path(lab.env['CARGO_HOME']).mkdir()
-    lab.q('pause', '--wait', '--group', 'gate')
+    lab.hold('gate')
     marker = lab.path / 'must-not-run'
     land = land_process(lab, 'touch ' + str(marker))
-    task = wait_for(lambda: lab.task('land repo') if lab.task('land repo') and
-                    lab.task('land repo')['state'] == 'queued' else None, 'policy gate queued')
+    # Land captures heavy's queued line until completion; observe its ledger.
+    task = wait_for(lambda: task if (task := lab.task('land repo')) and task['state'] == 'waiting'
+                    else None, 'policy gate waiting')
     if mode == 'runtime':
         runtime = Path(lab.env['SKEIN_TEST_CHROMIUM'])
         runtime.write_text(runtime.read_text() + '# changed runtime content\n')
@@ -1464,7 +1455,7 @@ def policy_refusal(lab, mode):
         (lab.repo / 'code').write_text('changed while queued\n')
         lab.call(['git', 'commit', '-qam', 'queued tree change'])
         head = lab.call(['git', 'rev-parse', 'HEAD']).stdout.strip()
-    lab.q('start', '--group', 'gate')
+    lab.unhold('gate')
     lab.done(land, 4)
     task = lab.released('land repo')
     assert task['code'] != 0 and not task.get('payload_started') and not marker.exists()
@@ -1537,7 +1528,15 @@ def main():
     root = opts.evidence.resolve()
     root.mkdir(parents=True, exist_ok=False)
     (root / 'EVIDENCE.TAG').write_text('agents fixture evidence\ntest-heavy-recovery\n')
-    cases = [('gc-build', gc_build), ('gc-budget', gc_budget), ('gc-gate', gc_gate), ('gc-errors', gc_errors),
+    cases = [('client-before-wrapper', unclaimed_client),
+             ('wrapper-before-claim', wrapper_before_claim),
+             ('wrapper-start-failure', wrapper_start_failure),
+             ('wrapper-stopped', lambda lab: descendants(lab, 'stop')),
+             ('gate-order', lambda lab: lane_order(lab, 'gate')),
+             ('build-order', lambda lab: lane_order(lab, 'build')),
+             ('maintenance-gate', maintenance_gate),
+             ('unclaimed-5s', lambda lab: unclaimed_client(lab, True)),
+             ('gc-build', gc_build), ('gc-budget', gc_budget), ('gc-gate', gc_gate), ('gc-errors', gc_errors),
              ('normal', normal), ('unsupported', unsupported), ('configured-kache', configured_kache),
              ('enospc-snapshot', lambda lab: storage_failure(lab, 'snapshot')),
              ('enospc-journal', lambda lab: storage_failure(lab, 'journal')),
@@ -1546,21 +1545,15 @@ def main():
              ('intent', lambda lab: kill_at(lab, 'intent')),
              ('intent-fsync', lambda lab: kill_at(lab, 'intent_fsynced')),
              ('submit-event-fsync', lambda lab: kill_at(lab, 'events_fsynced')),
-             ('enqueue-intent', lambda lab: kill_at(lab, 'enqueue_intent')),
-             ('paused', lambda lab: kill_at(lab, 'paused')),
              ('descendants', descendants), ('normal-descendants', lambda lab: descendants(lab, 'normal')),
-             ('queue-terminal-scope', lambda lab: descendants(lab, 'queue-kill')),
              ('release', lambda lab: kill_at(lab, 'release_empty')),
              ('release-fsync', lambda lab: kill_at(lab, 'release_fsynced')),
-             ('release-resumed', lambda lab: kill_at(lab, 'resumed')),
-             ('daemon-restart', lambda lab: descendants(lab, 'restart')),
              ('boot-change', lambda lab: descendants(lab, 'boot')),
-             ('prepaused', prepaused), ('maintenance', maintenance), ('concurrent', concurrent),
+             ('maintenance', maintenance), ('concurrent', concurrent),
              ('weighted', weighted), ('fmt-direct', fmt_direct),
              ('journal-replay', replay), ('late-launch', late_launch),
              ('late-launch-release-crash', lambda lab: late_launch(lab, True)),
              ('policy-helper-descendants', policy_helper_descendants),
-             ('cancelled-reused-id', cancelled_reused_id), ('stale-pause-5s', stale_pause),
              ('receipt-publication', publication_crash), ('inherited-after-landing-policy', lambda lab: relocated_after_landing(lab, True)), ('relocated-after-landing', relocated_after_landing), ('real147-land-cache', real_land),
              ('gate-settle-commit-drift', lambda lab: payload_tree_drift(lab, 'settled', 'commit')),
              ('gate-settle-index-drift', lambda lab: payload_tree_drift(lab, 'settled', 'index')),

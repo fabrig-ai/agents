@@ -44,7 +44,7 @@ prepare_gate_policy() {
 case ${1:-} in
     # The Python payload guard must precede every policy executable. These
     # skip the disk floor: --cancel above all must work below it.
-    --payload|--task|--observe|--reconcile|--install-reconciler|--remove-reconciler|--maintenance-pause|--maintenance-resume|--check-recovery|--repair-group|--group-held|--record-refusal|--cancel) ;;
+    --payload|--task|--reconcile|--install-reconciler|--remove-reconciler|--maintenance-pause|--maintenance-resume|--check-recovery|--group-held|--record-refusal|--cancel) ;;
     *)
         disk_floor heavy || {
             python3 -B "$kit/heavy-recovery.py" --record-refusal disk-floor || true

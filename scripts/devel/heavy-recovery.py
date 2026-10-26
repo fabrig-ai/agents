@@ -5,6 +5,7 @@ import errno
 import fcntl
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -26,11 +27,13 @@ ROOT = Path(os.environ.get('DEV_ROOT', str(Path.home() / 'src/rust'))).resolve()
 TMP = Path(os.environ.get('DEV_TMP', str(ROOT / 'tmp'))).resolve()
 BASE = TMP / 'heavy'
 LOGS = TMP / 'logs'
-PUEUE = shutil.which('pueue') or 'pueue'
 BOOT_FILE = Path(os.environ.get('HEAVY_BOOT_ID_FILE', '/proc/sys/kernel/random/boot_id'))
-CONFIG = Path(os.environ.get('PUEUE_CONFIG_PATH', str(
-    Path(os.environ.get('XDG_CONFIG_HOME', str(Path.home() / '.config'))) / 'pueue/pueue.yml'))).resolve()
-PREFIX = 'skein-heavy-' + hashlib.sha256(str(BASE).encode()).hexdigest()[:12]
+# The state directory is the queue (build-infrastructure.md, 2).
+QUEUE = hashlib.sha256(str(BASE).encode()).hexdigest()
+PREFIX = 'skein-heavy-' + QUEUE[:12]
+LANES = ('build', 'gate')
+UNCLAIMED = ('submitted', 'enqueuing', 'queued')
+LIVE = ('launching', 'active', 'finishing', 'closing')
 CGROOT = Path('/sys/fs/cgroup')
 CANCELLED = 130  # A cancelled task's exit, as check.sh and codex-run exit on SIGINT.
 USAGE = 'usage: heavy [--gate | --land] [--tail N] [--] command... | heavy --cancel TOKEN'
@@ -44,40 +47,11 @@ class Refusal(Exception):
     pass
 
 
-def queue_identity():
-    # Hash only endpoint-selection lines, without emitting config contents or
-    # reading queue authentication files. A changed socket/data selection must
-    # not silently reuse an existing host ledger.
-    selected = []
-    if CONFIG.exists():
-        selected = [line.strip() for line in CONFIG.read_text().splitlines() if re.match(
-            r'\s*(pueue_directory|runtime_directory|use_unix_socket|unix_socket_path|host|port):', line)]
-    return hashlib.sha256(json.dumps([str(CONFIG), os.environ.get('PUEUE_PROFILE', ''), selected]).encode()).hexdigest()
-
-
-def pueue_command(*args):
-    profile = os.environ.get('PUEUE_PROFILE')
-    return [PUEUE, *(['--profile', profile] if profile else []), *args]
-
-
-QUEUE = queue_identity()
-
-
 def run(args, **kw):
     # A session of its own: a terminal's SIGINT reaches heavy, which defers
     # it, and never fails a queue or systemd call midway.
     return subprocess.run([str(x) for x in args], stdin=subprocess.DEVNULL,
                           capture_output=True, text=True, start_new_session=True, **kw)
-
-
-def queue(*args):
-    # Never request task records: those include environments and output.
-    if args[0] in ('status', 'log', 'env'):
-        raise Refusal('unsafe queue operation')
-    result = run(pueue_command(*args))
-    if result.returncode:
-        raise Refusal('queue operation failed: ' + args[0])
-    return result.stdout
 
 
 def boot():
@@ -125,7 +99,7 @@ def atomic(path, value):
         fault('receipt_fsynced', value['token'])
     if path.name == 'state.json':
         gate = value.get('gate')
-        if gate and any(event['event'] == 'pause_begin' for event in value.get('pending', [])):
+        if gate and any(event['event'] == 'drain_begin' for event in value.get('pending', [])):
             fault('intent_fsynced', gate)
         for task in value.get('tasks', {}).values():
             if task['state'] == 'released' and any(event['id'] == task['token'] + ':release_end'
@@ -172,7 +146,7 @@ class Ledger:
             if self.data['queue'] != QUEUE:
                 raise Refusal('state directory belongs to a different queue identity')
         else:
-            self.data = {'version': 1, 'queue': QUEUE, 'tasks': {}, 'maintenance': {}, 'resume_requests': [],
+            self.data = {'version': 1, 'queue': QUEUE, 'next_id': 1, 'tasks': {}, 'maintenance': {},
                          'gate': None, 'pending': [], 'installation': None}
         self.flush()
 
@@ -332,28 +306,6 @@ def waiter_failure():
     return False
 
 
-def apply_holds(ledger):
-    held = set(ledger.data['maintenance'])
-    gate = ledger.data['gate']
-    if not gate and not held and not ledger.data.get('resume_requests'):
-        return
-    groups = json.loads(queue('group', '--json'))
-    if gate:
-        held.update(name for name in groups if name != 'gate')
-    for name in sorted(held):
-        if name in groups and groups[name]['status'] == 'Running':
-            queue('pause', '--wait', '--group', name)
-    if not gate:
-        resumed = []
-        for name in ledger.data.get('resume_requests', []):
-            if name not in held:
-                queue('start', '--group', name)
-                resumed.append(name)
-        if resumed:
-            ledger.data['resume_requests'] = [name for name in ledger.data['resume_requests'] if name not in resumed]
-            ledger.save()
-
-
 def finish(ledger, task):
     now = time.time()
     task['state'] = 'released'
@@ -503,94 +455,61 @@ def cancel(token):
     return 1
 
 
-def observer_unit(task):
-    return PREFIX + '-' + task['token'] + '-observe.service'
+def wrapper_unit(token) -> str:
+    return PREFIX + '-' + token + '-wrapper.service'
 
 
-def ensure_observer(task):
-    # The timer owns this observer independently of the submitting client.
-    # It never uses a queue ID for a destructive operation.
-    unit = observer_unit(task)
-    if properties(unit).get('ActiveState') in ('active', 'activating'):
-        return
-    env = BASE / 'reconcile.env'
-    result = run(['systemd-run', '--user', '--quiet', '--collect', '--unit=' + unit,
-                  '--property=EnvironmentFile=' + str(env), '--property=UMask=0077',
-                  '--property=StandardInput=null', '--property=StandardOutput=null',
-                  '--property=StandardError=null', sys.executable, Path(__file__).resolve(),
-                  '--observe', task['token']])
-    if result.returncode:
-        raise Refusal('cannot start queued completion observer')
-
-
-def observe(token):
-    with locked() as ledger:
-        task = ledger.tasks[token]
-        if task['state'] != 'queued':
-            return 0
-        task_id = task['id']
-    # Only the wait exit is observed. No queue records, logs or environments
-    # are requested or retained. Completion/missing ID is never success proof.
-    waiter = subprocess.Popen(pueue_command('wait', '--quiet', task_id),
-                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                              stderr=subprocess.DEVNULL)
+def start_wrapper(task) -> bool:
     try:
-        while waiter.poll() is None:
-            current = json.loads((BASE / 'state.json').read_text())['tasks'][token]
-            if current['state'] != 'queued':
-                return 0
-            time.sleep(0.1)
-        if waiter.returncode:
-            return 2  # Transport failure: retry through the independent timer.
-        fault('queue_observed', token)
-        with locked() as ledger:
-            task = ledger.tasks[token]
-            if task['state'] == 'queued':
-                task.update(state='closing', outcome='cancelled', code=137)
-                ledger.event(task, 'release_begin', outcome='cancelled')
-                ledger.event(task, 'queue_completion', reason='unclaimed token; terminal or absent queue ID')
-                ledger.save()
-            # A terminal queue row cannot prove a launched payload ended.
-            # The common path always kills/proves the owned cgroup empty.
-            reconcile(ledger)
+        result = run(['systemd-run', '--user', '--quiet', '--collect',
+                      '--unit=' + task['wrapper_unit'], '--service-type=exec',
+                      '--property=EnvironmentFile=' + str(BASE / (task['token'] + '.env')),
+                      '--property=UMask=0077', '--property=StandardInput=null',
+                      '--property=StandardOutput=null', '--property=StandardError=journal',
+                      '--working-directory=' + task['repo'],
+                      KIT / 'heavy', '--task', task['token']])
+        return result.returncode == 0
+    except OSError:
+        return False
+
+
+def wrapper_running(task) -> bool:
+    return bool(task.get('wrapper_unit')) and properties(task['wrapper_unit']).get('ActiveState') in (
+        'active', 'activating', 'deactivating', 'reloading')
+
+
+def room(ledger, task):
+    lane, token = task['lane'], task['token']
+    if lane in ledger.data['maintenance']:
         return 0
-    finally:
-        if waiter.poll() is None:
-            waiter.terminate()
-        waiter.wait()
+    if lane == 'build':
+        if ledger.data['gate']:
+            return 0
+        slots = int(os.environ.get('HEAVY_BUILD_SLOTS_EFFECTIVE', '0'))
+        return max(0, slots - sum(other['lane'] == 'build' and other['state'] in LIVE
+                                 for other in ledger.tasks.values())) if slots else math.inf
+    return int(ledger.data['gate'] in (None, token) and not any(
+        other['token'] != token and other['lane'] == 'gate' and other['state'] in LIVE
+        for other in ledger.tasks.values()))
+
+
+def admissible(ledger, task) -> bool:
+    older = sum(other['lane'] == task['lane'] and other['state'] in ('queued', 'waiting')
+                and int(other['id']) < int(task['id']) for other in ledger.tasks.values())
+    return older < room(ledger, task)
 
 
 def reconcile(ledger):
-    # Persistent gate holds precede queue mutations even after a queue restart.
-    queue_available = True
-    try:
-        apply_holds(ledger)
-    except Refusal:
-        # Queue availability is needed to resume holds, never to kill an
-        # orphan's scope. Keep gate intent durable until the queue returns.
-        queue_available = False
     for task in ledger.tasks.values():
-        if task['state'] == 'enqueuing':
-            try:
-                queue('group', '--json')
-            except Refusal:
-                queue_available = False
-                continue
-            # Re-enqueue is safe for the known ID: the guard still admits
-            # only a queued token, under this lock. If the first enqueue
-            # succeeded before its caller died, the wrapper can claim it.
-            run(pueue_command('enqueue', task['id']))
-            task['state'] = 'queued'
-            ledger.event(task, 'enqueue_recovery')
+        if task['state'] in UNCLAIMED and not wrapper_running(task):
+            task.update(state='closing', outcome='cancelled', code=137)
+            ledger.event(task, 'release_begin', outcome='cancelled')
+            ledger.event(task, 'unclaimed', reason='no running wrapper unit before its claim')
             ledger.save()
-        if task['state'] == 'submitted' and not alive(task.get('submitter')):
-            task['state'] = 'waiting'
-        if task['state'] == 'queued' and queue_available:
-            ensure_observer(task)
         if task['state'] == 'released':
             cleanup_transport(task)
             publish_receipt(ledger, task)
-        if task['state'] in ('submitted', 'queued', 'released'):
+        if task['state'] in (*UNCLAIMED, 'released'):
             continue
         orphan = task['boot'] != boot() or not alive(task.get('wrapper'))
         if task['state'] != 'closing' and (orphan or task['state'] == 'finishing'):
@@ -606,22 +525,9 @@ def reconcile(ledger):
             continue
         fault('release_empty', task['token'])
         if ledger.data['gate'] == task['token']:
-            if not queue_available:
-                continue
-            # Still closing, and gate remains durable until every resume is
-            # replayable. An operator hold is checked on every retry.
-            try:
-                for group in task.get('resume', []):
-                    if group not in ledger.data['maintenance']:
-                        queue('start', '--group', group)
-            except Refusal:
-                queue_available = False
-                continue
-            fault('resumed', task['token'])
             ledger.data['gate'] = None
         finish(ledger, task)
         publish_receipt(ledger, task)
-    return queue_available
 
 
 def probe_containment():
@@ -743,8 +649,7 @@ def install(interval):
         raise Refusal('invalid reconciler interval')
     groups = probe_containment()
     with locked() as ledger:
-        env = {key: os.environ[key] for key in ('PATH', 'DEV_ROOT', 'DEV_TMP', 'PUEUE_CONFIG_PATH',
-               'PUEUE_PROFILE', 'HEAVY_BOOT_ID_FILE', 'HEAVY_RECOVERY_FIXTURE', 'XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS') if key in os.environ}
+        env = {key: os.environ[key] for key in ('PATH', 'DEV_ROOT', 'DEV_TMP', 'HEAVY_BOOT_ID_FILE', 'HEAVY_RECOVERY_FIXTURE', 'XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS') if key in os.environ}
         env['DEV_ROOT'], env['DEV_TMP'] = str(ROOT), str(TMP)
         if os.environ.get('HEAVY_RECOVERY_FIXTURE') == '1' and 'HEAVY_FAULT_DIR' in os.environ:
             env['HEAVY_FAULT_DIR'] = os.environ['HEAVY_FAULT_DIR']
@@ -772,19 +677,16 @@ def install(interval):
     print('heavy: independent reconciler ' + timer + '; interval ' + interval)
 
 
-def maintenance(group, pause):
+def maintenance(lane, pause):
     with locked() as ledger:
-        if group == 'gate' or group not in json.loads(queue('group', '--json')):
-            raise Refusal('maintenance requires a known non-gate group')
+        if lane not in LANES and (pause or lane not in ledger.data['maintenance']):
+            raise Refusal('maintenance requires a lane: build or gate')
         if pause:
-            ledger.data['maintenance'][group] = True
-            ledger.data['resume_requests'] = [name for name in ledger.data.get('resume_requests', []) if name != group]
+            ledger.data['maintenance'][lane] = True
         else:
-            ledger.data['maintenance'].pop(group, None)
-            ledger.data.setdefault('resume_requests', []).append(group)
-        ledger.event(None, 'maintenance:' + uuid.uuid4().hex, group=group, held=pause)
+            ledger.data['maintenance'].pop(lane, None)
+        ledger.event(None, 'maintenance:' + uuid.uuid4().hex, group=lane, held=pause)
         ledger.save()
-        apply_holds(ledger)
         reconcile(ledger)
 
 
@@ -842,16 +744,20 @@ def submit(args, lane, tail_lines, exclusive):
     token = uuid.uuid4().hex
     with locked() as ledger:
         ensure_reconciler(ledger)
-        if not reconcile(ledger):
-            raise Refusal('queue is unavailable; admission is held')
+        reconcile(ledger)
         jobs = os.environ.get('HEAVY_BUILD_JOBS_EFFECTIVE', str(len(os.sched_getaffinity(0))))
         label = os.environ.get('HEAVY_LABEL', Path.cwd().name)
-        task = {'token': token, 'lane': lane, 'exclusive': exclusive, 'weight': weight(lane, label),
+        if 'next_id' not in ledger.data:
+            ledger.data['next_id'] = 1 + max((int(task['id']) for task in ledger.tasks.values()
+                                            if str(task.get('id', '')).isdigit()), default=0)
+        number = ledger.data['next_id']
+        ledger.data['next_id'] = number + 1
+        task = {'token': token, 'id': str(number), 'wrapper_unit': wrapper_unit(token), 'lane': lane,
+                'exclusive': exclusive, 'weight': weight(lane, label),
                 'args': args, 'label': label,
                 'repo': str(Path.cwd()), 'tree': tree, 'commit': commit, 'policy': os.environ.get('SKEIN_GATE_POLICY_ID', 'gate-policy-unavailable') if lane == 'gate' else 'build-' + jobs,
                 'boot': boot(), 'queue': QUEUE, 'unit': PREFIX + '-' + token + '.service',
-                'submitter': identity(),
-                'submitted': time.time(), 'state': 'submitted', 'log': str(LOGS / (token + '.log')),
+                'submitted': time.time(), 'state': 'queued', 'log': str(LOGS / (token + '.log')),
                 'capture': str(LOGS / (token + '.capture'))}
         ledger.tasks[token] = task
         Path(task['capture']).touch(mode=0o600)
@@ -863,20 +769,14 @@ def submit(args, lane, tail_lines, exclusive):
         env.pop('NEXTEST_TEST_THREADS', None)
         env['CARGO_BUILD_JOBS'] = jobs
         env['HEAVY_LANE'] = lane
-        # A stashed task cannot beat the durable token -> queue-ID mapping.
-        result = run(pueue_command('add', '--stashed', '--print-task-id', '--group', lane,
-                      '--working-directory', task['repo'], '--label', task['label'], '--escape', '--',
-                      KIT / 'heavy', '--task', token), env=env)
-        if result.returncode or not result.stdout.strip().isdigit():
-            raise Refusal('queue submission failed')
-        task['id'] = result.stdout.strip()
-        task['state'] = 'enqueuing'
-        ledger.save()
-        fault('enqueue_intent', token)
-        queue('enqueue', task['id'])
-        task['state'] = 'queued'
-        ledger.save()
-        ensure_observer(task)
+        environment_file(BASE / (token + '.env'), env)
+        fault('wrapper_intent', token)
+        if not start_wrapper(task):
+            task.update(state='closing', outcome='refused', code=2)
+            ledger.event(task, 'refusal', reason='cannot start the task wrapper unit')
+            ledger.save()
+            reconcile(ledger)
+            raise Refusal('cannot start the task wrapper unit')
     say(f"heavy: queued task {task['id']} in the {lane} lane token {token}", sys.stderr)
     warned, next_health, handled = False, 0.0, 0
     while True:
@@ -924,6 +824,7 @@ def submit(args, lane, tail_lines, exclusive):
 
 
 def wrapper(token):
+    fault('claim', token)
     with locked() as ledger:
         reconcile(ledger)
         task = ledger.tasks[token]
@@ -936,54 +837,26 @@ def wrapper(token):
         ledger.save()
     while True:
         with locked() as ledger:
-            queue_available = reconcile(ledger)
+            reconcile(ledger)
             task = ledger.tasks[token]
             if task['state'] == 'released':
                 return task['code']
             # A cancelled task still closing must never be admitted.
-            if not queue_available or task['state'] != 'waiting':
+            if task['state'] != 'waiting':
                 time.sleep(0.1)
                 continue
-            # A task saved before the land flag existed is exclusive if a gate.
-            if task['lane'] == 'gate' and task.get('exclusive', True):
-                if ledger.data['gate'] not in (None, token):
-                    ready = False
-                else:
-                    if ledger.data['gate'] is None:
-                        groups = json.loads(queue('group', '--json'))
-                        task['resume'] = [name for name, group in groups.items()
-                                          if name != 'gate' and group['status'] == 'Running']
-                        task['initially_paused'] = [name for name, group in groups.items()
-                                                   if name != 'gate' and group['status'] != 'Running']
-                        ledger.data['gate'] = token
-                        ledger.event(task, 'pause_begin', groups=task['resume'], initially_paused=task['initially_paused'])
-                        ledger.save()  # Pause intent is durable BEFORE any pause.
-                        fault('intent', token)
-                        apply_holds(ledger)
-                        ledger.event(task, 'pause_end')
-                        ledger.event(task, 'drain_begin')
-                        ledger.save()
-                        fault('paused', token)
-                    ready = not any(other['token'] != token and (other['lane'] == 'build'
-                                                                 or not other.get('exclusive', True))
-                                    and other['state'] in ('launching', 'active', 'finishing', 'closing')
-                                    for other in ledger.tasks.values())
-                    if ready:
-                        ledger.event(task, 'drain_end')
-            elif task['lane'] == 'gate':
-                # A landing's gate runs beside the builds, first by its weight,
-                # and alone among gates: two would share the machine evenly
-                # against wall-time budgets.
-                ready = not ledger.data['gate'] and not any(
-                    other['token'] != token and other['lane'] == 'gate'
-                    and other['state'] in ('launching', 'active', 'finishing', 'closing')
-                    for other in ledger.tasks.values())
-            else:
-                slots = int(os.environ.get('HEAVY_BUILD_SLOTS_EFFECTIVE', '0'))
-                ready = not ledger.data['gate'] and (not slots or sum(other['lane'] == 'build' and
-                    other['state'] in ('launching', 'active', 'finishing', 'closing')
-                    for other in ledger.tasks.values()) < slots)
-                ready = ready and 'build' not in ledger.data['maintenance']
+            ready = admissible(ledger, task)
+            # An exclusive gate records its hold before draining live scopes.
+            if ready and task['lane'] == 'gate' and task.get('exclusive', True):
+                if ledger.data['gate'] is None:
+                    ledger.data['gate'] = token
+                    ledger.event(task, 'drain_begin')
+                    ledger.save()
+                    fault('intent', token)
+                ready = not any(other['token'] != token and other['state'] in LIVE
+                                for other in ledger.tasks.values())
+                if ready:
+                    ledger.event(task, 'drain_end')
             if ready:
                 # Lazy-starting kache here would place the shared daemon inside
                 # this task. Its separate user service must already own it.
@@ -997,7 +870,6 @@ def wrapper(token):
                 task['state'] = 'launching'
                 ledger.event(task, 'admit', build_slots=int(os.environ.get('HEAVY_BUILD_SLOTS_EFFECTIVE', '0')),
                              jobs=os.environ.get('CARGO_BUILD_JOBS'), weight=task.get('weight', WEIGHTS['build']))
-                environment_file(BASE / (token + '.env'), safe_environment())
                 ledger.save()
                 # The in-cgroup guard takes the same lock and checks the durable
                 # token. A delayed StartTransientUnit after orphan recovery can
@@ -1185,15 +1057,6 @@ def main(args):
         with locked() as ledger:
             ensure_reconciler(ledger)
         return 0
-    if len(args) == 2 and args[0] == '--repair-group':
-        with locked() as ledger:
-            reconcile(ledger)
-            group = args[1]
-            if group not in json.loads(queue('group', '--json')):
-                raise Refusal('cannot repair an unknown group')
-            if group not in ledger.data['maintenance'] and not (ledger.data['gate'] and group != 'gate'):
-                queue('start', '--group', group)
-        return 0
     if args and args[0] == '--install-reconciler':
         install(args[1] if len(args) > 1 else '5s')
         return 0
@@ -1203,8 +1066,6 @@ def main(args):
             if any(task['state'] != 'released' for task in ledger.tasks.values()):
                 raise Refusal('cannot remove reconciler with unfinished tasks')
             installed = ledger.data['installation']
-            for task in ledger.tasks.values():
-                run(['systemctl', '--user', 'stop', observer_unit(task)])
             run(['systemctl', '--user', 'disable', '--now', PREFIX + '-reconcile.timer'], check=True)
             run(['systemctl', '--user', 'stop', PREFIX + '-reconcile.service'])
             for suffix in ('.service', '.timer'):
@@ -1223,8 +1084,8 @@ def main(args):
         return 0
     if len(args) == 2 and args[0] == '--cancel':
         return cancel(args[1])
-    if len(args) == 2 and args[0] in ('--task', '--payload', '--observe'):
-        return {'--task': wrapper, '--payload': payload, '--observe': observe}[args[0]](args[1])
+    if len(args) == 2 and args[0] in ('--task', '--payload'):
+        return {'--task': wrapper, '--payload': payload}[args[0]](args[1])
     lane, exclusive, tail_lines = 'build', False, int(os.environ.get('HEAVY_TAIL', '200'))
     while args:
         if args[0] == '--gate':
