@@ -975,9 +975,6 @@ def subscriptions(fleet):
 
 def kpis(fleet, shown, subscribed):
     now = fleet.now
-    tasks = fleet.tasks()
-    running = sum(t['state'] in RUNNING for _, t in tasks)
-    gates = sum(t['lane'] == 'gate' and t['state'] in RUNNING for _, t in tasks)
     flight = in_flight(fleet)
     landed = [r for r in fleet.runs if r['end'] and r['end']['event'] == 'done']
     last = max(landed, key=lambda r: r['end']['utc'], default=None)
@@ -996,8 +993,6 @@ def kpis(fleet, shown, subscribed):
                                          f'{shown["busy"]} busy now') if shown else ('Missions', '–', 'not shown'),
         ('Sets landing now', str(len(flight)),
          f'last landed {ago(last["end"]["utc"], now)} ({last["set"]})' if last else 'none landed in the feed'),
-        ('Heavy commands now', str(len(tasks)), f'{running} running, {len(tasks) - running} queued'
-                                                 + (f', {gates} gate' if gates else '')),
         ('Agents', str(len(sessions) + codex), agents),
         ('Land gates, 24 h', str(len(lands)), f'{sum(r[5] != "0" for r in lands)} failed'),
         ('Waiting on the user', str(len(waiting)), oldest),

@@ -392,6 +392,9 @@ def page(lab):
     assert 'fmt 0:04 · clippy 0:25' in text, 'step medians'
     assert 'waiting.md: line 5 not read' in text
     assert '<div class="label">Commands, 24 h</div>' not in text
+    assert '<div class="label">Heavy commands now</div>' not in text
+    assert re.findall(r'<div class="label">(.*?)</div>', text) == [
+        'Missions', 'Sets landing now', 'Agents', 'Land gates, 24 h', 'Waiting on the user', 'Subscriptions']
     data = json.loads(snapshot.read_text())
     for host, address in (('alpha', '62.238.103.124'), ('beta', '9.9.9.9')):
         assert f'{data["fleet"][host]["host"]} · {address} · load' in text
