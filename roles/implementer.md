@@ -25,8 +25,10 @@ file, it says why, and the task wins.
 
 ## 2. Building and testing
 
-Every build on the machine shares one `heavy` queue, so: narrow while
-working, the focused suite once, nothing twice without a reason.
+Every build on a build machine shares one `heavy` queue, so: narrow
+while working, the focused suite once, nothing twice without a reason.
+Where heavy isn't installed, `heavy` runs the command directly
+(build-infrastructure.md 12), and the same loop holds.
 
 - **After each change, the narrowest test that checks it,** in the
   package that holds the test, which is not always the changed crate:

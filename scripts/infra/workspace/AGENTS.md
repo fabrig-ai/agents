@@ -48,10 +48,13 @@ holds their reasons and open questions.
   `docs/design/cleanup.md`).
 - **A rebased branch is pushed under a new name;** never force-push.
 - **Build and test through `heavy`:** `heavy cargo nextest run -p
-  <crate>`. It queues every build on the machine, so that builds don't
-  starve each other and gates run alone. What builds nothing (`cargo
-  fmt`, `cargo tree`) runs directly. An implementer's loop is
-  agents' `roles/implementer.md`.
+  <crate>`. On a build machine it queues every build, so that builds
+  don't starve each other and gates run alone. On a machine without
+  heavy, a person's laptop, the same command runs the build directly,
+  and plain `cargo`, the repositories' scripts and `land` work as well
+  (agents' `docs/design/build-infrastructure.md` 12). What builds
+  nothing (`cargo fmt`, `cargo tree`) runs directly. An implementer's
+  loop is agents' `roles/implementer.md`.
 - **`main` moves only through `land`,** which rebases, runs the
   repository's gate and pushes; `land --docs` for Markdown alone, and
   for the mockups under `docs/design/`, which need no tests or builds.
