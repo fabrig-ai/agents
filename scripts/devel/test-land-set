@@ -59,19 +59,26 @@ def git(*args):
     try:
         with os.fdopen(read, 'rb') as out:
             output = out.read()
-    except BaseException:
-        try:
-            os.kill(child, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        raise
-    finally:
         while True:
             try:
                 _, status = os.waitpid(child, 0)
                 break
             except InterruptedError:
                 pass
+    except BaseException:
+        try:
+            os.kill(child, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        while True:
+            try:
+                os.waitpid(child, 0)
+                break
+            except InterruptedError:
+                pass
+            except ChildProcessError:
+                break
+        raise
     if status:
         import subprocess
         raise subprocess.CalledProcessError(os.waitstatus_to_exitcode(status), argv, output=output)
