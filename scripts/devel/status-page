@@ -46,6 +46,8 @@ GROUPS = [('Tests', ['focused', 'package', 'workspace', 'doc']),
           ('Landing', ['prebuild', 'land'])]
 STEPS = ('fmt', 'clippy', 'wasm', 'build', 'focused', 'fuzzy', 'bundle', 'browser')
 WINDOWS = (('24h', DAY, 'Last 24 hours'), ('7d', WEEK, 'Last 7 days'))
+# The front matter's public fields (status-page.md 1); a field joins only once it is.
+FRONT = ('state', 'owner', 'machine', 'ended')
 
 
 def clock():
@@ -102,9 +104,7 @@ def mission(path, tmp):
         return ''
     if not parts:
         return ''
-    # The old layout named a milestone's directory <mission>-m<N>.
-    old = re.fullmatch(r'(.+)-m[1-9][0-9]*', parts[0])
-    return old[1] if old else parts[0]
+    return parts[0]
 
 
 def kinds(command):
@@ -222,7 +222,7 @@ def part_turns(tmp, now):
 
 def active_units():
     result = subprocess.run(['systemctl', '--user', 'list-units', '--plain', '--no-legend', '--no-pager',
-                             '--state=active', 'codex-*'], stdin=subprocess.DEVNULL,
+                             '--state=active', 'codex-run-*'], stdin=subprocess.DEVNULL,
                             capture_output=True, text=True, timeout=20)
     if result.returncode:
         # Without the units every run would look dead.
@@ -266,19 +266,7 @@ def part_codex(tmp, now):
         tokens = row[11].split('/')
         tokens = [int(t) for t in tokens] if len(tokens) == 3 and all(t.isdigit() for t in tokens) else None
         ended.append([start, end, row[4], row[6], row[7], tokens, mission(row[8], tmp)])
-    owners = []
-    for name_path in sorted((tmp / 'owners').glob('*/codex/name')):
-        name = ''.join(lines_of(name_path)).strip()
-        if not name:
-            continue
-        # systemd-escape for a post name: hyphens escaped, then slashes as hyphens.
-        unit = 'codex-owner-' + name.replace('-', '\\x2d').replace('/', '-') + '.service'
-        rows = [r.split('\t') for r in lines_of(name_path.parent / 'turns.tsv') if r.count('\t') >= 1]
-        last = stamp(rows[-1][1]) if rows else None
-        alive = unit in units
-        if alive or (last and last >= now - DAY):
-            owners.append({'name': name, 'alive': alive, 'last_turn': last})
-    return {'running': running, 'ended': ended, 'owners': owners}
+    return {'running': running, 'ended': ended}
 
 
 def part_mail(tmp, now):
@@ -655,10 +643,9 @@ def records(root):
         fields = {}
         for line in front[1].splitlines() if front else []:
             key, sep, value = line.partition(':')
-            if sep:
+            if sep and key.strip() in FRONT:
                 fields[key.strip()] = value.strip()
-        missions.append({'name': readme.parent.name, **{k: fields.get(k, '') for k in (
-            'state', 'owner', 'machine', 'roadmap', 'started', 'ended', 'parent')}})
+        missions.append({'name': readme.parent.name, **{k: fields.get(k, '') for k in FRONT}})
     return {'missions': missions}
 
 
@@ -854,18 +841,31 @@ class Fleet:
         self.data = data
         self.names = data['machines']
         self.up = {n: d for n, d in data['fleet'].items() if 'unreachable' not in d}
+        self.recorded = {m['name']: m for m in data['records']['missions']}
         self.alias = {text(d.get('host')): n for n, d in self.up.items()}
-        self.rows = [(n, *r) for n, d in self.up.items() for r in records_of(d, ['rows'], 8, (0, 2, 3))]
+        self.rows = [(n, *r[:5], self.mission(r[5]), *r[6:])
+                     for n, d in self.up.items() for r in records_of(d, ['rows'], 8, (0, 2, 3))]
         self.feed = feed_records(next((d['feed'] for d in self.up.values() if d.get('feed') is not None), None))
         self.feed_seen = any(d.get('feed') is not None for d in self.up.values())
         self.runs = set_runs(self.feed)
         self.turns = [(n, *t) for n, d in self.up.items() for t in records_of(d, ['turns', 'done'], 4, (0,))]
         self.usage = [(n, cli, subscription_data(d.get(cli + '_usage')))
                       for cli in ('claude', 'codex') for n, d in sorted(self.up.items())]
-        self.codex = [(n, *r) for n, d in self.up.items() for r in records_of(d, ['codex', 'ended'], 7, (0, 1))]
+        self.codex = [(n, *r[:6], self.mission(r[6]))
+                      for n, d in self.up.items() for r in records_of(d, ['codex', 'ended'], 7, (0, 1))]
+
+    def mission(self, raw):
+        """A mission's name: whole when the record holds it, else without an old
+        milestone's -m<N> (status-page.md 2)."""
+        raw = text(raw)
+        if raw in self.recorded:
+            return raw
+        old = re.fullmatch(r'(.+)-m[1-9][0-9]*', raw)
+        return old[1] if old else raw
 
     def tasks(self):
-        return [(n, t) for n, d in self.up.items() for t in (d.get('heavy') or {}).get('tasks', [])]
+        return [(n, dict(t, mission=self.mission(t['mission'])))
+                for n, d in self.up.items() for t in (d.get('heavy') or {}).get('tasks', [])]
 
     def window(self, seconds):
         since = self.now - seconds
@@ -950,6 +950,19 @@ def kpis(fleet, shown, subscribed):
     sessions = [s for d in fleet.up.values() for s in d.get('sessions') or []]
     busy = sum(s['status'] in ('busy', 'working') for s in sessions)
     codex = sum(r['alive'] for d in fleet.up.values() for r in (d.get('codex') or {}).get('running', []))
+    roles = {}
+    for session in sessions:
+        role, _ = session_role(session['name'])
+        role = role or 'other'
+        roles[role] = roles.get(role, 0) + 1
+    roles['implementer'] = codex
+    counts = []
+    for role in ('director', 'designer', 'owner', 'implementer', 'other'):
+        count = roles.get(role, 0)
+        if count:
+            counts.append('director' if role == 'director' and count == 1 else
+                          f'{count} {role}' + ('s' if count > 1 and role != 'other' else ''))
+    agents = f'{busy + codex} busy' + (' · ' + ', '.join(counts) if counts else '')
     day = fleet.window(DAY)
     lands = [r for r in day if r[7] == 'land']
     tiles = [
@@ -959,7 +972,7 @@ def kpis(fleet, shown, subscribed):
          f'last landed {ago(last["end"]["utc"], now)} ({last["set"]})' if last else 'none landed in the feed'),
         ('Heavy commands now', str(len(tasks)), f'{running} running, {len(tasks) - running} queued'
                                                  + (f', {gates} gate' if gates else '')),
-        ('Agents working', str(busy + codex), f'{busy} Claude busy of {len(sessions)} live, {codex} Codex runs'),
+        ('Agents', str(len(sessions) + codex), agents),
         ('Commands, 24 h', f'{len(day):,}', f'{hours(sum(r[4] for r in day))} running, '
                                             f'{hours(sum(r[3] for r in day))} waiting'),
         ('Land gates, 24 h', str(len(lands)), f'{sum(r[5] != "0" for r in lands)} failed'),
@@ -1009,9 +1022,15 @@ def landing_now(fleet):
     return out
 
 
-def owner_mission(name):
-    match = re.fullmatch(r'o/(.+?)(?:-m[1-9][0-9]*)?', name or '')
-    return match[1] if match else ''
+def session_role(name):
+    """('owner', m) for o/<m>, ('designer', d) for design/<d>, ('director', '') for
+    director, else ('', '')."""
+    if name == 'director':
+        return 'director', ''
+    match = re.fullmatch(r'(o|design)/(.+)', name or '')
+    if match:
+        return ('owner' if match[1] == 'o' else 'designer'), match[2]
+    return '', ''
 
 
 def missions(fleet):
@@ -1027,27 +1046,27 @@ def missions(fleet):
             e['now'].append(doing)
         return e
 
-    recorded = {m['name']: m for m in fleet.data['records']['missions']}
+    recorded = fleet.recorded
     for name, m in recorded.items():
         if m['state'] in ('active', 'paused'):
             entry(name)
     for host, data in fleet.up.items():
         for task in (data.get('heavy') or {}).get('tasks', []):
-            if task['mission']:
-                entry(task['mission'], host, task['submitted'],
+            name = fleet.mission(task['mission'])
+            if name:
+                entry(name, host, task['submitted'],
                       'build' if task['state'] in RUNNING else 'queued build')
         codex = data.get('codex') or {}
         for run in codex.get('running', []):
-            if run['alive'] and run['mission']:
-                entry(run['mission'], host, run['started'], 'Codex run')
-        for owner in codex.get('owners', []):
-            if owner_mission(owner['name']):
-                entry(owner_mission(owner['name']), host, owner['last_turn'],
-                      'Codex owner' if owner['alive'] else None)
+            name = fleet.mission(run['mission'])
+            if run['alive'] and name:
+                entry(name, host, run['started'], 'implementer')
         for session in data.get('sessions') or []:
-            if owner_mission(session['name']):
-                entry(owner_mission(session['name']), host, None,
-                      f'session {session["status"]}' if session['status'] else 'session')
+            role, raw = session_role(session['name'])
+            name = fleet.mission(raw)
+            if name:
+                status = 'busy' if session['status'] in ('busy', 'working') else 'idle'
+                entry(name, host, None, f'{role} {status}')
     # Commands alone bring in a mission the record doesn't say has ended.
     for host, end, lane, wait, run, code, name, kind, repo in fleet.window(DAY):
         if not name or (name not in seen and recorded.get(name, {}).get('state') in ('ended', 'abandoned')):
@@ -1078,6 +1097,17 @@ def missions(fleet):
                         rows, numeric_from=9, empty='No mission is active, paused or busy.')
 
 
+def ended_missions(fleet):
+    ended = [(stamp(m.get('ended')), name, m) for name, m in fleet.recorded.items()
+             if m.get('state') in ('ended', 'abandoned')]
+    ended = sorted((e for e in ended if e[0] is not None and fleet.now - WEEK <= e[0] <= fleet.now),
+                   key=lambda e: (-e[0], e[1]))
+    rows = [[E(name), badge('neutral', m['state']), E(f'{utc(at)} · {ago(at, fleet.now)}'),
+             E(m.get('owner') or '–')] for at, name, m in ended]
+    return table(['Mission', 'State', 'Ended', 'Owner'], rows, numeric_from=9,
+                 empty='No mission ended this week.')
+
+
 def machine_card(fleet, name):
     now = fleet.now
     data = fleet.data['fleet'].get(name, {'unreachable': 'not gathered'})
@@ -1101,17 +1131,16 @@ def machine_card(fleet, name):
         body.append('<h4>heavy</h4><ul>' + ''.join(
             f'<li>{badge("info" if t["state"] in RUNNING else "warning", t["state"])} '
             f'{E(t["lane"])} · {E(t["kind"] + (" " + t["repo"] if t["repo"] else ""))} · '
-            f'{E(t["mission"] or t["label"] or "–")} · {E(lasted(t["started"] or t["submitted"], now))}</li>'
+            f'{E(fleet.mission(t["mission"]) or t["label"] or "–")} · {E(lasted(t["started"] or t["submitted"], now))}</li>'
             for t in tasks) + '</ul>')
     codex = data.get('codex') or {}
     runs = codex.get('running', [])
-    if runs or codex.get('owners'):
+    if runs:
         items = [f'<li>{badge("info" if r["alive"] else "warning", "running" if r["alive"] else "stale")} '
-                 f'run for {E(r["to"])} · {E(r["model"])} {E(r["effort"])} · {E(lasted(r["started"], now))}</li>'
+                 f'implementer for {E(fleet.mission(r["mission"]) or r["to"])} · '
+                 f'{E(r["model"])} {E(r["effort"])} · {E(lasted(r["started"], now))}</li>'
                  for r in runs]
-        items += [f'<li>{badge("info" if o["alive"] else "neutral", "owner up" if o["alive"] else "owner down")} '
-                  f'{E(o["name"])} · last turn {E(ago(o["last_turn"], now))}</li>' for o in codex.get('owners', [])]
-        body.append('<h4>Codex</h4><ul>' + ''.join(items) + '</ul>')
+        body.append('<h4>Implementers</h4><ul>' + ''.join(items) + '</ul>')
     sessions = data.get('sessions') or []
     if sessions:
         body.append('<h4>Claude sessions</h4><ul>' + ''.join(
@@ -1323,7 +1352,7 @@ def codex_table(fleet, since):
         out.append([E(f'{model} {effort}'), str(len(mine)), str(sum(r[3] != '0' for r in mine) or '–'),
                     span(median(took)), span(pct(took, .9)), compact(total[0]), cached, compact(total[2])])
     return table(['Model and effort', 'Runs', 'Failed', 'Median', 'p90', 'Input tokens', 'Cached', 'Output tokens'],
-                 out, empty='No codex-run run ended in this window.')
+                 out, empty='No implementer run ended in this window.')
 
 
 STYLE = """
@@ -1488,9 +1517,9 @@ landed or stopped.</p>
 <h3>Landing: the landing turn</h3>
 <p class="muted">How long each machine’s <code>land</code> waited for, and held, its repository’s turn.</p>
 <div class="panel">{guard("landing turns", turns_table, fleet, since)}</div>
-<h3>Codex runs</h3>
-<p class="muted">Every <code>codex-run</code> task that ended, from each machine’s <code>runs.tsv</code>.</p>
-<div class="panel">{guard("Codex runs", codex_table, fleet, since)}</div>
+<h3>Implementer runs</h3>
+<p class="muted">Every <code>codex-run task</code> that ended, from each machine’s <code>runs.tsv</code>.</p>
+<div class="panel">{guard("implementer runs", codex_table, fleet, since)}</div>
 </div>''')
     return f'''<!doctype html>
 <html lang="en">
@@ -1516,9 +1545,11 @@ landed or stopped.</p>
 <div class="panel">{guard("landing now", landing_now, fleet)}</div>
 <h3>Missions</h3>
 <p class="muted">Missions the record holds as active or paused, any mission with something running now (a heavy
-command, a Codex run or owner, a Claude session named for it), and any the record doesn’t call ended with heavy
-commands in the last 24 hours. Last activity is its last command, run or owner turn.</p>
+command, an implementer, its owner’s or designer’s session), and any the record doesn’t call ended with heavy
+commands in the last 24 hours. Last activity is its last command or implementer run.</p>
 <div class="panel">{mission_table}</div>
+<h3>Ended this week</h3>
+<div class="panel">{guard("ended missions", ended_missions, fleet)}</div>
 <h3>Machines</h3>
 <div class="cards">{"".join(guard(f"card of {name}", machine_card, fleet, name) for name in fleet.names)}</div>
 <h2>Costs</h2>
@@ -1624,7 +1655,7 @@ def main():
             # The web server reads it as another user.
             write(args.out, page, 0o644)
         if args.json:
-            # The data holds the missions' fields the page leaves out.
+            # The snapshot holds only the collector's public fields.
             write(args.json, json.dumps(data), 0o600)
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         print(f'status-page: {error}', file=sys.stderr)

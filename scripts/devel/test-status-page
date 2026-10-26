@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -146,15 +147,37 @@ class Lab:
         self.alpha = machine(root / 'alpha/tmp')
         self.beta = machine(root / 'beta/tmp', mission='beta-m')
         self.records = root / 'records'
-        for name, state in (('alpha-m', 'active'), ('paused-m', 'paused'), ('old-m', 'ended')):
+        for name, state in (('alpha-m', 'active'), ('paused-m', 'paused'), ('old-m', 'ended'),
+                            ('beta-d', 'active'), ('alpha-m2', 'active'),
+                            ('ended-m', 'ended'), ('old-ended', 'ended')):
+            owner = 'design/beta-d@beta' if name == 'beta-d' else f'o/{name}@alpha'
+            ended = f'ended: {iso(30 if name == "ended-m" else 240)}\n' if name in ('ended-m', 'old-ended') else ''
             write(self.records / f'missions/{name}/README.md',
-                  f'---\nstate: {state}\nowner: o/{name}@alpha\nmachine: alpha\n---\n\nThe brief.\n')
+                  f'---\nstate: {state}\nowner: {owner}\nmachine: alpha\n{ended}'
+                  'parent: PRIVATE-PARENT\nroadmap: PRIVATE-ROADMAP\nstarted: PRIVATE-STARTED\n'
+                  'end: PRIVATE-END-PROSE\n---\n\nThe brief.\n')
+        rows = self.alpha / 'logs/heavy.tsv'
+        extra = []
+        for name, path in (('alpha-m2', 'alpha-m2/wt'), ('legacy-m3', 'legacy-m3/m1/wt')):
+            extra.append('\t'.join(map(str, [name, 'build', iso(.5), 1, 10, 0, 10,
+                         self.alpha / 'owners' / path, 'L8', 'cargo check', 'wt'])) + '\n')
+        write(rows, rows.read_text() + ''.join(extra))
+        write(self.alpha / 'codex-run/20261025T113000Z-dddd/meta',
+              f'to=o/alpha-m2\nmodel=gpt-x\neffort=high\nstarted={iso(.5)}\n'
+              f'task={self.alpha}/owners/alpha-m2/t.md\n')
         write(self.records / 'STATUS.md', '# Status\n\nSECRET-STATUS-LINE\n')
         self.machines = write(root / 'machines',
                               'alpha local\nbeta free@beta\n# a comment\ngamma free@gamma  # out of reach\n')
         feed(root / 'feed.jsonl')
         for tmp, index in ((self.alpha, 1), (self.beta, 2)):
-            self.claude(tmp, claude_answer(index))
+            answer = claude_answer(index)
+            answer['agents'] = ([dict(name='o/alpha-m', kind='background', state='busy', pid=1),
+                                 dict(name='o/paused-m', kind='background', state='idle', pid=2),
+                                 dict(name='PRIVATE-PROMPT-TITLE', kind='interactive', status='idle', pid=3)]
+                                if index == 1 else
+                                [dict(name='design/beta-d', kind='background', state='busy', pid=1),
+                                 dict(name='director', kind='background', state='idle', pid=2)])
+            self.claude(tmp, answer)
             self.codex(tmp, codex_answer(index))
         tool(self.bin, 'claude', '''
 path = Path(os.environ['DEV_TMP']).parent
@@ -171,11 +194,11 @@ if sys.argv[1] != 'agents':
     time.sleep(answer.get('sleep', 0))
     print(json.dumps(answer.get('object')))
     sys.exit(answer.get('exit', 0))
-print(json.dumps([{"name": "o/alpha-m", "kind": "background", "state": "working", "status": "busy", "pid": 1,
+print(json.dumps(config.get("agents", [{"name": "o/alpha-m", "kind": "background", "state": "working", "status": "busy", "pid": 1,
                    "startedAt": 1},
                   {"name": "PRIVATE-PROMPT-TITLE", "kind": "interactive", "status": "idle", "pid": 2},
                   {"name": "PRIVATE-OLDER-TITLE", "kind": "claude", "status": "idle", "pid": 3},
-                  {"name": "o/gone", "kind": "background", "state": "done"}]))
+                  {"name": "o/gone", "kind": "background", "state": "done"}])))
 ''')
         tool(self.bin, 'codex', '''
 import signal
@@ -224,6 +247,8 @@ with open(os.environ['FIXTURE_TRACE'] + '/systemctl', 'a') as out:
     out.write(json.dumps(sys.argv[1:]) + '\\n')
 if 'list-units' in sys.argv:
     print('codex-run-20261025T110000Z-aaaa.service loaded active running x')
+    if Path(os.environ['DEV_TMP'], 'codex-run/20261025T113000Z-dddd/meta').exists():
+        print('codex-run-20261025T113000Z-dddd.service loaded active running z')
     print('codex-owner-o-alpha\\\\x2dm.service loaded active running y')
 ''')
         tool(self.bin, 'record', '''
@@ -278,20 +303,24 @@ def collect(lab):
     kinds = [(r[6], r[7], r[5], r[4]) for r in data['rows']]
     assert kinds == [('focused', '', 'alpha-m', '0'), ('clippy', '', 'alpha-m', '101'),
                      ('prebuild', 'skein', 'alpha-m', '0'), ('land', 'skein', 'alpha-m', '0'),
-                     ('check', '', 'old-m', '0')], kinds
+                     ('check', '', 'old-m', '0'), ('check', '', 'alpha-m2', '0'),
+                     ('check', '', 'legacy-m3', '0')], kinds
     tasks = sorted((t['state'], t['kind'], t['repo'], t['mission']) for t in data['heavy']['tasks'])
     assert tasks == [('active', 'workspace', '', 'alpha-m'), ('queued', 'land', 'temper', 'alpha-m')], tasks
     codex = data['codex']
     assert [(r['id'], r['alive'], r['mission']) for r in codex['running']] == [
-        ('20261025T110000Z-aaaa', True, 'alpha-m')], codex['running']
+        ('20261025T110000Z-aaaa', True, 'alpha-m'),
+        ('20261025T113000Z-dddd', True, 'alpha-m2')], codex['running']
     assert [r[2:] for r in codex['ended']] == [['0', 'gpt-x', 'high', [1000, 500, 20], 'alpha-m']], codex['ended']
-    assert [(o['name'], o['alive']) for o in codex['owners']] == [('o/alpha-m', True)], codex['owners']
+    assert set(codex) == {'running', 'ended'}, codex
+    units = [json.loads(line) for line in (lab.trace / 'systemctl').read_text().splitlines()]
+    assert units[0][-1] == 'codex-run-*', units
     assert [(m['name'], m['new']) for m in data['mail']] == [('o/alpha-m', 1)], data['mail']
     assert [t[1:] for t in data['turns']['done']] == [['temper', 200, 500], ['smith', 10, 50]], data['turns']
     assert [(t['repo'], t['event']) for t in data['turns']['open']] == [('jig', 'request')], data['turns']
     # An interactive session is someone's own: its name stays here.
     assert [(s['name'], s['kind']) for s in data['sessions']] == [
-        ('o/alpha-m', 'background'), ('', 'interactive'), ('', 'claude')], data['sessions']
+        ('o/alpha-m', 'background'), ('o/paused-m', 'background'), ('', 'interactive')], data['sessions']
     assert len(data['feed']) == 13, data['feed']
     # Elsewhere than the coordinator there is no feed, and that is no error.
     assert json.loads(lab.run('collect').stdout)['feed'] is None
@@ -303,7 +332,7 @@ def collect_missing(lab):
     data = json.loads(lab.run('collect', DEV_TMP=str(lab.root / 'empty'), disk_unavailable=True).stdout)
     failed = sorted(e.split(':')[0] for e in data['errors'])
     assert failed == ['heavy', 'machine', 'mail', 'rows'], data['errors']
-    assert data['codex'] == {'running': [], 'ended': [], 'owners': []}, data['codex']
+    assert data['codex'] == {'running': [], 'ended': []}, data['codex']
     assert data['claude_usage']['state'] == data['codex_usage']['state'] == 'signed-out'
 
 
@@ -326,7 +355,7 @@ def page(lab):
     assert 'alpha-m/m1' in now and 'done-m/m1' not in now and 'stale-m/m1' not in now, now
     assert '<div class="label">Sets landing now</div><div class="value">1</div>' in text
     for needle in ('alpha-m/m1', 'done-m/m1', 'beta-m', 'paused-m', 'land temper', 'landing turn jig',
-                   'o/alpha-m · last turn', '1 unread', 'Codex run', 'session busy'):
+                   'implementer for alpha-m', '1 unread', 'Implementer runs', 'owner busy'):
         assert needle in text, needle
     # Ended in the record, with commands only: history, not in flight.
     assert '<strong>old-m</strong>' not in text
@@ -336,6 +365,95 @@ def page(lab):
     sent = json.loads((lab.trace / 'ssh-free@beta').read_text())
     assert {'BatchMode=yes', 'StrictHostKeyChecking=yes'} <= set(sent) and sent[-2] == 'free@beta', sent
     assert 'fmt 0:04 · clippy 0:25' in text, 'step medians'
+
+
+def page_roles(lab):
+    out, snapshot = lab.root / 'page.html', lab.root / 'data.json'
+    lab.run('--no-pull', '--out', str(out), '--json', str(snapshot))
+    page, raw = out.read_text(), snapshot.read_text()
+    live = page[page.index('<h3>Missions</h3>'):page.index('<h3>Ended this week</h3>')]
+    rows = {name: row for row in re.findall(r'<tr>.*?</tr>', live)
+            for name in re.findall(r'<strong>(.*?)</strong>', row)}
+    assert {'alpha-m', 'alpha-m2', 'legacy', 'paused-m', 'beta-d'} <= rows.keys(), rows.keys()
+    assert 'legacy-m3' not in rows and 'alpha' not in rows, rows.keys()
+    for name, badges in (('alpha-m', ('owner busy', 'implementer')),
+                         ('paused-m', ('owner idle',)), ('beta-d', ('designer busy',))):
+        for word in badges:
+            assert word in rows[name], rows[name]
+    assert '1 · 0:10' in rows['alpha-m2'] and '1 · 0:10' in rows['legacy'], rows
+    card = page[page.index('<h3>alpha '):page.index('<h3>beta ')]
+    assert '<h4>Implementers</h4>' in card and 'implementer for alpha-m2' in card, card
+    ended = page[page.index('<h3>Ended this week</h3>'):page.index('<h3>Machines</h3>')]
+    for word in ('ended-m', '10-24 06:00Z · 30 h 0 min ago', 'o/ended-m@alpha'):
+        assert word in ended, ended
+    assert 'old-ended' not in ended, ended
+    assert '<div class="label">Agents</div><div class="value">8</div>' in page
+    assert '<div class="sub">5 busy · director, 1 designer, 2 owners, 3 implementers, 1 other</div>' in page
+    for word in ('PRIVATE-END-PROSE', 'PRIVATE-PARENT', 'PRIVATE-ROADMAP', 'PRIVATE-STARTED'):
+        assert word not in page and word not in raw, word
+    for word in ('owner up', 'owner down', 'last turn', 'Codex owner'):
+        assert word not in page, word
+    data = json.loads(raw)
+    assert all(set(m) == {'name', 'state', 'owner', 'machine', 'ended'}
+               for m in data['records']['missions']), data['records']
+
+
+def page_role_edges(lab):
+    """Stale runs do not count as agents; ended records can still have live work."""
+    for name, state, ended in (('ended-m', 'ended', iso(30)),
+                               ('abandoned-m', 'abandoned', iso(1)),
+                               ('invalid-ended', 'ended', 'not a time'),
+                               ('future-ended', 'ended', iso(-1))):
+        write(lab.records / f'missions/{name}/README.md',
+              f'---\nstate: {state}\nended: {ended}\nowner: o/{name}@alpha\n---\n')
+    answer = claude_answer()
+    answer['agents'] = [dict(name='o/ended-m', kind='background', state='waiting', pid=1),
+                        dict(name='design/legacy-m3', kind='background', state='working', pid=2),
+                        dict(name='o/alpha-m2', kind='background', state='idle', pid=3)]
+    lab.claude(lab.alpha, answer)
+    # Two alive implementers for one mission, plus a recent stale one with no mission.
+    write(lab.alpha / 'codex-run/20261025T113000Z-dddd/meta',
+          f'to=o/alpha-m\nmodel=gpt-x\neffort=high\nstarted={iso(.5)}\n'
+          f'task={lab.alpha}/owners/alpha-m/t.md\n')
+    write(lab.alpha / 'codex-run/stale/meta',
+          f'to=o/recipient\nmodel=gpt-x\neffort=low\nstarted={iso(2)}\n')
+    # Both heavy's ledger and ended runs carry raw milestone names too.
+    state = json.loads((lab.alpha / 'heavy/state.json').read_text())
+    state['tasks']['b']['repo'] = str(lab.alpha / 'owners/legacy-m3/wt')
+    state['tasks']['b']['submitted'] = NOW - 1800
+    write(lab.alpha / 'heavy/state.json', json.dumps(state))
+    runs = lab.alpha / 'codex-run/runs.tsv'
+    write(runs, runs.read_text().replace('/owners/alpha-m/', '/owners/legacy-m3/').replace(iso(2.5), iso(.1)))
+    out = lab.root / 'page.html'
+    lab.run('--no-pull', '--out', str(out))
+    page = out.read_text()
+    live = page[page.index('<h3>Missions</h3>'):page.index('<h3>Ended this week</h3>')]
+    rows = {name: row for row in re.findall(r'<tr>.*?</tr>', live)
+            for name in re.findall(r'<strong>(.*?)</strong>', row)}
+    assert 'owner idle' in rows['ended-m'], rows['ended-m']
+    assert 'owner idle' in rows['alpha-m2'], rows['alpha-m2']
+    assert 'designer busy' in rows['legacy'] and 'queued build' in rows['legacy'], rows['legacy']
+    assert '2 × implementer' in rows['alpha-m'], rows['alpha-m']
+    assert '6 min ago' in rows['legacy'], rows['legacy']
+    landing = page[page.index('<h3>Landing now</h3>'):page.index('<h3>Recent set runs</h3>')]
+    assert 'legacy-m3' not in live + landing, 'mission labels resolve on the page'
+    assert 'stale</span> implementer for o/recipient' in page, 'fallback recipient'
+    assert '<div class="label">Agents</div><div class="value">8</div>' in page
+    assert '<div class="sub">5 busy · director, 2 designers, 2 owners, 3 implementers</div>' in page
+    ended = page[page.index('<h3>Ended this week</h3>'):page.index('<h3>Machines</h3>')]
+    assert ended.index('abandoned-m') < ended.index('ended-m'), ended
+    assert 'invalid-ended' not in ended and 'future-ended' not in ended, ended
+    # No recent ending and no live session leaves a compact tile and the empty message.
+    for tmp in (lab.alpha, lab.beta):
+        answer = claude_answer(); answer['agents'] = []; lab.claude(tmp, answer)
+        for meta in (tmp / 'codex-run').glob('*/meta'):
+            write(meta.parent / 'ended', '')
+    for name in ('ended-m', 'abandoned-m'):
+        write(lab.records / f'missions/{name}/README.md', '---\nstate: ended\n---\n')
+    lab.run('--no-pull', '--out', str(out))
+    page = out.read_text()
+    assert 'No mission ended this week.' in page
+    assert '<div class="label">Agents</div><div class="value">0</div><div class="sub">0 busy</div>' in page
 
 
 def page_degraded(lab):
@@ -543,7 +661,7 @@ def claude_resets(lab):
     assert [v['used'] for v in data['claude_usage']['limits']] == list(range(7))
 
 
-CASES = [collect_subscriptions, page_subscriptions, subscriptions_signed_out, subscription_failures, claude_resets, collect, collect_missing, page, page_degraded, bad_data, write_failure, install]
+CASES = [collect_subscriptions, page_subscriptions, subscriptions_signed_out, subscription_failures, claude_resets, collect, collect_missing, page, page_roles, page_role_edges, page_degraded, bad_data, write_failure, install]
 
 
 def main():
