@@ -83,10 +83,11 @@ sys.exit(result.returncode)
 POST = r'''import json, os, sys
 from pathlib import Path
 root = Path(os.environ['AFTER_LANDING_FIXTURE'])
+assert sys.argv[1:4] == ['send', '--as', 'after-landing'], sys.argv
 if (root / 'post-refuse').exists():
     sys.exit(int((root / 'post-refuse').read_text() or '1'))
 with (root / 'posts.jsonl').open('a') as out:
-    out.write(json.dumps(dict(argv=sys.argv[1:], body=Path(sys.argv[4]).read_text())) + '\n')
+    out.write(json.dumps(dict(argv=sys.argv[1:], body=Path(sys.argv[6]).read_text())) + '\n')
 sys.exit(int((root / 'post-exit').read_text()) if (root / 'post-exit').exists() else 0)
 '''
 
@@ -344,7 +345,7 @@ def fault(lab):
     lab.run(director=True, env=env)
     lab.run(director=True, env=env)
     assert lab.state()['fault']['posted']
-    assert len(lab.posts()) == 1 and 'fault for 0 minutes' in lab.posts()[0]['argv'][2]
+    assert len(lab.posts()) == 1 and 'fault for 0 minutes' in lab.posts()[0]['argv'][4]
     assert tip in lab.posts()[0]['body'] and 'log:' in lab.posts()[0]['body']
     (lab.root / 'refuse').unlink()
     lab.run()
@@ -371,8 +372,8 @@ def unwatched_red(lab):
     lab.run(director=True, env=env)
     assert len(lab.posts()) == 1 and lab.state()['pending'] == []
     post = lab.posts()[0]
-    assert post['argv'][0:2] == ['send', 'director@x']
-    assert f'red at {tip[:9]} (demo/m1): 1 tests' in post['argv'][2]
+    assert post['argv'][0:4] == ['send', '--as', 'after-landing', 'director@x']
+    assert f'red at {tip[:9]} (demo/m1): 1 tests' in post['argv'][4]
     assert 't1' in post['body'] and tip in post['body'] and 'failure text' in post['body']
     lab.append(kind='watch', event='watching', target='demo/m1')
     two = lab.land(reds=['t1', 't2'], landed=True)

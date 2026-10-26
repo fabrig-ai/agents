@@ -188,7 +188,7 @@ def post(args, base, subject, body):
             out.write(body + '\n')
         executable = (os.environ.get('AFTER_LANDING_POST', str(KIT / 'post'))
                       if args.fixture else str(KIT / 'post'))
-        result = command([executable, 'send', args.director, subject, filename])
+        result = command([executable, 'send', '--as', 'after-landing', args.director, subject, filename])
         if result.returncode not in (0, 3):
             raise OSError(result.stdout.strip() or f'exit {result.returncode}')
         return True
