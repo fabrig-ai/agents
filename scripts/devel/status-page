@@ -25,6 +25,9 @@ import sys
 import threading
 import time
 import traceback
+import urllib.error
+import urllib.parse
+import urllib.request
 
 HOUR, DAY, WEEK = 3600, 86400, 7 * 86400
 SAMPLES_KEPT = 5000
@@ -47,12 +50,10 @@ STEPS = ('fmt', 'clippy', 'wasm', 'build', 'focused', 'fuzzy', 'bundle', 'browse
 WINDOWS = (('24h', DAY, 'Last 24 hours'), ('7d', WEEK, 'Last 7 days'))
 # The front matter's public fields (status-page.md 1); a field joins only once it is.
 FRONT = ('state', 'ended', 'description')
-# An item of director/waiting.md, as record checks it (records.md 3).
-WAIT = re.compile(r'- (unknown|[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}(?::[0-9]{2})?Z)'
-                  r' · ([a-z0-9][a-z0-9_-]*) · ([^·/]{1,160}) · ((?:R[0-9]+-)?[0-9]+)')
-
-# Keep the writer's known-secret refusal when someone edits the checkout directly.
-SECRET = re.compile(r'-----BEGIN [^\n]*PRIVATE KEY-----|(?<![\w-])(?:gh[pousr]_[A-Za-z0-9_-]{20,}|github_pat_[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9_-]{20,})|xox[abpr]-|AKIA[A-Z0-9]{16}')
+# The user's issues (status-page.md 2.3): the repository, its label, and where
+# a signed-in user sees them.
+ISSUES_REPO, ISSUES_LABEL = 'fabrig-ai/agents', 1
+ISSUES_LINK = 'https://git.fabrig.ai/fabrig-ai/agents/issues?state=open&labels=1'
 
 
 def clock():
@@ -317,6 +318,85 @@ def part_sessions(tmp, now):
 def part_feed(tmp, now):
     # Only the coordinator holds the landings feed; elsewhere this is None.
     return jsonlines(Path(os.environ.get('STATUS_FEED', FEED)), last=5000)
+
+
+def part_user_issues(tmp, now):
+    """The open issues waiting on the user (status-page.md 2.3): {'open': n};
+    None where this machine holds no token."""
+    path = tmp / 'git-fabrig/status-read.token'
+    try:
+        mode = path.stat().st_mode
+    except FileNotFoundError:
+        return None
+    if mode & 0o077:
+        raise PermissionError('token file readable by others')
+    try:
+        token = path.read_text(encoding='ascii').strip()
+    except UnicodeError:
+        raise ValueError('token file holds no token') from None
+    if not re.fullmatch(r'[A-Za-z0-9_-]{8,128}', token):
+        raise ValueError('token file holds no token')
+    base = os.environ.get('STATUS_FORGEJO', 'https://git.fabrig.ai').rstrip('/')
+    timeout = float(os.environ.get('STATUS_ISSUES_TIMEOUT') or 15)
+    deadline = time.monotonic() + 30
+
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        # A redirect must not forward the authorization header elsewhere.
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            return None
+
+    opener = urllib.request.build_opener(NoRedirect)
+
+    def ask(endpoint, shape):
+        remaining = min(timeout, deadline - time.monotonic())
+        if remaining <= 0:
+            raise OSError('timed out')
+        request = urllib.request.Request(f'{base}/api/v1/repos/{ISSUES_REPO}/{endpoint}',
+                                         headers={'Authorization': 'token ' + token,
+                                                  'Accept': 'application/json', 'User-Agent': 'status-page'})
+        answer = concurrent.futures.Future()
+
+        def fetch():
+            try:
+                with opener.open(request, timeout=remaining) as response:
+                    value = json.load(response)
+                answer.set_result(value)
+            except Exception as error:
+                answer.set_exception(error)
+
+        # The caller's deadline also bounds a response trickling bytes forever.
+        # A late worker is daemonized, never publishes, and holds only this request.
+        threading.Thread(target=fetch, daemon=True).start()
+        try:
+            return answer.result(timeout=remaining)
+        except urllib.error.HTTPError as error:
+            raise OSError(f'HTTP {error.code}') from None
+        except TimeoutError:
+            raise OSError('timed out') from None
+        except urllib.error.URLError as error:
+            reason = 'timed out' if isinstance(error.reason, TimeoutError) else type(error.reason).__name__
+            raise OSError(reason) from None
+        except (ValueError, UnicodeError):
+            raise ValueError(shape) from None
+        except Exception as error:
+            # HTTP parser errors can contain a raw response line, too.
+            raise OSError(type(error).__name__) from None
+
+    label = ask(f'labels/{ISSUES_LABEL}', 'label answer')
+    if (not isinstance(label, dict) or type(label.get('id')) is not int or label['id'] != ISSUES_LABEL
+            or not isinstance(label.get('name'), str) or not label['name'].strip()):
+        raise ValueError('label answer')
+    name = urllib.parse.quote(label['name'], safe='')
+    count = 0
+    for page in range(1, 21):
+        issues = ask(f'issues?state=open&type=issues&labels={name}&limit=50&page={page}', 'issues answer')
+        if not isinstance(issues, list) or any(not isinstance(issue, dict) for issue in issues):
+            raise ValueError('issues answer')
+        count += sum(any(isinstance(tag, dict) and type(tag.get('id')) is int and tag['id'] == ISSUES_LABEL
+                         for tag in shaped(issue.get('labels'), [])) for issue in issues)
+        if len(issues) < 50:
+            return {'open': count}
+    raise ValueError('more than 20 pages')
 
 
 def part_director_post(tmp, now):
@@ -593,7 +673,7 @@ def part_codex_usage(tmp, now):
 
 PARTS = [('machine', part_machine), ('heavy', part_heavy), ('rows', part_rows),
          ('turns', part_turns), ('codex', part_codex), ('sessions', part_sessions),
-         ('feed', part_feed), ('director_post', part_director_post),
+         ('feed', part_feed), ('director_post', part_director_post), ('user_issues', part_user_issues),
          ('claude_usage', part_claude_usage), ('codex_usage', part_codex_usage)]
 
 
@@ -689,10 +769,7 @@ def pull():
 
 
 def records(root):
-    """Public missions and waits: {'missions': [...], 'waiting': [...], 'unread': [...]}.
-
-    STATUS.md and the missions' bodies are internal; waits are public by writing.
-    """
+    """Public missions: {'missions': [...]}; no STATUS.md or mission bodies."""
     if not (root / 'missions').is_dir():
         raise FileNotFoundError(f'{root}/missions: no such directory')
     missions = []
@@ -705,32 +782,7 @@ def records(root):
                 fields[key.strip()] = value.strip()
         missions.append({'name': readme.parent.name, **{k: fields.get(k, '') for k in FRONT},
                          'started': stamp(fields.get('started'))})
-    waiting, unread = [], []
-    path = root / 'director/waiting.md'
-    try:
-        lines = path.read_bytes().splitlines()
-    except FileNotFoundError:
-        lines = []
-    for number, raw in enumerate(lines, 1):
-        try:
-            line = raw.decode('utf-8')
-        except UnicodeDecodeError:
-            unread.append(number)
-            continue
-        if number == 1:
-            if line != '# Waiting on the user':
-                unread.append(number)
-            continue
-        if not line.strip():
-            continue
-        item = WAIT.fullmatch(line)
-        since = stamp(item[1]) if item and item[1] != 'unknown' else None
-        if (not item or (item[1] != 'unknown' and since is None)
-                or SECRET.search(line) or len(waiting) >= 40):
-            unread.append(number)
-            continue
-        waiting.append(dict(since=since, who=item[2], what=item[3], decision=item[4]))
-    return {'missions': missions, 'waiting': waiting, 'unread': unread}
+    return {'missions': missions}
 
 
 def gather_all(machines_file, records_root, pulling, source):
@@ -755,7 +807,7 @@ def gather_all(machines_file, records_root, pulling, source):
     try:
         recorded = records(records_root)
     except OSError as error:
-        recorded = {'missions': [], 'waiting': [], 'unread': []}
+        recorded = {'missions': []}
         errors.append(f'records: {error}')
     return {'time': clock(), 'machines': [name for name, _ in pairs], 'fleet': fleet,
             'records': recorded, 'errors': errors}
@@ -1128,9 +1180,7 @@ def kpis(fleet, shown, subscribed):
     post = [shaped(d.get('director_post'), {}) for d in fleet.up.values()]
     post = [p for p in post if all(number(p.get(role)) is not None for role in ('owners', 'designers'))]
     owners, designers = (sum(p[role] for p in post) for role in ('owners', 'designers'))
-    waiting = fleet.data['records'].get('waiting', [])
-    known = [w['since'] for w in waiting if w['since'] is not None]
-    oldest = ('oldest ' + when(min(known), now) if known else 'since unknown' if waiting else 'none')
+    issues = user_issues(fleet)
     day = fleet.window(DAY)
     lands = [r for r in day if r[7] == 'land']
     tiles = [
@@ -1143,7 +1193,8 @@ def kpis(fleet, shown, subscribed):
          E(f'{owners} from owners, {designers} from designers')) if post
         else ("Director's post, 24 h", '–', "the director's mailbox was not reached"),
         ('Land gates, 24 h', str(len(lands)), E(f'{sum(r[5] != "0" for r in lands)} failed')),
-        ('Waiting on the user', str(len(waiting)), oldest),
+        ('Waiting on the user', str(issues) if issues is not None else '–',
+         f'<a href="{E(ISSUES_LINK)}">open issues on git.fabrig.ai</a>'),
         ('Subscriptions', str(subscribed['count']), E(subscribed['sub'])) if subscribed
         else ('Subscriptions', '–', 'not shown'),
     ]
@@ -1152,12 +1203,9 @@ def kpis(fleet, shown, subscribed):
         f'<div class="sub">{c}</div></div>' for a, b, c in tiles) + '</div>'
 
 
-def waiting_table(fleet):
-    rows = [[when(w['since'], fleet.now) if w['since'] is not None else 'unknown',
-             E(w['who']), E(w['what']), E(w['decision'])]
-            for w in fleet.data['records'].get('waiting', [])]
-    return table(['Since', 'Who', 'What', 'Decision'], rows, numeric_from=9, wrap=(2,),
-                 empty='Nothing waits on the user.')
+def user_issues(fleet):
+    return next((count for name in fleet.names if name in fleet.up
+                 if (count := number(shaped(fleet.up[name].get('user_issues'), {}).get('open'))) is not None), None)
 
 
 def reason_kind(reason):
@@ -1697,7 +1745,6 @@ def render(data, samples=None):
     fleet.samples = samples
     now = fleet.now
     problems = list(data['errors'])
-    problems += [f'waiting.md: line {n} not read' for n in data['records'].get('unread', [])]
 
     def guard(name, build, *args):
         try:
@@ -1715,6 +1762,10 @@ def render(data, samples=None):
     down = [n for n in fleet.names if n not in fleet.up]
     problems += [f'{n}: {fleet.data["fleet"][n]["unreachable"]}' for n in down if n in fleet.data['fleet']]
     problems += [f'{n}: {e}' for n, d in fleet.up.items() for e in shaped(d.get('errors'), [])]
+    if user_issues(fleet) is None and not any(
+            e.startswith('user_issues:') for d in fleet.up.values() for e in shaped(d.get('errors'), [])
+            if isinstance(e, str)):
+        problems.append("waiting on the user: no machine reached holds the issues' token")
     if not fleet.feed_seen:
         problems.append('landings feed: no reachable machine holds it')
     stats = []
@@ -1766,9 +1817,6 @@ landed or stopped.</p>
 <span class="meta">Written {E(utc(now, "%Y-%m-%d %H:%M UTC"))}, every 10 minutes ·
 {reached} of {len(fleet.names)} machines reached{(" · down: " + E(", ".join(down))) if down else ""}</span></header>
 {guard("tiles", kpis, fleet, shown, subscribed)}
-<h2>Waiting on the user</h2>
-<p class="muted">What only the user can answer or do, from <code>director/waiting.md</code> in the record.</p>
-<div class="panel">{guard("waiting on the user", waiting_table, fleet)}</div>
 <h2>Subscriptions</h2>
 <p class="muted">Distinct Claude and Codex subscriptions across the reached machines, with their current limits.
 {E("At this pace: when a limit fills before its reset, or what it reaches by then, "
@@ -1796,7 +1844,7 @@ commands in the last 24 hours. Last activity is its last command or implementer 
 <footer>
 <p>Written by agents’ <code>scripts/devel/status-page</code> from what the tools already keep: heavy’s
 <code>heavy.tsv</code> and ledger, the landings feed, the landing turns, <code>codex-run</code>’s runs,
-Claude Code’s sessions and subscription, Codex CLI’s subscription, the missions’ front matter, the user’s waits in the records repository,
+Claude Code’s sessions and subscription, Codex CLI’s subscription, the missions’ front matter, the open issues waiting on the user on git.fabrig.ai,
 {E("the director's post, counted by its headers,")}
 {E("and the subscriptions' use, which it samples itself for their pace")}
 (docs/design/status-page.md). Times are UTC; p90 is the

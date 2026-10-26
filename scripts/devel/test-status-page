@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Offline status-page fixtures: every case has its own temporary directory,
 and fake ssh, claude, systemctl and record stand in for the machine's."""
+from contextlib import contextmanager
 from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import hashlib
 import json
 import os
@@ -12,6 +14,8 @@ import shutil
 import subprocess
 import sys
 import time
+import threading
+from urllib.parse import parse_qs, urlsplit
 import case_runner
 
 SCRIPT = Path(__file__).resolve().with_name('status-page')
@@ -179,12 +183,6 @@ class Lab:
               f'to=o/alpha-m2\nmodel=gpt-x\neffort=high\nstarted={iso(.5)}\n'
               f'task={self.alpha}/owners/alpha-m2/t.md\n')
         write(self.records / 'STATUS.md', '# Status\n\nSECRET-STATUS-LINE\n')
-        write(self.records / 'director/waiting.md',
-              '# Waiting on the user\n\n'
-              '- 2026-10-24T20:00Z · director · Read <b>the proposal · 1099\n'
-              '- 2026-10-22T12:00:01Z · web-look-6 · Choose a gallery · R3-12\n'
-              'PRIVATE-MALFORMED-WAIT\n'
-              '- unknown · alpha-m · Answer & approve · 1124\n')
         self.machines = write(root / 'machines',
                               'alpha local\nbeta free@beta\n# a comment\ngamma free@gamma  # out of reach\n')
         feed(root / 'feed.jsonl')
@@ -406,7 +404,6 @@ def page(lab):
     sent = json.loads((lab.trace / 'ssh-free@beta').read_text())
     assert {'BatchMode=yes', 'StrictHostKeyChecking=yes'} <= set(sent) and sent[-2] == 'free@beta', sent
     assert 'fmt 0:04 · clippy 0:25' in text, 'step medians'
-    assert 'waiting.md: line 5 not read' in text
     assert '<div class="label">Commands, 24 h</div>' not in text
     assert '<div class="label">Heavy commands now</div>' not in text
     assert re.findall(r'<div class="label">(.*?)</div>', text) == [
@@ -418,44 +415,6 @@ def page(lab):
     for address in ('10.88.0.5', '127.0.0.2'):
         assert address not in text, address
     public_roles(text, lab)
-
-
-def page_waits(lab):
-    page, data = subscription_page(lab)
-    section = page[page.index('<h2>Waiting on the user</h2>'):page.index('<h2>Subscriptions')]
-    assert re.findall(r'<th(?: [^>]*)?>(.*?)</th>', section) == ['Since', 'Who', 'What', 'Decision']
-    assert re.findall(r'<tr><td>(.*?)</td>', section) == [
-        time_cell('2026-10-24T20:00:00Z', '16 h 0 min ago'),
-        time_cell('2026-10-22T12:00:01Z', '2 d ago'), 'unknown'], section
-    assert re.findall(r'<td class=wrap>(.*?)</td>', section) == [
-        'Read &lt;b&gt;the proposal', 'Choose a gallery', 'Answer &amp; approve'], section
-    assert re.findall(r'<td>([^<]*)</td></tr>', section) == ['1099', 'R3-12', '1124'], section
-    assert section.index('director</td>') < section.index('web-look-6</td>') < section.index('alpha-m</td>')
-    tile = ('<div class="label">Waiting on the user</div><div class="value">3</div>'
-            f'<div class="sub">oldest {time_cell("2026-10-22T12:00:01Z", "2 d ago")}</div>')
-    assert tile in page
-    assert page.index('Land gates, 24 h') < page.index(tile) < page.index('label">Subscriptions')
-    assert page.index('class="tiles"') < page.index('<h2>Waiting on the user') < page.index('<h2>Subscriptions')
-    assert 'waiting.md: line 5 not read' in page[page.index('<footer>'):]
-    assert 'PRIVATE-MALFORMED-WAIT' not in page and '<b>the proposal' not in page
-    assert data['records']['unread'] == [5], data['records']
-    assert data['records']['waiting'] == [
-        dict(since=NOW - 16 * 3600, who='director', what='Read <b>the proposal', decision='1099'),
-        dict(since=NOW - 72 * 3600 + 1, who='web-look-6', what='Choose a gallery', decision='R3-12'),
-        dict(since=None, who='alpha-m', what='Answer & approve', decision='1124')]
-    (lab.records / 'director/waiting.md').unlink()
-    page, data = subscription_page(lab)
-    assert 'Nothing waits on the user.' in page
-    assert ('<div class="label">Waiting on the user</div><div class="value">0</div>'
-            '<div class="sub">none</div>') in page
-    assert data['records']['waiting'] == data['records']['unread'] == []
-    assert 'waiting.md: line' not in page
-    write(lab.records / 'director/waiting.md',
-          '# Waiting on the user\n- unknown · director · Answer · 1\n')
-    page, _ = subscription_page(lab)
-    assert ('<div class="label">Waiting on the user</div><div class="value">1</div>'
-            '<div class="sub">since unknown</div>') in page
-
 
 def page_director_post(lab):
     mailbox = lab.alpha / 'post/director'
@@ -516,7 +475,7 @@ def page_director_post(lab):
         assert 'director_post' not in footer and label not in footer
         phrase = 'the director&#x27;s post, counted by its headers,'
         assert phrase in footer
-        assert footer.index('the user’s waits') < footer.index(phrase) < footer.index('and the subscriptions&#x27; use')
+        assert footer.index('the open issues waiting on the user on git.fabrig.ai') < footer.index(phrase) < footer.index('and the subscriptions&#x27; use')
         public_roles(page, lab)
         return data
 
@@ -529,44 +488,161 @@ def page_director_post(lab):
     assert all(data['fleet'][host]['director_post'] is None for host in ('alpha', 'beta'))
 
 
-def records_waits(lab):
-    read = runpy.run_path(str(SCRIPT))['records']
-    heading = '# Waiting on the user\n'
-    item = '- unknown · director · Answer · 1\n'
-    bad = [item.replace('unknown', '2026-02-30T20:00Z'),
-           item.replace('unknown', '2026-10-24T20:00+00:00'),
-           item.replace('director', 'Director'), item.replace('Answer', ''),
-           item.replace('Answer', 'a/b'), item.replace('Answer', 'a · b'),
-           item.replace('Answer', 'é' * 161), item.replace('1\n', 'R3-x\n'),
-           '# Waiting on the user\n', item.replace('Answer', 'sk-' + 'A' * 20)]
-    write(lab.records / 'director/waiting.md', heading + ''.join(bad) + item)
-    data = read(lab.records)
-    assert data['unread'] == list(range(2, 12)), data
-    assert data['waiting'] == [dict(since=None, who='director', what='Answer', decision='1')]
-    # A damaged UTF-8 line is omitted without losing missions or other waits.
-    (lab.records / 'director/waiting.md').write_bytes(heading.encode() + b'\xff broken\n' + item.encode())
-    data = read(lab.records)
-    assert data['missions'] and len(data['waiting']) == 1 and data['unread'] == [2], data
-    # 40 valid entries survive; a 41st is named by line, never printed.
-    write(lab.records / 'director/waiting.md', heading + item * 40 + item.replace('Answer', 'OVERFLOW'))
-    data = read(lab.records)
-    assert len(data['waiting']) == 40 and data['unread'] == [42], data
-    write(lab.records / 'director/waiting.md', 'PRIVATE-WRONG-HEADING\n' + item)
-    data = read(lab.records)
-    assert len(data['waiting']) == 1 and data['unread'] == [1], data
-    write(lab.records / 'director/waiting.md', heading + item.replace('unknown', '1970-01-01T00:00Z'))
-    page, data = subscription_page(lab)
-    assert '<tr><td>–</td><td>director</td>' in page and '<div class="sub">oldest –</div>' in page
-    assert data['records']['waiting'][0]['since'] == 0
-    # Known-token text and undecodable bytes stay out of both outputs; the footer names only lines.
-    token = 'sk-' + 'A' * 20
-    (lab.records / 'director/waiting.md').write_bytes(
-        heading.encode() + item.replace('Answer', token).encode() + b'\xff broken\n' + item.encode())
-    page, data = subscription_page(lab)
-    assert token not in page and token not in json.dumps(data)
-    assert data['records']['missions'] and len(data['records']['waiting']) == 1
-    assert data['records']['unread'] == [2, 3], data['records']
-    assert 'waiting.md: line 2 not read' in page and 'waiting.md: line 3 not read' in page
+@contextmanager
+def forgejo(answers):
+    """One case's loopback API, with its requests kept only in this fixture."""
+    requests = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            url = urlsplit(self.path)
+            requests.append((url.path, parse_qs(url.query), dict(self.headers)))
+            index = len(requests) - 1
+            status, payload, delay = answers[index] if index < len(answers) else (500, {}, 0)
+            time.sleep(delay)
+            if status == 0:
+                self.wfile.write(payload)  # An intentionally malformed HTTP status line.
+                return
+            body = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
+            try:
+                self.send_response(status)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                pass  # The timeout case has already left.
+
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f'http://127.0.0.1:{server.server_port}', requests
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def page_user_issues(lab):
+    token = 'fixture-token-0123456789'
+    token_file = write(lab.alpha / 'git-fabrig/status-read.token', token + '\n', mode=0o600)
+    label = (200, {'id': 1, 'name': 'waiting-on-user'}, 0)
+    link = ('<a href="https://git.fabrig.ai/fabrig-ai/agents/issues?state=open&amp;labels=1">'
+            'open issues on git.fabrig.ai</a>')
+
+    def issue(index, wanted):
+        return {'title': f'PRIVATE-TITLE-{index}', 'body': f'PRIVATE-BODY-{index}',
+                'user': {'login': 'PRIVATE-AUTHOR'}, 'labels': [{'id': 1 if wanted else 2}]}
+
+    def render(base, value, failure=None):
+        out, snapshot = lab.root / 'page.html', lab.root / 'data.json'
+        result = lab.run('--no-pull', '--out', str(out), '--json', str(snapshot),
+                         STATUS_FORGEJO=base, STATUS_ISSUES_TIMEOUT='1')
+        page = out.read_text()
+        assert (f'<div class="label">Waiting on the user</div><div class="value">{value}</div>'
+                f'<div class="sub">{link}</div>') in page
+        assert '<h2>Waiting on the user' not in page
+        assert '<div class="label">Missions</div><div class="value">–</div>' not in page
+        assert '<div class="label">Missions</div>' in page
+        footer = page[page.index('<footer>'):]
+        if failure:
+            assert failure in footer, footer
+            if failure.startswith('user_issues:'):
+                assert "no machine reached holds the issues&#x27; token" not in footer
+        else:
+            assert 'user_issues:' not in footer and 'no machine reached holds the issues' not in footer
+        for output in (page, snapshot.read_text(), result.stdout, result.stderr,
+                       *(path.read_text() for path in lab.trace.glob('ssh-*'))):
+            assert token not in output
+            private_absent(output)
+        public_roles(page, lab)
+        data = json.loads(snapshot.read_text())
+        assert set(data['records']) == {'missions'}, data['records']
+        assert data['fleet']['beta']['user_issues'] is None
+        return data
+
+    pages = [(200, [issue(i, i < 48) for i in range(50)], 0),
+             (200, [issue(i, i < 52) for i in range(50, 53)], 0)]
+    with forgejo([label, *pages]) as (base, requests):
+        data = render(base, '50')
+        assert data['fleet']['alpha']['user_issues'] == {'open': 50}
+        prefix = '/api/v1/repos/fabrig-ai/agents/'
+        assert [(path, query) for path, query, _ in requests] == [
+            (prefix + 'labels/1', {}),
+            *((prefix + 'issues', {'state': ['open'], 'type': ['issues'], 'labels': ['waiting-on-user'],
+                                   'limit': ['50'], 'page': [str(page)]}) for page in (1, 2))], requests
+        for _, _, headers in requests:
+            assert headers['Authorization'] == 'token ' + token
+            assert headers['Accept'] == 'application/json' and headers['User-Agent'] == 'status-page'
+
+    for answers, failure in (([(404, {'message': 'PRIVATE-ERROR'}, 0)], 'HTTP 404'),
+                             ([label, (401, {'message': 'PRIVATE-ERROR'}, 0)], 'HTTP 401'),
+                             ([(200, label[1], 1.5)], 'timed out'),
+                             ([label, (200, {'PRIVATE-WRONG-SHAPE': []}, 0)], 'issues answer')):
+        with forgejo(answers) as (base, _):
+            render(base, '–', 'user_issues: ' + ('ValueError: ' if failure == 'issues answer' else 'OSError: ') + failure)
+    token_file.chmod(0o644)
+    with forgejo([]) as (base, requests):
+        render(base, '–', 'user_issues: PermissionError: token file readable by others')
+        assert requests == []
+    token_file.unlink()
+    with forgejo([]) as (base, requests):
+        render(base, '–', 'waiting on the user: no machine reached holds the issues&#x27; token')
+        assert requests == []
+
+    # Collector boundaries beyond the rendered failures: no invalid token is sent,
+    # no malformed JSON escapes, and a full twentieth page requires refusal.
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    module = runpy.run_path(str(SCRIPT))
+    read = module['part_user_issues']
+
+    def refused(failure, answers):
+        with forgejo(answers) as (base, requests), patch.dict(os.environ, STATUS_FORGEJO=base):
+            try:
+                read(lab.alpha, NOW)
+            except (OSError, ValueError) as error:
+                assert str(error) == failure, (type(error).__name__, str(error))
+                assert token not in str(error)
+                private_absent(str(error))
+            else:
+                raise AssertionError('accepted ' + failure)
+            return requests
+
+    for invalid in ('short', 'PRIVATE-invalid token', 'é' * 10):
+        write(token_file, invalid, mode=0o600)
+        assert refused('token file holds no token', []) == []
+    write(token_file, token, mode=0o600)
+    for bad_label in ({'id': True, 'name': 'waiting-on-user'}, {'id': 2, 'name': 'waiting-on-user'},
+                      {'id': 1, 'name': ''}, [], {'id': 1, 'name': 4}):
+        assert len(refused('label answer', [(200, bad_label, 0)])) == 1
+    assert len(refused('issues answer', [label, (200, [None], 0)])) == 2
+    assert len(refused('label answer', [(200, b'PRIVATE-invalid-json', 0)])) == 1
+    assert len(refused('BadStatusLine', [(0, b'PRIVATE-HTTP-STATUS\r\n', 0)])) == 1
+    assert len(refused('issues answer', [label, (200, b'PRIVATE-invalid-json', 0)])) == 2
+    assert len(refused('more than 20 pages', [label, *([pages[0]] * 20)])) == 21
+    # Names are quoted as a single query value, including separators and Unicode.
+    with forgejo([(200, {'id': 1, 'name': 'wait & approve/é'}, 0), (200, [], 0)]) as (base, requests):
+        with patch.dict(os.environ, STATUS_FORGEJO=base):
+            assert read(lab.alpha, NOW) == {'open': 0}
+        assert requests[1][1]['labels'] == ['wait & approve/é']
+
+    # Time spent on the label consumes the shared budget before another request.
+    with patch.object(module['time'], 'monotonic', side_effect=[0, 0, 31]):
+        assert len(refused('timed out', [label])) == 1
+
+    # Fleet order chooses one reading; zero is a count and bad types are missing.
+    choose = module['user_issues']
+    fleet = SimpleNamespace(names=['down', 'beta', 'alpha'], up={
+        'alpha': {'user_issues': {'open': 50}}, 'beta': {'user_issues': {'open': 0}}})
+    assert choose(fleet) == 0
+    for wrong in (None, [], {'open': True}, {'open': '3'}, {'open': float('nan')}):
+        fleet.up['beta']['user_issues'] = wrong
+        assert choose(fleet) == 50
 
 
 def public_roles(page, lab):
@@ -873,8 +949,6 @@ def page_times(lab):
         assert rows[name][2] == time_cell(iso(2), '2 h 0 min ago'), rows[name]
         assert rows[name][3] == duration, rows[name]
         assert f'<td class=wrap>Ended {name}</td>' in ended, ended
-    waiting = section('<h2>Waiting on the user</h2>', '<h2>Subscriptions')
-    assert cells(waiting)[0][0] == time_cell('2026-10-24T20:00:00Z', '16 h 0 min ago'), waiting
     subscribed = section('<h2>Subscriptions', '<h2>In flight')
     assert any(row[3] == time_cell('2026-10-26T06:30:00Z', 'in 18 h 30 min')
                for row in cells(subscribed)), subscribed
@@ -888,11 +962,9 @@ def page_times(lab):
     landing = section('<h3>Landing now</h3>', '<h3>Recent set runs</h3>')
     assert cells(landing)[0][3] == time_cell(iso(.1), '6 min'), landing
     assert any(row[3] == time_cell(iso(1 / 60), '&lt;1 min') for row in cells(landing)), landing
-    tiles = section('<div class="tiles">', '<h2>Waiting on the user</h2>')
+    tiles = section('<div class="tiles">', '<h2>Subscriptions')
     assert ('<div class="label">Sets landing now</div><div class="value">1</div>'
             f'<div class="sub">last landed {time_cell(iso(4.4), "4 h 24 min ago")} (done-m/m1)</div>') in tiles
-    assert ('<div class="label">Waiting on the user</div><div class="value">3</div>'
-            f'<div class="sub">oldest {time_cell("2026-10-22T12:00:01Z", "2 d ago")}</div>') in tiles
     card = section('<h3>alpha ', '<h3>beta ')
     assert f'last heavy command {time_cell(iso(.5), "30 min ago")}</p>' in card, card
     assert f' · {time_cell(iso(5 / 60), "5 min")}</li>' in card, card
@@ -1262,7 +1334,7 @@ def claude_resets(lab):
     assert [v['used'] for v in data['claude_usage']['limits']] == list(range(7))
 
 
-CASES = [records_waits, page_waits, page_director_post, collect_subscriptions, page_subscriptions, page_pace, subscriptions_signed_out, subscription_failures, claude_resets, collect, collect_missing, page, reason_kind, page_recent, machine_ips, page_roles, page_role_edges, page_now, page_times, page_degraded, bad_data, write_failure, install]
+CASES = [page_user_issues, page_director_post, collect_subscriptions, page_subscriptions, page_pace, subscriptions_signed_out, subscription_failures, claude_resets, collect, collect_missing, page, reason_kind, page_recent, machine_ips, page_roles, page_role_edges, page_now, page_times, page_degraded, bad_data, write_failure, install]
 
 
 def run(case, directory, built):
