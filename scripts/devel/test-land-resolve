@@ -57,6 +57,9 @@ from pathlib import Path
 import subprocess
 import sys
 args = sys.argv[1:]
+assert '--land' not in args and '--gate' not in args, args
+assert os.environ['HEAVY_LABEL'] == 'land repo regenerate', os.environ['HEAVY_LABEL']
+print('heavy: queued task 1 in the build lane token fixture-token', file=sys.stderr)
 with Path(os.environ['HEAVY_CALLS']).open('a') as out:
     out.write(os.environ['HEAVY_LABEL'] + ': ' + ' '.join(args) + '\n')
 while args:
@@ -345,13 +348,14 @@ def regenerated(lab):
     for field in ('%an', '%ae'):
         assert lab.git('show', '-s', f'--format={field}').stdout.strip() == ('Fixture' if field == '%an' else 'fixture@invalid')
     assert lab.calls.read_text().count('scripts/regenerate.sh') == 1
-    assert '--land --tail 60 scripts/regenerate.sh ' + FIGURE in lab.calls.read_text()
+    assert 'land repo regenerate: --tail 60 scripts/regenerate.sh ' + FIGURE in lab.calls.read_text()
 
 
 def generated_kept(directory):
     lab = generated(directory)
     code, output = lab.resolve()
     assert code == 0 and f'regenerated {FIGURE} in ' in output, (code, output)
+    assert 'heavy: queued task 1 in the build lane token fixture-token' in output, output
     message = lab.git('show', '-s', '--format=%B', 'HEAD^').stdout
     assert f"Rebase-Resolved: {FIGURE}: main's side, for scripts/regenerate.sh" in message, message
     regenerated(lab)

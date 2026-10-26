@@ -265,12 +265,14 @@ class Repository:
         name = common.parent.name if common.name == '.git' else common.name.removesuffix('.git')
         try:
             result = subprocess.run([str(Path(__file__).resolve().with_name('heavy')),
-                '--land', '--tail', '60', 'scripts/regenerate.sh', *paths], cwd=self.worktree,
+                '--tail', '60', 'scripts/regenerate.sh', *paths], cwd=self.worktree,
                 capture_output=True, check=False,
                 env=dict(os.environ, HEAVY_LABEL=f'land {name} regenerate'))
         except OSError as error:
             reason = str(error)
         else:
+            for line in result.stderr.decode(errors='replace').splitlines():
+                print(line)
             if result.returncode:
                 # heavy tails the payload's combined log on stdout; its own
                 # refusal is on stderr. Preserve both explanations.

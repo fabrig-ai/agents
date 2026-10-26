@@ -691,9 +691,11 @@ def generated_after_repin(lab):
         shutil.copy(original.with_name(name), kit / name)
     heavy = kit / 'heavy'
     heavy.write_text('''#!/bin/sh
+[ "$HEAVY_LABEL" = 'land smith regenerate' ] || exit 90
 printf '%s\\n' "$*" >> "$DEV_TMP/regenerate.calls"
 while [ "$#" -gt 0 ]; do
     case "$1" in
+        --land|--gate) exit 91 ;;
         --) shift; break ;;
         --tail) shift 2 ;;
         -*) shift ;;
@@ -743,7 +745,7 @@ for path in sys.argv[1:]:
     messages = lab.git(lab.origin['smith'], 'log', '--format=%B', 'main')
     assert 'Rebase-Resolved: scripts/regenerate.sh rewrote ' + figure in messages, messages
     calls = (lab.tmp / 'regenerate.calls').read_text().splitlines()
-    assert calls == ['--land --tail 60 scripts/regenerate.sh ' + figure], calls
+    assert calls == ['--tail 60 scripts/regenerate.sh ' + figure], calls
 
 
 def land_failure(lab):
