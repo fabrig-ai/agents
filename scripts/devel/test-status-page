@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import runpy
+import shutil
 import subprocess
 import sys
 import time
@@ -409,7 +410,8 @@ def page(lab):
     assert '<div class="label">Commands, 24 h</div>' not in text
     assert '<div class="label">Heavy commands now</div>' not in text
     assert re.findall(r'<div class="label">(.*?)</div>', text) == [
-        'Missions', 'Sets landing now', 'Agents', 'Land gates, 24 h', 'Waiting on the user', 'Subscriptions']
+        'Missions', 'Sets landing now', 'Agents', 'Director&#x27;s post, 24 h',
+        'Land gates, 24 h', 'Waiting on the user', 'Subscriptions']
     data = json.loads(snapshot.read_text())
     for host, address in (('alpha', '62.238.103.124'), ('beta', '9.9.9.9')):
         assert f'{data["fleet"][host]["host"]} · {address} · load' in text
@@ -453,6 +455,75 @@ def page_waits(lab):
     page, _ = subscription_page(lab)
     assert ('<div class="label">Waiting on the user</div><div class="value">1</div>'
             '<div class="sub">since unknown</div>') in page
+
+
+def page_director_post(lab):
+    mailbox = lab.alpha / 'post/director'
+
+    def message(index, sender, hours, folder='new', *, id_header=True, from_header=True, mtime=NOW):
+        identity = datetime.fromtimestamp(NOW - hours * 3600, timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+        identity += f'-{index:08x}'
+        headers = (f'Id: {identity}\n' if id_header else '')
+        headers += f'From: {sender}\n' if from_header else ''
+        return write(mailbox / folder / (identity + '.md'),
+                     headers + f'To: director@alpha\nSubject: PRIVATE-SUBJECT-{index}\n\nPRIVATE-BODY-{index}\n',
+                     mtime=mtime)
+
+    message(1, 'o/secret-sender-m@alpha', 1)
+    message(2, 'design/secret-designer@beta', 3, 'cur')
+    message(3, 'o/secret-other-m@alpha', 23, 'cur')
+    message(4, 'o/secret-old-m@alpha', 25)
+    for index, sender in enumerate(('codex-run@alpha', 'qa-watch@hel8', 'user@hel8'), 5):
+        message(index, sender, 1)
+    message(8, 'o/secret-no-id@alpha', 1, id_header=False)
+    message(9, 'o/secret-no-from@alpha', 1, from_header=False)
+    stale = message(10, 'o/secret-stale@alpha', 1, mtime=NOW - 2 * 86400)
+    (mailbox / 'cur/directory').mkdir()
+    # Bad stamps, future messages and headers beyond the read limit add nothing.
+    malformed = message(11, 'o/secret-invalid@alpha', 1)
+    malformed.write_text(malformed.read_text().replace('20261025T110000Z', '20260230T110000Z'))
+    os.utime(malformed, (NOW, NOW))
+    message(12, 'o/secret-future@alpha', -1)
+    oversized = message(13, 'o/secret-large@alpha', 1)
+    oversized.write_text('Subject: ' + 'x' * 4096 + '\n' + oversized.read_text())
+    os.utime(oversized, (NOW, NOW))
+
+    # The stale message must be filtered by its metadata before any open.
+    from unittest.mock import patch
+    read = runpy.run_path(str(SCRIPT))['part_director_post']
+    original_open = Path.open
+
+    def checked_open(path, *args, **kwargs):
+        assert path != stale, 'opened a stale message'
+        if path.name == malformed.name:
+            raise PermissionError('PRIVATE-unreadable-message')
+        return original_open(path, *args, **kwargs)
+
+    with patch.object(Path, 'open', checked_open):
+        assert read(lab.alpha, NOW) == {'owners': 2, 'designers': 1}
+
+    def render(value, sub):
+        page, data = subscription_page(lab)
+        label = 'Director&#x27;s post, 24 h'
+        assert (f'<div class="label">{label}</div><div class="value">{value}</div>'
+                f'<div class="sub">{sub}</div>') in page
+        labels = re.findall(r'<div class="label">(.*?)</div>', page)
+        assert labels[labels.index('Agents') + 1] == label, labels
+        for output in (page, (lab.root / 'data.json').read_text()):
+            assert 'secret-' not in output
+            private_absent(output)
+        footer = page[page.index('<footer>'):]
+        assert 'director_post' not in footer and label not in footer and "director's post" not in footer
+        public_roles(page, lab)
+        return data
+
+    data = render('3', '2 from owners, 1 from designers')
+    assert data['fleet']['alpha']['director_post'] == {'owners': 2, 'designers': 1}
+    assert data['fleet']['beta']['director_post'] == {'owners': 0, 'designers': 0}
+    for tmp in (lab.alpha, lab.beta):
+        shutil.rmtree(tmp / 'post/director')
+    data = render('–', "the director's mailbox was not reached")
+    assert all(data['fleet'][host]['director_post'] is None for host in ('alpha', 'beta'))
 
 
 def records_waits(lab):
@@ -1188,7 +1259,7 @@ def claude_resets(lab):
     assert [v['used'] for v in data['claude_usage']['limits']] == list(range(7))
 
 
-CASES = [records_waits, page_waits, collect_subscriptions, page_subscriptions, page_pace, subscriptions_signed_out, subscription_failures, claude_resets, collect, collect_missing, page, reason_kind, page_recent, machine_ips, page_roles, page_role_edges, page_now, page_times, page_degraded, bad_data, write_failure, install]
+CASES = [records_waits, page_waits, page_director_post, collect_subscriptions, page_subscriptions, page_pace, subscriptions_signed_out, subscription_failures, claude_resets, collect, collect_missing, page, reason_kind, page_recent, machine_ips, page_roles, page_role_edges, page_now, page_times, page_degraded, bad_data, write_failure, install]
 
 
 def run(case, directory, built):
