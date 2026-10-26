@@ -17,10 +17,12 @@ every agent here needs.
 | `smith` | the agent kit | skein | `scripts/check.sh` |
 | `jig` | the kit for agentic applications | skein, smith | `scripts/check.sh` |
 | `hearth` | the factory's build daemon | skein | `scripts/check.sh` |
+| `qa` | the lab: QA's runner, the look's capture and checks, the hand's tools, and their design; private | skein (the lab's browser program, at run time) | `scripts/check.sh` |
 | `temper` | the application | skein, smith, jig | `scripts/check.sh` |
 
 Dependencies point upstream only: skein names neither smith nor temper,
 smith never names temper, and jig never names temper.
+qa runs skein's lab browser program and depends on no other repository; qa is private and the others but agents public, so none of them names a qa path or address.
 
 On a machine that keeps its checkouts elsewhere (`~/src/` rather than
 `~/src/rust/`), read that directory where this file says `~/src/rust`;

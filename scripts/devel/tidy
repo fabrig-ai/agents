@@ -12,7 +12,7 @@ import subprocess
 import sys
 import time
 
-REPOS = ('agents', 'skein', 'smith', 'jig', 'hearth', 'temper')
+REPOS = ('agents', 'skein', 'smith', 'jig', 'hearth', 'qa', 'temper')
 TOOLS = set('heavy logs gates landing-turn land-set kache lab after-landing post codex-run'.split())
 ALLOWED = TOOLS | {'machine.env', 'owners', 'director'}
 CONTENT = ('.', ':(exclude,glob)**/Cargo.lock')

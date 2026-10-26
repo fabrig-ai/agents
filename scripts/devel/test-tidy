@@ -13,7 +13,7 @@ import case_runner
 
 SCRIPT = Path(__file__).resolve().with_name('tidy')
 GIT = shutil.which('git')
-REPOS = ('agents', 'skein', 'smith', 'jig', 'hearth', 'temper')
+REPOS = ('agents', 'skein', 'smith', 'jig', 'hearth', 'qa', 'temper')
 
 
 class Lab:

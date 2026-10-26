@@ -102,8 +102,8 @@ prints what it would do. With REPO, it runs steps 1 to 3 and 7 for
 those repositories; with `--mission M`, step 4 for M; with neither,
 every step.
 
-- **The repositories** are the workspace's six (`agents`, `skein`,
-  `smith`, `jig`, `hearth`, `temper`), at their primary checkouts in
+- **The repositories** are the workspace's seven (`agents`, `skein`,
+  `smith`, `jig`, `hearth`, `qa`, `temper`), at their primary checkouts in
   `~/src/rust/<repo>`; `records` has no branches. `main` itself, a
   primary checkout and a locked worktree are never touched.
 - **First, fresh references:** `git fetch --prune origin` in each

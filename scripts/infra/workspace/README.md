@@ -5,9 +5,10 @@ beside this file is what every agent reads.
 
 ## A new machine
 
-Clone agents, skein, smith, jig, hearth and temper from
+Clone agents, skein, smith, jig, hearth, temper and qa from
 `git@github.com:fabrig-ai/` into `~/src/rust/`, then run
-`agents/scripts/infra/setup --fix`. It links the tools (`heavy`, `land`,
+`agents/scripts/infra/setup --fix`. Setup with `--fix` clones any of those
+repositories that are missing. It links the tools (`heavy`, `land`,
 `land-set`, `landings`, `repin`, `record`, `setup`, `post`, `codex-run`)
 into `~/.local/bin`, and
 `AGENTS.md`, `CLAUDE.md` and the Claude Code settings

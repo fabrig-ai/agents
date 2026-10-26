@@ -14,7 +14,7 @@ workspace() {
 }
 root=${DEV_ROOT:-$(workspace)}
 tmp=${DEV_TMP:-$root/tmp}
-repos=${DEV_REPOS:-skein smith jig hearth temper agents}
+repos=${DEV_REPOS:-skein smith jig hearth temper qa agents}
 claude_dir=${SETUP_CLAUDE_DIR:-$root}
 # shellcheck source=../devel/kit.sh
 source "$kit/../devel/kit.sh"
@@ -32,7 +32,22 @@ check() {
     local repo dir ahead behind
     for repo in $repos; do
         dir=$root/$repo
-        [[ -d $dir/.git ]] || { warn "$repo: no checkout at $dir"; continue; }
+        if [[ -e $dir/.git ]]; then
+            :
+        elif [[ -e $dir ]]; then
+            fail "$repo: $dir exists without a checkout"
+            continue
+        elif ((fix)); then
+            if git clone --quiet --branch main "git@github.com:fabrig-ai/$repo.git" "$dir"; then
+                ok "$repo: cloned $dir"
+            else
+                fail "$repo: cannot clone $dir"
+                continue
+            fi
+        else
+            warn "$repo: no checkout at $dir (--fix clones it)"
+            continue
+        fi
         if [[ $(git -C "$dir" symbolic-ref --quiet --short HEAD || true) != main ]]; then
             fail "$repo: primary checkout is not on main"
             continue
