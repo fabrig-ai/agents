@@ -50,10 +50,10 @@ serves it.
 | heavy's ledger | `tmp/heavy/state.json` | the tasks queued and running, and whether a gate holds the machine |
 | the landings feed | the coordinator's `~/.local/state/agents-land-set/feed.jsonl` | set runs and their results' gate steps (landing-flow.md 10) |
 | the landing turns | `tmp/landing-turn/events.jsonl` | each turn's wait and hold, and the turns open now; a `fail-open` closes one |
-| codex-run | `tmp/codex-run/*/meta`, `runs.tsv`, `tmp/owners/*/codex/` and the `codex-*` user units | runs and owners running, and the runs that ended |
+| codex-run | `tmp/codex-run/*/meta`, `runs.tsv` and the `codex-run-*` user units | the implementers running, each with its mission, and the runs that ended |
 | post | `tmp/post/*/new` | unread mail per box |
-| Claude | `claude agents --json --all` | the live sessions, busy or idle |
-| the records | `records/missions/*/README.md`, after `record pull` | each mission's state, owner and machine |
+| Claude | `claude agents --json --all` | the live sessions, busy or idle: the director, and by their names the designers (`design/<d>`) and owners (`o/<m>`) |
+| the records | `records/missions/*/README.md`, after `record pull` | each mission's front matter: its state, owner, machine and `ended` |
 | the machine | `/proc`, the disk under `tmp/` | load, free memory and disk |
 | Claude's subscription | `claude auth status --json`, `claude -p /usage` | what it is signed in to, and each limit's use and reset (2.1) |
 | Codex's subscription | `codex app-server`: `account/read`, `account/rateLimits/read` | the same (2.1) |
@@ -61,7 +61,10 @@ serves it.
 A command's kind is `record runs`' (records.md 5.1): `land <repo>` and
 `land <repo> prebuild` labels are land's gate and prebuild, and the
 rest by the cargo command. A command's mission is its working
-directory's under `tmp/owners/`.
+directory's under `tmp/owners/`, and a session's its name's: the name
+whole when the record holds a mission so named, else without an old
+milestone's `-m<N>`. The collector sends names whole, and the page,
+which has the record, decides.
 
 ### 2.1 Subscriptions
 
@@ -121,8 +124,9 @@ credential: not `.credentials.json`, `auth.json` nor a token.
 ## 3. The page
 
 - **Tiles:** missions, sets landing now, heavy commands now, agents
-  working, commands and land gates in the last 24 hours, and the
-  subscriptions with the highest use among them.
+  (the director, designers, owners and implementers live, and how many
+  of them are busy), commands and land gates in the last 24 hours, and
+  the subscriptions with the highest use among them.
 - **Subscriptions,** after the tiles: a table, one row per distinct
   subscription and limit, giving its CLI, plan and label, its
   machines, a bar of the percent used, and its reset (in how long, and
@@ -132,14 +136,24 @@ credential: not `.credentials.json`, `auth.json` nor a token.
   gates, landing turns) and the last eight set runs. A set is in flight
   when its latest run, as `landings` finds it, has not ended and was
   heard from in 6 hours: a killed `land-set` writes no end, and a turn
-  is lost the same way. the missions; one
-  card per machine with its heavy tasks, Codex runs and owners, Claude
-  sessions and unread post.
+  is lost the same way. Then the missions, and one card per machine
+  with its heavy tasks, its implementers, its Claude sessions and its
+  unread post.
+- **A mission's row:** its state in the record, its machines, what runs
+  for it now (its owner's or designer's session, busy or idle; its
+  implementers; its heavy commands), its commands in 24 hours, its last
+  activity and its owner. An owner idle on its waiters is waiting, as
+  the roles have it, not missing. The missions ended in the last 7 days
+  follow, newest first, with their `ended` time and owner: never their
+  `end`, which is prose, nor `closing.md`.
+- **An implementer,** on its machine's card: its mission (else its
+  recipient), model and effort, and how long it has run; one whose unit
+  is gone is stale.
 - **Costs,** for the last 24 hours or 7 days: command time per hour or
   4 hours, running and waiting; each kind's medians and p90s; each
   machine's; land's gates and prebuilds per repository; land-set's gate
-  steps; set runs' lock wait and run; the landing turn; Codex runs and
-  tokens per model.
+  steps; set runs' lock wait and run; the landing turn; the
+  implementers' runs (`codex-run task`) and their tokens per model.
 - **A mission shows** when the record holds it active or paused, when
   anything runs for it now, or when it has commands in the last 24
   hours and the record doesn't say it ended. Directories under
@@ -194,10 +208,18 @@ an unidentified one; resets read across a year's end; a `/usage`
 answered by a model, a probe that times out and one that answers
 nonsense, each named in the footer while the rest stands; the methods
 asked of the app-server; and no email or id, on the page or in the
-`--json` file.
+`--json` file. The roles' names: an owner's and a designer's session
+joining its mission, implementers per mission and machine, a recorded
+name ending `-m2` kept whole and an unrecorded one cut, missions ended
+within the week and before it, and no Codex owner read.
 
 ## 6. Open
 
 - Mission names are public. If one ever must not be, the page needs a
   filter, or a login in front of it.
 - The roles don't point at the page yet.
+- Whether a mission's `parent` and `feature` (its repository and
+  design path) become public, and with them the missions by the chain,
+  a designer's owners beneath its mission: the user's to answer
+  (10-26). The page reads the front matter's fields from one list, so
+  either answer is a small change.
