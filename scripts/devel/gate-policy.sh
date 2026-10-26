@@ -7,7 +7,7 @@ _gate_policy_script=$(readlink -f "${BASH_SOURCE[0]}")
 gate_policy_prepare() {
     local prepared
     unset SKEIN_GATE_POLICY_ID
-    prepared=$(python3 -I -B - "$_gate_policy_script" <<'PY'
+    prepared=$(python3 -I -S -B - "$_gate_policy_script" <<'PY'
 from copy import deepcopy
 import hashlib
 import json

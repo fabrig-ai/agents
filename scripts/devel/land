@@ -135,7 +135,7 @@ fi
 
 if ((in_set && !local && !no_push)) && [[ ${LAND_TURN:-0} == 1 &&
     ${LAND_TURN_ACTIVE:-0} != 1 ]]; then
-    turn=(python3 -I -B "$kit/land-turn.py" client "$tmp" set "$kit/land" "${original_args[@]}")
+    turn=(python3 -I -S -B "$kit/land-turn.py" client "$tmp" set "$kit/land" "${original_args[@]}")
     if ((docs)); then
         LAND_LOCK=$lock LAND_RESULT=$result_file exec "${turn[@]}"
     fi
@@ -286,7 +286,7 @@ candidate_check() {
 # Fixture barriers use the recovery fixture's isolated flag/path contract.
 land_fault() {
     [[ -n ${HEAVY_FAULT_DIR:-} ]] || return 0
-    python3 -I -B - "$1" "$tmp" "$HEAVY_FAULT_DIR" "${HEAVY_RECOVERY_FIXTURE:-}" <<'PYFAULT'
+    python3 -I -S -B - "$1" "$tmp" "$HEAVY_FAULT_DIR" "${HEAVY_RECOVERY_FIXTURE:-}" <<'PYFAULT'
 import os
 from pathlib import Path
 import sys
@@ -332,7 +332,7 @@ prebuild=${LAND_PREBUILD-$prebuild_command}
 # the completion evidence (gate-policy.md, 3). Keep validation in land so
 # its implementation is included in the policy identity.
 evidence() {
-    python3 -I -B - "$1" "$tree" "$policy" "$gate" <<'PY'
+    python3 -I -S -B - "$1" "$tree" "$policy" "$gate" <<'PY'
 from decimal import Decimal
 import hashlib
 import json
@@ -460,15 +460,13 @@ heard() { grep -E '^heavy: (task|receipt) ' "$out" 2>/dev/null || true; }
 # line on stdout and, when LAND_RESULT is set, the same JSON in that file.
 # Building or writing it never changes land's status or its other output.
 land_result() {
-    python3 -I -B - "$1" "${repo:-}" "${base:-}" "${tip:-}" "${tree:-}" "$((try < tries ? try : tries))" \
+    python3 -I -S -B - "$1" "${repo:-}" "${base:-}" "${tip:-}" "${tree:-}" "$((try < tries ? try : tries))" \
         "${prebuild_heard:-}" "${gate_kind:-}" "${gate_heard:-}" "${pushed:-false}" "${result_file:-}" <<'PYRESULT' ||
 import json
 import os
-from pathlib import Path
 import re
 import socket
 import sys
-import tempfile
 
 
 def task(heard):
@@ -489,6 +487,7 @@ def steps(log):
     # the first step that exited nonzero.
     sums, failed = {}, None
     try:
+        from pathlib import Path
         text = Path(log).read_text(errors="replace")
     except OSError:
         return sums, failed
@@ -521,6 +520,8 @@ def main():
     text = json.dumps(result, separators=(",", ":"))
     print("land: result " + text, flush=True)
     if path:
+        from pathlib import Path
+        import tempfile
         # Written whole: a reader sees the old file or the new one.
         target = Path(path)
         fd, temporary = tempfile.mkstemp(dir=target.parent, prefix="." + target.name + ".")
@@ -544,7 +545,7 @@ PYRESULT
 land_cleanup() {
     git config "branch.$branch.landed" "$commit" ||
         echo "land: warning: cannot mark $branch landed" >&2
-    python3 -B "$kit/tidy-hooks.py" "$top" "$tmp" "$repo" ||
+    python3 -S -B "$kit/tidy-hooks.py" "$top" "$tmp" "$repo" ||
         echo "land: warning: cleanup could not start" >&2
 }
 
@@ -605,7 +606,7 @@ Resolve them, run git rebase --continue, then land again."
             gate_kind=ran
             out=$(mktemp)
             if [[ -n $prebuild && -f Cargo.toml ]]; then
-                if HEAVY_LABEL="land $repo prebuild" python3 -B "$kit/land-capture.py" "$out" "$kit/heavy" --tail 60 bash -c "$prebuild"; then
+                if HEAVY_LABEL="land $repo prebuild" python3 -S -B "$kit/land-capture.py" "$out" "$kit/heavy" --tail 60 bash -c "$prebuild"; then
                     prebuild_heard=$(heard)
                 else
                     capture_status=$?
@@ -625,7 +626,7 @@ Resolve them, run git rebase --continue, then land again."
                 grep '^heavy: task ' "$out" | tail -n1 >&2 || true
             fi
             policy_recheck
-            if HEAVY_LABEL="land $repo" python3 -B "$kit/land-capture.py" "$out" "$kit/heavy" --land --tail 60 bash -c "$gate"; then
+            if HEAVY_LABEL="land $repo" python3 -S -B "$kit/land-capture.py" "$out" "$kit/heavy" --land --tail 60 bash -c "$gate"; then
                 gate_heard=$(heard)
             else
                 capture_status=$?

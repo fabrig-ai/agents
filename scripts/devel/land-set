@@ -40,11 +40,12 @@ SSH = ['ssh', '-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
        '-o', 'ServerAliveCountMax=2', '-o', 'UpdateHostKeys=no',
        '-o', 'LogLevel=QUIET', 'free@2.29.124.199']
 # The fixed remote program accepts the feed record only through stdin.
-FEED = '''import fcntl, os, pathlib, stat, sys
+FEED = '''import fcntl, os, stat, sys
 os.umask(0o077)
-p = pathlib.Path(sys.argv[1])
-p.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-os.chmod(p.parent, 0o700)
+p = sys.argv[1]
+parent = os.path.dirname(p)
+os.makedirs(parent, mode=0o700, exist_ok=True)
+os.chmod(parent, 0o700)
 fd = os.open(p, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
 with os.fdopen(fd, 'w') as out:
     if not stat.S_ISREG(os.fstat(out.fileno()).st_mode):
@@ -146,7 +147,7 @@ class SetLock:
         self.who = dict(token=token, repository='set', holder=host)
         self.heartbeat = not fixture and socket.gethostname() != COORDINATOR
         if fixture:
-            argv = [sys.executable, '-I', '-B', str(Path(__file__).resolve().with_name('land-turn.py')),
+            argv = [sys.executable, '-I', '-S', '-B', str(Path(__file__).resolve().with_name('land-turn.py')),
                     'holder', str(fixture), token, 'set', host, str(fixture)]
         else:
             land = shutil.which('land')
@@ -154,7 +155,7 @@ class SetLock:
             holder = Path(land).resolve().with_name('land-turn.py')
             require(re.fullmatch(HOLDER, str(holder)), 'invalid holder path', 5)
             mode = 'ssh' if self.heartbeat else 'local'
-            argv = ['python3', '-I', '-B', str(holder), 'connection-holder', token, 'set', host, mode]
+            argv = ['python3', '-I', '-S', '-B', str(holder), 'connection-holder', token, 'set', host, mode]
             if self.heartbeat:
                 argv = [*SSH, shlex.join(argv)]
         self.argv = argv
@@ -391,7 +392,7 @@ def feed(runner, fixture, record):
     if not fixture and os.environ.get('HEAVY_RECOVERY_FIXTURE') == '1':
         return
     path = str(fixture / 'feed.jsonl') if fixture else '/home/free/.local/state/agents-land-set/feed.jsonl'
-    argv = ['python3', '-I', '-c', FEED, path]
+    argv = ['python3', '-I', '-S', '-c', FEED, path]
     if not fixture and socket.gethostname() != COORDINATOR:
         argv = [*SSH, shlex.join(argv)]
     try:
