@@ -54,6 +54,9 @@ here. Durable know-how belongs here, not in the session's memory or in
 3. **Pull it on the machine** (`record pull` there), then start the
    session there, in `~/src/rust`, as owners.md 2 says (a designer:
    `-n design/<d>`). Check it is busy with `claude agents --json`.
+   A session resumed by hand (`claude --bg --resume`) keeps its name
+   but loses `--settings`' environment (`POST_NAME`): tell it to pass
+   `--as` and start its waiter by name.
 4. **Notes on another machine** (a resumed mission whose machine retired or
    changed) are copied to the new machine's
    `tmp/owners/<m>/from-<machine>/` with `tar` over ssh, without
@@ -171,7 +174,9 @@ here. Durable know-how belongs here, not in the session's memory or in
   end each one, with the user's word for theirs: hetzner5 took
   dev.fabrig.ai's worker and runner with it (10-26). Then archive to a
   kept machine what lives only there (a redeploy saves the same), not
-  forgetting `~/.local/state/` (land-set's feed and the turn's state live
+  forgetting `~/.profile`'s exports of the pinned tools (`TEMPER_FORGEJO`,
+  `TEMPER_FORGEJO_RUNNER`, `SKEIN_TEST_CHROMIUM`, lost with hetzner2's on
+  10-26) and `~/.local/state/` (land-set's feed and the turn's state live
   there on hetzner3: its redeploy of 10-26 lost the feed's history):
   branches not on GitHub as bundles, dirty worktrees' diffs,
   `tmp/owners`, `tmp/logs` (with `heavy.tsv`), `tmp/codex-run`,
