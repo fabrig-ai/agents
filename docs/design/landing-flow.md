@@ -3,8 +3,9 @@
 Provisional, 2026-10-24, proposed with the user; revised 10-25 (the
 user): a set proves its gates before it takes the lock, every landing
 takes the set lock, and there is no keeper; and 10-26 (the user): there
-is no landing queue, and after landing follows each `main` (4, step
-8). Built and live: `scripts/devel/land-set` and the
+is no landing queue, after landing follows each `main` (4, step 8),
+and the tools settle conflicts between STATUS.md's rows (3). Built and
+live: `scripts/devel/land-set` and the
 set lock (section 9). How changes reach `main` across skein, smith,
 jig, hearth and temper:
 - one set of branches per milestone;
@@ -172,6 +173,23 @@ Since 10-26 a milestone here is a mission's slice that lands (owners.md
      gate, without the lock and pushing no `main` (9.2).
      - A `Cargo.lock` conflict is never merged by hand: take `main`'s
        lock and repin to the set's tuple.
+     - **`docs/design/STATUS.md`'s rows,** which each landing changes
+       (owners.md 4), are merged by the tools, `land` and `land-set`
+       alike (the user, 10-26). Where `main` and the branch changed
+       different rows of a table, each row, keyed by its first cell and
+       unique in its table, is taken from the side that changed it, and
+       a row the branch added stands after the row before it there, below
+       any `main` added in the same place. The same row changed on both
+       sides, a row deleted on one side and changed on the other, rows
+       reordered, a malformed row, a line outside the rows, or any other
+       path stops the rebase as before, for the landing task to
+       resolve. A stop's paths are settled all, or none.
+     - **Never silent.** Each path settled gives the replayed commit a
+       trailer, `Rebase-Resolved: PATH: HOW`, and the tool's output a
+       `resolved` line, where HOW names the rows each side changed. The
+       gates then run on the resolved tree as on any other. A rule that
+       might drop or merge meaning is no rule: another path gets one
+       only where the stops show a frequent, mechanical shape.
   2. Land it: `land-set` on the machine that proved it, under the lock
      (9.1). Where no `main` moved since the proof, its gates are the
      proof's, from the cache, so no test runs twice.
@@ -502,7 +520,8 @@ agents checkout like `repin`, answers the first three:
   landing turn's holder.
 - **Every gate before any push.** In each repository of the set,
   upstream first, it rebases the branch on `main`, keeping `main`'s side
-  of a `Cargo.lock` conflict, repins it, and gates it with `land
+  of a `Cargo.lock` conflict and settling STATUS.md's rows (section 3),
+  repins it, and gates it with `land
   --no-push`. An upstream's gated commit goes to a staging branch, so
   that its downstreams can pin it. Only once every gate has passed does
   it push the mains, upstream first, each the very commit its
@@ -529,8 +548,8 @@ Beside the tool, the owner and its implementers do the rest:
 - **The milestone's end** follows section 3, as one implementer task,
   the landing (owners.md 4). It proves the set, `land-set --prove
   SETFILE` (9.2): it rebases, repins and gates every repository without
-  the lock, and pushes no `main`. A conflict outside `Cargo.lock` stops
-  it, and the task resolves it and proves again; a red it repairs. Then
+  the lock, and pushes no `main`. A conflict the tools don't settle
+  (section 3) stops it, and the task resolves it and proves again; a red it repairs. Then
   it lands the set, `land-set --prove SETFILE && land-set SETFILE` on
   the same machine (9.2), and its report, posted to the owner when the
   run ends, says how. The owner starts the next milestone on the set's

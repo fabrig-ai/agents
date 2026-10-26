@@ -41,8 +41,8 @@ landing scenario models this flow beside today's (section 6).
 
 - **Who runs it.** The implementer task at the milestone's end, in
   place of 9.1's "rebase and repin the set, and run no gate". A
-  conflict outside `Cargo.lock` stops it, as `land-set` stops today,
-  and the implementer resolves it. A red comes back as a repair, with
+  conflict the tools don't settle (landing-flow.md 3) stops it, and the
+  implementer resolves it. A red comes back as a repair, with
   no lock held and nothing pushed.
 - **What it builds, and where.** In each of the set's worktrees, on the
   owner's machine, upstream first:

@@ -665,9 +665,10 @@ hearth, jig, temper:
    is the set's, not the run's: the gate policy names the gate's absolute
    path (gate-policy.md), so a proof's cached gates hold only in the same
    worktree. A killed run's leftover there is removed first.
-2. Fetch, then rebase on `origin/main`. A stop whose only conflicted path is
-   the root `Cargo.lock` keeps the side being rebased onto and continues; any
-   other conflict aborts the rebase and exits 3.
+2. Fetch, then rebase on `origin/main`. A stop keeps the side being rebased
+   onto for the root `Cargo.lock`, and has `land-resolve.py` settle its other
+   conflicted paths (landing-flow.md 3), as `land` does; when every path is
+   settled the rebase continues, and otherwise it aborts and exits 3.
 3. Repin the root lock. Each upstream of the repository has a target: this
    run's candidate of that upstream (step 5) where there is one; else its
    landed commit recorded by an earlier run of the set (below); else the
@@ -735,7 +736,7 @@ exit, SIGINT and SIGTERM included, and
 prints each repository as landed (with its commit), gated (with its
 candidate, not pushed), skipped, failed (with its status and worktree) or not
 reached. Exit statuses: 0 all landed or skipped; 2 refused before the lock; 3
-a rebase conflict outside `Cargo.lock`; 5 the lock; 6 `main` kept moving;
+a rebase conflict that no rule settles; 5 the lock; 6 `main` kept moving;
 land's own status otherwise; 1 an unexpected failure. Landings made before
 a failure, in phase 2 only, stay landed. Their commits are recorded by set
 name at `DEV_TMP/land-set/state/<URL-escaped-set-name>.json` until the whole
