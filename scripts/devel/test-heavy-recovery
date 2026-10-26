@@ -74,7 +74,7 @@ class Lab:
             if key.startswith('P' + 'UEUE_'):
                 self.env.pop(key)
         self.env.update(DEV_ROOT=str(self.path), DEV_TMP=str(self.path / 'tmp'), LAND_TIDY='',
-                        HEAVY_BUILD_SLOTS='2', HEAVY_SETTLE='0',
+                        HEAVY_BUILD_SLOTS='2', HEAVY_SETTLE='0', PLAN_MIN_DISK_GB='0',
                         HEAVY_BOOT_ID_FILE=str(self.boot), HEAVY_FAULT_DIR=str(self.faults), HEAVY_RECOVERY_FIXTURE='1')
         cache_bin = self.path / 'fixture-bin'
         cache_bin.mkdir()
