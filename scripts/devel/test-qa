@@ -10,8 +10,8 @@ import shutil
 import socket
 import subprocess
 import sys
-import tempfile
-import traceback
+
+import case_runner
 
 os.umask(0o077)
 KIT = Path(__file__).resolve().parent
@@ -21,14 +21,20 @@ P = '20261026-0915-temper'
 
 
 class Lab:
-    def __init__(self, root):
+    def __init__(self, root, built=None):
+        if built is not None:
+            # Copy bytes (or private reflinks), never hardlink mutable Git state.
+            subprocess.run(['cp', '-R', '--preserve=mode,timestamps', '--reflink=auto',
+                            '--', str(built) + '/.', str(root)], check=True)
+            for config in root.rglob('config'):
+                config.write_text(config.read_text().replace(str(built), str(root)))
         self.root = root
         self.home, self.tmp, self.records = (root / n for n in ('home', 'tmp', 'records'))
         self.origins = root / 'origins'
         self.post_log = root / 'post.jsonl'
         self.post = root / 'post'
         for path in (self.home, self.tmp, self.records, self.origins):
-            path.mkdir()
+            path.mkdir(exist_ok=True)
         self.env = dict(PATH=os.environ['PATH'], HOME=str(self.home), DEV_ROOT=str(root),
                         DEV_TMP=str(self.tmp), RECORDS=str(self.records), QA_FIXTURE=str(root),
                         QA_RECORD=str(KIT / 'record'), QA_POST=str(self.post),
@@ -53,25 +59,25 @@ class Lab:
             tool.write_text(f'#!{sys.executable} -S\n' + WATCH_TOOLS)
             tool.chmod(0o700)
             self.env['QA_' + name.upper().replace('-', '_')] = str(tool)
+        self.origin = root / 'records.git'
+        self.products = {repo: root / repo for repo in REPOS}
+        self.serial = 0
+        if built is not None:
+            return
         self.git(self.records, 'init', '-b', 'main')
         self.put('STATUS.md', '# Status\n')
         self.put('director/backlog.md', '# Backlog\n')
         self.git(self.records, 'add', '.')
         self.git(self.records, 'commit', '-m', 'records baseline')
-        self.origin = root / 'records.git'
         self.git(root, 'clone', '--bare', str(self.records), str(self.origin))
         self.git(self.records, 'remote', 'add', 'origin', str(self.origin))
         self.git(self.records, 'fetch', 'origin')
-        self.products = {}
-        self.serial = 0
-        for repo in REPOS:
-            checkout = root / repo
+        for repo, checkout in self.products.items():
             self.git(root, 'init', '-b', 'main', str(checkout))
             self.git(checkout, 'commit', '--allow-empty', '-m', 'unmarked baseline')
             origin = self.origins / (repo + '.git')
             self.git(root, 'clone', '--bare', str(checkout), str(origin))
             self.git(checkout, 'remote', 'add', 'origin', str(origin))
-            self.products[repo] = checkout
 
     def git(self, root, *args):
         result = subprocess.run(['git', '-C', str(root), *args], env=self.env, text=True,
@@ -149,7 +155,13 @@ class Lab:
 
     def waiting(self, count):
         commits = [self.commit(f'feature {self.serial + 1}', f'feature {self.serial + 1}') for _ in range(count)]
-        self.run('decide', 'temper', *commits, 'run')
+        # Watch cases need published choices, not another test of decide's
+        # pull/resolve/record round trip (covered by the decision cases below).
+        path = self.records / 'qa/decisions.md'
+        text = path.read_text() if path.exists() else '# QA decisions\n\n'
+        stamp = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+        text += ''.join(f'- {stamp} temper {sha} run \n' for sha in commits)
+        self.publish('qa/decisions.md', text)
         self.configure(cleared={'temper': commits[-1]})
         return commits
 
@@ -825,33 +837,39 @@ def watch_start_refusal_starts_nothing_more(lab):
     assert len(lab.sent()) == 1 and 'fixture record refusal' in lab.sent()[0]['body']
 
 
+CASES = (watch_recovers_interrupted_launch_and_stop, watch_recovers_an_interrupted_start_commit,
+         watch_start_refusal_starts_nothing_more, watch_starts_a_pass_on_the_cleared_main,
+         watch_waits_for_a_cleared_main_holding_the_oldest, watch_takes_a_batch,
+         watch_finishes_a_pass_with_findings, watch_finishes_a_clean_pass_quietly,
+         watch_caps_a_long_pass, watch_fails_without_a_report, watch_fails_when_the_unit_vanished,
+         watch_cuts_a_long_report, watch_loops_on_its_mailbox, watch_runs_once_per_machine,
+         setup_installs_the_service, watch_refusals_are_recorded,
+         watch_reads_settings_and_stops_on_an_unreadable_feed, watch_retries_post_and_prunes_finished_directories,
+         candidates_are_marked_commits_oldest_first, deciding_records_the_choice,
+         decide_refuses_what_is_not_eligible, the_latest_decision_wins, a_pass_takes_its_commits,
+         findings_wait_until_triaged, triage_routes_a_finding, triage_refuses_and_writes_nothing,
+         record_refusal_leaves_both_files, repository_failures_are_read_errors,
+         failed_pull_warns_and_uses_local_record, merged_commits_are_candidates,
+         candidates_sort_across_repositories, default_records_matches_record,
+         ambiguous_prefix_is_refused, fixture_overrides_are_gated)
 
-def main():
-    cases = (watch_recovers_interrupted_launch_and_stop, watch_recovers_an_interrupted_start_commit, watch_start_refusal_starts_nothing_more,
-             watch_starts_a_pass_on_the_cleared_main, watch_waits_for_a_cleared_main_holding_the_oldest, watch_takes_a_batch, watch_finishes_a_pass_with_findings, watch_finishes_a_clean_pass_quietly, watch_caps_a_long_pass, watch_fails_without_a_report, watch_fails_when_the_unit_vanished, watch_cuts_a_long_report, watch_loops_on_its_mailbox, watch_runs_once_per_machine, setup_installs_the_service, watch_refusals_are_recorded, watch_reads_settings_and_stops_on_an_unreadable_feed, watch_retries_post_and_prunes_finished_directories,
-             candidates_are_marked_commits_oldest_first, deciding_records_the_choice,
-             decide_refuses_what_is_not_eligible, the_latest_decision_wins, a_pass_takes_its_commits,
-             findings_wait_until_triaged, triage_routes_a_finding, triage_refuses_and_writes_nothing,
-             record_refusal_leaves_both_files, repository_failures_are_read_errors,
-             failed_pull_warns_and_uses_local_record, merged_commits_are_candidates,
-             candidates_sort_across_repositories, default_records_matches_record, ambiguous_prefix_is_refused, fixture_overrides_are_gated)
-    if len(sys.argv) > 1:
-        known = {case.__name__ for case in cases}
-        assert all(name in known for name in sys.argv[1:]), 'unknown case'
-        cases = tuple(case for case in cases if case.__name__ in sys.argv[1:])
-    failed = 0
-    for case in cases:
-        try:
-            with tempfile.TemporaryDirectory(prefix='qa-fixture-') as directory:
-                case(Lab(Path(directory)))
-            print('ok: ' + case.__name__, flush=True)
-        except Exception:
-            failed += 1
-            print('FAIL: ' + case.__name__, flush=True)
-            traceback.print_exc()
-    print(f'completed {len(cases)} isolated cases', flush=True)
-    return int(bool(failed))
+
+
+def build_baseline(directory):
+    Lab(directory)
+
+
+def run(case, directory, built):
+    case(Lab(directory, built=built))
 
 
 if __name__ == '__main__':
-    sys.exit(main())
+    names = {case.__name__ for case in CASES}
+    if sys.argv[1:2] != ['--one'] and any(name not in names for name in sys.argv[1:]):
+        sys.exit('unknown case; choose: ' + ' '.join(case.__name__ for case in CASES))
+    # Measured individually: these five take longest after the setup is copied.
+    slow = ('triage_refuses_and_writes_nothing', 'triage_routes_a_finding',
+            'watch_reads_settings_and_stops_on_an_unreadable_feed',
+            'watch_refusals_are_recorded', 'a_pass_takes_its_commits')
+    sys.exit(case_runner.main(__file__, CASES, run, slow=slow,
+                              template=build_baseline, prefix='qa-fixture-'))
