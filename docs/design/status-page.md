@@ -1,8 +1,8 @@
 # Status page
 
-Provisional, 2026-10-25, with the user. One page for the whole fleet,
-https://status.fabrig.ai. It shows the work in flight and what
-building, testing and landing cost. `scripts/devel/status-page` writes
+Provisional, 2026-10-26, with the user. One page for the whole fleet,
+https://status.fabrig.ai. It shows the work in flight, what building,
+testing and landing cost, and how much of each subscription is used. `scripts/devel/status-page` writes
 it every 10 minutes on hel8 from what the tools already keep, and Caddy
 serves it.
 
@@ -32,7 +32,15 @@ serves it.
   (the user, 10-25). Only a background Claude session, which the
   launchers name, shows its name; any other is someone's own. An
   unreachable machine shows why in a few words (refused, timed out, key
-  refused); ssh's own, which name the target, go to the journal.
+  refused); ssh's own, which name the target, go to the journal. No
+  account's email, name, organisation or id: a subscription goes by a
+  label that names nothing (section 2.1).
+- **Subscriptions.** "We might have several claude/codex subscriptions
+  at the same time … go through all machines of the fleet and probe
+  the subscription usage of both claude and codex … deduping results"
+  (the user, 10-26). Each machine asks the two CLIs, through their own
+  commands and never a credential, what they are signed in to and how
+  much of it is used; the page merges the machines that share one.
 
 ## 2. Sources
 
@@ -47,16 +55,71 @@ serves it.
 | Claude | `claude agents --json --all` | the live sessions, busy or idle |
 | the records | `records/missions/*/README.md`, after `record pull` | each mission's state, owner and machine |
 | the machine | `/proc`, the disk under `tmp/` | load, free memory and disk |
+| Claude's subscription | `claude auth status --json`, `claude -p /usage` | what it is signed in to, and each limit's use and reset (2.1) |
+| Codex's subscription | `codex app-server`: `account/read`, `account/rateLimits/read` | the same (2.1) |
 
 A command's kind is `record runs`' (records.md 5.1): `land <repo>` and
 `land <repo> prebuild` labels are land's gate and prebuild, and the
 rest by the cargo command. A command's mission is its working
 directory's under `tmp/owners/`.
 
+### 2.1 Subscriptions
+
+Each machine's collector asks the CLIs it has, and reads no
+credential: not `.credentials.json`, `auth.json` nor a token.
+
+| CLI | Who | Limits |
+|---|---|---|
+| Claude Code | `claude auth status --json`: `loggedIn`, `authMethod`, `orgId`, `email`, `subscriptionType` | `claude -p /usage --output-format json --no-session-persistence --strict-mcp-config --tools "" --model haiku`, under `TZ=UTC`: the `result`'s lines `Current <limit>: <n>% used · resets <when>` |
+| Codex | `codex app-server` on stdio, after `initialize`: `account/read`'s `account` (`type`, `email`, `planType`) | `account/rateLimits/read`, `excludeResetCreditDetails`: its `accountId`, and each bucket's (`rateLimitsByLimitId`, else `rateLimits`) `primary` and `secondary` windows: `usedPercent`, `windowDurationMins`, `resetsAt` |
+
+- **A probe's answer** is one of four: a subscription, with its label,
+  plan and limits; signed out (Claude's `loggedIn` false, Codex's
+  `account` null); no subscription (an API key, Bedrock); or no such
+  CLI on the machine. Signed out is a state the page shows, not a
+  failure. A timeout, an exit the CLI doesn't document, or an answer of
+  the wrong shape fails that probe alone (section 1).
+- **The label** is the first 8 hex digits of SHA-256 over the CLI's
+  name, the account's id (Claude's `orgId`, Codex's `accountId`) and
+  its email, joined by NUL bytes. The collector computes it: the email
+  and the id never leave the machine, in the page, the `--json` file or
+  the journal. The id is known to no outsider, so no guessed email can
+  be checked against a label. A subscription without both has no
+  label, and shows with its machine alone, as unidentified.
+- **A limit** has a name, the percent used and its reset, a time.
+  Claude's name is the line's `<limit>` (`session`, `week (all
+  models)`, `week (Fable)`), letters, digits, spaces and brackets only;
+  its `<when>` (`Oct 30, 7pm`, `Oct 26, 5:30am`, or a time alone for
+  today) is UTC, in the year that puts it next after the probe. Codex's
+  name is its window's length (`5 h`, `week`, else in minutes, hours or
+  days), after the bucket's `limitName` or `limitId` when that isn't
+  `codex`. A reset that cannot be read leaves the use.
+- **Merged on the page:** the machines whose probes carry one CLI's
+  label share that subscription. Each of its limits is the reading with
+  the latest reset, then the highest use: a later reset is a newer
+  window, and within one window use only grows.
+- **Cheap.** The probes run beside the collector's other sources, each
+  command under its own timeout of 30 s, and the Codex app-server,
+  with what it started, ends with the exchange. `/usage` must be
+  answered by Claude Code itself (`local_command` `usage`, `num_turns`
+  0, `total_cost_usd` 0), or the probe fails and the footer says so:
+  a version that sends it to a model is seen within one run, and the
+  smallest model with no tools or MCP servers keeps that slip cheap.
+  No session is kept, so neither `claude agents` nor `record runs`
+  sees a probe. The app-server is asked nothing that changes the
+  account: never `account/rateLimitResetCredit/consume`, never with
+  `refreshToken`.
+
 ## 3. The page
 
 - **Tiles:** missions, sets landing now, heavy commands now, agents
-  working, commands and land gates in the last 24 hours.
+  working, commands and land gates in the last 24 hours, and the
+  subscriptions with the highest use among them.
+- **Subscriptions,** after the tiles: a table, one row per distinct
+  subscription and limit, giving its CLI, plan and label, its
+  machines, a bar of the percent used, and its reset (in how long, and
+  when). The machines signed out, with no subscription, or with an
+  unidentified one follow, by CLI. A machine not reached adds nothing.
 - **In flight:** what is landing (set runs, `land`'s prebuilds and
   gates, landing turns) and the last eight set runs. A set is in flight
   when its latest run, as `landings` finds it, has not ended and was
@@ -116,7 +179,14 @@ with none of them, the page (no private text, the down machine, the
 sets in flight, mode 0644), a failing pull and a missing records tree,
 fields of the wrong type and markup in names, a machine answering
 nonsense, a page that cannot be written, and the units `install`
-writes.
+writes. Fake `claude` and `codex` answer each machine from its tree:
+two machines on one subscription merged, with the later reset's and
+the higher reading; a second subscription; signed out, an API key and
+an unidentified one; resets read across a year's end; a `/usage`
+answered by a model, a probe that times out and one that answers
+nonsense, each named in the footer while the rest stands; the methods
+asked of the app-server; and no email or id, on the page or in the
+`--json` file.
 
 ## 6. Open
 
