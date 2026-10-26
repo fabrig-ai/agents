@@ -48,9 +48,9 @@ notes (section 3), never here.
   user's phone. Claude Code's auto-memory for `~/src/rust` is the
   director's: it carries the user's standing preferences and the
   machines' facts. Owners run with it off (owners.md, 2).
-- **Its window** is 500k since 10-23, when the user raised it from 282k:
-  each compaction loses detail, and a larger window halves them, at up
-  to twice a turn's cost. A new window needs a new session. At the
+- **Its window** is 1M since 10-26, the default for every Claude
+  session (500k from 10-23, 282k before): each compaction loses detail,
+  and a larger window makes them rarer, at a higher cost per turn. A new window needs a new session. At the
   first handover after the change, the director starts the next
   session with `start-director --handover` (which lets one running
   director, itself, through) instead of clearing its context, and the

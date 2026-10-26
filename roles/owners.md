@@ -46,7 +46,7 @@ out. The security rules are director.md 10's.
 - **Started by its parent** in `~/src/rust` of the machine it works
   on, named `o/<m>`:
   `claude --bg -n o/<m> --model 'claude-opus-5-5[1m]' --effort xhigh
-  --autocompact 282000 --dangerously-skip-permissions --settings
+  --autocompact 1000000 --dangerously-skip-permissions --settings
   '{"autoMemoryEnabled": false, "env": {"POST_NAME": "o/<m>"}}'
   "Read ~/src/rust/records/missions/<m>/README.md and do what it
   says."`
@@ -111,8 +111,8 @@ out. The security rules are director.md 10's.
 - **Starting one:** `codex-run task --effort EFFORT TASK WORKTREE
   REPORT`, with absolute paths and a fresh report: gpt-6.1-sol, high by
   default, medium where the work is plain. Where the work gets hard
-  (two tries without the cause, evidence that conflicts), Opus 5.5 at
-  xhigh advises, from the report and the evidence.
+  (two tries without the cause, evidence that conflicts), a sub-agent
+  advises, from the report and the evidence.
 - **The log.** Each implementer appends 3 or 4 lines to its log every
   30 minutes: where it is, and whether it is on track or getting lost.
   The owner reads them all on its 30-minute wake, and steps in where
