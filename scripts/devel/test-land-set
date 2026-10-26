@@ -38,7 +38,7 @@ if args == ['--no-push', '--docs']:
 assert args in ([], ['--no-push'])
 import subprocess
 from pathlib import Path
-import hashlib, json
+import json
 phase = 'gate' if args else 'push'
 def git(*args):
     return subprocess.check_output(['git', *args]).decode().strip()
@@ -109,20 +109,27 @@ if os.environ.get('MOVE_AFTER_REBASE'):
     move()
 # The gate cache: one gate per tree and worktree, as land's own, whose
 # policy names the gate's absolute path.
-tree = git('rev-parse', 'HEAD^{{tree}}')
-gated = Path(os.environ['DEV_TMP']) / 'fixture-gates' / hashlib.sha256((tree + '\0' + os.getcwd()).encode()).hexdigest()
+commit, tree, message = git('log', '-1', '--format=%H%x00%T%x00%B').split('\0', 2)
+message = message.strip()
+# Encode the path losslessly in bounded components; the non-hex sentinel
+# cannot collide with a component, even for ancestor/descendant worktrees.
+gated = Path(os.environ['DEV_TMP']) / 'fixture-gates' / tree
+identity = os.fsencode(os.getcwd()).hex()
+for offset in range(0, len(identity), 120):
+    gated /= identity[offset:offset + 120]
+gated /= 'gate'
 kind = 'cached' if gated.exists() else 'ran'
-gated.parent.mkdir(exist_ok=True)
+gated.parent.mkdir(parents=True, exist_ok=True)
 gated.touch()
-message = git('log', '-1', '--format=%B')
 updated = subprocess.check_output(['git', 'interpret-trailers', '--if-exists', 'replace',
                                    '--trailer', 'Fixture-Landed: yes'], input=message.encode()).decode().strip()
 if updated != message:
     git('commit', '--amend', '-m', updated)
+    commit = git('rev-parse', 'HEAD')
 def result(code):
     if os.environ.get('LAND_RESULT'):
         Path(os.environ['LAND_RESULT']).write_text(json.dumps(dict(
-            schema='land-result-v1', repo=name, commit=git('rev-parse', 'HEAD'), tree=tree,
+            schema='land-result-v1', repo=name, commit=commit, tree=tree,
             gate=dict(kind=kind), pushed=phase == 'push', exit=code)))
 if phase == 'push':
     git('push', 'origin', 'HEAD:main')
