@@ -179,8 +179,8 @@ config = json.loads((path / 'codex.json').read_text()) if (path / 'codex.json').
 if config.get('close_stdin'):
     call = json.loads(sys.stdin.readline())
     sys.stdin.close()
-    print(json.dumps({'id': call['id'], 'result': {}}), flush=True)
     (path / 'codex.pid').write_text(str(os.getpid()))
+    print(json.dumps({'id': call['id'], 'result': {}}), flush=True)
     time.sleep(60)
 for line in sys.stdin:
     call = json.loads(line)
@@ -190,9 +190,10 @@ for line in sys.stdin:
         continue
     if config.get('hang') == call['method']:
         if config.get('ignore_term'):
-            signal.signal(signal.SIGTERM, signal.SIG_IGN)
             signal.signal(signal.SIGCHLD, signal.SIG_IGN)
-            helper = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])
+            helper = subprocess.Popen([sys.executable, '-c',
+                'import signal, time; signal.signal(signal.SIGTERM, signal.SIG_DFL); time.sleep(60)'])
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
             (path / 'codex.helper').write_text(str(helper.pid))
         (path / 'codex.pid').write_text(str(os.getpid()))
         time.sleep(60)
