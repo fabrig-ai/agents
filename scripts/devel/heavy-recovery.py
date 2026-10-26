@@ -691,6 +691,11 @@ def install(interval):
         units = Path(os.environ.get('XDG_CONFIG_HOME', str(Path.home() / '.config'))) / 'systemd/user'
         if any(char in str(path) for path in (BASE, units, KIT) for char in '\r\n'):
             raise Refusal('systemd integration paths must be single-line paths')
+        # Record first: a partial install must refuse, never run plain
+        # (build-infrastructure.md 4 and 12). Reinstallation rewrites the units.
+        ledger.data['installation'] = {'boot': boot(), 'interval': interval, 'probe': groups,
+                                        'units': str(units)}
+        ledger.save()
         units.mkdir(parents=True, exist_ok=True)
         # Quote systemd specifiers and ExecStart words independently of a shell.
         quote = lambda value: '"' + str(value).replace('%', '%%').replace('\\', '\\\\').replace('"', '\\"') + '"'
@@ -704,8 +709,6 @@ def install(interval):
             'Unit=' + service + '\n[Install]\nWantedBy=timers.target\n')
         run(['systemctl', '--user', 'daemon-reload'], check=True)
         run(['systemctl', '--user', 'enable', '--now', timer], check=True)
-        ledger.data['installation'] = {'boot': boot(), 'interval': interval, 'probe': groups,
-                                        'units': str(units)}
         ledger.event(None, 'containment_probe:' + uuid.uuid4().hex, cgroups=groups, interval=interval)
         ledger.save()
     print('heavy: independent reconciler ' + timer + '; interval ' + interval)
