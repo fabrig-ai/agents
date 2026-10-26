@@ -508,6 +508,64 @@ def cargo_home_scripts(lab):
     assert not any((mission / f'cargo-{n}' / 'probe.py').exists() for n in range(2)), text
 
 
+def fixture_evidence(lab):
+    mission = lab.readme('active', 'active')
+    run = mission / 'evidence' / 'core' / 'accept-1'
+    mark = lab.put(run / 'EVIDENCE.TAG', 'agents fixture evidence\ntest-heavy-recovery\n')
+    kept = [mark, lab.put(run / 'normal' / 'fixture-bin' / 'kache', '#!/bin/sh\n'),
+            lab.put(run / 'normal' / 'payload.py'),
+            lab.put(run / 'normal' / 'previous' / 'scripts' / 'devel' / 'heavy', '#!\n'),
+            lab.put(run / 'results.json', '{}\n')]
+    removed = [lab.put(mission / 'evidence' / 'core' / 'accept-2' / 'normal' / 'fixture-bin' / 'kache', '#!\n'),
+               lab.put(mission / 'evidence' / 'probe.py'), lab.put(mission / 'scratch.py')]
+    text = lab.run()
+    assert all(p.exists() for p in kept) and str(run) not in text, text
+    assert all(not p.exists() and f'deleted script {p} ' in text for p in removed), text
+
+
+def evidence_marks(lab):
+    mission = lab.readme('active', 'active')
+    outside = lab.put(lab.root / 'valid-mark', 'agents fixture evidence\ntest-tidy\n')
+    removed = []
+    for name in ('wrong', 'empty', 'symlink', 'directory'):
+        run = mission / 'evidence' / name
+        run.mkdir(parents=True)
+        mark = run / 'EVIDENCE.TAG'
+        if name == 'symlink':
+            mark.symlink_to(outside)
+        elif name == 'directory':
+            mark.mkdir()
+        else:
+            mark.write_text('evidence\n' if name == 'wrong' else '')
+        removed.append(lab.put(run / 'case' / 'bin' / 'cargo', '#!\n'))
+    layout = (lab.tmp / 'owners', mission, lab.tmp / 'director',
+              lab.tmp / 'director' / 'tasks', lab.tmp / 'director' / 'tasks' / 't')
+    for path in layout:
+        lab.put(path / 'EVIDENCE.TAG', 'agents fixture evidence\ntest-tidy\n')
+        removed.append(lab.put(path / 'watch.sh'))
+    text = lab.run(status=1)
+    assert all(not p.exists() and f'deleted script {p} ' in text for p in removed), text
+    assert all(f'kept entry {p}: evidence mark on a directory of the tmp layout; ignored' in text
+               for p in layout), text
+
+
+def evidence_unreadable(lab):
+    if os.geteuid() == 0:
+        print('skip: evidence_unreadable needs an unprivileged user', flush=True)
+        return
+    mission = lab.readme('active', 'active')
+    run = mission / 'evidence' / 'unreadable'
+    mark = lab.put(run / 'EVIDENCE.TAG', 'agents fixture evidence\ntest-tidy\n')
+    cargo = lab.put(run / 'case' / 'bin' / 'cargo', '#!\n')
+    mark.chmod(0o000)
+    try:
+        text = lab.run(status=3)
+        assert cargo.exists() and f'kept entry {run}: evidence mark unreadable:' in text, text
+        assert f'deleted script {cargo} ' not in text, text
+    finally:
+        mark.chmod(0o600)
+
+
 def held_file(lab):
     mission = lab.readme('paused', 'paused')
     script = lab.put(mission / 'held.py')
@@ -785,7 +843,8 @@ def main():
     cases = (copies, lockfile_conflicts, lockfile_tree, lockfile_patches, lockfile_source,
              amended, conflict_copy, marks, patch_fallback, worktrees, dirty, detached, outside_worktrees, missions,
              mission_work, evidence, mission_clone_worktrees, old_directories, old_work, scripts, held_file,
-             script_boundaries, cargo_home_scripts, enclosing_git, symlinks, unknown, dry_run, scope, fetch_failure, push_failure,
+             script_boundaries, cargo_home_scripts, fixture_evidence, evidence_marks, evidence_unreadable,
+             enclosing_git, symlinks, unknown, dry_run, scope, fetch_failure, push_failure,
              already_gone, remote_race, head_race, local_race, nested_repositories, evidence_race,
              evidence_ref_race, evidence_stash,
              stale, deletion_failure, order, lock, usage, empty_tmp)

@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -15,6 +16,7 @@ REPOS = ('agents', 'skein', 'smith', 'jig', 'hearth', 'temper')
 TOOLS = set('heavy logs gates landing-turn land-set kache lab after-landing post codex-run'.split())
 ALLOWED = TOOLS | {'machine.env', 'owners', 'director'}
 CONTENT = ('.', ':(exclude,glob)**/Cargo.lock')
+MARK, SIGNATURE = 'EVIDENCE.TAG', 'agents fixture evidence'
 
 
 class Failure(Exception):
@@ -451,6 +453,12 @@ class Tidy:
                 except (Failure, OSError) as error:
                     self.keep('directory', path, str(error), 3)
 
+    def evidence(self, path):
+        if not stat.S_ISREG(path.lstat().st_mode):
+            return False
+        with path.open('rb') as source:
+            return source.readline().strip() == SIGNATURE.encode()
+
     def scripts(self):
         if not self.tmp.is_dir():
             return
@@ -464,6 +472,21 @@ class Tidy:
             if base == self.tmp:
                 dirs[:] = [d for d in dirs if d in ('owners', 'director')]
                 continue
+            if MARK in files:
+                try:
+                    marked = self.evidence(base / MARK)
+                except OSError as error:
+                    self.keep('entry', base, f'evidence mark unreadable: {error}', 3)
+                    dirs[:] = []
+                    continue
+                if marked:
+                    owners, director = self.tmp / 'owners', self.tmp / 'director'
+                    tasks = director / 'tasks'
+                    if base in (owners, director, tasks) or base.parent in (owners, tasks):
+                        self.keep('entry', base, 'evidence mark on a directory of the tmp layout; ignored', 1)
+                    else:
+                        dirs[:] = []
+                        continue
             if 'registry' in dirs and any(name in files for name in ('.package-cache', '.global-cache')):
                 dirs[:] = [d for d in dirs if d not in ('registry', 'git')]
             if repository(dirs, files):
