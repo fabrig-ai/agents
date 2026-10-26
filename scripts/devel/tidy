@@ -14,6 +14,7 @@ import time
 REPOS = ('agents', 'skein', 'smith', 'jig', 'hearth', 'temper')
 TOOLS = set('heavy logs gates landing-turn land-set kache lab after-landing post codex-run'.split())
 ALLOWED = TOOLS | {'machine.env', 'owners', 'director'}
+CONTENT = ('.', ':(exclude,glob)**/Cargo.lock')
 
 
 class Failure(Exception):
@@ -130,9 +131,10 @@ class Repository:
 
     def patch(self, oid):
         if oid not in self.patches:
-            diff = git(self.path, 'show', '--pretty=format:', '--no-ext-diff', '--no-textconv', oid).stdout
+            diff = git(self.path, 'show', '--pretty=format:', '--diff-merges=first-parent',
+                       '--no-ext-diff', '--no-textconv', '--no-renames', oid, '--', *CONTENT).stdout
             result = git(self.path, 'patch-id', '--stable', data=diff).stdout.split()
-            self.patches[oid] = result[0] if result else None
+            self.patches[oid] = result[0] if result else (b'' if not diff else None)
         return self.patches[oid]
 
     def landed(self, name, oid):
@@ -157,12 +159,18 @@ class Repository:
                 commits.append((commit, self.twins[tuple(identity)]))
             answer = ('', False)
             if commits:
-                merged = git(self.path, 'merge-tree', '--write-tree', self.remote['main'], oid, check=False)
+                merged = git(self.path, 'merge-tree', '--write-tree', '--name-only', '-z', '--no-messages',
+                             self.remote['main'], oid, check=False)
                 if merged.returncode not in (0, 1):
                     raise Failure(merged.stderr.decode(errors='replace').strip() or 'merge-tree failed')
                 tree = out(self.path, 'rev-parse', f'{self.remote["main"]}^{{tree}}')
-                same_tree = merged.returncode == 0 and merged.stdout.splitlines()[0].decode() == tree
-                if same_tree or all(self.patch(c) and any(self.patch(c) == self.patch(t) for t in twins)
+                merged_tree, *conflicts = merged.stdout.split(b'\0')
+                conflicts = [p for p in conflicts if p]
+                only_locks = bool(conflicts) and all(p.rsplit(b'/', 1)[-1] == b'Cargo.lock' for p in conflicts)
+                clean_source = (merged.returncode == 0 or only_locks) and not git(
+                    self.path, 'diff-tree', '--no-commit-id', '--name-only', '-r', '--no-renames',
+                    tree, os.fsdecode(merged_tree), '--', *CONTENT).stdout
+                if clean_source or all(self.patch(c) is not None and any(self.patch(c) == self.patch(t) for t in twins)
                                     for c, twins in commits):
                     answer = ('copy on origin/main', False)
                 else:
@@ -281,10 +289,12 @@ class Tidy:
 
     def worktrees(self, repo):
         for wt in repo.worktrees:
-            if 'HEAD' not in wt or not wt['path'].exists():
+            if self.tmp not in wt['path'].parents or 'HEAD' not in wt:
                 continue
             name = wt.get('branch', '').removeprefix('refs/heads/')
             try:
+                if self.tmp not in wt['path'].resolve().parents or not wt['path'].exists():
+                    continue
                 if name:
                     reason, differs = repo.landed(name, wt['HEAD'])
                     if differs:
@@ -446,8 +456,14 @@ class Tidy:
         if enclosing.returncode == 0 and b'true' in enclosing.stdout.splitlines():
             return
         for base, dirs, files in self.scan(self.tmp, onerror=lambda e: self.keep('entry', e.filename, str(e), 3)):
+            if 'CACHEDIR.TAG' in files:
+                dirs[:] = []
+                continue
             if base == self.tmp:
-                dirs[:] = [d for d in dirs if d not in TOOLS]
+                dirs[:] = [d for d in dirs if d in ('owners', 'director')]
+                continue
+            if 'registry' in dirs and any(name in files for name in ('.package-cache', '.global-cache')):
+                dirs[:] = [d for d in dirs if d not in ('registry', 'git')]
             if repository(dirs, files):
                 dirs[:] = []
                 continue
