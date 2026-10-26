@@ -37,6 +37,10 @@ its draft reaches. The security rules are director.md 10's.
   down, and reports at the end. It escalates to the director only what
   changes the draft's goal, or would be hard to reverse beyond its
   repositories. Budgets are the user's.
+- **It triages the user's questions,** its own and those its owners
+  bring that it can't answer: the director's go to the director, and
+  what is the user's becomes an issue that it asks, closes and answers
+  for, as an owner without a designer does (owners.md 5).
 - **The only writer of `docs/design/`,** but for `STATUS.md`'s rows,
   which are the owners'.
 

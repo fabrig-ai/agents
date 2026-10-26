@@ -79,8 +79,7 @@ metadata by the tools. The surveys behind it are
 
 | Path | Writer | Written | Holds |
 |---|---|---|---|
-| `STATUS.md` | the director | rewritten as missions start, change and end | one line per mission in progress, and a pointer to `director/waiting.md` |
-| `director/waiting.md` | the director | rewritten as items come and go | what waits on the user, one public line each (below) |
+| `STATUS.md` | the director | rewritten as missions start, change and end | one line per mission in progress, and a pointer to the open issues that wait on the user ([user-issues.md](user-issues.md)) |
 | `director/direction.md` | the director | rewritten | the vision, the priorities, the standing rules, the drafts and what waits |
 | `director/decisions/NNNN.md` | the director | appended | its numbered calls, 100 to a file (`0001.md` holds 1 to 100) |
 | `director/backlog.md` | the director | entries added and removed | findings owned by no roadmap |
@@ -119,16 +118,10 @@ and `qa.md`: their plan, decisions, milestones and QA passes.
   - `m<N>.md`: `driver`, `model`, `effort`, `started`, `cap`, `ended`.
   - Times are UTC, `2026-10-24T21:54Z`; what the writer doesn't know is
     `unknown`, never a guess.
-- **The user's waits,** `director/waiting.md`, are public by writing:
-  the status page shows them whole. A `# Waiting on the user` heading,
-  then one item per line, `- <since> · <who> · <what> · <decision>`:
-  `since` a UTC time or `unknown`; `who` a mission's name or
-  `director`; `what` at most 160 characters a stranger may read, with
-  no path, no person's or session's name and nothing from a decision's
-  body; `decision` the number of the decision that holds the detail
-  (`1099`, `R3-12`). At most 40 items. `record` checks the shape, and
-  the writer that it is fit to be public. The detail is written once,
-  in the decision; `STATUS.md` points here and copies nothing.
+- **The user's waits** were `director/waiting.md` until 10-26: they
+  are issues on the forge now ([user-issues.md](user-issues.md)). The
+  file's last version is its heading alone, and `record` refuses it
+  after that.
 
 ## 4. Written once
 
@@ -151,8 +144,8 @@ and `qa.md`: their plan, decisions, milestones and QA passes.
   The message that carries the answer is transport, not record.
 - **`STATUS.md`** is the director's: one line per mission in progress,
   with its owner's address, its last landing, its state or blocker and
-  its next step; then what waits on the user. A mission leaves it when
-  its closing note is committed.
+  its next step; then a pointer to what waits on the user. A mission
+  leaves it when its closing note is committed.
 - **No ledger and no log.** Who wrote what, and when, is git's history:
   `git log -- missions/<m>` is a mission's timeline, `git log --
   roadmaps/<r>` a roadmap's. What a ledger recorded besides is section
@@ -264,7 +257,6 @@ largest useful files and far below their journals.
 | `qa/decisions.md`, `qa/triage.md` | 128 KiB each |
 | a mission's files together | 128 KiB |
 | `STATUS.md`, a roadmap's README | 16 KiB each |
-| `director/waiting.md` | 8 KiB, 40 items |
 | `director/direction.md`, a backlog | 32 KiB each |
 | a decisions file | 100 decisions, 128 KiB |
 

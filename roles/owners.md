@@ -186,8 +186,19 @@ out. The security rules are director.md 10's.
   recommendation, and the turn ends. Only what changes the mission's
   goal or end, reaches into another mission's code, or would be hard to
   reverse: a stored format, an interface between repositories, a budget
-  (budgets are the user's). A tool the kit lacks is such a question. An
-  owner never asks the user.
+  (budgets are the user's). A tool the kit lacks is such a question.
+- **The user's questions.** An owner with a designer asks its designer
+  alone. An owner without one triages each question first: what
+  director.md 8 keeps the user's (budgets, sign-ins and credentials,
+  subscriptions, machines, what has long-term consequences hard to
+  change) becomes an issue on the forge, `issue open TITLE FILE`, in
+  the repository it concerns, and the rest goes to the director
+  ([user-issues.md](../docs/design/user-issues.md) 5). A public
+  repository's issue is written for anyone. The user's answer comes by
+  post; the owner acts on it, then closes the issue, `issue close
+  REPO#N`, even when nothing is due. An answer that sets a rule beyond
+  the mission goes to the director too. `progress.md` names the open
+  issues, and the closing note any left open.
 - **A mission closes once its last landing has cleared.** With no
   verdict in 2 hours (the wait's exit 3: the runner is at fault), the
   owner tells the director, and closes with the landing uncleared,
