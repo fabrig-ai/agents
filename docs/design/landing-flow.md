@@ -754,8 +754,10 @@ that a routine landing needs no post. Being built (10-26, o/landing-taught).
   - `land`: from the `main` its last pass rebased on to the commit it
     pushed.
   - `land-set`: in each repository, the set's own commits, from the base
-    its candidate was gated on to that candidate. A repin's commit carries
-    none, and a rebase under the lock (9.2) changes no message.
+    its candidate was gated on to that candidate, read before its push.
+    A repin's commit carries none. Where `main` moved under the lock and
+    `land` rebased again (9.2), the lines stay the candidate's: a commit
+    that rebase dropped as already upstream keeps its line.
 - **Bounded, never refused.** The tools keep a landing's first 10 lines in
   each repository, each cut to 200 characters (`…` marks a cut), and count
   the rest as `taught_more`. A trailer never stops a landing, and a feed
