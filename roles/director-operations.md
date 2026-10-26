@@ -25,6 +25,10 @@ here. Durable know-how belongs here, not in the session's memory or in
 - **A paused mission resumes only on the user's explicit yes** to a
   proposal naming the mission, its machine, why now and its first step. A
   general go ("schedule the next", "saturate") is no resume.
+- **A mission the director parks on the user** carries `blocked:
+  REPO#N` in its README's front matter, the issue it waits on
+  (records.md 3, user-issues.md 5), written when it is parked and
+  removed as it goes on; the status page counts it.
 - **A brief is committed and pulled before its session starts,** and the
   commit's output is read: `record` refuses a summary over 60 words, a
   description over 65 characters and a README over 8 KiB (section 2).
