@@ -1226,7 +1226,7 @@ def kpis(fleet, shown, subscribed):
     issues = user_issues(fleet)
     counts = shaped(issues.get('open'), {}) if issues else {}
     counts = {repo: n for repo, _ in ISSUES if (n := number(counts.get(repo))) is not None}
-    issues_sub = ' · '.join(f'<a href="{E(issues_link(repo, label))}">{E(repo)} '
+    issues_sub = ' · '.join(f'<a href="{E(issues_link(repo, label))}" target="_blank" rel="noopener noreferrer">{E(repo)} '
                             f'{E(str(counts.get(repo, "–")))}</a>' for repo, label in ISSUES)
     if counts and len(counts) < len(ISSUES):
         issues_sub = E(f'{len(counts)} of {len(ISSUES)} read · ') + issues_sub

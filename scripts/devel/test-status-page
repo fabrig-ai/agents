@@ -545,8 +545,9 @@ def page_user_issues(lab):
     label = (200, {'id': 1, 'name': 'waiting-on-user'}, 0)
 
     def links(counts):
-        return ' · '.join(f'<a href="https://git.fabrig.ai/fabrig-ai/{repo}/issues?state=open&amp;labels={tag}">'
-                          f'{repo} {counts.get(repo, "–")}</a>' for repo, tag in repos)
+        return ' · '.join(f'<a href="https://git.fabrig.ai/fabrig-ai/{repo}/issues?state=open&amp;labels={tag}" '
+                          f'target="_blank" rel="noopener noreferrer">{repo} {counts.get(repo, "–")}</a>'
+                          for repo, tag in repos)
 
     def issue(index, tag):
         return {'title': f'PRIVATE-TITLE-{index}', 'body': f'PRIVATE-BODY-{index}',
@@ -563,6 +564,12 @@ def page_user_issues(lab):
         sub = (f'{len(counts)} of 7 read · ' if counts and len(counts) < 7 else '') + links(counts)
         assert (f'<div class="label">Waiting on the user</div><div class="value">{value}</div>'
                 f'<div class="sub">{sub}</div>') in page
+        anchors = re.findall(r'<a [^>]*>', page)
+        assert sum('href="https://git.fabrig.ai/fabrig-ai/' in anchor for anchor in anchors) == 7, anchors
+        for anchor in anchors:
+            if re.search(r'href="http[^" ]*"', anchor):
+                assert anchor.count(' target="_blank"') == 1, anchor
+                assert anchor.count(' rel="noopener noreferrer"') == 1, anchor
         assert '<h2>Waiting on the user' not in page
         assert '<div class="label">Missions</div><div class="value">–</div>' not in page
         assert '<div class="label">Missions</div>' in page
