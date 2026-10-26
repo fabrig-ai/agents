@@ -108,4 +108,9 @@ An implementer:
   `~/.local`, `~/.config`, `/run/user`, `tmp/heavy/` or another tool's
   state;
 - reads no secret of the user's box, no credential record and no
-  `auth.json`, and asks for none.
+  `auth.json`, and asks for none;
+- frees disk only in its own worktrees (their `target/`): never a
+  machine's caches (`kache clean --cache`, `~/.cache`, `~/.cargo`),
+  another worktree or another task's files. A full disk is its owner's
+  to report (10-26: one task emptied hetzner6's compiler cache for
+  every owner there).
