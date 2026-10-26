@@ -1830,19 +1830,24 @@ def main():
         data = gather_all(machines_file, records_root, not args.no_pull, source)
         kept = None
         if args.samples:
-            stored, dropped = [], 0
             try:
-                stored, dropped = read_samples(args.samples)
-            except (OSError, ValueError) as error:
-                data['errors'].append(f'usage samples: {error}')
-            if dropped:
-                data['errors'].append(f'usage samples: {dropped} lines not read')
-            kept = kept_samples(stored + usage_samples(Fleet(data)), data['time'])
-            try:
-                Path(args.samples).parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-                write(args.samples, ''.join(json.dumps(s) + '\n' for s in kept), 0o600)
-            except (OSError, ValueError) as error:
-                data['errors'].append(f'usage samples: {error}')
+                stored, dropped = [], 0
+                try:
+                    stored, dropped = read_samples(args.samples)
+                except (OSError, ValueError) as error:
+                    data['errors'].append(f'usage samples: {error}')
+                if dropped:
+                    data['errors'].append(f'usage samples: {dropped} lines not read')
+                kept = kept_samples(stored + usage_samples(Fleet(data)), data['time'])
+                try:
+                    Path(args.samples).parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                    write(args.samples, ''.join(json.dumps(s) + '\n' for s in kept), 0o600)
+                except (OSError, ValueError) as error:
+                    data['errors'].append(f'usage samples: {error}')
+            except Exception as error:  # Sampling must leave the rest of the page.
+                print(f'status-page: usage samples:\n{traceback.format_exc()}', file=sys.stderr)
+                data['errors'].append(f'usage samples: not kept: {type(error).__name__}: {error}')
+                kept = None
         page = render(data, kept)
         if args.out == '-':
             sys.stdout.write(page)

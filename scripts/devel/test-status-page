@@ -313,7 +313,7 @@ sys.exit(subprocess.run([sys.executable, '-I', '-', 'collect'], env=env, input=s
     def codex(self, tmp, answer):
         write(tmp.parent / 'codex.json', json.dumps(answer))
 
-    def run(self, *args, status=0, disk_unavailable=False, **env):
+    def run(self, *args, status=0, disk_unavailable=False, usage_samples_failure=False, **env):
         command = [PYTHON, '-I', str(SCRIPT), *args]
         if disk_unavailable:
             # Leave a valid cwd for the CLIs, while keeping this case's
@@ -321,6 +321,13 @@ sys.exit(subprocess.run([sys.executable, '-I', '-', 'collect'], env=env, input=s
             code = ("import runpy, sys; from unittest.mock import patch; "
                     "mock = patch('shutil.disk_usage', side_effect=OSError('fixture disk unavailable')); "
                     "mock.start(); runpy.run_path(sys.argv.pop(1), run_name='__main__')")
+            command = [PYTHON, '-I', '-c', code, str(SCRIPT), *args]
+        if usage_samples_failure:
+            code = ("import runpy, sys\nfrom unittest.mock import Mock, patch\n"
+                    "module = runpy.run_path(sys.argv.pop(1))\n"
+                    "with patch.dict(module['main'].__globals__, "
+                    "usage_samples=Mock(side_effect=RuntimeError('fixture'))):\n"
+                    "    sys.exit(module['main']())\n")
             command = [PYTHON, '-I', '-c', code, str(SCRIPT), *args]
         result = subprocess.run(command, cwd=self.root, env=dict(self.env, **env),
                                 stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
@@ -974,8 +981,12 @@ def page_pace(lab):
     samples = lab.root / 'samples/usage.jsonl'
     out, snapshot = lab.root / 'page.html', lab.root / 'data.json'
 
-    def render(*args):
-        result = lab.run('--no-pull', '--out', str(out), '--json', str(snapshot), *args)
+    def render(*args, usage_samples_failure=False):
+        result = lab.run('--no-pull', '--out', str(out), '--json', str(snapshot), *args,
+                         usage_samples_failure=usage_samples_failure)
+        if usage_samples_failure:
+            assert 'Traceback (most recent call last):' in result.stderr, result.stderr
+            assert 'RuntimeError: fixture' in result.stderr, result.stderr
         page = out.read_text()
         private_absent(page, snapshot.read_text(), result.stderr)
         public_roles(page, lab)
@@ -1087,6 +1098,11 @@ def page_pace(lab):
     page, _, _ = render('--samples', str(samples))
     assert 'usage samples: 6 lines not read' in page[page.index('<footer>'):]
     private_absent(samples.read_text())
+    # An unexpected sampler exception leaves a newly written page with no pace.
+    out.unlink()
+    page, _, cells = render('--samples', str(samples), usage_samples_failure=True)
+    assert 'usage samples: not kept: RuntimeError: fixture' in page[page.index('<footer>'):]
+    assert cells and set(cells.values()) == {'–'}, cells
     # Without --samples, even a full limit has no pace; no storage is created anywhere in the lab.
     before = set(lab.root.rglob('*'))
     _, _, cells = render()
