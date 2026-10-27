@@ -311,11 +311,14 @@ machine's own.
    placing an owner.
 3. **`fleet tend` and its timer land,** and reach each machine with the
    kit's rollout, one quiet machine at a time (`setup --fix`, twice).
-   The runs `codex-run stale` lists on a machine before its first tend
-   are read by the director first: each told, or its directory left
-   for `tidy`. A machine whose kit lacks step 1's tools tends with what
-   it has: the commands it lacks exit 2, and the watch raises its
-   `untended` until the rollout reaches it.
+   Before a machine's first tend the director reads there what it will
+   do: `codex-run stale` (the runs of the last day its callers will be
+   told of), `tidy --dry-run --targets` and `post list --older 15`; it
+   stops any ended mission's session still running, and reads (`post
+   read NAME`) the mail waiting for an ended mission, so that the watch
+   raises none of it. A machine whose kit lacks step 1's tools tends
+   with what it has: the commands it lacks exit 2, and the watch raises
+   its `untended` until the rollout reaches it.
 4. **`fleet watch` lands,** and hel8 gets its address file, `director@hel8`.
    The director's by-hand readings of the machines end.
 5. **The roles' edits,** with step 4: director.md 2, 3 and 5 (the

@@ -138,9 +138,13 @@ The commands:
   `waiting`, `woken`, `queued`, or exit 3 with `queued, nobody will
   wake it: <why>`. With no unread mail it prints `NAME no mail` and
   wakes nothing. **`post wake --older MINUTES`** does the same for
-  every name of this machine whose oldest unread message is MINUTES old
-  or more and whose waiter is dead, but `user`, whom nothing wakes; it
-  exits 3 when any of them could not be woken, after trying them all.
+  every name of this machine with an unread message between MINUTES
+  old and a day old, and whose waiter is dead, but `user`, whom nothing
+  wakes; it exits 3 when any of them could not be woken, after trying
+  them all. Mail a day old wakes nothing: a session deaf that long has
+  been raised by the fleet watch long before, and one left running
+  after its mission ended would be resumed to read it (10-27: such
+  mail waited 38 hours in ended missions' mailboxes).
 
 Each command takes the mailbox's lock (`flock`) while it moves files.
 An id is the stamp and eight random hex digits; a sent copy never
@@ -267,7 +271,9 @@ overwrites another.
   without an end whose unit is gone (killed, out of memory, a reboot, a
   unit that never started), and those whose post failed. A run whose
   meta is under 2 minutes old is not listed: its unit may not have
-  started yet. A post failed on any exit but 0 and 3: on exit 3 the
+  started yet. Nor is one whose meta is more than a day old: whoever
+  waited for it has moved on, and its directory goes with `tidy`'s
+  step 5 (cleanup.md 4). A post failed on any exit but 0 and 3: on exit 3 the
   mail is in the caller's mailbox, and another exit than post's own
   (a crash, 127) leaves delivery unknown, so the end writes
   `post-failed` for every exit but 0 and 3, and a `post-failed` from
