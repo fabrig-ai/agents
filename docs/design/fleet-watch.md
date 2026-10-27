@@ -22,10 +22,11 @@ shows each machine's room before an owner is placed. `fleet`, in
   owners. "hardware monitoring? automatic disk cleanup? scripts for
   placement?" (the user, 10-27).
 - **Each machine tends itself** (section 4). `fleet tend`, a user
-  timer every 5 minutes on every machine, runs three of the kit's
-  commands: `tidy --targets` clears the build targets nobody uses,
-  `post wake --older 15` wakes a session whose mail waits with no
-  waiter, and `codex-run stale --post` tells a dead run's caller. Each
+  timer every 5 minutes on every machine, runs the kit's commands:
+  `tidy --targets` clears the build targets nobody uses, `post wake
+  --older 15` wakes a session whose mail waits with no waiter,
+  `codex-run stale --post` tells a dead run's caller, and `kache gc`
+  holds kache's store to its limit. Each
   rule is its tool's ([cleanup.md](cleanup.md) 4, [post.md](post.md) 3
   and 5); the timer only runs them, and records what they did.
 - **One reading, piped.** `fleet probe` reads one machine: load,

@@ -30,8 +30,8 @@ its recipes and checklists, is
   long-term consequences that would be hard to change, what the user's
   rules keep theirs, or what it can't reasonably decide, with its
   recommendation first (section 8).
-- **It keeps watch cheaply.** Its waiter wakes it when post comes, a
-  watcher when something else it must act on changes (section 5), and a
+- **It keeps watch cheaply.** Its waiter wakes it when post comes, the
+  fleet watch's too when a machine needs it (section 5), and a
   check every two hours looks at usage, machines and owners (section 7).
   It never polls, and reads code only through others.
 - **Its own spend counts** with everyone's: Claude for its judgement,
@@ -61,9 +61,9 @@ its recipes and checklists, is
   they stop for a compaction or a fresh context (below):
   - a cron, `17 */2 * * *`, recurring, with the prompt "Director's
     2-hour check: section 7 of agents' roles/director.md.";
-  - the watcher (section 12) and the waiter, `post wait director`, as
-    background tasks, each started again after it wakes
-    the director (section 5).
+  - the waiter, `post wait director`, as a background task, started
+    again after it wakes the director (section 5). The fleet watch is
+    no timer of the session's: it runs on hel8 by itself and posts.
 - **Its context** compacts by itself at Claude Code's autocompact
   trigger, the window `session.sh` reports. It aims at one compaction
   every two hours at most, on average; their number never ends a
@@ -72,7 +72,7 @@ its recipes and checklists, is
     context's size, compactions and checks since it began, and a
     verdict. At "compact first", about 30k below the trigger (a
     check's reading), it compacts before the check: it stops the
-    watcher and the waiter, deletes the cron, runs
+    waiter, deletes the cron, runs
     `context.sh compact "<what to keep>"` (section 12) and ends its
     turn. The script waits for the session to be idle, which it never
     is while a cron or a background task is registered, types
@@ -95,14 +95,14 @@ its recipes and checklists, is
   context is cleared. The director brings its record up to date
   (`STATUS.md`, the direction, the budgets, what waits on the user),
   writes `notes/handover.md` with what only it holds (what is in
-  flight, what is held, the items between owners), stops the watcher
-  and the waiter, deletes the cron, runs `context.sh clear` (section
-  12) and ends its turn. The script types `/clear`, then the
-  starting prompt above. The fresh context reads its notes (section 3)
-  and starts the cron, the watcher and the waiter. Should the clear
-  fail, the script types the failure into the old context.
-- **Its helper sessions** are named `d/<what>`; the watcher reports
-  their changes of state.
+  flight, what is held, the items between owners), stops the waiter,
+  deletes the cron, runs `context.sh clear` (section 12) and ends its
+  turn. The script types `/clear`, then the starting prompt above. The
+  fresh context reads its notes (section 3) and starts the cron and the
+  waiter. Should the clear fail, the script types the failure into the
+  old context.
+- **Its helper sessions** are named `d/<what>`; `fleet room` shows
+  them on their machine.
 
 ## 3. Its notes
 
@@ -139,8 +139,8 @@ machine's `tmp/post/` (section 5).
 - **After a compaction or a restart,** it reads `STATUS.md`,
   `director/direction.md`, `notes/decisions-live.md`, the decisions
   newer than that digest, the record's `git log` since its last check,
-  and `handover.md` while it exists. Then it makes sure the cron, the
-  watcher and the waiter run, and after a compaction runs `session.sh`
+  and `handover.md` while it exists. Then it makes sure the cron and
+  the waiter run, and after a compaction runs `session.sh`
   (section 2).
 
 ## 4. Starting an owner
@@ -226,20 +226,19 @@ machine's `tmp/post/` (section 5).
   `cur/` are the record.
 - **The waiter,** `post wait director`, ends when post comes. The
   director then runs `post read director`, acts, and starts it again.
-- **The watcher** (section 12). `watch.sh` runs `probe.sh` on each
-  machine every five minutes, over ssh, so `probe.sh` uses only bash,
-  coreutils, awk, jq and claude. It prints `t:` keys, the triggers, and
-  `i:` keys, for information. The triggers: mail unread for 15 minutes
-  on any machine (`post list --older 15`), which a waiter that died or a
-  session stuck at work leaves, and runs that will never post
-  (`codex-run stale`). For information: a helper session's state, a
-  machine missed twice in a row, a subscription near its limit. After a
-  first change it looks once more four minutes later, so that one wake
-  carries what arrived meanwhile, then exits with its report.
-  `watch-state/` keeps the last state seen, so a restart reports only
-  real changes; `hw.log` takes its hardware samples, and `usage.log` the
-  subscriptions' week. Each wake re-reads the director's whole context:
-  a trigger is only for what the director must act on.
+- **The fleet watch**
+  ([fleet-watch.md](../docs/design/fleet-watch.md)). Each machine
+  tends itself every 5 minutes: its idle build targets cleared, its deaf sessions woken in
+  place, its dead runs told to their callers, kache's store held to its
+  limit. `fleet watch`, a timer on hel8, reads every machine of post's
+  machines file and posts the director, from `fleet`, once per
+  condition two rounds confirm, at most every 10 minutes: disk near its
+  floor, load past 3 per core, memory short, kache past its limit, a
+  machine unreached, untended or unseen, a session its wake could not
+  reach, mail unread an hour, a dead run untold, an active mission's
+  session gone. A clear posts nothing. Each wake re-reads the
+  director's whole context: a condition is only what the director must
+  act on, and its thresholds are tuned from what it raises.
 - **After landing's runner** posts the director a red that nobody waits
   on, and a fault of its own that lasts 15 minutes (landing-flow.md 4,
   step 8); `landings` shows each tier. The inbox is gone.
@@ -319,7 +318,11 @@ is mechanical, and Codex reads what needs reading.
 2. **Catch up:** `record pull`, `STATUS.md`, the record's `git log`
    since the last check, and `landings taught --since` it: every landing
    since, with what its code taught (landing-flow.md 12).
-3. **The report:** `check-report.sh [MINUTES]` (section 12), over the
+3. **The machines:** `fleet room`
+   ([fleet-watch.md](../docs/design/fleet-watch.md) 5), each machine's
+   room and verdict, and on hel8 the conditions the watch holds raised.
+   **The
+   report:** `check-report.sh [MINUTES]` (section 12), over the
    last 120 minutes by default, reads every machine at once. For each:
    Claude's usage, who spent what, the owners' sessions and Codex units
    with their states, the disk, load and memory, the builds and gates
@@ -350,8 +353,7 @@ is mechanical, and Codex reads what needs reading.
    take`, start with `codex-run task --on-stop`, and give it at their
    end (qa-flow.md 10.2).
 6. **Record:** rewrite `STATUS.md`, add the decisions, commit them
-   with `record commit`, and make sure the cron, the watcher and the
-   waiter run.
+   with `record commit`, and make sure the cron and the waiter run.
 7. **Tidy:** `~/src/rust/agents/scripts/devel/tidy` on each machine
    with no landing since the last check
    ([cleanup.md](../docs/design/cleanup.md) 5), and a decision on each
@@ -404,7 +406,7 @@ is mechanical, and Codex reads what needs reading.
   Claude sub-agent only where taste is the point, on Opus.
 - **Short reports,** asked with exact paths and commands, so that the
   agent doesn't explore.
-- **Plain shell first:** `probe.sh` and a direct `ssh … cat`
+- **Plain shell first:** `fleet room` and a direct `ssh … cat`
   before any agent, when the answer is one file.
 - **Code is read through others:** Codex surveys.
 - **Few wakes** (section 5).
@@ -428,8 +430,10 @@ is mechanical, and Codex reads what needs reading.
     change to save tokens, as an owner's work, where quality and
     outcomes don't suffer.
 - **The disk floor,** 40 GB unless a machine's `tmp/machine.env` says
-  otherwise, below which `heavy` queues nothing, is watched at each
-  check.
+  otherwise, below which `heavy` queues nothing, is the fleet watch's
+  to watch: it posts the director when a machine comes within 10 GB of
+  it, after its tend has cleared what it may
+  ([fleet-watch.md](../docs/design/fleet-watch.md) 3, 4).
 - **x1 is the user's workstation:** its load is theirs. When it has no
   margin, landings go from another machine, with the same gate and
   budgets.
@@ -494,6 +498,9 @@ a time, with the owners who build it.
   `session.sh`, `context.sh`, the usage scripts and `machines.sh`)
   lived untracked in `tmp/director/`, and were gone by 10-25, when every
   script left `tmp/` ([cleanup.md](../docs/design/cleanup.md) 2 and 6).
+  The watcher and its probe came back on 10-27 as `fleet`
+  ([fleet-watch.md](../docs/design/fleet-watch.md)); the rest are
+  still open.
   Where sections 2, 5 and 7 name one, the director does its step by
   hand, until a mission builds what it needs into this repository's
   `scripts/`. Which ones, and in what shape, is open: the director asks

@@ -88,9 +88,9 @@ here. Durable know-how belongs here, not in the session's memory or in
   director post only questions, escalations, a red's repair and their
   closing.
 - **The two-hourly check** (director.md 7), by hand while its tools are
-  missing: `record pull`; `agents/scripts/devel/status-page --no-pull
-  --out FILE --json FILE` for every machine's disk, memory, load and
-  sessions; the subscriptions' use from the live page's Subscriptions
+  missing: `record pull`; `fleet room` for every machine's disk, memory,
+  load, sessions and verdict (`--targets` for who holds the disk); the
+  subscriptions' use from the live page's Subscriptions
   section; `landings taught --since` the last check; STATUS.md's "Asked
   in chat" (section 6); `tidy` on machines with no landing since the last
   check; a decision recording it.
@@ -204,13 +204,17 @@ here. Durable know-how belongs here, not in the session's memory or in
   director's to remove once its implementers have stopped.
   On XFS a target shares its blocks with kache's store (reflinks):
   removing a target frees little while the store holds them, and the
-  store is what to trim (`kache stats` shows it against its cap).
+  store is what to trim (`kache stats` shows it against its cap). Each
+  machine's tend clears idle targets and runs `kache gc` past the
+  store's limit by itself (fleet-watch.md 4); what it can't clear, the
+  watch posts.
 - **After a machine's memory crunch,** Claude Code may stop sessions'
   background tasks, their post waiters among them, and tell them not to
   restart them unasked: they go idle and deaf ("nobody will wake it").
-  Look for `post wait` processes there, and wake each idle session in
-  place (stop, then resume with a message to start its waiter by name and
-  read with `--as`).
+  The machine's tend wakes each in place within 5 minutes of its mail
+  waiting 15 (`post wake --older 15`), and the watch posts those it
+  could not wake; by hand: stop, then resume with a message to start its
+  waiter by name and read with `--as`.
 
 ## 9. The record
 

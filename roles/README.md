@@ -34,8 +34,6 @@ Claude is for taste; everything else goes to Codex.
 
 ## 2. Open questions
 
-- **The resource watcher:** a tool that wakes an owner when CPU, memory
-  or disk need it (owners.md 2), to be built.
 - **temper's drafts that read our roles:** `draft/configuring.md` and
   `draft/temper-on-temper.md` describe how we worked before 10-26:
   product owners, departments and milestones.

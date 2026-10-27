@@ -57,9 +57,11 @@ out. The security rules are director.md 10's.
     this way;
   - while implementers run, `sleep 1800`: then it reads their logs
     together (section 3);
-  - the machine: the kit's resource watcher, once it has one, wakes it
-    when CPU, memory or disk need it. Until then `heavy` guards the
-    disk floor.
+  - the machine: no waiter of the owner's. Each machine tends itself
+    (idle targets cleared, deaf sessions woken) and the fleet watch
+    wakes the director past a threshold
+    ([fleet-watch.md](../docs/design/fleet-watch.md)); `fleet room`
+    shows a machine's room.
 - **Its scratch** is `~/src/rust/tmp/owners/<m>/`: `common.md`, the
   tasks with their reports and logs, and one worktree per implementer.
   No scripts: throwaway code lives in a worktree, and a tool the kit
