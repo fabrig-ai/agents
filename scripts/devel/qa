@@ -2132,15 +2132,27 @@ class Watch:
         name = state[kind]
         if kind == 'pass' and not self.record.path(f'qa/passes/{name}.md').exists():
             return
+        copy = dict(state.get('copy', dict(state='waiting', tree=None, commit=None,
+                                          digest=None, posted=None, recorded='unknown')))
+
+        def save():
+            previous = state.get('copy')
+            state['copy'] = dict(copy)
+            try:
+                self.save(directory, state)
+            except OSError:
+                if previous is None:
+                    state.pop('copy', None)
+                else:
+                    state['copy'] = previous
+                raise
+
         if 'copy' not in state:
-            state['copy'] = dict(state='waiting', tree=None, commit=None,
-                                 digest=None, posted=None, recorded='unknown')
-            self.save(directory, state)
-        copy = state['copy']
+            save()
         if copy['state'] == 'kept' or self.copy_waiting and kind == 'pass':
             return
         copy.update(state='waiting', commit=None, digest=None)
-        self.save(directory, state)
+        save()
         try:
             extra = walk_reports if kind == 'walk' else ()
             snapshot = Snapshot.read(directory, self.options['QA_EVIDENCE_KIB'] * 1024, extra)
@@ -2170,7 +2182,15 @@ class Watch:
         except (Problem, OSError, ValueError, UnicodeError):
             self.copy_waiting = True
             log(f'{state[kind]}: evidence not kept; trying next check')
-        self.save(directory, state)
+        save()
+
+    def walk_keep(self, directory, state):
+        try:
+            self.keep(directory, state)
+        except OSError:
+            self.copy_failed.add(state['walk'])
+            self.copy_waiting = True
+            log(f'{state["walk"]}: evidence state not saved; trying next check')
 
     def copy_notice(self, state):
         copy = state.get('copy', {})
@@ -2184,6 +2204,8 @@ class Watch:
                 + ''.join(f'  refused: {line}\n' for line in lines))
 
     def walk_copy_notice(self, state):
+        if state['walk'] in self.copy_failed:
+            return 'evidence waiting: tried again at each check\n', None
         copy = state.get('copy', {})
         if copy.get('state') == 'kept':
             commit = copy['commit']
@@ -2197,7 +2219,8 @@ class Watch:
                         + 'Mend it by name and line, never opening a file: move the named file out of the '
                           'allowlist into the scratch root, or delete the named line (sed -i \'Nd\' FILE).\n',
                         copy['digest'])
-        return 'evidence waiting: tried again at each check\n', None
+        return ('evidence waiting: tried again at each check\n',
+                hashlib.sha256(b'waiting').hexdigest() if copy.get('state') == 'waiting' else None)
 
     def post_walk_copy(self, directory, state):
         body, receipt = self.walk_copy_notice(state)
@@ -2205,7 +2228,7 @@ class Watch:
             return
         copy = state['copy']
         subject = f'qa: walk {state["walk"]} evidence ' + (
-            'kept ' + copy['commit'] if copy['state'] == 'kept' else 'refused')
+            'kept ' + copy['commit'] if copy['state'] == 'kept' else copy['state'])
         message = directory / 'post-body'
         replace(message, body.encode())
         sent = self.call('post', 'send', '--as', 'qa-watch', state['starter'], subject, message)
@@ -2646,7 +2669,7 @@ class Watch:
             state['decision'] = 'walk-end'
             self.save(directory, state)
         if state.get('decision') == 'walk-end':
-            self.keep(directory, state)
+            self.walk_keep(directory, state)
         self.end(directory, state)
         missing = self.outstanding(state)
         units = self.deployments(directory, state)
@@ -2660,7 +2683,7 @@ class Watch:
                 state['pause_line'] = line
             self.save(directory, state)
             if state['decision'] == 'walk-end':
-                self.keep(directory, state)
+                self.walk_keep(directory, state)
         paused = state['decision'] == 'walk-pause'
         facts = self.facts(state['run'])
         note = f'exit {facts["exit"]}; out: ' + (', '.join(missing) or 'none')
@@ -2702,6 +2725,7 @@ class Watch:
         log('checking')
         self.options = options
         self.copy_waiting, self.copy_refusals = False, {}
+        self.copy_failed = set()
         self.stuck = self.stuck_addresses()
         self.route_repos, self.route_commits, self.route_answers, self.route_failed = {}, {}, {}, set()
         complete = {}
@@ -2781,8 +2805,12 @@ class Watch:
             for directory, state in walks:
                 try:
                     if state.get('stage') == 'ended':
-                        if state.get('decision') == 'walk-end' and directory.exists():
-                            self.keep(directory, state)
+                        if state['run'] and directory.exists():
+                            if 'decision' not in state:
+                                state['decision'] = 'walk-end'
+                                self.save(directory, state)
+                            if state['decision'] == 'walk-end':
+                                self.walk_keep(directory, state)
                     elif state.get('stage') != 'paused':
                         self.check_walk(directory, state)
                     if state.get('decision') == 'walk-end' and state.get('posted') and directory.exists():

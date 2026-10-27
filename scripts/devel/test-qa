@@ -5516,6 +5516,146 @@ def evidence_walk(lab):
     return walk_with_logins(lab, CHATGPT)
 
 
+def failed_walk_copy_save(lab, number):
+    directory, state = evidence_walk(lab)
+    unit, pid = deployment(lab, directory, login=CHATGPT)
+    lab.run('_give-back', str(directory), '5')
+    lab.end_run(state)
+    result = driven_watch(lab, f'''Watch = tool['Watch']
+original = Watch.save
+copies = 0
+failed = False
+def save(self, directory, state):
+    global copies, failed
+    if 'copy' in state and not failed:
+        copies += 1
+        if copies == {number}:
+            failed = True
+            raise OSError('fixture evidence state save failed')
+    return original(self, directory, state)
+Watch.save = save
+''')
+    assert 'evidence state not saved; trying next check' in result.stdout
+    saved = lab.walk_state()[1]
+    assert saved['stage'] == 'ended' and saved['given'] == [CHATGPT]
+    assert saved['released'] and saved['posted'] and saved['end_logged']
+    if number == 1:
+        assert 'copy' not in saved
+        assert lab.evidence('for-each-ref', '--format=%(refname)') == ''
+    else:
+        assert saved['copy'] == dict(state='waiting', tree=None, commit=None,
+                                     digest=None, posted=None, recorded='unknown')
+    post, = lab.sent()
+    assert post['args'][2] == 'qa: walk rung-b0-1 ended'
+    assert 'evidence waiting: tried again at each check' in post['body']
+    assert ['--user', 'stop', '--no-block', '--', unit] in lab.calls('systemctl')
+    dead(pid)
+    lab.watch()
+    saved = lab.walk_state()[1]
+    commit = lab.evidence('rev-parse', 'evidence')
+    assert saved['copy']['state'] == 'kept' and saved['copy']['commit'] == commit
+    assert len(lab.sent()) == 2
+    assert lab.sent()[-1]['args'][2] == 'qa: walk rung-b0-1 evidence kept ' + commit
+    lab.watch()
+    assert len(lab.sent()) == 2 and lab.evidence('rev-list', '--count', 'evidence') == '1'
+
+
+def a_walk_cleans_up_after_its_first_copy_save_fails(lab):
+    failed_walk_copy_save(lab, 1)
+
+
+def a_walk_cleans_up_after_its_waiting_copy_save_fails(lab):
+    failed_walk_copy_save(lab, 2)
+
+
+def a_walk_cleans_up_after_its_last_copy_save_fails(lab):
+    failed_walk_copy_save(lab, 3)
+
+
+def old_ended_walk(lab):
+    directory, state = evidence_walk(lab)
+    lab.end_run(state)
+    driven_watch(lab, '''Watch = tool['Watch']
+Watch.walk_keep = lambda self, directory, state: None
+Watch.walk_copy_notice = lambda self, state: ('', None)
+''')
+    directory, state = lab.walk_state()
+    assert state['stage'] == 'ended' and 'copy' not in state
+    for key in ('decision', 'attempt', 'attempts', 'report_attempt', 'kind', 'clock_walk'):
+        state.pop(key, None)
+    state['holder'] = 'walk/' + state['walk']
+    path = lab.tmp / 'qa/walks' / (state['walk'] + '.json')
+    path.write_text(json.dumps(state))
+    return directory, state
+
+
+def an_old_ended_walk_gets_its_evidence(lab):
+    directory, state = old_ended_walk(lab)
+    cancelled = dict(state, walk='rung-b0-2', run='', logins={}, kinds={}, pools={},
+                     given=[], requests=[], holder='walk/rung-b0-2',
+                     start_logged=False, end_logged=False, posted=False)
+    other = directory.with_name(cancelled['walk'])
+    lab.scratch({'report.md': 'This start never ran.\n'}, other)
+    path = lab.tmp / 'qa/walks/rung-b0-2.json'
+    original = json.dumps(cancelled)
+    path.write_text(original)
+    logins = lab.calls('logins')
+    clock = directory.parent / 'b0/loop.tsv'
+    events = clock.read_bytes()
+    lab.watch()
+    saved = next(s for _, s in lab.walk_states() if s['walk'] == state['walk'])
+    commit = lab.evidence('rev-parse', 'evidence')
+    assert saved['decision'] == 'walk-end' and saved['copy']['commit'] == commit
+    for key in ('stage', 'started', 'run', 'given', 'released', 'start_logged', 'end_logged', 'posted'):
+        assert saved[key] == state[key], key
+    assert path.read_text() == original and clock.read_bytes() == events
+    assert [c for c in lab.calls('logins') if c[:1] == ['give']] == [
+        c for c in logins if c[:1] == ['give']]
+    assert lab.evidence('ls-tree', '--name-only', 'evidence:walks') == '20261027-rung-b0-1'
+    post = lab.sent()[-1]
+    assert post['args'][1:3] == [state['starter'], 'qa: walk rung-b0-1 evidence kept ' + commit]
+    assert 'evidence kept: ' + commit in post['body']
+    assert len(lab.sent()) == 2
+    lab.watch()
+    assert len(lab.sent()) == 2 and lab.evidence('rev-list', '--count', 'evidence') == '1'
+
+
+def an_old_refused_walk_posts_its_copy_once(lab):
+    directory, state = old_ended_walk(lab)
+    value = secrets.token_hex(24)
+    lab.scratch({'evidence/http.txt': 'Authorization: Bearer ' + value + '\n'}, directory)
+    first = lab.watch()
+    saved = lab.walk_state()[1]
+    assert saved['decision'] == 'walk-end' and saved['copy']['state'] == 'refused'
+    post = lab.sent()[-1]
+    assert post['args'][1:3] == [state['starter'], 'qa: walk rung-b0-1 evidence refused']
+    assert 'refused: evidence/http.txt, line 1: header' in post['body']
+    again = lab.watch()
+    assert len(lab.sent()) == 2
+    assert_walk_private(lab, value, first, again)
+
+
+def an_old_waiting_walk_posts_its_copy_once(lab):
+    directory, state = old_ended_walk(lab)
+    hook = lab.origins / 'qa.git/hooks/pre-receive'
+    executable(hook, 'raise SystemExit(1)\n')
+    lab.watch()
+    saved = lab.walk_state()[1]
+    assert saved['decision'] == 'walk-end' and saved['copy']['state'] == 'waiting'
+    post = lab.sent()[-1]
+    assert post['args'][1:3] == [state['starter'], 'qa: walk rung-b0-1 evidence waiting']
+    assert 'evidence waiting: tried again at each check' in post['body']
+    lab.watch()
+    assert len(lab.sent()) == 2
+    hook.unlink()
+    lab.watch()
+    commit = lab.evidence('rev-parse', 'evidence')
+    assert lab.walk_state()[1]['copy']['commit'] == commit
+    assert lab.sent()[-1]['args'][2] == 'qa: walk rung-b0-1 evidence kept ' + commit
+    lab.watch()
+    assert len(lab.sent()) == 3 and lab.evidence('rev-list', '--count', 'evidence') == '1'
+
+
 def an_ended_walk_keeps_its_evidence(lab):
     directory, first = evidence_walk(lab)
     first = pause_walk(lab, directory, first)
@@ -6963,7 +7103,12 @@ def an_ambiguous_build_is_refused(lab):
     assert first[1]['main'] == fix and second[1]['main'] == commit
 
 
-CASES = (a_failed_pause_keeps_its_evidence_after_its_decision,
+CASES = (a_walk_cleans_up_after_its_first_copy_save_fails,
+         a_walk_cleans_up_after_its_waiting_copy_save_fails,
+         a_walk_cleans_up_after_its_last_copy_save_fails,
+         an_old_ended_walk_gets_its_evidence, an_old_refused_walk_posts_its_copy_once,
+         an_old_waiting_walk_posts_its_copy_once,
+         a_failed_pause_keeps_its_evidence_after_its_decision,
          an_ended_walk_keeps_its_evidence, a_paused_walk_keeps_nothing,
          a_refused_walk_is_mended, a_walk_copy_waits_on_a_hung_remote,
          a_completion_cut_keeps_every_finding,
