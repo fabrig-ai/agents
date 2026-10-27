@@ -98,6 +98,7 @@ suite test-receipt-inputs scripts/devel/test-receipt-inputs
 suite test-heavy-plain scripts/devel/test-heavy-plain
 suite test-repin scripts/devel/test-repin --evidence "$scratch/repin"
 suite test-kache-setup env DEV_TMP="$scratch" scripts/infra/test-kache-setup
+suite test-setup-checkouts scripts/infra/test-setup-checkouts
 suite test-after-landing-units scripts/infra/test-after-landing-units
 suite test-fleet-units scripts/infra/test-fleet-units
 suite test-gate-policy scripts/devel/test-gate-policy

@@ -28,6 +28,14 @@ check() {
     ok() { echo "ok    $*"; }
     warn() { echo "warn  $*"; }
     fail() { echo "FAIL  $*"; failed=1; }
+    check_checkouts
+
+    check_records
+    check_machine
+    return "$failed"
+}
+
+check_checkouts() {
     # Every primary checkout: on main, clean, equal to origin's main,
     # and origin takes a push.
     # --fix fast-forwards a clean checkout that is only behind.
@@ -68,16 +76,14 @@ check() {
         else
             ok "$repo: main is origin/main"
         fi
-        if GIT_TERMINAL_PROMPT=0 git -C "$dir" push --dry-run --quiet origin main >/dev/null 2>&1; then
+        # Pushing main itself would fail whenever main is behind origin/main.
+        if GIT_TERMINAL_PROMPT=0 git -C "$dir" push --dry-run --quiet origin "origin/main:refs/heads/setup-push-check" >/dev/null 2>&1; then
             ok "$repo: origin takes a push"
         else
-            fail "$repo: origin refuses a push from here: git -C $dir push --dry-run origin main"
+            fail "$repo: origin refuses a push from here: git -C $dir push --dry-run origin origin/main:refs/heads/setup-push-check"
         fi
     done
 
-    check_records
-    check_machine
-    return "$failed"
 }
 
 # records is shared by sessions; setup never resets or cleans an existing checkout.
