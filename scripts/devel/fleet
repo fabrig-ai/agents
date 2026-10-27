@@ -21,7 +21,6 @@ import subprocess
 import sys
 import tempfile
 import threading
-import textwrap
 import time
 
 # Settings. SSH, tmp_dir, LIVE/RUNNING and the piped reading are adapted
@@ -1129,6 +1128,27 @@ def room_line(row):
             show(['heavy'], lambda h: f'h{h["running"]}+{h["queued"]}' + (f'/{h["oldest_wait"]/60:.0f}m' if h['queued'] else ''))]
 
 
+def room_details(reading):
+    groups = []
+    if reading['errors']:
+        groups.append(['blind: ' + ', '.join(sorted(reading['errors']))])
+    if reading.get('implementers'):
+        groups.append(['implementers', *(f'{k} {v}' for k, v in sorted(reading['implementers'].items()))])
+    if reading.get('sessions'):
+        groups.append(['sessions', *(x['name'] for x in reading['sessions'])])
+    line = '  '
+    for n, group in enumerate(groups):
+        if n < len(groups) - 1:
+            group[-1] += ';'
+        for entry in group:
+            if line.strip() and len(line) + 1 + len(entry) > 120:
+                yield line
+                line = '    '
+            line += (' ' if line.strip() else '') + entry
+    if line.strip():
+        yield line
+
+
 def room(rows, json_output=False, targets=False):
     now = clock()
     state = load_state(tmp_dir() / 'fleet/watch.json')
@@ -1149,16 +1169,7 @@ def room(rows, json_output=False, targets=False):
                 continue
             print(''.join(c.ljust(widths[i]) + ('  ' if i == 0 else ' ')
                           for i, c in enumerate(lines[row['machine']])).rstrip())
-            r = row['reading']
-            details = []
-            if r['errors']:
-                details.append('blind: ' + ', '.join(sorted(r['errors'])))
-            if r.get('implementers'):
-                details.append('implementers ' + ' '.join(f'{k} {v}' for k, v in sorted(r['implementers'].items())))
-            if r.get('sessions'):
-                details.append('sessions ' + ' '.join(x['name'] for x in r['sessions']))
-            for line in textwrap.wrap('; '.join(details), width=120, initial_indent='  ', subsequent_indent='    ',
-                                      break_on_hyphens=False):
+            for line in room_details(row['reading']):
                 print(line)
             if targets:
                 ordered = sorted(row['reading'].get('targets', []), key=lambda t: (t['owner'], -(t.get('size') or 0), t['path']))

@@ -486,9 +486,11 @@ def room_fits_120(lab):
     write(lab.tmp() / 'post/machines', 'hetzner6 local\nbeta free@beta\ngamma free@gamma\n')
     names = [f'o/session-{n:02}-'.ljust(30, 'x') for n in range(9)]
     lab.answer('claude', [{'name': name, 'pid': n+1} for n, name in enumerate(names)])
-    for n in range(4):
-        lab.run_meta(f'run{n}', lab.tmp() / f'owners/mission{n}/task')
-    lab.answer('systemctl', ''.join(f'codex-run-run{n}.service loaded active running\n' for n in range(4)))
+    mission = 'a'.ljust(120 - len('  blind: stale; implementers '), 'x')
+    missions = [mission, *(f'mission{n}' for n in range(4))]
+    for n, name in enumerate(missions):
+        lab.run_meta(f'run{n}', lab.tmp() / f'owners/{name}/task')
+    lab.answer('systemctl', ''.join(f'codex-run-run{n}.service loaded active running\n' for n in range(len(missions))))
     lab.answer('codex-run', '', exit=1)
     lab.figures('alpha', load=(12.1, 12.1, 12.1), free=99*GB, available=3*GB)
     write(lab.root / 'alpha/host/proc/pressure/cpu', 'some avg60=100\n')
@@ -501,13 +503,21 @@ def room_fits_120(lab):
     output = lab.run('room', status=1).stdout
     assert all(len(line) <= 120 for line in output.splitlines()), output
     assert all(name in output for name in names), output
-    assert all(f'mission{n} 1' in output for n in range(4)), output
+    assert all(f'{name} 1' in output for name in missions), output
+    assert all(not line.lstrip().startswith(tuple('0123456789;')) for line in output.splitlines()), output
     assert 'tight (disk, load, memory)' in output and 'load99.9/99.9/99.9(12.5/c)' in output, output
-    assert '  blind: stale; implementers ' in output
+    assert '  blind: stale; implementers' in output.splitlines(), output
     details = [line for line in output.splitlines() if line.startswith(' ')]
     assert details[0].startswith('  ') and not details[0].startswith('    ')
     assert all(line.startswith('    ') for line in details[1:]), output
     print(output, end='')
+    details = API['room_details']
+    assert list(details({'errors': []})) == []
+    assert list(details({'errors': ['z', 'a'], 'sessions': [{'name': 's'}]})) == ['  blind: a, z; sessions s']
+    long_name = 'x' * 121
+    assert list(details({'errors': [], 'implementers': {long_name: 2}, 'sessions': [{'name': long_name}]})) == [
+        '  implementers', f'    {long_name} 2;', '    sessions', f'    {long_name}']
+    assert list(details({'errors': [long_name, 'z']})) == [f'  blind: {long_name}, z']
 
 
 def room_json(lab):
