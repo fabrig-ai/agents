@@ -2191,8 +2191,14 @@ class Watch:
                 if value is not None and value[2].lstrip().startswith(('"', "'")):
                     for physical in range(value[0] - 1, value[1]):
                         withheld.setdefault(physical, rule)
-        for number, rule in withheld.items():
-            lines[number] = f'(withheld: {rule})'
+        section = ''
+        for number, line in enumerate(lines):
+            heading = re.fullmatch(r'##[ \t]+(.*)', line.removesuffix('\r'))
+            if heading:
+                section = heading[1].strip()
+            if number in withheld:
+                title = re.match(r'(### [1-9][0-9]*\. )', line) if section == 'Findings' else None
+                lines[number] = (title[1] if title else '') + f'(withheld: {withheld[number]})'
         return '\n'.join(lines), sorted((number + 1, rule) for number, rule in withheld.items())
 
     def finish(self, directory, state, failure=None):

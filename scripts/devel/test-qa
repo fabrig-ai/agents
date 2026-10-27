@@ -3142,6 +3142,33 @@ def a_refused_pass_is_mended(lab):
     assert_pass_private(lab, values, first, again, changed, mended)
 
 
+def a_withheld_title_keeps_its_finding(lab):
+    lab.waiting(1)
+    lab.watch()
+    directory, state = lab.watch_state()
+    value = secrets.token_hex(12)
+    commit = state['commits'][0]
+    report = (f'## Findings\n### 1. Leaks Authorization: Bearer {value}\n'
+              f'Commit: {commit}\nConcerns: security\nReproduce.\n'
+              f'### 2. Refused commit\nCommit: Authorization: Bearer {value}\n'
+              'Concerns: ordinary\nReproduce.\n')
+    lab.end_run(state, report=report)
+    first = driven_watch(lab, "tool['Watch'].route = lambda self, directory, state: False")
+    listing = lab.run('findings')
+    assert f'{state["pass"]} 1 (withheld: header)' in listing.stdout
+    text = lab.content('qa/passes/' + state['pass'] + '.md')
+    assert f'### 1. (withheld: header)\nCommit: {commit}\nConcerns: security\n' in text
+    assert '### 2. Refused commit\n(withheld: header)\nConcerns: ordinary\n' in text
+    second = lab.watch()
+    posts = finding_posts(lab)
+    assert len(posts) == 2 and all(post['args'][1] == 'director@fixture' for post in posts)
+    assert '(withheld: header)' in posts[0]['args'][2]
+    triage = lab.content('qa/triage.md')
+    assert '1 director@fixture concerns: security' in triage
+    assert '2 director@fixture no commit' in triage
+    assert_pass_private(lab, [value], first, listing, second)
+
+
 def the_record_withholds_a_refused_line(lab):
     lab.waiting(1)
     lab.watch()
@@ -6661,7 +6688,8 @@ def an_ambiguous_build_is_refused(lab):
     assert first[1]['main'] == fix and second[1]['main'] == commit
 
 
-CASES = (a_record_refusal_keeps_its_evidence_field, a_full_legacy_record_is_cut_to_name_its_evidence,
+CASES = (a_withheld_title_keeps_its_finding,
+         a_record_refusal_keeps_its_evidence_field, a_full_legacy_record_is_cut_to_name_its_evidence,
          a_full_legacy_record_names_its_refused_evidence,
          an_unposted_refusal_is_not_pruned,
          the_record_withholds_multiline_secrets, a_failed_evidence_link_still_returns_a_login,
