@@ -75,9 +75,16 @@ def command(argv, cwd=None, timeout=None, pass_fds=(), data=None, env=None):
                 os.killpg(child.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-            stdout, stderr = child.communicate()
-            if binary:
-                stdout, stderr = stdout.decode(errors='replace'), stderr.decode(errors='replace')
+            try:
+                stdout, stderr = child.communicate(timeout=5)
+            except subprocess.TimeoutExpired as error:
+                stdout, stderr = error.output or b'', error.stderr or b''
+                child.stdout.close()
+                child.stderr.close()
+            if isinstance(stdout, bytes):
+                stdout = stdout.decode(errors='replace')
+            if isinstance(stderr, bytes):
+                stderr = stderr.decode(errors='replace')
             return subprocess.CompletedProcess(argv, 124, stdout, stderr + 'command timed out\n')
 
 
@@ -1076,6 +1083,14 @@ class Copy(NamedTuple):
                           + (f', {unreadable} entries unreadable' if unreadable else '') + '\n'
                           for tree, (count, size, unreadable) in self.snapshot.left_out.items())).encode()
 
+    def refusals(self):
+        label = 'README.md (index)'
+        refused = [Refusal(label, line, 'binary')
+                   for line, value in ((3, self.name), (4, self.machine), (5, self.source), (6, self.run))
+                   if not str(value).isprintable()]
+        refused.extend(Refusal(label, line, rule) for line, rule in scan(self.index().decode()))
+        return sorted(set(refused))
+
 
 class Evidence:
     """The qa repository's branch evidence, through tmp/qa/repos/qa.git (qa-flow.md 11.3)."""
@@ -1086,6 +1101,8 @@ class Evidence:
     def keep(self, copy):
         deadline = time.monotonic() + self.seconds
         need(not copy.snapshot.refusals, 'copy refused')
+        refusals = copy.refusals()
+        need(not refusals, '\n'.join('refused: ' + str(r) for r in refusals))
         need(copy.kind in ('pass', 'walk') and re.fullmatch(NAME, copy.name), 'invalid copy name')
         # Compute the directory's Git objects before the lock, so even a lock
         # timeout returns its tree. Only these owned bytes ever become blobs.
@@ -1169,6 +1186,10 @@ class Evidence:
                 pushurl = run(root, 'config', '--get-all', 'remote.origin.pushurl', check=False)
                 need(pushurl.returncode == 1 or (pushurl.returncode == 0 and pushurl.stdout.strip() == origin),
                      f'{root}: unexpected push origin', 4)
+                need(run(root, 'remote', 'get-url', 'origin') == origin,
+                     f'{root}: unexpected effective origin', 4)
+                need(run(root, 'remote', 'get-url', '--push', '--all', 'origin') == origin,
+                     f'{root}: unexpected effective push origin', 4)
                 need(run(root, 'rev-parse', '--is-bare-repository') == 'true',
                      f'{root}: expected bare repository', 4)
                 for kind, data in objects:
@@ -1189,7 +1210,11 @@ class Evidence:
                         tip = run(root, 'rev-parse', 'refs/remotes/origin/evidence')
                         found = run(root, 'ls-tree', tip, '--', directory)
                         if found:
-                            need(found.split()[0:3] == ['040000', 'tree', tree],
+                            def payload(oid):
+                                return [row for row in run(root, 'ls-tree', '-z', oid).split('\0')
+                                        if row and row.partition('\t')[2] != 'README.md']
+                            need(found.split()[0:2] == ['040000', 'tree']
+                                 and payload(found.split()[2]) == payload(tree),
                                  f'{directory}: name taken by another copy')
                             return run(root, 'rev-list', '-1', 'origin/evidence', '--', directory), tree
                     with tempfile.TemporaryDirectory(prefix='index-', dir=parent) as temporary:
@@ -1213,7 +1238,6 @@ class Evidence:
 
 
 def keep_walk(name, directory, workspace, options):
-    need(re.fullmatch(NAME, name), 'invalid walk name: ' + name)
     directory = Path(os.path.abspath(directory))
     snapshot = Snapshot.read(directory, options['QA_EVIDENCE_KIB'] * 1024)
     if snapshot.refusals:
@@ -1242,6 +1266,12 @@ def keep_walk(name, directory, workspace, options):
     run = runs[0] if len(runs) == 1 else 'unknown'
     writer = os.environ.get('POST_NAME') or os.environ.get('USER', 'unknown')
     copy = Copy('walk', name, snapshot, directory, run, '-', workspace.machine())
+    refusals = copy.refusals()
+    if refusals:
+        for refusal in refusals:
+            print(f'refused: {refusal}')
+        raise Problem(f'copy refused ({len(refusals)})')
+    need(re.fullmatch(NAME, name), 'invalid walk name')
     commit, _ = Evidence(workspace, writer, options['QA_EVIDENCE_SECONDS']).keep(copy)
     need(commit, f'{copy.directory()}: not pushed; run it again', 1)
     print(commit)

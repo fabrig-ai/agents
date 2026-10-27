@@ -2976,6 +2976,94 @@ def evidence_refuses_unsafe_clones_and_bounds_its_lock(lab):
     assert lab.evidence('rev-parse', 'evidence') == commit
 
 
+def the_copy_index_is_scanned(lab):
+    token = 'gh' + 'p_' + secrets.token_hex(18)
+    scratch = lab.scratch({'notes.md': 'Plain.\n'})
+    source = lab.root / token
+    source.mkdir()
+    (source / 'notes.md').write_text('Plain.\n')
+    newline = lab.root / 'line\nbreak'
+    newline.mkdir()
+    (newline / 'notes.md').write_text('Plain.\n')
+    results = [lab.walk('source', source, status=2), lab.walk(token, scratch, status=2),
+               lab.walk('newline', newline, status=2)]
+    meta = lab.tmp / 'codex-run' / token / 'meta'
+    meta.parent.mkdir(parents=True)
+    meta.write_text(f'report={scratch}/report.md\n')
+    results.append(lab.walk('run', scratch, status=2))
+    for result, line, rule in zip(results, (5, 3, 5, 6), ('key', 'key', 'binary', 'key')):
+        assert f'refused: README.md (index), line {line}: {rule}\n' in result.stdout
+    keep_private(lab, [token], *results)
+    assert not (lab.tmp / 'qa/repos').exists()
+    assert lab.evidence('for-each-ref', '--format=%(refname)') == ''
+
+
+def evidence_checks_effective_origins(lab):
+    scratch = lab.scratch({'notes.md': 'Plain.\n'})
+    lab.walk('initial', scratch)
+    tip = lab.evidence('rev-parse', 'evidence')
+    clone = lab.tmp / 'qa/repos/qa.git'
+    unexpected = lab.origins / 'unexpected.git'
+    lab.git(lab.root, 'init', '--bare', str(unexpected))
+    for rule in ('insteadOf', 'pushInsteadOf'):
+        # This is the fixture's global file, never the machine's configuration.
+        config = lab.root / 'global.gitconfig'
+        config.write_text(f'[url "{unexpected}"]\n    {rule} = {lab.origins / "qa.git"}\n')
+        result = lab.run('keep', '--walk', rule.lower(), str(scratch), status=4,
+                         extra={'GIT_CONFIG_GLOBAL': str(config)})
+        assert 'unexpected effective' in result.stderr
+        assert lab.evidence('rev-parse', 'evidence') == tip
+        assert lab.git(unexpected, 'for-each-ref', '--format=%(refname)') == ''
+
+
+def a_detached_pipe_cannot_hold_a_timed_out_command(lab):
+    marker = lab.root / 'detached.pid'
+    script = lab.root / 'detach.py'
+    script.write_text(f'''import os, time
+from pathlib import Path
+if os.fork() == 0:
+    os.setsid()
+    Path({str(marker)!r}).write_text(str(os.getpid()))
+time.sleep(60)
+''')
+    driver = f'''import runpy, sys, time
+tool = runpy.run_path({str(SCRIPT)!r})
+start = time.monotonic()
+result = tool['command']([sys.executable, {str(script)!r}], timeout=0.3)
+assert result.returncode == 124
+assert time.monotonic() - start < 7
+'''
+    try:
+        result = subprocess.run([sys.executable, '-I', '-S', '-c', driver], env=lab.env,
+                                capture_output=True, text=True, timeout=10)
+        assert result.returncode == 0, result.stderr
+        assert marker.exists()
+    finally:
+        if marker.exists():
+            pid = int(marker.read_text())
+            if alive(pid):
+                os.kill(pid, signal.SIGKILL)
+            dead(pid)
+
+
+def a_walks_copy_survives_run_discovery_changes(lab):
+    scratch = lab.scratch({'notes.md': 'Plain.\n'})
+    first = lab.walk('stable', scratch).stdout
+    meta = lab.tmp / 'codex-run/first/meta'
+    meta.parent.mkdir(parents=True)
+    meta.write_text(f'report={scratch}/report.md\n')
+    assert lab.walk('stable', scratch).stdout == first
+    other = meta.parent.with_name('second') / 'meta'
+    other.parent.mkdir()
+    other.write_text(meta.read_text())
+    assert lab.walk('stable', scratch).stdout == first
+    meta.unlink()
+    assert lab.walk('stable', scratch).stdout == first
+    other.unlink()
+    assert lab.walk('stable', scratch).stdout == first
+    assert lab.evidence('rev-list', '--count', 'evidence') == '1'
+
+
 def keep_key_rule_is_records(lab):
     # Compare the source literals without loading record or invoking its tools.
     qa = SCRIPT.read_text()
@@ -6179,7 +6267,9 @@ def an_ambiguous_build_is_refused(lab):
     assert first[1]['main'] == fix and second[1]['main'] == commit
 
 
-CASES = (keep_check_reads_whole_quoted_and_escaped_values, keep_check_counts_a_left_out_refused_directory,
+CASES = (the_copy_index_is_scanned, evidence_checks_effective_origins,
+         a_detached_pipe_cannot_hold_a_timed_out_command, a_walks_copy_survives_run_discovery_changes,
+         keep_check_reads_whole_quoted_and_escaped_values, keep_check_counts_a_left_out_refused_directory,
          keep_check_strips_no_comment_in_linear_time, keep_check_bounds_incomplete_private_key_markers,
          keep_check_reads_spaced_cookie_pairs, keep_check_reads_json_values_on_later_lines,
          keep_check_joins_shell_continuations, keep_check_reads_shell_escaped_spaces,
