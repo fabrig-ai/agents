@@ -46,10 +46,22 @@ def need(ok, why, code=2):
         raise Problem(why, code)
 
 
-def command(argv, cwd=None):
-    return subprocess.run([str(a) for a in argv], cwd=cwd, stdin=subprocess.DEVNULL,
+def command(argv, cwd=None, timeout=None):
+    argv = [str(a) for a in argv]
+    with subprocess.Popen(argv, cwd=cwd, stdin=subprocess.DEVNULL,
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                          env=dict(os.environ, GIT_TERMINAL_PROMPT='0'))
+                          env=dict(os.environ, GIT_TERMINAL_PROMPT='0'),
+                          start_new_session=timeout is not None) as child:
+        try:
+            stdout, stderr = child.communicate(timeout=timeout)
+            return subprocess.CompletedProcess(argv, child.returncode, stdout, stderr)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            stdout, stderr = child.communicate()
+            return subprocess.CompletedProcess(argv, 124, stdout, stderr + 'command timed out\n')
 
 
 def git(root, *args, check=True):
@@ -493,16 +505,22 @@ def deploy(args, workspace):
     need(re.fullmatch(NAME, directory.name), 'DIRECTORY must have a pass or walk name')
     stop_path(directory)
     script = stop_path(Path(__file__).resolve())
-    need(re.fullmatch(r'[a-z0-9][a-z0-9-]*', args.name), 'NAME must be a lowercase slug')
+    need(re.fullmatch(r'[a-z][a-z0-9-]*', args.name), 'NAME must be a lowercase slug')
     need(args.argv, 'deploy needs COMMAND')
     executable = shutil.which(args.argv[0])
     need(executable, f'COMMAND not found: {args.argv[0]}')
     executable = str(Path(executable).absolute())
     seconds = settings(workspace)['QA_STOP_SECONDS']
     unit = f'qa-{directory.name}-{args.name}'
-    with os.fdopen(os.open(directory / 'deployments', os.O_RDWR | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW
-                           | os.O_NONBLOCK, 0o600), 'r+') as recorded:
-        need(stat.S_ISREG(os.fstat(recorded.fileno()).st_mode), 'deployments must be a regular file', 4)
+    try:
+        descriptor = os.open(directory / 'deployments', os.O_RDWR | os.O_CREAT | os.O_APPEND
+                             | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    except OSError:
+        raise Problem('cannot open deployments safely') from None
+    with os.fdopen(descriptor, 'r') as recorded:
+        info = os.fstat(recorded.fileno())
+        need(stat.S_ISREG(info.st_mode) and info.st_nlink == 1,
+             'deployments must be a regular file with one link')
         fcntl.flock(recorded, fcntl.LOCK_EX)
         text = recorded.read()
         if unit not in text.splitlines():
@@ -510,7 +528,7 @@ def deploy(args, workspace):
             need(os.write(recorded.fileno(), line) == len(line), 'cannot record deployment', 4)
     stop = ' '.join('"' + str(word) + '"' for word in (script, '_give-back', directory, seconds))
     result = command([workspace.tool('systemd-run'), '--user', '--collect', '--quiet', '--unit', unit,
-                      '--service-type=exec', f'--working-directory={directory}', '--setenv=PATH',
+                      '--service-type=exec', '--expand-environment=no', f'--working-directory={directory}', '--setenv=PATH',
                       '--property=KillMode=control-group',
                       f'--property=StandardOutput=append:{directory}/{args.name}.log',
                       f'--property=StandardError=append:{directory}/{args.name}.log',
@@ -526,9 +544,19 @@ def give_back(args):
     started = time.monotonic()
     try:
         directory = Path(args[0])
-        output = os.fdopen(os.open(directory / 'give-back.log', os.O_WRONLY | os.O_APPEND | os.O_CREAT
-                                   | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600), 'a')
-        need(stat.S_ISREG(os.fstat(output.fileno()).st_mode), 'give-back.log must be a regular file')
+        try:
+            descriptor = os.open(directory / 'give-back.log', os.O_WRONLY | os.O_APPEND | os.O_CREAT
+                                 | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+            info = os.fstat(descriptor)
+            if stat.S_ISREG(info.st_mode) and info.st_nlink == 1:
+                output = os.fdopen(descriptor, 'a')
+            else:
+                os.close(descriptor)
+        except OSError:
+            pass
+        if output is None:
+            # Returning the login matters even when the pass's log is unsafe.
+            output = open(os.devnull, 'w')
         need(len(args) == 2, 'expected DIRECTORY SECONDS')
         seconds = int(args[1])
         need(seconds > 0, 'SECONDS must be positive')
@@ -593,7 +621,7 @@ class Watch:
         self.repositories = Repositories(workspace)
 
     def call(self, tool, *args):
-        return command([self.workspace.tool(tool), *args])
+        return command([self.workspace.tool(tool), *args], timeout=30 if tool == 'systemctl' else None)
 
     def save(self, directory, state):
         replace(directory / 'pass.json', (json.dumps(state, indent=2) + '\n').encode())
@@ -656,13 +684,20 @@ class Watch:
             elif result.returncode != 2:
                 log(f'{name}: cannot give stray login back: {result.stderr.strip()}')
 
-    def unit_status(self, unit):
-        # qa-flow.md 10: deactivating still runs the unit's give-back.
-        result = self.call('systemctl', '--user', 'show', '--property=LoadState',
-                           '--property=ActiveState', '--', unit)
-        fields = dict(line.split('=', 1) for line in result.stdout.splitlines() if '=' in line)
-        if result.returncode == 0 and set(fields) == {'LoadState', 'ActiveState'}:
+    def unit_status(self, unit, directory=None):
+        properties = ['--property=LoadState', '--property=ActiveState']
+        if directory is not None:
+            properties.append('--property=WorkingDirectory')
+        result = self.call('systemctl', '--user', 'show', *properties, '--', unit)
+        rows = [line.partition('=') for line in result.stdout.splitlines()]
+        keys = {prop.removeprefix('--property=') for prop in properties}
+        if (result.returncode == 0 and len(rows) == len(keys)
+                and all(sep for _, sep, _ in rows) and {key for key, _, _ in rows} == keys):
+            fields = {key: value for key, _, value in rows}
             load, active = fields['LoadState'], fields['ActiveState']
+            if directory is not None and load == 'loaded' and fields['WorkingDirectory'] != str(directory):
+                log(f'{unit}: WorkingDirectory is not the pass directory; keeping logins held')
+                return 'unknown'
             if (load == 'loaded' and active in ('inactive', 'failed')
                     or load == 'not-found' and active == 'inactive'):
                 return 'stopped'
@@ -671,71 +706,85 @@ class Watch:
         log(f'{unit}: cannot establish unit state; keeping logins held')
         return 'unknown'
 
-    def unit_stopped(self, state, seconds):
-        # qa-flow.md 10: ended precedes the unit's on-stop give-back.
+    def unit_stopped(self, unit, seconds, directory=None):
+        # ended precedes the session's on-stop; deactivating still runs give-back.
         deadline = time.monotonic() + seconds
         while True:
-            status = self.unit_status('codex-run-' + state['run'])
+            status = self.unit_status(unit, directory)
             if status == 'stopped':
                 return True
             if status == 'unknown':
                 return False
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                log(f'{state["pass"]}: waiting for unit to stop before giving logins back')
+                log(f'{unit}: waiting for unit to stop before giving logins back')
                 return False
             time.sleep(min(2, remaining))
 
     def deployments(self, directory, state):
-        try:
-            with os.fdopen(os.open(directory / 'deployments', os.O_RDONLY | os.O_NOFOLLOW
-                                   | os.O_NONBLOCK)) as source:
-                need(stat.S_ISREG(os.fstat(source.fileno()).st_mode), 'deployments must be a regular file', 4)
-                lines = source.read().splitlines()
-        except FileNotFoundError:
-            return []
-        units = []
-        for unit in lines:
-            if re.fullmatch(re.escape('qa-' + state['pass'] + '-') + r'[a-z0-9][a-z0-9-]*', unit):
-                if unit not in units:
-                    units.append(unit)
-            else:
-                log(f'{state["pass"]}: ignored deployment line {unit!r}')
+        if 'kinds' not in state:
+            return {}  # A legacy pass never used the deployment protocol.
+        result = self.call('systemctl', '--user', 'list-units', '--all', '--plain', '--no-legend',
+                           '--full', 'qa-' + state['pass'] + '-*')
+        if result.returncode:
+            log(f'{state["pass"]}: deployment listing failed; units unknown')
+            return None
+        units = {}
+        pattern = re.escape('qa-' + state['pass'] + '-') + r'[a-z][a-z0-9-]*'
+        for line in result.stdout.splitlines():
+            fields = line.split(maxsplit=4)
+            if (len(fields) < 4 or not fields[0].startswith('qa-' + state['pass'] + '-')
+                    or fields[1] != 'loaded'
+                    or fields[2] not in ('active', 'inactive', 'activating', 'deactivating', 'failed', 'reloading')
+                    or not re.fullmatch(r'[a-z][a-z0-9-]*', fields[3])):
+                log(f'{state["pass"]}: malformed deployment listing; units unknown')
+                return None
+            # list-units prints canonical service names, unlike --unit's input.
+            unit = fields[0].removesuffix('.service')
+            if not re.fullmatch(pattern, unit):
+                continue
+            if unit in units:
+                log(f'{state["pass"]}: duplicate deployment listing; units unknown')
+                return None
+            units[unit] = self.unit_status(unit, directory)
         return units
 
     def end(self, directory, state):
+        if 'stopped' in state:
+            state.pop('stopped')
+            self.save(directory, state)
         self.give(directory, state, 'moved')
         units = self.deployments(directory, state)
         moved = [name for name in self.outstanding(state)
                  if state.get('kinds', {}).get(name, 'moved') == 'moved']
-        if not moved:
-            for unit in units:
-                if unit in state.get('stopped', []):
+        if not moved and units is not None:
+            for unit, status in units.items():
+                if status != 'busy':
                     continue
-                stopped = self.call('systemctl', '--user', 'stop', '--', unit)
+                stopped = self.call('systemctl', '--user', 'stop', '--no-block', '--', unit)
                 if stopped.returncode:
-                    log(f'{state["pass"]}: stop {unit} failed: {stopped.stderr.strip()}')
-                # A collected unit can refuse stop while show confirms it is gone.
-                if self.unit_status(unit) == 'stopped':
-                    state.setdefault('stopped', []).append(unit)
-                    self.save(directory, state)
-                else:
-                    log(f'{state["pass"]}: waiting for {unit} to stop')
-        remaining = [unit for unit in units if unit not in state.get('stopped', [])]
-        if not remaining:
+                    log(f'{state["pass"]}: stop {unit} failed')
+                units[unit] = ('stopped' if self.unit_stopped(unit, self.options['QA_GIVE_BACK_SECONDS'], directory)
+                               else 'unknown')
+        remaining = [unit for unit, status in (units or {}).items() if status != 'stopped']
+        complete = units is not None and not remaining
+        if complete:
             self.give(directory, state, 'in-place')
         pending = state.pop('notice_pending', None)
         if pending:
             missing = self.outstanding(state)
-            if pending.pop('required') or missing or remaining:
+            if pending.pop('required') or missing or not complete:
                 pending['body'] += ''.join(
                     f'Login {login} is not back at {path}: its deployment is in {directory}; '
                     'qa watch gives it back once it is.\n' for login, path in missing.items())
                 pending['body'] += ''.join(f'Unit {unit} is still up or of unknown state.\n' for unit in remaining)
+                if units is None:
+                    pending['body'] += 'Deployment units are unknown.\n'
                 pending['body'] += f'Scratch: {directory}. The service tries again at each check.\n'
                 state['notice'] = pending
             self.save(directory, state)
         self.notify(directory, state)
+        return complete
 
     def notify(self, directory, state):
         notice = state.get('notice')
@@ -769,8 +818,15 @@ class Watch:
 
     def finish(self, directory, state, failure=None):
         name = state['pass']
-        report_path = directory / 'report.md'
-        report = report_path.read_text(errors='replace') if report_path.exists() else ''
+        report = ''
+        try:
+            with os.fdopen(os.open(directory / 'report.md', os.O_RDONLY | os.O_NOFOLLOW
+                                   | os.O_NONBLOCK)) as source:
+                info = os.fstat(source.fileno())
+                if stat.S_ISREG(info.st_mode) and info.st_nlink == 1:
+                    report = source.read()
+        except (OSError, UnicodeError):
+            pass
         facts = self.facts(state['run'])
         outcome = ('capped' if state['capped'] else 'failed' if failure or facts['exit'] != '0'
                    or not report.strip() or report.startswith('codex-run: the run wrote no report') else 'done')
@@ -810,7 +866,7 @@ class Watch:
                 f"records' qa/passes/{name}.md; qa findings lists them.\n"))
         self.save(directory, state)
         log(f'{name}: {outcome}, {count} findings, {wall}')
-        self.end(directory, state)
+        return self.end(directory, state)
 
     def start(self, repo, main, commits, checkout, cap, rung, logins, kinds, seconds):
         started = timestamp()
@@ -823,7 +879,7 @@ class Watch:
         directory.mkdir(mode=0o700)
         state = {'pass': name, 'repository': repo, 'main': main, 'commits': [c['commit'] for c in commits],
                  'started': started, 'run': '', 'capped': False, 'finished': False,
-                 'rung': rung, 'logins': logins, 'given': [], 'kinds': kinds, 'stopped': []}
+                 'rung': rung, 'logins': logins, 'given': [], 'kinds': kinds}
         # Persist custody before preparing the checkout or committing its start.
         self.save(directory, state)
         git(checkout, 'checkout', '--detach', '--force', main)
@@ -903,48 +959,53 @@ class Watch:
 
     def check(self, options):
         log('checking')
+        self.options = options
+        complete = {}
         with self.record.locked():
             passes = self.local_passes()
             self.give_strays(passes)
             for directory, state in passes:
-                if state['finished']:
-                    self.end(directory, state)
-                    continue
-                if not state['run']:
-                    if not self.record.path(f'qa/passes/{state["pass"]}.md').exists():
-                        self.give(directory, state)
-                        if self.outstanding(state):
+                try:
+                    if state['finished']:
+                        complete[state['pass']] = self.end(directory, state)
+                        continue
+                    if not state['run']:
+                        if not self.record.path(f'qa/passes/{state["pass"]}.md').exists():
+                            self.give(directory, state)
+                            if self.outstanding(state):
+                                continue
+                            shutil.rmtree(directory)
+                            log(f'{state["pass"]}: removed uncommitted start')
                             continue
-                        shutil.rmtree(directory)
-                        log(f'{state["pass"]}: removed uncommitted start')
-                        continue
-                    self.recover_run(directory, state)
-                run = state['run']
-                ended = self.runs / run / 'ended' if run else None
-                if ended and ended.exists():
-                    if self.outstanding(state) and not self.unit_stopped(state, options['QA_GIVE_BACK_SECONDS']):
-                        continue
-                    self.finish(directory, state)
-                elif not run:
-                    self.finish(directory, state, 'The service stopped before saving a run id.')
-                else:
-                    status = self.unit_status('codex-run-' + state['run'])
-                    if status == 'unknown':
-                        continue
-                    if status == 'stopped':
-                        self.finish(directory, state, None if ended.exists() else 'The run unit vanished without its end.')
-                        continue
-                    if not (state['capped'] or (utc(timestamp()) - utc(state['started'])).total_seconds() >= options['QA_CAP_MINUTES'] * 60):
-                        continue
-                    state['capped'] = True
-                    self.save(directory, state)
-                    stopped = self.call('systemctl', '--user', 'stop', 'codex-run-' + run)
-                    if stopped.returncode:
-                        state['capped'] = False
-                        self.save(directory, state)
-                        log(f'{state["pass"]}: stop failed: {stopped.stderr.strip()}')
+                        self.recover_run(directory, state)
+                    run = state['run']
+                    ended = self.runs / run / 'ended' if run else None
+                    if ended and ended.exists():
+                        if self.outstanding(state) and not self.unit_stopped('codex-run-' + state['run'], options['QA_GIVE_BACK_SECONDS']):
+                            continue
+                        complete[state['pass']] = self.finish(directory, state)
+                    elif not run:
+                        complete[state['pass']] = self.finish(directory, state, 'The service stopped before saving a run id.')
                     else:
-                        log(f'{state["pass"]}: capped run {run}')
+                        status = self.unit_status('codex-run-' + state['run'])
+                        if status == 'unknown':
+                            continue
+                        if status == 'stopped':
+                            complete[state['pass']] = self.finish(directory, state, None if ended.exists() else 'The run unit vanished without its end.')
+                            continue
+                        if not (state['capped'] or (utc(timestamp()) - utc(state['started'])).total_seconds() >= options['QA_CAP_MINUTES'] * 60):
+                            continue
+                        state['capped'] = True
+                        self.save(directory, state)
+                        stopped = self.call('systemctl', '--user', 'stop', 'codex-run-' + run)
+                        if stopped.returncode:
+                            state['capped'] = False
+                            self.save(directory, state)
+                            log(f'{state["pass"]}: stop failed: {stopped.stderr.strip()}')
+                        else:
+                            log(f'{state["pass"]}: capped run {run}')
+                except (Problem, OSError, ValueError, UnicodeError) as error:
+                    log(f'{state["pass"]}: cleanup failed ({type(error).__name__}); keeping logins and scratch')
             running = [s for _, s in self.local_passes() if not s['finished']]
             free = max(0, options['QA_SLOTS'] - len(running))
             busy = {s['repository'] for s in running}
@@ -1019,7 +1080,7 @@ class Watch:
             for directory, state in self.local_passes():
                 if (state['finished'] and not self.outstanding(state) and not state.get('notice')
                         and not state.get('notice_pending')
-                        and all(unit in state.get('stopped', []) for unit in self.deployments(directory, state))
+                        and complete.get(state['pass'], False)
                         and (utc(timestamp()) - utc(state['ended'])).total_seconds() >= 7 * 86400):
                     shutil.rmtree(directory)
                     log(f'{state["pass"]}: pruned')

@@ -466,7 +466,7 @@ def fixture_overrides_are_gated(lab):
                                          'git@github.com:fabrig-ai/temper.git']
 
 
-WATCH_TOOLS = r'''import json, os, sys, shlex, signal, subprocess, time
+WATCH_TOOLS = r'''import fnmatch, json, os, sys, shlex, signal, subprocess, time
 from pathlib import Path
 from datetime import datetime, timezone
 root = Path(os.environ['QA_FIXTURE'])
@@ -537,29 +537,57 @@ elif name == 'systemd-run':
         sys.exit('fixture deployment refused')
     properties = dict(arg.removeprefix('--property=').split('=', 1) for arg in args if arg.startswith('--property='))
     assert '--setenv=PATH' in args
+    assert '--expand-environment=no' in args
     with Path(properties['StandardOutput'].removeprefix('append:')).open('a') as output:
         child = subprocess.Popen(args[args.index('--') + 1:], cwd=directory, stdin=subprocess.DEVNULL,
                                  stdout=output, stderr=output, start_new_session=True,
                                  env=dict(PATH=os.environ['PATH']))
     units.mkdir(exist_ok=True)
     (units / (unit + '.json')).write_text(json.dumps(dict(pid=child.pid,
-        stop=shlex.split(properties['ExecStop'].removeprefix('-')))))
+        stop=shlex.split(properties['ExecStop'].removeprefix('-')), directory=str(directory))))
 elif name == 'systemctl':
-    unit = args[-1]
+    unit = args[-1].removesuffix('.service')
     run = unit.removeprefix('codex-run-')
     deployment = unit.startswith('qa-')
     path = units / (unit + '.json')
     saved = json.loads(path.read_text()) if deployment and path.exists() else None
+    pass_name = unit.removeprefix('qa-').removesuffix('-*') if args[1] == 'list-units' else ''
+    for owner, operation in config.get('hung_systemctl', {}).items():
+        if args[1] == operation and (pass_name == owner or fnmatch.fnmatchcase(unit, 'qa-' + owner + '-[a-z]*')):
+            child = subprocess.Popen([sys.executable, '-S', '-c', 'import time; time.sleep(600)'])
+            (root / ('hung-' + owner)).write_text(f'{os.getpid()} {child.pid}')
+            time.sleep(600)
+    if args[1] == 'list-units':
+        assert args[:7] == ['--user', 'list-units', '--all', '--plain', '--no-legend', '--full', args[-1]]
+        if config.get('unit_query_failure') or pass_name in config.get('list_failures', []):
+            sys.exit('fixture manager unavailable')
+        if pass_name in config.get('list_output', {}):
+            print(config['list_output'][pass_name])
+        else:
+            for file in sorted(units.glob('*.json')):
+                if fnmatch.fnmatchcase(file.stem, args[-1]):
+                    metadata = json.loads(file.read_text())
+                    active = 'active' if alive(metadata['pid']) else 'inactive'
+                    print(f'{file.stem}.service loaded {active} running Fixture deployment')
+        sys.exit(0)
     if args[1] == 'show':
-        assert args[2:-1] == ['--property=LoadState', '--property=ActiveState', '--'], args
+        properties = ['--property=LoadState', '--property=ActiveState']
+        if deployment:
+            properties.append('--property=WorkingDirectory')
+        assert args[2:-1] == [*properties, '--'], args
         if config.get('unit_query_failure'):
             sys.exit('fixture manager unavailable')
         if deployment:
             override = config.get('unit_states', {}).get(unit)
             if override == 'unknown':
                 sys.exit('fixture unit state unknown')
+            if unit in config.get('show_output', {}):
+                print(config['show_output'][unit])
+                sys.exit(0)
             print('LoadState=' + ('loaded' if saved else 'not-found'))
-            print('ActiveState=' + (override or ('active' if saved and alive(saved['pid']) else 'inactive')))
+            print('ActiveState=' + (override or ('deactivating' if saved and saved.get('stopping') else
+                                                'active' if saved and alive(saved['pid']) else 'inactive')))
+            print('WorkingDirectory=' + (saved['directory'] if saved else ''))
             sys.exit(0)
         active = config.get('unit_state', 'active' if config.get('unit_active') else
                             'inactive' if config.get('inactive') or (runs / run / 'ended').exists() else 'active')
@@ -569,14 +597,26 @@ elif name == 'systemctl':
             print('LoadState=' + config.get('unit_load', 'loaded'))
             print('ActiveState=' + active)
         sys.exit(0)
+    if args[1] == '_finish-stop':
+        assert deployment and saved
+        subprocess.run(saved['stop'], stdin=subprocess.DEVNULL, check=True)
+        stop_group(saved['pid'])
+        path.unlink(missing_ok=True)
+        sys.exit(0)
     assert args[1] == 'stop', args
     if config.get('stop_failure') or unit in config.get('stop_failures', []):
         sys.exit('fixture stop refused')
     if deployment:
-        assert args[:3] == ['--user', 'stop', '--']
+        assert args[:4] in (['--user', 'stop', '--no-block', '--'], ['--user', 'stop', '--', unit])
         if not saved:
             sys.exit('fixture unit not loaded')
-        if saved:
+        if '--no-block' in args:
+            saved['stopping'] = True
+            path.write_text(json.dumps(saved))
+            subprocess.Popen([sys.executable, '-S', sys.argv[0], '--user', '_finish-stop', unit],
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             start_new_session=True)
+        else:
             subprocess.run(saved['stop'], stdin=subprocess.DEVNULL, check=True)
             stop_group(saved['pid'])
             path.unlink()
@@ -1356,7 +1396,7 @@ def deployment_pass(lab, *logins, in_place=()):
 
 def deployment(lab, directory, name='box', login=None):
     box = directory / name
-    box.mkdir()
+    box.mkdir(exist_ok=True)
     path = lab.root / 'login-store' / login / 'login' if login else None
     program = executable(box / 'server', 'import os, time\nfrom pathlib import Path\n'
         + (f'Path({str(path)!r}).rename({str(box / "login")!r})\n' if login else '')
@@ -1439,7 +1479,7 @@ def deploy_records_then_starts_its_unit(lab):
     original = registry.read_bytes()
     registry.unlink()
     registry.symlink_to(directory / 'box.log')
-    lab.run('deploy', str(directory), 'box', '--', 'true', status=4)
+    lab.run('deploy', str(directory), 'box', '--', 'true', status=2)
     registry.unlink()
     registry.write_bytes(original)
     copied = lab.root / 'unsafe kit'
@@ -1475,14 +1515,14 @@ def a_stopped_pass_gives_its_login_back(lab):
     assert not Path(state['logins'][CHATGPT]).exists()
     end_deployment_pass(lab)
     state = lab.watch_state()[1]
-    assert state['finished'] and state['given'] == [CHATGPT] and state['stopped'] == [unit]
+    assert state['finished'] and state['given'] == [CHATGPT] and 'stopped' not in state
     assert Path(state['logins'][CHATGPT]).is_file()
     assert not (lab.root / 'units' / (unit + '.json')).exists()
     dead(pid)
     lines = (directory / 'give-back.log').read_text().splitlines()
     assert len(lines) == 2 and all(line.endswith(' exit 0') for line in lines), lines
     calls = list(map(json.loads, (lab.root / 'tools.jsonl').read_text().splitlines()))
-    stop = next(i for i, call in enumerate(calls) if call['tool'] == 'systemctl' and call['args'] == ['--user', 'stop', '--', unit])
+    stop = next(i for i, call in enumerate(calls) if call['tool'] == 'systemctl' and call['args'] == ['--user', 'stop', '--no-block', '--', unit])
     give = max(i for i, call in enumerate(calls[:stop]) if call['tool'] == 'logins' and call['args'][:2] == ['give', CHATGPT])
     assert give < stop
     assert directory.joinpath('on-stop').stat().st_mode & 0o777 == 0o700
@@ -1494,8 +1534,8 @@ def a_failed_export_leaves_the_unit_up(lab):
     executable(directory / 'give-back', 'raise SystemExit(1)\n')
     end_deployment_pass(lab)
     state = lab.watch_state()[1]
-    assert state['finished'] and not state['given'] and not state['stopped'] and alive(pid)
-    assert ['--user', 'stop', '--', unit] not in lab.calls('systemctl')
+    assert state['finished'] and not state['given'] and 'stopped' not in state and alive(pid)
+    assert ['--user', 'stop', '--no-block', '--', unit] not in lab.calls('systemctl')
     notice, = lab.sent()
     for text in (unit, CHATGPT, str(directory), state['logins'][CHATGPT], 'tries again at each check'):
         assert text in notice['body']
@@ -1588,44 +1628,42 @@ def a_deployment_that_exited_leaves_its_login_out(lab):
     dead(pid)
     end_deployment_pass(lab)
     state = lab.watch_state()[1]
-    assert not state['given'] and not state['stopped']
+    assert not state['given'] and 'stopped' not in state
     assert 'exit 1' in (directory / 'give-back.log').read_text()
     notice, = lab.sent()
-    assert unit in notice['body'] and CHATGPT in notice['body']
+    assert CHATGPT in notice['body'] and state['logins'][CHATGPT] in notice['body']
+    assert f'Unit {unit} is still up' not in notice['body']
     aged(lab, directory)
     lab.watch()
     assert directory.exists() and len(lab.sent()) == 1
 
 
 def a_failed_stop_is_tried_again(lab):
+    lab.env['QA_GIVE_BACK_SECONDS'] = '0'
     directory, _ = deployment_pass(lab)
     unit, pid = deployment(lab, directory)
     lab.configure(stop_failures=[unit])
     lab.end_run()
     result = lab.watch()
-    assert f'stop {unit} failed:' in result.stdout and alive(pid)
-    assert not lab.watch_state()[1]['stopped']
+    assert f'stop {unit} failed' in result.stdout and alive(pid)
+    assert 'stopped' not in lab.watch_state()[1]
     aged(lab, directory)
-    lab.configure(stop_failures=[], unit_states={unit: 'deactivating'})
+    lab.configure(unit_states={unit: 'deactivating'})
     result = lab.watch()
-    assert f'waiting for {unit} to stop' in result.stdout
-    assert directory.exists() and not lab.watch_state()[1]['stopped']
+    assert 'waiting for unit to stop' in result.stdout
+    assert directory.exists() and 'stopped' not in lab.watch_state()[1]
     lab.configure(unit_states={unit: 'unknown'})
     result = lab.watch()
     assert f'{unit}: cannot establish unit state' in result.stdout
-    assert directory.exists() and not lab.watch_state()[1]['stopped']
-    dead(pid)
-    lab.configure(unit_states={})
-    # Keep it young for one check so the saved completion can be inspected.
-    state = lab.watch_state()[1]
-    state['ended'] = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
-    (directory / 'pass.json').write_text(json.dumps(state))
+    assert directory.exists() and alive(pid)
+    lab.configure(stop_failures=[], unit_states={})
+    # The asynchronous stop is allowed to complete at the next check.
     lab.watch()
-    assert lab.watch_state()[1]['stopped'] == [unit]
-    aged(lab, directory)
+    dead(pid)
+    wait_for(lambda: not (lab.root / 'units' / (unit + '.json')).exists())
     lab.watch()
     assert not directory.exists() and len(lab.sent()) == 1
-    assert lab.calls('systemctl').count(['--user', 'stop', '--', unit]) == 4
+    assert lab.calls('systemctl').count(['--user', 'stop', '--no-block', '--', unit]) == 3
 
 
 def a_restarted_service_goes_on(lab):
@@ -1649,11 +1687,11 @@ sys.exit(tool['main']())
                              'director@fixture', '--once'], env=lab.env, capture_output=True, text=True)
     assert result.returncode == 17, result.stderr
     state = lab.watch_state()[1]
-    assert state['finished'] and state['given'] == [CHATGPT] and not state['stopped'] and alive(pid)
+    assert state['finished'] and state['given'] == [CHATGPT] and 'stopped' not in state and alive(pid)
     assert not lab.sent()
     lab.watch()
     state = lab.watch_state()[1]
-    assert state['stopped'] == [unit] and state['given'] == [CHATGPT, CLAUDE]
+    assert 'stopped' not in state and state['given'] == [CHATGPT, CLAUDE]
     dead(pid)
     # The recovery did not repeat custody's give (the pre-existing stray sweep
     # can still ask the login tool about an already free rung login).
@@ -1667,11 +1705,12 @@ def a_pass_with_no_login_stops_its_units(lab):
     assert f'qa deploy {directory} NAME -- COMMAND...' in (directory / 'brief.md').read_text()
     lab.end_run()
     lab.watch()
-    assert lab.watch_state()[1]['stopped'] == [unit] and not lab.sent()
+    assert 'stopped' not in lab.watch_state()[1] and not lab.sent()
     dead(pid)
 
 
 def an_in_place_login_waits_for_every_unit(lab):
+    lab.env['QA_GIVE_BACK_SECONDS'] = '1'
     directory, state = deployment_pass(lab, CHATGPT, CLAUDE, in_place=(CLAUDE,))
     assert state['kinds'] == {CHATGPT: 'moved', CLAUDE: 'in-place'}
     first, one = deployment(lab, directory, login=CHATGPT)
@@ -1679,24 +1718,24 @@ def an_in_place_login_waits_for_every_unit(lab):
     lab.configure(stop_failures=[second])
     end_deployment_pass(lab)
     state = lab.watch_state()[1]
-    assert state['given'] == [CHATGPT] and state['stopped'] == [first] and alive(two)
+    assert state['given'] == [CHATGPT] and 'stopped' not in state and alive(two)
     assert json.loads((lab.root / 'tools.json').read_text())['logins_held'] == [CLAUDE]
     dead(one)
     lab.configure(stop_failures=[])
     lab.watch()
     state = lab.watch_state()[1]
-    assert state['given'] == [CHATGPT, CLAUDE] and state['stopped'] == [first, second]
+    assert state['given'] == [CHATGPT, CLAUDE] and 'stopped' not in state
     dead(two)
     calls = list(map(json.loads, (lab.root / 'tools.jsonl').read_text().splitlines()))
     give = max(i for i, row in enumerate(calls) if row['tool'] == 'logins' and row['args'][:2] == ['give', CLAUDE])
-    stop = max(i for i, row in enumerate(calls) if row['tool'] == 'systemctl' and row['args'] == ['--user', 'stop', '--', second])
+    stop = max(i for i, row in enumerate(calls) if row['tool'] == 'systemctl' and row['args'] == ['--user', 'stop', '--no-block', '--', second])
     assert give > stop and len(lab.sent()) == 1
 
 
 def a_pass_from_before_ends_as_before(lab):
     directory, state = deployment_pass(lab, CHATGPT)
     for key in ('kinds', 'stopped'):
-        state.pop(key)
+        state.pop(key, None)
     (directory / 'pass.json').write_text(json.dumps(state))
     run_meta = lab.tmp / 'codex-run' / state['run'] / 'meta'
     run_meta.write_text(run_meta.read_text().replace(str(directory / 'on-stop'), str(directory / 'give-back')))
@@ -1707,6 +1746,7 @@ def a_pass_from_before_ends_as_before(lab):
     assert (directory / 'old-stop-ran').exists() and 'kinds' not in state and 'stopped' not in state
     assert not (directory / 'deployments').exists()
     assert lab.calls('logins')[-1] == ['give', CHATGPT, '--as', 'qa-watch']
+    assert not any(args[1] == 'list-units' or args[-1].startswith('qa-') for args in lab.calls('systemctl'))
 
 
 def deployments_names_only_its_own_units(lab):
@@ -1716,15 +1756,299 @@ def deployments_names_only_its_own_units(lab):
     (directory / 'deployments').write_text('\n'.join([*foreign, unit, unit]) + '\n')
     lab.end_run()
     result = lab.watch()
-    assert lab.watch_state()[1]['stopped'] == [unit]
+    assert 'stopped' not in lab.watch_state()[1]
     for name in foreign:
-        assert f'ignored deployment line {name!r}' in result.stdout
+        assert name not in result.stdout
         assert not any(name in args for args in lab.calls('systemctl'))
-    assert lab.calls('systemctl').count(['--user', 'stop', '--', unit]) == 1
+    assert lab.calls('systemctl').count(['--user', 'stop', '--no-block', '--', unit]) == 1
     dead(pid)
 
 
-CASES = (deploy_records_then_starts_its_unit,
+def driven_watch(lab, patch):
+    driver = f'''import runpy, sys
+tool = runpy.run_path({str(SCRIPT)!r})
+{patch}
+sys.exit(tool['main']())
+'''
+    result = subprocess.run([sys.executable, '-I', '-S', '-c', driver, 'watch', '--director',
+                             'director@fixture', '--once'], env=lab.env, capture_output=True,
+                            text=True, timeout=60)
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    return result
+
+
+def finished_pair(lab):
+    first, state = deployment_pass(lab, CHATGPT, CLAUDE, in_place=(CLAUDE,))
+    first_unit, first_pid = deployment(lab, first)
+    second = first.with_name(first.name + '-2')
+    second.mkdir()
+    other = dict(state, **{'pass': second.name, 'logins': {}, 'kinds': {}, 'given': [],
+                          'finished': True, 'ended': state['started']})
+    (second / 'pass.json').write_text(json.dumps(other))
+    second_unit, second_pid = deployment(lab, second)
+    lab.end_run(state)
+    return first, first_unit, first_pid, second, second_unit, second_pid
+
+
+def a_pass_never_stops_its_successors_unit(lab):
+    directory, state = deployment_pass(lab)
+    unit, pid = deployment(lab, directory)
+    successor = directory.with_name(directory.name + '-2')
+    successor.mkdir()
+    # Keep the successor's session running, independently of the first's end.
+    other = dict(state, **{'pass': successor.name, 'run': 'successor'})
+    (successor / 'pass.json').write_text(json.dumps(other))
+    lab.pass_file(name=successor.name, commits=state['commits'], outcome='running', findings=0)
+    next_unit, next_pid = deployment(lab, successor)
+    lab.end_run(state)
+    lab.watch()
+    dead(pid)
+    assert alive(next_pid)
+    assert ['--user', 'stop', '--no-block', '--', unit] in lab.calls('systemctl')
+    assert not any(next_unit in args for args in lab.calls('systemctl'))
+    # A numeric deployment slug would collide with this successor's namespace.
+    before = (directory / 'deployments').read_bytes()
+    lab.run('deploy', str(directory), '2-box', '--', 'true', status=2)
+    assert (directory / 'deployments').read_bytes() == before
+
+
+def an_edited_deployments_holds_the_in_place_login(lab):
+    directory, _ = deployment_pass(lab, CLAUDE, in_place=(CLAUDE,))
+    lab.end_run()
+    outside = lab.root / 'outside-trace'
+    marker = 'outside-' + 'trace-contents'
+    outside.write_text(marker)
+    registry = directory / 'deployments'
+    variants = ('deleted', 'empty', 'foreign', 'link', 'directory', 'fifo', 'hardlink')
+    for variant in variants:
+        state = json.loads((directory / 'pass.json').read_text())
+        state.update(finished=False, given=[])
+        state['ended'] = state['started']
+        (directory / 'pass.json').write_text(json.dumps(state))
+        lab.configure(logins_held=[CLAUDE])
+        # Reset only our fixture trace before qa deploy appends to it.
+        if registry.is_dir():
+            registry.rmdir()
+        elif registry.exists() or registry.is_symlink():
+            registry.unlink()
+        unit, pid = deployment(lab, directory, variant)
+        registry.unlink()
+        if variant == 'empty':
+            registry.touch()
+        elif variant == 'foreign':
+            registry.write_text('codex-run-foreign\nqa-otherpass-box\n')
+        elif variant == 'link':
+            registry.symlink_to(outside)
+        elif variant == 'directory':
+            registry.mkdir()
+        elif variant == 'fifo':
+            os.mkfifo(registry)
+        elif variant == 'hardlink':
+            os.link(outside, registry)
+        result = lab.watch()
+        dead(pid)
+        current = json.loads((directory / 'pass.json').read_text())
+        assert current['given'] == [CLAUDE] and 'stopped' not in current, variant
+        assert outside.read_text() == marker and marker not in result.stdout + result.stderr
+        calls = list(map(json.loads, (lab.root / 'tools.jsonl').read_text().splitlines()))
+        give = max(i for i, row in enumerate(calls) if row['tool'] == 'logins' and row['args'][:2] == ['give', CLAUDE])
+        stop = max(i for i, row in enumerate(calls) if row['tool'] == 'systemctl' and row['args'] == ['--user', 'stop', '--no-block', '--', unit])
+        show = max(i for i, row in enumerate(calls[:give]) if row['tool'] == 'systemctl' and row['args'][1] == 'show' and row['args'][-1] == unit)
+        assert stop < show < give, variant
+    # Historical confirmation cannot exempt a unit recreated under the same name.
+    registry.unlink()
+    state = json.loads((directory / 'pass.json').read_text())
+    state['stopped'] = [unit]
+    (directory / 'pass.json').write_text(json.dumps(state))
+    unit, pid = deployment(lab, directory, 'hardlink')
+    lab.watch()
+    dead(pid)
+    assert 'stopped' not in json.loads((directory / 'pass.json').read_text())
+    aged(lab, directory)
+    lab.watch()
+    assert not directory.exists()
+
+
+def a_unit_of_another_directory_is_not_stopped(lab):
+    directory, _ = deployment_pass(lab, CLAUDE, in_place=(CLAUDE,))
+    unit, pid = deployment(lab, directory)
+    path = lab.root / 'units' / (unit + '.json')
+    metadata = json.loads(path.read_text())
+    metadata['directory'] = str(lab.root / 'elsewhere')
+    path.write_text(json.dumps(metadata))
+    lab.end_run()
+    result = lab.watch()
+    assert 'WorkingDirectory is not the pass directory' in result.stdout
+    assert not lab.watch_state()[1]['given'] and alive(pid)
+    assert ['--user', 'stop', '--no-block', '--', unit] not in lab.calls('systemctl')
+    aged(lab, directory)
+    # Failures and malformed observations hold the login without leaking output.
+    marker = 'outside-' + 'observation-text'
+    for config in ({'list_failures': [directory.name]},
+                   {'list_output': {directory.name: marker}},
+                   {'show_output': {unit: 'LoadState=loaded\nLoadState=loaded\nActiveState=inactive\nWorkingDirectory=' + str(directory)}},
+                   {'show_output': {unit: marker}}):
+        lab.configure(list_failures=[], list_output={}, show_output={})
+        lab.configure(**config)
+        result = lab.watch()
+        assert directory.exists() and not lab.watch_state()[1]['given'] and alive(pid)
+        assert marker not in result.stdout + result.stderr
+    lab.configure(list_failures=[], list_output={}, show_output={})
+    metadata['directory'] = str(directory)
+    path.write_text(json.dumps(metadata))
+    lab.watch()
+    dead(pid)
+    assert not directory.exists()
+
+
+def a_hung_systemctl_bounds_the_check(lab):
+    first, unit, pid, second, other_unit, other_pid = finished_pair(lab)
+    # Fail both list and show independently; keep the first held between checks.
+    bounded = '''original = tool['command']
+def command(argv, cwd=None, timeout=None):
+    if str(argv[0]).endswith('/systemctl'):
+        assert timeout == 30
+        timeout = 1
+    return original(argv, cwd=cwd, timeout=timeout)
+tool['main'].__globals__['command'] = command
+'''
+    for operation in ('list-units', 'show'):
+        if operation == 'show':
+            # Recreate the other finished pass's unit for this independent check.
+            other_unit, other_pid = deployment(lab, second)
+        lab.configure(hung_systemctl={first.name: operation})
+        before = time.monotonic()
+        result = driven_watch(lab, bounded)
+        assert time.monotonic() - before < 60
+        state = json.loads((first / 'pass.json').read_text())
+        assert state['given'] == [CHATGPT] and alive(pid)
+        assert CLAUDE in json.loads((lab.root / 'tools.json').read_text())['logins_held']
+        assert not (lab.root / 'units' / (other_unit + '.json')).exists()
+        dead(other_pid)
+        for process in map(int, (lab.root / ('hung-' + first.name)).read_text().split()):
+            dead(process)
+        expected = 'units unknown' if operation == 'list-units' else 'cannot establish unit state'
+        assert expected in result.stdout
+        aged(lab, first)
+    lab.configure(hung_systemctl={})
+    lab.watch()
+    dead(pid)
+    assert not first.exists()
+
+
+def one_pass_failing_its_end_lets_the_check_go_on(lab):
+    first, unit, pid, second, other_unit, other_pid = finished_pair(lab)
+    # Mark first finished to enter exactly the retry path in check().
+    state = json.loads((first / 'pass.json').read_text())
+    state.update(finished=True, ended=state['started'])
+    (first / 'pass.json').write_text(json.dumps(state))
+    aged(lab, first)
+    marker = 'outside-' + 'exception-contents'
+    patch = f'''original = tool['Watch'].end
+def end(self, directory, state):
+    if state['pass'] == {first.name!r}:
+        raise OSError({marker!r})
+    return original(self, directory, state)
+tool['Watch'].end = end
+'''
+    result = driven_watch(lab, patch)
+    assert first.name in result.stdout and 'OSError' in result.stdout and marker not in result.stdout + result.stderr
+    assert first.exists() and alive(pid) and not json.loads((first / 'pass.json').read_text())['given']
+    dead(other_pid)
+    assert not (lab.root / 'units' / (other_unit + '.json')).exists()
+
+
+def deploy_passes_a_literal_dollar(lab):
+    directory = lab.root / P
+    directory.mkdir()
+    output = directory / 'arguments'
+    program = executable(directory / 'capture', 'import json, sys\nfrom pathlib import Path\n'
+                         "Path('arguments').write_text(json.dumps(sys.argv[1:]))\n")
+    args = ['$HOME', '${PATH}']
+    lab.run('deploy', str(directory), 'literal', '--', str(program), *args)
+    wait_for(output.exists)
+    assert json.loads(output.read_text()) == args
+    call, = lab.calls('systemd-run')
+    assert '--expand-environment=no' in call and call[-2:] == args
+
+
+def a_linked_log_or_registry_writes_nowhere_else(lab):
+    directory = lab.root / P
+    directory.mkdir()
+    outside = lab.root / 'outside-notes'
+    marker = 'outside-' + 'write-contents'
+    outside.write_text(marker)
+    executable(directory / 'give-back', "from pathlib import Path\nPath('returned').touch()\nprint('export output')\n")
+    log = directory / 'give-back.log'
+    # A bad log must never prevent the login's give-back from running.
+    for kind in ('hardlink', 'symlink', 'fifo', 'directory'):
+        if kind == 'hardlink':
+            os.link(outside, log)
+        elif kind == 'symlink':
+            log.symlink_to(outside)
+        elif kind == 'fifo':
+            os.mkfifo(log)
+        else:
+            log.mkdir()
+        result = lab.run('_give-back', str(directory), '2')
+        assert (directory / 'returned').exists() and outside.read_text() == marker
+        assert not result.stdout + result.stderr
+        (directory / 'returned').unlink()
+        log.rmdir() if log.is_dir() else log.unlink()
+    registry = directory / 'deployments'
+    for kind in ('hardlink', 'fifo', 'directory'):
+        if kind == 'hardlink':
+            os.link(outside, registry)
+        elif kind == 'fifo':
+            os.mkfifo(registry)
+        else:
+            registry.mkdir()
+        result = lab.run('deploy', str(directory), 'box', '--', 'true', status=2)
+        assert not lab.calls('systemd-run') and outside.read_text() == marker
+        assert marker not in result.stdout + result.stderr
+        registry.rmdir() if registry.is_dir() else registry.unlink()
+
+
+def a_linked_report_is_no_report(lab):
+    directory, state = deployment_pass(lab)
+    outside = lab.root / 'outside-report'
+    marker = 'outside-' + 'report-contents'
+    outside.write_text(marker)
+    # Re-run finish on the same pass for each unsafe report file type.
+    lab.end_run()
+    report = directory / 'report.md'
+    for kind in ('symlink', 'hardlink', 'fifo', 'directory'):
+        current = json.loads((directory / 'pass.json').read_text())
+        current['finished'] = False
+        (directory / 'pass.json').write_text(json.dumps(current))
+        report.unlink()
+        if kind == 'symlink':
+            report.symlink_to(outside)
+        elif kind == 'hardlink':
+            os.link(outside, report)
+        elif kind == 'fifo':
+            os.mkfifo(report)
+        else:
+            report.mkdir()
+        result = lab.watch()
+        saved = lab.content(f'qa/passes/{state["pass"]}.md')
+        assert 'outcome: failed' in saved and marker not in saved + result.stdout + result.stderr
+        assert all(marker not in post['body'] for post in lab.sent())
+        assert outside.read_text() == marker
+        if report.is_dir():
+            report.rmdir()
+            report.touch()
+
+
+CASES = (a_pass_never_stops_its_successors_unit,
+         an_edited_deployments_holds_the_in_place_login,
+         a_unit_of_another_directory_is_not_stopped,
+         a_hung_systemctl_bounds_the_check,
+         one_pass_failing_its_end_lets_the_check_go_on,
+         deploy_passes_a_literal_dollar,
+         a_linked_log_or_registry_writes_nowhere_else,
+         a_linked_report_is_no_report,
+         deploy_records_then_starts_its_unit,
          a_stopped_pass_gives_its_login_back,
          a_failed_export_leaves_the_unit_up,
          two_stops_take_turns,
