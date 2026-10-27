@@ -807,7 +807,28 @@ sys.exit(module.main())
     assert lab.read('holder.json')['holder'] == 'b'
 
 
-CASES = (a_now_take_preserves_stale_and_legacy_queue_files, a_now_take_never_joins_the_queue, a_now_take_takes_a_free_unclaimed_login, a_request_granted_by_old_code_leaves_the_queue, a_pool_take_grants_a_free_login_and_names_it, one_queue_in_arrival_order,
+def a_wait_that_runs_out_leaves_the_queue(lab):
+    lab.login()
+    lab.run('take', CHATGPT, '--as', 'a')
+    code, out, err = lab.run('take', CHATGPT, '--as', 'b', '--wait', '0.2')
+    assert code == 1 and not out and 'held by a' in err
+    assert lab.read('waiting.json') == []
+
+
+def drop_removes_a_waiters_row(lab):
+    lab.login()
+    lab.run('take', CHATGPT, '--as', 'a')
+    lab.run('take', CHATGPT, '--as', 'b')
+    lab.run('take', CHATGPT, '--any', '--as', 'c')
+    assert lab.run('drop', CHATGPT, '--as', 'b') == (0, 'dropped: chatgpt\n', '')
+    assert [row['holder'] for row in lab.read('waiting.json')] == ['c']
+    assert lab.run('drop', CHATGPT, '--any', '--as', 'c') == (0, 'dropped: chatgpt\n', '')
+    assert lab.read('waiting.json') == []
+    assert lab.run('drop', CHATGPT, '--as', 'b') == (0, 'not waiting: chatgpt\n', '')
+    assert lab.run('drop', CHATGPT, '--any', '--as', 'c') == (0, 'not waiting: chatgpt\n', '')
+
+
+CASES = (a_wait_that_runs_out_leaves_the_queue, drop_removes_a_waiters_row, a_now_take_preserves_stale_and_legacy_queue_files, a_now_take_never_joins_the_queue, a_now_take_takes_a_free_unclaimed_login, a_request_granted_by_old_code_leaves_the_queue, a_pool_take_grants_a_free_login_and_names_it, one_queue_in_arrival_order,
          a_waiter_for_a_stuck_login_holds_back_no_free_one, a_pool_waiter_keeps_one_free_login_not_all,
          a_stale_waiter_leaves_the_queue, two_takes_at_once_get_two_logins,
          old_per_login_queues_are_migrated, an_old_process_lock_still_excludes,
