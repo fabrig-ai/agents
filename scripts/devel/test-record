@@ -418,7 +418,7 @@ def refusals(lab):
     cases.append(('director/waiting.md', 'arbitrary content\n',
                   'director/waiting.md: retired: what waits on the user is a forge issue (user-issues.md)'))
     cases.append(('director/other.md', 'wrong', 'place'))
-    secrets = ['-----BEGIN RSA PRIVATE KEY-----', *[prefix + 'A' * 20 for prefix in ('ghp_', 'gho_', 'ghu_', 'ghs_', 'ghr_', 'github_pat_')], 'sk-' + 'A' * 20, 'xoxb-fake', 'xoxa-fake', 'xoxp-fake', 'xoxr-fake', 'AKIA' + 'A' * 16]
+    secrets = ['-----BEGIN ' + 'RSA PRIVATE KEY-----', *[prefix + 'A' * 20 for prefix in ('ghp_', 'gho_', 'ghu_', 'ghs_', 'ghr_', 'github_pat_')], 'sk-' + 'A' * 20, 'xoxb-fake', 'xoxa-fake', 'xoxp-fake', 'xoxr-fake', 'AKIA' + 'A' * 16]
     cases += [('STATUS.md', secret, 'secret') for secret in secrets]
     for name, content, reason in cases:
         path = lab.put(name, content)
@@ -460,6 +460,28 @@ def refusals(lab):
     for prefix in ('1067', 'R3-12', '12.'):
         lab.put('missions/x/decisions.md', ('## ' + prefix + ' decision\n') * 101)
         assert '100 decisions' in lab.run('commit', 'missions/x/decisions.md', status=2)
+
+
+def private_key_headers_are_refused(lab):
+    headers = ['-----BEGIN ' + kind + ' PRIVATE KEY-----'
+               for kind in ('RSA', 'EC', 'OPENSSH', 'ENCRYPTED')]
+    original = (lab.a / 'STATUS.md').read_bytes()
+    old = lab.git(lab.a, 'rev-parse', 'HEAD')
+    remote = lab.git(lab.origin, 'rev-parse', 'main')
+    for header in headers:
+        path = lab.put('STATUS.md', header + '\n')
+        output = lab.run('commit', 'STATUS.md', status=2)
+        assert 'STATUS.md: secret refused' in output
+        assert all(value not in output for value in headers)
+        assert lab.git(lab.a, 'rev-parse', 'HEAD') == old
+        assert lab.git(lab.origin, 'rev-parse', 'main') == remote
+        path.write_bytes(original)
+    # Refusal writes no matched text into records, logs or other fixture output.
+    for root in (lab.a, lab.b, lab.tmp):
+        for path in root.rglob('*'):
+            if path.is_file():
+                assert all(value.encode() not in path.read_bytes() for value in headers)
+    assert all(value not in lab.git(lab.origin, 'show', 'main:STATUS.md') for value in headers)
 
 
 def different_files(lab):
@@ -946,7 +968,7 @@ def qa_defaults_has_its_place(lab):
 def main():
     # The cases share nothing (each has its own Lab, and every subprocess its
     # own env), so they run at once on threads; results print in case order.
-    cases = (qa_defaults_has_its_place, qa_places, closing_unpublished, closing_dirty, closing_deleted_remote, closing_fetch_failure, closing_unreadable, closing_nested,
+    cases = (private_key_headers_are_refused, qa_defaults_has_its_place, qa_places, closing_unpublished, closing_dirty, closing_deleted_remote, closing_fetch_failure, closing_unreadable, closing_nested,
              closing_cached_output, closing_cached_worktree, closing_clean, closing_abandoned, closing_active,
              writer, mission_progress, mission_blocked, refusals, different_files, name_race, conflict, offline, merged_validation, installation_failures, setup, mission_runs, telemetry, milestone)
     if len(sys.argv) > 1:

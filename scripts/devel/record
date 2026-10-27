@@ -15,7 +15,7 @@ import tempfile
 HOOKS = runpy.run_path(str(Path(__file__).resolve().with_name('tidy-hooks.py')))
 UNKNOWN = 'unknown'
 NAME = r'[a-z0-9][a-z0-9_-]*'
-SECRET = re.compile(r'-----BEGIN [^\n]*PRIVATE KEY-----|(?<![\w-])(?:gh[pousr]_[A-Za-z0-9_-]{20,}|github_pat_[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9_-]{20,})|xox[abpr]-|AKIA[A-Z0-9]{16}')
+SECRET = re.compile(r'-----BEGIN [^\n-]*PRIVATE KEY-----|(?<![\w-])(?:gh[pousr]_[A-Za-z0-9_-]{20,}|github_pat_[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9_-]{20,})|xox[abpr]-|AKIA[A-Z0-9]{16}')
 MISSION_KEYS = 'roadmap feature parent owner machine model effort started ended state end'.split()
 # The repositories whose issues may block a mission (user-issues.md 2.1).
 ISSUE_REPOS = 'agents skein smith jig hearth temper qa'.split()
