@@ -888,10 +888,10 @@ the kit only starts it and ends it, as the service ends a pass.
   appends `walk-end` to the clock (its note the run's exit and what is
   still out) and posts the walk's end to its saved starter: its report,
   and any login not back; each saved as done, and tried again at each
-  check until accepted. It commits no record, routes no finding and
-  keeps no evidence: the rung owner reads the report, files its
-  findings by the loop's rules, and keeps the walk with `qa keep
-  --walk` (11.5).
+  check until accepted. It commits no record and routes no finding:
+  the rung owner reads the report and files its findings by the loop's
+  rules. At a walk's end, not its pause, the service keeps its evidence
+  as a pass's (11.5).
 - **A pause at a blocking finding** (the user, 10-27: resume from the
   very same state as soon as the fix is ready, even before it lands;
   meanwhile the login serves another walk). The walk's task says how,
@@ -1144,13 +1144,19 @@ days. agents alone names qa's paths: the public repositories never do.
 
 ### 11.5 Focused walks, and the command
 
-- **The same path:** the ladder's focused walks, the director's runs on
-  a rung (10.2), read roles/qa.md, so they lay their scratch out the
-  same way, and their copies are kept the same way, in `walks/<name>/`.
-  The director keeps one with `qa keep --walk NAME DIRECTORY` on the
-  walk's machine once its run has ended, at its end post, and names the
-  commit wherever it records the walk. NAME is a new one: the date and
-  the walk's (`20261026-rung-a-1`).
+- **The same path:** a rung walk reads roles/qa.md, so it lays its
+  scratch out the same way, and its copy is kept the same way, in
+  `walks/<name>/`, NAME the walk's start date and its name
+  (`20261027-rung-b1-3`), so that a number the ladder reuses never takes
+  another's place. A walk `qa walk` started is kept by the service at
+  its end (10.7), as step 1 of its end, before its logins are given
+  back, and its `walk-end` post names the commit or the refusal; a
+  pause keeps nothing, and the walk's end after its last resume keeps
+  the whole of it. A walk's allowlist adds its earlier attempts'
+  reports, `report-<k>.md`. A walk from before `qa walk` (the ladder's
+  rung-a and github-land walks of 10-26 and 10-27) is kept by hand,
+  with `qa keep --walk NAME DIRECTORY` on its machine once its run has
+  ended.
 - **`qa keep --walk NAME DIRECTORY`** prints the commit, exit 0; or the
   refusal, exit 2; or exit 1 when the push failed, to run again, which
   keeps the same tree.
@@ -1160,8 +1166,10 @@ days. agents alone names qa's paths: the public repositories never do.
   record, no clone, no network. A pass runs it on its own scratch
   before its report's last write, and moves out of the allowlist what
   it names (roles/qa.md 2, step 5).
-- **One code path:** the service keeps a pass's copy through the same
-  snapshot, scan, cap, index and push as `qa keep --walk`.
+- **One code path:** the service keeps a pass's and a walk's copy
+  through the same snapshot, scan, cap, index and push as `qa keep
+  --walk`; a walk's refusal is mended as a pass's (11.4), its state
+  trying the copy again at each check while its directory is there.
 
 ### 11.6 Its fixture
 
