@@ -4,6 +4,13 @@ set -Eeuo pipefail
 umask 077
 trap 'echo "test-codex-run: failed at line $LINENO" >&2' ERR
 started=$(date +%s.%N)
+# Like case_runner.py: five minutes of tool hang patience; a unit runs
+# several tools (and sometimes retries or an ExecStop), so allow a whole
+# case. The supplied standalone baseline is 179 checks in 19 seconds.
+HUNG_TOOL_S=300
+HUNG_CASE_S=$((3 * HUNG_TOOL_S))
+# This deadline is the subject of the TERM-ignoring callback case.
+ON_STOP_TIMEOUT_S=1
 kit=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
 t=$(mktemp -d "${TMPDIR:-/tmp}/test-codex-run.XXXXXX")
 cleanup() {
@@ -25,8 +32,11 @@ export PATH=$t/bin:$PATH
 fake=$DEV_ROOT/fake
 # A monitor notifies only after publishing its ended marker. Keep a reader
 # open so a fast unit can finish before wait_unit starts reading.
-mkfifo "$fake/unit-events"
+mkfifo "$fake/unit-events" "$fake/pause-release"
 exec {unit_events}<>"$fake/unit-events"
+# Pause until the signal case ends this child, regardless of host scheduling.
+# A reader held open also lets the child open its end without a handshake.
+exec {pause_release}<>"$fake/pause-release"
 printf 'Implement the fixture task.\n' >"$t/task file.md"
 printf 'Own the fixture tasks.\n' >"$t/brief.md"
 
@@ -161,7 +171,8 @@ if scenario == 'pause':
     (state / 'worker.pid').write_text(str(os.getppid()))
     (state / 'codex.pid').write_text(str(os.getpid()))
     print(json.dumps({'type': 'thread.started', 'thread_id': 'thread-fixture'}), flush=True)
-    time.sleep(10)
+    with (fake / 'pause-release').open('rb', buffering=0) as release:
+        release.read(1)
 if scenario == 'remove-parent':
     report = pathlib.Path((fake / 'report').read_text().strip())
     report.unlink()
@@ -277,18 +288,49 @@ json_expect() {
     fi
     checks=$((checks + 1))
 }
-# Hang patience for scheduled fixture work, not a codex-run performance bound.
-HUNG_UNIT_S=300
-poll_until() {
-    local deadline=$((${EPOCHREALTIME//[.,]/} + HUNG_UNIT_S * 1000000))
-    until "$@"; do
-        ((${EPOCHREALTIME//[.,]/} < deadline)) || { echo "FAIL deadline: $*" >&2; return 1; }
-        sleep 0.02
-    done
+# Subscribe before inspecting publications, so a write between the check and
+# the wait cannot be lost. Readiness includes the Codex PID contents and the stamped
+# thread event, not just creation of their files. No scheduling sleeps.
+wait_task_ready() {
+    python3 - "$state" "$HUNG_CASE_S" <<'PYWAIT'
+import ctypes
+import os
+from pathlib import Path
+import select
+import sys
+import time
+
+state = Path(sys.argv[1])
+deadline = time.monotonic() + int(sys.argv[2])
+libc = ctypes.CDLL(None, use_errno=True)
+fd = libc.inotify_init1(os.O_CLOEXEC | os.O_NONBLOCK)
+if fd < 0:
+    raise OSError(ctypes.get_errno(), 'inotify_init1')
+try:
+    # IN_MODIFY | IN_CLOSE_WRITE | IN_MOVED_TO | IN_CREATE
+    if libc.inotify_add_watch(fd, os.fsencode(state), 0x2 | 0x8 | 0x80 | 0x100) < 0:
+        raise OSError(ctypes.get_errno(), 'inotify_add_watch', str(state))
+
+    def ready():
+        try:
+            return ((state / 'codex.pid').read_text().strip().isdigit() and
+                    b'"thread_id": "thread-fixture"}\n' in
+                    (state / 'events.jsonl').read_bytes())
+        except FileNotFoundError:
+            return False
+
+    while not ready():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not select.select([fd], [], [], remaining)[0]:
+            sys.exit(f'FAIL deadline: task publications in {state}')
+        os.read(fd, 65536)
+finally:
+    os.close(fd)
+PYWAIT
 }
 wait_unit() {
     local unit=$1 finished
-    IFS= read -r -t "$HUNG_UNIT_S" finished <&"$unit_events" || {
+    IFS= read -r -t "$HUNG_CASE_S" finished <&"$unit_events" || {
         echo "FAIL deadline: unit $unit" >&2
         return 1
     }
@@ -442,7 +484,7 @@ start_task on-stop --on-stop "$t/work dir/return login"
 expect 'on-stop with a space in its path' "$(cat "$state/on-stop"),$(cat "$fake/stop.cwd")" "exit 0,$t/work dir"
 
 # Exercise a TERM-ignoring callback with a one-second private bound.
-sed 's/^ON_STOP_SECONDS=60$/ON_STOP_SECONDS=1/' "$kit/codex-run" >"$kit/codex-run.new"
+sed "s/^ON_STOP_SECONDS=60$/ON_STOP_SECONDS=$ON_STOP_TIMEOUT_S/" "$kit/codex-run" >"$kit/codex-run.new"
 chmod +x "$kit/codex-run.new"
 mv "$kit/codex-run.new" "$kit/codex-run"
 start_task on-stop-timeout --on-stop "$t/ignores-term"
@@ -752,11 +794,9 @@ for signal in TERM INT KILL; do
     : >"$fake/post.calls"
     output=$("$kit/codex-run" task "$t/task file.md" "$t/work dir" "$report")
     read -r id state <<<"$output"
-    poll_until test -f "$state/codex.pid"
-    # The PID is published before Codex emits its thread. Wait for the
-    # stamper to record the event before killing the unit, so KILL leaves a
-    # thread to recover even though turn() never writes the thread file.
-    poll_until grep -Fq '"thread_id": "thread-fixture"}' "$state/events.jsonl"
+    # Wait for the Codex PID write and stamped thread before reading or
+    # signaling: KILL must leave a thread that stale can recover.
+    wait_task_ready
     worker=$(cat "$state/worker.pid")
     if [[ $signal == TERM ]]; then kill -TERM "$worker"
     else kill -"$signal" -- "-$worker"; fi
@@ -774,6 +814,8 @@ for signal in TERM INT KILL; do
             killed_id=$id ;;
     esac
 done
+# Every paused unit has ended; no child still needs this writer held open.
+exec {pause_release}>&-
 
 rows_before=$(cat "$DEV_ROOT/tmp/codex-run/runs.tsv")
 report_before=$(cat "$report")

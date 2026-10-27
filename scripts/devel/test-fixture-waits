@@ -3,9 +3,13 @@
 import json
 from pathlib import Path
 import runpy
+import select
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+
+from case_runner import HUNG_CASE_S
 
 
 SUPPORT = runpy.run_path(str(Path(__file__).with_name('test-heavy-recovery')))
@@ -82,6 +86,85 @@ class Publications(unittest.TestCase):
             out.write('malformed\n')
         with self.assertRaises(json.JSONDecodeError):
             self.lab.events()
+
+
+class CodexPublications(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix='codex-publications-')
+        self.addCleanup(temporary.cleanup)
+        self.state = Path(temporary.name)
+        self.codex = self.state / 'codex.pid'
+        self.events = self.state / 'events.jsonl'
+        script = Path(__file__).with_name('test-codex-run').read_text()
+        # Exercise the exact reader embedded in the Bash fixture, without
+        # starting a worker or running any of that fixture's signal cases.
+        source = script.split("<<'PYWAIT'\n", 1)[1].split('\nPYWAIT', 1)[0]
+        self.reader = compile(source, 'codex-publications', 'exec')
+        self.thread = b'"thread_id": "thread-fixture"}\n'
+
+    def wait(self, seconds=HUNG_CASE_S):
+        with patch.object(sys, 'argv', ['wait', str(self.state), str(seconds)]):
+            exec(self.reader, {})
+
+    def publish(self):
+        self.codex.write_text('5678')
+        self.events.write_bytes(self.thread)
+
+    def test_empty_pid_and_partial_event_wait_for_writes(self):
+        select_ready = select.select
+        stages = []
+
+        def publish(readers, writers, errors, remaining):
+            stages.append(len(stages) + 1)
+            if len(stages) == 1:
+                self.codex.touch()
+                self.events.write_bytes(self.thread)
+            elif len(stages) == 2:
+                self.codex.write_text('5678')
+                self.events.write_bytes(self.thread[:-1])
+            elif len(stages) == 3:
+                with self.events.open('ab') as out:
+                    out.write(b'\n')
+            else:
+                self.fail('publication did not wake reader')
+            result = select_ready(readers, writers, errors, 0)
+            self.assertTrue(result[0], 'write must wake the subscribed reader')
+            return result
+
+        with patch.object(select, 'select', side_effect=publish):
+            self.wait()
+        self.assertEqual(stages, [1, 2, 3])
+
+    def test_already_published_needs_no_wake(self):
+        self.publish()
+        with patch.object(select, 'select', side_effect=AssertionError('already ready')):
+            self.wait()
+
+    def test_write_between_inspection_and_wait_is_not_lost(self):
+        self.publish()
+        self.events.write_bytes(self.thread[:-1])
+        read_bytes = Path.read_bytes
+        select_ready = select.select
+
+        def publish_after_read(path):
+            data = read_bytes(path)
+            if path == self.events:
+                self.events.write_bytes(self.thread)
+            return data
+
+        def wake(readers, writers, errors, remaining):
+            result = select_ready(readers, writers, errors, 0)
+            self.assertTrue(result[0], 'write between check and wait must wake reader')
+            return result
+
+        with patch.object(Path, 'read_bytes', publish_after_read):
+            with patch.object(select, 'select', side_effect=wake):
+                self.wait()
+
+    def test_missing_publication_reports_deadline(self):
+        with patch.object(select, 'select', side_effect=AssertionError('expired')):
+            with self.assertRaisesRegex(SystemExit, 'FAIL deadline: task publications in '):
+                self.wait(seconds=0)
 
 
 if __name__ == '__main__':
