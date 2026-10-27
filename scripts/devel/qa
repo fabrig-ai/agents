@@ -998,24 +998,34 @@ class Watch:
                         self.save(directory, state)
 
     def stuck_addresses(self):
-        addresses = {self.director}
+        addresses = []
         path = Path.home() / '.config/agents-qa/stuck'
         try:
-            lines = path.read_text(errors='replace').splitlines()
+            with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), 'rb') as source:
+                need(stat.S_ISREG(os.fstat(source.fileno()).st_mode), 'not a regular file', 4)
+                data = source.read(16 * 1024 + 1)
+            need(len(data) <= 16 * 1024, 'exceeds 16 KiB', 4)
         except FileNotFoundError:
-            return sorted(addresses)
-        except OSError as error:
-            log(f'{path}: cannot read stuck addresses ({type(error).__name__}); using director alone')
-            return sorted(addresses)
-        for number, line in enumerate(lines, 1):
+            return [self.director]
+        except (OSError, Problem) as error:
+            why = str(error) if isinstance(error, Problem) else type(error).__name__
+            log(f'{path}: cannot read stuck addresses ({why}); using director alone')
+            return [self.director]
+        for number, line in enumerate(data.decode(errors='replace').splitlines(), 1):
+            if len(line) > 200:
+                log(f'{path}:{number}: invalid stuck address; skipped')
+                continue
             address = line.split('#', 1)[0].strip()
             if not address:
                 continue
-            if re.fullmatch(ADDRESS, address):
-                addresses.add(address)
+            if len(address) <= 120 and re.fullmatch(ADDRESS, address):
+                if address not in addresses and len(addresses) < 16:
+                    addresses.append(address)
             else:
                 log(f'{path}:{number}: invalid stuck address; skipped')
-        return sorted(addresses)
+        if self.director not in addresses:
+            addresses.append(self.director)
+        return addresses
 
     def alert(self, directory, state, units):
         kind = self.classes[directory]
@@ -1041,8 +1051,13 @@ class Watch:
             for address, sent in receipts.items():
                 if sent:
                     continue
-                result = self.call('post', 'send', '--as', 'qa-watch', address,
-                                   f'qa: login {login} stuck in {kind} {name}', message)
+                try:
+                    need(len(address) <= 120, 'invalid stuck address', 4)
+                    result = self.call('post', 'send', '--as', 'qa-watch', address,
+                                       f'qa: login {login} stuck in {kind} {name}', message)
+                except (OSError, Problem) as error:
+                    log(f'{name}: alert for {login} failed ({type(error).__name__}); trying next check')
+                    continue
                 if result.returncode in (0, 3):
                     receipts[address] = True
                     try:

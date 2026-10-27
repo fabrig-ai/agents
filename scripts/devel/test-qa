@@ -1797,6 +1797,116 @@ def start_stuck_pass(lab, *logins):
     return directory, state
 
 
+def unsafe_stuck_list(lab, shape):
+    lab.rung('temper', REAL, CHATGPT)
+    two_repositories_waiting(lab)
+    lab.watch(extra={'QA_SLOTS': '2'})
+    for _, state in lab.watch_states():
+        lab.end_run(state)
+    lab.configure(logins_out=[CHATGPT])
+    path = lab.home / '.config/agents-qa/stuck'
+    path.parent.mkdir(parents=True)
+    if shape == 'fifo':
+        os.mkfifo(path)
+    else:
+        line = b'design/overflow@fixture\n'
+        path.write_bytes((line * (20 * 1024 // len(line) + 1))[:20 * 1024])
+    # A FIFO without a writer must not consume the fixture's five-minute tool deadline.
+    result = subprocess.run([str(SCRIPT), 'watch', '--director', 'director@fixture', '--once'],
+                            env=lab.env, cwd=lab.root, stdin=subprocess.DEVNULL,
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    reason = 'not a regular file' if shape == 'fifo' else 'exceeds 16 KiB'
+    assert f'cannot read stuck addresses ({reason}); using director alone' in result.stdout
+    assert all(state['finished'] and state['released'] for _, state in lab.watch_states())
+    assert {state['repository'] for _, state in lab.watch_states()} == {'temper', 'jig'}
+    temper = next(state for _, state in lab.watch_states() if state['repository'] == 'temper')
+    assert temper['alerts'] == {CHATGPT: {'director@fixture': True}}
+    assert not temper.get('notice') and not temper.get('notice_pending')
+    alert, notice = lab.sent()
+    assert alert == stuck_posts(lab)[0] and alert['args'][1] == 'director@fixture'
+    assert notice['args'][2].startswith('qa: pass ') and CHATGPT in notice['body']
+    assert 'design/overflow@fixture' not in result.stdout + result.stderr
+    assert all('design/overflow@fixture' not in post['body'] for post in lab.sent())
+
+
+def a_fifo_stuck_list_does_not_block_cleanup(lab):
+    unsafe_stuck_list(lab, 'fifo')
+    path = lab.home / '.config/agents-qa/stuck'
+    path.unlink()
+    target = lab.root / 'stuck-target'
+    target.write_text('design/linked@fixture\n')
+    path.symlink_to(target)
+    before = lab.sent()
+    result = lab.watch()
+    assert 'cannot read stuck addresses (OSError); using director alone' in result.stdout
+    assert lab.sent() == before and target.read_text() == 'design/linked@fixture\n'
+
+
+def an_oversized_stuck_list_does_not_block_cleanup(lab):
+    unsafe_stuck_list(lab, 'oversized')
+
+
+def stuck_recipients_are_bounded_in_file_order(lab):
+    path = lab.home / '.config/agents-qa/stuck'
+    path.parent.mkdir(parents=True)
+    limit = 'a' * (120 - len('@fixture')) + '@fixture'
+    too_long = 'a' + limit
+    long_line = 'design/long-line@fixture'.ljust(201)
+    addresses = [f'design/team-{number}@fixture' for number in reversed(range(20))]
+    text = '\n'.join([limit, too_long, long_line, limit, *addresses]) + '\n'
+    path.write_text(text + '\n' * (16 * 1024 - len(text)))
+    assert path.stat().st_size == 16 * 1024
+    _, state = start_stuck_pass(lab, CHATGPT)
+    result = lab.watch()
+    expected = [limit, *addresses[:15], 'director@fixture']
+    alerts = stuck_posts(lab)
+    assert [post['args'][1] for post in alerts] == expected
+    assert lab.watch_state()[1]['alerts'] == {CHATGPT: dict.fromkeys(expected, True)}
+    for number in (2, 3):
+        assert f'{path}:{number}: invalid stuck address; skipped' in result.stdout
+    for invalid in (too_long, 'design/long-line@fixture'):
+        assert invalid not in result.stdout + result.stderr
+        assert all(invalid not in post['body'] for post in lab.sent())
+    assert all(len(post['args'][1]) <= 120 for post in alerts)
+    assert all(post['args'][2] == f'qa: login {CHATGPT} stuck in pass {state["pass"]}' for post in alerts)
+    lab.watch()
+    assert stuck_posts(lab) == alerts
+
+
+def a_recipient_launch_error_does_not_block_the_other_alerts(lab):
+    path = lab.home / '.config/agents-qa/stuck'
+    path.parent.mkdir(parents=True)
+    refused = ['design/oserror@fixture', 'design/problem@fixture']
+    accepted = ['director@fixture', 'design/accepted@fixture']
+    path.write_text('\n'.join(refused + accepted) + '\n')
+    _, state = start_stuck_pass(lab, CHATGPT)
+    result = driven_watch(lab, """original = tool['Watch'].call
+def call(self, name, *args):
+    if name == 'post' and args[0] == 'send':
+        if args[-3] == 'design/oserror@fixture':
+            raise OSError('fixture private launch failure')
+        if args[-3] == 'design/problem@fixture':
+            raise tool['Problem']('fixture private post problem', 4)
+    return original(self, name, *args)
+tool['Watch'].call = call
+""")
+    saved = lab.watch_state()[1]
+    assert saved['finished'] and saved['released'] and not saved.get('notice')
+    assert saved['alerts'] == {CHATGPT: dict(zip(refused + accepted, [False, False, True, True]))}
+    assert [post['args'][1] for post in stuck_posts(lab)] == accepted
+    assert lab.sent()[-1]['args'][2].startswith('qa: pass ') and CHATGPT in lab.sent()[-1]['body']
+    for name in ('OSError', 'Problem'):
+        assert f'alert for {CHATGPT} failed ({name}); trying next check' in result.stdout
+    assert 'fixture private' not in result.stdout + result.stderr
+    lab.watch()
+    assert [post['args'][1] for post in stuck_posts(lab)] == accepted + refused
+    assert all(lab.watch_state()[1]['alerts'][CHATGPT].values())
+    before = lab.sent()
+    lab.watch()
+    assert lab.sent() == before and lab.watch_state()[1]['pass'] == state['pass']
+
+
 def a_stuck_login_alerts_the_director_and_the_list(lab):
     path = lab.home / '.config/agents-qa/stuck'
     path.parent.mkdir(parents=True)
@@ -5229,6 +5339,8 @@ def hex_walk_builds_refuse_ambiguous_and_non_commit_objects(lab):
 
 
 CASES = (a_stuck_login_alerts_the_director_and_the_list, a_refused_alert_is_sent_again,
+         a_fifo_stuck_list_does_not_block_cleanup, an_oversized_stuck_list_does_not_block_cleanup,
+         stuck_recipients_are_bounded_in_file_order, a_recipient_launch_error_does_not_block_the_other_alerts,
          an_alert_goes_once_per_stuck_login, no_list_alerts_the_director_alone, the_stuck_list_is_read_at_each_check,
          saved_alerts_retry_when_the_run_state_is_unknown,
          finding_metadata_stops_before_reproduction, accepted_findings_survive_refused_triage_commits,
