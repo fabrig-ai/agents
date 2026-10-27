@@ -103,7 +103,10 @@ its date and source, are [qa-operations.md](qa-operations.md).
    not through its store, its HTTP API, or a fake's internals; and act
    on a backend only as a case's plan says, with the hands the binding
    gives.
-5. **Report** (section 3). Then give each held login back: run the
+5. **Report** (section 3). Before its last write, check what will
+   be kept, `qa keep --check DIR` on the scratch directory, and move
+   out of `evidence/` and `scripts/` what it names, or delete the
+   line it names (section 4). Then give each held login back: run the
    give-back file, and check each moved login's path by `stat` alone (a
    regular file, `0600`, not empty); a login used in place moves
    nothing, and is back once its deployment has stopped. Then stop
