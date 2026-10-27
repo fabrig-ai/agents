@@ -174,6 +174,13 @@ out. The security rules are director.md 10's.
     taught. The designer adjusts the design from it.
   - Questions and escalations (section 5), a red verdict's repair once it
     has landed, and the closing still post.
+- **The pages change with the behaviour.** A landing that makes a page
+  of the product's documentation for agents untrue (temper's
+  `docs/help/`: a command, a refusal's words, an order, a default)
+  updates that page in the same landing. The owner greps the pages for
+  what it changes and writes the page itself: they are written by Opus
+  owners only, never by an implementer (the user, 10-26). The gate
+  catches a renamed command or a broken link, never a changed fact.
 - **The QA marker:** a landing commit whose change a user meets
   through the product's tool carries the trailer `QA: <what a user can
   now do>`, one line of at most 160 characters, which its landing task
