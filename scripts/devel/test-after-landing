@@ -408,12 +408,46 @@ def cap_removal_fails(lab):
         assert not bulk.exists()
         assert sum(path.lstat().st_blocks * 512 for path in
                    (target, locked, locked / 'fill')) < 65536
+        # An unmeasurable remainder must not erase the pending whole removal.
+        locked.chmod(0o000)
+        lab.run()
+        assert (lab.calls(), lab.records('running'), lab.records('verdict')) == before
+        assert lab.state()['last_run'] == previous
+        assert lab.state()['fault']['reason'] == 'target past its cap could not be removed'
     finally:
         locked.chmod(0o700)
     lab.run()
     assert lab.state()['last_run'] == head and lab.state()['fault'] is None
     assert lab.records('running')[-1]['fresh'] is True
     assert not lab.calls()[-1]['warm']
+
+
+def cap_measure_fails(lab):
+    previous = lab.green()
+    target = lab.root / 'runner/demo/target'
+    unreadable = target / 'unreadable'
+    unreadable.mkdir()
+    (unreadable / 'fill').write_bytes(b'x')
+    unreadable.chmod(0o000)
+    try:
+        head = lab.land()
+        lab.push()
+        before = lab.calls(), lab.records('running'), lab.records('verdict'), lab.records('tier')
+        for _ in range(2):
+            lab.run()
+            assert (lab.calls(), lab.records('running'), lab.records('verdict'), lab.records('tier')) == before
+            assert lab.state()['last_run'] == previous
+            assert lab.state()['fault']['reason'] == 'target could not be measured'
+        faults = lab.records('fault')
+        assert len(faults) == 1 and faults[0]['commit'] == head
+    finally:
+        unreadable.chmod(0o700)
+    lab.run()
+    assert lab.state()['last_run'] == head and lab.state()['fault'] is None
+    assert len(lab.calls()) == len(before[0]) + 1 and lab.calls()[-1]['warm']
+    assert lab.records('running')[-1]['commit'] == head
+    assert 'fresh' not in lab.records('running')[-1]
+    assert lab.verdict(head)['verdict'] == 'cleared'
 
 
 def target_allocation(lab):
@@ -1171,7 +1205,7 @@ def part_refusals(lab):
 
 
 CASES = (polls, target_past_its_cap_is_removed, cap_never_mid_run, cap_from_follow_line,
-         cap_removal_fails, target_allocation, no_tier, flake, starved_pass, starved_with_a_rerun, red, bisect, baseline, already_red, fault, unwatched_red,
+         cap_removal_fails, cap_measure_fails, target_allocation, no_tier, flake, starved_pass, starved_with_a_rerun, red, bisect, baseline, already_red, fault, unwatched_red,
          meets_landings, parts_meet_landings, not_runner_machine, one_follower, refusals,
          multi_bisect, limits, nested_faults, unnamed, pending_delivery, stale_watch, history_reset,
          trailers, feed_failure, parts_follow_apart, part_red_bisected_while_the_other_clears,

@@ -406,19 +406,25 @@ def pass_once(args, base, clone, state):
     except FileNotFoundError:
         info = None
     if info is not None and stat.S_ISDIR(info.st_mode):
-        size = allocated(target)
-        # A failed removal may already have deleted enough to fall below the cap.
+        # Finish a failed removal without a measurement fault erasing its retry.
         retry = state['fault'] and state['fault']['reason'] == 'target past its cap could not be removed'
-        if size > limit or retry:
+        size = None
+        if not retry:
+            try:
+                size = allocated(target)
+            except OSError:
+                fault(args, base, state, token, main, 'target could not be measured', log)
+                return
+        if retry or size > limit:
             try:
                 shutil.rmtree(target)
             except OSError:
                 fault(args, base, state, token, main, 'target past its cap could not be removed', log)
                 return
             with log.open('a') as out:
-                action = 'past its cap' if size > limit else 'finishing removal past its cap'
-                out.write(f'target: {size / args.gb:g} GB allocated, {action} of '
-                          f'{limit / args.gb:g} GB: removed\n')
+                description = ('finishing removal past its cap' if retry else
+                               f'{size / args.gb:g} GB allocated, past its cap')
+                out.write(f'target: {description} of {limit / args.gb:g} GB: removed\n')
             fresh['fresh'] = True
     emit(args.fixture, token, args.name, 'running', commit=main,
          **{'from': state['last_run']}, **fresh)
