@@ -324,6 +324,7 @@ takes a repository's name where it needs one.
 | `qa keep --check DIRECTORY` | scans what a copy of DIRECTORY would hold, and writes nothing (section 11.5) |
 | `qa keep --walk NAME DIRECTORY` | keeps a focused walk's evidence (section 11.5) |
 | `qa walk REPO RUNG [--build REF] [--login POOL]... [--cap MINUTES]` | starts a rung walk on a reserved login, ended by the service (section 10.7) |
+| `qa walk REPO RUNG --resume N --build REF [--login POOL]... [--cap MINUTES]` | resumes a paused walk from its kept state, at a fix's build (section 10.7) |
 | `qa deploy DIRECTORY NAME -- COMMAND...` | starts a pass's deployment in a unit of its own, stopped by its give-back (section 10.5) |
 
 The record is committed with `record commit`, and its rows are in
@@ -803,6 +804,41 @@ the kit only starts it and ends it, as the service ends a pass.
   keeps no evidence: the rung owner reads the report, files its
   findings by the loop's rules, and keeps the walk with `qa keep
   --walk` (11.5).
+- **A pause at a blocking finding** (the user, 10-27: resume from the
+  very same state as soon as the fix is ready, even before it lands;
+  meanwhile the login serves another walk). The walk's task says how,
+  and the rung's brief and loop say when:
+  1. the session writes the finding in its report and its notes, and
+     the step it stopped at in `DIRECTORY/paused`, one line;
+  2. it gives each login back by the give-back file and checks each by
+     `stat` (give back before you break it), then stops its
+     deployments, whose directories stay as they are;
+  3. it ends. The service ends the run as any walk's (10.3's order), but
+     finding `paused` and every login back, it marks the walk paused,
+     not ended: it frees its walk slot, keeps its directory and state,
+     appends `walk-pause` to the clock (its note the paused line) and
+     posts the starter. A pause with a login not back is no pause: the
+     walk ends with it stuck, and is alerted as any.
+- **`qa walk REPO RUNG --resume N --build REF [--login POOL]...
+  [--cap MINUTES]`** resumes paused walk n of the rung, from its
+  state: it takes a free walk slot and one free login of each POOL
+  (any of the pool, not the one it gave back), as step 2 and 3 above,
+  checks the slot out at REF (the fix's branch, before it lands),
+  writes the session's task (the walk's facts, its kept deployments'
+  directories to restart with the fixed binary on their own data, each
+  login to import again, and the step to go on from, its `paused`
+  line), appends `walk-resume` to the clock (its note the logins and
+  REF), and resumes the walk's Codex thread with it (`codex-run task
+  --resume RUN`), or starts a fresh session on its notes when the thread
+  can't resume. The walk keeps its number, directory and report; its
+  cap starts again. A paused walk not resumed stays paused: the rung's
+  owner starts a new walk instead, from the start, when the fix moves a
+  stored family that the kept deployment can't open, and says so in the
+  finding's line.
+- **The walk that counts ends on `main`:** a resume on a branch shows
+  the fix; the rung's final walk confirms it at the landed commit,
+  resumed from the kept state where the landed binary reads it, else
+  from the start (design/ladder's loop).
 - **Not QA's:** a walk's logins are no `qa-watch` holder's, so they
   don't count against QA's cap (10.6), and its walk slots are no QA
   slot; QA's `--now` takes never stand ahead of a walk that waits.
@@ -815,7 +851,11 @@ the kit only starts it and ends it, as the service ends a pass.
   ends it in 10.3's order, appends `walk-end` once and posts its
   starter, again until accepted; a stuck login stays held by the walk
   and is alerted; a walk's slot stays held while a unit is up or
-  unknown; a walk's logins leave QA's cap untouched.
+  unknown; a walk's logins leave QA's cap untouched; a paused walk
+  frees its slot and logins, appends `walk-pause`, and resumes at a
+  branch with another free login, its number, directory and report
+  kept, appending `walk-resume`; a pause with a login out ends the walk
+  stuck.
 
 ## 11. The evidence, kept
 
