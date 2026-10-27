@@ -238,7 +238,9 @@ new work. There is no keep list: a landed branch's commits are on
       workspace names in a `source = "git+…#<commit>"` line: the
       primary checkouts', and every worktree's under `tmp/` and a
       repository's `.claude/worktrees/`, never looking inside a
-      `target/`, a `.git` or a Cargo home.
+      `target/`, a `.git` or a Cargo home. A `Cargo.lock` it cannot read
+      fails the step (exit 3) and deletes nothing: a pin it might hold
+      can't be ruled out.
     - **Kept:** a pinned checkout; one changed in the last 6 hours (a
       repin under way, before its lock names it); one held by a
       process (section 4's sense).

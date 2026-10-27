@@ -215,7 +215,8 @@ commands, in this order, each whatever the others' exits:
 
 It appends one line to `tmp/fleet/tend.jsonl`: its start and end, and
 each command's argv, exit and output lines (at most 200 each, then how
-many more), under a lock, keeping 7 days. Its exit is 0 when every
+many more, then its last line, which holds a summary such as `tidy
+--checkouts`'), under a lock, keeping 7 days. Its exit is 0 when every
 command it ran exited 0, else 1. `fleet-tend.timer` runs it every 5 minutes on every
 machine `setup` sets up (section 6).
 
