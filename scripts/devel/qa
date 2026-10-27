@@ -12,6 +12,7 @@ qa walk REPO RUNG --resume NAME --build REF [--cap MINUTES]
 qa take KIND [--login POOL] --as walk/<KIND>/<WHAT> [--note TEXT]
 qa give NAME --as HOLDER
 qa keep --check DIRECTORY
+qa keep --walk NAME DIRECTORY
 qa watch --director ADDRESS [--once]
 qa deploy DIRECTORY NAME -- COMMAND...
 """
@@ -19,6 +20,7 @@ import argparse
 from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -56,14 +58,17 @@ def need(ok, why, code=2):
         raise Problem(why, code)
 
 
-def command(argv, cwd=None, timeout=None, pass_fds=()):
+def command(argv, cwd=None, timeout=None, pass_fds=(), data=None, env=None):
     argv = [str(a) for a in argv]
-    with subprocess.Popen(argv, cwd=cwd, stdin=subprocess.DEVNULL,
-                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                          env=dict(os.environ, GIT_TERMINAL_PROMPT='0'),
+    binary = isinstance(data, bytes)
+    with subprocess.Popen(argv, cwd=cwd, stdin=subprocess.PIPE if data is not None else subprocess.DEVNULL,
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=not binary,
+                          env=dict(os.environ, GIT_TERMINAL_PROMPT='0', **(env or {})),
                           start_new_session=timeout is not None, pass_fds=pass_fds) as child:
         try:
-            stdout, stderr = child.communicate(timeout=timeout)
+            stdout, stderr = child.communicate(input=data, timeout=timeout)
+            if binary:
+                stdout, stderr = stdout.decode(errors='replace'), stderr.decode(errors='replace')
             return subprocess.CompletedProcess(argv, child.returncode, stdout, stderr)
         except subprocess.TimeoutExpired:
             try:
@@ -71,6 +76,8 @@ def command(argv, cwd=None, timeout=None, pass_fds=()):
             except ProcessLookupError:
                 pass
             stdout, stderr = child.communicate()
+            if binary:
+                stdout, stderr = stdout.decode(errors='replace'), stderr.decode(errors='replace')
             return subprocess.CompletedProcess(argv, 124, stdout, stderr + 'command timed out\n')
 
 
@@ -124,6 +131,9 @@ class Workspace:
     def origin(self, repo):
         need(repo in REPOSITORIES, f'unknown repository: {repo}')
         return str(self.fixture / 'origins' / (repo + '.git')) if self.fixture else f'git@github.com:fabrig-ai/{repo}.git'
+
+    def evidence_origin(self):
+        return str(self.fixture / 'origins/qa.git') if self.fixture else 'git@github.com:fabrig-ai/qa.git'
 
 
 def no_links(anchor, path):
@@ -862,6 +872,7 @@ class Snapshot:
         self.left_out = left_out
         self.refusals = refusals
         self.names = {}
+        self.modes = {}
 
     @classmethod
     def read(cls, directory, cap):
@@ -872,11 +883,11 @@ class Snapshot:
             root = os.open(directory, flags | os.O_DIRECTORY)
         except OSError:
             raise Problem('the scratch directory cannot be opened without following a link') from None
-        files, left_out, refusals, names = {}, {}, [], {}
+        files, left_out, refusals, names, modes = {}, {}, [], {}, {}
         used = 0
 
         def walk(parent, entries, budget, count_only=False):
-            held, labels, refused = {}, {}, []
+            held, labels, refused, bits = {}, {}, [], {}
             count = size = total = unreadable = 0
             past = count_only
             # A stack keeps deep trees independent of Python's recursion limit.
@@ -956,10 +967,12 @@ class Snapshot:
                             past = True
                             held.clear()
                             labels.clear()
+                            bits.clear()
                             refused.clear()
                         else:
                             held[path] = data
                             labels[path] = label
+                            bits[path] = '100755' if after.st_mode & stat.S_IXUSR else '100644'
                     except OSError:
                         unreadable += 1
                         refused.append(Refusal(label, 0, 'kind'))
@@ -970,23 +983,25 @@ class Snapshot:
                 for fd, _, _, close in stack:
                     if close:
                         os.close(fd)
-            return held, labels, refused, past, (count, size, unreadable)
+            return held, labels, refused, past, (count, size, unreadable), bits
 
         try:
-            docs, labels, refused, past, _ = walk(root, [(n, name, False) for n, name in enumerate(DOCUMENTS, 1)], cap)
+            docs, labels, refused, past, _, bits = walk(root, [(n, name, False) for n, name in enumerate(DOCUMENTS, 1)], cap)
             files.update(docs)
+            modes.update(bits)
             names.update(labels)
             refusals.extend([Refusal('documents', 0, 'cap')] if past else refused)
             used = sum(map(len, files.values()))
             omit = past
             for tree in TREES:
-                held, labels, refused, over, counts = walk(root, [(1, tree, True)], cap - used, omit)
+                held, labels, refused, over, counts, bits = walk(root, [(1, tree, True)], cap - used, omit)
                 if over:
                     if counts[0] or counts[2]:
                         left_out[tree + '/'] = counts
                     omit = True
                 else:
                     files.update(held)
+                    modes.update(bits)
                     names.update(labels)
                     refusals.extend(refused)
                     used += sum(map(len, held.values()))
@@ -1006,6 +1021,7 @@ class Snapshot:
                        {tree + '/': left_out[tree + '/'] for tree in reversed(TREES) if tree + '/' in left_out},
                        sorted(set(refusals)))
         snapshot.names = names
+        snapshot.modes = modes
         return snapshot
 
     def bytes(self):
@@ -1024,6 +1040,214 @@ def keep_check(directory, options):
     for refusal in snapshot.refusals:
         print(f'refused: {refusal}')
     need(not snapshot.refusals, f'copy refused ({len(snapshot.refusals)})')
+    return 0
+
+
+EVIDENCE_README = '''# QA evidence
+
+This branch holds QA passes' and focused walks' evidence, kept by agents'
+`qa` tool (agents' `docs/design/qa-flow.md` 11): a pass's in
+`passes/<pass>/`, named as its record, `qa/passes/<pass>.md`; a walk's in
+`walks/<name>/`. Each directory's `README.md` is its index: where it came
+from, its run, and what the cap left out. The branch shares no history
+with `main`, nothing on `main` reads it, and only that tool writes it, one
+commit per copy, never rewritten.
+'''
+
+
+class Copy(NamedTuple):
+    """One directory of the branch evidence: a snapshot and its index (qa-flow.md 11.3)."""
+    kind: str
+    name: str
+    snapshot: Snapshot
+    source: Path
+    run: str
+    record: str
+    machine: str
+
+    def directory(self):
+        return ('passes/' if self.kind == 'pass' else 'walks/') + self.name
+
+    def index(self):
+        fields = dict(kind=self.kind, name=self.name, machine=self.machine, source=self.source,
+                      run=self.run, record=self.record, files=len(self.snapshot.files), bytes=self.snapshot.bytes())
+        return ('---\n' + ''.join(f'{key}: {value}\n' for key, value in fields.items()) + '---\n'
+                + ''.join(f'left out: {tree}, {count} files, {size} bytes'
+                          + (f', {unreadable} entries unreadable' if unreadable else '') + '\n'
+                          for tree, (count, size, unreadable) in self.snapshot.left_out.items())).encode()
+
+
+class Evidence:
+    """The qa repository's branch evidence, through tmp/qa/repos/qa.git (qa-flow.md 11.3)."""
+
+    def __init__(self, workspace, writer, seconds):
+        self.workspace, self.writer, self.seconds = workspace, writer, seconds
+
+    def keep(self, copy):
+        deadline = time.monotonic() + self.seconds
+        need(not copy.snapshot.refusals, 'copy refused')
+        need(copy.kind in ('pass', 'walk') and re.fullmatch(NAME, copy.name), 'invalid copy name')
+        # Compute the directory's Git objects before the lock, so even a lock
+        # timeout returns its tree. Only these owned bytes ever become blobs.
+        objects, trees, entries = [], {'': {}}, []
+
+        def object_id(kind, data):
+            objects.append((kind, data))
+            return hashlib.sha1(f'{kind} {len(data)}\0'.encode() + data).hexdigest()
+
+        files = dict(copy.snapshot.files)
+        files['README.md'] = copy.index()
+        for path, data in files.items():
+            parent, _, name = path.rpartition('/')
+            while parent not in trees:
+                trees[parent] = {}
+                parent = parent.rpartition('/')[0]
+            parent = path.rpartition('/')[0]
+            mode = '100644' if path == 'README.md' else copy.snapshot.modes[path]
+            oid = object_id('blob', data)
+            trees[parent][name] = (mode, oid)
+            entries.append(f'{mode} {oid}\t{copy.directory()}/{path}\0'.encode())
+        for path in sorted(trees, key=lambda p: p.count('/') + bool(p), reverse=True):
+            children = trees[path]
+            data = b''.join(mode.encode() + b' ' + name.encode() + b'\0' + bytes.fromhex(oid)
+                            for name, (mode, oid) in sorted(children.items(),
+                                key=lambda row: (row[0] + ('/' if row[1][0] == '40000' else '')).encode()))
+            tree = object_id('tree', data)
+            if path:
+                parent, _, name = path.rpartition('/')
+                trees[parent][name] = ('40000', tree)
+
+        parent = self.workspace.tmp / 'qa/repos'
+        root = parent / 'qa.git'
+        origin = self.workspace.evidence_origin()
+        directory = copy.directory()
+        env = dict(GIT_NO_LAZY_FETCH='1', GIT_AUTHOR_NAME=self.writer,
+                   GIT_COMMITTER_NAME=self.writer, GIT_AUTHOR_EMAIL=f'{self.writer}@{copy.machine}',
+                   GIT_COMMITTER_EMAIL=f'{self.writer}@{copy.machine}')
+
+        def run(at, *args, check=True, data=None, extra=None):
+            remaining = deadline - time.monotonic()
+            result = (command(['git', '-C', at, *args], timeout=remaining, data=data,
+                              env=dict(env, **(extra or {}))) if remaining > 0 else
+                      subprocess.CompletedProcess(args, 124, '', 'evidence deadline expired'))
+            if check:
+                need(result.returncode == 0, result.stderr.strip() or 'git failed', 4)
+                return result.stdout.strip()
+            return result
+
+        no_links(self.workspace.tmp, parent)
+        parent.mkdir(parents=True, exist_ok=True)
+        no_links(self.workspace.tmp, parent / 'qa.lock')
+        with os.fdopen(os.open(parent / 'qa.lock', os.O_WRONLY | os.O_CREAT | os.O_APPEND
+                               | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600), 'a') as lock:
+            info = os.fstat(lock.fileno())
+            need(stat.S_ISREG(info.st_mode) and info.st_nlink == 1,
+                 f'{parent / "qa.lock"}: invalid lock file', 4)
+            while True:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return None, tree
+                    time.sleep(min(0.02, remaining))
+            try:
+                no_links(self.workspace.tmp, root)
+                if not root.exists():
+                    # Initialize the partial clone without a fetch: clone -b
+                    # fails before evidence exists, and ordinary clone fetches main.
+                    with tempfile.TemporaryDirectory(prefix='qa-', dir=parent) as temporary:
+                        clone = Path(temporary) / 'repo'
+                        run(parent, 'init', '--bare', '--object-format=sha1', str(clone))
+                        run(clone, 'remote', 'add', '-t', 'evidence', 'origin', origin)
+                        run(clone, 'config', 'remote.origin.promisor', 'true')
+                        run(clone, 'config', 'remote.origin.partialclonefilter', 'blob:none')
+                        clone.rename(root)
+                need(run(root, 'config', '--get-all', 'remote.origin.url') == origin,
+                     f'{root}: unexpected origin', 4)
+                pushurl = run(root, 'config', '--get-all', 'remote.origin.pushurl', check=False)
+                need(pushurl.returncode == 1 or (pushurl.returncode == 0 and pushurl.stdout.strip() == origin),
+                     f'{root}: unexpected push origin', 4)
+                need(run(root, 'rev-parse', '--is-bare-repository') == 'true',
+                     f'{root}: expected bare repository', 4)
+                for kind, data in objects:
+                    run(root, 'hash-object', '-t', kind, '-w', '--stdin', data=data)
+                for attempt in range(5):
+                    tip = run(root, 'ls-remote', '--exit-code', 'origin', 'refs/heads/evidence', check=False)
+                    if tip.returncode not in (0, 2):
+                        continue
+                    tip = tip.stdout.split()[0] if tip.returncode == 0 else None
+                    if tip:
+                        local = run(root, 'rev-parse', '--verify', 'refs/remotes/origin/evidence', check=False)
+                        if local.returncode or local.stdout.strip() != tip:
+                            fetched = run(root, 'fetch', '--quiet', '--no-tags', '--filter=blob:none', 'origin',
+                                          'refs/heads/evidence:refs/remotes/origin/evidence', check=False)
+                            if fetched.returncode:
+                                continue
+                        # The branch can move between ls-remote and fetch.
+                        tip = run(root, 'rev-parse', 'refs/remotes/origin/evidence')
+                        found = run(root, 'ls-tree', tip, '--', directory)
+                        if found:
+                            need(found.split()[0:3] == ['040000', 'tree', tree],
+                                 f'{directory}: name taken by another copy')
+                            return run(root, 'rev-list', '-1', 'origin/evidence', '--', directory), tree
+                    with tempfile.TemporaryDirectory(prefix='index-', dir=parent) as temporary:
+                        index = dict(GIT_INDEX_FILE=str(Path(temporary) / 'index'))
+                        run(root, 'read-tree', tip if tip else '--empty', extra=index)
+                        if not tip:
+                            readme = run(root, 'hash-object', '-w', '--stdin', data=EVIDENCE_README.encode())
+                            run(root, 'update-index', '--add', '--cacheinfo', '100644', readme, 'README.md', extra=index)
+                        run(root, 'update-index', '-z', '--index-info', data=b''.join(entries), extra=index)
+                        base = run(root, 'write-tree', '--missing-ok', extra=index)
+                        commit = run(root, 'commit-tree', base, *(['-p', tip] if tip else []),
+                                     data=f'qa keep: {copy.kind} {copy.name}\n'.encode())
+                    pushed = run(root, 'push', 'origin', commit + ':refs/heads/evidence', check=False)
+                    if pushed.returncode == 0:
+                        return commit, tree
+                return None, tree
+            except Problem:
+                if time.monotonic() >= deadline:
+                    return None, tree
+                raise
+
+
+def keep_walk(name, directory, workspace, options):
+    need(re.fullmatch(NAME, name), 'invalid walk name: ' + name)
+    directory = Path(os.path.abspath(directory))
+    snapshot = Snapshot.read(directory, options['QA_EVIDENCE_KIB'] * 1024)
+    if snapshot.refusals:
+        for refusal in snapshot.refusals:
+            print(f'refused: {refusal}')
+        raise Problem(f'copy refused ({len(snapshot.refusals)})')
+    runs = []
+    for path in (workspace.tmp / 'codex-run').glob('*/meta'):
+        try:
+            no_links(workspace.tmp, path)
+            with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), 'rb') as source:
+                info = os.fstat(source.fileno())
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                    continue
+                data = source.read(1024 * 1024 + 1)
+            if len(data) > 1024 * 1024:
+                continue
+            fields = dict(line.split('=', 1) for line in data.decode().splitlines() if '=' in line)
+            report = Path(fields.get('report', ''))
+            if (report.is_absolute() and (report := Path(os.path.abspath(report))) != directory
+                    and report.is_relative_to(directory)
+                    and re.fullmatch(r'[a-zA-Z0-9_-]+', path.parent.name)):
+                runs.append(path.parent.name)
+        except (OSError, UnicodeError, Problem):
+            continue
+    run = runs[0] if len(runs) == 1 else 'unknown'
+    writer = os.environ.get('POST_NAME') or os.environ.get('USER', 'unknown')
+    copy = Copy('walk', name, snapshot, directory, run, '-', workspace.machine())
+    commit, _ = Evidence(workspace, writer, options['QA_EVIDENCE_SECONDS']).keep(copy)
+    need(commit, f'{copy.directory()}: not pushed; run it again', 1)
+    print(commit)
+    for tree, (count, size, unreadable) in snapshot.left_out.items():
+        print(f'left out: {tree}, {count} files, {size} bytes'
+              + (f', {unreadable} entries unreadable' if unreadable else ''))
     return 0
 
 
@@ -1057,14 +1281,14 @@ def log(message):
 def settings(workspace):
     # Same precedence and valid machine.env lines as kit.sh's machine_setting.
     values = dict(QA_SLOTS='1', QA_BATCH='5', QA_CAP_MINUTES='120', QA_INTERVAL_SECONDS='300',
-                  QA_GIVE_BACK_SECONDS='90', QA_EVIDENCE_KIB='2048', QA_STOP_SECONDS='50', QA_LOGIN_RESERVE='2', QA_WALK_KINDS='forgejo=2:chatgpt claude=2:claude')
+                  QA_GIVE_BACK_SECONDS='90', QA_EVIDENCE_KIB='2048', QA_EVIDENCE_SECONDS='120', QA_STOP_SECONDS='50', QA_LOGIN_RESERVE='2', QA_WALK_KINDS='forgejo=2:chatgpt claude=2:claude')
     path = workspace.tmp / 'machine.env'
     try:
         text = path.read_text(errors='replace')
     except OSError:
         text = ''  # kit.sh ignores an absent or unreadable machine file.
     for line in text.split('\n'):
-        match = re.fullmatch(r'(QA_SLOTS|QA_BATCH|QA_CAP_MINUTES|QA_INTERVAL_SECONDS|QA_GIVE_BACK_SECONDS|QA_STOP_SECONDS|QA_LOGIN_RESERVE|QA_EVIDENCE_KIB)=([0-9]+)', line)
+        match = re.fullmatch(r'(QA_SLOTS|QA_BATCH|QA_CAP_MINUTES|QA_INTERVAL_SECONDS|QA_GIVE_BACK_SECONDS|QA_STOP_SECONDS|QA_LOGIN_RESERVE|QA_EVIDENCE_KIB|QA_EVIDENCE_SECONDS)=([0-9]+)', line)
         if match:
             values[match[1]] = match[2]
         if line.startswith('QA_WALK_KINDS='):
@@ -1076,6 +1300,7 @@ def settings(workspace):
         values[key] = int(value)
     need(values['QA_BATCH'] > 0, 'QA_BATCH must be positive')
     need(values['QA_EVIDENCE_KIB'] > 0, 'QA_EVIDENCE_KIB must be positive')
+    need(values['QA_EVIDENCE_SECONDS'] > 0, 'QA_EVIDENCE_SECONDS must be positive')
     need(0 < values['QA_STOP_SECONDS'] < 60, 'QA_STOP_SECONDS must be positive and below 60')
     parsed, totals = {}, {}
     need(kinds.strip() and not any(ord(c) < 32 or 0x7f <= ord(c) < 0xa0 for c in kinds),
@@ -2791,7 +3016,9 @@ def main():
     giving.add_argument('name')
     giving.add_argument('--as', dest='holder', required=True)
     keep = sub.add_parser('keep')
-    keep.add_mutually_exclusive_group(required=True).add_argument('--check', metavar='DIRECTORY')
+    keeping = keep.add_mutually_exclusive_group(required=True)
+    keeping.add_argument('--check', metavar='DIRECTORY')
+    keeping.add_argument('--walk', nargs=2, metavar=('NAME', 'DIRECTORY'))
     service = sub.add_parser('watch')
     service.add_argument('--director', required=True)
     service.add_argument('--once', action='store_true')
@@ -2808,7 +3035,9 @@ def main():
         if args.command == 'walk':
             return walk(args, workspace)
         if args.command == 'keep':
-            return keep_check(args.check, settings(workspace))
+            options = settings(workspace)
+            return (keep_check(args.check, options) if args.check is not None else
+                    keep_walk(*args.walk, workspace, options))
         if args.command == 'watch':
             return watch(args.director, args.once, workspace)
         why = getattr(args, 'why', '') or ''
