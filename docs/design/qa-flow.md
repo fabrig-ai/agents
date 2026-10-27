@@ -577,7 +577,14 @@ the director says so to the user.
   in `~/.config/agents-qa/stuck` on the service's machine, one a line
   (design/upgrades-draft's, 10-27), the director's to keep. Each
   address's delivery is saved and tried again at each check until
-  accepted, once per stuck login.
+  accepted, once per stuck login (per attempt, for a walk). Its body
+  names the login, its resting path and pool, the pass or walk, its
+  directory, its units still up, and that it counts against its class's
+  cap until it is back. The recipients are read at the first failed
+  give and kept; the file is read without following a link, a regular
+  file of at most 16 KiB, at most 16 addresses, `#` for comments, and
+  one absent or damaged leaves the director alone. As every post of
+  the service's, an alert is sent at least once (agents 5330c8b).
 - **A pass's end, in order,** each step saved in its `pass.json` before
   the next, and each one not done tried again at the next check:
   1. the report and the evidence (section 5, 11.4);

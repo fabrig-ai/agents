@@ -303,11 +303,11 @@ the first's:
 
 ### 6.4 A stuck login
 
-- **The alert,** once piece 5 lands, goes at once to the addresses in
-  hetzner6's `~/.config/agents-qa/stuck` (design/upgrades-draft@hetzner6)
-  and to the director (qa-flow.md 10.3). Until then a pass's stuck login
-  is in its notice to the director, and a walk's in its end post to
-  whoever started it.
+- **The alert** goes at once, before the pass's notice or the walk's
+  end post, to the director and to the addresses in hetzner6's
+  `~/.config/agents-qa/stuck` (design/upgrades-draft@hetzner6), once
+  per stuck login, retried until accepted (qa-flow.md 10.3; agents
+  5330c8b). Rolling `qa` back past 5330c8b drains pending alerts first.
 - **One hand on the box:** the owner design/upgrades-draft names alone
   touches the deployment that holds the login (with none named, the
   director names one), and nobody restarts it meanwhile.
@@ -369,8 +369,9 @@ The director's, on hetzner6:
   - `QA_EVIDENCE_KIB` 2048, read once the evidence's keeping lands.
 
   qa-flow.md 7 lists them with their defaults.
-- **`~/.config/agents-qa/stuck`:** `design/upgrades-draft@hetzner6`,
-  read once piece 5 lands.
+- **`~/.config/agents-qa/stuck`:** `design/upgrades-draft@hetzner6`;
+  one address a line, `#` for comments, at most 16; absent or damaged,
+  the alert goes to the director alone.
 - **The open rung:** `qa rung temper real-model --login chatgpt`, the
   pool.
 - **Default choosing:** `qa default temper on`, the director's, once
@@ -378,12 +379,13 @@ The director's, on hetzner6:
   by default (qa-flow.md 3); `qa default temper` shows it, `off` stops
   it. Rolling back past 45c713a needs an explicit `qa decide ... run`
   for each commit a default alone keeps chosen.
-- **What lands next** (o/qa-evidence-keep): 5, the stuck alert. Each
+- **What lands next** (o/qa-evidence-keep): the evidence's keeping
+  (section 8), once the director lifts its pause. Each
   landing's post says what hetzner6 needs. Landed: the pool (b3abf0e),
   passes side by side (8935bc9), the reserve and `--now` (86f918b), `qa
   walk` by kind with pause and resume, `qa take` and `logins drop`
   (b844696), marked commits by default (45c713a), triage by landing and
-  `landings landed` (66efd32). Rolling `qa` back past 66efd32 leaves
+  `landings landed` (66efd32), the stuck alert (5330c8b). Rolling `qa` back past 66efd32 leaves
   saved routes unused: untriaged findings return to the director's
   queue.
 
@@ -477,3 +479,5 @@ Newest last, times UTC.
   66efd32); passes ended before it stay the director's
   (design/qa-evidence).
 - 10-27 21:2xZ: QA's choosing by default (agents 45c713a) and triage by landing (agents 66efd32) built; section 4 updated (the director).
+- 10-27 21:4xZ: the stuck alert landed (agents 5330c8b): the last of
+  the day's exempt QA kit (design/qa-evidence).
