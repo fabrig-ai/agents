@@ -200,6 +200,29 @@ class Repositories:
         git(path, 'clean', '-fdq')
         return path
 
+    def build(self, repo, ref):
+        why = f'build {ref}: no branch origin/{ref} and no commit; try origin/<branch> or a commit'
+        with self.fetched(repo) as root:
+            branch = ref[7:] if ref.startswith('origin/') else ref
+            remote = None
+            if git(root, 'check-ref-format', 'refs/heads/' + branch, check=False).returncode == 0:
+                resolved = git(root, 'rev-parse', '--verify', 'refs/remotes/origin/' + branch + '^{commit}', check=False)
+                if resolved.returncode == 0 and re.fullmatch(SHA, resolved.stdout.strip()):
+                    remote = resolved.stdout.strip()
+            if ref.startswith('origin/') or ref == 'main':
+                need(remote, why)
+                return remote
+            if re.fullmatch(r'[0-9a-fA-F]{4,40}', ref):
+                resolved = git(root, 'rev-parse', '--disambiguate=' + ref.lower(), check=False)
+                objects = resolved.stdout.splitlines()
+                need(resolved.returncode == 0 and len(objects) == 1 and re.fullmatch(SHA, objects[0])
+                     and git(root, 'cat-file', '-t', objects[0]) == 'commit', why)
+                need(not remote, f'build {ref}: ambiguous branch and commit; try origin/{ref} for the branch '
+                     f'or the full commit {objects[0]}')
+                return objects[0]
+            need(not re.fullmatch(r'[0-9a-fA-F]+', ref) and remote, why)
+            return remote
+
     def resolve(self, repo, prefixes):
         with self.fetched(repo) as root:
             commits = []
@@ -2126,6 +2149,8 @@ def walk(args, workspace):
     options = settings(workspace)
     service = Watch(workspace, '')
     service.options = options
+    ref = args.build if args.build is not None else 'main'
+    main = service.repositories.build(args.repo, ref)
     with service.walks_locked():
         focused = workspace.tmp / 'qa-focused'
         no_links(workspace.tmp, focused)
@@ -2151,7 +2176,7 @@ def walk(args, workspace):
             service.save(directory, state)
             previous_run = next((a['run'] for a in reversed(state['attempts']) if a.get('run')), '')
             need(previous_run, 'paused walk has no earlier run')
-            state.update(attempt=state['attempt'] + 1, ref=args.build, cap=args.cap or state['cap'],
+            state.update(attempt=state['attempt'] + 1, ref=ref, main=main, cap=args.cap or state['cap'],
                          started=timestamp(), slot=None, logins={}, kinds={}, pools={}, given=[],
                          requests=state['requests'], run='', holder='walk/' + kind + '/' + name,
                          stage='reserving', released=False, start_logged=False, end_logged=False,
@@ -2180,7 +2205,7 @@ def walk(args, workspace):
             directory = focused / name
             directory.mkdir(mode=0o700)
             state = dict(walk=name, repo=args.repo, rung=args.rung, kind=kind,
-                         clock_walk=name[len('rung-' + args.rung + '-'):], ref=args.build if args.build is not None else 'main',
+                         clock_walk=name[len('rung-' + args.rung + '-'):], ref=ref, main=main,
                          starter=starter + '@' + workspace.machine(), cap=args.cap or 180, started=timestamp(),
                          slot=None, holder='walk/' + kind + '/' + name, logins={}, kinds={}, pools={}, run='',
                          stage='reserving', requests=requests, given=[], released=False,
@@ -2196,7 +2221,7 @@ def walk(args, workspace):
         try:
             slot = f'{args.repo}-walk-{kind}-{state["slot"]}'
             with service.repositories.fetched(args.repo) as root:
-                service.repositories.checkout(root, args.repo, slot, 'refs/remotes/origin/main')
+                checkout = service.repositories.checkout(root, args.repo, slot, state['main'])
             for pool in state['requests']:
                 service.walk_room([pool], kind)
                 taken = service.call('logins', 'take', pool, '--any', '--now', '--as', state['holder'],
@@ -2214,26 +2239,6 @@ def walk(args, workspace):
                     mode = 0
                 state['kinds'][login] = 'in-place' if stat.S_ISDIR(mode) else 'moved'
                 service.save(directory, state)
-            with service.repositories.fetched(args.repo) as root:
-                ref = state['ref']
-                if ref == 'main':
-                    ref = 'origin/main'
-                if ref.startswith('origin/'):
-                    need(git(root, 'check-ref-format', 'refs/heads/' + ref[7:], check=False).returncode == 0,
-                         f'unresolvable build: {state["ref"]}', 1)
-                    resolved = git(root, 'rev-parse', '--verify', 'refs/remotes/' + ref + '^{commit}', check=False)
-                    need(resolved.returncode == 0 and re.fullmatch(SHA, resolved.stdout.strip()),
-                         f'unresolvable build: {state["ref"]}', 1)
-                    state['main'] = resolved.stdout.strip()
-                else:
-                    need(re.fullmatch(r'[0-9a-fA-F]{4,40}', ref), f'unresolvable build: {ref}', 1)
-                    resolved = git(root, 'rev-parse', '--disambiguate=' + ref.lower(), check=False)
-                    objects = resolved.stdout.splitlines()
-                    need(resolved.returncode == 0 and len(objects) == 1 and re.fullmatch(SHA, objects[0])
-                         and git(root, 'cat-file', '-t', objects[0]) == 'commit', f'unresolvable build: {ref}', 1)
-                    state['main'] = objects[0]
-                checkout = service.repositories.checkout(root, args.repo, slot, state['main'])
-            service.save(directory, state)
             if args.resume is not None:
                 report = directory / 'report.md'
                 no_links(workspace.tmp, report)

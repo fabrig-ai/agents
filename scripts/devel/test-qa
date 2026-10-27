@@ -4042,8 +4042,6 @@ def a_walk_resolves_origin_branches_and_commit_prefixes(lab):
 
 
 def a_walk_preparation_refusal_returns_its_grants(lab):
-    for ref in ('origin/missing', 'HEAD~1'):
-        lab.walk('b0', '--build', ref, '--login', CHATGPT, status=1)
     # Read the absent brief without Lab.walk creating one for this request.
     lab.run('walk', 'temper', 'missing', '--login', CHATGPT, status=1)
     assert all(state['stage'] == 'ended' and state['released'] and state['given'] == [CHATGPT]
@@ -4052,7 +4050,7 @@ def a_walk_preparation_refusal_returns_its_grants(lab):
     assert not list((lab.tmp / 'qa-focused').glob('*/loop.tsv'))
     lab.configure(refuse_launch=True)
     lab.walk('b0', '--login', CHATGPT, status=1)
-    state = next(state for _, state in lab.walk_states() if state['walk'] == 'rung-b0-3')
+    state = next(state for _, state in lab.walk_states() if state['walk'] == 'rung-b0-1')
     assert state['released'] and state['stage'] == 'ended' and state['given'] == [CHATGPT]
 
 
@@ -5235,7 +5233,9 @@ def a_new_walk_grant_checks_existing_claims_before_giving(lab):
     forged = dict(original, logins={claimed: str(lab.root / 'resting' / claimed)},
                   kinds={claimed: 'moved'}, pools={CHATGPT: claimed})
     (directory / 'pass.json').write_text(json.dumps(forged))
-    result = lab.walk('b0', '--login', CHATGPT, '--build', 'origin/missing', status=1)
+    # A missing brief fails after the grant; an invalid build is refused before it.
+    result = lab.run('walk', 'temper', 'b0', '--login', CHATGPT, status=1)
+    assert 'rung brief missing:' in result.stderr
     assert f'{claimed}: conflicting custody claims' in result.stdout
     walk = lab.walk_state()[1]
     assert walk['pools'] == {CHATGPT: claimed} and walk['stage'] == 'cancelled'
@@ -5329,13 +5329,74 @@ def hex_walk_builds_refuse_ambiguous_and_non_commit_objects(lab):
     commit = lab.git(origin, 'rev-parse', 'HEAD')
     lab.git(origin, 'tag', commit[:9], sha)
     for ref in (sha[:4], sha, first_sha):
-        result = lab.walk('b0', '--build', ref, '--login', CHATGPT, status=1)
-        assert 'unresolvable build' in result.stderr
-    assert not lab.calls('codex-run')
-    assert all(state['given'] == [CHATGPT] and state['released'] for _, state in lab.walk_states())
+        result = lab.walk('b0', '--build', ref, '--login', CHATGPT, status=2)
+        assert 'try origin/<branch> or a commit' in result.stderr
+    assert not lab.calls('codex-run') and not lab.calls('logins') and not lab.walk_states()
     lab.walk('b0', '--build', commit[:9].upper())
     state = next(state for _, state in lab.walk_states() if state['run'])
     assert state['main'] == commit
+
+
+def a_bare_branch_resolves_to_origins(lab):
+    main = lab.marked()
+    fix = lab.commit('bare branch fix', branch='fix')
+    # A branch moving after resolution must not change the saved build.
+    driver = f'''original = tool['Repositories'].checkout
+def checkout(self, root, repo, slot, main):
+    tool['git'](root, 'update-ref', 'refs/remotes/origin/fix', {main!r})
+    return original(self, root, repo, slot, main)
+tool['Repositories'].checkout = checkout
+'''
+    lab.walk('b0', '--build', 'fix')
+    driven_walk(lab, driver, '--build', 'origin/fix')
+    first, second = lab.walk_states()
+    assert first[1]['ref'] == 'fix' and second[1]['ref'] == 'origin/fix'
+    assert first[1]['main'] == second[1]['main'] == fix
+    for slot in (1, 2):
+        assert lab.git(lab.tmp / f'qa/repos/temper-walk-forgejo-{slot}', 'rev-parse', 'HEAD') == fix
+    assert lab.git(lab.tmp / 'qa/repos/temper', 'rev-parse', 'refs/remotes/origin/fix') == main
+
+
+def an_unresolvable_build_takes_nothing(lab):
+    for ref in ('nosuch', 'origin/missing', 'HEAD~1', '../main', 'bad..branch', 'abc', '1234'):
+        result = lab.walk('b0', '--build', ref, '--login', CHATGPT, status=2)
+        assert result.stderr == (f'qa: build {ref}: no branch origin/{ref} and no commit; '
+                                 'try origin/<branch> or a commit\n')
+    assert not lab.calls('logins') and not lab.calls('codex-run') and not lab.walk_states()
+    assert not (lab.tmp / 'qa/walks').exists()
+    assert not list((lab.tmp / 'qa/repos').glob('temper-walk-*'))
+    assert not list((lab.tmp / 'qa-focused').glob('*/loop.tsv'))
+    assert not list((lab.tmp / 'qa-focused').glob('rung-b0-1'))
+    directory, state = walk_with_logins(lab, CHATGPT)
+    pause_walk(lab, directory, state)
+    saved = lab.tmp / 'qa/walks' / (state['walk'] + '.json')
+    paths = [saved, directory / 'paused', directory / 'report.md', directory / 'notes.md',
+             directory.parent / 'b0/loop.tsv']
+    before = [path.read_bytes() for path in paths]
+    calls = lab.calls('logins')
+    slots = lab.git(lab.tmp / 'qa/repos/temper', 'worktree', 'list', '--porcelain')
+    result = lab.run('walk', 'temper', 'b0', '--resume', state['walk'], '--build', 'nosuch', status=2)
+    assert 'try origin/<branch> or a commit' in result.stderr
+    assert lab.calls('logins') == calls and len(lab.calls('codex-run')) == 1
+    assert [path.read_bytes() for path in paths] == before
+    assert lab.git(lab.tmp / 'qa/repos/temper', 'worktree', 'list', '--porcelain') == slots
+    assert len(lab.walk_states()) == 1 and not (directory / 'report-1.md').exists()
+
+
+def an_ambiguous_build_is_refused(lab):
+    commit = lab.marked()
+    fix = lab.commit('branch with a hexadecimal name', branch=commit[:9])
+    result = lab.walk('b0', '--build', commit[:9], '--login', CHATGPT, status=2)
+    assert 'ambiguous branch and commit' in result.stderr
+    assert 'origin/' + commit[:9] in result.stderr and 'full commit ' + commit in result.stderr
+    assert not lab.calls('logins') and not lab.calls('codex-run') and not lab.walk_states()
+    assert not (lab.tmp / 'qa/walks').exists()
+    assert not list((lab.tmp / 'qa/repos').glob('temper-walk-*'))
+    assert not list((lab.tmp / 'qa-focused').glob('*/loop.tsv'))
+    lab.walk('b0', '--build', 'origin/' + commit[:9])
+    lab.walk('b0', '--build', commit)
+    first, second = lab.walk_states()
+    assert first[1]['main'] == fix and second[1]['main'] == commit
 
 
 CASES = (a_stuck_login_alerts_the_director_and_the_list, a_refused_alert_is_sent_again,
@@ -5374,6 +5435,7 @@ CASES = (a_stuck_login_alerts_the_director_and_the_list, a_refused_alert_is_sent
          deeply_nested_and_oversized_states_keep_custody_without_stopping_checks,
          a_walk_resolves_remote_branches_despite_colliding_tags,
          hex_walk_builds_refuse_ambiguous_and_non_commit_objects,
+         a_bare_branch_resolves_to_origins, an_unresolvable_build_takes_nothing, an_ambiguous_build_is_refused,
          manual_kind_holders_stay_held_when_watcher_checks, kind_slots_are_shared_across_repositories,
          walk_kind_settings_are_validated_and_follow_precedence, a_refused_now_take_reports_the_broken_caps,
          pre_kind_walks_drain_before_kind_admission, numbering_survives_a_change_of_default_kind,
