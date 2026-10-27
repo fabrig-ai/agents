@@ -267,6 +267,17 @@ cgroup and its recorded cgroup path, using cgroup v2 `populated` evidence.
 A release occurs only after neither contains processes. Old boot IDs do
 not authorize skipping the current unit check.
 
+**The payload adopts its orphans** (10-27: three user managers exited
+in an hour, each killing every heavy unit and runner on its machine: a
+test's process whose parent had died was adopted by `systemd --user`
+and signalled "its parent", and a user manager exits on SIGTERM). The
+payload unit's top process, the guard below, makes itself a child
+subreaper (`PR_SET_CHILD_SUBREAPER`) before it starts the requested
+command, and stays as its parent: an orphan of the payload is adopted
+by it, a stray signal to "the parent" ends that one task, and the guard
+reaps what it adopted before the payload ends. The wrapper, in a unit
+of its own, is no ancestor of the payload and cannot do it.
+
 The cgroup payload guard takes the host lock and verifies an unreleased
 launching token, a live wrapper, the boot identity and its owned populated
 cgroup before any policy preparation or requested command. It durably
@@ -1157,6 +1168,11 @@ last run's commit:
   and the tip cleared. A commit's first landing is the landing whose
   range holds it; an existing failure still counts against that first
   landing alone.
+
+**The follower adopts its orphans,** as heavy's payload does (section
+3): it makes itself a child subreaper at its start, so that an orphan
+of what it runs outside heavy (git, ssh, post) never reaches the user
+manager, and reaps them.
 
 **Its records** go in the landing feed (section 10), beside the sets'.
 None has a `set` key, so the readers of sets skip them. Each has `time`,
