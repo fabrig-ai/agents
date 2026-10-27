@@ -2318,7 +2318,7 @@ sys.exit(tool['main']())
 def keep_check_hides_invalid_walk_settings(lab):
     value = secrets.token_hex(12)
     scratch = lab.scratch({'brief.md': 'plain\n'})
-    for word in (value, 'other=1:' + value):
+    for word in (value, 'other=1:' + value + '/invalid'):
         for file_setting in (False, True):
             kinds = 'forgejo=1:chatgpt  ' + word
             extra = {} if file_setting else {'QA_WALK_KINDS': kinds}
