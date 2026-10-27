@@ -1917,7 +1917,7 @@ sys.exit(tool['main']())
 '''
     result = subprocess.run([sys.executable, '-I', '-S', '-c', driver, 'watch', '--director',
                              'director@fixture', '--once'], env=lab.env, capture_output=True,
-                            text=True, timeout=60)
+                            text=True, timeout=HUNG_TOOL_S)
     assert result.returncode == 0, (result.stdout, result.stderr)
     return result
 
@@ -2640,7 +2640,25 @@ tool['Record'].commit = commit
     assert len(lab.calls('codex-run')) == 2
 
 
-TIMEOUT_DRIVER = """original = tool['command']
+TIMEOUT_DRIVER = """import os, time
+from pathlib import Path
+subprocess = tool['subprocess']
+original_popen = subprocess.Popen
+class ReadyPopen(original_popen):
+    def communicate(self, input=None, timeout=None):
+        if timeout == 0.3:
+            # Start the short deadline only after the intended side effect.
+            marker = Path(os.environ['QA_FIXTURE']) / 'hung-tool'
+            deadline = time.monotonic() + 300
+            while not (marker.exists() and marker.read_text() == str(self.pid)):
+                if self.poll() is not None or time.monotonic() >= deadline:
+                    self.kill()
+                    super().communicate()
+                    raise AssertionError('fixture tool never reached its hang')
+                time.sleep(0.01)
+        return super().communicate(input=input, timeout=timeout)
+subprocess.Popen = ReadyPopen
+original = tool['command']
 def command(argv, cwd=None, timeout=None):
     name = str(argv[0]).rsplit('/', 1)[-1]
     expected = {'git': 300, 'record': 300, 'systemctl': 30, 'logins': 60,
