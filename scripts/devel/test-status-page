@@ -739,9 +739,10 @@ def unblocking(lab, name):
     write(readme, re.sub(r'^blocked:.*\n', '', readme.read_text(), flags=re.M))
 
 
-def history_absent(lab, *outputs):
-    """No whole or abbreviated commit hash escapes the records' history."""
-    for commit in lab.history_hashes if hasattr(lab, 'history_hashes') else lab.git('log', '--format=%H').splitlines():
+def history_absent(hashes, *outputs):
+    """No commit hash of the records' history, whole or as its 7-digit
+    abbreviation, in any of outputs (status-page.md 2.4)."""
+    for commit in hashes:
         for output in outputs:
             assert commit not in output and commit[:7] not in output, 'history hash escaped'
 
@@ -804,7 +805,7 @@ def page_blocked_on_you(lab):
         assert mission['blocked_since'] == (int(NOW) - hours * 3600 if hours else None), mission
     footer = page[page.index('<footer>'):]
     assert 'records: history:' not in footer
-    history_absent(lab, page, json.dumps(data), footer)
+    history_absent(lab.git('rev-list', '--all').split(), page, json.dumps(data), footer)
     for readme in (lab.records / 'missions').glob('*/README.md'):
         unblocking(lab, readme.parent.name)
     page, _ = subscription_page(lab)
@@ -821,6 +822,8 @@ def blocked_history_failures(lab):
     blocking(lab, 'paused-m', 'qa#2')
     lab.commit(5)
 
+    hashes = lab.git('rev-list', '--all').split()
+
     def check(reason, **env):
         out, snapshot = lab.root / 'page.html', lab.root / 'data.json'
         started = time.monotonic()
@@ -835,7 +838,7 @@ def blocked_history_failures(lab):
         assert all(m['blocked_since'] is None for m in data['records']['missions'])
         footer = page[page.index('<footer>'):]
         assert re.findall(r'records: history: ([^<]+)', footer) == [reason], footer
-        history_absent(lab, page, raw, footer)
+        history_absent(hashes, page, raw, footer)
         return page, raw, result.stderr
 
     shallow = lab.root / 'shallow'
@@ -850,7 +853,6 @@ def blocked_history_failures(lab):
     tool(fake, 'git', f'import time\nprint({message!r}, file=sys.stderr, flush=True)\ntime.sleep(60)\n')
     page, raw, stderr = check('timed out', PATH=path, STATUS_HISTORY_TIMEOUT='1')
     assert message in stderr and message not in page and message not in raw
-    lab.history_hashes = lab.git('log', '--format=%H').splitlines()
     shutil.rmtree(lab.records / '.git')
     check('no git repository')
 
