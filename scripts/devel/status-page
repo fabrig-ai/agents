@@ -742,22 +742,123 @@ def references(value):
                               if re.fullmatch(rf'({repos})#[1-9][0-9]*', word)))
 
 
+def front_matter(text):
+    """A README's public front-matter fields, as section 2's records row reads them."""
+    text = text.replace('\r\n', '\n').replace('\r', '\n')
+    front = re.match(r'\A---\n(.*?)\n---', text, re.S)
+    fields = {}
+    for line in front[1].splitlines() if front else []:
+        key, sep, value = line.partition(':')
+        if sep and key.strip() in (*FRONT, 'started', 'blocked'):
+            fields[key.strip()] = value.strip()
+    return fields
+
+
 def records(root):
     """Public missions: {'missions': [...]}; no STATUS.md or mission bodies."""
     if not (root / 'missions').is_dir():
         raise FileNotFoundError(f'{root}/missions: no such directory')
     missions = []
     for readme in sorted((root / 'missions').glob('*/README.md')):
-        front = re.match(r'\A---\n(.*?)\n---', readme.read_text(errors='replace'), re.S)
-        fields = {}
-        for line in front[1].splitlines() if front else []:
-            key, sep, value = line.partition(':')
-            if sep and key.strip() in (*FRONT, 'started', 'blocked'):
-                fields[key.strip()] = value.strip()
+        fields = front_matter(readme.read_text(errors='replace'))
         missions.append({'name': readme.parent.name, **{k: fields.get(k, '') for k in FRONT},
                          'started': stamp(fields.get('started')),
                          'blocked': references(fields.get('blocked', ''))})
     return {'missions': missions}
+
+
+def history_timeout():
+    return float(os.environ.get('STATUS_HISTORY_TIMEOUT') or 30)
+
+
+def blocked_since(root, names):
+    """Since when each named mission has waited on the user, from its
+    README's first-parent history on HEAD (status-page.md 2.4):
+    ({name: seconds or None}, [reason, ...]), each reason once, in fixed
+    words. Only commit times leave git."""
+    since = dict.fromkeys(sorted(names))
+    reasons = []
+    if not since:
+        return since, reasons
+    if not (root / '.git').exists():
+        return since, ['no git repository']
+    env = {k: v for k, v in os.environ.items() if not k.startswith('GIT_')}
+    deadline = time.monotonic() + history_timeout()
+
+    def git(*args, data=None):
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise subprocess.TimeoutExpired('git', 0)
+        result = subprocess.run(['git', '-C', str(root), '--literal-pathspecs', *args],
+                                input=data, stdin=subprocess.DEVNULL if data is None else None,
+                                capture_output=True, env=env, timeout=left)
+        if result.stderr:
+            print('status-page: records: history: ' + result.stderr.decode(errors='replace').rstrip(),
+                  file=sys.stderr)
+        if result.returncode:
+            raise ValueError('git exited unsuccessfully')
+        return result.stdout
+
+    def failed(error):
+        reason = 'timed out' if isinstance(error, subprocess.TimeoutExpired) else 'git failed'
+        if reason not in reasons:
+            reasons.append(reason)
+        if isinstance(error, subprocess.TimeoutExpired) and error.stderr:
+            print('status-page: records: history: ' + error.stderr.decode(errors='replace').rstrip(),
+                  file=sys.stderr)
+        print(f'status-page: records: history: {error}', file=sys.stderr)
+
+    try:
+        shallow = git('rev-parse', '--is-shallow-repository')
+        if shallow == b'true\n':
+            return since, ['shallow']
+        if shallow != b'false\n':
+            raise ValueError('invalid shallow answer')
+    except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+        failed(error)
+        return since, reasons
+    for name in since:
+        try:
+            path = f'missions/{name}/README.md'
+            log = git('log', '--first-parent', '--format=%H %ct', '--', path)
+            commits = []
+            for line in log.splitlines():
+                match = re.fullmatch(rb'([0-9a-f]{40}|[0-9a-f]{64}) (-?[0-9]+)', line)
+                if not match:
+                    raise ValueError('invalid history answer')
+                commits.append((match[1].decode(), int(match[2])))
+            if not commits:
+                continue
+            queries = [f'{commit}:{path}' for commit, _ in commits]
+            answer = git('cat-file', '--batch', data=('\n'.join(queries) + '\n').encode())
+            versions = []
+            for query in queries:
+                header, sep, answer = answer.partition(b'\n')
+                if not sep:
+                    raise ValueError('missing version header')
+                if header == (query + ' missing').encode():
+                    versions.append('')
+                    continue
+                match = re.fullmatch(rb'(?:[0-9a-f]{40}|[0-9a-f]{64}) blob ([0-9]+)', header)
+                if not match:
+                    raise ValueError('invalid version header')
+                size = int(match[1])
+                if len(answer) <= size or answer[size:size + 1] != b'\n':
+                    raise ValueError('incomplete version')
+                versions.append(answer[:size].decode(errors='replace'))
+                answer = answer[size + 1:]
+            if answer:
+                raise ValueError('extra version data')
+            for (_, at), version in zip(commits, versions):
+                if not references(front_matter(version).get('blocked', '')):
+                    break
+                since[name] = at
+        except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+            since[name] = None
+            failed(error)
+            if isinstance(error, subprocess.TimeoutExpired):
+                break
+    return since, reasons
 
 
 def gather_all(machines_file, records_root, pulling, source):
@@ -781,6 +882,10 @@ def gather_all(machines_file, records_root, pulling, source):
                 fleet[name] = {'unreachable': f'{type(error).__name__}: {error}'}
     try:
         recorded = records(records_root)
+        since, reasons = blocked_since(records_root, [m['name'] for m in recorded['missions'] if parked(m)])
+        for m in recorded['missions']:
+            m['blocked_since'] = since.get(m['name'])
+        errors.extend(f'records: history: {reason}' for reason in reasons)
     except OSError as error:
         recorded = None
         errors.append(f'records: {error}')
@@ -1211,9 +1316,9 @@ def kpis(fleet, shown, subscribed):
     waiting = blocked(fleet)
     if waiting:
         title = '; '.join(f'{name}: {", ".join(refs)}' for name, refs in waiting)
-        blocked_sub = f'<span title="{E(title)}">{len(waiting)} blocked</span>'
+        blocked_sub = f'<a href="#blocked" title="{E(title)}">{len(waiting)} blocked</a>'
     else:
-        blocked_sub = '– blocked' if waiting is None else '0 blocked'
+        blocked_sub = '<a href="#blocked">' + ('– blocked' if waiting is None else '0 blocked') + '</a>'
     issues_sub = blocked_sub + ' · ' + issues_sub
     day = fleet.window(DAY)
     lands = [r for r in day if r[7] == 'land']
@@ -1241,6 +1346,12 @@ def user_issues(fleet):
                  if any(number(shaped(answer.get('open'), {}).get(repo)) is not None for repo, _ in ISSUES)), None)
 
 
+def parked(mission):
+    """Whether the record holds the mission active or paused with a
+    blocked naming an issue: those the blocked count counts (status-page.md 3)."""
+    return mission.get('state') in ('active', 'paused') and bool(mission.get('blocked'))
+
+
 def blocked(fleet):
     """The missions the record holds active or paused whose blocked names
     an issue, as (name, references), by name (status-page.md 3); None
@@ -1248,7 +1359,7 @@ def blocked(fleet):
     if not fleet.records_read:
         return None
     return [(name, mission['blocked']) for name, mission in sorted(fleet.recorded.items())
-            if mission['state'] in ('active', 'paused') and mission['blocked']]
+            if parked(mission)]
 
 
 def reason_kind(reason):
@@ -1403,6 +1514,32 @@ def missions(fleet):
              **{s: sum(recorded.get(n, {}).get('state') == s for n in seen) for s in ('active', 'paused')}}
     return shown, table(['Mission', 'Record', 'Description', 'Now', 'Last activity'],
                         rows, numeric_from=9, wrap=(2,), empty='No mission is active, paused or busy.')
+
+
+def issue_link(reference):
+    """Where an issue reference (temper#9) is on git.fabrig.ai."""
+    repo, issue = reference.split('#')
+    return f'https://git.fabrig.ai/fabrig-ai/{repo}/issues/{issue}'
+
+
+def blocked_table(fleet):
+    """Blocked on you (status-page.md 3): each mission the blocked count
+    counts, the longest waiting first, then those whose since is unknown,
+    each set by name."""
+    waiting = blocked(fleet)
+    if waiting is None:
+        return '<p class="empty">The record was not read this time.</p>'
+    entries = [(number(fleet.recorded[name].get('blocked_since')), name, refs)
+               for name, refs in waiting]
+    rows = []
+    for since, name, refs in sorted(entries, key=lambda e: (e[0] is None, e[0] or 0, e[1])):
+        m = fleet.recorded[name]
+        links = ', '.join(f'<a href="{E(issue_link(ref))}" target="_blank" '
+                          f'rel="noopener noreferrer">{E(ref)}</a>' for ref in refs)
+        rows.append([E(name), badge('good' if m['state'] == 'active' else 'warning', m['state']),
+                     E(description(m)) or '–', links, when(since, fleet.now)])
+    return table(['Mission', 'State', 'Description', 'Waiting on', 'Since'], rows,
+                 numeric_from=9, wrap=(2,), empty='Nothing is blocked on you.')
 
 
 def ended_missions(fleet):
@@ -1871,6 +2008,10 @@ landed or stopped.</p>
 <span class="meta">Written {E(utc(now, "%Y-%m-%d %H:%M UTC"))}, every 10 minutes ·
 {reached} of {len(fleet.names)} machines reached{(" · down: " + E(", ".join(down))) if down else ""}</span></header>
 {guard("tiles", kpis, fleet, shown, subscribed)}
+<h2 id="blocked">Blocked on you</h2>
+<p class="muted">Missions the record holds as active or paused whose <code>blocked</code> names an issue, the
+longest waiting first. Since is when the record first said so, from its history.</p>
+<div class="panel">{guard("blocked on you", blocked_table, fleet)}</div>
 <h2>Subscriptions</h2>
 <p class="muted">Distinct Claude and Codex subscriptions across the reached machines, with their current limits.
 {E("At this pace: when a limit fills before its reset, or what it reaches by then, "
@@ -1898,7 +2039,7 @@ commands in the last 24 hours. Last activity is its last command or implementer 
 <footer>
 <p>Written by agents’ <code>scripts/devel/status-page</code> from what the tools already keep: heavy’s
 <code>heavy.tsv</code> and ledger, the landings feed, the landing turns, <code>codex-run</code>’s runs,
-Claude Code’s sessions and subscription, Codex CLI’s subscription, the missions’ front matter, the open issues waiting on the user on git.fabrig.ai,
+Claude Code’s sessions and subscription, Codex CLI’s subscription, the missions’ front matter and, for those blocked, the record’s history, the open issues waiting on the user on git.fabrig.ai,
 {E("and the subscriptions' use, which it samples itself for their pace")}
 (docs/design/status-page.md). Times are UTC; p90 is the
 nearest rank.</p>

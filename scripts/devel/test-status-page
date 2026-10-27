@@ -2,20 +2,23 @@
 """Offline status-page fixtures: every case has its own temporary directory,
 and fake ssh, claude, systemctl and record stand in for the machine's."""
 from case_runner import HUNG_TOOL_S
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stderr
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
 import re
 import runpy
+import shutil
 import subprocess
 import sys
 import time
 import threading
 from urllib.parse import parse_qs, urlsplit
+from unittest.mock import patch
 import case_runner
 
 SCRIPT = Path(__file__).resolve().with_name('status-page')
@@ -182,6 +185,8 @@ class Lab:
               f'to=o/alpha-m2\nmodel=gpt-x\neffort=high\nstarted={iso(.5)}\n'
               f'task={self.alpha}/owners/alpha-m2/t.md\n')
         write(self.records / 'STATUS.md', '# Status\n\nSECRET-STATUS-LINE\n')
+        self.git('init', '-q')
+        self.commit(48)
         self.machines = write(root / 'machines',
                               'alpha local\nbeta free@beta\n# a comment\ngamma free@gamma  # out of reach\n')
         feed(root / 'feed.jsonl')
@@ -304,6 +309,21 @@ sys.exit(subprocess.run([sys.executable, '-I', '-', 'collect'], env=env, input=s
                         DEV_TMP=str(self.alpha), RECORDS=str(self.records), STATUS_MACHINES=str(self.machines),
                         STATUS_FEED=str(root / 'no-feed'), STATUS_NOW=str(NOW), FIXTURE_TRACE=str(self.trace),
                         FIXTURE_BETA=str(self.beta), XDG_CONFIG_HOME=str(root / 'config'))
+
+    def git(self, *args, **extra):
+        """The machine's git on the records tree, with chosen identities."""
+        env = {k: v for k, v in os.environ.items() if not k.startswith('GIT_')}
+        env.update(GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL='/dev/null',
+                   GIT_AUTHOR_NAME='PRIVATE-AUTHOR', GIT_AUTHOR_EMAIL='PRIVATE-AUTHOR@example.invalid',
+                   GIT_COMMITTER_NAME='PRIVATE-COMMITTER', GIT_COMMITTER_EMAIL='PRIVATE-COMMITTER@example.invalid')
+        return subprocess.run(['git', '-C', str(self.records), *args], env=dict(env, **extra),
+                              stdin=subprocess.DEVNULL, capture_output=True, text=True, check=True).stdout
+
+    def commit(self, hours_ago, what='the records'):
+        """Commit the whole records tree at NOW - hours_ago with a private message."""
+        self.git('add', '--all')
+        self.git('commit', '-q', '-m', 'PRIVATE-MESSAGE: ' + what,
+                 GIT_AUTHOR_DATE=iso(hours_ago), GIT_COMMITTER_DATE=iso(hours_ago))
 
     def claude(self, tmp, answer):
         write(tmp.parent / 'claude.json', json.dumps(answer))
@@ -522,7 +542,7 @@ def page_user_issues(lab):
         result = lab.run('--no-pull', '--out', str(out), '--json', str(snapshot),
                          STATUS_FORGEJO=base, STATUS_ISSUES_TIMEOUT='1')
         page = out.read_text()
-        sub = '0 blocked · ' + (f'{len(counts)} of 7 read · ' if counts and len(counts) < 7 else '') + links(counts)
+        sub = '<a href="#blocked">0 blocked</a> · ' + (f'{len(counts)} of 7 read · ' if counts and len(counts) < 7 else '') + links(counts)
         assert (f'<div class="label">Waiting on the user</div><div class="value">{value}</div>'
                 f'<div class="sub">{sub}</div>') in page
         anchors = re.findall(r'<a [^>]*>', page)
@@ -697,11 +717,196 @@ def page_user_issues(lab):
                                          'failed': {repo: 'HTTP 404' for repo, _ in repos if repo != 'qa'}}
     page = module['render'](data)
     assert '<div class="label">Waiting on the user</div><div class="value">1</div>' in page
-    assert '<div class="sub">0 blocked · 1 of 7 read · ' + links({'qa': 1}) + '</div>' in page
+    assert '<div class="sub"><a href="#blocked">0 blocked</a> · 1 of 7 read · ' + links({'qa': 1}) + '</div>' in page
     footer = page.split('<footer>', 1)[1]
     assert footer.count('waiting on the user:') == 6 and 'HTTP 401' not in footer
     public_roles(page, lab)
     private_absent(page)
+
+
+def blocking(lab, name, value):
+    readme = lab.records / f'missions/{name}/README.md'
+    content = readme.read_text()
+    if re.search(r'^blocked:.*$', content, re.M):
+        content = re.sub(r'^blocked:.*$', lambda _: f'blocked: {value}', content, flags=re.M)
+    else:
+        content = content.replace('---\n', f'---\nblocked: {value}\n', 1)
+    write(readme, content)
+
+
+def unblocking(lab, name):
+    readme = lab.records / f'missions/{name}/README.md'
+    write(readme, re.sub(r'^blocked:.*\n', '', readme.read_text(), flags=re.M))
+
+
+def history_absent(lab, *outputs):
+    """No whole or abbreviated commit hash escapes the records' history."""
+    for commit in lab.history_hashes if hasattr(lab, 'history_hashes') else lab.git('log', '--format=%H').splitlines():
+        for output in outputs:
+            assert commit not in output and commit[:7] not in output, 'history hash escaped'
+
+
+def blocked_section(page):
+    return page[page.index('<h2 id="blocked">'):page.index('<h2>Subscriptions')]
+
+
+def blocked_rows(page):
+    return [re.findall(r'<td[^>]*>(.*?)</td>', row)
+            for row in re.findall(r'<tr>.*?</tr>', blocked_section(page)) if '<td' in row]
+
+
+def page_blocked_on_you(lab):
+    blocking(lab, 'paused-m', 'qa#2')
+    lab.commit(30)
+    unblocking(lab, 'paused-m')
+    lab.commit(20)
+    for name, refs in (('alpha-m', 'temper#9'), ('alpha-m2', 'agents#11'), ('old-m', 'temper#4')):
+        blocking(lab, name, refs)
+    lab.commit(10)
+    blocking(lab, 'alpha-m', 'temper#9 agents#11')
+    lab.commit(6)
+    blocking(lab, 'paused-m', 'qa#2')
+    lab.commit(5)
+    write(lab.records / 'missions/brief-m/README.md',
+          '---\nstate: active\ndescription: Brief committed blocked\nblocked: skein#3\n---\n')
+    lab.commit(3)
+    readme = lab.records / 'missions/alpha-m/README.md'
+    write(readme, readme.read_text() + '\nPRIVATE-BODY-EDIT\n')
+    lab.commit(2)
+    blocking(lab, 'beta-d', 'temper#4')
+    blocking(lab, 'alpha-m2', 'agents#11 hearth#5')
+    page, data = subscription_page(lab)
+    section = blocked_section(page)
+    assert page.index('<div class="tiles">') < page.index('<h2 id="blocked">') < page.index('<h2>Subscriptions')
+    assert re.findall(r'<th(?: [^>]*)?>(.*?)</th>', section) == [
+        'Mission', 'State', 'Description', 'Waiting on', 'Since']
+    rows = blocked_rows(page)
+    names = ['alpha-m', 'alpha-m2', 'paused-m', 'brief-m', 'beta-d']
+    assert [r[0] for r in rows] == names, rows
+    for row, hours in zip(rows, (10, 10, 5, 3, None)):
+        name = row[0]
+        assert row[4] == (time_cell(iso(hours), f'{hours} h 0 min ago') if hours else '–'), row
+        tone, state = ('warning', 'paused') if name == 'paused-m' else ('good', 'active')
+        assert row[1] == f'<span class="badge {tone}"><i aria-hidden="true"></i>{state}</span>', row
+        description = ('Probe the fleet&#x27;s subscriptions' if name == 'alpha-m' else
+                       'Brief committed blocked' if name == 'brief-m' else '–')
+        assert row[2] == description, row
+        mission = next(m for m in data['records']['missions'] if m['name'] == name)
+        expected = []
+        for ref in mission['blocked']:
+            repo, issue = ref.split('#')
+            expected.append(f'<a href="https://git.fabrig.ai/fabrig-ai/{repo}/issues/{issue}" '
+                            f'target="_blank" rel="noopener noreferrer">{ref}</a>')
+        assert row[3] == ', '.join(expected), row
+    times = dict(zip(names, (10, 10, 5, 3, None)))
+    for mission in data['records']['missions']:
+        hours = times.get(mission['name'])
+        assert mission['blocked_since'] == (int(NOW) - hours * 3600 if hours else None), mission
+    footer = page[page.index('<footer>'):]
+    assert 'records: history:' not in footer
+    history_absent(lab, page, json.dumps(data), footer)
+    for readme in (lab.records / 'missions').glob('*/README.md'):
+        unblocking(lab, readme.parent.name)
+    page, _ = subscription_page(lab)
+    assert '<p class="empty">Nothing is blocked on you.</p>' in blocked_section(page)
+    page, _ = subscription_page(lab, RECORDS=str(lab.root / 'nowhere'))
+    assert '<p class="empty">The record was not read this time.</p>' in blocked_section(page)
+    footer = page[page.index('<footer>'):]
+    assert 'records:' in footer and 'records: history:' not in footer
+
+
+def blocked_history_failures(lab):
+    blocking(lab, 'alpha-m', 'temper#9')
+    lab.commit(10)
+    blocking(lab, 'paused-m', 'qa#2')
+    lab.commit(5)
+
+    def check(reason, **env):
+        out, snapshot = lab.root / 'page.html', lab.root / 'data.json'
+        started = time.monotonic()
+        result = lab.run('--no-pull', '--out', str(out), '--json', str(snapshot), **env)
+        assert time.monotonic() - started < 20
+        page, raw = out.read_text(), snapshot.read_text()
+        private_absent(page, raw, result.stderr)
+        rows = blocked_rows(page)
+        assert [r[0] for r in rows] == ['alpha-m', 'paused-m'], rows
+        assert all(r[4] == '–' for r in rows), rows
+        data = json.loads(raw)
+        assert all(m['blocked_since'] is None for m in data['records']['missions'])
+        footer = page[page.index('<footer>'):]
+        assert re.findall(r'records: history: ([^<]+)', footer) == [reason], footer
+        history_absent(lab, page, raw, footer)
+        return page, raw, result.stderr
+
+    shallow = lab.root / 'shallow'
+    lab.git('clone', '-q', '--depth', '1', lab.records.as_uri(), str(shallow))
+    check('shallow', RECORDS=str(shallow))
+    fake = lab.root / 'fake-git'
+    message = 'fatal: bad object 4b825dc642cb6eb9a060e54bf8d69288fbee4904'
+    tool(fake, 'git', f'print({message!r}, file=sys.stderr)\nsys.exit(128)\n')
+    path = f'{fake}:{lab.env["PATH"]}'
+    page, raw, stderr = check('git failed', PATH=path)
+    assert message in stderr and message not in page and message not in raw
+    tool(fake, 'git', f'import time\nprint({message!r}, file=sys.stderr, flush=True)\ntime.sleep(60)\n')
+    page, raw, stderr = check('timed out', PATH=path, STATUS_HISTORY_TIMEOUT='1')
+    assert message in stderr and message not in page and message not in raw
+    lab.history_hashes = lab.git('log', '--format=%H').splitlines()
+    shutil.rmtree(lab.records / '.git')
+    check('no git repository')
+
+
+def blocked_history_edges(lab):
+    """Bad versions fail one mission; the shared deadline preserves completed reads."""
+    walk = runpy.run_path(str(SCRIPT))['blocked_since']
+    commit = 'a' * 40
+    version = b'---\r\nblocked: qa#2\r\n---\r\n'
+    batch = f'{commit} blob {len(version)}\n'.encode() + version + b'\n'
+
+    def answer(output):
+        return subprocess.CompletedProcess([], 0, output, b'')
+
+    with patch('subprocess.run') as run:
+        assert walk(lab.records, []) == ({}, [])
+        run.assert_not_called()
+    for broken in (OSError('cannot start git'), answer(b'bad log\n'),
+                   subprocess.CompletedProcess([], 128, b'', b'fixture diagnostic')):
+        def run(argv, **kwargs):
+            assert argv[:4] == ['git', '-C', str(lab.records), '--literal-pathspecs']
+            assert not any(k.startswith('GIT_') for k in kwargs['env'])
+            assert kwargs['timeout'] > 0
+            if argv[4] == 'rev-parse':
+                return answer(b'false\n')
+            if argv[4] == 'log':
+                if 'missions/a/README.md' == argv[-1]:
+                    if isinstance(broken, OSError):
+                        raise broken
+                    return broken
+                return answer(f'{commit} 123\n'.encode())
+            assert argv[4:] == ['cat-file', '--batch']
+            return answer(batch)
+        with patch.dict(os.environ, GIT_DIR='/fixture/misdirection'), \
+                patch('subprocess.run', side_effect=run), redirect_stderr(io.StringIO()):
+            assert walk(lab.records, ['b', 'a']) == ({'a': None, 'b': 123}, ['git failed'])
+    for data, expected in ((b'bad header\n', (None, ['git failed'])),
+                           (f'{commit} blob 999\nshort\n'.encode(), (None, ['git failed'])),
+                           (f'{commit}:missions/a/README.md missing\n'.encode(), (None, []))):
+        with patch('subprocess.run', side_effect=[answer(b'false\n'),
+                   answer(f'{commit} 123\n'.encode()), answer(data)]), redirect_stderr(io.StringIO()):
+            since, reasons = walk(lab.records, ['a'])
+            assert (since['a'], reasons) == expected
+    with patch.dict(os.environ, STATUS_HISTORY_TIMEOUT='1'), \
+            patch('time.monotonic', side_effect=[0, 0, .25, .5, 1.1]), \
+            patch('subprocess.run', side_effect=[answer(b'false\n'),
+                  answer(f'{commit} 123\n'.encode()), answer(batch)]), redirect_stderr(io.StringIO()):
+        assert walk(lab.records, ['b', 'a']) == ({'a': 123, 'b': None}, ['timed out'])
+    # A real linked worktree has a .git file, and cannot be redirected by the caller.
+    blocking(lab, 'alpha-m', 'qa#2')
+    lab.commit(10)
+    linked = lab.root / 'linked-records'
+    lab.git('worktree', 'add', '-q', '--detach', str(linked))
+    assert (linked / '.git').is_file()
+    with patch.dict(os.environ, GIT_DIR=str(lab.root / 'missing-git')):
+        assert walk(linked, ['alpha-m']) == ({'alpha-m': int(NOW) - 10 * 3600}, [])
 
 
 def page_blocked(lab):
@@ -710,18 +915,14 @@ def page_blocked(lab):
     (status-page.md 3); the record's other words reach nothing."""
     tile = '<div class="label">Waiting on the user</div><div class="value">–</div><div class="sub">'
     page, _ = subscription_page(lab)
-    assert tile + '0 blocked · ' + links({}) + '</div>' in page
+    assert tile + '<a href="#blocked">0 blocked</a> · ' + links({}) + '</div>' in page
 
-    def blocking(name, value):
-        readme = lab.records / f'missions/{name}/README.md'
-        write(readme, readme.read_text().replace('---\n', f'---\nblocked: {value}\n', 1))
-
-    blocking('alpha-m', 'temper#9 PRIVATE-WORD agents#11 temper#9')
-    blocking('paused-m', 'qa#2')
-    blocking('old-m', 'temper#4')
-    blocking('beta-d', 'forge#3 temper#09 temper#0 PRIVATE-OTHER')
+    blocking(lab, 'alpha-m', 'temper#9 PRIVATE-WORD agents#11 temper#9')
+    blocking(lab, 'paused-m', 'qa#2')
+    blocking(lab, 'old-m', 'temper#4')
+    blocking(lab, 'beta-d', 'forge#3 temper#09 temper#0 PRIVATE-OTHER')
     page, data = subscription_page(lab)
-    assert (tile + '<span title="alpha-m: temper#9, agents#11; paused-m: qa#2">2 blocked</span> · '
+    assert (tile + '<a href="#blocked" title="alpha-m: temper#9, agents#11; paused-m: qa#2">2 blocked</a> · '
             + links({}) + '</div>') in page
     recorded = {m['name']: m['blocked'] for m in data['records']['missions']}
     for name, refs in (('alpha-m', ['temper#9', 'agents#11']), ('paused-m', ['qa#2']),
@@ -733,7 +934,7 @@ def page_blocked(lab):
     public_roles(page, lab)
 
     page, data = subscription_page(lab, RECORDS=str(lab.root / 'nowhere'))
-    assert tile + '– blocked · ' + links({}) + '</div>' in page
+    assert tile + '<a href="#blocked">– blocked</a> · ' + links({}) + '</div>' in page
     assert data['records'] is None, data['records']
     footer = page[page.index('<footer>'):]
     assert 'records:' in footer and 'nowhere/missions: no such directory' in footer, footer
@@ -899,7 +1100,7 @@ def page_roles(lab):
     for word in ('owner up', 'owner down', 'last turn', 'Codex owner'):
         assert word not in page, word
     data = json.loads(raw)
-    assert all(set(m) == {'name', 'state', 'ended', 'description', 'started', 'blocked'}
+    assert all(set(m) == {'name', 'state', 'ended', 'description', 'started', 'blocked', 'blocked_since'}
                for m in data['records']['missions']), data['records']
 
     # 83 recent endings: show exactly the newest ten and count the other 73.
@@ -1533,7 +1734,7 @@ def claude_resets(lab):
     assert [v['used'] for v in data['claude_usage']['limits']] == list(range(7))
 
 
-CASES = [page_user_issues, page_blocked, director_mailbox_unread, collect_subscriptions, page_subscriptions, page_pace, subscriptions_signed_out, subscription_failures, claude_resets, collect, collect_missing, page, reason_kind, page_recent, page_landings_rate, machine_ips, page_roles, page_role_edges, page_now, page_times, page_degraded, bad_data, write_failure, install]
+CASES = [page_user_issues, page_blocked, page_blocked_on_you, blocked_history_failures, blocked_history_edges, director_mailbox_unread, collect_subscriptions, page_subscriptions, page_pace, subscriptions_signed_out, subscription_failures, claude_resets, collect, collect_missing, page, reason_kind, page_recent, page_landings_rate, machine_ips, page_roles, page_role_edges, page_now, page_times, page_degraded, bad_data, write_failure, install]
 
 
 def run(case, directory, built):
