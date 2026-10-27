@@ -147,8 +147,12 @@ finish_task() {
     ended=$(date -u +%FT%TZ)
     if [[ ! -e $report ]] || cmp -s <(reservation) "$report"; then
         {
-            if [[ -f $state/last.md ]]; then
-                printf '%s\n' 'codex-run: the run wrote no report; its last message follows.' && cat "$state/last.md"
+            if [[ -s $state/last.md ]]; then
+                if [[ $read_only == 1 ]]; then
+                    cat "$state/last.md"
+                else
+                    printf '%s\n' 'codex-run: the run wrote no report; its last message follows.' && cat "$state/last.md"
+                fi
             else
                 printf 'codex-run: the run wrote no report and no last message; exit %s; see %s.\n' "$status" "$state"
             fi
@@ -282,7 +286,11 @@ task_run() {
     trap 'finish_task "$?"' EXIT
     trap 'terminate 143' TERM
     trap 'terminate 130' INT
-    turn "${search_rule}Read $task and do what it says. Write your report to $report."
+    local report_instruction="Write your report to $report."
+    if [[ $read_only == 1 ]]; then
+        report_instruction="Return your entire report as your final message, even if the task asks you to write a report file. Do not write the report file; codex-run will write it to $report."
+    fi
+    turn "${search_rule}Read $task and do what it says. $report_instruction"
     exit "$run_exit"
 }
 

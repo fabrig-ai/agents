@@ -161,15 +161,16 @@ if capacity:
         print(json.dumps({'type': 'error', 'message': message}))
         print(json.dumps({'type': 'turn.failed', 'error': {'message': message}}))
     sys.exit(17)
-if scenario in ('failure', 'no-last', 'capacity-other'):
+if scenario in ('failure', 'no-last', 'empty-last', 'capacity-other'):
     print(json.dumps({'type': 'item.completed', 'item': {'text': message}}))
     print(json.dumps({'type': 'turn.failed', 'error': {'message': 'another failure'}}))
     if scenario != 'no-last':
-        last.write_text('The task failed.\n')
+        last.write_text('' if scenario == 'empty-last' else 'The task failed.\n')
     sys.exit(9)
-last.write_text('Last message from the fixture.\n')
+last.write_text('Read-only fixture findings.\n\nFirst finding.\nSecond finding.\n\nValidation complete.\n'
+                if scenario == 'read-only-report' else 'Last message from the fixture.\n')
 report = (fake / 'report').read_text().strip()
-if report and scenario not in ('no-report', 'remove-parent', 'report-directory', 'fallback-directory'):
+if report and '--sandbox' not in args and scenario not in ('no-report', 'remove-parent', 'report-directory', 'fallback-directory'):
     pathlib.Path(report).write_text('\tFixture task completed.\r\nReport body.\n' if scenario == 'controls' else 'Fixture task completed.\nReport body.\n')
 for usage in ({'input_tokens': 10, 'cached_input_tokens': 2, 'output_tokens': 3},
               {'input_tokens': 20, 'cached_input_tokens': 4, 'output_tokens': 5}):
@@ -432,6 +433,32 @@ expect 'missing report gets last message' "$(cat "$report")" \
     'codex-run: the run wrote no report; its last message follows.' 'Last message from the fixture.'
 json_expect '--to overrides POST_NAME' '.[0].args[3] == "director@hel8"' "$fake/post.calls"
 
+# The sandbox prevents report writes; the final message is the whole report.
+start_task read-only-report --read-only
+expect 'read-only publishes the final message unchanged' \
+    "$(cmp -s "$report" "$state/last.md" && cmp -s "$report" "$state/report.md" && echo whole)" whole
+expect 'read-only publication keeps successful status' "$(row)" $'\t0\t1\t'
+json_expect 'read-only posts the report title without a fallback warning' \
+    'length == 1 and (.[0].args[4] | test("^run .* ok: Read-only fixture findings\\.$"))' "$fake/post.calls"
+json_expect 'read-only prompt overrides task file-write instructions' \
+    'length == 1 and (.[0].stdin | contains("entire report as your final message") and
+     contains("even if the task asks") and contains("codex-run will write it to ") and
+     (contains("Write your report to ") | not))' "$fake/codex.calls"
+
+start_task failure --read-only
+expect 'failed read-only report keeps its exit status' "$(row)" $'\t9\t1\t'
+expect 'failed read-only publishes its final message unchanged' \
+    "$(cmp -s "$report" "$state/last.md" && echo whole)" whole
+json_expect 'failed read-only post keeps failure status' \
+    '.[0].args[4] | test("^run .* failed 9: The task failed\\.$")' "$fake/post.calls"
+start_task no-last --read-only
+expect 'read-only without a final message keeps diagnostics' "$(cat "$report")" 'no report and no last message; exit 9'
+
+start_task empty-last --read-only
+[[ -f $state/last.md && ! -s $state/last.md ]]
+expect 'read-only with an empty final message keeps diagnostics' "$(cat "$report")" 'no report and no last message; exit 9'
+expect 'empty read-only final message keeps failure status' "$(row)" $'\t9\t1\t'
+
 start_task capacity-once --model fixture-model --effort xhigh
 expect 'capacity once succeeds on second try' "$(row)" $'\t0\t2\tfixture-model\txhigh\t'
 json_expect 'capacity resume retains every flag and uses the retry prompt' \
@@ -462,16 +489,20 @@ expect 'capacity without a thread cannot resume' "$(row)" $'\t17\t1\t' $'\t-\t-\
 
 start_task capacity-once --read-only --model read-model --effort medium
 readonly_id=$id
+expect 'read-only retry publishes its final message unchanged' \
+    "$(cmp -s "$report" "$state/last.md" && echo whole)" whole
 json_expect 'read-only sandbox survives retry before the resume subcommand' \
     'length == 2 and all(.[]; .args[0:3] == ["exec", "--sandbox", "read-only"] and
      (.args | index("--dangerously-bypass-approvals-and-sandbox")) == null) and
      .[1].args[3] == "resume" and .[0].args[3:-1] == .[1].args[4:-2]' "$fake/codex.calls"
 
 start_task success --resume "$readonly_id"
+expect 'read-only resume publishes its final message unchanged' \
+    "$(cmp -s "$report" "$state/last.md" && echo whole)" whole
 expect 'resume inherits settings' "$(cat "$state/meta")" 'model=read-model' 'effort=medium' 'read_only=1' "resume_of=$readonly_id"
 json_expect 'explicit resume starts on the saved thread with the new task' \
     'length == 1 and .[0].args[0:4] == ["exec", "--sandbox", "read-only", "resume"] and
-     .[0].args[-2] == "thread-fixture" and (.[0].stdin | contains("Read ") and contains("Write your report to "))' "$fake/codex.calls"
+     .[0].args[-2] == "thread-fixture" and (.[0].stdin | contains("Read ") and contains("entire report as your final message"))' "$fake/codex.calls"
 
 # A resumed run can leave DIR out; explicit settings still override the old run.
 n=$((n + 1))

@@ -245,8 +245,10 @@ overwrites another.
     (owners.md 3): `--model`, by default gpt-6.1-sol, and `--effort`,
     medium, high or xhigh, by default high. The tool never changes
     them, as `start.sh`'s knobs did. `--read-only`
-    (for surveys) runs Codex with `--sandbox read-only`, and every
-    other run with `--dangerously-bypass-approvals-and-sandbox`.
+    (for surveys and reviews) runs Codex with `--sandbox read-only`,
+    and every other run with `--dangerously-bypass-approvals-and-sandbox`.
+    A read-only run returns its whole report in its final message;
+    codex-run writes REPORT outside the sandbox. No write grant is needed.
   - **It returns at once.** It starts `systemd-run --user --collect
     --service-type=exec --unit codex-run-<id>`, whose command runs
     through a login shell, so that the run sees the machine's profile
@@ -265,7 +267,9 @@ overwrites another.
     2026-10-25).
   - Its prompt is `start.sh`'s search rule, then "Read TASK and do what
     it says. Write your report to REPORT.", so a task never lacks its
-    report's path.
+    report's path. With `--read-only`, the last instruction instead asks
+    for the entire report as the final message, even if TASK asks for a
+    report file, and says codex-run will write it to REPORT.
   - `--resume RUN` continues that run's thread, with that run's
     settings, but for `--on-stop`, which a run has only if its own call
     gives it.
@@ -290,7 +294,12 @@ overwrites another.
 - **The end, whichever it is,** a TERM or an INT among them (exit 143
   or 130), each step tried even if one before it failed:
   - if REPORT is gone or still holds only the reservation, `last.md` is
-    copied there, and the copy says so in its first line;
+    copied there. For a read-only run this is normal publication, with
+    the final message copied unchanged; for other runs the copy starts
+    with a missing-report warning. An absent or empty last message
+    produces a diagnostic report in either mode. Publication also keeps
+    a copy in the run directory's `report.md`, and preserves the run's
+    exit status;
   - a row goes to `~/src/rust/tmp/codex-run/runs.tsv`: id, caller,
     start, end, exit, tries, model, effort, TASK, REPORT, thread, and
     tokens from the events;

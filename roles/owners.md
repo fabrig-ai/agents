@@ -112,9 +112,11 @@ out. The security rules are director.md 10's.
   task is always ready for the next free slot.
 - **Starting one:** `codex-run task --effort EFFORT TASK WORKTREE
   REPORT`, with absolute paths and a fresh report: gpt-6.1-sol, high by
-  default, medium where the work is plain. Where the work gets hard
-  (two tries without the cause, evidence that conflicts), a sub-agent
-  advises, from the report and the evidence.
+  default, medium where the work is plain. For a survey or review, add
+  `--read-only`: the run returns the whole report in its final message,
+  even if TASK asks for a file, and codex-run writes REPORT. Where the
+  work gets hard (two tries without the cause, evidence that conflicts),
+  a sub-agent advises, from the report and the evidence.
 - **The log.** Each implementer appends 3 or 4 lines to its log every
   30 minutes: where it is, and whether it is on track or getting lost.
   The owner reads them all on its 30-minute wake, and steps in where
