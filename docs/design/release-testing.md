@@ -58,17 +58,17 @@ binding.
 ## 4. The ladder
 
 temper's `draft/v0.1.0.md` 2 and 3; its stories from
-`draft/reference-case-2.md`, mapped in temper's `domain/testing.md`
+`draft/reference-case.md`, mapped in temper's `domain/testing.md`
 2.7.
 
 | Rung | Story | What it leaves |
 |---|---|---|
 | 0 | a box's owned Forgejo set up through `ctl`; one chat turn on the held login | passed, 10-24 |
 | A | the playground's three requests on a copy of `playground/widget`, one delegated, pushed, passed by CI and an agent's review, landed | a brief, walked, fixed, rerun unchanged as the pass |
-| B0 | A, with a question and the person's answer (reference-case-2 4.2, 7.2) | the same |
+| B0 | A, with a question and the person's answer (reference-case.md 4.2, 7.2) | the same |
 | B1 | B0, with a gate the first push fails, and its repair (4.3) | the same |
 | B2 | B1, with an advisor and two delegates, one depending on the other (4.1, 4.2) | the same |
-| C | `reference-case-2.md`, act by act, by `process-model.md` | the top rung (section 5) |
+| C | `reference-case.md`, act by act, by `process-model.md` | the top rung (section 5) |
 | D | the case's process described to temper in words, its proposal accepted, C run under it | configuring's golden (section 6) |
 | W | A and B walked through the web client | browser walks, after B2 and the user's word on the pages |
 
@@ -86,7 +86,7 @@ temper's `draft/v0.1.0.md` 2 and 3; its stories from
 
 ## 5. The reference case at the top
 
-`draft/reference-case-2.md`, applying `draft/process-model.md`.
+`draft/reference-case.md`, applying `draft/process-model.md`.
 
 - **On fakes:** each of its 20 steps a story, `fuzzy_case2_X_Y`, with
   each judgement scripted as the oracle.
