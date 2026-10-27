@@ -1,6 +1,7 @@
 # QA after landing
 
-Provisional, 2026-10-26, proposed with the user. This is how a change that
+Provisional, 2026-10-26, proposed with the user; revised 2026-10-27
+(section 11). This is how a change that
 landed gets tested by an agent that drives the product the way its users'
 agents do:
 - the landing's owner marks the commit;
@@ -54,6 +55,13 @@ whose future is open (section 9).
   passes run, and a second tool, `logins`, keeps its custody. QA's
   passes and the director's other live runs take it in turn, and it is
   free again only once it is back (section 10).
+- **A pass's evidence is kept** (the user, 10-27): at its end, the
+  service copies an allowlist of its scratch (its brief, plan, notes and
+  report, the helpers it wrote, the outputs it captured) to the branch
+  `evidence` of the private qa repository, and the report's front
+  matter names the commit. A scan by name and shape refuses a copy that
+  holds a secret, whole, and says which file; nothing is trimmed. The
+  ladder's focused walks keep theirs the same way (section 11).
 
 ## 2. The marker
 
@@ -116,7 +124,8 @@ whose future is open (section 9).
   `tmp/qa/repos/<repo>/`, kept with its target as after landing's are.
   The service checks it out, detached, at the pass's `main`. The pass
   builds through `heavy` at `HEAVY_CLASS=background`. The service
-  deletes a pass's scratch directory 7 days after it ends.
+  deletes a pass's scratch directory 7 days after it ends, once its
+  evidence is kept or refused (section 11.4).
 - **The session:** Codex at `codex-run`'s defaults, started by
   `codex-run task` with a brief the service writes. The brief says to
   read `roles/qa.md`, then the product's binding, `docs/design/qa.md`
@@ -167,10 +176,14 @@ whose future is open (section 9).
 `records/qa/passes/<pass>.md`, at most 8 KB, `<pass>` its start and
 repository (`20261026-0915-temper`). The service writes the front
 matter: repository, `main`, commits, rung, machine, model, effort,
-started, ended, wall time, tokens, and the outcome (`done`, `capped` or
-`failed`). It commits the file twice: at the pass's start, `running`,
+started, ended, wall time, tokens, the outcome (`done`, `capped` or
+`failed`), and `evidence`, the commit that keeps its evidence (section
+11.4). It commits the file twice: at the pass's start, `running`,
 so that the pass shows in `qa passes` and its commits are taken
 wherever the record is read; and at its end, completed, with the body.
+A third commit writes `evidence` when its copy was pushed after the
+end's. A line of the body that the evidence's scan refuses is withheld
+from the record, and said (section 11.4).
 The pass writes the body, in [roles/qa.md](../../roles/qa.md) 3's
 shape; past the cap, the service cuts it and says so:
 
@@ -222,6 +235,8 @@ takes a repository's name where it needs one.
 | `qa triage PASS N ROUTE [--why]` | routes one finding |
 | `qa rung REPO [RUNG [--login NAME]... [--why]]` | opens a rung, or shows the open one (section 10.1) |
 | `qa watch` | runs the service (section 4) |
+| `qa keep --check DIRECTORY` | scans what a copy of DIRECTORY would hold, and writes nothing (section 11.5) |
+| `qa keep --walk NAME DIRECTORY` | keeps a focused walk's evidence (section 11.5) |
 
 The record is committed with `record commit`, and its rows are in
 [records.md](records.md) 3's table:
@@ -235,8 +250,8 @@ The record is committed with `record commit`, and its rows are in
 
 Times are UTC to the second, commits full SHAs. The settings are the
 kit's: the machine, named as section 4 says, and `machine.env`'s
-`QA_SLOTS` (1), `QA_BATCH` (5), `QA_CAP_MINUTES` (120) and
-`QA_INTERVAL_SECONDS` (300).
+`QA_SLOTS` (1), `QA_BATCH` (5), `QA_CAP_MINUTES` (120),
+`QA_INTERVAL_SECONDS` (300) and `QA_EVIDENCE_KIB` (2048, section 11.1).
 
 ## 8. When it runs
 
@@ -260,6 +275,13 @@ kit's: the machine, named as section 4 says, and `machine.env`'s
   is the user's.
 - **qa's lab:** what becomes of it (the user, 10-26).
 - **The machine:** settled, where the held logins rest (section 10.2).
+- **Evidence that isn't text** (a page's screenshot): the scan can't
+  read it, so it refuses it (section 11.2). Whether a pass that
+  captures pages keeps them, and how, waits for one that does.
+- **The branch's growth:** about 1 MB a day packed, at ten passes a
+  day of 200 to 400 KB each, 30 to 90 KB compressed (measured 10-27).
+  Whether old directories ever leave it, by a new branch and never a
+  rewrite, is open.
 
 ## 10. Real backends: rungs and the held logins
 
@@ -387,3 +409,229 @@ held).
 | `logins take NAME --as HOLDER [--note TEXT] [--wait SECONDS]` | grants NAME in turn and prints its resting path; exit 1 while another holds it or waits first |
 | `logins give NAME --as HOLDER` | frees NAME once its login is back; exit 1, still held, if it isn't |
 | `logins list [NAME]` | each login's holder, waiters and last 24 hours |
+
+## 11. The evidence, kept
+
+The user, 10-27: at a pass's end, its non-secret evidence goes into the
+private qa repository, so that what a pass did outlives its scratch's 7
+days. agents alone names qa's paths: the public repositories never do.
+
+### 11.1 What is kept
+
+- **An allowlist** of the pass's scratch directory, and nothing else:
+  `brief.md`, `plan.md`, `notes.md`, `report.md` (whole, before the
+  record's cut), `scripts/`, the helpers the pass wrote, and `evidence/`,
+  the outputs it captured. Any of them may be absent. The deployments,
+  the binaries, the give-back file, the service's own files
+  (`pass.json`, `post-body`) and everything else stay in the scratch and
+  go with it.
+- **The pass lays its scratch out for it** ([roles/qa.md](../../roles/qa.md)
+  4): captures in `evidence/` and helpers in `scripts/`, as text; what
+  holds a secret outside them; a helper that needs a secret reads it by
+  its path (`curl -H @FILE`), never with its value in its text.
+- **Not the transcript:** Codex's rollout holds every command's output,
+  the secrets the pass handled among them, so it stays where Codex keeps
+  it on the machine, and the copy's index names its run.
+- **A cap,** `QA_EVIDENCE_KIB` (2048), on the bytes of the files a copy
+  holds. Past it, the copy leaves out `evidence/` whole, then `scripts/`
+  whole, and its index says what it left out, with the files and bytes.
+  Documents past the cap alone refuse the copy (11.2). A pass's
+  allowlist measured 200 to 400 KB on 10-27.
+
+### 11.2 What never is: the scan
+
+- **One snapshot:** the tool walks the allowlist through descriptors
+  that never follow a link (the allowlist's directories too), reads each
+  file once, and scans those bytes; the bytes it commits are the bytes
+  it scanned, so a file changed after the scan never reaches the copy.
+- **Whole or not at all:** one file that fails refuses the copy, and the
+  refusal names each failing file with its line and the rule's name,
+  never the text that matched. Nothing is trimmed, but for 11.1's cap,
+  which says what it left out.
+- **By name and shape alone:** the scan is the tool's match, and no
+  agent reads a file to check it. A refusal is mended by name and line
+  (11.4), and the matched text never reaches an output, a log or a post.
+- **Paths are scanned as lines are:** a path whose text a content rule
+  below matches refuses the copy, and is named by its directory and its
+  place in that directory's sorted listing (`evidence/, entry 17`),
+  never by its text. Every other refusal names its path.
+- **The rules,** each with its name:
+  - `kind`: anything but a regular file: a symbolic link, a file with
+    another name (a hard link), a device, a pipe, a socket;
+  - `binary`: a file that isn't UTF-8 text, or holds a NUL: a store, a
+    database, a binary;
+  - `name`: a path any of whose parts holds as a word, case aside and
+    between `-`, `_`, `.` or its ends, `cookie`, `cookies`, `password`,
+    `passwd`, `secret`, `token`, `credential`, `credentials` or `netrc`;
+    or is `auth.json`, `id_rsa`, `id_ed25519`, or `login` with or
+    without an extension; or ends in `.header`, `.headers`, `.pem`,
+    `.key` or `.env`. So `token-form.html` and `forge-cookies` refuse,
+    and `tokens.txt` and `session-status.txt` pass;
+  - `key`: a private key's block, or a token's known prefix, as
+    `record` refuses them ([records.md](records.md) 2);
+  - `jwt`: a signed token's shape, three base64url parts after `eyJ`;
+  - `header`: `Authorization` or `Proxy-Authorization` with a scheme
+    and a value, or `Cookie` or `Set-Cookie` with a name and a value;
+  - `cookie-jar`: a cookie file's line, in Netscape's tab-separated form,
+    or its heading;
+  - `link`: a URL with a user and a password before its host, or a
+    query or fragment parameter named `code`, `token`, `secret`, `key`,
+    `password`, `access_token`, `refresh_token`, `id_token`,
+    `client_secret` or `signature` with a value: a sign-in or an
+    authorization link;
+  - `assigned`: `password`, `passwd`, `secret`, `token`, `api_key`,
+    `client_secret`, `access_token`, `refresh_token` or `private_key`,
+    as a quoted key with a string value (`"token": "…"`), a name with
+    `=` and its value (`TOKEN=…`, a form's `password=…`), or a line of
+    the name, a colon and a value alone (`password: …`);
+  - `user`: curl's `-u` or `--user` with a password after the colon.
+- **Placeholders pass, at any length:** a value that is empty, `null`,
+  `true` or `false`; a name in capitals (`TOKEN`, `FILE`); `<…>`;
+  `$NAME` or `${NAME}`; `@FILE`; `…` or `...`; or a run of `*`. So a
+  plan's "`Authorization: token TOKEN`" and a help page's
+  `--password-file FILE` pass, and any other value, however short,
+  refuses. A rule that refuses a plain capture twice is narrowed in
+  the tool, with a fixture story of that capture.
+- **What has no shape** (a forge's new token, shown once in its answer
+  or its page) the scan can't know: keeping such a capture out of
+  `evidence/` is the pass's rule (roles/qa.md 4).
+
+### 11.3 Where
+
+- **The branch `evidence` of the qa repository,** `fabrig-ai/qa`: a
+  pass's copy in `passes/<pass>/`, its name the record's; a focused
+  walk's in `walks/<name>/` (11.5); and at its root a `README.md` that
+  says what it holds and points here. It shares no history with `main`,
+  and nothing on `main` reads it.
+- **Off `main`, so no gate:** qa's gate proves the lab's code on
+  `main`, which a copy never touches, and `land` moves `main` alone. A
+  clone of `main` with `--single-branch` never fetches it. tidy keeps it:
+  none of its commits has a twin on `main` ([cleanup.md](cleanup.md) 4).
+- **A copy is a tree:** its files and its index, and nothing that varies
+  between two copies of the same files: the time is the commit's. Two
+  copies of the same scratch, unchanged, are the same tree.
+- **Only appended:** each copy is one commit that adds its directory on
+  the branch's tip, pushed fast-forward; never a force-push, a rewrite
+  or a deletion. The first copy makes the branch, with its `README.md`.
+  A directory already on the branch with the copy's tree is the copy
+  already kept (a push whose answer was lost, a walk kept twice), and
+  its commit is the copy's; with another tree, the name is taken, and
+  the copy refuses.
+- **Each copy's index,** `README.md` in its directory, front matter
+  then lines:
+  - `kind` (`pass` or `walk`), `name`, `machine`, `source` (the scratch
+    directory), `run` (codex-run's id, whose rollout is the transcript,
+    or `unknown`), `record` (`qa/passes/<pass>.md`, or `-` for a walk),
+    `files` and `bytes`;
+  - below it, a line for each tree the cap left out, with its files and
+    bytes, or none.
+- **The writer is the `qa` tool** on the scratch's machine, in a bare,
+  blobless clone of its own, `tmp/qa/repos/qa.git`, that fetches
+  `evidence` alone, under a lock beside it, as its product clones are
+  kept (section 4). With a temporary index and plumbing it commits the
+  copy's tree on `origin/evidence` and pushes, five tries when the
+  branch moved, as `record` does (records.md 2), within 2 minutes in
+  all: past them the copy waits for the next try. The commit's author
+  and committer are the writer's name at its machine (`qa-watch
+  <qa-watch@hetzner6>`, the service's), and its subject `qa keep: <kind>
+  <name>`; the push goes with the machine's key.
+
+### 11.4 When, and the link
+
+- **The pass's state** (`pass.json`) holds its copy's: `waiting`, with
+  the tree once made; `kept`, with its commit; or `refused`, with the
+  refusal's digest; and whether the report's front matter names it yet.
+  Each step saves it before the next, so a check after a crash goes on
+  from the last one saved.
+- **At a pass's end,** the service scans and makes the copy, tries its
+  push (11.3's 2 minutes), then commits the completed report (section
+  5), whose front matter's `evidence` is the commit that holds
+  `passes/<pass>/`, `refused`, or `unknown` while the copy waits. Then
+  it gives the logins back and posts its notice, as before: a copy
+  delays them by its 2 minutes at most, and never stops them.
+- **The record's report takes the same scan:** a line of its body that
+  a content rule refuses is withheld from the record, replaced by
+  `(withheld: RULE)`, and the notice says so, as it says the report's
+  cut (section 5).
+- **At each check,** the service tries again every finished pass whose
+  scratch is there and whose copy isn't kept: it scans the scratch
+  afresh, so a mended one goes through, and pushes a clean copy that
+  waits. A report whose front matter doesn't name its kept copy yet is
+  committed again with it.
+- **A refusal** is in the pass's notice to the director, with each
+  file, line and rule, never the text; a check that finds the same
+  refusal (the same digest) posts nothing, and a new one posts again.
+  The director mends it on the machine by name alone, never opening a
+  file: it moves a named file out of the allowlist, into the scratch's
+  root, or deletes a named line (`sed -i 'Nd' FILE`); or it leaves the
+  copy refused.
+- **The scratch waits for the copy:** at its 7 days, the check tries
+  the copy once more, then deletes the scratch if its copy is kept or
+  refused, and keeps it while its copy waits for a push, as it keeps a
+  scratch whose login is not back (10.3). `refused` stays in the record.
+- **Passes from before this** are finished passes whose copy is neither
+  kept nor refused: the first check gets theirs, as far as their scratch
+  holds the allowlist.
+- **The link** is the front matter's commit: `git show
+  COMMIT:passes/<pass>/` in a clone of qa that fetched `evidence`.
+  A report from before this has no `evidence`, and `qa` reads it as
+  `unknown`.
+
+### 11.5 Focused walks, and the command
+
+- **The same path:** the ladder's focused walks, the director's runs on
+  a rung (10.2), read roles/qa.md, so they lay their scratch out the
+  same way, and their copies are kept the same way, in `walks/<name>/`.
+  The director keeps one with `qa keep --walk NAME DIRECTORY` on the
+  walk's machine once its run has ended, at its end post, and names the
+  commit wherever it records the walk. NAME is a new one: the date and
+  the walk's (`20261026-rung-a-1`).
+- **`qa keep --walk NAME DIRECTORY`** prints the commit, exit 0; or the
+  refusal, exit 2; or exit 1 when the push failed, to run again, which
+  keeps the same tree.
+- **`qa keep --check DIRECTORY`** scans what a copy would hold, and
+  prints its files, its bytes, what the cap would leave out and each
+  refusal, exit 0 or 2. It reads DIRECTORY alone and writes nothing: no
+  record, no clone, no network. A pass runs it on its own scratch
+  before its report's last write, and moves out of the allowlist what
+  it names (roles/qa.md 2, step 5).
+- **One code path:** the service keeps a pass's copy through the same
+  snapshot, scan, cap, index and push as `qa keep --walk`.
+
+### 11.6 Its fixture
+
+`scripts/devel/test-qa` proves it against a local origin for qa, in the
+fixture's `origins/`, never `fabrig-ai/qa`. Its secrets are made at run
+time, never written whole in a source file:
+
+- **A clean pass** ends: `passes/<pass>/` on `evidence` holds the
+  allowlist and nothing else from a scratch that also holds a
+  deployment, a header file and a cookie jar outside it; its index's
+  fields are right; the report's `evidence` is the commit.
+- **Each rule refuses:** a scratch with one file per rule, and one path
+  with a secret's shape, refuses the copy, naming each file, line and
+  rule, and that path by its entry; the matched text is nowhere in the
+  output, the log, the post's body or the record; nothing is pushed;
+  the report says `refused`. Moving the named file out lets the next
+  check keep it, and the report's `evidence` follows; the same refusal
+  twice posts once.
+- **Plain captures pass:** JSON with `tokens` counts and `"secret":
+  false`, a commit's `sha`, a help page's `--password-file FILE`, a
+  plan quoting `Authorization: token TOKEN`, a file named
+  `session-status.txt`.
+- **One snapshot:** a file swapped for a link, or changed, between the
+  walk and the commit never reaches the copy.
+- **Past the cap,** `evidence/` is left out and the index says so; past
+  it again, `scripts/` too; documents past it alone refuse.
+- **A push race:** the branch moved between the fetch and the push, and
+  the second try keeps both directories.
+- **A lost answer:** the push landed but the state wasn't saved, and the
+  next check takes the commit that holds the same tree.
+- **A failed push** leaves `unknown` without delaying the give-back or
+  the notice past 11.3's bound, is tried again, and keeps the scratch
+  past its 7 days until it is pushed.
+- **The record's body** withholds a refused line, and says so.
+- **A walk** is kept in `walks/<name>/`; kept again unchanged it gives
+  the same commit; the same name with other files refuses.
+- **`--check`** writes nothing and runs with no record and no origin.
+- **An old report,** without `evidence`, is read as before.

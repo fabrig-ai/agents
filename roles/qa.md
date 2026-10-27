@@ -31,6 +31,10 @@ makes a finding there.
 - **The report** gives each case's outcome, each finding with the
   commands that reproduce it, what a helper could automate, and what
   was blocked (section 3).
+- **What it keeps is kept for good:** its `plan.md`, `notes.md` and
+  `report.md`, its helpers in `scripts/` and its captures in
+  `evidence/` go to the private qa repository at its end, scanned for
+  secrets; nothing secret goes in them (section 4).
 - **It changes nothing but its scratch:** no commit, push, landing,
   record or post, and the checkout's tracked files stay as they are.
 
@@ -131,6 +135,21 @@ Saw: <...>
 
 - **Its scratch directory** holds its plan, notes, deployments and
   throwaway scripts; nothing goes elsewhere in `~/src/rust/tmp/`.
+- **Its layout is what is kept** ([qa-flow.md](../docs/design/qa-flow.md)
+  11): `brief.md`, `plan.md`, `notes.md` and `report.md`, and two
+  directories:
+  - `evidence/`, each capture of what it ran and saw, as text, a file
+    for each (a command's output, a backend's answer), named for its
+    case;
+  - `scripts/`, the helpers it writes; one that needs a secret reads it
+    by its path (`curl -H @FILE`), never with the value in its text.
+
+  They are kept for good, so nothing secret goes in them: no header
+  file, cookie jar, password, token or login, no deployment's directory,
+  and no capture that shows one (a sign-in link, the page or answer that
+  shows a new token once, a form with a password). Those stay in the
+  scratch's root or the deployment's directories, and go with the
+  scratch.
 - **The security rules** are an implementer's
   ([implementer.md](implementer.md) 5), and the product's deployment
   uses its fakes alone, unless the brief names a real rung: then its
