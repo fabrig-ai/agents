@@ -1597,17 +1597,18 @@ def page_pace(lab):
                sample('codex', codex, 'sol week', 7, 20), older, expired]
     write(samples, ''.join(json.dumps(s) + '\n' for s in history) + 'not json\n{"time": "x"}\n')
     page, _, cells = render('--samples', str(samples))
-    # (84 - 60) / 12 = 2%/h over 12 h; (100 - 84) / 2 = 8 h to full.
+    # Only samples older than an hour: no rate, but the pace still uses 12 h.
+    # (84 - 60) / 12 = 2%/h; (100 - 84) / 2 = 8 h to full.
     assert cells[claude, 'week (all models)'] == (
-        '<span title="over 12 h 0 min, since 2026-10-25 00:00 UTC">2.0%/h</span>',
+        '–',
         time_cell('2026-10-25T20:00:00Z', 'full in 8 h 0 min')), cells
-    # 6 h >= 18.5/4 h; (1 - 0) / 6 = 1/6 %/h -> 0.2; floor(1 + 18.5/6) = 4%.
+    # No sample in the last hour; pace: 6 h >= 18.5/4 h; floor(1 + 18.5/6) = 4%.
     assert cells[claude, 'session'] == (
-        '<span title="over 6 h 0 min, since 2026-10-25 06:00 UTC">0.2%/h</span>',
+        '–',
         'lasts, 4% at reset'), cells
-    # 7 h >= 24/4 = 6 h; (0 - 0) / 7 = 0%/h; 0 + 0 * 127 = 0%.
+    # No sample in the last hour; pace: 7 h >= 24/4 = 6 h; 0 + 0 * 127 = 0%.
     assert cells[claude, 'week (Fable)'] == (
-        '<span title="over 7 h 0 min, since 2026-10-25 05:00 UTC">0.0%/h</span>',
+        '–',
         'lasts, 0% at reset'), cells
     # The 3 h sample is outside the 1 h look-back; (16 - 6) / (50/60) = 12%/h; 16 + 12 = 28%.
     assert cells[codex, '5 h'] == (
@@ -1619,15 +1620,40 @@ def page_pace(lab):
     # 3 h >= 30 min, but 3 h < 24/4 = 6 h: another 3 h needed.
     assert cells[codex, 'other week'] == (
         '–', '<span title="needs 6 h 0 min of samples, has 3 h 0 min">pace in 3 h 0 min</span>'), cells
-    # 7 h >= 24/4 h; (12 - 20) / 7 < 0, so rate is clamped to 0 and use stays 12%.
+    # No sample in the last hour; pace: 7 h >= 24/4 h; (12 - 20) / 7 < 0, use stays 12%.
     assert cells[codex, 'sol week'] == (
-        '<span title="over 7 h 0 min, since 2026-10-25 05:00 UTC">0.0%/h</span>',
+        '–',
         'lasts, 12% at reset'), cells
     # Use >= 100 is full now, without needing a rate.
     assert cells[other_codex, '5 h'] == ('–', 'full'), cells
     assert 'usage samples: 2 lines not read' in page[page.index('<footer>'):]
     stored = [json.loads(line) for line in samples.read_text().splitlines()]
     assert older not in stored and expired not in stored, stored
+
+    # A week's rate uses the oldest sample in the last hour (40 min),
+    # while its pace keeps the 12 h sample: 3%/h versus 2%/h.
+    history += [sample('claude', claude, 'week (all models)', 40 / 60, 82),
+                sample('claude', claude, 'week (all models)', 20 / 60, 83),
+                sample('claude', claude, 'week (Fable)', 30 / 60, 0),
+                sample('codex', codex, 'sol week', 1, 20),
+                sample('codex', codex, 'other week', 40 / 60, 6)]
+    write(samples, ''.join(json.dumps(s) + '\n' for s in history))
+    _, _, cells = render('--samples', str(samples))
+    assert cells[claude, 'week (all models)'] == (
+        '<span title="over 40 min, since 2026-10-25 11:20 UTC">3.0%/h</span>',
+        time_cell('2026-10-25T20:00:00Z', 'full in 8 h 0 min')), cells
+    # Exactly 30 min suffices for rate, including no rise; pace stays at 7 h.
+    assert cells[claude, 'week (Fable)'] == (
+        '<span title="over 30 min, since 2026-10-25 11:30 UTC">0.0%/h</span>',
+        'lasts, 0% at reset'), cells
+    # Exactly an hour is included, and a fall is clamped to 0; pace stays at 7 h.
+    assert cells[codex, 'sol week'] == (
+        '<span title="over 1 h 0 min, since 2026-10-25 11:00 UTC">0.0%/h</span>',
+        'lasts, 12% at reset'), cells
+    # Rate is ready before pace: (7 - 6) / (40/60) = 1.5%/h, but pace needs 6 h.
+    assert cells[codex, 'other week'] == (
+        '<span title="over 40 min, since 2026-10-25 11:20 UTC">1.5%/h</span>',
+        '<span title="needs 6 h 0 min of samples, has 3 h 0 min">pace in 3 h 0 min</span>'), cells
 
     # 6,000 old readings plus 11 current ones: keep the newest 5,000, in time order.
     history = [sample('codex', codex, 'sol week', i / 6000 * 24, 10) for i in range(1, 6001)]

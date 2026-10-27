@@ -176,11 +176,16 @@ could use the status script itself for sampling)" (the user, 10-26).
   + (100 − used) / pace`, or lasts to it, at `used + pace × (reset −
   now)` then, rounded down; a pace of zero or less lasts at its use.
   A use of 100 or more is full now.
-- **The rate** is that pace per hour, beside it: `2.0%/h`, to one
-  decimal, `0.0%/h` for none or a fall; its hover title the readings'
-  span and its start (`over 5 h 12 min, since 2026-10-26 06:20 UTC`), a
-  moving average as the look-back slides (the user, 10-26). A dash
-  where there is no pace.
+- **The rate** is the rise per hour over the last hour alone (the user,
+  10-27: fresher, so a change in trend shows sooner), not the pace's
+  look-back: from the oldest sample of the limit's window in the last
+  hour to now, over the time between them, once they are at least 30
+  minutes apart: `2.0%/h`, to one decimal, `0.0%/h` for none or a fall;
+  its hover title the readings' span and its start (`over 55 min, since
+  2026-10-27 18:05 UTC`), a moving average as the hour slides. A use
+  read in whole points moves in steps, so a week's rate over an hour
+  reads `0.0%/h` or `1.0%/h` more often than its pace suggests. A dash
+  until the window has 30 minutes of samples in the last hour.
 - **No pace yet.** Where a run keeps samples but its window's readings
   don't yet span enough, the pace says how long it still waits for
   them, at most: `pace in 2 h 10 min`, the span it needs (a quarter of

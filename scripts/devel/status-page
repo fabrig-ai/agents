@@ -1207,9 +1207,8 @@ def kept_samples(samples, now):
                   key=lambda s: s['time'])[-SAMPLES_KEPT:]
 
 
-def rise(samples, limit, cli, label, now):
-    """A limit's pace readings (2.2): rate and since, or needs and has."""
-    lookback = min(DAY, max(HOUR, limit['resets'] - now))
+def rise(samples, limit, cli, label, now, lookback):
+    """A limit's readings over the look-back (2.2): rate and since, or needs and has."""
     earlier = min((s for s in samples if s['cli'] == cli and s['label'] == label
                    and s['limit'] == limit['name'] and abs(s['resets'] - limit['resets']) <= 600
                    and now - lookback <= s['time'] <= now), key=lambda s: s['time'], default=None)
@@ -1227,7 +1226,7 @@ def pace(samples, limit, cli, label, now):
         return '–'
     if used >= 100:
         return 'full'
-    reading = rise(samples, limit, cli, label, now)
+    reading = rise(samples, limit, cli, label, now, min(DAY, max(HOUR, reset - now)))
     if 'needs' in reading:
         needs, has = reading['needs'], reading['has']
         title = f'needs {length(needs)} of samples, has {length(has)}'
@@ -1244,7 +1243,7 @@ def rate(samples, limit, cli, label, now):
     """A limit's rate per hour, with its readings' span on hover (2.2)."""
     if limit['used'] is None or limit['resets'] is None:
         return '–'
-    reading = rise(samples, limit, cli, label, now)
+    reading = rise(samples, limit, cli, label, now, HOUR)
     if 'rate' not in reading:
         return '–'
     title = (f'over {length(now - reading["since"])}, '
