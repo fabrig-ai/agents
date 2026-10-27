@@ -392,11 +392,24 @@ The director's, on hetzner6:
 ## 8. The evidence
 
 A pass's non-secret evidence goes into the private qa repository at its
-end, and a walk keeps its own with `qa keep --walk` (qa-flow.md 11; the
-user, 10-27). It never holds a credential, a cookie, a login or a
-sign-in link. The scan is built, and the keeping waits under the soft
-pause. Meanwhile a walk's evidence stays in its directory on the logins'
-machine.
+end, and so does a rung walk's at its end (qa-flow.md 11; the user,
+10-27, unpaused at 22:2xZ). It never holds a credential, a cookie, a
+login or a sign-in link.
+
+- **The scan** (agents 16c1655): `qa keep --check DIR` reads the
+  allowlist (`brief.md`, `plan.md`, `notes.md`, `report.md`,
+  `scripts/`, `evidence/`), applies the cap (`QA_EVIDENCE_KIB`), and
+  names each refusal as `refused: PATH[, line N]: RULE`, never the
+  text; it writes nothing. Every pass and walk runs it on its own
+  scratch before its report's last write (roles/qa.md 2, step 5), and
+  moves out of `evidence/` and `scripts/` what it names.
+- **The copy** (slice 2, building): at a pass's end, to qa's branch
+  `evidence`, the record naming the commit; a refusal mended by name
+  and line, never by opening the file (qa-flow.md 11.4).
+- **Walks** (slice 3, after it): kept by the service at a walk's end.
+  The walks from before `qa walk` are the director's to keep by hand,
+  `qa keep --walk DATE-NAME DIR`, once slice 2 lands. Until then a
+  walk's evidence stays in its directory on the logins' machine.
 
 ## 9. Open
 
@@ -483,3 +496,5 @@ Newest last, times UTC.
   the day's exempt QA kit (design/qa-evidence).
 - 10-27 22:3xZ: `qa walk` resolves `--build` first and takes a bare
   branch on origin (agents fe72017; design/ladder's note).
+- 10-27 23:1xZ: the evidence's scan and `qa keep --check` landed (agents
+  16c1655); section 8 as built (design/qa-evidence).

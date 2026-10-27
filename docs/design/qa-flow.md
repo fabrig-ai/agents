@@ -1061,6 +1061,15 @@ days. agents alone names qa's paths: the public repositories never do.
   `--password-file FILE` pass, and any other value, however short,
   refuses. A rule that refuses a plain capture twice is narrowed in
   the tool, with a fixture story of that capture.
+- **What the code settled** (agents 16c1655): a path is scanned part by
+  part and whole, a match named by its entry; a quoted value is checked
+  whole, and a comment cut only from an unquoted value after a name; a
+  shell word with escaped spaces is read whole; a placeholder may end in
+  one of `, ; ) . :`; a tree the cap leaves out is counted whole, an
+  entry it can't read said. Left as they are, by decision: HTTP header
+  folding (obsolete since RFC 7230), JSON's `\u` escapes inside a key,
+  and the scratch path's own ancestors (the operator's). `record`'s
+  private-key rule is the same as the scan's, linear.
 - **What has no shape** (a forge's new token, shown once in its answer
   or its page) the scan can't know: keeping such a capture out of
   `evidence/` is the pass's rule (roles/qa.md 4).
