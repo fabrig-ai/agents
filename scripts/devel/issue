@@ -24,6 +24,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unicodedata
 import urllib.error
 import urllib.parse
@@ -39,6 +40,9 @@ TOOL = 'fabrig-agents'
 PEOPLE = ('free',)
 SENDER = 'issues'  # The router's post name.
 LISTEN = '127.0.0.1:8391'  # The default loopback webhook listener.
+# Let an ordinary oversized upload finish after 413, but cap a stalled or
+# endless sender's hold on a handler. This is a total budget, not idle time.
+REJECT_DRAIN_S = 5
 # Copied from scripts/devel/post: name_pattern, machine_pattern, valid_address.
 NAME = r'[a-z][a-z0-9-]*(/[a-z0-9][a-z0-9-]*)*'
 MACHINE = r'[a-z][a-z0-9-]*'
@@ -541,9 +545,12 @@ class Hook(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
 
-    def answer(self, status, reason):
+    def answer(self, status, reason, *, close=False):
         self.send_response(status)
         self.send_header('Content-Length', '0')
+        if close:
+            self.send_header('Connection', 'close')
+            self.close_connection = True
         self.end_headers()
         print(f'issue: request {status}: {reason}', file=sys.stderr, flush=True)
 
@@ -562,7 +569,24 @@ class Hook(BaseHTTPRequestHandler):
         except ValueError:
             return self.answer(400, 'invalid content length')
         if length > 1024 * 1024:
-            return self.answer(413, 'body too large')
+            self.answer(413, 'body too large', close=True)
+            # Deliver the response and EOF now, while keeping the read side
+            # open: closing with unread input can reset a still-writing client.
+            deadline = time.monotonic() + REJECT_DRAIN_S
+            try:
+                self.connection.shutdown(socket.SHUT_WR)
+                while length:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    self.connection.settimeout(remaining)
+                    chunk = self.rfile.read1(min(length, 64 * 1024))
+                    if not chunk:
+                        break
+                    length -= len(chunk)
+            except OSError:
+                pass  # A stalled or disconnected sender must not hold a worker.
+            return
         self.connection.settimeout(5)
         try:
             body = self.rfile.read(length)

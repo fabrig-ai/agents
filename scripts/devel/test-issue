@@ -6,12 +6,15 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
 import io
+import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
+import queue
 from pathlib import Path
 import runpy
 import selectors
+import socket
 import stat
 import subprocess
 import sys
@@ -20,7 +23,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from unittest.mock import patch
+from unittest.mock import Mock, call, patch
 
 import case_runner
 
@@ -881,6 +884,96 @@ def webhook_boundaries_reject_bad_requests(lab):
     assert 'no webhook secret at' in lab.run('serve', status=2)
 
 
+def oversized_webhook_keeps_reading_after_413(lab):
+    # Hold the upload until the handler either reads its body or returns.
+    # On the old path, wait for the actual close before resuming the sender:
+    # unread input then makes the upload fail, regardless of scheduling.
+    progress, closed = queue.Queue(), threading.Event()
+
+    class BodyReader:
+        def __init__(self, stream):
+            self.stream = stream
+
+        def __getattr__(self, name):
+            method = getattr(self.stream, name)
+            if name in ('read', 'read1'):
+                def read(*args):
+                    progress.put('reading')
+                    return method(*args)
+                return read
+            return method
+
+    class Handler(TOOL['Hook']):
+        def do_POST(self):
+            self.rfile = BodyReader(self.rfile)
+            try:
+                # This case holds scheduling, not the production deadline;
+                # the fake-clock case below proves that deadline separately.
+                with patch.dict(TOOL['Hook'].do_POST.__globals__, REJECT_DRAIN_S=HUNG_TOOL_S):
+                    super().do_POST()
+            finally:
+                progress.put('returned')
+
+    class Server(ThreadingHTTPServer):
+        def shutdown_request(self, connection):
+            try:
+                super().shutdown_request(connection)
+            finally:
+                closed.set()
+
+    server = Server(('127.0.0.1', 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with socket.create_connection(server.server_address, timeout=HUNG_TOOL_S) as client:
+            length = 1024 * 1024 + 1
+            client.sendall(f'POST /hook HTTP/1.1\r\nHost: localhost\r\n'
+                           f'Content-Length: {length}\r\n\r\n'.encode() + b'x')
+            if progress.get(timeout=HUNG_TOOL_S) == 'returned':
+                assert closed.wait(HUNG_TOOL_S), 'server did not close'
+            response = http.client.HTTPResponse(client)
+            response.begin()
+            assert response.status == 413
+            assert response.read() == b''
+            # Read EOF as well: the response must finish before upload finishes.
+            assert client.recv(1) == b''
+            client.sendall(b'x' * (length - 1))
+            client.shutdown(socket.SHUT_WR)
+            assert closed.wait(HUNG_TOOL_S), 'server did not finish draining'
+            assert response.getheader('Connection') == 'close'
+            response.close()
+        assert not list(lab.spool.glob('*/*.json'))
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=HUNG_TOOL_S)
+        assert not thread.is_alive()
+
+
+def oversized_webhook_drain_has_a_total_deadline(lab):
+    # A trickling sender consumes the total budget even while reads succeed.
+    # Also cover EOF, a stalled reader and a peer gone before write shutdown.
+    for reads, times, shutdown_error, expected_timeouts in (
+            ([b'x', b'x'], [100, 100, 102, 105], None, [5, 3]),
+            ([b''], [100, 100], None, [5]),
+            ([TimeoutError()], [100, 100], None, [5]),
+            ([], [100], ConnectionResetError(), [])):
+        handler = TOOL['Hook'].__new__(TOOL['Hook'])
+        handler.path = '/hook'
+        handler.headers = {'Content-Length': str(1 << 60)}
+        handler.answer = Mock()
+        handler.connection = Mock()
+        handler.connection.shutdown.side_effect = shutdown_error
+        handler.rfile = Mock()
+        handler.rfile.read1.side_effect = reads
+        with patch.object(TOOL['time'], 'monotonic', side_effect=times):
+            handler.do_POST()
+        handler.answer.assert_called_once_with(413, 'body too large', close=True)
+        handler.connection.shutdown.assert_called_once_with(socket.SHUT_WR)
+        assert handler.connection.settimeout.call_args_list == [call(n) for n in expected_timeouts]
+        assert handler.rfile.read1.call_args_list == [call(64 * 1024) for _ in reads]
+
+
 def retries_restart_and_exhausted_chains_are_recorded(lab):
     lab.open()
     # Exercise worker retries through real child posts, without waiting 60 seconds.
@@ -947,7 +1040,8 @@ CASES = (open_files_an_issue_in_the_missions_repository, a_public_repository_nee
          a_restart_resumes_the_chain_after_the_last_tried, a_redelivered_comment_posts_once,
          open_validates_input_and_reports_forge_failures, open_refuses_secrets_and_private_files,
          a_public_issue_refuses_what_names_the_fleet, install_writes_the_unit_and_keeps_the_secret,
-         webhook_boundaries_reject_bad_requests,
+         webhook_boundaries_reject_bad_requests, oversized_webhook_keeps_reading_after_413,
+         oversized_webhook_drain_has_a_total_deadline,
          retries_restart_and_exhausted_chains_are_recorded)
 
 
