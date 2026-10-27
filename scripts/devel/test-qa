@@ -510,6 +510,10 @@ if name == 'codex-run':
     assert args[:4] == ['task', '--to', 'qa-watch', '--on-stop'], args
     assert Path(args[4]).is_absolute()
     task, checkout, report = args[5:]
+    if config.get('capture_launch'):
+        snapshot = [json.loads(path.read_text()) for path in sorted((root / 'tmp/qa').glob('*/pass.json'))]
+        with (root / 'launches.jsonl').open('a') as out:
+            out.write(json.dumps(snapshot) + '\n')
     runs.mkdir(parents=True, exist_ok=True)
     run = 'fixture-' + str(len(list(runs.glob('fixture-*'))) + 1)
     state = runs / run
@@ -627,26 +631,59 @@ elif name == 'systemctl':
             subprocess.run([str(on_stop)], cwd=on_stop.parent, stdin=subprocess.DEVNULL, timeout=60)
         end(run, 'codex-run: the run wrote no report and no last message; exit 143.\n', 143)
 elif name == 'logins':
-    assert args[0] in ('take', 'give') and args[2:4] == ['--as', 'qa-watch'], args
+    held = set(config.get('logins_held', []))
+    holders = {login: config.get('login_holders', {}).get(login, 'qa-watch') for login in held}
+    if args == ['list']:
+        if config.get('login_list_failure'):
+            sys.exit('fixture login list failed')
+        members = set(holders) | set(config.get('logins_out', []))
+        for pool in config.get('pools', {}).values():
+            members.update(pool)
+        for login in sorted(members):
+            if login not in holders and login not in config.get('logins_out', []):
+                print(f'{login}: at rest')
+                continue
+            holder = holders.get(login, 'qa-watch')
+            note = ' (temper)' if login != 'chatgpt-2' else ''
+            print(f'{login}: held by {holder}{note} since 2026-10-26T09:15:23Z, 0:01, at rest')
+            print('  waiting: other since 2026-10-26T09:15:23Z (any of chatgpt)')
+            print('  last 24 hours: 0:01 held')
+        sys.exit(0)
+    assert args[0] in ('take', 'give'), args
     login = args[1]
+    position = 3 if args[0] == 'take' else 2
+    assert args[position] == '--as', args
+    holder = args[position + 1]
+    assert holder == 'qa-watch' or holder.startswith('qa-watch/'), args
     if login in config.get('logins_refused', []):
         print('fixture login refused', file=sys.stderr)
         sys.exit(4)
     if args[0] == 'take':
-        assert args[4:] == ['--note', 'temper'], args
-        if login in config.get('logins_busy', []):
+        assert args[2] == '--any' and args[5:] == ['--note', 'temper'], args
+        members = config.get('pools', {}).get(login, [login])
+        free = [member for member in members if member not in holders
+                and member not in config.get('logins_busy', []) and member not in config.get('logins_out', [])]
+        if login in config.get('logins_busy', []) or not free:
             print('fixture login busy', file=sys.stderr)
             sys.exit(1)
-        config['logins_held'] = sorted(set(config.get('logins_held', [])) | {login})
+        login = free[0]
+        held.add(login)
+        holders[login] = holder
+        config.update(logins_held=sorted(held), login_holders=holders)
         (root / 'tools.json').write_text(json.dumps(config))
-        print(root / 'login-store' / login / 'login')
+        print(login, root / 'login-store' / login / 'login')
+    elif login in holders and holders[login] != holder:
+        print('fixture held by another', file=sys.stderr)
+        sys.exit(2)
     elif (login in config.get('logins_out', []) or login in config.get('logins_real', [])
           and not (root / 'login-store' / login / 'login').exists()):
         print('fixture login out', file=sys.stderr)
         sys.exit(1)
-    elif login in config.get('logins_held', []):
+    elif login in held:
         config.setdefault('logins_released', []).append(login)
-        config['logins_held'].remove(login)
+        held.remove(login)
+        holders.pop(login)
+        config.update(logins_held=sorted(held), login_holders=holders)
         (root / 'tools.json').write_text(json.dumps(config))
     else:
         print('already free: ' + login)
@@ -1018,7 +1055,7 @@ def rung_records_the_opening(lab):
     brief = (directory / 'brief.md').read_text()
     assert '- Your rung: fakes, as the product' in brief and 'No held login.' in brief
     assert state['rung'] == 'fakes'
-    assert lab.calls('logins') == [['give', name, '--as', 'qa-watch'] for name in (CHATGPT, CLAUDE)]
+    assert lab.calls('logins') == [['list']]
 
 
 def rung_without_an_opening_names_the_first(lab):
@@ -1044,13 +1081,12 @@ def watch_takes_the_rungs_login_before_the_pass(lab):
     lab.watch()
     directory, state = lab.watch_state()
     path = str(lab.root / 'login-store' / CHATGPT / 'login')
-    assert lab.calls('logins') == [['give', CHATGPT, '--as', 'qa-watch'],
-                                 ['take', CHATGPT, '--as', 'qa-watch', '--note', 'temper']]
+    assert lab.calls('logins') == [['list'], ['take', CHATGPT, '--any', '--as', state['holder'], '--note', 'temper']]
     calls = [json.loads(line)['tool'] for line in (lab.root / 'tools.jsonl').read_text().splitlines()]
     assert calls.index('logins') < calls.index('codex-run')
     brief = (directory / 'brief.md').read_text()
     for text in (f'- Your rung: {REAL}, as the product', '- Held logins, taken for you by the service',
-                 f'    - {CHATGPT}: {path}', str(directory / 'give-back'),
+                 f'    - {CHATGPT} (pool {CHATGPT}): {path}', str(directory / 'give-back'),
                  "its path by the product's export, every program in it named by its\n"
                  '  absolute path (it runs outside your shell).',
                  'Never run `logins`, never read or copy a login.'):
@@ -1065,7 +1101,7 @@ def watch_without_a_rung_takes_no_login(lab):
     lab.waiting(1)
     lab.watch()
     directory, state = lab.watch_state()
-    assert not lab.calls('logins') and not state['logins'] and state['rung'] == '-'
+    assert lab.calls('logins') == [['list']] and not state['logins'] and state['rung'] == '-'
     brief = (directory / 'brief.md').read_text()
     assert "- Your rung: the binding's first; no held login." in brief
     assert 'Held logins,' not in brief
@@ -1079,40 +1115,56 @@ def watch_waits_while_the_login_is_busy(lab):
         lab.configure(**config)
         result = lab.watch()
         assert f'temper: waiting for login {CHATGPT}:' in result.stdout
-        assert not lab.watch_states() and not lab.calls('codex-run') and lab.head() == before
+        assert lab.watch_state()[1]['stage'] == 'reserving'
+        assert not lab.calls('codex-run') and lab.head() == before
         assert 'waiting: 1 commits chosen to run' in lab.run('passes').stdout
 
 
-def watch_gives_back_the_first_when_the_second_is_busy(lab):
+def watch_keeps_the_first_when_the_second_is_busy(lab):
     lab.rung('temper', REAL, CLAUDE, CHATGPT)
-    lab.waiting(1)
+    commits = lab.waiting(1)
     lab.configure(logins_busy=[CLAUDE])
+    driven_watch(lab, """Watch = tool['Watch']
+original = Watch.call
+def call(self, name, *args):
+    if name == 'logins' and args[:2] == ('take', 'claude'):
+        directory, state = self.local_passes()[0]
+        assert state['pools'] == {'chatgpt': 'chatgpt'}
+        assert state['logins'] and state['kinds']
+    return original(self, name, *args)
+Watch.call = call
+""")
+    directory, state = lab.watch_state()
+    holder = state['holder']
+    assert lab.calls('logins') == [['list'],
+                                 ['take', CHATGPT, '--any', '--as', holder, '--note', 'temper'],
+                                 ['take', CLAUDE, '--any', '--as', holder, '--note', 'temper']]
+    assert state['pools'] == {CHATGPT: CHATGPT} and not state['commits']
+    assert not lab.calls('codex-run')
     lab.watch()
-    assert lab.calls('logins') == [['give', CHATGPT, '--as', 'qa-watch'],
-                                 ['give', CLAUDE, '--as', 'qa-watch'],
-                                 ['take', CHATGPT, '--as', 'qa-watch', '--note', 'temper'],
-                                 ['take', CLAUDE, '--as', 'qa-watch', '--note', 'temper'],
-                                 ['give', CHATGPT, '--as', 'qa-watch']]
-    assert not lab.watch_states() and not lab.calls('codex-run')
-    lab.configure(logins_out=[CHATGPT])
-    result = lab.watch()
-    assert f'{CHATGPT} is out with no pass:' in result.stdout
-    assert f'cannot give {CHATGPT} back' in result.stdout
+    assert lab.calls('logins')[-1] == ['take', CLAUDE, '--any', '--as', holder, '--note', 'temper']
+    assert sum(args[:2] == ['take', CHATGPT] for args in lab.calls('logins')) == 1
+    # Cancelling its remaining work gives back the earlier grant and removes it.
+    lab.run('decide', 'temper', *commits, 'backlog')
+    lab.watch()
+    assert not directory.exists()
+    assert lab.calls('logins')[-1] == ['give', CHATGPT, '--as', holder]
 
 
 def watch_gives_the_login_after_the_unit_stops(lab):
     lab.rung('temper', REAL, CHATGPT)
     lab.waiting(1)
     lab.watch()
+    _, state = lab.watch_state()
     lab.end_run()
     lab.watch()
-    assert lab.calls('logins')[-1] == ['give', CHATGPT, '--as', 'qa-watch']
-    assert len(lab.calls('logins')) == 3 and not lab.sent()
+    assert lab.calls('logins')[-1] == ['give', CHATGPT, '--as', state['holder']]
+    assert len(lab.calls('logins')) == 4 and not lab.sent()
     _, state = lab.watch_state()
     assert state['finished'] and state['given'] == [CHATGPT]
     lab.watch()
-    assert len(lab.calls('logins')) == 4
-    assert lab.calls('logins')[-1] == ['give', CHATGPT, '--as', 'qa-watch']
+    assert len(lab.calls('logins')) == 5
+    assert lab.calls('logins')[-1] == ['list']
 
 
 def watch_waits_for_the_unit_before_giving(lab):
@@ -1123,10 +1175,10 @@ def watch_waits_for_the_unit_before_giving(lab):
     lab.configure(unit_active=True)
     (lab.tmp / 'machine.env').write_text('QA_GIVE_BACK_SECONDS=0\n')
     lab.watch()
-    assert len(lab.calls('logins')) == 2
+    assert len(lab.calls('logins')) == 3
     (lab.tmp / 'machine.env').write_text('QA_GIVE_BACK_SECONDS=90\n')
     lab.watch(extra={'QA_GIVE_BACK_SECONDS': '0'})
-    assert len(lab.calls('logins')) == 2 and not lab.watch_state()[1]['finished']
+    assert len(lab.calls('logins')) == 4 and not lab.watch_state()[1]['finished']
     lab.configure(unit_active=False)
     lab.watch()
     assert lab.watch_state()[1]['finished'] and lab.watch_state()[1]['given'] == [CHATGPT]
@@ -1147,7 +1199,7 @@ def watch_holds_logins_until_stop_is_confirmed(lab):
             lab.configure(**(dict(unit_state='active', unit_query_failure=False, unit_malformed=False) | config))
             lab.watch(extra={'QA_GIVE_BACK_SECONDS': '0'})
             assert not lab.watch_state()[1]['finished']
-            assert len(lab.calls('logins')) == 2
+            assert not any(args[0] == 'give' for args in lab.calls('logins'))
         lab.configure(unit_query_failure=False, unit_malformed=False)
     lab.configure(unit_load='not-found', unit_state='inactive')
     lab.watch()
@@ -1197,9 +1249,10 @@ def watch_starts_no_pass_while_its_login_is_out(lab):
     lab.waiting(1)
     before = len(lab.calls('logins'))
     result = lab.watch()
-    assert f'temper: login {CHATGPT} not back from {state["pass"]}' in result.stdout
-    assert len(lab.calls('logins')) == before + 1  # Only a retry of give, never take.
-    assert len(lab.calls('codex-run')) == 1 and len(lab.watch_states()) == 1
+    assert f'temper: waiting for login {CHATGPT}:' in result.stdout
+    assert len(lab.calls('logins')) == before + 3  # List, retry of give, and a new reservation's take.
+    assert len(lab.calls('codex-run')) == 1 and len(lab.watch_states()) == 2
+    assert lab.watch_states()[-1][1]['stage'] == 'reserving'
 
 
 def watch_keeps_a_pass_whose_login_is_out(lab):
@@ -1226,7 +1279,7 @@ def a_refused_launch_gives_the_login_back(lab):
     lab.watch()
     _, state = lab.watch_state()
     assert state['finished'] and state['given'] == [CHATGPT]
-    assert lab.calls('logins')[-1] == ['give', CHATGPT, '--as', 'qa-watch']
+    assert lab.calls('logins')[-1] == ['give', CHATGPT, '--as', state['holder']]
     # Record refusal also gives back, and leaves custody recorded locally.
     lab.waiting(1)
     wrapper = lab.root / 'record-wrapper'
@@ -1265,11 +1318,11 @@ def watch_caps_a_pass_holding_a_login(lab):
     lab.watch(extra={'QA_CAP_MINUTES': '0'})
     lab.watch(extra={'QA_CAP_MINUTES': '0'})
     _, state = lab.watch_state()
-    assert state['capped'] and not state['finished'] and len(lab.calls('logins')) == 2
+    assert state['capped'] and not state['finished'] and not any(args[0] == 'give' for args in lab.calls('logins'))
     assert ['--user', 'stop', 'codex-run-' + state['run']] in lab.calls('systemctl')
     lab.configure(unit_active=True)
     lab.watch(extra={'QA_GIVE_BACK_SECONDS': '0'})
-    assert not lab.watch_state()[1]['finished'] and len(lab.calls('logins')) == 2
+    assert not lab.watch_state()[1]['finished'] and not any(args[0] == 'give' for args in lab.calls('logins'))
     lab.configure(unit_active=False)
     lab.watch()
     _, state = lab.watch_state()
@@ -1283,8 +1336,8 @@ def watch_gives_back_a_login_held_without_a_pass(lab):
     lab.waiting(1)
     result = lab.watch()
     assert f'gave back {CHATGPT}: held without a pass' in result.stdout
-    assert lab.calls('logins')[:2] == [['give', CHATGPT, '--as', 'qa-watch'],
-                                    ['take', CHATGPT, '--as', 'qa-watch', '--note', 'temper']]
+    assert lab.calls('logins')[:3] == [['list'], ['give', CHATGPT, '--as', 'qa-watch'],
+                                    ['take', CHATGPT, '--any', '--as', lab.watch_state()[1]['holder'], '--note', 'temper']]
     assert not lab.sent()
     lab.end_run()
     lab.watch()
@@ -1321,7 +1374,7 @@ def watch_posts_once_for_a_login_out_with_no_pass(lab):
     assert CHATGPT in json.loads(path.read_text())
     lab.watch()
     assert len(lab.sent()) == 3  # First notice, failed attempt, successful retry.
-    lab.configure(logins_out=[], logins_refused=[CHATGPT])
+    lab.configure(logins_out=[], logins_refused=[CHATGPT], logins_held=[CHATGPT])
     assert f'{CHATGPT}: cannot give stray login back: fixture login refused' in lab.watch().stdout
 
 
@@ -1331,14 +1384,14 @@ def watch_leaves_a_login_its_pass_holds(lab):
     lab.watch()
     before = len(lab.calls('logins'))
     lab.watch()
-    assert len(lab.calls('logins')) == before  # A running pass protects its login too.
+    assert len(lab.calls('logins')) == before + 1  # A running pass protects its login too.
     lab.end_run()
     lab.configure(logins_out=[CHATGPT])
     lab.watch()
     assert lab.watch_state()[1]['finished'] and not lab.watch_state()[1]['given']
     before = len(lab.calls('logins'))
     result = lab.watch()
-    assert lab.calls('logins')[before:] == [['give', CHATGPT, '--as', 'qa-watch']]
+    assert lab.calls('logins')[before:] == [['list'], ['give', CHATGPT, '--as', lab.watch_state()[1]['holder']]]
     assert f'{CHATGPT} is out with no pass' not in result.stdout and len(lab.sent()) == 1
     assert not (lab.tmp / 'qa/strays.json').exists()
 
@@ -1826,7 +1879,7 @@ def a_pass_from_before_ends_as_before(lab):
     assert state['finished'] and state['given'] == [CHATGPT]
     assert (directory / 'old-stop-ran').exists() and 'kinds' not in state and 'stopped' not in state
     assert not (directory / 'deployments').exists()
-    assert lab.calls('logins')[-1] == ['give', CHATGPT, '--as', 'qa-watch']
+    assert lab.calls('logins')[-1] == ['give', CHATGPT, '--as', state['holder']]
     assert not any(args[1] == 'list-units' or args[-1].startswith('qa-') for args in lab.calls('systemctl'))
 
 
@@ -2121,7 +2174,303 @@ def a_linked_report_is_no_report(lab):
             report.touch()
 
 
-CASES = (a_pass_never_stops_its_successors_unit,
+def two_passes_start_side_by_side(lab):
+    lab.rung('temper', REAL, CHATGPT)
+    lab.configure(pools={CHATGPT: [CHATGPT, 'chatgpt-2']}, capture_launch=True)
+    commits = lab.waiting(7)
+    lab.watch(extra={'QA_SLOTS': '2'})
+    first, second = lab.watch_states()
+    assert [first[1]['commits'], second[1]['commits']] == [commits[:4], commits[4:]]
+    assert [first[1]['slot'], second[1]['slot']] == [1, 2]
+    snapshots = [json.loads(line) for line in (lab.root / 'launches.jsonl').read_text().splitlines()]
+    assert len(snapshots) == 2
+    assert [s['commits'] for s in snapshots[0]] == [commits[:4], commits[4:]]
+    assert all(s['stage'] == 'starting' for s in snapshots[0])
+    clone = lab.tmp / 'qa/repos/temper'
+    common = lab.git(clone, 'rev-parse', '--path-format=absolute', '--git-common-dir')
+    with (clone / '.git/info/exclude').open('a') as exclude:
+        exclude.write('\ntarget/\n')
+    for (directory, state), login, slot in zip((first, second), (CHATGPT, 'chatgpt-2'), (1, 2)):
+        assert state['holder'] == 'qa-watch/' + state['pass'] and 'stage' not in state
+        assert state['pools'] == {CHATGPT: login}
+        path = str(lab.root / 'login-store' / login / 'login')
+        assert state['logins'] == {login: path}
+        assert f'- {login} (pool {CHATGPT}): {path}' in (directory / 'brief.md').read_text()
+        assert f'logins: {login}\n' in lab.content(f'qa/passes/{state["pass"]}.md')
+        checkout = clone if slot == 1 else clone.with_name('temper-2')
+        assert lab.git(checkout, 'rev-parse', 'HEAD') == commits[-1]
+        assert lab.git(checkout, 'branch', '--show-current') == ''
+        assert lab.git(checkout, 'rev-parse', '--path-format=absolute', '--git-common-dir') == common
+        assert str(checkout) == lab.calls('codex-run')[slot - 1][-2]
+        (checkout / 'target').mkdir()
+        (checkout / 'target' / 'warm').touch()
+    assert (clone / 'target').resolve() != (clone.with_name('temper-2') / 'target').resolve()
+    for _, state in (first, second):
+        lab.end_run(state)
+    lab.waiting(2)
+    lab.watch(extra={'QA_SLOTS': '2'})
+    assert (clone / 'target/warm').exists() and (clone.with_name('temper-2') / 'target/warm').exists()
+
+
+def the_shares_stop_at_the_batch(lab):
+    commits = lab.waiting(12)
+    lab.watch(extra={'QA_SLOTS': '2', 'QA_BATCH': '5'})
+    assert [s['commits'] for _, s in lab.watch_states()] == [commits[:5], commits[5:10]]
+    assert 'waiting: 2 commits' in lab.run('passes').stdout
+    for _, state in lab.watch_states():
+        lab.end_run(state)
+    lab.waiting(1)
+    # Finish the two passes and assign the three remaining commits to three slots.
+    lab.watch(extra={'QA_SLOTS': '4'})
+    active = [s for _, s in lab.watch_states() if not s['finished']]
+    assert len(active) == 3 and all(len(s['commits']) == 1 for s in active)
+    assert [s['slot'] for s in active] == [1, 2, 3]
+    for state in active:
+        lab.end_run(state)
+    commits = lab.waiting(5)
+    lab.watch(extra={'QA_SLOTS': '4'})
+    active = [s for _, s in lab.watch_states() if not s['finished']]
+    assert [s['commits'] for s in active] == [commits[:2], commits[2:3], commits[3:4], commits[4:]]
+
+
+def a_pass_waits_for_a_free_login(lab):
+    lab.rung('temper', REAL, CHATGPT)
+    lab.configure(pools={CHATGPT: [CHATGPT]}, logins_held=[CHATGPT], login_holders={CHATGPT: 'director'})
+    commits = lab.waiting(1)
+    for _ in range(2):
+        lab.watch()
+        directory, state = lab.watch_state()
+        assert state['stage'] == 'reserving' and state['slot'] == 1 and not state['commits']
+    takes = [args for args in lab.calls('logins') if args[0] == 'take']
+    assert len(takes) == 2 and takes[0] == takes[1]
+    assert not lab.calls('codex-run')
+    lab.configure(logins_held=[])
+    lab.watch()
+    assert lab.watch_state()[0] == directory
+    assert lab.watch_state()[1]['commits'] == commits
+    assert lab.watch_state()[1]['holder'] == state['holder']
+
+
+def a_stuck_login_holds_back_only_its_pass(lab):
+    lab.rung('temper', REAL, CHATGPT)
+    lab.configure(pools={CHATGPT: [CHATGPT, 'chatgpt-2']})
+    lab.waiting(1)
+    lab.watch(extra={'QA_SLOTS': '2'})
+    directory, state = lab.watch_state()
+    unit, pid = deployment(lab, directory)
+    lab.end_run(state)
+    lab.configure(logins_out=[CHATGPT])
+    lab.waiting(1)
+    lab.watch(extra={'QA_SLOTS': '2'})
+    first, second = lab.watch_states()
+    assert first[1]['finished'] and not first[1].get('released') and alive(pid)
+    assert second[1]['slot'] == 2 and second[1]['pools'] == {CHATGPT: 'chatgpt-2'}
+    assert second[1]['run'] and unit in lab.sent()[0]['body'] and CHATGPT in lab.sent()[0]['body']
+
+
+def a_grant_lost_in_a_crash_is_given_back(lab):
+    lab.rung('temper', REAL, CHATGPT)
+    lab.configure(pools={CHATGPT: [CHATGPT, 'chatgpt-2', 'chatgpt-3']})
+    lab.waiting(1)
+    patch = """Watch = tool['Watch']
+original = Watch.call
+def call(self, name, *args):
+    result = original(self, name, *args)
+    if name == 'logins' and args[0] == 'take' and result.returncode == 0:
+        sys.exit(0)
+    return result
+Watch.call = call
+"""
+    driven_watch(lab, patch)
+    directory, state = lab.watch_state()
+    assert state['stage'] == 'reserving' and not state['pools']
+    lab.configure(logins_held=[CHATGPT, 'chatgpt-2'],
+                  login_holders={CHATGPT: state['holder'], 'chatgpt-2': 'qa-watch'})
+    before = len(lab.calls('logins'))
+    lab.watch()
+    calls = lab.calls('logins')[before:]
+    assert ['give', CHATGPT, '--as', state['holder']] in calls
+    assert ['give', 'chatgpt-2', '--as', 'qa-watch'] in calls
+    assert lab.watch_state()[1]['run']
+    before = len(lab.calls('logins'))
+    lab.watch()
+    assert lab.calls('logins')[before:] == [['list']]
+    # A failed list cannot trigger any stray give.
+    lab.configure(login_list_failure=True)
+    result = lab.watch()
+    assert 'cannot list stray logins' in result.stdout
+    assert lab.calls('logins')[-1] == ['list']
+
+
+def a_half_made_worktree_is_made_again(lab):
+    lab.waiting(2)
+    path = lab.tmp / 'qa/repos/temper-2'
+    path.mkdir(parents=True)
+    (path / 'half-made').touch()
+    for mode in ('plain', 'other', 'link'):
+        lab.watch(extra={'QA_SLOTS': '2'})
+        states = lab.watch_states()
+        assert len([s for _, s in states if not s['finished']]) == 2
+        clone = path.with_name('temper')
+        assert lab.git(path, 'rev-parse', '--path-format=absolute', '--git-common-dir') == str(clone / '.git')
+        assert not (path / 'half-made').exists()
+        for _, state in states:
+            if not state['finished']:
+                lab.end_run(state)
+        lab.watch(extra={'QA_SLOTS': '0'})
+        lab.waiting(2)
+        if mode == 'plain':
+            shutil.rmtree(path)
+            lab.git(lab.products['jig'], 'worktree', 'add', '--detach', str(path), 'HEAD')
+        elif mode == 'other':
+            shutil.rmtree(path)
+            outside = lab.root / 'outside-slot'
+            outside.mkdir()
+            (outside / 'keep').touch()
+            path.symlink_to(outside, target_is_directory=True)
+        else:
+            assert (lab.root / 'outside-slot/keep').exists()
+
+
+def a_finished_pass_with_units_up_keeps_its_slot(lab):
+    directory, state = deployment_pass(lab, CHATGPT)
+    unit, pid = deployment(lab, directory)
+    lab.end_run(state)
+    lab.waiting(1)
+    lab.configure(logins_out=[CHATGPT])
+    for mode in ('active', 'unknown'):
+        lab.configure(unit_states={unit: mode})
+        lab.watch(extra={'QA_SLOTS': '1', 'QA_GIVE_BACK_SECONDS': '0'})
+        assert len(lab.calls('codex-run')) == 1
+        assert lab.watch_state()[1]['finished'] and not lab.watch_state()[1].get('released')
+    lab.configure(logins_out=[], unit_states={})
+    lab.watch(extra={'QA_SLOTS': '1'})
+    assert json.loads((directory / 'pass.json').read_text())['released']
+    assert len(lab.calls('codex-run')) == 2 and lab.watch_states()[-1][1]['slot'] == 1
+    dead(pid)
+
+
+def a_pass_from_before_ends_and_holds_slot_1(lab):
+    lab.rung('temper', REAL, CHATGPT)
+    lab.configure(pools={CHATGPT: [CHATGPT, 'chatgpt-2']})
+    lab.waiting(1)
+    lab.watch()
+    directory, state = lab.watch_state()
+    for key in ('holder', 'slot'):
+        state.pop(key)
+    (directory / 'pass.json').write_text(json.dumps(state))
+    lab.configure(login_holders={CHATGPT: 'qa-watch'})
+    lab.waiting(1)
+    lab.watch(extra={'QA_SLOTS': '2'})
+    assert lab.watch_states()[-1][1]['slot'] == 2
+    lab.end_run(state)
+    lab.watch(extra={'QA_SLOTS': '2'})
+    assert json.loads((directory / 'pass.json').read_text())['finished']
+    assert ['give', CHATGPT, '--as', 'qa-watch'] in lab.calls('logins')
+
+
+def rung_refuses_a_login_that_is_no_pool(lab):
+    before = lab.head()
+    result = lab.run('rung', 'temper', REAL, '--login', 'chatgpt-2', status=2)
+    assert 'not a pool: chatgpt-2' in result.stderr
+    assert lab.head() == before and not (lab.records / 'qa/rungs.md').exists()
+
+
+def a_cancelled_reservation_never_reuses_a_returned_grant(lab):
+    lab.rung('temper', REAL, CHATGPT, CLAUDE)
+    commits = lab.waiting(1)
+    driven_watch(lab, """def fail(*args):
+    raise tool['Problem']('fixture checkout failed', 4)
+tool['Repositories'].checkout = fail
+""")
+    directory, state = lab.watch_state()
+    assert state['stage'] == 'reserving' and len(state['pools']) == 2 and not state['commits']
+    lab.configure(logins_out=[CLAUDE])
+    lab.run('decide', 'temper', *commits, 'backlog')
+    lab.watch()
+    cancelled = json.loads((directory / 'pass.json').read_text())
+    assert cancelled['cancelled'] and cancelled['given'] == [CHATGPT]
+    lab.waiting(1)
+    lab.watch()
+    active = [s for _, s in lab.watch_states() if not s['finished']]
+    assert len(active) == 1 and active[0]['holder'] != state['holder']
+    assert active[0]['pools'] == {CHATGPT: CHATGPT} and not active[0]['run']
+    lab.configure(logins_out=[])
+    lab.watch()
+    assert not directory.exists() and lab.watch_state()[1]['run']
+
+
+def cancelled_work_with_jig_waiting(lab):
+    lab.rung('temper', REAL, CHATGPT)
+    commits = lab.waiting(1)
+    lab.configure(logins_busy=[CHATGPT])
+    lab.watch()
+    directory, state = lab.watch_state()
+    lab.run('decide', 'temper', *commits, 'backlog')
+    jig = lab.commit('jig feature', 'jig feature', repo='jig')
+    lab.run('decide', 'jig', jig, 'run')
+    lab.configure(cleared={'jig': jig})
+    return directory, state
+
+
+def cancelling_a_reservation_respects_a_lowered_slot_cap(lab):
+    cancelled_work_with_jig_waiting(lab)
+    lab.watch(extra={'QA_SLOTS': '0'})
+    assert not lab.watch_states() and not lab.calls('codex-run')
+
+
+def one_reservation_failing_its_end_lets_the_check_go_on(lab):
+    directory, state = cancelled_work_with_jig_waiting(lab)
+    lab.env['QA_SLOTS'] = '2'
+    marker = 'outside-' + 'exception-contents'
+    result = driven_watch(lab, f"""original = tool['Watch'].end
+def end(self, directory, state):
+    if state['pass'] == {state['pass']!r}:
+        raise OSError({marker!r})
+    return original(self, directory, state)
+tool['Watch'].end = end
+""")
+    assert 'cleanup failed (OSError)' in result.stdout and marker not in result.stdout + result.stderr
+    saved = json.loads((directory / 'pass.json').read_text())
+    assert saved['cancelled'] and saved['finished'] and not saved.get('released')
+    assert len(lab.calls('codex-run')) == 1
+    assert [s['repository'] for _, s in lab.watch_states() if not s['finished']] == ['jig']
+    lab.watch()
+    assert not directory.exists()
+
+
+def a_finished_pass_waits_for_its_session_to_stop(lab):
+    lab.waiting(1)
+    lab.watch()
+    directory, state = lab.watch_state()
+    lab.end_run(state)
+    lab.waiting(1)
+    for config in (dict(unit_active=True), dict(unit_active=False, unit_malformed=True)):
+        lab.configure(**config)
+        lab.watch(extra={'QA_GIVE_BACK_SECONDS': '0'})
+        saved = json.loads((directory / 'pass.json').read_text())
+        assert saved['finished'] and not saved.get('released')
+        assert len(lab.calls('codex-run')) == 1
+    lab.configure(unit_active=False, unit_malformed=False)
+    lab.watch()
+    assert json.loads((directory / 'pass.json').read_text())['released']
+    assert lab.watch_states()[-1][1]['slot'] == 1 and len(lab.calls('codex-run')) == 2
+
+
+CASES = (a_cancelled_reservation_never_reuses_a_returned_grant,
+         cancelling_a_reservation_respects_a_lowered_slot_cap,
+         one_reservation_failing_its_end_lets_the_check_go_on,
+         a_finished_pass_waits_for_its_session_to_stop,
+         two_passes_start_side_by_side,
+         the_shares_stop_at_the_batch,
+         a_pass_waits_for_a_free_login,
+         a_stuck_login_holds_back_only_its_pass,
+         a_grant_lost_in_a_crash_is_given_back,
+         a_half_made_worktree_is_made_again,
+         a_finished_pass_with_units_up_keeps_its_slot,
+         a_pass_from_before_ends_and_holds_slot_1,
+         rung_refuses_a_login_that_is_no_pool,
+         a_pass_never_stops_its_successors_unit,
          an_edited_deployments_holds_the_in_place_login,
          a_unit_of_another_directory_is_not_stopped,
          a_hung_systemctl_bounds_the_check,
@@ -2152,7 +2501,7 @@ CASES = (a_pass_never_stops_its_successors_unit,
          watch_takes_the_rungs_login_before_the_pass,
          watch_without_a_rung_takes_no_login,
          watch_waits_while_the_login_is_busy,
-         watch_gives_back_the_first_when_the_second_is_busy,
+         watch_keeps_the_first_when_the_second_is_busy,
          watch_gives_the_login_after_the_unit_stops,
          watch_waits_for_the_unit_before_giving,
          watch_holds_logins_until_stop_is_confirmed,

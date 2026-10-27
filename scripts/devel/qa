@@ -4,7 +4,7 @@ qa decide REPO COMMIT... run|backlog [--why TEXT]
 qa backlog [REPO]
 qa passes [--running]
 qa findings
-qa rung REPO [RUNG [--login NAME]... [--why TEXT]]
+qa rung REPO [RUNG [--login POOL]... [--why TEXT]]
 qa triage PASS N owner ADDRESS|backlog|drop [--why TEXT]
 qa watch --director ADDRESS [--once]
 qa deploy DIRECTORY NAME -- COMMAND...
@@ -124,6 +124,7 @@ class Repositories:
     def fetched(self, repo):
         origin = self.workspace.origin(repo)
         parent = self.workspace.tmp / 'qa/repos'
+        need(not parent.is_symlink(), f'{parent}: symlink refused', 4)
         parent.mkdir(parents=True, exist_ok=True)
         root = parent / repo
         with (parent / (repo + '.lock')).open('a') as lock:
@@ -153,6 +154,27 @@ class Repositories:
                 result.append(dict(repository=repo, commit=sha, short=sha[:9], date=date,
                                    subject=subject, seconds=int(seconds), qa=' '.join(trailer.splitlines()).strip()))
         return result
+
+    def checkout(self, root, repo, slot, main):
+        # The caller holds fetched's clone lock throughout validation and add.
+        path = root if slot == 1 else root.with_name(f'{repo}-{slot}')
+        if slot != 1:
+            listed = git(root, 'worktree', 'list', '--porcelain').splitlines()
+            common = git(root, 'rev-parse', '--path-format=absolute', '--git-common-dir')
+            own = (git(path, 'rev-parse', '--path-format=absolute', '--git-common-dir', check=False)
+                   if path.is_dir() and not path.is_symlink() else None)
+            valid = (f'worktree {path}' in listed and own is not None
+                     and own.returncode == 0 and own.stdout.strip() == common)
+            if not valid:
+                if path.is_symlink() or path.exists() and not path.is_dir():
+                    path.unlink()
+                elif path.exists():
+                    shutil.rmtree(path)
+                git(root, 'worktree', 'prune')
+                git(root, 'worktree', 'add', '--detach', str(path), main)
+        git(path, 'checkout', '--detach', '--force', main)
+        git(path, 'clean', '-fdq')
+        return path
 
     def resolve(self, repo, prefixes):
         with self.fetched(repo) as root:
@@ -188,6 +210,7 @@ class Pass:
             need(sep and key not in fields and value.strip(), f'{path}: invalid front matter', 4)
             fields[key] = value.strip()
         fields.setdefault('rung', '-')
+        fields.setdefault('logins', '-')
         need(fields['rung'] == '-' or re.fullmatch(NAME, fields['rung']), f'{path}: invalid rung', 4)
         need(all(key in fields for key in PASS_KEYS), f'{path}: incomplete front matter', 4)
         need(fields['repository'] in REPOSITORIES and fields['outcome'] in ('running', 'done', 'capped', 'failed'),
@@ -364,6 +387,8 @@ def open_rung(args, record):
         return
     need(re.fullmatch(NAME, args.rung), 'invalid rung: expected NAME')
     need(all(re.fullmatch(LOGIN, name) for name in args.login), 'invalid login: expected NAME')
+    for name in args.login:
+        need(not re.search(r'-[0-9]+$', name), f'not a pool: {name}')
     need(len(args.login) == len(set(args.login)), 'repeated login')
     logins = ','.join(sorted(args.login)) or '-'
     name = 'qa/rungs.md'
@@ -644,7 +669,7 @@ class Watch:
         for name in self.outstanding(state):
             if kind and state.get('kinds', {}).get(name, 'moved') != kind:
                 continue
-            result = self.call('logins', 'give', name, '--as', 'qa-watch')
+            result = self.call('logins', 'give', name, '--as', state.get('holder', 'qa-watch'))
             if result.returncode == 0:
                 state.setdefault('given', []).append(name)
                 self.save(directory, state)
@@ -654,14 +679,24 @@ class Watch:
 
     def give_strays(self, passes):
         # qa-flow.md 10: a take can survive a crash before pass.json is saved.
-        held = {name for _, state in passes for name in self.outstanding(state)}
-        names = {name for event in self.record.events('rungs') for name in event['route'].split(',') if name != '-'}
+        held = {(state.get('holder', 'qa-watch'), name)
+                for _, state in passes for name in self.outstanding(state)}
+        listing = self.call('logins', 'list')
+        if listing.returncode:
+            log(f'cannot list stray logins: {listing.stderr.strip()}')
+            return
+        names = {}
+        for line in listing.stdout.splitlines():
+            match = re.fullmatch(r'(' + LOGIN + r'): held by (qa-watch(?:/\S+)?)'
+                                 r'(?: \([^\n]*\))? since \S+, .+', line)
+            if match and (match[2], match[1]) not in held:
+                names[match[1]] = match[2]
         path = self.directory / 'strays.json'
         need(not path.is_symlink(), f'{path}: symlink refused', 4)
         strays = json.loads(path.read_text()) if path.exists() else {}
         need(isinstance(strays, dict), f'{path}: invalid strays', 4)
-        for name in sorted(names - held):
-            result = self.call('logins', 'give', name, '--as', 'qa-watch')
+        for name, holder in sorted(names.items()):
+            result = self.call('logins', 'give', name, '--as', holder)
             if result.returncode == 0:
                 if result.stdout.strip() != f'already free: {name}':
                     log(f'gave back {name}: held without a pass')
@@ -770,6 +805,10 @@ class Watch:
         complete = units is not None and not remaining
         if complete:
             self.give(directory, state, 'in-place')
+        if (complete and not state.get('released') and (not state['run']
+                or self.unit_status('codex-run-' + state['run']) == 'stopped')):
+            state['released'] = True
+            self.save(directory, state)
         pending = state.pop('notice_pending', None)
         if pending:
             missing = self.outstanding(state)
@@ -868,7 +907,7 @@ class Watch:
         log(f'{name}: {outcome}, {count} findings, {wall}')
         return self.end(directory, state)
 
-    def start(self, repo, main, commits, checkout, cap, rung, logins, kinds, seconds):
+    def reserve(self, repo, slot, opening):
         started = timestamp()
         base = utc(started).strftime('%Y%m%d-%H%M-') + repo
         name, index = base, 1
@@ -877,13 +916,43 @@ class Watch:
             name = base + '-' + str(index)
         directory = self.directory / name
         directory.mkdir(mode=0o700)
-        state = {'pass': name, 'repository': repo, 'main': main, 'commits': [c['commit'] for c in commits],
+        state = {'pass': name, 'repository': repo, 'commits': [],
                  'started': started, 'run': '', 'capped': False, 'finished': False,
-                 'rung': rung, 'logins': logins, 'given': [], 'kinds': kinds}
-        # Persist custody before preparing the checkout or committing its start.
+                 'holder': 'qa-watch/' + name, 'slot': slot, 'stage': 'reserving',
+                 'rung': opening['rung'] if opening else '-',
+                 'requests': sorted(opening['logins']) if opening else [],
+                 'pools': {}, 'logins': {}, 'given': [], 'kinds': {}}
         self.save(directory, state)
-        git(checkout, 'checkout', '--detach', '--force', main)
-        git(checkout, 'clean', '-fdq')
+        return directory, state
+
+    def take(self, directory, state, opening):
+        for pool in state['requests']:
+            if pool in state['pools']:
+                continue
+            taken = self.call('logins', 'take', pool, '--any', '--as', state['holder'],
+                              '--note', state['repository'])
+            if taken.returncode:
+                log(f'{state["repository"]}: waiting for login {pool}: {taken.stderr.strip()}')
+                return False
+            name, sep, path = taken.stdout.strip().partition(' ')
+            need(sep and re.fullmatch(LOGIN, name) and Path(path).is_absolute(),
+                 f'{state["pass"]}: invalid login grant', 4)
+            state['pools'][pool] = name
+            state['logins'][name] = path
+            try:
+                mode = os.lstat(path).st_mode
+            except FileNotFoundError:
+                mode = 0
+            state['kinds'][name] = 'in-place' if stat.S_ISDIR(mode) else 'moved'
+            self.save(directory, state)
+        return True
+
+    def launch(self, directory, state, checkout, options):
+        name, repo, main = state['pass'], state['repository'], state['main']
+        started, rung, logins = state['started'], state['rung'], state['logins']
+        cap, seconds = options['QA_CAP_MINUTES'], options['QA_STOP_SECONDS']
+        commits = state['details']
+        pools = {name: pool for pool, name in state['pools'].items()}
         if rung == '-':
             rung_brief = "- Your rung: the binding's first; no held login."
         else:
@@ -893,7 +962,7 @@ class Watch:
                 rung_brief += '\nNo held login.'
             else:
                 rung_brief += ('\n- Held logins, taken for you by the service, each at rest at its path:\n'
-                               + '\n'.join(f'    - {name}: {path}' for name, path in logins.items())
+                               + '\n'.join(f'    - {name} (pool {pools[name]}): {path}' for name, path in logins.items())
                                + f"\n  Move each into your deployment as the binding says. At once after,\n"
                                f'  write {directory}/give-back: an executable that moves each back to\n'
                                "  its path by the product's export, every program in it named by its\n"
@@ -912,7 +981,7 @@ class Watch:
         replace(directory / 'on-stop', on_stop.encode(), 0o700)
         fields = dict(repository=repo, main=main, commits=' '.join(state['commits']), rung=rung, machine=self.workspace.machine(),
                       model='unknown', effort='unknown', started=started, ended='unknown', wall='unknown',
-                      tokens='unknown', outcome='running')
+                      tokens='unknown', outcome='running', logins=','.join(sorted(logins)) or '-')
         report = Pass(name, fields, f'# QA pass {name}\n')
         try:
             self.record.commit({f'qa/passes/{name}.md': report.text()}, f'qa watch: {name} started')
@@ -921,6 +990,7 @@ class Watch:
             self.give(directory, state)
             state.update(finished=True, ended=timestamp())
             self.save(directory, state)
+            self.end(directory, state)
             message = directory / 'post-body'
             replace(message, f'QA pass {name} could not start: {error}.\n'.encode())
             sent = self.call('post', 'send', '--as', 'qa-watch', self.director, f'qa: pass {name} refused', message)
@@ -938,6 +1008,7 @@ class Watch:
             self.finish(directory, state, 'codex-run refused: ' + (launch.stderr.strip() or launch.stdout.strip() or 'no run id'))
         else:
             state['run'] = words[0]
+            state.pop('stage', None)
             self.save(directory, state)
             log(f'{name}: started run {state["run"]} at {main}')
         return True
@@ -954,6 +1025,7 @@ class Watch:
         need(len(matches) <= 1, f'{state["pass"]}: multiple runs for one brief', 4)
         if matches:
             state['run'] = matches[0]
+            state.pop('stage', None)
             self.save(directory, state)
             log(f'{state["pass"]}: recovered run {state["run"]}')
 
@@ -968,6 +1040,10 @@ class Watch:
                 try:
                     if state['finished']:
                         complete[state['pass']] = self.end(directory, state)
+                        if state.get('cancelled') and state.get('released') and not self.outstanding(state):
+                            shutil.rmtree(directory)
+                        continue
+                    if state.get('stage') == 'reserving':
                         continue
                     if not state['run']:
                         if not self.record.path(f'qa/passes/{state["pass"]}.md').exists():
@@ -1006,12 +1082,29 @@ class Watch:
                             log(f'{state["pass"]}: capped run {run}')
                 except (Problem, OSError, ValueError, UnicodeError) as error:
                     log(f'{state["pass"]}: cleanup failed ({type(error).__name__}); keeping logins and scratch')
-            running = [s for _, s in self.local_passes() if not s['finished']]
-            free = max(0, options['QA_SLOTS'] - len(running))
-            busy = {s['repository'] for s in running}
+            local = self.local_passes()
+            def holds_slot(state):
+                return not state.get('released', False) if 'holder' in state else not state['finished']
             # Preflight every source before any launch: an unreadable feed starts none.
-            waiting = chosen(self.record, 'run')
-            repos = list(dict.fromkeys(r for r, _, _ in waiting if r not in busy)) if free else []
+            taken = {(s['repository'], sha) for _, s in local if not s['finished']
+                     for sha in s['commits']}
+            waiting = [row for row in chosen(self.record, 'run') if row[:2] not in taken]
+            pending = {s['repository']: (d, s) for d, s in local if s.get('stage') == 'reserving'}
+            wanted = {r for r, _, _ in waiting}
+            for repo, (directory, state) in list(pending.items()):
+                if repo not in wanted:
+                    try:
+                        state.update(cancelled=True, finished=True, ended=timestamp())
+                        state.pop('stage')
+                        self.save(directory, state)
+                        self.end(directory, state)
+                        if state.get('released') and not self.outstanding(state):
+                            shutil.rmtree(directory)
+                    except (Problem, OSError, ValueError, UnicodeError) as error:
+                        log(f'{state["pass"]}: cleanup failed ({type(error).__name__}); keeping logins and scratch')
+                    pending.pop(repo)
+            free = max(0, options['QA_SLOTS'] - sum(holds_slot(s) for _, s in self.local_passes()))
+            repos = list(dict.fromkeys(r for r, _, _ in waiting)) if free or pending else []
             cleared = {}
             for repo in repos:
                 result = self.call('landings', 'cleared', repo)
@@ -1025,16 +1118,17 @@ class Watch:
                 main = result.stdout.strip()
                 need(re.fullmatch(SHA, main), f'{repo}: invalid cleared main', 4)
                 cleared[repo] = main
+            refused = False
             for repo, main in cleared.items():
-                if not free:
-                    break
-                with self.repositories.fetched(repo) as checkout:
-                    order = git(checkout, 'rev-list', '--reverse', 'origin/main').splitlines()
+                if not free and repo not in pending:
+                    continue
+                with self.repositories.fetched(repo) as root:
+                    order = git(root, 'rev-list', '--reverse', 'origin/main').splitlines()
                     selected = {sha for r, sha, _ in waiting if r == repo}
                     need(selected <= set(order), f'{repo}: waiting commit missing from origin/main', 4)
                     selected = [sha for sha in order if sha in selected]
                     def holds(sha):
-                        result = git(checkout, 'merge-base', '--is-ancestor', sha, main, check=False)
+                        result = git(root, 'merge-base', '--is-ancestor', sha, main, check=False)
                         need(result.returncode in (0, 1), f'{repo}: cannot read cleared commit {main}', 4)
                         return result.returncode == 0
                     if not holds(selected[0]):
@@ -1043,44 +1137,50 @@ class Watch:
                     commits = []
                     for sha in selected:
                         if holds(sha):
-                            subject = git(checkout, 'show', '-s', '--format=%s', sha)
-                            trailer = git(checkout, 'show', '-s', '--format=%(trailers:key=QA,valueonly)', sha)
+                            subject = git(root, 'show', '-s', '--format=%s', sha)
+                            trailer = git(root, 'show', '-s', '--format=%(trailers:key=QA,valueonly)', sha)
                             commits.append(dict(commit=sha, subject=subject, qa=' '.join(trailer.splitlines())))
-                            if len(commits) == options['QA_BATCH']:
-                                break
                     opening = rung(self.record, repo)
-                    names = sorted(opening['logins']) if opening else []
-                    held = [(name, state['pass']) for _, state in self.local_passes()
-                            for name in self.outstanding(state) if name in names]
-                    if held:
-                        for name, pass_name in held:
-                            log(f'{repo}: login {name} not back from {pass_name}')
-                        continue
-                    logins, kinds = {}, {}
-                    for name in names:
-                        taken = self.call('logins', 'take', name, '--as', 'qa-watch', '--note', repo)
-                        if taken.returncode:
-                            for login in logins:
-                                given = self.call('logins', 'give', login, '--as', 'qa-watch')
-                                if given.returncode:
-                                    log(f'{repo}: cannot give {login} back: {given.stderr.strip()}')
-                            log(f'{repo}: waiting for login {name}: {taken.stderr.strip()}')
+                    granted = []
+                    while len(granted) < len(commits) and (free or repo in pending):
+                        if repo in pending:
+                            directory, state = pending.pop(repo)
+                        else:
+                            slots = {s.get('slot', 1) for _, s in self.local_passes()
+                                     if s['repository'] == repo and holds_slot(s)}
+                            slot = next(n for n in range(1, len(slots) + 2) if n not in slots)
+                            directory, state = self.reserve(repo, slot, opening)
+                            free -= 1
+                        if not self.take(directory, state, opening):
                             break
-                        logins[name] = taken.stdout.strip()
                         try:
-                            mode = os.lstat(logins[name]).st_mode
-                        except FileNotFoundError:
-                            mode = 0
-                        kinds[name] = 'in-place' if stat.S_ISDIR(mode) else 'moved'
-                    else:
-                        if not self.start(repo, main, commits, checkout, options['QA_CAP_MINUTES'],
-                                          opening['rung'] if opening else '-', logins, kinds, options['QA_STOP_SECONDS']):
+                            checkout = self.repositories.checkout(root, repo, state['slot'], main)
+                        except (Problem, OSError) as error:
+                            log(f'{state["pass"]}: cannot prepare slot: {error}')
                             break
-                        free -= 1
+                        granted.append((directory, state, checkout))
+                    if not granted:
+                        continue
+                    share = min(options['QA_BATCH'], (len(commits) + len(granted) - 1) // len(granted))
+                    # Save every share before the first record or session can start.
+                    offset = 0
+                    for index, (directory, state, checkout) in enumerate(granted):
+                        count = min(share, len(commits) - offset - (len(granted) - index - 1))
+                        details = commits[offset:offset + count]
+                        offset += count
+                        state.update(main=main, commits=[c['commit'] for c in details], details=details,
+                                     stage='starting', started=timestamp())
+                        self.save(directory, state)
+                    for directory, state, checkout in granted:
+                        if not self.launch(directory, state, checkout, options):
+                            refused = True
+                            break
+                if refused:
+                    break
             for directory, state in self.local_passes():
                 if (state['finished'] and not self.outstanding(state) and not state.get('notice')
                         and not state.get('notice_pending')
-                        and complete.get(state['pass'], False)
+                        and complete.get(state['pass'], False) and state.get('released', False)
                         and (utc(timestamp()) - utc(state['ended'])).total_seconds() >= 7 * 86400):
                     shutil.rmtree(directory)
                     log(f'{state["pass"]}: pruned')
