@@ -7,9 +7,11 @@ import os
 from pathlib import Path
 import runpy
 import shlex
+import shutil
 import subprocess
 import sys
 import time
+from unittest.mock import patch
 import case_runner
 
 SCRIPT = Path(__file__).resolve().with_name('fleet')
@@ -119,6 +121,40 @@ sys.exit(subprocess.run([sys.executable, '-I', '-', *words[4:]], input=source, e
                                 env=dict(self.env, **env), capture_output=True, text=True, timeout=40)
         assert result.returncode == status, (result.returncode, result.stdout, result.stderr)
         return result
+
+    def tend_kit(self):
+        self.kit = self.root / 'scratch kit'
+        self.kit.mkdir()
+        shutil.copy2(SCRIPT, self.kit / 'fleet')
+        for name in ('tidy', 'post', 'codex-run'):
+            self.answer('tend-' + name, '')
+            tool(self.kit, name, '''name = Path(sys.argv[0]).name
+root = Path(os.environ['DEV_TMP']).parent
+assert sys.stdin.read() == ''
+with (root / 'tend.calls').open('a') as out:
+    out.write(json.dumps([name, *sys.argv[1:]]) + '\\n')
+a = json.loads((root / ('tend-' + name + '.json')).read_text())
+for stream, line in a.get('lines', []):
+    print(line, file=sys.stdout if stream == 'out' else sys.stderr, flush=True)
+print(a.get('out', ''), end='')
+sys.exit(a.get('exit', 0))
+''')
+
+    def tend(self, status=0, now=NOW):
+        # A private process clock makes retention and --since exact, without sleeps.
+        driver = f"import runpy, sys, time; time.time = lambda: {now!r}; " \
+                 "path = sys.argv[1]; sys.argv = [path, 'tend']; " \
+                 "runpy.run_path(path, run_name='__main__')"
+        result = subprocess.run([PYTHON, '-I', '-S', '-c', driver, str(self.kit / 'fleet')],
+                                cwd=self.root, env=self.env, capture_output=True, text=True, timeout=40)
+        assert result.returncode == status, (result.returncode, result.stdout, result.stderr)
+        return result
+
+    def tends(self):
+        return [json.loads(line) for line in (self.tmp() / 'fleet/tend.jsonl').read_text().splitlines()]
+
+    def tend_calls(self):
+        return [json.loads(line) for line in (self.root / 'alpha/tend.calls').read_text().splitlines()]
 
     def probe(self, *args, **env):
         return json.loads(self.run('probe', *args, **env).stdout)
@@ -336,6 +372,8 @@ def room_order_and_exit(lab):
     text = lab.run('room', status=1).stdout
     assert text.splitlines()[-1].split() == ['gamma', 'unreached:', 'refused'], text
     assert 'cpu 4%' in text and 'GB' in text and '/core)' in text
+    line = API['room_line'](r[0])
+    assert line[9].startswith('implementers ') and line[10].startswith('sessions '), line
 
 
 def room_unreached_why(lab):
@@ -405,10 +443,112 @@ def room_json(lab):
     assert output['machines'][-1] == {'machine': 'gamma', 'unreached': 'refused'}
 
 
+def tend_order(lab):
+    lab.tend_kit()
+    lab.answer('tend-tidy', 'tidy output\n', exit=1)
+    lab.answer('tend-post', 'post output\n', exit=3)
+    result = lab.tend(status=1)
+    assert result.stdout == 'fleet tend: tidy 1, post 3, codex-run 0\n' and result.stderr == ''
+    expected = [['tidy', '--targets'], ['post', 'wake', '--older', '15'], ['codex-run', 'stale', '--post']]
+    assert lab.tend_calls() == expected
+    record, = lab.tends()
+    assert record == {'start': API['iso'](NOW), 'end': API['iso'](NOW), 'commands': [
+        {'argv': argv, 'exit': code, 'lines': lines, 'more': 0}
+        for argv, code, lines in zip(expected, [1, 3, 0], [['tidy output'], ['post output'], []])]}, record
+
+
+def tend_all_ok(lab):
+    lab.tend_kit()
+    result = lab.tend()
+    assert result.stdout == 'fleet tend: tidy 0, post 0, codex-run 0\n' and result.stderr == ''
+    assert [c['exit'] for c in lab.tends()[0]['commands']] == [0, 0, 0]
+    assert (lab.tmp() / 'fleet').stat().st_mode & 0o777 == 0o700
+    assert (lab.tmp() / 'fleet/tend.jsonl').stat().st_mode & 0o777 == 0o600
+    for args in [('tend', 'extra'), ('tend', '--sizes')]:
+        lab.run(*args, status=2)
+
+
+def tend_not_started(lab):
+    lab.tend_kit()
+    (lab.kit / 'codex-run').unlink()
+    result = lab.tend(status=1)
+    assert result.stdout == 'fleet tend: tidy 0, post 0, codex-run -\n'
+    assert lab.tend_calls() == [['tidy', '--targets'], ['post', 'wake', '--older', '15']]
+    assert lab.tends()[0]['commands'][-1] == {'argv': ['codex-run', 'stale', '--post'], 'exit': None,
+                                           'error': 'FileNotFoundError', 'lines': [], 'more': 0}
+    # A launch failure in the first command still reaches both later ones.
+    (lab.kit / 'tidy').chmod(0o600)
+    lab.tend(status=1)
+    assert lab.tends()[-1]['commands'][0]['error'] == 'PermissionError'
+    assert lab.tend_calls()[-1] == ['post', 'wake', '--older', '15']
+
+
+def tend_lines(lab):
+    lab.tend_kit()
+    lines = [('out' if n % 2 == 0 else 'err', f'line {n}') for n in range(250)]
+    lab.answer('tend-tidy', '', lines=lines)
+    lab.tend()
+    command = lab.tends()[0]['commands'][0]
+    assert command['lines'] == [line for _, line in lines[:200]] and command['more'] == 50, command
+
+
+def tend_keeps_a_week(lab):
+    lab.tend_kit()
+    rows = [{'start': API['iso'](NOW-age*86400), 'end': API['iso'](NOW-age*86400), 'commands': []}
+            for age in (8, 6, 7)]
+    path = write(lab.tmp() / 'fleet/tend.jsonl', '\n'.join(map(json.dumps, rows)) +
+                 '\nbroken\n[]\n{"end": 1}\n{"end": "2026-99-99T00:00:00Z"}\n' + '['*2000 + ']\n', 0o644)
+    path.parent.chmod(0o755)
+    lab.tend()
+    kept = lab.tends()
+    assert len(kept) == 2 and kept[0] == rows[1] and kept[1]['end'] == API['iso'](NOW), kept
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert path.parent.stat().st_mode & 0o777 == 0o700
+    assert {p.name for p in path.parent.iterdir()} == {'tend.jsonl', 'tend.lock'}
+
+
+def tend_read_by_probe(lab):
+    lab.tend_kit()
+    lab.tend()
+    first, = lab.tends()
+    lab.tend(now=NOW+300)
+    records = lab.tends()
+    assert len(records) == 2
+    assert lab.probe('--since', first['end'])['tend'] == records[1:]
+    assert lab.probe()['tend'] == records[1:]
+
+
+def tend_record_failure(lab):
+    lab.tend_kit()
+    path = lab.tmp() / 'fleet'
+    write(path, 'blocked')
+    result = lab.tend(status=2)
+    assert result.stdout == '' and result.stderr.startswith('fleet tend: cannot write record: ')
+    assert len(lab.tend_calls()) == 3
+    path.unlink()
+    (path / 'tend.jsonl').mkdir(parents=True)
+    lab.tend(status=2)
+    assert len(lab.tend_calls()) == 6
+    assert {p.name for p in path.iterdir()} == {'tend.jsonl', 'tend.lock'}
+    (path / 'tend.jsonl').rmdir()
+    lab.tend()
+    before = (path / 'tend.jsonl').read_bytes()
+    with patch.object(Path, 'replace', side_effect=OSError('fixture rename failure')):
+        try:
+            API['append_tend'](lab.tmp(), lab.tends()[0])
+        except OSError:
+            pass
+        else:
+            raise AssertionError('rename failure was hidden')
+    assert (path / 'tend.jsonl').read_bytes() == before
+    assert {p.name for p in path.iterdir()} == {'tend.jsonl', 'tend.lock'}
+
+
 CASES = [reading_fields, reading_floor, reading_absent, reading_source_fails, reading_no_text,
          reading_implementers_stale, reading_targets, reading_tend_since, room_verdicts,
          room_order_and_exit, room_unreached_why, room_new_machine, room_named, room_piped,
-         room_targets, room_json]
+         room_targets, room_json, tend_order, tend_all_ok, tend_not_started, tend_lines,
+         tend_keeps_a_week, tend_read_by_probe, tend_record_failure]
 
 
 def run(case, directory, built):

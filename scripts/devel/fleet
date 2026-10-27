@@ -2,6 +2,7 @@
 """Read each machine's room (docs/design/fleet-watch.md).
 
 fleet probe [--since TIME] [--sizes]
+fleet tend
 fleet room [--json] [--targets] [MACHINE...]
 """
 import argparse
@@ -17,6 +18,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
@@ -446,6 +448,80 @@ def probe(tmp, now, since=None, sizes=False):
     return checked(data)
 
 
+# Tending. Run this checkout's kit, then keep a week of its results.
+# fleet-watch.md 4: what each machine runs every 5 minutes, each under its own design.
+TENDING = (('tidy', '--targets'), ('post', 'wake', '--older', '15'),
+           ('codex-run', 'stale', '--post'))
+
+
+def tend_command(kit, argv):
+    result = {'argv': list(argv), 'exit': None, 'lines': [], 'more': 0}
+    try:
+        process = subprocess.Popen([str(kit / argv[0]), *argv[1:]], stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    except OSError as error:
+        result['error'] = type(error).__name__
+        return result
+    with process:
+        for line in process.stdout:
+            if len(result['lines']) < 200:
+                result['lines'].append(line.decode(errors='replace').rstrip('\r\n'))
+            else:
+                result['more'] += 1
+        result['exit'] = process.wait()
+    return result
+
+
+def append_tend(tmp, record):
+    directory = tmp / 'fleet'
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    directory.chmod(0o700)
+    path = directory / 'tend.jsonl'
+    cutoff = datetime.fromisoformat(record['end'].replace('Z', '+00:00')).timestamp() - 7 * 86400
+    with (directory / 'tend.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        kept = []
+        try:
+            with path.open(encoding='utf-8', errors='replace') as old:
+                for line in old:
+                    try:
+                        value = json.loads(line)
+                        end = value['end']
+                        if not isinstance(end, str) or not re.fullmatch(TIME, end):
+                            continue
+                        if datetime.fromisoformat(end.replace('Z', '+00:00')).timestamp() > cutoff:
+                            kept.append(value)
+                    except (ValueError, TypeError, KeyError, OverflowError, RecursionError):
+                        continue
+        except FileNotFoundError:
+            pass
+        sibling = None
+        try:
+            with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=directory,
+                                             prefix='tend.jsonl.', delete=False) as out:
+                sibling = Path(out.name)
+                for value in [*kept, record]:
+                    out.write(json.dumps(value) + '\n')
+            sibling.replace(path)
+        finally:
+            if sibling is not None:
+                sibling.unlink(missing_ok=True)
+
+
+def tend(tmp):
+    start = iso(clock())
+    kit = Path(__file__).resolve().parent
+    commands = [tend_command(kit, argv) for argv in TENDING]
+    record = {'start': start, 'end': iso(clock()), 'commands': commands}
+    try:
+        append_tend(tmp, record)
+    except OSError as error:
+        print(f'fleet tend: cannot write record: {error}', file=sys.stderr)
+        return 2
+    print('fleet tend: ' + ', '.join(f'{c["argv"][0]} {c["exit"] if c["exit"] is not None else "-"}' for c in commands))
+    return int(any(c['exit'] != 0 for c in commands))
+
+
 # Judging. The watch reuses holds; the room uses only the raise tests.
 def holds(condition, test, reading):
     if test not in ('raise', 'clear'):
@@ -571,8 +647,8 @@ def room_line(row):
             show(['disk', 'floor'], lambda d, f: f'disk {d["free"]/GB:.0f} GB, floor {f/GB:.0f}'),
             show(['kache'], lambda k: f'kache {k["store"]/GB:.0f}/{k["limit"]/GB:.0f} GB'),
             show(['heavy'], lambda h: f'heavy {h["running"]}+{h["queued"]}' + (f' {h["oldest_wait"]/60:.0f}m' if h['queued'] else '')),
-            show(['sessions'], lambda s: 'sessions ' + (' '.join(x['name'] for x in s) or '-')),
             show(['implementers'], lambda i: 'implementers ' + (' '.join(f'{k} {v}' for k, v in sorted(i.items())) or '-')),
+            show(['sessions'], lambda s: 'sessions ' + (' '.join(x['name'] for x in s) or '-')),
             'blind: ' + ', '.join(sorted(r['errors'])) if r['errors'] else '']
 
 
@@ -608,6 +684,7 @@ def main():
     p = commands.add_parser('probe')
     p.add_argument('--since')
     p.add_argument('--sizes', action='store_true')
+    commands.add_parser('tend')
     p = commands.add_parser('room')
     p.add_argument('--json', action='store_true')
     p.add_argument('--targets', action='store_true')
@@ -618,6 +695,8 @@ def main():
             parser.error('TIME must be YYYY-MM-DDTHH:MM:SSZ')
         print(json.dumps(probe(tmp_dir(), clock(), args.since, args.sizes), sort_keys=True))
         return 0
+    if args.command == 'tend':
+        return tend(tmp_dir())
     try:
         selected = machines(tmp_dir() / 'post/machines')
         unknown = set(args.machines) - {n for n, _ in selected}
