@@ -493,6 +493,69 @@ def a_pool_take_grants_a_free_login_and_names_it(lab):
     assert not (lab.directory('chatgpt-tools') / 'holder.json').exists()
 
 
+def a_now_take_never_joins_the_queue(lab):
+    path = lab.login()
+    lab.run('take', CHATGPT, '--as', 'a')
+    queue = lab.tmp / 'logins/waiting.json'
+    queue.unlink()
+    assert lab.run('take', CHATGPT, '--any', '--now', '--as', 'qa-watch/p')[0] == 1
+    assert not queue.exists()
+    lab.clock('2026-10-27T10:00:00Z')
+    assert lab.run('take', CHATGPT, '--any', '--as', 'b')[0] == 1
+    before = queue.read_bytes()
+    for holder in ('qa-watch/p', 'b'):
+        assert lab.run('take', CHATGPT, '--any', '--now', '--as', holder)[0] == 1
+        assert queue.read_bytes() == before
+    lab.run('give', CHATGPT, '--as', 'a')
+    before = queue.read_bytes()
+    for args in ((CHATGPT, '--any'), (CHATGPT,)):
+        assert lab.run('take', *args, '--now', '--as', 'c')[0] == 1
+        assert queue.read_bytes() == before
+    assert lab.run('take', CHATGPT, '--any', '--as', 'b') == (0, f'{CHATGPT} {path}\n', '')
+    # --now by name requires a free login, even for its current holder.
+    assert lab.run('take', CHATGPT, '--now', '--as', 'b')[0] == 1
+    assert lab.run('take', CHATGPT, '--now', '--wait', '1', '--as', 'c')[0] == 2
+
+
+def a_now_take_takes_a_free_unclaimed_login(lab):
+    names = (CHATGPT, 'chatgpt-2', 'chatgpt-3', 'chatgpt-4')
+    for name in names:
+        lab.login(name)
+        assert lab.run('take', name, '--as', 'a')[0] == 0
+    assert lab.run('take', CHATGPT, '--any', '--as', 'b')[0] == 1
+    for name in names[2:]:
+        lab.run('give', name, '--as', 'a')
+    queue = lab.tmp / 'logins/waiting.json'
+    before = queue.read_bytes()
+    assert lab.run('take', CHATGPT, '--any', '--now', '--as', 'qa-watch/p') == (
+        0, f'chatgpt-4 {lab.directory("chatgpt-4") / "login"}\n', '')
+    assert queue.read_bytes() == before
+    assert lab.read('holder.json', 'chatgpt-4')['holder'] == 'qa-watch/p'
+    assert lab.log('chatgpt-4')[-1][1:4] == ['take', 'qa-watch/p', '0']
+    assert lab.run('take', CHATGPT, '--any', '--as', 'b')[0] == 0
+    lab.run('give', 'chatgpt-4', '--as', 'qa-watch/p')
+    before = queue.read_bytes()
+    assert lab.run('take', 'chatgpt-4', '--now', '--as', 'c')[0] == 0
+    assert queue.read_bytes() == before
+
+
+def a_now_take_preserves_stale_and_legacy_queue_files(lab):
+    path = lab.login()
+    lab.clock('2026-10-27T10:00:00Z')
+    assert lab.run('take', CHATGPT, '--as', 'a')[0] == 0
+    assert lab.run('take', CHATGPT, '--as', 'b')[0] == 1
+    queue = lab.tmp / 'logins/waiting.json'
+    legacy = lab.directory() / 'waiting.json'
+    row = lab.read('waiting.json')[0]
+    # Leave both stale rows on disk while returning the login under the earlier clock.
+    assert lab.run('give', CHATGPT, '--as', 'a')[0] == 0
+    legacy.write_text(json.dumps([{key: row[key] for key in ('holder', 'note', 'since', 'seen')}]))
+    before = queue.read_bytes(), legacy.read_bytes()
+    lab.clock('2026-10-27T10:15:01Z')
+    assert lab.run('take', CHATGPT, '--now', '--as', 'c') == (0, f'{path}\n', '')
+    assert (queue.read_bytes(), legacy.read_bytes()) == before
+
+
 def one_queue_in_arrival_order(lab):
     path = lab.login()
     lab.run('take', CHATGPT, '--as', 'a')
@@ -744,7 +807,7 @@ sys.exit(module.main())
     assert lab.read('holder.json')['holder'] == 'b'
 
 
-CASES = (a_request_granted_by_old_code_leaves_the_queue, a_pool_take_grants_a_free_login_and_names_it, one_queue_in_arrival_order,
+CASES = (a_now_take_preserves_stale_and_legacy_queue_files, a_now_take_never_joins_the_queue, a_now_take_takes_a_free_unclaimed_login, a_request_granted_by_old_code_leaves_the_queue, a_pool_take_grants_a_free_login_and_names_it, one_queue_in_arrival_order,
          a_waiter_for_a_stuck_login_holds_back_no_free_one, a_pool_waiter_keeps_one_free_login_not_all,
          a_stale_waiter_leaves_the_queue, two_takes_at_once_get_two_logins,
          old_per_login_queues_are_migrated, an_old_process_lock_still_excludes,

@@ -45,7 +45,7 @@ class Lab:
                         DEV_TMP=str(self.tmp), RECORDS=str(self.records), QA_FIXTURE=str(root),
                         QA_RECORD=str(KIT / 'record'), QA_POST=str(self.post),
                         QA_POST_LOG=str(self.post_log), QA_POST_STATUS='0',
-                        USER='fixture', POST_NAME='o/fixture', RECORD_TIDY='',
+                        QA_LOGIN_RESERVE='0', USER='fixture', POST_NAME='o/fixture', RECORD_TIDY='',
                         GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1',
                         GIT_AUTHOR_NAME='Fixture', GIT_AUTHOR_EMAIL='fixture@invalid',
                         GIT_COMMITTER_NAME='Fixture', GIT_COMMITTER_EMAIL='fixture@invalid',
@@ -59,7 +59,7 @@ class Lab:
             self.env[f'GIT_CONFIG_KEY_{count + index}'] = key
             self.env[f'GIT_CONFIG_VALUE_{count + index}'] = value
         self.env['GIT_CONFIG_COUNT'] = str(count + 4)
-        self.configure(cleared={})
+        self.configure(cleared={}, pools={CHATGPT: [CHATGPT], CLAUDE: [CLAUDE]})
         for name in ('post', 'codex-run', 'landings', 'systemctl', 'systemd-run', 'logins'):
             tool = root / name
             tool.write_text(f'#!{sys.executable} -S\n' + WATCH_TOOLS)
@@ -654,28 +654,50 @@ elif name == 'logins':
                 continue
             holder = holders.get(login, 'qa-watch')
             note = ' (temper)' if login != 'chatgpt-2' else ''
-            print(f'{login}: held by {holder}{note} since 2026-10-26T09:15:23Z, 0:01, at rest')
+            state = 'not at rest' if login in config.get('logins_out', []) else 'at rest'
+            print(f'{login}: held by {holder}{note} since 2026-10-26T09:15:23Z, 0:01, {state}')
             print('  waiting: other since 2026-10-26T09:15:23Z (any of chatgpt)')
             print('  last 24 hours: 0:01 held')
         sys.exit(0)
     assert args[0] in ('take', 'give'), args
     login = args[1]
-    position = 3 if args[0] == 'take' else 2
-    assert args[position] == '--as', args
+    position = args.index('--as')
     holder = args[position + 1]
-    assert holder == 'qa-watch' or holder.startswith('qa-watch/'), args
     if login in config.get('logins_refused', []):
         print('fixture login refused', file=sys.stderr)
         sys.exit(4)
     if args[0] == 'take':
-        assert args[2] == '--any' and args[5:] == ['--note', 'temper'], args
-        members = config.get('pools', {}).get(login, [login])
-        free = [member for member in members if member not in holders
-                and member not in config.get('logins_busy', []) and member not in config.get('logins_out', [])]
-        if login in config.get('logins_busy', []) or not free:
+        pool = '--any' in args
+        now = '--now' in args
+        if holder.startswith('qa-watch'):
+            assert pool and now and args[position + 2] == '--note' and args[position + 3] in ('temper', 'jig'), args
+        members = config.get('pools', {}).get(login, [login]) if pool else [login]
+        queue = config.setdefault('login_queue', [])
+        entry = dict(holder=holder, request=login, pool=pool)
+        if not now:
+            entry = next((row for row in queue if row == entry), entry)
+            if entry not in queue:
+                queue.append(entry)
+        reserved = set()
+        free = {member for group in config.get('pools', {}).values() for member in group
+                if member not in holders and member not in config.get('logins_busy', [])
+                and member not in config.get('logins_out', [])}
+        available = None
+        for row in [*queue, entry] if now else queue:
+            choices = config.get('pools', {}).get(row['request'], [row['request']]) if row['pool'] else [row['request']]
+            choice = next((member for member in choices if member in free and member not in reserved), None)
+            if row is entry:
+                available = choice
+                break
+            if choice:
+                reserved.add(choice)
+        if login in config.get('logins_busy', []) or available is None:
+            (root / 'tools.json').write_text(json.dumps(config))
             print('fixture login busy', file=sys.stderr)
             sys.exit(1)
-        login = free[0]
+        login = available
+        if not now:
+            queue.remove(entry)
         held.add(login)
         holders[login] = holder
         config.update(logins_held=sorted(held), login_holders=holders)
@@ -1091,7 +1113,7 @@ def watch_takes_the_rungs_login_before_the_pass(lab):
     lab.watch()
     directory, state = lab.watch_state()
     path = str(lab.root / 'login-store' / CHATGPT / 'login')
-    assert lab.calls('logins') == [['list'], ['take', CHATGPT, '--any', '--as', state['holder'], '--note', 'temper']]
+    assert lab.calls('logins') == [['list'], ['take', CHATGPT, '--any', '--now', '--as', state['holder'], '--note', 'temper']]
     calls = [json.loads(line)['tool'] for line in (lab.root / 'tools.jsonl').read_text().splitlines()]
     assert calls.index('logins') < calls.index('codex-run')
     brief = (directory / 'brief.md').read_text()
@@ -1117,48 +1139,38 @@ def watch_without_a_rung_takes_no_login(lab):
     assert 'Held logins,' not in brief
 
 
-def watch_waits_while_the_login_is_busy(lab):
+def watch_refuses_a_busy_login(lab):
     lab.rung('temper', REAL, CHATGPT)
     lab.waiting(1)
     before = lab.head()
     for config in [dict(logins_busy=[CHATGPT]), dict(logins_busy=[], logins_refused=[CHATGPT])]:
         lab.configure(**config)
         result = lab.watch()
-        assert f'temper: waiting for login {CHATGPT}:' in result.stdout
-        assert lab.watch_state()[1]['stage'] == 'reserving'
+        assert f'temper: cannot take login {CHATGPT}:' in result.stdout
+        assert not lab.watch_states()
         assert not lab.calls('codex-run') and lab.head() == before
         assert 'waiting: 1 commits chosen to run' in lab.run('passes').stdout
 
 
-def watch_keeps_the_first_when_the_second_is_busy(lab):
+def a_refused_take_cancels_its_reservation(lab):
     lab.rung('temper', REAL, CLAUDE, CHATGPT)
     commits = lab.waiting(1)
     lab.configure(logins_busy=[CLAUDE])
-    driven_watch(lab, """Watch = tool['Watch']
-original = Watch.call
-def call(self, name, *args):
-    if name == 'logins' and args[:2] == ('take', 'claude'):
-        directory, state = self.local_passes()[0]
-        assert state['pools'] == {'chatgpt': 'chatgpt'}
-        assert state['logins'] and state['kinds']
-    return original(self, name, *args)
-Watch.call = call
-""")
-    directory, state = lab.watch_state()
-    holder = state['holder']
-    assert lab.calls('logins') == [['list'],
-                                 ['take', CHATGPT, '--any', '--as', holder, '--note', 'temper'],
-                                 ['take', CLAUDE, '--any', '--as', holder, '--note', 'temper']]
-    assert state['pools'] == {CHATGPT: CHATGPT} and not state['commits']
-    assert not lab.calls('codex-run')
-    lab.watch()
-    assert lab.calls('logins')[-1] == ['take', CLAUDE, '--any', '--as', holder, '--note', 'temper']
-    assert sum(args[:2] == ['take', CHATGPT] for args in lab.calls('logins')) == 1
-    # Cancelling its remaining work gives back the earlier grant and removes it.
-    lab.run('decide', 'temper', *commits, 'backlog')
-    lab.watch()
-    assert not directory.exists()
-    assert lab.calls('logins')[-1] == ['give', CHATGPT, '--as', holder]
+    lab.watch(now='2026-10-27T10:00:00Z')
+    assert not lab.watch_states() and not lab.calls('codex-run')
+    calls = lab.calls('logins')
+    holder = calls[1][5]
+    assert calls == [['list'],
+                     ['take', CHATGPT, '--any', '--now', '--as', holder, '--note', 'temper'],
+                     ['take', CLAUDE, '--any', '--now', '--as', holder, '--note', 'temper'],
+                     ['give', CHATGPT, '--as', holder]]
+    config = json.loads((lab.root / 'tools.json').read_text())
+    assert not config['logins_held'] and not config['login_queue']
+    lab.configure(logins_busy=[])
+    lab.watch(now='2026-10-27T10:01:00Z')
+    _, state = lab.watch_state()
+    assert state['holder'] != holder and state['commits'] == commits and state['run']
+    assert state['pools'] == {CHATGPT: CHATGPT, CLAUDE: CLAUDE}
 
 
 def watch_gives_the_login_after_the_unit_stops(lab):
@@ -1259,10 +1271,10 @@ def watch_starts_no_pass_while_its_login_is_out(lab):
     lab.waiting(1)
     before = len(lab.calls('logins'))
     result = lab.watch()
-    assert f'temper: waiting for login {CHATGPT}:' in result.stdout
-    assert len(lab.calls('logins')) == before + 3  # List, retry of give, and a new reservation's take.
-    assert len(lab.calls('codex-run')) == 1 and len(lab.watch_states()) == 2
-    assert lab.watch_states()[-1][1]['stage'] == 'reserving'
+    assert f'temper: no QA login available in pool {CHATGPT};' in result.stdout
+    assert len(lab.calls('logins')) == before + 2  # List and retry of give; the cap refuses a take.
+    assert len(lab.calls('codex-run')) == 1 and len(lab.watch_states()) == 1
+    assert not any(s.get('stage') == 'reserving' for _, s in lab.watch_states())
 
 
 def watch_keeps_a_pass_whose_login_is_out(lab):
@@ -1348,7 +1360,7 @@ def watch_gives_back_a_login_held_without_a_pass(lab):
     result = lab.watch()
     assert f'gave back {CHATGPT}: held without a pass' in result.stdout
     assert lab.calls('logins')[:3] == [['list'], ['give', CHATGPT, '--as', 'qa-watch'],
-                                    ['take', CHATGPT, '--any', '--as', lab.watch_state()[1]['holder'], '--note', 'temper']]
+                                    ['take', CHATGPT, '--any', '--now', '--as', lab.watch_state()[1]['holder'], '--note', 'temper']]
     assert not lab.sent()
     lab.end_run()
     lab.watch()
@@ -2244,22 +2256,26 @@ def the_shares_stop_at_the_batch(lab):
     assert [s['commits'] for s in active] == [commits[:2], commits[2:3], commits[3:4], commits[4:]]
 
 
-def a_pass_waits_for_a_free_login(lab):
+def a_crashed_reservation_is_advanced_once_or_cancelled(lab):
     lab.rung('temper', REAL, CHATGPT)
-    lab.configure(pools={CHATGPT: [CHATGPT]}, logins_held=[CHATGPT], login_holders={CHATGPT: 'director'})
-    commits = lab.waiting(1)
-    for _ in range(2):
-        lab.watch()
+    lab.waiting(1)
+    for busy in (True, False):
+        driven_watch(lab, """def take(*args):
+    sys.exit(0)
+tool['Watch'].take = take
+""")
         directory, state = lab.watch_state()
-        assert state['stage'] == 'reserving' and state['slot'] == 1 and not state['commits']
-    takes = [args for args in lab.calls('logins') if args[0] == 'take']
-    assert len(takes) == 2 and takes[0] == takes[1]
-    assert not lab.calls('codex-run')
-    lab.configure(logins_held=[])
-    lab.watch()
-    assert lab.watch_state()[0] == directory
-    assert lab.watch_state()[1]['commits'] == commits
-    assert lab.watch_state()[1]['holder'] == state['holder']
+        assert state['stage'] == 'reserving' and not state['pools']
+        lab.configure(logins_busy=[CHATGPT] if busy else [])
+        before = len(lab.calls('logins'))
+        lab.watch()
+        calls = lab.calls('logins')[before:]
+        assert sum(args[0] == 'take' for args in calls) == 1
+        if busy:
+            assert not directory.exists() and not lab.calls('codex-run')
+        else:
+            assert lab.watch_state()[1]['run']
+        lab.configure(logins_busy=[])
 
 
 def a_stuck_login_holds_back_only_its_pass(lab):
@@ -2410,18 +2426,20 @@ tool['Repositories'].checkout = fail
     lab.waiting(1)
     lab.watch()
     active = [s for _, s in lab.watch_states() if not s['finished']]
-    assert len(active) == 1 and active[0]['holder'] != state['holder']
-    assert active[0]['pools'] == {CHATGPT: CHATGPT} and not active[0]['run']
+    assert not active
+    assert json.loads((lab.root / 'tools.json').read_text())['logins_held'] == [CLAUDE]
     lab.configure(logins_out=[])
-    lab.watch()
+    lab.watch(now='2026-10-28T10:00:00Z')
     assert not directory.exists() and lab.watch_state()[1]['run']
 
 
 def cancelled_work_with_jig_waiting(lab):
     lab.rung('temper', REAL, CHATGPT)
     commits = lab.waiting(1)
-    lab.configure(logins_busy=[CHATGPT])
-    lab.watch()
+    driven_watch(lab, """def checkout(*args):
+    raise tool['Problem']('fixture checkout failed', 4)
+tool['Repositories'].checkout = checkout
+""")
     directory, state = lab.watch_state()
     lab.run('decide', 'temper', *commits, 'backlog')
     jig = lab.commit('jig feature', 'jig feature', repo='jig')
@@ -2488,16 +2506,15 @@ def save(self, directory, state):
 tool['Watch'].save = save
 """)
     reservations = lab.watch_states()
-    assert len(reservations) == 4 and not lab.calls('codex-run')
-    assert [len(s['pools']) for _, s in reservations] == [2, 2, 2, 1]
+    assert len(reservations) == 3 and not lab.calls('codex-run')
+    assert [len(s['pools']) for _, s in reservations] == [2, 2, 2]
     assert all(s['stage'] == 'reserving' and not s['commits'] for _, s in reservations)
     lab.watch()
     states = lab.watch_states()
     active = [s for _, s in states if s['run']]
     assert len(active) == 3 and [s['slot'] for s in active] == [1, 2, 3]
     assert [sha for s in active for sha in s['commits']] == commits
-    pending, = [s for _, s in states if s.get('stage') == 'reserving']
-    assert pending['pass'] == reservations[-1][1]['pass'] and pending['slot'] == 4
+    assert not [s for _, s in states if s.get('stage') == 'reserving']
 
 
 def later_incomplete_reservations_are_cancelled(lab):
@@ -2505,7 +2522,10 @@ def later_incomplete_reservations_are_cancelled(lab):
     lab.configure(pools={CHATGPT: [CHATGPT, 'chatgpt-2'], CLAUDE: [CLAUDE]}, logins_busy=[CLAUDE])
     lab.waiting(2)
     lab.env['QA_SLOTS'] = '2'
-    lab.watch()
+    driven_watch(lab, """def take(*args):
+    sys.exit(0)
+tool['Watch'].take = take
+""")
     first, state = lab.watch_state()
     second = first.with_name(first.name + '-2')
     second.mkdir()
@@ -2514,14 +2534,13 @@ def later_incomplete_reservations_are_cancelled(lab):
                           'logins': {'chatgpt-2': str(lab.root / 'login-store/chatgpt-2/login')},
                           'kinds': {'chatgpt-2': 'moved'}})
     (second / 'pass.json').write_text(json.dumps(other))
-    lab.configure(logins_held=[CHATGPT, 'chatgpt-2'],
-                  login_holders={CHATGPT: state['holder'], 'chatgpt-2': other['holder']})
+    lab.configure(logins_held=['chatgpt-2'], login_holders={'chatgpt-2': other['holder']})
     before = len(lab.calls('logins'))
     lab.watch()
-    assert lab.watch_state()[0] == first and not second.exists()
+    assert not lab.watch_states() and not lab.calls('codex-run')
     calls = lab.calls('logins')[before:]
-    assert ['take', CLAUDE, '--any', '--as', state['holder'], '--note', 'temper'] in calls
-    assert ['take', CLAUDE, '--any', '--as', other['holder'], '--note', 'temper'] in calls
+    assert ['take', CLAUDE, '--any', '--now', '--as', state['holder'], '--note', 'temper'] in calls
+    assert not any(args[0] == 'take' and other['holder'] in args for args in calls)
     assert ['give', 'chatgpt-2', '--as', other['holder']] in calls
 
 
@@ -2685,12 +2704,11 @@ def a_timed_out_take_is_recovered_as_a_stray(lab):
     lab.waiting(1)
     lab.configure(hang={'logins:take': 'after'})
     timed_watch(lab, 'logins:take')
-    directory, state = lab.watch_state()
-    assert state['stage'] == 'reserving' and not state['pools'] and not state['logins']
-    assert json.loads((lab.root / 'tools.json').read_text())['login_holders'][CHATGPT] == state['holder']
+    assert not lab.watch_states()
+    holder = json.loads((lab.root / 'tools.json').read_text())['login_holders'][CHATGPT]
     lab.configure(hang={})
     timed_watch(lab)
-    assert ['give', CHATGPT, '--as', state['holder']] in lab.calls('logins')
+    assert ['give', CHATGPT, '--as', holder] in lab.calls('logins')
     assert lab.watch_state()[1]['run']
 
 
@@ -2778,7 +2796,147 @@ tool['main'].__globals__['command'] = command
     assert {s['repository'] for _, s in lab.watch_states() if s['run']} == {'temper', 'jig'}
 
 
-CASES = (timed_out_repository_and_record_calls_leave_work_recoverable,
+def reserved_pool(lab, size=4):
+    lab.env.pop('QA_LOGIN_RESERVE')  # Exercise the service's default of two.
+    lab.env['QA_SLOTS'] = '4'
+    lab.rung('temper', REAL, CHATGPT)
+    members = [CHATGPT, *[f'chatgpt-{n}' for n in range(2, size + 1)]]
+    lab.configure(pools={CHATGPT: members})
+    return members
+
+
+def qa_holds_at_most_the_pool_less_the_reserve(lab):
+    members = reserved_pool(lab)
+    commits = lab.waiting(8)
+    result = lab.watch()
+    states = lab.watch_states()
+    assert len(states) == 2 and [s['commits'] for _, s in states] == [commits[:4], commits[4:]]
+    config = json.loads((lab.root / 'tools.json').read_text())
+    assert config['logins_held'] == members[:2] and not config['login_queue']
+    assert len(lab.calls('codex-run')) == 2
+    assert 'keeping the reserve for walks' in result.stdout
+    assert sum(args == ['list'] for args in lab.calls('logins')) == 1
+    lab.waiting(1)
+    assert 'pool chatgpt: 4 logins, QA holds 2, keeps 2 for walks' in lab.run('passes').stdout
+
+
+def a_stuck_login_leaves_qa_one_pass(lab):
+    members = reserved_pool(lab)
+    lab.waiting(2)
+    lab.watch()
+    first, second = lab.watch_states()
+    lab.end_run(first[1])
+    lab.configure(logins_out=[members[0]])
+    lab.waiting(2)
+    lab.watch()
+    assert len(lab.calls('codex-run')) == 2
+    state = json.loads((first[0] / 'pass.json').read_text())
+    assert state['finished'] and not state['given']
+    assert "It counts against QA's logins of pool chatgpt until it is back" in lab.sent()[0]['body']
+    lab.configure(logins_out=[])
+    lab.watch()
+    assert len(lab.calls('codex-run')) == 3
+    assert json.loads((first[0] / 'pass.json').read_text())['given'] == [members[0]]
+    held = json.loads((lab.root / 'tools.json').read_text())['logins_held']
+    assert len(held) == 2 and second[1]['pools'][CHATGPT] in held
+
+
+def a_walks_take_finds_a_login_whatever_qa_asked(lab):
+    members = reserved_pool(lab)
+    lab.waiting(8)
+    lab.watch()
+    for walk, member in zip(('a', 'b'), members[2:]):
+        result = subprocess.run([lab.env['QA_LOGINS'], 'take', CHATGPT, '--any', '--as', 'director/walk-' + walk],
+                                env=lab.env, capture_output=True, text=True, timeout=HUNG_TOOL_S)
+        assert result.returncode == 0 and result.stdout.startswith(member + ' '), result.stderr
+    config = json.loads((lab.root / 'tools.json').read_text())
+    assert not config['login_queue'] and len(config['logins_held']) == 4
+
+
+def a_pool_no_larger_than_the_reserve_runs_no_pass(lab):
+    reserved_pool(lab, 2)
+    lab.waiting(1)
+    lab.watch()
+    assert not lab.watch_states() and not lab.calls('codex-run')
+    assert lab.calls('logins') == [['list']]
+    expected = 'pool chatgpt: 2 logins, QA holds 0, keeps 2 for walks: no QA pass runs'
+    assert expected in lab.run('passes').stdout
+    lab.run('passes', status=2, extra={'QA_LOGIN_RESERVE': '-1'})
+    (lab.tmp / 'machine.env').write_text('QA_LOGIN_RESERVE=1\n')
+    assert 'keeps 1 for walks' in lab.run('passes').stdout
+    lab.watch()
+    assert len(lab.calls('codex-run')) == 1
+
+
+def a_failed_listing_admits_no_pass(lab):
+    reserved_pool(lab)
+    lab.waiting(2)
+    lab.configure(login_list_failure=True)
+    lab.watch()
+    assert not lab.watch_states() and not lab.calls('codex-run')
+    assert lab.calls('logins') == [['list']]
+    lab.configure(login_list_failure=False)
+    lab.watch()
+    assert len(lab.calls('codex-run')) == 2
+
+
+def an_old_stuck_holder_counts_against_the_reserve(lab):
+    members = reserved_pool(lab)
+    lab.configure(logins_held=[members[0]], logins_out=[members[0]])
+    lab.waiting(4)
+    lab.watch()
+    assert len(lab.calls('codex-run')) == 1
+    assert json.loads((lab.root / 'tools.json').read_text())['logins_held'] == members[:2]
+
+
+def qa_takes_only_a_login_unclaimed_by_a_walk(lab):
+    members = reserved_pool(lab)
+    queue = [dict(holder='director/walk-a', request=CHATGPT, pool=True)]
+    lab.configure(login_queue=queue)
+    lab.waiting(2)
+    lab.watch()
+    states = lab.watch_states()
+    assert [s['pools'][CHATGPT] for _, s in states] == members[1:3]
+    assert json.loads((lab.root / 'tools.json').read_text())['login_queue'] == queue
+
+
+def an_uncertain_grant_counts_before_another_repository_takes(lab):
+    reserved_pool(lab)
+    lab.rung('jig', REAL, CHATGPT)
+    commits, _ = two_repositories_waiting(lab, 2)
+    jig = lab.commit('second jig feature', 'second jig feature', repo='jig')
+    lab.run('decide', 'jig', jig, 'run')
+    lab.configure(cleared={'temper': commits[-1], 'jig': jig}, hang={'logins:take': 'after'})
+    patch = """import json
+original_call = tool['Watch'].call
+def call(self, name, *args):
+    global HUNG
+    result = original_call(self, name, *args)
+    if name == 'logins' and args[0] == 'take' and result.returncode == 124:
+        HUNG = ()
+        path = self.workspace.fixture / 'tools.json'
+        config = json.loads(path.read_text())
+        config['hang'] = {}
+        path.write_text(json.dumps(config))
+    return result
+tool['Watch'].call = call
+"""
+    driven_watch(lab, "HUNG = ('logins:take',)\n" + TIMEOUT_DRIVER + patch)
+    config = json.loads((lab.root / 'tools.json').read_text())
+    assert len(config['logins_held']) == 2 and len(lab.calls('codex-run')) == 1
+    assert not config['login_queue']
+    assert not any(s.get('stage') == 'reserving' for _, s in lab.watch_states())
+
+
+CASES = (an_uncertain_grant_counts_before_another_repository_takes,
+         qa_holds_at_most_the_pool_less_the_reserve,
+         a_stuck_login_leaves_qa_one_pass,
+         a_walks_take_finds_a_login_whatever_qa_asked,
+         a_pool_no_larger_than_the_reserve_runs_no_pass,
+         a_failed_listing_admits_no_pass,
+         an_old_stuck_holder_counts_against_the_reserve,
+         qa_takes_only_a_login_unclaimed_by_a_walk,
+         timed_out_repository_and_record_calls_leave_work_recoverable,
          all_reservations_survive_a_crash_before_their_shares,
          later_incomplete_reservations_are_cancelled,
          slot_preparation_refuses_every_linked_component,
@@ -2794,7 +2952,7 @@ CASES = (timed_out_repository_and_record_calls_leave_work_recoverable,
          a_finished_pass_waits_for_its_session_to_stop,
          two_passes_start_side_by_side,
          the_shares_stop_at_the_batch,
-         a_pass_waits_for_a_free_login,
+         a_crashed_reservation_is_advanced_once_or_cancelled,
          a_stuck_login_holds_back_only_its_pass,
          a_grant_lost_in_a_crash_is_given_back,
          a_half_made_worktree_is_made_again,
@@ -2831,8 +2989,8 @@ CASES = (timed_out_repository_and_record_calls_leave_work_recoverable,
          rung_refuses_a_repeated_login,
          watch_takes_the_rungs_login_before_the_pass,
          watch_without_a_rung_takes_no_login,
-         watch_waits_while_the_login_is_busy,
-         watch_keeps_the_first_when_the_second_is_busy,
+         watch_refuses_a_busy_login,
+         a_refused_take_cancels_its_reservation,
          watch_gives_the_login_after_the_unit_stops,
          watch_waits_for_the_unit_before_giving,
          watch_holds_logins_until_stop_is_confirmed,
