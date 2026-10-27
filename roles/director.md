@@ -226,19 +226,19 @@ machine's `tmp/post/` (section 5).
   `cur/` are the record.
 - **The waiter,** `post wait director`, ends when post comes. The
   director then runs `post read director`, acts, and starts it again.
-- **The fleet watch**
-  ([fleet-watch.md](../docs/design/fleet-watch.md)). Each machine
-  tends itself every 5 minutes: its idle build targets cleared, its deaf sessions woken in
-  place, its dead runs told to their callers, kache's store held to its
-  limit. `fleet watch`, a timer on hel8, reads every machine of post's
-  machines file and posts the director, from `fleet`, once per
-  condition two rounds confirm, at most every 10 minutes: disk near its
-  floor, load past 3 per core, memory short, kache past its limit, a
-  machine unreached, untended or unseen, a session its wake could not
-  reach, mail unread an hour, a dead run untold, an active mission's
-  session gone. A clear posts nothing. Each wake re-reads the
-  director's whole context: a condition is only what the director must
-  act on, and its thresholds are tuned from what it raises.
+- **The fleet watch** ([fleet-watch.md](../docs/design/fleet-watch.md)).
+  Each machine tends itself every 5 minutes: its idle build targets
+  cleared, its deaf sessions woken in place, its dead runs told to their
+  callers, kache's store held to its limit. `fleet watch`, a timer on
+  hel8, reads every machine of post's machines file and posts the
+  director, from `fleet`, once per condition two rounds confirm, at most
+  every 10 minutes: disk near its floor, load past 3 per core, memory
+  short, kache past its limit, a machine unreached, untended or unseen,
+  a session its wake could not reach, mail unread an hour, a dead run
+  untold, an active mission's session gone. A clear posts nothing. Each
+  wake re-reads the director's whole context: a condition is only what
+  the director must act on, and its thresholds are tuned from what it
+  raises.
 - **After landing's runner** posts the director a red that nobody waits
   on, and a fault of its own that lasts 15 minutes (landing-flow.md 4,
   step 8); `landings` shows each tier. The inbox is gone.
