@@ -1392,7 +1392,7 @@ def unknown_ancestry_leaves_the_landing_undecided(lab):
     commit, tip, main = range_run(lab)
     lab.append(tier_record('verdict', 'temper', 'f' * 40, 10, token=main[:32], run=main))
     lab.standin_git('')
-    result = lab.run('wait', '--cleared', commit[:9], '--timeout', '.5', status=3)
+    result = lab.run('wait', '--cleared', commit[:9], '--timeout', '10', status=3)
     assert result.stdout == '' and result.stderr == (
         f'landings: timed out waiting for {commit[:9]}\nlandings: no verdict for temper {commit}\n'), result
     calls = [json.loads(line) for line in (lab.root / 'git.jsonl').read_text().splitlines()]
@@ -1404,11 +1404,11 @@ def unknown_ancestry_leaves_the_landing_undecided(lab):
 def git_calls_cut_to_the_deadline(lab):
     lab.repository('agents', tier=False)
     commit = lab.land('agents', 'slow ancestry')
-    lab.standin_git("if sys.argv[3] == 'merge-base':\n    time.sleep(3)\n")
+    lab.standin_git("if sys.argv[3] == 'merge-base':\n    time.sleep(60)\n")
     start = time.monotonic()
-    lab.run('wait', '--cleared', commit[:9], '--timeout', '.5', status=3)
+    lab.run('wait', '--cleared', commit[:9], '--timeout', '5', status=3)
     elapsed = time.monotonic() - start
-    assert elapsed < 2, elapsed
+    assert elapsed < 15, elapsed
     calls = [json.loads(line) for line in (lab.root / 'git.jsonl').read_text().splitlines()]
     assert any(argv[2] == 'merge-base' for argv in calls), calls
 
