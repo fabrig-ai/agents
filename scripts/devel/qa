@@ -11,6 +11,7 @@ qa walk REPO RUNG [--kind KIND] [--build REF] [--login POOL]... [--cap MINUTES]
 qa walk REPO RUNG --resume NAME --build REF [--cap MINUTES]
 qa take KIND [--login POOL] --as walk/<KIND>/<WHAT> [--note TEXT]
 qa give NAME --as HOLDER
+qa keep --check DIRECTORY
 qa watch --director ADDRESS [--once]
 qa deploy DIRECTORY NAME -- COMMAND...
 """
@@ -31,6 +32,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from typing import NamedTuple
 
 os.umask(0o077)
 REPOSITORIES = ('skein', 'smith', 'hearth', 'jig', 'temper')
@@ -657,6 +659,317 @@ def passes(running, record, repositories):
                 print(line + (': no QA pass runs' if size <= reserve else ''))
 
 
+DOCUMENTS = ('brief.md', 'plan.md', 'notes.md', 'report.md')
+TREES = ('scripts', 'evidence')
+
+# record's SECRET (records.md 2)
+KEY = re.compile(r'-----BEGIN [^\n]*PRIVATE KEY-----|(?<![\w-])(?:gh[pousr]_[A-Za-z0-9_-]{20,}|github_pat_[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9_-]{20,})|xox[abpr]-|AKIA[A-Z0-9]{16}')
+JWT = re.compile(r'(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+')
+HEADER = re.compile(r'''(?<![\w-])(["']?)(?:Proxy-)?Authorization(["']?)\s*:\s*(["']?)[A-Za-z][A-Za-z0-9_-]*[ \t]+''', re.I)
+COOKIE = re.compile(r'''(?<![\w-])(["']?)(Set-)?Cookie(["']?)\s*:\s*(["']?)''', re.I)
+COOKIE_PAIR = re.compile(r'''[ \t]*[^\s=;"']+=''')
+JAR_HEADING = re.compile(r'^# (?:Netscape HTTP|HTTP) Cookie File\s*$')
+JAR = re.compile(r'^(?:#HttpOnly_)?[^\t]+\t(?:TRUE|FALSE)\t[^\t]+\t(?:TRUE|FALSE)\t[0-9]+\t[^\t]+\t([^\t]*)$')
+URL = re.compile(r'''(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]*://[^\s"'<>]+''')
+URL_USER = re.compile(r'^[^:/?#]+://[^/@:?#]*:([^/@?#]*)@[^/?#]+')
+PARAMETER = re.compile(r'[?&#;](?:code|token|secret|key|password|access_token|refresh_token|id_token|client_secret|signature)=([^&#;]*)', re.I)
+ASSIGN_NAME = r'(?:password|passwd|secret|token|api_key|client_secret|access_token|refresh_token|private_key)'
+ASSIGNED = re.compile(r'''(?<![\w])(?:(?P<json>["']''' + ASSIGN_NAME + r'''["']\s*:\s*)(?=["'])|''' + ASSIGN_NAME + r'(?![\w])\s*=\s*)', re.I)
+COLON = re.compile(r'^\s*' + ASSIGN_NAME + r'\s*:\s*(.*)$', re.I)
+USER = re.compile(r'(?<!\S)(?:--user(?:[ \t]+|=)|-u(?:[ \t]+|=)?)')
+PLACEHOLDER = re.compile(r'(?:null|true|false|[A-Z][A-Z0-9_]*|<[^\n]*>|\$[A-Za-z_][A-Za-z0-9_]*|\$\{[A-Za-z_][A-Za-z0-9_]*\}|@[^\s]+|…|\.\.\.|\*+)?')
+NAME_PART = re.compile(r'(?:^|[-_.])(?:cookies?|password|passwd|secret|token|credentials?|netrc)(?:$|[-_.])', re.I)
+NAME_END = re.compile(r'(?:^auth\.json$|^id_rsa$|^id_ed25519$|^login(?:\..*)?$|\.(?:headers?|pem|key|env)$)', re.I)
+
+
+class Refusal(NamedTuple):
+    """A refused file, line and rule: never the text that matched (qa-flow.md 11.2)."""
+    where: str
+    line: int
+    rule: str
+
+    def __str__(self):
+        return f'{self.where}, line {self.line}: {self.rule}' if self.line else f'{self.where}: {self.rule}'
+
+
+def placeholder(value):
+    if len(value) >= 2 and value[0] in ('"', "'") and value[-1] == value[0]:
+        value = value[1:-1]
+    return PLACEHOLDER.fullmatch(value) is not None
+
+
+def refused_name(part):
+    return bool(NAME_PART.search(part) or NAME_END.search(part))
+
+
+def value_at(text, start, stops='', wrapper='', string=False):
+    """One whole value, including adjacent chunks; an unmatched opener consumes its tail."""
+    end = start
+    while end < len(text):
+        char = text[end]
+        if char.isspace() or char in stops or (wrapper and char == wrapper):
+            break
+        if char in ('"', "'"):
+            quote = char
+            finish = end + 1
+            while finish < len(text):
+                if text[finish] == '\\':
+                    finish += 2
+                elif text[finish] == quote:
+                    break
+                else:
+                    finish += 1
+            if finish >= len(text):
+                # Keep truncated values nonempty rather than accepting an empty placeholder.
+                return text[start:], len(text)
+            end = finish + 1
+            if string:
+                break  # A JSON string ends here; following punctuation is not its value.
+        elif char == '<':
+            finish = text.find('>', end + 1)
+            if finish < 0:
+                return text[start:], len(text)
+            end = finish + 1
+        else:
+            end += 1
+    return text[start:end], end
+
+
+def scan(text):
+    result = []
+    for number, line in enumerate(text.split('\n'), 1):
+        line = line.removesuffix('\r')
+        rules = []
+        if KEY.search(line):
+            rules.append('key')
+        if JWT.search(line):
+            rules.append('jwt')
+        header = False
+        end = 0
+        for match in HEADER.finditer(line):
+            if match.start() < end:
+                continue
+            wrapper = match[3] or (match[1] if not match[2] else '')
+            value, end = value_at(line, match.end(), wrapper=wrapper)
+            if not placeholder(value):
+                header = True
+                break
+        end = 0
+        for cookie in COOKIE.finditer(line):
+            if header:
+                break
+            if cookie.start() < end:
+                continue
+            wrapper = cookie[4] or (cookie[1] if not cookie[3] else '')
+            offset = cookie.end()
+            while pair := COOKIE_PAIR.match(line, offset):
+                value, end = value_at(line, pair.end(), stops=';', wrapper=wrapper)
+                header |= not placeholder(value)
+                if header or cookie[2] or line[end:end + 1] != ';':
+                    break  # Set-Cookie's remaining pairs are attributes, not cookies.
+                offset = end + 1
+        if header:
+            rules.append('header')
+        jar = JAR.fullmatch(line)
+        if JAR_HEADING.fullmatch(line) or (jar and not placeholder(jar[1])):
+            rules.append('cookie-jar')
+        for url in URL.finditer(line):
+            user = URL_USER.match(url[0])
+            if ((user and not placeholder(user[1]))
+                    or any(not placeholder(m[1]) for m in PARAMETER.finditer(url[0]))):
+                rules.append('link')
+                break
+        colon = COLON.fullmatch(line)
+        assigned = bool(colon and not placeholder(colon[1].rstrip()))
+        end = 0
+        for match in ASSIGNED.finditer(line):
+            if assigned:
+                break
+            if match.start() < end:
+                continue
+            value, end = value_at(line, match.end(), stops='&;', string=bool(match['json']))
+            assigned = not placeholder(value)
+        if assigned:
+            rules.append('assigned')
+        end = 0
+        for user in USER.finditer(line):
+            if user.start() < end:
+                continue
+            value, end = value_at(line, user.end(), stops='&;')
+            if value[:1] in ('"', "'") and value[-1:] == value[:1]:
+                value = value[1:-1]
+            if ':' in value and not placeholder(value.partition(':')[2]):
+                rules.append('user')
+                break
+        result.extend((number, rule) for rule in rules)
+    return result
+
+
+class Snapshot:
+    """A scratch directory's allowlist, read once through no-follow descriptors (qa-flow.md 11.1, 11.2)."""
+
+    def __init__(self, files, left_out, refusals):
+        self.files = files
+        self.left_out = left_out
+        self.refusals = refusals
+        self.names = {}
+
+    @classmethod
+    def read(cls, directory, cap):
+        flags = os.O_RDONLY | os.O_NOFOLLOW
+        try:
+            root = os.open(directory, flags | os.O_DIRECTORY)
+        except OSError:
+            raise Problem(f'{directory}: cannot open directory without following links') from None
+        files, left_out, refusals, names = {}, {}, [], {}
+        used = 0
+
+        def walk(parent, entries, budget, count_only=False):
+            held, labels, refused = {}, {}, []
+            count = size = total = 0
+            past = count_only
+            # A stack keeps deep trees independent of Python's recursion limit.
+            stack = [(parent, iter(entries), '', False)]
+            try:
+                while stack:
+                    fd, listing, prefix, close = stack[-1]
+                    item = next(listing, None)
+                    if item is None:
+                        stack.pop()
+                        if close:
+                            os.close(fd)
+                        continue
+                    entry, part, tree = item
+                    path = prefix + part
+                    label = f'{prefix or "./"}, entry {entry}'
+                    rules = []
+                    if not past:
+                        try:
+                            part.encode('utf-8')
+                            binary = any(ord(c) < 32 or ord(c) == 127 for c in part)
+                        except UnicodeError:
+                            binary = True
+                        rules = ['binary'] if binary else list(dict.fromkeys(rule for _, rule in scan(part)))
+                        if not rules:
+                            label = path
+                            if refused_name(part):
+                                rules = ['name']
+                    try:
+                        before = os.stat(part, dir_fd=fd, follow_symlinks=False)
+                    except FileNotFoundError:
+                        if not prefix:  # Absent allowlist entries are normal.
+                            continue
+                        refused.append(Refusal(label, 0, 'kind'))
+                        continue
+                    except OSError:
+                        refused.append(Refusal(label, 0, 'kind'))
+                        continue
+                    refused.extend(Refusal(label, 0, rule) for rule in rules)
+                    is_dir = stat.S_ISDIR(before.st_mode)
+                    if (tree is False and is_dir) or (tree is True and not is_dir):
+                        refused.append(Refusal(label, 0, 'kind'))
+                        continue
+                    if is_dir and rules:
+                        continue  # Never walk or name anything under a refused directory.
+                    regular = stat.S_ISREG(before.st_mode)
+                    if regular:
+                        count += 1
+                        size += before.st_size
+                    if not is_dir and (not regular or before.st_nlink != 1):
+                        refused.append(Refusal(label, 0, 'kind'))
+                        continue
+                    if past and not is_dir:
+                        continue
+                    child = None
+                    try:
+                        child = os.open(part, flags | (os.O_DIRECTORY if is_dir else os.O_NONBLOCK), dir_fd=fd)
+                        after = os.fstat(child)
+                        if any(getattr(before, key) != getattr(after, key) for key in
+                               ('st_dev', 'st_ino', 'st_mode', 'st_nlink', 'st_size', 'st_mtime_ns', 'st_ctime_ns')):
+                            refused.append(Refusal(label, 0, 'kind'))
+                            continue
+                        if is_dir:
+                            children = sorted(os.listdir(child), key=os.fsencode)
+                            stack.append((child, iter((n, name, None) for n, name in enumerate(children, 1)), path + '/', True))
+                            child = None  # The stack owns this descriptor.
+                            continue
+                        with os.fdopen(child, 'rb') as stream:
+                            child = None
+                            data = stream.read(max(0, budget - total) + 1)
+                        total += len(data)
+                        if total > budget:
+                            past = True
+                            held.clear()
+                            labels.clear()
+                            refused.clear()
+                        else:
+                            held[path] = data
+                            labels[path] = label
+                    except OSError:
+                        refused.append(Refusal(label, 0, 'kind'))
+                    finally:
+                        if child is not None:
+                            os.close(child)
+            finally:
+                for fd, _, _, close in stack:
+                    if close:
+                        os.close(fd)
+            return held, labels, refused, past, (count, size)
+
+        try:
+            docs, labels, refused, past, _ = walk(root, [(n, name, False) for n, name in enumerate(DOCUMENTS, 1)], cap)
+            files.update(docs)
+            names.update(labels)
+            refusals.extend([Refusal('documents', 0, 'cap')] if past else refused)
+            used = sum(map(len, files.values()))
+            omit = past
+            for tree in TREES:
+                held, labels, refused, over, counts = walk(root, [(1, tree, True)], cap - used, omit)
+                if over:
+                    if counts[0]:
+                        left_out[tree + '/'] = counts
+                    omit = True
+                else:
+                    files.update(held)
+                    names.update(labels)
+                    refusals.extend(refused)
+                    used += sum(map(len, held.values()))
+        finally:
+            os.close(root)
+        for path, data in files.items():
+            where = names[path]
+            try:
+                text = data.decode('utf-8')
+                if '\0' in text:
+                    raise ValueError('NUL')
+            except (UnicodeError, ValueError):
+                refusals.append(Refusal(where, 0, 'binary'))
+                continue
+            refusals.extend(Refusal(where, line, rule) for line, rule in scan(text))
+        snapshot = cls(dict(sorted(files.items())),
+                       {tree + '/': left_out[tree + '/'] for tree in reversed(TREES) if tree + '/' in left_out},
+                       sorted(set(refusals)))
+        snapshot.names = names
+        return snapshot
+
+    def bytes(self):
+        return sum(map(len, self.files.values()))
+
+
+def keep_check(directory, options):
+    cap = options['QA_EVIDENCE_KIB']
+    snapshot = Snapshot.read(directory, cap * 1024)
+    print(f'qa keep: {len(snapshot.files)} files, {snapshot.bytes()} bytes')
+    for path, data in snapshot.files.items():
+        print(f'  {snapshot.names[path]} {len(data)}')
+    for tree, (count, size) in snapshot.left_out.items():
+        print(f'left out: {tree}, {count} files, {size} bytes, past {cap} KiB')
+    for refusal in snapshot.refusals:
+        print(f'refused: {refusal}')
+    need(not snapshot.refusals, f'copy refused ({len(snapshot.refusals)})')
+    return 0
+
+
 BRIEF = '''# QA pass {name}
 
 Read {agents}/roles/qa.md first: it is your role.
@@ -687,14 +1000,14 @@ def log(message):
 def settings(workspace):
     # Same precedence and valid machine.env lines as kit.sh's machine_setting.
     values = dict(QA_SLOTS='1', QA_BATCH='5', QA_CAP_MINUTES='120', QA_INTERVAL_SECONDS='300',
-                  QA_GIVE_BACK_SECONDS='90', QA_STOP_SECONDS='50', QA_LOGIN_RESERVE='2', QA_WALK_KINDS='forgejo=2:chatgpt claude=2:claude')
+                  QA_GIVE_BACK_SECONDS='90', QA_EVIDENCE_KIB='2048', QA_STOP_SECONDS='50', QA_LOGIN_RESERVE='2', QA_WALK_KINDS='forgejo=2:chatgpt claude=2:claude')
     path = workspace.tmp / 'machine.env'
     try:
         text = path.read_text(errors='replace')
     except OSError:
         text = ''  # kit.sh ignores an absent or unreadable machine file.
     for line in text.split('\n'):
-        match = re.fullmatch(r'(QA_SLOTS|QA_BATCH|QA_CAP_MINUTES|QA_INTERVAL_SECONDS|QA_GIVE_BACK_SECONDS|QA_STOP_SECONDS|QA_LOGIN_RESERVE)=([0-9]+)', line)
+        match = re.fullmatch(r'(QA_SLOTS|QA_BATCH|QA_CAP_MINUTES|QA_INTERVAL_SECONDS|QA_GIVE_BACK_SECONDS|QA_STOP_SECONDS|QA_LOGIN_RESERVE|QA_EVIDENCE_KIB)=([0-9]+)', line)
         if match:
             values[match[1]] = match[2]
         if line.startswith('QA_WALK_KINDS='):
@@ -705,6 +1018,7 @@ def settings(workspace):
         need(re.fullmatch(r'[0-9]+', value), f'{key} must be a nonnegative integer')
         values[key] = int(value)
     need(values['QA_BATCH'] > 0, 'QA_BATCH must be positive')
+    need(values['QA_EVIDENCE_KIB'] > 0, 'QA_EVIDENCE_KIB must be positive')
     need(0 < values['QA_STOP_SECONDS'] < 60, 'QA_STOP_SECONDS must be positive and below 60')
     parsed, totals = {}, {}
     need(kinds.strip() and not any(ord(c) < 32 or 0x7f <= ord(c) < 0xa0 for c in kinds),
@@ -2421,6 +2735,8 @@ def main():
     giving = sub.add_parser('give')
     giving.add_argument('name')
     giving.add_argument('--as', dest='holder', required=True)
+    keep = sub.add_parser('keep')
+    keep.add_mutually_exclusive_group(required=True).add_argument('--check', metavar='DIRECTORY')
     service = sub.add_parser('watch')
     service.add_argument('--director', required=True)
     service.add_argument('--once', action='store_true')
@@ -2436,6 +2752,8 @@ def main():
             return deploy(args, workspace)
         if args.command == 'walk':
             return walk(args, workspace)
+        if args.command == 'keep':
+            return keep_check(args.check, settings(workspace))
         if args.command == 'watch':
             return watch(args.director, args.once, workspace)
         why = getattr(args, 'why', '') or ''
