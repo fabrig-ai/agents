@@ -1188,6 +1188,45 @@ def kept_replaced_by_next_prove(lab):
     assert not lab.worktrees() and lab.proof() is None
 
 
+def prove_after_prove_keeps_the_tuple(lab):
+    """A later prove reuses the tuple QA tested, despite fresh repin dates."""
+    lab.change('skein')
+    spec = lab.spec()
+    lab.run(spec, prove=True, env=dict(GIT_AUTHOR_DATE='2026-10-02T12:00:00+00:00',
+                                     GIT_COMMITTER_DATE='2026-10-02T12:00:00+00:00'))
+    first = lab.proof()
+    lab.run(spec, prove=True, env=dict(GIT_AUTHOR_DATE='2026-10-03T12:00:00+00:00',
+                                     GIT_COMMITTER_DATE='2026-10-03T12:00:00+00:00'))
+    second = lab.proof()
+    assert second['token'] != first['token']
+    assert {name: entry['commit'] for name, entry in second['repos'].items()} == {
+        name: entry['commit'] for name, entry in first['repos'].items()}
+    for name, entry in second['repos'].items():
+        if entry['pin_only']:
+            assert entry['worktree'] == first['repos'][name]['worktree']
+            assert lab.git(Path(entry['worktree']), 'rev-parse', 'HEAD') == first['repos'][name]['commit']
+    lab.untouched(ORDER)
+
+
+def prove_after_main_moved(lab):
+    """A pin-only main's new parent makes a new proved commit necessary."""
+    lab.change('jig')
+    spec = lab.spec({'jig': str(lab.work['jig']), 'temper': 'pin-only'})
+    lab.run(spec, prove=True)
+    first = lab.proof()
+    lab.change('temper', 'other.txt', path=lab.primary['temper'])
+    main = lab.git(lab.primary['temper'], 'rev-parse', 'HEAD')
+    lab.git(lab.primary['temper'], 'push', 'origin', 'HEAD:main')
+    lab.run(spec, prove=True)
+    second = lab.proof()
+    assert second['repos']['jig']['commit'] == first['repos']['jig']['commit']
+    entry = second['repos']['temper']
+    assert entry['commit'] != first['repos']['temper']['commit']
+    assert entry['base'] == main
+    assert lab.git(Path(entry['worktree']), 'rev-parse', 'HEAD', 'HEAD^').splitlines() == [entry['commit'], main]
+    assert lab.heads()['temper'] == main, 'a prove moved main'
+
+
 def proved_then_moved(lab):
     """A main that moved since the prove gates again; its upstreams keep their proof."""
     lab.change('jig')
@@ -1586,7 +1625,8 @@ CASES = (tidy_hooks, tidy_hooks_partial, staging_cargo, rerun, advanced_main, re
          partial_set, split_source, tuple_explicit_worktrees, tuple_external_source, tuple_package_collision, tuple_source_refusal, tuple_new_crate, success, taught, moved_between_phases, moved_during_pushes,
          moved_earlier_in_second_round, regate_failure_resume, catch_up,
          pushed_then_failed, push_without_result_marks_unknown_range, lagging_fetch,
-         proved, kept_replaced_by_next_prove, proved_then_moved, prove_failure, same_set,
+         proved, kept_replaced_by_next_prove, prove_after_prove_keeps_the_tuple, prove_after_main_moved,
+         proved_then_moved, prove_failure, same_set,
          outside_snapshot, moved_gate_base,
          interrupted_with_staging, interrupted_during_feed, interrupted_during_cleanup,
          feed_failure, cleanup_warning,

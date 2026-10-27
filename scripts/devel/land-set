@@ -785,13 +785,13 @@ def main():
         except BlockingIOError:
             raise Failure(2, 'another land-set run of this set is active on this machine') from None
         announced = True
+        proof_token, proved = read_proof(proof, spec['set'], host)
         if prove:
             lock = NoLock()
             runner.lock = lock
             proof.unlink(missing_ok=True)
             event('proving')
         else:
-            proof_token, proved = read_proof(proof, spec['set'], host)
             event('waiting')
             lock = SetLock(tmp, fixture, token, host)
             runner.lock = lock
