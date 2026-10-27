@@ -987,6 +987,31 @@ def room_after(lab):
     lab.done(build)
 
 
+def room_regenerate(lab):
+    lab.env.update(PLAN_MIN_DISK_GB='40', PLAN_LAND_ROOM_GB='30')
+    lab.done(lab.start('land repo prebuild'))
+    lab.free(60)
+    build = lab.start('build')
+    lab.waiting('build')
+    wait_for(lambda: lab.event('build', 'room_wait'), 'build waiting on the prebuild reservation')
+    lab.done(lab.start('land repo regenerate'))
+    assert lab.event('land repo regenerate', 'payload_begin')
+    assert not lab.event('land repo regenerate', 'room_wait')
+    assert not lab.event('build', 'admit')
+    lab.free(5)
+    client = lab.start('land other regenerate')
+    lab.waiting('land other regenerate')
+    wait_for(lambda: lab.task('land other regenerate').get('disk_wait'), 'regeneration disk wait')
+    wait_for(lambda: 'waits for the disk floor: 5 GB free, below its floor of 40 GB; '
+             'refused after 20 minutes below it' in (lab.path / 'land other regenerate.client.txt').read_text(),
+             'regeneration client disk diagnostic')
+    assert client.poll() is None and not lab.event('land other regenerate', 'admit')
+    lab.free(100)
+    lab.done(client)
+    lab.done(build)
+    assert lab.event('land other regenerate', 'payload_begin')
+
+
 def room_settings(lab):
     lab.env.update(PLAN_MIN_DISK_GB='40', PLAN_LAND_ROOM_GB='20')
     marker = lab.path / 'finish-settings'
@@ -2054,7 +2079,8 @@ def main():
              ('room-build-waits', room_build_waits),
              ('room-landing-first', room_landing_first),
              ('room-landing-first-slot', lambda lab: room_landing_first(lab, 1)),
-             ('room-after', room_after), ('room-settings', room_settings),
+             ('room-after', room_after), ('room-regenerate', room_regenerate),
+             ('room-settings', room_settings),
              ('land-floor-wait', land_floor_wait),
              ('land-floor-wait-orphan', land_floor_wait_orphan),
              ('land-floor-wait-boot', lambda lab: land_floor_wait_orphan(lab, True)),

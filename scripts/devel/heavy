@@ -68,7 +68,7 @@ case ${1:-} in
         if ((installed_status != 1)); then
             # Landing labels must agree with heavy-recovery.py's landing:
             # these tasks queue below the floor and wait for admission.
-            if [[ ! ${HEAVY_LABEL:-} =~ ^land\ [^[:space:]]+(\ prebuild)?$ ]]; then
+            if [[ ! ${HEAVY_LABEL:-} =~ ^land\ [^[:space:]]+(\ (prebuild|regenerate))?$ ]]; then
                 disk_floor heavy || {
                     python3 -B "$kit/heavy-recovery.py" --record-refusal disk-floor || true
                     exit 2

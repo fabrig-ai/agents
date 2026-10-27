@@ -85,7 +85,7 @@ def free_gb() -> int:
 
 
 def landing(task) -> bool:
-    return re.fullmatch(r'land \S+( prebuild)?', task['label']) is not None
+    return re.fullmatch(r'land \S+( (prebuild|regenerate))?', task['label']) is not None
 
 
 def floor_of(task):

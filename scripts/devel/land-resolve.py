@@ -277,7 +277,10 @@ class Repository:
                 payload = [line for line in stdout if not line.startswith('heavy: ')]
                 for line in payload:
                     print(f'scripts/regenerate.sh: {line}')
-                if any(re.match(r'^heavy: task [0-9]+ ', line) for line in stdout):
+                if 'heavy: disk floor refused before payload start' in stderr:
+                    reason = (f'heavy refused to run scripts/regenerate.sh (exit {result.returncode}): '
+                              'disk floor refused before payload start')
+                elif any(re.match(r'^heavy: task [0-9]+ ', line) for line in stdout):
                     verb = 'refused' if result.returncode == 3 else 'failed'
                     reason = f'scripts/regenerate.sh {verb} (exit {result.returncode})'
                     # A diagnostic starts at the last unindented line; build

@@ -80,6 +80,12 @@ while args:
 if os.environ.get('REGENERATE_MODE') == 'heavy':
     print('fixture heavy refused', file=sys.stderr)
     sys.exit(9)
+if os.environ.get('REGENERATE_MODE') == 'floor':
+    print('heavy: 5 GB free on fixture, below the disk floor of 40 GB (as submitted); '
+          'the largest directories:', file=sys.stderr)
+    print('heavy: disk floor refused before payload start', file=sys.stderr)
+    print(f'heavy: task 1 (build) exit 2, waited 1201s, ran 0s, log {os.environ["HEAVY_CALLS"]}.log')
+    sys.exit(2)
 code = subprocess.run(args, stderr=subprocess.STDOUT).returncode
 print(f'heavy: task 1 (build) exit {code}, waited 0s, ran 0s, log {os.environ["HEAVY_CALLS"]}.log')
 sys.exit(code)
@@ -425,6 +431,17 @@ def heavy_refused(directory):
     lab.undone()
 
 
+def heavy_floor_refused(directory):
+    lab = generated(directory)
+    code, output = lab.resolve(env=dict(REGENERATE_MODE='floor'))
+    assert code == 1, (code, output)
+    stops = [line for line in output.splitlines() if line.startswith('stops ')]
+    assert stops == [f'stops {FIGURE}: heavy refused to run scripts/regenerate.sh (exit 2): '
+                     f'disk floor refused before payload start (log {lab.calls}.log)'], output
+    assert output.splitlines()[-2] == stops[0], output
+    lab.undone()
+
+
 def generated_touches_declaration(directory):
     for mode in ('declaration', 'broken_writer'):
         sub = directory / mode
@@ -674,7 +691,7 @@ def land_feed_none(directory):
 
 CASES = (rows_kept, row_added, added_in_one_place, same_row, deleted_and_changed, added_on_both, malformed_row,
          outside_rows, code_file, all_or_nothing, not_stopped, land_rows, land_same_row,
-         generated_kept, generated_and_rows, generated_no_change, generated_refused, heavy_refused,
+         generated_kept, generated_and_rows, generated_no_change, generated_refused, heavy_refused, heavy_floor_refused,
          generated_touches_declaration, generated_then_stop, rows_then_stop, no_script,
          cargo_lock, later, regenerate_refused, land_undone, land_feed, land_feed_starved, land_feed_none)
 
