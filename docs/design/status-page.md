@@ -76,6 +76,7 @@ serves it.
 | the machine | `/proc`, the disk under `tmp/`, `ip -j -4 addr show scope global` | load, free memory and disk, and its public IPv4 addresses (the globally routable ones) |
 | Claude's subscription | `claude auth status --json`, `claude -p /usage` | what it is signed in to, and each limit's use and reset (2.1) |
 | Codex's subscription | `codex app-server`: `account/read`, `account/rateLimits/read` | the same (2.1) |
+| the release pages | the writing machine's `--out` directory | the names of the release pages served beside the page, `v<version>.html` (3): never what they hold |
 
 A command's kind is `record runs`' (records.md 5.1): `land <repo>` and
 `land <repo> prebuild` labels are land's gate and prebuild, and the
@@ -277,6 +278,21 @@ the line written by a mission and by its parent alike.
 
 ## 3. The page
 
+- **The release pages** (the user, 10-27): the header links each
+  release's page served beside the page, which the director writes at
+  its checks (`v0.1.0.html`: a release's missions with their progress
+  and the share QA has cleared). The page links what it finds, so that
+  a new release needs no change here: each file of `--out`'s directory
+  (a regular file, or a link to one) named `v<version>.html`, the
+  version two to four numbers of ASCII digits joined by dots, each
+  without a leading zero but `0` itself; newest first by those numbers,
+  a missing one counting as 0, then by name (`v1.2.0` before `v1.2`);
+  as `v0.1.0 progress`, after the machines reached. A link within the
+  site, relative, in the same tab. None with none, none when the page
+  goes to stdout, and none where the directory is missing (`write`
+  makes it). A directory that can't be listed gives none, and the
+  footer says `release pages: not listed`, in those words alone: the
+  error, which names the path, goes to the journal.
 - **Tiles:** missions, landings per hour (below), agents (the director,
   designers, owners and implementers live, and how many of them are
   busy), land gates in the last 24 hours, what waits on the user (the open issues
@@ -407,6 +423,8 @@ On hel8, whose name `status.fabrig.ai` is (a CNAME of `fabrig.ai`):
   units.
 - `/var/www/status` belongs to `free`. The page is replaced atomically,
   mode 0644, so Caddy never reads half of one; `--json` writes 0600.
+  Beside it, the director's release pages (`v0.1.0.html`), which the
+  page links (section 3) and never writes.
 - `/etc/caddy/Caddyfile` holds:
 
   ```
@@ -501,7 +519,15 @@ page, in the `--json` file or in the footer. `test-record` proves `record`'s
 check of `blocked`: the seven repositories' references taken, one or
 several; another form (`temper#09`, `temper#0`, `temper 9`), another
 repository and an issue named twice refused, and so is `blocked` beside a `state` of `ended`, `abandoned`
-or `unknown`.
+or `unknown`. The release pages: `v0.1.0.html`, `v0.10.0.html`,
+`v0.1.html` and `v1.2.3.4.html` beside the page linked in the header,
+`v0.10.0` first and `v0.1.0` before `v0.1`; a `notes.html`, a
+`v0.1.0-draft.html`, a `v1.html`, a `v1.2.3.4.5.html`, a
+`v01.0.html` and a directory `v0.2.0.html` beside them not; no link
+with none, none when the page goes to stdout, and none with the
+directory missing, the page still written there; a directory that
+can't be listed giving none and its fixed footer line, with no path;
+nothing of a release page's content on the page.
 
 ## 6. Open
 
