@@ -141,6 +141,7 @@ def rows(path):
 class Lab:
     def __init__(self, root):
         self.root = root
+        self.now = datetime(2026, 10, 27, 12, tzinfo=timezone.utc)
         self.origin = root / 'origin/demo.git'
         self.work = root / 'work'
         self.env = dict({key: value for key, value in os.environ.items()
@@ -213,10 +214,15 @@ class Lab:
             argv.append('--once')
         if director:
             argv += ['--director', 'director@x']
-        return call(argv, self.root, env or self.env, status)
+        # Runner ages and watcher records share a fixture-owned wall clock.
+        driver = ('import runpy\n'
+                  f'tool = runpy.run_path({str(SCRIPT)!r})\n'
+                  f'tool["main"].__globals__["now"] = lambda: {self.now.isoformat()!r}\n'
+                  'raise SystemExit(tool["main"]())\n')
+        return call([PYTHON, '-I', '-B', '-c', driver, *argv[4:]], self.root, env or self.env, status)
 
     def append(self, **fields):
-        row = dict(time=datetime.now(timezone.utc).isoformat(), host='fixture', token='fixture')
+        row = dict(time=self.now.isoformat(), host='fixture', token='fixture')
         row.update(fields)
         with (self.root / 'feed.jsonl').open('a') as out:
             out.write(json.dumps(row) + '\n')
@@ -229,8 +235,14 @@ class Lab:
     def landings(self, *args, status=0):
         env = dict(self.env, LANDINGS_FEED=str(self.root / 'feed.jsonl'), LANDINGS_POLL='.02',
                    DEV_ROOT=str(self.root / 'workspace'))
-        return call([PYTHON, '-I', '-B', SCRIPT.with_name('landings'), *args],
-                    self.root, env, status)
+        driver = ('import runpy\n'
+                  f'tool = runpy.run_path({str(SCRIPT.with_name("landings"))!r})\n'
+                  'class FixtureDateTime(tool["datetime"]):\n'
+                  '    @classmethod\n'
+                  f'    def now(cls, tz=None): return cls.fromisoformat({self.now.isoformat()!r})\n'
+                  'tool["main"].__globals__["datetime"] = FixtureDateTime\n'
+                  'raise SystemExit(tool["main"]())\n')
+        return call([PYTHON, '-I', '-B', '-c', driver, *args], self.root, env, status)
 
     def wait(self, label, status):
         return self.landings('wait', '--cleared', label, '--timeout', '0', status=status)
@@ -999,7 +1011,7 @@ def stale_watch(lab):
     lab.green()
     tip = lab.land(reds=['t1'], landed=True)
     lab.push()
-    old = datetime.now(timezone.utc) - timedelta(hours=3)
+    old = lab.now - timedelta(hours=3)
     lab.append(kind='watch', event='watching', target='demo/m1', time=old.isoformat())
     lab.run(director=True)
     assert len(lab.state()['pending']) == 1
@@ -1155,7 +1167,7 @@ def whole_red(lab):
     lab.run()
     state = lab.state()
     assert state['reds'] == {'p2.t9': tip} and len(state['pending']) == 1
-    state['fault'] = dict(since=datetime.now(timezone.utc).isoformat(), reason='whole fault',
+    state['fault'] = dict(since=lab.now.isoformat(), reason='whole fault',
                           commit=tip, posted=False)
     path = lab.root / 'state/demo.json'
     path.write_text(json.dumps(state) + '\n')

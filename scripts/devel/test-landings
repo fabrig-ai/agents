@@ -150,32 +150,61 @@ class Lab:
             for row in rows:
                 out.write(json.dumps(row) + '\n')
 
-    def run(self, *args, status=0, env=None, code=None):
+    def command(self, *args, code=None):
         command = [PYTHON, '-I', str(SCRIPT), *args]
         if code is not None:
             driver = ('import runpy, sys\n'
                       f'tool = runpy.run_path({str(SCRIPT)!r})\n' + code +
                       '\nraise SystemExit(tool["main"]())\n')
             command = [PYTHON, '-I', '-S', '-c', driver, *args]
-        result = subprocess.run(command, cwd=self.root,
+        return command
+
+    def run(self, *args, status=0, env=None, code=None):
+        result = subprocess.run(self.command(*args, code=code), cwd=self.root,
                                 env=env or self.env, stdin=subprocess.DEVNULL,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=HUNG_LANDINGS_S)
         assert result.returncode == status, (result.returncode, result.stdout, result.stderr)
         return result
 
+    def pending(self):
+        ready, release = self.root / 'pending', self.root / 'release'
+        return ready, release, f"""
+from pathlib import Path
+from types import SimpleNamespace
+import time
+sleep = time.sleep
+def pending_sleep(seconds):
+    Path({str(ready)!r}).touch()
+    deadline = time.monotonic() + {HUNG_LANDINGS_S}
+    while not Path({str(release)!r}).exists():
+        assert time.monotonic() < deadline, 'pending fixture release'
+        sleep(.01)
+    sleep(seconds)
+tool['wait'].__globals__['time'] = SimpleNamespace(monotonic=time.monotonic, sleep=pending_sleep)
+"""
+
+    def await_pending(self, proc, ready):
+        deadline = time.monotonic() + HUNG_LANDINGS_S
+        while not ready.exists():
+            assert proc.poll() is None, 'wait returned before reaching a pending decision'
+            assert time.monotonic() < deadline, 'wait did not reach a pending decision'
+            time.sleep(.01)
+        assert proc.poll() is None, 'wait returned while pending'
+
     def following(self, rows, status=0, before=None, cleared=False):
         # However late the append comes under load, an unreadable feed is not yet unreachable.
         env = dict(self.env, LANDINGS_UNREACHABLE=str(HUNG_LANDINGS_S))
-        with subprocess.Popen([PYTHON, '-I', str(SCRIPT), 'wait', 'fixture/m1', '--timeout', str(HUNG_LANDINGS_S),
-                               *(['--cleared'] if cleared else [])],
+        ready, release, hook = self.pending()
+        with subprocess.Popen(self.command('wait', 'fixture/m1', '--timeout', str(HUNG_LANDINGS_S),
+                                           *(['--cleared'] if cleared else []), code=hook),
                               cwd=self.root, env=env, stdin=subprocess.DEVNULL,
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as proc:
             try:
-                time.sleep(.12)
-                assert proc.poll() is None, 'wait returned before appended records'
+                self.await_pending(proc, ready)
                 if before:
                     before()
                 self.append(*rows)
+                release.touch()
                 out, err = proc.communicate(timeout=HUNG_TOOL_S)
                 assert proc.returncode == status, (proc.returncode, out, err)
                 return out
@@ -327,7 +356,7 @@ def latest_first_line(lab):
                record(event='done', token='old', minute=2))
     assert lab.run('--last', '0').stdout.splitlines() == [
         'in flight:', '  fixture/m1: waiting since 2026-10-24T12:01:00+00:00 on fixture-host; last event 12:01Z', 'tiers: none in the feed']
-    lab.run('wait', 'fixture/m1', '--timeout', '.06', status=3)
+    lab.run('wait', 'fixture/m1', '--timeout', '0', status=3)
 
 
 def history_only(lab):
@@ -642,29 +671,80 @@ def remote_failure(lab):
     assert 'fixture transport failed' in lab.run('wait', 'fixture/m1', status=4, env=env).stderr
 
 
+def remote_read_hook(lab, release=False):
+    return f"""
+from pathlib import Path
+from types import SimpleNamespace
+import time
+clock, sleep = time.monotonic, time.sleep
+now = 0
+def monotonic():
+    return now
+tool['wait'].__globals__['time'] = SimpleNamespace(monotonic=monotonic, sleep=sleep)
+spawn = tool['subprocess'].Popen
+def stop(process, communicate):
+    process.kill()
+    communicate()
+def observed_spawn(argv, **kwargs):
+    process = spawn(argv, **kwargs)
+    if argv[0] == 'ssh':
+        try:
+            deadline = clock() + {HUNG_LANDINGS_S}
+            while not Path({str(lab.root / 'ssh-started')!r}).exists():
+                assert process.poll() is None and clock() < deadline, 'blocked ssh startup'
+                sleep(.01)
+        except BaseException:
+            stop(process, process.communicate)
+            raise
+        communicate = process.communicate
+        def observed(*args, timeout=None, **kwargs):
+            global now
+            try:
+                if timeout is not None:
+                    assert timeout == {HUNG_LANDINGS_S if release else float(READ)!r}, timeout
+                    # The user deadline has passed when the first read is released.
+                    now = 1
+                    if {release!r}:
+                        Path({str(lab.root / 'ssh-release')!r}).touch()
+                return communicate(*args, timeout=timeout, **kwargs)
+            except tool['subprocess'].TimeoutExpired:
+                Path({str(lab.root / 'ssh-cut')!r}).touch()
+                raise
+            except BaseException:
+                stop(process, communicate)
+                raise
+        process.communicate = observed
+    return process
+tool['subprocess'].Popen = observed_spawn
+"""
+
+
 def remote_hang(lab):
-    lab.ssh('time.sleep(60)\n')
+    lab.ssh(f'Path({str(lab.root / "ssh-started")!r}).touch()\n'
+            'import signal; signal.pause()\n')
     env = dict(lab.env, LANDINGS_READ=READ)
     del env['LANDINGS_FEED']
-    start = time.monotonic()
-    lab.run('wait', 'fixture/m1', status=4, env=env)
-    assert time.monotonic() - start >= float(READ), 'initial read was cut short'
+    lab.run('wait', 'fixture/m1', status=4, env=env, code=remote_read_hook(lab))
+    assert (lab.root / 'ssh-cut').exists(), 'blocked initial read was not cut'
 
 
 def remote_first_read(lab):
-    # A delayed stand-in exceeds tiny user deadlines but gets a full first read.
     lab.ssh("with Path(os.environ['FIXTURE_FEED']).with_suffix('.reads').open('a') as out:\n"
             "    out.write('read\\n')\n"
-            "time.sleep(.08)\nsys.stdout.buffer.write(Path(os.environ['FIXTURE_FEED']).read_bytes())\n")
-    # A first read far longer than the stand-in's delay, however slow its start-up under load.
+            f'Path({str(lab.root / "ssh-started")!r}).touch()\n'
+            f'while not Path({str(lab.root / "ssh-release")!r}).exists(): time.sleep(.01)\n'
+            "sys.stdout.buffer.write(Path(os.environ['FIXTURE_FEED']).read_bytes())\n")
     env = dict(lab.env, LANDINGS_READ=str(HUNG_LANDINGS_S))
     del env['LANDINGS_FEED']
     reads = 0
     for timeout_value in ('0', '.01'):
         for event, status in (('done', 0), ('stopped', 1), ('waiting', 3)):
+            for name in ('ssh-started', 'ssh-release'):
+                (lab.root / name).unlink(missing_ok=True)
             lab.feed.write_text('')
             lab.append(record(event='started'), record(event=event, status=7, reason='fixture'))
-            result = lab.run('wait', 'fixture/m1', '--timeout', timeout_value, status=status, env=env)
+            result = lab.run('wait', 'fixture/m1', '--timeout', timeout_value, status=status,
+                             env=env, code=remote_read_hook(lab, release=True))
             reads += 1
             assert lab.feed.with_suffix('.reads').read_text().splitlines() == ['read'] * reads
             if status == 1:
@@ -1222,13 +1302,14 @@ def waits_for_verdict(lab):
     result = lab.run('wait', '--cleared', 'fixture/m1', '--timeout', '0', status=3)
     assert result.stdout == '' and result.stderr == (
         'landings: timed out waiting for fixture/m1\nlandings: no verdict for temper ' + 'b' * 40 + '\n'), result
-    with subprocess.Popen([PYTHON, '-I', '-B', str(SCRIPT), 'wait', '--cleared', 'fixture/m1', '--timeout', str(HUNG_LANDINGS_S)],
+    ready, release, hook = lab.pending()
+    with subprocess.Popen(lab.command('wait', '--cleared', 'fixture/m1', '--timeout', str(HUNG_LANDINGS_S), code=hook),
                           cwd=lab.root, env=lab.env, stdin=subprocess.DEVNULL,
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as proc:
         try:
-            time.sleep(.12)
-            assert proc.poll() is None, 'returned before missing verdict'
+            lab.await_pending(proc, ready)
             lab.append(tier_record('verdict', tier='temper', commit='b' * 40))
+            release.touch()
             out, err = proc.communicate(timeout=HUNG_TOOL_S)
             assert proc.returncode == 0 and 'jig aaaaaaaaa cleared' in out and 'temper bbbbbbbbb cleared' in out, (out, err)
         finally:
@@ -1491,16 +1572,72 @@ def cut_run_start_read_keeps_newest_run_pending(lab):
     run_read_cut(lab, start=True)
 
 
+def blocked_git_deadline(lab, command, ready, limit):
+    # Freeze setup time; the wait clock starts only once its stand-in is blocked.
+    return f"""
+from pathlib import Path
+from types import SimpleNamespace
+import os, signal, time
+clock, sleep = time.monotonic, time.sleep
+started = None
+def monotonic():
+    return 0 if started is None else clock() - started
+tool['wait'].__globals__['time'] = SimpleNamespace(monotonic=monotonic, sleep=sleep)
+spawn = tool['subprocess'].Popen
+def stop(process, communicate):
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    communicate()
+def observed_spawn(argv, **kwargs):
+    global started
+    process = spawn(argv, **kwargs)
+    if argv[0] == 'git' and (not {command!r} or argv[3] == {command!r}):
+        try:
+            deadline = clock() + {HUNG_LANDINGS_S}
+            while not all(Path(path).exists() and Path(path).read_text().isdigit() for path in {list(map(str, ready))!r}):
+                assert process.poll() is None and clock() < deadline, 'blocked git startup'
+                sleep(.01)
+        except BaseException:
+            stop(process, process.communicate)
+            raise
+        started = clock()
+        communicate = process.communicate
+        def observed(*args, timeout=None, **kwargs):
+            try:
+                if timeout is not None:
+                    assert timeout == {limit!r}, timeout
+                    Path({str(lab.root / 'git-timeout')!r}).write_text(str(timeout))
+                result = communicate(*args, timeout=timeout, **kwargs)
+                if process.returncode is not None:
+                    Path({str(lab.root / 'git-killed')!r}).write_text(str(process.returncode))
+                return result
+            except tool['subprocess'].TimeoutExpired:
+                raise
+            except BaseException:
+                stop(process, communicate)
+                raise
+        process.communicate = observed
+    return process
+tool['subprocess'].Popen = observed_spawn
+"""
+
+
 def git_calls_cut_to_the_deadline(lab):
-    lab.repository('agents', tier=False)
-    commit = lab.land('agents', 'slow ancestry')
-    lab.standin_git("if sys.argv[3] == 'merge-base':\n    time.sleep(60)\n")
-    start = time.monotonic()
-    lab.run('wait', '--cleared', commit[:9], '--timeout', '5', status=3)
-    elapsed = time.monotonic() - start
-    assert elapsed < 15, elapsed
+    # No real repository work has to fit before the first, blocked Git call.
+    (lab.workspace / 'agents/.git').mkdir(parents=True)
+    started = lab.root / 'git-started'
+    lab.standin_git(f'Path({str(started)!r}).write_text(str(os.getpid()))\n'
+                    'import signal; signal.pause()\n')
+    hook = blocked_git_deadline(lab, None, [started], .05)
+    result = lab.run('wait', '--cleared', 'a' * 9, '--timeout', '.05', status=3, code=hook)
+    assert 'timed out waiting for ' + 'a' * 9 in result.stderr, result
+    assert started.read_text().isdigit()
+    assert float((lab.root / 'git-timeout').read_text()) == .05
+    assert int((lab.root / 'git-killed').read_text()) == -9
     calls = [json.loads(line) for line in (lab.root / 'git.jsonl').read_text().splitlines()]
-    assert any(argv[2] == 'merge-base' for argv in calls), calls
+    assert len(calls) == 1 and calls[0][2:] == ['rev-parse', '--is-shallow-repository'], calls
 
 
 def no_git_call_past_the_deadline(lab):
@@ -1515,8 +1652,21 @@ def no_git_call_past_the_deadline(lab):
 
 def display_keeps_full_git_timeouts(lab):
     base, resolver, tip = pushed_range(lab, resolver_tests=['resolver regression'])
-    lab.standin_git("if sys.argv[3] == 'merge-base':\n    time.sleep(3)\n")
-    result = lab.run()
+    lab.standin_git('')
+    hook = """
+spawn = tool['subprocess'].Popen
+def observed_spawn(argv, **kwargs):
+    process = spawn(argv, **kwargs)
+    if argv[0] == 'git':
+        communicate = process.communicate
+        def observed(*args, timeout=None, **kwargs):
+            assert timeout == tool['GIT_READ_TIMEOUT'], timeout
+            return communicate(*args, timeout=timeout, **kwargs)
+        process.communicate = observed
+    return process
+tool['subprocess'].Popen = observed_spawn
+"""
+    result = lab.run(code=hook)
     assert f'{tip[:9]} red over pushed range {base[:9]}..{tip[:9]}' in result.stdout, result
     assert f'{resolver[:9]} red by run {tip[:9]}: resolver regression' in result.stdout, result
 
@@ -1557,34 +1707,20 @@ def hung_fetch_ends_at_the_timeout(lab):
                     f'    Path({str(parent_file)!r}).write_text(str(os.getpid()))\n'
                     f'    subprocess.Popen([sys.executable, "-c", {child!r}])\n'
                     '    import signal; signal.pause()\n')
-    timeout_file = lab.root / 'fetch-timeout'
-    # Observe the remaining wait budget, after the Git call has started.
-    # Wait for both stand-ins so the assertion also checks their cleanup.
-    hook = f'''
-import time
-from pathlib import Path
-original = tool['subprocess'].Popen
-def spawn(argv, **kwargs):
-    process = original(argv, **kwargs)
-    if len(argv) > 3 and argv[3] == 'fetch':
-        paths = [Path({str(pid_file)!r}), Path({str(parent_file)!r})]
-        deadline = time.monotonic() + {HUNG_LANDINGS_S}
-        while not all(path.exists() and path.read_text().isdigit() for path in paths):
-            assert process.poll() is None and time.monotonic() < deadline, 'fetch fixture startup'
-            time.sleep(.01)
-        communicate = process.communicate
-        def observed(*args, timeout=None, **kwargs):
-            if timeout is not None:
-                assert 0 < timeout <= 20, timeout
-                Path({str(timeout_file)!r}).write_text(str(timeout))
-            return communicate(*args, timeout=timeout, **kwargs)
-        process.communicate = observed
-    return process
-tool['subprocess'].Popen = spawn
-'''
+    # Adopt the killed stand-in's child so a dead zombie cannot look alive.
+    hook = blocked_git_deadline(lab, 'fetch', [pid_file, parent_file], 20) + f"""
+import atexit, ctypes, os
+assert ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0) == 0
+def reap_child():
+    pid, status = os.waitpid(int(Path({str(pid_file)!r}).read_text()), 0)
+    Path({str(lab.root / 'child-killed')!r}).write_text(str(os.waitstatus_to_exitcode(status)))
+atexit.register(reap_child)
+"""
     try:
         result = lab.run('wait', '--cleared', commit[:9], '--timeout', '20', status=3, code=hook)
-        assert 0 < float(timeout_file.read_text()) <= 20
+        assert float((lab.root / 'git-timeout').read_text()) == 20
+        assert int((lab.root / 'git-killed').read_text()) == -9
+        assert int((lab.root / 'child-killed').read_text()) == -9
         assert result.stdout == '' and result.stderr == (
             f'landings: timed out waiting for {commit[:9]}\nlandings: no verdict for temper {commit}\n'), result
         for path in (pid_file, parent_file):
