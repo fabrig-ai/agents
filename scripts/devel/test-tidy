@@ -138,6 +138,22 @@ class Lab:
         self.age_target(target, age)
         return target
 
+    def kept_target(self, name, age=1800, token='0' * 32):
+        label = 'fixture/' + name
+        path = self.tmp / 'land-set' / 'worktrees' / quote(label, safe='') / 'agents'
+        branch = f'land-set/{token}/agents'
+        target = self.target(branch, age, path=path)
+        self.put(path / 'file', label + '\n')
+        commit = self.commit(path, label)
+        entry = dict(base=self.base, commit=commit, tree=self.git(path, 'rev-parse', 'HEAD^{tree}'),
+                     pin_only=True, worktree=str(path))
+        proof = dict(schema='land-set-proof-v1', set=label, machine='fixture', token=token,
+                     time=datetime.now(timezone.utc).isoformat(), repos=dict(agents=entry))
+        proof_file = self.tmp / 'land-set' / 'proofs' / (quote(label, safe='') + '.json')
+        self.put(proof_file, json.dumps(proof))
+        self.put(self.tmp / 'land-set' / 'state' / (quote(label, safe='') + '.lock'), '')
+        return target, proof_file, branch
+
     def age_target(self, target, age):
         stamp = time.time() - age
         # Only fixture setup walks; the tool samples Cargo's directory timestamps.
@@ -1252,6 +1268,103 @@ def targets_trash_invalid(lab):
 
 
 
+def room_kept_proofs(lab):
+    """Kept targets stay warm until room is needed; proof and usage guards apply."""
+    rows = ('set-locked', 'missing-lock', 'held', 'cargo-locked', 'root-locked',
+            'unnamed', 'malformed', 'old-key', 'non-pin', 'wrong-token', 'moved-head',
+            'recent', 'clear')
+    made = []
+    with ExitStack() as stack:
+        for index, mode in enumerate(rows):
+            target, proof_file, branch = lab.kept_target(mode, 600 if mode == 'recent' else 3 * 3600,
+                                                       token=f'{index:032x}')
+            proof = json.loads(proof_file.read_text())
+            entry = proof['repos']['agents']
+            lock_path = lab.tmp / 'land-set' / 'state' / (quote(proof['set'], safe='') + '.lock')
+            if mode == 'set-locked':
+                source = stack.enter_context(lock_path.open('r'))
+                fcntl.flock(source, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            elif mode == 'missing-lock':
+                lock_path.unlink()
+            elif mode == 'held':
+                process = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'],
+                                           cwd=target.parent, stdout=subprocess.DEVNULL,
+                                           stderr=subprocess.DEVNULL)
+                stack.callback(process.wait, timeout=5)
+                stack.callback(process.terminate)
+            elif mode in ('cargo-locked', 'root-locked'):
+                lock_file = target / ('.cargo-lock' if mode == 'root-locked' else 'debug/.cargo-lock')
+                lab.put(lock_file, '')
+                lab.age_target(target, 3 * 3600)
+                source = stack.enter_context(lock_file.open('rb'))
+                fcntl.flock(source, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            elif mode == 'old-key':
+                entry['path'] = entry.pop('worktree')
+            elif mode == 'non-pin':
+                entry['pin_only'] = False
+            elif mode == 'wrong-token':
+                proof['token'] = 'f' * 32
+            elif mode == 'moved-head':
+                entry['commit'] = lab.base
+            if mode == 'unnamed':
+                proof_file.unlink()
+            else:
+                proof_file.write_text('{broken' if mode == 'malformed' else json.dumps(proof))
+            made.append((mode, target, proof_file, branch, entry['commit'], lock_path,
+                         lock_path.stat().st_ino if lock_path.exists() else None))
+        # Even old targets and more than two kept trees bypass the normal rules.
+        assert lab.run('--targets') == ''
+        assert all(target.exists() for _, target, *_ in made)
+        lab.room_free(10)
+        preview = lab.target_fault('def refuse(*args):\n    raise AssertionError("preview took a lock")\n'
+                                  'tool["fcntl"].flock = refuse', '--dry-run', '--room', '30', status=0)
+        assert 'would delete target' in preview and all(target.exists() for _, target, *_ in made), preview
+        # The set flock, like Cargo's locks, must cover the actual removal.
+        clear_lock = made[-1][5]
+        code = ('clear = tool["Tidy"].clear_target\n'
+                'def checked(self, work, target, reason, trash):\n'
+                f'    with open({str(clear_lock)!r}, "r") as source:\n'
+                '        try:\n'
+                '            tool["fcntl"].flock(source, tool["fcntl"].LOCK_EX | tool["fcntl"].LOCK_NB)\n'
+                '        except BlockingIOError:\n'
+                '            pass\n'
+                '        else:\n'
+                '            raise AssertionError("set lock released before target removal")\n'
+                '    return clear(self, work, target, reason, trash)\n'
+                'tool["Tidy"].clear_target = checked\n')
+        text = lab.room_reclaim(20, '--room', '30', code=code)
+        for mode, target, proof_file, branch, commit, lock_path, inode in made:
+            assert target.exists() == (mode != 'clear'), (mode, text)
+            assert target.parent.exists() and lab.exists(branch), (mode, text)
+            actual = lab.git(target.parent, 'rev-parse', 'HEAD')
+            if mode != 'moved-head':
+                assert actual == commit, (mode, actual, commit)
+            if mode == 'unnamed':
+                assert not proof_file.exists()
+            else:
+                assert proof_file.exists()
+            assert (lock_path.stat().st_ino if lock_path.exists() else None) == inode, mode
+        assert text.count('deleted target') == 1 and '(room for a landing)' in text, text
+        assert 'set lock unavailable' in text, text
+
+
+def room_kept_replacement(lab):
+    """An old proof cannot clear a failed run's replacement after discovery."""
+    target, proof_file, branch = lab.kept_target('replacement')
+    source = proof_file.read_text()
+    replacement = 'land-set/' + 'f' * 32 + '/agents'
+    lab.room_free(10)
+    code = ('room = tool["Tidy"].target_room\n'
+            'def replace(self, candidates, trash, kept):\n'
+            f'    tool["git"]({str(target.parent)!r}, "branch", "-m", {replacement!r})\n'
+            '    return room(self, candidates, trash, kept)\n'
+            'tool["Tidy"].target_room = replace\n')
+    text = lab.room_reclaim(20, '--room', '30', code=code)
+    assert target.exists() and target.parent.exists() and lab.exists(replacement), text
+    assert not lab.exists(branch) and proof_file.read_text() == source, text
+    assert f'kept target {target}: proved worktree changed (room for a landing)' in text, text
+
+
 def room_clears_oldest_first(lab):
     targets = [lab.target(f'room-{n}', n * 600, owner=f'owner-{n % 2}') for n in (2, 3, 4, 5)]
     lab.room_free(10)
@@ -1412,6 +1525,7 @@ CASES = (copies, lockfile_conflicts, lockfile_tree, lockfile_patches, lockfile_s
          targets_triple, targets_left_alone, targets_trash, targets_dry_run, targets_scope,
          fleet_is_a_tools_entry, targets_root_lock, targets_preview_no_locks, targets_list_failure,
          targets_rename_failure, targets_delete_failure, targets_trash_failure, targets_trash_invalid,
+         room_kept_proofs, room_kept_replacement,
          room_clears_oldest_first, room_spares_recent_and_used, room_after_rules, room_already_free,
          room_dry_run, room_ties_and_boundary, room_clear_race, room_failure_continues, room_free_source)
 
