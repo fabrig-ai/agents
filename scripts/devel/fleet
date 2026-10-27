@@ -483,7 +483,8 @@ def tend_room(tmp):
 def tend_command(kit, argv):
     result = {'argv': list(argv), 'exit': None, 'lines': [], 'more': 0}
     try:
-        process = subprocess.Popen([str(kit / argv[0]), *argv[1:]], stdin=subprocess.DEVNULL,
+        process = subprocess.Popen([str(kit / argv[0]) if kit is not None else argv[0], *argv[1:]],
+                                   stdin=subprocess.DEVNULL,
                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     except OSError as error:
         result['error'] = type(error).__name__
@@ -496,6 +497,20 @@ def tend_command(kit, argv):
                 result['more'] += 1
         result['exit'] = process.wait()
     return result
+
+
+def tend_kache(tmp):
+    try:
+        stats = source_kache(tmp, clock())
+        if stats is None:
+            return 'no kache'
+        if not all(number(stats[key]) for key in ('store', 'limit')):
+            return 'kache stats failed'
+        if stats['store'] <= stats['limit']:
+            return 'store within its limit'
+    except (OSError, ValueError, TypeError, KeyError, RecursionError, subprocess.SubprocessError):
+        return 'kache stats failed'
+    return None
 
 
 def append_tend(tmp, record):
@@ -542,13 +557,22 @@ def tend(tmp):
     if room is not None:
         tending[0] += ('--room', str(room))
     commands = [tend_command(kit, argv) for argv in tending]
+    why = tend_kache(tmp)
+    if why is None:
+        commands.append(tend_command(None, ('kache', 'gc')))
     record = {'start': start, 'end': iso(clock()), 'commands': commands}
+    if why is not None:
+        record['skipped'] = [{'argv': ['kache', 'gc'], 'why': why}]
     try:
         append_tend(tmp, record)
     except OSError as error:
         print(f'fleet tend: cannot write record: {error}', file=sys.stderr)
         return 2
-    print('fleet tend: ' + ', '.join(f'{c["argv"][0]} {c["exit"] if c["exit"] is not None else "-"}' for c in commands))
+    summary = [f'{"kache gc" if c["argv"] == ["kache", "gc"] else c["argv"][0]} '
+               f'{c["exit"] if c["exit"] is not None else "-"}' for c in commands]
+    if why is not None:
+        summary.append('kache gc skipped: ' + why)
+    print('fleet tend: ' + ', '.join(summary))
     return int(any(c['exit'] != 0 for c in commands))
 
 
@@ -608,10 +632,13 @@ def stamp(value):
 
 def tend_ran(tend):
     commands = tend.get('commands', [])
-    return (isinstance(commands, list) and len(commands) == 3 and
+    return (isinstance(commands, list) and len(commands) in (3, 4) and
             all(isinstance(c, dict) and isinstance(c.get('argv'), list) and c['argv'][:1] == [name] and
                 type(c.get('exit')) is int and c['exit'] != 2
-                for c, (name, *_) in zip(commands, TENDING)))
+                for c, (name, *_) in zip(commands, TENDING)) and
+            (len(commands) == 3 or
+             (isinstance(commands[3], dict) and commands[3].get('argv') == ['kache', 'gc'] and
+              type(commands[3].get('exit')) is int and commands[3]['exit'] != 2)))
 
 
 def read_tends(state, machine, reading):

@@ -166,6 +166,17 @@ if IFS= read -r line || [ -n "$line" ]; then exit 99; fi
 . "$root/tend-$name.reply"
 ''')
 
+        self.answer('tend-kache', '')
+        shell_tool(self.bin, 'kache', '''root=${DEV_TMP%/tmp}
+if [ "$*" = 'stats --json' ]; then
+    printf '%s\\n' '["kache", "stats", "--json"]' >> "$root/calls"
+    . "$root/kache.reply"
+fi
+[ "$*" = gc ] || exit 99
+if IFS= read -r line || [ -n "$line" ]; then exit 99; fi
+printf '%s\\n' '["kache", "gc"]' >> "$root/tend.calls"
+. "$root/tend-kache.reply"
+''')
 
     def tend(self, status=0, now=NOW):
         result = subprocess.run([PYTHON, '-I', '-S', str(self.kit / 'fleet'), 'tend'],
@@ -512,19 +523,20 @@ def tend_order(lab):
     lab.answer('tend-tidy', 'tidy output\n', exit=1)
     lab.answer('tend-post', 'post output\n', exit=3)
     result = lab.tend(status=1)
-    assert result.stdout == 'fleet tend: tidy 1, post 3, codex-run 0\n' and result.stderr == ''
+    assert result.stdout == 'fleet tend: tidy 1, post 3, codex-run 0, kache gc skipped: store within its limit\n' and result.stderr == ''
     expected = [['tidy', '--targets'], ['post', 'wake', '--older', '15'], ['codex-run', 'stale', '--post']]
     assert lab.tend_calls() == expected
     record, = lab.tends()
     assert record == {'start': API['iso'](NOW), 'end': API['iso'](NOW), 'commands': [
         {'argv': argv, 'exit': code, 'lines': lines, 'more': 0}
-        for argv, code, lines in zip(expected, [1, 3, 0], [['tidy output'], ['post output'], []])]}, record
+        for argv, code, lines in zip(expected, [1, 3, 0], [['tidy output'], ['post output'], []])],
+        'skipped': [{'argv': ['kache', 'gc'], 'why': 'store within its limit'}]}, record
 
 
 def tend_all_ok(lab):
     lab.tend_kit()
     result = lab.tend()
-    assert result.stdout == 'fleet tend: tidy 0, post 0, codex-run 0\n' and result.stderr == ''
+    assert result.stdout == 'fleet tend: tidy 0, post 0, codex-run 0, kache gc skipped: store within its limit\n' and result.stderr == ''
     assert [c['exit'] for c in lab.tends()[0]['commands']] == [0, 0, 0]
     assert (lab.tmp() / 'fleet').stat().st_mode & 0o777 == 0o700
     assert (lab.tmp() / 'fleet/tend.jsonl').stat().st_mode & 0o777 == 0o600
@@ -536,7 +548,7 @@ def tend_not_started(lab):
     lab.tend_kit()
     (lab.kit / 'codex-run').unlink()
     result = lab.tend(status=1)
-    assert result.stdout == 'fleet tend: tidy 0, post 0, codex-run -\n'
+    assert result.stdout == 'fleet tend: tidy 0, post 0, codex-run -, kache gc skipped: store within its limit\n'
     assert lab.tend_calls() == [['tidy', '--targets'], ['post', 'wake', '--older', '15']]
     assert lab.tends()[0]['commands'][-1] == {'argv': ['codex-run', 'stale', '--post'], 'exit': None,
                                            'error': 'FileNotFoundError', 'lines': [], 'more': 0}
@@ -545,6 +557,80 @@ def tend_not_started(lab):
     lab.tend(status=1)
     assert lab.tends()[-1]['commands'][0]['error'] == 'PermissionError'
     assert lab.tend_calls()[-1] == ['post', 'wake', '--older', '15']
+
+
+def tend_kache_gc_past_limit(lab):
+    lab.tend_kit()
+    lab.answer('kache', {'disk': {'store_bytes': 37*GB, 'store_limit_bytes': 20*GB}})
+    lab.answer('tend-kache', 'collected\n')
+    result = lab.tend()
+    assert result.stdout == 'fleet tend: tidy 0, post 0, codex-run 0, kache gc 0\n'
+    assert lab.tend_calls() == [list(argv) for argv in API['TENDING']] + [['kache', 'gc']]
+    record, = lab.tends()
+    assert record['commands'][-1] == {'argv': ['kache', 'gc'], 'exit': 0, 'lines': ['collected'], 'more': 0}
+    assert 'skipped' not in record
+    state = rounds(reading(tend=[record]))
+    assert state['tends']['alpha']['ran'] and not state['pending']
+
+
+def kache_skipped(lab, why):
+    result = lab.tend()
+    assert result.stdout == 'fleet tend: tidy 0, post 0, codex-run 0, kache gc skipped: ' + why + '\n'
+    record = lab.tends()[-1]
+    assert record['skipped'] == [{'argv': ['kache', 'gc'], 'why': why}]
+    assert [c['argv'] for c in record['commands']] == [list(argv) for argv in API['TENDING']]
+    assert ['kache', 'gc'] not in lab.tend_calls()
+    state = rounds(reading(tend=[record]))
+    assert state['tends']['alpha']['ran'] and not state['pending']
+
+
+def tend_kache_within_limit(lab):
+    lab.tend_kit()
+    for store in (20*GB, 5*GB):
+        lab.answer('kache', {'disk': {'store_bytes': store, 'store_limit_bytes': 20*GB}})
+        kache_skipped(lab, 'store within its limit')
+
+
+def tend_without_kache(lab):
+    lab.tend_kit()
+    (lab.bin / 'kache').unlink()
+    lab.env['PATH'] = str(lab.bin)
+    kache_skipped(lab, 'no kache')
+    assert lab.tend_calls() == [list(argv) for argv in API['TENDING']]
+
+
+def tend_kache_stats_fails(lab):
+    lab.tend_kit()
+    for answer, extra in [('', {'exit': 1}), ({'disk': {'store_bytes': 37*GB}}, {}),
+                          ('broken json', {}), ({'disk': []}, {}),
+                          ({'disk': {'store_bytes': True, 'store_limit_bytes': 20*GB}}, {}),
+                          ({'disk': {'store_bytes': 37*GB, 'store_limit_bytes': '20'}}, {})]:
+        lab.answer('kache', answer, **extra)
+        kache_skipped(lab, 'kache stats failed')
+    # Exercise the timeout classification without a slow real stats process.
+    with patch.dict(os.environ, lab.env), patch('subprocess.Popen') as popen:
+        process = popen.return_value
+        process.communicate.side_effect = [subprocess.TimeoutExpired(['kache', 'stats', '--json'], 15), (b'', b'')]
+        with patch('os.killpg'):
+            assert API['tend_kache'](lab.tmp()) == 'kache stats failed'
+        assert process.communicate.call_args_list[0].kwargs == {'timeout': 15}
+
+
+def tend_kache_gc_fails(lab):
+    lab.tend_kit()
+    lab.answer('kache', {'disk': {'store_bytes': 37*GB, 'store_limit_bytes': 20*GB}})
+    lab.answer('tend-kache', 'gc failed\n', exit=2)
+    result = lab.tend(status=1)
+    assert result.stdout == 'fleet tend: tidy 0, post 0, codex-run 0, kache gc 2\n'
+    record, = lab.tends()
+    assert record['commands'][-1]['exit'] == 2 and 'skipped' not in record
+    first = rounds(reading(tend=[record]), count=1)
+    assert not first['pending'] and not first['tends']['alpha']['ran']
+    second = rounds(reading(tend=[record]), first, now=NOW+300, count=1)
+    assert second['pending'] == ['alpha untended']
+    for code, ran in ((None, False), (1, True), (3, True)):
+        record['commands'][-1]['exit'] = code
+        assert API['tend_ran'](record) is ran
 
 
 def tend_lines(lab):
@@ -621,7 +707,7 @@ def tend_no_room(lab):
         if content is not None:
             write(path, content)
         result = lab.tend()
-        assert result.stdout == 'fleet tend: tidy 0, post 0, codex-run 0\n'
+        assert result.stdout == 'fleet tend: tidy 0, post 0, codex-run 0, kache gc skipped: store within its limit\n'
         assert lab.tend_calls()[-3:] == [['tidy', '--targets'], ['post', 'wake', '--older', '15'],
                                         ['codex-run', 'stale', '--post']]
         assert lab.tends()[-1]['commands'][0]['argv'] == ['tidy', '--targets']
@@ -1078,7 +1164,8 @@ CASES = [reading_fields, reading_disk_workspace, reading_floor, reading_absent, 
          reading_implementers_stale, reading_targets, reading_tend_since, room_verdicts,
          room_order_and_exit, room_unreached_why, room_new_machine, room_named, room_piped,
          room_targets, room_fits_120, room_json, tend_order, tend_all_ok, tend_not_started, tend_lines,
-         tend_keeps_a_week, tend_read_by_probe, tend_room_for_landing, tend_no_room, tend_record_failure,
+         tend_kache_gc_past_limit, tend_kache_within_limit, tend_without_kache,
+         tend_kache_stats_fails, tend_kache_gc_fails, tend_keeps_a_week, tend_read_by_probe, tend_room_for_landing, tend_no_room, tend_record_failure,
          raise_after_two_rounds, clear_after_two_rounds, between_changes_nothing, each_condition,
          missing_field_keeps, session_from_missions, subjects_gone, untended_rows, tends_counted_once,
          user_and_fleet_never, quiet_machine, no_state_first_round, gap_carries,
