@@ -202,8 +202,7 @@ temper's binding, `docs/design/qa.md` 3, is the source; as of 10-27:
 - **Two Claude logins,** `claude` and `claude-2`, Claude Code's
   configuration directories, used in place (6.2a): the Claude walks'
   pool, one each for its two walk slots. The user signed in `claude` at
-  18:56Z and `claude-2` at 19:2xZ on 10-27. Until piece W lands, a
-  Claude walk takes one by name (`logins take claude-2 --as HOLDER`).
+  18:56Z and `claude-2` at 19:2xZ on 10-27.
 - **One account each:** an account signed in twice gives a second login
   but shares the first's usage limits, so a new held login is another
   account wherever one is to hand.
@@ -212,17 +211,22 @@ temper's binding, `docs/design/qa.md` 3, is the source; as of 10-27:
   hold at most the pool's size less `QA_LOGIN_RESERVE`, a login one
   stranded included (qa-flow.md 10.6; agents 86f918b). `qa passes`
   shows each pool's size, QA's holding and the reserve.
-- **By hand,** a walk or a live story takes as a kind's holder, so that
-  it counts against that kind's cap (qa-flow.md 10.6). Once piece W2
-  lands, through `qa take KIND --as walk/KIND/WHAT --note DIR`, which
-  admits it below the cap, and `qa give NAME --as walk/KIND/WHAT`.
-  Until then, read `qa passes` first: take only while the kind holds
-  fewer than its slots, never as `walk/forgejo/…` beyond two: `logins
-  take chatgpt --any --now --as walk/forgejo/WHAT --note DIR`, which prints the name and
-  path it grants, and gives back `logins give NAME --as HOLDER`. Once
-  piece W lands, `qa walk` does both for a rung walk (qa-flow.md 10.7),
-  and a queued take is dropped with `logins drop chatgpt --any --as
-  HOLDER`, as a `--wait` that runs out drops itself.
+- **A rung walk** is started by `qa walk REPO RUNG [--kind KIND]
+  [--build REF] [--cap MINUTES]` (qa-flow.md 10.7; agents b844696):
+  REF `main`, `origin/<branch>` (the exact remote ref) or a unique
+  commit; it prints the walk's name, each login `NAME PATH` and its run.
+  The default kind is ChatGPT+Forgejo's; `--kind claude` for Claude's.
+  It paused, `qa walk REPO RUNG --resume NAME --build REF`, refused at
+  once while its kind has no free slot or login. The service ends and
+  pauses walks, and writes `walk-start`, `walk-pause`, `walk-resume` and
+  `walk-end` on the rung's clock.
+- **By hand,** a live story or a recovery takes through `qa take KIND
+  [--login POOL] --as walk/KIND/WHAT [--note TEXT]`, admitted below the
+  kind's cap, WHAT never a walk's name, and gives back with `qa give
+  NAME --as walk/KIND/WHAT`; never `logins take`, which would count
+  without being admitted. A queued `logins take` is dropped with
+  `logins drop NAME|POOL [--any] --as HOLDER`, and a `--wait` that runs
+  out drops itself.
 - **Saturation:** the director reads `logins list` at each check. A
   login held most of the day while walks or passes wait is saturated,
   and the user hears of it.
@@ -277,6 +281,9 @@ the first's:
   the roll.
 - **After** a roll that changes `qa`, restart `agents-qa-watch.service`
   between passes, when `qa passes --running` is empty.
+- **Rolling back** `qa` past b844696 needs no walk running or paused
+  and no `walk/…` holder holding a login: the older service knows no
+  walk.
 - **Rolling back** `logins` past b3abf0e needs its queue drained and
   `tmp/logins/lock` and `tmp/logins/waiting.json` moved out first;
   rolling `qa` back past 8935bc9 needs the passes of the newer code
@@ -335,13 +342,16 @@ The director's, on hetzner6:
     the slots;
   - `QA_LOGIN_RESERVE` 2, the ChatGPT+Forgejo walks' two logins; 3 once
     ChatGPT+GitHub walks start, QA then yielding one (qa-flow.md 10.6);
-  - `QA_WALK_KINDS` `forgejo=2:chatgpt claude=2:claude` (from piece W):
-    each kind of walk, its own walk slots and its pools,
+  - `QA_WALK_KINDS`, by default `forgejo=2:chatgpt claude=2:claude`:
+    each kind of walk (no hyphen in its name), its own walk slots and
+    its pools, the first the default kind,
     ChatGPT+Forgejo's never taken by another; `github=1:chatgpt` added,
     with `QA_LOGIN_RESERVE` 3, when ChatGPT+GitHub walks start
     (qa-flow.md 10.6, 10.7). The tool refuses a reserve below the slots
-    of the kinds that use a pool. A change reclaims nothing: it holds
-    once holdings drain below it (`qa passes`);
+    of the kinds that use a pool, in every `qa` command. A change
+    reclaims nothing: it holds once holdings drain below it (`qa
+    passes`). Each walk slot is a worktree with its own target, about 8
+    GB, its first build cold;
   - `QA_BATCH` 5, `QA_CAP_MINUTES` 120 and `QA_INTERVAL_SECONDS` 300;
   - `QA_STOP_SECONDS` 50, the give-back wrapper's bound in a
     deployment's stop (qa-flow.md 10.5);
@@ -353,12 +363,12 @@ The director's, on hetzner6:
 - **The open rung:** `qa rung temper real-model --login chatgpt`, the
   pool.
 - **Once piece 3 is built:** `qa default temper on`.
-- **What lands, in order** (o/qa-evidence-keep, each alone): W, `qa
-  walk` with pause and resume, kinds and `logins drop`; W2, `qa take`
-  and `qa give`, a take by hand admitted below its kind's cap; 3, marked commits by
-  default; 4, triage by landing; 5, the stuck alert. Each landing's post
-  says what hetzner6 needs. Landed: the pool (b3abf0e), passes side by
-  side (8935bc9), the reserve and `--now` (86f918b).
+- **What lands, in order** (o/qa-evidence-keep, each alone): 3, marked
+  commits by default; 4, triage by landing; 5, the stuck alert. Each
+  landing's post says what hetzner6 needs. Landed: the pool (b3abf0e),
+  passes side by side (8935bc9), the reserve and `--now` (86f918b), `qa
+  walk` by kind with pause and resume, `qa take` and `logins drop`
+  (b844696).
 
 ## 8. The evidence
 
@@ -438,3 +448,6 @@ Newest last, times UTC.
   then, `qa passes` read first (design/qa-evidence).
 - 10-27 20:4xZ: a resumed walk raises a new binary's memory figure at the
   restart, as a setup step (section 3, item 4; design/ladder).
+- 10-27 20:4xZ: `qa walk` by kind with pause and resume, `qa take` and
+  `qa give`, `logins drop` landed (agents b844696); 6.1, 6.3 and 7 as
+  built (design/qa-evidence).

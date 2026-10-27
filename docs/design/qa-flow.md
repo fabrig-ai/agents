@@ -919,6 +919,19 @@ the kit only starts it and ends it, as the service ends a pass.
   the fix; the rung's final walk confirms it at the landed commit,
   resumed from the kept state where the landed binary reads it, else
   from the start (design/ladder's loop).
+- **What the code settled** (agents b844696): a resume moves the
+  walk's `report.md` to `report-<k>.md` and `paused` to `paused-<k>`
+  (codex-run refuses an existing report), and the resumed session writes
+  `report.md` anew, carrying the earlier findings over; a run with its
+  meta and no unit or end is a launch still possible for 10 minutes,
+  and past them while a `codex-run task` process for its task lives; a
+  `logins take` decided under an admission lock passes that lock to its
+  child, so that a child outliving its caller keeps every class under
+  its cap; a login two states claim is given back for neither, and a
+  state over 1 MiB or unreadable is set aside, its custody kept. Left as
+  they are, by decision: a pool smaller than its kinds' walk slots
+  (a refused `--now` names the broken cap), and a starter's post sent
+  again after a crash (at least once).
 - **Not QA's:** a walk's logins are no `qa-watch` holder's, so they
   don't count against QA's cap (10.6), and its walk slots are no QA
   slot; QA's `--now` takes never stand ahead of a walk that waits.
