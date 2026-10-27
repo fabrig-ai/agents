@@ -98,7 +98,7 @@ GitHub, and the sweep of the six machines' `tmp/` (section 6).
 
 ## 4. tidy
 
-`scripts/devel/tidy [--dry-run] [REPO... | --mission M | --targets]`,
+`scripts/devel/tidy [--dry-run] [REPO... | --mission M | --targets [--room GB]]`,
 Python, under a lock per machine (`tmp/logs/tidy.lock`; a second run
 waits for it), safe to run at any time. `--dry-run` takes no lock,
 deletes nothing and prints what it would do. With REPO, it runs steps 1
@@ -203,6 +203,15 @@ new work. There is no keep list: a landed branch's commits are on
      target and starts afresh. The rename done, it deletes the target
      there. Each run first deletes what an interrupted one left in the
      trash.
+   - **Room for a landing,** with `--room GB`: after the rules above,
+     while less than GB is free on `tmp/`'s filesystem, it clears the
+     least recently built target that is not in use and was last built
+     15 minutes ago or more, one at a time, reading the free space
+     after each, and stops when none is left. Its line's reason is
+     `(room for a landing)`. A machine's tend passes it while a landing
+     waits for its floor in heavy's ledger
+     ([build-infrastructure.md](build-infrastructure.md) 2, "A
+     landing's room").
    - **Held beyond two:** an owner with more than two targets in use
      keeps them all, each one past its two reported, without exit 1:
      nothing waits on a decision, and the fleet watch shows it.

@@ -25,6 +25,11 @@ owners' `heavy` commands. Runtime identity is specified by gate-policy.md.
   between them: pueue's role ended on 10-26 (section 7).
 - **A lane keeps submission order.** Each lane, `build` and `gate`,
   admits its waiting tasks oldest first, as far as it has room.
+- **A landing has its room** (section 2, "A landing's room"). While a
+  landing's task waits or runs on a machine, other builds start only
+  with a reservation free above the floor, and wait for it, while the
+  landing starts on the floor alone and waits for that, rather than
+  being refused.
 - **One exclusive gate, by choice.** `heavy --gate` still runs alone, one
   at a time: for what needs a quiet machine, a kache setup or a
   measurement. Host admission counts task lifetimes in the ledger, not
@@ -136,6 +141,55 @@ Keep the floor check; no target-size reservation is added.
 This change adds no ledger or unit format and needs no setup or state
 migration. The director rolls out the kit; reverting the change restores
 submission-only checking without editing state.
+
+**A landing's room.** On 10-26 and 10-27 sets first in line stopped at
+the floor again and again: four times in three hours on hetzner6, where
+other owners' builds swung the free disk by about 25 GB at a time
+(decision 1365). A landing refused at the floor loses its place, and
+the build that took its room goes on. So the room is the landing's,
+and the others wait for it:
+
+- **A landing's task** is one labelled `land REPO` or `land REPO
+  prebuild` (`HEAVY_LABEL`, as `land` and `land-set` submit them), in
+  either lane.
+- **The reservation** holds on a machine while a landing's task is in
+  the ledger and not released, and for 2 minutes after the last one's
+  release, so that a landing's next step (its gate after its prebuild,
+  a set's next repository) finds its room. It is `PLAN_LAND_ROOM_GB`
+  (the environment, then `machine.env`, as the floor), 30 GB by
+  default: the swing of a temper build, with some margin.
+- **Others wait for room.** While the reservation holds, the build lane
+  admits a task that is not a landing's only with the floor plus the
+  reservation free; otherwise it stays queued, and the lane's order
+  holds behind it. Its submission's check and its payload's check stay
+  the floor's alone: a build is refused only below the floor, as
+  before. A build already running goes on.
+- **A landing waits for its floor.** A landing's task below the floor
+  is not refused at submission: it is queued, and admitted once the
+  floor is free, past the builds that wait for room, its lane's other
+  rules unchanged. It records the time it began to wait, `disk_wait`,
+  in its ledger entry, which the machine's tend reads to make room
+  ([fleet-watch.md](fleet-watch.md) 4). Twenty minutes after that it is
+  refused as today, with the floor's diagnostic and exit 2 (land's 9).
+  Its payload's check stays the floor's, with no wait: a landing
+  admitted on the floor that finds less just before its command starts
+  is refused, as before.
+- **What it costs:** a landing's wait under the set lock holds other
+  landings for as long, at most 20 minutes, where today the set stops
+  and loses the lock. Others' builds wait while a landing reserves and
+  the disk is short; the tend's clearing (cleanup.md 4, step 9) and the
+  landing's end release them.
+- **Its format:** the ledger gains `disk_wait` on a task, a time or
+  absent; readers that don't know it ignore it. Reverting the change
+  leaves it unread.
+- **Its fixture,** in `test-heavy-recovery`'s scratch ledger and a disk
+  whose free space the fixture sets: a build queued behind a landing's
+  task while the reservation is short, and admitted once it isn't; a
+  landing's prebuild admitted past it; the reservation held 2 minutes
+  after the last landing's task and not after; a landing below its floor
+  queued with `disk_wait`, admitted when the floor frees, refused with
+  exit 2 after 20 minutes; a build still refused only below the floor;
+  a landing's payload check refusing as before.
 
 ## 3. Durable state and release
 

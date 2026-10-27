@@ -182,7 +182,10 @@ mode 0600:
 commands of the kit, in this order, each whatever the others' exits:
 
 1. `tidy --targets`: the build targets past their use (cleanup.md 4,
-   step 9);
+   step 9); with `--room GB` while a landing's task in heavy's ledger
+   waits for its floor (`disk_wait`, build-infrastructure.md 2, "A
+   landing's room"), GB its floor plus its reservation, as heavy reads
+   them;
 2. `post wake --older 15`: each name whose mail has waited 15 minutes
    with no waiter, woken as delivery would wake it (post.md 3, 4);
 3. `codex-run stale --post`: each run that will never post, told to its
