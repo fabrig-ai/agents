@@ -1,6 +1,7 @@
 #!/usr/bin/env -S python3 -S
 """qa candidates [REPO]
 qa decide REPO COMMIT... run|backlog [--why TEXT]
+qa default REPO [on|off [--why TEXT]]
 qa backlog [REPO]
 qa passes [--running]
 qa findings
@@ -138,6 +139,7 @@ def no_links(anchor, path):
 class Repositories:
     def __init__(self, workspace):
         self.workspace = workspace
+        self.failed = set()
 
     @contextmanager
     def fetched(self, repo):
@@ -286,7 +288,8 @@ class Record:
         rows = []
         patterns = dict(decisions=rf'- (\S+) (\S+) ({SHA}) (run|backlog)(?: (.*))?',
                         triage=r'- (\S+) (\S+) ([1-9][0-9]*) (\S+)(?: (.*))?',
-                        rungs=rf'- (\S+) (\S+) ({NAME}) (-|{LOGIN}(?:,{LOGIN})*)(?: (.*))?')
+                        rungs=rf'- (\S+) (\S+) ({NAME}) (-|{LOGIN}(?:,{LOGIN})*)(?: (.*))?',
+                        defaults=rf'- (\S+) (\S+) (on|off) ({SHA})(?: (.*))?')
         pattern = patterns[kind]
         for line in path.read_text().splitlines():
             if not line.strip() or line.startswith('#'):
@@ -345,16 +348,51 @@ def replace(path, data, mode=0o600):
             temporary.unlink(missing_ok=True)
 
 
-def states(decisions, passes):
-    """Latest event wins; at equal times a pass takes precedence."""
+def covered(record, repositories, repo=None):
+    repositories.failed.clear()
+    openings = {}
+    for event in record.events('defaults'):
+        if repo is None or event['who'] == repo:
+            openings.setdefault(event['who'], []).append(event)
+    result = []
+    for who, events in openings.items():
+        try:
+            selected = {}
+            with repositories.fetched(who) as root:
+                for index, opening in enumerate(events):
+                    if opening['item'] != 'on':
+                        continue
+                    closing = next((event for event in events[index + 1:] if event['item'] == 'off'), None)
+                    end = closing['route'] if closing else 'origin/main'
+                    # Git's revision range is reachability, independent of commit dates.
+                    text = git(root, 'log', '--format=%H%x1f%(trailers:key=QA,valueonly)%x00',
+                               opening['route'] + '..' + end)
+                    for row in text.split('\0'):
+                        if not row.strip():
+                            continue
+                        sha, trailer = row.lstrip('\n').split('\x1f', 1)
+                        if trailer.strip() and (sha not in selected or opening['time'] < selected[sha]['time']):
+                            selected[sha] = dict(time=opening['time'], who=who, item=sha, route='run', why='default')
+            result.extend(selected.values())
+        except (Problem, OSError, ValueError, UnicodeError) as error:
+            if not record.logger:
+                raise
+            repositories.failed.add(who)
+            record.logger(f'{who}: preparation failed ({type(error).__name__}): {error}; keeping saved custody')
+    return result
+
+
+def states(decisions, passes, defaults=()):
+    """Latest event wins; ties put defaults, decisions, then passes in order."""
     result, keys = {}, {}
-    for index, event in enumerate(decisions):
-        identity = event['who'], event['item']
-        key = event['time'], 0, index
-        if identity not in keys or key > keys[identity]:
-            keys[identity], result[identity] = key, event
+    for rank, events in enumerate((defaults, decisions)):
+        for index, event in enumerate(events):
+            identity = event['who'], event['item']
+            key = event['time'], rank, index
+            if identity not in keys or key > keys[identity]:
+                keys[identity], result[identity] = key, event
     for index, report in enumerate(passes):
-        key = utc(report.fields['started']), 1, index
+        key = utc(report.fields['started']), 2, index
         for sha in report.fields['commits'].split():
             identity = report.fields['repository'], sha
             if identity not in keys or key > keys[identity]:
@@ -393,6 +431,24 @@ def rung(record, repo):
         return dict(rung=opening['item'], logins=[] if opening['route'] == '-' else opening['route'].split(','),
                     time=opening['time'])
     return None
+
+
+def default(args, record, repositories):
+    latest = next((event for event in reversed(record.events('defaults')) if event['who'] == args.repo), None)
+    current = latest['item'] if latest else 'off'
+    if args.switch is None:
+        need(not args.why, '--why needs on or off')
+        since = (' since ' + latest['time'].strftime('%Y-%m-%dT%H:%M:%SZ')
+                 + ' at ' + latest['route'][:9]) if latest else ''
+        print(f'{args.repo} {current}{since}')
+        return
+    need(args.switch != current, f'{args.repo}: already {current}')
+    with repositories.fetched(args.repo) as root:
+        main = git(root, 'rev-parse', 'origin/main')
+    name = 'qa/defaults.md'
+    text = record.append(name, f'- {timestamp()} {args.repo} {args.switch} {main} {args.why}', '# QA defaults')
+    record.commit({name: text}, f'qa default: {args.repo} {args.switch}')
+    print(f'default: {args.repo} {args.switch} from {main[:9]}')
 
 
 def open_rung(args, record):
@@ -455,14 +511,15 @@ def triage(args, workspace, record):
     return
 
 
-def chosen(record, route, repo=None):
-    current = states(record.events('decisions'), record.passes())
+def chosen(record, repositories, route, repo=None):
+    current = states(record.events('decisions'), record.passes(), covered(record, repositories, repo))
     return sorted([(r, sha, event) for (r, sha), event in current.items()
-                   if event['route'] == route and (not repo or repo == r)], key=lambda row: row[2]['time'])
+                   if event['route'] == route and r not in repositories.failed
+                   and (not repo or repo == r)], key=lambda row: row[2]['time'])
 
 
 def candidates(repo, record, repositories):
-    current = states(record.events('decisions'), record.passes())
+    current = states(record.events('decisions'), record.passes(), covered(record, repositories, repo))
     commits = [c for r in ([repo] if repo else REPOSITORIES) for c in repositories.commits(r)
                if c['qa'] and (r, c['commit']) not in current]
     commits.sort(key=lambda c: c['seconds'])
@@ -470,7 +527,7 @@ def candidates(repo, record, repositories):
 
 
 def backlog(repo, record, repositories):
-    selected = chosen(record, 'backlog', repo)
+    selected = chosen(record, repositories, 'backlog', repo)
     if not selected:
         print('no commits kept for later')
     for commit, event in show_commits(repositories, selected):
@@ -517,7 +574,7 @@ def passes(running, record, repositories):
              + ' '.join(s[:9] for s in p.fields['commits'].split()) for p in record.passes()
              if not running or p.fields['outcome'] == 'running']
     print('\n'.join(lines) or 'no passes')
-    selected = chosen(record, 'run')
+    selected = chosen(record, repositories, 'run')
     print(f'waiting: {len(selected)} commits chosen to run')
     for commit, _ in show_commits(repositories, selected):
         print(first_line(commit))
@@ -1623,7 +1680,7 @@ class Watch:
             # Preflight every source before any launch: an unreadable feed starts none.
             taken = {(s['repository'], sha) for _, s in local if not s['finished']
                      for sha in s['commits']}
-            waiting = [row for row in chosen(self.record, 'run') if row[:2] not in taken]
+            waiting = [row for row in chosen(self.record, self.repositories, 'run') if row[:2] not in taken]
             pending = {}
             for directory, state in local:
                 if state.get('stage') == 'reserving':
@@ -1633,7 +1690,8 @@ class Watch:
                     int(item[1]['pass'].rsplit('-', 1)[-1]) if item[1]['pass'].rsplit('-', 1)[-1].isdigit() else 1))
             wanted = {r for r, _, _ in waiting}
             for repo, reservations in list(pending.items()):
-                if repo not in wanted or not self.giving:
+                # A failed coverage read is not an empty choice: keep its reservations.
+                if (repo not in wanted and repo not in self.repositories.failed) or not self.giving:
                     for directory, state in reservations:
                         try:
                             self.cancel(directory, state)
@@ -2080,6 +2138,10 @@ def main():
     decide_parser.add_argument('repo')
     decide_parser.add_argument('choices', nargs='+')
     decide_parser.add_argument('--why', default='')
+    default_parser = sub.add_parser('default')
+    default_parser.add_argument('repo')
+    default_parser.add_argument('switch', nargs='?', choices=('on', 'off'))
+    default_parser.add_argument('--why', default='')
     sub.add_parser('passes').add_argument('--running', action='store_true')
     sub.add_parser('findings')
     rung_parser = sub.add_parser('rung')
@@ -2142,6 +2204,8 @@ def main():
                 candidates(repo, record, repositories)
             elif args.command == 'decide':
                 decide(args, record, repositories)
+            elif args.command == 'default':
+                default(args, record, repositories)
             elif args.command == 'backlog':
                 backlog(repo, record, repositories)
             elif args.command == 'passes':

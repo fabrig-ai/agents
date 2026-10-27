@@ -930,10 +930,23 @@ def qa_places(lab):
         assert 'place' in lab.run('commit', name, status=2)
 
 
+def qa_defaults_has_its_place(lab):
+    name, cap = 'qa/defaults.md', 128 * 1024
+    prefix = '# QA defaults\n\n'
+    content = prefix + 'x' * (cap - len(prefix.encode()))
+    lab.put(name, content)
+    assert 'pushed' in lab.run('commit', name)
+    assert lab.git(lab.origin, 'show', 'main:' + name) == content
+    before = lab.git(lab.origin, 'rev-parse', 'main')
+    lab.put(name, content + 'x')
+    assert 'cap exceeded' in lab.run('commit', name, status=2)
+    assert lab.git(lab.origin, 'rev-parse', 'main') == before
+
+
 def main():
     # The cases share nothing (each has its own Lab, and every subprocess its
     # own env), so they run at once on threads; results print in case order.
-    cases = (qa_places, closing_unpublished, closing_dirty, closing_deleted_remote, closing_fetch_failure, closing_unreadable, closing_nested,
+    cases = (qa_defaults_has_its_place, qa_places, closing_unpublished, closing_dirty, closing_deleted_remote, closing_fetch_failure, closing_unreadable, closing_nested,
              closing_cached_output, closing_cached_worktree, closing_clean, closing_abandoned, closing_active,
              writer, mission_progress, mission_blocked, refusals, different_files, name_race, conflict, offline, merged_validation, installation_failures, setup, mission_runs, telemetry, milestone)
     if len(sys.argv) > 1:
