@@ -188,7 +188,9 @@ A third commit writes `evidence` when its copy was pushed after the
 end's. A line of the body that the evidence's scan refuses is withheld
 from the record, and said (section 11.4).
 The pass writes the body, in [roles/qa.md](../../roles/qa.md) 3's
-shape; past the cap, the service cuts it and says so:
+shape; past the cap, the service cuts it and says so. The service reads
+`report.md` without following a link: a link there is no report, so
+that a pass can't bring another file into the record.
 
 - **Cases:** for each commit, one line per case: what it tried, what it
   expected, what it saw, and `ok` or a finding's number.
@@ -255,7 +257,8 @@ The record is committed with `record commit`, and its rows are in
 Times are UTC to the second, commits full SHAs. The settings are the
 kit's: the machine, named as section 4 says, and `machine.env`'s
 `QA_SLOTS` (1), `QA_BATCH` (5), `QA_CAP_MINUTES` (120),
-`QA_INTERVAL_SECONDS` (300) and `QA_EVIDENCE_KIB` (2048, section 11.1).
+`QA_INTERVAL_SECONDS` (300), `QA_STOP_SECONDS` (50, section 10.5) and
+`QA_EVIDENCE_KIB` (2048, section 11.1).
 
 ## 8. When it runs
 
@@ -426,7 +429,7 @@ the director says so to the user.
   2. each moved login given back (`logins give`, which frees it once it
      is back at rest);
   3. once every moved login is back, each of the pass's units stopped,
-     those `qa deploy` recorded (10.5), and its stop confirmed by
+     those systemd lists for it (10.5), and its stop confirmed by
      `systemctl`; a pass that held no login has its units stopped at
      once;
   4. each login used in place given back, only once every unit of the
@@ -470,18 +473,35 @@ held).
   name, and prints the unit's name. DIRECTORY is a pass's scratch
   directory, or a focused walk's, absolute and of the characters a stop
   command may hold (codex-run's rule: no shell, no `$`); NAME is a
-  lowercase slug. Before it starts the unit, it appends the unit's name
-  to `DIRECTORY/deployments`, which the service reads (10.3), since a
-  collected unit leaves no trace in systemd.
+  lowercase slug that starts with a letter, so that `qa-P-2-box` is
+  never both P's `2-box` and P-2's `box`. Before it starts the unit, it
+  appends the unit's name to `DIRECTORY/deployments`: a trace for the
+  director, never read by the service, since the pass can change it.
+- **The service finds a pass's units by systemd's listing,**
+  `systemctl --user list-units --all 'qa-<pass>-*'`, keeping a unit only
+  when its name is exactly `qa-<pass>-<NAME>` and its working directory
+  is the pass's scratch. A listing or a `show` that fails or reads
+  oddly makes the units' state unknown: the pass's in-place logins and
+  its scratch stay held. Each stop is `--no-block`, then confirmed by
+  bounded `show`s, since a collected unit refuses a stop as not loaded;
+  every `systemctl` call is bounded (30 seconds), and one pass's failure
+  never stops the check for the others. A pass from before `qa deploy`
+  has no logins' kinds in its state, and its units are never listed or
+  stopped.
 - **The unit:**
   - `Type=exec`, COMMAND in the foreground, `KillMode=control-group`;
+    started with `--expand-environment=no` (systemd 257 expands `$` in a
+    transient unit's command) and the caller's `PATH` alone;
   - works in DIRECTORY, its output appended to `DIRECTORY/<NAME>.log`;
   - its stop command (`ExecStop=`) is `qa`'s give-back wrapper on
     DIRECTORY: it runs `DIRECTORY/give-back` under a lock,
     `DIRECTORY/give-back.lock`, so that runs take turns; an absent file
     is nothing; a run is bounded, its output and exit appended to
     `DIRECTORY/give-back.log`; and a failure never fails the unit, as
-    codex-run runs a stop command (post.md 5);
+    codex-run runs a stop command (post.md 5). Its bound is
+    `QA_STOP_SECONDS` (50). A give-back child that leaves its process
+    group (`setsid`) escapes the lock, though the unit's cgroup kill
+    still ends it: a known limit;
   - `TimeoutStopSec=` above the wrapper's bound, so that systemd never
     signals the deployment while its export runs;
   - no `ExecStopPost=`;
