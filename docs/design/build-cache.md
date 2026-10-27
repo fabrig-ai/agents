@@ -313,6 +313,10 @@ store or subsequent cache-related gate failures. Measure remote hits
 over the following day.
 
 Day to day:
+- **The store's limit,** kept by each machine's tend too: every 5
+  minutes it runs `kache gc` when the store is past its limit
+  ([fleet-watch.md](fleet-watch.md) 4), since the daemon's own
+  collection fell behind twice on 10-27.
 - **Health.** On hetzner3, `garage -c ~/garage/garage.toml status` and
   `garage -c ~/garage/garage.toml bucket info kache` give size, object
   count and quota (the config isn't at Garage's default

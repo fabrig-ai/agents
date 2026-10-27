@@ -6,8 +6,8 @@ without the director reading them by hand: each machine tends itself
 told to their callers), one watch on the director's machine reads every
 machine and wakes the director only past a threshold, and one command
 shows each machine's room before an owner is placed. `fleet`, in
-`scripts/devel/`, reads, judges and shows; `tidy`, `post` and
-`codex-run` act, each under its own design.
+`scripts/devel/`, reads, judges and shows; `tidy`, `post`,
+`codex-run` and kache act, each under its own design.
 
 ## 1. In one page
 
@@ -116,7 +116,7 @@ keeps that field's conditions as they were.
 | `memory` | available under 10 % of total | 15 % or more |
 | `kache` | the store at 1.5 times its limit or more | at 1.1 times or less |
 | `unreached` | the machine not read | read |
-| `untended` | its last tend ended 15 minutes ago or more, or never, or a command of it refused (exit 2) or could not start | a tend within 15 minutes whose three commands ran |
+| `untended` | its last tend ended 15 minutes ago or more, or never, or a command of it refused (exit 2) or could not start | a tend within 15 minutes whose commands ran |
 | `deaf NAME` | its tend's `post wake` could not wake NAME (exit 3): raised in the round that reads it, since the mail has waited 15 minutes already | NAME's mail read |
 | `mail NAME` | NAME's oldest unread message 60 minutes old or more | none that old |
 | `stale RUN` | RUN listed by `codex-run stale`, its caller not told | no longer listed |
@@ -178,8 +178,8 @@ mode 0600:
 
 ## 4. Tending
 
-`fleet tend` runs, on its own machine and from its checkout, three
-commands of the kit, in this order, each whatever the others' exits:
+`fleet tend` runs, on its own machine and from its checkout, these
+commands, in this order, each whatever the others' exits:
 
 1. `tidy --targets`: the build targets past their use (cleanup.md 4,
    step 9); with `--room GB` while a landing's task in heavy's ledger
@@ -188,12 +188,21 @@ commands of the kit, in this order, each whatever the others' exits:
 2. `post wake --older 15`: each name whose mail has waited 15 minutes
    with no waiter, woken as delivery would wake it (post.md 3, 4);
 3. `codex-run stale --post`: each run that will never post, told to its
-   caller (post.md 5).
+   caller (post.md 5);
+4. `kache gc`, only when `kache stats --json` shows the store
+   (`disk.store_bytes`) past its limit (`disk.store_limit_bytes`): kache
+   evicts by its own limits, as its daemon does
+   ([build-cache.md](build-cache.md) 7). On 10-27 the daemon's
+   collection fell behind twice in a night under heavy builds, hetzner's
+   store reaching 37 GB of its 20 and the disk 6 GB free; the watch's
+   `kache` raise stays for a store still past half again its limit after
+   this. No kache, or a store within its limit: nothing runs, and the
+   tend's line says so.
 
 It appends one line to `tmp/fleet/tend.jsonl`: its start and end, and
 each command's argv, exit and output lines (at most 200 each, then how
-many more), under a lock, keeping 7 days. Its exit is 0 when all three
-exited 0, else 1. `fleet-tend.timer` runs it every 5 minutes on every
+many more), under a lock, keeping 7 days. Its exit is 0 when every
+command it ran exited 0, else 1. `fleet-tend.timer` runs it every 5 minutes on every
 machine `setup` sets up (section 6).
 
 - **What the watch reads of it:** each tend once. The watch keeps, per
@@ -291,8 +300,9 @@ machine's own.
   `unreached`; a round with no state raising nothing in its first
   round; the subject's length; the body's 15 lines; `rounds.jsonl`
   pruned at 7 days.
-- **The tend:** the three commands in order, each run when one before
-  fails; its line in `tend.jsonl` with each exit and at most 200 lines;
+- **The tend:** the commands in order, each run when one before
+  fails; `kache gc` run with a store past its limit and not within it,
+  nor without kache; its line in `tend.jsonl` with each exit and at most 200 lines;
   lines past 7 days dropped; exit 1 when any failed.
 - **The units:** what `setup` writes, the watch's only with its
   address file (`test-after-landing-units` covers setup's units today;
