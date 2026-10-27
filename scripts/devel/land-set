@@ -538,6 +538,9 @@ def write_proof(runner, path, label, host, token, spec, paths, candidates, bases
                         tree=runner.git(paths[name], 'rev-parse', commit + '^{tree}'),
                         pin_only=spec['repos'][name] == 'pin-only')
              for name, commit in candidates.items()}
+    for name, entry in repos.items():
+        if entry['pin_only']:
+            entry['path'] = str(paths[name].resolve())
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     pending = path.with_suffix('.tmp')
     with pending.open('w') as out:
@@ -798,8 +801,8 @@ def main():
         gates(0)
         if prove:
             write_proof(runner, proof, spec['set'], host, token, spec, paths, candidates, bases)
-            for name in list(made):
-                remove_pin_only(name)
+            # Keep the proved tuple available for the owner's checks. The next
+            # run replaces these worktrees under the same local file lock.
             for name, commit in candidates.items():
                 summary[name] = 'proved ' + commit + ' (not pushed)'
         for index, name in enumerate(names):

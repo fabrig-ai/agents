@@ -3,7 +3,9 @@
 import argparse
 from collections import defaultdict
 from contextlib import contextmanager, ExitStack
+from datetime import datetime, timezone
 import fcntl
+import json
 import os
 from pathlib import Path
 import re
@@ -13,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from urllib.parse import quote
 
 REPOS = ('agents', 'skein', 'smith', 'jig', 'hearth', 'qa', 'temper')
 TOOLS = set('heavy logs gates landing-turn land-set kache lab after-landing post codex-run qa git-fabrig fleet'.split())
@@ -318,6 +321,76 @@ class Tidy:
                     self.branch(repo, name, wt['HEAD'])
             except (Failure, OSError) as error:
                 self.keep('worktree', wt['path'], str(error), 3)
+
+    def kept_proofs(self):
+        base = self.tmp / 'land-set'
+        worktrees = base / 'worktrees'
+        for proof_file in sorted((base / 'proofs').glob('*.json')):
+            try:
+                source = proof_file.read_text()
+                proof = json.loads(source)
+                if (proof['schema'] != 'land-set-proof-v1' or not isinstance(proof['set'], str)
+                        or not isinstance(proof['repos'], dict)
+                        or not isinstance(proof['token'], str)
+                        or not re.fullmatch('[0-9a-f]{32}', proof['token'])):
+                    continue
+                stamp = datetime.fromisoformat(proof['time'])
+                expired = (datetime.now(timezone.utc) - stamp).total_seconds() > 24 * 3600
+            except (OSError, ValueError, KeyError, TypeError, AttributeError):
+                continue
+            for repo in self.repos:
+                entry = proof['repos'].get(repo.name)
+                if (not repo.ready or not isinstance(entry, dict) or entry.get('pin_only') is not True
+                        or not isinstance(entry.get('path'), str)):
+                    continue
+                path = Path(entry['path'])
+                if (not path.is_absolute() or worktrees not in path.parents
+                        or not path.exists() or path.resolve() != path):
+                    continue
+                wt = next((w for w in repo.worktrees if w['path'] == path), None)
+                branch = f'refs/heads/land-set/{proof["token"]}/{repo.name}'
+                if not wt or wt.get('branch') != branch or wt.get('HEAD') != entry.get('commit'):
+                    continue
+                try:
+                    if not expired and not repo.on_main(wt['HEAD']):
+                        continue
+                    # Open the existing inode only. A run retains this lock file;
+                    # holding it through removal excludes replacement by that set.
+                    lock_path = base / 'state' / (quote(proof['set'], safe='') + '.lock')
+                    try:
+                        lock = lock_path.open('r')
+                    except OSError as error:
+                        self.keep('worktree', path, f'set lock unavailable: {error}')
+                        continue
+                    with lock:
+                        try:
+                            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        except BlockingIOError:
+                            self.keep('worktree', path, 'set lock held by another run')
+                            continue
+                        # A run may have replaced both proof and worktree since
+                        # the fetch snapshot. The token and commit also exclude
+                        # a failed landing's replacement with the old proof.
+                        if proof_file.read_text() != source:
+                            continue
+                        wt = next((w for w in worktree_list(repo.path) if w['path'] == path), None)
+                        if (not wt or path == repo.path or not path.exists() or path.resolve() != path
+                                or wt.get('branch') != branch or wt.get('HEAD') != entry.get('commit')):
+                            continue
+                        reason = ('proof over 24 hours old' if expired else
+                                  'proved HEAD on origin/main' if repo.on_main(wt['HEAD']) else '')
+                        if not reason:
+                            continue
+                        busy = held(path)
+                        if busy:
+                            self.keep('worktree', path, busy)
+                            continue
+                        def remove():
+                            git(repo.path, 'worktree', 'remove', '--force', str(path))
+                            git(repo.path, 'branch', '-D', wt['branch'].removeprefix('refs/heads/'))
+                        self.delete('worktree', path, wt['HEAD'], reason, remove)
+                except (Failure, OSError) as error:
+                    self.keep('worktree', path, str(error), 3)
 
     def scan(self, path, include_git=False, onerror=None):
         # Never follow links into another owner's directory.
@@ -713,6 +786,7 @@ class Tidy:
         for repo in self.repos:
             if repo.ready:
                 self.worktrees(repo)
+        self.step(self.kept_proofs)
         for path, kind, reason in self.directories:
             self.directory(path, kind, reason)
         if not self.args.repos and not self.args.mission:
