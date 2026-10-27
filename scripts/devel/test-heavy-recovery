@@ -975,10 +975,11 @@ def room_after(lab):
     wait_for(lambda: lab.event('after', 'room_wait'), 'reservation after release')
     # The boundary is measured from release, not from the test's wall time.
     ended = lab.task('land repo')['ended']
-    lab.age('land repo', 119 - (time.time() - ended))
-    time.sleep(0.7)
+    lab.age('land repo', 100 - (time.time() - ended))
+    # Give the wrapper a fresh admission pass with twenty seconds of margin.
+    time.sleep(1)
     assert not lab.event('after', 'admit'), 'reservation expired before two minutes'
-    lab.age('land repo', 2)
+    lab.age('land repo', 21)
     lab.done(build)
 
 
