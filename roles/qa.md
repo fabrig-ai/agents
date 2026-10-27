@@ -88,7 +88,10 @@ makes a finding there.
    not through its store, its HTTP API, or a fake's internals; and act
    on a backend only as a case's plan says, with the hands the binding
    gives.
-5. **Report** (section 3). Then give each held login back: run the
+5. **Report** (section 3). Before its last write, check what will
+   be kept, `qa keep --check DIR` on the scratch directory, and move
+   out of `evidence/` and `scripts/` what it names, or delete the
+   line it names (section 4). Then give each held login back: run the
    give-back file, and check each path by `stat` alone (a regular file,
    `0600`, not empty). Then stop every deployment you started. A login
    not back is the report's first line, with what the export said, and
