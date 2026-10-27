@@ -984,6 +984,11 @@ that a routine landing needs no post. Built 10-26 (o/landing-taught).
     first, both kinds. One line for each, its date and time, set or branch,
     repository, commit and machine, then its lines indented under it; a
     landing that taught nothing is its line alone.
+  - `landings landed REPO COMMIT`: the landing that brought COMMIT to
+    REPO's `main`, the oldest whose commit holds it and whose base
+    doesn't, as one line, its set or branch, its time and its commit;
+    exit 1 when none does. QA routes a finding by it
+    ([qa-flow.md](qa-flow.md) 6).
 - **Who reads it.**
   - **The director,** at its check, `landings taught --since` its last
     one (director.md 7): an owner under the director posts nothing at a

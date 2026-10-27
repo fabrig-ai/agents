@@ -184,7 +184,9 @@ out. The security rules are director.md 10's.
 - **The QA marker:** a landing commit whose change a user meets
   through the product's tool carries the trailer `QA: <what a user can
   now do>`, one line of at most 160 characters, which its landing task
-  writes ([qa-flow.md](../docs/design/qa-flow.md) 2).
+  writes ([qa-flow.md](../docs/design/qa-flow.md) 2). A commit that
+  changes only tests, fixtures or figures carries none: marked commits
+  run by default (qa-flow.md 3).
 - **A look request done:** a landing that does one of the person's look
   requests (temper's `client/journeys.md` 7) carries the trailer
   `Look-request: NAME`, the request's name on the branch

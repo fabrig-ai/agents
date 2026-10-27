@@ -91,8 +91,9 @@ metadata by the tools. The surveys behind it are
 | `missions/<m>/closing.md` | its owner or designer | once | the closing note (owners.md 5) |
 | `qa/decisions.md` | the director, through `qa decide` | appended | one item per choice of a commit for QA ([qa-flow.md](qa-flow.md) 7) |
 | `qa/passes/<pass>.md` | `qa watch` and the pass | at the pass's start and end | a QA pass's report, its front matter `qa watch`'s (qa-flow.md 5) |
-| `qa/triage.md` | the triager, through `qa triage` | appended | one item per routed finding (qa-flow.md 6) |
-| `qa/rungs.md` | the director, through `qa rung` | appended | one item per rung opened for a repository (qa-flow.md 10.1) |
+| `qa/triage.md` | `qa watch`, routing by landing, and the director, through `qa triage` | appended | one item per routed finding (qa-flow.md 6) |
+| `qa/rungs.md` | the director or design/ladder, through `qa rung` | appended | one item per rung opened for a repository (qa-flow.md 10.1) |
+| `qa/defaults.md` | the director, through `qa default` | appended | one item per change of a repository's default choosing (qa-flow.md 3) |
 
 Missions before 10-26 also hold `plan.md`, `decisions.md`, `m<N>.md`
 and `qa.md`: their plan, decisions, milestones and QA passes.
@@ -271,7 +272,7 @@ largest useful files and far below their journals.
 | `m<N>.md` | 8 KiB, and 4 KiB of table |
 | `closing.md` | 8 KiB |
 | `qa/passes/<pass>.md` | 8 KiB |
-| `qa/decisions.md`, `qa/triage.md`, `qa/rungs.md` | 128 KiB each |
+| `qa/decisions.md`, `qa/triage.md`, `qa/rungs.md`, `qa/defaults.md` | 128 KiB each |
 | a mission's files together | 128 KiB |
 | `STATUS.md`, a roadmap's README | 16 KiB each |
 | `director/direction.md`, a backlog | 32 KiB each |

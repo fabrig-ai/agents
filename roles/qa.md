@@ -128,7 +128,8 @@ which the tools read:
 ## Findings
 
 ### 1. <one line: what is wrong>
-Commit: <the short commit it most likely comes from>
+Commit: <the short commit it most likely comes from, or unknown>
+Concerns: <security, or lost data; only when it does>
 Reproduce, from a fresh deployment:
     <the commands>
 Expected: <...>
@@ -142,7 +143,9 @@ Saw: <...>
 ```
 
 - **Findings** are numbered from 1, each a level-3 heading as above;
-  with none, the section says `None.`
+  with none, the section says `None.` Each goes by its `Commit:` to
+  the mission that landed it (qa-flow.md 6), so name the one you
+  believe, or `unknown`; a `Concerns:` line sends it to the director.
 - **Automation** names setup repeated, waits written, checks scripted,
   each with its time: these lists decide which helpers get built.
 - **Blocked** includes a build or setup that failed, with the commands

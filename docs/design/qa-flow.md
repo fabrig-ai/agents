@@ -1,29 +1,31 @@
 # QA after landing
 
 Provisional, 2026-10-26, proposed with the user; revised 2026-10-27
-(section 11). This is how a change that
+(sections 3, 6, 10.5, 10.6, 11). This is how a change that
 landed gets tested by an agent that drives the product the way its users'
 agents do:
 - the landing's owner marks the commit;
-- the director chooses which marked commits get a pass;
+- marked commits are chosen by default, the director keeping the
+  exceptions;
 - a service starts each pass on a batch of chosen commits;
-- the pass reports its findings, and what in it could be automated.
+- the pass reports its findings, and what in it could be automated;
+- each finding goes to the mission that landed its commit.
 
 It starts as light as it can (the user, 10-26): no setup helpers
 beyond the product's own commands, and tools added only as the passes'
 reports show the need. It settles the roles' open question of who
 starts QA and who judges its findings ([roles/README.md](../../roles/README.md)
-2), except for the triage itself (section 6). It does not use qa's lab,
+2), the triage included since 10-27 (section 6). It does not use qa's lab,
 whose future is open (section 9).
 
 ## 1. In one page
 
 - **The owner marks** a landing commit worth testing with a `QA:`
   trailer: one line on what a user can now do (section 2).
-- **The director chooses** which marked commits get a pass and which
-  wait in a backlog. It works from the user's priorities and the
-  capacity and spend at hand, and records each choice with `qa decide`
-  (section 3).
+- **Marked commits run by default** (the user, 10-27): once the
+  director turns it on for a repository, every marked commit that lands
+  after runs, in landing order and batched; the director's `qa decide
+  ... backlog` is the exception, for when priorities change (section 3).
 - **A service starts the passes by itself.** When a slot and a login
   of each of the rung's pools are free, and chosen commits wait, it
   starts a pass over them, on the newest `main` that after landing has
@@ -41,11 +43,13 @@ whose future is open (section 9).
 - **Its report** gives each case's outcome, each finding with the
   commands that reproduce it, and what in the pass a helper could
   automate (section 5).
-- **Findings wait in a queue** until they are triaged: routed to an
-  owner, put in the backlog, or dropped. Who triages is open; for now,
-  the director (section 6).
+- **Findings go to whoever landed them** (the user, 10-27): the service
+  finds the landing that brought a finding's commit to `main`, and posts
+  the finding to that mission's designer; one with no commit, a
+  security hole, lost data or a stuck login goes to the director, who
+  also routes by hand what the rules don't (section 6).
 - **One tool, `qa`,** in `scripts/devel/`, which names no product. Its
-  record is three kinds of files in `records/qa/` (section 7).
+  record is files in `records/qa/` (section 7).
 - **Rungs, from fakes to real backends:** a product's binding names its
   rungs, its fakes first, and the held logins each takes. The director
   opens a repository's rung with `qa rung` once the rung below has run
@@ -85,9 +89,11 @@ whose future is open (section 9).
 ## 3. Choosing
 
 - **`qa candidates [REPO]`** lists the marked commits on origin's
-  `main` that have no decision yet, oldest first, each with its
-  repository, short commit, subject and trailer.
-- **The director decides** at its check (director.md 7), from:
+  `main` that have no decision yet and that no default covers (below),
+  oldest first, each with its repository, short commit, subject and
+  trailer.
+- **The director decides** the exceptions at its check (director.md 7),
+  from:
   - the user's QA priorities, in `director/direction.md`;
   - capacity: the passes running and the commits waiting for one
     (`qa passes`);
@@ -100,6 +106,21 @@ whose future is open (section 9).
   The latest decision on a commit wins, until a pass has taken it. A
   decision after that chooses it again, for a pass that was capped or
   failed: a commit's state is its latest event, decision or pass.
+- **By default** (the user, 10-27): `qa default REPO on|off [--why
+  TEXT]` appends to `qa/defaults.md` the repository, `on` or `off`, and
+  origin's `main` at that moment. An `on` and the next `off` (or now)
+  bound a stretch of `main`: every marked commit that the `on`'s `main`
+  doesn't hold and the `off`'s does (or now's) is covered, by ancestry,
+  never by a commit's time, which a rebase changes. A covered commit
+  counts as a `run` decision made at its `on`'s time: any later event,
+  a decision or a pass, comes after it, so that a `backlog` holds it
+  and a pass that took it is never followed by another. The service
+  takes covered commits in their order on `main`, batched (section 4).
+  An `off` leaves the commits it covered chosen; `qa candidates` lists
+  the undecided commits no stretch covers. A commit whose rung's pool
+  has no login yet waits as any chosen commit does.
+- **What carries no mark:** a commit that changes only tests, fixtures
+  or figures ([roles/owners.md](../../roles/owners.md) 4).
 
 ## 4. The pass
 
@@ -234,6 +255,35 @@ and the service posts the director.
 
 - **The queue** is every finding in a committed report that has no
   triage line yet. `qa findings` lists them, oldest first.
+- **Routed by landing:** after a pass's end (10.3's order, after its
+  notice), the service routes each of its findings that has no triage
+  line, by itself:
+  - its `Commit:` names a commit on `main`; `landings landed REPO
+    COMMIT` names the landing that brought it there: the oldest landing
+    in the feed, a plain `land` record or a set's, whose commit holds it
+    and whose base doesn't; a landing with no base is skipped;
+  - the mission: a set's name, or a plain landing's branch's first
+    segment, when it names a directory of the record's `missions/`
+    holding a README whose front matter reads;
+  - the recipient: the README's `parent` when it is a designer
+    (`design/<d>@…`) whose own mission, `missions/<d>/`, is `active`;
+    else its `owner` when its own mission is `active`; else the
+    director;
+  - it posts the finding there, as `qa triage` does, and only once the
+    post is accepted (sent or queued) appends the triage line, `- <time>
+    <pass> <n> <address> landed by <mission>`, which is what marks it
+    routed: so a crash between the two posts it again, and nothing
+    else does. The routes waiting are kept in the pass's `pass.json`
+    and tried again at each check; a report's later commits (its
+    evidence's link) route nothing new.
+
+  The director gets the finding instead when its `Commit:` is absent,
+  `unknown`, not on `main` or brought by no landing, when its mission
+  or recipient can't be read, and when the finding says `Concerns:
+  security` or `Concerns: lost data` (roles/qa.md 3). A designer passes
+  on a finding that is another's, as designers do. `qa triage` stays
+  the director's, to route by hand or route again: its line is the
+  latest.
 - **`qa triage PASS N owner ADDRESS|backlog|drop [--why TEXT]`**
   routes one finding by appending its line:
   - an owner's finding goes to that owner by post, naming the report;
@@ -241,13 +291,11 @@ and the service posts the director.
     at the report.
 - **The service posts the director** one line when it commits a report
   that has findings.
-- **Who triages is open** (the user, 10-26). Until that is settled, the
-  director does it at its check, by director.md 6: a finding on
-  v0.1.0's happy path goes to the owner of what it names, or to its
-  designer; any other goes to the backlog. Two options for later:
-  - a Codex session per pass, which proposes each finding's route and
-    any duplicates for the director to confirm;
-  - a standing owner for QA's findings.
+- **Who triages** was open (the user, 10-26), and is settled (the
+  user, 10-27): the landing routes, the director keeps the exceptions.
+  A Codex session per pass proposing routes, and a standing owner for
+  QA's findings, were weighed and not taken: more tokens, and the
+  director still in the loop, for what the feed already knows.
 
 ## 7. The tool and the record
 
@@ -261,7 +309,8 @@ takes a repository's name where it needs one.
 | `qa backlog [REPO]` | lists the commits kept for later |
 | `qa passes [--running]` | lists passes, with their commits, outcome, wall time and tokens |
 | `qa findings` | lists the queue |
-| `qa triage PASS N ROUTE [--why]` | routes one finding |
+| `qa triage PASS N ROUTE [--why]` | routes one finding by hand |
+| `qa default REPO [on\|off [--why]]` | runs marked commits by default from now, or stops; alone, shows it (section 3) |
 | `qa rung REPO [RUNG [--login POOL]... [--why]]` | opens a rung, or shows the open one (section 10.1) |
 | `qa watch` | runs the service (section 4) |
 | `qa keep --check DIRECTORY` | scans what a copy of DIRECTORY would hold, and writes nothing (section 11.5) |
@@ -275,12 +324,14 @@ The record is committed with `record commit`, and its rows are in
 |---|---|---|---|
 | `qa/decisions.md` | the director, through `qa decide` | appended | one item per choice: `- <time> <repo> <commit> run\|backlog <why>` |
 | `qa/passes/<pass>.md` | the pass, and `qa watch` for the front matter | at the pass's start and end | the report (section 5) |
-| `qa/triage.md` | the triager, through `qa triage` | appended | one item per finding: `- <time> <pass> <n> <route> <why>`, the route an owner's address, `backlog` or `drop` |
-| `qa/rungs.md` | the director, through `qa rung` | appended | one item per opening: `- <time> <repo> <rung> <logins> <why>`, the logins comma-separated, or `-` |
+| `qa/triage.md` | `qa watch`, by landing, and the director, through `qa triage` | appended | one item per finding: `- <time> <pass> <n> <route> <why>`, the route an owner's address, `backlog` or `drop` |
+| `qa/defaults.md` | the director, through `qa default` | appended | one item per change: `- <time> <repo> on\|off <main> <why>`, `<main>` origin's at that moment |
+| `qa/rungs.md` | the director or design/ladder, through `qa rung` | appended | one item per opening: `- <time> <repo> <rung> <logins> <why>`, the logins comma-separated, or `-` |
 
 Times are UTC to the second, commits full SHAs. The settings are the
 kit's: the machine, named as section 4 says, and `machine.env`'s
-`QA_SLOTS` (1; 4 on hetzner6), `QA_BATCH` (5), `QA_CAP_MINUTES` (120),
+`QA_SLOTS` (1; 4 on hetzner6), `QA_LOGIN_RESERVE` (2, section
+10.6), `QA_BATCH` (5), `QA_CAP_MINUTES` (120),
 `QA_INTERVAL_SECONDS` (300), `QA_STOP_SECONDS` (50, section 10.5) and
 `QA_EVIDENCE_KIB` (2048, section 11.1).
 
@@ -305,7 +356,7 @@ kit's: the machine, named as section 4 says, and `machine.env`'s
 
 ## 9. Open
 
-- **Triage:** who works the findings queue (section 6).
+- **Triage:** settled, by landing (section 6).
 - **Real backends' spend:** the subscriptions' use is measured by
   `logins list`'s last day; whether passes get a cap of their own on it
   is the user's.
@@ -332,7 +383,8 @@ the director says so to the user.
   then each real backend in turn, and for each the held logins a pass
   takes, by their pools' names in `logins` (temper's `docs/design/qa.md`
   3: fakes; a real model, with a ChatGPT login; GitHub).
-- **The director opens a rung** for a repository: `qa rung REPO RUNG
+- **The director, or design/ladder, opens a rung** (the user, 10-27:
+  design/ladder judges when a walk has passed) for a repository: `qa rung REPO RUNG
   [--login POOL]... [--why TEXT]`, each POOL a pool's name (10.2),
   once the rung below has run clean,
   as the binding says, which `qa passes` shows, each pass with its
@@ -487,6 +539,13 @@ the director says so to the user.
   deployment's directories and its units, and the service tries the give
   again at each check, so that the login is free as soon as it is back.
   It keeps that pass's scratch until then, past its 7 days.
+- **A stuck login's alert** goes as soon as the service finds a moved
+  login not back (step 2 of a pass's end, below), apart from the
+  pass's notice and ahead of it: to the director and to each address
+  in `~/.config/agents-qa/stuck` on the service's machine, one a line
+  (design/upgrades-draft's, 10-27), the director's to keep. Each
+  address's delivery is saved and tried again at each check until
+  accepted, once per stuck login.
 - **A pass's end, in order,** each step saved in its `pass.json` before
   the next, and each one not done tried again at the next check:
   1. the report and the evidence (section 5, 11.4);
@@ -500,7 +559,11 @@ the director says so to the user.
      pass is confirmed stopped, so that no deployment still uses it
      when it is free;
   5. the notice, which says what is still out: a login not back, a
-     unit up or of unknown state.
+     unit up or of unknown state;
+  6. its findings routed (section 6).
+
+  A moved login found not back at step 2 raises its alert at once
+  (above), before the steps that follow.
 
   A login's kind, moved or in place, is known from its resting path
   when the service takes it (a file is moved, a directory used in
@@ -527,7 +590,7 @@ held).
 |---|---|
 | `logins add NAME PATH` | moves PATH, a file or a program's configuration directory, in as NAME's login, at rest |
 | `logins take NAME --as HOLDER [--note TEXT] [--wait SECONDS]` | grants NAME in turn and prints its resting path; exit 1 while another holds it or waits first |
-| `logins take POOL --any --as HOLDER [--note TEXT] [--wait SECONDS]` | grants any free login of the pool, first come first served, and prints its name and resting path; exit 1 while none is free to HOLDER (10.2) |
+| `logins take POOL --any --as HOLDER [--note TEXT] [--wait SECONDS \| --now]` | grants any free login of the pool, first come first served, and prints its name and resting path; exit 1 while none is free to HOLDER (10.2); `--now` never joins the queue (10.6) |
 | `logins give NAME --as HOLDER` | frees NAME once its login is back; exit 1, still held, if it isn't |
 | `logins list [NAME]` | each login's holder, waiters and last 24 hours |
 
@@ -609,6 +672,22 @@ held).
 - **As many as slots and logins allow:** `QA_SLOTS` caps the passes at
   once on the machine, and a rung with a pool runs no more passes than
   the pool has free logins. A pass on the fakes needs a slot alone.
+- **Two logins kept for rung walks** (the user, 10-27: rung walks come
+  first, as they prove the product end to end): of each pool, QA's
+  passes hold at most its size less `QA_LOGIN_RESERVE` (2), counting
+  every login held by `qa-watch/…` or by `qa-watch` from before, a
+  stuck one included: a login a pass stranded counts against QA until
+  it is back, and its report and notice say so. With four, QA holds two
+  at most, and a walk's `logins take POOL --any` always finds one unless
+  walks already hold two: the second is the first's backup. The
+  reserve is the service's own cap, checked under its own lock, one
+  admission at a time; `logins` keeps no class of holder. A pool no
+  larger than the reserve runs no QA pass, and `qa passes` says why.
+- **QA never waits in the queue:** its takes are `logins take POOL
+  --any --now`, granted only a login that is free and that no waiter
+  claims, refused at once otherwise without a place in the queue
+  (10.4). So QA never holds a reservation a walk would need, and a walk
+  that waits goes before it.
 - **Built where they run:** each pass builds in its slot's checkout,
   through `heavy` at background weight, which queues builds so that
   they never starve the machine's other work. Measured on hetzner6
@@ -638,7 +717,11 @@ held).
   - a finished pass whose units are up or unknown keeps its slot, and
     its logins as 10.3 says;
   - a pass waits while no login of its pool is free, and starts once
-    one is given back.
+    one is given back;
+  - the reserve: with four, two passes hold two and a third waits while
+    two are free; a stuck login leaves QA one pass; a walk's take finds
+    a login while walks hold fewer than two, whatever QA has asked; a
+    `--now` take refused leaves no row in the queue.
 
 ## 11. The evidence, kept
 
