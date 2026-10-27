@@ -713,7 +713,8 @@ elif name == 'logins':
             assert pool and now and args[position + 2] == '--note' and args[position + 3] in ('temper', 'jig'), args
         if holder.startswith('walk/'):
             assert pool and now and '--wait' not in args, args
-            assert Path(args[args.index('--note') + 1]).is_dir(), args
+            if (root / 'tmp/qa/walks' / (holder.rsplit('/', 1)[-1] + '.json')).exists():
+                assert Path(args[args.index('--note') + 1]).is_dir(), args
         members = config.get('pools', {}).get(login, [login]) if pool else [login]
         queue = config.setdefault('login_queue', [])
         entry = dict(holder=holder, request=login, pool=pool)
@@ -3912,6 +3913,134 @@ def a_walk_reads_its_inventory_strictly(lab):
     assert lab.calls('logins') == [['list']] and not lab.walk_states() and not lab.calls('codex-run')
 
 
+def a_take_by_hand_is_refused_past_its_kinds_cap(lab):
+    lab.env['QA_WALK_KINDS'] = 'forgejo=1:chatgpt github=1:chatgpt'
+    lab.configure(pools={CHATGPT: [CHATGPT, 'chatgpt-2', 'chatgpt-3', 'chatgpt-4']})
+    head = lab.head()
+    result = lab.run('take', 'github', '--as', 'walk/github/manual')
+    assert result.stdout == f'{CHATGPT} {lab.root}/login-store/{CHATGPT}/login\n'
+    assert lab.calls('logins') == [['list'], ['take', CHATGPT, '--any', '--now', '--as', 'walk/github/manual']]
+    assert not lab.walk_states() and lab.head() == head
+    result = lab.run('take', 'github', '--as', 'walk/github/manual-2', status=1)
+    assert result.stderr == 'qa: kind github holds 1 of its 1 logins of pool chatgpt\n'
+    calls = lab.calls('logins')
+    lab.run('take', 'github', '--as', 'walk/forgejo/x', status=2)
+    assert lab.calls('logins') == calls
+    lab.walk('b0')
+    walk = lab.walk_state()[1]
+    assert walk['kind'] == 'forgejo' and walk['pools'] == {CHATGPT: 'chatgpt-2'}
+    lab.watch()
+    config = json.loads((lab.root / 'tools.json').read_text())
+    assert config['login_holders'][CHATGPT] == 'walk/github/manual'
+    lab.run('give', CHATGPT, '--as', 'walk/github/manual')
+    assert lab.run('give', CHATGPT, '--as', 'walk/github/manual').stdout == 'already free: chatgpt\n'
+    result = lab.run('take', 'github', '--as', 'walk/github/manual-2')
+    assert result.stdout == f'{CHATGPT} {lab.root}/login-store/{CHATGPT}/login\n'
+    assert len(lab.walk_states()) == 1 and not lab.watch_states()
+    assert not json.loads((lab.root / 'tools.json').read_text())['login_queue']
+
+
+def manual_login_commands_refuse_invalid_inputs_before_tools(lab):
+    for args in (('take', 'missing', '--as', 'walk/missing/x'),
+                 ('take', 'forgejo', '--as', 'walk/claude/x'),
+                 ('take', 'forgejo', '--login', CLAUDE, '--as', 'walk/forgejo/x'),
+                 ('take', 'forgejo', '--login', 'chatgpt-2', '--as', 'walk/forgejo/x')):
+        lab.run(*args, status=2)
+    for holder in ('qa-watch/x', 'walk/forgejo', 'walk/forgejo/-x', 'walk/forgejo/x_y',
+                   'walk/forgejo/x/y', 'walk/Forgejo/x'):
+        lab.run('take', 'forgejo', '--as', holder, status=2)
+        lab.run('give', CHATGPT, '--as', holder, status=2)
+    lab.run('give', 'Bad', '--as', 'walk/forgejo/x', status=2)
+    lab.run('take', 'forgejo', status=2)
+    lab.run('give', CHATGPT, status=2)
+    assert not lab.calls('logins') and not (lab.tmp / 'qa').exists()
+
+
+def manual_and_generated_walk_holders_never_share_custody(lab):
+    holder = 'walk/forgejo/rung-b0-1'
+    lab.run('take', 'forgejo', '--as', holder)
+    lab.walk('b0')
+    directory, walk = lab.walk_state()
+    assert walk['walk'] == 'rung-b0-2' and walk['holder'] != holder
+    assert walk['pools'] == {CHATGPT: 'chatgpt-2'}
+    lab.watch()
+    assert not any(args[0] == 'give' for args in lab.calls('logins'))
+    lab.run('give', CHATGPT, '--as', holder)
+    before = lab.calls('logins')
+    result = lab.run('take', 'forgejo', '--as', walk['holder'], status=1)
+    assert 'holder name already belongs to a saved walk' in result.stderr
+    assert lab.calls('logins') == before
+    lab.end_run(walk)
+    lab.watch()
+    assert lab.walk_state()[1]['stage'] == 'ended'
+    before = lab.calls('logins')
+    lab.run('take', 'forgejo', '--as', walk['holder'], status=1)
+    assert lab.calls('logins') == before
+    # The earlier generated-looking manual name stays usable once given back.
+    lab.run('take', 'forgejo', '--as', holder)
+    lab.watch()
+    config = json.loads((lab.root / 'tools.json').read_text())
+    assert config['login_holders'][CHATGPT] == holder
+    assert lab.calls('logins').count(['give', CHATGPT, '--as', holder]) == 1
+
+
+def a_manual_take_selects_its_pool_and_give_passes_through(lab):
+    lab.env['QA_WALK_KINDS'] = 'both=2:claude,chatgpt'
+    note = 'recovery $(literal); `literal` $HOME'
+    result = lab.run('take', 'both', '--as', 'walk/both/first', '--note', note)
+    assert result.stdout == f'{CLAUDE} {lab.root}/login-store/{CLAUDE}/login\n'
+    assert lab.calls('logins')[-1] == ['take', CLAUDE, '--any', '--now', '--as', 'walk/both/first', '--note', note]
+    lab.run('take', 'both', '--login', CHATGPT, '--as', 'walk/both/second', '--note', '')
+    assert lab.calls('logins')[-1] == ['take', CHATGPT, '--any', '--now', '--as', 'walk/both/second', '--note', '']
+    result = lab.run('give', CHATGPT, '--as', 'walk/both/first', status=2)
+    assert result.stdout == '' and result.stderr == 'fixture held by another\n'
+    lab.configure(logins_out=[CHATGPT])
+    result = lab.run('give', CHATGPT, '--as', 'walk/both/second', status=1)
+    assert result.stdout == '' and result.stderr == 'fixture login out\n'
+    # Recovery must work after a kind is retired, even with broken current settings.
+    lab.env['QA_WALK_KINDS'] = 'broken'
+    lab.configure(logins_out=[], logins_refused=[CHATGPT])
+    result = lab.run('give', CHATGPT, '--as', 'walk/both/second', status=4)
+    assert result.stderr == 'fixture login refused\n'
+    lab.configure(logins_refused=[])
+    lab.run('give', CHATGPT, '--as', 'walk/both/second')
+    assert lab.run('give', CHATGPT, '--as', 'walk/both/second').stdout == 'already free: chatgpt\n'
+    assert not lab.walk_states() and not lab.watch_states() and not lab.calls('codex-run')
+
+
+def a_manual_take_refuses_unknown_inventory_and_a_broken_cap(lab):
+    for config in ({'list_lines': ['unexpected listing']}, {'list_lines': ['chatgpt: at rest']},
+                   {'login_list_failure': True}):
+        lab.configure(list_lines=[], login_list_failure=False)
+        lab.configure(**config)
+        result = lab.run('take', 'forgejo', '--as', 'walk/forgejo/manual', status=1)
+        assert 'cannot read login inventory for walk admission' in result.stderr
+    assert all(args == ['list'] for args in lab.calls('logins'))
+    lab.configure(list_lines=[], login_list_failure=False, logins_busy=[CHATGPT])
+    result = lab.run('take', 'forgejo', '--as', 'walk/forgejo/manual', status=1)
+    assert result.stderr == 'qa: the caps are broken: fixture login busy\n'
+    assert lab.calls('logins')[-1] == ['take', CHATGPT, '--any', '--now', '--as', 'walk/forgejo/manual']
+    assert not json.loads((lab.root / 'tools.json').read_text())['login_queue']
+    assert not lab.walk_states() and not lab.watch_states()
+
+
+def hung_manual_inventory_and_takes_are_bounded(lab):
+    for operation in ('list', 'take'):
+        lab.configure(hang={'logins:' + operation: 'before'})
+        driver = (f'import runpy, sys\ntool = runpy.run_path({str(SCRIPT)!r})\n'
+                  + f'HUNG = ("logins:{operation}",)\n' + TIMEOUT_DRIVER
+                  + '\nsys.exit(tool["main"]())\n')
+        result = subprocess.run([sys.executable, '-I', '-S', '-c', driver, 'take', 'forgejo',
+                                 '--as', 'walk/forgejo/manual'], env=lab.env, cwd=lab.root,
+                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, timeout=HUNG_TOOL_S)
+        assert result.returncode == 1, (result.stdout, result.stderr)
+        expected = 'cannot read login inventory' if operation == 'list' else 'the caps are broken: command timed out'
+        assert expected in result.stderr
+        dead(int((lab.root / 'hung-tool').read_text()))
+    assert not lab.walk_states() and not lab.watch_states()
+
+
 def a_surviving_launcher_keeps_custody_until_its_unit_exists(lab):
     resting(lab, CHATGPT, in_place=True)
     lab.env['QA_WALK_KINDS'] = 'forgejo=1:chatgpt'
@@ -4186,7 +4315,11 @@ def hex_walk_builds_refuse_ambiguous_and_non_commit_objects(lab):
     assert state['main'] == commit
 
 
-CASES = (a_surviving_launcher_keeps_custody_until_its_unit_exists,
+CASES = (a_take_by_hand_is_refused_past_its_kinds_cap, manual_login_commands_refuse_invalid_inputs_before_tools,
+         manual_and_generated_walk_holders_never_share_custody,
+         a_manual_take_selects_its_pool_and_give_passes_through,
+         a_manual_take_refuses_unknown_inventory_and_a_broken_cap, hung_manual_inventory_and_takes_are_bounded,
+         a_surviving_launcher_keeps_custody_until_its_unit_exists,
          a_missing_walk_unit_is_ended_after_the_launch_grace,
          a_missing_pass_unit_keeps_its_grants_and_slot_for_ten_minutes,
          a_resumed_launch_without_a_unit_keeps_its_new_grant,

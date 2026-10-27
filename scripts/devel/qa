@@ -8,6 +8,8 @@ qa rung REPO [RUNG [--login POOL]... [--why TEXT]]
 qa triage PASS N owner ADDRESS|backlog|drop [--why TEXT]
 qa walk REPO RUNG [--kind KIND] [--build REF] [--login POOL]... [--cap MINUTES]
 qa walk REPO RUNG --resume NAME --build REF [--cap MINUTES]
+qa take KIND [--login POOL] --as walk/<KIND>/<WHAT> [--note TEXT]
+qa give NAME --as HOLDER
 qa watch --director ADDRESS [--once]
 qa deploy DIRECTORY NAME -- COMMAND...
 """
@@ -1403,6 +1405,7 @@ class Watch:
         for pool in pools:
             held = walk_count(holders, pool, kind)
             need(held < slots, f'kind {kind} holds {held} of its {slots} logins of pool {pool}', 1)
+        return holders
 
     def cancel_walk(self, directory, state, drop=True):
         state['stage'] = 'cancelled'
@@ -1719,6 +1722,39 @@ def pause_line(directory):
         return None
 
 
+def take(args, workspace):
+    options = settings(workspace)
+    kinds = options['QA_WALK_KINDS']
+    need(args.kind in kinds, 'unknown walk kind: ' + args.kind)
+    need(re.fullmatch('walk/' + args.kind + r'/[a-z0-9][a-z0-9-]*', args.holder),
+         'holder must be walk/' + args.kind + '/WHAT')
+    pool = args.login if args.login is not None else kinds[args.kind]['pools'][0]
+    need(pool in kinds[args.kind]['pools'], 'login is not a pool of kind ' + args.kind)
+    service = Watch(workspace, '')
+    service.options = options
+    with service.walks_locked():
+        name = args.holder.rsplit('/', 1)[-1]
+        saved = service.directory / 'walks' / (name + '.json')
+        need(not saved.exists() and not saved.is_symlink(), 'holder name already belongs to a saved walk: ' + name, 1)
+        service.walk_room([pool], args.kind)
+        note = ['--note', args.note] if args.note is not None else []
+        result = service.call('logins', 'take', pool, '--any', '--now', '--as', args.holder, *note)
+        need(result.returncode == 0, 'the caps are broken: ' + (result.stderr.strip() or result.stdout.strip()
+             or f'cannot take {pool}'), 1)
+        sys.stdout.write(result.stdout)
+    return 0
+
+
+def give(args, workspace):
+    need(re.fullmatch(LOGIN, args.name), 'invalid login name')
+    need(re.fullmatch(r'walk/[a-z][a-z0-9]*/[a-z0-9][a-z0-9-]*', args.holder),
+         'holder must be walk/KIND/WHAT')
+    result = Watch(workspace, '').call('logins', 'give', args.name, '--as', args.holder)
+    sys.stdout.write(result.stdout)
+    sys.stderr.write(result.stderr)
+    return result.returncode
+
+
 def walk(args, workspace):
     starter = os.environ.get('POST_NAME', '')
     need(re.fullmatch(r'[a-z][a-z0-9-]*(/[a-z0-9][a-z0-9-]*)*', starter),
@@ -1770,7 +1806,7 @@ def walk(args, workspace):
             need(kind in kinds, 'unknown walk kind: ' + kind)
             requests = sorted(args.login or kinds[kind]['pools'])
             need(set(requests) <= set(kinds[kind]['pools']), 'login is not a pool of kind ' + kind)
-            service.walk_room(requests, kind)
+            holders = service.walk_room(requests, kind)
             prefix = 'rung-' + args.rung + '-' + ('' if kind == next(iter(kinds)) else kind + '-')
             known = {state['walk'] for _, state in walks}
             names = [state['walk'].rsplit('-', 1)[-1] for _, state in walks
@@ -1780,7 +1816,9 @@ def walk(args, workspace):
                       for candidate in prefixes if path.name not in known and path.name.startswith(candidate)]
             numbers = [int(number) for number in names if re.fullmatch(r'[1-9][0-9]*', number)]
             number = max(numbers, default=0) + 1
-            while (focused / (prefix + str(number))).exists() or (service.directory / 'walks' / (prefix + str(number) + '.json')).exists():
+            while ((focused / (prefix + str(number))).exists()
+                   or (service.directory / 'walks' / (prefix + str(number) + '.json')).exists()
+                   or 'walk/' + kind + '/' + prefix + str(number) in holders.values()):
                 number += 1
             name = prefix + str(number)
             directory = focused / name
@@ -2005,12 +2043,24 @@ def main():
     walking.add_argument('--kind')
     walking.add_argument('--login', action='append', default=[])
     walking.add_argument('--cap', type=int)
+    taking = sub.add_parser('take')
+    taking.add_argument('kind')
+    taking.add_argument('--login')
+    taking.add_argument('--as', dest='holder', required=True)
+    taking.add_argument('--note')
+    giving = sub.add_parser('give')
+    giving.add_argument('name')
+    giving.add_argument('--as', dest='holder', required=True)
     service = sub.add_parser('watch')
     service.add_argument('--director', required=True)
     service.add_argument('--once', action='store_true')
     args = parser.parse_args()
     try:
         workspace = Workspace()
+        if args.command == 'take':
+            return take(args, workspace)
+        if args.command == 'give':
+            return give(args, workspace)
         if args.command == 'deploy':
             need('--' in sys.argv[2:] and sys.argv[2:].index('--') == 2, 'deploy needs DIRECTORY NAME -- COMMAND...')
             return deploy(args, workspace)
