@@ -608,7 +608,9 @@ def reconcile(ledger):
             ledger.event(task, 'release_begin', outcome='cancelled')
             ledger.event(task, 'unclaimed', reason='no running wrapper unit before its claim')
             ledger.save()
-        if landing(task) and task['state'] in ('queued', 'waiting'):
+        orphan = task['state'] not in (*UNCLAIMED, 'released') and (
+            task['boot'] != boot() or not alive(task.get('wrapper')))
+        if landing(task) and task['state'] in ('queued', 'waiting') and not orphan:
             if free is None:
                 free = free_gb()
             track_disk_wait(ledger, task, free)
@@ -622,7 +624,6 @@ def reconcile(ledger):
             publish_receipt(ledger, task)
         if task['state'] in (*UNCLAIMED, 'released'):
             continue
-        orphan = task['boot'] != boot() or not alive(task.get('wrapper'))
         if task['state'] != 'closing' and (orphan or task['state'] == 'finishing'):
             task['state'] = 'closing'
             task['outcome'] = 'recovered' if orphan else 'completed'

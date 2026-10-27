@@ -1042,6 +1042,38 @@ def land_floor_wait(lab):
     assert [event['waiting'] for event in spells] == [True, False, True, False]
 
 
+def land_floor_wait_orphan(lab, changed_boot=False):
+    label = 'land repo prebuild'
+    lab.env.update(PLAN_MIN_DISK_GB='40', PLAN_LAND_ROOM_GB='30')
+    lab.free(5)
+    client = lab.start(label)
+    lab.waiting(label)
+    wait_for(lambda: lab.task(label).get('disk_wait'), 'disk wait before wrapper loss')
+    lab.call(['systemctl', '--user', 'stop', lab.prefix + '-reconcile.timer'])
+    if changed_boot:
+        # Keep the wrapper from reconciling between the boot change and aging.
+        wrapper = lab.task(label)['wrapper']['pid']
+        os.kill(wrapper, signal.SIGSTOP)
+        lab.boot.write_text('fixture-next-boot\n')
+    else:
+        lab.kill_wrapper(label)
+    lab.age(label, 1201)
+    lab.call(['systemctl', '--user', 'start', lab.prefix + '-reconcile.timer'])
+    task = lab.released(label)
+    if changed_boot:
+        os.kill(wrapper, signal.SIGCONT)
+    lab.done(client, 137)
+    assert task['outcome'] == 'recovered' and task['code'] == 137
+    assert not task.get('payload_started') and not lab.event(label, 'payload_begin')
+    events = [event for event in lab.events() if event.get('token') == task['token']]
+    assert sum(event['event'] == 'recovery' for event in events) == 1
+    assert not any(event['event'] == 'refusal' and event.get('reason') == 'disk-floor' for event in events)
+    assert lab.event(label, 'recovery')['source'] == '--reconcile'
+    receipt = lab.base / 'receipts' / (task['token'] + '.json')
+    wait_for(receipt.exists, 'recovered waiting task receipt')
+    assert json.loads(receipt.read_text())['outcome'] == 'recovered'
+
+
 def land_floor_client_killed(lab):
     lab.env.update(PLAN_MIN_DISK_GB='40', PLAN_LAND_ROOM_GB='30')
     lab.free(5)
@@ -1997,6 +2029,8 @@ def main():
              ('room-landing-first-slot', lambda lab: room_landing_first(lab, 1)),
              ('room-after', room_after), ('room-settings', room_settings),
              ('land-floor-wait', land_floor_wait),
+             ('land-floor-wait-orphan', land_floor_wait_orphan),
+             ('land-floor-wait-boot', lambda lab: land_floor_wait_orphan(lab, True)),
              ('land-floor-refused', land_disk_floor),
              ('land-floor-refused-machine', lambda lab: land_disk_floor(lab, machine=True)),
              ('land-floor-refused-gate', lambda lab: land_disk_floor(lab, 'gate')),
