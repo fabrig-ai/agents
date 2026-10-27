@@ -101,8 +101,8 @@ class Lab:
         path.write_text(text)
         return path
 
-    def scratch(self, files):
-        root = self.root / 'scratch'
+    def scratch(self, files, directory=None):
+        root = directory if directory is not None else self.root / 'scratch'
         root.mkdir(exist_ok=True)
         for name, data in files.items():
             path = root / name
@@ -1074,10 +1074,10 @@ def accepted_findings_survive_refused_triage_commits(lab):
     lab.end_run(report=finding_report('Commit: unknown'))
     refusal = '''
 original = tool['command']
-def command(argv, cwd=None, timeout=None):
+def command(argv, cwd=None, timeout=None, **kwargs):
     if str(argv[0]).endswith('/record') and any(str(arg).startswith('qa watch: route ') for arg in argv):
         return tool['subprocess'].CompletedProcess(argv, 2, '', 'fixture triage commit refused')
-    return original(argv, cwd=cwd, timeout=timeout)
+    return original(argv, cwd=cwd, timeout=timeout, **kwargs)
 tool['main'].__globals__['command'] = command
 '''
     for _ in range(2):
@@ -1525,8 +1525,9 @@ def watch_refusals_are_recorded(lab):
     lab.end_run(state, report='## Findings\n### 1. Secret\n' + 'sk-' + 'a' * 30 + '\n')
     lab.watch()
     text = lab.content(f'qa/passes/{state["pass"]}.md')
-    assert 'outcome: failed' in text and 'The report was refused by record:' in text and 'sk-' not in text
-    assert len(lab.sent()) == 2 and 'failed, 0 findings' in lab.sent()[-1]['args'][2]
+    assert 'outcome: done' in text and '(withheld: key)' in text and 'sk-' not in text
+    assert len(lab.sent()) == 3 and 'done, 1 findings' in lab.sent()[-2]['args'][2]
+    assert 'evidence is refused' in lab.sent()[-2]['body']
 
 
 def watch_reads_settings_and_stops_on_an_unreadable_feed(lab):
@@ -2428,7 +2429,7 @@ def keep_check_accepts_punctuated_placeholders(lab):
     keep_shapes(lab, value, shapes)
 
 
-def keep_check_refuses_each_rule(lab):
+def refused_scratch(lab, directory=None):
     value = secrets.token_hex(8)
     token = 'gh' + 'p_' + secrets.token_hex(18)
     private = '-----BEGIN ' + 'OPENSSH PRIVATE KEY-----'
@@ -2464,7 +2465,7 @@ def keep_check_refuses_each_rule(lab):
               ('token=< ' * 10000, 'assigned'),
               ('password: ' + ' ' * 30000 + value, 'assigned')]
     files['evidence/shapes.txt'] = '\n'.join(line for line, _ in shapes)
-    scratch = lab.scratch(files)
+    scratch = lab.scratch(files, directory)
     (scratch / 'evidence/a-link').symlink_to(lab.root / 'outside')
     (lab.root / 'outside').write_text(value)
     (scratch / 'evidence/hard-a.txt').write_text('plain\n')
@@ -2497,6 +2498,13 @@ def keep_check_refuses_each_rule(lab):
                               ('evidence/forms.txt', (1, 2, 3, 4, 5, 6), 'assigned'),
                               ('scripts/fetch.sh', (1, 2), 'user')]:
         expected.update(f'refused: {name}, line {line}: {rule}' for line in lines)
+    return scratch, expected, (value, token, private, jwt, unsafe, binary_name)
+
+
+def keep_check_refuses_each_rule(lab):
+    scratch, expected, values = refused_scratch(lab)
+    children = sorted(os.listdir(scratch / 'evidence'), key=os.fsencode)
+    value, token, private, jwt, unsafe, binary_name = values
     result = lab.run('keep', '--check', str(scratch), status=2)
     assert set(line for line in result.stdout.splitlines() if line.startswith('refused:')) == expected, result.stdout
     assert result.stderr == f'qa: copy refused ({len(expected)})\n'
@@ -3021,6 +3029,352 @@ def a_walks_copy_survives_run_discovery_changes(lab):
     other.unlink()
     assert lab.walk('stable', scratch).stdout == first
     assert lab.evidence('rev-list', '--count', 'evidence') == '1'
+
+
+def a_clean_pass_keeps_its_evidence(lab):
+    lab.waiting(1)
+    lab.rung('temper', REAL, CHATGPT)
+    lab.watch()
+    directory, state = lab.watch_state()
+    lab.scratch({'plan.md': 'Plan.\n', 'notes.md': 'Notes.\n',
+                 'scripts/run.sh': '#!/bin/sh\necho fixture\n', 'evidence/case-1.txt': 'capture\n',
+                 'deployment/bin': b'\0', 'forge.header': 'outside', 'cookies': 'outside',
+                 'give-back': 'outside', 'post-body': 'outside'}, directory)
+    (directory / 'scripts/run.sh').chmod(0o700)
+    lab.end_run(state)
+    lab.watch()
+    saved = json.loads((directory / 'pass.json').read_text())
+    copy = saved['copy']
+    commit = lab.evidence('rev-parse', 'evidence')
+    assert copy['state'] == 'kept' and copy['commit'] == copy['recorded'] == commit
+    prefix = 'passes/' + state['pass'] + '/'
+    assert lab.evidence('ls-tree', '-r', '--name-only', 'evidence', prefix).splitlines() == [prefix + path for path in
+        ('README.md', 'brief.md', 'evidence/case-1.txt', 'notes.md', 'plan.md', 'report.md', 'scripts/run.sh')]
+    index = lab.evidence('show', 'evidence:' + prefix + 'README.md')
+    for field in ('kind: pass', 'run: ' + state['run'], 'record: qa/passes/' + state['pass'] + '.md',
+                  'source: ' + str(directory), 'files: 6'):
+        assert field in index
+    assert lab.evidence('show', '-s', '--format=%an <%ae>', commit) == f'qa-watch <qa-watch@{socket.gethostname()}>'
+    path = 'qa/passes/' + state['pass'] + '.md'
+    assert 'evidence: ' + commit in lab.content(path)
+    assert lab.git(lab.origin, 'rev-list', '--count', 'main', '--', path) == '2'
+    assert saved['given'] == [CHATGPT] and saved['released']
+
+
+def assert_pass_private(lab, values, *results):
+    outputs = [r.stdout + r.stderr for r in results]
+    outputs += [p.read_text(errors='replace') for p in (lab.tmp / 'qa').glob('*/pass.json')]
+    outputs += [p.read_text() for p in (lab.post_log, lab.root / 'tools.jsonl') if p.exists()]
+    assert all(value not in output for value in values for output in outputs)
+    for value in values:
+        result = subprocess.run(['git', '-C', str(lab.origin), 'grep', '-F', '-e', value, 'main'],
+                                env=lab.env, capture_output=True, timeout=HUNG_TOOL_S)
+        assert result.returncode == 1, 'planted text reached the records origin'
+
+
+def a_refused_pass_is_mended(lab):
+    lab.waiting(1)
+    lab.watch()
+    directory, state = lab.watch_state()
+    _, expected, values = refused_scratch(lab, directory)
+    lab.end_run(state)
+    first = lab.watch()
+    assert lab.evidence('for-each-ref', '--format=%(refname)') == ''
+    path = 'qa/passes/' + state['pass'] + '.md'
+    assert 'evidence: refused' in lab.content(path)
+    post, = lab.sent()
+    lines = {line.strip() for line in post['body'].splitlines() if line.strip().startswith('refused:')}
+    assert lines == expected, (lines, expected)
+    again = lab.watch()
+    assert len(lab.sent()) == 1
+    (directory / 'evidence/http.txt').rename(directory / 'left-http.txt')
+    changed = lab.watch()
+    assert len(lab.sent()) == 2
+    assert lab.sent()[-1]['args'][2] == f'qa: pass {state["pass"]} evidence refused'
+    for tree in ('evidence', 'scripts'):
+        (directory / tree).rename(directory / ('left-' + tree))
+    mended = lab.watch()
+    commit = lab.evidence('rev-parse', 'evidence')
+    assert 'evidence: ' + commit in lab.content(path)
+    assert len(lab.sent()) == 2
+    assert lab.git(lab.origin, 'rev-list', '--count', 'main', '--', path) == '3'
+    assert_pass_private(lab, values, first, again, changed, mended)
+
+
+def the_record_withholds_a_refused_line(lab):
+    lab.waiting(1)
+    lab.watch()
+    directory, state = lab.watch_state()
+    value = secrets.token_hex(12)
+    report = ('## Cases\nPlain.\nAuthorization: Bearer ' + value + '\n'
+              'Still plain.\nhttps://forge.test/cb?code=' + value + '\n## Findings\nNone.\n')
+    lab.end_run(state, report=report)
+    result = lab.watch()
+    record = lab.content('qa/passes/' + state['pass'] + '.md')
+    assert record.endswith('# QA pass ' + state['pass'] + '\n\n' +
+                           report.replace('Authorization: Bearer ' + value, '(withheld: header)').replace(
+                               'https://forge.test/cb?code=' + value, '(withheld: link)').strip())
+    post, = lab.sent()
+    assert '2 lines of its report are withheld from the record: line 3 (header), line 5 (link).' in post['body']
+    assert 'evidence: refused' in record
+    assert_pass_private(lab, [value], result)
+
+
+def a_lost_answer_takes_the_kept_commit(lab):
+    lab.waiting(1)
+    lab.watch()
+    directory, state = lab.watch_state()
+    lab.end_run(state)
+    lab.env['QA_EVIDENCE_SECONDS'] = '1'
+    driven_watch(lab, '''original = tool['command']
+def command(argv, **kwargs):
+    result = original(argv, **kwargs)
+    if 'push' in argv:
+        assert result.returncode == 0, result.stderr
+        tool['time'].sleep(1.1)
+        return subprocess.CompletedProcess(argv, 1, '', 'lost answer')
+    return result
+tool['main'].__globals__['command'] = command
+'''.replace('original =', 'import subprocess\noriginal =', 1))
+    path = 'qa/passes/' + state['pass'] + '.md'
+    commit = lab.evidence('rev-parse', 'evidence')
+    assert 'evidence: unknown' in lab.content(path)
+    assert json.loads((directory / 'pass.json').read_text())['copy']['state'] == 'waiting'
+    lab.watch()
+    assert 'evidence: ' + commit in lab.content(path)
+    assert lab.evidence('rev-list', '--count', 'evidence') == '1'
+    assert lab.git(lab.origin, 'rev-list', '--count', 'main', '--', path) == '3'
+
+
+def a_failed_push_delays_nothing(lab):
+    reserved_pool(lab, size=4)
+    lab.env.update(QA_SLOTS='2', QA_EVIDENCE_SECONDS='3')
+    lab.waiting(2)
+    lab.watch()
+    states = lab.watch_states()
+    assert len(states) == 2
+    for directory, state in states:
+        lab.end_run(state, code=1)
+    marker, attempts = lab.root / 'hook.pid', lab.root / 'hook.attempts'
+    hook = lab.origins / 'qa.git/hooks/pre-receive'
+    executable(hook, f'import os, time\nfrom pathlib import Path\n'
+                    f'Path({str(marker)!r}).write_text(str(os.getpid()))\n'
+                    f'with open({str(attempts)!r}, "a") as out: out.write("try\\n")\n'
+                    'time.sleep(60)\nraise SystemExit(1)\n')
+    started = time.monotonic()
+    lab.watch()
+    assert time.monotonic() - started < 15
+    assert attempts.read_text().splitlines() == ['try']
+    dead(int(marker.read_text()))
+    for directory, state in lab.watch_states():
+        assert set(state['given']) == set(state['logins']) and state['released']
+        assert 'evidence: unknown' in lab.content('qa/passes/' + state['pass'] + '.md')
+    assert len(lab.sent()) == 2
+    later = (utc_fixture(states[0][1]['started']) + timedelta(days=8)).strftime('%Y-%m-%dT%H:%M:%SZ')
+    lab.watch(now=later)
+    assert len(lab.watch_states()) == 2
+    assert len(attempts.read_text().splitlines()) == 2
+    dead(int(marker.read_text()))
+    hook.unlink()
+    lab.watch(now=later)
+    assert len(lab.watch_states()) == 2
+    for directory, state in lab.watch_states():
+        assert state['copy']['state'] == 'kept' and state['copy']['recorded'] == state['copy']['commit']
+        path = 'qa/passes/' + state['pass'] + '.md'
+        assert lab.git(lab.origin, 'rev-list', '--count', 'main', '--', path) == '3'
+    lab.watch(now=later)
+    assert not lab.watch_states()
+
+
+def utc_fixture(stamp):
+    return datetime.fromisoformat(stamp.replace('Z', '+00:00'))
+
+
+def an_old_pass_gets_its_copy(lab):
+    lab.waiting(1)
+    lab.watch()
+    directory, state = lab.watch_state()
+    ended = lab.end_run(state)
+    state.update(finished=True, ended=ended, released=True)
+    (directory / 'pass.json').write_text(json.dumps(state))
+    lab.scratch({'plan.md': 'Legacy plan.\n'}, directory)
+    path = 'qa/passes/' + state['pass'] + '.md'
+    legacy = lab.content(path).replace('outcome: running', 'outcome: done').replace('ended: unknown', 'ended: ' + ended)
+    legacy = re.sub(r'^evidence:.*\n', '', legacy, flags=re.M) + '\n## Findings\nNone.\n'
+    lab.publish(path, legacy)
+    lab.run('passes')
+    lab.run('findings')
+    lab.watch()
+    commit = lab.evidence('rev-parse', 'evidence')
+    assert 'evidence: ' + commit in lab.content(path)
+    lab.publish(path, lab.content(path).replace('evidence: ' + commit, 'evidence: nonsense') + '\n')
+    assert 'invalid evidence' in lab.run('passes', status=4).stderr
+
+
+def the_record_withholds_multiline_secrets(lab):
+    lab.waiting(1)
+    lab.watch()
+    directory, state = lab.watch_state()
+    value, payload = secrets.token_hex(12), secrets.token_hex(24)
+    begin = '-----BEGIN ' + 'OPENSSH PRIVATE KEY-----'
+    end = '-----END ' + 'OPENSSH PRIVATE KEY-----'
+    join = '\\' + '\n'
+    report = ('## Cases\nBefore.\nAuthorization: ' + join + 'Bearer ' + value + '\n'
+              '"tok' + join + 'en":\n "' + value + '"\n'
+              '"token":\n ' + join + '"' + value + '"\n'
+              + begin + '\n' + payload + '\n' + end + '\nAfter.\n## Findings\nNone.\n'
+              + begin + '\n' + payload)
+    lab.end_run(state, report=report)
+    result = lab.watch()
+    record = lab.content('qa/passes/' + state['pass'] + '.md')
+    assert 'Before.' in record and 'After.' in record and '(withheld: key)' in record
+    assert '(withheld: assigned)' in record and '(withheld: header)' in record
+    assert_pass_private(lab, [value, payload, begin, end], result)
+
+
+def a_failed_evidence_link_still_returns_a_login(lab):
+    lab.waiting(1)
+    lab.rung('temper', REAL, CHATGPT)
+    lab.watch()
+    directory, state = lab.watch_state()
+    value = secrets.token_hex(12)
+    lab.scratch({'evidence/capture.txt': 'Authorization: Bearer ' + value + '\n'}, directory)
+    lab.end_run(state)
+    lab.configure(logins_out=[CHATGPT])
+    lab.watch()
+    assert not lab.watch_state()[1]['given']
+    (directory / 'evidence/capture.txt').unlink()
+    lab.configure(logins_out=[])
+    result = driven_watch(lab, '''Record = tool['Record']
+original = Record.commit
+def commit(self, changes, message):
+    if message.endswith(' evidence'):
+        raise tool['Problem']('fixture link failed', 1)
+    return original(self, changes, message)
+Record.commit = commit
+''')
+    saved = lab.watch_state()[1]
+    assert saved['given'] == [CHATGPT] and saved['released']
+    assert saved['copy']['state'] == 'kept' and saved['copy']['recorded'] == 'refused'
+    assert 'evidence link not committed' in result.stdout
+    lab.watch()
+    assert lab.watch_state()[1]['copy']['recorded'] == saved['copy']['commit']
+
+
+def a_mended_old_refusal_waits_for_its_push(lab):
+    lab.waiting(1)
+    lab.watch()
+    directory, state = lab.watch_state()
+    lab.scratch({'evidence/auth.header': 'fixture\n'}, directory)
+    lab.end_run(state)
+    lab.watch()
+    (directory / 'evidence/auth.header').unlink()
+    hook = lab.origins / 'qa.git/hooks/pre-receive'
+    executable(hook, 'raise SystemExit(1)\n')
+    later = (utc_fixture(state['started']) + timedelta(days=8)).strftime('%Y-%m-%dT%H:%M:%SZ')
+    lab.watch(now=later)
+    assert directory.exists()
+    assert lab.watch_state()[1]['copy']['state'] == 'waiting'
+    assert 'evidence: unknown' in lab.content('qa/passes/' + state['pass'] + '.md')
+    hook.unlink()
+    lab.watch(now=later)
+    assert directory.exists() and lab.watch_state()[1]['copy']['state'] == 'kept'
+    lab.watch(now=later)
+    assert not directory.exists()
+
+
+def a_pending_link_fits_the_record(lab):
+    lab.waiting(1)
+    lab.watch()
+    directory, state = lab.watch_state()
+    lab.end_run(state, report='A long line of plain text.\n' * 1000)
+    hook = lab.origins / 'qa.git/hooks/pre-receive'
+    executable(hook, 'raise SystemExit(1)\n')
+    lab.watch()
+    path = 'qa/passes/' + state['pass'] + '.md'
+    before = lab.content(path)
+    assert 'evidence: unknown' in before and len(before.encode()) <= 8192 - 33
+    hook.unlink()
+    lab.watch()
+    after = lab.content(path)
+    assert len(after.encode()) <= 8192
+    assert before.split('---', 2)[2] == after.split('---', 2)[2]
+    copy = lab.watch_state()[1]['copy']
+    assert copy['recorded'] == copy['commit']
+    saved = (directory / 'pass.json').read_text()
+    for bad in (dict(copy, extra=True), dict(copy, commit='short'), dict(copy, digest='bad'),
+                dict(copy, state='waiting'), dict(copy, state='refused', digest=None)):
+        broken = json.loads(saved)
+        broken['copy'] = bad
+        (directory / 'pass.json').write_text(json.dumps(broken))
+        assert 'invalid pass state' in lab.watch().stdout
+        assert directory.exists()
+    (directory / 'pass.json').write_text(saved)
+
+
+def an_unposted_refusal_is_not_pruned(lab):
+    lab.env['QA_SLOTS'] = '2'
+    lab.waiting(2)
+    lab.watch()
+    states = lab.watch_states()
+    first, second = states
+    lab.scratch({'evidence/auth.header': 'fixture\n'}, second[0])
+    for directory, state in states:
+        lab.end_run(state)
+    lab.watch()
+    first_state = json.loads((first[0] / 'pass.json').read_text())
+    first_state.pop('copy')
+    (first[0] / 'pass.json').write_text(json.dumps(first_state))
+    second_state = json.loads((second[0] / 'pass.json').read_text())
+    second_state['copy']['posted'] = None
+    (second[0] / 'pass.json').write_text(json.dumps(second_state))
+    count = len(lab.sent())
+    later = (utc_fixture(first_state['started']) + timedelta(days=8)).strftime('%Y-%m-%dT%H:%M:%SZ')
+    driven_watch(lab, f'''tool['main'].__globals__['timestamp'] = lambda: {later!r}
+tool['Evidence'].keep = lambda self, copy: (None, 'a' * 40)
+''')
+    assert second[0].exists() and len(lab.sent()) == count
+    lab.watch(now=later)
+    assert len(lab.sent()) == count + 1
+
+
+def a_record_refusal_keeps_its_evidence_field(lab):
+    lab.waiting(1)
+    lab.watch()
+    directory, state = lab.watch_state()
+    lab.end_run(state)
+    driven_watch(lab, '''Record = tool['Record']
+original = Record.commit
+def commit(self, changes, message):
+    if message.endswith(' done'):
+        raise tool['Problem']('fixture report refused', 2)
+    return original(self, changes, message)
+Record.commit = commit
+''')
+    saved = lab.watch_state()[1]
+    report = lab.content('qa/passes/' + state['pass'] + '.md')
+    assert 'outcome: failed' in report and 'The report was refused by record' in report
+    assert 'evidence: ' + saved['copy']['commit'] in report
+    assert saved['copy']['recorded'] == saved['copy']['commit']
+
+
+def a_full_legacy_record_retains_its_body_and_scratch(lab):
+    lab.waiting(1)
+    lab.watch()
+    directory, state = lab.watch_state()
+    state.update(finished=True, ended=lab.end_run(state), released=True)
+    (directory / 'pass.json').write_text(json.dumps(state))
+    path = 'qa/passes/' + state['pass'] + '.md'
+    legacy = lab.content(path).replace('outcome: running', 'outcome: done')
+    legacy = re.sub(r'^evidence:.*\n', '', legacy, flags=re.M) + '\n'
+    legacy += 'x' * (8192 - len(legacy.encode()) - 1) + '\n'
+    lab.publish(path, legacy)
+    later = (utc_fixture(state['started']) + timedelta(days=8)).strftime('%Y-%m-%dT%H:%M:%SZ')
+    result = lab.watch(now=later)
+    saved = lab.watch_state()[1]
+    assert saved['copy']['state'] == 'kept' and saved['copy']['recorded'] == 'unknown'
+    assert lab.content(path) == legacy.strip()
+    assert 'evidence link not committed' in result.stdout and directory.exists()
 
 
 def keep_key_rule_is_records(lab):
@@ -3681,11 +4035,11 @@ def a_hung_systemctl_bounds_the_check(lab):
     first, unit, pid, second, other_unit, other_pid = finished_pair(lab)
     # Fail both list and show independently; keep the first held between checks.
     bounded = '''original = tool['command']
-def command(argv, cwd=None, timeout=None, pass_fds=()):
+def command(argv, cwd=None, timeout=None, pass_fds=(), **kwargs):
     if str(argv[0]).endswith('/systemctl'):
         assert timeout == 30
         timeout = 1
-    return original(argv, cwd=cwd, timeout=timeout, pass_fds=pass_fds)
+    return original(argv, cwd=cwd, timeout=timeout, pass_fds=pass_fds, **kwargs)
 tool['main'].__globals__['command'] = command
 '''
     for operation in ('list-units', 'show'):
@@ -4297,15 +4651,18 @@ class ReadyPopen(original_popen):
         return super().communicate(input=input, timeout=timeout)
 subprocess.Popen = ReadyPopen
 original = tool['command']
-def command(argv, cwd=None, timeout=None, pass_fds=()):
+def command(argv, cwd=None, timeout=None, pass_fds=(), **kwargs):
     name = str(argv[0]).rsplit('/', 1)[-1]
     expected = {'git': 300, 'record': 300, 'systemctl': 30, 'logins': 60,
                 'post': 60, 'landings': 120, 'codex-run': 120}
-    assert timeout == expected[name], (argv, timeout)
+    if kwargs.get('env', {}).get('GIT_NO_LAZY_FETCH') == '1':
+        assert name == 'git' and 0 < timeout <= 120
+    else:
+        assert timeout == expected[name], (argv, timeout)
     operation = name + ':' + str(argv[1] if len(argv) > 1 else '')
     if operation in HUNG:
         timeout = 0.3
-    return original(argv, cwd=cwd, timeout=timeout, pass_fds=pass_fds)
+    return original(argv, cwd=cwd, timeout=timeout, pass_fds=pass_fds, **kwargs)
 tool['main'].__globals__['command'] = command
 """
 
@@ -4394,14 +4751,14 @@ def timed_out_repository_and_record_calls_leave_work_recoverable(lab):
     lab.env['QA_SLOTS'] = '2'
     # Kill a real command group under the caller's required production deadline.
     patch = """original = tool['command']
-def command(argv, cwd=None, timeout=None, pass_fds=()):
+def command(argv, cwd=None, timeout=None, pass_fds=(), **kwargs):
     name = str(argv[0]).rsplit('/', 1)[-1]
     cut = (name == 'record' and str(argv[1]) in RECORD
            or name == 'git' and OPERATION in argv and any('temper' in str(arg) for arg in argv))
     if cut:
         assert timeout == 300, (argv, timeout)
         return original([sys.executable, '-S', '-c', 'import time; time.sleep(600)'], timeout=0.2)
-    return original(argv, cwd=cwd, timeout=timeout, pass_fds=pass_fds)
+    return original(argv, cwd=cwd, timeout=timeout, pass_fds=pass_fds, **kwargs)
 tool['main'].__globals__['command'] = command
 """
     result = driven_watch(lab, "RECORD = ('pull',)\nOPERATION = 'clone'\n" + patch)
@@ -6147,7 +6504,14 @@ def hex_walk_builds_refuse_ambiguous_and_non_commit_objects(lab):
     assert state['main'] == commit
 
 
-CASES = (the_copy_index_is_scanned, evidence_checks_effective_origins,
+CASES = (a_record_refusal_keeps_its_evidence_field, a_full_legacy_record_retains_its_body_and_scratch,
+         an_unposted_refusal_is_not_pruned,
+         the_record_withholds_multiline_secrets, a_failed_evidence_link_still_returns_a_login,
+         a_mended_old_refusal_waits_for_its_push, a_pending_link_fits_the_record,
+         a_clean_pass_keeps_its_evidence, a_refused_pass_is_mended,
+         the_record_withholds_a_refused_line, a_lost_answer_takes_the_kept_commit,
+         a_failed_push_delays_nothing, an_old_pass_gets_its_copy,
+         the_copy_index_is_scanned, evidence_checks_effective_origins,
          a_detached_pipe_cannot_hold_a_timed_out_command, a_walks_copy_survives_run_discovery_changes,
          keep_check_bounds_incomplete_private_key_markers,
          keep_check_reads_spaced_cookie_pairs, keep_check_reads_json_values_on_later_lines,

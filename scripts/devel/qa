@@ -259,6 +259,9 @@ class Pass:
         fields, body = front_matter(path)
         fields.setdefault('rung', '-')
         fields.setdefault('logins', '-')
+        fields.setdefault('evidence', 'unknown')
+        need(fields['evidence'] in ('unknown', 'refused') or re.fullmatch(SHA, fields['evidence']),
+             f'{path}: invalid evidence', 4)
         need(fields['rung'] == '-' or re.fullmatch(NAME, fields['rung']), f'{path}: invalid rung', 4)
         need(all(key in fields for key in PASS_KEYS), f'{path}: incomplete front matter', 4)
         need(fields['repository'] in REPOSITORIES and fields['outcome'] in ('running', 'done', 'capped', 'failed'),
@@ -362,6 +365,7 @@ class Record:
                  2 if result.returncode == 2 else 1)
             if result.returncode == 3:
                 self.warn(result.stderr.strip())
+            return result.returncode == 0
         except BaseException:
             for name, old in before.items():
                 path = self.path(name)
@@ -730,7 +734,7 @@ def value_at(text, start, stops='', wrapper='', string=False):
     return text[start:end], end
 
 
-def scan(text):
+def scan_lines(text):
     lines, chunks, first = [], [], 1
     physical = text.split('\n')
     for number, line in enumerate(physical, 1):
@@ -738,9 +742,14 @@ def scan(text):
         continued = line.endswith('\\') and number < len(physical)
         chunks.append(line[:-1] if continued else line)
         if not continued:
-            lines.append((first, ''.join(chunks)))
+            lines.append((first, number, ''.join(chunks)))
             chunks = []
             first = number + 1
+    return lines
+
+
+def scan(text):
+    lines = [(first, line) for first, last, line in scan_lines(text)]
     result = []
     for index, (number, line) in enumerate(lines):
         rules = []
@@ -1035,7 +1044,11 @@ class Copy(NamedTuple):
         refused = [Refusal(label, line, 'binary')
                    for line, value in ((3, self.name), (4, self.machine), (5, self.source), (6, self.run))
                    if not str(value).isprintable()]
-        refused.extend(Refusal(label, line, rule) for line, rule in scan(self.index().decode()))
+        try:
+            text = self.index().decode()
+        except UnicodeError:
+            return sorted(set(refused or [Refusal(label, 0, 'binary')]))
+        refused.extend(Refusal(label, line, rule) for line, rule in scan(text))
         return sorted(set(refused))
 
 
@@ -1163,7 +1176,7 @@ class Evidence:
                             need(found.split()[0:2] == ['040000', 'tree']
                                  and payload(found.split()[2]) == payload(tree),
                                  f'{directory}: name taken by another copy')
-                            return run(root, 'rev-list', '-1', 'origin/evidence', '--', directory), tree
+                            return run(root, 'rev-list', '-1', 'origin/evidence', '--', directory), found.split()[2]
                     with tempfile.TemporaryDirectory(prefix='index-', dir=parent) as temporary:
                         index = dict(GIT_INDEX_FILE=str(Path(temporary) / 'index'))
                         run(root, 'read-tree', tip if tip else '--empty', extra=index)
@@ -1531,6 +1544,22 @@ class Watch:
                                  and isinstance(name, str) and name in logins and pool_of(name) == pool
                                  for pool, name in state['pools'].items()), f'{path}: invalid pools', 4)
                 check_alerts(state)
+                if 'copy' in state:
+                    copy = state['copy']
+                    need(isinstance(copy, dict) and set(copy) ==
+                         {'state', 'tree', 'commit', 'digest', 'posted', 'recorded'}
+                         and copy['state'] in ('waiting', 'kept', 'refused')
+                         and all(copy[k] is None or isinstance(copy[k], str) and re.fullmatch(SHA, copy[k])
+                                 for k in ('tree', 'commit'))
+                         and all(copy[k] is None or isinstance(copy[k], str) and re.fullmatch(r'[0-9a-f]{64}', copy[k])
+                                 for k in ('digest', 'posted'))
+                         and isinstance(copy['recorded'], str)
+                         and (copy['recorded'] in ('unknown', 'refused') or re.fullmatch(SHA, copy['recorded']))
+                         and (copy['state'] != 'kept' or copy['commit'] is not None)
+                         and (copy['state'] == 'kept' or copy['commit'] is None)
+                         and (copy['state'] == 'refused' or copy['digest'] is None)
+                         and (copy['state'] != 'refused' or copy['digest'] is not None),
+                         f'{path}: invalid copy', 4)
                 for key in ('notice', 'notice_pending'):
                     if key in state:
                         notice = state[key]
@@ -2019,6 +2048,90 @@ class Watch:
                         ended, exit_code, model, effort, tokens = row[3], row[4], row[6], row[7], row[11]
         return dict(ended=ended, exit=exit_code, model=model, effort=effort, tokens=tokens)
 
+    def wanted(self, state):
+        copy = state.get('copy', {})
+        return copy.get('commit') if copy.get('state') == 'kept' else (
+            'refused' if copy.get('state') == 'refused' else 'unknown')
+
+    def keep(self, directory, state):
+        if not self.record.path(f'qa/passes/{state["pass"]}.md').exists():
+            return
+        copy = state.setdefault('copy', dict(state='waiting', tree=None, commit=None,
+                                            digest=None, posted=None, recorded='unknown'))
+        if copy['state'] == 'kept' or self.copy_waiting:
+            return
+        copy.update(state='waiting', commit=None, digest=None)
+        self.save(directory, state)
+        try:
+            snapshot = Snapshot.read(directory, self.options['QA_EVIDENCE_KIB'] * 1024)
+            held = Copy('pass', state['pass'], snapshot, directory, state['run'] or 'unknown',
+                        f'qa/passes/{state["pass"]}.md', self.workspace.machine())
+            refusals = sorted(set(snapshot.refusals + held.refusals()))
+            if not refusals:
+                try:
+                    commit, tree = Evidence(self.workspace, 'qa-watch', self.options['QA_EVIDENCE_SECONDS']).keep(held)
+                    copy.update(state='kept' if commit else 'waiting', tree=tree, commit=commit)
+                    self.copy_waiting = commit is None
+                except Problem as error:
+                    if error.code != 2:
+                        raise
+                    refusals = [Refusal('passes/' + state['pass'], 0, 'taken')]
+            if refusals:
+                lines = '\n'.join(map(str, refusals))
+                copy.update(state='refused', tree=None, commit=None,
+                            digest=hashlib.sha256(lines.encode()).hexdigest())
+                self.copy_refusals[state['pass']] = refusals
+        except (Problem, OSError, ValueError, UnicodeError):
+            self.copy_waiting = True
+            log(f'{state["pass"]}: evidence not kept; trying next check')
+        self.save(directory, state)
+
+    def copy_notice(self, state):
+        copy = state.get('copy', {})
+        if copy.get('state') != 'refused' or copy.get('digest') == copy.get('posted'):
+            return ''
+        lines = self.copy_refusals.get(state['pass'])
+        if not lines:
+            return ''
+        copy['posted'] = copy['digest']
+        return ("Its evidence is refused (qa-flow.md 11.4): mend it by name and line, never opening a file, or leave it refused.\n"
+                + ''.join(f'  refused: {line}\n' for line in lines))
+
+    def link(self, directory, state):
+        copy = state.get('copy')
+        if copy is None or copy['recorded'] == self.wanted(state):
+            return
+        name = f'qa/passes/{state["pass"]}.md'
+        report = Pass.read(self.record.path(name))
+        report.fields['evidence'] = self.wanted(state)
+        if self.record.commit({name: report.text()}, f'qa watch: {state["pass"]} evidence') is not False:
+            copy['recorded'] = self.wanted(state)
+            self.save(directory, state)
+
+    def withhold(self, report):
+        lines, logical = report.split('\n'), scan_lines(report)
+        positions = {first: (index, last, line) for index, (first, last, line) in enumerate(logical)}
+        withheld = {}
+        for number, rule in scan(report):
+            index, last, line = positions[number]
+            for physical in range(number - 1, last):
+                withheld.setdefault(physical, rule)
+            private = re.search(r'-----BEGIN ([^\n-]*PRIVATE KEY)-----', line)
+            if private:
+                end = next((stop for first, stop, text in logical[index + 1:]
+                            if '-----END ' + private[1] + '-----' in text), len(lines))
+                for physical in range(last, end):
+                    withheld.setdefault(physical, rule)
+            # JSON's following logical value belongs to the key's refusal too.
+            if rule == 'assigned' and JSON_KEY.search(line):
+                value = next((row for row in logical[index + 1:] if row[2].strip()), None)
+                if value is not None and value[2].lstrip().startswith(('"', "'")):
+                    for physical in range(value[0] - 1, value[1]):
+                        withheld.setdefault(physical, rule)
+        for number, rule in withheld.items():
+            lines[number] = f'(withheld: {rule})'
+        return '\n'.join(lines), sorted((number + 1, rule) for number, rule in withheld.items())
+
     def finish(self, directory, state, failure=None):
         name = state['pass']
         report = ''
@@ -2035,38 +2148,47 @@ class Watch:
                    or not report.strip() or report.startswith('codex-run: the run wrote no report') else 'done')
         if failure:
             report = failure + '\n' + report
+        self.keep(directory, state)
+        report, withheld = self.withhold(report)
         path = self.record.path(f'qa/passes/{name}.md')
         result = Pass.read(path)
         ended = facts['ended'] if facts['ended'] != 'unknown' else timestamp()
         minutes = max(0, int((utc(ended) - utc(state['started'])).total_seconds()) // 60)
         wall = f'{minutes // 60}:{minutes % 60:02}'
         result.fields.update(ended=ended, wall=wall, tokens=facts['tokens'], model=facts['model'],
-                             effort=facts['effort'], outcome=outcome)
+                             effort=facts['effort'], outcome=outcome, evidence=self.wanted(state))
         result.body = f'# QA pass {name}\n\n' + report
-        if len(result.text().encode()) > 8192:
+        limit = 8192 - (40 - len(self.wanted(state)))
+        if len(result.text().encode()) > limit:
             suffix = f'\n(Cut at 8 KiB: the report was {len(report.encode())} bytes.)\n'
             result.body = f'# QA pass {name}\n\n'
-            budget = 8192 - len((result.text() + suffix).encode())
+            budget = limit - len((result.text() + suffix).encode())
             prefix = report.encode()[:max(0, budget)]
             # A long first line contributes nothing; no partial UTF-8 or partial line.
             prefix = prefix[:prefix.rfind(b'\n') + 1]
             result.body += prefix.decode() + suffix
         try:
-            self.record.commit({f'qa/passes/{name}.md': result.text()}, f'qa watch: {name} {outcome}')
+            pushed = self.record.commit({f'qa/passes/{name}.md': result.text()}, f'qa watch: {name} {outcome}')
         except Problem as error:
             if error.code != 2:
                 raise
             outcome = 'failed'
             result.fields['outcome'] = outcome
             result.body = f'# QA pass {name}\n\nThe report was refused by record: {error}.\n'
-            self.record.commit({f'qa/passes/{name}.md': result.text()}, f'qa watch: {name} failed')
+            pushed = self.record.commit({f'qa/passes/{name}.md': result.text()}, f'qa watch: {name} failed')
             log(f'{name}: report refused by record: {error}')
         count = len(result.findings())
+        if pushed is not False and 'copy' in state:
+            state['copy']['recorded'] = self.wanted(state)
+        extra = self.copy_notice(state)
+        if withheld:
+            extra += (f'{len(withheld)} lines of its report are withheld from the record: '
+                      + ', '.join(f'line {n} ({rule})' for n, rule in withheld) + '.\n')
         state.update(finished=True, ended=ended, routes={}, routed={})
-        state['notice_pending'] = dict(required=outcome in ('failed', 'capped') or bool(count),
+        state['notice_pending'] = dict(required=outcome in ('failed', 'capped') or bool(count) or bool(extra),
             subject=f'qa: pass {name} {outcome}, {count} findings', body=(
                 f'QA pass {name} on {state["repository"]} ended {outcome} after {wall}, with {count} findings: '
-                f"records' qa/passes/{name}.md; qa findings lists them.\n"))
+                f"records' qa/passes/{name}.md; qa findings lists them.\n" + extra))
         self.save(directory, state)
         log(f'{name}: {outcome}, {count} findings, {wall}')
         return self.end(directory, state)
@@ -2437,6 +2559,7 @@ class Watch:
     def check(self, options):
         log('checking')
         self.options = options
+        self.copy_waiting, self.copy_refusals = False, {}
         self.stuck = self.stuck_addresses()
         self.route_repos, self.route_commits, self.route_answers, self.route_failed = {}, {}, {}, set()
         complete = {}
@@ -2444,12 +2567,31 @@ class Watch:
             self.states.clear()
             self.classes.clear()
             passes = self.local_passes()
+            prunable = {directory for directory, state in passes
+                        if not self.record.path(f'qa/passes/{state["pass"]}.md').exists()
+                        or state.get('copy', {}).get('state') in ('kept', 'refused')
+                        and state['copy']['recorded'] == self.wanted(state)}
             walks = self.local_walks(strict=False) if walking else []
             self.claims(passes + walks)
             self.give_strays(passes + walks, sweep_walks=walking and self.walks_valid)
             for directory, state in passes:
                 try:
                     if state['finished']:
+                        self.keep(directory, state)
+                        extra = self.copy_notice(state)
+                        if extra:
+                            if state.get('notice'):
+                                state['notice']['body'] += extra
+                            elif state.get('notice_pending'):
+                                state['notice_pending']['body'] += extra
+                                state['notice_pending']['required'] = True
+                            else:
+                                state['notice'] = dict(subject=f'qa: pass {state["pass"]} evidence refused', body=extra)
+                            self.save(directory, state)
+                        try:
+                            self.link(directory, state)
+                        except (Problem, OSError, ValueError, UnicodeError):
+                            log(f'{state["pass"]}: evidence link not committed; trying next check')
                         complete[state['pass']] = self.end(directory, state)
                         if (complete[state['pass']] and state.get('cancelled')
                                 and state.get('released') and not self.outstanding(state)):
@@ -2607,6 +2749,12 @@ class Watch:
                     log(f'{repo}: preparation failed ({type(error).__name__}): {error}; keeping saved custody')
             for directory, state in self.local_passes():
                 if (state['finished'] and not self.outstanding(state) and not state.get('notice')
+                        and directory in prunable
+                        and (not self.record.path(f'qa/passes/{state["pass"]}.md').exists()
+                             or state.get('copy', {}).get('state') in ('kept', 'refused')
+                             and state['copy']['recorded'] == self.wanted(state)
+                             and (state['copy']['state'] != 'refused'
+                                  or state['copy']['posted'] == state['copy']['digest']))
                         and not state.get('notice_pending')
                         and complete.get(state['pass'], False) and state.get('released', False)
                         and (utc(timestamp()) - utc(state['ended'])).total_seconds() >= 7 * 86400):
