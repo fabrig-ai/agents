@@ -181,6 +181,11 @@ out. The security rules are director.md 10's.
   what it changes and writes the page itself: they are written by Opus
   owners only, never by an implementer (the user, 10-26). The gate
   catches a renamed command or a broken link, never a changed fact.
+  A change under temper's `docs/help/` lands with plain `land`, never
+  `land --docs`: temper's tests read those pages (their bounds, their
+  placeholders, every command line), and `--docs` skips them (box.md's
+  red, 10-27 19:33Z). Once the kit honours a repository's declared
+  gated Markdown, `land --docs` refuses such a change by itself.
 - **The QA marker:** a landing commit whose change a user meets
   through the product's tool carries the trailer `QA: <what a user can
   now do>`, one line of at most 160 characters, which its landing task
