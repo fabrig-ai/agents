@@ -66,10 +66,14 @@ case ${1:-} in
             exec python3 -B "$kit/heavy-recovery.py" "$@"
         fi
         if ((installed_status != 1)); then
-            disk_floor heavy || {
-                python3 -B "$kit/heavy-recovery.py" --record-refusal disk-floor || true
-                exit 2
-            }
+            # Landing labels must agree with heavy-recovery.py's landing:
+            # these tasks queue below the floor and wait for admission.
+            if [[ ! ${HEAVY_LABEL:-} =~ ^land\ [^[:space:]]+(\ prebuild)?$ ]]; then
+                disk_floor heavy || {
+                    python3 -B "$kit/heavy-recovery.py" --record-refusal disk-floor || true
+                    exit 2
+                }
+            fi
             # Preparation at submission preserves the policy helper selection in
             # the queue; contained entry validates it again before payload start.
             if ((gate_policy)); then prepare_gate_policy ""; fi

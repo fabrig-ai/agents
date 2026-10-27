@@ -75,10 +75,16 @@ class Lab:
             if key.startswith('P' + 'UEUE_'):
                 self.env.pop(key)
         self.env.update(DEV_ROOT=str(self.path), DEV_TMP=str(self.path / 'tmp'), LAND_TIDY='',
-                        HEAVY_BUILD_SLOTS='2', HEAVY_SETTLE='0', PLAN_MIN_DISK_GB='0',
+                        HEAVY_BUILD_SLOTS='2', HEAVY_SETTLE='0', PLAN_MIN_DISK_GB='0', PLAN_LAND_ROOM_GB='0',
                         HEAVY_BOOT_ID_FILE=str(self.boot), HEAVY_FAULT_DIR=str(self.faults), HEAVY_RECOVERY_FIXTURE='1')
         cache_bin = self.path / 'fixture-bin'
         cache_bin.mkdir()
+        self.available = self.path / 'tmp/available-gb'
+        self.available.write_text('100')
+        self.env['HEAVY_DISK_FREE_FILE'] = str(self.available)
+        df = cache_bin / 'df'
+        df.write_text('#!/bin/sh\nprintf "Avail\\n%sG\\n" "$(cat ' + shlex.quote(str(self.available)) + ')"\n')
+        df.chmod(0o700)
         cache = cache_bin / 'kache'
         cache.write_text('#!/usr/bin/env python3\nimport os,sys\nfrom pathlib import Path\n'
                          'assert sys.argv[1:] == ["gc"]\n'
@@ -169,6 +175,23 @@ class Lab:
             temporary.replace(self.base / 'state.json')
         return data
 
+    def free(self, gb):
+        temporary = self.available.with_suffix('.new')
+        temporary.write_text(str(gb))
+        temporary.replace(self.available)
+
+    def age(self, label, seconds):
+        with (self.base / 'host.lock').open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            data = self.state()
+            task = next(task for task in data['tasks'].values() if task['label'] == label)
+            for key in ('submitted', 'payload_started', 'payload_ended', 'ended', 'disk_wait'):
+                if key in task:
+                    task[key] -= seconds
+            temporary = self.base / 'state.json.fixture-new'
+            temporary.write_text(json.dumps(data) + '\n')
+            temporary.replace(self.base / 'state.json')
+
     def events(self):
         return [json.loads(line) for line in (self.base / 'events.jsonl').read_text().splitlines()]
 
@@ -241,7 +264,8 @@ class Lab:
                 else:
                     assert 'exclusive' not in active.values(), ('scope overlaps exclusive gate', active)
                     assert lane != 'gate' or 'gate' not in active.values(), ('landing gates overlap', active)
-                    assert list(active.values()).count('build') < int(self.env['HEAVY_BUILD_SLOTS']) or lane != 'build', \
+                    assert (not int(self.env['HEAVY_BUILD_SLOTS']) or lane != 'build' or
+                            list(active.values()).count('build') < int(self.env['HEAVY_BUILD_SLOTS'])), \
                         ("more builds than the lab permits", active)
                 active[token] = lane
             elif name == 'release_end':
@@ -809,14 +833,10 @@ def missing_reconciler(lab):
     lab.done(gate)
 
 
-def land_disk_floor(lab, mode='queued', machine=False):
-    # df is the only stand-in: real land/heavy, disposable units and ledger.
-    available = lab.path / 'available-gb'
-    available.write_text('100')
-    df = lab.path / 'fixture-bin/df'
-    df.write_text('#!/bin/sh\nprintf "Avail\\n%sG\\n" "$(cat ' + shlex.quote(str(available)) + ')"\n')
-    df.chmod(0o700)
+def land_disk_floor(lab, mode='refused', machine=False):
+    # Real land/heavy, with the Lab's disposable units, ledger and free space.
     lab.env.pop('PLAN_MIN_DISK_GB')
+    lab.env['PLAN_LAND_ROOM_GB'] = '30'
     if machine:
         (lab.path / 'tmp/machine.env').write_text('PLAN_MIN_DISK_GB=60\n')
     (lab.repo / 'Cargo.toml').write_text('# disk floor prebuild fixture\n')
@@ -825,40 +845,216 @@ def land_disk_floor(lab, mode='queued', machine=False):
     base, head = candidate(lab)
     prebuilt, gated = lab.path / 'prebuilt', lab.path / 'gated'
     command = 'touch ' + shlex.quote(str(prebuilt))
-    if mode == 'consumed':
-        command += '; echo 5 > ' + shlex.quote(str(available))
-    if mode == 'initial':
-        available.write_text('5')
-    queued = mode in ('queued', 'gate-queued')
-    lane = 'gate' if mode == 'gate-queued' else 'build'
-    if queued:
-        lab.hold(lane)
+    gate = mode == 'gate'
+    label = 'land repo' if gate else 'land repo prebuild'
+    if mode == 'payload':
+        lab.arm('payload_floor')
+    else:
+        lab.free(5)
     output = lab.path / 'land.client.txt'
     with output.open('w') as stream:
         client = subprocess.Popen([str(KIT / 'land'), '--local', '--gate', 'touch ' + shlex.quote(str(gated))],
-            env=dict(lab.env, LAND_PREBUILD='' if lane == 'gate' else command), cwd=lab.repo,
+            env=dict(lab.env, LAND_PREBUILD='' if gate else command), cwd=lab.repo,
             stdin=subprocess.DEVNULL, stdout=stream, stderr=subprocess.STDOUT)
     lab.clients.append(client)
-    label = 'land repo' if lane == 'gate' else 'land repo prebuild'
-    if queued:
-        wait_for(lambda: (task := lab.task(label)) and task['state'] == 'waiting',
-                 'prebuild waiting')
-        available.write_text('5')
-        lab.unhold(lane)
+    if mode == 'payload':
+        lab.barrier('payload_floor', label)
+        assert lab.event(label, 'admit') and not lab.task(label).get('payload_started')
+        lab.free(5)
+        lab.disarm('payload_floor')
+    else:
+        wait_for(lambda: (task := lab.task(label)) and task.get('disk_wait'), 'landing queued below floor')
+        assert client.poll() is None and not lab.task(label).get('payload_started')
+        lab.age(label, 1201)
     lab.done(client, 9)
-    assert prebuilt.exists() == (mode == 'consumed'), 'below-floor prebuild ran'
+    assert not prebuilt.exists(), 'below-floor prebuild ran'
     assert not gated.exists(), 'below-floor gate ran'
     text = output.read_text()
     floor, source = (60, 'machine.env') if machine else (40, 'default')
     assert f'5 GB free on {lab.path}, below the disk floor of {floor} GB ({source})' in text, text
+    assert 'heavy: disk floor refused before payload start' in text, text
     assert lab.call(['git', 'rev-parse', 'main']).stdout.strip() == base
     assert lab.call(['git', 'rev-parse', 'HEAD']).stdout.strip() == head
     assert not (lab.path / 'tmp/gates').exists()
-    if queued:
-        task = lab.task(label)
-        assert task['code'] == 2 and task['outcome'] == 'refused'
-        assert not task.get('payload_started') and not task.get('payload_ended')
-    available.write_text('100')
+    task = lab.task(label)
+    assert task['code'] == 2 and task['outcome'] == 'refused'
+    assert not task.get('payload_started') and not task.get('payload_ended')
+    assert task['refusal'] == 'disk floor refused before payload start'
+    if mode != 'payload':
+        assert task.get('disk_wait') and not lab.event(label, 'admit')
+        assert lab.event(label, 'release_begin')['outcome'] == 'refused'
+        assert lab.event(label, 'refusal')['reason'] == 'disk-floor'
+    receipt = lab.base / 'receipts' / (task['token'] + '.json')
+    assert receipt.is_file() and json.loads(receipt.read_text())['outcome'] == 'refused'
+    lab.free(100)
+    lab.done(lab.start('progress'))
+
+
+def room_build_waits(lab):
+    lab.env.update(PLAN_MIN_DISK_GB='40', PLAN_LAND_ROOM_GB='30', HEAVY_BUILD_SLOTS='3')
+    marker = lab.path / 'finish-builds'
+    code = ('from pathlib import Path; import time\nwhile not Path(' + repr(str(marker)) +
+            ').exists(): time.sleep(.02)')
+    landing = lab.start('land repo prebuild', code=code)
+    wait_for(lambda: lab.event('land repo prebuild', 'payload_begin'), 'landing prebuild running')
+    lab.free(60)
+    build = lab.start('build', code=code)
+    lab.waiting('build')
+    wait_for(lambda: "waits for a landing's room: 60 GB free, starting at 70 GB" in
+             (lab.path / 'build.client.txt').read_text(), 'client room diagnostic')
+    lab.env['PLAN_MIN_DISK_GB'] = '0'
+    younger = lab.start('younger', code=code)
+    lab.waiting('younger')
+    time.sleep(0.7)
+    assert not lab.event('build', 'admit') and not lab.event('younger', 'admit')
+    lab.free(75)
+    wait_for(lambda: lab.event('build', 'payload_begin') and lab.event('younger', 'payload_begin'),
+             'both builds beside the landing')
+    assert not lab.event('land repo prebuild', 'payload_end')
+    assert len([event for event in lab.events() if event.get('label') == 'build' and
+                event['event'] == 'room_wait']) == 1
+    assert lab.event('build', 'room_wait')['floor_gb'] == 40
+    assert lab.event('build', 'room_wait')['room_gb'] == 30
+    marker.touch()
+    for client in (landing, build, younger):
+        lab.done(client)
+
+
+def room_landing_first(lab, slots=0):
+    lab.env.update(PLAN_MIN_DISK_GB='40', PLAN_LAND_ROOM_GB='30', HEAVY_BUILD_SLOTS=str(slots))
+    marker = lab.path / 'finish-reservation'
+    code = ('from pathlib import Path; import time\nwhile not Path(' + repr(str(marker)) +
+            ').exists(): time.sleep(.02)')
+    first_marker = lab.path / 'finish-first'
+    if slots:
+        first = lab.start('first-build', code=(
+            'from pathlib import Path; import time\nwhile not Path(' + repr(str(first_marker)) +
+            ').exists(): time.sleep(.02)'))
+        wait_for(lambda: lab.event('first-build', 'payload_begin'), 'first build in the only slot')
+    holder = lab.start('land holder', land=True, code=code)
+    wait_for(lambda: lab.event('land holder', 'payload_begin'), 'landing reservation running')
+    lab.free(60)
+    build = lab.start('room-build')
+    lab.waiting('room-build')
+    wait_for(lambda: lab.event('room-build', 'room_wait'), 'build waiting for room')
+    landing = lab.start('land repo prebuild', code=code)
+    if slots:
+        lab.waiting('land repo prebuild')
+        time.sleep(0.7)
+        assert not lab.event('land repo prebuild', 'admit'), 'landing ignored the live slot'
+        first_marker.touch()
+        lab.done(first)
+    wait_for(lambda: lab.event('land repo prebuild', 'payload_begin'), 'younger landing goes first')
+    assert not lab.event('room-build', 'admit')
+    marker.touch()
+    lab.done(landing)
+    lab.done(holder)
+    lab.free(100)
+    lab.done(build)
+    assert lab.event('land repo prebuild', 'admit')['time_ns'] < lab.event('room-build', 'admit')['time_ns']
+
+
+def room_after(lab):
+    lab.env.update(PLAN_MIN_DISK_GB='40', PLAN_LAND_ROOM_GB='30')
+    lab.done(lab.start('land repo', land=True))
+    lab.free(60)
+    build = lab.start('after')
+    lab.waiting('after')
+    wait_for(lambda: lab.event('after', 'room_wait'), 'reservation after release')
+    # The boundary is measured from release, not from the test's wall time.
+    ended = lab.task('land repo')['ended']
+    lab.age('land repo', 119 - (time.time() - ended))
+    time.sleep(0.7)
+    assert not lab.event('after', 'admit'), 'reservation expired before two minutes'
+    lab.age('land repo', 2)
+    lab.done(build)
+
+
+def room_settings(lab):
+    lab.env.update(PLAN_MIN_DISK_GB='40', PLAN_LAND_ROOM_GB='20')
+    marker = lab.path / 'finish-settings'
+    landing = lab.start('land repo', land=True, code=(
+        'from pathlib import Path; import time\nwhile not Path(' + repr(str(marker)) +
+        ').exists(): time.sleep(.02)'))
+    wait_for(lambda: lab.event('land repo', 'payload_begin'), 'landing with its own room')
+    lab.env['PLAN_LAND_ROOM_GB'] = '50'
+    lab.free(61)
+    lab.done(lab.start('own-floor'))
+    assert lab.task('land repo')['room_gb'] == 20 and lab.task('own-floor')['room_gb'] == 50
+    marker.touch()
+    lab.done(landing)
+    (lab.path / 'tmp/machine.env').write_text('PLAN_MIN_DISK_GB=40\n')
+    lab.env['PLAN_MIN_DISK_GB'] = '50'
+    lab.free(45)
+    lab.arm('claim')
+    pending = lab.start('land other prebuild')
+    lab.barrier('claim', 'land other prebuild')
+    task = wait_for(lambda: (task if (task := lab.task('land other prebuild')).get('disk_wait') else None),
+                    'reconciler sees submitter floor')
+    assert task['floor_gb'] == 50 and task['state'] == 'queued'
+    events = wait_for(lambda: [event for event in lab.events() if event.get('label') == 'land other prebuild' and
+                              event['event'].startswith('disk_wait:')], 'durable reconciler disk wait')
+    assert len(events) == 1 and events[0]['source'] == '--reconcile' and events[0]['waiting']
+    lab.free(100)
+    lab.disarm('claim')
+    lab.done(pending)
+    assert 'disk_wait' not in lab.task('land other prebuild')
+
+
+def land_floor_wait(lab):
+    lab.env.update(PLAN_MIN_DISK_GB='40', PLAN_LAND_ROOM_GB='30')
+    lab.free(5)
+    client = lab.start('land repo prebuild')
+    lab.waiting('land repo prebuild')
+    first = wait_for(lambda: lab.task('land repo prebuild').get('disk_wait'), 'first disk wait')
+    wait_for(lambda: 'waits for the disk floor: 5 GB free, below its floor of 40 GB; '
+             'refused after 20 minutes below it' in (lab.path / 'land repo prebuild.client.txt').read_text(),
+             'client disk diagnostic')
+    assert client.poll() is None and not lab.event('land repo prebuild', 'admit')
+    lab.hold('build')
+    lab.free(100)
+    wait_for(lambda: 'disk_wait' not in lab.task('land repo prebuild'), 'disk wait cleared under hold')
+    assert lab.task('land repo prebuild')['state'] == 'waiting'
+    # Let the client observe the end of this spell before starting another.
+    time.sleep(1.1)
+    lab.free(5)
+    second = wait_for(lambda: lab.task('land repo prebuild').get('disk_wait'), 'second disk wait')
+    assert second > first
+    wait_for(lambda: (lab.path / 'land repo prebuild.client.txt').read_text().count(
+             'waits for the disk floor:') == 2, 'client reports the second spell')
+    lab.free(100)
+    lab.unhold('build')
+    lab.done(client)
+    spells = [event for event in lab.events() if event.get('label') == 'land repo prebuild' and
+              event['event'].startswith('disk_wait:')]
+    assert [event['waiting'] for event in spells] == [True, False, True, False]
+
+
+def land_floor_client_killed(lab):
+    lab.env.update(PLAN_MIN_DISK_GB='40', PLAN_LAND_ROOM_GB='30')
+    lab.free(5)
+    client = lab.start('land repo prebuild')
+    wait_for(lambda: (task := lab.task('land repo prebuild')) and task.get('disk_wait'), 'disk wait')
+    client.kill()
+    client.wait(timeout=5)
+    lab.age('land repo prebuild', 1201)
+    task = lab.released('land repo prebuild')
+    assert task['code'] == 2 and task['outcome'] == 'refused'
+    assert task['refusal'] == 'disk floor refused before payload start'
+    assert task.get('disk_wait') and not task.get('payload_started')
+    receipt = lab.base / 'receipts' / (task['token'] + '.json')
+    wait_for(receipt.exists, 'receipt without a waiting client')
+
+
+def build_floor_refused(lab):
+    lab.env.update(PLAN_MIN_DISK_GB='40', PLAN_LAND_ROOM_GB='30')
+    lab.free(5)
+    client = lab.start('build')
+    lab.done(client, 2)
+    text = (lab.path / 'build.client.txt').read_text()
+    assert f'5 GB free on {lab.path}, below the disk floor of 40 GB (environment)' in text
+    assert 'queued task' not in text and not lab.state()['tasks']
+    lab.free(100)
     lab.done(lab.start('progress'))
 
 
@@ -1784,11 +1980,17 @@ def main():
              ('maintenance-gate', maintenance_gate),
              ('unclaimed-5s', lambda lab: unclaimed_client(lab, True)),
              ('gc-build', gc_build), ('gc-budget', gc_budget), ('gc-gate', gc_gate), ('gc-errors', gc_errors),
-             ('land-floor-queued', land_disk_floor),
-             ('land-floor-machine', lambda lab: land_disk_floor(lab, machine=True)),
-             ('land-floor-initial', lambda lab: land_disk_floor(lab, 'initial')),
-             ('land-floor-gate-queued', lambda lab: land_disk_floor(lab, 'gate-queued')),
-             ('land-floor-consumed', lambda lab: land_disk_floor(lab, 'consumed')),
+             ('room-build-waits', room_build_waits),
+             ('room-landing-first', room_landing_first),
+             ('room-landing-first-slot', lambda lab: room_landing_first(lab, 1)),
+             ('room-after', room_after), ('room-settings', room_settings),
+             ('land-floor-wait', land_floor_wait),
+             ('land-floor-refused', land_disk_floor),
+             ('land-floor-refused-machine', lambda lab: land_disk_floor(lab, machine=True)),
+             ('land-floor-refused-gate', lambda lab: land_disk_floor(lab, 'gate')),
+             ('land-floor-refused-client-killed', land_floor_client_killed),
+             ('build-floor-refused', build_floor_refused),
+             ('land-floor-payload', lambda lab: land_disk_floor(lab, 'payload')),
              ('normal', normal), ('unsupported', unsupported), ('configured-kache', configured_kache),
              ('enospc-snapshot', lambda lab: storage_failure(lab, 'snapshot')),
              ('enospc-journal', lambda lab: storage_failure(lab, 'journal')),

@@ -3,6 +3,7 @@
 import contextlib
 import errno
 import fcntl
+import functools
 import hashlib
 import json
 import math
@@ -34,6 +35,9 @@ PREFIX = 'skein-heavy-' + QUEUE[:12]
 LANES = ('build', 'gate')
 UNCLAIMED = ('submitted', 'enqueuing', 'queued')
 LIVE = ('launching', 'active', 'finishing', 'closing')
+ROOM_AFTER = 120  # Reservation after release (build-infrastructure.md 2).
+DISK_WAIT_LIMIT = 20 * 60  # Time below a landing's floor (build-infrastructure.md 2).
+FLOOR_REFUSAL = 'disk floor refused before payload start'
 CGROOT = Path('/sys/fs/cgroup')
 CANCELLED = 130  # A cancelled task's exit, as check.sh and codex-run exit on SIGINT.
 USAGE = 'usage: heavy [--gate | --land] [--tail N] [--] command... | heavy --cancel TOKEN'
@@ -59,6 +63,57 @@ def boot():
             os.environ.get('HEAVY_RECOVERY_FIXTURE') != '1' or not BOOT_FILE.resolve().is_relative_to(TMP)):
         raise Refusal('boot identity override requires an isolated recovery fixture')
     return BOOT_FILE.read_text().strip()
+
+
+@functools.cache
+def setting(key, default) -> int:
+    result = run(['bash', '-c', 'set -euo pipefail; root=$1; tmp=$2; '
+                  'source "$3"; machine_setting "$4" "$5"',
+                  'heavy-setting', ROOT, TMP, KIT / 'kit.sh', key, str(default)], check=True)
+    return int(result.stdout.split()[0])
+
+
+def free_gb() -> int:
+    override = os.environ.get('HEAVY_DISK_FREE_FILE')
+    if override is not None:
+        path = Path(override).resolve()
+        if os.environ.get('HEAVY_RECOVERY_FIXTURE') != '1' or not path.is_relative_to(TMP):
+            raise Refusal('disk free override requires an isolated recovery fixture')
+        return int(path.read_text())
+    st = os.statvfs(ROOT)
+    return math.ceil(st.f_bavail * st.f_frsize / 2**30)
+
+
+def landing(task) -> bool:
+    return re.fullmatch(r'land \S+( prebuild)?', task['label']) is not None
+
+
+def floor_of(task):
+    return task['floor_gb'] if 'floor_gb' in task else setting('PLAN_MIN_DISK_GB', 40)
+
+
+def room_of(task):
+    return task['room_gb'] if 'room_gb' in task else setting('PLAN_LAND_ROOM_GB', 30)
+
+
+def reservation(tasks) -> int | None:
+    now = time.time()
+    return max((room_of(task) for task in tasks.values() if landing(task) and
+                (task['state'] != 'released' or now - task['ended'] < ROOM_AFTER)), default=None)
+
+
+def track_disk_wait(ledger, task, free) -> None:
+    if not landing(task) or task['state'] not in ('queued', 'waiting'):
+        return
+    waiting = free < floor_of(task)
+    if waiting == ('disk_wait' in task):
+        return
+    if waiting:
+        task['disk_wait'] = time.time()
+    else:
+        task.pop('disk_wait')
+    ledger.event(task, 'disk_wait:' + uuid.uuid4().hex, waiting=waiting, floor_gb=floor_of(task))
+    ledger.save()
 
 
 def identity(pid=None):
@@ -527,18 +582,41 @@ def room(ledger, task):
 
 
 def admissible(ledger, task) -> bool:
+    is_landing = landing(task)
     older = sum(other['lane'] == task['lane'] and other['state'] in ('queued', 'waiting')
-                and int(other['id']) < int(task['id']) for other in ledger.tasks.values())
-    return older < room(ledger, task)
+                and int(other['id']) < int(task['id']) and (not is_landing or landing(other))
+                for other in ledger.tasks.values())
+    if older >= room(ledger, task):
+        return False
+    if is_landing:
+        return free_gb() >= floor_of(task)
+    if task['lane'] == 'build' and (reserved := reservation(ledger.tasks)) is not None:
+        free = free_gb()
+        # Even unlimited slots keep younger builds behind one waiting for room.
+        floors = [floor_of(other) for other in ledger.tasks.values()
+                  if other['lane'] == 'build' and other['state'] in ('queued', 'waiting')
+                  and int(other['id']) < int(task['id']) and not landing(other)]
+        return free >= max([floor_of(task), *floors]) + reserved
+    return True
 
 
 def reconcile(ledger):
+    free = None
     for task in ledger.tasks.values():
         if task['state'] in UNCLAIMED and not wrapper_running(task):
             task.update(state='closing', outcome='cancelled', code=137)
             ledger.event(task, 'release_begin', outcome='cancelled')
             ledger.event(task, 'unclaimed', reason='no running wrapper unit before its claim')
             ledger.save()
+        if landing(task) and task['state'] in ('queued', 'waiting'):
+            if free is None:
+                free = free_gb()
+            track_disk_wait(ledger, task, free)
+            if 'disk_wait' in task and time.time() - task['disk_wait'] >= DISK_WAIT_LIMIT:
+                task.update(state='closing', outcome='refused', code=2, refusal=FLOOR_REFUSAL)
+                ledger.event(task, 'release_begin', outcome='refused')
+                ledger.event(task, 'refusal', reason='disk-floor')
+                ledger.save()
         if task['state'] == 'released':
             cleanup_transport(task)
             publish_receipt(ledger, task)
@@ -685,8 +763,10 @@ def install(interval):
     with locked() as ledger:
         env = {key: os.environ[key] for key in ('PATH', 'DEV_ROOT', 'DEV_TMP', 'HEAVY_BOOT_ID_FILE', 'HEAVY_RECOVERY_FIXTURE', 'XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS') if key in os.environ}
         env['DEV_ROOT'], env['DEV_TMP'] = str(ROOT), str(TMP)
-        if os.environ.get('HEAVY_RECOVERY_FIXTURE') == '1' and 'HEAVY_FAULT_DIR' in os.environ:
-            env['HEAVY_FAULT_DIR'] = os.environ['HEAVY_FAULT_DIR']
+        if os.environ.get('HEAVY_RECOVERY_FIXTURE') == '1':
+            for key in ('HEAVY_FAULT_DIR', 'HEAVY_DISK_FREE_FILE'):
+                if key in os.environ:
+                    env[key] = os.environ[key]
         environment_file(BASE / 'reconcile.env', env)
         units = Path(os.environ.get('XDG_CONFIG_HOME', str(Path.home() / '.config'))) / 'systemd/user'
         if any(char in str(path) for path in (BASE, units, KIT) for char in '\r\n'):
@@ -797,6 +877,8 @@ def submit(args, lane, tail_lines, exclusive):
         task = {'token': token, 'id': str(number), 'wrapper_unit': wrapper_unit(token), 'lane': lane,
                 'exclusive': exclusive, 'weight': weight(lane),
                 'args': args, 'label': label,
+                'floor_gb': setting('PLAN_MIN_DISK_GB', 40),
+                'room_gb': setting('PLAN_LAND_ROOM_GB', 30),
                 'repo': str(Path.cwd()), 'tree': tree, 'commit': commit, 'policy': os.environ.get('SKEIN_GATE_POLICY_ID', 'gate-policy-unavailable') if lane == 'gate' else 'build-' + jobs,
                 'boot': boot(), 'queue': QUEUE, 'unit': PREFIX + '-' + token + '.service',
                 'submitted': time.time(), 'state': 'queued', 'log': str(LOGS / (token + '.log')),
@@ -821,6 +903,7 @@ def submit(args, lane, tail_lines, exclusive):
             raise Refusal('cannot start the task wrapper unit')
     say(f"heavy: queued task {task['id']} in the {lane} lane token {token}", sys.stderr)
     warned, next_health, handled = False, 0.0, 0
+    disk_spell, room_spell = None, False
     while True:
         if received and not handled:
             # The cancel is durable before anything is printed.
@@ -834,7 +917,8 @@ def submit(args, lane, tail_lines, exclusive):
             say(f"heavy: interrupted again; leaving task {task['id']} token {token} "
                 'to the reconciler', sys.stderr)
             return CANCELLED
-        if time.monotonic() >= next_health:
+        check_health = time.monotonic() >= next_health
+        if check_health:
             failed = waiter_failure()
             if failed and not warned:
                 print(RECOVERY_DIAGNOSTIC, file=sys.stderr, flush=True)
@@ -843,13 +927,38 @@ def submit(args, lane, tail_lines, exclusive):
         # Atomic snapshots let clients observe completion without contending
         # with admission. The row marker follows the durable event/TSV flush.
         try:
-            task = json.loads((BASE / 'state.json').read_text())['tasks'][token]
+            snapshot = json.loads((BASE / 'state.json').read_text())
+            task = snapshot['tasks'][token]
         except (OSError, ValueError):
             print(RECOVERY_DIAGNOSTIC, file=sys.stderr, flush=True)
             return 2
+        if check_health:
+            spell = task.get('disk_wait') if task['state'] in ('queued', 'waiting') else None
+            free = None
+            if spell is not None and spell != disk_spell:
+                free = free_gb()
+                say(f"heavy: task {task['id']} waits for the disk floor: {free} GB free, below its floor "
+                    f"of {floor_of(task)} GB; refused after 20 minutes below it", sys.stderr)
+            disk_spell = spell
+            held = False
+            if not landing(task) and lane == 'build' and task['state'] in ('queued', 'waiting'):
+                reserved = reservation(snapshot['tasks'])
+                if reserved is not None:
+                    free = free_gb() if free is None else free
+                    held = free < floor_of(task) + reserved
+                    if held and not room_spell:
+                        say(f"heavy: task {task['id']} waits for a landing's room: {free} GB free, "
+                            f"starting at {floor_of(task) + reserved} GB", sys.stderr)
+            room_spell = held
         if task['state'] == 'released' and (BASE / 'receipts' / (token + '.json')).is_file():
             break
         time.sleep(0.1)
+    if task.get('refusal') == FLOOR_REFUSAL and not task.get('payload_started'):
+        result = run(['bash', '-c', 'set -euo pipefail; root=$1; tmp=$2; '
+                      'source "$3"; disk_floor heavy',
+                      'heavy-disk-floor', ROOT, TMP, KIT / 'kit.sh'])
+        if result.stderr:
+            say(result.stderr.rstrip(), sys.stderr)
     if task.get('refusal'):
         print('heavy: ' + task['refusal'], file=sys.stderr, flush=True)
     if task.get('outcome') == 'cancelled' and not handled:
@@ -866,6 +975,7 @@ def submit(args, lane, tail_lines, exclusive):
 
 
 def wrapper(token):
+    room_warned = False
     fault('claim', token)
     with locked() as ledger:
         reconcile(ledger)
@@ -887,6 +997,14 @@ def wrapper(token):
             if task['state'] != 'waiting':
                 time.sleep(0.1)
                 continue
+            if landing(task):
+                track_disk_wait(ledger, task, free_gb())
+            elif task['lane'] == 'build' and not room_warned:
+                reserved = reservation(ledger.tasks)
+                if reserved is not None and free_gb() < floor_of(task) + reserved:
+                    ledger.event(task, 'room_wait', floor_gb=floor_of(task), room_gb=reserved)
+                    ledger.save()
+                    room_warned = True
             ready = admissible(ledger, task)
             # An exclusive gate records its hold before draining live scopes.
             if ready and task['lane'] == 'gate' and task.get('exclusive', True):
@@ -1026,7 +1144,7 @@ def payload_disk_floor(token):
         task = ledger.tasks[token]
         if task['state'] == 'active':
             task.update(state='finishing', code=2, outcome='refused',
-                        refusal='disk floor refused before payload start')
+                        refusal=FLOOR_REFUSAL)
             ledger.event(task, 'refusal', reason='disk-floor')
             ledger.save()
     return False
@@ -1061,6 +1179,7 @@ def payload(token):
             time.sleep(min(5, max(0, settle - (time.monotonic() - start))))
         phase(token, 'settle_end')
         fault('settled', token)
+    fault('payload_floor', token)
     if not payload_disk_floor(token):
         return 2
     with locked() as ledger:
