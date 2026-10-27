@@ -2646,6 +2646,25 @@ def keep_check_writes_nothing(lab):
     assert not missing_records.exists() and not missing_tmp.exists()
 
 
+def keep_check_bounds_incomplete_private_key_markers(lab):
+    driver = f'''
+import runpy, time
+tool = runpy.run_path({str(SCRIPT)!r})
+marker = '-----' + 'BEGIN '
+size = 2 * 1024 * 1024
+text = (marker * (size // len(marker) + 1))[:size]
+start = time.perf_counter()
+assert tool['scan'](text) == []
+elapsed = time.perf_counter() - start
+assert elapsed < 2, f'2 MiB scan took {{elapsed:.3f}} seconds'
+print(f'2 MiB scan: {{elapsed:.3f}} seconds')
+'''
+    result = subprocess.run([sys.executable, '-I', '-S', '-c', driver], env=lab.env,
+                            capture_output=True, text=True, timeout=HUNG_TOOL_S)
+    assert result.returncode == 0, result.stderr
+    print(result.stdout.strip())
+
+
 def keep_key_rule_is_records(lab):
     # Compare the source literals without loading record or invoking its tools.
     qa = SCRIPT.read_text()
@@ -5770,7 +5789,8 @@ def hex_walk_builds_refuse_ambiguous_and_non_commit_objects(lab):
     assert state['main'] == commit
 
 
-CASES = (keep_check_reads_spaced_cookie_pairs, keep_check_reads_json_values_on_later_lines,
+CASES = (keep_check_bounds_incomplete_private_key_markers,
+         keep_check_reads_spaced_cookie_pairs, keep_check_reads_json_values_on_later_lines,
          keep_check_joins_shell_continuations, keep_check_reads_shell_escaped_spaces,
          keep_check_reads_combined_and_quoted_user_flags,
          keep_check_limits_link_parameters_to_query_or_fragment,

@@ -637,7 +637,7 @@ DOCUMENTS = ('brief.md', 'plan.md', 'notes.md', 'report.md')
 TREES = ('scripts', 'evidence')
 
 # record's SECRET (records.md 2)
-KEY = re.compile(r'-----BEGIN [^\n]*PRIVATE KEY-----|(?<![\w-])(?:gh[pousr]_[A-Za-z0-9_-]{20,}|github_pat_[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9_-]{20,})|xox[abpr]-|AKIA[A-Z0-9]{16}')
+KEY = re.compile(r'-----BEGIN [^\n-]*PRIVATE KEY-----|(?<![\w-])(?:gh[pousr]_[A-Za-z0-9_-]{20,}|github_pat_[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9_-]{20,})|xox[abpr]-|AKIA[A-Z0-9]{16}')
 JWT = re.compile(r'(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+')
 HEADER = re.compile(r'''(?<![\w-])(["']?)(?:Proxy-)?Authorization(["']?)\s*:\s*(["']?)[A-Za-z][A-Za-z0-9_-]*[ \t]+''', re.I)
 COOKIE = re.compile(r'''(?<![\w-])(["']?)(Set-)?Cookie(["']?)\s*:\s*(["']?)''', re.I)
