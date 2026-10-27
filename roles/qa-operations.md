@@ -320,7 +320,10 @@ machine.
 - **The GitHub and Claude walks** of rungs A and B0 wait for the user's
   word. So do the ladder's paused owners: rung B2, the Claude pair, and
   GitHub's remaining tasks.
-- **A held Claude login** waits for the user's sign-in.
+- **A held Claude login,** `claude`, is at rest in `logins` since 10-27
+  18:5xZ (the user signed Claude Code in, agents#11): a program's login,
+  used in place (qa-flow.md 10.2). The Claude walks it serves wait for
+  the user's word, as above.
 
 ## 10. Changes
 
@@ -363,3 +366,4 @@ Newest last, times UTC.
 - 10-27 19:0xZ: a recovery by 6.4 needs no yes: the director hears when
   it starts and when the login is back, and a departure from 6.4 waits
   for its yes (the director, the user wanting it out of QA's routine).
+- 10-27 18:5xZ: the held Claude login in custody (agents#11, the user's sign-in); its walks wait for the user's word.
