@@ -245,16 +245,25 @@ machine, in a private directory `E`, with temper's binary copied in:
   and to the director (qa-flow.md 10.3). Until then a pass's stuck login
   is in its notice to the director, and a walk's in its end post to
   whoever started it.
-- **One hand on the box:** design/upgrades-draft's owner alone touches
-  the deployment that holds the login, and nobody restarts it
-  meanwhile.
-- **The recovery:** the deployment's own build plus the fix alone (no
-  stored family moved), run once, alone, on its own config, data and
-  cache. A setting raised for it goes into that deployment's config
-  only, and is restored byte for byte after. Then the export, checked
-  by `stat` (a regular file, 0600, its size) and its sha256. A
-  deployment whose export hangs is stopped at once and never restarted
-  until the fix is in.
+- **One hand on the box:** the owner design/upgrades-draft names alone
+  touches the deployment that holds the login (with none named, the
+  director names one), and nobody restarts it meanwhile.
+- **In place, never copied:** the deployment is diagnosed and recovered
+  where it is. Its data is never copied, and no copy of it starts: a
+  copy holds the same refresh token, and whichever refreshes first
+  leaves the other dead (jig's `llm.md` 5.6). A diagnosis runs the
+  deployment's own commit (a debug build with throwaway diagnostics
+  allowed, never landed), one opener at a time.
+- **The recovery,** on the director's yes: the deployment's own build,
+  with one setting raised (1008, 1202) or the cause's fix alone on top
+  of that commit (1659, on a throwaway branch, never landed); never a
+  later build, and no stored family moved. It runs once, alone, on the
+  deployment's own config, data and cache. A setting raised for it
+  goes into that deployment's config only, and is restored byte for
+  byte after. Then the export, checked by `stat` (a regular file, 0600,
+  its size) and its sha256, and the box stopped with the login at rest.
+  A deployment whose export hangs is stopped at once and never
+  restarted until the fix is in.
 - **An export from a stopped deployment** is parked, not for v0.1.0
   (design/upgrades-draft, 10-27; jig's `llm.md` 10).
 - **10-27's four,** each recovered:
@@ -342,3 +351,7 @@ Newest last, times UTC.
 - 10-27 18:5xZ: sections 6 and 7 brought to what is built and what each
   coming piece adds: the reserve and `--now`, `qa walk`, `logins drop`,
   the stuck alert, `QA_STOP_SECONDS`, the rollbacks (design/qa-evidence).
+- 10-27 19:0xZ: 6.4 corrected to the day's recoveries: a setting raised
+  or the fix alone on the deployment's own commit, in place and never
+  copied, on the director's yes; the hand on the box the one
+  design/upgrades-draft names (design/upgrades-draft).
