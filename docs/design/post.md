@@ -267,18 +267,20 @@ overwrites another.
   without an end whose unit is gone (killed, out of memory, a reboot, a
   unit that never started), and those whose post failed. A run whose
   meta is under 2 minutes old is not listed: its unit may not have
-  started yet. A post failed only on exit 2: on exit 3 the mail is in
-  the caller's mailbox, so the end writes `post-failed` for exit 2
-  alone, and a `post-failed` from before that holding `queued, nobody
-  will wake it` counts as told.
+  started yet. A post failed on any exit but 0 and 3: on exit 3 the
+  mail is in the caller's mailbox, and another exit than post's own
+  (a crash, 127) leaves delivery unknown, so the end writes
+  `post-failed` for every exit but 0 and 3, and a `post-failed` from
+  before that holding `queued, nobody will wake it` counts as told.
   **`codex-run stale --post`** tells each one's caller once, as its end
   would have: a run whose post failed sends that post again, and a run
   whose unit is gone posts `run <id> failed stale: <why>` with the
   end's body. A post that goes through (exit 0 or 3: the mail is in the
   caller's mailbox) writes `told` in the run's directory, which takes it
-  off the list; one that doesn't leaves it for the next sweep. Nothing
-  else of the end is replayed: `runs.tsv` has no row for a run whose
-  unit died.
+  off the list; one that doesn't leaves it for the next sweep. It
+  prints `ID told: LINE` or `ID not told: LINE`, LINE post's own, and
+  exits 1 when any was not told. Nothing else of the end is replayed:
+  `runs.tsv` has no row for a run whose unit died.
   Each machine's tend runs it every 5 minutes, and the fleet watch
   raises a run still listed (fleet-watch.md 3.1, 4).
 

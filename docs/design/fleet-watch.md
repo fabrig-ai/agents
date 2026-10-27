@@ -303,7 +303,7 @@ machine's own.
 1. **The tools' parts land:** `tidy --targets`, `post wake` and
    `codex-run stale --post`, each with its fixture. Until a tend runs
    them, only the director's full `tidy` reaches step 9, and the end of
-   a run marks `post-failed` for exit 2 alone.
+   a run marks `post-failed` for every exit but 0 and 3.
 2. **`fleet probe` and `fleet room` land.** The director reads the
    machines with `fleet room` from then on, at its check and before
    placing an owner.
