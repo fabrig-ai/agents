@@ -189,9 +189,9 @@ overwrites another.
     (`record pull`; on failure it reads its clone as it stands) and
     reads each `missions/*/README.md`'s front matter. NAME is resumed
     when a mission whose `owner` is `NAME@MACHINE`, MACHINE this
-    machine, says `state: active`; or when no mission's `owner` names
-    NAME on any machine, nor could: `director` and the director's
-    helpers, `d/<what>`. A name that owns missions here, none of them
+    machine, says `state: active`; or when NAME is `director` or one of
+    its helpers, `d/<what>`, and no mission's `owner` names it. A name
+    that owns missions here, none of them
     active, is not resumed: exit 3, `queued, nobody will wake it:
     mission M is STATE` (paused, ended, abandoned, unknown). So is a
     mission's name (`o/`, `design/`, `p/`) that owns none here, its
