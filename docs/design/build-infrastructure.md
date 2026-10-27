@@ -290,6 +290,21 @@ is independent. Masked global settings do not require kache. Refusals give
 the caller the service/override remedy without printing configuration or
 environment values. Collection connects to the existing service.
 
+**The snapshot holds what is live** (10-27: ledgers of 6-11 MB and
+4,500 tasks, parsed by every waiting client ten times a second, cost
+each client half a core). A released task whose row is durable in the
+TSV shrinks, in the snapshot that saves it, to its token, number,
+state, code, `row_durable` and release time, enough for a late
+wrapper's refusal and for the release's replays; 24 hours after its
+release it leaves the snapshot. Its history is the TSV row, the receipt
+and the events, which every reader of the past reads instead. The next
+task number never goes back, so no number is reused.
+
+**A waiting client reads the snapshot at most once a second**, under
+the lock or not: while it waits for admission, and while its payload
+runs, when it may instead block on its launcher and read once at its
+end. Admission keeps submission order whatever the clients' timing.
+
 A gate's hold is the ledger's gate token: saved before draining starts,
 and cleared in the snapshot that commits the gate's release. While it is
 set no build and no other gate is admitted, across crashes and restarts
