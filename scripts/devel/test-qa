@@ -7,6 +7,8 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
+import secrets
 import shutil
 import socket
 import subprocess
@@ -94,6 +96,15 @@ class Lab:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text)
         return path
+
+    def scratch(self, files):
+        root = self.root / 'scratch'
+        root.mkdir(exist_ok=True)
+        for name, data in files.items():
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data if isinstance(data, bytes) else data.encode())
+        return root
 
     def publish(self, name, text):
         self.put(name, text)
@@ -1241,7 +1252,244 @@ def watch_leaves_a_login_its_pass_holds(lab):
     assert not (lab.tmp / 'qa/strays.json').exists()
 
 
-CASES = (watch_gives_back_a_login_held_without_a_pass,
+def keep_check_refuses_each_rule(lab):
+    value = secrets.token_hex(8)
+    token = 'gh' + 'p_' + secrets.token_hex(18)
+    private = '-----BEGIN ' + 'OPENSSH PRIVATE KEY-----'
+    jwt = 'ey' + 'J' + secrets.token_hex(8) + '.body.signature'
+    files = {'brief.md': 'QA brief\n', 'plan.md': 'QA plan\n',
+             'evidence/nul.txt': b'a\0b', 'evidence/latin.txt': b'caf\xe9\n',
+             'evidence/forge-cookies': 'plain\n', 'scripts/token-form.html': 'plain\n',
+             'evidence/auth.json': '{}\n', 'evidence/login.txt': 'plain\n',
+             'evidence/request.headers': 'plain\n',
+             'evidence/keys.txt': 'plain\n' + token + '\n' + private + '\n',
+             'evidence/signed.txt': jwt + '\n',
+             'evidence/http.txt': f'> Authorization: Bearer {value}\n< Set-Cookie: sid={value}; Path=/\nAuthorization: Bearer <placeholder>{value}\n',
+             'evidence/jar.txt': '# Netscape HTTP Cookie File\n' + f'.forge.test\tTRUE\t/\tFALSE\t0\tsid\t{value}\n',
+             'evidence/urls.txt': f'https://qa:{value}@forge.test/x\nhttps://forge.test/cb?state=1&code={value}\nhttps://forge.test/#signature={value}\n',
+             'evidence/forms.txt': f'{{"token": "{value}"}}\nPASSWORD={value}\npassword: {value}\nuser=qa&passwd={value}\ntoken=<placeholder>{value}\ntoken="TOKEN"{value}\n',
+             'scripts/fetch.sh': f'curl -u qa:{value} https://forge.test/api\ncurl -u qa:<placeholder>{value} https://forge.test/api\n',
+             'evidence/' + token: 'plain\n'}
+    shapes = [(f'"authorization": "Bearer {value}"', 'header'),
+              (f'Proxy-Authorization: Basic {value}', 'header'),
+              (f'Cookie: first=VALUE; sid={value}', 'header'),
+              (f'Authorization: Bearer TOKEN&{value}', 'header'),
+              (f'Authorization: Bearer "{value}', 'header'),
+              (f'token=${{TOKEN}}{value}', 'assigned'),
+              (f'token=`{value}`', 'assigned'),
+              (f'token="{value}', 'assigned'),
+              (f'"token": "{value}', 'assigned'),
+              (f'curl --user=qa:{value} https://forge.test', 'user'),
+              (f'curl -uqa:{value} https://forge.test', 'user'),
+              (f'curl --user "qa:{value}" https://forge.test', 'user'),
+              (f'curl -u qa:`{value}` https://forge.test', 'user'),
+              ('password: ' + '<x>' * 100 + ' suffix', 'assigned'),
+              ('token=' + '<' * 30000, 'assigned'),
+              ('token=< ' * 10000, 'assigned'),
+              ('password: ' + ' ' * 30000 + value, 'assigned')]
+    files['evidence/shapes.txt'] = '\n'.join(line for line, _ in shapes)
+    scratch = lab.scratch(files)
+    (scratch / 'evidence/a-link').symlink_to(lab.root / 'outside')
+    (lab.root / 'outside').write_text(value)
+    (scratch / 'evidence/hard-a.txt').write_text('plain\n')
+    os.link(scratch / 'evidence/hard-a.txt', scratch / 'evidence/hard-b.txt')
+    os.mkfifo(scratch / 'evidence/pipe')
+    # Refused directories hide everything beneath them, including unsafe names.
+    (scratch / 'evidence/password').mkdir()
+    (scratch / 'evidence/password' / token).write_text(value)
+    unsafe = 'bad\nname'
+    (scratch / 'evidence' / unsafe).write_text(value)
+    binary_name = os.fsdecode(b'bad-\xff')
+    (scratch / 'evidence' / binary_name).write_text(value)
+    children = sorted(os.listdir(scratch / 'evidence'), key=os.fsencode)
+    expected = {f'refused: evidence/{name}: kind' for name in ('a-link', 'hard-a.txt', 'hard-b.txt', 'pipe')}
+    expected.update(f'refused: {name}: binary' for name in ('evidence/nul.txt', 'evidence/latin.txt'))
+    expected.update(f'refused: {name}: name' for name in
+                    ('evidence/forge-cookies', 'scripts/token-form.html', 'evidence/auth.json',
+                     'evidence/login.txt', 'evidence/request.headers', 'evidence/password'))
+    expected.add(f'refused: evidence/, entry {children.index(token) + 1}: key')
+    expected.update(f'refused: evidence/shapes.txt, line {line}: {rule}'
+                    for line, (_, rule) in enumerate(shapes, 1))
+    for name in (unsafe, binary_name):
+        label = f'evidence/, entry {children.index(name) + 1}'
+        expected.add(f'refused: {label}: binary')
+    for name, lines, rule in [('evidence/keys.txt', (2, 3), 'key'),
+                              ('evidence/signed.txt', (1,), 'jwt'),
+                              ('evidence/http.txt', (1, 2, 3), 'header'),
+                              ('evidence/jar.txt', (1, 2), 'cookie-jar'),
+                              ('evidence/urls.txt', (1, 2, 3), 'link'),
+                              ('evidence/forms.txt', (1, 2, 3, 4, 5, 6), 'assigned'),
+                              ('scripts/fetch.sh', (1, 2), 'user')]:
+        expected.update(f'refused: {name}, line {line}: {rule}' for line in lines)
+    result = lab.run('keep', '--check', str(scratch), status=2)
+    assert set(line for line in result.stdout.splitlines() if line.startswith('refused:')) == expected, result.stdout
+    assert result.stderr == f'qa: copy refused ({len(expected)})\n'
+    assert f'  evidence/, entry {children.index(token) + 1} 6\n' in result.stdout
+    for planted in (value, token, private, jwt, unsafe, binary_name):
+        assert planted not in result.stdout + result.stderr
+        assert all(planted not in path.read_text(errors='replace') for path in lab.records.rglob('*.md'))
+        for path in (lab.post_log, lab.root / 'tools.jsonl'):
+            assert not path.exists() or planted not in path.read_text()
+    assert not lab.sent() and not lab.calls('post')
+
+
+def keep_check_passes_plain_captures(lab):
+    files = {'evidence/usage.json': json.dumps({'tokens': {'input': 1200, 'output': 300},
+                                             'secret': False, 'sha': 'a' * 40}) + '\n',
+             'evidence/help.txt': '--password-file FILE\n',
+             'evidence/jar.txt': '#HttpOnly_.forge.test\tTRUE\t/\tFALSE\t0\tsid\tVALUE\r\n',
+             'plan.md': '''curl -H "Authorization: token TOKEN"
+Authorization: Bearer $TOKEN
+Authorization: Bearer ${TOKEN}
+curl -H @FILE ...
+curl -u qa:PASSWORD ...
+"password": ""
+"token": null
+secret=***
+token=<the new token>
+password: ...
+Cookie: NAME=VALUE
+Cookie: first=VALUE; second=TOKEN
+Set-Cookie: sid=VALUE; Path=/; HttpOnly
+{"authorization": "Bearer TOKEN"}
+{"Cookie": "NAME=VALUE"}
+curl --user "qa:PASSWORD";
+curl -u qa:<curl -u qa:placeholder>
+https://forge.test/cb?code=
+https://forge.test/x?page=2&per_page=100
+''', 'evidence/session-status.txt': '200 OK\n', 'evidence/tokens.txt': '1200\n',
+             'evidence/id_rsa.pub': 'public\n', 'evidence/long.txt': 'x' * 100000,
+             'evidence/placeholders.txt': 'token=<' * 10000 + '>',
+             'scripts/run.sh': 'curl -H @auth.header https://forge.test/api\n'}
+    scratch = lab.scratch(files)
+    # Outside the allowlist, even names with secret shapes stay unlisted.
+    ignored = 'gh' + 'p_' + secrets.token_hex(18)
+    lab.scratch({ignored: secrets.token_hex(8), 'deployment/bin': b'\0'})
+    result = lab.run('keep', '--check', str(scratch))
+    size = sum(len(text.encode()) for text in files.values())
+    assert result.stdout.splitlines() == [f'qa keep: {len(files)} files, {size} bytes'] + [
+        f'  {name} {len(files[name].encode())}' for name in sorted(files)], result.stdout
+    assert not result.stderr and ignored not in result.stdout
+
+
+def keep_check_reads_one_snapshot(lab):
+    first, changed, outside = (secrets.token_hex(8) for _ in range(3))
+    scratch = lab.scratch({'evidence/a.txt': first, 'evidence/b.txt': 'b', 'evidence/c.txt': 'c'})
+    target = lab.root / 'outside'
+    target.write_text(outside)
+    driver = f'''
+import json, os, runpy
+from pathlib import Path
+tool = runpy.run_path({str(SCRIPT)!r})
+scratch = Path({str(scratch)!r})
+original = os.open
+def swapped(path, flags, *args, **kwargs):
+    if path == 'b.txt':
+        (scratch / 'evidence/a.txt').write_text({changed!r})
+        (scratch / 'evidence/c.txt').unlink()
+        (scratch / 'evidence/c.txt').symlink_to({str(target)!r})
+    return original(path, flags, *args, **kwargs)
+os.open = swapped
+snapshot = tool['Snapshot'].read(scratch, 2048)
+print(json.dumps({{'files': {{k: v.decode() for k, v in snapshot.files.items()}},
+                   'refusals': [str(r) for r in snapshot.refusals]}}))
+'''
+    result = subprocess.run([sys.executable, '-I', '-S', '-c', driver], env=lab.env,
+                            capture_output=True, text=True, timeout=HUNG_TOOL_S)
+    assert result.returncode == 0, result.stderr
+    row = json.loads(result.stdout)
+    assert row == {'files': {'evidence/a.txt': first, 'evidence/b.txt': 'b'},
+                   'refusals': ['evidence/c.txt: kind']}, row
+    assert outside not in result.stdout + result.stderr and changed not in result.stdout + result.stderr
+    shutil.rmtree(scratch / 'evidence')
+    (scratch / 'evidence').symlink_to(lab.root, target_is_directory=True)
+    result = lab.run('keep', '--check', str(scratch), status=2)
+    assert result.stdout == 'qa keep: 0 files, 0 bytes\nrefused: evidence: kind\n'
+    assert outside not in result.stdout + result.stderr
+    (scratch / 'evidence').unlink()
+    (scratch / 'evidence').write_text('not a tree')
+    (scratch / 'brief.md').mkdir()
+    result = lab.run('keep', '--check', str(scratch), status=2)
+    assert result.stdout == ('qa keep: 0 files, 0 bytes\nrefused: brief.md: kind\n'
+                             'refused: evidence: kind\n')
+
+
+def keep_check_leaves_out_past_the_cap(lab):
+    token = 'gh' + 'p_' + secrets.token_hex(18)
+    scratch = lab.scratch({'brief.md': 'b' * 150, 'plan.md': 'p' * 150,
+                           'scripts/a': 'a' * 200, 'scripts/b': 'b' * 200,
+                           'evidence/a': 'a' * 200, 'evidence/b': 'b' * 200,
+                           'evidence/c': token.ljust(200, '.')})
+    extra = {'QA_EVIDENCE_KIB': '1'}
+    result = lab.run('keep', '--check', str(scratch), extra=extra)
+    assert result.stdout == ('qa keep: 4 files, 700 bytes\n  brief.md 150\n  plan.md 150\n'
+                             '  scripts/a 200\n  scripts/b 200\n'
+                             'left out: evidence/, 3 files, 600 bytes, past 1 KiB\n'), result.stdout
+    assert token not in result.stdout + result.stderr
+    lab.scratch({'scripts/a': 'a' * 600})
+    result = lab.run('keep', '--check', str(scratch), extra=extra)
+    assert result.stdout == ('qa keep: 2 files, 300 bytes\n  brief.md 150\n  plan.md 150\n'
+                             'left out: evidence/, 3 files, 600 bytes, past 1 KiB\n'
+                             'left out: scripts/, 2 files, 800 bytes, past 1 KiB\n'), result.stdout
+    assert token not in result.stdout + result.stderr
+    lab.scratch({'brief.md': 'b' * 950})
+    result = lab.run('keep', '--check', str(scratch), status=2, extra=extra)
+    assert 'refused: documents: cap\n' in result.stdout
+    assert result.stderr == 'qa: copy refused (1)\n' and token not in result.stdout + result.stderr
+    # The file setting is read without a write, and the environment wins.
+    (lab.tmp / 'machine.env').write_text('QA_EVIDENCE_KIB=1\n')
+    assert 'documents: cap' in lab.run('keep', '--check', str(scratch), status=2).stdout
+    lab.run('keep', '--check', str(scratch), extra={'QA_EVIDENCE_KIB': '4'}, status=2)
+    result = lab.run('keep', '--check', str(scratch), status=2, extra={'QA_EVIDENCE_KIB': '0'})
+    assert result.stderr == 'qa: QA_EVIDENCE_KIB must be positive\n'
+    shutil.rmtree(scratch / 'scripts')
+    shutil.rmtree(scratch / 'evidence')
+    lab.scratch({'brief.md': 'b' * 874})
+    result = lab.run('keep', '--check', str(scratch), extra=extra)
+    assert result.stdout == 'qa keep: 2 files, 1024 bytes\n  brief.md 874\n  plan.md 150\n'
+
+
+def keep_check_writes_nothing(lab):
+    scratch = lab.scratch({'brief.md': 'brief\n', 'evidence/plain.txt': 'plain\n'})
+    missing_records, missing_tmp = lab.root / 'no-records', lab.root / 'no-tmp'
+    shutil.rmtree(lab.origins)
+    extra = {'RECORDS': str(missing_records), 'DEV_TMP': str(missing_tmp)}
+    def listing():
+        return {str(p.relative_to(scratch)): (p.stat().st_size, p.stat().st_mtime_ns)
+                for p in [scratch, *scratch.rglob('*')]}
+    before = listing()
+    tools = lab.root / 'tools.jsonl'
+    previous = tools.read_bytes() if tools.exists() else b''
+    result = lab.run('keep', '--check', str(scratch), extra=extra)
+    assert result.stdout.startswith('qa keep: 2 files, 12 bytes\n')
+    assert not missing_records.exists() and not missing_tmp.exists() and listing() == before
+    assert (tools.read_bytes() if tools.exists() else b'') == previous
+    for name in ('missing', 'linked', 'regular'):
+        path = lab.root / name
+        if name == 'linked':
+            path.symlink_to(scratch, target_is_directory=True)
+        elif name == 'regular':
+            path.write_text('plain')
+        result = lab.run('keep', '--check', str(path), status=2, extra=extra)
+        assert str(path) in result.stderr and not result.stdout
+    lab.run('keep', status=2, extra=extra)
+    lab.run('keep', '--check', str(scratch), status=2, extra=dict(extra, QA_EVIDENCE_KIB='bad'))
+    assert not missing_records.exists() and not missing_tmp.exists()
+
+
+def keep_key_rule_is_records(lab):
+    # Compare the source literals without loading record or invoking its tools.
+    qa = SCRIPT.read_text()
+    record = (KIT / 'record').read_text()
+    key, = re.findall(r'^KEY = re.compile\((.+)\)$', qa, re.M)
+    secret, = re.findall(r'^SECRET = re.compile\((.+)\)$', record, re.M)
+    assert key == secret
+
+
+CASES = (keep_check_refuses_each_rule, keep_check_passes_plain_captures,
+         keep_check_reads_one_snapshot, keep_check_leaves_out_past_the_cap,
+         keep_check_writes_nothing, keep_key_rule_is_records,
+         watch_gives_back_a_login_held_without_a_pass,
          watch_posts_once_for_a_login_out_with_no_pass,
          watch_leaves_a_login_its_pass_holds,
          rung_records_the_opening,
