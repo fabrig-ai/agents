@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 import fcntl
 import json
 import os
+import runpy
 from pathlib import Path
 import shlex
 import shutil
@@ -13,6 +14,7 @@ import subprocess
 import sys
 import time
 from urllib.parse import quote
+from unittest.mock import patch
 
 import case_runner
 
@@ -429,6 +431,109 @@ def detached(lab):
     lab.git(lab.a, 'worktree', 'add', '--detach', str(protected), lab.base)
     assert lab.run('agents') == ''
     assert protected.exists()
+
+
+def bisect_in_progress(lab):
+    for number in range(3):
+        lab.put(lab.a / 'file', f'advance {number}\n')
+        lab.commit(lab.a, f'advance {number}')
+    lab.git(lab.a, 'push', 'origin', 'main')
+    work = lab.tmp / 'owners' / 'active' / 'bisect'
+    lab.git(lab.a, 'worktree', 'add', '--detach', str(work), 'main')
+    lab.git(work, 'bisect', 'start', 'main', lab.base)
+    assert lab.git(work, 'rev-parse', 'HEAD') != lab.git(lab.a, 'rev-parse', 'main')
+    log = Path(lab.git(work, 'rev-parse', '--path-format=absolute', '--git-path', 'BISECT_LOG'))
+    refs = Path(lab.git(work, 'rev-parse', '--path-format=absolute', '--git-path', 'refs/bisect'))
+    assert log.is_file() and refs.is_dir()
+    text = lab.run('agents')
+    assert work.exists() and f'kept worktree {work}: bisect in progress' in text, text
+    # Either marker alone protects this worktree; refs are per-worktree.
+    saved = log.read_text()
+    log.unlink()
+    text = lab.run('agents')
+    assert work.exists() and f'kept worktree {work}: bisect in progress' in text, text
+    shutil.rmtree(refs)
+    log.write_text(saved)
+    text = lab.run('agents')
+    assert work.exists() and f'kept worktree {work}: bisect in progress' in text, text
+    lab.git(work, 'bisect', 'reset')
+    text = lab.run('agents')
+    assert not work.exists() and f'deleted worktree {work}' in text, text
+
+
+def bisect_clone(lab):
+    for number in range(3):
+        lab.put(lab.a / 'file', f'advance {number}\n')
+        lab.commit(lab.a, f'advance {number}')
+    lab.git(lab.a, 'push', 'origin', 'main')
+    ended = lab.readme('ended', 'ended')
+    clone = ended / 'copy'
+    lab.git(lab.root, 'clone', str(lab.origins['agents']), str(clone))
+    lab.git(clone, 'bisect', 'start', 'main', lab.base)
+    text = lab.run('--mission', 'ended', status=1)
+    assert clone.exists() and f'kept worktree {clone}: bisect in progress' in text, text
+    lab.git(clone, 'bisect', 'reset')
+    text = lab.run('--mission', 'ended')
+    assert not ended.exists() and f'deleted mission {ended}' in text, text
+
+
+def proc_gone(lab, site):
+    held = runpy.run_path(str(SCRIPT))['held']
+    watched = lab.root / 'watched'
+    missing = lab.root / 'unheld'
+    procs = [lab.root / 'proc' / str(pid) for pid in (90000001, 90000002)]
+    for proc in procs:
+        (proc / 'fd').mkdir(parents=True)
+        (proc / 'cwd').symlink_to(watched if proc == procs[1] else lab.root)
+    (procs[0] / 'fd' / '0').symlink_to(lab.root)
+    original_iterdir, original_stat, original_readlink = Path.iterdir, Path.stat, os.readlink
+    hits = []
+
+    def disappear(path):
+        hits.append(path)
+        raise ProcessLookupError(3, 'No such process', str(path))
+
+    def iterdir(path):
+        if path == Path('/proc'):
+            return iter(procs)
+        if site == 'fds' and path == procs[0] / 'fd':
+            # Raise during iteration, as a process may exit after opening fd/.
+            def entries():
+                disappear(path)
+                yield
+            return entries()
+        return original_iterdir(path)
+
+    def stat(path, *args, **kwargs):
+        if site == 'stat' and path == procs[0]:
+            disappear(path)
+        return original_stat(path, *args, **kwargs)
+
+    def readlink(path, *args, **kwargs):
+        if path == procs[0] / ('cwd' if site == 'cwd' else 'fd/0') and site in ('cwd', 'link'):
+            disappear(path)
+        return original_readlink(path, *args, **kwargs)
+
+    with patch.object(Path, 'iterdir', iterdir), patch.object(Path, 'stat', stat), patch.object(os, 'readlink', readlink):
+        assert held(watched) == f'held by process {procs[1].name}'
+        assert held(missing) == ''
+    assert len(hits) == 2, (site, hits)
+
+
+def proc_stat_gone(lab):
+    proc_gone(lab, 'stat')
+
+
+def proc_fds_gone(lab):
+    proc_gone(lab, 'fds')
+
+
+def proc_cwd_gone(lab):
+    proc_gone(lab, 'cwd')
+
+
+def proc_link_gone(lab):
+    proc_gone(lab, 'link')
 
 
 def outside_worktrees(lab):
@@ -956,6 +1061,7 @@ def kept_proofs(lab):
         ('old', 25, False, 'valid', True),
         ('landed', 1, True, 'valid', True),
         ('young', 1, False, 'valid', False),
+        ('bisect', 25, False, 'bisect', False),
         ('locked', 25, False, 'locked', False),
         ('held', 25, False, 'held', False),
         ('unnamed', 25, False, 'unnamed', False),
@@ -989,6 +1095,8 @@ def kept_proofs(lab):
                 lab.git(lab.a, 'push', 'origin', 'main')
             entry = dict(base=lab.base, commit=commit, tree=lab.git(path, 'rev-parse', 'HEAD^{tree}'),
                          pin_only=mode != 'non-pin', worktree=str(path))
+            if mode == 'bisect':
+                lab.git(path, 'bisect', 'start', '--no-checkout', 'HEAD', lab.base)
             if mode == 'replacement-token':
                 lab.git(path, 'branch', '-m', f'land-set/{index + len(rows):032x}/agents')
                 branch = lab.git(path, 'branch', '--show-current')
@@ -1041,6 +1149,8 @@ def kept_proofs(lab):
             if mode != 'unnamed':
                 assert proof_file.read_text() == source, mode
             assert (lock_path.stat().st_ino if lock_path.exists() else None) == inode, mode
+            if mode == 'bisect':
+                assert f'kept worktree {path}: bisect in progress' in text, text
             if mode in ('locked', 'held', 'missing-lock'):
                 assert f'kept worktree {path}:' in text, (mode, text)
             if remove:
@@ -1638,7 +1748,8 @@ def empty_tmp(lab):
 CASES = (checkouts_pinned_kept, checkouts_recent_and_held, checkouts_not_in_target,
          checkouts_no_heavy, checkouts_dry_run, checkouts_db_untouched,
          checkouts_failure_continues, checkouts_bad_lock, copies, lockfile_conflicts, lockfile_tree, lockfile_patches, lockfile_source,
-         amended, conflict_copy, marks, patch_fallback, worktrees, dirty, detached, outside_worktrees, missions,
+         amended, conflict_copy, marks, patch_fallback, worktrees, dirty, detached, bisect_in_progress, bisect_clone,
+         proc_stat_gone, proc_fds_gone, proc_cwd_gone, proc_link_gone, outside_worktrees, missions,
          mission_work, evidence, mission_clone_worktrees, old_directories, old_work, scripts, held_file,
          script_boundaries, cargo_home_scripts, fixture_evidence, evidence_marks, evidence_unreadable,
          enclosing_git, symlinks, qa_is_a_tools_entry, unknown, dry_run, scope, fetch_failure, push_failure,

@@ -71,6 +71,18 @@ def worktree_list(path):
     return result
 
 
+def bisecting(path):
+    # Bisect refs belong to this worktree, not its shared common Git dir.
+    git_dir = Path(out(path, 'rev-parse', '--path-format=absolute', '--git-dir'))
+    if (git_dir / 'BISECT_LOG').exists():
+        return True
+    # Reset can leave an empty refs/bisect directory behind.
+    try:
+        return any((git_dir / 'refs/bisect').iterdir())
+    except FileNotFoundError:
+        return False
+
+
 def held(path):
     # Read links only, never another process's environment or file contents.
     for proc in Path('/proc').iterdir():
@@ -82,16 +94,16 @@ def held(path):
             links = [proc / 'cwd']
             try:
                 links.extend((proc / 'fd').iterdir())
-            except (FileNotFoundError, PermissionError):
+            except (FileNotFoundError, ProcessLookupError, PermissionError):
                 pass
             for link in links:
                 try:
                     target = os.readlink(link)
                     if target.startswith('/') and inside(Path(target.removesuffix(' (deleted)')), path):
                         return f'held by process {proc.name}'
-                except (FileNotFoundError, PermissionError):
+                except (FileNotFoundError, ProcessLookupError, PermissionError):
                     pass
-        except (FileNotFoundError, PermissionError):
+        except (FileNotFoundError, ProcessLookupError, PermissionError):
             pass
     return ''
 
@@ -268,6 +280,8 @@ class Tidy:
 
     def worktree_guard(self, repo, wt):
         path = wt['path']
+        if bisecting(path):
+            return 'bisect in progress'
         if path == repo.path or wt is repo.worktrees[0]:
             return 'primary checkout'
         if 'locked' in wt:
@@ -386,7 +400,7 @@ class Tidy:
                                   'proved HEAD on origin/main' if repo.on_main(wt['HEAD']) else '')
                         if not reason:
                             continue
-                        busy = held(path)
+                        busy = 'bisect in progress' if bisecting(path) else held(path)
                         if busy:
                             self.keep('worktree', path, busy)
                             continue
