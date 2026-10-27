@@ -673,6 +673,11 @@ elif name == 'systemctl':
             subprocess.run([str(on_stop)], cwd=on_stop.parent, stdin=subprocess.DEVNULL, timeout=60)
         end(run, 'codex-run: the run wrote no report and no last message; exit 143.\n', 143)
 elif name == 'logins':
+    if args[0] == 'take' and config.get('delay_take'):
+        (root / 'take-waiting').write_text(str(os.getpid()))
+        while not (root / 'allow-take').exists():
+            time.sleep(0.01)
+        config = json.loads((root / 'tools.json').read_text())
     held = set(config.get('logins_held', []))
     holders = {login: config.get('login_holders', {}).get(login, 'qa-watch') for login in held}
     if args == ['list']:
@@ -2112,11 +2117,11 @@ def a_hung_systemctl_bounds_the_check(lab):
     first, unit, pid, second, other_unit, other_pid = finished_pair(lab)
     # Fail both list and show independently; keep the first held between checks.
     bounded = '''original = tool['command']
-def command(argv, cwd=None, timeout=None):
+def command(argv, cwd=None, timeout=None, pass_fds=()):
     if str(argv[0]).endswith('/systemctl'):
         assert timeout == 30
         timeout = 1
-    return original(argv, cwd=cwd, timeout=timeout)
+    return original(argv, cwd=cwd, timeout=timeout, pass_fds=pass_fds)
 tool['main'].__globals__['command'] = command
 '''
     for operation in ('list-units', 'show'):
@@ -2728,7 +2733,7 @@ class ReadyPopen(original_popen):
         return super().communicate(input=input, timeout=timeout)
 subprocess.Popen = ReadyPopen
 original = tool['command']
-def command(argv, cwd=None, timeout=None):
+def command(argv, cwd=None, timeout=None, pass_fds=()):
     name = str(argv[0]).rsplit('/', 1)[-1]
     expected = {'git': 300, 'record': 300, 'systemctl': 30, 'logins': 60,
                 'post': 60, 'landings': 120, 'codex-run': 120}
@@ -2736,7 +2741,7 @@ def command(argv, cwd=None, timeout=None):
     operation = name + ':' + str(argv[1] if len(argv) > 1 else '')
     if operation in HUNG:
         timeout = 0.3
-    return original(argv, cwd=cwd, timeout=timeout)
+    return original(argv, cwd=cwd, timeout=timeout, pass_fds=pass_fds)
 tool['main'].__globals__['command'] = command
 """
 
@@ -2825,14 +2830,14 @@ def timed_out_repository_and_record_calls_leave_work_recoverable(lab):
     lab.env['QA_SLOTS'] = '2'
     # Kill a real command group under the caller's required production deadline.
     patch = """original = tool['command']
-def command(argv, cwd=None, timeout=None):
+def command(argv, cwd=None, timeout=None, pass_fds=()):
     name = str(argv[0]).rsplit('/', 1)[-1]
     cut = (name == 'record' and str(argv[1]) in RECORD
            or name == 'git' and OPERATION in argv and any('temper' in str(arg) for arg in argv))
     if cut:
         assert timeout == 300, (argv, timeout)
         return original([sys.executable, '-S', '-c', 'import time; time.sleep(600)'], timeout=0.2)
-    return original(argv, cwd=cwd, timeout=timeout)
+    return original(argv, cwd=cwd, timeout=timeout, pass_fds=pass_fds)
 tool['main'].__globals__['command'] = command
 """
     result = driven_watch(lab, "RECORD = ('pull',)\nOPERATION = 'clone'\n" + patch)
@@ -3913,6 +3918,186 @@ def a_walk_reads_its_inventory_strictly(lab):
     assert lab.calls('logins') == [['list']] and not lab.walk_states() and not lab.calls('codex-run')
 
 
+def a_surviving_launcher_keeps_custody_past_the_grace(lab):
+    a_surviving_launcher_keeps_custody_until_its_unit_exists(lab, past_grace=True)
+
+
+def a_unit_created_during_launcher_scan_keeps_its_custody(lab):
+    lab.walk('b0', now='2026-10-27T08:00:00Z')
+    walk_directory, walk = lab.walk_state()
+    lab.rung('temper', REAL, CHATGPT)
+    lab.waiting(1)
+    lab.watch(now='2026-10-27T08:00:00Z')
+    directory, state = lab.watch_state()
+    state.update(finished=True, ended=state['started'])
+    (directory / 'pass.json').write_text(json.dumps(state))
+    for saved in (walk, state):
+        run = lab.tmp / 'codex-run' / saved['run']
+        (run / 'unit').unlink()
+        clock = datetime(2026, 10, 27, 8, tzinfo=timezone.utc).timestamp()
+        os.utime(run / 'meta', (clock, clock))
+    patch = '''original = tool['Watch'].launcher_alive
+def launcher_alive(self, meta):
+    result = original(self, meta)
+    assert result is False
+    (meta.parent / 'unit').touch()
+    return result
+tool['Watch'].launcher_alive = launcher_alive
+tool['main'].__globals__['timestamp'] = lambda: '2026-10-27T08:11:00Z'
+'''
+    driven_watch(lab, patch)
+    current_walk = lab.walk_state()[1]
+    current_pass = json.loads((directory / 'pass.json').read_text())
+    assert current_walk['stage'] == 'running' and not current_walk['released'] and not current_walk['given']
+    assert not current_pass.get('released') and not current_pass['given']
+    assert not any(args[0] == 'give' for args in lab.calls('logins'))
+
+
+def orphaned_take_keeps_admission(lab, mode):
+    lab.env['QA_WALK_KINDS'] = 'forgejo=1:chatgpt'
+    if mode == 'take':
+        args = ['take', 'forgejo', '--as', 'walk/forgejo/manual']
+    elif mode == 'watch':
+        lab.rung('temper', REAL, CHATGPT)
+        lab.waiting(1)
+        args = ['watch', '--director', 'director@fixture', '--once']
+    else:
+        brief = lab.tmp / 'qa-focused/rung-b0-brief.md'
+        brief.parent.mkdir(parents=True)
+        brief.write_text('Admission fixture.\n')
+        args = ['walk', 'temper', 'b0']
+        if mode == 'resume':
+            lab.walk('b0')
+            directory, state = lab.walk_state()
+            state = pause_walk(lab, directory, state)
+            args += ['--resume', state['walk'], '--build', 'main']
+    lab.configure(delay_take=True)
+    with (lab.root / 'first-output').open('w') as output, (lab.root / 'second-output').open('w') as second_output:
+        starter = subprocess.Popen([str(SCRIPT), *args], env=lab.env, cwd=lab.root,
+                                   stdin=subprocess.DEVNULL, stdout=output, stderr=output)
+        child = second = None
+        try:
+            waiting = lab.root / 'take-waiting'
+            wait_for(waiting.exists)
+            child = int(waiting.read_text())
+            os.kill(child, signal.SIGSTOP)
+            starter.kill()
+            assert starter.wait(timeout=10) == -signal.SIGKILL and alive(child)
+            lock = lab.tmp / 'qa' / ('watch.lock' if mode == 'watch' else 'walks.lock')
+            with lock.open('a') as probe:
+                try:
+                    fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    pass
+                else:
+                    raise AssertionError('orphan take lost its admission lock')
+            calls = lab.calls('logins')
+            if mode == 'watch':
+                result = lab.watch(status=2)
+                assert 'another service runs' in result.stderr
+            else:
+                marker = lab.root / 'second-waiting'
+                driver = f'''import runpy, sys
+from pathlib import Path
+tool = runpy.run_path({str(SCRIPT)!r})
+original = tool['fcntl'].flock
+def flock(fd, operation):
+    if operation == tool['fcntl'].LOCK_EX:
+        Path({str(marker)!r}).touch()
+    return original(fd, operation)
+tool['fcntl'].flock = flock
+sys.exit(tool['main']())
+'''
+                second = subprocess.Popen([sys.executable, '-I', '-S', '-c', driver, 'take', 'forgejo',
+                                           '--as', 'walk/forgejo/second'], env=lab.env, cwd=lab.root,
+                                          stdin=subprocess.DEVNULL, stdout=second_output, stderr=second_output)
+                wait_for(marker.exists)
+                try:
+                    second.wait(timeout=0.2)
+                except subprocess.TimeoutExpired:
+                    pass
+                else:
+                    raise AssertionError('second admission did not wait for the orphan take')
+            assert lab.calls('logins') == calls
+            (lab.root / 'allow-take').touch()
+            os.kill(child, signal.SIGCONT)
+            dead(child)
+            if second is not None:
+                assert second.wait(timeout=10) == 1
+                assert 'kind forgejo holds 1 of its 1 logins of pool chatgpt' in (lab.root / 'second-output').read_text()
+                assert len(lab.calls('logins')) == len(calls) + 1  # Only its listing; no second take.
+            lab.configure(delay_take=False)
+            if mode == 'take':
+                lab.watch()
+                config = json.loads((lab.root / 'tools.json').read_text())
+                assert config['login_holders'][CHATGPT] == 'walk/forgejo/manual'
+                lab.run('give', CHATGPT, '--as', 'walk/forgejo/manual')
+            else:
+                lab.watch()
+                if mode == 'watch':
+                    assert lab.watch_state()[1]['run']
+                else:
+                    assert lab.walk_state()[1]['released']
+        finally:
+            (lab.root / 'allow-take').touch()
+            if starter.poll() is None:
+                starter.kill()
+                starter.wait(timeout=10)
+            if second is not None and second.poll() is None:
+                second.kill()
+                second.wait(timeout=10)
+            if child is not None:
+                if alive(child):
+                    os.kill(child, signal.SIGCONT)
+                dead(child)
+
+
+def an_orphan_manual_take_keeps_its_admission_lock(lab):
+    orphaned_take_keeps_admission(lab, 'take')
+
+
+def an_orphan_walk_take_keeps_its_admission_lock(lab):
+    orphaned_take_keeps_admission(lab, 'walk')
+
+
+def an_orphan_resume_take_keeps_its_admission_lock(lab):
+    orphaned_take_keeps_admission(lab, 'resume')
+
+
+def an_orphan_pass_take_keeps_the_watch_lock(lab):
+    orphaned_take_keeps_admission(lab, 'watch')
+
+
+def walk_keys_in_a_pass_are_isolated_before_claims(lab):
+    lab.walk('b1', '--kind', 'claude')
+    walk_directory, walk = lab.walk_state()
+    lab.rung('temper', REAL, CHATGPT)
+    lab.waiting(1)
+    lab.watch()
+    directory, broken = lab.watch_state()
+    walk_path = lab.tmp / 'qa/walks' / (walk['walk'] + '.json')
+    walk_path.write_text(json.dumps(dict(walk, **{'pass': []})))
+    lab.end_run(walk)
+    jig = lab.commit('jig beside damaged pass', 'fixture', repo='jig')
+    lab.run('decide', 'jig', jig, 'run')
+    lab.configure(cleared={'jig': jig})
+    for key in ('walk', 'kind', 'attempts'):
+        corrupt = json.dumps(dict(broken, **{key: []}))
+        (directory / 'pass.json').write_text(corrupt)
+        result = lab.watch(extra={'QA_CAP_MINUTES': '0'})
+        assert 'invalid pass state; keeping custody' in result.stdout
+        assert (directory / 'pass.json').read_text() == corrupt
+        assert not any(args[0] == 'give' and args[1] == CHATGPT for args in lab.calls('logins'))
+    saved_walk = json.loads(walk_path.read_text())
+    assert saved_walk['stage'] == 'ended' and saved_walk['given'] == [CLAUDE]
+    assert saved_walk['pass'] == []  # Its class came from the walk loader.
+    good_path, = (path for path in (lab.tmp / 'qa').glob('*/pass.json') if path.parent != directory)
+    good = json.loads(good_path.read_text())
+    assert good['repository'] == 'jig' and good['finished'] and good['capped'] and good['released']
+    config = json.loads((lab.root / 'tools.json').read_text())
+    assert config['login_holders'][CHATGPT] == broken['holder']
+
+
 def a_take_by_hand_is_refused_past_its_kinds_cap(lab):
     lab.env['QA_WALK_KINDS'] = 'forgejo=1:chatgpt github=1:chatgpt'
     lab.configure(pools={CHATGPT: [CHATGPT, 'chatgpt-2', 'chatgpt-3', 'chatgpt-4']})
@@ -4041,7 +4226,7 @@ def hung_manual_inventory_and_takes_are_bounded(lab):
     assert not lab.walk_states() and not lab.watch_states()
 
 
-def a_surviving_launcher_keeps_custody_until_its_unit_exists(lab):
+def a_surviving_launcher_keeps_custody_until_its_unit_exists(lab, past_grace=False):
     resting(lab, CHATGPT, in_place=True)
     lab.env['QA_WALK_KINDS'] = 'forgejo=1:chatgpt'
     focused = lab.tmp / 'qa-focused'
@@ -4057,11 +4242,18 @@ def a_surviving_launcher_keeps_custody_until_its_unit_exists(lab):
             waiting = lab.root / 'launch-waiting'
             wait_for(waiting.exists)
             child = int(waiting.read_text())
+            if past_grace:
+                os.kill(child, signal.SIGSTOP)
             directory, state = lab.walk_state()
             assert state['stage'] == 'starting' and not state['run']
             os.kill(starter.pid, signal.SIGKILL)  # Only the starter; codex-run owns another session.
             assert starter.wait(timeout=10) == -signal.SIGKILL and alive(child)
-            result = lab.watch()
+            now = None
+            if past_grace:
+                meta = lab.tmp / 'codex-run/fixture-1/meta'
+                now = (datetime.fromtimestamp(meta.stat().st_mtime, timezone.utc)
+                       + timedelta(minutes=11)).strftime('%Y-%m-%dT%H:%M:%SZ')
+            result = lab.watch(now=now)
             state = lab.walk_state()[1]
             assert 'launch may still start' in result.stdout
             assert state['run'] == 'fixture-1' and state['stage'] == 'running'
@@ -4069,6 +4261,8 @@ def a_surviving_launcher_keeps_custody_until_its_unit_exists(lab):
             lab.walk('b0', '--login', CHATGPT, status=1)
             assert not any(args[0] == 'give' for args in lab.calls('logins'))
             (lab.root / 'allow-launch').touch()
+            if past_grace:
+                os.kill(child, signal.SIGCONT)
             wait_for((lab.tmp / 'codex-run/fixture-1/unit').exists)
             dead(child)
             lab.watch()
@@ -4085,6 +4279,8 @@ def a_surviving_launcher_keeps_custody_until_its_unit_exists(lab):
                 starter.kill()
                 starter.wait(timeout=10)
             if child is not None:
+                if alive(child):
+                    os.kill(child, signal.SIGCONT)
                 dead(child)
 
 
@@ -4315,7 +4511,12 @@ def hex_walk_builds_refuse_ambiguous_and_non_commit_objects(lab):
     assert state['main'] == commit
 
 
-CASES = (a_take_by_hand_is_refused_past_its_kinds_cap, manual_login_commands_refuse_invalid_inputs_before_tools,
+CASES = (a_surviving_launcher_keeps_custody_past_the_grace,
+         a_unit_created_during_launcher_scan_keeps_its_custody,
+         an_orphan_manual_take_keeps_its_admission_lock, an_orphan_walk_take_keeps_its_admission_lock,
+         an_orphan_resume_take_keeps_its_admission_lock, an_orphan_pass_take_keeps_the_watch_lock,
+         walk_keys_in_a_pass_are_isolated_before_claims,
+         a_take_by_hand_is_refused_past_its_kinds_cap, manual_login_commands_refuse_invalid_inputs_before_tools,
          manual_and_generated_walk_holders_never_share_custody,
          a_manual_take_selects_its_pool_and_give_passes_through,
          a_manual_take_refuses_unknown_inventory_and_a_broken_cap, hung_manual_inventory_and_takes_are_bounded,

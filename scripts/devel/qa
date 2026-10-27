@@ -52,12 +52,12 @@ def need(ok, why, code=2):
         raise Problem(why, code)
 
 
-def command(argv, cwd=None, timeout=None):
+def command(argv, cwd=None, timeout=None, pass_fds=()):
     argv = [str(a) for a in argv]
     with subprocess.Popen(argv, cwd=cwd, stdin=subprocess.DEVNULL,
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                           env=dict(os.environ, GIT_TERMINAL_PROMPT='0'),
-                          start_new_session=timeout is not None) as child:
+                          start_new_session=timeout is not None, pass_fds=pass_fds) as child:
         try:
             stdout, stderr = child.communicate(timeout=timeout)
             return subprocess.CompletedProcess(argv, child.returncode, stdout, stderr)
@@ -774,14 +774,22 @@ class Watch:
         self.giving = True
         self.conflicts = set()
         self.states = {}
+        self.classes = {}
+        self.walk_lock = self.watch_lock = None
         self.pools, self.holders, self.queued = {}, {}, False
 
     def call(self, tool, *args):
         seconds = dict(systemctl=30, logins=60, post=60, landings=120, **{'codex-run': 120})
-        return command([self.workspace.tool(tool), *args], timeout=seconds[tool])
+        options = {}
+        if tool == 'logins' and args[:1] == ('take',):
+            lock = self.watch_lock if self.watch_lock is not None else self.walk_lock
+            need(lock is not None, 'login take needs its admission lock', 4)
+            options['pass_fds'] = (lock,)
+        return command([self.workspace.tool(tool), *args], timeout=seconds[tool], **options)
 
     def save(self, directory, state):
-        if 'walk' in state:
+        kind = self.classes[directory]
+        if kind == 'walk':
             state.setdefault('attempt', 1)
             attempts = state.setdefault('attempts', [])
             snapshot = json.loads(json.dumps({key: state[key] for key in ATTEMPT_KEYS if key in state}))
@@ -790,10 +798,10 @@ class Watch:
             else:
                 need(len(attempts) == state['attempt'], 'invalid walk attempt history', 4)
                 attempts[-1] = snapshot
-        path = (self.directory / 'walks' / (state['walk'] + '.json') if 'walk' in state
+        path = (self.directory / 'walks' / (state['walk'] + '.json') if kind == 'walk'
                 else directory / 'pass.json')
         replace(path, (json.dumps(state, indent=2) + '\n').encode())
-        self.states[('walk' in state, state.get('walk', state.get('pass')))] = state
+        self.states[(kind, state[kind])] = state
 
     def read_state(self, path):
         no_links(self.workspace.tmp, path)
@@ -810,6 +818,8 @@ class Watch:
         for path in sorted(self.directory.glob('*/pass.json')):
             try:
                 state = self.read_state(path)
+                need(isinstance(state, dict) and not {'walk', 'kind', 'attempts'}.intersection(state),
+                     f'{path}: reserved walk state keys', 4)
                 need(state['pass'] == path.parent.name and re.fullmatch(NAME, state['pass'])
                      and state['repository'] in REPOSITORIES, f'{path}: invalid pass', 4)
                 need('holder' not in state or state['holder'] == 'qa-watch/' + state['pass'],
@@ -844,6 +854,7 @@ class Watch:
                 utc(state['started'])
                 if state['finished']:
                     utc(state['ended'])
+                self.classes[path.parent] = 'pass'
                 result.append((path.parent, state))
             except (Problem, OSError, ValueError, RecursionError, KeyError, TypeError):
                 self.passes_valid = False
@@ -851,12 +862,22 @@ class Watch:
         return result
 
     def claims(self, states):
-        self.states.update({('walk' in state, state.get('walk', state.get('pass'))): state
-                            for _, state in states})
+        for directory, state in states:
+            try:
+                kind = self.classes[directory]
+                name = state[kind]
+                need(isinstance(name, str) and re.fullmatch(NAME, name), 'invalid state identity', 4)
+                self.states[(kind, name)] = state
+            except (Problem, KeyError, TypeError, ValueError, RecursionError):
+                log(f'{directory.name}: invalid state claims; keeping custody')
         claimed = {}
-        for state in self.states.values():
-            for name in self.outstanding(state):
-                claimed.setdefault(name, []).append(state.get('walk', state.get('pass')))
+        for (_, owner), state in self.states.items():
+            try:
+                names = list(self.outstanding(state))
+                for name in names:
+                    claimed.setdefault(name, []).append(owner)
+            except (KeyError, TypeError, ValueError, RecursionError, AttributeError):
+                log(f'{owner}: invalid state claims; keeping custody')
         self.conflicts = {name for name, owners in claimed.items() if len(owners) > 1}
         for name in sorted(self.conflicts):
             log(f'{name}: conflicting custody claims by {", ".join(claimed[name])}; keeping custody')
@@ -939,7 +960,7 @@ class Watch:
             elif result.returncode != 2:
                 log(f'{name}: cannot give stray login back: {result.stderr.strip()}')
 
-    def unit_status(self, unit, directory=None):
+    def unit_status(self, unit, directory=None, launch_checked=False):
         properties = ['--property=LoadState', '--property=ActiveState']
         if directory is not None:
             properties.append('--property=WorkingDirectory')
@@ -953,7 +974,8 @@ class Watch:
             if directory is not None and load == 'loaded' and fields['WorkingDirectory'] != str(directory):
                 log(f'{unit}: WorkingDirectory is not the pass directory; keeping logins held')
                 return 'unknown'
-            if load == 'not-found' and active == 'inactive' and unit.startswith('codex-run-'):
+            if (not launch_checked and load == 'not-found' and active == 'inactive'
+                    and unit.startswith('codex-run-')):
                 run = self.runs / unit.removeprefix('codex-run-')
                 if not (run / 'ended').exists():
                     try:
@@ -961,9 +983,12 @@ class Watch:
                     except FileNotFoundError:
                         pass
                     else:
-                        if utc(timestamp()).timestamp() - meta.st_mtime < 600:
+                        if (utc(timestamp()).timestamp() - meta.st_mtime < 600
+                                or self.launcher_alive(run / 'meta') is not False):
                             log(f'{unit}: launch may still start; keeping custody and slot')
                             return 'launching'
+                        # The launcher may have created the unit and exited during the scan.
+                        return self.unit_status(unit, directory, launch_checked=True)
             if (load == 'loaded' and active in ('inactive', 'failed')
                     or load == 'not-found' and active == 'inactive'):
                 return 'stopped'
@@ -971,6 +996,32 @@ class Watch:
                 return 'busy'
         log(f'{unit}: cannot establish unit state; keeping logins held')
         return 'unknown'
+
+    def launcher_alive(self, meta):
+        fields = dict(line.split('=', 1) for line in meta.read_text().splitlines() if '=' in line)
+        task = fields.get('task', '')
+        need(task and Path(task).is_absolute(), 'cannot establish launcher task; keeping custody', 4)
+        expected = os.fsencode(task)
+        unknown = False
+        for process in Path('/proc').iterdir():
+            if not process.name.isdecimal():
+                continue
+            try:
+                with (process / 'cmdline').open('rb') as source:
+                    data = source.read(1024 * 1024 + 1)
+            except (FileNotFoundError, ProcessLookupError):
+                continue
+            except OSError:
+                unknown = True
+                continue
+            if len(data) > 1024 * 1024:
+                unknown = True
+                continue
+            words = data.rstrip(b'\0').split(b'\0')
+            if any(Path(os.fsdecode(word)).name == 'codex-run' and words[index + 1:index + 2] == [b'task']
+                   and expected in words[index + 2:] for index, word in enumerate(words)):
+                return True
+        return None if unknown else False
 
     def unit_stopped(self, unit, seconds, directory=None):
         # ended precedes the session's on-stop; deactivating still runs give-back.
@@ -1017,7 +1068,7 @@ class Watch:
 
     def end(self, directory, state):
         if (state['run'] and not (self.runs / state['run'] / 'ended').exists()
-                and self.unit_status('codex-run-' + state['run']) == 'launching'):
+                and self.unit_status('codex-run-' + state['run']) != 'stopped'):
             return False
         if 'stopped' in state:
             state.pop('stopped')
@@ -1156,6 +1207,7 @@ class Watch:
                  'rung': opening['rung'] if opening else '-',
                  'requests': sorted(opening['logins']) if opening else [],
                  'pools': {}, 'logins': {}, 'given': [], 'kinds': {}}
+        self.classes[directory] = 'pass'
         self.save(directory, state)
         return directory, state
 
@@ -1323,7 +1375,12 @@ class Watch:
                 log('cannot read walks directory; keeping walk custody')
                 yield False
                 return
-            yield True
+            previous = self.walk_lock
+            self.walk_lock = lock.fileno()
+            try:
+                yield True
+            finally:
+                self.walk_lock = previous
 
     def local_walks(self, strict=True):
         result = []
@@ -1361,6 +1418,7 @@ class Watch:
                 need(isinstance(state['starter'], str) and state['starter'], f'{path}: invalid starter', 4)
                 directory = self.workspace.tmp / 'qa-focused' / name
                 no_links(self.workspace.tmp, directory)
+                self.classes[directory] = 'walk'
                 result.append((directory, state))
             except (Problem, OSError, ValueError, RecursionError, KeyError, TypeError):
                 if strict:
@@ -1501,6 +1559,7 @@ class Watch:
         complete = {}
         with self.record.locked(), self.walks_locked(wait=False) as walking:
             self.states.clear()
+            self.classes.clear()
             passes = self.local_passes()
             walks = self.local_walks(strict=False) if walking else []
             self.claims(passes + walks)
@@ -1829,6 +1888,7 @@ def walk(args, workspace):
                          slot=None, holder='walk/' + kind + '/' + name, logins={}, kinds={}, pools={}, run='',
                          stage='reserving', requests=requests, given=[], released=False,
                          start_logged=False, end_logged=False, posted=False, report_attempt=1)
+        service.classes[directory] = 'walk'
         service.save(directory, state)
         held = {s['slot'] for _, s in walks if s.get('kind', next(iter(kinds))) == kind and not s.get('released')}
         state['slot'] = next((k for k in range(1, kinds[kind]['slots'] + 1) if k not in held), None)
@@ -1988,6 +2048,7 @@ def watch(director, once, workspace):
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise Problem('another service runs') from None
+        service.watch_lock = lock.fileno()
         while True:
             options = settings(workspace)
             service.check(options)
