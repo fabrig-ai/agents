@@ -261,18 +261,24 @@ the line written by a mission and by its parent alike.
   read, for the missions the count counts (section 3) alone: the
   README's commits newest first (`git log --first-parent
   --format='%H %ct' -- missions/<m>/README.md`), then their versions
-  until one names no reference. Only commit times leave the history:
+  until one names no reference, or holds no README (a deletion ends a
+  run as an unblocked version does). git runs with every `GIT_*`
+  variable dropped, so that a caller's `GIT_DIR` can't point it
+  elsewhere. Only commit times leave the history:
   never an author, committer, message or hash, on the page, in the
   `--json` file or in the footer.
 - **Unknown,** a dash, where `HEAD`'s version names no reference, or
   where the history can't be read whole. The footer names each reason
   once, `records: history: <reason>`, in fixed words, while the rest
-  stands: `no git repository`; `shallow`, a checkout whose history is
+  stands: `no git repository`, decided by the records root's `.git`
+  before any git runs, never from git's words; `shallow`, a checkout
+  whose history is
   cut (`git rev-parse --is-shallow-repository`), whose runs could end
   at its cut and so are read for none; `git failed`; `timed out`, the
-  reads together running under 30 seconds and leaving what they didn't
-  reach unknown. git's own words go to the journal: they can hold a
-  path or a hash.
+  reads together running under 30 seconds (`STATUS_HISTORY_TIMEOUT`,
+  as the probes' `STATUS_PROBE_TIMEOUT`, so that the fixture can prove
+  it) and leaving what they didn't reach unknown. git's own words go to
+  the journal: they can hold a path or a hash.
 - **In the `--json` file,** each mission's `blocked_since`: seconds
   since the epoch, null where unknown or not blocked.
 
