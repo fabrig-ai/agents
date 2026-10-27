@@ -853,9 +853,10 @@ failing one is kept, and its path printed. A successful `--prove` keeps
 every pin-only worktree, at its proved commit, so that the set can run
 what its owner names there before it lands (landing-flow.md 9.1); the
 proof file records each one's path beside its base and commit. The
-set's next run replaces it, as a leftover; the set's landing removes
-it; and `tidy` removes one whose set has since landed, or whose proof
-is over 24 hours old, while no run of the set holds the set's file lock
+set's next run replaces it, as a leftover, at the same commit where its
+`main` hasn't moved; the set's landing removes it; and `tidy` removes
+one whose set has since landed, or whose proof is over 24 hours old,
+while no run of the set holds the set's file lock and nothing uses it
 (cleanup.md, step 9). Each child runs in its own
 process group, which a signal to the run reaches whole before the lock goes.
 
@@ -875,13 +876,17 @@ that commit for downstream pins without landing it again.
 **Proving a set.** `land-set --prove SETFILE` runs the checks and phase 1
 as above, with no lock: nothing it does moves a `main`. Its staging
 branches are pushed and deleted as a landing run's. It reads the set's
-recorded landings and writes none. On success it removes its pin-only
-worktrees and writes the proof,
+recorded landings and writes none. On success it keeps its pin-only
+worktrees (below) and writes the proof,
 `DEV_TMP/land-set/proofs/<URL-escaped-set-name>.json`: `schema`
 (`land-set-proof-v1`), `set`, `machine`, `token`, `time`, and per
-candidate its `base`, `commit`, `tree` and `pin_only`. A prove deletes the
-set's earlier proof when it starts, and a run that lands the whole set
-deletes it at the end.
+candidate its `base`, `commit`, `tree` and `pin_only`, and a pin-only
+one's `worktree`, its absolute path. A prove reads the set's earlier
+proof, if any, before it replaces it, and resets a pin-only repin to
+that proof's commit where the repin has its parent and tree, as the
+landing run does (below): so a prove after the set's qa run proves the
+very tuple the qa run tested. A run that lands the whole set deletes
+the proof at the end.
 
 The gates' evidence is `land`'s gate cache, per machine, by tree, gate and
 policy (gate-policy.md 3), so the landing run gates again only what has

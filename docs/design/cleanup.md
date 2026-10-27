@@ -183,7 +183,8 @@ new work. There is no keep list: a landed branch's commits are on
    `land-set/`, but for a pin-only worktree a set's proof kept
    (build-infrastructure.md 10): `tidy` removes it whole, its target
    with it, once its set has landed or its proof is over 24 hours old,
-   while no run of the set holds the set's file lock.
+   while no run of the set holds the set's file lock and it is not in
+   use (section 4's sense).
    - **Its owner** is the mission whose directory holds it, with its
      milestones' `owners/<m>-m<N>/` as one, or `director`.
    - **In use** while held by a process (section 4's sense, for its

@@ -651,7 +651,13 @@ Beside the tool, the owner and its implementers do the rest:
   the worktree the proof made and keeps for it,
   `DEV_TMP/land-set/worktrees/<set>/<repo>`, which the proof file
   names. What to run is the owner's, named in its landing task;
-  `land-set` runs no product's tests. Then
+  `land-set` runs no product's tests. The qa run is the landing task's
+  step between its proof and its landing, so no other run of the set
+  runs meanwhile. Where no `main` moved, the landing's own prove resets
+  to the proved commits, and what lands is what the qa run tested; where
+  one moved, the landing gates the new tuple and the qa run is not
+  repeated: the landing is optimistic, as the gates are, and after
+  landing's tier runs the qa tests on `main`. Then
   it lands the set, `land-set --prove SETFILE && land-set SETFILE` on
   the same machine (9.2), and its report, posted to the owner when the
   run ends, says how. The owner starts the next milestone on the set's
