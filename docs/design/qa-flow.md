@@ -340,7 +340,7 @@ The record is committed with `record commit`, and its rows are in
 Times are UTC to the second, commits full SHAs. The settings are the
 kit's: the machine, named as section 4 says, and `machine.env`'s
 `QA_SLOTS` (1; 4 on hetzner6), `QA_LOGIN_RESERVE` (2, section
-10.6), `QA_BATCH` (5), `QA_CAP_MINUTES` (120),
+10.6), `QA_WALK_SLOTS` (2, section 10.7), `QA_BATCH` (5), `QA_CAP_MINUTES` (120),
 `QA_INTERVAL_SECONDS` (300), `QA_STOP_SECONDS` (50, section 10.5) and
 `QA_EVIDENCE_KIB` (2048, section 11.1).
 
@@ -449,7 +449,8 @@ the director says so to the user.
   a login's. The lock is taken first, then each login's own lock in
   name order.
 - **Leaving the queue:** a `--wait` that runs out removes its row, and
-  `logins drop NAME|POOL --as HOLDER` removes a waiter's row by hand
+  `logins drop NAME --as HOLDER`, or `logins drop POOL --any --as
+  HOLDER` for a pool's request, removes that waiter's row by hand
   (B0's walk waited 12 minutes behind a stale row, 10-27). A holder
   that asked only once and went is still gone after 15 minutes.
   A login not back stays held by its holder, as below, and the pool's
@@ -604,7 +605,7 @@ held).
 | `logins add NAME PATH` | moves PATH, a file or a program's configuration directory, in as NAME's login, at rest |
 | `logins take NAME --as HOLDER [--note TEXT] [--wait SECONDS]` | grants NAME in turn and prints its resting path; exit 1 while another holds it or waits first |
 | `logins take POOL --any --as HOLDER [--note TEXT] [--wait SECONDS \| --now]` | grants any free login of the pool, first come first served, and prints its name and resting path; exit 1 while none is free to HOLDER (10.2); `--now` never joins the queue (10.6) |
-| `logins drop NAME\|POOL --as HOLDER` | removes HOLDER's place in the queue for that request (10.2) |
+| `logins drop NAME --as HOLDER`, `logins drop POOL --any --as HOLDER` | removes HOLDER's place in the queue for that request (10.2) |
 | `logins give NAME --as HOLDER` | frees NAME once its login is back; exit 1, still held, if it isn't |
 | `logins list [NAME]` | each login's holder, waiters and last 24 hours |
 
@@ -746,51 +747,75 @@ rung and its findings are the rung owner's (design/ladder's loop), and
 the kit only starts it and ends it, as the service ends a pass.
 
 - **`qa walk REPO RUNG [--build REF] [--login POOL]... [--cap
-  MINUTES]`,** on the logins' machine, by the rung's owner:
-  1. the walk is the rung's next number n, its directory
-     `tmp/qa-focused/rung-<RUNG>-<n>/`, private;
-  2. it takes one login of each POOL, `logins take POOL --any --as
-     walk/<RUNG>-<n> --note DIRECTORY --wait 900`, saving each grant
-     before the next; one not granted gives back those taken, and
-     nothing starts;
-  3. it takes the lowest free walk slot of REPO, a worktree of the
-     service's clone, `tmp/qa/repos/<repo>-walk-<k>/` (k from 1, two
-     at most, as walks hold two logins at most), kept warm as a pass's
-     slot is (section 4), and checks it out, detached, at REF: a commit
-     or a branch on origin, `main` by default (a fix's branch, for its
-     confirming walk);
-  4. it copies the rung's brief, `tmp/qa-focused/rung-<RUNG>-brief.md`,
+  MINUTES]`,** on the logins' machine, by the rung's owner, whose
+  address (`POST_NAME`) it checks first. RUNG is the ladder's name
+  (`a`, `b0`), one namespace on the machine. Under the walks' lock,
+  `tmp/qa/walks.lock`, one walk at a time:
+  1. the walk is the rung's next number n, its name `rung-<RUNG>-<n>`,
+     its directory `tmp/qa-focused/rung-<RUNG>-<n>/`, private, and its
+     state `tmp/qa/walks/rung-<RUNG>-<n>.json`, saved before anything is
+     taken and after each step: REPO, RUNG, REF, the starter, the cap
+     and its start, the slot, each grant with its kind, the run, and how
+     far its end has come;
+  2. it takes the lowest free walk slot of REPO, a worktree of the
+     service's clone, `tmp/qa/repos/<repo>-walk-<k>/` (k from 1,
+     `QA_WALK_SLOTS` of them, 2), made and checked as a pass's slot is
+     (section 4); with none free it refuses at once, having taken
+     nothing. The slots bound the walks, so walks hold at most two
+     logins of a pool;
+  3. it takes one login of each POOL, `logins take POOL --any --as
+     walk/rung-<RUNG>-<n> --note DIRECTORY --wait 900`, saving each grant
+     before the next; one not granted gives back those taken, frees the
+     slot, and nothing starts;
+  4. it checks the slot out, detached, at REF: a commit or a branch on
+     origin, `main` by default (a fix's branch, for its confirming
+     walk);
+  5. it copies the rung's brief, `tmp/qa-focused/rung-<RUNG>-brief.md`,
      unchanged into the directory as `brief.md`, and writes beside it
      the session's task: read `brief.md`, then the walk's facts (its
      directory, its checkout and REF, each login's name and resting
      path, the give-back file, `qa deploy` for its deployments, its cap);
-  5. it appends `walk-start` to the rung's clock,
-     `tmp/qa-focused/<RUNG>/loop.tsv` (`time rung walk event note`,
-     its note the logins and REF), saves its state, `walk.json`, in the
-     directory, and starts the session: `codex-run task --to qa-watch
-     --on-stop` the give-back wrapper (10.5), its report
-     `DIRECTORY/report.md`;
-  6. it prints the walk's number, its logins and its run.
+  6. it appends `walk-start` to the rung's clock,
+     `tmp/qa-focused/<RUNG>/loop.tsv` (made with its heading, `time rung
+     walk event note`, if absent; each append under a lock on the file,
+     and saved as done in the state, so that a retry never writes it
+     twice), its note the logins and REF;
+  7. it starts the session, `codex-run task --to qa-watch --on-stop`
+     the give-back wrapper (10.5), its report `DIRECTORY/report.md`,
+     saves the run, and prints the walk's name, its logins and its run.
+
+  A crash at any step leaves the state saying how far it came: the
+  service's next check gives back each login held by a `walk/…` holder
+  that no saved state holds a grant of (10.3's strays), and frees a slot
+  whose walk never started.
 - **The service ends it** as it ends a pass (10.3's order, steps 2 to
-  5): its moved logins given back as `walk/<RUNG>-<n>`, its units
-  stopped once they are back, in-place logins after, and a stuck login's
-  alert at once; it caps it at MINUTES (180 by default) as it caps a
-  pass; then it appends `walk-end` to the clock (its note the run's
-  exit and what is still out) and posts the walk's end to the one who
-  started it (`POST_NAME`): its report, and any login not back. It
-  commits no record, routes no finding and keeps no evidence: the rung
-  owner reads the report, files its findings by the loop's rules, and
-  keeps the walk with `qa keep --walk` (11.5).
+  5), from its saved state: it stops the session at its cap (MINUTES,
+  180 by default, from its saved start) and waits for its stop wrapper
+  before it gives anything back; its moved logins given back as
+  `walk/rung-<RUNG>-<n>`, its units stopped once they are back,
+  in-place logins after, and a stuck login's alert at once. The walk
+  slot is held until the session's unit and every deployment unit of
+  the walk are confirmed stopped; one of unknown state keeps it. Then it
+  appends `walk-end` to the clock (its note the run's exit and what is
+  still out) and posts the walk's end to its saved starter: its report,
+  and any login not back; each saved as done, and tried again at each
+  check until accepted. It commits no record, routes no finding and
+  keeps no evidence: the rung owner reads the report, files its
+  findings by the loop's rules, and keeps the walk with `qa keep
+  --walk` (11.5).
 - **Not QA's:** a walk's logins are no `qa-watch` holder's, so they
   don't count against QA's cap (10.6), and its walk slots are no QA
   slot; QA's `--now` takes never stand ahead of a walk that waits.
 - **Its fixture,** `test-qa`: a walk takes a free login of its pool and
   a walk slot, writes the rung's brief unchanged beside its task, and
-  appends `walk-start`; one refused login starts nothing and leaves
-  nothing held; the service ends it in 10.3's order, appends `walk-end`
-  and posts its starter; a stuck login stays held by the walk and is
-  alerted; a third walk waits for a walk slot; a walk's logins leave
-  QA's cap untouched.
+  appends `walk-start` once; one refused login starts nothing and
+  leaves nothing held; a third walk is refused at once, holding
+  nothing; a crash after a take and before its save leaves the login
+  given back at the next check; the service stops a walk at its cap,
+  ends it in 10.3's order, appends `walk-end` once and posts its
+  starter, again until accepted; a stuck login stays held by the walk
+  and is alerted; a walk's slot stays held while a unit is up or
+  unknown; a walk's logins leave QA's cap untouched.
 
 ## 11. The evidence, kept
 
