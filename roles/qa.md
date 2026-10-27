@@ -22,9 +22,10 @@ makes a finding there.
   back to its path by the give-back file before the deployment stops,
   whatever stops it (section 2, step 3; qa-flow.md 10.3).
 - **It works as the product's users' agents do:** the product's tool for
-  the product (for temper, `temper ctl`, whose `help` is temper's guide
-  for agents), and tools of its own for the systems the product works
-  with, as the binding names them (for temper's forges, `curl`).
+  the product (for temper, `temper ctl`, with `temper help` and
+  `temper ctl help` for its documentation), and tools of its own for
+  the systems the product works with, as the binding names them (for
+  temper's forges, `curl`).
   Outcomes are checked on both sides: what the product says, and what
   the backend shows.
 - **The report** gives each case's outcome, each finding with the
@@ -36,8 +37,9 @@ makes a finding there.
 ## 2. The steps
 
 1. **Read** each commit's diff (`git show`), its trailer, and the
-   designs it touches; then the product's binding and its guide: for
-   temper, `docs/design/qa.md`, `docs/guide/` and `temper ctl help`.
+   designs it touches; then the product's binding and its documentation:
+   for temper, `docs/design/qa.md`, `docs/help/`, `temper help` and
+   `temper ctl help`.
 2. **Plan,** in `plan.md` in the scratch directory, before running
    anything. For each commit: the happy path, then two to four tricky
    cases you pick (an error, a retry, odd input, a thing done twice or
@@ -45,15 +47,15 @@ makes a finding there.
    expectation before the run, never after.
 3. **Build and set up.** Build the product at the checkout through
    `heavy`, at background weight: `HEAVY_CLASS=background heavy
-   COMMAND`, the narrowest build that gives the binaries the guide
-   needs, once. Build in the checkout, whose `target/` the service keeps
-   warm between passes (no `--target-dir`, no `CARGO_TARGET_DIR`); copy
+   COMMAND`, the narrowest build that gives the binaries the
+   documentation needs, once. Build in the checkout, whose
+   `target/` the service keeps warm between passes (no `--target-dir`, no `CARGO_TARGET_DIR`); copy
    or install the binaries into the scratch directory, never into
    `~/.local`. Set up a deployment with the product's own commands, as
    its binding says for the brief's rung, in a directory of the
    scratch: for temper's fakes, `temper box --fake-backends` as
-   `docs/guide/box.md`'s section on them says; for its real ones, the
-   guide's walk from empty directories. Then `temper ctl`'s sign-in
+   `docs/help/box.md`'s section on them says; for its real ones, the
+   help's walk from empty directories. Then `temper ctl`'s sign-in
    with the link it prints, and the forge's hands from the files the box
    names (temper's `docs/design/qa.md`, 4). Cases that don't disturb
    each other share one deployment; a case that would disturb others
@@ -75,9 +77,9 @@ makes a finding there.
    outcome on both sides: the product's account through its tool, and
    the backend's through the tools the binding names. A finding is the
    product not saying where to look, the two accounts disagreeing, the
-   product stale past its bound, a guide that doesn't get you there, or
-   the product's words wrong (temper's binding, 6); having read the
-   backend is none. What the product's `STATUS.md` lists as not yet
+   product stale past its bound, documentation that doesn't get you
+   there, or the product's words wrong (temper's binding, 6); having read
+   the backend is none. What the product's `STATUS.md` lists as not yet
    built goes under Blocked. Never act on the product any other way:
    not through its store, its HTTP API, or a fake's internals; and act
    on a backend only as a case's plan says, with the hands the binding

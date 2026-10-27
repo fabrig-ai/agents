@@ -32,7 +32,7 @@ it is proved, and the director checks the work against it (agents'
 | Source | What it produces |
 |---|---|
 | skein's `testing-strategy.md`, temper's `domain/testing.md` | each change's tests, in the lowest world that shows the behaviour; the real loop's default sum under the user's 15 s |
-| `../qa.md`'s profile (temper), owners.md 4 | `qa_*` stories, skipped by the gates and run between a set's proof and its landing when the landing changes what a world's stories rely on |
+| temper's `.config/nextest.toml` profile `qa`, owners.md 4 | `qa_*` stories, skipped by the gates and run between a set's proof and its landing when the landing changes what a world's stories rely on |
 | after landing's tiers (landing-flow.md 4) | the slower QA, process, lab and browser tiers on the newest `main`; a red bisected to its landing; temper's tier split across two runners |
 | v0.1.0.md 4 | each finding's fix with a test in the lowest world that reproduces it, the real run's transcript as a fake model's script where the model's turn matters |
 
@@ -67,7 +67,7 @@ temper's `draft/v0.1.0.md` 2 and 3; its stories from
 | A | the playground's three requests on a copy of `playground/widget`, one delegated, pushed, passed by CI and an agent's review, landed | a brief, walked, fixed, rerun unchanged as the pass |
 | B0 | A, with a question and the person's answer (reference-case.md 4.2, 7.2) | the same |
 | B1 | B0, with a gate the first push fails, and its repair (4.3) | the same |
-| B2 | B1, with an advisor and two delegates, one depending on the other (4.1, 4.2) | the same |
+| B2 | B1, with an advisor and two delegates, one depending on the other (4.2, 5.1) | the same |
 | C | `reference-case.md`, act by act, by `process-model.md` | the top rung (section 5) |
 | D | the case's process described to temper in words, its proposal accepted, C run under it | configuring's golden (section 6) |
 | W | A and B walked through the web client | browser walks, after B2 and the user's word on the pages |

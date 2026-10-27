@@ -301,8 +301,8 @@ What `tmp/` may hold, and how it goes, is [cleanup.md](cleanup.md).
    the end report), 3.3 (the design report), 4.6 (QA) and 6 (the
    closing note); product.md 2 (its notes), 4 (the backlog) and 6 (a
    feature's end); director.md 3 (its notes), 4 (the brief) and 7
-   (`STATUS.md` at each check); qa.md 3, qa-milestone.md and qa-lab.md
-   where they name the report's file. New missions follow them; a
+   (`STATUS.md` at each check); qa.md 3
+   where it names the report's file. New missions follow them; a
    running mission ends in `tmp/`, and is backfilled once it has.
 
 Live 10-25.
