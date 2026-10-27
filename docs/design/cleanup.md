@@ -65,7 +65,8 @@ GitHub, and the sweep of the six machines' `tmp/` (section 6).
 
 | Path | Whose | What |
 |---|---|---|
-| `heavy/`, `logs/`, `gates/`, `landing-turn/`, `land-set/` | `heavy`, `land`, `land-set`, `tidy` | receipts, `heavy.tsv`, `tidy.log` and its lock, the gates' stamps, the landing turns, the sets' locks and state |
+| `heavy/`, `logs/`, `gates/`, `landing-turn/`, `land-set/` | `heavy`, `land`, `land-set`, `tidy` | receipts, `heavy.tsv`, `tidy.log` and its lock, `tidy-trash/` (step 9), the gates' stamps, the landing turns, the sets' locks and state |
+| `fleet/` | `fleet` | the last tend's record, and on the watch's machine its state and rounds ([fleet-watch.md](fleet-watch.md) 3.3, 4) |
 | `kache/`, `lab/`, `after-landing/` | their tools | the build cache's binary, the lab's store, the runner's clones, state, logs and locks |
 | `post/`, `codex-run/` | `post`, `codex-run` | the mailboxes, the runs and `runs.tsv` |
 | `git-fabrig/` | the director, `issue` | the forge's tokens, which the director copies, 0600 in a 0700 directory; on hel8 the router's webhook secret ([user-issues.md](user-issues.md) 3.2, 4) |
@@ -97,12 +98,13 @@ GitHub, and the sweep of the six machines' `tmp/` (section 6).
 
 ## 4. tidy
 
-`scripts/devel/tidy [--dry-run] [REPO... | --mission M]`, Python, under
-a lock per machine (`tmp/logs/tidy.lock`; a second run waits for it),
-safe to run at any time. `--dry-run` takes no lock, deletes nothing and
-prints what it would do. With REPO, it runs steps 1 to 3 and 7 for
-those repositories; with `--mission M`, step 4 for M; with neither,
-every step.
+`scripts/devel/tidy [--dry-run] [REPO... | --mission M | --targets]`,
+Python, under a lock per machine (`tmp/logs/tidy.lock`; a second run
+waits for it), safe to run at any time. `--dry-run` takes no lock,
+deletes nothing and prints what it would do. With REPO, it runs steps 1
+to 3 and 7 for those repositories; with `--mission M`, step 4 for M;
+with `--targets`, step 9 alone, with no fetch and no pull; with none of
+them, every step.
 
 - **The repositories** are the workspace's seven (`agents`, `skein`,
   `smith`, `jig`, `hearth`, `qa`, `temper`), at their primary checkouts in
@@ -172,6 +174,34 @@ new work. There is no keep list: a landed branch's commits are on
    it touched.
 8. **The rest** at the top of `tmp/`, outside section 3's table:
    reported, never deleted.
+9. **Build targets past their use** (the user, 10-27: "finished tasks'
+   build targets, each owner's two-target limit"): a `target/` holding
+   `CACHEDIR.TAG` at the top of a worktree under `tmp/owners/` or
+   `tmp/director/`, as step 3 finds them. Nothing else: not a primary
+   checkout's, a session's or the user's worktree, after landing's
+   runner (which caps its own, build-infrastructure.md 11), `qa/` or
+   `land-set/`.
+   - **Its owner** is the mission whose directory holds it, with its
+     milestones' `owners/<m>-m<N>/` as one, or `director`.
+   - **In use** while held by a process (section 4's sense, for its
+     worktree): never touched, nor counted idle.
+   - **Its last build** is the newest modification time of `target/` and of
+     each profile directory's `deps/`, `.fingerprint/` and `build/` in
+     it: a few `stat`s, never a walk.
+   - **Cleared** when not in use and either its last build is 2 hours
+     old or more, a finished task's, or it is beyond its owner's two:
+     an owner keeps at most two targets on a machine, those in use
+     first, then the latest built.
+   - **Clearing** renames the target into `tmp/logs/tidy-trash/`, one
+     rename, so that a build starting after it finds no target and
+     starts afresh, then deletes it there. Each run first deletes what
+     an interrupted one left in the trash.
+   - **Held beyond two:** an owner with more than two targets in use
+     keeps them all, each one past its two reported, without exit 1:
+     nothing waits on a decision, and the fleet watch shows it.
+   - On XFS a target shares its blocks with kache's store (reflinks),
+     so clearing one frees what the store no longer holds; kache's own
+     collection frees the rest ([build-cache.md](build-cache.md) 7).
 
 - **`land`'s mark.** After a landing that pushed, or landed on the
   local `main` (`--local`), `land` sets `branch.<name>.landed` to the
@@ -195,9 +225,10 @@ new work. There is no keep list: a landed branch's commits are on
 - **Its output:** a line for each thing deleted or kept, `tidy: deleted
   KIND WHAT COMMIT (REASON)` or `tidy: kept KIND WHAT: REASON`, and
   `tidy: would delete` under `--dry-run`. KIND is `github-branch`,
-  `branch`, `worktree`, `mission`, `directory`, `script` or `entry`;
-  WHAT is `REPO:NAME` for a branch, else the path. New work prints
-  nothing.
+  `branch`, `worktree`, `mission`, `directory`, `script`, `entry` or
+  `target`; WHAT is `REPO:NAME` for a branch, else the path. A target
+  has no commit: `tidy: deleted target PATH (idle 3 h)`, or `(beyond
+  two of OWNER)`. New work prints nothing.
 - **Its exit:** 0 done; 1 something kept that needs a decision (step
   4's work on no remote, an `owners/` directory with no README, a
   branch landed in name only, an entry outside section 3, an evidence
@@ -222,6 +253,8 @@ new work. There is no keep list: a landed branch's commits are on
 - **The director's check** (director.md 7) runs `tidy` on each machine,
   for the machines with no landing, and takes a decision on each line
   of an exit 1.
+- **Each machine's tend,** every 5 minutes, runs `tidy --targets`
+  ([fleet-watch.md](fleet-watch.md) 4).
 - No agent runs it, and no role holds a step of cleanup.
 
 ## 6. The sweep of 10-25

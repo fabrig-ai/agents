@@ -133,6 +133,14 @@ The commands:
 - **`post list [--older MINUTES]`** lists this machine's unread
   messages, for every name: their age, name, id, sender and subject, and
   whether the name's waiter is alive.
+- **`post wake NAME`** wakes NAME for the mail already in its `new/`,
+  as delivery does (section 4), and prints `NAME` and what happened:
+  `waiting`, `woken`, `queued`, or exit 3 with `queued, nobody will
+  wake it: <why>`. With no unread mail it prints `NAME no mail` and
+  wakes nothing. **`post wake --older MINUTES`** does the same for
+  every name of this machine whose oldest unread message is MINUTES old
+  or more and whose waiter is dead, but `user`, whom nothing wakes; it
+  exits 3 when any of them could not be woken, after trying them all.
 
 Each command takes the mailbox's lock (`flock`) while it moves files.
 An id is the stamp and eight random hex digits; a sent copy never
@@ -173,10 +181,13 @@ overwrites another.
     and its parent decides.
 - **At a handover** the outgoing session doesn't restart its waiter.
   The new session starts one, which replaces any that is left.
-- **Stuck mail.** The director's `probe.sh` runs `post list --older 15`
-  on each machine and reports each line as a trigger. That covers
-  what's left: a session that shows working but sits idle, and a waiter
-  that died during a turn.
+- **Stuck mail.** Each machine's tend runs `post wake --older 15` every
+  5 minutes ([fleet-watch.md](fleet-watch.md) 4): a waiter that died
+  during a turn, or that a memory crunch stopped, leaves its session
+  idle and deaf once the turn ends, and the wake resumes it in place.
+  The fleet watch raises a name the wake could not reach, and mail
+  unread an hour: a session that shows working but sits idle
+  (fleet-watch.md 3.1).
 
 ## 5. codex-run
 
@@ -254,8 +265,17 @@ overwrites another.
     body.
 - **`codex-run stale`** lists the runs that will never post: those
   without an end whose unit is gone (killed, out of memory, a reboot, a
-  unit that never started), and those whose post failed. The director's
-  probe reports its lines as a trigger, as it does stuck mail.
+  unit that never started), and those whose post failed.
+  **`codex-run stale --post`** tells each one's caller once, as its end
+  would have: a run whose post failed sends that post again, and a run
+  whose unit is gone posts `run <id> failed stale: <why>` with the
+  end's body. A post that goes through (exit 0 or 3: the mail is in the
+  caller's mailbox) writes `told` in the run's directory, which takes it
+  off the list; one that doesn't leaves it for the next sweep. Nothing
+  else of the end is replayed: `runs.tsv` has no row for a run whose
+  unit died.
+  Each machine's tend runs it every 5 minutes, and the fleet watch
+  raises a run still listed (fleet-watch.md 3.1, 4).
 
   The caller reads REPORT, never the events. An implementer with a
   question writes it as its report's first line and ends, so the
