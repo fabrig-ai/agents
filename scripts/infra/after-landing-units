@@ -9,9 +9,9 @@ check_after_landing() {
     local unit_dir=$HOME/.config/systemd/user unit=agents-after-landing@.service
     local director expected sibling follower name entry k n line=0
     local follow_file=$HOME/.config/agents-after-landing/follow
-    local running enabled service _load active rest
-    local -a followers=(skein smith hearth jig temper) lines=() unlisted=()
-    local -A followed=() seen=()
+    local running enabled service link _load active rest
+    local -a followers=(skein smith hearth jig temper) lines=() services=() unlisted=()
+    local -A followed=() seen=() active_services=()
     local -a addresses=()
     if [[ ! -e $address_file && ! -L $address_file ]]; then
         ok "after-landing: not this machine's runner"
@@ -81,31 +81,37 @@ UNIT
         fail 'after-landing: no user bus; cannot check or start runner services'
         return
     fi
-    # list-units includes stopped loaded units; list-unit-files also finds
-    # enabled instances that are currently stopped. Only these two sets count.
-    if ! running=$(systemctl --user list-units --all --plain --no-legend 'agents-after-landing@*') ||
-        ! enabled=$(systemctl --user list-unit-files --plain --no-legend 'agents-after-landing@*'); then
+    # Loaded units in every state and enabled links cover instances; systemd's
+    # list-unit-files reports only the template, not its enabled instances.
+    if ! running=$(systemctl --user list-units --all --plain --no-legend 'agents-after-landing@*'); then
         fail 'after-landing: cannot list runner services'
         return
     fi
     while read -r service _load active rest; do
-        [[ -n $service && $active != inactive && $active != failed ]] || continue
         [[ $service == agents-after-landing@?*.service ]] || continue
-        follower=${service#agents-after-landing@}
-        follower=${follower%.service}
-        [[ -v followed[$follower] || -v seen[$follower] ]] && continue
-        seen[$follower]=1
-        unlisted+=("$follower")
+        services+=("$service")
+        if [[ $active != inactive && $active != failed ]]; then
+            active_services[$service]=1
+        fi
     done <<< "$running"
-    while read -r service active rest; do
-        [[ $active == enabled || $active == enabled-runtime ]] || continue
-        [[ $service == agents-after-landing@?*.service ]] || continue
+    for link in "$unit_dir"/default.target.wants/agents-after-landing@?*.service; do
+        [[ -L $link ]] || continue
+        services+=("${link##*/}")
+    done
+    for service in "${services[@]}"; do
         follower=${service#agents-after-landing@}
         follower=${follower%.service}
         [[ -v followed[$follower] || -v seen[$follower] ]] && continue
         seen[$follower]=1
+        if [[ ! -v active_services[$service] ]]; then
+            if ! enabled=$(systemctl --user is-enabled "$service" 2>/dev/null) && [[ -z $enabled ]]; then
+                fail "after-landing: cannot check whether $service is enabled"
+                return
+            fi
+            [[ $enabled == enabled || $enabled == enabled-runtime ]] || continue
+        fi
         unlisted+=("$follower")
-    done <<< "$enabled"
+    done
     if ((fix)); then
         if ! mkdir -p "$unit_dir" || ! sibling=$(mktemp "$unit_dir/$unit.XXXXXX"); then
             fail "after-landing: cannot prepare $unit_dir/$unit"

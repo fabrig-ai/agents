@@ -36,25 +36,35 @@ elif op == 'list-units':
     assert tail == ['--all', '--plain', '--no-legend', 'agents-after-landing@*'], tail
     for name, flags in state.items():
         if flags.get('loaded', True):
-            active = 'active running' if flags['active'] else 'inactive dead'
+            active = ('failed failed' if flags['active'] == 'failed' else
+                      'active running' if flags['active'] else 'inactive dead')
             print(f'agents-after-landing@{name}.service loaded {active} fixture')
 elif op == 'list-unit-files':
     assert tail == ['--plain', '--no-legend', 'agents-after-landing@*'], tail
-    print('agents-after-landing@.service disabled enabled')
-    for name, flags in state.items():
-        status = 'enabled' if flags['enabled'] else 'disabled'
-        print(f'agents-after-landing@{name}.service {status} enabled')
+    print('agents-after-landing@.service indirect enabled')
 elif op in ('is-enabled', 'is-active'):
-    assert len(tail) == 2 and tail[0] == '--quiet', tail
-    name = tail[1].removeprefix('agents-after-landing@').removesuffix('.service')
+    quiet = tail[0] == '--quiet'
+    assert len(tail) == (2 if quiet else 1), tail
+    name = tail[-1].removeprefix('agents-after-landing@').removesuffix('.service')
     key = 'enabled' if op == 'is-enabled' else 'active'
-    found = any(flags[key] for flags in state.values()) if name == '*' else state.get(name, {}).get(key, False)
+    value = state.get(name, {}).get(key, False)
+    found = any(flags[key] is True for flags in state.values()) if name == '*' else value not in (False, 'failed')
+    if not quiet:
+        assert op == 'is-enabled', args
+        print(value if isinstance(value, str) else 'enabled' if value else 'disabled')
     sys.exit(0 if found else 1)
 elif op in ('enable', 'disable'):
     assert len(tail) == 2 and tail[0] == '--now', tail
     name = tail[1].removeprefix('agents-after-landing@')
     state[name] = dict(enabled=op == 'enable', active=op == 'enable')
     path.write_text(json.dumps(state))
+    link = Path.home() / '.config/systemd/user/default.target.wants' / f'agents-after-landing@{name}.service'
+    if op == 'enable':
+        link.parent.mkdir(parents=True, exist_ok=True)
+        if not link.is_symlink():
+            link.symlink_to('../agents-after-landing@.service')
+    else:
+        link.unlink(missing_ok=True)
 else:
     raise AssertionError(args)
 '''
@@ -82,6 +92,7 @@ class AfterLandingUnits(unittest.TestCase):
         self.config.mkdir(parents=True)
         (self.config / 'director').write_text('d@x\n')
         self.unit = self.home / '.config/systemd/user' / UNIT
+        self.wants = self.unit.parent / 'default.target.wants'
         self.state = self.root / 'state.json'
         self.state.write_text('{}')
         self.trace = self.root / 'calls'
@@ -101,7 +112,16 @@ class AfterLandingUnits(unittest.TestCase):
         (self.config / 'follow').write_text(text)
 
     def instances(self, names):
-        self.state.write_text(json.dumps({name: dict(enabled=True, active=True) for name in names}))
+        self.set_state({name: dict(enabled=True, active=True) for name in names})
+
+    def set_state(self, state):
+        self.state.write_text(json.dumps(state))
+        self.wants.mkdir(parents=True, exist_ok=True)
+        for link in self.wants.iterdir():
+            link.unlink()
+        for name, flags in state.items():
+            if flags['enabled'] is True:
+                (self.wants / f'agents-after-landing@{name}.service').symlink_to('../' + UNIT)
 
     def check(self, fix=False, success=True, fault=None):
         env = self.env | ({'FIXTURE_FAIL': fault} if fault else {})
@@ -243,16 +263,67 @@ class AfterLandingUnits(unittest.TestCase):
 
     def test_enabled_or_running_unlisted(self):
         self.follow('skein\n')
-        self.state.write_text(json.dumps({
+        self.set_state({
             'smith': dict(enabled=True, active=False, loaded=False),
             'temper': dict(enabled=False, active=True),
             'hearth': dict(enabled=False, active=False),
-        }))
+        })
         lines = self.check(fix=True)
         self.assertEqual(set(call[-1] for call in self.calls('disable')),
                          {'agents-after-landing@smith', 'agents-after-landing@temper'})
         self.assertEqual(len(self.calls('disable')), 2)
         self.assertEqual(lines[-1], 'ok    after-landing: skein enabled and active')
+
+    def stopped_enabled(self, loaded, active=False, enabled=True):
+        self.follow('skein\n')
+        self.check(fix=True)
+        self.set_state({
+            'skein': dict(enabled=True, active=True),
+            'temper': dict(enabled=enabled, active=active, loaded=loaded),
+        })
+        link = self.wants / 'agents-after-landing@temper.service'
+        self.assertEqual(link.is_symlink(), enabled is True)
+        self.reset_trace()
+        before = self.unit.read_bytes(), self.state.read_bytes(), (os.readlink(link) if link.is_symlink() else None)
+        self.assertIn('FAIL  after-landing: temper runs but is not followed here (--fix stops it)',
+                      self.check(success=False))
+        self.assertEqual(self.mutations(), [])
+        self.assertEqual((self.unit.read_bytes(), self.state.read_bytes(),
+                          os.readlink(link) if link.is_symlink() else None), before)
+        self.reset_trace()
+        self.assertIn('ok    after-landing: temper stopped: not followed here', self.check(fix=True))
+        self.assertEqual(self.calls('disable'), [['--user', 'disable', '--now', 'agents-after-landing@temper']])
+        self.assertEqual(json.loads(self.state.read_text())['temper'], dict(enabled=False, active=False))
+        self.assertFalse(link.is_symlink())
+        self.assertEqual(self.calls('list-unit-files'), [])
+
+    def test_stopped_but_enabled_is_disabled(self):
+        for active in (False, 'failed'):
+            for enabled in (True, 'enabled-runtime'):
+                with self.subTest(active=active, enabled=enabled):
+                    self.stopped_enabled(loaded=True, active=active, enabled=enabled)
+
+    def test_enabled_not_loaded(self):
+        self.stopped_enabled(loaded=False)
+
+    def test_stopped_and_disabled_is_left(self):
+        self.follow('skein\n')
+        self.check(fix=True)
+        self.set_state({
+            'skein': dict(enabled=True, active=True),
+            'temper': dict(enabled=False, active=False),
+        })
+        self.reset_trace()
+        before = self.unit.read_bytes(), self.state.read_bytes()
+        lines = self.check()
+        self.assertFalse(any('temper' in line for line in lines))
+        self.assertEqual(self.mutations(), [])
+        self.assertEqual((self.unit.read_bytes(), self.state.read_bytes()), before)
+        self.reset_trace()
+        lines = self.check(fix=True)
+        self.assertFalse(any('temper' in line for line in lines))
+        self.assertEqual(self.calls('disable'), [])
+        self.assertEqual(json.loads(self.state.read_text())['temper'], dict(enabled=False, active=False))
 
     def test_empty_follow(self):
         self.follow('# no followers here\n  \n')
@@ -266,15 +337,27 @@ class AfterLandingUnits(unittest.TestCase):
         self.follow(name)  # A final newline is optional.
         self.assertEqual(self.check(fix=True), [f'ok    after-landing: {name} enabled and active'])
 
+    def test_is_enabled_failure(self):
+        self.follow('# no followers here\n')
+        self.check(fix=True)
+        self.set_state({'temper': dict(enabled=True, active=False)})
+        link = self.wants / 'agents-after-landing@temper.service'
+        before = self.unit.read_bytes(), self.state.read_bytes(), os.readlink(link)
+        for fix in (False, True):
+            with self.subTest(fix=fix):
+                self.reset_trace()
+                self.assertEqual(self.check(fix=fix, success=False, fault='is-enabled'),
+                                 [f'ok    after-landing: {UNIT} is current',
+                                  'FAIL  after-landing: cannot check whether agents-after-landing@temper.service is enabled'])
+                self.assertEqual(self.mutations(), [])
+                self.assertEqual((self.unit.read_bytes(), self.state.read_bytes(), os.readlink(link)), before)
+
     def test_service_manager_failures(self):
         self.follow('skein\n')
-        for fault in ('list-units', 'list-unit-files'):
-            with self.subTest(fault=fault):
-                self.reset_trace()
-                self.assertEqual(self.check(fix=True, success=False, fault=fault),
-                                 ['FAIL  after-landing: cannot list runner services'])
-                self.assertFalse(self.unit.exists())
-                self.assertEqual(self.mutations(), [])
+        self.assertEqual(self.check(fix=True, success=False, fault='list-units'),
+                         ['FAIL  after-landing: cannot list runner services'])
+        self.assertFalse(self.unit.exists())
+        self.assertEqual(self.mutations(), [])
         self.assertEqual(self.check(fix=True, success=False, fault='daemon-reload'),
                          ['FAIL  after-landing: user daemon-reload failed'])
         self.assertEqual(self.calls('enable'), [])
