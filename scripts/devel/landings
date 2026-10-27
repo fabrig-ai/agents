@@ -3,6 +3,7 @@
 
 landings [--last N]
 landings wait [--cleared] TARGET [--timeout SECONDS] [--post ADDRESS]
+    With --timeout 0, decide by records alone, without ancestry.
 landings cleared REPO
 landings taught [--since TIME]
 landings report [--since DATE] [--repo NAME] [--tsv]
@@ -395,7 +396,9 @@ class Checkouts:
         path = self.root / repo
         if not (path / '.git').exists():
             return None
-        timeout = min(timeout, max(GIT_READ_TIMEOUT, self.deadline - time.monotonic()))
+        timeout = min(timeout, self.deadline - time.monotonic())
+        if timeout <= 0:
+            return None
         try:
             with subprocess.Popen(['git', '-C', str(path), *args],
                                   stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
