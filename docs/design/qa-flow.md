@@ -325,8 +325,8 @@ takes a repository's name where it needs one.
 | `qa watch` | runs the service (section 4) |
 | `qa keep --check DIRECTORY` | scans what a copy of DIRECTORY would hold, and writes nothing (section 11.5) |
 | `qa keep --walk NAME DIRECTORY` | keeps a focused walk's evidence (section 11.5) |
-| `qa walk REPO RUNG [--build REF] [--login POOL]... [--cap MINUTES]` | starts a rung walk on a reserved login, ended by the service (section 10.7) |
-| `qa walk REPO RUNG --resume N --build REF [--login POOL]... [--cap MINUTES]` | resumes a paused walk from its kept state, at a fix's build (section 10.7) |
+| `qa walk REPO RUNG [--kind KIND] [--build REF] [--login POOL]... [--cap MINUTES]` | starts a rung walk on a reserved login, ended by the service (section 10.7) |
+| `qa walk REPO RUNG --resume NAME --build REF [--cap MINUTES]` | resumes a paused walk from its kept state, at a fix's build (section 10.7) |
 | `qa deploy DIRECTORY NAME -- COMMAND...` | starts a pass's deployment in a unit of its own, stopped by its give-back (section 10.5) |
 
 The record is committed with `record commit`, and its rows are in
@@ -343,7 +343,7 @@ The record is committed with `record commit`, and its rows are in
 Times are UTC to the second, commits full SHAs. The settings are the
 kit's: the machine, named as section 4 says, and `machine.env`'s
 `QA_SLOTS` (1; 4 on hetzner6), `QA_LOGIN_RESERVE` (2, section
-10.6), `QA_WALK_SLOTS` (2, section 10.7), `QA_BATCH` (5), `QA_CAP_MINUTES` (120),
+10.6), `QA_WALK_KINDS` (`forgejo=2:chatgpt claude=2:claude`, section 10.7), `QA_BATCH` (5), `QA_CAP_MINUTES` (120),
 `QA_INTERVAL_SECONDS` (300), `QA_STOP_SECONDS` (50, section 10.5) and
 `QA_EVIDENCE_KIB` (2048, section 11.1).
 
@@ -701,6 +701,31 @@ held).
   reserve is the service's own cap, checked under its own lock, one
   admission at a time; `logins` keeps no class of holder. A pool no
   larger than the reserve runs no QA pass, and `qa passes` says why.
+- **A pool shared out by caps** (the user, 10-27: ChatGPT+Forgejo walks
+  are never blocked by anything): every taker of a pool is in a class,
+  each class has a cap, and the caps add up to at most the pool's size,
+  so that a class below its cap always finds a free login, whatever the
+  others do. The classes: QA's passes, holders `qa-watch` and
+  `qa-watch/…`, whose cap is the size less `QA_LOGIN_RESERVE`; and each
+  kind of walk, holders `walk/<kind>/…`, whose cap is its walk slots
+  (10.7), one login of a pool per walk. A take by hand (a live story,
+  a recovery) is made as a kind's holder, `walk/<kind>/<what>`, and
+  counts against that kind. A class's count is every login its holders
+  hold in `logins list`, whatever their state: a stuck one, a grant
+  saved but not yet started, a walk ended with a login still out. Each
+  class admits below its cap alone, machine-wide, under its own lock
+  (the watch's, the walks'), and takes with `--now`: under the caps a
+  free login is there, and a refused take means a cap was broken, so
+  the walk or pass refuses at once and says so. The kit never waits in
+  the queue.
+- **The sum is checked:** each kind names its pools (10.7), and the
+  tool refuses a configuration where, for a pool, the reserve is less
+  than the slots of the kinds that use it. With ChatGPT+Forgejo's two
+  alone, `QA_LOGIN_RESERVE` is 2; with ChatGPT+GitHub's one beside them,
+  3, QA yielding one login until more accounts give it back. A cap
+  lowered, or the reserve raised, reclaims nothing: the new guarantee
+  holds once the class's holdings have drained below it, which `qa
+  passes` shows, each class's holding beside its cap.
 - **QA never waits in the queue:** its takes are `logins take POOL
   --any --now`, granted only a login that is free and that no waiter
   claims, refused at once otherwise without a place in the queue
@@ -727,6 +752,14 @@ held).
   and building elsewhere would add a binary's transfer and a second
   machine's state for minutes saved: they build on the logins'
   machine.
+- **Four walks and two passes** on hetzner6 (10-27, from 10.6's
+  measures): six boxes at about 0.4 GB and six Codex sessions, about 5
+  GB with the Claude walks' Claude Code processes (one per agent run,
+  a few hundred MB each, not yet measured there) against about 11 GB
+  free; six slots' targets about 48 GB against 232 free; builds queued
+  by heavy. It holds, with a margin to watch: the first Claude walk is
+  measured, and below 2 GB free QA's slots go to 1 before any walk
+  waits.
 - **Its fixture,** `test-logins` and `test-qa`:
   - a pool's take grants a free login and names it; never one already
     held, by this holder or another; a name ending in `-<digits>` is no
@@ -758,27 +791,41 @@ again, as tightly as possible. A walk is the ladder's: its brief, its
 rung and its findings are the rung owner's (design/ladder's loop), and
 the kit only starts it and ends it, as the service ends a pass.
 
-- **`qa walk REPO RUNG [--build REF] [--login POOL]... [--cap
-  MINUTES]`,** on the logins' machine, by the rung's owner, whose
+- **Kinds of walk** (the user, 10-27: per rung, ChatGPT+Forgejo first,
+  then the same walk on Claude+Forgejo, then ChatGPT+GitHub; the first
+  never blocked): a walk has a kind, `--kind KIND`, one of
+  `QA_WALK_KINDS`, each kind with its walk slots and its pools
+  (`forgejo=2:chatgpt claude=2:claude`, and `github=1:chatgpt` once
+  its walks start), the first listed by default. A kind's walk slots are
+  its own, machine-wide, never taken by another kind, and they cap its
+  logins of each of its pools (10.6). A walk's logins are its kind's
+  pools; `--login` may only name one of them.
+  Its brief is `tmp/qa-focused/rung-<RUNG>-<KIND>-brief.md` where that
+  file is, else the rung's. The default kind's walks keep their names,
+  `rung-<RUNG>-<n>`; another kind's are `rung-<RUNG>-<KIND>-<n>`, with
+  `<KIND>-<n>` in the clock's walk column.
+- **`qa walk REPO RUNG [--kind KIND] [--build REF] [--login POOL]...
+  [--cap MINUTES]`,** on the logins' machine, by the rung's owner, whose
   address (`POST_NAME`) it checks first. RUNG is the ladder's name
   (`a`, `b0`), one namespace on the machine. Under the walks' lock,
   `tmp/qa/walks.lock`, one walk at a time:
-  1. the walk is the rung's next number n, its name `rung-<RUNG>-<n>`,
-     its directory `tmp/qa-focused/rung-<RUNG>-<n>/`, private, and its
-     state `tmp/qa/walks/rung-<RUNG>-<n>.json`, saved before anything is
+  1. the walk is the rung's next number n of its kind, its name as
+     above, `rung-<RUNG>-<n>` for the default kind, its directory
+     `tmp/qa-focused/<name>/`, private, and its state
+     `tmp/qa/walks/<name>.json`, saved before anything is
      taken and after each step: REPO, RUNG, REF, the starter, the cap
      and its start, the slot, each grant with its kind, the run, and how
      far its end has come;
-  2. it takes the lowest free walk slot of REPO, a worktree of the
-     service's clone, `tmp/qa/repos/<repo>-walk-<k>/` (k from 1,
-     `QA_WALK_SLOTS` of them, 2), made and checked as a pass's slot is
-     (section 4); with none free it refuses at once, having taken
-     nothing. The slots bound the walks, so walks hold at most two
-     logins of a pool;
-  3. it takes one login of each POOL, `logins take POOL --any --as
-     walk/rung-<RUNG>-<n> --note DIRECTORY --wait 900`, saving each grant
-     before the next; one not granted gives back those taken, frees the
-     slot, and nothing starts;
+  2. it takes the lowest free walk slot of its kind, a worktree of the
+     service's clone, `tmp/qa/repos/<repo>-walk-<kind>-<k>/` (k from 1 to
+     the kind's slots), made and checked as a pass's slot is (section
+     4); with none free it refuses at once, having taken nothing;
+  3. it takes one login of each of its kind's pools, `logins take POOL
+     --any --now --as walk/<kind>/<name> --note DIRECTORY`, saving each
+     grant before the next; with the caps kept (10.6), a kind below its
+     cap finds a free login at once; one not granted gives back those
+     taken, frees the slot, nothing starts, and the refusal names the
+     broken cap;
   4. it checks the slot out, detached, at REF: a commit or a branch on
      origin, `main` by default (a fix's branch, for its confirming
      walk);
@@ -804,7 +851,7 @@ the kit only starts it and ends it, as the service ends a pass.
   5), from its saved state: it stops the session at its cap (MINUTES,
   180 by default, from its saved start) and waits for its stop wrapper
   before it gives anything back; its moved logins given back as
-  `walk/rung-<RUNG>-<n>`, its units stopped once they are back,
+  `walk/<kind>/<name>`, its units stopped once they are back,
   in-place logins after, and a stuck login's alert at once. The walk
   slot is held until the session's unit and every deployment unit of
   the walk are confirmed stopped; one of unknown state keeps it. Then it
@@ -835,14 +882,17 @@ the kit only starts it and ends it, as the service ends a pass.
      stuck end, alerted as any. A paused walk frees its walk slot,
      keeps its directory and state, appends `walk-pause` (its note the
      paused line) and posts the starter.
-- **`qa walk REPO RUNG --resume N --build REF [--login POOL]...
-  [--cap MINUTES]`** resumes paused walk n of the rung, under the
+- **`qa walk REPO RUNG --resume NAME --build REF [--cap MINUTES]`**
+  resumes the paused walk NAME (`rung-b1-claude-2`), of the kind its
+  state saved, under the
   walks' lock and only once its pause's end is complete. It saves a new
   attempt in the walk's state (its run, start, slot, grants and end
   progress, so that nothing of the attempt before is given or ended
-  twice), takes a free walk slot and one free login of each pool, the
-  walk's own pools unless `--login` names others, one refused undoing
-  all as at a start (steps 2 and 3 above), checks the slot out at REF
+  twice), takes a free walk slot of its kind and one free login of each
+  of its pools, one refused undoing all as at a start (steps 2 and 3
+  above): a pause frees its kind's slot and logins for other walks, so
+  a resume refuses at once while the kind has none free, and its owner
+  asks again, checks the slot out at REF
   (the fix's branch, before it lands, or `main` for the walk that
   counts), removes `paused`, writes the session's task (the walk's
   facts, each kept deployment's saved command and directories to start

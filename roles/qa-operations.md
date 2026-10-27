@@ -194,8 +194,9 @@ temper's binding, `docs/design/qa.md` 3, is the source; as of 10-27:
   hold at most the pool's size less `QA_LOGIN_RESERVE`, a login one
   stranded included (qa-flow.md 10.6; agents 86f918b). `qa passes`
   shows each pool's size, QA's holding and the reserve.
-- **By hand,** a walk or a live story takes `logins take chatgpt --any
-  --as HOLDER --note DIR [--wait SECONDS]`, which prints the name and
+- **By hand,** a walk or a live story takes as a kind's holder, so that
+  it counts against that kind's cap (qa-flow.md 10.6): `logins take
+  chatgpt --any --now --as walk/forgejo/WHAT --note DIR`, which prints the name and
   path it grants, and gives back `logins give NAME --as HOLDER`. Once
   piece W lands, `qa walk` does both for a rung walk (qa-flow.md 10.7),
   and a queued take is dropped with `logins drop chatgpt --any --as
@@ -229,6 +230,22 @@ machine, in a private directory `E`, with temper's binary copied in:
 
 `temper ctl` reads its standard input: in a script, give each call
 `</dev/null`.
+
+### 6.2a A new Claude login
+
+`claude` is a program's login, Claude Code's configuration directory,
+used in place and never moved (qa-flow.md 10.2; agents#11). A second
+account makes the pool `claude`, `claude-2`: two Claude walks at once,
+or one backing the other. The user, on the logins' machine, in a
+terminal of their own (`ssh` to it), with another Claude account than
+the first's:
+
+1. `mkdir -m 700 ~/claude-qa-login-2`, then
+   `CLAUDE_CONFIG_DIR=~/claude-qa-login-2 claude`, and `/login`: open
+   the address it prints in a browser, sign in with that account, paste
+   the code back, then `/exit`. No tunnel is needed.
+2. The director, or an agent by path alone: `logins add claude-2
+   ~/claude-qa-login-2`, then `logins list` shows it at rest.
 
 ### 6.3 Rolling the logins kit
 
@@ -294,8 +311,15 @@ The director's, on hetzner6:
   - `QA_SLOTS` 2, set once agents 86f918b runs there: every temper
     pass needs a login, and the reserve keeps the walks' two whatever
     the slots;
-  - `QA_LOGIN_RESERVE` 2 and `QA_WALK_SLOTS` 2 (from piece W), the
-    walks';
+  - `QA_LOGIN_RESERVE` 2, the ChatGPT+Forgejo walks' two logins; 3 once
+    ChatGPT+GitHub walks start, QA then yielding one (qa-flow.md 10.6);
+  - `QA_WALK_KINDS` `forgejo=2:chatgpt claude=2:claude` (from piece W):
+    each kind of walk, its own walk slots and its pools,
+    ChatGPT+Forgejo's never taken by another; `github=1:chatgpt` added,
+    with `QA_LOGIN_RESERVE` 3, when ChatGPT+GitHub walks start
+    (qa-flow.md 10.6, 10.7). The tool refuses a reserve below the slots
+    of the kinds that use a pool. A change reclaims nothing: it holds
+    once holdings drain below it (`qa passes`);
   - `QA_BATCH` 5, `QA_CAP_MINUTES` 120 and `QA_INTERVAL_SECONDS` 300;
   - `QA_STOP_SECONDS` 50, the give-back wrapper's bound in a
     deployment's stop (qa-flow.md 10.5);
@@ -378,3 +402,6 @@ Newest last, times UTC.
   at most two of the four logins; `QA_SLOTS` 2 once it runs on hetzner6
   (design/qa-evidence).
 - 10-27 19:0xZ: each rung walks ChatGPT+Forgejo, then Claude+Forgejo, then ChatGPT+GitHub; ChatGPT+Forgejo never blocked; two more walk slots for the others (the user).
+- 10-27 19:1xZ: walk kinds with their own slots (`QA_WALK_KINDS`
+  `forgejo=2 claude=2`), a pool shared out by caps, a second Claude
+  login's steps (6.2a; qa-flow.md 10.6, 10.7; the user, design/qa-evidence).
