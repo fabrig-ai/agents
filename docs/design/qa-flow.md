@@ -266,6 +266,11 @@ kit's: the machine, named as section 4 says, and `machine.env`'s
 - `director.md` gains a line for the rungs and the held logins at its
   check: opening a rung, and reading `logins list` for saturation
   (section 10).
+- `director.md` gains a line for the evidence: a focused walk kept with
+  `qa keep --walk` at its end post, and a refused copy mended by name
+  and line, or left refused (section 11.4, 11.5). `roles/qa.md` gains
+  its scratch's layout and the check before its report's last write
+  (section 11.1, 11.5).
 
 ## 9. Open
 
