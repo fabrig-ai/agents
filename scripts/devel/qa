@@ -651,7 +651,7 @@ ASSIGN_NAME = r'(?:password|passwd|secret|token|api_key|client_secret|access_tok
 ASSIGNED = re.compile(r'''(?<![\w])(?:(?P<json>["']''' + ASSIGN_NAME + r'''["']\s*:\s*)(?=["'])|''' + ASSIGN_NAME + r'(?![\w])\s*=\s*)', re.I)
 JSON_KEY = re.compile(r'''(?<![\w])["']''' + ASSIGN_NAME + r'''["']\s*:\s*$''', re.I)
 COLON = re.compile(r'^\s*' + ASSIGN_NAME + r'\s*:\s*(.*)$', re.I)
-USER = re.compile(r'''(?<!\S)(?:--user(?:[ \t]+|=)|(?:"-u"|'-u')[ \t]+|-[A-Za-z]*?u(?:[ \t]+|=)?)''')
+USER = re.compile(r'''(?<!\S)(?:--user(?:[ \t]+|=)|(?:"-u"|'-u')[ \t]+|-[sSkvLfiINqgjnRZ]*u(?:[ \t]+|=)?)''')
 PLACEHOLDER = re.compile(r'(?:null|true|false|[A-Z][A-Z0-9_]*|<[^\n]*>|\$[A-Za-z_][A-Za-z0-9_]*|\$\{[A-Za-z_][A-Za-z0-9_]*\}|@[^\s]+|…|\.\.\.|\*+)?')
 NAME_PART = re.compile(r'(?:^|[-_.])(?:cookies?|password|passwd|secret|token|credentials?|netrc)(?:$|[-_.])', re.I)
 NAME_END = re.compile(r'(?:^auth\.json$|^id_rsa$|^id_ed25519$|^login(?:\..*)?$|\.(?:headers?|pem|key|env)$)', re.I)
@@ -668,7 +668,7 @@ class Refusal(NamedTuple):
 
 
 def placeholder(value):
-    value = re.split(r'[ \t]+#', value, maxsplit=1)[0].rstrip()
+    value = value.rstrip()
     if value.endswith((',', ';', ')', '.', ':')) and value != '...':
         value = value[:-1]
     if len(value) >= 2 and value[0] in ('"', "'") and value[-1] == value[0]:
@@ -733,15 +733,22 @@ def scan(text):
             rules.append('jwt')
         header = False
         end = 0
-        shell = line.replace('\\ ', ' ')
-        for match in HEADER.finditer(shell):
+        for match in HEADER.finditer(line):
             if match.start() < end:
                 continue
             wrapper = match[3] or (match[1] if not match[2] else '')
-            value, end = value_at(shell, match.end(), wrapper=wrapper)
+            value, end = value_at(line, match.end(), wrapper=wrapper)
             if not placeholder(value):
                 header = True
                 break
+        # A shell word with escaped spaces is one argument: its value runs to the word's end.
+        for word in re.findall(r'(?:\\ |\S)+', line):
+            if header or '\\ ' not in word:
+                continue
+            word = word.replace('\\ ', ' ')
+            match = HEADER.search(word)
+            header = bool(match and not placeholder(word[match.end():].strip()))
+        shell = line
         end = 0
         for cookie in COOKIE.finditer(shell):
             if header:
@@ -772,7 +779,13 @@ def scan(text):
                 rules.append('link')
                 break
         colon = COLON.fullmatch(line)
-        assigned = bool(colon and not placeholder(colon[1].rstrip()))
+        spoken = colon[1].rstrip() if colon else ''
+        if spoken[:1] in ('"', "'"):
+            spoken, _ = value_at(spoken, 0, string=True)
+        else:
+            # A name: value line's unquoted value ends at a YAML comment (found in one pass).
+            spoken = min((spoken.split(mark, 1)[0] for mark in (' #', '\t#')), key=len).rstrip()
+        assigned = bool(colon and not placeholder(spoken))
         if JSON_KEY.search(line):
             following = next((lines[i][1].lstrip() for i in range(index + 1, len(lines))
                               if lines[i][1].strip()), '')
@@ -790,15 +803,27 @@ def scan(text):
         if assigned:
             rules.append('assigned')
         end = 0
-        for user in USER.finditer(shell):
+        for user in USER.finditer(line):
             if user.start() < end:
                 continue
-            value, end = value_at(shell, user.end(), stops='&;')
+            value, end = value_at(line, user.end(), stops='&;')
             if value[:1] in ('"', "'") and value[-1:] == value[:1]:
                 value = value[1:-1]
             if ':' in value and not placeholder(value.partition(':')[2]):
                 rules.append('user')
                 break
+        # A shell word with escaped spaces is one argument, the flag's value running to its end.
+        for word in re.findall(r'(?:\\ |\S)+', line):
+            if 'user' in rules or '\\ ' not in word:
+                continue
+            word = word.replace('\\ ', ' ')
+            for match in USER.finditer(word):
+                value = word[match.end():].strip()
+                if value[:1] in ('"', "'") and value[-1:] == value[:1]:
+                    value = value[1:-1]
+                if ':' in value and not placeholder(value.partition(':')[2]):
+                    rules.append('user')
+                    break
         result.extend((number, rule) for rule in rules)
     return result
 
@@ -870,8 +895,10 @@ class Snapshot:
                     if (tree is False and is_dir) or (tree is True and not is_dir):
                         refused.append(Refusal(label, 0, 'kind'))
                         continue
-                    if is_dir and rules:
-                        continue  # Never walk or name anything under a refused directory.
+                    if is_dir and rules and not past:
+                        # Never walk or name anything under a refused directory; its count is unknown.
+                        unreadable += 1
+                        continue
                     regular = stat.S_ISREG(before.st_mode)
                     if regular:
                         count += 1

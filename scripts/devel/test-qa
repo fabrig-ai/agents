@@ -2393,6 +2393,45 @@ def keep_check_reads_combined_and_quoted_user_flags(lab):
     assert 'refused:' not in lab.run('keep', '--check', str(scratch)).stdout
 
 
+def keep_check_reads_whole_quoted_and_escaped_values(lab):
+    value = secrets.token_hex(12)
+    # A comment inside quotes and an escaped space are part of the value: never a placeholder's tail.
+    keep_shapes(lab, value, [(f'curl -u "qa:TOKEN # {value}"\n', 1, 'user'),
+                             (f'curl -u qa:TOKEN\\ {value}\n', 1, 'user'),
+                             (f'curl -H Authorization:\\ Bearer\\ TOKEN\\ {value}\n', 1, 'header')])
+    plain = 'curl -H Authorization:\\ Bearer\\ TOKEN\ncurl -oout:status.json -ooutput:a3f9c2 https://forge.test\n'
+    scratch = lab.scratch({'evidence/capture.txt': plain + f'curl -o out:{"a" * 40} https://forge.test\n'})
+    assert 'refused:' not in lab.run('keep', '--check', str(scratch)).stdout
+    # The scratch keeps what each call wrote: the names below come last.
+    for name in (f'curl -u "qa:TOKEN # {value}"', f'-u "qa:TOKEN # {value}"'):
+        scratch = lab.scratch({'evidence/capture.txt': 'plain\n', f'evidence/{name}': 'plain\n'})
+        result = lab.run('keep', '--check', str(scratch), status=2)
+        keep_private(lab, [value], result)
+
+
+def keep_check_counts_a_left_out_refused_directory(lab):
+    lab.env['QA_EVIDENCE_KIB'] = '1'
+    scratch = lab.scratch({'scripts/huge': 'x' * 2048, 'evidence/password/child.txt': 'six b\n'})
+    out = lab.run('keep', '--check', str(scratch)).stdout
+    assert 'left out: evidence/, 1 files, 6 bytes' in out, out
+
+
+def keep_check_strips_no_comment_in_linear_time(lab):
+    driver = f'''
+import runpy, time
+tool = runpy.run_path({str(SCRIPT)!r})
+size = 2 * 1024 * 1024
+text = 'password: "' + ' ' * size + '"'
+start = time.perf_counter()
+tool['scan'](text)
+elapsed = time.perf_counter() - start
+assert elapsed < 2, f'2 MiB scan took {{elapsed:.3f}} seconds'
+'''
+    result = subprocess.run([sys.executable, '-I', '-S', '-c', driver], env=lab.env,
+                            capture_output=True, text=True, timeout=HUNG_TOOL_S)
+    assert result.returncode == 0, result.stderr
+
+
 def keep_check_limits_link_parameters_to_query_or_fragment(lab):
     value = secrets.token_hex(12)
     plain = ('https://forge.test/assets;code=200\nhttps://forge.test/assets&code=200\n'
@@ -5789,7 +5828,8 @@ def hex_walk_builds_refuse_ambiguous_and_non_commit_objects(lab):
     assert state['main'] == commit
 
 
-CASES = (keep_check_bounds_incomplete_private_key_markers,
+CASES = (keep_check_reads_whole_quoted_and_escaped_values, keep_check_counts_a_left_out_refused_directory,
+         keep_check_strips_no_comment_in_linear_time, keep_check_bounds_incomplete_private_key_markers,
          keep_check_reads_spaced_cookie_pairs, keep_check_reads_json_values_on_later_lines,
          keep_check_joins_shell_continuations, keep_check_reads_shell_escaped_spaces,
          keep_check_reads_combined_and_quoted_user_flags,
