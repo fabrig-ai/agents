@@ -87,12 +87,25 @@ signal.signal(signal.SIGQUIT, signal.SIG_DFL)
 with (fixture / (unit + '.log')).open('wb') as log:
     pid = os.fork()
     if pid == 0:
+        orphan_story = ((fixture / 'scenario').exists() and
+                        (fixture / 'scenario').read_text().strip() == 'orphan')
+        if orphan_story:
+            import ctypes
+            assert ctypes.CDLL(None).prctl(36, 1, 0, 0, 0) == 0
+            signal.signal(signal.SIGTERM, lambda sig, frame:
+                          (fixture / (unit + '.manager-signal')).write_text(str(sig)))
         os.dup2(log.fileno(), 1)
         os.dup2(log.fileno(), 2)
         proc = subprocess.Popen(command, env=env, stdin=subprocess.DEVNULL,
                                 stdout=log, stderr=log, start_new_session=True)
         (fixture / (unit + '.pid')).write_text(str(proc.pid) + '\n')
         status = proc.wait()
+        if orphan_story:
+            while True:
+                try:
+                    os.waitpid(-1, 0)
+                except ChildProcessError:
+                    break
         if stop_args is not None:
             subprocess.run(stop_args, env=env, stdin=subprocess.DEVNULL,
                            stdout=log, stderr=log, check=True)
@@ -123,6 +136,17 @@ with (fake / 'codex.calls').open('a') as out:
                           'home': os.environ.get('HOME'), 'post_name': os.environ.get('POST_NAME'),
                           'unwanted': os.environ.get('CODEX_RUN_FIXTURE_UNWANTED')}) + '\n')
 scenario = (fake / 'scenario').read_text().strip()
+if scenario == 'orphan':
+    import signal, time
+    parent = os.getpid()
+    if os.fork() == 0:
+        while os.getppid() == parent:
+            time.sleep(.01)
+        parent = os.getppid()
+        (state / 'orphan-parent').write_text(str(parent))
+        os.kill(parent, signal.SIGTERM)
+        os._exit(0)
+    sys.exit(0)
 if scenario in ('on-stop', 'on-stop-failure', 'on-stop-timeout'):
     meta = dict(line.split('=', 1) for line in (state / 'meta').read_text().splitlines())
     hook = pathlib.Path(meta['on_stop'])
@@ -712,6 +736,12 @@ expect 'row failure diagnosed' "$(cat "$state/finish-errors")" 'row failed'
 json_expect 'row failure still posts' 'length == 1' "$fake/post.calls"
 rm "$fake/row-fail"
 ln -sfn /usr/bin/flock "$t/bin/flock"
+
+# An orphan signals the worker, never its subreaper stand-in user manager.
+start_task orphan
+expect 'worker adopts an orphan' "$(cat "$state/orphan-parent")" "$(cat "$fake/codex-run-$id.pid")"
+expect 'orphan signal ends the worker' "$(cat "$fake/codex-run-$id.ended")" 143
+expect 'stand-in manager receives no orphan signal' "$(test ! -e "$fake/codex-run-$id.manager-signal" && echo clear)" clear
 
 # Termination of the worker alone and of its whole unit both finish with failure.
 for signal in TERM INT KILL; do

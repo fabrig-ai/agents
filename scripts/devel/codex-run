@@ -277,6 +277,10 @@ task_launch() {
 
 task_run() {
     (($# == 1)) || refuse 'usage: codex-run _run ID'
+    if [[ ${CODEX_RUN_SUBREAPER:-} != "$$" ]]; then
+        # exec preserves the adopting parent: an orphan must never signal systemd --user.
+        exec python3 -I -c 'import ctypes, os, sys; libc = ctypes.CDLL(None, use_errno=True); libc.prctl(36, 1, 0, 0, 0) == 0 or sys.exit("codex-run: cannot become child subreaper: " + os.strerror(ctypes.get_errno())); os.environ["CODEX_RUN_SUBREAPER"] = str(os.getpid()); os.execv(sys.argv[1], sys.argv[1:])' "$script" _run "$@"
+    fi
     local id=$1 state=$runs/$1 key value
     local model='' effort='' read_only='' task='' dir='' report='' to='' started='' tries=0 run_exit=0
     while IFS='=' read -r key value; do
@@ -291,6 +295,7 @@ task_run() {
         report_instruction="Return your entire report as your final message, even if the task asks you to write a report file. Do not write the report file; codex-run will write it to $report."
     fi
     turn "${search_rule}Read $task and do what it says. $report_instruction"
+    wait || true
     exit "$run_exit"
 }
 
