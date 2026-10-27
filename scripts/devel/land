@@ -12,7 +12,7 @@
 # CPU weight beside the machine's builds, runs only the suites, and a tree
 # that does not build or lint never reaches it.
 # A gate that passed before the rebase still holds when what moved main
-# changed only Markdown files under docs/, which no gate reads.
+# changed only Markdown files under docs/ outside declared gate inputs.
 # The push only fast-forwards: a rejected push means main moved, and land
 # starts again from the rebase. Then the local main, and the checkout that
 # has it, follow. A code landing holds its repository's turn on this
@@ -35,7 +35,7 @@
 #
 # --docs   Markdown only, or the mockups under docs/design/ (a directory
 #          named mockups), which need no build or test: check that, and
-#          skip the gate.
+#          skip the gate, except paths declared in scripts/gated-docs.
 # --local  No remote: land on the local main under a lock (LAND_LOCK, or
 #          the repository's land.lock) instead of pushing.
 # --no-push  Gate and record trailers, then stop with not pushed; no main
@@ -331,18 +331,64 @@ policy_recheck() {
     candidate_check
 }
 
-# The tree a gate passed on before this rebase, when this tree differs from
-# it only in Markdown files under docs/: the tip's Gate-Tree, from an
-# earlier try, with its result still in the cache.
+# Both exemptions use the candidate repository's tracked declaration. Literal
+# paths ending in / cover descendants; no declaration preserves the old rules.
+# Read Git objects, with NUL-delimited names, including deleted/renamed inputs.
+docs_exempt() { # BEFORE AFTER docs|cache
+    python3 -I -S -B - "$@" <<'PYDOCS'
+import subprocess
+import sys
+
+before, after, mode = sys.argv[1:]
+declaration = 'scripts/gated-docs'
+
+
+def git(*args):
+    return subprocess.check_output(['git', *args], stderr=subprocess.DEVNULL)
+
+
+try:
+    entries = git('ls-tree', '-z', after, '--', declaration)
+    paths = []
+    if entries:
+        metadata, name = entries.rstrip(b'\0').split(b'\t', 1)
+        if metadata.split()[0] not in (b'100644', b'100755'):
+            raise ValueError('declaration must be a regular file')
+        for line in git('show', after + ':' + declaration).decode().splitlines():
+            path = line.strip()
+            if not path or path.startswith('#'):
+                continue
+            parts = path.removesuffix('/').split('/')
+            if any(part in ('', '.', '..') for part in parts) or '\0' in path:
+                raise ValueError('expected repository-relative literal paths')
+            paths.append(path.encode())
+    changes = git('diff', '--no-renames', '--name-only', '-z', before, after)
+    for path in changes.split(b'\0'):
+        if not path:
+            continue
+        declared = any(path.startswith(p) if p.endswith(b'/') else path == p for p in paths)
+        mockup = path.startswith(b'docs/design/') and b'mockups' in path.split(b'/')[2:-1]
+        exempt = path.endswith(b'.md') and (mode == 'docs' or path.startswith(b'docs/'))
+        if declared or not (exempt or (mode == 'docs' and mockup)):
+            print('land: ' + repr(path.decode(errors='backslashreplace')) +
+                  (' is a declared gate input; use land' if declared else
+                   " is neither Markdown nor docs/design/'s mockups; use land"), file=sys.stderr)
+            sys.exit(1)
+except (OSError, ValueError, subprocess.CalledProcessError):
+    print('land: cannot read scripts/gated-docs or changed paths; use land', file=sys.stderr)
+    sys.exit(1)
+PYDOCS
+}
+
+# The tip's Gate-Tree from an earlier try, with evidence still in the cache,
+# holds across docs/ Markdown changes only outside declared gate inputs.
 gated_before() {
-    local tree=$1 before changes others
+    local tree=$1 before
     [[ $(git log -1 --format='%(trailers:key=Gate-Policy,valueonly,separator=)' "$candidate") == "$policy" ]] || return 1
     before=$(git log -1 --format='%(trailers:key=Gate-Tree,valueonly,separator=)' "$candidate")
     [[ -n $before && $before != "$tree" ]] || return 1
     cache_read "$cache_dir/$(gate_key "$before")" >/dev/null || return 1
-    changes=$(git diff --no-renames --name-only "$before" "$tree" 2>/dev/null) || return 1
-    others=$(grep -vE '^docs/.*\.md$' <<<"$changes" || true)
-    [[ -z $others ]] || return 1
+    docs_exempt "$before" "$tree" cache 2>/dev/null || return 1
     echo "$before"
 }
 
@@ -666,10 +712,8 @@ rebase on it by hand, resolve it, then land again."
     tree=$(git rev-parse "$candidate^{tree}")
     candidate_check
     if ((docs)); then
-        others=$(git diff --no-renames --name-only "$base" "$candidate" |
-            grep -vE '\.md$|^docs/design/(.*/)?mockups/' || true)
-        [[ -z $others ]] ||
-            die 2 "--docs, but these are neither Markdown nor docs/design/'s mockups: $others"
+        docs_exempt "$base" "$candidate" docs ||
+            die 2 "--docs includes gate inputs; use land"
         summary="none (Markdown and mockups only)"
         policy="none (Markdown and mockups only)"
         gated=$tree

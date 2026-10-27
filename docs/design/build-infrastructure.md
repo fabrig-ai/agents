@@ -929,7 +929,12 @@ very tuple the qa run tested. A run that lands the whole set deletes
 the proof at the end.
 
 The gates' evidence is `land`'s gate cache, per machine, by tree, gate and
-policy (gate-policy.md 3), so the landing run gates again only what has
+policy (gate-policy.md 3). A previous tree's evidence survives changes only
+in `docs/` Markdown outside the repository's optional `scripts/gated-docs`
+list (landing-flow.md 9.1); declared paths require a fresh gate in both
+plain and heavy runs, and `land --docs` refuses them with `use land`.
+Without a declaration, the existing Markdown exemptions hold. Changing
+the declaration itself also requires a gate. So the landing run gates again only what has
 changed since: on the same machine, where no `main` moved, every step of
 its phase 1 is a no-op or a cache hit, and nothing builds. A branch's tip
 is already its candidate. A pin-only repository's repin commits afresh,

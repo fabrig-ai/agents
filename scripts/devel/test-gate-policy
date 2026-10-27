@@ -241,10 +241,11 @@ sys.exit(int(os.environ.get("FIXTURE_GATE_EXIT", "0")))
         self.assertFalse((self.root / "tmp/gates/repo").exists())
         self.assertEqual(self.result_json(result)["exit"], 4)
 
-    def advance_main_docs(self):
+    def advance_main_docs(self, path="docs/new.md"):
         self.git("switch", "-qc", "docs-main", self.base)
-        (self.repo / "docs").mkdir()
-        (self.repo / "docs/new.md").write_text("documentation\n")
+        page = self.repo / path
+        page.parent.mkdir(parents=True, exist_ok=True)
+        page.write_text("documentation\n")
         self.git("add", "docs")
         self.git("commit", "-qm", "docs")
         self.git("update-ref", "refs/heads/main", self.git("rev-parse", "HEAD").strip())
@@ -434,6 +435,94 @@ sys.exit(int(os.environ.get("FIXTURE_GATE_EXIT", "0")))
         self.assertIsNone(self.result_json(result)["runner"])
         self.assertEqual(self.installed_calls(), [])
         self.assertEqual(self.calls(), [])
+
+    def declare_gate_docs(self, declaration="docs/help/\ndocs/exact.md\n"):
+        self.git("reset", "--hard", self.base)
+        (self.repo / "scripts").mkdir()
+        (self.repo / "scripts/gated-docs").write_text(declaration)
+        self.git("add", "scripts/gated-docs")
+        self.git("commit", "-qm", "declare gate inputs")
+        self.base = self.git("rev-parse", "HEAD").strip()
+        self.git("update-ref", "refs/heads/main", self.base)
+
+    def docs_policy(self, path, refused, declaration="docs/help/\ndocs/exact.md\n"):
+        self.declare_gate_docs(declaration)
+        page = self.repo / path
+        page.parent.mkdir(parents=True, exist_ok=True)
+        page.write_text("documentation\n")
+        self.git("add", ".")
+        self.git("commit", "-qm", "docs change")
+        result = self.run_command([str(self.kit / "land"), "--local", "--docs"], check=False)
+        self.assertEqual(result.returncode, 2 if refused else 0, result.stdout + result.stderr)
+        self.assertEqual(self.calls(), [])
+        if refused:
+            self.assertIn("use land", result.stderr)
+            self.assertEqual(self.git("rev-parse", "main").strip(), self.base)
+        else:
+            self.assertEqual(self.result_json(result)["gate"]["kind"], "none")
+
+    def test_declared_directory_refuses_docs(self):
+        self.docs_policy("docs/help/page.md", True)
+
+    def test_declared_directory_covers_reference(self):
+        self.docs_policy("docs/help/reference/page.md", True)
+
+    def test_declared_file_refuses_docs(self):
+        self.docs_policy("docs/exact.md", True)
+
+    def test_undeclared_markdown_stays_docs_only(self):
+        self.docs_policy("docs/helpful/page.md", False)
+
+    def test_declaration_comments_and_literal_paths(self):
+        self.docs_policy("docs/a*/page.md", True, "# gate inputs\n\ndocs/a*/\n")
+
+    def test_declared_mockup_refuses_docs(self):
+        self.docs_policy("docs/design/mockups/page.html", True, "docs/design/mockups/\n")
+
+    def test_invalid_declaration_refuses_docs(self):
+        self.docs_policy("docs/page.md", True, "../docs/help/\n")
+
+    def cache_docs_policy(self, installed, path, declared):
+        self.declare_gate_docs()
+        # A real content change is proved first; then main moves in Markdown.
+        (self.repo / "code").write_text("work\n")
+        self.git("commit", "-qam", "work")
+        extra = {"FIXTURE_HEAVY_INSTALLED": installed}
+        gate = self.evidence_gate()
+        self.land(extra, gate=gate)
+        self.advance_main_docs(path)
+        result = self.land(extra, gate=gate)
+        if not declared or installed == "1":
+            self.assertEqual(self.result_json(result)["gate"]["kind"], "ran" if declared else "cached")
+        self.assertEqual(len(self.marker_lines()), 2 if declared else 1)
+        self.assertEqual(len(self.calls()), (2 if declared else 1) if installed == "0" else 0)
+
+    def test_declared_directory_invalidates_contained_cache(self):
+        self.cache_docs_policy("0", "docs/help/reference/page.md", True)
+
+    def test_declared_file_invalidates_plain_cache(self):
+        self.cache_docs_policy("1", "docs/exact.md", True)
+
+    def test_undeclared_markdown_reuses_contained_cache(self):
+        self.cache_docs_policy("0", "docs/helpful/page.md", False)
+
+    def test_undeclared_markdown_reuses_plain_cache(self):
+        self.cache_docs_policy("1", "docs/helpful/page.md", False)
+
+    def test_removed_declared_input_refuses_docs(self):
+        self.declare_gate_docs()
+        page = self.repo / "docs/help/page.md"
+        page.parent.mkdir(parents=True)
+        page.write_text("input\n")
+        self.git("add", ".")
+        self.git("commit", "-qm", "input")
+        self.base = self.git("rev-parse", "HEAD").strip()
+        self.git("update-ref", "refs/heads/main", self.base)
+        self.git("rm", "docs/help/page.md")
+        self.git("commit", "-qm", "remove input")
+        result = self.run_command([str(self.kit / "land"), "--local", "--docs"], check=False)
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("declared gate input; use land", result.stderr)
 
     def test_landed_mark_push(self):
         origin = self.root / "origin.git"

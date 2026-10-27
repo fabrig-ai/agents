@@ -694,8 +694,13 @@ Beside the tool, the owner and its implementers do the rest:
   escalates a landing as owners.md 4 says.
 - **Landing news.** Whoever waits on a set runs `landings wait`, and
   directors read `landings`: no hashes are relayed.
-- **What `land` still does.** A docs change still lands with `land
-  --docs`. Code that moves skein, smith or jig goes through `land-set`,
+- **What `land` still does.** Markdown and design mockups land with `land
+  --docs` unless declared as gate inputs in the repository's
+  `scripts/gated-docs`; those changes must use `land`. The optional tracked
+  file lists literal repository-relative paths, one per line; a trailing
+  `/` includes descendants, and blank lines and `#` comments are ignored.
+  Adding or changing this non-Markdown declaration uses `land` too.
+  Code that moves skein, smith or jig goes through `land-set`,
   with its pin-only repositories; a lone temper or hearth change may use
   either. Either way it takes the set lock, and `land` proves a code
   change first, without it (9.2).
