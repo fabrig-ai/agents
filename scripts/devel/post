@@ -105,8 +105,53 @@ session() {
         sort_by(.startedAt) | last // empty'
 }
 unwoken() { echo "queued, nobody will wake it: $*"; return 3; }
+# Only a resume consults the record; a failed pull leaves the clone usable.
+active_owner() {
+    local name=$1 records=${RECORDS:-$root/records} file
+    local -a missions=()
+    RECORDS="$records" timeout -s INT 90 record pull </dev/null >/dev/null 2>&1 || true
+    if [[ ! -d $records/missions ]]; then
+        [[ $name == director || $name == d/* ]] && return 0
+        echo 'record unreadable'; return 1
+    fi
+    for file in "$records"/missions/*/README.md; do
+        [[ -f $file && -r $file ]] || continue
+        missions+=("$file")
+    done
+    # /dev/null also makes an empty missions directory an empty readable record.
+    awk -v name="$name" -v machine="$local_machine" '
+        FNR == 1 {front=0; owner=""; state=""; started=""}
+        /^---$/ {
+            if (front == 0) {front=1; next}
+            if (front != 1) next
+            front=2
+            if (substr(owner, 1, length(name)+1) == name "@") owned=1
+            if (owner != name "@" machine) next
+            if (state == "active") active=1
+            n=split(FILENAME, path, "/"); mission=path[n-1]
+            if (!here || started > latest || (started == latest && mission > last)) {
+                latest=started; last=mission; last_state=state
+            }
+            here=1
+            next
+        }
+        front == 1 && /^(owner|state|started):/ {
+            key=$0; sub(/:.*/, "", key)
+            value=$0; sub(/^[^:]*:[[:space:]]*/, "", value); sub(/[[:space:]]+$/, "", value)
+            if (key == "owner") owner=value
+            if (key == "state") state=value
+            if (key == "started") started=value
+        }
+        END {
+            if (active || ((name == "director" || substr(name,1,2) == "d/") && !owned)) exit 0
+            if (here) print "mission " last " is " (last_state == "" ? "unknown" : last_state)
+            else print "no active mission here"
+            exit 1
+        }
+    ' /dev/null "${missions[@]}"
+}
 wake() (
-    local name=$1 info state full_id short_id cwd stop_info attempt kind='' alive=0
+    local name=$1 info state full_id short_id cwd stop_info attempt reason kind='' alive=0
     exec 8>"$box/.wake.lock"
     flock -x 8 || fail 'cannot lock wake'
     {
@@ -138,6 +183,8 @@ wake() (
             if [[ $(jq -r '.sessionId // .id // empty' <<<"$info") != "$full_id" ]]; then
                 unwoken 'session changed'; return $?
             fi
+            machines
+            if ! reason=$(active_owner "$name"); then unwoken "$reason"; return $?; fi
             short_id=$(jq -r '.id // empty' <<<"$info")
             if [[ -z $short_id ]] || ! claude stop "$short_id" </dev/null >/dev/null 2>&1; then
                 unwoken 'stop failed'; return $?

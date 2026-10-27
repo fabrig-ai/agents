@@ -51,6 +51,8 @@ fixture() {
     # Waiters poll and stop checks retry quickly; post's defaults are 2 s and 1 s.
     export POST_POLL=0.02 POST_STOP_STEP=0.02
     export POST_TOOL=$kit/post FIXTURE=$t
+    export RECORDS=$t/records
+    mkdir -p "$RECORDS/missions"
     unset SSH_ORIGINAL_COMMAND
     mkdir -p "$HOME/.local/bin" "$t"/{a,b}/tmp/post "$t/session cwd"
     export PATH=$HOME/.local/bin:$PATH
@@ -85,6 +87,18 @@ fi
 cat "$FIXTURE/ack"
 exit "$code"
 STUB
+    cat >"$HOME/.local/bin/record" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$*" >>"$FIXTURE/record-calls"
+printf '%s\n' "$RECORDS" >"$FIXTURE/record-root"
+[ "$#" = 1 ] && [ "$1" = pull ] || exit 99
+# post must suppress both streams and supply EOF, even after a failed pull.
+if read -r line; then exit 99; fi
+echo 'fixture record output'
+echo 'fixture record error' >&2
+exit "${FIXTURE_RECORD_EXIT:-0}"
+STUB
+    chmod 700 "$HOME/.local/bin/record"
     # Refuse a call that loses the exported function, keeping real Claude
     # unreachable even if post later launches it through another executable.
     cat >"$HOME/.local/bin/claude" <<'STUB'
@@ -148,7 +162,13 @@ STUB
     chmod 700 "$HOME/.local/bin/ssh" "$HOME/.local/bin/claude"
 }
 post() { "$POST_TOOL" "$@"; }
+mission() {
+    mkdir -p "$RECORDS/missions/$1"
+    printf '%s\n' '---' "owner: $2" "state: $3" "started: ${4:-2026-10-24T12:00:00Z}" '---' >"$RECORDS/missions/$1/README.md"
+}
 session() {
+    # Existing wake stories start with an eligible mission; wake_guard replaces it.
+    mission "${1//\//+}" "$1@a" active
     jq -n --arg name "$1" --arg state "$2" --arg cwd "$t/session cwd" \
         '[{id:"short",sessionId:"full-session-id",name:$name,state:$state,pid:123,
            startedAt:"2026-10-24T12:00:00Z",cwd:$cwd,kind:"claude"}]' >"$t/sessions.json"
@@ -165,6 +185,13 @@ count() (
     done
     printf '%s\n' "$n"
 )
+# Stage mail without delivery waking it first.
+stage_wake_mail() {
+    local name=$1 box=$t/a/tmp/post/${1//\//+}
+    mkdir -p "$box"/{tmp,new,cur,sent}
+    message a "$name" | sed 's/@b$/@a/' >"$box/new/20261024T213500Z-7f3a0000.md"
+}
+
 concurrent_delivered() { [[ $(count "$t/a/tmp/post/concurrent/new") == 2 ]]; }
 
 local_and_remote() {
@@ -277,13 +304,130 @@ wake() {
     expect 'resume state rechecked' "$(capture env FIXTURE_RESUME_STATE=done "$POST_TOOL" send resume-idle failure <<< body)" 'status=3' 'nobody will wake it: done'
 }
 
-wake_command() {
-    # Stage mail without delivery waking it first.
-    stage_wake_mail() {
-        local name=$1 box=$t/a/tmp/post/${1//\//+}
-        mkdir -p "$box"/{tmp,new,cur,sent}
-        message a "$name" | sed 's/@b$/@a/' >"$box/new/20261024T213500Z-7f3a0000.md"
+wake_guard() {
+    # Bash preserves the exported Claude fake through delivery's timeout.
+    cat >"$HOME/.local/bin/timeout" <<'STUB'
+#!/usr/bin/env bash
+if [ "$*" = '-s INT 90 record pull' ]; then
+    echo bounded >>"$FIXTURE/record-bounds"
+fi
+exec /usr/bin/timeout "$@"
+STUB
+    chmod 700 "$HOME/.local/bin/timeout"
+    guard_prepare() {
+        local name=$1
+        session "$name" 'done'
+        rm -rf "$RECORDS/missions" "$t/a/tmp/post/${name//\//+}"
+        mkdir -p "$RECORDS/missions"
+        : >"$t/record-calls"
+        : >"$t/record-bounds"
+        : >"$t/claude-calls"
+        : >"$t/stops"
+        : >"$t/resumes"
     }
+    guard_check() {
+        local story=$1 name=$2 code=$3 line=$4 path=${5:-wake} output result mutations
+        if [[ $path == send ]]; then
+            output=$(capture post send "$name" guard <<< body)
+        else
+            stage_wake_mail "$name"
+            output=$(capture post wake "$name")
+        fi
+        expect "$story exit" "[${output%%$'\n'*}]" "[status=$code]"
+        result=${output##*$'\n'}
+        expect "$story line" "[${result#* }]" "[$line]"
+        mutations=$(jq -sc '[.[] | select(.args[0] != "agents") | .args[0]]' "$t/claude-calls")
+        if ((code == 0)); then
+            expect "$story stops then resumes" "$mutations" '["stop","--bg"]'
+        else
+            expect "$story never stops or resumes" "$mutations" '[]'
+        fi
+        expect "$story mail stays new" "[$(count "$t/a/tmp/post/${name//\//+}/new")]" '[1]'
+        expect "$story pulls once" "[$(cat "$t/record-calls")]" '[pull]'
+        expect "$story pulls the inspected record" "[$(cat "$t/record-root")]" "[${RECORDS:-$t/a/records}]"
+        expect "$story pull bounded" "[$(cat "$t/record-bounds")]" '[bounded]'
+        expect "$story pull output suppressed" "$([[ $output != *'fixture record'* ]] && echo yes)" yes
+    }
+    guard_prepare o/x
+    mission x o/x@a active
+    guard_check active o/x 0 woken
+    local state
+    for state in paused ended ''; do
+        guard_prepare o/x
+        mission x o/x@a "$state"
+        if [[ -z $state ]]; then
+            # Omission as well as an empty value must become unknown.
+            sed '/^state:/d' "$RECORDS/missions/x/README.md" >"$t/no-state"
+            mv "$t/no-state" "$RECORDS/missions/x/README.md"
+        fi
+        guard_check "state ${state:-missing}" o/x 3 "queued, nobody will wake it: mission x is ${state:-unknown}"
+    done
+    guard_prepare o/x
+    mission x1 o/x@a ended 2026-10-27T12:00:00Z
+    mission x2 o/x@a active
+    guard_check 'ended and active' o/x 0 woken
+    guard_prepare o/x
+    mission x o/x@b active
+    guard_check elsewhere o/x 3 'queued, nobody will wake it: no active mission here'
+    local name
+    for name in director d/fix; do
+        guard_prepare "$name"
+        guard_check "unowned $name" "$name" 0 woken
+    done
+    guard_prepare d/fix
+    mission x d/fix@a ended
+    guard_check 'owned helper' d/fix 3 'queued, nobody will wake it: mission x is ended'
+    guard_prepare director
+    mission x director@b active
+    guard_check 'director owned elsewhere' director 3 'queued, nobody will wake it: no active mission here'
+    for name in o/x director d/fix; do
+        guard_prepare "$name"
+        rm -rf "$RECORDS/missions"
+        if [[ $name == o/x ]]; then
+            guard_check 'no record' "$name" 3 'queued, nobody will wake it: record unreadable'
+        else
+            guard_check "no record $name" "$name" 0 woken
+        fi
+    done
+    guard_prepare o/x
+    mission x o/x@a active
+    FIXTURE_RECORD_EXIT=1 guard_check 'pull fails' o/x 0 woken
+    guard_prepare o/x
+    mission x o/x@a active
+    mv "$RECORDS" "$t/a/records"
+    # With RECORDS unset, both pull and inspection use the workspace records.
+    unset RECORDS
+    guard_check 'workspace record' o/x 0 woken
+    export RECORDS=$t/records
+    mv "$t/a/records" "$RECORDS"
+    guard_prepare o/x
+    mission old o/x@a paused 2026-10-20T12:00:00Z
+    mission latest-a o/x@a abandoned 2026-10-27T12:00:00Z
+    mission latest-z o/x@a ended 2026-10-27T12:00:00Z
+    # Body fields and a later fence cannot grant eligibility.
+    printf '%s\n' 'state: active' '---' 'owner: o/x@a' 'state: active' '---' >>"$RECORDS/missions/latest-z/README.md"
+    guard_check 'latest start and name tie' o/x 3 'queued, nobody will wake it: mission latest-z is ended'
+    guard_prepare o/x
+    mission x o/x@a paused
+    guard_check 'delivery refusal' o/x 3 'queued, nobody will wake it: mission x is paused' send
+
+    guard_prepare o/x
+    capture post wait o/x --timeout 0 --holder "$$" >/dev/null
+    stage_wake_mail o/x
+    expect 'guard live waiter' "[$(capture post wake o/x)]" $'[status=0\no/x waiting]'
+    session o/working working
+    stage_wake_mail o/working
+    expect 'guard working session' "[$(capture post wake o/working)]" $'[status=0\no/working queued]'
+    session o/stopped 'done'
+    jq 'map(del(.pid))' "$t/sessions.json" >"$t/stopped.json"
+    mv "$t/stopped.json" "$t/sessions.json"
+    stage_wake_mail o/stopped
+    expect 'guard stopped session' "[$(capture post wake o/stopped)]" $'[status=3\no/stopped queued, nobody will wake it: stopped]'
+    expect 'non-resume paths never pull' "[$(cat "$t/record-calls")]" '[]'
+    expect 'non-resume paths never stop or resume' "$(jq -sc '[.[] | select(.args[0] != "agents")] | length' "$t/claude-calls")" 0
+}
+
+wake_command() {
     expect 'wake missing mailbox' "[$(capture post wake o/missing)]" $'[status=0\no/missing no mail]'
     expect 'wake missing creates nothing' "$([[ ! -e $t/a/tmp/post/o+missing ]] && echo absent)" absent
     mkdir -p "$t/a/tmp/post/o+empty/new"
@@ -375,6 +519,8 @@ wake_command() {
         touch -d '25 hours ago' "$t/a/tmp/post/${name//\//+}/new/"*.md
     done
     session o/stale 'done'
+    mission fresh o/fresh@a active
+    mission both o/both@a active
     jq '[.[0] as $session | ["o/fresh", "o/stale", "o/both"][] | $session + {name:.,id:.,sessionId:.}]' \
         "$t/sessions.json" >"$t/window-sessions.json"
     mv "$t/window-sessions.json" "$t/sessions.json"
@@ -597,7 +743,7 @@ STUB
 }
 
 # The parts share nothing, so they run at once; each reports its checks and failures.
-parts=(local_and_remote wake wake_command waiters_and_limits names_and_order ids_and_transport)
+parts=(local_and_remote wake wake_guard wake_command waiters_and_limits names_and_order ids_and_transport)
 if (($#)); then parts=("$@"); fi
 for part in "${parts[@]}"; do
     (
