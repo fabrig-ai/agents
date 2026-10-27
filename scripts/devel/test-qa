@@ -80,6 +80,8 @@ class Lab:
         self.git(root, 'clone', '--bare', str(self.records), str(self.origin))
         self.git(self.records, 'remote', 'add', 'origin', str(self.origin))
         self.git(self.records, 'fetch', 'origin')
+        self.git(root, 'init', '--bare', str(self.origins / 'qa.git'))
+        self.evidence('config', 'uploadpack.allowFilter', 'true')
         for repo, checkout in self.products.items():
             self.git(root, 'init', '-b', 'main', str(checkout))
             self.git(checkout, 'commit', '--allow-empty', '-m', 'unmarked baseline')
@@ -160,6 +162,9 @@ class Lab:
     def head(self):
         return self.git(self.origin, 'rev-parse', 'main')
 
+    def evidence(self, *args):
+        return self.git(self.origins / 'qa.git', *args)
+
     def content(self, name):
         return self.git(self.origin, 'show', 'main:' + name)
 
@@ -206,6 +211,9 @@ class Lab:
         return self.run('watch', '--director', 'director@fixture', '--once', status=status, extra=extra, now=now)
 
     def walk(self, rung='b0', *args, status=0, now=None):
+        # A Path selects keep's walk helper; existing rung-launch stories use strings.
+        if len(args) == 1 and isinstance(args[0], Path):
+            return self.run('keep', '--walk', rung, str(args[0]), status=status)
         path = self.tmp / 'qa-focused' / ('rung-' + rung + '-brief.md')
         path.parent.mkdir(parents=True, exist_ok=True)
         if not path.exists():
@@ -2663,6 +2671,268 @@ print(f'2 MiB scan: {{elapsed:.3f}} seconds')
                             capture_output=True, text=True, timeout=HUNG_TOOL_S)
     assert result.returncode == 0, result.stderr
     print(result.stdout.strip())
+
+
+def driven_keep(lab, patch, name, directory, status=0):
+    driver = (f'import os, runpy, sys, subprocess\nfrom pathlib import Path\n'
+              f'tool = runpy.run_path({str(SCRIPT)!r})\n' + patch + '\nsys.exit(tool["main"]())\n')
+    result = subprocess.run([sys.executable, '-I', '-S', '-c', driver,
+                             'keep', '--walk', name, str(directory)], env=lab.env,
+                            capture_output=True, text=True, timeout=HUNG_TOOL_S)
+    assert result.returncode == status, (result.returncode, result.stdout, result.stderr)
+    return result
+
+
+def a_walk_is_kept(lab):
+    name = '20261026-rung-a-1'
+    files = {'plan.md': 'A plan.\n', 'notes.md': 'Notes.\n',
+             'scripts/run.sh': '#!/bin/sh\necho fixture\n', 'evidence/case-1.txt': 'capture\n'}
+    scratch = lab.scratch(dict(files, **{'deployment/bin': b'\0', 'forge.header': 'outside'}))
+    (scratch / 'scripts/run.sh').chmod(0o700)
+    machine = lab.root / 'tmp/post/machines'
+    machine.parent.mkdir(parents=True, exist_ok=True)
+    machine.write_text('fixture-machine local\n')
+    # Keeping needs neither a record checkout nor its pull tool.
+    shutil.rmtree(lab.records)
+    lab.env['QA_RECORD'] = str(lab.root / 'absent-record-tool')
+    result = lab.walk(name, scratch)
+    commit = result.stdout.strip()
+    assert re.fullmatch(r'[0-9a-f]{40}', commit) and not result.stderr
+    assert lab.evidence('rev-parse', 'evidence') == commit
+    assert lab.evidence('rev-list', '--parents', 'evidence') == commit
+    assert lab.evidence('ls-tree', '--name-only', 'evidence') == 'README.md\nwalks'
+    expected_readme = '''# QA evidence
+
+This branch holds QA passes' and focused walks' evidence, kept by agents'
+`qa` tool (agents' `docs/design/qa-flow.md` 11): a pass's in
+`passes/<pass>/`, named as its record, `qa/passes/<pass>.md`; a walk's in
+`walks/<name>/`. Each directory's `README.md` is its index: where it came
+from, its run, and what the cap left out. The branch shares no history
+with `main`, nothing on `main` reads it, and only that tool writes it, one
+commit per copy, never rewritten.
+'''
+    assert lab.evidence('show', 'evidence:README.md') == expected_readme.strip()
+    prefix = 'walks/' + name + '/'
+    assert lab.evidence('ls-tree', '-r', '--name-only', 'evidence', prefix).splitlines() == [
+        prefix + path for path in sorted(['README.md', *files])]
+    for path, text in files.items():
+        assert lab.evidence('show', 'evidence:' + prefix + path) == text.strip()
+    assert lab.evidence('ls-tree', 'evidence', prefix + 'scripts/run.sh').startswith('100755 blob ')
+    assert lab.evidence('ls-tree', 'evidence', prefix + 'notes.md').startswith('100644 blob ')
+    index = ('---\nkind: walk\nname: ' + name + '\nmachine: fixture-machine\n'
+             f'source: {scratch}\nrun: unknown\nrecord: -\nfiles: 4\n'
+             f'bytes: {sum(len(text.encode()) for text in files.values())}\n---')
+    assert lab.evidence('show', 'evidence:' + prefix + 'README.md') == index
+    assert lab.evidence('show', '-s', '--format=%an <%ae>%n%cn <%ce>%n%s', commit) == (
+        'o/fixture <o/fixture@fixture-machine>\no/fixture <o/fixture@fixture-machine>\nqa keep: walk ' + name)
+    assert lab.walk(name, scratch).stdout == result.stdout
+    (scratch / 'notes.md').write_text('Changed.\n')
+    refused = lab.walk(name, scratch, status=2)
+    assert refused.stderr == f'qa: walks/{name}: name taken by another copy\n'
+    assert lab.evidence('rev-parse', 'evidence') == commit
+    second = lab.walk(name + '-2', scratch).stdout.strip()
+    assert lab.evidence('rev-parse', second + '^') == commit
+    # A later tip must still return the commit that added the first directory.
+    (scratch / 'notes.md').write_text(files['notes.md'])
+    assert lab.walk(name, scratch).stdout == result.stdout
+    clone = lab.tmp / 'qa/repos/qa.git'
+    assert lab.git(clone, 'rev-parse', '--is-bare-repository') == 'true'
+    assert lab.git(clone, 'config', '--get', 'remote.origin.fetch') == '+refs/heads/evidence:refs/remotes/origin/evidence'
+    assert lab.git(clone, 'config', '--get', 'remote.origin.partialclonefilter') == 'blob:none'
+    # The cap is absent from the index; a setting change alone changes no tree.
+    lab.env['QA_EVIDENCE_KIB'] = '1'
+    assert lab.walk(name, scratch).stdout == result.stdout
+    (scratch / 'evidence/case-1.txt').write_text('x' * 1200)
+    capped = lab.walk('capped', scratch)
+    assert capped.stdout.splitlines()[1:] == ['left out: evidence/, 1 files, 1200 bytes']
+    cap_index = lab.evidence('show', 'evidence:walks/capped/README.md')
+    assert cap_index.endswith('---\nleft out: evidence/, 1 files, 1200 bytes')
+    assert 'files: 3\n' in cap_index and 'KiB' not in cap_index
+    lab.env['QA_EVIDENCE_KIB'] = '2'
+    lab.walk('capped', scratch, status=2)
+    # Exactly one bounded meta names the run; two matching runs mean unknown.
+    meta = lab.tmp / 'codex-run/20261026T091523Z-ab12/meta'
+    meta.parent.mkdir(parents=True)
+    meta.write_text(f'report={scratch}/report.md\n')
+    outside = meta.parent.with_name('outside') / 'meta'
+    outside.parent.mkdir()
+    outside.write_text(f'report={scratch}/../outside/report.md\n')
+    lab.walk('known-run', scratch)
+    assert '\nrun: 20261026T091523Z-ab12\n' in lab.evidence('show', 'evidence:walks/known-run/README.md')
+    other = meta.parent.with_name('another') / 'meta'
+    other.parent.mkdir()
+    other.write_text(meta.read_text())
+    lab.walk('ambiguous-run', scratch)
+    assert '\nrun: unknown\n' in lab.evidence('show', 'evidence:walks/ambiguous-run/README.md')
+    for value in ('0', 'bad'):
+        lab.run('keep', '--walk', 'invalid-setting', str(scratch), status=2,
+                extra={'QA_EVIDENCE_SECONDS': value})
+    lab.walk('../invalid', scratch, status=2)
+
+
+def a_push_race_keeps_both(lab):
+    scratch = lab.scratch({'notes.md': 'Our walk.\n'})
+    other = lab.root / 'other-scratch'
+    other.mkdir()
+    (other / 'notes.md').write_text('Other walk with a distinct blob.\n')
+    result = driven_keep(lab, f'''
+original = tool['command']
+raced = False
+def command(argv, **kwargs):
+    global raced
+    if 'push' in argv and not raced:
+        raced = True
+        rival = subprocess.run([{str(SCRIPT)!r}, 'keep', '--walk', 'other', {str(other)!r}],
+                               env=dict(os.environ, DEV_TMP={str(lab.root / 'other-tmp')!r}),
+                               capture_output=True, text=True, timeout=20)
+        assert rival.returncode == 0, rival.stderr
+    result = original(argv, **kwargs)
+    if 'push' in argv:
+        with open({str(lab.root / 'pushes')!r}, 'a') as out:
+            out.write(str(result.returncode) + '\\n')
+    return result
+tool['main'].__globals__['command'] = command
+''', 'ours', scratch)
+    commit = result.stdout.strip()
+    assert lab.evidence('rev-parse', 'evidence') == commit
+    assert lab.evidence('ls-tree', '--name-only', 'evidence:walks') == 'other\nours'
+    assert lab.evidence('show', '-s', '--format=%s', commit + '^') == 'qa keep: walk other'
+    pushes = (lab.root / 'pushes').read_text().splitlines()
+    assert len(pushes) == 2 and pushes[0] != '0' and pushes[1] == '0', pushes
+    oid = lab.evidence('rev-parse', 'evidence:walks/other/notes.md')
+    missing = subprocess.run(['git', '-C', str(lab.tmp / 'qa/repos/qa.git'), 'cat-file', '-e', oid],
+                             env=dict(lab.env, GIT_NO_LAZY_FETCH='1'), capture_output=True, text=True,
+                             timeout=HUNG_TOOL_S)
+    assert missing.returncode != 0, 'another copy\'s blob was fetched'
+
+
+def a_lost_answer_is_the_kept_copy(lab):
+    scratch = lab.scratch({'notes.md': 'A walk.\n'})
+    result = driven_keep(lab, '''
+original = tool['command']
+lost = False
+def command(argv, **kwargs):
+    global lost
+    result = original(argv, **kwargs)
+    if 'push' in argv and not lost:
+        lost = True
+        assert result.returncode == 0, result.stderr
+        return subprocess.CompletedProcess(argv, 1, '', 'lost answer')
+    return result
+tool['main'].__globals__['command'] = command
+''', 'lost-answer', scratch)
+    assert lab.evidence('rev-parse', 'evidence') == result.stdout.strip()
+    assert lab.evidence('rev-list', '--count', 'evidence') == '1'
+
+
+def a_failed_push_exits_1_within_the_bound(lab):
+    scratch = lab.scratch({'notes.md': 'A walk.\n'})
+    marker = lab.root / 'hook.pid'
+    finished = lab.root / 'hook.finished'
+    hook = lab.origins / 'qa.git/hooks/pre-receive'
+    executable(hook, f'import os, time\nfrom pathlib import Path\n'
+                    f'Path({str(marker)!r}).write_text(str(os.getpid()))\n'
+                    f'time.sleep(60)\nPath({str(finished)!r}).touch()\nraise SystemExit(1)\n')
+    lab.env['QA_EVIDENCE_SECONDS'] = '3'
+    started = time.monotonic()
+    result = lab.walk('bounded', scratch, status=1)
+    assert time.monotonic() - started < 10
+    assert result.stderr == 'qa: walks/bounded: not pushed; run it again\n' and not result.stdout
+    assert marker.exists(), 'the push never reached the hook'
+    dead(int(marker.read_text()))
+    assert not finished.exists()
+    assert lab.evidence('for-each-ref', '--format=%(refname)') == ''
+    hook.unlink()
+    lab.walk('bounded', scratch)
+    # Immediate failures get five pushes, even when time remains.
+    hook = lab.origins / 'qa.git/hooks/pre-receive'
+    attempts = lab.root / 'hook.attempts'
+    executable(hook, f'with open({str(attempts)!r}, "a") as out: out.write("try\\n")\nraise SystemExit(1)\n')
+    lab.walk('five-tries', scratch, status=1)
+    assert attempts.read_text().splitlines() == ['try'] * 5
+
+
+def the_copy_is_the_snapshot(lab):
+    scratch = lab.scratch({'evidence/a.txt': 'first a\n', 'evidence/b.txt': 'first b\n'})
+    target = lab.root / 'outside'
+    target.write_text('outside text\n')
+    driven_keep(lab, f'''
+Snapshot = tool['Snapshot']
+original = Snapshot.read
+def read(cls, directory, cap):
+    snapshot = original(directory, cap)
+    (Path(directory) / 'evidence/a.txt').write_text('changed a\\n')
+    (Path(directory) / 'evidence/b.txt').unlink()
+    (Path(directory) / 'evidence/b.txt').symlink_to({str(target)!r})
+    return snapshot
+Snapshot.read = classmethod(read)
+''', 'snapshot', scratch)
+    for letter in ('a', 'b'):
+        assert lab.evidence('show', f'evidence:walks/snapshot/evidence/{letter}.txt') == 'first ' + letter
+    assert '120000' not in lab.evidence('ls-tree', '-r', 'evidence')
+
+
+def a_refused_walk_touches_no_clone(lab):
+    scratch = lab.scratch({'evidence/auth.header': 'fixture\n'})
+    result = lab.walk('refused', scratch, status=2)
+    assert result.stdout == 'refused: evidence/auth.header: name\n'
+    assert result.stderr == 'qa: copy refused (1)\n'
+    assert not (lab.tmp / 'qa/repos').exists()
+    assert lab.evidence('for-each-ref', '--format=%(refname)') == ''
+
+
+def evidence_refuses_unsafe_clones_and_bounds_its_lock(lab):
+    scratch = lab.scratch({'notes.md': 'A walk.\n'})
+    parent = lab.tmp / 'qa/repos'
+    parent.mkdir(parents=True)
+    clone, lock = parent / 'qa.git', parent / 'qa.lock'
+    clone.symlink_to(lab.origins / 'qa.git', target_is_directory=True)
+    result = lab.walk('linked-clone', scratch, status=4)
+    assert 'symlink refused' in result.stderr
+    clone.unlink()
+    lock.unlink()
+    lock.symlink_to(lab.root / 'untouched')
+    lab.walk('linked-lock', scratch, status=4)
+    assert not (lab.root / 'untouched').exists()
+    lock.unlink()
+    os.mkfifo(lock)
+    lab.walk('fifo-lock', scratch, status=4)
+    lock.unlink()
+    lab.env['QA_EVIDENCE_SECONDS'] = '1'
+    with lock.open('a') as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        started = time.monotonic()
+        result = lab.walk('locked', scratch, status=1)
+        assert time.monotonic() - started < 5
+        assert result.stderr == 'qa: walks/locked: not pushed; run it again\n'
+        assert not clone.exists()
+    lab.env.pop('QA_EVIDENCE_SECONDS')
+    # An existing main must neither be fetched nor become evidence's parent.
+    main = lab.products['temper']
+    (main / 'unrelated').write_text('A blob only on main.\n')
+    lab.git(main, 'add', 'unrelated')
+    lab.git(main, 'commit', '-m', 'qa main fixture')
+    main_commit = lab.git(main, 'rev-parse', 'HEAD')
+    lab.git(main, 'push', str(lab.origins / 'qa.git'), 'HEAD:refs/heads/main')
+    commit = lab.walk('kept', scratch).stdout.strip()
+    assert lab.evidence('rev-list', '--parents', 'evidence') == commit
+    assert lab.evidence('rev-parse', 'main') == main_commit
+    assert lab.git(clone, 'for-each-ref', '--format=%(refname)') == 'refs/remotes/origin/evidence'
+    absent = subprocess.run(['git', '-C', str(clone), 'cat-file', '-e', main_commit],
+                            env=dict(lab.env, GIT_NO_LAZY_FETCH='1'), capture_output=True, text=True,
+                            timeout=HUNG_TOOL_S)
+    assert absent.returncode != 0
+    unexpected = lab.origins / 'unexpected.git'
+    lab.git(lab.root, 'init', '--bare', str(unexpected))
+    lab.git(clone, 'config', 'remote.origin.pushurl', str(unexpected))
+    result = lab.walk('wrong-push-origin', scratch, status=4)
+    assert result.stderr == f'qa: {clone}: unexpected push origin\n'
+    assert lab.git(unexpected, 'for-each-ref', '--format=%(refname)') == ''
+    lab.git(clone, 'config', '--unset', 'remote.origin.pushurl')
+    lab.git(clone, 'config', 'remote.origin.url', str(lab.origins / 'unexpected.git'))
+    result = lab.walk('wrong-origin', scratch, status=4)
+    assert result.stderr == f'qa: {clone}: unexpected origin\n'
+    assert lab.evidence('rev-parse', 'evidence') == commit
 
 
 def keep_key_rule_is_records(lab):
@@ -5798,6 +6068,12 @@ CASES = (keep_check_bounds_incomplete_private_key_markers,
          keep_check_scans_whole_paths, keep_check_hides_an_unopenable_root,
          keep_check_refuses_a_link_with_a_trailing_slash,
          keep_check_marks_incomplete_omission_counts, keep_check_hides_invalid_walk_settings,
+
+
+         a_walk_is_kept, a_push_race_keeps_both, a_lost_answer_is_the_kept_copy,
+         a_failed_push_exits_1_within_the_bound, the_copy_is_the_snapshot,
+         a_refused_walk_touches_no_clone,
+         evidence_refuses_unsafe_clones_and_bounds_its_lock,
          keep_check_refuses_each_rule, keep_check_passes_plain_captures,
          keep_check_reads_one_snapshot, keep_check_leaves_out_past_the_cap,
          keep_check_writes_nothing, keep_key_rule_is_records,
