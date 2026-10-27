@@ -250,7 +250,15 @@ def cleared_main(runner, repo, checkouts):
 
 
 def show_tiers(records, set_records):
-    repos = {r['tier'] for r in records if r['kind'] == 'tier'}
+    repositories = {}
+    for row in records:
+        if row['kind'] == 'tier':
+            repositories.setdefault(follower(row['tier'])[0], []).append(row)
+    repos = set()
+    for mine in repositories.values():
+        # The newest record selects the split; keep every follower of that split.
+        parts = follower(newest(mine)['tier'])[2]
+        repos.update(r['tier'] for r in mine if follower(r['tier'])[2] == parts)
     if not repos:
         print('tiers: none in the feed')
         return

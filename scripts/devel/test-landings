@@ -879,9 +879,69 @@ def tiers_shown_per_part(lab):
                tier_record('fault', tier='temper.2of2', minute=8))
     assert lab.run('--last', '0').stdout.split('tiers:\n')[1].splitlines() == [
         '  skein: green at aaaaaaaaa (10-26 05:01Z)',
-        '  temper: green at aaaaaaaaa (10-26 05:00Z)',
         '  temper.1of2: red at aaaaaaaaa (10-26 05:06Z): 2 tests, first red bbbbbbbbb (newer/m1)',
         '  temper.2of2: fault since 05:08Z: lacks chromium; running on bbbbbbbbb since 05:07Z; green at aaaaaaaaa (10-26 05:03Z)']
+
+
+def tiers_whole_line_goes_once_parts_run(lab):
+    lab.append(tier_record(tier='temper', minute=1, state='red', last_green=None,
+                           reds=[dict(landing=None, tests=['whole'])]))
+    assert lab.run('--last', '0').stdout.split('tiers:\n')[1].splitlines() == [
+        '  temper: red at aaaaaaaaa (10-26 05:01Z): 1 tests, 1 standing since the first run']
+    lab.append(tier_record('running', tier='temper.1of2', minute=2))
+    assert lab.run('--last', '0').stdout.split('tiers:\n')[1].splitlines() == [
+        '  temper.1of2: running on aaaaaaaaa since 05:02Z']
+    lab.append(tier_record(tier='temper.1of2', minute=3),
+               tier_record(tier='temper.2of2', minute=4))
+    assert lab.run('--last', '0').stdout.split('tiers:\n')[1].splitlines() == [
+        '  temper.1of2: green at aaaaaaaaa (10-26 05:03Z)',
+        '  temper.2of2: green at aaaaaaaaa (10-26 05:04Z)']
+
+
+def tiers_newest_split_by_its_newest_record(lab):
+    lab.append(tier_record(tier='temper.2of2', minute=4),
+               tier_record(tier='temper.1of3', minute=1),
+               tier_record(tier='temper.1of2', minute=0),
+               tier_record(tier='temper.3of3', minute=3),
+               tier_record(tier='temper.2of3', minute=2),
+               tier_record(tier='jig', minute=5))
+    assert lab.run('--last', '0').stdout.split('tiers:\n')[1].splitlines() == [
+        '  jig: green at aaaaaaaaa (10-26 05:05Z)',
+        '  temper.1of2: green at aaaaaaaaa (10-26 05:00Z)',
+        '  temper.2of2: green at aaaaaaaaa (10-26 05:04Z)']
+    lab.append(tier_record('fault', tier='temper.2of3', minute=6))
+    assert lab.run('--last', '0').stdout.split('tiers:\n')[1].splitlines() == [
+        '  jig: green at aaaaaaaaa (10-26 05:05Z)',
+        '  temper.1of3: green at aaaaaaaaa (10-26 05:01Z)',
+        '  temper.2of3: fault since 05:06Z: lacks chromium; green at aaaaaaaaa (10-26 05:02Z)',
+        '  temper.3of3: green at aaaaaaaaa (10-26 05:03Z)']
+
+
+def tiers_newest_split_uses_feed_order_on_time_ties(lab):
+    lab.append(tier_record(tier='temper.2of2', minute=1),
+               tier_record(tier='temper', minute=1),
+               tier_record(tier='temper.1of2', minute=0))
+    assert lab.run('--last', '0').stdout.split('tiers:\n')[1].splitlines() == [
+        '  temper: green at aaaaaaaaa (10-26 05:01Z)']
+    lab.append(tier_record('verdict', tier='temper.1of2', minute=1))
+    assert lab.run('--last', '0').stdout.split('tiers:\n')[1].splitlines() == [
+        '  temper.1of2: green at aaaaaaaaa (10-26 05:00Z)',
+        '  temper.2of2: green at aaaaaaaaa (10-26 05:01Z)']
+
+
+def tiers_join_still_reads_every_split(lab):
+    commit = 'a' * 40
+    lab.append(*tier_run('temper', commit, None, 1, [(commit, ['whole red'])]),
+               *tier_run('temper.1of2', commit, None, 2, [(commit, [])]),
+               *tier_run('temper.2of2', commit, None, 2, [(commit, [])]))
+    assert lab.run('--last', '0').stdout.split('tiers:\n')[1].splitlines() == [
+        '  temper.1of2: green at aaaaaaaaa (10-26 05:02Z)',
+        '  temper.2of2: green at aaaaaaaaa (10-26 05:02Z)']
+    result = lab.run('wait', '--cleared', commit[:9], '--timeout', '0', status=1)
+    assert result.stdout == ('10-26 05:01Z temper aaaaaaaaa red by run aaaaaaaaa: '
+                             'whole red; log fixture-host:/fixture/log\n'
+                             '    first failure\n    second failure\n'), result
+    assert result.stderr == '', result
 
 
 def parts_join_run_verdicts(lab):
@@ -1601,6 +1661,8 @@ def main():
              part_cleared_waits_for_the_other, part_red_decides_at_once,
              whole_verdict_before_the_split_stands, split_needs_one_complete_split,
              commit_target_joins_parts, cleared_main_over_two_parts, tiers_shown_per_part,
+             tiers_whole_line_goes_once_parts_run, tiers_newest_split_by_its_newest_record,
+             tiers_newest_split_uses_feed_order_on_time_ties, tiers_join_still_reads_every_split,
              parts_join_run_verdicts, part_own_verdict_combines_with_other_run,
              complete_splits_prefer_smallest_and_reds_win, split_commit_targets_keep_repositories_apart,
              cleared_main_none, cleared_main_unreadable, red_set, stopped_set, stopped_proof, appended_stopped_proof,
