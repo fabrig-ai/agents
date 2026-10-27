@@ -212,7 +212,8 @@ class Lab:
 
     def end_run(self, state=None, report='## Findings\nNone.\n', code=0):
         state = state or self.watch_state()[1]
-        directory = self.tmp / 'qa' / state['pass']
+        directory = (self.tmp / 'qa-focused' / state['walk'] if 'walk' in state
+                     else self.tmp / 'qa' / state['pass'])
         (directory / 'report.md').write_text(report)
         run = self.tmp / 'codex-run' / state['run']
         meta = dict(line.split('=', 1) for line in (run / 'meta').read_text().splitlines())
@@ -528,11 +529,21 @@ def end(run, report, code=0):
     (state / 'ended').touch()
 
 if name == 'codex-run':
+    if args[1:2] == ['--resume']:
+        previous = runs / args[2]
+        if config.get('resume_refusal'):
+            sys.exit(config['resume_refusal'])
+        if not (previous / 'thread').is_file():
+            sys.exit('resume run has no thread')
+        if not (previous / 'meta').is_file():
+            sys.exit('resume run has no meta')
+        args = [args[0], *args[3:]]
     if config.get('refuse_launch'):
         sys.exit('fixture launch refused')
     assert args[:4] == ['task', '--to', 'qa-watch', '--on-stop'], args
     assert Path(args[4]).is_absolute()
     task, checkout, report = args[5:]
+    assert not Path(report).exists(), 'REPORT already exists'
     if config.get('capture_launch'):
         snapshot = [json.loads(path.read_text()) for path in sorted((root / 'tmp/qa').glob('*/pass.json'))]
         with (root / 'launches.jsonl').open('a') as out:
@@ -542,6 +553,7 @@ if name == 'codex-run':
     state = runs / run
     state.mkdir()
     started = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    (state / 'thread').write_text('fixture thread')
     (state / 'meta').write_text(f'model=gpt-6.1-sol\neffort=high\nstarted={started}\ntask={task}\nreport={report}\non_stop={args[4]}\n')
     Path(report).write_text(f'codex-run: run {run} is writing this report.\n')
     hang('after')
@@ -3334,7 +3346,356 @@ def a_linked_walk_state_keeps_its_grant_held(lab):
     assert lab.walk_state()[1]['stage'] == 'ended'
 
 
-CASES = (a_saved_reservation_past_the_cap_is_cancelled, qa_admits_nothing_while_its_old_rows_wait,
+def walk_with_logins(lab, *pools, cap=180):
+    for pool in pools:
+        resting(lab, pool)
+    lab.configure(logins_real=list(pools))
+    flags = [word for pool in pools for word in ('--login', pool)]
+    lab.walk('b0', *flags, '--cap', str(cap), now='2026-10-27T08:00:00Z')
+    return lab.walk_state()
+
+
+def pause_walk(lab, directory, state, line='step 4: blocked by a finding', post_status='0'):
+    (directory / 'paused').write_text(line + '\n')
+    (directory / 'notes.md').write_text('Finding: keep the deployment data and continue step 4.\n')
+    lab.run('_give-back', str(directory), '5')
+    lab.end_run(state, report='Blocking finding at step 4.\n')
+    lab.watch(extra={'QA_POST_STATUS': post_status})
+    return next(saved for _, saved in lab.walk_states() if saved['walk'] == state['walk'])
+
+
+def a_paused_walk_frees_its_slot_and_logins(lab):
+    directory, state = walk_with_logins(lab, CHATGPT)
+    state = pause_walk(lab, directory, state, post_status='2')
+    assert state['decision'] == 'walk-pause' and state['released'] and state['given'] == [CHATGPT]
+    assert state['end_logged'] and not state['posted'] and state['stage'] == 'ending'
+    lab.watch(extra={'QA_POST_STATUS': '3'})
+    lab.watch()
+    state = lab.walk_state()[1]
+    assert state['stage'] == 'paused' and state['posted'] and directory.is_dir()
+    posts = lab.sent()
+    assert len(posts) == 2 and posts[-1]['args'][1:3] == [state['starter'], 'qa: walk rung-b0-1 paused']
+    assert state['pause_line'] in posts[-1]['body'] and str(directory / 'report.md') in posts[-1]['body']
+    rows = (directory.parent / 'b0/loop.tsv').read_text().splitlines()
+    assert [row.split('\t')[3] for row in rows[1:]] == ['walk-start', 'walk-pause']
+    assert state['pause_line'] in rows[-1]
+    lab.walk('other', '--login', CHATGPT)
+    other = lab.walk_states()[-1][1]
+    assert other['slot'] == 1 and other['logins'][CHATGPT] == state['logins'][CHATGPT]
+    assert state['attempts'][0]['decision'] == 'walk-pause'
+
+
+def a_pause_with_a_login_out_ends_stuck(lab):
+    directory, state = walk_with_logins(lab, CHATGPT)
+    unit, pid = deployment(lab, directory, login=CHATGPT)
+    executable(directory / 'give-back', 'raise SystemExit(1)\n')
+    state = pause_walk(lab, directory, state)
+    assert state['decision'] == 'walk-end' and state['stage'] == 'ending' and not state['released']
+    post, = lab.sent()
+    assert post['args'][2] == 'qa: walk rung-b0-1 ended' and CHATGPT in post['body'] and unit in post['body']
+    (directory / 'box/login').rename(state['logins'][CHATGPT])
+    lab.watch()
+    assert lab.walk_state()[1]['decision'] == 'walk-end' and lab.walk_state()[1]['stage'] == 'ended'
+    assert len(lab.sent()) == 1
+    dead(pid)
+
+
+def a_paused_walk_resumes_at_a_branch_with_another_login(lab):
+    lab.configure(pools={CHATGPT: [CHATGPT, 'chatgpt-2']})
+    resting(lab, 'chatgpt-2')
+    directory, state = walk_with_logins(lab, CHATGPT, cap=7)
+    unit, pid = deployment(lab, directory, login=CHATGPT)
+    kept = directory / 'box/data'
+    kept.write_text('kept deployment data\n')
+    state = pause_walk(lab, directory, state)
+    previous = state['attempts'][0]
+    assert state['deployments'] == [dict(name='box', unit=unit, argv=[str(directory / 'box/server')])]
+    dead(pid)
+    lab.walk('other', '--login', CHATGPT)
+    fix = lab.commit('fix before landing', branch='fix')
+    report = (directory / 'report.md').read_bytes()
+    lab.run('walk', 'temper', 'b0', '--resume', '1', '--build', 'origin/fix', now='2026-10-27T09:00:00Z')
+    resumed = next(saved for _, saved in lab.walk_states() if saved['walk'] == state['walk'])
+    assert resumed['walk'] == state['walk'] and resumed['attempt'] == 2 and len(resumed['attempts']) == 2
+    assert resumed['attempts'][0] == previous and resumed['run'] != state['run']
+    assert resumed['pools'] == {CHATGPT: 'chatgpt-2'} and resumed['slot'] == 2
+    assert resumed['main'] == fix and resumed['cap'] == 7 and resumed['started'] == '2026-10-27T09:00:00Z'
+    assert lab.git(lab.tmp / 'qa/repos/temper-walk-2', 'rev-parse', 'HEAD') == fix
+    assert not (directory / 'paused').exists() and not (directory / 'give-back').exists()
+    assert (directory / 'report-1.md').read_bytes() == report and kept.read_text() == 'kept deployment data\n'
+    task = (directory / 'task.md').read_text()
+    assert all(word in task for word in (state['pause_line'], str(directory / 'box/server'),
+        str(directory / 'box'), resumed['logins']['chatgpt-2'], 'report-1.md', 'notes.md',
+        'configuration', 'stored family', 'fresh deployment', 'main at the landed commit'))
+    call = lab.calls('codex-run')[-1]
+    assert call[:6] == ['task', '--resume', state['run'], '--to', 'qa-watch', '--on-stop']
+    assert call[-3:] == [str(directory / 'task.md'), str(lab.tmp / 'qa/repos/temper-walk-2'), str(directory / 'report.md')]
+    lab.watch(now='2026-10-27T09:06:59Z')
+    current = next(saved for _, saved in lab.walk_states() if saved['walk'] == state['walk'])
+    assert current['stage'] == 'running' and not current['capped']
+    lab.end_run(current, report='Fix confirmed at the branch.\n')
+    lab.watch()
+    current = next(saved for _, saved in lab.walk_states() if saved['walk'] == state['walk'])
+    assert current['stage'] == 'ended' and current['given'] == ['chatgpt-2'] and current['attempts'][0] == previous
+    assert lab.calls('logins').count(['give', CHATGPT, '--as', state['holder']]) == 1
+    rows = (directory.parent / 'b0/loop.tsv').read_text().splitlines()
+    assert [row.split('\t')[3] for row in rows[1:]] == ['walk-start', 'walk-pause', 'walk-resume', 'walk-end']
+
+
+def a_failed_resume_launch_gives_back_and_stays_paused(lab):
+    directory, state = walk_with_logins(lab, CHATGPT)
+    state = pause_walk(lab, directory, state)
+    lab.configure(resume_refusal='resume run has no thread', refuse_launch=True)
+    lab.run('walk', 'temper', 'b0', '--resume', '1', '--build', 'main', status=1)
+    failed = lab.walk_state()[1]
+    assert failed['stage'] == 'paused' and failed['released'] and failed['given'] == [CHATGPT]
+    assert failed['attempt'] == 2 and len(failed['attempts']) == 2 and not failed['run']
+    assert failed['attempts'][0]['run'] == state['run'] and len(lab.calls('codex-run')) == 3
+    assert (directory / 'paused').read_text().strip() == state['pause_line']
+    assert (directory / 'report-1.md').read_text() == 'Blocking finding at step 4.\n'
+    lab.configure(refuse_launch=False, resume_refusal='')
+    lab.run('walk', 'temper', 'b0', '--resume', '1', '--build', 'main')
+    current = lab.walk_state()[1]
+    assert current['attempt'] == 3 and len(current['attempts']) == 3 and current['stage'] == 'running'
+    assert lab.calls('codex-run')[-1][1:3] == ['--resume', state['run']]
+
+
+def a_resume_before_the_pause_is_complete_is_refused(lab):
+    directory, state = walk_with_logins(lab, CHATGPT)
+    pause_walk(lab, directory, state, post_status='2')
+    before = lab.calls('logins')
+    lab.run('walk', 'temper', 'b0', '--resume', '1', '--build', 'main', status=2)
+    assert lab.calls('logins') == before and len(lab.calls('codex-run')) == 1
+    assert lab.walk_state()[1]['attempt'] == 1
+
+
+def a_resume_whose_thread_is_gone_starts_fresh(lab):
+    directory, state = walk_with_logins(lab, CHATGPT)
+    state = pause_walk(lab, directory, state)
+    (lab.tmp / 'codex-run' / state['run'] / 'thread').unlink()
+    lab.run('walk', 'temper', 'b0', '--resume', '1', '--build', 'main')
+    current = lab.walk_state()[1]
+    calls = lab.calls('codex-run')
+    assert len(calls) == 3 and calls[1][1:3] == ['--resume', state['run']]
+    assert calls[2][:4] == ['task', '--to', 'qa-watch', '--on-stop']
+    assert current['stage'] == 'running' and current['run'] != state['run']
+    task = (directory / 'task.md').read_text()
+    assert 'notes.md' in task and 'report-1.md' in task and 'Carry their findings' in task
+
+
+def resume_refuses_a_walk_not_paused(lab):
+    directory, state = walk_with_logins(lab, CHATGPT)
+    before = lab.calls('logins')
+    for args in [('--resume', '1', '--build', 'main'), ('--resume', '1'),
+                 ('--resume', '0', '--build', 'main')]:
+        lab.run('walk', 'temper', 'b0', *args, status=2)
+    assert lab.calls('logins') == before
+    lab.end_run(state)
+    lab.watch()
+    before = lab.calls('logins')
+    lab.run('walk', 'temper', 'b0', '--resume', '1', '--build', 'main', status=2)
+    assert lab.calls('logins') == before and lab.walk_state()[1]['stage'] == 'ended'
+
+
+def invalid_pause_lines_end_the_walk(lab):
+    for line in ('x' * 201, 'a\tb', 'a\x85b', 'a\u2028b', ''):
+        lab.walk('b0')
+        directory, state = lab.walk_states()[-1]
+        (directory / 'paused').write_text(line + '\n')
+        lab.end_run(state)
+        lab.watch()
+        state = lab.walk_states()[-1][1]
+        assert state['decision'] == 'walk-end' and state['stage'] == 'ended'
+    assert all(post['args'][2].endswith(' ended') for post in lab.sent())
+
+
+def a_linked_pause_marker_is_not_read(lab):
+    lab.walk('b0')
+    directory, state = lab.walk_state()
+    outside = lab.root / 'outside-pause'
+    outside.write_text('linked pause line\n')
+    (directory / 'paused').symlink_to(outside)
+    lab.end_run(state)
+    lab.watch()
+    assert lab.walk_state()[1]['decision'] == 'walk-end'
+    assert 'linked pause line' not in lab.sent()[0]['body'] and outside.read_text() == 'linked pause line\n'
+
+
+def a_second_pause_has_its_own_clock_event(lab):
+    directory, state = walk_with_logins(lab)
+    state = pause_walk(lab, directory, state, line='attempt 2: this is user text')
+    lab.run('walk', 'temper', 'b0', '--resume', '1', '--build', 'main')
+    state = lab.walk_state()[1]
+    # The bound is characters, with the terminating newline outside it.
+    state = pause_walk(lab, directory, state, line='x' * 200)
+    assert state['stage'] == 'paused' and state['attempt'] == 2
+    rows = [row.split('\t') for row in (directory.parent / 'b0/loop.tsv').read_text().splitlines()[1:]]
+    assert [row[3] for row in rows] == ['walk-start', 'walk-pause', 'walk-resume', 'walk-pause']
+    assert rows[-1][4] == 'attempt 2: ' + 'x' * 200
+    lab.run('walk', 'temper', 'b0', '--resume', '1', '--build', 'main')
+    lab.end_run(lab.walk_state()[1])
+    lab.watch()
+    rows = [row.split('\t') for row in (directory.parent / 'b0/loop.tsv').read_text().splitlines()[1:]]
+    assert rows[-2][3] == 'walk-resume' and rows[-2][4].startswith('attempt 3: ')
+    assert rows[-1][3] == 'walk-end' and (directory / 'report-2.md').is_file()
+
+
+def an_interrupted_resume_releases_only_its_new_grant(lab):
+    directory, state = walk_with_logins(lab, CHATGPT)
+    state = pause_walk(lab, directory, state)
+    previous = state['attempts'][0]
+    driven_walk(lab, '''Watch = tool['Watch']
+original = Watch.call
+def call(self, name, *args):
+    result = original(self, name, *args)
+    if name == 'logins' and args[0] == 'take' and result.returncode == 0:
+        os._exit(77)
+    return result
+Watch.call = call
+''', '--resume', '1', '--build', 'main', status=77)
+    assert not lab.walk_state()[1]['logins'] and lab.walk_state()[1]['attempt'] == 2
+    lab.watch()
+    current = lab.walk_state()[1]
+    assert current['stage'] == 'paused' and current['released'] and current['attempts'][0] == previous
+    assert not current['run'] and len(lab.calls('codex-run')) == 1
+    assert lab.calls('logins').count(['give', CHATGPT, '--as', state['holder']]) == 2
+
+
+def an_accepted_resume_recovers_only_its_new_run(lab):
+    directory, state = walk_with_logins(lab, CHATGPT)
+    state = pause_walk(lab, directory, state)
+    previous = state['attempts'][0]
+    driven_walk(lab, '''Watch = tool['Watch']
+original = Watch.call
+def call(self, name, *args):
+    result = original(self, name, *args)
+    if name == 'codex-run':
+        result.returncode = 124
+    return result
+Watch.call = call
+''', '--resume', '1', '--build', 'main', status=1)
+    assert lab.walk_state()[1]['stage'] == 'starting'
+    lab.watch()
+    current = lab.walk_state()[1]
+    assert current['stage'] == 'running' and current['run'] == 'fixture-2'
+    assert current['attempts'][0] == previous and not current['given']
+    assert lab.calls('logins').count(['give', CHATGPT, '--as', state['holder']]) == 1
+
+
+def a_resume_without_its_meta_starts_fresh(lab):
+    directory, state = walk_with_logins(lab)
+    state = pause_walk(lab, directory, state)
+    (lab.tmp / 'codex-run' / state['run'] / 'meta').unlink()
+    lab.run('walk', 'temper', 'b0', '--resume', '1', '--build', 'main')
+    assert lab.walk_state()[1]['stage'] == 'running' and lab.walk_state()[1]['run'] == 'fixture-2'
+    assert len(lab.calls('codex-run')) == 3
+
+
+def a_refused_walk_deployment_preserves_its_saved_command(lab):
+    directory, state = walk_with_logins(lab)
+    unit, pid = deployment(lab, directory)
+    command = [dict(name='box', unit=unit, argv=[str(directory / 'box/server')])]
+    lab.configure(deploy_failure=True)
+    lab.run('deploy', str(directory), 'box', '--', '/bin/true', status=4)
+    assert lab.walk_state()[1]['deployments'] == command and alive(pid)
+    lab.run('deploy', str(directory), 'other', '--', '/bin/true', status=4)
+    assert lab.walk_state()[1]['deployments'] == command
+    os.killpg(pid, signal.SIGKILL)
+    dead(pid)
+    registry = directory / 'deployments'
+    registry.unlink()
+    registry.mkdir()
+    lab.run('deploy', str(directory), 'box', '--', '/bin/true', status=2)
+    assert lab.walk_state()[1]['deployments'] == command
+    registry.rmdir()
+    registry.write_bytes(b'\xff')
+    lab.run('deploy', str(directory), 'box', '--', '/bin/true', status=4)
+    assert lab.walk_state()[1]['deployments'] == command
+    registry.write_text(unit + '\n')
+    lab.run('deploy', str(directory), 'box', '--', '/bin/true', status=4,
+            extra={'QA_SYSTEMD_RUN': str(lab.root / 'missing-manager')})
+    assert lab.walk_state()[1]['deployments'] == command
+    state = pause_walk(lab, directory, lab.walk_state()[1])
+    dead(pid)
+    lab.configure(deploy_failure=False)
+    lab.run('walk', 'temper', 'b0', '--resume', '1', '--build', 'main')
+    task = (directory / 'task.md').read_text()
+    assert str(directory / 'box/server') in task and '/bin/true' not in task
+
+
+def damaged_attempt_history_keeps_walk_custody(lab):
+    directory, state = walk_with_logins(lab, CHATGPT)
+    saved = lab.tmp / 'qa/walks/rung-b0-1.json'
+    original = saved.read_bytes()
+    for corruption in (dict(state, attempts=[None]), dict(state, deployments=[None]),
+                       dict(state, report_attempt='../outside'), dict(state, attempts=[{}])):
+        saved.write_text(json.dumps(corruption))
+        result = lab.watch()
+        assert 'invalid walk state; keeping custody' in result.stdout
+        assert ['give', CHATGPT, '--as', state['holder']] not in lab.calls('logins')
+    saved.write_bytes(original)
+    assert not lab.sent()
+
+
+def a_saved_pause_decision_survives_its_marker_removal(lab):
+    directory, state = walk_with_logins(lab)
+    (directory / 'paused').write_text('original paused step\n')
+    lab.end_run(state)
+    driven_watch(lab, '''import os
+Watch = tool['Watch']
+original = Watch.save
+def save(self, directory, state):
+    original(self, directory, state)
+    if state.get('decision') == 'walk-pause':
+        os._exit(0)
+Watch.save = save
+''')
+    assert lab.walk_state()[1]['decision'] == 'walk-pause' and not lab.walk_state()[1]['end_logged']
+    (directory / 'paused').unlink()
+    lab.watch()
+    state = lab.walk_state()[1]
+    assert state['stage'] == 'paused' and state['pause_line'] == 'original paused step'
+    assert 'original paused step' in lab.sent()[0]['body']
+
+
+def a_resume_can_change_its_pools_and_cap(lab):
+    directory, state = walk_with_logins(lab, CHATGPT)
+    state = pause_walk(lab, directory, state)
+    resting(lab, CLAUDE)
+    lab.run('walk', 'temper', 'b0', '--resume', '1', '--build', 'main', '--login', CLAUDE, '--cap', '1')
+    current = lab.walk_state()[1]
+    assert current['cap'] == 1 and current['requests'] == [CLAUDE] and current['pools'] == {CLAUDE: CLAUDE}
+    assert current['attempts'][0] == state['attempts'][0]
+    lab.end_run(current)
+    lab.watch()
+    assert lab.walk_state()[1]['given'] == [CLAUDE]
+    assert lab.calls('logins').count(['give', CHATGPT, '--as', state['holder']]) == 1
+
+
+def an_old_pending_end_does_not_turn_into_a_pause(lab):
+    directory, state = walk_with_logins(lab)
+    lab.end_run(state)
+    lab.watch(extra={'QA_POST_STATUS': '2'})
+    state = lab.walk_state()[1]
+    for key in ('decision', 'attempt', 'attempts', 'report_attempt'):
+        state.pop(key, None)
+    (lab.tmp / 'qa/walks/rung-b0-1.json').write_text(json.dumps(state))
+    (directory / 'paused').write_text('a marker added after the old end\n')
+    lab.watch()
+    current = lab.walk_state()[1]
+    assert current['stage'] == 'ended' and current['decision'] == 'walk-end'
+    assert current['attempt'] == 1 and len(current['attempts']) == 1
+    assert all(post['args'][2] == 'qa: walk rung-b0-1 ended' for post in lab.sent())
+
+
+CASES = (a_resume_can_change_its_pools_and_cap, an_old_pending_end_does_not_turn_into_a_pause, invalid_pause_lines_end_the_walk, a_linked_pause_marker_is_not_read,
+         a_second_pause_has_its_own_clock_event, an_interrupted_resume_releases_only_its_new_grant,
+         an_accepted_resume_recovers_only_its_new_run, a_resume_without_its_meta_starts_fresh,
+         a_refused_walk_deployment_preserves_its_saved_command, damaged_attempt_history_keeps_walk_custody,
+         a_saved_pause_decision_survives_its_marker_removal, a_paused_walk_frees_its_slot_and_logins, a_pause_with_a_login_out_ends_stuck,
+         a_paused_walk_resumes_at_a_branch_with_another_login, a_failed_resume_launch_gives_back_and_stays_paused,
+         a_resume_before_the_pause_is_complete_is_refused, a_resume_whose_thread_is_gone_starts_fresh,
+         resume_refuses_a_walk_not_paused, a_saved_reservation_past_the_cap_is_cancelled, qa_admits_nothing_while_its_old_rows_wait,
          a_listing_out_of_its_form_admits_and_gives_nothing, a_damaged_walk_state_does_not_block_others_cleanup,
          a_linked_walk_state_keeps_its_grant_held, a_walk_refuses_invalid_inputs_before_taking_anything,
          a_walk_resolves_origin_branches_and_commit_prefixes,

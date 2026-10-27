@@ -7,11 +7,12 @@ qa findings
 qa rung REPO [RUNG [--login POOL]... [--why TEXT]]
 qa triage PASS N owner ADDRESS|backlog|drop [--why TEXT]
 qa walk REPO RUNG [--build REF] [--login POOL]... [--cap MINUTES]
+qa walk REPO RUNG --resume N --build REF [--login POOL]... [--cap MINUTES]
 qa watch --director ADDRESS [--once]
 qa deploy DIRECTORY NAME -- COMMAND...
 """
 import argparse
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 import fcntl
 import json
@@ -34,6 +35,8 @@ NAME = r'[a-z0-9][a-z0-9_-]*'
 LOGIN = r'[a-z][a-z0-9-]*'
 SHA = r'[0-9a-f]{40}'
 PASS_KEYS = 'repository main commits machine model effort started ended wall tokens outcome'.split()
+ATTEMPT_KEYS = ('attempt ref main cap started slot logins kinds pools requests run stage given released '
+                'start_logged end_logged posted capped decision pause_line resume_run report_attempt').split()
 
 
 class Problem(Exception):
@@ -603,30 +606,52 @@ def deploy(args, workspace):
     executable = str(Path(executable).absolute())
     seconds = settings(workspace)['QA_STOP_SECONDS']
     unit = f'qa-{directory.name}-{args.name}'
-    try:
-        descriptor = os.open(directory / 'deployments', os.O_RDWR | os.O_CREAT | os.O_APPEND
-                             | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
-    except OSError:
-        raise Problem('cannot open deployments safely') from None
-    with os.fdopen(descriptor, 'r') as recorded:
-        info = os.fstat(recorded.fileno())
-        need(stat.S_ISREG(info.st_mode) and info.st_nlink == 1,
-             'deployments must be a regular file with one link')
-        fcntl.flock(recorded, fcntl.LOCK_EX)
-        text = recorded.read()
-        if unit not in text.splitlines():
-            line = (('' if not text or text.endswith('\n') else '\n') + unit + '\n').encode()
-            need(os.write(recorded.fileno(), line) == len(line), 'cannot record deployment', 4)
-    stop = ' '.join('"' + str(word) + '"' for word in (script, '_give-back', directory, seconds))
-    result = command([workspace.tool('systemd-run'), '--user', '--collect', '--quiet', '--unit', unit,
-                      '--service-type=exec', '--expand-environment=no', f'--working-directory={directory}', '--setenv=PATH',
-                      '--property=KillMode=control-group',
-                      f'--property=StandardOutput=append:{directory}/{args.name}.log',
-                      f'--property=StandardError=append:{directory}/{args.name}.log',
-                      '--property=ExecStop=-' + stop, f'--property=TimeoutStopSec={seconds + 60}',
-                      '--', executable, *args.argv[1:]])
-    need(result.returncode == 0, result.stderr.strip() or 'systemd-run failed', 4)
-    print(unit)
+    service = Watch(workspace, '')
+    saved = service.directory / 'walks' / (directory.name + '.json')
+    walking = saved.exists() or saved.is_symlink()
+    with service.walks_locked() if walking else nullcontext():
+        if walking:
+            match = next(((path, state) for path, state in service.local_walks() if state['walk'] == directory.name), None)
+            need(match and match[0] == directory and match[1]['stage'] == 'running', 'walk is not running here')
+            state = match[1]
+            deployments = state.setdefault('deployments', [])
+            previous_deployments = list(deployments)
+            if any(d['name'] == args.name for d in deployments):
+                need(service.unit_status(unit, directory) == 'stopped', 'deployment is still up or unknown', 4)
+            deployments[:] = [deployment for deployment in deployments if deployment['name'] != args.name]
+            deployments.append(dict(name=args.name, unit=unit, argv=[executable, *args.argv[1:]]))
+        try:
+            try:
+                descriptor = os.open(directory / 'deployments', os.O_RDWR | os.O_CREAT | os.O_APPEND
+                                     | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+            except OSError:
+                raise Problem('cannot open deployments safely') from None
+            with os.fdopen(descriptor, 'r') as recorded:
+                info = os.fstat(recorded.fileno())
+                need(stat.S_ISREG(info.st_mode) and info.st_nlink == 1,
+                     'deployments must be a regular file with one link')
+                fcntl.flock(recorded, fcntl.LOCK_EX)
+                text = recorded.read()
+                if unit not in text.splitlines():
+                    line = (('' if not text or text.endswith('\n') else '\n') + unit + '\n').encode()
+                    need(os.write(recorded.fileno(), line) == len(line), 'cannot record deployment', 4)
+            stop = ' '.join('"' + str(word) + '"' for word in (script, '_give-back', directory, seconds))
+            if walking:
+                service.save(directory, state)
+            result = command([workspace.tool('systemd-run'), '--user', '--collect', '--quiet', '--unit', unit,
+                              '--service-type=exec', '--expand-environment=no', f'--working-directory={directory}', '--setenv=PATH',
+                              '--property=KillMode=control-group',
+                              f'--property=StandardOutput=append:{directory}/{args.name}.log',
+                              f'--property=StandardError=append:{directory}/{args.name}.log',
+                              '--property=ExecStop=-' + stop, f'--property=TimeoutStopSec={seconds + 60}',
+                              '--', executable, *args.argv[1:]])
+            need(result.returncode == 0, result.stderr.strip() or 'systemd-run failed', 4)
+        except (Problem, OSError):
+            if walking:
+                state['deployments'] = previous_deployments
+                service.save(directory, state)
+            raise
+        print(unit)
 
 
 def give_back(args):
@@ -719,6 +744,15 @@ class Watch:
         return command([self.workspace.tool(tool), *args], timeout=timeout)
 
     def save(self, directory, state):
+        if 'walk' in state:
+            state.setdefault('attempt', 1)
+            attempts = state.setdefault('attempts', [])
+            snapshot = json.loads(json.dumps({key: state[key] for key in ATTEMPT_KEYS if key in state}))
+            if len(attempts) == state['attempt'] - 1:
+                attempts.append(snapshot)
+            else:
+                need(len(attempts) == state['attempt'], 'invalid walk attempt history', 4)
+                attempts[-1] = snapshot
         path = (self.directory / 'walks' / (state['walk'] + '.json') if 'walk' in state
                 else directory / 'pass.json')
         replace(path, (json.dumps(state, indent=2) + '\n').encode())
@@ -1140,7 +1174,10 @@ class Watch:
         matches = []
         for path in self.runs.glob('*/meta'):
             fields = dict(line.split('=', 1) for line in path.read_text().splitlines() if '=' in line)
-            if fields.get('task') == str(directory / ('task.md' if 'walk' in state else 'brief.md')) and fields.get('report') == str(directory / 'report.md'):
+            earlier = {a.get('run') for a in state.get('attempts', [])[:-1]}
+            if (path.parent.name not in earlier
+                    and fields.get('task') == str(directory / ('task.md' if 'walk' in state else 'brief.md'))
+                    and fields.get('report') == str(directory / 'report.md')):
                 need(re.fullmatch(r'[a-zA-Z0-9_-]+', path.parent.name), 'invalid recovered run', 4)
                 matches.append(path.parent.name)
         need(len(matches) <= 1, f'{state.get("walk", state.get("pass"))}: multiple runs for one brief', 4)
@@ -1191,26 +1228,25 @@ class Watch:
                 need(name == path.stem and re.fullmatch(r'rung-[a-z0-9][a-z0-9-]*-[1-9][0-9]*', name)
                      and state['repo'] in REPOSITORIES and name.rsplit('-', 1)[0] == 'rung-' + state['rung']
                      and state['holder'] == 'walk/' + name, f'{path}: invalid walk', 4)
-                need(not state['run'] or re.fullmatch(r'[a-zA-Z0-9_-]+', state['run']), f'{path}: invalid run', 4)
-                need(state['stage'] in ('reserving', 'starting', 'running', 'ending', 'cancelled', 'ended')
-                     and type(state['cap']) is int and state['cap'] >= 1
-                     and (state['slot'] is None or type(state['slot']) is int and state['slot'] >= 1),
-                     f'{path}: invalid progress', 4)
-                need(all(isinstance(state[key], dict) for key in ('logins', 'kinds', 'pools'))
-                     and isinstance(state['given'], list) and isinstance(state['requests'], list)
-                     and all(isinstance(login, str) and re.fullmatch(LOGIN, login)
-                             and isinstance(path, str) and Path(path).is_absolute()
-                             for login, path in state['logins'].items())
-                     and set(state['kinds']) == set(state['logins'])
-                     and all(kind in ('moved', 'in-place') for kind in state['kinds'].values())
-                     and all(isinstance(login, str) and login in state['logins'] for login in state['given'])
-                     and all(isinstance(pool, str) and re.fullmatch(LOGIN, pool) and pool_of(pool) == pool
-                             for pool in state['requests'])
-                     and all(pool in state['requests'] and isinstance(login, str) and login in state['logins']
-                             and pool_of(login) == pool for pool, login in state['pools'].items())
-                     and set(state['pools'].values()) == set(state['logins']), f'{path}: invalid custody', 4)
+                walk_attempt(state)
+                if 'attempts' in state or 'attempt' in state:
+                    need(type(state['attempt']) is int and state['attempt'] >= 1
+                         and isinstance(state['attempts'], list) and len(state['attempts']) == state['attempt'],
+                         'invalid walk attempt history', 4)
+                    for number, attempt in enumerate(state['attempts'], 1):
+                        walk_attempt(attempt)
+                        need(attempt['attempt'] == number, 'invalid attempt number', 4)
+                deployments = state.get('deployments', [])
+                need(isinstance(deployments, list), 'invalid saved deployments', 4)
+                for deployment in deployments:
+                    need(isinstance(deployment, dict) and set(deployment) == {'name', 'unit', 'argv'}
+                         and isinstance(deployment['name'], str) and re.fullmatch(r'[a-z][a-z0-9-]*', deployment['name'])
+                         and deployment['unit'] == f'qa-{name}-{deployment["name"]}'
+                         and isinstance(deployment['argv'], list) and deployment['argv']
+                         and all(isinstance(word, str) for word in deployment['argv'])
+                         and Path(deployment['argv'][0]).is_absolute(), 'invalid saved deployment', 4)
+                need(len({d['name'] for d in deployments}) == len(deployments), 'duplicate saved deployment', 4)
                 need(isinstance(state['starter'], str) and state['starter'], f'{path}: invalid starter', 4)
-                utc(state['started'])
                 directory = self.workspace.tmp / 'qa-focused' / name
                 no_links(self.workspace.tmp, directory)
                 result.append((directory, state))
@@ -1233,25 +1269,32 @@ class Watch:
             fcntl.flock(out, fcntl.LOCK_EX)
             text = out.read()
             # The append can survive a crash before the state's progress save.
-            if not any(row.split('\t')[2:4] == [state['walk'], event] for row in text.splitlines()):
+            attempt = state.get('attempt', 1)
+            prefix = f'attempt {attempt}: '
+            if not any(row.split('\t')[2:4] == [state['walk'], event]
+                       and (attempt == 1 or row.split('\t')[-1].startswith(prefix))
+                       for row in text.splitlines()):
                 if not text:
                     out.write('time\trung\twalk\tevent\tnote\n')
-                out.write(f'{timestamp()}\t{state["rung"]}\t{state["walk"]}\t{event}\t{note}\n')
+                out.write(f'{timestamp()}\t{state["rung"]}\t{state["walk"]}\t{event}\t{prefix}{note}\n')
                 out.flush()
                 os.fsync(out.fileno())
-        state['start_logged' if event == 'walk-start' else 'end_logged'] = True
+        state['start_logged' if event in ('walk-start', 'walk-resume') else 'end_logged'] = True
         self.save(directory, state)
 
-    def cancel_walk(self, directory, state):
+    def cancel_walk(self, directory, state, drop=True):
         state['stage'] = 'cancelled'
         self.save(directory, state)
         # A take may have left a waiter or a grant without a reply.
-        for pool in state['requests']:
+        for pool in state['requests'] if drop else []:
             dropped = self.call('logins', 'drop', pool, '--any', '--as', state['holder'])
             need(dropped.returncode == 0, f'cannot drop walk request for {pool}', 4)
         self.give(directory, state)
         if not self.outstanding(state):
             state.update(stage='ended', released=True)
+            if state.get('attempt', 1) > 1:
+                state.update(stage='paused', decision='walk-pause', end_logged=True, posted=True)
+                replace(directory / 'paused', (state['pause_line'] + '\n').encode())
             self.save(directory, state)
 
     def check_walk(self, directory, state):
@@ -1289,15 +1332,27 @@ class Watch:
         missing = self.outstanding(state)
         units = self.deployments(directory, state)
         remaining = [unit for unit, status in (units or {}).items() if status != 'stopped']
+        if 'decision' not in state:
+            line = pause_line(directory)
+            state['decision'] = ('walk-pause' if not state.get('end_logged') and not state.get('posted')
+                                 and line is not None and not missing
+                                 and units is not None and not remaining and state.get('released') else 'walk-end')
+            if state['decision'] == 'walk-pause':
+                state['pause_line'] = line
+            self.save(directory, state)
+        paused = state['decision'] == 'walk-pause'
         facts = self.facts(state['run'])
         note = f'exit {facts["exit"]}; out: ' + (', '.join(missing) or 'none')
         if remaining or units is None:
             note += '; units: ' + (', '.join(remaining) if units is not None else 'unknown')
         if not state.get('end_logged'):
-            self.walk_event(directory, state, 'walk-end', note)
+            self.walk_event(directory, state, state['decision'], state['pause_line'] if paused else note)
         if not state.get('posted'):
-            body = (f'Walk {state["walk"]} ended; exit {facts["exit"]}.\n'
+            outcome = 'paused' if paused else 'ended'
+            body = (f'Walk {state["walk"]} {outcome}; exit {facts["exit"]}.\n'
                     f'Report: {directory}/report.md\n')
+            if paused:
+                body += f'Paused at: {state["pause_line"]}\n'
             body += ''.join(f'Login {name} is not back at {path}.\n' for name, path in missing.items())
             body += ''.join(f'Unit {unit} is still up or of unknown state.\n' for unit in remaining)
             if units is None:
@@ -1307,12 +1362,12 @@ class Watch:
             message = directory / 'post-body'
             replace(message, body.encode())
             sent = self.call('post', 'send', '--as', 'qa-watch', state['starter'],
-                             f'qa: walk {state["walk"]} ended', message)
+                             f'qa: walk {state["walk"]} {outcome}', message)
             if sent.returncode in (0, 3):
                 state['posted'] = True
                 self.save(directory, state)
         if state.get('released') and state.get('end_logged') and state.get('posted') and not missing:
-            state['stage'] = 'ended'
+            state['stage'] = 'paused' if paused else 'ended'
             self.save(directory, state)
 
     def check(self, options):
@@ -1370,7 +1425,7 @@ class Watch:
                 except (Problem, OSError, ValueError, UnicodeError) as error:
                     log(f'{state["pass"]}: cleanup failed ({type(error).__name__}); keeping logins and scratch')
             for directory, state in walks:
-                if state.get('stage') == 'ended':
+                if state.get('stage') in ('ended', 'paused'):
                     continue
                 try:
                     self.check_walk(directory, state)
@@ -1488,12 +1543,65 @@ class Watch:
                     log(f'{state["pass"]}: pruned')
 
 
+def walk_attempt(state):
+    need(isinstance(state, dict), 'invalid walk attempt', 4)
+    need(not state['run'] or re.fullmatch(r'[a-zA-Z0-9_-]+', state['run']), f'attempt: invalid run', 4)
+    need(state['stage'] in ('reserving', 'starting', 'running', 'ending', 'cancelled', 'ended', 'paused')
+         and type(state['cap']) is int and state['cap'] >= 1
+         and (state['slot'] is None or type(state['slot']) is int and state['slot'] >= 1),
+         f'attempt: invalid progress', 4)
+    need(all(isinstance(state[key], dict) for key in ('logins', 'kinds', 'pools'))
+         and isinstance(state['given'], list) and isinstance(state['requests'], list)
+         and all(isinstance(login, str) and re.fullmatch(LOGIN, login)
+                 and isinstance(path, str) and Path(path).is_absolute()
+                 for login, path in state['logins'].items())
+         and set(state['kinds']) == set(state['logins'])
+         and all(kind in ('moved', 'in-place') for kind in state['kinds'].values())
+         and all(isinstance(login, str) and login in state['logins'] for login in state['given'])
+         and all(isinstance(pool, str) and re.fullmatch(LOGIN, pool) and pool_of(pool) == pool
+                 for pool in state['requests'])
+         and all(pool in state['requests'] and isinstance(login, str) and login in state['logins']
+                 and pool_of(login) == pool for pool, login in state['pools'].items())
+         and set(state['pools'].values()) == set(state['logins']), f'attempt: invalid custody', 4)
+    need(all(type(state[key]) is bool for key in ('released', 'start_logged', 'end_logged', 'posted')),
+         'invalid attempt progress', 4)
+    if 'report_attempt' in state:
+        need(type(state['report_attempt']) is int and 1 <= state['report_attempt'] <= state.get('attempt', 1),
+             'invalid report attempt', 4)
+    if 'resume_run' in state:
+        need(isinstance(state['resume_run'], str) and re.fullmatch(r'[a-zA-Z0-9_-]+', state['resume_run']),
+             'invalid earlier run', 4)
+    need(state.get('decision') in (None, 'walk-pause', 'walk-end'), 'invalid end decision', 4)
+    if state.get('decision') == 'walk-pause' or state.get('attempt', 1) > 1:
+        need(isinstance(state['pause_line'], str) and 0 < len(state['pause_line']) <= 200
+             and not any(ord(c) < 32 or 0x7f <= ord(c) < 0xa0 or c in '\u2028\u2029' for c in state['pause_line']),
+             'invalid paused line', 4)
+    utc(state['started'])
+
+
+def pause_line(directory):
+    try:
+        descriptor = os.open(directory / 'paused', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(descriptor, 'r') as source:
+            info = os.fstat(source.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                return None
+            line = source.readline(202).removesuffix('\n')
+            if not line or len(line) > 200 or any(
+                    ord(c) < 32 or 0x7f <= ord(c) < 0xa0 or c in '\u2028\u2029' for c in line):
+                return None
+            return line
+    except (OSError, UnicodeError):
+        return None
+
+
 def walk(args, workspace):
     starter = os.environ.get('POST_NAME', '')
     need(re.fullmatch(r'[a-z][a-z0-9-]*(/[a-z0-9][a-z0-9-]*)*', starter),
          'POST_NAME must be set to a valid starter name')
     need(re.fullmatch(r'[a-z0-9][a-z0-9-]*', args.rung), 'invalid rung name')
-    need(args.cap >= 1, '--cap must be at least 1')
+    need(args.cap is None or args.cap >= 1, '--cap must be at least 1')
+    need(args.resume is None or args.resume >= 1 and args.build is not None, '--resume needs a positive N and --build')
     need(all(re.fullmatch(LOGIN, pool) and pool_of(pool) == pool for pool in args.login), 'invalid login pool')
     need(len(set(args.login)) == len(args.login), 'repeated login pool')
     workspace.origin(args.repo)
@@ -1506,23 +1614,39 @@ def walk(args, workspace):
         focused.mkdir(mode=0o700, parents=True, exist_ok=True)
         walks = service.local_walks()
         prefix = 'rung-' + args.rung + '-'
-        names = [state['walk'] for _, state in walks] + [p.name for p in focused.iterdir()]
-        numbers = [int(name[len(prefix):]) for name in names
-                   if name.startswith(prefix) and re.fullmatch(r'[1-9][0-9]*', name[len(prefix):])]
-        name = prefix + str(max(numbers, default=0) + 1)
-        directory = focused / name
-        directory.mkdir(mode=0o700)
-        state = dict(walk=name, repo=args.repo, rung=args.rung, ref=args.build,
-                     starter=starter + '@' + workspace.machine(), cap=args.cap, started=timestamp(),
-                     slot=None, holder='walk/' + name, logins={}, kinds={}, pools={}, run='',
-                     stage='reserving', requests=sorted(args.login), given=[], released=False,
-                     start_logged=False, end_logged=False, posted=False)
+        if args.resume is not None:
+            name = prefix + str(args.resume)
+            match = next(((path, state) for path, state in walks if state['walk'] == name), None)
+            need(match and match[1]['repo'] == args.repo, 'resume needs a saved walk of this repository')
+            directory, state = match
+            need(state['stage'] == 'paused' and state.get('released') and state.get('end_logged')
+                 and state.get('posted') and not service.outstanding(state), 'walk pause is not complete')
+            service.save(directory, state)
+            previous_run = next((a['run'] for a in reversed(state['attempts']) if a.get('run')), '')
+            need(previous_run, 'paused walk has no earlier run')
+            state.update(attempt=state['attempt'] + 1, ref=args.build, cap=args.cap or state['cap'],
+                         started=timestamp(), slot=None, logins={}, kinds={}, pools={}, given=[],
+                         requests=sorted(args.login) if args.login else state['requests'], run='',
+                         stage='reserving', released=False, start_logged=False, end_logged=False,
+                         posted=False, capped=False, resume_run=previous_run)
+            state.pop('decision', None)
+        else:
+            names = [state['walk'] for _, state in walks] + [p.name for p in focused.iterdir()]
+            numbers = [int(name[len(prefix):]) for name in names
+                       if name.startswith(prefix) and re.fullmatch(r'[1-9][0-9]*', name[len(prefix):])]
+            name = prefix + str(max(numbers, default=0) + 1)
+            directory = focused / name
+            directory.mkdir(mode=0o700)
+            state = dict(walk=name, repo=args.repo, rung=args.rung, ref=args.build if args.build is not None else 'main',
+                         starter=starter + '@' + workspace.machine(), cap=args.cap or 180, started=timestamp(),
+                         slot=None, holder='walk/' + name, logins={}, kinds={}, pools={}, run='',
+                         stage='reserving', requests=sorted(args.login), given=[], released=False,
+                         start_logged=False, end_logged=False, posted=False, report_attempt=1)
         service.save(directory, state)
         held = {s['slot'] for _, s in walks if s['repo'] == args.repo and not s.get('released')}
         state['slot'] = next((k for k in range(1, options['QA_WALK_SLOTS'] + 1) if k not in held), None)
         if state['slot'] is None:
-            state.update(stage='ended', released=True)
-            service.save(directory, state)
+            service.cancel_walk(directory, state, drop=False)
             raise Problem(f'no free walk slot for {args.repo}', 1)
         service.save(directory, state)
         try:
@@ -1545,27 +1669,43 @@ def walk(args, workspace):
                 state['kinds'][login] = 'in-place' if stat.S_ISDIR(mode) else 'moved'
                 service.save(directory, state)
             with service.repositories.fetched(args.repo) as root:
-                ref = args.build
+                ref = state['ref']
                 if ref == 'main':
                     ref = 'origin/main'
                 valid = re.fullmatch(r'[0-9a-fA-F]{4,40}', ref)
                 if ref.startswith('origin/'):
                     valid = git(root, 'check-ref-format', 'refs/heads/' + ref[7:], check=False).returncode == 0
-                need(valid, f'unresolvable build: {args.build}', 1)
+                need(valid, f'unresolvable build: {state["ref"]}', 1)
                 resolved = git(root, 'rev-parse', '--verify', ref + '^{commit}', check=False)
                 need(resolved.returncode == 0 and re.fullmatch(SHA, resolved.stdout.strip()),
-                     f'unresolvable build: {args.build}', 1)
+                     f'unresolvable build: {state["ref"]}', 1)
                 state['main'] = resolved.stdout.strip()
                 checkout = service.repositories.checkout(root, args.repo, slot, state['main'])
             service.save(directory, state)
-            brief = focused / ('rung-' + args.rung + '-brief.md')
-            no_links(workspace.tmp, brief)
-            need(brief.is_file(), f'rung brief missing: {brief}', 1)
-            replace(directory / 'brief.md', brief.read_bytes())
+            if args.resume is not None:
+                report = directory / 'report.md'
+                no_links(workspace.tmp, report)
+                if report.exists():
+                    need(stat.S_ISREG(report.stat().st_mode) and report.stat().st_nlink == 1, 'invalid earlier report', 1)
+                    earlier = directory / f'report-{state.get("report_attempt", 1)}.md'
+                    need(not earlier.exists() and not earlier.is_symlink(), 'earlier report already exists', 1)
+                    report.rename(earlier)
+                state['report_attempt'] = state['attempt']
+                service.save(directory, state)
+                (directory / 'paused').unlink(missing_ok=True)
+                # The earlier exporter names grants that may now belong to another walk.
+                (directory / 'give-back').unlink(missing_ok=True)
+                no_links(workspace.tmp, directory / 'brief.md')
+                need((directory / 'brief.md').is_file(), 'saved rung brief missing', 1)
+            else:
+                brief = focused / ('rung-' + args.rung + '-brief.md')
+                no_links(workspace.tmp, brief)
+                need(brief.is_file(), f'rung brief missing: {brief}', 1)
+                replace(directory / 'brief.md', brief.read_bytes())
             task = (f'Read {directory}/brief.md first.\n\nWalk {name} on {args.repo}, rung {args.rung}.\n'
                     f'Directory: {directory}\nCheckout: {checkout}\n'
-                    f'Build: {args.build}, commit {state["main"]}\n'
-                    f'Cap: {args.cap} minutes. Report: {directory}/report.md\n\nHeld logins:\n')
+                    f'Build: {state["ref"]}, commit {state["main"]}\n'
+                    f'Cap: {state["cap"]} minutes. Report: {directory}/report.md\n\nHeld logins:\n')
             task += ''.join(f'- {login} (pool {pool}): {state["logins"][login]} ({state["kinds"][login]})\n'
                             for pool, login in state['pools'].items()) or 'None.\n'
             task += (f'\nMove file logins into deployments as the binding says; directory logins are used in place.\n'
@@ -1576,8 +1716,28 @@ def walk(args, workspace):
                      'deployment stops run the same file under one lock. Never run logins, never\n'
                      'read or copy a login. Stop using directory logins before their units stop.\n'
                      f'For every deployment use: qa deploy {directory} NAME -- COMMAND...\n')
+            task += (f'\nTo pause at a blocking finding: write the finding in your report and {directory}/notes.md,\n'
+                     f'and the step you stopped at in {directory}/paused (one line, at most 200 characters, no controls).\n'
+                     'Give each moved login back through give-back and check it by stat: give back before you break it.\n'
+                     'Then stop the deployments, keeping their data directories and saved commands, and end your session.\n'
+                     'A branch resume confirms a fix; the walk that counts must finish on main at the landed commit.\n')
+            if args.resume is not None:
+                reports = sorted(path.name for path in directory.glob('report-*.md')
+                                 if re.fullmatch(r'report-[1-9][0-9]*\.md', path.name))
+                task += (f'\nResume from: {state["pause_line"]}\n'
+                         f'Read {directory}/notes.md and the earlier reports: {", ".join(reports)}.\n'
+                         'Carry their findings into the new report. Import each login again from its new resting path,\n'
+                         'and write a new give-back file for these grants before moving them.\n'
+                         'Keep each deployment directory and restart through qa deploy on its own data.\n'
+                         'Use this checkout’s REF binary in place of any earlier slot executable; check the binding’s\n'
+                         'configuration before starting. If a kept store will not open (a fix moved a stored family),\n'
+                         'say so in the report and walk again from the first step on a fresh deployment in this directory.\n'
+                         'Saved deployment commands and directories:\n')
+                task += ''.join(f'- {directory}/{d["name"]}: {shlex.join(d["argv"])}\n'
+                                f'  qa deploy {directory} {d["name"]} -- {shlex.join(d["argv"])}\n'
+                                for d in state.get('deployments', []))
             replace(directory / 'task.md', task.encode())
-            service.walk_event(directory, state, 'walk-start', ', '.join(state['logins']) + ' ' + state['main'][:9])
+            service.walk_event(directory, state, 'walk-resume' if args.resume is not None else 'walk-start', ', '.join(state['logins']) + ' ' + state['main'][:9])
             script = stop_path(Path(__file__).resolve())
             stop_path(directory)
             on_stop = '#!/bin/sh\nexec ' + ' '.join(shlex.quote(str(word)) for word in
@@ -1585,8 +1745,15 @@ def walk(args, workspace):
             replace(directory / 'on-stop', on_stop.encode(), 0o700)
             state.update(stage='starting', started=timestamp())
             service.save(directory, state)
-            launched = service.call('codex-run', 'task', '--to', 'qa-watch', '--on-stop', directory / 'on-stop',
-                                    directory / 'task.md', checkout, directory / 'report.md')
+            launch = ['task', '--to', 'qa-watch', '--on-stop', directory / 'on-stop',
+                      directory / 'task.md', checkout, directory / 'report.md']
+            if args.resume is not None:
+                launch[1:1] = ['--resume', state['resume_run']]
+            launched = service.call('codex-run', *launch)
+            if args.resume is not None and launched.returncode not in (0, 124) and any(
+                    reason in launched.stderr + launched.stdout
+                    for reason in ('resume run has no thread', 'resume run has no meta')):
+                launched = service.call('codex-run', *[launch[0], *launch[3:]])
             if launched.returncode == 124:
                 log(f'{name}: launch timed out; keeping custody for run recovery')
                 return 1
@@ -1673,9 +1840,10 @@ def main():
     walking = sub.add_parser('walk')
     walking.add_argument('repo')
     walking.add_argument('rung')
-    walking.add_argument('--build', default='main')
+    walking.add_argument('--build')
+    walking.add_argument('--resume', type=int)
     walking.add_argument('--login', action='append', default=[])
-    walking.add_argument('--cap', type=int, default=180)
+    walking.add_argument('--cap', type=int)
     service = sub.add_parser('watch')
     service.add_argument('--director', required=True)
     service.add_argument('--once', action='store_true')
