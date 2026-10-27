@@ -1227,7 +1227,9 @@ def landed(records, lands, repo, commit, checkouts):
             print(f'landings: {repo} {commit}: landing range unreadable', file=sys.stderr)
             return 4
         holds = checkouts.holds(repo, row.get('commit', ''), full)
-        base = checkouts.holds(repo, row['base'], full)
+        if holds is False:
+            continue
+        base = checkouts.holds(repo, row['base'], full) if holds else None
         if holds is None or base is None:
             print(f'landings: {repo} {commit}: landing ancestry unreadable', file=sys.stderr)
             return 4

@@ -980,21 +980,21 @@ class Watch:
             if (report.name, number) in triaged:
                 continue
             key = str(number)
-            route = state['routes'].get(key)
-            if route is None:
-                try:
-                    route = self.destination(report, number)
-                except (Problem, OSError, ValueError, UnicodeError) as error:
-                    log(f'{report.name} {number}: route unreadable ({type(error).__name__}); trying next check')
-                    continue
+            try:
+                route = state['routes'].get(key)
                 if route is None:
-                    continue
-                state['routes'][key] = route
-                self.save(directory, state)
-            subject, body = finding_message(report, number, title, route['why'])
-            message = directory / 'finding-body'
-            replace(message, body.encode())
-            sent = self.call('post', 'send', '--as', 'qa-watch', route['address'], subject, message)
+                    route = self.destination(report, number)
+                    if route is None:
+                        continue
+                    state['routes'][key] = route
+                    self.save(directory, state)
+                subject, body = finding_message(report, number, title, route['why'])
+                message = directory / 'finding-body'
+                replace(message, body.encode())
+                sent = self.call('post', 'send', '--as', 'qa-watch', route['address'], subject, message)
+            except (Problem, OSError, ValueError, UnicodeError) as error:
+                log(f'{report.name} {number}: route failed ({type(error).__name__}); trying next check')
+                continue
             if sent.returncode in (0, 3):
                 lines.append(f'- {timestamp()} {report.name} {number} {route["address"]} {route["why"]}')
                 triaged.add((report.name, number))
