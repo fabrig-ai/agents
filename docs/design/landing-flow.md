@@ -755,7 +755,9 @@ tool that sees it; the reports only read.
   `SECONDS` has three decimals. The names are the same in every
   repository: `fmt`, `clippy`, `wasm` (lints and checks on the browser
   target), `build` (the test binaries, `cargo nextest run --workspace
-  --no-run`), `focused`, `fuzzy`; and, in results from before the
+  --no-run`), `focused`, `fuzzy`, and `scripts` where a repository
+  tests its own scripts (their unittest suites: temper's, smith's,
+  10-27); and, in results from before the
   browser tier left the gates, `bundle` (what that tier serves) and
   `browser`. A name may come twice, and its times add. What
   no step covers is `other`: the gate's time less its steps'. agents'
