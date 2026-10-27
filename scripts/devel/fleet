@@ -21,6 +21,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import textwrap
 import time
 
 # Settings. SSH, tmp_dir, LIVE/RUNNING and the piped reading are adapted
@@ -673,7 +674,7 @@ def tests(kind, subject, row, state, now, deaf):
     if kind == 'deaf':
         return False, subject not in r['mail']
     if kind == 'mail':
-        raised = r['mail'].get(subject, {}).get('oldest', 0) >= 3600
+        raised = r['mail'].get(subject, {}).get('oldest', 0) >= 60
     elif kind == 'stale':
         raised = subject in {x['run'] for x in r['stale']}
     elif kind == 'session':
@@ -713,7 +714,7 @@ def raised_reading(kind, subject, row, state, now):
             return '(tend refused)'
         return f'(last tend {int((now-stamp(tend["end"]))/60)} min ago)'
     if kind == 'mail':
-        return f'{r["mail"][subject]["oldest"]//60} min'
+        return f'{r["mail"][subject]["oldest"]} min'
     return 'gone' if kind == 'session' else ''
 
 
@@ -1092,16 +1093,13 @@ def room_line(row):
         except KeyError:
             return '-'
     return [row['machine'], label,
-            show(['cores'], lambda n: f'{n} cores'),
-            show(['load', 'cores'], lambda l, n: 'load ' + ' '.join(f'{v:.1f}' for v in l) + f' ({l[2]/n:.1f}/core)'),
-            show(['pressure'], lambda p: f'cpu {p["cpu"]:.0f}%'),
-            show(['memory'], lambda m: f'mem {m["available"]/GB:.1f}/{m["total"]/GB:.1f} GB'),
-            show(['disk', 'floor'], lambda d, f: f'disk {d["free"]/GB:.0f} GB, floor {f/GB:.0f}'),
-            show(['kache'], lambda k: f'kache {k["store"]/GB:.0f}/{k["limit"]/GB:.0f} GB'),
-            show(['heavy'], lambda h: f'heavy {h["running"]}+{h["queued"]}' + (f' {h["oldest_wait"]/60:.0f}m' if h['queued'] else '')),
-            show(['implementers'], lambda i: 'implementers ' + (' '.join(f'{k} {v}' for k, v in sorted(i.items())) or '-')),
-            show(['sessions'], lambda s: 'sessions ' + (' '.join(x['name'] for x in s) or '-')),
-            'blind: ' + ', '.join(sorted(r['errors'])) if r['errors'] else '']
+            show(['cores'], lambda n: f'{n}c'),
+            show(['load', 'cores'], lambda l, n: 'load' + '/'.join(f'{v:.1f}' for v in l) + f'({l[2]/n:.1f}/c)'),
+            show(['pressure'], lambda p: f'cpu{p["cpu"]:.0f}%'),
+            show(['memory'], lambda m: f'mem{m["available"]/GB:.1f}/{m["total"]/GB:.1f}G'),
+            show(['disk', 'floor'], lambda d, f: f'disk{d["free"]/GB:.0f}/f{f/GB:.0f}G'),
+            show(['kache'], lambda k: f'k{k["store"]/GB:.0f}/{k["limit"]/GB:.0f}G'),
+            show(['heavy'], lambda h: f'h{h["running"]}+{h["queued"]}' + (f'/{h["oldest_wait"]/60:.0f}m' if h['queued'] else ''))]
 
 
 def room(rows, json_output=False, targets=False):
@@ -1116,13 +1114,25 @@ def room(rows, json_output=False, targets=False):
         print(json.dumps(data, sort_keys=True))
     else:
         lines = {r['machine']: room_line(r) for r in rows if 'reading' in r}
-        widths = [max([len(c[i]) for c in lines.values()], default=0) for i in range(12)]
+        widths = [max([len(c[i]) for c in lines.values()], default=0) for i in range(9)]
         widths[0] = max(widths[0], *(len(r['machine']) for r in rows))
         for row in rows:
             if 'unreached' in row:
                 print(f'{row["machine"]:<{widths[0]}}  unreached: {row["unreached"]}')
                 continue
-            print('  '.join(c.ljust(widths[i]) for i, c in enumerate(lines[row['machine']])).rstrip())
+            print(''.join(c.ljust(widths[i]) + ('  ' if i == 0 else ' ')
+                          for i, c in enumerate(lines[row['machine']])).rstrip())
+            r = row['reading']
+            details = []
+            if r['errors']:
+                details.append('blind: ' + ', '.join(sorted(r['errors'])))
+            if r.get('implementers'):
+                details.append('implementers ' + ' '.join(f'{k} {v}' for k, v in sorted(r['implementers'].items())))
+            if r.get('sessions'):
+                details.append('sessions ' + ' '.join(x['name'] for x in r['sessions']))
+            for line in textwrap.wrap('; '.join(details), width=120, initial_indent='  ', subsequent_indent='    ',
+                                      break_on_hyphens=False):
+                print(line)
             if targets:
                 ordered = sorted(row['reading'].get('targets', []), key=lambda t: (t['owner'], -(t.get('size') or 0), t['path']))
                 for target in ordered:

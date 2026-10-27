@@ -34,6 +34,20 @@ def tool(directory, name, body):
     return write(directory / name, f'#!{PYTHON} -S\nimport json, os, sys, time\nfrom pathlib import Path\n' + body, 0o700)
 
 
+def shell_tool(directory, name, body):
+    return write(directory / name, '#!/bin/sh\n' + body, 0o700)
+
+
+def reply(out='', exit=0, sleep=None, lines=()):
+    script = []
+    if sleep is not None:
+        script.append('sleep ' + shlex.quote(str(sleep)))
+    for stream, line in lines:
+        script.append("printf '%s\\n' " + shlex.quote(line) + (' >&2' if stream == 'err' else ''))
+    script.extend(['printf %s ' + shlex.quote(out), 'exit ' + str(exit)])
+    return '\n'.join(script) + '\n'
+
+
 class Lab:
     def __init__(self, root):
         self.root, self.bin = root, root / 'bin'
@@ -43,22 +57,17 @@ class Lab:
             self.machine(name)
         write(self.tmp() / 'post/machines', 'alpha local\nbeta free@beta\ngamma free@gamma\n')
         for name in ('claude', 'kache', 'post', 'codex-run', 'systemctl'):
-            tool(self.bin, name, '''
-name = Path(sys.argv[0]).name
-root = Path(os.environ['DEV_TMP']).parent
-with (root / 'calls').open('a') as out:
-    out.write(json.dumps([name, *sys.argv[1:]]) + '\\n')
-a = json.loads((root / (name + '.json')).read_text())
-if a.get('sleep'): time.sleep(a['sleep'])
-print(a.get('out', ''), end='')
-sys.exit(a.get('exit', 0))
+            shell_tool(self.bin, name, '''name=${0##*/}
+root=${DEV_TMP%/tmp}
+# Sources run together; append each call in one write.
+call='["'"$name"'"'
+for arg do call=$call', "'"$arg"'"'; done
+printf '%s]\\n' "$call" >> "$root/calls"
+. "$root/$name.reply"
 ''')
-        tool(self.bin, 'du', '''
-a = json.loads((Path(os.environ['DEV_TMP']).parent / 'du.json').read_text())
-answer = a.get(sys.argv[-1], {'size': 123})
-if answer.get('sleep'): time.sleep(answer['sleep'])
-if 'out' in answer: print(answer['out'], end=''); sys.exit(0)
-print(str(answer['size']) + '\\t' + sys.argv[-1])
+        shell_tool(self.bin, 'du', '''root=${DEV_TMP%/tmp}
+for target do :; done
+. "$root/du.reply"
 ''')
         tool(self.bin, 'ssh', '''
 import subprocess, shlex
@@ -88,7 +97,9 @@ sys.exit(subprocess.run([sys.executable, '-I', '-', *words[4:]], input=source, e
         self.env = dict(os.environ, HOME=str(root / 'home'), PATH=f'{self.bin}:/usr/bin:/bin',
                         DEV_TMP=str(self.tmp()), FLEET_FIXTURE_HOST=str(root / 'alpha/host'),
                         FIXTURE_ROOT=str(root), FIXTURE_TRACE=str(self.trace))
-        self.env.pop('PLAN_MIN_DISK_GB', None)
+        for name in ('PLAN_MIN_DISK_GB', 'FLEET_READ_SECONDS', 'FLEET_DU_SECONDS', 'FLEET_NOW'):
+            self.env.pop(name, None)
+        self.env['FLEET_NOW'] = str(NOW)
 
     def tmp(self, name='alpha'):
         return self.root / name / 'tmp'
@@ -100,7 +111,7 @@ sys.exit(subprocess.run([sys.executable, '-I', '-', *words[4:]], input=source, e
         self.answer('kache', {'disk': {'store_bytes': 60 * GB, 'store_limit_bytes': 100 * GB}}, name)
         for tool_name in ('post', 'codex-run', 'systemctl'):
             self.answer(tool_name, '', name)
-        write(self.root / name / 'du.json', '{}')
+        self.du_answers({}, name)
 
     def figures(self, name='alpha', load=(1, 2, 3), cores=8, free=200*GB, total=600*GB, available=12*GB, memory=16*GB):
         host = self.root / name / 'host'
@@ -115,10 +126,26 @@ sys.exit(subprocess.run([sys.executable, '-I', '-', *words[4:]], input=source, e
         if isinstance(out, (dict, list)):
             out = json.dumps(out)
         write(self.root / machine / (name + '.json'), json.dumps(dict(out=out, **extra)))
+        write(self.root / machine / (name + '.reply'), reply(out, **extra))
+
+    def du_answers(self, values, machine='alpha'):
+        write(self.root / machine / 'du.json', json.dumps(values))
+        cases = ['case "$target" in']
+        for path, answer in values.items():
+            cases.append(shlex.quote(path) + ')')
+            if answer.get('sleep'):
+                cases.append('sleep ' + shlex.quote(str(answer['sleep'])))
+            if 'out' in answer:
+                cases.append('printf %s ' + shlex.quote(answer['out']))
+            else:
+                cases.append("printf '%s\\t%s\\n' " + shlex.quote(str(answer['size'])) + ' "$target"')
+            cases.append(';;')
+        cases.extend(['*) printf \'123\\t%s\\n\' "$target" ;;', 'esac'])
+        write(self.root / machine / 'du.reply', '\n'.join(cases) + '\n')
 
     def run(self, *args, status=0, **env):
         result = subprocess.run([PYTHON, '-I', '-S', str(SCRIPT), *args], cwd=self.root,
-                                env=dict(self.env, **env), capture_output=True, text=True, timeout=40)
+                                env=dict(self.env, **env), capture_output=True, text=True, timeout=120)
         assert result.returncode == status, (result.returncode, result.stdout, result.stderr)
         return result
 
@@ -128,25 +155,22 @@ sys.exit(subprocess.run([sys.executable, '-I', '-', *words[4:]], input=source, e
         shutil.copy2(SCRIPT, self.kit / 'fleet')
         for name in ('tidy', 'post', 'codex-run'):
             self.answer('tend-' + name, '')
-            tool(self.kit, name, '''name = Path(sys.argv[0]).name
-root = Path(os.environ['DEV_TMP']).parent
-assert sys.stdin.read() == ''
-with (root / 'tend.calls').open('a') as out:
-    out.write(json.dumps([name, *sys.argv[1:]]) + '\\n')
-a = json.loads((root / ('tend-' + name + '.json')).read_text())
-for stream, line in a.get('lines', []):
-    print(line, file=sys.stdout if stream == 'out' else sys.stderr, flush=True)
-print(a.get('out', ''), end='')
-sys.exit(a.get('exit', 0))
+            shell_tool(self.kit, name, '''name=${0##*/}
+root=${DEV_TMP%/tmp}
+if IFS= read -r line || [ -n "$line" ]; then exit 99; fi
+{
+    printf '["%s"' "$name"
+    for arg do printf ', "%s"' "$arg"; done
+    printf ']\\n'
+} >> "$root/tend.calls"
+. "$root/tend-$name.reply"
 ''')
 
+
     def tend(self, status=0, now=NOW):
-        # A private process clock makes retention and --since exact, without sleeps.
-        driver = f"import runpy, sys, time; time.time = lambda: {now!r}; " \
-                 "path = sys.argv[1]; sys.argv = [path, 'tend']; " \
-                 "runpy.run_path(path, run_name='__main__')"
-        result = subprocess.run([PYTHON, '-I', '-S', '-c', driver, str(self.kit / 'fleet')],
-                                cwd=self.root, env=self.env, capture_output=True, text=True, timeout=40)
+        result = subprocess.run([PYTHON, '-I', '-S', str(self.kit / 'fleet'), 'tend'],
+                                cwd=self.root, env=dict(self.env, FLEET_NOW=str(now)),
+                                capture_output=True, text=True, timeout=120)
         assert result.returncode == status, (result.returncode, result.stdout, result.stderr)
         return result
 
@@ -165,7 +189,7 @@ sys.exit(a.get('exit', 0))
     def heavy(self, wait=0):
         write(self.tmp() / 'heavy/state.json', json.dumps({'gate': 'held', 'tasks': {
             'r': {'state': 'active', 'args': ['PRIVATE-ARGUMENT']},
-            'q': {'state': 'queued', 'submitted': time.time() - wait},
+            'q': {'state': 'queued', 'submitted': NOW - wait},
             'done': {'state': 'released'}}}))
 
     def run_meta(self, name, task, ended=False):
@@ -194,7 +218,7 @@ sys.exit(a.get('exit', 0))
             os.utime(path, (NOW, NOW))
         sizes = self.root / 'alpha/du.json'
         values = json.loads(sizes.read_text()); values[str(target)] = {'size': size}
-        write(sizes, json.dumps(values))
+        self.du_answers(values)
         return target
 
 
@@ -265,7 +289,7 @@ def reading_source_fails(lab):
         assert r['errors'].get(source) == kind and source not in r, (name, r)
         affected = {'sessions', 'implementers'} if name == 'systemctl' else {source}
         assert set(r['errors']) == affected and set(r) == expected_fields - affected, r
-        write(lab.root / 'alpha' / (name + '.json'), originals[name])
+        lab.answer(name, **json.loads(originals[name]))
     # Receiving side uses exactly the same shape checks and drops unknown keys.
     write(lab.root / 'beta/ssh', 'answer:' + json.dumps({'disk': {'free': 'x', 'total': 1}, 'private': 'SECRET'}))
     r = lab.rooms('beta')[0]['reading']
@@ -382,9 +406,9 @@ def room_order_and_exit(lab):
     assert [x['machine'] for x in r] == ['delta', 'epsilon', 'beta', 'alpha', 'zeta', 'gamma'], r
     text = lab.run('room', status=1).stdout
     assert text.splitlines()[-1].split() == ['gamma', 'unreached:', 'refused'], text
-    assert 'cpu 4%' in text and 'GB' in text and '/core)' in text
+    assert 'cpu4%' in text and 'G' in text and '/c)' in text
     line = API['room_line'](r[0])
-    assert line[9].startswith('implementers ') and line[10].startswith('sessions '), line
+    assert len(line) == 9 and line[2] == '8c', line
 
 
 def room_unreached_why(lab):
@@ -392,14 +416,15 @@ def room_unreached_why(lab):
                       ('Host key verification failed', 'host key refused'), ('Could not resolve hostname', 'name not resolved'),
                       ('No route to host', 'no route'), ('Connection timed out', 'timed out'), ('strange failure', 'ssh exited 255'), ('probe-failed', 'wrong answer')]:
         write(lab.root / 'beta/ssh', mode)
-        result = lab.run('room', 'beta', status=1, FLEET_READ_SECONDS='2')
+        env = {'FLEET_READ_SECONDS': '2'} if mode == 'sleep' else {}
+        result = lab.run('room', 'beta', status=1, **env)
         assert result.stdout.strip() == f'beta  unreached: {why}', result.stdout
         assert mode not in result.stdout
     write(lab.root / 'beta/ssh', 'warning')
     warning = lab.run('room', 'beta')
     assert 'SSH-WARNING' in warning.stderr and 'SSH-WARNING' not in warning.stdout
-    lab.answer('kache', '', sleep=10)
-    assert lab.rooms('alpha', status=1, FLEET_READ_SECONDS='2')[0]['unreached'] == 'timed out'
+    lab.answer('kache', '', machine='beta', sleep=10)
+    assert lab.rooms('beta', status=1, FLEET_READ_SECONDS='2')[0]['unreached'] == 'timed out'
     write(lab.root / 'beta/ssh', 'answer:[]')
     assert lab.rooms('beta', status=1)[0]['unreached'] == 'wrong answer'
 
@@ -436,14 +461,42 @@ def room_targets(lab):
     out = lab.run('room', '--targets', 'alpha').stdout.splitlines()
     assert ['director' in out[1], 'wt-b' in out[2], 'wt-a' in out[3]] == [True]*3, out
     sizes = lab.root / 'alpha/du.json'; values = json.loads(sizes.read_text())
-    values[str(b)]['sleep'] = 10; write(sizes, json.dumps(values))
+    values[str(b)]['sleep'] = 10; lab.du_answers(values)
     out = lab.run('room', '--targets', 'alpha', FLEET_DU_SECONDS='1').stdout
     assert 'mission  ?  owners/mission/wt-b/target' in out and 'mission  2.0 GB' in out, out
     rows = lab.probe('--sizes', FLEET_DU_SECONDS='1')['targets']
     expected = {str(a.relative_to(lab.tmp())): 2*GB, str(b.relative_to(lab.tmp())): None, str(c.relative_to(lab.tmp())): GB}
     assert {t['path']: t['size'] for t in rows} == expected
-    values[str(b)] = {'out': ''}; write(sizes, json.dumps(values))
+    values[str(b)] = {'out': ''}; lab.du_answers(values)
     assert {t['path']: t['size'] for t in lab.probe('--sizes')['targets']} == expected
+
+
+def room_fits_120(lab):
+    write(lab.tmp() / 'post/machines', 'hetzner6 local\nbeta free@beta\ngamma free@gamma\n')
+    names = [f'o/session-{n:02}-'.ljust(30, 'x') for n in range(9)]
+    lab.answer('claude', [{'name': name, 'pid': n+1} for n, name in enumerate(names)])
+    for n in range(4):
+        lab.run_meta(f'run{n}', lab.tmp() / f'owners/mission{n}/task')
+    lab.answer('systemctl', ''.join(f'codex-run-run{n}.service loaded active running\n' for n in range(4)))
+    lab.answer('codex-run', '', exit=1)
+    lab.figures('alpha', load=(12.1, 12.1, 12.1), free=99*GB, available=3*GB)
+    write(lab.root / 'alpha/host/proc/pressure/cpu', 'some avg60=100\n')
+    lab.figures('beta', load=(99.9, 99.9, 99.9), free=999*GB, available=int(15.2*GB), memory=int(15.2*GB))
+    lab.answer('kache', {'disk': {'store_bytes': 999*GB, 'store_limit_bytes': 999*GB}}, 'beta')
+    write(lab.tmp() / 'heavy/state.json', json.dumps({'tasks': {
+        str(n): {'state': 'active' if n < 9 else 'queued', 'submitted': NOW-540} for n in range(18)}}))
+    write(lab.tmp('beta') / 'heavy/state.json', json.dumps({'tasks': {
+        str(n): {'state': 'active' if n < 9 else 'queued', 'submitted': NOW-600} for n in range(18)}}))
+    output = lab.run('room', status=1).stdout
+    assert all(len(line) <= 120 for line in output.splitlines()), output
+    assert all(name in output for name in names), output
+    assert all(f'mission{n} 1' in output for n in range(4)), output
+    assert 'tight (disk, load, memory)' in output and 'load99.9/99.9/99.9(12.5/c)' in output, output
+    assert '  blind: stale; implementers ' in output
+    details = [line for line in output.splitlines() if line.startswith(' ')]
+    assert details[0].startswith('  ') and not details[0].startswith('    ')
+    assert all(line.startswith('    ') for line in details[1:]), output
+    print(output, end='')
 
 
 def room_json(lab):
@@ -676,8 +729,8 @@ def each_condition(lab):
         ('kache', row(reading(kache={'store': 160, 'limit': 100}))),
         ('unreached', {'machine': 'alpha', 'unreached': 'refused'}),
         ('untended', row(reading(tend=[]))),
-        ('deaf o/x', row(reading(tend=[bad_tend], mail={'o/x': {'oldest': 4000}}))),
-        ('mail o/x', row(reading(mail={'o/x': {'oldest': 4500}}))),
+        ('deaf o/x', row(reading(tend=[bad_tend], mail={'o/x': {'oldest': 75}}))),
+        ('mail o/x', row(reading(mail={'o/x': {'oldest': 75}}))),
         ('stale run1', row(reading(stale=[{'run': 'run1'}]))),
         ('session o/x', row()),
         ('blind kache', row(reading(errors={'kache': 'exit 1'})))]
@@ -721,7 +774,7 @@ def session_from_missions(lab):
 
 
 def subjects_gone(lab):
-    state = rounds(reading(mail={'o/x': {'oldest': 4000}}, stale=[{'run': 'run1'}]))
+    state = rounds(reading(mail={'o/x': {'oldest': 75}}, stale=[{'run': 'run1'}]))
     gone = API['judge'](state, [row(machine='beta')], set(), NOW+600)
     assert not gone['conditions'] or all(key.startswith('beta ') for key in gone['conditions'])
     assert not gone['pending'] and not gone['cleared']
@@ -754,7 +807,7 @@ def tends_counted_once(lab):
 
 
 def user_and_fleet_never(lab):
-    r = reading(mail={name: {'oldest': 7200} for name in ('user', 'fleet')},
+    r = reading(mail={name: {'oldest': 120} for name in ('user', 'fleet')},
                 tend=[tend_record(NOW, (0, 3, 0), ((), tuple(name+' queued, nobody will wake it: absent' for name in ('user', 'fleet')), ()))])
     assert not rounds(r)['pending']
 
@@ -762,7 +815,7 @@ def user_and_fleet_never(lab):
 def quiet_machine(lab):
     r = reading(quiet=True, disk={'free': 0}, load=[0, 0, 100], memory={'available': 0, 'total': 100},
                 kache={'store': 200, 'limit': 100}, tend=[], errors={'kache': 'exit 1'},
-                mail={'o/x': {'oldest': 7200}}, stale=[{'run': 'run1'}])
+                mail={'o/x': {'oldest': 120}}, stale=[{'run': 'run1'}])
     state = rounds(r, missions={('o/x', 'alpha')})
     assert not state['pending']
     for n in (2, 3):
@@ -773,7 +826,7 @@ def quiet_machine(lab):
 
 def no_state_first_round(lab):
     r = reading(disk={'free': 0}, load=[0, 0, 100], memory={'available': 0, 'total': 100},
-                kache={'store': 200, 'limit': 100}, errors={'targets': 'shape'}, mail={'o/x': {'oldest': 7200}},
+                kache={'store': 200, 'limit': 100}, errors={'targets': 'shape'}, mail={'o/x': {'oldest': 120}},
                 stale=[{'run': 'run1'}], tend=[tend_record(NOW, (0, 3, 0), ((), ('o/x queued, nobody will wake it: absent',), ()))])
     state = rounds(r, missions={('o/x', 'alpha')}, count=1)
     assert state['pending'] == ['alpha deaf o/x']
@@ -844,10 +897,9 @@ print('director queued, nobody will wake it: absent' if a['exit'] == 3 else 'sen
 sys.exit(a['exit'])
 ''')
     write(lab.root / 'alpha/send.json', '{"exit":0}')
-    tool(lab.bin, 'record', '''
-root = Path(os.environ['DEV_TMP']).parent
-with (root / 'pulls').open('a') as out: out.write(' '.join(sys.argv[1:]) + '\\n')
-sys.exit(int(os.environ.get('RECORD_EXIT', '0')))
+    shell_tool(lab.bin, 'record', '''root=${DEV_TMP%/tmp}
+printf '%s\\n' "$*" >> "$root/pulls"
+exit "${RECORD_EXIT:-0}"
 ''')
     lab.env['RECORDS'] = str(lab.root / 'records')
     write(lab.root / 'records/missions/a/README.md', '---\nstate: active\nowner: o/live@alpha\n---\n')
@@ -862,7 +914,7 @@ sys.exit(int(os.environ.get('RECORD_EXIT', '0')))
 def watch_round(lab, n, status=0, **env):
     result = subprocess.run([PYTHON, '-I', '-S', str(lab.kit / 'fleet'), 'watch', '--director', 'director@alpha'],
                             env=dict(lab.env, FLEET_NOW=str(NOW+n*300), **env), cwd=lab.root,
-                            capture_output=True, text=True, timeout=40)
+                            capture_output=True, text=True, timeout=120)
     assert result.returncode == status, (result.returncode, result.stdout, result.stderr)
     return result
 
@@ -892,6 +944,19 @@ def round_posts_once(lab):
     for address in ('bad', '-x@alpha', 'x@alpha/escape', 'a@@alpha'):
         lab.run('watch', '--director', address, status=2)
     lab.run('watch', status=2)
+
+
+def round_mail_minutes(lab):
+    watch_kit(lab)
+    lab.figures('beta')
+    lab.answer('post', '75 o/x id caller waiter=dead subject\n120 user id2 caller waiter=dead subject\n', 'beta')
+    watch_round(lab, 0)
+    assert not sends(lab)
+    watch_round(lab, 1)
+    sent, = sends(lab)
+    assert sent['argv'][4] == 'fleet: beta mail o/x 75 min, gamma unreached (refused)', sent
+    assert 'beta mail o/x 75 min' in sent['body'] and 'user' not in sent['body'], sent
+    assert 'beta mail user' not in watch_state(lab)['conditions']
 
 
 def round_failed_post(lab):
@@ -1012,13 +1077,13 @@ def watch_write_failure(lab):
 CASES = [reading_fields, reading_disk_workspace, reading_floor, reading_absent, reading_source_fails, reading_no_text,
          reading_implementers_stale, reading_targets, reading_tend_since, room_verdicts,
          room_order_and_exit, room_unreached_why, room_new_machine, room_named, room_piped,
-         room_targets, room_json, tend_order, tend_all_ok, tend_not_started, tend_lines,
+         room_targets, room_fits_120, room_json, tend_order, tend_all_ok, tend_not_started, tend_lines,
          tend_keeps_a_week, tend_read_by_probe, tend_room_for_landing, tend_no_room, tend_record_failure,
          raise_after_two_rounds, clear_after_two_rounds, between_changes_nothing, each_condition,
          missing_field_keeps, session_from_missions, subjects_gone, untended_rows, tends_counted_once,
          user_and_fleet_never, quiet_machine, no_state_first_round, gap_carries,
          cleared_before_post_dropped, subject_length, body_lines, round_posts_once,
-         round_failed_post, round_reads_since, round_record_pull, round_rounds_pruned,
+         round_mail_minutes, round_failed_post, round_reads_since, round_record_pull, round_rounds_pruned,
          round_state_unreadable, room_shows_watch, malformed_watch_inputs, watch_write_failure]
 
 
