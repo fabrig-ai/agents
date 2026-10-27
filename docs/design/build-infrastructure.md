@@ -292,11 +292,14 @@ environment values. Collection connects to the existing service.
 
 **The snapshot holds what is live** (10-27: ledgers of 6-11 MB and
 4,500 tasks, parsed by every waiting client ten times a second, cost
-each client half a core). A released task whose row is durable in the
-TSV shrinks, in the snapshot that saves it, to its token, number,
-state, code, `row_durable` and release time, enough for a late
-wrapper's refusal and for the release's replays; 24 hours after its
-release it leaves the snapshot. Its history is the TSV row, the receipt
+each client half a core). A released task shrinks once nothing in
+heavy reads the rest of its record: its TSV row durable, its release
+complete, its receipt written, and its landing's room no longer kept
+(section 2, "A landing's room"). At the first save after all of these
+it keeps only its token, number, state, code, `row_durable` and
+release time, enough for a late wrapper's refusal and for the
+release's replays; 24 hours after its release it leaves the snapshot.
+Every reader inside heavy takes a shrunk task as released. Its history is the TSV row, the receipt
 and the events, which every reader of the past reads instead. The next
 task number never goes back, so no number is reused.
 
