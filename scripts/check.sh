@@ -101,6 +101,7 @@ suite test-kache-setup env DEV_TMP="$scratch" scripts/infra/test-kache-setup
 suite test-after-landing-units scripts/infra/test-after-landing-units
 suite test-gate-policy scripts/devel/test-gate-policy
 suite test-status-page scripts/devel/test-status-page
+suite test-fleet scripts/devel/test-fleet
 # The full heavy-recovery and land-turn suites install real systemd units.
 # Only land-turn's five local pipe/protocol cases belong in this gate.
 suite test-land-turn scripts/devel/test-land-turn --evidence "$scratch/land-turn" \

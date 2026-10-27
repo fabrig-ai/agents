@@ -189,7 +189,7 @@ check_machine() {
     cargo nextest --version >/dev/null 2>&1 && ok "has cargo-nextest" || fail "no cargo-nextest"
     # The tools link to this checkout.
     local bin=$HOME/.local/bin home=$kit target
-    for tool in heavy land land-set landings after-landing repin record setup post codex-run qa logins issue; do
+    for tool in heavy land land-set landings after-landing repin record setup post codex-run qa logins issue fleet; do
         target=$home/../devel/$tool
         [[ $tool != setup ]] || target=$home/setup
         target=$(readlink -f "$target")

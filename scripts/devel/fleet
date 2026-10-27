@@ -1,0 +1,634 @@
+#!/usr/bin/env -S python3 -S
+"""Read each machine's room (docs/design/fleet-watch.md).
+
+fleet probe [--since TIME] [--sizes]
+fleet room [--json] [--targets] [MACHINE...]
+"""
+import argparse
+import concurrent.futures as futures
+from datetime import datetime, timezone
+import fcntl
+import json
+import math
+import os
+from pathlib import Path
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import threading
+import time
+
+# Settings. SSH, tmp_dir, LIVE/RUNNING and the piped reading are adapted
+# from scripts/devel/status-page; no installed remote collector is needed.
+SSH = ['ssh', '-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
+       '-o', 'ConnectTimeout=5', '-o', 'ServerAliveInterval=5',
+       '-o', 'ServerAliveCountMax=2', '-o', 'UpdateHostKeys=no']
+REMOTE = "bash -lc 'exec python3 -I - probe{}'"
+LIVE = {'submitted', 'enqueuing', 'queued', 'waiting', 'launching', 'active', 'finishing', 'closing'}
+RUNNING = {'launching', 'active', 'finishing', 'closing'}
+REPOS = ('agents', 'skein', 'smith', 'jig', 'hearth', 'qa', 'temper')
+GB = 2 ** 30
+# fleet-watch.md 3.1 and 5: first guesses of 10-26, shared with the watch.
+DISK_RAISE, DISK_CLEAR = 10 * GB, 20 * GB
+LOAD_RAISE, LOAD_CLEAR = 3.0, 2.0
+MEMORY_RAISE, MEMORY_CLEAR = 0.10, 0.15
+KACHE_RAISE, KACHE_CLEAR = 1.5, 1.1
+ROOM_DISK, ROOM_LOAD, ROOM_MEMORY, ROOM_WAIT = 60 * GB, 1.5, 0.25, 600
+READ_CONTEXT = threading.local()
+TIME = r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ'
+
+
+def tmp_dir():
+    home = Path.home()
+    workspace = home / ('src/rust' if (home / 'src/rust').exists() else 'src')
+    return Path(os.environ.get('DEV_TMP', Path(os.environ.get('DEV_ROOT', workspace)) / 'tmp')).expanduser().absolute()
+
+
+def clock():
+    return time.time()
+
+
+def iso(now):
+    return datetime.fromtimestamp(now, timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+def proc_root():
+    # The fixture's FLEET_FIXTURE_HOST substitutes all machine figures and proc links.
+    host = os.environ.get('FLEET_FIXTURE_HOST')
+    return Path(host) / 'proc' if host else Path('/proc')
+
+
+def read_seconds():
+    # The fixture's FLEET_READ_SECONDS bounds each machine (normally 60 s).
+    return float(os.environ.get('FLEET_READ_SECONDS', 60))
+
+
+def command(argv, data=None, timeout=15, echo_stderr=False):
+    deadline = getattr(READ_CONTEXT, 'deadline', None)
+    if deadline is not None:
+        timeout = min(timeout, max(.001, deadline - time.monotonic()))
+    process = subprocess.Popen(argv, stdin=subprocess.PIPE if data is not None else subprocess.DEVNULL,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+    try:
+        out, err = process.communicate(data, timeout=timeout)
+    except BaseException:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.communicate()
+        raise
+    if process.returncode:
+        raise subprocess.CalledProcessError(process.returncode, argv, out, err)
+    if echo_stderr and err:
+        sys.stderr.write(err.decode(errors='replace'))
+    return out
+
+
+def number(value):
+    try:
+        return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def integer(value):
+    return type(value) is int and value >= 0
+
+
+def text(value):
+    return isinstance(value, str) and not any(ord(c) < 32 for c in value)
+
+
+def shape(value, schema):
+    if isinstance(schema, dict):
+        return isinstance(value, dict) and set(value) == set(schema) and all(shape(value[k], s) for k, s in schema.items())
+    if isinstance(schema, list):
+        return isinstance(value, list) and all(shape(v, schema[0]) for v in value)
+    return schema(value)
+
+
+def mapping(schema):
+    return lambda v: isinstance(v, dict) and all(text(k) and shape(x, schema) for k, x in v.items())
+
+
+def target_shape(v):
+    schema = {'path': text, 'owner': text, 'built': text, 'in_use': lambda x: type(x) is bool}
+    if isinstance(v, dict) and 'size' in v:
+        schema['size'] = lambda x: x is None or integer(x)
+    return shape(v, schema)
+
+
+SCHEMAS = {
+    'time': lambda x: text(x) and re.fullmatch(TIME, x) is not None,
+    'cores': lambda x: integer(x) and x > 0,
+    'load': lambda x: shape(x, [number]) and len(x) == 3 and min(x) >= 0,
+    'pressure': {'cpu': number, 'memory_some': number, 'memory_full': number},
+    'memory': {'available': integer, 'total': lambda x: integer(x) and x > 0},
+    'disk': {'free': integer, 'total': lambda x: integer(x) and x > 0},
+    'floor': integer, 'quiet': lambda x: type(x) is bool,
+    'kache': {'store': integer, 'limit': lambda x: integer(x) and x > 0},
+    'heavy': {'running': integer, 'queued': integer, 'oldest_wait': number, 'gate': lambda x: type(x) is bool},
+    'sessions': [lambda x: shape(x, {'name': text, 'kind': lambda k: k == 'codex'}) or
+                 shape(x, {'name': text, 'state': text, 'kind': lambda k: k == 'claude'})],
+    'implementers': mapping(integer),
+    'mail': mapping({'count': integer, 'oldest': integer, 'waiter': lambda x: type(x) is bool}),
+    'stale': [{'run': text, 'why': text, 'caller': text, 'since': text}],
+    'targets': [target_shape],
+    'tend': [lambda x: isinstance(x, dict) and isinstance(x.get('end'), str)],
+}
+
+
+def checked(reading):
+    """Check each field once at either boundary; unknown fields never travel."""
+    errors = reading.get('errors', {})
+    errors = {k: v for k, v in errors.items() if k in SCHEMAS and text(v) and
+              (re.fullmatch(r'exit -?\d+', v) or re.fullmatch(r'[A-Za-z]+', v))} if isinstance(errors, dict) else {}
+    result = {'errors': errors}
+    for name, schema in SCHEMAS.items():
+        if name in reading:
+            if shape(reading[name], schema):
+                result[name] = reading[name]
+            else:
+                errors[name] = 'shape'
+    return result
+
+
+# Reading. Sources return only the named measures, never command output or errors.
+def source_cores(tmp, now):
+    host = os.environ.get('FLEET_FIXTURE_HOST')
+    return int((Path(host) / 'cores').read_text()) if host else os.cpu_count()
+
+
+def source_load(tmp, now):
+    return [float(x) for x in (proc_root() / 'loadavg').read_text().split()[:3]]
+
+
+def source_pressure(tmp, now):
+    def avg(file, kind):
+        rows = dict((row.split()[0], dict(x.split('=') for x in row.split()[1:]))
+                    for row in (proc_root() / 'pressure' / file).read_text().splitlines())
+        return float(rows[kind]['avg60'])
+    return {'cpu': avg('cpu', 'some'), 'memory_some': avg('memory', 'some'), 'memory_full': avg('memory', 'full')}
+
+
+def source_memory(tmp, now):
+    values = {k: int(v.split()[0]) * 1024 for k, v in
+              (line.split(':', 1) for line in (proc_root() / 'meminfo').read_text().splitlines())}
+    return {'available': values['MemAvailable'], 'total': values['MemTotal']}
+
+
+def source_disk(tmp, now):
+    host = os.environ.get('FLEET_FIXTURE_HOST')
+    if host:
+        free, total = map(int, (Path(host) / 'disk').read_text().split())
+    else:
+        stat = os.statvfs(tmp)
+        free, total = stat.f_bavail * stat.f_frsize, stat.f_blocks * stat.f_frsize
+    return {'free': free, 'total': total}
+
+
+def settings(tmp):
+    try:
+        return (tmp / 'machine.env').read_text().splitlines()
+    except FileNotFoundError:
+        return []
+
+
+def source_floor(tmp, now):
+    value = '40'
+    for line in settings(tmp):
+        if re.fullmatch(r'PLAN_MIN_DISK_GB=[0-9]+', line):
+            value = line.split('=')[1]
+    value = os.environ.get('PLAN_MIN_DISK_GB', value)
+    if not re.fullmatch(r'[0-9]+', value):
+        raise ValueError()
+    return int(value) * GB
+
+
+def source_quiet(tmp, now):
+    return 'FLEET_QUIET=1' in settings(tmp)
+
+
+def source_kache(tmp, now):
+    if not shutil.which('kache'):
+        return None
+    disk = json.loads(command(['kache', 'stats', '--json']))['disk']
+    return {'store': disk['store_bytes'], 'limit': disk['store_limit_bytes']}
+
+
+def source_heavy(tmp, now):
+    path = tmp / 'heavy/state.json'
+    if not path.exists():
+        return None
+    state = json.loads(path.read_text())
+    live = [t for t in state['tasks'].values() if t['state'] in LIVE]
+    queued = [t for t in live if t['state'] not in RUNNING]
+    return {'running': len(live) - len(queued), 'queued': len(queued),
+            'oldest_wait': max([max(0, now - t['submitted']) for t in queued], default=0),
+            'gate': bool(state.get('gate'))}
+
+
+def active_units():
+    return {line.split()[0] for line in command(['systemctl', '--user', 'list-units', '--plain', '--no-legend',
+            '--no-pager', '--state=active', 'codex-owner-*', 'codex-run-*']).decode().splitlines() if line.split()}
+
+
+def unescape(name):
+    # systemd-escape --unescape: unescaped hyphens are slashes, hex escapes bytes.
+    return re.sub(rb'\\x([0-9a-fA-F]{2})', lambda m: bytes([int(m[1], 16)]), name.replace('-', '/').encode()).decode()
+
+
+def source_sessions(tmp, now, units):
+    sessions = json.loads(command(['claude', 'agents', '--json', '--all']))
+    if not isinstance(sessions, list):
+        raise Shape()
+    result = [{'name': s['name'], 'state': s.get('state', s.get('status', '')), 'kind': 'claude'}
+              for s in sessions if isinstance(s, dict) and s.get('pid') and s.get('name')]
+    result.extend({'name': unescape(u[len('codex-owner-'):-len('.service')]), 'kind': 'codex'}
+                  for u in sorted(units.result()) if u.startswith('codex-owner-') and u.endswith('.service'))
+    return result
+
+
+def owner(path, tmp):
+    path = Path(path)
+    for area in ('owners', 'director'):
+        try:
+            parts = path.relative_to(tmp / area).parts
+        except ValueError:
+            continue
+        if parts:
+            return re.sub(r'-m[0-9]+$', '', parts[0]) if area == 'owners' else 'director'
+    return 'other'
+
+
+def source_implementers(tmp, now, units):
+    active = units.result()
+    result = {}
+    for meta in sorted((tmp / 'codex-run').glob('*/meta')):
+        if (meta.parent / 'ended').exists() or f'codex-run-{meta.parent.name}.service' not in active:
+            continue
+        fields = dict(line.split('=', 1) for line in meta.read_text().splitlines() if '=' in line)
+        name = owner(fields.get('task', ''), tmp)
+        result[name] = result.get(name, 0) + 1
+    return result
+
+
+def source_mail(tmp, now):
+    result = {}
+    for line in command(['post', 'list']).decode().splitlines():
+        fields = line.split(None, 5)[:5]
+        if len(fields) != 5 or fields[4] not in ('waiter=alive', 'waiter=dead'):
+            raise Shape()
+        age, name = int(fields[0]), fields[1]
+        value = result.setdefault(name, {'count': 0, 'oldest': 0, 'waiter': False})
+        value['count'] += 1
+        value['oldest'] = max(value['oldest'], age)
+        value['waiter'] |= fields[4] == 'waiter=alive'
+    return result
+
+
+def source_stale(tmp, now):
+    result = []
+    for line in command(['codex-run', 'stale']).decode().splitlines():
+        fields = line.split('\t')
+        if len(fields) != 4 or Path(fields[0]).name != fields[0]:
+            raise Shape()
+        run, why, _, caller = fields
+        directory = tmp / 'codex-run' / run
+        newest = max((p.stat().st_mtime for p in directory.iterdir() if p.is_file()), default=directory.stat().st_mtime)
+        result.append({'run': run, 'why': why, 'caller': caller, 'since': iso(newest)})
+    return result
+
+
+def held(path):
+    # Copied from tidy: links only, restricted to this user's processes.
+    for proc in proc_root().iterdir():
+        if not proc.name.isdigit():
+            continue
+        try:
+            if proc.stat().st_uid != os.getuid():
+                continue
+            links = [proc / 'cwd']
+            try:
+                links.extend((proc / 'fd').iterdir())
+            except (FileNotFoundError, PermissionError):
+                pass
+            for link in links:
+                try:
+                    target = Path(os.readlink(link).removesuffix(' (deleted)'))
+                    if target.is_absolute() and (target == path or path in target.parents):
+                        return True
+                except (FileNotFoundError, PermissionError):
+                    pass
+        except (FileNotFoundError, PermissionError):
+            pass
+    return False
+
+
+def worktree_list(path):
+    # Copied from tidy's NUL-delimited worktree_list, including locked records.
+    for block in command(['git', '-C', str(path), 'worktree', 'list', '--porcelain', '-z']).split(b'\0\0'):
+        fields = dict(os.fsdecode(item).partition(' ')[::2] for item in block.split(b'\0') if item)
+        if 'worktree' in fields:
+            yield fields
+
+
+def source_targets(tmp, now, sizes=False):
+    # cleanup.md 4 step 9, copied for reading: owner, held worktree, Cargo locks,
+    # and last build from target and profile metadata, never a recursive walk.
+    result = []
+    seen = set()
+    for repo in REPOS:
+        primary = tmp.parent / repo
+        if not primary.is_dir():
+            continue
+        for fields in worktree_list(primary):
+            work = Path(fields['worktree']).absolute()
+            target = work / 'target'
+            if work in seen or work == primary or 'locked' in fields or owner(work, tmp) == 'other':
+                continue
+            seen.add(work)
+            if target.is_symlink() or not target.is_dir() or not (target / 'CACHEDIR.TAG').is_file():
+                continue
+            # Do not follow a symlink through an owner or profile directory.
+            if work.resolve() != work or target.resolve() != target:
+                continue
+            profiles = [p for pattern in ('*/.fingerprint', '*/*/.fingerprint') for p in target.glob(pattern)
+                        if p.is_dir() and p.resolve() == p]
+            profiles = [p.parent for p in profiles]
+            built = max([target.stat().st_mtime] + [p.stat().st_mtime for profile in profiles
+                        for name in ('deps', '.fingerprint', 'build') if (p := profile / name).is_dir()])
+            in_use = held(work)
+            for directory in [target, *profiles]:
+                lock = directory / '.cargo-lock'
+                if not lock.is_file():
+                    continue
+                with lock.open('rb') as handle:
+                    try:
+                        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        in_use = True
+            result.append({'path': str(target.relative_to(tmp)), 'owner': owner(work, tmp),
+                           'built': iso(built), 'in_use': in_use})
+    if sizes and result:
+        # The fixture's FLEET_DU_SECONDS bounds all sizes together (normally 30 s).
+        deadline = min(time.monotonic() + float(os.environ.get('FLEET_DU_SECONDS', 30)),
+                       getattr(READ_CONTEXT, 'deadline', math.inf))
+        def weigh(row):
+            try:
+                size = int(command(['du', '-sb', '--', str(tmp / row['path'])],
+                                   timeout=max(.001, min(15, deadline - time.monotonic()))).split()[0])
+                return size if size >= 0 else None
+            except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+                return None
+        with futures.ThreadPoolExecutor(max_workers=min(32, len(result))) as pool:
+            sizes_read = list(pool.map(weigh, result))
+        for row, size in zip(result, sizes_read):
+            row['size'] = size
+    return result
+
+
+def source_tend(tmp, now, since=None):
+    path = tmp / 'fleet/tend.jsonl'
+    if not path.exists():
+        return None
+    result = []
+    for line in path.read_text().splitlines():
+        try:
+            value = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(value, dict) and isinstance(value.get('end'), str):
+            if since is None or value['end'] > since:
+                result.append(value)
+    return result if since is not None else result[-1:]
+
+
+class Shape(Exception):
+    pass
+
+
+def error_kind(error):
+    if isinstance(error, subprocess.CalledProcessError):
+        return f'exit {error.returncode}'
+    if isinstance(error, (subprocess.TimeoutExpired, TimeoutError)):
+        return 'timeout'
+    if isinstance(error, (Shape, json.JSONDecodeError, KeyError, TypeError)):
+        return 'shape'
+    return type(error).__name__
+
+
+def probe(tmp, now, since=None, sizes=False):
+    data = {'time': iso(now), 'errors': {}}
+    names = 'cores load pressure memory disk floor quiet kache heavy mail stale'.split()
+    deadline = time.monotonic() + read_seconds()
+
+    def read(build, *args):
+        READ_CONTEXT.deadline = deadline
+        return build(*args)
+    with futures.ThreadPoolExecutor(max_workers=len(names) + 4) as pool:
+        units = pool.submit(read, active_units)
+        pending = {name: pool.submit(read, globals()['source_' + name], tmp, now) for name in names}
+        pending.update(sessions=pool.submit(read, source_sessions, tmp, now, units),
+                       implementers=pool.submit(read, source_implementers, tmp, now, units),
+                       targets=pool.submit(read, source_targets, tmp, now, sizes),
+                       tend=pool.submit(read, source_tend, tmp, now, since))
+        for name, future in pending.items():
+            try:
+                value = future.result()
+                if value is not None or name not in ('kache', 'heavy', 'tend'):
+                    data[name] = value
+            except Exception as error:
+                data['errors'][name] = error_kind(error)
+    return checked(data)
+
+
+# Judging. The watch reuses holds; the room uses only the raise tests.
+def holds(condition, test, reading):
+    if test not in ('raise', 'clear'):
+        raise ValueError('unknown test')
+    try:
+        if condition == 'disk':
+            free = reading['disk']['free'] - reading['floor']
+            return free < DISK_RAISE if test == 'raise' else free >= DISK_CLEAR
+        if condition == 'load':
+            ratio = reading['load'][2] / reading['cores']
+            return ratio >= LOAD_RAISE if test == 'raise' else ratio < LOAD_CLEAR
+        if condition == 'memory':
+            ratio = reading['memory']['available'] / reading['memory']['total']
+            return ratio < MEMORY_RAISE if test == 'raise' else ratio >= MEMORY_CLEAR
+        if condition == 'kache':
+            ratio = reading['kache']['store'] / reading['kache']['limit']
+            return ratio >= KACHE_RAISE if test == 'raise' else ratio <= KACHE_CLEAR
+    except KeyError:
+        return None
+    raise ValueError('unknown condition')
+
+
+def verdict(reading):
+    raised = [name for name in ('disk', 'load', 'memory', 'kache') if holds(name, 'raise', reading)]
+    if raised:
+        return 'full', raised
+    short = []
+    tests = {'disk': lambda: reading['disk']['free'] - reading['floor'] >= ROOM_DISK,
+             'load': lambda: reading['load'][2] / reading['cores'] <= ROOM_LOAD,
+             'memory': lambda: reading['memory']['available'] / reading['memory']['total'] >= ROOM_MEMORY,
+             'wait': lambda: reading.get('heavy', {}).get('oldest_wait', 0) < ROOM_WAIT}
+    for name, test in tests.items():
+        try:
+            if not test():
+                short.append(name)
+        except KeyError:
+            short.append(name + ' unknown')
+    return ('tight', short) if short else ('room', [])
+
+
+# Fleet. Each machine gets this source, and a bound on its whole reading.
+def machines(path):
+    result = []
+    for line in path.read_text().splitlines():
+        fields = line.split('#', 1)[0].split()
+        if not fields:
+            continue
+        if len(fields) != 2 or not re.fullmatch(r'[a-z][a-z0-9-]*', fields[0]) or fields[1].startswith('-'):
+            raise ValueError('invalid machines file')
+        result.append(tuple(fields))
+    if not result:
+        raise ValueError('machines file names no machine')
+    return result
+
+
+UNREACHED = [('Connection timed out', 'timed out'), ('Connection refused', 'refused'),
+             ('Permission denied', 'key refused'), ('Host key verification failed', 'host key refused'),
+             ('Could not resolve', 'name not resolved'), ('No route to host', 'no route'),
+             ('Network is unreachable', 'no route')]
+
+
+def read_machine(name, target, source, since=None, sizes=False):
+    if target == 'local':
+        start = time.monotonic()
+        reading = checked(probe(tmp_dir(), clock(), since, sizes))
+        if time.monotonic() - start >= read_seconds():
+            return {'machine': name, 'unreached': 'timed out'}
+        return {'machine': name, 'reading': reading}
+    args = (' --sizes' if sizes else '') + (' --since ' + since if since else '')
+    try:
+        output = command([*SSH, target, REMOTE.format(args)], data=source, timeout=read_seconds(), echo_stderr=True)
+    except subprocess.TimeoutExpired as error:
+        if error.stderr:
+            sys.stderr.write(error.stderr.decode(errors='replace'))
+        return {'machine': name, 'unreached': 'timed out'}
+    except subprocess.CalledProcessError as error:
+        reason = error.stderr.decode(errors='replace')
+        if reason:
+            print(reason, end='' if reason.endswith('\n') else '\n', file=sys.stderr)
+        why = (next((why for words, why in UNREACHED if words in reason), f'ssh exited {error.returncode}')
+               if error.returncode == 255 else 'wrong answer')
+        return {'machine': name, 'unreached': why}
+    except OSError:
+        return {'machine': name, 'unreached': 'ssh exited 127'}
+    try:
+        reading = json.loads(output)
+        if not isinstance(reading, dict):
+            raise Shape()
+        return {'machine': name, 'reading': checked(reading)}
+    except (ValueError, Shape, RecursionError):
+        return {'machine': name, 'unreached': 'wrong answer'}
+
+
+def read_fleet(selected, since=None, sizes=False):
+    source = Path(__file__).read_bytes()
+    with futures.ThreadPoolExecutor(max_workers=len(selected)) as pool:
+        pending = [pool.submit(read_machine, name, target, source, since, sizes) for name, target in selected]
+        result = [future.result() for future in pending]
+    for row in result:
+        if 'reading' in row:
+            row['verdict'], row['short'] = verdict(row['reading'])
+    def order(row):
+        reading = row.get('reading', {})
+        load = reading['load'][2] / reading['cores'] if 'load' in reading and 'cores' in reading else math.inf
+        return (('room', 'tight', 'full').index(row['verdict']), load, row['machine']) if 'reading' in row else (3, 0, row['machine'])
+    return sorted(result, key=order)
+
+
+# Room. The JSON and terminal share their readings, verdicts and order.
+def room_line(row):
+    r = row['reading']
+    label = row['verdict'] + (' (' + ', '.join(row['short']) + ')' if row['short'] else '')
+    def show(keys, render):
+        try:
+            return render(*(r[k] for k in keys))
+        except KeyError:
+            return '-'
+    return [row['machine'], label,
+            show(['cores'], lambda n: f'{n} cores'),
+            show(['load', 'cores'], lambda l, n: 'load ' + ' '.join(f'{v:.1f}' for v in l) + f' ({l[2]/n:.1f}/core)'),
+            show(['pressure'], lambda p: f'cpu {p["cpu"]:.0f}%'),
+            show(['memory'], lambda m: f'mem {m["available"]/GB:.1f}/{m["total"]/GB:.1f} GB'),
+            show(['disk', 'floor'], lambda d, f: f'disk {d["free"]/GB:.0f} GB, floor {f/GB:.0f}'),
+            show(['kache'], lambda k: f'kache {k["store"]/GB:.0f}/{k["limit"]/GB:.0f} GB'),
+            show(['heavy'], lambda h: f'heavy {h["running"]}+{h["queued"]}' + (f' {h["oldest_wait"]/60:.0f}m' if h['queued'] else '')),
+            show(['sessions'], lambda s: 'sessions ' + (' '.join(x['name'] for x in s) or '-')),
+            show(['implementers'], lambda i: 'implementers ' + (' '.join(f'{k} {v}' for k, v in sorted(i.items())) or '-')),
+            'blind: ' + ', '.join(sorted(r['errors'])) if r['errors'] else '']
+
+
+def room(rows, json_output=False, targets=False):
+    now = clock()
+    if json_output:
+        print(json.dumps({'time': iso(now), 'machines': rows}, sort_keys=True))
+    else:
+        lines = {r['machine']: room_line(r) for r in rows if 'reading' in r}
+        widths = [max([len(c[i]) for c in lines.values()], default=0) for i in range(12)]
+        widths[0] = max(widths[0], *(len(r['machine']) for r in rows))
+        for row in rows:
+            if 'unreached' in row:
+                print(f'{row["machine"]:<{widths[0]}}  unreached: {row["unreached"]}')
+                continue
+            print('  '.join(c.ljust(widths[i]) for i, c in enumerate(lines[row['machine']])).rstrip())
+            if targets:
+                ordered = sorted(row['reading'].get('targets', []), key=lambda t: (t['owner'], -(t.get('size') or 0), t['path']))
+                for target in ordered:
+                    size = f'{target["size"]/GB:.1f} GB' if target.get('size') is not None else '?'
+                    try:
+                        age = max(0, int((now - datetime.fromisoformat(target['built'].replace('Z', '+00:00')).timestamp()) / 60))
+                    except ValueError:
+                        age = '?'
+                    print(f'  {target["owner"]}  {size}  {target["path"]}  {age}m ago' + ('  in use' if target['in_use'] else ''))
+    return int(any('unreached' in row for row in rows))
+
+
+# Main.
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    commands = parser.add_subparsers(dest='command', required=True)
+    p = commands.add_parser('probe')
+    p.add_argument('--since')
+    p.add_argument('--sizes', action='store_true')
+    p = commands.add_parser('room')
+    p.add_argument('--json', action='store_true')
+    p.add_argument('--targets', action='store_true')
+    p.add_argument('machines', nargs='*')
+    args = parser.parse_args()
+    if args.command == 'probe':
+        if args.since is not None and not re.fullmatch(TIME, args.since):
+            parser.error('TIME must be YYYY-MM-DDTHH:MM:SSZ')
+        print(json.dumps(probe(tmp_dir(), clock(), args.since, args.sizes), sort_keys=True))
+        return 0
+    try:
+        selected = machines(tmp_dir() / 'post/machines')
+        unknown = set(args.machines) - {n for n, _ in selected}
+        if unknown:
+            parser.error('unknown machine: ' + ', '.join(sorted(unknown)))
+        if args.machines:
+            selected = [(n, t) for n, t in selected if n in args.machines]
+    except (OSError, ValueError) as error:
+        parser.error(str(error))
+    return room(read_fleet(selected, sizes=args.targets), args.json, args.targets)
+
+
+if __name__ == '__main__':
+    sys.exit(main())
