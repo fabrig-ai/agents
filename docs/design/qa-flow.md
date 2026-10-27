@@ -810,31 +810,45 @@ the kit only starts it and ends it, as the service ends a pass.
   and the rung's brief and loop say when:
   1. the session writes the finding in its report and its notes, and
      the step it stopped at in `DIRECTORY/paused`, one line;
-  2. it gives each login back by the give-back file and checks each by
-     `stat` (give back before you break it), then stops its
-     deployments, whose directories stay as they are;
-  3. it ends. The service ends the run as any walk's (10.3's order), but
-     finding `paused` and every login back, it marks the walk paused,
-     not ended: it frees its walk slot, keeps its directory and state,
-     appends `walk-pause` to the clock (its note the paused line) and
-     posts the starter. A pause with a login not back is no pause: the
-     walk ends with it stuck, and is alerted as any.
+  2. it gives each moved login back by the give-back file and checks
+     each by `stat` (give back before you break it), then stops its
+     deployments, whose directories stay as they are, with the command
+     that started each (`qa deploy`'s arguments, which the tool also
+     saves), so that a restart needs neither the slot's checkout nor
+     its unit;
+  3. it ends. The service ends the run as any walk's (10.3's order:
+     moved logins given back, units stopped and confirmed, in-place
+     logins after), and makes one decision, saved: `walk-pause` when
+     `paused` is there and every login is back and every unit
+     confirmed stopped, else `walk-end`, a login not back making it a
+     stuck end, alerted as any. A paused walk frees its walk slot,
+     keeps its directory and state, appends `walk-pause` (its note the
+     paused line) and posts the starter.
 - **`qa walk REPO RUNG --resume N --build REF [--login POOL]...
-  [--cap MINUTES]`** resumes paused walk n of the rung, from its
-  state: it takes a free walk slot and one free login of each POOL
-  (any of the pool, not the one it gave back), as step 2 and 3 above,
-  checks the slot out at REF (the fix's branch, before it lands),
-  writes the session's task (the walk's facts, its kept deployments'
-  directories to restart with the fixed binary on their own data, each
-  login to import again, and the step to go on from, its `paused`
+  [--cap MINUTES]`** resumes paused walk n of the rung, under the
+  walks' lock and only once its pause's end is complete. It saves a new
+  attempt in the walk's state (its run, start, slot, grants and end
+  progress, so that nothing of the attempt before is given or ended
+  twice), takes a free walk slot and one free login of each pool, the
+  walk's own pools unless `--login` names others, one refused undoing
+  all as at a start (steps 2 and 3 above), checks the slot out at REF
+  (the fix's branch, before it lands, or `main` for the walk that
+  counts), removes `paused`, writes the session's task (the walk's
+  facts, each kept deployment's saved command and directories to start
+  again with REF's binary through `qa deploy` on their own data, the
+  binding's configuration checks before that start, each login to
+  import again, and the step to go on from, the removed `paused`
   line), appends `walk-resume` to the clock (its note the logins and
-  REF), and resumes the walk's Codex thread with it (`codex-run task
-  --resume RUN`), or starts a fresh session on its notes when the thread
-  can't resume. The walk keeps its number, directory and report; its
-  cap starts again. A paused walk not resumed stays paused: the rung's
-  owner starts a new walk instead, from the start, when the fix moves a
-  stored family that the kept deployment can't open, and says so in the
-  finding's line.
+  REF), and resumes the walk's Codex thread with it, `codex-run task
+  --resume RUN --to qa-watch --on-stop` the wrapper. A thread that
+  can't resume gets a fresh session on the same task and the walk's
+  notes, saved as the attempt's run; a launch that fails gives back
+  what the attempt took. The walk keeps its number, directory and
+  report; its cap starts again.
+- **A kept store that won't open** (a fix moved a stored family, which
+  no version guards before the first release): the resumed session
+  says so in its report and walks again from the first step on a fresh
+  deployment in the walk's directory.
 - **The walk that counts ends on `main`:** a resume on a branch shows
   the fix; the rung's final walk confirms it at the landed commit,
   resumed from the kept state where the landed binary reads it, else
