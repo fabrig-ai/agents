@@ -18,6 +18,8 @@ workspace() {
     agents=$(cd "$kit/../.." && pwd)
     if [[ $(basename "$agents") == agents ]]; then dirname "$agents"; else echo "$HOME/src/rust"; fi
 }
+# Shared with landings; the limit includes the message headers.
+read -r message_limit <"$kit/post-limit"
 root=${DEV_ROOT:-$(workspace)}
 # wait changes directory before registering; keep relative DEV_ROOT usable.
 root=$(realpath -m "$root")
@@ -44,8 +46,8 @@ mailbox() {
     box=$post/$name
 }
 receive() {
-    timeout 30 head -c 65537 >"$scratch" || fail 'cannot read message'
-    (($(stat -c %s "$scratch") <= 65536)) || fail 'message exceeds 64 KiB'
+    timeout 30 head -c "$((message_limit + 1))" >"$scratch" || fail 'cannot read message'
+    (($(stat -c %s "$scratch") <= message_limit)) || fail 'message exceeds 64 KiB'
 }
 
 parse_message() {
@@ -313,11 +315,11 @@ send() {
     scratch=$(mktemp) || fail 'cannot stage message'
     if (($# == 3)); then
         [[ -r $file ]] || fail "cannot read body: $file"
-        head -c 65537 -- "$file" >"$scratch" || fail 'cannot read body'
+        head -c "$((message_limit + 1))" -- "$file" >"$scratch" || fail 'cannot read body'
     else
-        head -c 65537 >"$scratch" || fail 'cannot read body'
+        head -c "$((message_limit + 1))" >"$scratch" || fail 'cannot read body'
     fi
-    (($(stat -c %s "$scratch") <= 65536)) || fail 'message exceeds 64 KiB'
+    (($(stat -c %s "$scratch") <= message_limit)) || fail 'message exceeds 64 KiB'
     mailbox "$sender"
     {
         flock -x 7 || fail 'cannot lock sent mailbox'
@@ -334,7 +336,7 @@ send() {
             break
         done
     } 7>"$box/.lock"
-    if (($(stat -c %s "$sent") > 65536)); then
+    if (($(stat -c %s "$sent") > message_limit)); then
         rm -f -- "$sent"
         fail 'message exceeds 64 KiB'
     fi

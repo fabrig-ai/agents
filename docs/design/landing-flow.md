@@ -375,7 +375,12 @@ cite:
      once, and says so.
    - **The owner waits for the verdict** (the user, 10-26). On the
      landing task's report, it starts the wait in a user unit that
-     posts it the exit. During the mission the owner is on anyway, and
+     posts it the exit. `landings wait --post` sends a bounded red
+     summary (verdict, repository and commit, failing test names with an
+     omitted count, and log paths), never the failure output; it uses
+     post's shared message limit and reserves room for the headers. A
+     failed post makes the wait exit nonzero and prints the retained
+     body's path on stderr. During the mission the owner is on anyway, and
      a red comes back like a failed landing. A mission closes only once
      its last landing has cleared, about one tier run after it lands. A
      new owner would read less than the landing's own, and add a session

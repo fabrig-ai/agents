@@ -162,11 +162,12 @@ def joined(repo, answers):
         if answer is not None and answer[0] == 'red':
             reds.append(answer)
     if reds:
-        return 'red', [line for _, lines in reds for line in lines]
+        return ('red', [line for answer in reds for line in answer[1]],
+                [row for answer in reds for row in answer[2]])
     for parts, split in sorted(splits.items()):
         if len(split) == parts and all(answer is not None and answer[0] == 'cleared'
                                        for answer in split.values()):
-            return 'cleared', [line for _, answer in sorted(split.items()) for line in answer[1]]
+            return ('cleared', [line for _, answer in sorted(split.items()) for line in answer[1]], [])
     return None
 
 
@@ -539,7 +540,7 @@ class Checkouts:
 
 
 def judge(runner, checkouts, repo, commit):
-    """Return (outcome, lines), or None while this landing is undecided."""
+    """Return (outcome, console lines, red verdict rows), or None while this landing is undecided."""
     def lines(row, suffix='', naming=None):
         out = io.StringIO()
         with redirect_stdout(out):
@@ -548,7 +549,8 @@ def judge(runner, checkouts, repo, commit):
         if suffix:
             run = 'by run ' + row['run'][:9]
             text = text.replace(run, run + suffix, 1)
-        return row['verdict'], text.splitlines()
+        return row['verdict'], text.splitlines(), ([dict(row, commit=naming or row['commit'])]
+                                                   if row['verdict'] == 'red' else [])
 
     mine = [r for r in runner if r['kind'] == 'tier'
             and (repo is None or follower(r['tier'])[0] == repo)]
@@ -565,20 +567,21 @@ def judge(runner, checkouts, repo, commit):
     if answers and (any(answer is not None and answer[0] == 'red' for answer in answers)
                     or all(answer is not None for answer in answers)):
         return ('red' if any(answer is not None and answer[0] == 'red' for answer in answers) else 'cleared',
-                [line for answer in answers if answer is not None for line in answer[1]])
+                [line for answer in answers if answer is not None for line in answer[1]],
+                [row for answer in answers if answer is not None for row in answer[2]])
     found = checkouts.find(commit, repo)
     if len(found) != 1:
         return None
     repo, commit = found[0]
     held = checkouts.on_main(repo, commit)
     if held is False:
-        return 'not landed', [f'landings: {repo} {commit[:9]} is not on main: wait on the commit that landed']
+        return 'not landed', [f'landings: {repo} {commit[:9]} is not on main: wait on the commit that landed'], []
     if held is None:
         return None
     tier = checkouts.has_tier(repo, commit)
     if tier is False:
         stamp = datetime.now(timezone.utc).strftime('%m-%d %H:%MZ')
-        return 'cleared', [f'{stamp} {repo} {commit[:9]} cleared on landing: {repo} has no tier']
+        return 'cleared', [f'{stamp} {repo} {commit[:9]} cleared on landing: {repo} has no tier'], []
     if tier is None:
         return None
     mine = [r for r in mine if follower(r['tier'])[0] == repo]
@@ -658,8 +661,9 @@ def judge_landing(row, runner, checkouts):
     span = f'pushed range {base[:9]}..{tip[:9]}'
     if reds:
         # A red decides even while another pushed commit has no verdict yet.
-        details = [line for _, lines in reds for line in lines]
-        return 'red', [f'{repo} {tip[:9]} red over {span}', *details]
+        details = [line for answer in reds for line in answer[1]]
+        return ('red', [f'{repo} {tip[:9]} red over {span}', *details],
+                [row for answer in reds for row in answer[2]])
     if any(answer is None for answer in answers):
         return None
     unlanded = next((answer for answer in answers if answer[0] == 'not landed'), None)
@@ -667,10 +671,10 @@ def judge_landing(row, runner, checkouts):
         return unlanded
     # All pushed commits cleared. Show the tip's explanation once.
     answer = answers[commits.index(checkouts.need(repo, tip))]
-    return 'cleared', [answer[1][0] + '; ' + span, *answer[1][1:]]
+    return 'cleared', [answer[1][0] + '; ' + span, *answer[1][1:]], []
 
 
-def clearance(records, runner, target, checkouts, lands=()):
+def clearance(records, runner, target, checkouts, lands=(), post_reds=None):
     if re.fullmatch(r'[0-9a-fA-F]{7,40}', target):
         landings = [r for r in [*records, *lands] if r['event'] == 'landed'
                     and r.get('commit', '').lower().startswith(target.lower())
@@ -699,10 +703,12 @@ def clearance(records, runner, target, checkouts, lands=()):
             return 2, [], 'not landed'
         else:
             decided.append(answer)
-    red = any(outcome == 'red' for outcome, _ in decided)
+    red = any(answer[0] == 'red' for answer in decided)
     if red or (ready and not missing):
-        for _, lines in decided:
+        for _, lines, rows in decided:
             print('\n'.join(lines))
+            if post_reds is not None:
+                post_reds.extend(rows)
         return (1 if red else 0), missing, ('red' if red else 'cleared')
     return None, missing, None
 
@@ -797,7 +803,7 @@ def show(records, lands, last, runner, checkouts):
         print(line)
 
 
-def wait(label, timeout, poll, unreachable, read=15, cleared=False):
+def wait(label, timeout, poll, unreachable, read=15, cleared=False, post_reds=None):
     start = last_read = time.monotonic()
     deadline = start + timeout if timeout is not None else math.inf
     last_error = None
@@ -827,7 +833,7 @@ def wait(label, timeout, poll, unreachable, read=15, cleared=False):
             last_read = time.monotonic()
             last_error = None
             if cleared:
-                status, missing, outcome = clearance(records, runner, label, checkouts, lands)
+                status, missing, outcome = clearance(records, runner, label, checkouts, lands, post_reds)
                 if status is not None:
                     return status, outcome
             else:
@@ -858,30 +864,84 @@ def wait(label, timeout, poll, unreachable, read=15, cleared=False):
         time.sleep(max(0, min(poll, deadline - now, last_read + unreachable - now)))
 
 
+def red_post(label, rows, limit, log):
+    """Bound names by bytes, keeping space for the verdict and log references."""
+    budget = limit // 2  # The envelope also counts against post's limit.
+    field_limit = budget // 16
+
+    def field(value):
+        data = display_text(value).encode('utf-8')
+        return (data[:field_limit].decode('utf-8', errors='ignore') + '...'
+                if len(data) > field_limit else data.decode('utf-8'))
+
+    lines = [f'landings: {field(label)} red', f'wait log {socket.gethostname()}:{log}']
+    for index, row in enumerate(rows):
+        heading = (f"{row['date']} {row['clock']} {field(row['tier'])} "
+                   f"{field(row['commit'])} red by run {field(row['run'])}")
+        tail = f"; log {field(row['host'])}:{field(row['log'])}"
+        tests = []
+        # Reserve the fixed fields and the remaining-verdict count first.
+        available = budget - len(('\n'.join(lines) + '\n' + heading + tail).encode('utf-8')) - 128
+        for name in row['tests']:
+            candidate = '; '.join([*tests, field(name)])
+            if len(candidate.encode('utf-8')) > min(available, budget // 8):
+                break
+            tests.append(field(name))
+        more = len(row['tests']) - len(tests) + row.get('tests_more', 0)
+        detail = ': ' + '; '.join(tests) if tests else ''
+        if more:
+            detail += f"; and {more} more tests"
+        line = heading + detail + tail
+        if len(('\n'.join([*lines, line]) + '\n').encode('utf-8')) > budget - 128:
+            lines.append(f'and {len(rows) - index} more verdicts (see wait log)')
+            break
+        lines.append(line)
+    return '\n'.join(lines) + '\n'
+
+
 def wait_and_post(address, label, *args):
     import tempfile
 
     if address is None:
         return wait(label, *args)[0]
-    out, err = io.StringIO(), io.StringIO()
+    out, err, reds = io.StringIO(), io.StringIO(), []
     with redirect_stdout(out), redirect_stderr(err):
-        status, outcome = wait(label, *args)
+        status, outcome = wait(label, *args, post_reds=reds)
     stdout, stderr = out.getvalue(), err.getvalue()
     print(stdout, end='')
     print(stderr, end='', file=sys.stderr)
+    body = None
     try:
-        with tempfile.TemporaryDirectory(prefix='landings-post-') as directory:
-            body = Path(directory) / 'body'
-            body.write_text(stdout + stderr)
-            result = subprocess.run(['post', 'send', '--as', 'landings', address,
-                                     f'landings: {label} {outcome}', str(body)],
-                                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                    stderr=subprocess.PIPE, text=True)
-            if result.returncode not in (0, 3):
-                raise OSError(result.stderr.strip() or result.stdout.strip()
-                              or f'exit {result.returncode}')
-    except OSError as error:
+        # Keep evidence outside the checkout, including after a failed delivery.
+        directory = Path(tempfile.mkdtemp(prefix='landings-post-'))
+        body = directory / 'body'
+        full = stdout + stderr
+        body.write_text(full, encoding='utf-8')
+        limit = int(Path(__file__).resolve().with_name('post-limit').read_text())
+        if outcome == 'red':
+            log = directory / 'wait.log'
+            log.write_text(full, encoding='utf-8')
+            body.write_text(red_post(label, reds, limit, log), encoding='utf-8')
+        elif len(full.encode('utf-8')) > limit // 2:
+            log = directory / 'wait.log'
+            log.write_text(full, encoding='utf-8')
+            body.write_text(f'landings: {outcome}; wait log {socket.gethostname()}:{log}\n',
+                            encoding='utf-8')
+        result = subprocess.run(['post', 'send', '--as', 'landings', address,
+                                 f'landings: {label} {outcome}', str(body)],
+                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True)
+        if result.returncode not in (0, 3):
+            raise OSError(result.stderr.strip() or result.stdout.strip()
+                          or f'exit {result.returncode}')
+        body.unlink()
+        if not (directory / 'wait.log').exists():
+            directory.rmdir()
+    except (OSError, ValueError) as error:
         print(f'landings: warning: post failed: {error}', file=sys.stderr)
+        if body is not None and body.exists():
+            print(f'landings: post body saved at {body}', file=sys.stderr)
+        return status or 1
     return status
 
 
@@ -1155,7 +1215,7 @@ def main():
     waiter = commands.add_parser('wait', help='wait for a set to land or stop')
     waiter.add_argument('set')
     waiter.add_argument('--timeout', type=seconds)
-    waiter.add_argument('--post', metavar='ADDRESS', help='post the wait output and outcome')
+    waiter.add_argument('--post', metavar='ADDRESS', help='post a bounded verdict summary and log references')
     waiter.add_argument('--cleared', action='store_true', help='wait for tier verdicts (default timeout: 7200s)')
     cleared = commands.add_parser('cleared', help='show the newest main with all run verdicts cleared')
     cleared.add_argument('repo')

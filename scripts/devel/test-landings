@@ -76,7 +76,7 @@ class Lab:
         self.workspace.mkdir()
         self.env = dict({key: value for key, value in os.environ.items()
                          if not key.startswith('GIT_') and key != 'LANDINGS_READ'},
-                        DEV_ROOT=str(self.workspace),
+                        DEV_ROOT=str(self.workspace), TMPDIR=str(root),
                         GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL='/dev/null',
                         GIT_AUTHOR_NAME='Fixture', GIT_AUTHOR_EMAIL='fixture@example.invalid',
                         GIT_COMMITTER_NAME='Fixture', GIT_COMMITTER_EMAIL='fixture@example.invalid',
@@ -1826,6 +1826,8 @@ def post_standin(lab):
     post.write_text(f'#!{PYTHON}\n' + r'''import json, os, sys
 from pathlib import Path
 assert sys.argv[1:5] == ['send', '--as', 'landings', 'owner@fixture'], sys.argv
+with Path(os.environ['FIXTURE_FEED']).with_suffix('.body-paths').open('a') as paths:
+    paths.write(sys.argv[6] + '\n')
 with Path(os.environ['FIXTURE_FEED']).with_suffix('.posts').open('a') as out:
     out.write(json.dumps(dict(subject=sys.argv[5], body=Path(sys.argv[6]).read_text())) + '\n')
 sys.exit(int(os.environ.get('FIXTURE_POST_EXIT', '0')))
@@ -1855,20 +1857,87 @@ def posted_wait(lab):
                          '--post', 'owner@fixture', status=status)
         posts = [json.loads(line) for line in lab.feed.with_suffix('.posts').read_text().splitlines()]
         assert len(posts) == index + 1, posts
-        assert posts[-1] == dict(subject=f'landings: fixture/m1 {outcome}',
-                                 body=result.stdout + result.stderr), (posts, result)
-    # An undelivered post warns without changing the wait exit; queued exit 3 succeeds.
+        assert posts[-1]['subject'] == f'landings: fixture/m1 {outcome}', posts
+        if outcome == 'red':
+            body = posts[-1]['body']
+            assert 'jig ' + 'a' * 40 + ' red by run ' + 'a' * 40 in body, body
+            assert ': regression; log fixture-host:/fixture/log' in body, body
+            assert 'failure detail' not in body and 'failure detail' in result.stdout, result
+            log = Path(body.splitlines()[1].split(':', 1)[1])
+            assert log.read_text() == result.stdout + result.stderr, body
+        else:
+            assert posts[-1]['body'] == result.stdout + result.stderr, (posts, result)
+        saved = Path(lab.feed.with_suffix('.body-paths').read_text().splitlines()[-1])
+        assert not saved.exists(), saved
+    # Queued exit 3 is delivered; a refusal keeps its body and existing nonzero status.
     lab.feed.touch()
     for code in ('2', '3'):
         result = lab.run('wait', 'absent', '--timeout', '0', '--post', 'owner@fixture', status=3,
                          env=dict(lab.env, FIXTURE_POST_EXIT=code))
         assert ('warning: post failed' in result.stderr) == (code == '2'), result
+        saved = Path(lab.feed.with_suffix('.body-paths').read_text().splitlines()[-1])
+        assert saved.exists() == (code == '2'), saved
+        if code == '2':
+            assert f'post body saved at {saved}' in result.stderr, result
+            assert saved.read_text() == 'landings: timed out waiting for absent\n', saved
     post.unlink()
-    # A missing executable is also a warning and leaves the wait's status intact.
+    # A missing executable also keeps the body.
     post.write_text('#!/missing/fixture-interpreter\n')
     post.chmod(0o700)
     result = lab.run('wait', 'absent', '--timeout', '0', '--post', 'owner@fixture', status=3)
     assert 'warning: post failed' in result.stderr, result
+
+
+def posted_large_red(lab):
+    post_standin(lab)
+    landed_set(lab)
+    limit = int(SCRIPT.with_name('post-limit').read_text())
+    tests = [f'regression-{index}-' + '失敗' * 80 for index in range(1000)]
+    excerpt = 'failure output must stay in the log\n' * limit
+    lab.append(tier_record('verdict', verdict='red', tests=tests, tests_more=7,
+                           excerpt=excerpt, log='/fixture/large-red.log'),
+               tier_record('verdict', tier='temper', commit='b' * 40))
+    result = lab.run('wait', '--cleared', 'fixture/m1', '--timeout', '0',
+                     '--post', 'owner@fixture', status=1)
+    post = json.loads(lab.feed.with_suffix('.posts').read_text())
+    body = post['body']
+    assert len(body.encode('utf-8')) < limit // 2, len(body.encode('utf-8'))
+    assert body.startswith('landings: fixture/m1 red\n'), body
+    assert 'jig ' + 'a' * 40 + ' red by run ' + 'a' * 40 in body, body
+    assert tests[0] in body, body
+    named = sum(name in body for name in tests)
+    assert 0 < named < len(tests), named
+    assert f'and {len(tests) - named + 7} more tests' in body, body
+    assert 'log fixture-host:/fixture/large-red.log' in body, body
+    assert 'failure output must stay in the log' not in body, body
+    assert excerpt.splitlines()[0] in result.stdout, result
+    log = Path(body.splitlines()[1].split(':', 1)[1])
+    assert log.read_text() == result.stdout + result.stderr, log
+    assert len(log.read_bytes()) > limit, log
+
+
+def posted_delivery_failure(lab):
+    post_standin(lab)
+    landed_set(lab)
+    lab.append(tier_record('verdict'), tier_record('verdict', tier='temper', commit='b' * 40))
+    for code in ('2', '127'):
+        result = lab.run('wait', '--cleared', 'fixture/m1', '--timeout', '0',
+                         '--post', 'owner@fixture', status=1,
+                         env=dict(lab.env, FIXTURE_POST_EXIT=code))
+        saved = Path(lab.feed.with_suffix('.body-paths').read_text().splitlines()[-1])
+        post = json.loads(lab.feed.with_suffix('.posts').read_text().splitlines()[-1])
+        assert 'warning: post failed' in result.stderr, result
+        assert f'post body saved at {saved}' in result.stderr, result
+        assert saved.read_text() == post['body'] == result.stdout, (saved, result)
+        assert saved.stat().st_mode & 0o777 == 0o600, saved.stat()
+    # A failed exec after a successful wait has the same nonzero, retained-body behavior.
+    standin = lab.bin / 'post'
+    standin.write_text('#!/missing/fixture-interpreter\n')
+    standin.chmod(0o700)
+    result = lab.run('wait', '--cleared', 'fixture/m1', '--timeout', '0',
+                     '--post', 'owner@fixture', status=1)
+    saved = Path(result.stderr.split('post body saved at ', 1)[1].strip())
+    assert saved.read_text() == result.stdout, result
 
 
 def remote_watch(lab):
@@ -1928,7 +1997,7 @@ def main():
              plain_landing_uses_its_range, range_excludes_an_inherited_red,
              range_waits_for_every_pushed_commit, range_without_checkout_stays_pending,
              unknown_push_range_never_uses_tip_clearance,
-             watch_record, malformed_runner_records, posted_wait, remote_watch,
+             watch_record, malformed_runner_records, posted_wait, posted_large_red, posted_delivery_failure, remote_watch,
              no_tier_clears_on_landing, baseline_clears_an_older_landing,
              commit_in_a_range_takes_its_landing_verdict, held_in_a_red_landing_is_red,
              own_red_stays_red_under_later_clean_runs, waits_while_no_run_holds_it,
