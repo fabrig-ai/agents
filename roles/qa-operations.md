@@ -183,7 +183,17 @@ temper's binding, `docs/design/qa.md` 3, is the source; as of 10-27:
 - **One account each:** an account signed in twice gives a second login
   but shares the first's usage limits, so a new held login is another
   account wherever one is to hand.
-- **Two are the walks'** (section 3), the rest QA's (section 4).
+- **Two are the walks'** (section 3), the rest QA's (section 4). Once
+  piece 2b lands, QA's passes take only a login free and claimed by no
+  waiter (`--now`), and hold at most the pool's size less
+  `QA_LOGIN_RESERVE`, a login one stranded included (qa-flow.md 10.6);
+  until then `QA_SLOTS` stays 1.
+- **By hand,** a walk or a live story takes `logins take chatgpt --any
+  --as HOLDER --note DIR [--wait SECONDS]`, which prints the name and
+  path it grants, and gives back `logins give NAME --as HOLDER`. Once
+  piece W lands, `qa walk` does both for a rung walk (qa-flow.md 10.7),
+  and a queued take is dropped with `logins drop chatgpt --any --as
+  HOLDER`, as a `--wait` that runs out drops itself.
 - **Saturation:** the director reads `logins list` at each check. A
   login held most of the day while walks or passes wait is saturated,
   and the user hears of it.
@@ -222,12 +232,19 @@ machine, in a private directory `E`, with temper's binary copied in:
   the roll.
 - **After** a roll that changes `qa`, restart `agents-qa-watch.service`
   between passes, when `qa passes --running` is empty.
+- **Rolling back** `logins` past b3abf0e needs its queue drained and
+  `tmp/logins/lock` and `tmp/logins/waiting.json` moved out first;
+  rolling `qa` back past 8935bc9 needs the passes of the newer code
+  drained, since the older service knows neither `qa-watch/<pass>`
+  holders nor slots (agents b3abf0e, 8935bc9).
 
 ### 6.4 A stuck login
 
-- **The alert** goes at once to the addresses in hetzner6's
-  `~/.config/agents-qa/stuck` (design/upgrades-draft@hetzner6) and to
-  the director.
+- **The alert,** once piece 5 lands, goes at once to the addresses in
+  hetzner6's `~/.config/agents-qa/stuck` (design/upgrades-draft@hetzner6)
+  and to the director (qa-flow.md 10.3). Until then a pass's stuck login
+  is in its notice to the director, and a walk's in its end post to
+  whoever started it.
 - **One hand on the box:** design/upgrades-draft's owner alone touches
   the deployment that holds the login, and nobody restarts it
   meanwhile.
@@ -254,17 +271,26 @@ The director's, on hetzner6:
 
 - **`agents-qa-watch.service`,** a user unit, which runs `qa watch`.
 - **`machine.env`:**
-  - `QA_SLOTS`: 1 until the reserve lands, then 2, so QA holds two of the
-    four logins;
-  - `QA_LOGIN_RESERVE` 2 and `QA_WALK_SLOTS` 2, the walks';
+  - `QA_SLOTS`: 1 until the reserve (piece 2b) lands, then 2: every
+    temper pass needs a login, and the reserve keeps the walks' two
+    whatever the slots;
+  - `QA_LOGIN_RESERVE` 2 (from piece 2b) and `QA_WALK_SLOTS` 2 (from
+    piece W), the walks';
   - `QA_BATCH` 5, `QA_CAP_MINUTES` 120 and `QA_INTERVAL_SECONDS` 300;
-  - `QA_EVIDENCE_KIB` 2048.
+  - `QA_STOP_SECONDS` 50, the give-back wrapper's bound in a
+    deployment's stop (qa-flow.md 10.5);
+  - `QA_EVIDENCE_KIB` 2048, read once the evidence's keeping lands.
 
   qa-flow.md 7 lists them with their defaults.
-- **`~/.config/agents-qa/stuck`:** `design/upgrades-draft@hetzner6`.
+- **`~/.config/agents-qa/stuck`:** `design/upgrades-draft@hetzner6`,
+  read once piece 5 lands.
 - **The open rung:** `qa rung temper real-model --login chatgpt`, the
   pool.
-- **Once it is built:** `qa default temper on`.
+- **Once piece 3 is built:** `qa default temper on`.
+- **What lands, in order** (o/qa-evidence-keep, each alone): 2b, the
+  reserve and `--now`; W, `qa walk` with pause and resume and `logins
+  drop`; 3, marked commits by default; 4, triage by landing; 5, the
+  stuck alert. Each landing's post says what hetzner6 needs.
 
 ## 8. The evidence
 
@@ -313,3 +339,6 @@ Newest last, times UTC.
   same state (the user); qa-flow.md 10.7 (agents 209b58f, 03a0f49).
 - 10-27 18:5xZ: this file (the user), with the walk loop moved here from
   design/ladder's notes.
+- 10-27 18:5xZ: sections 6 and 7 brought to what is built and what each
+  coming piece adds: the reserve and `--now`, `qa walk`, `logins drop`,
+  the stuck alert, `QA_STOP_SECONDS`, the rollbacks (design/qa-evidence).
