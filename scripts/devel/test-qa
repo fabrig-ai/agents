@@ -13,6 +13,7 @@ import subprocess
 import sys
 
 import case_runner
+import fixture_signals
 
 os.umask(0o077)
 KIT = Path(__file__).resolve().parent
@@ -138,7 +139,7 @@ class Lab:
                       f'tool["main"].__globals__["timestamp"] = lambda: {now!r}; '
                       'sys.exit(tool["main"]())')
             command = [sys.executable, '-I', '-S', '-c', driver, *args]
-        result = subprocess.run(command, env=dict(self.env, **(extra or {})), cwd=self.root,
+        result = fixture_signals.run(command, env=dict(self.env, FIXTURE_SIGNALS=str(KIT / 'fixture_signals.py'), **(extra or {})), cwd=self.root,
                                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 text=True, timeout=HUNG_TOOL_S)
         assert result.returncode == status, (args, result.returncode, result.stdout, result.stderr)
@@ -499,7 +500,7 @@ if name == 'codex-run':
     (state / 'meta').write_text(f'model=gpt-6.1-sol\neffort=high\nstarted={started}\ntask={task}\nreport={report}\n')
     Path(report).write_text(f'codex-run: run {run} is writing this report.\n')
     if config.get('interrupt_launch'):
-        os.kill(os.getppid(), 9)
+        __import__('runpy').run_path(os.environ['FIXTURE_SIGNALS'])['interrupt'](9)
     print(run, state)
 elif name == 'landings':
     assert args[0] == 'cleared'
@@ -860,7 +861,7 @@ def watch_recovers_an_interrupted_start_commit(lab):
     wrapper.write_text(f'#!{sys.executable} -S\nimport os, signal, subprocess, sys\n'
                        f'result = subprocess.run([{str(KIT / "record")!r}, *sys.argv[1:]])\n'
                        "if result.returncode in (0, 3) and 'commit' in sys.argv and sys.argv[sys.argv.index('-m') + 1].endswith(' started'):\n"
-                       ' os.kill(os.getppid(), signal.SIGKILL)\n'
+                       " __import__('runpy').run_path(os.environ['FIXTURE_SIGNALS'])['interrupt'](signal.SIGKILL)\n"
                        'sys.exit(result.returncode)\n')
     wrapper.chmod(0o700)
     lab.watch(status=-9, extra={'QA_RECORD': str(wrapper)})
@@ -1241,7 +1242,50 @@ def watch_leaves_a_login_its_pass_holds(lab):
     assert not (lab.tmp / 'qa/strays.json').exists()
 
 
-CASES = (watch_gives_back_a_login_held_without_a_pass,
+def signal_guard_refuses_a_gone_parent(lab):
+    import signal
+    import time
+    release = lab.root / 'release-orphan'
+    result = lab.root / 'orphan-result'
+    helper = str(KIT / 'fixture_signals.py')
+    orphan = ("import os, runpy, time; from pathlib import Path; "
+              f"release=Path({str(release)!r}); "
+              "\nwhile not release.exists(): time.sleep(.01)\n"
+              f"runpy.run_path({helper!r})['publish'](Path({str(result)!r}), "
+              f"str(runpy.run_path({helper!r})['interrupt']({signal.SIGTERM})))")
+    # run() supplies the parent's identity. Its child inherits that explicit
+    # target, then waits until the launcher has reaped the intended parent.
+    parent = (f"import subprocess, sys; subprocess.Popen([sys.executable, '-c', {orphan!r}], "
+              "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)")
+    finished = fixture_signals.run([sys.executable, '-c', parent], stdin=subprocess.DEVNULL,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=HUNG_TOOL_S)
+    assert finished.returncode == 0, finished.stderr
+    release.touch()
+    deadline = time.monotonic() + HUNG_TOOL_S
+    while not result.exists() and time.monotonic() < deadline:
+        time.sleep(.01)
+    assert result.read_text() == 'False'
+
+
+def signal_guard_refuses_invalid_or_replaced_targets(lab):
+    import signal
+    from unittest.mock import patch
+    with patch.object(signal, 'pidfd_send_signal') as sent:
+        for pid in (-2, -1, 0, 1):
+            try:
+                fixture_signals.send(dict(pid=pid, ticks='0'), signal.SIGTERM)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError('accepted nonpositive/group-special PID')
+        owner = fixture_signals.identity(os.getpid())
+        owner['ticks'] = str(int(owner['ticks']) + 1)
+        assert not fixture_signals.send(owner, signal.SIGTERM)
+        assert not fixture_signals.send(owner, signal.SIGKILL, group=True)
+        sent.assert_not_called()
+
+
+CASES = (signal_guard_refuses_a_gone_parent, signal_guard_refuses_invalid_or_replaced_targets, watch_gives_back_a_login_held_without_a_pass,
          watch_posts_once_for_a_login_out_with_no_pass,
          watch_leaves_a_login_its_pass_holds,
          rung_records_the_opening,

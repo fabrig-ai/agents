@@ -15,21 +15,23 @@ scratch=$(mktemp -d /tmp/agents-check.XXXXXX)
 export TMPDIR=$scratch
 # Retention requested by a caller must not escape this gate's scratch.
 unset GATE_POLICY_FIXTURE_EVIDENCE
+signal_helper=$PWD/scripts/devel/fixture_signals.py
 names=() pids=() stopped=0
 cleanup() {
     local pid tries
+    touch "$scratch/stop-requested"
     # No suite's process group outlives the gate, and the scratch goes only
     # once each has gone: a stopped suite may still be stopping its own
     # children, and a second signal would cut that short.
     for pid in "${pids[@]}"; do
         if ((!stopped)); then
-            kill -TERM -- "-$pid" 2>/dev/null || continue
+            python3 "$signal_helper" send "$scratch/$pid.identity" TERM group || continue
         fi
         for ((tries = 0; tries < 150; tries++)); do
-            kill -0 -- "-$pid" 2>/dev/null || continue 2
+            python3 "$signal_helper" alive "$scratch/$pid.identity" || continue 2
             sleep 0.1
         done
-        kill -KILL -- "-$pid" 2>/dev/null || true
+        python3 "$signal_helper" send "$scratch/$pid.identity" KILL group || true
     done
     wait
     # Whatever a fixture left read-only must still go.
@@ -41,8 +43,9 @@ trap cleanup EXIT
 stop() {
     local pid
     stopped=1
+    touch "$scratch/stop-requested"
     for pid in "${pids[@]}"; do
-        kill -TERM -- "-$pid" 2>/dev/null || true
+        python3 "$signal_helper" send "$scratch/$pid.identity" TERM group || true
     done
     exit "$1"
 }
@@ -56,16 +59,18 @@ suite() {
     local name=$1
     shift
     names+=("$name")
-    (
+    # The supervisor owns the session until every child (including an
+    # abruptly exited suite's adopted descendants) has been killed and reaped.
+    python3 "$signal_helper" supervise "$scratch" bash -c '
+        scratch=$1 name=$2
+        shift 2
         start=$(date +%s%N)
         status=0
-        # Bash's time includes the command (also a shell function) and its
-        # waited-for children, while keeping their stderr in the suite log.
-        TIMEFORMAT='%3U %3S'
+        TIMEFORMAT="%3U %3S"
         { time "$@" >"$scratch/$name.log" 2>&1 </dev/null; } 2>"$scratch/$name.time" || status=$?
         echo $((($(date +%s%N) - start) / 1000000)) >"$scratch/$name.ms"
         exit "$status"
-    ) &
+    ' fixture-suite "$scratch" "$name" "$@" </dev/null &
     pids+=("$!")
 }
 
@@ -81,6 +86,7 @@ shellcheck_tools() {
     shellcheck -x -P SCRIPTDIR "${bash_tools[@]}"
 }
 
+export -f shellcheck_tools
 suite shellcheck shellcheck_tools
 suite test-fixture-waits scripts/devel/test-fixture-waits
 suite test-gate-budget scripts/devel/test-gate-budget
@@ -116,6 +122,7 @@ for i in "${!names[@]}"; do
     name=${names[i]}
     status=0
     wait "${pids[i]}" || status=$?
+    unset "pids[i]"
     log=$scratch/$name.log
     cat "$log"
     # A log cut off mid-line must not swallow its gate-step line.

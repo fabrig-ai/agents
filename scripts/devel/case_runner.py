@@ -1,6 +1,7 @@
 """One process, session and directory per fixture case, over a pool."""
 from concurrent.futures import ThreadPoolExecutor
 import ctypes
+import fixture_signals
 import os
 from pathlib import Path
 import signal
@@ -44,7 +45,10 @@ def reap_descendants():
             return
         for pid in children:
             try:
-                os.kill(pid, signal.SIGKILL)
+                if pid <= 1:
+                    continue
+                # These are our unreaped children; waitpid below owns reaping.
+                fixture_signals.send(fixture_signals.identity(pid), signal.SIGKILL)
                 os.waitpid(pid, 0)
             except (ProcessLookupError, ChildProcessError):
                 pass
@@ -71,18 +75,25 @@ def ignore_signals():
 
 def stop_cases(procs):
     """SIGTERM lets each case's cleanups run; SIGKILL takes whatever remains of its session."""
-    for sig in (signal.SIGTERM, signal.SIGKILL):
-        for proc in procs:
-            try:
-                os.killpg(proc.pid, sig)
-            except (ProcessLookupError, PermissionError):
-                pass
-        deadline = time.monotonic() + CASE_STOP_S
-        for proc in procs:
-            try:
-                proc.wait(timeout=max(0, deadline - time.monotonic()))
-            except subprocess.TimeoutExpired:
-                pass
+    pinned = [(proc, proc.fixture_target.capture_members()) for proc in procs]
+    try:
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            for proc, members in pinned:
+                if sig == signal.SIGKILL:
+                    members.extend(proc.fixture_target.capture_members())
+                proc.fixture_target.send(sig)
+                for member in members:
+                    member.send(sig)
+            deadline = time.monotonic() + CASE_STOP_S
+            for proc in procs:
+                try:
+                    proc.wait(timeout=max(0, deadline - time.monotonic()))
+                except subprocess.TimeoutExpired:
+                    pass
+    finally:
+        for _, members in pinned:
+            for member in members:
+                member.close()
 
 
 def main(suite, cases, run, slow=(), template=None, timeout=HUNG_CASE_S, prefix='fixture-'):
@@ -126,9 +137,11 @@ def run_pool(suite, cases, slow, timeout, directory, built, start):
             if built is not None:
                 args += ['--built', str(built)]
             # Names never enter lab paths: fixture wrappers match argv substrings.
-            proc = subprocess.Popen(args, stdin=subprocess.DEVNULL,
+            proc = subprocess.Popen([sys.executable, "-S", "-B", fixture_signals.__file__, "supervise", "-", *args],
+                                    stdin=subprocess.DEVNULL,
                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True,
                                     env=dict(os.environ, TMPDIR=directory))
+            proc.fixture_target = fixture_signals.Target(fixture_signals.identity(proc.pid))
             live.add(proc)
         try:
             try:
@@ -139,6 +152,7 @@ def run_pool(suite, cases, slow, timeout, directory, built, start):
         finally:
             with guard:
                 live.discard(proc)
+                proc.fixture_target.close()
         return proc.returncode, timed_out, output.decode(errors='replace'), time.monotonic() - case_start
 
     pool = ThreadPoolExecutor(min(len(cases), len(os.sched_getaffinity(0))))
@@ -165,8 +179,9 @@ def run_pool(suite, cases, slow, timeout, directory, built, start):
         with guard:
             stopping = True
             procs = list(live)
+            # Workers cannot close these pidfds until group delivery finishes.
+            stop_cases(procs)
         pool.shutdown(wait=False, cancel_futures=True)
-        stop_cases(procs)
         pool.shutdown(wait=True, cancel_futures=True)
         raise
     pool.shutdown()

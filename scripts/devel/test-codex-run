@@ -7,14 +7,15 @@ started=$(date +%s.%N)
 kit=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
 t=$(mktemp -d "${TMPDIR:-/tmp}/test-codex-run.XXXXXX")
 cleanup() {
-    local file pid
-    for file in "$DEV_ROOT"/fake/*.pid; do
-        [[ -f $file && ! -f ${file%.pid}.ended ]] || continue
-        read -r pid <"$file"
-        kill "$pid" 2>/dev/null || true
+    local file
+    for file in "$DEV_ROOT"/fake/*.identity; do
+        [[ -f $file && ! -f ${file%.identity}.ended ]] || continue
+        python3 "$signal_helper" send "$file" TERM group || true
     done
     rm -rf "$t"
 }
+signal_helper=$kit/fixture_signals.py
+export FIXTURE_SIGNALS=$signal_helper
 export HOME=$t/home DEV_ROOT=$t/workspace POST_NAME=o/caller
 export CODEX_RUN_RETRY_DELAYS='0 0 0'
 mkdir -p "$HOME" "$DEV_ROOT/fake" "$t/bin" "$t/reports" "$t/work dir" "$t/kit"
@@ -40,7 +41,7 @@ fixture = pathlib.Path(os.environ['DEV_ROOT']).resolve() / 'fake'
 (fixture / 'launch.args').write_bytes(b'\0'.join(os.fsencode(a) for a in args) + b'\0')
 if (fixture / 'launch-fail').exists():
     sys.exit('fixture launch failed')
-env = {'HOME': os.environ['HOME'], 'PATH': '/usr/bin:/bin'}
+env = {'HOME': os.environ['HOME'], 'PATH': '/usr/bin:/bin', 'FIXTURE_SIGNALS': os.environ['FIXTURE_SIGNALS']}
 unit = ''
 stop = None
 assert '--service-type=exec' in args
@@ -91,6 +92,9 @@ with (fixture / (unit + '.log')).open('wb') as log:
         os.dup2(log.fileno(), 2)
         proc = subprocess.Popen(command, env=env, stdin=subprocess.DEVNULL,
                                 stdout=log, stderr=log, start_new_session=True)
+        helper = __import__('runpy').run_path(os.environ['FIXTURE_SIGNALS'])
+        owner = helper['identity'](proc.pid)
+        helper['publish'](fixture / (unit + '.identity'), f"{proc.pid} {owner['ticks']}")
         (fixture / (unit + '.pid')).write_text(str(proc.pid) + '\n')
         status = proc.wait()
         if stop_args is not None:
@@ -134,7 +138,6 @@ if scenario in ('on-stop', 'on-stop-failure', 'on-stop-timeout'):
     hook.chmod(0o700)
 if scenario == 'pause':
     import time
-    (state / 'worker.pid').write_text(str(os.getppid()))
     (state / 'codex.pid').write_text(str(os.getpid()))
     print(json.dumps({'type': 'thread.started', 'thread_id': 'thread-fixture'}), flush=True)
     time.sleep(10)
@@ -727,9 +730,12 @@ for signal in TERM INT KILL; do
     # stamper to record the event before killing the unit, so KILL leaves a
     # thread to recover even though turn() never writes the thread file.
     poll_until grep -Fq '"thread_id": "thread-fixture"}' "$state/events.jsonl"
-    worker=$(cat "$state/worker.pid")
-    if [[ $signal == TERM ]]; then kill -TERM "$worker"
-    else kill -"$signal" -- "-$worker"; fi
+    poll_until test -s "$fake/codex-run-$id.identity"
+    if [[ $signal == TERM ]]; then
+        python3 "$signal_helper" send "$fake/codex-run-$id.identity" "$signal"
+    else
+        python3 "$signal_helper" send "$fake/codex-run-$id.identity" "$signal" group
+    fi
     wait_unit "codex-run-$id"
     case $signal in
         TERM|INT)

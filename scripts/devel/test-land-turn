@@ -2,6 +2,7 @@
 """Exercise advisory turns with isolated local pipes and simulated SSH; no real gate."""
 from case_runner import HUNG_TOOL_S
 import argparse
+import fixture_signals
 import ast
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 import fcntl
@@ -408,6 +409,7 @@ class TurnLab(Lab):
             git(clone, 'commit', '-qm', tag)
             self.clones[tag] = clone
         self.transports = []
+        self.signal_targets = []
 
     def start_land(self, tag='a', extra=(), environment=None, cwd=None):
         out = (self.path / (tag + '.land.txt')).open('w')
@@ -431,16 +433,29 @@ class TurnLab(Lab):
         def find():
             rows = subprocess.run(['ps', '-o', 'pid=,args=', '--ppid', str(client.pid)],
                                   capture_output=True, text=True, check=False).stdout.splitlines()
-            return next((int(row.split()[0]) for row in rows
-                         if str(KIT / 'land-turn.py') + ' client ' in row), None)
+            for row in rows:
+                if str(KIT / 'land-turn.py') + ' client ' in row:
+                    target = fixture_signals.Target(dict(pid=int(row.split()[0])), parent=client.pid)
+                    if target.alive():
+                        self.signal_targets.append(target)
+                        return target
+                    target.close()
+            return None
         return wait_for(find, 'own advisory client')
 
     def transport(self, client):
         advisory = self.turn_client(client)
         def find():
-            rows = subprocess.run(['ps', '-o', 'pid=,comm=', '--ppid', str(advisory)],
+            rows = subprocess.run(['ps', '-o', 'pid=,comm=', '--ppid', str(advisory.pid)],
                                   capture_output=True, text=True, check=False).stdout.splitlines()
-            return next((int(row.split()[0]) for row in rows if row.split()[1] == 'python3'), None)
+            for row in rows:
+                if row.split()[1] == 'python3':
+                    target = fixture_signals.Target(dict(pid=int(row.split()[0])), parent=advisory.pid)
+                    if advisory.alive() and target.alive():
+                        self.signal_targets.append(target)
+                        return target
+                    target.close()
+            return None
         pid = wait_for(find, 'own transport child')
         self.transports.append(pid)
         return pid
@@ -464,7 +479,9 @@ class TurnLab(Lab):
             self.allow(marker.stem)
         super().cleanup()
         for pid in getattr(self, 'transports', []):
-            wait_for(lambda: not live(pid), 'owned holder exit')
+            wait_for(lambda: not pid.alive(), 'owned holder exit')
+        for target in getattr(self, 'signal_targets', []):
+            target.close()
 
 
 def serialization(lab):
@@ -631,9 +648,9 @@ def lost(lab, queued=False, kill_client=False):
                 wait_for(lambda: 'land: another landing in temper has its turn; waiting for it'
                          in (lab.path / 'a.land.txt').read_text(), 'landing child at host turn')
             if kill_client:
-                os.kill(lab.turn_client(client), signal.SIGKILL)
+                lab.turn_client(client).send(signal.SIGKILL)
                 lab.done(client, 137)
-                wait_for(lambda: not live(pid), 'EOF releases holder after client kill')
+                wait_for(lambda: not pid.alive(), 'EOF releases holder after client kill')
                 if queued:
                     assert not (lab.clones['a'] / '.git/land-turn.lock').exists()
                 else:
@@ -641,7 +658,7 @@ def lost(lab, queued=False, kill_client=False):
                     grant(probe)
                     disconnect(probe)
             else:
-                os.kill(pid, signal.SIGKILL)
+                pid.send(signal.SIGKILL)
                 wait_for(lambda: any(e['event'] == 'fail-open' for e in lab.turn_events()),
                          'visible connection failure')
         if kill_client and not queued:
@@ -651,7 +668,7 @@ def lost(lab, queued=False, kill_client=False):
             lab.done(client)
             assert len([e for e in lab.turn_events() if e['event'] == 'fail-open']) == 1
         return {'layer': 'actual-land', 'queued': queued, 'killed_client': kill_client,
-                'holder_pid': pid, 'holder_ended': not live(pid),
+                'holder_pid': pid.pid, 'holder_ended': not pid.alive(),
                 'land_continues_after_loss': not queued or not kill_client}
     finally:
         if blocker:
@@ -774,9 +791,9 @@ def terminated(lab):
         client = lab.start_land()
         lab.prove()
         pid = lab.transport(client)
-        os.kill(lab.turn_client(client), signal.SIGTERM)
+        lab.turn_client(client).send(signal.SIGTERM)
         lab.done(client, 143)
-        assert not live(pid)
+        assert not pid.alive()
         assert not (lab.clones['a'] / '.git/land-turn.lock').exists()
         return {'layer': 'actual-land', 'queued_sigterm_exit': 143, 'holder_reaped': True}
     finally:

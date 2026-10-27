@@ -362,6 +362,7 @@ def fault(point, token):
         if os.environ.get('HEAVY_RECOVERY_FIXTURE') != '1' or not path.is_relative_to(TMP):
             raise Refusal('fault barriers require an isolated recovery fixture')
         if (path / ('arm-' + point)).exists():
+            (path / (token + '-' + point + '.identity')).write_text(json.dumps(identity()))
             (path / (token + '-' + point)).write_text(str(os.getpid()))
             while not (path / ('continue-' + point)).exists():
                 time.sleep(0.02)

@@ -1476,9 +1476,14 @@ def hung_fetch_ends_at_the_timeout(lab):
     lab.append(*tier_run('temper', main, None, 10, [(main, [])], baseline=True))
     pid_file = lab.root / 'child.pid'
     parent_file = lab.root / 'parent.pid'
-    child = (f'from pathlib import Path; import os, signal; '
+    identities = lab.root / 'signal-identities'
+    identities.mkdir()
+    helper = str(SCRIPT.with_name('fixture_signals.py'))
+    child = (f'from pathlib import Path; import os, signal, runpy; '
+             f"Path({str(identities / 'child')!r}).write_text(__import__('json').dumps(runpy.run_path({helper!r})['identity'](os.getpid()))); "
              f'Path({str(pid_file)!r}).write_text(str(os.getpid())); signal.pause()')
     lab.standin_git("if sys.argv[3] == 'fetch':\n"
+                    f'    Path({str(identities / "parent")!r}).write_text(json.dumps(__import__("runpy").run_path({helper!r})["identity"](os.getpid())))\n'
                     f'    Path({str(parent_file)!r}).write_text(str(os.getpid()))\n'
                     f'    subprocess.Popen([sys.executable, "-c", {child!r}])\n'
                     '    import signal; signal.pause()\n')
@@ -1520,11 +1525,13 @@ tool['subprocess'].Popen = spawn
                 continue
             raise AssertionError(f'stand-in process {pid} survived the timeout')
     finally:
-        if parent_file.exists():
-            try:
-                os.killpg(int(parent_file.read_text()), 9)
-            except ProcessLookupError:
-                pass
+        # The production timeout may already have reaped the group leader.
+        # Each stand-in published its own identity; only those exact processes
+        # can receive fallback cleanup, never a reused group number.
+        import fixture_signals
+        for path in identities.iterdir():
+            fixture_signals.send(json.loads(path.read_text()), 9)
+
 
 
 def run_without_its_start_judges_nothing(lab):

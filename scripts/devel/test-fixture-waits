@@ -1,8 +1,17 @@
 #!/usr/bin/env python3
 """Hold fixture publications between create, write and journal completion."""
+import ctypes
 import json
+import os
+import signal
+import time
+import case_runner
+import fixture_signals
 from pathlib import Path
 import runpy
+import subprocess
+import sys
+from case_runner import HUNG_TOOL_S
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -23,6 +32,7 @@ class Publications(unittest.TestCase):
         self.lab.faults = self.root / 'faults'
         self.lab.base.mkdir()
         self.lab.faults.mkdir()
+        self.lab.barrier_owners = {}
         self.task = {'label': 'gate', 'token': 'token', 'state': 'released'}
         (self.lab.base / 'state.json').write_text(json.dumps({'tasks': {'token': self.task}}))
         self.journal = self.lab.base / 'events.jsonl'
@@ -48,9 +58,96 @@ class Publications(unittest.TestCase):
     def test_empty_barrier_waits_for_pid(self):
         barrier = self.lab.faults / 'token-claim'
         barrier.touch()
+        barrier.with_name(barrier.name + '.identity').write_text(json.dumps({'pid': 1234, 'ticks': '5678'}))
         with patch.object(SUPPORT['time'], 'sleep', side_effect=lambda _: barrier.write_text('1234')) as yielded:
             self.assertEqual(self.lab.barrier('claim', 'gate'), 1234)
         yielded.assert_called_once()
+
+    def test_supervisor_reaps_after_case_crashes_with_open_stdout(self):
+        helper = Path(__file__).with_name('fixture_signals.py')
+        code = ('import os, subprocess, sys; '
+                'child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"]); '
+                'print(child.pid, flush=True); os._exit(23)')
+        result = subprocess.run([sys.executable, '-S', '-B', str(helper), 'supervise', '-',
+                                 sys.executable, '-c', code], stdin=subprocess.DEVNULL,
+                                capture_output=True, text=True, start_new_session=True, timeout=HUNG_TOOL_S)
+        self.assertEqual(result.returncode, 23, result.stderr)
+        self.assertFalse(Path('/proc/' + result.stdout.strip()).exists())
+
+    def test_escalation_uses_pinned_members_after_leader_is_reaped(self):
+        kernel = ctypes.CDLL(None)
+        previous = ctypes.c_int()
+        self.assertEqual(kernel.prctl(37, ctypes.byref(previous), 0, 0, 0), 0)
+        self.assertEqual(kernel.prctl(36, 1, 0, 0, 0), 0)
+        ready = self.root / 'ignoring-child'
+        child_code = ('import os, signal, time; from pathlib import Path; '
+                      'signal.signal(signal.SIGTERM, signal.SIG_IGN); '
+                      f'path=Path({str(ready)!r}); temporary=path.with_suffix(".new"); '
+                      'temporary.write_text(str(os.getpid())); temporary.replace(path); time.sleep(60)')
+        code = f'import subprocess, sys; subprocess.Popen([sys.executable, "-c", {child_code!r}]).wait()'
+        proc = subprocess.Popen([sys.executable, '-c', code], start_new_session=True,
+                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        proc.fixture_target = fixture_signals.Target(fixture_signals.identity(proc.pid))
+        member = None
+        try:
+            deadline = time.monotonic() + HUNG_TOOL_S
+            while not ready.exists() and time.monotonic() < deadline:
+                time.sleep(.01)
+            pid = int(ready.read_text())
+            member = fixture_signals.Target(dict(pid=pid), parent=proc.pid)
+            case_runner.stop_cases([proc])
+            self.assertEqual(proc.returncode, -signal.SIGTERM)
+            self.assertEqual(os.waitpid(pid, 0)[1], signal.SIGKILL)
+            self.assertFalse(member.alive())
+        finally:
+            proc.fixture_target.send(signal.SIGKILL)
+            proc.wait()
+            proc.fixture_target.close()
+            if member is not None:
+                member.send(signal.SIGKILL)
+                member.close()
+                try:
+                    os.waitpid(pid, 0)
+                except ChildProcessError:
+                    pass
+            kernel.prctl(36, previous.value, 0, 0, 0)
+
+    def test_supervisor_refuses_a_gate_stopped_before_identity_publication(self):
+        helper = Path(__file__).with_name('fixture_signals.py')
+        marker = self.root / 'must-not-run'
+        (self.root / 'stop-requested').touch()
+        code = f'from pathlib import Path; Path({str(marker)!r}).touch()'
+        result = subprocess.run([sys.executable, '-S', '-B', str(helper), 'supervise', str(self.root),
+                                 sys.executable, '-c', code], stdin=subprocess.DEVNULL,
+                                capture_output=True, text=True, start_new_session=True, timeout=HUNG_TOOL_S)
+        self.assertEqual(result.returncode, 143, result.stderr)
+        self.assertFalse(marker.exists())
+
+    def test_supervisor_forwards_late_term_to_its_pinned_child(self):
+        helper = Path(__file__).with_name('fixture_signals.py')
+        ready, ended = self.root / 'ready', self.root / 'graceful-exit'
+        code = ("import signal, sys; from pathlib import Path; "
+                f"signal.signal(signal.SIGTERM, lambda *_: (Path({str(ended)!r}).touch(), sys.exit(0))); "
+                f"Path({str(ready)!r}).touch(); signal.pause()")
+        proc = subprocess.Popen([sys.executable, '-S', '-B', str(helper), 'supervise', '-',
+                                 sys.executable, '-c', code], stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+        target = fixture_signals.Target(fixture_signals.identity(proc.pid))
+        try:
+            deadline = time.monotonic() + HUNG_TOOL_S
+            while not ready.exists() and time.monotonic() < deadline:
+                time.sleep(.01)
+            self.assertTrue(ready.exists())
+            # Signal only the supervisor, after launch. Its owned child must
+            # receive TERM gracefully without waiting for group escalation.
+            target.send(signal.SIGTERM)
+            _, errors = proc.communicate(timeout=HUNG_TOOL_S)
+            self.assertEqual(proc.returncode, 0, errors)
+            self.assertTrue(ended.exists())
+        finally:
+            target.send_group(signal.SIGKILL)
+            proc.communicate()
+            target.close()
 
     def test_partial_json_waits_for_complete_value(self):
         marker = self.root / 'payload.json'

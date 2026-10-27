@@ -7,6 +7,7 @@ Raw evidence is retained in --evidence (a new directory).
 """
 from case_runner import HUNG_TOOL_S
 import argparse
+import fixture_signals
 import fcntl
 import hashlib
 import json
@@ -115,6 +116,7 @@ class Lab:
         self.env.pop('SKEIN_GATE_POLICY_HELPER', None)
         self.base = self.path / 'tmp/heavy'
         self.prefix = 'skein-heavy-' + hashlib.sha256(str(self.base).encode()).hexdigest()[:12]
+        self.barrier_owners = {}
         self.clients = []
         self.extra_units = []
         self.installed = False
@@ -202,7 +204,7 @@ class Lab:
                     task[key] -= seconds
             if changed_boot:
                 # Stop only while we own the lock, so the timer can recover it.
-                os.kill(task['wrapper']['pid'], signal.SIGSTOP)
+                fixture_signals.send(task['wrapper'], signal.SIGSTOP)
                 self.boot.write_text('fixture-next-boot\n')
             temporary = self.base / 'state.json.fixture-new'
             temporary.write_text(json.dumps(data) + '\n')
@@ -251,8 +253,12 @@ class Lab:
     def barrier(self, point, label):
         token = wait_for(lambda: self.task(label), label + ' token')['token']
         path = self.faults / (token + '-' + point)
-        return wait_for(lambda: int(text) if path.exists() and (text := path.read_text()) else None,
-                        point + ' barrier PID')
+        pid = wait_for(lambda: int(text) if path.exists() and (text := path.read_text()) else None,
+                       point + ' barrier PID')
+        owner = json.loads(path.with_name(path.name + '.identity').read_text())
+        assert owner['pid'] == pid
+        self.barrier_owners[pid] = owner
+        return pid
 
     def disarm(self, point):
         (self.faults / ('arm-' + point)).unlink(missing_ok=True)
@@ -260,7 +266,7 @@ class Lab:
 
     def kill_wrapper(self, label):
         task = wait_for(lambda: self.task(label) if self.task(label).get('wrapper') else None, label + ' wrapper')
-        os.kill(task['wrapper']['pid'], signal.SIGKILL)
+        fixture_signals.send(task['wrapper'], signal.SIGKILL)
 
     def verify(self, retired_tasks=None):
         events = self.events()
@@ -345,7 +351,7 @@ class Lab:
         if (self.base / 'state.json').exists():
             for task in self.state()['tasks'].values():
                 if task['state'] != 'released' and owned_wrapper(task.get('wrapper')):
-                    os.kill(task['wrapper']['pid'], signal.SIGKILL)
+                    fixture_signals.send(task['wrapper'], signal.SIGKILL)
                 for unit in (task['unit'], task.get('wrapper_unit')):
                     if unit:
                         self.call(['systemctl', '--user', 'stop', unit], check=False)
@@ -374,7 +380,7 @@ class Lab:
         if (self.base / 'state.json').exists():
             for task in self.state()['tasks'].values():
                 if owned_wrapper(task.get('wrapper')):
-                    os.kill(task['wrapper']['pid'], signal.SIGKILL)
+                    fixture_signals.send(task['wrapper'], signal.SIGKILL)
                 for unit in (task['unit'], task.get('wrapper_unit')):
                     if unit:
                         self.call(['systemctl', '--user', 'kill', '--kill-whom=all', '--signal=KILL', unit], check=False)
@@ -1105,7 +1111,7 @@ def land_floor_wait_orphan(lab, changed_boot=False):
     lab.call(['systemctl', '--user', 'start', lab.prefix + '-reconcile.timer'])
     task = lab.released(label)
     if changed_boot:
-        os.kill(task['wrapper']['pid'], signal.SIGCONT)
+        fixture_signals.send(task['wrapper'], signal.SIGCONT)
     lab.done(client, 137)
     assert task['outcome'] == 'recovered' and task['code'] == 137
     assert not task.get('payload_started') and not lab.event(label, 'payload_begin')
@@ -1243,7 +1249,7 @@ def kill_at(lab, point):
     lab.arm(point)
     gate = lab.start('gate', gate=True)
     pid = lab.barrier(point, 'gate')
-    os.kill(pid, signal.SIGKILL)
+    fixture_signals.send(lab.barrier_owners[pid], signal.SIGKILL)
     lab.disarm(point)
     lab.released('gate')
     if gate.pid != pid:
@@ -1449,7 +1455,7 @@ def late_launch(lab, release_crash=False):
         reconciler = lab.barrier('release_saved', 'gate')
         assert lab.task('gate')['state'] == 'released'
         lab.call(['systemctl', '--user', 'stop', lab.prefix + '-reconcile.timer'])
-        os.kill(reconciler, signal.SIGKILL)
+        fixture_signals.send(lab.barrier_owners[reconciler], signal.SIGKILL)
         lab.disarm('release_saved')
         task = lab.task('gate')
         transport = lab.base / (task['token'] + '.env')
@@ -1668,7 +1674,7 @@ def publication_crash(lab, point='receipt_ready'):
     if point == 'receipt_fsynced':
         assert (lab.base / 'receipts' / (task['token'] + '.json.new')).stat().st_mode & 0o777 == 0o600
     digest = hashlib.sha256(Path(task['log']).read_bytes()).hexdigest()
-    os.kill(pid, signal.SIGKILL)
+    fixture_signals.send(lab.barrier_owners[pid], signal.SIGKILL)
     lab.disarm(point)
     lab.done(gate)
     receipt = json.loads((lab.base / 'receipts' / (task['token'] + '.json')).read_text())
@@ -1828,7 +1834,7 @@ def land_interrupt(lab):
                                 stdin=subprocess.DEVNULL, stdout=stream, stderr=subprocess.STDOUT)
     lab.clients.append(land)
     wait_for(marker.exists, 'land gate running')
-    os.killpg(land.pid, signal.SIGINT)
+    fixture_signals.send(fixture_signals.identity(land.pid), signal.SIGINT, group=True)
     assert land.wait(timeout=HUNG_TOOL_S) == 4
     text = output.read_text()
     assert 'Traceback' not in text and 'heavy: interrupted; cancelled task' in text, text

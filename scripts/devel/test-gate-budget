@@ -22,7 +22,8 @@ class BudgetFixtures(unittest.TestCase):
         scripts = self.root / 'scripts'
         devel = scripts / 'devel'
         devel.mkdir(parents=True)
-        (devel / 'gate-shares.py').write_bytes((KIT / 'gate-shares.py').read_bytes())
+        for name in ('gate-shares.py', 'fixture_signals.py'):
+            (devel / name).write_bytes((KIT / name).read_bytes())
         (scripts / 'gate-shares').write_text('ballast 100 Fixtures supply the remaining gate CPU\n' + admission)
         # Exercise the actual timing, logging and share check with two suites.
         # process_time burns CPU in a child, so sleeping cannot satisfy this test.

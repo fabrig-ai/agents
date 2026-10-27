@@ -999,7 +999,8 @@ printf '%s\\n' "$before"
         script.parent.mkdir()
         shutil.copy(KIT.parent / "check.sh", script)
         (script.parent / "devel").mkdir()
-        shutil.copy(KIT / "gate-shares.py", script.parent / "devel/gate-shares.py")
+        for name in ("gate-shares.py", "fixture_signals.py"):
+            shutil.copy(KIT / name, script.parent / "devel" / name)
         self.script(self.repo / "scripts/devel/gate-policy.sh", "#!/bin/sh\nexit 91\n")
         self.script(self.bin / "shellcheck", "#!/bin/sh\nexit 0\n")
         self.script(self.repo / "scripts/devel/test-post",

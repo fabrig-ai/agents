@@ -8,11 +8,16 @@ trap 'echo "test-post: failed at line $LINENO" >&2' ERR
 started=$(date +%s.%N)
 kit=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
 root=$(mktemp -d)
+signal_helper=$kit/fixture_signals.py
+identities=$root/identities
+mkdir "$identities"
 failed=0 checks=0
 pids=()
 stop_children() {
     local pid
-    for pid in "${pids[@]}"; do kill "$pid" 2>/dev/null || true; done
+    for pid in "${pids[@]}"; do
+        python3 "$signal_helper" send "$identities/$pid" TERM || true
+    done
     for pid in "${pids[@]}"; do wait "$pid" 2>/dev/null || true; done
 }
 cleanup() {
@@ -195,15 +200,16 @@ stage_wake_mail() {
 concurrent_delivered() { [[ $(count "$t/a/tmp/post/concurrent/new") == 2 ]]; }
 
 local_and_remote() {
-    post wait o/live --timeout "$HUNG_POST_S" >"$t/wait.out" &
+    python3 "$signal_helper" record-exec "$identities" "$POST_TOOL" wait o/live --timeout "$HUNG_POST_S" >"$t/wait.out" </dev/null &
     waiter=$!
     pids+=("$waiter")
     poll_until test -s "$t/a/tmp/post/o+live/waiter"
     # Paused, the fast-polling waiter cannot take the mail before send sees it alive.
     read -r live_pid _ <"$t/a/tmp/post/o+live/waiter"
-    kill -STOP "$live_pid"
+    [[ $live_pid == "$waiter" ]]
+    python3 "$signal_helper" send "$identities/$waiter" STOP
     out=$(capture post send o/live 'local subject' <<< 'local body')
-    kill -CONT "$live_pid"
+    python3 "$signal_helper" send "$identities/$waiter" CONT
     expect 'local send reaches live waiter' "$out" 'status=0' 'waiting'
     id=$(sed -n '2s/ .*//p' <<<"$out")
     wait "$waiter"
@@ -614,7 +620,7 @@ waiters_and_limits() {
     rm "$t/a/tmp/post/codex/waiter"
     expect 'Codex kind without waiter' "$(capture post send codex sleeping <<< body)" 'status=3' 'codex owner not running'
     expect 'zero timeout is silent' "[$(capture post wait empty --timeout 0)]" '[status=1]'
-    post wait replaced --timeout "$HUNG_POST_S" >"$t/replaced.out" 2>&1 &
+    python3 "$signal_helper" record-exec "$identities" "$POST_TOOL" wait replaced --timeout "$HUNG_POST_S" >"$t/replaced.out" 2>&1 </dev/null &
     first=$!
     pids+=("$first")
     poll_until test -s "$t/a/tmp/post/replaced/waiter"
@@ -793,10 +799,10 @@ STUB
     : >"$t/resumes"
     mkfifo "$t/resume-barrier"
     exec {resume_barrier}<>"$t/resume-barrier"
-    FIXTURE_RESUME_BARRIER=$t/resume-barrier post send concurrent first <<< body >"$t/concurrent-1" &
+    FIXTURE_RESUME_BARRIER=$t/resume-barrier python3 "$signal_helper" record-exec "$identities" "$POST_TOOL" send concurrent first <<< body >"$t/concurrent-1" &
     one=$!
     pids+=("$one")
-    FIXTURE_RESUME_BARRIER=$t/resume-barrier post send concurrent second <<< body >"$t/concurrent-2" &
+    FIXTURE_RESUME_BARRIER=$t/resume-barrier python3 "$signal_helper" record-exec "$identities" "$POST_TOOL" send concurrent second <<< body >"$t/concurrent-2" &
     two=$!
     pids+=("$two")
     poll_until concurrent_delivered
@@ -813,6 +819,11 @@ parts=(local_and_remote wake wake_guard wake_command waiter_listing waiter_holde
 if (($#)); then parts=("$@"); fi
 for part in "${parts[@]}"; do
     (
+        # Publish this subshell's own identity before it can start children.
+        read -r self_stat <"/proc/$BASHPID/stat"
+        self_stat=${self_stat##*) }
+        read -ra self_fields <<<"$self_stat"
+        printf '%s %s' "$BASHPID" "${self_fields[19]}" >"$identities/$BASHPID"
         # A part's exit handler stops its own children, never the earlier parts.
         # shellcheck disable=SC2030
         pids=()
@@ -820,7 +831,7 @@ for part in "${parts[@]}"; do
         fixture "$root/$part"
         "$part"
         echo "$checks $failed" >"$root/$part.result"
-    ) >"$root/$part.log" 2>&1 &
+    ) >"$root/$part.log" 2>&1 </dev/null &
     # shellcheck disable=SC2031
     pids+=("$!")
 done
