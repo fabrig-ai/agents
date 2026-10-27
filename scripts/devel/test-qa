@@ -1397,10 +1397,13 @@ def deployment_pass(lab, *logins, in_place=()):
 def deployment(lab, directory, name='box', login=None):
     box = directory / name
     box.mkdir(exist_ok=True)
+    (box / 'pid').unlink(missing_ok=True)
     path = lab.root / 'login-store' / login / 'login' if login else None
     program = executable(box / 'server', 'import os, time\nfrom pathlib import Path\n'
         + (f'Path({str(path)!r}).rename({str(box / "login")!r})\n' if login else '')
-        + f'Path({str(box / "pid")!r}).write_text(str(os.getpid()))\n'
+        + f'pid = Path({str(box / "pid-new")!r})\n'
+          'pid.write_text(str(os.getpid()))\n'
+        + f'pid.replace({str(box / "pid")!r})\n'
           'while True: time.sleep(1)\n')
     unit = lab.run('deploy', str(directory), name, '--', str(program)).stdout.strip()
     wait_for(lambda: (box / 'pid').exists())
