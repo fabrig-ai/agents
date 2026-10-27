@@ -222,6 +222,10 @@ def installed():
     return data.get('installation') is not None
 
 
+def shrink(task):
+    return {key: task[key] for key in ('token', 'id', 'state', 'code', 'row_durable', 'ended')}
+
+
 class Ledger:
     def __init__(self):
         self.path = BASE / 'state.json'
@@ -266,6 +270,19 @@ class Ledger:
         self.data['pending'].append(fields)
 
     def save(self):
+        now = time.time()
+        tasks = {}
+        for token, task in self.tasks.items():
+            if (task['state'] == 'released' and task.get('row_durable') and
+                    now - task['ended'] >= ROOM_AFTER and
+                    (task.get('release_complete') or 'label' not in task) and
+                    (BASE / 'receipts' / (token + '.json')).is_file()):
+                if now - task['ended'] >= 24 * 60 * 60:
+                    continue
+                task = shrink(task)
+            tasks[token] = task
+        # Replace the mapping: callers may be reconciling its previous values.
+        self.data['tasks'] = tasks
         atomic(self.path, self.data)
         self.flush()
 

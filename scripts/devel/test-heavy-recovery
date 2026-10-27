@@ -122,6 +122,7 @@ class Lab:
         self.started = time.monotonic()
         self.number = 0
         self.retired_tasks = {}
+        self.completed_tasks = {}
 
     def call(self, args, check=True, environment=None, cwd=None, **kw):
         result = subprocess.run([str(x) for x in args], env=environment or self.env, cwd=cwd or self.repo,
@@ -166,7 +167,11 @@ class Lab:
         self.installed = True
 
     def state(self):
-        return json.loads((self.base / 'state.json').read_text())
+        data = json.loads((self.base / 'state.json').read_text())
+        self.__dict__.setdefault('completed_tasks', {}).update(
+            {token: task for token, task in data['tasks'].items()
+             if task['state'] == 'released' and 'label' in task})
+        return data
 
     def pueue_era(self, edit=None):
         previous = hashlib.sha256(b'pueue-era fixture').hexdigest()
@@ -197,7 +202,7 @@ class Lab:
         with (self.base / 'host.lock').open('a') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             data = self.state()
-            task = next(task for task in data['tasks'].values() if task['label'] == label)
+            task = next(task for task in data['tasks'].values() if task.get('label') == label)
             for key in ('submitted', 'payload_started', 'payload_ended', 'ended', 'disk_wait'):
                 if key in task:
                     task[key] -= seconds
@@ -218,7 +223,7 @@ class Lab:
         return next((event for event in self.events() if event.get('label') == label and event['event'] == name), None)
 
     def task(self, label):
-        return next((task for task in self.state()['tasks'].values() if task['label'] == label), None)
+        return next((task for task in self.state()['tasks'].values() if task.get('label') == label), None)
 
     def start(self, label, gate=False, code=None, duration=0.15, args=None, land=False):
         if args is None:
@@ -267,6 +272,11 @@ class Lab:
         events = self.events()
         current = self.state()['tasks']
         tasks = {**(retired_tasks or {}), **current}
+        for token, task in current.items():
+            if 'label' not in task:
+                whole = self.completed_tasks[token]
+                assert task == {key: whole[key] for key in task}, task
+                tasks[token] = whole
         cgroup_proofs = []
         ids = [event['id'] for event in events]
         assert len(ids) == len(set(ids)), 'duplicate durable event IDs'
@@ -348,7 +358,7 @@ class Lab:
             for task in self.state()['tasks'].values():
                 if task['state'] != 'released' and owned_wrapper(task.get('wrapper')):
                     os.kill(task['wrapper']['pid'], signal.SIGKILL)
-                for unit in (task['unit'], task.get('wrapper_unit')):
+                for unit in (task.get('unit'), task.get('wrapper_unit')):
                     if unit:
                         self.call(['systemctl', '--user', 'stop', unit], check=False)
             for _ in range(4):
@@ -377,15 +387,15 @@ class Lab:
             for task in self.state()['tasks'].values():
                 if owned_wrapper(task.get('wrapper')):
                     os.kill(task['wrapper']['pid'], signal.SIGKILL)
-                for unit in (task['unit'], task.get('wrapper_unit')):
+                for unit in (task.get('unit'), task.get('wrapper_unit')):
                     if unit:
                         self.call(['systemctl', '--user', 'kill', '--kill-whom=all', '--signal=KILL', unit], check=False)
                         self.call(['systemctl', '--user', 'stop', unit], check=False)
                 group = task.get('cgroup')
                 path = Path('/sys/fs/cgroup') / group.lstrip('/') / 'cgroup.events' if group else None
                 empty = not path or not path.exists() or 'populated 0' in path.read_text()
-                assert empty, ('cleanup left populated cgroup', task['unit'])
-                scope_proofs.append({'unit': task['unit'], 'empty': empty})
+                assert empty, ('cleanup left populated cgroup', task.get('unit'))
+                scope_proofs.append({'unit': task.get('unit'), 'empty': empty})
         for unit in self.extra_units:
             self.call(['systemctl', '--user', 'stop', unit], check=False)
         for private_env in self.base.glob('*.env'):
@@ -2345,6 +2355,86 @@ def reservation_ignores_shrunk(lab):
                 del ledger.tasks['waiting']
 
 
+def released_task_shrinks(lab):
+    with released_ledger(lab) as (module, ledger, task):
+        token = task['token']
+        with patch.object(time, 'time', return_value=task['ended'] + module['ROOM_AFTER'] - .001):
+            ledger.save()
+            assert ledger.tasks[token] == task
+        ledger.save()
+        assert ledger.tasks[token] == module['shrink'](task)
+        assert set(ledger.tasks[token]) == {'token', 'id', 'state', 'code', 'row_durable', 'ended'}
+        assert json.loads(ledger.path.read_text())['tasks'][token] == ledger.tasks[token]
+
+
+def shrink_waits_for_receipt_and_room(lab):
+    with released_ledger(lab) as (module, ledger, task):
+        token = task['token']
+        receipt = ledger.path.parent / 'receipts' / (token + '.json')
+        for missing in ('row_durable', 'release_complete', 'receipt', 'room'):
+            whole = dict(task)
+            if missing in whole:
+                whole[missing] = False
+            if missing == 'receipt':
+                receipt.rename(receipt.with_suffix('.saved'))
+            ledger.data['tasks'] = {token: whole}
+            now = task['ended'] + module['ROOM_AFTER'] - (1 if missing == 'room' else 0)
+            with patch.object(time, 'time', return_value=now):
+                ledger.save()
+            assert ledger.tasks[token] == whole, missing
+            if missing == 'receipt':
+                receipt.with_suffix('.saved').rename(receipt)
+
+
+def shrunk_task_leaves_after_a_day(lab):
+    with released_ledger(lab) as (module, ledger, task):
+        token = task['token']
+        ledger.save()
+        with patch.object(time, 'time', return_value=task['ended'] + 86400 - .001):
+            ledger.save()
+            assert token in ledger.tasks
+        with patch.object(time, 'time', return_value=task['ended'] + 86400):
+            ledger.save()
+            assert token not in ledger.tasks
+        # A queue takeover must preserve the allocator even with no retained task.
+        ledger.data['queue'] = 'previous queue'
+        module['take_over'](ledger)
+        assert ledger.data['next_id'] == int(task['id']) + 1
+        # An old snapshot lacking the counter seeds from the TSV, even when empty.
+        ledger.data.pop('next_id')
+        ledger.save()
+        restored = module['Ledger']()
+        assert restored.data['next_id'] == int(task['id']) + 1
+        # Submit through the production allocator; refuse before any unit starts.
+        scope = module['submit'].__globals__
+        with patch.dict(scope, ensure_reconciler=lambda ledger: None, start_wrapper=lambda task: False,
+                        kill_scope=lambda task: True):
+            try:
+                module['submit'](['true'], 'build', 0, False)
+            except module['Refusal'] as error:
+                assert str(error) == 'cannot start the task wrapper unit'
+            else:
+                raise AssertionError('fixture wrapper start must refuse')
+        fresh = module['Ledger']()
+        assert [int(t['id']) for t in fresh.tasks.values()] == [int(task['id']) + 1]
+
+
+def old_snapshot_migrates(lab):
+    with released_ledger(lab) as (module, ledger, task):
+        tasks = {str(i): dict(task, token=str(i), id=str(i)) for i in range(1, 101)}
+        for token in tasks:
+            (ledger.path.parent / 'receipts' / (token + '.json')).write_text('{}')
+        live = {state: dict(task, token=state, state=state) for state in
+                ('queued', 'waiting', 'launching', 'active', 'finishing', 'closing')}
+        ledger.data['tasks'] = {**tasks, **live}
+        ledger.data['next_id'] = 101
+        ledger.path.write_text(json.dumps(ledger.data))
+        restored = module['Ledger']()
+        restored.save()
+        assert restored.tasks == {**{token: module['shrink'](t) for token, t in tasks.items()}, **live}
+        assert restored.data['next_id'] == 101
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--evidence', required=True, type=Path)
@@ -2353,7 +2443,11 @@ def main():
     root = opts.evidence.resolve()
     root.mkdir(parents=True, exist_ok=False)
     (root / 'EVIDENCE.TAG').write_text('agents fixture evidence\ntest-heavy-recovery\n')
-    cases = [('delayed_client_reads_shrunk_history', delayed_client_reads_shrunk_history),
+    cases = [('released_task_shrinks', released_task_shrinks),
+             ('shrink_waits_for_receipt_and_room', shrink_waits_for_receipt_and_room),
+             ('shrunk_task_leaves_after_a_day', shrunk_task_leaves_after_a_day),
+             ('old_snapshot_migrates', old_snapshot_migrates),
+             ('delayed_client_reads_shrunk_history', delayed_client_reads_shrunk_history),
              ('task_number_survives_retired_records', task_number_survives_retired_records),
              ('late_wrapper_refused_by_a_shrunk_task', late_wrapper_refused_by_a_shrunk_task),
              ('release_replay_on_a_shrunk_task', release_replay_on_a_shrunk_task),
