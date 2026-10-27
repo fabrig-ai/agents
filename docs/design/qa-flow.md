@@ -377,11 +377,16 @@ the director says so to the user.
   is made under one lock for the whole tool, `tmp/logins/lock`, and
   every taker that waits is in one queue, `tmp/logins/waiting.json`,
   each with its request (a name, or a pool), when it first asked, and
-  when it last asked. A request is granted a free login it matches
-  unless an earlier request that still waits matches that same login:
-  so a taker waiting for a stuck login by name never holds back a pool
-  taker from another, free one. Ties go by holder name. A waiter that
-  hasn't asked again within 15 minutes leaves the queue, as today.
+  when it last asked. A free login goes to the earliest waiter it
+  matches: in arrival order, each waiter reserves the first free login
+  it matches, so that a waiter for a stuck login by name reserves none
+  and a pool's waiter only one, and a taker is granted the login it
+  reserves. Ties go by holder name. A waiter that hasn't asked again
+  within 15 minutes leaves the queue, as today, and until then its row
+  keeps its reservation: a taker that gives up asks no more and its row
+  goes stale. The names `lock` and `waiting.json` are the tool's, never
+  a login's. The lock is taken first, then each login's own lock in
+  name order.
   A login not back stays held by its holder, as below, and the pool's
   others go on serving: the notice and `logins list` name the one that
   is stuck.
