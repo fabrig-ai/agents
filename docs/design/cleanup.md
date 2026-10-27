@@ -184,7 +184,10 @@ new work. There is no keep list: a landed branch's commits are on
    (build-infrastructure.md 10): `tidy` removes it whole, its target
    with it, once its set has landed or its proof is over 24 hours old,
    while no run of the set holds the set's file lock and it is not in
-   use (section 4's sense).
+   use (section 4's sense). Before then its target counts for room
+   alone: `--room` may clear it, never the worktree, as any idle
+   target, so that the qa run starts warm where there is room and from
+   the cache where there isn't.
    - **Its owner** is the mission whose directory holds it, with its
      milestones' `owners/<m>-m<N>/` as one, or `director`.
    - **In use** while held by a process (section 4's sense, for its
