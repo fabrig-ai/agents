@@ -700,6 +700,17 @@ def tend_room_for_landing(lab):
         assert lab.tends()[-1]['commands'][0]['argv'] == ['tidy', '--targets', '--room', '61']
 
 
+def tend_room_for_regenerate(lab):
+    lab.tend_kit()
+    task = {'label': 'land temper regenerate', 'state': 'queued', 'disk_wait': NOW,
+            'floor_gb': 40, 'room_gb': 45}
+    write(lab.tmp() / 'heavy/state.json', json.dumps({'tasks': {'temper': task}}))
+    lab.tend()
+    assert lab.tend_calls() == [['tidy', '--targets', '--room', '85'],
+                                ['post', 'wake', '--older', '15'], ['codex-run', 'stale', '--post']]
+    assert lab.tends()[-1]['commands'][0]['argv'] == ['tidy', '--targets', '--room', '85']
+
+
 def tend_no_room(lab):
     lab.tend_kit()
     path = lab.tmp() / 'heavy/state.json'
@@ -707,7 +718,8 @@ def tend_no_room(lab):
                'floor_gb': 40, 'room_gb': 30}
     rows = [dict(landing, state='active'), dict(landing, disk_wait=None),
             dict(landing, label='build temper'), dict(landing, label='land Temper'),
-            dict(landing, label='land temper extra'), dict(landing, state='released'),
+            dict(landing, label='land temper extra'), dict(landing, label='land temper rebuild'),
+            dict(landing, state='released'),
             dict(landing, state=[]), dict(landing, label=[]),
             {k: v for k, v in landing.items() if k != 'disk_wait'}]
     for key in ('floor_gb', 'room_gb'):
@@ -1177,7 +1189,7 @@ CASES = [reading_fields, reading_disk_workspace, reading_floor, reading_absent, 
          room_order_and_exit, room_unreached_why, room_new_machine, room_named, room_piped,
          room_targets, room_fits_120, room_json, tend_order, tend_all_ok, tend_not_started, tend_lines,
          tend_kache_gc_past_limit, tend_kache_within_limit, tend_without_kache,
-         tend_kache_stats_fails, tend_kache_gc_fails, tend_keeps_a_week, tend_read_by_probe, tend_room_for_landing, tend_no_room, tend_record_failure,
+         tend_kache_stats_fails, tend_kache_gc_fails, tend_keeps_a_week, tend_read_by_probe, tend_room_for_landing, tend_room_for_regenerate, tend_no_room, tend_record_failure,
          raise_after_two_rounds, clear_after_two_rounds, between_changes_nothing, each_condition,
          missing_field_keeps, session_from_missions, subjects_gone, untended_rows, tends_counted_once,
          user_and_fleet_never, quiet_machine, no_state_first_round, gap_carries,

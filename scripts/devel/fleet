@@ -469,7 +469,7 @@ def tend_room(tmp):
         if not isinstance(task, dict):
             continue
         label, status = task.get('label'), task.get('state')
-        if not isinstance(label, str) or not re.fullmatch(r'land [a-z][a-z0-9-]*(?: prebuild)?', label):
+        if not isinstance(label, str) or not re.fullmatch(r'land [a-z][a-z0-9-]*(?: (?:prebuild|regenerate))?', label):
             continue
         if not isinstance(status, str) or status not in LIVE or status in RUNNING or task.get('disk_wait') is None:
             continue
