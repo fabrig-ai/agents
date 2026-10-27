@@ -33,7 +33,7 @@ it is proved, and the director checks the work against it (agents'
 |---|---|
 | skein's `testing-strategy.md`, temper's `domain/testing.md` | each change's tests, in the lowest world that shows the behaviour; the real loop's default sum under the user's 15 s |
 | temper's `.config/nextest.toml` profile `qa`, owners.md 4 | `qa_*` stories, skipped by the gates and run between a set's proof and its landing when the landing changes what a world's stories rely on |
-| after landing's tiers (landing-flow.md 4) | the slower QA, process, lab and browser tiers on the newest `main`; a red bisected to its landing; temper's tier split across two runners |
+| after landing's tiers (landing-flow.md 4) | the slower QA, process and browser tiers on the newest `main`; a red bisected to its landing; temper's tier split across two runners |
 | v0.1.0.md 4 | each finding's fix with a test in the lowest world that reproduces it, the real run's transcript as a fake model's script where the model's turn matters |
 
 - **Flakes** that fail a gate or a tier go to the flakes' owner

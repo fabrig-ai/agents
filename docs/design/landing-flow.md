@@ -81,8 +81,10 @@ and milestones are [owners.md](../../roles/owners.md).
   - **The cache:** a change is compiled once for the fleet, and two
     versions of the same crates coexist for at most a milestone.
   - **Coordination:** owners neither wait on nor relay for each other.
-  - **QA:** the lab takes each milestone as soon as it lands and its
-    tier is green, while the next one is being built (the user).
+  - **QA:** QA after landing takes the commits the director marks
+    from a `main` whose tiers are green ([qa-flow.md](qa-flow.md)),
+    while the next milestone is being built; the lab it replaced
+    retired on 10-27.
 - **What a landing taught** goes in its commit, as `Taught:` trailers,
   which `land` and `land-set` copy into the feed and `landings taught`
   lists, so that a routine landing posts no one (section 12).
