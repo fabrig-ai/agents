@@ -5,6 +5,7 @@
 #   post wait NAME [--timeout SECONDS] [--holder PID --kind KIND]
 #   post read NAME
 #   post list [--older MINUTES]
+#   post wake NAME | --older MINUTES
 # See docs/design/post.md for the addresses, delivery and waking rules.
 set -euo pipefail
 umask 077
@@ -27,7 +28,7 @@ scratch=
 trap '[[ -z $scratch ]] || rm -f -- "$scratch"' EXIT
 
 fail() { echo "post: ${error_prefix:-}$*" >&2; exit 2; }
-usage() { fail 'usage: post {send|deliver|wait|read|list} (see docs/design/post.md)'; }
+usage() { fail 'usage: post {send|deliver|wait|read|list|wake} (see docs/design/post.md)'; }
 valid_name() { [[ $1 =~ $name_pattern ]]; }
 valid_machine() { [[ $1 =~ $machine_pattern ]]; }
 valid_subject() { [[ ${#1} -le 200 && ! $1 =~ [[:cntrl:]] ]]; }
@@ -392,6 +393,62 @@ list_mail() {
     done < <(find "$post" -type f -path '*/new/*.md' -print0 | sort -z)
 }
 
+# Select under the mailbox lock, then let wake take its own locks and recheck.
+wake_existing() (
+    local name=$1 older=${2:-} now=${3:-} message age found=0 status code=0
+    local box=$post/${name//\//+}
+    if [[ ! -d $box/new ]]; then
+        [[ -n $older ]] || echo "$name no mail"
+        return 0
+    fi
+    {
+        flock -x 9 || fail 'cannot lock mailbox'
+        for message in "$box/new/"*.md; do
+            [[ -f $message ]] || continue
+            if [[ -n $older ]]; then
+                age=$(((now - $(stat -c %Y "$message")) / 60))
+                ((age >= older)) || continue
+            fi
+            found=1
+            break
+        done
+        if (( ! found )); then
+            [[ -n $older ]] || echo "$name no mail"
+            return 0
+        fi
+        if [[ -n $older ]]; then
+            load_waiter
+            if waiter_alive; then return 0; fi
+        fi
+    } 9>"$box/.lock" || fail 'cannot lock mailbox'
+    status=$(wake "$name") || code=$?
+    [[ -z $status ]] || printf '%s %s\n' "$name" "$status"
+    return "$code"
+)
+wake_mail() {
+    local older name now code=0 result=0
+    if [[ $# == 1 && $1 != --older ]]; then
+        valid_name "$1" || usage
+        wake_existing "$1"
+        return $?
+    fi
+    [[ $# == 2 && $1 == --older && $2 =~ ^[0-9]+$ ]] || usage
+    older=$((10#$2))
+    [[ -d $post ]] || return 0
+    now=$(date +%s)
+    while IFS= read -r -d '' name; do
+        valid_name "$name" || continue
+        [[ $name != user ]] || continue
+        code=0
+        wake_existing "$name" "$older" "$now" || code=$?
+        case $code in
+            2) result=2 ;;
+            3) ((result == 2)) || result=3 ;;
+        esac
+    done < <(find "$post" -mindepth 1 -maxdepth 1 -type d -printf '%f\0' | tr '+' '/' | sort -z)
+    return "$result"
+}
+
 (($#)) || usage
 command=$1
 shift
@@ -403,5 +460,6 @@ case $command in
     wait) wait_mail "$@" ;;
     read) read_mail "$@" ;;
     list) list_mail "$@" ;;
+    wake) wake_mail "$@" ;;
     *) usage ;;
 esac

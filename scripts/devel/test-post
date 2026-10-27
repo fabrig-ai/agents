@@ -277,6 +277,95 @@ wake() {
     expect 'resume state rechecked' "$(capture env FIXTURE_RESUME_STATE=done "$POST_TOOL" send resume-idle failure <<< body)" 'status=3' 'nobody will wake it: done'
 }
 
+wake_command() {
+    # Stage mail without delivery waking it first.
+    stage_wake_mail() {
+        local name=$1 box=$t/a/tmp/post/${1//\//+}
+        mkdir -p "$box"/{tmp,new,cur,sent}
+        message a "$name" | sed 's/@b$/@a/' >"$box/new/20261024T213500Z-7f3a0000.md"
+    }
+    expect 'wake missing mailbox' "[$(capture post wake o/missing)]" $'[status=0\no/missing no mail]'
+    expect 'wake missing creates nothing' "$([[ ! -e $t/a/tmp/post/o+missing ]] && echo absent)" absent
+    mkdir -p "$t/a/tmp/post/o+empty/new"
+    expect 'wake empty mailbox' "[$(capture post wake o/empty)]" $'[status=0\no/empty no mail]'
+
+    capture post wait o/live --timeout 0 --holder "$$" >/dev/null
+    stage_wake_mail o/live
+    expect 'wake live waiter' "[$(capture post wake o/live)]" $'[status=0\no/live waiting]'
+    expect 'no mail and live waiter never stop or resume' "$([[ ! -e $t/stops && ! -s $t/resumes ]] && echo none)" none
+
+    stage_wake_mail o/sleeping
+    session o/sleeping 'done'
+    expect 'wake done session' "[$(capture post wake o/sleeping)]" $'[status=0\no/sleeping woken]'
+    expect 'wake stops and resumes once in session cwd' "$(jq -sc --arg cwd "$t/session cwd" '
+        [.[] | select(.args[0] != "agents")] |
+        length == 2 and .[0].args == ["stop","short"] and
+        .[1].args == ["--bg","--resume","full-session-id","Post for o/sleeping: run post read o/sleeping and act on it, then start post wait o/sleeping in the background, and do the same each time it ends."] and
+        .[1].cwd == $cwd' "$t/claude-calls")" true
+    expect 'wake records one stop and resume' "stops=$(wc -l <"$t/stops") resumes=$(wc -l <"$t/resumes")" 'stops=1 resumes=2'
+    expect 'wake leaves mail unread' "$(count "$t/a/tmp/post/o+sleeping/new")" 1
+    stage_wake_mail o/working
+    session o/working working
+    expect 'wake working session' "[$(capture post wake o/working)]" $'[status=0\no/working queued]'
+    stage_wake_mail o/stopped
+    session o/stopped 'done'
+    jq 'map(del(.pid))' "$t/sessions.json" >"$t/stopped.json"
+    mv "$t/stopped.json" "$t/sessions.json"
+    expect 'wake stopped session' "[$(capture post wake o/stopped)]" $'[status=3\no/stopped queued, nobody will wake it: stopped]'
+    stage_wake_mail o/absent
+    echo '[]' >"$t/sessions.json"
+    expect 'wake absent session' "[$(capture post wake o/absent)]" $'[status=3\no/absent queued, nobody will wake it: no session]'
+    stage_wake_mail o/codex
+    echo codex >"$t/a/tmp/post/o+codex/kind"
+    expect 'wake Codex without waiter' "[$(capture post wake o/codex)]" $'[status=3\no/codex queued, nobody will wake it: codex owner not running]'
+    expect 'queued and unwoken names never stop or resume' "stops=$(wc -l <"$t/stops") resumes=$(wc -l <"$t/resumes")" 'stops=1 resumes=2'
+
+    for name in o/old o/young o/heard user o/gone; do
+        stage_wake_mail "$name"
+        printf '2147483647 1 claude\n' >"$t/a/tmp/post/${name//\//+}/waiter"
+    done
+    capture post wait o/heard --timeout 0 --holder "$$" >/dev/null
+    touch -d '20 minutes ago' "$t/a/tmp/post/o+old/new/"*.md
+    touch -d '5 minutes ago' "$t/a/tmp/post/o+young/new/"*.md
+    touch -d '30 minutes ago' "$t/a/tmp/post/o+heard/new/"*.md
+    touch -d '2 hours ago' "$t/a/tmp/post/user/new/"*.md
+    touch -d '40 minutes ago' "$t/a/tmp/post/o+gone/new/"*.md
+    # The oldest mtime need not be the first id, and a name wakes only once.
+    cp "$t/a/tmp/post/o+old/new/20261024T213500Z-7f3a0000.md" "$t/a/tmp/post/o+old/new/20261024T213500Z-00000001.md"
+    touch -d '5 minutes ago' "$t/a/tmp/post/o+old/new/20261024T213500Z-00000001.md"
+    session o/old 'done'
+    : >"$t/claude-calls"
+    : >"$t/stops"
+    : >"$t/resumes"
+    expect 'older wakes all eligible names in order despite failure' "[$(capture post wake --older 15)]" $'[status=3\no/gone queued, nobody will wake it: no session\no/old woken]'
+    expect 'older stops and resumes old once' "stops=$(wc -l <"$t/stops") resumes=$(wc -l <"$t/resumes")" 'stops=1 resumes=2'
+    expect 'older resumes old full id and prompt' "[$(cat "$t/resumes")]" $'[full-session-id\nPost for o/old: run post read o/old and act on it, then start post wait o/old in the background, and do the same each time it ends.]'
+    expect 'older records stop before resume' "$(jq -sc '[.[] | select(.args[0] != "agents") | .args[0]] == ["stop","--bg"]' "$t/claude-calls")" true
+    expect 'older with nothing old enough is silent' "[$(capture post wake --older 10000)]" '[status=0]'
+
+    # A wake-lock failure keeps its error and exit 2, without stopping the batch.
+    # shellcheck disable=SC2317
+    flock() {
+        if [[ $* == '-x 8' && $box == "$FIXTURE/a/tmp/post/o+gone" ]]; then return 1; fi
+        command flock "$@"
+    }
+    export -f flock
+    expect 'single wake lock failure' "[$(capture post wake o/gone)]" $'[status=2\npost: cannot lock wake]'
+    stage_wake_mail o/z-gone
+    touch -d '40 minutes ago' "$t/a/tmp/post/o+z-gone/new/"*.md
+    session o/old 'done'
+    : >"$t/stops"
+    : >"$t/resumes"
+    expect 'batch lock failure wins over later exit 3 and still resumes' "[$(capture post wake --older 15)]" $'[status=2\npost: cannot lock wake\no/old woken\no/z-gone queued, nobody will wake it: no session]'
+    expect 'batch after lock failure resumes once' "stops=$(wc -l <"$t/stops") resumes=$(wc -l <"$t/resumes")" 'stops=1 resumes=2'
+    unset -f flock
+
+    for args in 'wake' 'wake --older' 'wake --older x' 'wake Bad/Name' 'wake a b'; do
+        read -r -a arguments <<<"$args"
+        expect "usage: $args" "$(capture post "${arguments[@]}")" 'status=2' 'usage: post'
+    done
+}
+
 waiters_and_limits() {
     # Register a Codex holder, then substitute a definitely dead PID.
     expect 'holder registration times out without mail' "$(capture post wait codex --timeout 0 --holder "$$" --kind codex)" 'status=1'
@@ -481,7 +570,8 @@ STUB
 }
 
 # The parts share nothing, so they run at once; each reports its checks and failures.
-parts=(local_and_remote wake waiters_and_limits names_and_order ids_and_transport)
+parts=(local_and_remote wake wake_command waiters_and_limits names_and_order ids_and_transport)
+if (($#)); then parts=("$@"); fi
 for part in "${parts[@]}"; do
     (
         # A part's exit handler stops its own children, never the earlier parts.
