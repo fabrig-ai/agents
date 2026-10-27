@@ -341,9 +341,9 @@ class Tidy:
             for repo in self.repos:
                 entry = proof['repos'].get(repo.name)
                 if (not repo.ready or not isinstance(entry, dict) or entry.get('pin_only') is not True
-                        or not isinstance(entry.get('path'), str)):
+                        or not isinstance(entry.get('worktree'), str)):
                     continue
-                path = Path(entry['path'])
+                path = Path(entry['worktree'])
                 if (not path.is_absolute() or worktrees not in path.parents
                         or not path.exists() or path.resolve() != path):
                     continue
