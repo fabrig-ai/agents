@@ -365,13 +365,17 @@ The director's, on hetzner6:
   read once piece 5 lands.
 - **The open rung:** `qa rung temper real-model --login chatgpt`, the
   pool.
-- **Once piece 3 is built:** `qa default temper on`.
-- **What lands, in order** (o/qa-evidence-keep, each alone): 3, marked
-  commits by default; 4, triage by landing; 5, the stuck alert. Each
+- **Default choosing:** `qa default temper on`, the director's, once
+  agents 45c713a runs there: every marked commit landed after it runs
+  by default (qa-flow.md 3); `qa default temper` shows it, `off` stops
+  it. Rolling back past 45c713a needs an explicit `qa decide ... run`
+  for each commit a default alone keeps chosen.
+- **What lands, in order** (o/qa-evidence-keep, each alone): 4, triage
+  by landing; 5, the stuck alert. Each
   landing's post says what hetzner6 needs. Landed: the pool (b3abf0e),
   passes side by side (8935bc9), the reserve and `--now` (86f918b), `qa
   walk` by kind with pause and resume, `qa take` and `logins drop`
-  (b844696).
+  (b844696), marked commits by default (45c713a).
 
 ## 8. The evidence
 
@@ -456,3 +460,6 @@ Newest last, times UTC.
   built (design/qa-evidence).
 - 10-27 20:4xZ: walks start with `qa walk`, by-hand takes with `qa take` (agents
   b844696; section 3's preamble).
+- 10-27 21:1xZ: marked commits by default landed (agents 45c713a); `qa
+  default temper on` the director's once it runs on hetzner6
+  (design/qa-evidence).

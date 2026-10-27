@@ -120,7 +120,12 @@ each with its date and source, are
   takes covered commits in their order on `main`, batched (section 4).
   An `off` leaves the commits it covered chosen; `qa candidates` lists
   the undecided commits no stretch covers. A commit whose rung's pool
-  has no login yet waits as any chosen commit does.
+  has no login yet waits as any chosen commit does. Overlapping
+  stretches give a commit the earliest `on`'s time, and at equal times
+  a default ranks under a decision or a pass. Stretches assume that
+  `main` only fast-forwards, as `land` never force-pushes; a repository
+  whose defaults can't be read starts nothing at that check, its
+  reservations kept (agents 45c713a).
 - **What carries no mark:** a commit that changes only tests, fixtures
   or figures ([roles/owners.md](../../roles/owners.md) 4).
 
