@@ -1050,7 +1050,10 @@ green at every commit. Run from the root of a checkout:
   together, a phase they need (a build) may run in several, and a part
   with nothing in it is green. It splits by phase, weighed by times
   measured once and written in the script, ties broken by the phases'
-  order. A NAME keeps its meaning across parts;
+  order. A NAME keeps its meaning across parts. A commit that moves a
+  test to another part lands while that test is green: a red standing
+  in its old part drops there, and its new part, which never saw it,
+  would bisect it anew onto an innocent landing;
 - it prints `after-landing: starved NAME` per test that passed starved
   (skein's `testing-strategy.md` 2.8: a real-loop run that waited for
   a CPU it wasn't given passes and says so in its output), read from
