@@ -3399,23 +3399,60 @@ Record.commit = commit
     assert saved['copy']['recorded'] == saved['copy']['commit']
 
 
-def a_full_legacy_record_retains_its_body_and_scratch(lab):
+def full_legacy_pass(lab):
     lab.waiting(1)
     lab.watch()
     directory, state = lab.watch_state()
-    state.update(finished=True, ended=lab.end_run(state), released=True)
+    report = ('## Cases\nPlain.\n## Findings\n### 1. Earlier finding\nReproduce.\n'
+              '## Automation\n' + 'More multibyte detail: é.\n' * 400)
+    state.update(finished=True, ended=lab.end_run(state, report=report), released=True)
     (directory / 'pass.json').write_text(json.dumps(state))
     path = 'qa/passes/' + state['pass'] + '.md'
     legacy = lab.content(path).replace('outcome: running', 'outcome: done')
     legacy = re.sub(r'^evidence:.*\n', '', legacy, flags=re.M) + '\n'
-    legacy += 'x' * (8192 - len(legacy.encode()) - 1) + '\n'
+    legacy += report.encode()[:8192 - len(legacy.encode())].decode(errors='ignore')
+    legacy += 'x' * (8192 - len(legacy.encode()))
+    assert len(legacy.encode()) == 8192
     lab.publish(path, legacy)
+    return directory, state, path, legacy
+
+
+def a_full_legacy_record_is_cut_to_name_its_evidence(lab):
+    directory, state, path, legacy = full_legacy_pass(lab)
     later = (utc_fixture(state['started']) + timedelta(days=8)).strftime('%Y-%m-%dT%H:%M:%SZ')
-    result = lab.watch(now=later)
+    lab.watch(now=later)
     saved = lab.watch_state()[1]
-    assert saved['copy']['state'] == 'kept' and saved['copy']['recorded'] == 'unknown'
-    assert lab.content(path) == legacy.strip()
-    assert 'evidence link not committed' in result.stdout and directory.exists()
+    commit = saved['copy']['commit']
+    assert saved['copy']['state'] == 'kept' and saved['copy']['recorded'] == commit
+    result = lab.content(path)
+    assert 'evidence: ' + commit + '\n' in result and len(result.encode()) <= 8192
+    suffix = ('\n(Cut at 8 KiB to name its evidence: the whole report is in the evidence copy, git show '
+              + commit + ':passes/' + state['pass'] + '/report.md.)')
+    assert result.endswith(suffix)
+    kept = result[:-len(suffix)].split('---', 2)[2]
+    assert kept.endswith('\n') and legacy.split('---', 2)[2].startswith(kept)
+    assert '### 1. Earlier finding\nReproduce.\n' in kept
+    assert lab.evidence('show', 'evidence:passes/' + state['pass'] + '/report.md').endswith('More multibyte detail: é.')
+    lab.watch(now=later)
+    assert not directory.exists()
+
+
+def a_full_legacy_record_names_its_refused_evidence(lab):
+    directory, state, path, legacy = full_legacy_pass(lab)
+    lab.scratch({'evidence/auth.header': 'outside the copy\n'}, directory)
+    later = (utc_fixture(state['started']) + timedelta(days=8)).strftime('%Y-%m-%dT%H:%M:%SZ')
+    lab.watch(now=later)
+    saved = lab.watch_state()[1]
+    assert saved['copy']['state'] == 'refused' and saved['copy']['recorded'] == 'refused'
+    result = lab.content(path)
+    suffix = '\n(Cut at 8 KiB to name its evidence.)'
+    assert 'evidence: refused\n' in result and len(result.encode()) <= 8192
+    assert result.endswith(suffix) and 'git show' not in result
+    kept = result[:-len(suffix)].split('---', 2)[2]
+    assert kept.endswith('\n') and legacy.split('---', 2)[2].startswith(kept)
+    assert '### 1. Earlier finding\nReproduce.\n' in kept
+    lab.watch(now=later)
+    assert not directory.exists()
 
 
 def keep_key_rule_is_records(lab):
@@ -6624,7 +6661,8 @@ def an_ambiguous_build_is_refused(lab):
     assert first[1]['main'] == fix and second[1]['main'] == commit
 
 
-CASES = (a_record_refusal_keeps_its_evidence_field, a_full_legacy_record_retains_its_body_and_scratch,
+CASES = (a_record_refusal_keeps_its_evidence_field, a_full_legacy_record_is_cut_to_name_its_evidence,
+         a_full_legacy_record_names_its_refused_evidence,
          an_unposted_refusal_is_not_pruned,
          the_record_withholds_multiline_secrets, a_failed_evidence_link_still_returns_a_login,
          a_mended_old_refusal_waits_for_its_push, a_pending_link_fits_the_record,

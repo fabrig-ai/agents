@@ -2157,6 +2157,16 @@ class Watch:
         name = f'qa/passes/{state["pass"]}.md'
         report = Pass.read(self.record.path(name))
         report.fields['evidence'] = self.wanted(state)
+        if len(report.text().encode()) > 8192:
+            suffix = ('\n(Cut at 8 KiB to name its evidence'
+                      + (': the whole report is in the evidence copy, git show '
+                         f'{copy["commit"]}:passes/{state["pass"]}/report.md.'
+                         if copy['state'] == 'kept' else '.') + ')\n')
+            body, report.body = report.body.encode(), ''
+            budget = max(0, 8192 - len((report.text() + suffix).encode()))
+            prefix = body[:budget]
+            prefix = prefix[:prefix.rfind(b'\n') + 1]
+            report.body = prefix.decode() + suffix
         if self.record.commit({name: report.text()}, f'qa watch: {state["pass"]} evidence') is not False:
             copy['recorded'] = self.wanted(state)
             self.save(directory, state)
