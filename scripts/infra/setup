@@ -278,7 +278,7 @@ check_machine() {
     # The queue is heavy's ledger (build-infrastructure.md, 2 and 4).
     read -r slots slots_source < <(machine_setting HEAVY_BUILD_SLOTS 0)
     while IFS= read -r line; do warn "machine.env: ignored line $line"; done < <(
-        awk 'NF && $0 !~ /^(PLAN_MIN_MEM_GB|PLAN_MIN_DISK_GB|HEAVY_BUILD_SLOTS|HEAVY_BUILD_JOBS|KACHE_MAX_GB|KACHE_LOCAL_ONLY|QA_SLOTS|QA_BATCH|QA_CAP_MINUTES|QA_INTERVAL_SECONDS|FLEET_QUIET)=[0-9]+$/ { print NR ": " $0 }' "$tmp/machine.env" 2>/dev/null || true)
+        awk 'NF && $0 !~ /^(PLAN_MIN_MEM_GB|PLAN_MIN_DISK_GB|PLAN_LAND_ROOM_GB|HEAVY_BUILD_SLOTS|HEAVY_BUILD_JOBS|KACHE_MAX_GB|KACHE_LOCAL_ONLY|QA_SLOTS|QA_BATCH|QA_CAP_MINUTES|QA_INTERVAL_SECONDS|FLEET_QUIET)=[0-9]+$/ { print NR ": " $0 }' "$tmp/machine.env" 2>/dev/null || true)
     if ((installed_status == 0)); then
         if [[ $slots == 0 ]]; then
             ok "builds: every task at once ($slots_source)"

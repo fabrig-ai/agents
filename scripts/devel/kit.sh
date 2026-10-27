@@ -3,7 +3,7 @@
 # Functions shared by land, heavy, setup and kache-setup once they know
 # the workspace; sourced, not run.
 
-# The machine file accepts only these eleven integer settings, including qa watch's
+# The machine file accepts only these twelve integer settings, including qa watch's
 # QA_SLOTS, QA_BATCH, QA_CAP_MINUTES and QA_INTERVAL_SECONDS, and fleet's
 # FLEET_QUIET (1 raises only unreached). An environment value wins, then the
 # file's last valid value, then the caller's default.
@@ -14,7 +14,7 @@ machine_setting() {
         return
     fi
     value=$(awk -F= -v key="$key" '
-        /^(PLAN_MIN_MEM_GB|PLAN_MIN_DISK_GB|HEAVY_BUILD_SLOTS|HEAVY_BUILD_JOBS|KACHE_MAX_GB|KACHE_LOCAL_ONLY|QA_SLOTS|QA_BATCH|QA_CAP_MINUTES|QA_INTERVAL_SECONDS|FLEET_QUIET)=[0-9]+$/ && $1 == key { value = $2 }
+        /^(PLAN_MIN_MEM_GB|PLAN_MIN_DISK_GB|PLAN_LAND_ROOM_GB|HEAVY_BUILD_SLOTS|HEAVY_BUILD_JOBS|KACHE_MAX_GB|KACHE_LOCAL_ONLY|QA_SLOTS|QA_BATCH|QA_CAP_MINUTES|QA_INTERVAL_SECONDS|FLEET_QUIET)=[0-9]+$/ && $1 == key { value = $2 }
         END { print value }' "$tmp/machine.env" 2>/dev/null || true)
     if [[ -n $value ]]; then printf '%s machine.env\n' "$value"; else printf '%s default\n' "$fallback"; fi
 }
