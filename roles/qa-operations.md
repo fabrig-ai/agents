@@ -370,12 +370,14 @@ The director's, on hetzner6:
   by default (qa-flow.md 3); `qa default temper` shows it, `off` stops
   it. Rolling back past 45c713a needs an explicit `qa decide ... run`
   for each commit a default alone keeps chosen.
-- **What lands, in order** (o/qa-evidence-keep, each alone): 4, triage
-  by landing; 5, the stuck alert. Each
+- **What lands next** (o/qa-evidence-keep): 5, the stuck alert. Each
   landing's post says what hetzner6 needs. Landed: the pool (b3abf0e),
   passes side by side (8935bc9), the reserve and `--now` (86f918b), `qa
   walk` by kind with pause and resume, `qa take` and `logins drop`
-  (b844696), marked commits by default (45c713a).
+  (b844696), marked commits by default (45c713a), triage by landing and
+  `landings landed` (66efd32). Rolling `qa` back past 66efd32 leaves
+  saved routes unused: untriaged findings return to the director's
+  queue.
 
 ## 8. The evidence
 
@@ -462,4 +464,7 @@ Newest last, times UTC.
   b844696; section 3's preamble).
 - 10-27 21:1xZ: marked commits by default landed (agents 45c713a); `qa
   default temper on` the director's once it runs on hetzner6
+  (design/qa-evidence).
+- 10-27 21:1xZ: findings routed by the landing of their commit (agents
+  66efd32); passes ended before it stay the director's
   (design/qa-evidence).

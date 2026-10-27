@@ -299,6 +299,15 @@ and the service posts the director.
   on a finding that is another's, as designers do. `qa triage` stays
   the director's, to route by hand or route again: its line is the
   latest.
+- **What the code settled** (agents 66efd32): a finding's `Commit:` and
+  `Concerns:` come from its own lines under its heading, and a key
+  given twice there is ambiguous and goes to the director; an accepted
+  post's triage line is saved in `pass.json` before the record's
+  commit, so that a refused commit never posts a finding twice;
+  `landings landed` reads the whole feed and exits 4, not 1, when it
+  can't, and prints `set|land NAME TIME COMMIT`; a post's subject is
+  cut to 200 characters, the whole title in its body. Passes that ended
+  before routing are never routed: their findings stay the director's.
 - **`qa triage PASS N owner ADDRESS|backlog|drop [--why TEXT]`**
   routes one finding by appending its line:
   - an owner's finding goes to that owner by post, naming the report;
