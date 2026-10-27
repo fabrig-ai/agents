@@ -184,7 +184,8 @@ new work. There is no keep list: a landed branch's commits are on
    (build-infrastructure.md 10): `tidy` removes it whole, its target
    with it, once its set has landed or its proof is over 24 hours old,
    while no run of the set holds the set's file lock and it is not in
-   use (section 4's sense). Before then its target counts for room
+   use (section 4's sense); under that lock it checks again that the
+   worktree is still on the proof's branch and commit. Before then its target counts for room
    alone: `--room` may clear it, never the worktree, as any idle
    target, so that the qa run starts warm where there is room and from
    the cache where there isn't.
