@@ -161,7 +161,8 @@ class Repositories:
                     clone.rename(root)
             need(git(root, 'config', '--get', 'remote.origin.url') == origin,
                  f'{root}: unexpected origin', 4)
-            result = git(root, 'fetch', '--quiet', 'origin', '+refs/heads/*:refs/remotes/origin/*', check=False)
+            # Prune: a branch deleted on origin never resolves from a stale tracking ref.
+            result = git(root, 'fetch', '--quiet', '--prune', 'origin', '+refs/heads/*:refs/remotes/origin/*', check=False)
             need(result.returncode == 0, f'cannot fetch {repo}: {result.stderr.strip()}', 4)
             yield root
 
@@ -206,9 +207,11 @@ class Repositories:
             branch = ref[7:] if ref.startswith('origin/') else ref
             remote = None
             if git(root, 'check-ref-format', 'refs/heads/' + branch, check=False).returncode == 0:
-                resolved = git(root, 'rev-parse', '--verify', 'refs/remotes/origin/' + branch + '^{commit}', check=False)
-                if resolved.returncode == 0 and re.fullmatch(SHA, resolved.stdout.strip()):
-                    remote = resolved.stdout.strip()
+                # The exact ref alone: rev-parse would fall back to a tag or a local branch of that spelling.
+                shown = git(root, 'show-ref', '--verify', '--hash', 'refs/remotes/origin/' + branch, check=False)
+                sha = shown.stdout.strip() if shown.returncode == 0 else ''
+                if re.fullmatch(SHA, sha) and git(root, 'cat-file', '-t', sha, check=False).stdout.strip() == 'commit':
+                    remote = sha
             if ref.startswith('origin/') or ref == 'main':
                 need(remote, why)
                 return remote

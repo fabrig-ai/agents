@@ -5383,6 +5383,24 @@ def an_unresolvable_build_takes_nothing(lab):
     assert len(lab.walk_states()) == 1 and not (directory / 'report-1.md').exists()
 
 
+def a_build_never_resolves_through_a_tag_or_a_stale_ref(lab):
+    old = lab.marked()
+    checkout = lab.products['temper']
+    # A tag spelled as the tracking ref, with no branch of that name on origin.
+    lab.git(checkout, 'tag', 'refs/remotes/origin/fix', old)
+    lab.git(checkout, 'push', 'origin', 'refs/tags/refs/remotes/origin/fix')
+    result = lab.walk('b0', '--build', 'fix', '--login', CHATGPT, status=2)
+    assert 'no branch origin/fix and no commit' in result.stderr
+    # A branch fetched once, then deleted on origin.
+    gone = lab.commit('a fix branch later deleted', branch='gone')
+    lab.run('candidates', 'temper')
+    assert lab.git(lab.tmp / 'qa/repos/temper', 'rev-parse', 'refs/remotes/origin/gone') == gone
+    lab.git(checkout, 'push', 'origin', ':gone')
+    result = lab.walk('b0', '--build', 'gone', '--login', CHATGPT, status=2)
+    assert 'no branch origin/gone and no commit' in result.stderr
+    assert not lab.calls('logins') and not lab.calls('codex-run') and not lab.walk_states()
+
+
 def an_ambiguous_build_is_refused(lab):
     commit = lab.marked()
     fix = lab.commit('branch with a hexadecimal name', branch=commit[:9])
@@ -5399,7 +5417,7 @@ def an_ambiguous_build_is_refused(lab):
     assert first[1]['main'] == fix and second[1]['main'] == commit
 
 
-CASES = (a_stuck_login_alerts_the_director_and_the_list, a_refused_alert_is_sent_again,
+CASES = (a_build_never_resolves_through_a_tag_or_a_stale_ref, a_stuck_login_alerts_the_director_and_the_list, a_refused_alert_is_sent_again,
          a_fifo_stuck_list_does_not_block_cleanup, an_oversized_stuck_list_does_not_block_cleanup,
          stuck_recipients_are_bounded_in_file_order, a_recipient_launch_error_does_not_block_the_other_alerts,
          an_alert_goes_once_per_stuck_login, no_list_alerts_the_director_alone, the_stuck_list_is_read_at_each_check,
