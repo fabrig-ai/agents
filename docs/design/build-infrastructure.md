@@ -847,11 +847,15 @@ feed, or to none: never to hetzner3's.
 directly, elsewhere with one fixed `tail -n 5000` over the same ssh argv.
 `LANDINGS_FEED`, a local path, replaces both, for fixtures. An unreadable
 feed exits 4 at once; `wait` keeps polling, and exits 4 after five minutes
-without a read. A run whose first line read is neither `waiting` nor
-`started` is history, from before the events or cut off by the read: its
+without a read. A run whose first line read is not `waiting`, `started`
+or `proving` is history, from before the events or cut off by the read: its
 lines are printed, but it is never in flight, and `wait` passes over it.
 A prove's run, first line `proving`, holds no lock: it is in flight, as
-proving, but `wait` waits only for a landing run.
+proving. Both wait modes follow the newest proof or landing run, ordered
+by its first feed record. A newer `proving`, `waiting` or `started` run
+supersedes an older stop, even if that stop arrives later. A successful
+proof waits for a landing; a stopped proof ends the wait as a stopped
+landing does.
 - `landings [--last N]` prints the last N events (20), dated `MM-DD
   HH:MMZ`, then each set whose latest run has not ended, as waiting or
   running, since when, its last event's time, and the last repository it
@@ -859,7 +863,8 @@ proving, but `wait` waits only for a landing run.
   an ending shows its age in its last event.
 - `landings wait SET [--timeout SECONDS]` reads the feed every 30 seconds. It
   exits 0 once the set's latest run is `done`, printing its landed commits; 1
-  once that run has `stopped`, printing its status, repository and reason; 3
+  once that run (proof or landing) has `stopped`, printing one line with its
+  status, repository (when present) and reason; 3
   at the timeout. A set not yet in the feed is waited for. The first read
   gets its full 15 seconds, so `--timeout 0` checks the feed once.
 - `landings taught [--since TIME]` lists every landing since TIME, a
@@ -1120,9 +1125,10 @@ only with its own verdict under the legacy single-commit judgement;
 a recorded range whose ancestry git can't answer waits.
 
 It writes its `watch` record first, then exits 0 once each landing is
-cleared, 1 at the first red or on the set's `stopped`, 2 at once when a
-landing's commit is not on its repository's `main` after a fetch, 3 at
-the timeout, 2 hours by default, and 4 when the feed is unreadable, as
+cleared, 1 at the first red or when the set's newest proof or landing run
+has `stopped` (one line with its status, repository when present, and reason),
+2 at once when a landing's commit is not on its repository's `main` after
+a fetch, 3 at the timeout, 2 hours by default, and 4 when the feed is unreadable, as
 `wait` does. It prints a line per landing that says which rule gave
 the verdict, and a red's tests and excerpt:
 

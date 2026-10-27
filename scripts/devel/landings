@@ -646,7 +646,7 @@ def clearance(records, runner, target, checkouts, lands=()):
             landings = [dict(repo=None, commit=target)]
         ready = True
     else:
-        run = latest_runs(records).get(target, [])
+        run = wait_run(records, target)
         terminal = ending(run)
         if terminal is not None and terminal['event'] == 'stopped':
             print(event_line(terminal))
@@ -721,6 +721,12 @@ def latest_runs(records, proves=False):
     return latest
 
 
+def wait_run(records, label):
+    """The newest landing or proof attempt, ordered by its first feed record."""
+    runs = [latest_runs(records, proves=proves).get(label, []) for proves in (False, True)]
+    return max(runs, key=lambda run: run[0]['position'] if run else -1)
+
+
 def ending(run):
     return next((r for r in reversed(run) if r['event'] in ('done', 'proved', 'stopped')), None)
 
@@ -792,9 +798,9 @@ def wait(label, timeout, poll, unreachable, read=15, cleared=False):
                 if status is not None:
                     return status, outcome
             else:
-                run = latest_runs(records).get(label, [])
+                run = wait_run(records, label)
                 terminal = ending(run)
-                if terminal is not None:
+                if terminal is not None and terminal['event'] in ('done', 'stopped'):
                     if terminal['event'] == 'stopped':
                         print(event_line(terminal))
                         return 1, 'stopped'

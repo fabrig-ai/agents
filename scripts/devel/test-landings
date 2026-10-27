@@ -154,10 +154,11 @@ class Lab:
         assert result.returncode == status, (result.returncode, result.stdout, result.stderr)
         return result
 
-    def following(self, rows, status=0, before=None):
+    def following(self, rows, status=0, before=None, cleared=False):
         # However late the append comes under load, an unreadable feed is not yet unreachable.
         env = dict(self.env, LANDINGS_UNREACHABLE='30')
-        with subprocess.Popen([PYTHON, '-I', str(SCRIPT), 'wait', 'fixture/m1', '--timeout', '20'],
+        with subprocess.Popen([PYTHON, '-I', str(SCRIPT), 'wait', 'fixture/m1', '--timeout', '20',
+                               *(['--cleared'] if cleared else [])],
                               cwd=self.root, env=env, stdin=subprocess.DEVNULL,
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as proc:
             try:
@@ -1087,6 +1088,65 @@ def stopped_set(lab):
     assert out == '10-24 12:00Z fixture/m1 stopped status=6 reason=fixture stopped fixture-host\n', out
 
 
+def stopped_proof(lab):
+    # A failed proof is the set's newest run, including after an older landing.
+    for index, (status, repo, reason) in enumerate([
+            (3, 'skein', 'rebase conflict'), (4, 'smith', 'gate failed'),
+            (6, 'temper', 'third failure')], 1):
+        if index == 2:
+            lab.append(record(event='started', token='old'), record(event='done', token='old'))
+        token = f'proof{index}'
+        lab.append(record(event='proving', token=token, mode='prove'),
+                   record(event='stopped', token=token, minute=index, mode='prove',
+                          status=status, repo=repo, reason=reason))
+        for flags in (['--cleared'], []):
+            result = lab.run('wait', *flags, 'fixture/m1', '--timeout', '0', status=1)
+            assert result.stdout == (f'10-24 12:0{index}Z fixture/m1 stopped {repo} '
+                                     f'status={status} reason={reason} fixture-host\n'), result
+            assert result.stderr == '', result
+
+
+def appended_stopped_proof(lab):
+    for cleared in (False, True):
+        lab.feed.write_text('')
+        lab.append(record(event='proving', mode='prove'))
+        out = lab.following([record(event='stopped', mode='prove', status=4,
+                                    repo='jig', reason='gate failed')], status=1, cleared=cleared)
+        assert out == ('10-24 12:00Z fixture/m1 stopped jig '
+                       'status=4 reason=gate failed fixture-host\n'), out
+
+
+def stopped_run_superseded(lab):
+    # A new landing or proof supersedes a stop; a successful proof still waits for landing.
+    for start in ('waiting', 'started', 'proving'):
+        lab.feed.write_text('')
+        lab.append(record(event='proving', mode='prove'),
+                   record(event='stopped', mode='prove', status=4, repo='jig', reason='old stop'),
+                   record(event=start, token='retry', minute=1))
+        for flags in (['--cleared'], []):
+            result = lab.run('wait', *flags, 'fixture/m1', '--timeout', '0', status=3)
+            assert result.stdout == '', result
+        if start == 'proving':
+            lab.append(record(event='proved', token='retry', minute=2, mode='prove'))
+            for flags in (['--cleared'], []):
+                lab.run('wait', *flags, 'fixture/m1', '--timeout', '0', status=3)
+        lab.append(record(event='waiting', token='land', minute=3),
+                   record(event='done', token='land', minute=4))
+        for flags in (['--cleared'], []):
+            lab.run('wait', *flags, 'fixture/m1', '--timeout', '0')
+    # A new proof also supersedes a stopped landing, despite its late terminal event.
+    lab.feed.write_text('')
+    lab.append(record(event='started', token='old'),
+               record(event='proving', token='new', minute=1, mode='prove'),
+               record(event='stopped', token='old', minute=2, status=4, reason='late stop'),
+               record('other', 'proving', 'other', 3, mode='prove'),
+               record('other', 'stopped', 'other', 4, mode='prove', reason='other stop'),
+               record(event='stopped', token='truncated', minute=5, mode='prove', reason='lost start'))
+    for flags in (['--cleared'], []):
+        result = lab.run('wait', *flags, 'fixture/m1', '--timeout', '0', status=3)
+        assert result.stdout == '', result
+
+
 def waits_for_verdict(lab):
     landed_set(lab)
     lab.append(tier_record('verdict'))
@@ -1514,7 +1574,8 @@ def main():
              commit_target_joins_parts, cleared_main_over_two_parts, tiers_shown_per_part,
              parts_join_run_verdicts, part_own_verdict_combines_with_other_run,
              complete_splits_prefer_smallest_and_reds_win, split_commit_targets_keep_repositories_apart,
-             cleared_main_none, cleared_main_unreadable, red_set, stopped_set, waits_for_verdict, commit_target,
+             cleared_main_none, cleared_main_unreadable, red_set, stopped_set, stopped_proof, appended_stopped_proof,
+             stopped_run_superseded, waits_for_verdict, commit_target,
              resolver_red_counts_against_the_set, tip_red_still_counts_against_the_set,
              push_result_also_supplies_the_range, legacy_landing_keeps_its_tip_verdict,
              plain_landing_uses_its_range, range_excludes_an_inherited_red,

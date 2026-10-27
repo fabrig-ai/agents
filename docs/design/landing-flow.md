@@ -622,8 +622,13 @@ agents checkout like `repin`, answers the first three:
 - **The feed.** Each run's steps go into a feed on hetzner3: waiting,
   started, each repository gated and landed, and how it ended.
   `landings` shows the feed and the sets in flight, the lock's holder
-  among them; `landings wait <set>` exits when the set has landed or
-  stopped.
+  among them. `landings wait <set>`, with `--cleared` too, exits 1 when
+  the set's newest run, a proof or a landing, has stopped, printing a
+  line with its repository, status and reason. A newer run, started by
+  `proving`, `waiting` or `started`, supersedes that stop; a successful
+  proof still waits for landing. Runs are ordered by their first feed
+  record, so an older run's late stop cannot end the newer run's wait.
+  Landing and tier-verdict outcomes keep their existing exits.
 
 Beside the tool, the owner and its implementers do the rest:
 - **The catch-up.** The first set after the release brings every
