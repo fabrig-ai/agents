@@ -84,7 +84,7 @@ the others stand.
 | `mail` | `post list`: for each name with unread mail, how many, the oldest's age in minutes and whether its waiter lives |
 | `stale` | `codex-run stale`: the runs that will never post, and since when |
 | `targets` | each target that `tidy --targets` would weigh (cleanup.md 4, step 9): its path under `tmp/`, its owner, its last build and whether it is in use; its size only when asked (`--sizes`), by `du`, within 30 seconds for all |
-| `tend` | `tmp/fleet/tend.json` (section 4) |
+| `tend` | `tmp/fleet/tend.jsonl` (section 4): the tends that ended after the time the reader asks from (`probe --since TIME`), or the last one |
 
 - **One failure leaves the rest,** as on the status page: a source that
   fails, or answers with a field of the wrong type, is left out and
@@ -116,11 +116,12 @@ keeps that field's conditions as they were.
 | `memory` | available under 10 % of total | 15 % or more |
 | `kache` | the store at 1.5 times its limit or more | at 1.1 times or less |
 | `unreached` | the machine not read | read |
-| `untended` | its last tend ended 15 minutes ago or more, or never | a tend within 15 minutes |
+| `untended` | its last tend ended 15 minutes ago or more, or never, or a command of it refused (exit 2) or could not start | a tend within 15 minutes whose three commands ran |
 | `deaf NAME` | its tend's `post wake` could not wake NAME (exit 3): raised in the round that reads it, since the mail has waited 15 minutes already | NAME's mail read |
 | `mail NAME` | NAME's oldest unread message 60 minutes old or more | none that old |
 | `stale RUN` | RUN listed by `codex-run stale`, its caller not told | no longer listed |
-| `session NAME` | an active mission's session absent from its machine's live sessions | present |
+| `session NAME` | an active mission's session absent from its machine's live sessions | present, or the record no longer holds an active mission owned at that address (ended, paused, moved) |
+| `blind MACHINE SOURCE` | a source of the reading failing on that machine (its `errors`) | read |
 
 - **`session`** reads the record on the watch's machine, pulled once a
   round (`record pull`, read as it stands when the pull fails): each
@@ -128,6 +129,12 @@ keeps that field's conditions as they were.
   `NAME@MACHINE`. A session that is stopped or gone was ended on
   purpose or died; the watch wakes none, and the director decides
   (post.md 4).
+- **A condition's subject gone** clears it: a mailbox, a run's
+  directory or a machine's line in the machines file that no longer
+  exists, as the record's mission does for `session`.
+- **`blind`** keeps a failing source from passing for a quiet one: a
+  machine whose `kache stats` or `post list` has failed for ten
+  minutes is one the watch no longer sees there.
 - **`user`'s mailbox** raises nothing: the user reads post when they
   choose. Nor does the watch's own, `fleet`.
 - **`x1` and its like:** a machine whose `tmp/machine.env` says
@@ -162,8 +169,9 @@ mode 0600:
 
 - `watch.json`: per condition, the rounds its test has held and
   whether it is raised; the raises not yet posted; the last post's
-  time. A round without it starts from nothing, so a restart raises
-  only what two of its own rounds confirm.
+  time; per machine, the end of the last tend read. A round without
+  it starts from nothing, so a restart raises only what two of its own
+  rounds confirm.
 - `rounds.jsonl`: each round's figures per machine (time, load,
   pressure, memory, disk, kache, the conditions raised), kept 7 days,
   for reading back what a machine went through.
@@ -180,10 +188,19 @@ commands of the kit, in this order, each whatever the others' exits:
 3. `codex-run stale --post`: each run that will never post, told to its
    caller (post.md 5).
 
-It writes `tmp/fleet/tend.json`, replaced atomically: its start and
-end, and each command's exit and output lines (at most 50 each). Its
-exit is 0 when all three exited 0, else 1. `fleet-tend.timer` runs it
-every 5 minutes on every machine `setup` sets up (section 6).
+It appends one line to `tmp/fleet/tend.jsonl`: its start and end, and
+each command's argv, exit and output lines (at most 200 each, then how
+many more), under a lock, keeping 7 days. Its exit is 0 when all three
+exited 0, else 1. `fleet-tend.timer` runs it every 5 minutes on every
+machine `setup` sets up (section 6).
+
+- **What the watch reads of it:** each tend once. The watch keeps, per
+  machine, the end of the last tend it has read, and asks the probe for
+  those after it, so a tend that falls between two rounds, or two
+  tends in one, is never lost. The lines it reads are the tools' own:
+  `tidy: deleted target …` (cleanup.md 4), `NAME woken` and `NAME
+  queued, nobody will wake it: …` (post.md 3), and the runs told
+  (post.md 5).
 
 - **Why each machine:** what tending decides needs only its own
   machine, and runs its own kit's rules: a machine whose watch is down,
@@ -264,14 +281,17 @@ machine's own.
   gap carried by one post; a raise cleared before its post dropped from
   it; a failed post tried again, an exit 3 not; each condition of 3.1
   from its fixture; `deaf` raised in its first round; `session` from an
-  active mission's README and not from a paused one's; `user` and
+  active mission's README and not from a paused one's, cleared when
+  the README says paused; `blind` from a source failing twice; a
+  mailbox or a run's directory gone clearing its condition; two tends
+  between rounds both read, and none read twice; `user` and
   `fleet` never raised; a `FLEET_QUIET` machine raising only
   `unreached`; a round with no state raising nothing in its first
   round; the subject's length; the body's 15 lines; `rounds.jsonl`
   pruned at 7 days.
 - **The tend:** the three commands in order, each run when one before
-  fails; `tend.json` with each exit and at most 50 lines; exit 1 when
-  any failed.
+  fails; its line in `tend.jsonl` with each exit and at most 200 lines;
+  lines past 7 days dropped; exit 1 when any failed.
 - **The units:** what `setup` writes, the watch's only with its
   address file (`test-after-landing-units` covers setup's units today;
   the owner picks the fixture).
@@ -281,8 +301,9 @@ machine's own.
 ## 8. Going live
 
 1. **The tools' parts land:** `tidy --targets`, `post wake` and
-   `codex-run stale --post`, each with its fixture. They change nothing
-   until a tend runs them.
+   `codex-run stale --post`, each with its fixture. Until a tend runs
+   them, only the director's full `tidy` reaches step 9, and the end of
+   a run marks `post-failed` for exit 2 alone.
 2. **`fleet probe` and `fleet room` land.** The director reads the
    machines with `fleet room` from then on, at its check and before
    placing an owner.
@@ -290,7 +311,9 @@ machine's own.
    kit's rollout, one quiet machine at a time (`setup --fix`, twice).
    The runs `codex-run stale` lists on a machine before its first tend
    are read by the director first: each told, or its directory left
-   for `tidy`.
+   for `tidy`. A machine whose kit lacks step 1's tools tends with what
+   it has: the commands it lacks exit 2, and the watch raises its
+   `untended` until the rollout reaches it.
 4. **`fleet watch` lands,** and hel8 gets its address file, `director@hel8`.
    The director's by-hand readings of the machines end.
 5. **The roles' edits,** with step 4: director.md 2, 3 and 5 (the

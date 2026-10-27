@@ -265,7 +265,12 @@ overwrites another.
     body.
 - **`codex-run stale`** lists the runs that will never post: those
   without an end whose unit is gone (killed, out of memory, a reboot, a
-  unit that never started), and those whose post failed.
+  unit that never started), and those whose post failed. A run whose
+  meta is under 2 minutes old is not listed: its unit may not have
+  started yet. A post failed only on exit 2: on exit 3 the mail is in
+  the caller's mailbox, so the end writes `post-failed` for exit 2
+  alone, and a `post-failed` from before that holding `queued, nobody
+  will wake it` counts as told.
   **`codex-run stale --post`** tells each one's caller once, as its end
   would have: a run whose post failed sends that post again, and a run
   whose unit is gone posts `run <id> failed stale: <why>` with the

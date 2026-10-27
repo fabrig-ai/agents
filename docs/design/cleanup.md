@@ -184,18 +184,25 @@ new work. There is no keep list: a landed branch's commits are on
    - **Its owner** is the mission whose directory holds it, with its
      milestones' `owners/<m>-m<N>/` as one, or `director`.
    - **In use** while held by a process (section 4's sense, for its
-     worktree): never touched, nor counted idle.
+     worktree: a build, a test binary, an implementer's Codex), or while
+     a build holds Cargo's lock, a `.cargo-lock` in `target/` or one of
+     its profile directories (`flock`, tried without waiting): never
+     touched, nor counted idle.
    - **Its last build** is the newest modification time of `target/` and of
      each profile directory's `deps/`, `.fingerprint/` and `build/` in
      it: a few `stat`s, never a walk.
-   - **Cleared** when not in use and either its last build is 2 hours
-     old or more, a finished task's, or it is beyond its owner's two:
-     an owner keeps at most two targets on a machine, those in use
-     first, then the latest built.
-   - **Clearing** renames the target into `tmp/logs/tidy-trash/`, one
-     rename, so that a build starting after it finds no target and
-     starts afresh, then deletes it there. Each run first deletes what
-     an interrupted one left in the trash.
+   - **Cleared** when not in use and either idle, its last build 2
+     hours old or more, or beyond its owner's two: an owner keeps at
+     most two targets on a machine, those in use first, then the latest
+     built. Age and count decide alone: no task, run or record is read,
+     so a finished task's target goes once idle, whatever its task.
+   - **Clearing** takes every `.cargo-lock` of the target, then checks
+     again that no process holds its worktree, then renames the target
+     into `tmp/logs/tidy-trash/` and lets the locks go: a build that
+     started before holds a lock, and one that starts after finds no
+     target and starts afresh. The rename done, it deletes the target
+     there. Each run first deletes what an interrupted one left in the
+     trash.
    - **Held beyond two:** an owner with more than two targets in use
      keeps them all, each one past its two reported, without exit 1:
      nothing waits on a decision, and the fleet watch shows it.
