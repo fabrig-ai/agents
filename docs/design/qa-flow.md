@@ -516,6 +516,12 @@ held).
   - `qa deploy` records the unit, then hands systemd its name, its
     directory, its log, the wrapper as its stop command, the timeout,
     and no `ExecStopPost=`; an unsafe DIRECTORY or NAME is refused;
+  - the real command line: with no tool overridden, `qa deploy` runs the
+    program named `systemd-run` on PATH, and the service the one named
+    `systemctl` (10-27: `qa deploy` ran systemctl with systemd-run's
+    arguments, since every story overrode the tool); where the machine
+    has a user manager, a story on a real throwaway unit shows its stop
+    command run before its process ends;
   - a deployment that can export only while it is up gets its login
     back when the session is stopped at the cap, and the service stops
     its unit after the give: a stopped pass's login is back;
