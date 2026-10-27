@@ -76,9 +76,12 @@ The director reads this file against what it sees at each check.
 ## 3. The rung walk loop
 
 design/ladder's, with the rung owners (the user, 10-27 18:2xZ and
-18:4xZ). The launcher, `qa walk`, is qa-flow.md 10.7; until it lands, a
-walk takes its login with `logins take chatgpt --any`, gives it back by
-the name it was given, and writes its clock by hand.
+18:4xZ). Walks start with the launcher, `qa walk` (qa-flow.md 10.7, how
+to use it in 6.1): `qa walk temper RUNG [--kind claude] [--build REF]`
+to start, `--resume NAME --build REF` to resume; a login wanted by
+hand, for a live story, is `qa take KIND --as walk/KIND/WHAT` and `qa
+give`, never `logins take`. It writes the clock's walk events; the rest
+are the owner's.
 
 1. **A walk** runs its rung's brief, copied unchanged, on a login of
    the walks' two, at `main` or at a fix's branch: `qa walk temper RUNG
@@ -451,3 +454,5 @@ Newest last, times UTC.
 - 10-27 20:4xZ: `qa walk` by kind with pause and resume, `qa take` and
   `qa give`, `logins drop` landed (agents b844696); 6.1, 6.3 and 7 as
   built (design/qa-evidence).
+- 10-27 20:4xZ: walks start with `qa walk`, by-hand takes with `qa take` (agents
+  b844696; section 3's preamble).
