@@ -472,10 +472,19 @@ a time, with the owners who build it.
   builders, the budgets, and the other owners near its repositories. It
   answers what each brings, and breaks the ties between them.
 - **What stays the director's:** the user; machines, placement and
-  spend; security; the landing flow; what crosses drafts; starting and
+  spend; security; the landing flow; a tie between drafts; starting and
   stopping designers.
-- **One answer per question.** An owner writes to its designer only.
-  The director answers a designer's owners only through it.
+- **Designers settle what crosses drafts with each other,** by post,
+  the director in copy (the user, 10-27): a technical point one draft
+  needs of another (a limit, a stock value, a shared file's order, a
+  transcript wanted) goes from designer to designer. The director steps
+  in only on a tie, a machine or spend, a landing hold, or what goes to
+  the user.
+- **One answer per question.** An owner writes to its designer only,
+  but a flake: one that fails a gate or a tier, not its own change's,
+  goes straight to the flakes' owner named in `direction.md`, with the
+  test, the log's path, the machine and its load. The director answers a
+  designer's owners only through it.
 - **A draft's end:** the designer's closing note folds into the
   director's comparison across owners (section 6).
 
