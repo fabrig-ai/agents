@@ -322,9 +322,8 @@ class Tidy:
             except (Failure, OSError) as error:
                 self.keep('worktree', wt['path'], str(error), 3)
 
-    def kept_proofs(self):
+    def proofs(self):
         base = self.tmp / 'land-set'
-        worktrees = base / 'worktrees'
         for proof_file in sorted((base / 'proofs').glob('*.json')):
             try:
                 source = proof_file.read_text()
@@ -338,6 +337,12 @@ class Tidy:
                 expired = (datetime.now(timezone.utc) - stamp).total_seconds() > 24 * 3600
             except (OSError, ValueError, KeyError, TypeError, AttributeError):
                 continue
+            yield proof_file, source, proof, expired
+
+    def kept_proofs(self):
+        base = self.tmp / 'land-set'
+        worktrees = base / 'worktrees'
+        for proof_file, source, proof, expired in self.proofs():
             for repo in self.repos:
                 entry = proof['repos'].get(repo.name)
                 if (not repo.ready or not isinstance(entry, dict) or entry.get('pin_only') is not True
@@ -639,7 +644,7 @@ class Tidy:
         fixture = os.environ.get('TIDY_FREE_BYTES')
         return int(Path(fixture).read_text()) if fixture else shutil.disk_usage(self.root).free
 
-    def target_room(self, candidates, trash):
+    def target_room(self, candidates, trash, kept):
         wanted = self.args.room * 2**30
         free = self.free_bytes()
         for newest, work, target in sorted(candidates, key=lambda item: (item[0], str(item[2]))):
@@ -652,7 +657,23 @@ class Tidy:
                 self.delete('target', target, '', reason, lambda: None)
             else:
                 try:
-                    self.clear_target(work, target, reason, trash)
+                    with ExitStack() as locks:
+                        if work in kept:
+                            repo, proof_file, source, proof, branch, commit = kept[work]
+                            lock_path = self.tmp / 'land-set' / 'state' / (quote(proof['set'], safe='') + '.lock')
+                            try:
+                                lock = locks.enter_context(lock_path.open('r'))
+                                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                            except OSError as error:
+                                self.keep('target', target, f'set lock unavailable: {error} ({reason})')
+                                continue
+                            wt = next((w for w in worktree_list(repo) if w['path'] == work), None)
+                            if (proof_file.read_text() != source or not wt or 'locked' in wt
+                                    or wt.get('branch') != branch or wt.get('HEAD') != commit
+                                    or work.resolve() != work or target.is_symlink()):
+                                self.keep('target', target, f'proved worktree changed ({reason})')
+                                continue
+                        self.clear_target(work, target, reason, trash)
                 except (Failure, OSError) as error:
                     self.keep('target', target, f'{error} ({reason})', 3)
                 free = self.free_bytes()
@@ -680,6 +701,13 @@ class Tidy:
                 except OSError as error:
                     self.keep('directory', path, str(error), 3)
         owners = defaultdict(list)
+        proofs, kept, room_only = {}, {}, []
+        if self.args.room is not None:
+            for proof_file, source, proof, _ in self.proofs():
+                for name, entry in proof['repos'].items():
+                    if (isinstance(entry, dict) and entry.get('pin_only') is True
+                            and isinstance(entry.get('worktree'), str)):
+                        proofs[(name, entry['worktree'])] = (proof_file, source, proof, entry.get('commit'))
         for name in REPOS:
             repo = self.root / name
             try:
@@ -700,7 +728,14 @@ class Tidy:
                         owner = re.sub(r'-m[0-9]+$', '', parts[0]) if area == 'owners' else 'director'
                         break
                 if owner is None:
-                    continue
+                    record = proofs.get((name, str(work)))
+                    if not record or self.tmp / 'land-set' / 'worktrees' not in work.parents:
+                        continue
+                    proof_file, source, proof, commit = record
+                    branch = f'refs/heads/land-set/{proof["token"]}/{name}'
+                    if wt.get('branch') != branch or wt['HEAD'] != commit:
+                        continue
+                    kept[work] = (repo, proof_file, source, proof, branch, commit)
                 try:
                     if work.resolve() != work or target.is_symlink() or not target.is_dir():
                         continue
@@ -719,13 +754,19 @@ class Tidy:
                     else:
                         with self.target_locks(target, profiles) as busy:
                             busy = busy or held(work)
-                    owners[owner].append((busy, newest, work, target))
+                    if owner is None:
+                        # A proved target stays warm unless room is requested;
+                        # it never participates in owners' age or count rules.
+                        if not busy and time.time() - newest >= 900:
+                            room_only.append((newest, work, target))
+                    else:
+                        owners[owner].append((busy, newest, work, target))
                 except FileNotFoundError:
                     continue
                 except (Failure, OSError) as error:
                     self.keep('target', target, str(error), 3)
         now = time.time()
-        candidates = []
+        candidates = room_only
         for owner, targets in sorted(owners.items()):
             targets.sort(key=lambda item: (not bool(item[0]), -item[1], str(item[2])))
             for number, (busy, newest, work, target) in enumerate(targets):
@@ -746,7 +787,7 @@ class Tidy:
                     except (Failure, OSError) as error:
                         self.keep('target', target, str(error), 3)
         if self.args.room is not None:
-            self.target_room(candidates, trash)
+            self.target_room(candidates, trash, kept)
 
     def step(self, action):
         try:
