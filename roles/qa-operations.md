@@ -105,7 +105,9 @@ the name it was given, and writes its clock by hand.
    on its branch, before it lands: `qa walk temper RUNG --resume N
    --build FIX-BRANCH`. The kept box restarts with the fix branch's
    binary on its own data, any free login is imported, and the walk goes
-   on from the step it paused at. A fix that moves a stored family
+   on from the step it paused at. A new binary may name a new memory
+   figure at the restart (its worst case moved): it is raised as temper's
+   qa.md 3 says and said in the report, a setup step, not a finding. A fix that moves a stored family
    restarts the walk from step 1, and the finding's line says so:
    nothing is versioned before the first release, so an older store may
    not open, and design/upgrades-draft says whether one does.
@@ -434,3 +436,5 @@ Newest last, times UTC.
 - 10-27 19:5xZ: a take by hand admitted by `qa take` below its kind's
   cap, after W (qa-flow.md 10.6; o/qa-evidence-keep's finding); until
   then, `qa passes` read first (design/qa-evidence).
+- 10-27 20:4xZ: a resumed walk raises a new binary's memory figure at the
+  restart, as a setup step (section 3, item 4; design/ladder).
