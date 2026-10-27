@@ -232,7 +232,7 @@ machine's `tmp/post/` (section 5).
   callers, kache's store held to its limit. `fleet watch`, a timer on
   hel8, reads every machine of post's machines file and posts the
   director, from `fleet`, once per condition two rounds confirm, at most
-  every 10 minutes: disk near its floor, load past 3 per core, memory
+  every 10 minutes: disk near its floor, load past 4 per core, memory
   short, kache past its limit, a machine unreached, untended or unseen,
   a session its wake could not reach, mail unread an hour, a dead run
   untold, an active mission's session gone. A clear posts nothing. Each
