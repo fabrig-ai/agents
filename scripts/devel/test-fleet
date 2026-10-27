@@ -606,11 +606,420 @@ def tend_record_failure(lab):
     assert {p.name for p in path.iterdir()} == {'tend.jsonl', 'tend.lock'}
 
 
+def reading(**changes):
+    r = {'errors': {}, 'cores': 4, 'load': [1, 1, 1], 'floor': 40*GB,
+         'disk': {'free': 100*GB, 'total': 600*GB}, 'memory': {'available': 50, 'total': 100},
+         'kache': {'store': 50*GB, 'limit': 100*GB}, 'quiet': False,
+         'mail': {}, 'stale': [], 'sessions': [], 'tend': [tend_record(NOW)]}
+    r.update(changes)
+    return r
+
+
+def tend_record(now, exits=(0, 0, 0), lines=((), (), ())):
+    return {'end': API['iso'](now), 'commands': [
+        {'argv': list(argv), 'exit': code, 'lines': list(output)}
+        for argv, code, output in zip(API['TENDING'], exits, lines)]}
+
+
+def row(r=None, machine='alpha', **changes):
+    return {'machine': machine, 'reading': reading() if r is None else r, **changes}
+
+
+def rounds(r, state=None, missions=(), now=NOW, count=2):
+    for n in range(count):
+        state = API['judge'](state or {}, [row(r)], set(missions), now+n*300)
+    return state
+
+
+def raise_after_two_rounds(lab):
+    r = reading(disk={'free': 38*GB})
+    first = rounds(r, count=1)
+    assert first['pending'] == [] and not API['due'](first, NOW)
+    state = rounds(r, first, count=1, now=NOW+300)
+    assert state['pending'] == ['alpha disk'] and API['due'](state, NOW+300)
+    posted = API['posted'](state, 0, NOW+300)
+    third = rounds(r, posted, count=1, now=NOW+600)
+    assert third['pending'] == [] and state['pending'] == ['alpha disk']
+    assert first['conditions']['alpha disk']['raise'] == 1
+
+
+def clear_after_two_rounds(lab):
+    state = API['posted'](rounds(reading(load=[0, 0, 16])), 0, NOW+300)
+    low, middle = reading(), reading(load=[0, 0, 10])
+    for n, r in enumerate((low, middle, low)):
+        state = rounds(r, state, now=NOW+600+n*300, count=1)
+        assert state['conditions']['alpha load']['raised']
+    state = rounds(low, state, now=NOW+1500, count=1)
+    assert not state['conditions']['alpha load']['raised'] and state['cleared'] == ['alpha load']
+
+
+def between_changes_nothing(lab):
+    for kind, high, middle in [
+        ('disk', {'disk': {'free': 38*GB}}, {'disk': {'free': 55*GB}}),
+        ('load', {'load': [0, 0, 16]}, {'load': [0, 0, 10]}),
+        ('memory', {'memory': {'available': 8, 'total': 100}}, {'memory': {'available': 12, 'total': 100}}),
+        ('kache', {'kache': {'store': 160, 'limit': 100}}, {'kache': {'store': 120, 'limit': 100}})]:
+        key = 'alpha ' + kind
+        raised = rounds(reading(**high))
+        state = rounds(reading(**middle), raised, now=NOW+600)
+        assert state['conditions'][key]['raised']
+        assert state['conditions'][key]['raise'] == state['conditions'][key]['clear'] == 0
+        assert key not in rounds(reading(**middle))['conditions']
+
+
+def each_condition(lab):
+    bad_tend = tend_record(NOW, (0, 3, 0), ((), ('o/x queued, nobody will wake it: absent',), ()))
+    examples = [
+        ('disk', row(reading(disk={'free': 38*GB}))),
+        ('load', row(reading(load=[0, 0, 16]))),
+        ('memory', row(reading(memory={'available': 8, 'total': 100}))),
+        ('kache', row(reading(kache={'store': 160, 'limit': 100}))),
+        ('unreached', {'machine': 'alpha', 'unreached': 'refused'}),
+        ('untended', row(reading(tend=[]))),
+        ('deaf o/x', row(reading(tend=[bad_tend], mail={'o/x': {'oldest': 4000}}))),
+        ('mail o/x', row(reading(mail={'o/x': {'oldest': 4500}}))),
+        ('stale run1', row(reading(stale=[{'run': 'run1'}]))),
+        ('session o/x', row()),
+        ('blind kache', row(reading(errors={'kache': 'exit 1'})))]
+    for kind, bad in examples:
+        missions = {('o/x', 'alpha')} if kind.startswith('session') else set()
+        key = 'alpha ' + kind
+        state = API['judge']({}, [bad], missions, NOW)
+        assert state['conditions'][key]['raised'] is kind.startswith('deaf'), kind
+        state = API['judge'](state, [bad], missions, NOW+300)
+        assert state['conditions'][key]['raised'], kind
+        good = row(reading(sessions=[{'name': 'o/x'}], tend=[tend_record(NOW+600)]))
+        state = API['judge'](state, [good], missions, NOW+600)
+        assert state['conditions'][key]['raised'], kind
+        state = API['judge'](state, [good], missions, NOW+900)
+        assert not state['conditions'][key]['raised'], kind
+
+
+def missing_field_keeps(lab):
+    state = rounds(reading(kache={'store': 160, 'limit': 100}), count=1)
+    missing = reading(errors={'kache': 'exit 1'}); del missing['kache']
+    state = rounds(missing, state, now=NOW+300)
+    assert state['conditions']['alpha kache']['raise'] == 1
+    assert state['pending'] == ['alpha blind kache']
+    unchanged = rounds(reading(kache={'store': 160, 'limit': 100}, errors={'kache': 'exit 1'}), state, now=NOW+900, count=1)
+    assert unchanged['conditions']['alpha kache']['raise'] == 1
+    unread = API['judge'](state, [{'machine': 'alpha', 'unreached': 'refused'}], set(), NOW+900)
+    assert unread['conditions']['alpha kache'] == state['conditions']['alpha kache']
+
+
+def session_from_missions(lab):
+    root = lab.root / 'records'
+    active = write(root / 'missions/a/README.md', '---\nstate: active\nowner: o/x@alpha\n---\n')
+    write(root / 'missions/b/README.md', '---\nstate: paused\nowner: o/y@alpha\n---\n')
+    missions = API['active_owners'](root)
+    assert missions == {('o/x', 'alpha')}
+    state = rounds(reading(), missions=missions)
+    assert state['pending'] == ['alpha session o/x']
+    active.write_text('---\nstate: paused\nowner: o/x@alpha\n---\n')
+    state = rounds(reading(), state, API['active_owners'](root), now=NOW+600, count=1)
+    assert 'alpha session o/x' not in state['conditions'] and not state['pending'] and not state['cleared']
+
+
+def subjects_gone(lab):
+    state = rounds(reading(mail={'o/x': {'oldest': 4000}}, stale=[{'run': 'run1'}]))
+    gone = API['judge'](state, [row(machine='beta')], set(), NOW+600)
+    assert not gone['conditions'] or all(key.startswith('beta ') for key in gone['conditions'])
+    assert not gone['pending'] and not gone['cleared']
+    posted = API['posted'](state, 0, NOW+300)
+    cleared = rounds(reading(), posted, now=NOW+600)
+    assert set(cleared['cleared']) == {'alpha mail o/x', 'alpha stale run1'}
+
+
+def untended_rows(lab):
+    for tends in ([], [tend_record(NOW-900)], [tend_record(NOW, (2, 0, 0))], [tend_record(NOW, (0, 0, None))]):
+        state = rounds(reading(tend=tends))
+        assert 'alpha untended' in state['pending'], tends
+        fresh = reading(tend=[tend_record(NOW+600)])
+        assert not rounds(fresh, state, now=NOW+600)['conditions']['alpha untended']['raised']
+    # Exits 1 and 3 mean the commands ran; they do not make the tend untended.
+    assert not rounds(reading(tend=[tend_record(NOW, (1, 3, 1))]))['pending']
+
+
+def tends_counted_once(lab):
+    lines = (('tidy: deleted target a', 'tidy: deleted target b'), ('o/x woken',), ('run1 told: sent',))
+    r = reading(tend=[tend_record(NOW-100, lines=lines), tend_record(NOW, lines=lines)])
+    state = rounds(r, count=1)
+    assert state['done']['alpha'] == {'cleared': 4, 'woken': ['o/x'], 'told': 2}
+    assert state['tends']['alpha'] == {'end': API['iso'](NOW), 'ran': True}
+    assert rounds(r, state, count=1, now=NOW+300)['done'] == state['done']
+    state['cleared'] = ['alpha load']
+    assert API['posted'](state, 2, NOW+300) == state
+    posted = API['posted'](state, 3, NOW+300)
+    assert not posted['done'] and not posted['cleared'] and not posted['pending']
+
+
+def user_and_fleet_never(lab):
+    r = reading(mail={name: {'oldest': 7200} for name in ('user', 'fleet')},
+                tend=[tend_record(NOW, (0, 3, 0), ((), tuple(name+' queued, nobody will wake it: absent' for name in ('user', 'fleet')), ()))])
+    assert not rounds(r)['pending']
+
+
+def quiet_machine(lab):
+    r = reading(quiet=True, disk={'free': 0}, load=[0, 0, 100], memory={'available': 0, 'total': 100},
+                kache={'store': 200, 'limit': 100}, tend=[], errors={'kache': 'exit 1'},
+                mail={'o/x': {'oldest': 7200}}, stale=[{'run': 'run1'}])
+    state = rounds(r, missions={('o/x', 'alpha')})
+    assert not state['pending']
+    for n in (2, 3):
+        state = API['judge'](state, [{'machine': 'alpha', 'unreached': 'refused'}], {('o/x', 'alpha')}, NOW+n*300)
+    assert state['pending'] == ['alpha unreached']
+    assert not rounds(r, state, now=NOW+1200)['conditions']['alpha unreached']['raised']
+
+
+def no_state_first_round(lab):
+    r = reading(disk={'free': 0}, load=[0, 0, 100], memory={'available': 0, 'total': 100},
+                kache={'store': 200, 'limit': 100}, errors={'targets': 'shape'}, mail={'o/x': {'oldest': 7200}},
+                stale=[{'run': 'run1'}], tend=[tend_record(NOW, (0, 3, 0), ((), ('o/x queued, nobody will wake it: absent',), ()))])
+    state = rounds(r, missions={('o/x', 'alpha')}, count=1)
+    assert state['pending'] == ['alpha deaf o/x']
+
+
+def gap_carries(lab):
+    state = API['posted'](rounds(reading(disk={'free': 38*GB})), 0, NOW+300)
+    r = reading(load=[0, 0, 16], disk={'free': 38*GB})
+    state = rounds(r, state, now=NOW+300)
+    assert state['pending'] == ['alpha load'] and not API['due'](state, NOW+600)
+    assert API['due'](state, NOW+900)
+    newer = rounds(reading(memory={'available': 0, 'total': 100}), state, now=NOW+600)
+    assert 'alpha memory' in newer['pending'] and API['due'](newer, NOW+900)
+    assert API['posted'](newer, 2, NOW+900) == newer
+
+
+def cleared_before_post_dropped(lab):
+    state = rounds(reading(load=[0, 0, 16]))
+    state['last_post'] = API['iso'](NOW+300)
+    state = rounds(reading(), state, now=NOW+600)
+    assert not state['pending'] and not state['cleared'] and not API['due'](state, NOW+900)
+
+
+def subject_length(lab):
+    fleet = [row(reading(disk={'free': 38*GB}, load=[0, 0, 16], memory={'available': 8, 'total': 100}), name)
+             for name in ('delta', 'alpha', 'beta', 'gamma')]
+    state = API['judge']({}, fleet, set(), NOW)
+    state = API['judge'](state, fleet, set(), NOW+300)
+    subject, body = API['compose'](state, fleet, [], NOW+300)
+    assert len(subject) <= 120 and subject.startswith('fleet: delta disk 38 GB free (floor 40), delta load 4.0/core')
+    import re
+    count = int(re.search(r', and (\d+) more$', subject)[1])
+    assert count == 12 - sum(subject.count(' '+kind+' ') for kind in ('disk', 'load', 'memory'))
+    assert 'since 02:45Z' in body
+
+
+def body_lines(lab):
+    r = reading(disk={'free': 38*GB}, stale=[{'run': f'run{n}'} for n in range(8)])
+    fleet = [row(r), row(reading(load=[0, 0, 16]), 'beta')]
+    state = API['judge']({}, fleet, set(), NOW)
+    state = API['judge'](state, fleet, set(), NOW+300)
+    state['pending'].remove('beta load')
+    state['cleared'] = ['beta memory']
+    state['done'] = {'alpha': {'cleared': 3, 'woken': ['o/x'], 'told': 1}}
+    sized = [row(reading(targets=[{'owner': name, 'size': size*GB} for name, size in
+                                  [('small', 1), ('large', 40), ('medium', 12), ('large', 1)]]))]
+    _, body = API['compose'](state, fleet, sized, NOW+300)
+    lines = body.splitlines()
+    assert lines[1] == '  targets: large 41 GB (2), medium 12 GB (1), small 1 GB (1)', body
+    assert 'alpha tends: cleared 3 targets (disk now 38 GB free), woke o/x, told 1 caller' in lines
+    assert 'Still raised: beta load' in lines and 'Cleared since: beta memory' in lines
+    state['pending'] += ['alpha stale extra'+str(n) for n in range(6)]
+    for key in state['pending']:
+        state['conditions'].setdefault(key, {'raised': True, 'reading': '', 'since': API['iso'](NOW)})
+    _, body = API['compose'](state, fleet, sized, NOW+300)
+    assert len(body.splitlines()) == 15 and body.splitlines()[-1] == '… 5 more lines', body
+
+
+def watch_kit(lab):
+    lab.kit = lab.root / 'watch kit'; lab.kit.mkdir()
+    shutil.copy2(SCRIPT, lab.kit / 'fleet')
+    tool(lab.kit, 'post', '''
+root = Path(os.environ['DEV_TMP']).parent
+with (root / 'sends').open('a') as out:
+    out.write(json.dumps({'argv': sys.argv[1:], 'body': sys.stdin.read()}) + '\\n')
+a = json.loads((root / 'send.json').read_text())
+print('director queued, nobody will wake it: absent' if a['exit'] == 3 else 'send result')
+sys.exit(a['exit'])
+''')
+    write(lab.root / 'alpha/send.json', '{"exit":0}')
+    tool(lab.bin, 'record', '''
+root = Path(os.environ['DEV_TMP']).parent
+with (root / 'pulls').open('a') as out: out.write(' '.join(sys.argv[1:]) + '\\n')
+sys.exit(int(os.environ.get('RECORD_EXIT', '0')))
+''')
+    lab.env['RECORDS'] = str(lab.root / 'records')
+    write(lab.root / 'records/missions/a/README.md', '---\nstate: active\nowner: o/live@alpha\n---\n')
+    write(lab.root / 'records/missions/p/README.md', '---\nstate: paused\nowner: o/gone@beta\n---\n')
+    # All sources stay fake, including the watch's own post and record tools.
+    lab.answer('claude', [{'name': 'o/live', 'state': 'idle', 'pid': 123}])
+    lab.figures('beta', free=38*GB)
+    for machine in ('alpha', 'beta'):
+        write(lab.tmp(machine) / 'fleet/tend.jsonl', json.dumps(tend_record(NOW))+'\n')
+
+
+def watch_round(lab, n, status=0, **env):
+    result = subprocess.run([PYTHON, '-I', '-S', str(lab.kit / 'fleet'), 'watch', '--director', 'director@alpha'],
+                            env=dict(lab.env, FLEET_NOW=str(NOW+n*300), **env), cwd=lab.root,
+                            capture_output=True, text=True, timeout=40)
+    assert result.returncode == status, (result.returncode, result.stdout, result.stderr)
+    return result
+
+
+def watch_state(lab):
+    return json.loads((lab.tmp() / 'fleet/watch.json').read_text())
+
+
+def sends(lab):
+    path = lab.root / 'alpha/sends'
+    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+
+def round_posts_once(lab):
+    watch_kit(lab)
+    for n in range(3):
+        result = watch_round(lab, n)
+        assert len(result.stdout.splitlines()) == 1 and '2/3 machines read' in result.stdout
+    sent, = sends(lab)
+    assert sent['argv'][:4] == ['send', '--as', 'fleet', 'director@alpha']
+    assert sent['argv'][4] == 'fleet: beta disk 38 GB free (floor 40), gamma unreached (refused)', sent
+    assert 'beta disk 38 GB free (floor 40) (since 02:45Z)' in sent['body']
+    assert len((lab.tmp() / 'fleet/rounds.jsonl').read_text().splitlines()) == 3
+    for name in ('watch.json', 'rounds.jsonl'):
+        assert (lab.tmp() / 'fleet' / name).stat().st_mode & 0o777 == 0o600
+    assert (lab.tmp() / 'fleet').stat().st_mode & 0o777 == 0o700
+    for address in ('bad', '-x@alpha', 'x@alpha/escape', 'a@@alpha'):
+        lab.run('watch', '--director', address, status=2)
+    lab.run('watch', status=2)
+
+
+def round_failed_post(lab):
+    watch_kit(lab)
+    watch_round(lab, 0)
+    write(lab.root / 'alpha/send.json', '{"exit":2}')
+    watch_round(lab, 1, status=1)
+    failed = watch_state(lab)
+    assert failed['pending'] and 'last_post' not in failed
+    write(lab.root / 'alpha/send.json', '{"exit":3}')
+    result = watch_round(lab, 2)
+    assert 'director queued, nobody will wake it: absent' in result.stderr
+    assert not watch_state(lab)['pending']
+    watch_round(lab, 3)
+    assert len(sends(lab)) == 2
+
+
+def round_reads_since(lab):
+    watch_kit(lab)
+    watch_round(lab, 0)
+    lines = (('tidy: deleted target x',), ('o/x woken',), ('run1 told: sent',))
+    records = [tend_record(NOW), tend_record(NOW+60, lines=lines), tend_record(NOW+120, lines=lines)]
+    write(lab.tmp('beta') / 'fleet/tend.jsonl', '\n'.join(map(json.dumps, records))+'\n')
+    watch_round(lab, 1)
+    sent, = sends(lab)
+    assert 'beta tends: cleared 2 targets (disk now 38 GB free), woke o/x, told 2 callers' in sent['body']
+    # Sized disk reads do not have --since; gamma's unsized trace proves its own absence.
+    watch_round(lab, 2)
+    assert '--since '+API['iso'](NOW+120) in json.loads((lab.trace / 'beta.args').read_text())[-1]
+    assert '--since' not in json.loads((lab.trace / 'gamma.args').read_text())[-1]
+    assert not watch_state(lab)['done']
+
+
+def round_record_pull(lab):
+    watch_kit(lab)
+    # Missing active owner still counts when the pull fails.
+    lab.answer('claude', [])
+    for n in range(2):
+        watch_round(lab, n, RECORD_EXIT='1')
+    assert (lab.root / 'alpha/pulls').read_text().splitlines() == ['pull', 'pull']
+    assert 'alpha session o/live' in watch_state(lab)['conditions']
+    assert 'alpha session o/live gone' in sends(lab)[0]['body']
+
+
+def round_rounds_pruned(lab):
+    watch_kit(lab)
+    path = lab.tmp() / 'fleet/rounds.jsonl'
+    write(path, '\n'.join(json.dumps({'time': API['iso'](NOW-n*86400), 'machines': {}}) for n in (8, 6, 7))+'\nbroken\n[]\n', 0o644)
+    watch_round(lab, 0)
+    assert [json.loads(line)['time'] for line in path.read_text().splitlines()] == [API['iso'](NOW-6*86400), API['iso'](NOW)]
+    assert path.stat().st_mode & 0o777 == 0o600
+
+
+def round_state_unreadable(lab):
+    watch_kit(lab)
+    path = write(lab.tmp() / 'fleet/watch.json', 'broken', 0o644)
+    watch_round(lab, 0)
+    assert not watch_state(lab)['pending'] and not sends(lab)
+    assert path.stat().st_mode & 0o777 == 0o600
+    for bad in ('[]', '{"tends":{"alpha":{"end":"bad"}}}', '{"conditions":[]}', '{"pending":[[]]}'):
+        write(path, bad)
+        assert API['load_state'](path) == {}
+
+
+def room_shows_watch(lab):
+    watch_kit(lab)
+    for n in range(2): watch_round(lab, n)
+    text = lab.run('room', 'alpha').stdout
+    assert text.splitlines()[-1] == 'watch: raised beta disk, gamma unreached; last round 02:45Z', text
+    data = json.loads(lab.run('room', '--json', 'alpha').stdout)
+    assert data['watch'] == {'raised': ['beta disk', 'gamma unreached'], 'round': API['iso'](NOW+300)}
+
+
+def malformed_watch_inputs(lab):
+    # Tend records cross a loose boundary: one malformed command cannot stop a sweep.
+    for commands in (None, 7, {}, [None], [{'argv': 7}],
+                     [{'argv': None}, {'argv': ['post'], 'exit': 0}, {'argv': ['codex-run'], 'exit': 0}]):
+        record = {'end': API['iso'](NOW), 'commands': commands}
+        first = rounds(reading(tend=[record]), count=1)
+        state = rounds(reading(tend=[]), first, now=NOW+300, count=1)
+        assert 'alpha untended' in state['pending']
+    # The refusal is still described after the cursor has consumed its record.
+    first = rounds(reading(tend=[tend_record(NOW, (2, 0, 0))]), count=1)
+    state = rounds(reading(tend=[]), first, now=NOW+300, count=1)
+    assert state['conditions']['alpha untended']['reading'] == '(tidy refused)'
+    path = lab.tmp() / 'fleet/watch.json'
+    for bad in ({'cleared': ['alpha session']}, {'pending': ['alpha disk']},
+                {'cleared': ['alpha session x', 'alpha session x']},
+                {'conditions': {'alpha untended': {'raise': 2, 'clear': 0, 'raised': False}}},
+                {'conditions': {'alpha untended': {'raise': 1, 'clear': 0, 'raised': False, 'reading': ['bad']}}}):
+        write(path, json.dumps(dict(round=API['iso'](NOW), **bad)))
+        assert API['load_state'](path) == {}, bad
+    # A cleared condition may since have left conditions; keep it until a post goes.
+    saved = dict(round=API['iso'](NOW), cleared=['alpha load'], conditions={})
+    write(path, json.dumps(saved))
+    assert API['load_state'](path) == saved
+
+
+def watch_write_failure(lab):
+    watch_kit(lab)
+    path = lab.tmp() / 'fleet/watch.json'
+    path.mkdir()
+    watch_round(lab, 0, status=2)
+    assert not list(path.parent.glob('watch.json.*'))
+    path.rmdir()
+    watch_round(lab, 0)
+    before = path.read_bytes()
+    with patch.object(Path, 'replace', side_effect=OSError('fixture rename failure')):
+        try:
+            API['atomic'](path, '{}')
+        except OSError:
+            pass
+        else:
+            raise AssertionError('rename failure was hidden')
+    assert path.read_bytes() == before and not list(path.parent.glob('watch.json.*'))
+
+
 CASES = [reading_fields, reading_disk_workspace, reading_floor, reading_absent, reading_source_fails, reading_no_text,
          reading_implementers_stale, reading_targets, reading_tend_since, room_verdicts,
          room_order_and_exit, room_unreached_why, room_new_machine, room_named, room_piped,
          room_targets, room_json, tend_order, tend_all_ok, tend_not_started, tend_lines,
-         tend_keeps_a_week, tend_read_by_probe, tend_room_for_landing, tend_no_room, tend_record_failure]
+         tend_keeps_a_week, tend_read_by_probe, tend_room_for_landing, tend_no_room, tend_record_failure,
+         raise_after_two_rounds, clear_after_two_rounds, between_changes_nothing, each_condition,
+         missing_field_keeps, session_from_missions, subjects_gone, untended_rows, tends_counted_once,
+         user_and_fleet_never, quiet_machine, no_state_first_round, gap_carries,
+         cleared_before_post_dropped, subject_length, body_lines, round_posts_once,
+         round_failed_post, round_reads_since, round_record_pull, round_rounds_pruned,
+         round_state_unreadable, room_shows_watch, malformed_watch_inputs, watch_write_failure]
 
 
 def run(case, directory, built):
