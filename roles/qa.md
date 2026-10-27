@@ -85,14 +85,12 @@ makes a finding there.
    you go: a second deployment that takes the login over takes the file
    over too. Never run `logins`, and never read, copy or print a login.
 
-   **A deployment in a unit of its own** (`systemd-run --user`, so
-   that it outlives your session) takes the give-back file as its stop
-   command, `--property=ExecStop=-FILE` (the `-` keeps a failure or an
-   absent file from failing the unit), which systemd runs before it
-   signals the deployment, while it can still export; and
-   `--property=TimeoutStopSec=300`, so that the export has time. Never
-   `ExecStopPost=`: it runs after the deployment has exited, when no
-   export can succeed (qa-flow.md 10.3).
+   **Each deployment in a unit of its own:** start it with `qa deploy
+   DIR NAME -- COMMAND...` (qa-flow.md 10.5), DIR your scratch
+   directory. It runs as the unit `qa-<pass>-NAME`, outside your
+   session, and its stop runs your give-back file before it signals the
+   deployment, while it can still export. Never `systemd-run` it
+   yourself.
 4. **Drive each case as the product's users' agents do,** and check its
    outcome on both sides: the product's account through its tool, and
    the backend's through the tools the binding names. A finding is the
