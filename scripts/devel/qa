@@ -64,8 +64,8 @@ def command(argv, cwd=None, timeout=None):
             return subprocess.CompletedProcess(argv, 124, stdout, stderr + 'command timed out\n')
 
 
-def git(root, *args, check=True):
-    result = command(['git', '-C', root, *args])
+def git(root, *args, check=True, timeout=300):
+    result = command(['git', '-C', root, *args], timeout=timeout)
     if check:
         need(result.returncode == 0, result.stderr.strip() or 'git failed', 4)
     return result.stdout.strip() if check else result
@@ -116,6 +116,19 @@ class Workspace:
         return str(self.fixture / 'origins' / (repo + '.git')) if self.fixture else f'git@github.com:fabrig-ai/{repo}.git'
 
 
+def no_links(anchor, path):
+    parts = path.relative_to(anchor).parts
+    current = anchor
+    for part in ('', *parts):
+        if part:
+            current /= part
+        try:
+            mode = os.lstat(current).st_mode
+        except FileNotFoundError:
+            break
+        need(not stat.S_ISLNK(mode), f'{current}: symlink refused', 4)
+
+
 class Repositories:
     def __init__(self, workspace):
         self.workspace = workspace
@@ -124,17 +137,17 @@ class Repositories:
     def fetched(self, repo):
         origin = self.workspace.origin(repo)
         parent = self.workspace.tmp / 'qa/repos'
-        need(not parent.is_symlink(), f'{parent}: symlink refused', 4)
+        no_links(self.workspace.tmp, parent)
         parent.mkdir(parents=True, exist_ok=True)
         root = parent / repo
         with (parent / (repo + '.lock')).open('a') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            need(not root.is_symlink(), f'{root}: symlink refused', 4)
+            no_links(self.workspace.tmp, root)
             if not root.exists():
                 # A failed clone leaves no half-built repository at the shared path.
                 with tempfile.TemporaryDirectory(prefix=repo + '-', dir=parent) as directory:
                     clone = Path(directory) / 'repo'
-                    result = command(['git', 'clone', '--filter=blob:none', '--no-checkout', origin, clone])
+                    result = command(['git', 'clone', '--filter=blob:none', '--no-checkout', origin, clone], timeout=300)
                     need(result.returncode == 0, f'cannot clone {repo}: {result.stderr.strip()}', 4)
                     clone.rename(root)
             need(git(root, 'config', '--get', 'remote.origin.url') == origin,
@@ -158,6 +171,7 @@ class Repositories:
     def checkout(self, root, repo, slot, main):
         # The caller holds fetched's clone lock throughout validation and add.
         path = root if slot == 1 else root.with_name(f'{repo}-{slot}')
+        no_links(self.workspace.tmp, path)
         if slot != 1:
             listed = git(root, 'worktree', 'list', '--porcelain').splitlines()
             common = git(root, 'rev-parse', '--path-format=absolute', '--git-common-dir')
@@ -166,7 +180,8 @@ class Repositories:
             valid = (f'worktree {path}' in listed and own is not None
                      and own.returncode == 0 and own.stdout.strip() == common)
             if not valid:
-                if path.is_symlink() or path.exists() and not path.is_dir():
+                no_links(self.workspace.tmp, path)
+                if path.exists() and not path.is_dir():
                     path.unlink()
                 elif path.exists():
                     shutil.rmtree(path)
@@ -245,7 +260,7 @@ class Record:
         # Separate from record.lock: record's subprocess must acquire that itself.
         with (common / 'qa.lock').open('a') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            result = command([self.workspace.tool('record'), 'pull'])
+            result = command([self.workspace.tool('record'), 'pull'], timeout=300)
             if result.returncode:
                 self.warn('record pull failed: ' + result.stderr.strip())
             yield self
@@ -296,7 +311,7 @@ class Record:
                 path = self.path(name)
                 before[name] = (path.read_bytes(), path.stat().st_mode) if path.exists() else None
                 replace(path, text.encode(), before[name][1] if before[name] else 0o600)
-            result = command([self.workspace.tool('record'), 'commit', '-m', message, *changes])
+            result = command([self.workspace.tool('record'), 'commit', '-m', message, *changes], timeout=300)
             need(result.returncode in (0, 3), result.stderr.strip() or 'record commit failed',
                  2 if result.returncode == 2 else 1)
             if result.returncode == 3:
@@ -644,9 +659,11 @@ class Watch:
         self.runs = workspace.root / 'tmp/codex-run'
         self.record = Record(workspace, log)
         self.repositories = Repositories(workspace)
+        self.giving = True
 
     def call(self, tool, *args):
-        return command([self.workspace.tool(tool), *args], timeout=30 if tool == 'systemctl' else None)
+        seconds = dict(systemctl=30, logins=60, post=60, landings=120, **{'codex-run': 120})
+        return command([self.workspace.tool(tool), *args], timeout=seconds[tool])
 
     def save(self, directory, state):
         replace(directory / 'pass.json', (json.dumps(state, indent=2) + '\n').encode())
@@ -666,6 +683,8 @@ class Watch:
         return {name: path for name, path in state.get('logins', {}).items() if name not in state.get('given', [])}
 
     def give(self, directory, state, kind=None):
+        if not self.giving:
+            return
         for name in self.outstanding(state):
             if kind and state.get('kinds', {}).get(name, 'moved') != kind:
                 continue
@@ -682,6 +701,7 @@ class Watch:
         held = {(state.get('holder', 'qa-watch'), name)
                 for _, state in passes for name in self.outstanding(state)}
         listing = self.call('logins', 'list')
+        self.giving = listing.returncode == 0
         if listing.returncode:
             log(f'cannot list stray logins: {listing.stderr.strip()}')
             return
@@ -1001,17 +1021,29 @@ class Watch:
             return False
         launch = self.call('codex-run', 'task', '--to', 'qa-watch', '--on-stop', directory / 'on-stop',
                            directory / 'brief.md', checkout, directory / 'report.md')
+        if launch.returncode == 124:
+            log(f'{name}: launch timed out; keeping custody for run recovery')
+            return False
         words = launch.stdout.split()
         if launch.returncode or not words or not re.fullmatch(r'[a-zA-Z0-9_-]+', words[0]):
             # No unit launched: a record failure must not keep resting logins held.
             self.give(directory, state)
             self.finish(directory, state, 'codex-run refused: ' + (launch.stderr.strip() or launch.stdout.strip() or 'no run id'))
+            return False
         else:
             state['run'] = words[0]
             state.pop('stage', None)
             self.save(directory, state)
             log(f'{name}: started run {state["run"]} at {main}')
         return True
+
+    def cancel(self, directory, state):
+        state.update(cancelled=True, finished=True, ended=timestamp())
+        state.pop('stage', None)
+        self.save(directory, state)
+        self.end(directory, state)
+        if state.get('released') and not self.outstanding(state):
+            shutil.rmtree(directory)
 
     def recover_run(self, directory, state):
         # codex-run writes meta before launching its unit. Recover an acknowledged
@@ -1084,24 +1116,26 @@ class Watch:
                     log(f'{state["pass"]}: cleanup failed ({type(error).__name__}); keeping logins and scratch')
             local = self.local_passes()
             def holds_slot(state):
-                return not state.get('released', False) if 'holder' in state else not state['finished']
+                return not state.get('released', False)
             # Preflight every source before any launch: an unreadable feed starts none.
             taken = {(s['repository'], sha) for _, s in local if not s['finished']
                      for sha in s['commits']}
             waiting = [row for row in chosen(self.record, 'run') if row[:2] not in taken]
-            pending = {s['repository']: (d, s) for d, s in local if s.get('stage') == 'reserving'}
+            pending = {}
+            for directory, state in local:
+                if state.get('stage') == 'reserving':
+                    pending.setdefault(state['repository'], []).append((directory, state))
+            for reservations in pending.values():
+                reservations.sort(key=lambda item: (item[1]['started'],
+                    int(item[1]['pass'].rsplit('-', 1)[-1]) if item[1]['pass'].rsplit('-', 1)[-1].isdigit() else 1))
             wanted = {r for r, _, _ in waiting}
-            for repo, (directory, state) in list(pending.items()):
+            for repo, reservations in list(pending.items()):
                 if repo not in wanted:
-                    try:
-                        state.update(cancelled=True, finished=True, ended=timestamp())
-                        state.pop('stage')
-                        self.save(directory, state)
-                        self.end(directory, state)
-                        if state.get('released') and not self.outstanding(state):
-                            shutil.rmtree(directory)
-                    except (Problem, OSError, ValueError, UnicodeError) as error:
-                        log(f'{state["pass"]}: cleanup failed ({type(error).__name__}); keeping logins and scratch')
+                    for directory, state in reservations:
+                        try:
+                            self.cancel(directory, state)
+                        except (Problem, OSError, ValueError, UnicodeError) as error:
+                            log(f'{repo}: cleanup failed ({type(error).__name__}); keeping logins and scratch')
                     pending.pop(repo)
             free = max(0, options['QA_SLOTS'] - sum(holds_slot(s) for _, s in self.local_passes()))
             repos = list(dict.fromkeys(r for r, _, _ in waiting)) if free or pending else []
@@ -1118,65 +1152,70 @@ class Watch:
                 main = result.stdout.strip()
                 need(re.fullmatch(SHA, main), f'{repo}: invalid cleared main', 4)
                 cleared[repo] = main
-            refused = False
             for repo, main in cleared.items():
+                free = max(0, options['QA_SLOTS'] - sum(holds_slot(s) for _, s in self.local_passes()))
                 if not free and repo not in pending:
                     continue
-                with self.repositories.fetched(repo) as root:
-                    order = git(root, 'rev-list', '--reverse', 'origin/main').splitlines()
-                    selected = {sha for r, sha, _ in waiting if r == repo}
-                    need(selected <= set(order), f'{repo}: waiting commit missing from origin/main', 4)
-                    selected = [sha for sha in order if sha in selected]
-                    def holds(sha):
-                        result = git(root, 'merge-base', '--is-ancestor', sha, main, check=False)
-                        need(result.returncode in (0, 1), f'{repo}: cannot read cleared commit {main}', 4)
-                        return result.returncode == 0
-                    if not holds(selected[0]):
-                        log(f'{repo}: cleared main does not hold oldest waiting commit')
-                        continue
-                    commits = []
-                    for sha in selected:
-                        if holds(sha):
-                            subject = git(root, 'show', '-s', '--format=%s', sha)
-                            trailer = git(root, 'show', '-s', '--format=%(trailers:key=QA,valueonly)', sha)
-                            commits.append(dict(commit=sha, subject=subject, qa=' '.join(trailer.splitlines())))
-                    opening = rung(self.record, repo)
-                    granted = []
-                    while len(granted) < len(commits) and (free or repo in pending):
-                        if repo in pending:
-                            directory, state = pending.pop(repo)
-                        else:
+                try:
+                    with self.repositories.fetched(repo) as root:
+                        order = git(root, 'rev-list', '--reverse', 'origin/main').splitlines()
+                        selected = {sha for r, sha, _ in waiting if r == repo}
+                        need(selected <= set(order), f'{repo}: waiting commit missing from origin/main', 4)
+                        selected = [sha for sha in order if sha in selected]
+                        def holds(sha):
+                            result = git(root, 'merge-base', '--is-ancestor', sha, main, check=False)
+                            need(result.returncode in (0, 1), f'{repo}: cannot read cleared commit {main}', 4)
+                            return result.returncode == 0
+                        if not holds(selected[0]):
+                            log(f'{repo}: cleared main does not hold oldest waiting commit')
+                            continue
+                        commits = []
+                        for sha in selected:
+                            if holds(sha):
+                                subject = git(root, 'show', '-s', '--format=%s', sha)
+                                trailer = git(root, 'show', '-s', '--format=%(trailers:key=QA,valueonly)', sha)
+                                commits.append(dict(commit=sha, subject=subject, qa=' '.join(trailer.splitlines())))
+                        opening = rung(self.record, repo)
+                        granted = []
+                        incomplete = False
+                        for directory, state in pending.pop(repo, []):
+                            if not self.take(directory, state, opening):
+                                if incomplete:
+                                    self.cancel(directory, state)
+                                incomplete = True
+                                continue
+                            if len(granted) == len(commits):
+                                self.cancel(directory, state)
+                                continue
+                            checkout = self.repositories.checkout(root, repo, state['slot'], main)
+                            granted.append((directory, state, checkout))
+                        free = max(0, options['QA_SLOTS'] - sum(holds_slot(s) for _, s in self.local_passes()))
+                        while not incomplete and free and len(granted) < len(commits):
                             slots = {s.get('slot', 1) for _, s in self.local_passes()
                                      if s['repository'] == repo and holds_slot(s)}
                             slot = next(n for n in range(1, len(slots) + 2) if n not in slots)
                             directory, state = self.reserve(repo, slot, opening)
                             free -= 1
-                        if not self.take(directory, state, opening):
-                            break
-                        try:
+                            if not self.take(directory, state, opening):
+                                break
                             checkout = self.repositories.checkout(root, repo, state['slot'], main)
-                        except (Problem, OSError) as error:
-                            log(f'{state["pass"]}: cannot prepare slot: {error}')
-                            break
-                        granted.append((directory, state, checkout))
-                    if not granted:
-                        continue
-                    share = min(options['QA_BATCH'], (len(commits) + len(granted) - 1) // len(granted))
-                    # Save every share before the first record or session can start.
-                    offset = 0
-                    for index, (directory, state, checkout) in enumerate(granted):
-                        count = min(share, len(commits) - offset - (len(granted) - index - 1))
-                        details = commits[offset:offset + count]
-                        offset += count
-                        state.update(main=main, commits=[c['commit'] for c in details], details=details,
-                                     stage='starting', started=timestamp())
-                        self.save(directory, state)
-                    for directory, state, checkout in granted:
-                        if not self.launch(directory, state, checkout, options):
-                            refused = True
-                            break
-                if refused:
-                    break
+                            granted.append((directory, state, checkout))
+                        if not granted:
+                            continue
+                        share = min(options['QA_BATCH'], (len(commits) + len(granted) - 1) // len(granted))
+                        # Save every share before the first record or session can start.
+                        offset = 0
+                        for index, (directory, state, checkout) in enumerate(granted):
+                            count = min(share, len(commits) - offset - (len(granted) - index - 1))
+                            details = commits[offset:offset + count]
+                            offset += count
+                            state.update(main=main, commits=[c['commit'] for c in details], details=details,
+                                         stage='starting', started=timestamp())
+                            self.save(directory, state)
+                        for directory, state, checkout in granted:
+                            self.launch(directory, state, checkout, options)
+                except (Problem, OSError, ValueError, UnicodeError) as error:
+                    log(f'{repo}: preparation failed ({type(error).__name__}): {error}; keeping saved custody')
             for directory, state in self.local_passes():
                 if (state['finished'] and not self.outstanding(state) and not state.get('notice')
                         and not state.get('notice_pending')
@@ -1194,6 +1233,7 @@ def watch(director, once, workspace):
     need(re.fullmatch(r'[a-z][a-z0-9-]*(/[a-z0-9][a-z0-9-]*)*@[a-z][a-z0-9-]*', director),
          'invalid director address: expected NAME@MACHINE')
     service = Watch(workspace, director)
+    no_links(workspace.tmp, service.directory)
     service.directory.mkdir(parents=True, exist_ok=True)
     with (service.directory / 'watch.lock').open('a') as lock:
         try:

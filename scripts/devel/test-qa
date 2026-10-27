@@ -478,6 +478,14 @@ config = json.loads((root / 'tools.json').read_text())
 runs = root / 'tmp/codex-run'
 units = root / 'units'
 
+def hang(when):
+    operation = name + ':' + (args[0] if args else '')
+    if config.get('hang', {}).get(operation) == when:
+        (root / 'hung-tool').write_text(str(os.getpid()))
+        time.sleep(600)
+
+hang('before')
+
 def alive(pid):
     try:
         return Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[0] != 'Z'
@@ -521,6 +529,7 @@ if name == 'codex-run':
     started = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
     (state / 'meta').write_text(f'model=gpt-6.1-sol\neffort=high\nstarted={started}\ntask={task}\nreport={report}\non_stop={args[4]}\n')
     Path(report).write_text(f'codex-run: run {run} is writing this report.\n')
+    hang('after')
     if config.get('interrupt_launch'):
         os.kill(os.getppid(), 9)
     print(run, state)
@@ -671,6 +680,7 @@ elif name == 'logins':
         holders[login] = holder
         config.update(logins_held=sorted(held), login_holders=holders)
         (root / 'tools.json').write_text(json.dumps(config))
+        hang('after')
         print(login, root / 'login-store' / login / 'login')
     elif login in holders and holders[login] != holder:
         print('fixture held by another', file=sys.stderr)
@@ -1018,7 +1028,7 @@ def watch_recovers_an_interrupted_start_commit(lab):
     assert not orphan.exists()
 
 
-def watch_start_refusal_starts_nothing_more(lab):
+def watch_start_refusal_is_local_to_each_pass(lab):
     lab.waiting(1)
     jig = lab.commit('jig marked', 'jig feature', repo='jig')
     lab.run('decide', 'jig', jig, 'run')
@@ -1032,7 +1042,7 @@ def watch_start_refusal_starts_nothing_more(lab):
     result = lab.watch(extra={'QA_RECORD': str(wrapper), 'QA_SLOTS': '2'})
     assert 'fixture record refusal' in result.stdout
     assert not lab.watch_states() and not lab.calls('codex-run') and lab.head() == before
-    assert len(lab.sent()) == 1 and 'fixture record refusal' in lab.sent()[0]['body']
+    assert len(lab.sent()) == 2 and all('fixture record refusal' in sent['body'] for sent in lab.sent())
 
 
 
@@ -1297,7 +1307,8 @@ def a_refused_launch_gives_the_login_back(lab):
                        "if sys.argv[1] == 'commit' and not sys.argv[sys.argv.index('-m') + 1].endswith(' started'):\n"
                        " print('fixture completion refusal', file=sys.stderr)\n sys.exit(2)\n"
                        f'sys.exit(subprocess.run([{str(KIT / "record")!r}, *sys.argv[1:]]).returncode)\n')
-    lab.watch(status=2, extra={'QA_RECORD': str(wrapper)})
+    result = lab.watch(extra={'QA_RECORD': str(wrapper)})
+    assert 'temper: preparation failed' in result.stdout
     _, state = lab.watch_states()[-1]
     assert not state['finished'] and state['given'] == [CHATGPT]
     assert len(lab.calls('codex-run')) == 2 and len(lab.calls('logins')) == 9
@@ -2307,7 +2318,7 @@ def a_half_made_worktree_is_made_again(lab):
     path = lab.tmp / 'qa/repos/temper-2'
     path.mkdir(parents=True)
     (path / 'half-made').touch()
-    for mode in ('plain', 'other', 'link'):
+    for mode in ('plain', 'other'):
         lab.watch(extra={'QA_SLOTS': '2'})
         states = lab.watch_states()
         assert len([s for _, s in states if not s['finished']]) == 2
@@ -2322,14 +2333,6 @@ def a_half_made_worktree_is_made_again(lab):
         if mode == 'plain':
             shutil.rmtree(path)
             lab.git(lab.products['jig'], 'worktree', 'add', '--detach', str(path), 'HEAD')
-        elif mode == 'other':
-            shutil.rmtree(path)
-            outside = lab.root / 'outside-slot'
-            outside.mkdir()
-            (outside / 'keep').touch()
-            path.symlink_to(outside, target_is_directory=True)
-        else:
-            assert (lab.root / 'outside-slot/keep').exists()
 
 
 def a_finished_pass_with_units_up_keeps_its_slot(lab):
@@ -2360,13 +2363,27 @@ def a_pass_from_before_ends_and_holds_slot_1(lab):
         state.pop(key)
     (directory / 'pass.json').write_text(json.dumps(state))
     lab.configure(login_holders={CHATGPT: 'qa-watch'})
+    unit, pid = deployment(lab, directory)
     lab.waiting(1)
     lab.watch(extra={'QA_SLOTS': '2'})
     assert lab.watch_states()[-1][1]['slot'] == 2
     lab.end_run(state)
+    lab.configure(logins_out=[CHATGPT])
+    for mode in ('active', 'unknown'):
+        lab.configure(unit_states={unit: mode})
+        lab.watch(extra={'QA_SLOTS': '2', 'QA_GIVE_BACK_SECONDS': '0'})
+        saved = json.loads((directory / 'pass.json').read_text())
+        assert saved['finished'] and not saved.get('released')
+        assert len(lab.calls('codex-run')) == 2
+    lab.waiting(1)
+    lab.watch(extra={'QA_SLOTS': '2', 'QA_GIVE_BACK_SECONDS': '0'})
+    assert len(lab.calls('codex-run')) == 2  # Both slots remain held.
+    lab.configure(logins_out=[], unit_states={})
     lab.watch(extra={'QA_SLOTS': '2'})
-    assert json.loads((directory / 'pass.json').read_text())['finished']
+    assert json.loads((directory / 'pass.json').read_text())['released']
+    assert lab.watch_states()[-1][1]['slot'] == 1
     assert ['give', CHATGPT, '--as', 'qa-watch'] in lab.calls('logins')
+    dead(pid)
 
 
 def rung_refuses_a_login_that_is_no_pool(lab):
@@ -2457,7 +2474,303 @@ def a_finished_pass_waits_for_its_session_to_stop(lab):
     assert lab.watch_states()[-1][1]['slot'] == 1 and len(lab.calls('codex-run')) == 2
 
 
-CASES = (a_cancelled_reservation_never_reuses_a_returned_grant,
+def all_reservations_survive_a_crash_before_their_shares(lab):
+    lab.rung('temper', REAL, CHATGPT, CLAUDE)
+    lab.configure(pools={CHATGPT: [CHATGPT, 'chatgpt-2', 'chatgpt-3', 'chatgpt-4'],
+                         CLAUDE: [CLAUDE, 'claude-2', 'claude-3']})
+    commits = lab.waiting(4)
+    lab.env['QA_SLOTS'] = '4'
+    driven_watch(lab, """original = tool['Watch'].save
+def save(self, directory, state):
+    if state.get('stage') == 'starting':
+        sys.exit(0)
+    return original(self, directory, state)
+tool['Watch'].save = save
+""")
+    reservations = lab.watch_states()
+    assert len(reservations) == 4 and not lab.calls('codex-run')
+    assert [len(s['pools']) for _, s in reservations] == [2, 2, 2, 1]
+    assert all(s['stage'] == 'reserving' and not s['commits'] for _, s in reservations)
+    lab.watch()
+    states = lab.watch_states()
+    active = [s for _, s in states if s['run']]
+    assert len(active) == 3 and [s['slot'] for s in active] == [1, 2, 3]
+    assert [sha for s in active for sha in s['commits']] == commits
+    pending, = [s for _, s in states if s.get('stage') == 'reserving']
+    assert pending['pass'] == reservations[-1][1]['pass'] and pending['slot'] == 4
+
+
+def later_incomplete_reservations_are_cancelled(lab):
+    lab.rung('temper', REAL, CHATGPT, CLAUDE)
+    lab.configure(pools={CHATGPT: [CHATGPT, 'chatgpt-2'], CLAUDE: [CLAUDE]}, logins_busy=[CLAUDE])
+    lab.waiting(2)
+    lab.env['QA_SLOTS'] = '2'
+    lab.watch()
+    first, state = lab.watch_state()
+    second = first.with_name(first.name + '-2')
+    second.mkdir()
+    other = dict(state, **{'pass': second.name, 'holder': 'qa-watch/' + second.name, 'slot': 2,
+                          'pools': {CHATGPT: 'chatgpt-2'},
+                          'logins': {'chatgpt-2': str(lab.root / 'login-store/chatgpt-2/login')},
+                          'kinds': {'chatgpt-2': 'moved'}})
+    (second / 'pass.json').write_text(json.dumps(other))
+    lab.configure(logins_held=[CHATGPT, 'chatgpt-2'],
+                  login_holders={CHATGPT: state['holder'], 'chatgpt-2': other['holder']})
+    before = len(lab.calls('logins'))
+    lab.watch()
+    assert lab.watch_state()[0] == first and not second.exists()
+    calls = lab.calls('logins')[before:]
+    assert ['take', CLAUDE, '--any', '--as', state['holder'], '--note', 'temper'] in calls
+    assert ['take', CLAUDE, '--any', '--as', other['holder'], '--note', 'temper'] in calls
+    assert ['give', 'chatgpt-2', '--as', other['holder']] in calls
+
+
+def slot_preparation_refuses_every_linked_component(lab):
+    lab.waiting(2)
+    outside = lab.root / 'outside-slot'
+    outside.mkdir()
+    marker = outside / 'keep'
+    marker.write_text('outside contents\n')
+    # Startup refuses qa itself before creating a lock through it.
+    qa = lab.tmp / 'qa'
+    qa.symlink_to(outside, target_is_directory=True)
+    result = lab.watch(status=4, extra={'QA_SLOTS': '2'})
+    assert 'symlink refused' in result.stderr and sorted(p.name for p in outside.iterdir()) == ['keep']
+    qa.unlink()
+    # Refusal inside the repository boundary also catches a link appearing later.
+    lab.env['QA_SLOTS'] = '2'
+    result = driven_watch(lab, f"""original = tool['Repositories'].checkout
+def checkout(self, root, repo, slot, main):
+    if slot == 2:
+        path = root.with_name(repo + '-2')
+        path.symlink_to({str(outside)!r}, target_is_directory=True)
+    return original(self, root, repo, slot, main)
+tool['Repositories'].checkout = checkout
+""")
+    assert 'temper: preparation failed' in result.stdout and 'symlink refused' in result.stdout
+    assert marker.read_text() == 'outside contents\n' and sorted(p.name for p in outside.iterdir()) == ['keep']
+    assert not lab.calls('codex-run')
+    path = qa / 'repos/temper-2'
+    assert path.is_symlink()
+    path.unlink()
+    # A qa link appearing after the watch lock is acquired is logged per repository.
+    result = driven_watch(lab, f"""from contextlib import contextmanager
+original = tool['Repositories'].fetched
+@contextmanager
+def fetched(self, repo):
+    qa = self.workspace.tmp / 'qa'
+    backup = self.workspace.tmp / 'saved-qa'
+    qa.rename(backup)
+    qa.symlink_to({str(outside)!r}, target_is_directory=True)
+    try:
+        with original(self, repo) as root:
+            yield root
+    finally:
+        qa.unlink()
+        backup.rename(qa)
+tool['Repositories'].fetched = fetched
+""")
+    assert 'temper: preparation failed' in result.stdout and 'symlink refused' in result.stdout
+    # Check the anchor, qa, repos, and the slot itself before a direct preparation.
+    driven_watch(lab, f"""workspace = tool['Workspace']()
+repositories = tool['Repositories'](workspace)
+for relative in ('qa', 'qa/repos', 'qa/repos/temper-2', ''):
+    path = workspace.tmp / relative
+    backup = path.with_name(path.name + '-before-link')
+    existed = path.exists()
+    if existed:
+        path.rename(backup)
+    path.symlink_to({str(outside)!r}, target_is_directory=True)
+    try:
+        repositories.checkout(workspace.tmp / 'qa/repos/temper', 'temper', 2, 'HEAD')
+    except tool['Problem'] as error:
+        assert 'symlink refused' in str(error)
+    else:
+        raise AssertionError('linked component accepted: ' + relative)
+    finally:
+        path.unlink()
+        if existed:
+            backup.rename(path)
+""")
+    assert marker.read_text() == 'outside contents\n' and sorted(p.name for p in outside.iterdir()) == ['keep']
+
+
+def two_repositories_waiting(lab, count=1):
+    commits = lab.waiting(count)
+    jig = lab.commit('jig feature', 'jig feature', repo='jig')
+    lab.run('decide', 'jig', jig, 'run')
+    lab.configure(cleared={'temper': commits[-1], 'jig': jig})
+    return commits, jig
+
+
+def one_repository_failing_preparation_leaves_the_others_running(lab):
+    two_repositories_waiting(lab)
+    lab.env['QA_SLOTS'] = '2'
+    result = driven_watch(lab, """from contextlib import contextmanager
+original = tool['Repositories'].fetched
+@contextmanager
+def fetched(self, repo):
+    if repo == 'temper':
+        raise tool['Problem']('fixture fetch failed', 4)
+    with original(self, repo) as root:
+        yield root
+tool['Repositories'].fetched = fetched
+""")
+    assert 'temper: preparation failed' in result.stdout and 'fixture fetch failed' in result.stdout
+    assert [s['repository'] for _, s in lab.watch_states()] == ['jig']
+    assert len(lab.calls('codex-run')) == 1
+
+
+def one_refused_start_leaves_its_siblings_and_other_repositories_running(lab):
+    commits, jig = two_repositories_waiting(lab, 2)
+    lab.env['QA_SLOTS'] = '2'
+    result = driven_watch(lab, """original = tool['Record'].commit
+refused = False
+def commit(self, changes, message):
+    global refused
+    if not refused and message.endswith(' started'):
+        refused = True
+        raise tool['Problem']('fixture first start refused', 2)
+    return original(self, changes, message)
+tool['Record'].commit = commit
+""")
+    assert 'fixture first start refused' in result.stdout
+    active = [s for _, s in lab.watch_states() if s['run']]
+    assert {(s['repository'], tuple(s['commits'])) for s in active} == {('temper', (commits[1],)), ('jig', (jig,))}
+    assert len(lab.calls('codex-run')) == 2
+
+
+TIMEOUT_DRIVER = """original = tool['command']
+def command(argv, cwd=None, timeout=None):
+    name = str(argv[0]).rsplit('/', 1)[-1]
+    expected = {'git': 300, 'record': 300, 'systemctl': 30, 'logins': 60,
+                'post': 60, 'landings': 120, 'codex-run': 120}
+    assert timeout == expected[name], (argv, timeout)
+    operation = name + ':' + str(argv[1] if len(argv) > 1 else '')
+    if operation in HUNG:
+        timeout = 0.3
+    return original(argv, cwd=cwd, timeout=timeout)
+tool['main'].__globals__['command'] = command
+"""
+
+
+def timed_watch(lab, *hung):
+    result = driven_watch(lab, 'HUNG = ' + repr(hung) + '\n' + TIMEOUT_DRIVER)
+    path = lab.root / 'hung-tool'
+    if path.exists():
+        dead(int(path.read_text()))
+    return result
+
+
+def a_timed_out_take_is_recovered_as_a_stray(lab):
+    lab.rung('temper', REAL, CHATGPT)
+    lab.waiting(1)
+    lab.configure(hang={'logins:take': 'after'})
+    timed_watch(lab, 'logins:take')
+    directory, state = lab.watch_state()
+    assert state['stage'] == 'reserving' and not state['pools'] and not state['logins']
+    assert json.loads((lab.root / 'tools.json').read_text())['login_holders'][CHATGPT] == state['holder']
+    lab.configure(hang={})
+    timed_watch(lab)
+    assert ['give', CHATGPT, '--as', state['holder']] in lab.calls('logins')
+    assert lab.watch_state()[1]['run']
+
+
+def timed_out_login_listing_and_giving_keep_custody(lab):
+    lab.rung('temper', REAL, CHATGPT)
+    lab.waiting(1)
+    timed_watch(lab)
+    directory, state = lab.watch_state()
+    lab.configure(logins_held=[CHATGPT, 'chatgpt-2'],
+                  login_holders={CHATGPT: state['holder'], 'chatgpt-2': 'qa-watch/orphan'},
+                  hang={'logins:list': 'before'})
+    lab.end_run(state)
+    result = timed_watch(lab, 'logins:list')
+    assert 'cannot list stray logins' in result.stdout
+    assert not any(args[0] == 'give' for args in lab.calls('logins'))
+    assert lab.watch_state()[1]['finished'] and not lab.watch_state()[1]['given']
+    lab.configure(hang={'logins:give': 'before'})
+    timed_watch(lab, 'logins:give')
+    assert not lab.watch_state()[1]['given']
+    lab.configure(hang={})
+    timed_watch(lab)
+    assert lab.watch_state()[1]['given'] == [CHATGPT]
+
+
+def a_timed_out_launch_keeps_grants_until_run_recovery(lab):
+    lab.rung('temper', REAL, CHATGPT)
+    lab.waiting(1)
+    for when in ('after', 'before'):
+        lab.configure(hang={'codex-run:task': when})
+        timed_watch(lab, 'codex-run:task')
+        directory, state = next((d, s) for d, s in lab.watch_states() if not s['finished'])
+        assert not state['run'] and not state['given'] and state['stage'] == 'starting'
+        lab.configure(hang={})
+        timed_watch(lab)
+        saved = json.loads((directory / 'pass.json').read_text())
+        if when == 'after':
+            assert saved['run'] == 'fixture-1' and not saved['given']
+            lab.end_run(saved)
+            timed_watch(lab)
+            lab.waiting(1)
+        else:
+            assert saved['finished'] and saved['given'] == [CHATGPT]
+    assert len(lab.calls('codex-run')) == 2
+
+
+def timed_out_feeds_and_notices_do_not_stop_later_checks(lab):
+    lab.waiting(1)
+    lab.configure(hang={'landings:cleared': 'before'})
+    result = timed_watch(lab, 'landings:cleared')
+    assert 'cannot read cleared main' in result.stdout and not lab.calls('codex-run')
+    lab.configure(hang={})
+    timed_watch(lab)
+    lab.end_run(report='## Findings\n### 1. Fixture finding\n')
+    lab.configure(hang={'post:send': 'before'})
+    timed_watch(lab, 'post:send')
+    assert lab.watch_state()[1].get('notice')
+    lab.configure(hang={})
+    timed_watch(lab)
+    assert not lab.watch_state()[1].get('notice')
+
+
+def timed_out_repository_and_record_calls_leave_work_recoverable(lab):
+    two_repositories_waiting(lab)
+    lab.env['QA_SLOTS'] = '2'
+    # Kill a real command group under the caller's required production deadline.
+    patch = """original = tool['command']
+def command(argv, cwd=None, timeout=None):
+    name = str(argv[0]).rsplit('/', 1)[-1]
+    cut = (name == 'record' and str(argv[1]) in RECORD
+           or name == 'git' and OPERATION in argv and any('temper' in str(arg) for arg in argv))
+    if cut:
+        assert timeout == 300, (argv, timeout)
+        return original([sys.executable, '-S', '-c', 'import time; time.sleep(600)'], timeout=0.2)
+    return original(argv, cwd=cwd, timeout=timeout)
+tool['main'].__globals__['command'] = command
+"""
+    result = driven_watch(lab, "RECORD = ('pull',)\nOPERATION = 'clone'\n" + patch)
+    assert 'record pull failed' in result.stdout and 'temper: preparation failed' in result.stdout
+    assert [s['repository'] for _, s in lab.watch_states()] == ['jig']
+    result = driven_watch(lab, "RECORD = ()\nOPERATION = 'fetch'\n" + patch)
+    assert 'cannot fetch temper' in result.stdout and len(lab.calls('codex-run')) == 1
+    result = driven_watch(lab, "RECORD = ('commit',)\nOPERATION = '-'\n" + patch)
+    assert 'record refused start' in result.stdout and len(lab.calls('codex-run')) == 1
+    timed_watch(lab)
+    assert {s['repository'] for _, s in lab.watch_states() if s['run']} == {'temper', 'jig'}
+
+
+CASES = (timed_out_repository_and_record_calls_leave_work_recoverable,
+         all_reservations_survive_a_crash_before_their_shares,
+         later_incomplete_reservations_are_cancelled,
+         slot_preparation_refuses_every_linked_component,
+         one_repository_failing_preparation_leaves_the_others_running,
+         one_refused_start_leaves_its_siblings_and_other_repositories_running,
+         a_timed_out_take_is_recovered_as_a_stray,
+         timed_out_login_listing_and_giving_keep_custody,
+         a_timed_out_launch_keeps_grants_until_run_recovery,
+         timed_out_feeds_and_notices_do_not_stop_later_checks,
+         a_cancelled_reservation_never_reuses_a_returned_grant,
          cancelling_a_reservation_respects_a_lowered_slot_cap,
          one_reservation_failing_its_end_lets_the_check_go_on,
          a_finished_pass_waits_for_its_session_to_stop,
@@ -2513,7 +2826,7 @@ CASES = (a_cancelled_reservation_never_reuses_a_returned_grant,
          passes_before_rungs_still_read,
          watch_caps_a_pass_holding_a_login,
          watch_recovers_interrupted_launch_and_stop, watch_recovers_an_interrupted_start_commit,
-         watch_start_refusal_starts_nothing_more, watch_starts_a_pass_on_the_cleared_main,
+         watch_start_refusal_is_local_to_each_pass, watch_starts_a_pass_on_the_cleared_main,
          watch_waits_for_a_cleared_main_holding_the_oldest, watch_takes_a_batch,
          watch_finishes_a_pass_with_findings, watch_finishes_a_clean_pass_quietly,
          watch_caps_a_long_pass, watch_fails_without_a_report, watch_fails_when_the_unit_vanished,
