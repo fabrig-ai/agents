@@ -7,6 +7,7 @@ qa findings
 qa rung REPO [RUNG [--login NAME]... [--why TEXT]]
 qa triage PASS N owner ADDRESS|backlog|drop [--why TEXT]
 qa watch --director ADDRESS [--once]
+qa deploy DIRECTORY NAME -- COMMAND...
 """
 import argparse
 from contextlib import contextmanager
@@ -16,8 +17,11 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
+import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -92,7 +96,7 @@ class Workspace:
         return socket.gethostname()
 
     def tool(self, name):
-        default = Path('systemctl') if name == 'systemctl' else self.kit / name
+        default = Path('systemctl') if name in ('systemctl', 'systemd-run') else self.kit / name
         return Path(os.environ.get('QA_' + name.upper().replace('-', '_'), default)) if self.fixture else default
 
     def origin(self, repo):
@@ -441,6 +445,11 @@ Read {agents}/roles/qa.md first: it is your role.
 - Your wall time is capped at {cap} minutes, from {started}: past it
   your session is stopped, and your report is what the file holds
   then. Write it early and keep it current.
+- Start each deployment with `qa deploy {directory} NAME -- COMMAND...`:
+  it runs as the unit qa-{name}-NAME, outside your session, and its stop
+  runs your give-back file before it signals the deployment. Never
+  systemd-run one yourself, and never stop one whose moved login isn't
+  back by stat: leave it up and name its unit in your report's first line.
 - Your report: {directory}/report.md, at most 7 KiB.
 '''
 
@@ -453,14 +462,14 @@ def log(message):
 def settings(workspace):
     # Same precedence and valid machine.env lines as kit.sh's machine_setting.
     values = dict(QA_SLOTS='1', QA_BATCH='5', QA_CAP_MINUTES='120', QA_INTERVAL_SECONDS='300',
-                  QA_GIVE_BACK_SECONDS='90')
+                  QA_GIVE_BACK_SECONDS='90', QA_STOP_SECONDS='50')
     path = workspace.tmp / 'machine.env'
     try:
         text = path.read_text(errors='replace')
     except OSError:
         text = ''  # kit.sh ignores an absent or unreadable machine file.
     for line in text.split('\n'):
-        match = re.fullmatch(r'(QA_SLOTS|QA_BATCH|QA_CAP_MINUTES|QA_INTERVAL_SECONDS|QA_GIVE_BACK_SECONDS)=([0-9]+)', line)
+        match = re.fullmatch(r'(QA_SLOTS|QA_BATCH|QA_CAP_MINUTES|QA_INTERVAL_SECONDS|QA_GIVE_BACK_SECONDS|QA_STOP_SECONDS)=([0-9]+)', line)
         if match:
             values[match[1]] = match[2]
     for key in values:
@@ -468,7 +477,111 @@ def settings(workspace):
         need(re.fullmatch(r'[0-9]+', value), f'{key} must be a nonnegative integer')
         values[key] = int(value)
     need(values['QA_BATCH'] > 0, 'QA_BATCH must be positive')
+    need(0 < values['QA_STOP_SECONDS'] < 60, 'QA_STOP_SECONDS must be positive and below 60')
     return values
+
+
+def stop_path(path):
+    need(not any(c in str(path) for c in '$%"\\ \t\n'), f'{path}: unsafe path in a stop command')
+    return path
+
+
+def deploy(args, workspace):
+    directory = Path(args.directory)
+    need(directory.is_absolute() and directory.is_dir() and not directory.is_symlink(),
+         'DIRECTORY must be an absolute directory, not a link')
+    need(re.fullmatch(NAME, directory.name), 'DIRECTORY must have a pass or walk name')
+    stop_path(directory)
+    script = stop_path(Path(__file__).resolve())
+    need(re.fullmatch(r'[a-z0-9][a-z0-9-]*', args.name), 'NAME must be a lowercase slug')
+    need(args.argv, 'deploy needs COMMAND')
+    executable = shutil.which(args.argv[0])
+    need(executable, f'COMMAND not found: {args.argv[0]}')
+    executable = str(Path(executable).absolute())
+    seconds = settings(workspace)['QA_STOP_SECONDS']
+    unit = f'qa-{directory.name}-{args.name}'
+    with os.fdopen(os.open(directory / 'deployments', os.O_RDWR | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW
+                           | os.O_NONBLOCK, 0o600), 'r+') as recorded:
+        need(stat.S_ISREG(os.fstat(recorded.fileno()).st_mode), 'deployments must be a regular file', 4)
+        fcntl.flock(recorded, fcntl.LOCK_EX)
+        text = recorded.read()
+        if unit not in text.splitlines():
+            line = (('' if not text or text.endswith('\n') else '\n') + unit + '\n').encode()
+            need(os.write(recorded.fileno(), line) == len(line), 'cannot record deployment', 4)
+    stop = ' '.join('"' + str(word) + '"' for word in (script, '_give-back', directory, seconds))
+    result = command([workspace.tool('systemd-run'), '--user', '--collect', '--quiet', '--unit', unit,
+                      '--service-type=exec', f'--working-directory={directory}', '--setenv=PATH',
+                      '--property=KillMode=control-group',
+                      f'--property=StandardOutput=append:{directory}/{args.name}.log',
+                      f'--property=StandardError=append:{directory}/{args.name}.log',
+                      '--property=ExecStop=-' + stop, f'--property=TimeoutStopSec={seconds + 60}',
+                      '--', executable, *args.argv[1:]])
+    need(result.returncode == 0, result.stderr.strip() or 'systemd-run failed', 4)
+    print(unit)
+
+
+def give_back(args):
+    # Stop commands cannot fail their unit, even if their scratch has gone away.
+    output = None
+    started = time.monotonic()
+    try:
+        directory = Path(args[0])
+        output = os.fdopen(os.open(directory / 'give-back.log', os.O_WRONLY | os.O_APPEND | os.O_CREAT
+                                   | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600), 'a')
+        need(stat.S_ISREG(os.fstat(output.fileno()).st_mode), 'give-back.log must be a regular file')
+        need(len(args) == 2, 'expected DIRECTORY SECONDS')
+        seconds = int(args[1])
+        need(seconds > 0, 'SECONDS must be positive')
+        deadline = started + seconds
+        with os.fdopen(os.open(directory / 'give-back.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW
+                               | os.O_NONBLOCK, 0o600), 'r+') as lock:
+            need(stat.S_ISREG(os.fstat(lock.fileno()).st_mode), 'give-back.lock must be a regular file')
+            while True:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        output.write(f'{timestamp()} lock busy past {seconds} s\n')
+                        return 0
+                    time.sleep(min(0.05, remaining))
+            path = directory / 'give-back'
+            try:
+                regular = stat.S_ISREG(path.lstat().st_mode) and os.access(path, os.X_OK)
+            except FileNotFoundError:
+                regular = False
+            status = 'absent'
+            if regular:
+                with subprocess.Popen([str(path)], cwd=directory, stdin=subprocess.DEVNULL,
+                                      stdout=output, stderr=output, start_new_session=True) as child:
+                    try:
+                        code = child.wait(timeout=max(0, deadline - time.monotonic()))
+                        status = f'exit {code}'
+                    except subprocess.TimeoutExpired:
+                        os.killpg(child.pid, signal.SIGKILL)
+                        child.wait()
+                        status = f'killed past {seconds} s'
+                    finally:
+                        # A successful exporter must not leave background work outside the lock.
+                        try:
+                            os.killpg(child.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+            output.write(f'{timestamp()} {status}\n')
+    except BaseException as error:
+        try:
+            if output:
+                output.write(f'{timestamp()} error: {error}\n')
+        except BaseException:
+            pass
+    finally:
+        if output:
+            try:
+                output.close()
+            except BaseException:
+                pass
+    return 0
 
 
 class Watch:
@@ -499,8 +612,10 @@ class Watch:
     def outstanding(self, state):
         return {name: path for name, path in state.get('logins', {}).items() if name not in state.get('given', [])}
 
-    def give(self, directory, state):
+    def give(self, directory, state, kind=None):
         for name in self.outstanding(state):
+            if kind and state.get('kinds', {}).get(name, 'moved') != kind:
+                continue
             result = self.call('logins', 'give', name, '--as', 'qa-watch')
             if result.returncode == 0:
                 state.setdefault('given', []).append(name)
@@ -541,10 +656,10 @@ class Watch:
             elif result.returncode != 2:
                 log(f'{name}: cannot give stray login back: {result.stderr.strip()}')
 
-    def unit_status(self, state):
+    def unit_status(self, unit):
         # qa-flow.md 10: deactivating still runs the unit's give-back.
         result = self.call('systemctl', '--user', 'show', '--property=LoadState',
-                           '--property=ActiveState', '--', 'codex-run-' + state['run'])
+                           '--property=ActiveState', '--', unit)
         fields = dict(line.split('=', 1) for line in result.stdout.splitlines() if '=' in line)
         if result.returncode == 0 and set(fields) == {'LoadState', 'ActiveState'}:
             load, active = fields['LoadState'], fields['ActiveState']
@@ -553,14 +668,14 @@ class Watch:
                 return 'stopped'
             if load == 'loaded' and active in ('activating', 'active', 'reloading', 'deactivating'):
                 return 'busy'
-        log(f'{state["pass"]}: cannot establish unit state; keeping logins held')
+        log(f'{unit}: cannot establish unit state; keeping logins held')
         return 'unknown'
 
     def unit_stopped(self, state, seconds):
         # qa-flow.md 10: ended precedes the unit's on-stop give-back.
         deadline = time.monotonic() + seconds
         while True:
-            status = self.unit_status(state)
+            status = self.unit_status('codex-run-' + state['run'])
             if status == 'stopped':
                 return True
             if status == 'unknown':
@@ -570,6 +685,57 @@ class Watch:
                 log(f'{state["pass"]}: waiting for unit to stop before giving logins back')
                 return False
             time.sleep(min(2, remaining))
+
+    def deployments(self, directory, state):
+        try:
+            with os.fdopen(os.open(directory / 'deployments', os.O_RDONLY | os.O_NOFOLLOW
+                                   | os.O_NONBLOCK)) as source:
+                need(stat.S_ISREG(os.fstat(source.fileno()).st_mode), 'deployments must be a regular file', 4)
+                lines = source.read().splitlines()
+        except FileNotFoundError:
+            return []
+        units = []
+        for unit in lines:
+            if re.fullmatch(re.escape('qa-' + state['pass'] + '-') + r'[a-z0-9][a-z0-9-]*', unit):
+                if unit not in units:
+                    units.append(unit)
+            else:
+                log(f'{state["pass"]}: ignored deployment line {unit!r}')
+        return units
+
+    def end(self, directory, state):
+        self.give(directory, state, 'moved')
+        units = self.deployments(directory, state)
+        moved = [name for name in self.outstanding(state)
+                 if state.get('kinds', {}).get(name, 'moved') == 'moved']
+        if not moved:
+            for unit in units:
+                if unit in state.get('stopped', []):
+                    continue
+                stopped = self.call('systemctl', '--user', 'stop', '--', unit)
+                if stopped.returncode:
+                    log(f'{state["pass"]}: stop {unit} failed: {stopped.stderr.strip()}')
+                # A collected unit can refuse stop while show confirms it is gone.
+                if self.unit_status(unit) == 'stopped':
+                    state.setdefault('stopped', []).append(unit)
+                    self.save(directory, state)
+                else:
+                    log(f'{state["pass"]}: waiting for {unit} to stop')
+        remaining = [unit for unit in units if unit not in state.get('stopped', [])]
+        if not remaining:
+            self.give(directory, state, 'in-place')
+        pending = state.pop('notice_pending', None)
+        if pending:
+            missing = self.outstanding(state)
+            if pending.pop('required') or missing or remaining:
+                pending['body'] += ''.join(
+                    f'Login {login} is not back at {path}: its deployment is in {directory}; '
+                    'qa watch gives it back once it is.\n' for login, path in missing.items())
+                pending['body'] += ''.join(f'Unit {unit} is still up or of unknown state.\n' for unit in remaining)
+                pending['body'] += f'Scratch: {directory}. The service tries again at each check.\n'
+                state['notice'] = pending
+            self.save(directory, state)
+        self.notify(directory, state)
 
     def notify(self, directory, state):
         notice = state.get('notice')
@@ -637,20 +803,16 @@ class Watch:
             self.record.commit({f'qa/passes/{name}.md': result.text()}, f'qa watch: {name} failed')
             log(f'{name}: report refused by record: {error}')
         count = len(result.findings())
-        self.give(directory, state)
         state.update(finished=True, ended=ended)
-        missing = self.outstanding(state)
-        if outcome in ('failed', 'capped') or count or missing:
-            state['notice'] = dict(subject=f'qa: pass {name} {outcome}, {count} findings', body=(
+        state['notice_pending'] = dict(required=outcome in ('failed', 'capped') or bool(count),
+            subject=f'qa: pass {name} {outcome}, {count} findings', body=(
                 f'QA pass {name} on {state["repository"]} ended {outcome} after {wall}, with {count} findings: '
-                f"records' qa/passes/{name}.md; qa findings lists them.\n"
-                + ''.join(f'Login {login} is not back at {path}: its deployment is in {directory}; '
-                          'qa watch gives it back once it is.\n' for login, path in missing.items())))
+                f"records' qa/passes/{name}.md; qa findings lists them.\n"))
         self.save(directory, state)
         log(f'{name}: {outcome}, {count} findings, {wall}')
-        self.notify(directory, state)
+        self.end(directory, state)
 
-    def start(self, repo, main, commits, checkout, cap, rung, logins):
+    def start(self, repo, main, commits, checkout, cap, rung, logins, kinds, seconds):
         started = timestamp()
         base = utc(started).strftime('%Y%m%d-%H%M-') + repo
         name, index = base, 1
@@ -661,7 +823,7 @@ class Watch:
         directory.mkdir(mode=0o700)
         state = {'pass': name, 'repository': repo, 'main': main, 'commits': [c['commit'] for c in commits],
                  'started': started, 'run': '', 'capped': False, 'finished': False,
-                 'rung': rung, 'logins': logins, 'given': []}
+                 'rung': rung, 'logins': logins, 'given': [], 'kinds': kinds, 'stopped': []}
         # Persist custody before preparing the checkout or committing its start.
         self.save(directory, state)
         git(checkout, 'checkout', '--detach', '--force', main)
@@ -687,6 +849,11 @@ class Watch:
                              checkout=checkout, directory=directory, cap=cap, started=started, rung_brief=rung_brief,
                              commits='\n'.join(f'  - {c["commit"]} {c["subject"]}\n    QA: {c["qa"]}' for c in commits))
         replace(directory / 'brief.md', brief.encode())
+        script = stop_path(Path(__file__).resolve())
+        stop_path(directory)
+        on_stop = '#!/bin/sh\nexec ' + ' '.join(shlex.quote(str(word)) for word in
+                      (script, '_give-back', directory, seconds)) + '\n'
+        replace(directory / 'on-stop', on_stop.encode(), 0o700)
         fields = dict(repository=repo, main=main, commits=' '.join(state['commits']), rung=rung, machine=self.workspace.machine(),
                       model='unknown', effort='unknown', started=started, ended='unknown', wall='unknown',
                       tokens='unknown', outcome='running')
@@ -706,7 +873,7 @@ class Watch:
             if not logins:
                 shutil.rmtree(directory)
             return False
-        launch = self.call('codex-run', 'task', '--to', 'qa-watch', '--on-stop', directory / 'give-back',
+        launch = self.call('codex-run', 'task', '--to', 'qa-watch', '--on-stop', directory / 'on-stop',
                            directory / 'brief.md', checkout, directory / 'report.md')
         words = launch.stdout.split()
         if launch.returncode or not words or not re.fullmatch(r'[a-zA-Z0-9_-]+', words[0]):
@@ -741,8 +908,7 @@ class Watch:
             self.give_strays(passes)
             for directory, state in passes:
                 if state['finished']:
-                    self.give(directory, state)
-                    self.notify(directory, state)
+                    self.end(directory, state)
                     continue
                 if not state['run']:
                     if not self.record.path(f'qa/passes/{state["pass"]}.md').exists():
@@ -762,7 +928,7 @@ class Watch:
                 elif not run:
                     self.finish(directory, state, 'The service stopped before saving a run id.')
                 else:
-                    status = self.unit_status(state)
+                    status = self.unit_status('codex-run-' + state['run'])
                     if status == 'unknown':
                         continue
                     if status == 'stopped':
@@ -829,7 +995,7 @@ class Watch:
                         for name, pass_name in held:
                             log(f'{repo}: login {name} not back from {pass_name}')
                         continue
-                    logins = {}
+                    logins, kinds = {}, {}
                     for name in names:
                         taken = self.call('logins', 'take', name, '--as', 'qa-watch', '--note', repo)
                         if taken.returncode:
@@ -840,13 +1006,21 @@ class Watch:
                             log(f'{repo}: waiting for login {name}: {taken.stderr.strip()}')
                             break
                         logins[name] = taken.stdout.strip()
+                        try:
+                            mode = os.lstat(logins[name]).st_mode
+                        except FileNotFoundError:
+                            mode = 0
+                        kinds[name] = 'in-place' if stat.S_ISDIR(mode) else 'moved'
                     else:
                         if not self.start(repo, main, commits, checkout, options['QA_CAP_MINUTES'],
-                                          opening['rung'] if opening else '-', logins):
+                                          opening['rung'] if opening else '-', logins, kinds, options['QA_STOP_SECONDS']):
                             break
                         free -= 1
             for directory, state in self.local_passes():
-                if state['finished'] and not self.outstanding(state) and not state.get('notice') and (utc(timestamp()) - utc(state['ended'])).total_seconds() >= 7 * 86400:
+                if (state['finished'] and not self.outstanding(state) and not state.get('notice')
+                        and not state.get('notice_pending')
+                        and all(unit in state.get('stopped', []) for unit in self.deployments(directory, state))
+                        and (utc(timestamp()) - utc(state['ended'])).total_seconds() >= 7 * 86400):
                     shutil.rmtree(directory)
                     log(f'{state["pass"]}: pruned')
 
@@ -886,6 +1060,8 @@ def watch(director, once, workspace):
 
 
 def main():
+    if sys.argv[1:2] == ['_give-back']:
+        return give_back(sys.argv[2:])
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest='command', required=True)
     for name in ('candidates', 'backlog'):
@@ -906,12 +1082,19 @@ def main():
     triage_parser.add_argument('number', type=int)
     triage_parser.add_argument('route', nargs='+')
     triage_parser.add_argument('--why', default='')
+    deployment = sub.add_parser('deploy')
+    deployment.add_argument('directory')
+    deployment.add_argument('name')
+    deployment.add_argument('argv', nargs=argparse.REMAINDER)
     service = sub.add_parser('watch')
     service.add_argument('--director', required=True)
     service.add_argument('--once', action='store_true')
     args = parser.parse_args()
     try:
         workspace = Workspace()
+        if args.command == 'deploy':
+            need('--' in sys.argv[2:] and sys.argv[2:].index('--') == 2, 'deploy needs DIRECTORY NAME -- COMMAND...')
+            return deploy(args, workspace)
         if args.command == 'watch':
             return watch(args.director, args.once, workspace)
         why = getattr(args, 'why', '') or ''

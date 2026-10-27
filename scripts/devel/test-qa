@@ -8,6 +8,8 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
+import time
 import socket
 import subprocess
 import sys
@@ -58,7 +60,7 @@ class Lab:
             self.env[f'GIT_CONFIG_VALUE_{count + index}'] = value
         self.env['GIT_CONFIG_COUNT'] = str(count + 4)
         self.configure(cleared={})
-        for name in ('post', 'codex-run', 'landings', 'systemctl', 'logins'):
+        for name in ('post', 'codex-run', 'landings', 'systemctl', 'systemd-run', 'logins'):
             tool = root / name
             tool.write_text(f'#!{sys.executable} -S\n' + WATCH_TOOLS)
             tool.chmod(0o700)
@@ -464,7 +466,7 @@ def fixture_overrides_are_gated(lab):
                                          'git@github.com:fabrig-ai/temper.git']
 
 
-WATCH_TOOLS = r'''import json, os, sys
+WATCH_TOOLS = r'''import json, os, sys, shlex, signal, subprocess, time
 from pathlib import Path
 from datetime import datetime, timezone
 root = Path(os.environ['QA_FIXTURE'])
@@ -474,6 +476,23 @@ with (root / 'tools.jsonl').open('a') as log:
     log.write(json.dumps(dict(tool=name, args=args)) + '\n')
 config = json.loads((root / 'tools.json').read_text())
 runs = root / 'tmp/codex-run'
+units = root / 'units'
+
+def alive(pid):
+    try:
+        return Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[0] != 'Z'
+    except FileNotFoundError:
+        return False
+
+def stop_group(pid):
+    try:
+        os.killpg(pid, signal.SIGTERM)
+        deadline = time.monotonic() + 0.5
+        while alive(pid) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        os.killpg(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
 
 def end(run, report, code=0):
     state = runs / run
@@ -496,7 +515,7 @@ if name == 'codex-run':
     state = runs / run
     state.mkdir()
     started = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
-    (state / 'meta').write_text(f'model=gpt-6.1-sol\neffort=high\nstarted={started}\ntask={task}\nreport={report}\n')
+    (state / 'meta').write_text(f'model=gpt-6.1-sol\neffort=high\nstarted={started}\ntask={task}\nreport={report}\non_stop={args[4]}\n')
     Path(report).write_text(f'codex-run: run {run} is writing this report.\n')
     if config.get('interrupt_launch'):
         os.kill(os.getppid(), 9)
@@ -509,12 +528,39 @@ elif name == 'landings':
             print('fixture feed unreadable', file=sys.stderr)
         sys.exit(value)
     print(value)
+elif name == 'systemd-run':
+    unit = args[args.index('--unit') + 1]
+    directory = Path(next(arg.split('=', 1)[1] for arg in args if arg.startswith('--working-directory=')))
+    # Recording must precede the manager call, including a refused start.
+    assert unit in (directory / 'deployments').read_text().splitlines()
+    if config.get('deploy_failure'):
+        sys.exit('fixture deployment refused')
+    properties = dict(arg.removeprefix('--property=').split('=', 1) for arg in args if arg.startswith('--property='))
+    assert '--setenv=PATH' in args
+    with Path(properties['StandardOutput'].removeprefix('append:')).open('a') as output:
+        child = subprocess.Popen(args[args.index('--') + 1:], cwd=directory, stdin=subprocess.DEVNULL,
+                                 stdout=output, stderr=output, start_new_session=True,
+                                 env=dict(PATH=os.environ['PATH']))
+    units.mkdir(exist_ok=True)
+    (units / (unit + '.json')).write_text(json.dumps(dict(pid=child.pid,
+        stop=shlex.split(properties['ExecStop'].removeprefix('-')))))
 elif name == 'systemctl':
-    run = args[-1].removeprefix('codex-run-')
+    unit = args[-1]
+    run = unit.removeprefix('codex-run-')
+    deployment = unit.startswith('qa-')
+    path = units / (unit + '.json')
+    saved = json.loads(path.read_text()) if deployment and path.exists() else None
     if args[1] == 'show':
         assert args[2:-1] == ['--property=LoadState', '--property=ActiveState', '--'], args
         if config.get('unit_query_failure'):
             sys.exit('fixture manager unavailable')
+        if deployment:
+            override = config.get('unit_states', {}).get(unit)
+            if override == 'unknown':
+                sys.exit('fixture unit state unknown')
+            print('LoadState=' + ('loaded' if saved else 'not-found'))
+            print('ActiveState=' + (override or ('active' if saved and alive(saved['pid']) else 'inactive')))
+            sys.exit(0)
         active = config.get('unit_state', 'active' if config.get('unit_active') else
                             'inactive' if config.get('inactive') or (runs / run / 'ended').exists() else 'active')
         if config.get('unit_malformed'):
@@ -524,9 +570,22 @@ elif name == 'systemctl':
             print('ActiveState=' + active)
         sys.exit(0)
     assert args[1] == 'stop', args
-    if config.get('stop_failure'):
+    if config.get('stop_failure') or unit in config.get('stop_failures', []):
         sys.exit('fixture stop refused')
-    end(run, 'codex-run: the run wrote no report and no last message; exit 143.\n', 143)
+    if deployment:
+        assert args[:3] == ['--user', 'stop', '--']
+        if not saved:
+            sys.exit('fixture unit not loaded')
+        if saved:
+            subprocess.run(saved['stop'], stdin=subprocess.DEVNULL, check=True)
+            stop_group(saved['pid'])
+            path.unlink()
+    else:
+        meta = dict(line.split('=', 1) for line in (runs / run / 'meta').read_text().splitlines())
+        on_stop = Path(meta['on_stop'])
+        if on_stop.is_file() and not on_stop.is_symlink() and os.access(on_stop, os.X_OK):
+            subprocess.run([str(on_stop)], cwd=on_stop.parent, stdin=subprocess.DEVNULL, timeout=60)
+        end(run, 'codex-run: the run wrote no report and no last message; exit 143.\n', 143)
 elif name == 'logins':
     assert args[0] in ('take', 'give') and args[2:4] == ['--as', 'qa-watch'], args
     login = args[1]
@@ -540,11 +599,13 @@ elif name == 'logins':
             sys.exit(1)
         config['logins_held'] = sorted(set(config.get('logins_held', [])) | {login})
         (root / 'tools.json').write_text(json.dumps(config))
-        print(root / 'logins' / login / 'login')
-    elif login in config.get('logins_out', []):
+        print(root / 'login-store' / login / 'login')
+    elif (login in config.get('logins_out', []) or login in config.get('logins_real', [])
+          and not (root / 'login-store' / login / 'login').exists()):
         print('fixture login out', file=sys.stderr)
         sys.exit(1)
     elif login in config.get('logins_held', []):
+        config.setdefault('logins_released', []).append(login)
         config['logins_held'].remove(login)
         (root / 'tools.json').write_text(json.dumps(config))
     else:
@@ -582,7 +643,7 @@ def watch_starts_a_pass_on_the_cleared_main(lab):
     for text in (b, c, 'QA: feature 1', 'QA: feature 2', '120 minutes', str(directory / 'report.md'), str(KIT.parent.parent / 'roles/qa.md')):
         assert text in brief, (text, brief)
     call, = lab.calls('codex-run')
-    assert call == ['task', '--to', 'qa-watch', '--on-stop', str(directory / 'give-back'), str(directory / 'brief.md'), str(checkout), str(directory / 'report.md')]
+    assert call == ['task', '--to', 'qa-watch', '--on-stop', str(directory / 'on-stop'), str(directory / 'brief.md'), str(checkout), str(directory / 'report.md')]
     assert directory.stat().st_mode & 0o777 == 0o700
     text = lab.content(f'qa/passes/{state["pass"]}.md')
     assert f'commits: {b} {c}\nrung: -\n' in text and 'outcome: running\n' in text and f'main: {c}\n' in text
@@ -605,7 +666,7 @@ def watch_waits_for_a_cleared_main_holding_the_oldest(lab):
 def watch_takes_a_batch(lab):
     commits = lab.waiting(3)
     # The -2 assertion is a collision in one minute, however slow the watches.
-    now = '2026-10-27T12:00:00Z'
+    now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
     lab.watch(extra={'QA_BATCH': '2'}, now=now)
     _, state = lab.watch_state()
     assert state['commits'] == commits[:2]
@@ -634,7 +695,8 @@ def watch_finishes_a_pass_with_findings(lab):
     sent, = lab.sent()
     assert sent['args'][1] == 'director@fixture' and sent['args'][2] == f'qa: pass {state["pass"]} done, 2 findings'
     assert sent['body'] == (f'QA pass {state["pass"]} on temper ended done after 0:00, with 2 findings: '
-                            f"records' qa/passes/{state['pass']}.md; qa findings lists them.\n")
+                            f"records' qa/passes/{state['pass']}.md; qa findings lists them.\n"
+                            f'Scratch: {directory}. The service tries again at each check.\n')
     assert lab.run('findings').stdout.splitlines() == [f'{state["pass"]} 1 First', f'{state["pass"]} 2 Second']
     assert json.loads((directory / 'pass.json').read_text())['ended'] == ended
     lab.watch()
@@ -941,7 +1003,7 @@ def watch_takes_the_rungs_login_before_the_pass(lab):
     lab.waiting(1)
     lab.watch()
     directory, state = lab.watch_state()
-    path = str(lab.root / 'logins' / CHATGPT / 'login')
+    path = str(lab.root / 'login-store' / CHATGPT / 'login')
     assert lab.calls('logins') == [['give', CHATGPT, '--as', 'qa-watch'],
                                  ['take', CHATGPT, '--as', 'qa-watch', '--note', 'temper']]
     calls = [json.loads(line)['tool'] for line in (lab.root / 'tools.jsonl').read_text().splitlines()]
@@ -953,7 +1015,7 @@ def watch_takes_the_rungs_login_before_the_pass(lab):
                  '  absolute path (it runs outside your shell).',
                  'Never run `logins`, never read or copy a login.'):
         assert text in brief, (text, brief)
-    assert lab.calls('codex-run')[0][3:5] == ['--on-stop', str(directory / 'give-back')]
+    assert lab.calls('codex-run')[0][3:5] == ['--on-stop', str(directory / 'on-stop')]
     assert f'commits: {state["commits"][0]}\nrung: {REAL}\n' in lab.content(f'qa/passes/{state["pass"]}.md')
     assert state['rung'] == REAL and state['logins'] == {CHATGPT: path} and state['given'] == []
     assert f'{state["pass"]} temper {REAL} running ' in lab.run('passes').stdout
@@ -1241,7 +1303,440 @@ def watch_leaves_a_login_its_pass_holds(lab):
     assert not (lab.tmp / 'qa/strays.json').exists()
 
 
-CASES = (watch_gives_back_a_login_held_without_a_pass,
+def executable(path, text):
+    path.write_text(f'#!{sys.executable} -S\n' + text)
+    path.chmod(0o700)
+    return path
+
+
+def alive(pid):
+    try:
+        return Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[0] != 'Z'
+    except FileNotFoundError:
+        return False
+
+
+def wait_for(check):
+    deadline = time.monotonic() + 10
+    while not check():
+        assert time.monotonic() < deadline, 'fixture process did not settle'
+        time.sleep(0.01)
+
+
+def dead(pid):
+    wait_for(lambda: not alive(pid))
+    try:
+        os.waitpid(pid, 0)
+    except ChildProcessError:
+        pass
+
+
+def resting(lab, name, in_place=False):
+    path = lab.root / 'login-store' / name / 'login'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if in_place:
+        path.mkdir(mode=0o700)
+        (path / 'fixture').touch()
+    else:
+        path.write_text('fixture login\n')
+        path.chmod(0o600)
+    return path
+
+
+def deployment_pass(lab, *logins, in_place=()):
+    for name in logins:
+        resting(lab, name, name in in_place)
+    lab.configure(logins_real=list(logins))
+    if logins:
+        lab.rung('temper', REAL, *logins)
+    lab.waiting(1)
+    lab.watch()
+    return lab.watch_state()
+
+
+def deployment(lab, directory, name='box', login=None):
+    box = directory / name
+    box.mkdir()
+    path = lab.root / 'login-store' / login / 'login' if login else None
+    program = executable(box / 'server', 'import os, time\nfrom pathlib import Path\n'
+        + (f'Path({str(path)!r}).rename({str(box / "login")!r})\n' if login else '')
+        + f'Path({str(box / "pid")!r}).write_text(str(os.getpid()))\n'
+          'while True: time.sleep(1)\n')
+    unit = lab.run('deploy', str(directory), name, '--', str(program)).stdout.strip()
+    wait_for(lambda: (box / 'pid').exists())
+    pid = int((box / 'pid').read_text())
+    if login:
+        executable(directory / 'give-back', 'import os, sys\nfrom pathlib import Path\n'
+            + f'path = Path({str(path)!r})\n'
+              'if path.exists(): sys.exit(0)\n'
+            + f'pid = int(Path({str(box / "pid")!r}).read_text())\n'
+              'try:\n'
+              "    live = Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[0] != 'Z'\n"
+              'except FileNotFoundError: live = False\n'
+              'if not live: sys.exit(1)\n'
+            + f'Path({str(box / "login")!r}).rename(path)\n')
+    return unit, pid
+
+
+def aged(lab, directory):
+    state = json.loads((directory / 'pass.json').read_text())
+    state['ended'] = (datetime.now(timezone.utc) - timedelta(days=8)).strftime('%Y-%m-%dT%H:%M:%SZ')
+    (directory / 'pass.json').write_text(json.dumps(state))
+
+
+def end_deployment_pass(lab):
+    lab.watch(extra={'QA_CAP_MINUTES': '0'})
+    lab.watch()
+
+
+def deploy_records_then_starts_its_unit(lab):
+    directory = lab.root / P
+    directory.mkdir()
+    unit, pid = deployment(lab, directory)
+    assert unit == f'qa-{P}-box'
+    args, = lab.calls('systemd-run')
+    for arg in ('--user', '--quiet', '--collect', '--service-type=exec', '--setenv=PATH',
+                f'--working-directory={directory}', '--property=KillMode=control-group',
+                f'--property=StandardOutput=append:{directory}/box.log',
+                f'--property=StandardError=append:{directory}/box.log', '--property=TimeoutStopSec=110',
+                f'--property=ExecStop=-"{SCRIPT}" "_give-back" "{directory}" "50"'):
+        assert arg in args, (arg, args)
+    assert args[-1] == str(directory / 'box/server')
+    assert not any('ExecStopPost=' in arg for arg in args)
+    assert (directory / 'deployments').read_text() == unit + '\n'
+    # Do not replace an active fake unit: refuse the repeated launch.
+    lab.configure(deploy_failure=True)
+    result = lab.run('deploy', str(directory), 'box', '--', 'true', status=4)
+    assert 'fixture deployment refused' in result.stderr
+    assert (directory / 'deployments').read_text() == unit + '\n'
+    lab.run('deploy', str(directory), 'other', '--', 'true', status=4)
+    assert (directory / 'deployments').read_text().splitlines() == [unit, f'qa-{P}-other']
+    command = lab.calls('systemd-run')[-1]
+    assert Path(command[command.index('--') + 1]).is_absolute()
+    link = lab.root / 'linked'
+    link.symlink_to(directory, target_is_directory=True)
+    unsafe = []
+    for name in ('has space', 'has$dollar', 'has%percent', 'has"quote', 'has\\slash', 'has\ttab', 'has\nline'):
+        path = lab.root / name
+        path.mkdir()
+        scratch = path / P
+        scratch.mkdir()
+        unsafe.append(str(scratch))
+    before = len(lab.calls('systemd-run'))
+    for path, name, argv in [('relative', 'box', ['true']), (str(link), 'box', ['true']),
+                             *[(path, 'box', ['true']) for path in unsafe],
+                             (str(directory), 'Box', ['true']), (str(directory), 'a/b', ['true']),
+                             (str(directory), 'missing', ['not-a-command-on-path']),
+                             (str(directory), 'missing', [])]:
+        previous = (directory / 'deployments').read_bytes()
+        lab.run('deploy', path, name, '--', *argv, status=2)
+        assert (directory / 'deployments').read_bytes() == previous
+        assert len(lab.calls('systemd-run')) == before
+        if Path(path).is_absolute() and Path(path) != directory:
+            assert Path(path).is_symlink() or not (Path(path) / 'deployments').exists()
+    # Refuse a linked registry, and an unsafe resolved qa path, before a launch.
+    registry = directory / 'deployments'
+    original = registry.read_bytes()
+    registry.unlink()
+    registry.symlink_to(directory / 'box.log')
+    lab.run('deploy', str(directory), 'box', '--', 'true', status=4)
+    registry.unlink()
+    registry.write_bytes(original)
+    copied = lab.root / 'unsafe kit'
+    copied.mkdir()
+    qa = copied / 'qa'
+    shutil.copy2(SCRIPT, qa)
+    result = subprocess.run([str(qa), 'deploy', str(directory), 'box', '--', 'true'],
+                            env=lab.env, capture_output=True, text=True)
+    assert result.returncode == 2 and len(lab.calls('systemd-run')) == before
+    for value in ('0', '60', 'bad'):
+        lab.run('deploy', str(directory), 'box', '--', 'true', status=2, extra={'QA_STOP_SECONDS': value})
+    assert registry.read_bytes() == original
+    lab.configure(deploy_failure=False)
+    binary = lab.root / 'caller-bin'
+    binary.mkdir()
+    output = directory / 'arguments'
+    executable(binary / 'capture', 'import json, os, sys\nfrom pathlib import Path\n'
+        + f'Path({str(output)!r}).write_text(json.dumps([sys.argv[1:], os.environ["PATH"]]))\n')
+    caller_path = str(binary) + os.pathsep + lab.env['PATH']
+    arguments = ['one value', '$literal', '--flag']
+    lab.run('deploy', str(directory), 'args', '--', 'capture', *arguments, extra={'PATH': caller_path})
+    wait_for(output.exists)
+    assert json.loads(output.read_text()) == [arguments, caller_path]
+    call = lab.calls('systemd-run')[-1]
+    assert call[call.index('--') + 1:] == [str(binary / 'capture'), *arguments]
+    os.killpg(pid, signal.SIGKILL)
+    dead(pid)
+
+
+def a_stopped_pass_gives_its_login_back(lab):
+    directory, state = deployment_pass(lab, CHATGPT)
+    unit, pid = deployment(lab, directory, login=CHATGPT)
+    assert not Path(state['logins'][CHATGPT]).exists()
+    end_deployment_pass(lab)
+    state = lab.watch_state()[1]
+    assert state['finished'] and state['given'] == [CHATGPT] and state['stopped'] == [unit]
+    assert Path(state['logins'][CHATGPT]).is_file()
+    assert not (lab.root / 'units' / (unit + '.json')).exists()
+    dead(pid)
+    lines = (directory / 'give-back.log').read_text().splitlines()
+    assert len(lines) == 2 and all(line.endswith(' exit 0') for line in lines), lines
+    calls = list(map(json.loads, (lab.root / 'tools.jsonl').read_text().splitlines()))
+    stop = next(i for i, call in enumerate(calls) if call['tool'] == 'systemctl' and call['args'] == ['--user', 'stop', '--', unit])
+    give = max(i for i, call in enumerate(calls[:stop]) if call['tool'] == 'logins' and call['args'][:2] == ['give', CHATGPT])
+    assert give < stop
+    assert directory.joinpath('on-stop').stat().st_mode & 0o777 == 0o700
+
+
+def a_failed_export_leaves_the_unit_up(lab):
+    directory, state = deployment_pass(lab, CHATGPT)
+    unit, pid = deployment(lab, directory, login=CHATGPT)
+    executable(directory / 'give-back', 'raise SystemExit(1)\n')
+    end_deployment_pass(lab)
+    state = lab.watch_state()[1]
+    assert state['finished'] and not state['given'] and not state['stopped'] and alive(pid)
+    assert ['--user', 'stop', '--', unit] not in lab.calls('systemctl')
+    notice, = lab.sent()
+    for text in (unit, CHATGPT, str(directory), state['logins'][CHATGPT], 'tries again at each check'):
+        assert text in notice['body']
+    aged(lab, directory)
+    lab.watch()
+    assert directory.exists() and alive(pid)
+    (directory / 'box/login').rename(state['logins'][CHATGPT])
+    lab.watch()
+    dead(pid)
+    assert not directory.exists() and len(lab.sent()) == 1
+
+
+def two_stops_take_turns(lab):
+    directory = lab.root / P
+    directory.mkdir()
+    executable(directory / 'give-back', 'import time\nfrom pathlib import Path\n'
+               "with Path('runs').open('a') as out:\n out.write('start\\n'); out.flush()\n"
+               'time.sleep(1)\n'
+               "with Path('runs').open('a') as out: out.write('end\\n')\n")
+    processes = [subprocess.Popen([str(SCRIPT), '_give-back', str(directory), '5'], env=lab.env) for _ in range(2)]
+    assert [proc.wait(timeout=10) for proc in processes] == [0, 0]
+    assert (directory / 'runs').read_text().splitlines() == ['start', 'end', 'start', 'end']
+    assert (directory / 'give-back.log').read_text().count('exit 0') == 2
+    with (directory / 'give-back.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        lab.run('_give-back', str(directory), '1')
+    assert 'lock busy past 1 s' in (directory / 'give-back.log').read_text()
+    (directory / 'give-back').unlink()
+    lab.run('_give-back', str(directory), '1')
+    (directory / 'give-back').symlink_to('/bin/false')
+    lab.run('_give-back', str(directory), '1')
+    assert (directory / 'give-back.log').read_text().count('absent') == 2
+    lab.run('_give-back')
+    lab.run('_give-back', str(directory), 'invalid')
+    assert 'error:' in (directory / 'give-back.log').read_text()
+    lab.run('_give-back', str(directory / 'missing'), '1')
+    (directory / 'give-back.lock').unlink()
+    (directory / 'give-back.lock').symlink_to(directory / 'runs')
+    lab.run('_give-back', str(directory), '1')
+    assert 'error:' in (directory / 'give-back.log').read_text()
+    (directory / 'give-back.lock').unlink()
+    (directory / 'give-back.log').unlink()
+    os.mkfifo(directory / 'give-back.log')
+    started = time.monotonic()
+    lab.run('_give-back', str(directory), '1')
+    assert time.monotonic() - started < 5
+
+
+
+def a_wrapper_past_its_bound_is_ended(lab):
+    (lab.tmp / 'machine.env').write_text('QA_STOP_SECONDS=3\n')
+    lab.env['QA_STOP_SECONDS'] = '2'
+    directory, _ = deployment_pass(lab)
+    unit, pid = deployment(lab, directory)
+    executable(directory / 'give-back', 'import os, subprocess, time\nfrom pathlib import Path\n'
+        + f'child = subprocess.Popen([{sys.executable!r}, "-S", "-c", "import time; time.sleep(60)"])\n'
+          "Path('export-pids').write_text(f'{os.getpid()} {child.pid}')\n"
+          'time.sleep(60)\n')
+    started = time.monotonic()
+    lab.run('_give-back', str(directory), '2')
+    assert time.monotonic() - started < 10
+    for process in map(int, (directory / 'export-pids').read_text().split()):
+        dead(process)
+    assert 'killed past 2 s' in (directory / 'give-back.log').read_text()
+    # The bound also applies when the manager invokes the wrapper.
+    saved = lab.root / 'units' / (unit + '.json')
+    metadata = json.loads(saved.read_text())
+    assert metadata['stop'][-1] == '2'
+    assert '--property=TimeoutStopSec=62' in lab.calls('systemd-run')[0]
+    result = subprocess.run([str(lab.root / 'systemctl'), '--user', 'stop', '--', unit],
+                            env=lab.env, capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    for process in map(int, (directory / 'export-pids').read_text().split()):
+        dead(process)
+    dead(pid)
+    assert not saved.exists() and (directory / 'give-back.log').read_text().count('killed past 2 s') == 2
+    # A leader that exits successfully must not leave an exporter child alive.
+    executable(directory / 'give-back', 'import subprocess\nfrom pathlib import Path\n'
+        + f'child = subprocess.Popen([{sys.executable!r}, "-S", "-c", "import time; time.sleep(60)"])\n'
+          "Path('leftover-pid').write_text(str(child.pid))\n")
+    lab.run('_give-back', str(directory), '2')
+    dead(int((directory / 'leftover-pid').read_text()))
+    assert (directory / 'give-back.log').read_text().splitlines()[-1].endswith('exit 0')
+
+
+def a_deployment_that_exited_leaves_its_login_out(lab):
+    directory, state = deployment_pass(lab, CHATGPT)
+    unit, pid = deployment(lab, directory, login=CHATGPT)
+    os.killpg(pid, signal.SIGKILL)
+    dead(pid)
+    end_deployment_pass(lab)
+    state = lab.watch_state()[1]
+    assert not state['given'] and not state['stopped']
+    assert 'exit 1' in (directory / 'give-back.log').read_text()
+    notice, = lab.sent()
+    assert unit in notice['body'] and CHATGPT in notice['body']
+    aged(lab, directory)
+    lab.watch()
+    assert directory.exists() and len(lab.sent()) == 1
+
+
+def a_failed_stop_is_tried_again(lab):
+    directory, _ = deployment_pass(lab)
+    unit, pid = deployment(lab, directory)
+    lab.configure(stop_failures=[unit])
+    lab.end_run()
+    result = lab.watch()
+    assert f'stop {unit} failed:' in result.stdout and alive(pid)
+    assert not lab.watch_state()[1]['stopped']
+    aged(lab, directory)
+    lab.configure(stop_failures=[], unit_states={unit: 'deactivating'})
+    result = lab.watch()
+    assert f'waiting for {unit} to stop' in result.stdout
+    assert directory.exists() and not lab.watch_state()[1]['stopped']
+    lab.configure(unit_states={unit: 'unknown'})
+    result = lab.watch()
+    assert f'{unit}: cannot establish unit state' in result.stdout
+    assert directory.exists() and not lab.watch_state()[1]['stopped']
+    dead(pid)
+    lab.configure(unit_states={})
+    # Keep it young for one check so the saved completion can be inspected.
+    state = lab.watch_state()[1]
+    state['ended'] = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    (directory / 'pass.json').write_text(json.dumps(state))
+    lab.watch()
+    assert lab.watch_state()[1]['stopped'] == [unit]
+    aged(lab, directory)
+    lab.watch()
+    assert not directory.exists() and len(lab.sent()) == 1
+    assert lab.calls('systemctl').count(['--user', 'stop', '--', unit]) == 4
+
+
+def a_restarted_service_goes_on(lab):
+    directory, state = deployment_pass(lab, CHATGPT, CLAUDE, in_place=(CLAUDE,))
+    unit, pid = deployment(lab, directory, login=CHATGPT)
+    # Restore the moved login as the session stop would; finish then crashes just
+    # after saving its give, before any deployment stop or in-place give.
+    lab.run('_give-back', str(directory), '5')
+    lab.end_run()
+    driver = f'''import os, runpy, sys
+tool = runpy.run_path({str(SCRIPT)!r})
+watch = tool['Watch']
+save = watch.save
+def crash(self, directory, state):
+    save(self, directory, state)
+    if state.get('given') == [{CHATGPT!r}]: os._exit(17)
+watch.save = crash
+sys.exit(tool['main']())
+'''
+    result = subprocess.run([sys.executable, '-I', '-S', '-c', driver, 'watch', '--director',
+                             'director@fixture', '--once'], env=lab.env, capture_output=True, text=True)
+    assert result.returncode == 17, result.stderr
+    state = lab.watch_state()[1]
+    assert state['finished'] and state['given'] == [CHATGPT] and not state['stopped'] and alive(pid)
+    assert not lab.sent()
+    lab.watch()
+    state = lab.watch_state()[1]
+    assert state['stopped'] == [unit] and state['given'] == [CHATGPT, CLAUDE]
+    dead(pid)
+    # The recovery did not repeat custody's give (the pre-existing stray sweep
+    # can still ask the login tool about an already free rung login).
+    config = json.loads((lab.root / 'tools.json').read_text())
+    assert config['logins_held'] == [] and config['logins_released'] == [CHATGPT, CLAUDE]
+
+
+def a_pass_with_no_login_stops_its_units(lab):
+    directory, _ = deployment_pass(lab)
+    unit, pid = deployment(lab, directory)
+    assert f'qa deploy {directory} NAME -- COMMAND...' in (directory / 'brief.md').read_text()
+    lab.end_run()
+    lab.watch()
+    assert lab.watch_state()[1]['stopped'] == [unit] and not lab.sent()
+    dead(pid)
+
+
+def an_in_place_login_waits_for_every_unit(lab):
+    directory, state = deployment_pass(lab, CHATGPT, CLAUDE, in_place=(CLAUDE,))
+    assert state['kinds'] == {CHATGPT: 'moved', CLAUDE: 'in-place'}
+    first, one = deployment(lab, directory, login=CHATGPT)
+    second, two = deployment(lab, directory, 'other')
+    lab.configure(stop_failures=[second])
+    end_deployment_pass(lab)
+    state = lab.watch_state()[1]
+    assert state['given'] == [CHATGPT] and state['stopped'] == [first] and alive(two)
+    assert json.loads((lab.root / 'tools.json').read_text())['logins_held'] == [CLAUDE]
+    dead(one)
+    lab.configure(stop_failures=[])
+    lab.watch()
+    state = lab.watch_state()[1]
+    assert state['given'] == [CHATGPT, CLAUDE] and state['stopped'] == [first, second]
+    dead(two)
+    calls = list(map(json.loads, (lab.root / 'tools.jsonl').read_text().splitlines()))
+    give = max(i for i, row in enumerate(calls) if row['tool'] == 'logins' and row['args'][:2] == ['give', CLAUDE])
+    stop = max(i for i, row in enumerate(calls) if row['tool'] == 'systemctl' and row['args'] == ['--user', 'stop', '--', second])
+    assert give > stop and len(lab.sent()) == 1
+
+
+def a_pass_from_before_ends_as_before(lab):
+    directory, state = deployment_pass(lab, CHATGPT)
+    for key in ('kinds', 'stopped'):
+        state.pop(key)
+    (directory / 'pass.json').write_text(json.dumps(state))
+    run_meta = lab.tmp / 'codex-run' / state['run'] / 'meta'
+    run_meta.write_text(run_meta.read_text().replace(str(directory / 'on-stop'), str(directory / 'give-back')))
+    executable(directory / 'give-back', "from pathlib import Path\nPath('old-stop-ran').touch()\n")
+    end_deployment_pass(lab)
+    state = lab.watch_state()[1]
+    assert state['finished'] and state['given'] == [CHATGPT]
+    assert (directory / 'old-stop-ran').exists() and 'kinds' not in state and 'stopped' not in state
+    assert not (directory / 'deployments').exists()
+    assert lab.calls('logins')[-1] == ['give', CHATGPT, '--as', 'qa-watch']
+
+
+def deployments_names_only_its_own_units(lab):
+    directory, _ = deployment_pass(lab)
+    unit, pid = deployment(lab, directory)
+    foreign = ['codex-run-x', 'agents-qa-watch', 'qa-otherpass-box', unit + ' bad', unit + '/bad']
+    (directory / 'deployments').write_text('\n'.join([*foreign, unit, unit]) + '\n')
+    lab.end_run()
+    result = lab.watch()
+    assert lab.watch_state()[1]['stopped'] == [unit]
+    for name in foreign:
+        assert f'ignored deployment line {name!r}' in result.stdout
+        assert not any(name in args for args in lab.calls('systemctl'))
+    assert lab.calls('systemctl').count(['--user', 'stop', '--', unit]) == 1
+    dead(pid)
+
+
+CASES = (deploy_records_then_starts_its_unit,
+         a_stopped_pass_gives_its_login_back,
+         a_failed_export_leaves_the_unit_up,
+         two_stops_take_turns,
+         a_wrapper_past_its_bound_is_ended,
+         a_deployment_that_exited_leaves_its_login_out,
+         a_failed_stop_is_tried_again,
+         a_restarted_service_goes_on,
+         a_pass_with_no_login_stops_its_units,
+         an_in_place_login_waits_for_every_unit,
+         a_pass_from_before_ends_as_before,
+         deployments_names_only_its_own_units,
+         watch_gives_back_a_login_held_without_a_pass,
          watch_posts_once_for_a_login_out_with_no_pass,
          watch_leaves_a_login_its_pass_holds,
          rung_records_the_opening,
@@ -1284,7 +1779,10 @@ def build_baseline(directory):
 
 
 def run(case, directory, built):
-    case(Lab(directory, built=built))
+    try:
+        case(Lab(directory, built=built))
+    finally:
+        case_runner.reap_descendants()
 
 
 if __name__ == '__main__':
