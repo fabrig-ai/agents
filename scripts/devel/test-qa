@@ -534,8 +534,9 @@ if name == 'codex-run':
         os.kill(os.getppid(), 9)
     print(run, state)
 elif name == 'landings':
-    assert args[0] == 'cleared'
-    value = config['cleared'].get(args[1], 1)
+    assert args[0] in ('cleared', 'landed')
+    value = (config['cleared'].get(args[1], 1) if args[0] == 'cleared'
+             else config.get('landed', {}).get(args[2], 1))
     if isinstance(value, int):
         if value == 4:
             print('fixture feed unreadable', file=sys.stderr)
@@ -791,6 +792,178 @@ def watch_takes_a_batch(lab):
     assert running[0][1]['pass'].endswith('-2')
 
 
+def finding_report(*fields):
+    return ('## Cases\n### 99. Not a finding\nCommit: unknown\n\n## Findings\n' +
+            ''.join(f'### {n}. Problem {n}\n{value}\nReproduce {n}.\n\n'
+                    for n, value in enumerate(fields, 1)) +
+            '## Automation\n### 98. Not a finding\nCommit: unknown\n')
+
+
+def mission(lab, name, parent='director@fixture', owner='o/fixture@fixture', state='active'):
+    lab.publish(f'missions/{name}/README.md',
+                f'---\nparent: {parent}\nowner: {owner}\nstate: {state}\n---\n# Mission\n')
+
+
+def finding_posts(lab):
+    return [post for post in lab.sent() if post['args'][2].startswith('QA finding ')]
+
+
+def a_finding_goes_to_the_designer_of_its_landing(lab):
+    a, b = lab.waiting(2)
+    mission(lab, 'm1', parent='design/d1@fixture')
+    mission(lab, 'd1')
+    mission(lab, 'm2', owner='o/m2@fixture')
+    lab.configure(landed={a[:9]: f'set m1/first 2026-10-27T13:25:00Z {b}',
+                          b: f'land m2/second 2026-10-27T13:26:00Z {b}'})
+    lab.watch()
+    directory, state = lab.watch_state()
+    lab.end_run(report=finding_report(f'Commit: {a[:9]}', f'Commit: {b}'))
+    lab.watch()
+    posts = finding_posts(lab)
+    assert [p['args'][1] for p in posts] == ['design/d1@fixture', 'o/m2@fixture']
+    for n, post in enumerate(posts, 1):
+        assert post['args'][2] == f'QA finding {state["pass"]} {n}: Problem {n}'
+        assert f"records' qa/passes/{state['pass']}.md, finding {n}: record pull, then read it." in post['body']
+    lines = lab.content('qa/triage.md').splitlines()[-2:]
+    assert lines[0].endswith(f'{state["pass"]} 1 design/d1@fixture landed by m1')
+    assert lines[1].endswith(f'{state["pass"]} 2 o/m2@fixture landed by m2')
+    assert all(call[1:3] == ['--as', 'qa-watch'] for call in lab.calls('post') if call[0] == 'send')
+    assert lab.git(lab.origin, 'log', '-1', '--format=%s', 'main') == f'qa-watch: qa watch: route {state["pass"]}'
+    assert lab.run('findings').stdout == 'no findings waiting\n'
+    saved = json.loads((directory / 'pass.json').read_text())
+    assert saved['routes']['1'] == dict(address='design/d1@fixture', why='landed by m1')
+    lab.watch()
+    assert len(finding_posts(lab)) == 2
+    lab.run('triage', state['pass'], '1', 'drop', '--why', 'director correction')
+    lab.watch()
+    assert len(finding_posts(lab)) == 2
+    assert lab.content('qa/triage.md').endswith('1 drop director correction')
+
+
+def the_director_keeps_the_exceptions(lab):
+    side = lab.commit('side branch', branch='side')
+    lab.git(lab.products['temper'], 'checkout', 'main')
+    a, b, c, d = lab.waiting(4)
+    mission(lab, 'ended', parent='design/ended-design@fixture', state='done')
+    mission(lab, 'ended-design', state='done')
+    lab.publish('missions/broken/README.md', 'no front matter\n')
+    lab.configure(landed={b: f'land absent/one 2026-10-27T13:25:00Z {d}',
+                          c: f'set ended/two 2026-10-27T13:25:00Z {d}',
+                          d: f'set broken/three 2026-10-27T13:25:00Z {d}'})
+    lab.watch()
+    _, state = lab.watch_state()
+    lab.end_run(report=finding_report('', 'Commit: unknown', f'Commit: {side}',
+                f'Commit: {a}', f'Commit: {b}', f'Commit: {c}',
+                f'Commit: {a}\nConcerns: security', f'Commit: {a}\nConcerns: lost data', f'Commit: {d}'))
+    lab.watch()
+    posts = finding_posts(lab)
+    assert len(posts) == 9 and all(p['args'][1] == 'director@fixture' for p in posts)
+    reasons = ('no commit', 'no commit', 'not on main', 'brought by no landing',
+               'mission unreadable', 'landed by ended', 'concerns: security', 'concerns: lost data', 'mission unreadable')
+    lines = lab.content('qa/triage.md').splitlines()[-9:]
+    for n, (line, why) in enumerate(zip(lines, reasons), 1):
+        assert line.endswith(f'{state["pass"]} {n} director@fixture {why}'), line
+    assert lab.run('findings').stdout == 'no findings waiting\n'
+
+
+def a_refused_post_is_routed_again(lab):
+    a, = lab.waiting(1)
+    mission(lab, 'm', owner='o/first@fixture')
+    lab.configure(landed={a: f'land m/one 2026-10-27T13:25:00Z {a}'})
+    lab.watch()
+    directory, state = lab.watch_state()
+    lab.end_run(report=finding_report(f'Commit: {a}'))
+    # Accept the notice but refuse the finding; even an old scratch must wait.
+    driven_watch(lab, '''
+original = tool['Watch'].call
+def call(self, name, *args):
+    result = original(self, name, *args)
+    if name == 'post' and args[0] == 'send' and str(args[-2]).startswith('QA finding '):
+        result.returncode = 1
+    return result
+tool['Watch'].call = call
+''')
+    assert not (lab.records / 'qa/triage.md').exists()
+    saved = json.loads((directory / 'pass.json').read_text())
+    assert saved['routes']['1']['address'] == 'o/first@fixture' and not saved.get('notice')
+    saved['ended'] = (datetime.now(timezone.utc) - timedelta(days=8)).strftime('%Y-%m-%dT%H:%M:%SZ')
+    (directory / 'pass.json').write_text(json.dumps(saved))
+    lab.watch(extra={'QA_POST_STATUS': '1'})
+    assert directory.exists() and not (lab.records / 'qa/triage.md').exists()
+    mission(lab, 'm', owner='o/changed@fixture')
+    lab.configure(landed={a: 4})
+    lab.watch(extra={'QA_POST_STATUS': '3'})
+    assert not directory.exists()
+    assert [p['args'][1] for p in finding_posts(lab)] == ['o/first@fixture'] * 3
+    assert lab.content('qa/triage.md').endswith('1 o/first@fixture landed by m')
+    # Crash after acceptance, before the line: precisely that window repeats a post.
+    lab.waiting(1)
+    lab.watch()
+    _, state = lab.watch_state()
+    lab.end_run(report=finding_report('Commit: unknown'))
+    driven_watch(lab, '''
+original = tool['Record'].commit
+def commit(self, changes, message):
+    if message.startswith('qa watch: route '):
+        sys.exit(0)
+    return original(self, changes, message)
+tool['Record'].commit = commit
+''')
+    assert state['pass'] not in lab.content('qa/triage.md')
+    before = len(finding_posts(lab))
+    lab.watch()
+    assert len(finding_posts(lab)) == before + 1
+    lab.watch()
+    assert len(finding_posts(lab)) == before + 1
+
+
+def a_landings_failure_waits_for_the_next_check(lab):
+    a, = lab.waiting(1)
+    mission(lab, 'm')
+    lab.configure(landed={a: 4})
+    lab.watch()
+    directory, _ = lab.watch_state()
+    lab.end_run(report=finding_report(f'Commit: {a}'))
+    lab.watch()
+    assert not json.loads((directory / 'pass.json').read_text())['routes']
+    assert not finding_posts(lab) and not (lab.records / 'qa/triage.md').exists()
+    lab.configure(hang={'landings:landed': 'before'})
+    timed_watch(lab, 'landings:landed')
+    assert not json.loads((directory / 'pass.json').read_text())['routes']
+    assert not finding_posts(lab)
+    lab.configure(hang={}, landed={a: f'set m/one 2026-10-27T13:25:00Z {a}'})
+    lab.watch()
+    assert len(finding_posts(lab)) == 1 and finding_posts(lab)[0]['args'][1] == 'o/fixture@fixture'
+
+
+def a_pass_from_before_is_never_routed(lab):
+    lab.waiting(1)
+    lab.watch()
+    directory, state = lab.watch_state()
+    lab.end_run(report=finding_report('Commit: unknown'))
+    driven_watch(lab, "tool['Watch'].route = lambda self, directory, state: True")
+    saved = json.loads((directory / 'pass.json').read_text())
+    saved.pop('routes')
+    (directory / 'pass.json').write_text(json.dumps(saved))
+    lab.watch()
+    assert not finding_posts(lab)
+    assert lab.run('findings').stdout == f'{state["pass"]} 1 Problem 1\n'
+
+
+def a_finding_triaged_by_hand_is_never_routed(lab):
+    commits = lab.waiting(1)
+    lab.watch()
+    _, state = lab.watch_state()
+    lab.pass_file(name=state['pass'], commits=commits, findings=2)
+    lab.run('triage', state['pass'], '1', 'drop', '--why', 'by hand')
+    lab.end_run(report=finding_report('Commit: unknown', 'Commit: unknown'))
+    lab.watch()
+    posts = finding_posts(lab)
+    assert len(posts) == 1 and posts[0]['args'][2] == f'QA finding {state["pass"]} 2: Problem 2'
+    lines = lab.content('qa/triage.md').splitlines()[-2:]
+    assert lines[0].endswith('1 drop by hand') and lines[1].endswith('2 director@fixture no commit')
+
+
 def watch_finishes_a_pass_with_findings(lab):
     lab.waiting(1)
     lab.watch()
@@ -803,15 +976,16 @@ def watch_finishes_a_pass_with_findings(lab):
     assert f'machine: {socket.gethostname()}\n' in result
     for text in ('outcome: done', 'tokens: 100/20/30', 'model: gpt-6.1-sol', 'effort: high', 'ended: ' + ended, 'wall: 0:00', report.strip()):
         assert text in result, (text, result)
-    sent, = lab.sent()
+    sent, *routed = lab.sent()
     assert sent['args'][1] == 'director@fixture' and sent['args'][2] == f'qa: pass {state["pass"]} done, 2 findings'
     assert sent['body'] == (f'QA pass {state["pass"]} on temper ended done after 0:00, with 2 findings: '
                             f"records' qa/passes/{state['pass']}.md; qa findings lists them.\n"
                             f'Scratch: {directory}. The service tries again at each check.\n')
-    assert lab.run('findings').stdout.splitlines() == [f'{state["pass"]} 1 First', f'{state["pass"]} 2 Second']
+    assert len(routed) == 2 and all(p['args'][1] == 'director@fixture' for p in routed)
+    assert lab.run('findings').stdout == 'no findings waiting\n'
     assert json.loads((directory / 'pass.json').read_text())['ended'] == ended
     lab.watch()
-    assert len(lab.sent()) == 1
+    assert len(lab.sent()) == 3
 
 
 def watch_finishes_a_clean_pass_quietly(lab):
@@ -1002,7 +1176,7 @@ def watch_retries_post_and_prunes_finished_directories(lab):
     lab.watch(extra={'QA_POST_STATUS': '2'})
     assert directory.exists()
     lab.watch(extra={'QA_POST_STATUS': '3'})
-    assert not directory.exists() and len(lab.sent()) == 3
+    assert not directory.exists() and len(lab.sent()) == 6
     assert 'outcome: done' in lab.content(f'qa/passes/{state["pass"]}.md')
 
 
@@ -2979,7 +3153,10 @@ tool['Watch'].call = call
     assert not any(s.get('stage') == 'reserving' for _, s in lab.watch_states())
 
 
-CASES = (a_saved_reservation_past_the_cap_is_cancelled, qa_admits_nothing_while_its_old_rows_wait,
+CASES = (a_finding_goes_to_the_designer_of_its_landing, the_director_keeps_the_exceptions,
+         a_refused_post_is_routed_again, a_landings_failure_waits_for_the_next_check,
+         a_pass_from_before_is_never_routed, a_finding_triaged_by_hand_is_never_routed,
+         a_saved_reservation_past_the_cap_is_cancelled, qa_admits_nothing_while_its_old_rows_wait,
          a_listing_out_of_its_form_admits_and_gives_nothing, an_uncertain_grant_counts_before_another_repository_takes,
          qa_holds_at_most_the_pool_less_the_reserve,
          a_stuck_login_leaves_qa_one_pass,

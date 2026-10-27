@@ -5,6 +5,7 @@ landings [--last N]
 landings wait [--cleared] TARGET [--timeout SECONDS] [--post ADDRESS]
     With --timeout 0, decide by records alone, without ancestry.
 landings cleared REPO
+landings landed REPO COMMIT
 landings taught [--since TIME]
 landings report [--since DATE] [--repo NAME] [--tsv]
 """
@@ -1208,6 +1209,38 @@ def report(records, runner, lands, repo, tsv):
     report_starved(results, runner, lands)
 
 
+def landed(records, lands, repo, commit, checkouts):
+    if (repo not in CHECKOUTS or not re.fullmatch(r'[0-9a-fA-F]{7,40}', commit)
+            or not checkouts.available(repo)):
+        print(f'landings: {repo} {commit}: checkout or commit unreadable', file=sys.stderr)
+        return 4
+    full = checkouts.need(repo, commit.lower())
+    if full is None:
+        print(f'landings: {repo} {commit}: commit unreadable', file=sys.stderr)
+        return 4
+    candidates = sorted(lands + [r for r in records if r['event'] == 'landed'],
+                        key=lambda r: r['position'])
+    for row in candidates:
+        if row.get('repo') != repo or not row.get('base'):
+            continue
+        if not all(isinstance(row.get(key), str) for key in ('base', 'commit')):
+            print(f'landings: {repo} {commit}: landing range unreadable', file=sys.stderr)
+            return 4
+        holds = checkouts.holds(repo, row.get('commit', ''), full)
+        base = checkouts.holds(repo, row['base'], full)
+        if holds is None or base is None:
+            print(f'landings: {repo} {commit}: landing ancestry unreadable', file=sys.stderr)
+            return 4
+        if holds and not base:
+            kind = 'land' if row.get('kind') == 'land' else 'set'
+            name = row['branch'] if kind == 'land' else row['set']
+            tip = checkouts.need(repo, row['commit'])
+            print(kind, display_text(name), row['utc'].strftime('%Y-%m-%dT%H:%M:%SZ'), tip)
+            return 0
+    print(f'landings: {commit}: brought by no landing in the feed', file=sys.stderr)
+    return 1
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--last', type=count, default=20)
@@ -1219,6 +1252,9 @@ def main():
     waiter.add_argument('--cleared', action='store_true', help='wait for tier verdicts (default timeout: 7200s)')
     cleared = commands.add_parser('cleared', help='show the newest main with all run verdicts cleared')
     cleared.add_argument('repo')
+    brought = commands.add_parser('landed', help='show the landing that brought a commit to main')
+    brought.add_argument('repo')
+    brought.add_argument('commit')
     teacher = commands.add_parser('taught', help='show every landing and what it taught')
     teacher.add_argument('--since', type=since, help='UTC date or ISO time')
     reporter = commands.add_parser('report', help='summarize gate and set costs')
@@ -1244,6 +1280,8 @@ def main():
         return 4
     if args.command == 'cleared':
         return cleared_main(runner, args.repo, Checkouts(workspace()))
+    if args.command == 'landed':
+        return landed(records, lands, args.repo, args.commit, Checkouts(workspace()))
     if args.command == 'taught':
         events = sorted([r for r in records if r['event'] == 'landed'] + lands,
                         key=lambda r: r['position'])
