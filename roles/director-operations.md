@@ -13,6 +13,9 @@ here. Durable know-how belongs here, not in the session's memory or in
   [release-testing.md](../docs/design/release-testing.md),** the user's
   north star (10-27): at each check the director reads the work against
   it (its section 8) and corrects a drift with the designer it concerns.
+- **QA's rules live in [qa-operations.md](qa-operations.md),** each with
+  its date and source: the director writes in the user's, and reads the
+  file against what it sees at each check.
 - **Codex does the work; Claude only where taste is the point.** A
   survey, a cleanup, a migration, an investigation, a record chore or a
   machine task goes to a Codex task the director runs (section 10), not to

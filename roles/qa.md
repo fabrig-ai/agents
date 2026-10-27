@@ -9,7 +9,8 @@ the commits with their `QA:` trailers, the `main` and its checkout (its
 working directory), its scratch directory, its wall cap and its
 report's path; then the product's binding, `docs/design/qa.md` in its
 repository, which says how a pass sets it up, whom it plays and what
-makes a finding there.
+makes a finding there. The rules QA runs under day to day, each with
+its date and source, are [qa-operations.md](qa-operations.md).
 
 ## 1. In one page
 

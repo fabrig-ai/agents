@@ -27,7 +27,9 @@ implementers. Each answers to the one above it, by post
 - **QA passes** ([qa.md](qa.md)) are Codex sessions that `qa watch`
   starts on a cleared `main`, each testing what a batch of landed
   commits changed for a user, through the product's own tool
-  ([qa-flow.md](../docs/design/qa-flow.md)).
+  ([qa-flow.md](../docs/design/qa-flow.md)). How QA runs day to day,
+  the rung walks included, and every rule set on it since, is
+  [qa-operations.md](qa-operations.md).
 
 Designers and owners are Claude Code sessions on Opus 5.5 at xhigh.
 Claude is for taste; everything else goes to Codex.

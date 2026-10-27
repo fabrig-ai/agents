@@ -186,7 +186,8 @@ out. The security rules are director.md 10's.
   now do>`, one line of at most 160 characters, which its landing task
   writes ([qa-flow.md](../docs/design/qa-flow.md) 2). A commit that
   changes only tests, fixtures or figures carries none: marked commits
-  run by default (qa-flow.md 3).
+  run by default (qa-flow.md 3). A rung's owner runs its walks by
+  [qa-operations.md](qa-operations.md) 3's loop.
 - **A look request done:** a landing that does one of the person's look
   requests (temper's `client/journeys.md` 7) carries the trailer
   `Look-request: NAME`, the request's name on the branch

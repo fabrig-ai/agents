@@ -16,7 +16,9 @@ beyond the product's own commands, and tools added only as the passes'
 reports show the need. It settles the roles' open question of who
 starts QA and who judges its findings ([roles/README.md](../../roles/README.md)
 2), the triage included since 10-27 (section 6). It does not use qa's lab,
-whose future is open (section 9).
+whose future is open (section 9). The rules that operate it day to day,
+each with its date and source, are
+[roles/qa-operations.md](../../roles/qa-operations.md).
 
 ## 1. In one page
 
