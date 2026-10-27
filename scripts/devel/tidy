@@ -561,6 +561,32 @@ class Tidy:
         shutil.rmtree(renamed)
         self.delete('target', target, '', reason, lambda: None)
 
+    def free_bytes(self):
+        # Only test-tidy sets this file; real runs measure DEV_ROOT's filesystem.
+        fixture = os.environ.get('TIDY_FREE_BYTES')
+        return int(Path(fixture).read_text()) if fixture else shutil.disk_usage(self.root).free
+
+    def target_room(self, candidates, trash):
+        wanted = self.args.room * 2**30
+        free = self.free_bytes()
+        for newest, work, target in sorted(candidates, key=lambda item: (item[0], str(item[2]))):
+            if free >= wanted:
+                break
+            if not target.is_dir():
+                continue
+            reason = 'room for a landing'
+            if self.args.dry_run:
+                self.delete('target', target, '', reason, lambda: None)
+            else:
+                try:
+                    self.clear_target(work, target, reason, trash)
+                except (Failure, OSError) as error:
+                    self.keep('target', target, f'{error} ({reason})', 3)
+                free = self.free_bytes()
+        if free < wanted:
+            print(f'tidy: room for a landing: {free // 2**30} GB free of '
+                  f'{self.args.room} GB wanted, no target left to clear', flush=True)
+
     def targets(self):
         trash = self.tmp / 'logs' / 'tidy-trash'
         if not self.args.dry_run:
@@ -626,12 +652,15 @@ class Tidy:
                 except (Failure, OSError) as error:
                     self.keep('target', target, str(error), 3)
         now = time.time()
+        candidates = []
         for owner, targets in sorted(owners.items()):
             targets.sort(key=lambda item: (not bool(item[0]), -item[1], str(item[2])))
             for number, (busy, newest, work, target) in enumerate(targets):
                 age = now - newest
                 reason = f'idle {int(age // 3600)} h' if age >= 7200 else (
                     f'beyond two of {owner}' if number >= 2 else '')
+                if not busy and age >= 900 and not (reason and self.args.dry_run):
+                    candidates.append((newest, work, target))
                 if not reason:
                     continue
                 if busy:
@@ -643,6 +672,8 @@ class Tidy:
                         self.clear_target(work, target, reason, trash)
                     except (Failure, OSError) as error:
                         self.keep('target', target, str(error), 3)
+        if self.args.room is not None:
+            self.target_room(candidates, trash)
 
     def step(self, action):
         try:
@@ -722,11 +753,14 @@ def main():
     parser.add_argument('--dry-run', action='store_true')
     parser.add_argument('--mission')
     parser.add_argument('--targets', action='store_true')
+    parser.add_argument('--room', type=int, metavar='GB')
     parser.add_argument('repos', nargs='*', metavar='REPO')
     args = parser.parse_args()
     if (args.mission and args.repos) or (args.targets and (args.repos or args.mission)) or any(
             name not in REPOS for name in args.repos):
         parser.error('choose repository names or --mission M or --targets')
+    if args.room is not None and (not args.targets or args.room < 1):
+        parser.error('--room needs --targets and a whole number of GB, 1 or more')
     if args.mission and not re.fullmatch(r'[a-z0-9][a-z0-9_-]*', args.mission):
         parser.error('invalid mission name')
     args.repos = list(dict.fromkeys(args.repos))

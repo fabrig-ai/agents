@@ -167,6 +167,21 @@ class Lab:
         assert result.returncode == status, (result.returncode, result.stdout, result.stderr)
         return result.stdout + result.stderr
 
+    def room_free(self, gb):
+        source = self.put(self.root / 'free-bytes', str(gb * 2**30))
+        self.env['TIDY_FREE_BYTES'] = str(source)
+        return source
+
+    def room_reclaim(self, gb, *args, code='', status=0):
+        # Model recovered blocks after deletion, entirely inside the fixture child.
+        hook = ('remove = tool["shutil"].rmtree\n'
+                'def reclaim(path, *args, **kwargs):\n'
+                '    remove(path, *args, **kwargs)\n'
+                '    source = tool["Path"](tool["os"].environ["TIDY_FREE_BYTES"])\n'
+                f'    source.write_text(str(int(source.read_text()) + {gb * 2**30}))\n'
+                'tool["shutil"].rmtree = reclaim\n')
+        return self.target_fault(hook + code, *args, status=status)
+
     def exists(self, name, repo='agents', remote=False):
         path = self.origins[repo] if remote else self.primary[repo]
         return self.git(path, 'show-ref', '--verify', f'refs/heads/{name}', check=False).returncode == 0
@@ -1133,6 +1148,128 @@ def targets_trash_invalid(lab):
     assert lab.target_exists(target)
 
 
+
+def room_clears_oldest_first(lab):
+    targets = [lab.target(f'room-{n}', n * 600, owner=f'owner-{n % 2}') for n in (2, 3, 4, 5)]
+    lab.room_free(10)
+    text = lab.room_reclaim(12, '--room', '30')
+    assert text == ''.join(f'tidy: deleted target {target} (room for a landing)\n'
+                           for target in reversed(targets[2:])), text
+    assert all(lab.target_exists(t) for t in targets[:2])
+    assert all(not lab.target_exists(t) for t in targets[2:])
+
+
+def room_spares_recent_and_used(lab):
+    recent = lab.target('recent', 600)
+    used = lab.target('used', 1800)
+    lab.room_free(10)
+    with (used / 'debug' / '.cargo-lock').open('rb') as source:
+        fcntl.flock(source, fcntl.LOCK_EX)
+        text = lab.run('--targets', '--room', '30')
+    assert text == 'tidy: room for a landing: 10 GB free of 30 GB wanted, no target left to clear\n', text
+    assert lab.target_exists(recent) and lab.target_exists(used)
+
+
+def room_after_rules(lab):
+    idle = lab.target('idle', 3 * 3600, owner='idle-owner')
+    older = lab.target('older', 1800)
+    younger = lab.target('younger', 1200)
+    lab.room_free(10)
+    text = lab.room_reclaim(12, '--room', '30')
+    assert text == (f'tidy: deleted target {idle} (idle 3 h)\n'
+                    f'tidy: deleted target {older} (room for a landing)\n'), text
+    assert not lab.target_exists(idle) and not lab.target_exists(older) and lab.target_exists(younger)
+
+
+def room_already_free(lab):
+    target = lab.target('warm', 1800)
+    lab.room_free(31)
+    assert lab.run('--targets', '--room', '30') == '' and lab.target_exists(target)
+
+
+def room_dry_run(lab):
+    targets = [lab.target(f'preview-{n}', n * 600, owner=f'owner-{n % 2}') for n in (2, 3, 4, 5)]
+    for target in targets:
+        (target / 'debug' / '.cargo-lock').unlink()
+    lab.room_free(10)
+    text = lab.target_fault('def refuse(*args):\n    raise AssertionError("preview took a lock")\n'
+                            'tool["fcntl"].flock = refuse', '--dry-run', '--room', '30', status=0)
+    assert text == (''.join(f'tidy: would delete target {target} (room for a landing)\n'
+                            for target in reversed(targets)) +
+                    'tidy: room for a landing: 10 GB free of 30 GB wanted, no target left to clear\n'), text
+    assert all(lab.target_exists(t) and not (t / 'debug' / '.cargo-lock').exists() for t in targets)
+    assert not (lab.tmp / 'logs' / 'tidy-trash').exists()
+    assert not (lab.tmp / 'logs' / 'tidy.lock').exists()
+
+
+def room_ties_and_boundary(lab):
+    # Exactly fifteen minutes is eligible; equal build times sort by path.
+    later = lab.target('z-last', 900)
+    earlier = lab.target('a-first', 900)
+    stamp = time.time() - 900
+    for target in (later, earlier):
+        for base, dirs, files in os.walk(target, topdown=False):
+            os.utime(base, (stamp, stamp))
+    lab.room_free(10)
+    text = lab.room_reclaim(20, '--room', '30')
+    assert text == f'tidy: deleted target {earlier} (room for a landing)\n', text
+    assert not lab.target_exists(earlier) and lab.target_exists(later)
+
+
+def room_clear_race(lab):
+    older = lab.target('older', 2400)
+    younger = lab.target('younger', 1200)
+    lab.room_free(10)
+    # The worktree becomes held between discovery and the locked clearing check.
+    code = ('original_held = tool["held"]\n'
+            'calls = {}\n'
+            'def race(path):\n'
+            '    calls[path] = calls.get(path, 0) + 1\n'
+            f'    if str(path) == {str(older.parent)!r} and calls[path] > 1:\n'
+            '        return "fixture build started"\n'
+            '    return original_held(path)\n'
+            'tool["Tidy"].clear_target.__globals__["held"] = race\n')
+    text = lab.room_reclaim(20, '--room', '30', code=code)
+    assert text == (f'tidy: kept target {older}: fixture build started (room for a landing)\n'
+                    f'tidy: deleted target {younger} (room for a landing)\n'), text
+    assert lab.target_exists(older) and not lab.target_exists(younger)
+    with (older / 'debug' / '.cargo-lock').open('rb') as source:
+        fcntl.flock(source, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def room_failure_continues(lab):
+    older = lab.target('older', 2400)
+    younger = lab.target('younger', 1200)
+    lab.room_free(10)
+    code = ('rename = tool["os"].rename\n'
+            'def fail(source, destination):\n'
+            f'    if str(source) == {str(older)!r}:\n'
+            '        raise OSError("fixture room rename failure")\n'
+            '    return rename(source, destination)\n'
+            'tool["os"].rename = fail\n')
+    text = lab.room_reclaim(20, '--room', '30', code=code, status=3)
+    assert text == (f'tidy: kept target {older}: fixture room rename failure (room for a landing)\n'
+                    f'tidy: deleted target {younger} (room for a landing)\n'), text
+    assert lab.target_exists(older) and not lab.target_exists(younger)
+
+
+def room_free_source(lab):
+    target = lab.target('warm', 1800)
+    # Exercise the real measurement branch without reading this machine's free space.
+    code = ('def usage(path):\n'
+            f'    assert path == tool["Path"]({str(lab.workspace)!r})\n'
+            '    return type("Usage", (), {"free": 30 * 2**30})()\n'
+            'tool["shutil"].disk_usage = usage\n')
+    assert lab.target_fault(code, '--room', '30', status=0) == '' and lab.target_exists(target)
+    source = lab.room_free(10)
+    source.write_text('malformed')
+    text = lab.run('--targets', '--room', '30', status=3)
+    assert 'kept entry' in text and 'invalid literal' in text and lab.target_exists(target), text
+    source.unlink()
+    text = lab.run('--targets', '--room', '30', status=3)
+    assert 'kept entry' in text and 'No such file' in text and lab.target_exists(target), text
+
+
 def fleet_is_a_tools_entry(lab):
     path = lab.put(lab.tmp / 'fleet' / 'tend.json')
     text = lab.run()
@@ -1140,6 +1277,13 @@ def fleet_is_a_tools_entry(lab):
 
 
 def usage(lab):
+    lab.run('--room', '30', status=2)
+    lab.run('--targets', '--room', '0', status=2)
+    lab.run('--targets', '--room', 'x', status=2)
+    lab.run('--room', '30', 'agents', status=2)
+    lab.run('--targets', '--room', '-1', status=2)
+    lab.run('--targets', '--room', '1.5', status=2)
+    lab.run('--targets', '--room', status=2)
     lab.run('--targets', 'agents', status=2)
     lab.run('--targets', '--mission', 'm', status=2)
     lab.run('bogus', status=2)
@@ -1164,7 +1308,9 @@ CASES = (copies, lockfile_conflicts, lockfile_tree, lockfile_patches, lockfile_s
          targets_idle, targets_beyond_two, targets_held, targets_cargo_lock, targets_in_use_first,
          targets_triple, targets_left_alone, targets_trash, targets_dry_run, targets_scope,
          fleet_is_a_tools_entry, targets_root_lock, targets_preview_no_locks, targets_list_failure,
-         targets_rename_failure, targets_delete_failure, targets_trash_failure, targets_trash_invalid)
+         targets_rename_failure, targets_delete_failure, targets_trash_failure, targets_trash_invalid,
+         room_clears_oldest_first, room_spares_recent_and_used, room_after_rules, room_already_free,
+         room_dry_run, room_ties_and_boundary, room_clear_race, room_failure_continues, room_free_source)
 
 
 def build_baseline(directory):
