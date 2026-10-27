@@ -30,6 +30,8 @@ import urllib.request
 
 HOUR, DAY, WEEK = 3600, 86400, 7 * 86400
 SAMPLES_KEPT = 5000
+# A release's version: two to four ASCII numbers, no leading zero but 0.
+RELEASE = re.compile(r'v(0|[1-9][0-9]*)(?:\.(0|[1-9][0-9]*)){1,3}\.html')
 # Copied from scripts/devel/landings: SSH's options and feed()'s path, but
 # for LogLevel=QUIET, so that a refused key or host key says so.
 SSH = ['ssh', '-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
@@ -1920,11 +1922,37 @@ SCRIPT = """
 """
 
 
-def render(data, samples=None):
+def release_pages(directory):
+    """The release pages beside the page, by name, newest first
+    (status-page.md 3): [] where directory is None or missing; an
+    OSError where it can't be listed."""
+    if directory is None:
+        return []
+    try:
+        with os.scandir(directory) as entries:
+            names = [entry.name for entry in entries if RELEASE.fullmatch(entry.name) and entry.is_file()]
+    except FileNotFoundError:
+        return []
+
+    def order(name):
+        version = [int(n) for n in name[1:-5].split('.')]
+        return tuple(-n for n in version + [0] * (4 - len(version))), name
+
+    return sorted(names, key=order)
+
+
+def render(data, samples=None, site=None):
     fleet = Fleet(data)
     fleet.samples = samples
     now = fleet.now
     problems = list(data['errors'])
+    try:
+        releases = release_pages(site)
+    except OSError as error:
+        print(f'status-page: release pages: {error}', file=sys.stderr)
+        problems.append('release pages: not listed')
+        releases = []
+    release_links = ''.join(f' · <a href="{E(name)}">{E(name[:-5])} progress</a>' for name in releases)
 
     def guard(name, build, *args):
         try:
@@ -2006,7 +2034,7 @@ landed or stopped.</p>
 <main>
 <header><h1>Fabrig status</h1>
 <span class="meta">Written {E(utc(now, "%Y-%m-%d %H:%M UTC"))}, every 10 minutes ·
-{reached} of {len(fleet.names)} machines reached{(" · down: " + E(", ".join(down))) if down else ""}</span></header>
+{reached} of {len(fleet.names)} machines reached{(" · down: " + E(", ".join(down))) if down else ""}{release_links}</span></header>
 {guard("tiles", kpis, fleet, shown, subscribed)}
 <h2 id="blocked">Blocked on you</h2>
 <p class="muted">Missions the record holds as active or paused whose <code>blocked</code> names an issue, the
@@ -2151,7 +2179,8 @@ def main():
                 print(f'status-page: usage samples:\n{traceback.format_exc()}', file=sys.stderr)
                 data['errors'].append(f'usage samples: not kept: {type(error).__name__}: {error}')
                 kept = None
-        page = render(data, kept)
+        site = None if args.out == '-' else Path(args.out).expanduser().absolute().parent
+        page = render(data, kept, site)
         if args.out == '-':
             sys.stdout.write(page)
         else:

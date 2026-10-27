@@ -436,6 +436,58 @@ def page(lab):
         assert address not in text, address
     public_roles(text, lab)
 
+
+def page_release_pages(lab):
+    """Only release filenames beside --out become same-tab header links."""
+    www = lab.root / 'www'
+    www.mkdir()
+    for name in ('v0.1.0.html', 'v0.10.0.html', 'v0.1.html', 'notes.html',
+                 'v0.1.0-draft.html', 'v1.html', 'v1.2.3.4.5.html', 'v01.0.html'):
+        write(www / name, 'PRIVATE-RELEASE-CONTENT')
+    outside = write(lab.root / 'release.html', 'PRIVATE-RELEASE-CONTENT')
+    (www / 'v1.2.3.4.html').symlink_to(outside)
+    (www / 'v0.2.0.html').mkdir()
+
+    def render(directory):
+        out = directory / 'index.html'
+        result = lab.run('--no-pull', '--out', str(out))
+        page = out.read_text()
+        private_absent(page)
+        header = page.split('<header>', 1)[1].split('</header>', 1)[0]
+        return page, header, result.stderr
+
+    page, header, _ = render(www)
+    assert re.findall(r'<a href="([^"]+)"[^>]*>(.*?)</a>', header) == [
+        ('v1.2.3.4.html', 'v1.2.3.4 progress'),
+        ('v0.10.0.html', 'v0.10.0 progress'),
+        ('v0.1.0.html', 'v0.1.0 progress'),
+        ('v0.1.html', 'v0.1 progress')], header
+    assert all('target' not in attrs for attrs in re.findall(r'<a([^>]*)>', header)), header
+    assert header.index('machines reached') < header.index('down: gamma') < header.index('<a '), header
+    empty = lab.root / 'empty'
+    empty.mkdir()
+    _, header, _ = render(empty)
+    assert 'progress</a>' not in header, header
+    write(lab.root / 'v0.1.0.html', 'PRIVATE-RELEASE-CONTENT')
+    result = lab.run('--no-pull', '--out', '-')
+    private_absent(result.stdout)
+    assert 'progress</a>' not in result.stdout.split('</header>', 1)[0]
+    page, header, stderr = render(lab.root / 'new/deeper')
+    assert 'progress</a>' not in header and 'release pages' not in page + stderr
+    locked = lab.root / 'locked'
+    write(locked / 'v0.1.0.html', 'PRIVATE-RELEASE-CONTENT')
+    locked.chmod(0o300)
+    try:
+        page, header, stderr = render(locked)
+        footer = page.split('<footer>', 1)[1].split('</footer>', 1)[0]
+        assert 'progress</a>' not in header, header
+        assert footer.count('<li>release pages: not listed</li>') == 1, footer
+        assert not re.search(r'(?<!\w)locked(?!\w)', footer), footer
+        assert 'status-page: release pages:' in stderr and str(locked) in stderr, stderr
+    finally:
+        locked.chmod(0o700)
+
+
 def director_mailbox_unread(lab):
     """A machine holding the director's mailbox adds nothing of it to the
     page, the --json file or the footer (status-page.md 1, 3 and 5)."""
@@ -1736,7 +1788,7 @@ def claude_resets(lab):
     assert [v['used'] for v in data['claude_usage']['limits']] == list(range(7))
 
 
-CASES = [page_user_issues, page_blocked, page_blocked_on_you, blocked_history_failures, blocked_history_edges, director_mailbox_unread, collect_subscriptions, page_subscriptions, page_pace, subscriptions_signed_out, subscription_failures, claude_resets, collect, collect_missing, page, reason_kind, page_recent, page_landings_rate, machine_ips, page_roles, page_role_edges, page_now, page_times, page_degraded, bad_data, write_failure, install]
+CASES = [page_release_pages, page_user_issues, page_blocked, page_blocked_on_you, blocked_history_failures, blocked_history_edges, director_mailbox_unread, collect_subscriptions, page_subscriptions, page_pace, subscriptions_signed_out, subscription_failures, claude_resets, collect, collect_missing, page, reason_kind, page_recent, page_landings_rate, machine_ips, page_roles, page_role_edges, page_now, page_times, page_degraded, bad_data, write_failure, install]
 
 
 def run(case, directory, built):
