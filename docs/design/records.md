@@ -127,8 +127,11 @@ and `qa.md`: their plan, decisions, milestones and QA passes.
     (user-issues.md 5). `record` refuses another form, another
     repository, an issue named twice, and `blocked` beside a `state`
     other than `active` or `paused`, so that a closing removes it.
-    Public on the status page, as a count and the issues' references
-    (status-page.md 3);
+    Public on the status page, as a count and a list of the missions
+    with their issues' references and since when, which the page reads
+    from the README's history: the first commit of its newest unbroken
+    run of versions naming an issue (status-page.md 2.4, 3). No field
+    records it;
   - `m<N>.md`: `driver`, `model`, `effort`, `started`, `cap`, `ended`.
   - Times are UTC, `2026-10-24T21:54Z`; what the writer doesn't know is
     `unknown`, never a guess.

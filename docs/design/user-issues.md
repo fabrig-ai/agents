@@ -253,7 +253,8 @@ is exit 2 and names the rule, never the text:
   left to do without it. An owner with a designer names the issue its
   designer asked; a parent that parks a mission on the user, its
   session stopped, writes the line in its stead. The status page counts
-  these missions beside the open issues (status-page.md 3).
+  these missions beside the open issues, and lists each in Blocked on
+  you with its issues and since when (status-page.md 3).
 
 ## 6. Going live
 

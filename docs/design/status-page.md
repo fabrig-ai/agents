@@ -36,7 +36,9 @@ serves it.
   mission's README beyond its front matter's `state`, `ended` and
   `description`, its `started` as a time alone, for a duration
   (the user, 10-25 and 10-26), and its `blocked` as the references
-  of issues alone (`temper#9`). No owner, designer,
+  of issues alone (`temper#9`), with the time it was first committed
+  so, from the record's history: never a commit's author, message or
+  hash (2.4). No owner, designer,
   implementer or other session shows by name: the page counts them, and
   a name only joins a session to its mission (the user, 10-26). Each
   machine's public IP shows on its card (the user, 10-26). The
@@ -69,7 +71,7 @@ serves it.
 | the landing turns | `tmp/landing-turn/events.jsonl` | each turn's wait and hold, and the turns open now; a `fail-open` closes one |
 | codex-run | `tmp/codex-run/*/meta`, `runs.tsv` and the `codex-run-*` user units | the implementers running, each with its mission, and the runs that ended |
 | Claude | `claude agents --json --all` | the live sessions by role, busy or idle: the director, the designers (`design/<d>`) and owners (`o/<m>`) by their names, and the rest |
-| the records | `records/missions/*/README.md`, after `record pull` | each mission's front matter: its `state`, `ended` and `description`, its `started` read as a time (anything else is unknown), and its `blocked` read as the seven repositories' issue references, `<repo>#<n>`, n without a leading zero (records.md 3; any other word is dropped) |
+| the records | `records/missions/*/README.md`, after `record pull` | each mission's front matter: its `state`, `ended` and `description`, its `started` read as a time (anything else is unknown), and its `blocked` read as the seven repositories' issue references, `<repo>#<n>`, n without a leading zero (records.md 3; any other word is dropped); for a mission so blocked, since when, from its README's history in the checkout (2.4) |
 | the user's issues | git.fabrig.ai's API (Forgejo), from the machine holding `tmp/git-fabrig/status-read.token` (hel8), a read token for issues and repositories | how many open issues of seven `fabrig-ai` repositories carry their `waiting-on-user` label (2.3) |
 | the machine | `/proc`, the disk under `tmp/`, `ip -j -4 addr show scope global` | load, free memory and disk, and its public IPv4 addresses (the globally routable ones) |
 | Claude's subscription | `claude auth status --json`, `claude -p /usage` | what it is signed in to, and each limit's use and reset (2.1) |
@@ -226,6 +228,53 @@ with its own label's id (the user, 10-26; agents' `user-issues.md`):
   whose answer holds a count gives the tile; with none, the tile is a
   dash and the footer says that no machine reached holds the token.
 
+### 2.4 Blocked since
+
+"Since when" a mission has waited on the user (agents#12, the user,
+10-27) is read from the record's history, never written: git's history
+is the record's timeline (records.md 1), and every `blocked` line
+reaches it through `record commit`. No writer can forget or misdate it,
+the line written by a mission and by its parent alike.
+
+- **The time** is the commit time of the oldest version of the
+  mission's README in the newest unbroken run of its versions, on the
+  checkout's `HEAD` along first parents, whose `blocked` names a
+  reference (as section 2's records row reads it). The issues may
+  change within the run (`temper#9`, then `temper#9 agents#11`), and
+  the README be rewritten around the line: the mission has waited
+  since the first. One that went on and was parked again waits since
+  the second time. A run that reaches the README's first version waits
+  since that version: its brief was committed blocked. It is when the
+  mission blocked, not when its issue was opened: an issue it worked
+  beside blocked nothing (user-issues.md 5).
+- **A commit time is its publishing.** `record commit` makes each
+  commit as it pushes, and remakes it on a `main` that moved (records.md
+  2): its time is within seconds of the writing, or of the next push
+  for one whose push failed (exit 3).
+- **Committed history alone.** The working tree's README says which
+  missions are counted (section 2's records row), and `HEAD`'s history
+  since when. An edit not committed changes no since: a `blocked` in
+  the working tree alone is unknown, and one `HEAD` already names keeps
+  the run `HEAD` holds.
+- **Read on the writing machine,** from the records checkout the page
+  read, for the missions the count counts (section 3) alone: the
+  README's commits newest first (`git log --first-parent
+  --format='%H %ct' -- missions/<m>/README.md`), then their versions
+  until one names no reference. Only commit times leave the history:
+  never an author, committer, message or hash, on the page, in the
+  `--json` file or in the footer.
+- **Unknown,** a dash, where `HEAD`'s version names no reference, or
+  where the history can't be read whole. The footer names each reason
+  once, `records: history: <reason>`, in fixed words, while the rest
+  stands: `no git repository`; `shallow`, a checkout whose history is
+  cut (`git rev-parse --is-shallow-repository`), whose runs could end
+  at its cut and so are read for none; `git failed`; `timed out`, the
+  reads together running under 30 seconds and leaving what they didn't
+  reach unknown. git's own words go to the journal: they can hold a
+  path or a hash.
+- **In the `--json` file,** each mission's `blocked_since`: seconds
+  since the epoch, null where unknown or not blocked.
+
 ## 3. The page
 
 - **Tiles:** missions, landings per hour (below), agents (the director,
@@ -248,7 +297,21 @@ with its own label's id (the user, 10-26; agents' `user-issues.md`):
   its issues (`configuring-docs: temper#9; ladder: agents#11`);
   `0 blocked` with none, and `– blocked` where the record was not
   read. It is the record's word, independent of the issues' source: a
-  dash in the tile's value leaves it.
+  dash in the tile's value leaves it. In each of its three forms the
+  count is a link to Blocked on you, `href="#blocked"`: on the same
+  page, so it opens no tab (agents#12, the user, 10-27).
+- **Blocked on you** (agents#12, the user, 10-27), the section after
+  the tiles, `<h2 id="blocked">Blocked on you</h2>`: a table, one row
+  per mission the count counts, the longest waiting first, then those
+  whose since is unknown, each set by name. A row gives the mission's
+  name, its state in the record (`active`, `paused`), its description
+  (a dash without one), the issues it waits on, each `temper#9` a link
+  to its issue, `https://git.fabrig.ai/fabrig-ai/<repo>/issues/<n>`,
+  opening a new tab as the page's other links out, and since when
+  (2.4): `5 h 12 min ago`, its time on hover as in Times below, or a
+  dash. With none blocked it says `Nothing is blocked on you.`, and
+  with the record not read `The record was not read this time.`, the
+  footer saying why. Its data failing shows as any section's does.
 - **Landings per hour** (the user, 10-26): the landings that pushed a
   `main` in the last 6 hours, over 6, to one decimal: a set's run once,
   at its last `landed` event, and a plain `land`'s record once. Six
@@ -257,7 +320,7 @@ with its own label's id (the user, 10-26; agents' `user-issues.md`):
   4 sets, 83 lands`), and the sub the last landing (`last landed 3 min
   ago`, its time on hover, as in 3's Times). What is landing now stays
   under In flight.
-- **Subscriptions,** after the tiles: a table, one row per distinct
+- **Subscriptions,** after Blocked on you: a table, one row per distinct
   subscription and limit, giving its CLI, plan and label, a bar of the
   percent used, its reset (in how long), its rate (2.2), `2.0%/h`
   with its span on hover, and at this pace: `full in 2 h 5 min`, the
@@ -420,7 +483,21 @@ issues in the hover title, by name; an `ended` one (written past
 repositories not; a word of `blocked` other than a reference on
 neither the page nor the `--json` file; `0 blocked` with none, `–
 blocked` without the records tree, and the count beside the tile's
-dash when no machine holds the token. `test-record` proves `record`'s
+dash when no machine holds the token, each a link to `#blocked`.
+Blocked on you, over a records tree that is a git repository whose
+commits carry chosen times and an author and message of their own: a
+mission blocked since its first blocked commit, through a later change
+of its issues and a commit of its body alone; one blocked, gone on and
+blocked again, since the second time; one whose `blocked` is in the
+working tree alone, a dash; the rows longest waiting first, the
+unknown after them; the state, the description and a dash without
+one; each issue a link to its issue that opens a new tab; `Nothing is
+blocked on you.` with none, and the record's line without the records
+tree; a records tree that is no git repository, each since a dash and
+the footer naming the history once, and the same of a shallow clone
+and of a git that fails, in their fixed words; `blocked_since` in the `--json`
+file; and no author, committer, message or hash of the history on the
+page, in the `--json` file or in the footer. `test-record` proves `record`'s
 check of `blocked`: the seven repositories' references taken, one or
 several; another form (`temper#09`, `temper#0`, `temper 9`), another
 repository and an issue named twice refused, and so is `blocked` beside a `state` of `ended`, `abandoned`
@@ -434,10 +511,11 @@ or `unknown`.
 - A mission's `parent` and `feature` stay off the page, and so does
   the chain they would draw: the description says what a mission is
   for (the user, 10-26).
-- The blocked count trusts the record: a `blocked` naming only closed
-  issues still counts until its writer removes it. If that goes stale
+- The blocked count and Blocked on you trust the record: a `blocked`
+  naming only closed issues still counts, and is listed, until its
+  writer removes it. If that goes stale
   in practice, the issues' collector could return the open issues'
   numbers, which name nothing, and the page count only the missions
   blocked on one of them.
-- A blocked mission's row under the missions doesn't say so; the
-  tile's hover names it.
+- A blocked mission's row under the missions doesn't say so; Blocked
+  on you lists it.
