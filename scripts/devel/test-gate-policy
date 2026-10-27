@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Gate policy and land evidence in disposable local Git repositories."""
+from case_runner import HUNG_TOOL_S
 import hashlib
 import json
 import os
@@ -21,6 +22,8 @@ import io
 
 sys.dont_write_bytecode = True
 KIT = Path(__file__).resolve().parent
+# Hang detection for local land work and its fixture barriers, not a speed check.
+HUNG_LAND_S = HUNG_TOOL_S
 from gate_policy_fixture import submission_header, completion_output
 
 
@@ -177,7 +180,7 @@ sys.exit(result.returncode)
 
     def run_command(self, args, check=True, extra=None):
         result = subprocess.run(args, cwd=self.repo, env=self.env | (extra or {}),
-                                text=True, capture_output=True, stdin=subprocess.DEVNULL, timeout=20)
+                                text=True, capture_output=True, stdin=subprocess.DEVNULL, timeout=HUNG_LAND_S)
         if self.retain:
             self.command_serial += 1
             (self.root / f"command-{self.command_serial:04}.json").write_text(json.dumps({
@@ -516,7 +519,7 @@ sys.exit(int(os.environ.get("FIXTURE_GATE_EXIT", "0")))
         log.parent.mkdir(parents=True)
         log.write_text('previous\n')
         result = self.land({"LAND_TIDY": self.tidy_stub()})
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + HUNG_TOOL_S
         while not log.exists() or 'tidy-error' not in log.read_text():
             self.assertLess(time.monotonic(), deadline)
             time.sleep(.01)
@@ -553,7 +556,7 @@ sys.exit(int(os.environ.get("FIXTURE_GATE_EXIT", "0")))
         result = self.land()
         self.assertNotIn('warning: cannot start tidy', result.stderr)
         calls = self.root / 'tidy.args'
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + HUNG_TOOL_S
         while not calls.exists() or not calls.read_text().endswith('repo\n'):
             self.assertLess(time.monotonic(), deadline)
             time.sleep(.01)
@@ -564,7 +567,7 @@ sys.exit(int(os.environ.get("FIXTURE_GATE_EXIT", "0")))
         self.assertNotIn('warning: cannot start tidy', result.stderr)
         self.assertEqual(self.result_json(result)['exit'], 0)
         log = self.root / 'tmp/logs/tidy.log'
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + HUNG_TOOL_S
         while not log.exists() or 'No such file or directory' not in log.read_text():
             self.assertLess(time.monotonic(), deadline)
             time.sleep(.01)
@@ -574,7 +577,7 @@ sys.exit(int(os.environ.get("FIXTURE_GATE_EXIT", "0")))
         stub = shlex.split(self.tidy_stub())[0]
         result = self.land({'LAND_TIDY': '"$FIXTURE_TIDY" --fixture-flag', 'FIXTURE_TIDY': stub})
         self.assertNotIn('warning: cannot start tidy', result.stderr)
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + HUNG_TOOL_S
         calls = self.root / 'tidy.args'
         while not calls.exists() or not calls.read_text().endswith('repo\n'):
             self.assertLess(time.monotonic(), deadline)
@@ -599,7 +602,7 @@ sys.exit(int(os.environ.get("FIXTURE_GATE_EXIT", "0")))
                     '        assert release.read(1) == b"x"\n')
         try:
             self.land({'LAND_TIDY': shlex.quote(str(stub))})
-            self.assertTrue(select.select([ready_fd], [], [], 5)[0], "tidy readiness")
+            self.assertTrue(select.select([ready_fd], [], [], HUNG_TOOL_S)[0], "tidy readiness")
             pid, session = json.loads(os.read(ready_fd, 4096))
             pidfd = os.pidfd_open(pid)
             self.assertEqual(pid, session)
@@ -607,7 +610,7 @@ sys.exit(int(os.environ.get("FIXTURE_GATE_EXIT", "0")))
             os.write(release_fd, b"x")
             try:
                 if pidfd is not None:
-                    self.assertTrue(select.select([pidfd], [], [], 5)[0], "tidy child exit")
+                    self.assertTrue(select.select([pidfd], [], [], HUNG_TOOL_S)[0], "tidy child exit")
             finally:
                 if pidfd is not None:
                     os.close(pidfd)
@@ -714,7 +717,7 @@ sys.exit(int(os.environ.get("FIXTURE_GATE_EXIT", "0")))
                          self.git('rev-parse', 'HEAD').strip())
         self.assertEqual(self.result_json(result)['exit'], 5)
         self.assertTrue(self.result_json(result)['pushed'])
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + HUNG_TOOL_S
         while not (self.root / 'tidy.args').exists():
             self.assertLess(time.monotonic(), deadline)
             time.sleep(.01)
@@ -1171,7 +1174,7 @@ exit 97
             child = subprocess.Popen([str(self.kit / "land"), "--local", "--gate", "true"],
                 cwd=self.repo, env=self.env | extra, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT)
         try:
-            deadline = time.monotonic() + 20
+            deadline = time.monotonic() + HUNG_LAND_S
             while not (faults / ("land-" + point)).exists():
                 self.assertIsNone(child.poll(), output.read_text())
                 self.assertLess(time.monotonic(), deadline, "candidate fixture barrier")
@@ -1179,7 +1182,7 @@ exit 97
             self.candidate_mutation(mode)
             changed = self.run_command(["git", "rev-parse", "--verify", "HEAD"], check=False)
             (faults / ("continue-" + point)).touch()
-            self.assertEqual(child.wait(timeout=20), 4, output.read_text())
+            self.assertEqual(child.wait(timeout=HUNG_LAND_S), 4, output.read_text())
             reason = ("candidate HEAD is unavailable" if mode == "head-unavailable" else
                       "candidate index/worktree cannot be checked" if mode == "status-error" else
                       "candidate merge/rebase state changed" if mode in ("rebase-state", "rebase-apply-state", "merge-state", "relocated-merge-state") else
@@ -1203,7 +1206,7 @@ exit 97
             (faults / ("continue-" + point)).touch()
             if child.poll() is None:
                 child.terminate()
-                child.wait(timeout=20)
+                child.wait(timeout=HUNG_LAND_S)
 
     def test_expected_old_candidate_ref_cas_refuses_concurrent_commit(self):
         self.concurrent_candidate("before_candidate_cas", "commit")
@@ -1433,7 +1436,7 @@ class ReceiptRows(FixtureFiles):
                 capture.write_bytes(output)
                 result = subprocess.run(["bash", "-c", evidence + '\nevidence receipt "$1"',
                                          "fixture", str(capture)], env=env, text=True,
-                                        capture_output=True, stdin=subprocess.DEVNULL, timeout=5)
+                                        capture_output=True, stdin=subprocess.DEVNULL, timeout=HUNG_TOOL_S)
                 # Retained rows carry both the actual result and its input files.
                 if self.retain:
                     (capture.parent / "result.json").write_text(json.dumps({

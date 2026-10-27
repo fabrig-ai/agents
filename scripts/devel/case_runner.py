@@ -12,6 +12,15 @@ import threading
 import time
 
 
+# Hang detection for honest subprocess work, never an assertion of tool speed.
+# Local tidy/land commands measured below two seconds idle, but exceeded
+# 60 seconds in a gate at load >100 on eight cores. Five minutes detects
+# a hung tool; fifteen bounds a whole case with several tool invocations.
+HUNG_TOOL_S = 300
+HUNG_CASE_S = 900
+CASE_STOP_S = 5
+
+
 def stop_on_signals():
     """SIGINT and SIGTERM raise, so every cleanup on the way out still runs."""
     def stop(signum, frame):
@@ -68,7 +77,7 @@ def stop_cases(procs):
                 os.killpg(proc.pid, sig)
             except (ProcessLookupError, PermissionError):
                 pass
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + CASE_STOP_S
         for proc in procs:
             try:
                 proc.wait(timeout=max(0, deadline - time.monotonic()))
@@ -76,7 +85,7 @@ def stop_cases(procs):
                 pass
 
 
-def main(suite, cases, run, slow=(), template=None, timeout=180, prefix='fixture-'):
+def main(suite, cases, run, slow=(), template=None, timeout=HUNG_CASE_S, prefix='fixture-'):
     """Run selected cases in private sessions over an affinity-sized pool.
 
     A template, when supplied, is built once and passed read-only by convention

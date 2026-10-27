@@ -1,0 +1,88 @@
+#!/usr/bin/env python3
+"""Hold fixture publications between create, write and journal completion."""
+import json
+from pathlib import Path
+import runpy
+import tempfile
+import unittest
+from unittest.mock import patch
+
+
+SUPPORT = runpy.run_path(str(Path(__file__).with_name('test-heavy-recovery')))
+TURN = runpy.run_path(str(Path(__file__).with_name('test-land-turn')))
+
+
+class Publications(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix='fixture-publications-')
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        # Exercise the readers without installing a queue or any systemd unit.
+        self.lab = SUPPORT['Lab'].__new__(SUPPORT['Lab'])
+        self.lab.base = self.root / 'queue'
+        self.lab.faults = self.root / 'faults'
+        self.lab.base.mkdir()
+        self.lab.faults.mkdir()
+        self.task = {'label': 'gate', 'token': 'token', 'state': 'released'}
+        (self.lab.base / 'state.json').write_text(json.dumps({'tasks': {'token': self.task}}))
+        self.journal = self.lab.base / 'events.jsonl'
+        self.journal.touch()
+
+    def append(self, name):
+        with self.journal.open('a') as out:
+            out.write(json.dumps({'label': 'gate', 'event': name, 'source': '--reconcile'}) + '\n')
+
+    def test_released_snapshot_waits_for_journal_completion(self):
+        stages = iter(('release_end', 'task_completion'))
+
+        def publish(_):
+            self.append(next(stages))
+
+        # Each sleep is a reader yielding to the writer, with time held still.
+        # Even release_end alone must not let verify() inspect an unfinished journal.
+        with patch.object(SUPPORT['time'], 'sleep', side_effect=publish) as yielded:
+            self.assertEqual(self.lab.released('gate'), self.task)
+        self.assertEqual(yielded.call_count, 2)
+        self.assertEqual(self.lab.event('gate', 'release_end')['source'], '--reconcile')
+
+    def test_empty_barrier_waits_for_pid(self):
+        barrier = self.lab.faults / 'token-claim'
+        barrier.touch()
+        with patch.object(SUPPORT['time'], 'sleep', side_effect=lambda _: barrier.write_text('1234')) as yielded:
+            self.assertEqual(self.lab.barrier('claim', 'gate'), 1234)
+        yielded.assert_called_once()
+
+    def test_partial_json_waits_for_complete_value(self):
+        marker = self.root / 'payload.json'
+        marker.write_text('{"pid":')
+        with patch.object(SUPPORT['time'], 'sleep', side_effect=lambda _: marker.write_text('{"pid":1234}')) as yielded:
+            value = SUPPORT['wait_for'](lambda: SUPPORT['fixture_json'](marker), 'complete payload JSON')
+        self.assertEqual(value, {'pid': 1234})
+        yielded.assert_called_once()
+
+    def test_turn_journal_waits_for_publication_newline(self):
+        directory = self.root / 'landing-turn'
+        directory.mkdir()
+        journal = directory / 'events.jsonl'
+        journal.write_text('{"event":"grant"}')
+        self.assertEqual(TURN['events'](self.root), [])
+        with journal.open('a') as out:
+            out.write('\n')
+        self.assertEqual(TURN['events'](self.root), [{'event': 'grant'}])
+
+    def test_journal_waits_for_newline_and_rejects_malformed_record(self):
+        self.append('release_end')
+        with self.journal.open('a') as out:
+            out.write('{"label":"gate","event":"task_completion"}')
+        self.assertEqual([row['event'] for row in self.lab.events()], ['release_end'])
+        with self.journal.open('a') as out:
+            out.write('\n')
+        self.assertEqual([row['event'] for row in self.lab.events()], ['release_end', 'task_completion'])
+        with self.journal.open('a') as out:
+            out.write('malformed\n')
+        with self.assertRaises(json.JSONDecodeError):
+            self.lab.events()
+
+
+if __name__ == '__main__':
+    unittest.main(verbosity=2)

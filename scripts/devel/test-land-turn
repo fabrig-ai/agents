@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Exercise advisory turns with isolated local pipes and simulated SSH; no real gate."""
+from case_runner import HUNG_TOOL_S
 import argparse
 import ast
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
@@ -23,6 +24,8 @@ from unittest.mock import patch
 os.umask(0o077)
 sys.dont_write_bytecode = True
 KIT = Path(__file__).resolve().parent
+# Healthy transport exit is work, not the shortened reap-timeout case's subject.
+HUNG_TRANSPORT_S = HUNG_TOOL_S
 support = runpy.run_path(str(KIT / 'test-heavy-recovery'))
 Lab, wait_for, live = (support[name] for name in ('Lab', 'wait_for', 'live'))
 
@@ -34,7 +37,8 @@ def git(path, *args):
 
 def events(tmp):
     path = tmp / 'landing-turn/events.jsonl'
-    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+    return [json.loads(line) for line in path.read_bytes().splitlines(keepends=True)
+            if line.endswith(b'\n')] if path.exists() else []
 
 
 def holder(tmp, token='1' * 32, repo='temper'):
@@ -47,13 +51,13 @@ def holder(tmp, token='1' * 32, repo='temper'):
 
 
 def grant(process):
-    assert select.select([process.stdout], [], [], 10)[0], 'holder never granted'
+    assert select.select([process.stdout], [], [], HUNG_TOOL_S)[0], 'holder never granted'
     return json.loads(process.stdout.readline())
 
 
 def disconnect(process):
     process.stdin.close()
-    assert process.wait(timeout=10) == 0
+    assert process.wait(timeout=HUNG_TOOL_S) == 0
     process.stdout.close()
 
 
@@ -131,8 +135,9 @@ def release_visibility(root):
                 'sys.stdin.buffer.read(); ' + ending)
             return [sys.executable, '-I', '-B', '-c', code], False
 
-        # Only the transport that never exits waits out the reap bound, shortened here.
-        reap = .1 if name == 'reap-timeout' else module.REAP_TIMEOUT_S
+        # Only the non-exiting transport tests the reap deadline. Give the
+        # other transports hang patience to be scheduled after pipe EOF.
+        reap = .1 if name == 'reap-timeout' else HUNG_TRANSPORT_S
         with (tmp / 'caller.stderr').open('w') as out:
             with patch.object(module, 'transport_command', command), patch.object(sys, 'stderr', out), \
                     patch.object(module, 'REAP_TIMEOUT_S', reap):
@@ -219,7 +224,7 @@ def holds_open(process, path):
 
 def pulse_until(process, ready):
     # Pulse from spawn, so the holder's clock never runs from its entry alone.
-    deadline = time.monotonic() + 10
+    deadline = time.monotonic() + HUNG_TOOL_S
     while True:
         process.stdin.write(b'\0')
         process.stdin.flush()
@@ -256,7 +261,7 @@ def heartbeat_expiry(root, queued):
         process.stdin.flush()
         start = time.monotonic()
         # Leave stdin OPEN: model a blackholed SSH session on the server.
-        assert process.wait(timeout=10) == 0
+        assert process.wait(timeout=HUNG_TOOL_S) == 0
         duration = time.monotonic() - start
         assert .98 * LIVENESS_S <= duration <= LIVENESS_S + EXPIRY_SLACK_S, duration
         assert not process.stdout.read()
@@ -331,12 +336,12 @@ def holder_validation(root):
         process = subprocess.Popen([sys.executable, '-I', '-B', '-c', code],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
-            assert select.select([process.stdout], [], [], 10)[0], 'verification did not settle'
+            assert select.select([process.stdout], [], [], HUNG_TOOL_S)[0], 'verification did not settle'
             reply = process.stdout.readline()
             if fault == 'valid':
                 assert json.loads(reply)['token'] == 'e' * 32
             process.stdin.close()
-            assert process.wait(timeout=10) == expected, fault
+            assert process.wait(timeout=HUNG_TOOL_S) == expected, fault
             stderr = process.stderr.read()
             (home / 'stderr.txt').write_text(stderr)
             assert fault == 'valid' or 'ValueError: invalid-holder-path' in stderr, fault
@@ -537,7 +542,7 @@ def lost(lab, queued=False, kill_client=False):
             lab.reached('gate-a-1')
         if kill_client:
             client.kill()
-            assert client.wait(timeout=10) == -signal.SIGKILL
+            assert client.wait(timeout=HUNG_TOOL_S) == -signal.SIGKILL
             wait_for(lambda: not live(pid), 'EOF releases holder after client kill')
             if queued:
                 assert not (lab.clones['a'] / '.git/land-turn.lock').exists()

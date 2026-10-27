@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Heavy's optional installation and plain execution in disposable trees."""
+from case_runner import HUNG_TOOL_S
 import hashlib
 import json
 import os
@@ -31,7 +32,7 @@ class Plain(unittest.TestCase):
     def heavy(self, *args, extra=None):
         return subprocess.run([str(KIT / 'heavy'), *args], cwd=self.cwd,
                               env=self.env | (extra or {}), text=True, capture_output=True,
-                              stdin=subprocess.DEVNULL, timeout=10)
+                              stdin=subprocess.DEVNULL, timeout=HUNG_TOOL_S)
 
     def ledger(self, installation=None, version=1):
         self.state.parent.mkdir(exist_ok=True)

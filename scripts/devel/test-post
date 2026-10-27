@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Test post in two isolated workspaces with fake SSH and Claude sessions.
 set -Eeuo pipefail
+# Fixture readiness and waiter lifetime only; timeout-zero cases remain subjects.
+export HUNG_POST_S=300
 umask 077
 trap 'echo "test-post: failed at line $LINENO" >&2' ERR
 started=$(date +%s.%N)
@@ -36,13 +38,11 @@ capture() {
     printf 'status=%s\n%s\n' "$code" "$output"
 }
 poll_until() {
-    local attempt
-    # Only a guard against a hang: about 30 s, however loaded the machine.
-    for ((attempt=0; attempt<3000; attempt++)); do
-        "$@" && return 0
+    local deadline=$((${EPOCHREALTIME//[.,]/} + HUNG_POST_S * 1000000))
+    until "$@"; do
+        ((${EPOCHREALTIME//[.,]/} < deadline)) || return 1
         sleep 0.01
     done
-    return 1
 }
 # Each part has its own workspaces, stubs and sessions under its own $t.
 fixture() {
@@ -142,7 +142,7 @@ STUB
             jq -e --arg id "$3" 'all(.[]; (.sessionId // .id) != $id or .pid == null)' "$FIXTURE/sessions.json" >/dev/null || return 1
             if [[ -n ${FIXTURE_RESUME_BARRIER:-} ]]; then
                 # Both messages must be delivered before the winning wake can finish.
-                IFS= read -r -t 30 _ <>"$FIXTURE_RESUME_BARRIER" || return 1
+                IFS= read -r -t "$HUNG_POST_S" _ <>"$FIXTURE_RESUME_BARRIER" || return 1
             fi
             jq --arg id "$3" --arg state "${FIXTURE_RESUME_STATE:-working}" \
                 'map(if (.sessionId // .id) == $id then .pid=456 | .state=$state else . end)' \
@@ -195,7 +195,7 @@ stage_wake_mail() {
 concurrent_delivered() { [[ $(count "$t/a/tmp/post/concurrent/new") == 2 ]]; }
 
 local_and_remote() {
-    post wait o/live --timeout 30 >"$t/wait.out" &
+    post wait o/live --timeout "$HUNG_POST_S" >"$t/wait.out" &
     waiter=$!
     pids+=("$waiter")
     poll_until test -s "$t/a/tmp/post/o+live/waiter"
@@ -548,7 +548,7 @@ waiters_and_limits() {
     rm "$t/a/tmp/post/codex/waiter"
     expect 'Codex kind without waiter' "$(capture post send codex sleeping <<< body)" 'status=3' 'codex owner not running'
     expect 'zero timeout is silent' "[$(capture post wait empty --timeout 0)]" '[status=1]'
-    post wait replaced --timeout 30 >"$t/replaced.out" 2>&1 &
+    post wait replaced --timeout "$HUNG_POST_S" >"$t/replaced.out" 2>&1 &
     first=$!
     pids+=("$first")
     poll_until test -s "$t/a/tmp/post/replaced/waiter"

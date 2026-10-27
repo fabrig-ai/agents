@@ -14,6 +14,8 @@ import time
 from unittest.mock import patch
 import case_runner
 
+# Whole-fleet hang allowance; not a service latency requirement.
+HUNG_FLEET_S = case_runner.HUNG_TOOL_S
 SCRIPT = Path(__file__).resolve().with_name('fleet')
 PYTHON = sys.executable
 GB = 2 ** 30
@@ -145,7 +147,7 @@ sys.exit(subprocess.run([sys.executable, '-I', '-', *words[4:]], input=source, e
 
     def run(self, *args, status=0, **env):
         result = subprocess.run([PYTHON, '-I', '-S', str(SCRIPT), *args], cwd=self.root,
-                                env=dict(self.env, **env), capture_output=True, text=True, timeout=120)
+                                env=dict(self.env, **env), capture_output=True, text=True, timeout=HUNG_FLEET_S)
         assert result.returncode == status, (result.returncode, result.stdout, result.stderr)
         return result
 
@@ -181,7 +183,7 @@ printf '%s\\n' '["kache", "gc"]' >> "$root/tend.calls"
     def tend(self, status=0, now=NOW):
         result = subprocess.run([PYTHON, '-I', '-S', str(self.kit / 'fleet'), 'tend'],
                                 cwd=self.root, env=dict(self.env, FLEET_NOW=str(now)),
-                                capture_output=True, text=True, timeout=120)
+                                capture_output=True, text=True, timeout=HUNG_FLEET_S)
         assert result.returncode == status, (result.returncode, result.stdout, result.stderr)
         return result
 
@@ -1010,7 +1012,7 @@ exit "${RECORD_EXIT:-0}"
 def watch_round(lab, n, status=0, **env):
     result = subprocess.run([PYTHON, '-I', '-S', str(lab.kit / 'fleet'), 'watch', '--director', 'director@alpha'],
                             env=dict(lab.env, FLEET_NOW=str(NOW+n*300), **env), cwd=lab.root,
-                            capture_output=True, text=True, timeout=120)
+                            capture_output=True, text=True, timeout=HUNG_FLEET_S)
     assert result.returncode == status, (result.returncode, result.stdout, result.stderr)
     return result
 

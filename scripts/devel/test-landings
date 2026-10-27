@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Offline landing-feed fixtures; every case has its own temporary directory."""
+from case_runner import HUNG_TOOL_S
 import argparse
 import ast
 import concurrent.futures
@@ -19,6 +20,8 @@ SCRIPT = Path(__file__).resolve().with_name('landings')
 PYTHON = sys.executable
 # The first read's deadline, which remote_hang waits out.
 READ = '1'
+# Only catches a hung fixture command; user/read deadlines below are subjects.
+HUNG_LANDINGS_S = HUNG_TOOL_S
 
 
 def record(label='fixture/m1', event='waiting', token='run1', minute=0, **extra):
@@ -88,7 +91,7 @@ class Lab:
     def git(self, cwd, *args):
         result = subprocess.run(['git', '-C', str(cwd), *map(str, args)], env=self.env,
                                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE, text=True, timeout=10)
+                                stderr=subprocess.PIPE, text=True, timeout=HUNG_TOOL_S)
         assert result.returncode == 0, (args, result.stdout, result.stderr)
         return result.stdout.strip()
 
@@ -147,17 +150,23 @@ class Lab:
             for row in rows:
                 out.write(json.dumps(row) + '\n')
 
-    def run(self, *args, status=0, env=None):
-        result = subprocess.run([PYTHON, '-I', str(SCRIPT), *args], cwd=self.root,
+    def run(self, *args, status=0, env=None, code=None):
+        command = [PYTHON, '-I', str(SCRIPT), *args]
+        if code is not None:
+            driver = ('import runpy, sys\n'
+                      f'tool = runpy.run_path({str(SCRIPT)!r})\n' + code +
+                      '\nraise SystemExit(tool["main"]())\n')
+            command = [PYTHON, '-I', '-S', '-c', driver, *args]
+        result = subprocess.run(command, cwd=self.root,
                                 env=env or self.env, stdin=subprocess.DEVNULL,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=20)
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=HUNG_LANDINGS_S)
         assert result.returncode == status, (result.returncode, result.stdout, result.stderr)
         return result
 
     def following(self, rows, status=0, before=None, cleared=False):
         # However late the append comes under load, an unreadable feed is not yet unreachable.
-        env = dict(self.env, LANDINGS_UNREACHABLE='30')
-        with subprocess.Popen([PYTHON, '-I', str(SCRIPT), 'wait', 'fixture/m1', '--timeout', '20',
+        env = dict(self.env, LANDINGS_UNREACHABLE=str(HUNG_LANDINGS_S))
+        with subprocess.Popen([PYTHON, '-I', str(SCRIPT), 'wait', 'fixture/m1', '--timeout', str(HUNG_LANDINGS_S),
                                *(['--cleared'] if cleared else [])],
                               cwd=self.root, env=env, stdin=subprocess.DEVNULL,
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as proc:
@@ -167,7 +176,7 @@ class Lab:
                 if before:
                     before()
                 self.append(*rows)
-                out, err = proc.communicate(timeout=25)
+                out, err = proc.communicate(timeout=HUNG_TOOL_S)
                 assert proc.returncode == status, (proc.returncode, out, err)
                 return out
             finally:
@@ -648,7 +657,7 @@ def remote_first_read(lab):
             "    out.write('read\\n')\n"
             "time.sleep(.08)\nsys.stdout.buffer.write(Path(os.environ['FIXTURE_FEED']).read_bytes())\n")
     # A first read far longer than the stand-in's delay, however slow its start-up under load.
-    env = dict(lab.env, LANDINGS_READ='10')
+    env = dict(lab.env, LANDINGS_READ=str(HUNG_LANDINGS_S))
     del env['LANDINGS_FEED']
     reads = 0
     for timeout_value in ('0', '.01'):
@@ -1160,7 +1169,7 @@ def waits_for_verdict(lab):
             time.sleep(.12)
             assert proc.poll() is None, 'returned before missing verdict'
             lab.append(tier_record('verdict', tier='temper', commit='b' * 40))
-            out, err = proc.communicate(timeout=15)
+            out, err = proc.communicate(timeout=HUNG_TOOL_S)
             assert proc.returncode == 0 and 'jig aaaaaaaaa cleared' in out and 'temper bbbbbbbbb cleared' in out, (out, err)
         finally:
             if proc.poll() is None:
@@ -1355,10 +1364,6 @@ def shallow_checkout_is_no_checkout(lab):
         f'landings: timed out waiting for {commit[:9]}\nlandings: no verdict for {commit[:9]}\n'), result
 
 
-# A timeout-zero fetch gets the 5-second read floor; leave room for process startup.
-HUNG_FETCH_LIMIT = 15
-
-
 def hung_fetch_ends_at_the_timeout(lab):
     lab.repository('temper')
     commit = lab.land('temper', 'older landing')
@@ -1366,16 +1371,40 @@ def hung_fetch_ends_at_the_timeout(lab):
     lab.append(*tier_run('temper', main, None, 10, [(main, [])], baseline=True))
     pid_file = lab.root / 'child.pid'
     parent_file = lab.root / 'parent.pid'
-    child = (f'from pathlib import Path; import os, time; '
-             f'Path({str(pid_file)!r}).write_text(str(os.getpid())); time.sleep(60)')
+    child = (f'from pathlib import Path; import os, signal; '
+             f'Path({str(pid_file)!r}).write_text(str(os.getpid())); signal.pause()')
     lab.standin_git("if sys.argv[3] == 'fetch':\n"
                     f'    Path({str(parent_file)!r}).write_text(str(os.getpid()))\n'
                     f'    subprocess.Popen([sys.executable, "-c", {child!r}])\n'
-                    '    time.sleep(60)\n')
-    start = time.monotonic()
+                    '    import signal; signal.pause()\n')
+    timeout_file = lab.root / 'fetch-timeout'
+    # Check the five-second floor where it bounds the Git read. Interpreter
+    # startup and unrelated ancestry queries are honest work, not that bound.
+    hook = f'''
+import time
+from pathlib import Path
+original = tool['subprocess'].Popen
+def spawn(argv, **kwargs):
+    process = original(argv, **kwargs)
+    if len(argv) > 3 and argv[3] == 'fetch':
+        paths = [Path({str(pid_file)!r}), Path({str(parent_file)!r})]
+        deadline = time.monotonic() + {HUNG_LANDINGS_S}
+        while not all(path.exists() and path.read_text().isdigit() for path in paths):
+            assert process.poll() is None and time.monotonic() < deadline, 'fetch fixture startup'
+            time.sleep(.01)
+        communicate = process.communicate
+        def observed(*args, timeout=None, **kwargs):
+            if timeout is not None:
+                assert timeout == 5, timeout
+                Path({str(timeout_file)!r}).write_text(str(timeout))
+            return communicate(*args, timeout=timeout, **kwargs)
+        process.communicate = observed
+    return process
+tool['subprocess'].Popen = spawn
+'''
     try:
-        result = lab.run('wait', '--cleared', commit[:9], '--timeout', '0', status=3)
-        assert time.monotonic() - start < HUNG_FETCH_LIMIT
+        result = lab.run('wait', '--cleared', commit[:9], '--timeout', '0', status=3, code=hook)
+        assert float(timeout_file.read_text()) == 5
         assert result.stdout == '' and result.stderr == (
             f'landings: timed out waiting for {commit[:9]}\nlandings: no verdict for temper {commit}\n'), result
         for path in (pid_file, parent_file):

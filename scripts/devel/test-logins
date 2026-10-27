@@ -1,5 +1,6 @@
 #!/usr/bin/env -S python3 -S
 """Offline login custody fixtures, each selectable by name in a fresh Lab."""
+from case_runner import HUNG_TOOL_S
 from datetime import datetime, timedelta, timezone
 import json
 import os
@@ -32,7 +33,7 @@ class Lab:
 
     def run(self, *args):
         result = subprocess.run([*self.argv, *args], env=self.env, text=True,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=HUNG_TOOL_S)
         return result.returncode, result.stdout, result.stderr
 
     def source(self, mode=0o600):
@@ -409,14 +410,14 @@ def give_by_another_holder_is_refused(lab):
 def take_waits_until_the_login_is_given(lab):
     path = lab.login()
     lab.run('take', CHATGPT, '--as', QA)
-    proc = subprocess.Popen([*lab.argv, 'take', CHATGPT, '--as', RUNG, '--wait', '5'],
+    proc = subprocess.Popen([*lab.argv, 'take', CHATGPT, '--as', RUNG, '--wait', str(HUNG_TOOL_S)],
                             env=lab.env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
-        deadline = time.monotonic() + 3
+        deadline = time.monotonic() + HUNG_TOOL_S
         while not lab.read('waiting.json') and time.monotonic() < deadline:
             time.sleep(0.01)
         lab.run('give', CHATGPT, '--as', QA)
-        out, err = proc.communicate(timeout=5)
+        out, err = proc.communicate(timeout=HUNG_TOOL_S)
         assert (proc.returncode, out, err) == (0, f'{path}\n', '')
         assert lab.read('holder.json')['holder'] == RUNG
     finally:

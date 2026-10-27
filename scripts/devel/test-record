@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Offline records fixtures: two machines, scratch HOME and optional telemetry."""
+from case_runner import HUNG_TOOL_S
 from concurrent.futures import ThreadPoolExecutor
 import csv
 import io
@@ -72,7 +73,7 @@ class Lab:
                            'if [ -n "$PAUSE_PUSH" ]; then\n'
                            ' for arg; do [ "$arg" = push ] || continue\n'
                            '  if [ ! -e "$PAUSE_PUSH" ]; then\n'
-                           '   : >"$PAUSE_PUSH"; until=$(($(date +%s) + 15))\n'
+                           f'   : >"$PAUSE_PUSH"; until=$(($(date +%s) + {HUNG_TOOL_S}))\n'
                            '   while [ ! -e "$PAUSE_PUSH.release" ]; do\n'
                            '    [ "$(date +%s)" -lt "$until" ] || exit 1; sleep .02\n'
                            '   done\n'
@@ -110,7 +111,7 @@ class Lab:
     def run(self, *args, machine=None, status=0, extra=None):
         env = dict(self.env, RECORDS=str(machine or self.a), **(extra or {}))
         p = subprocess.run([sys.executable, '-I', str(SCRIPT), *args], env=env, text=True,
-                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=HUNG_TOOL_S)
         assert p.returncode == status, (args, p.returncode, p.stdout, p.stderr)
         return p.stdout + p.stderr
 
@@ -123,13 +124,13 @@ class Lab:
         process = subprocess.Popen([sys.executable, '-I', str(SCRIPT), 'commit', name], env=env,
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
-            until = time.monotonic() + 15
+            until = time.monotonic() + HUNG_TOOL_S
             while not pause.exists():
                 assert process.poll() is None and time.monotonic() < until
                 time.sleep(.02)
             self.run('commit', name, machine=self.b)
             pause.with_suffix('.release').touch()
-            stdout, stderr = process.communicate(timeout=20)
+            stdout, stderr = process.communicate(timeout=HUNG_TOOL_S)
             assert process.returncode == status, (stdout, stderr)
             return stdout + stderr
         finally:
@@ -278,7 +279,7 @@ def closing_clean(lab):
     stub.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > ' + shlex.quote(str(calls)) + '\n')
     stub.chmod(0o700)
     lab.run('commit', *paths, extra=dict(RECORD_TIDY=shlex.quote(str(stub))))
-    deadline = time.monotonic() + 5
+    deadline = time.monotonic() + HUNG_TOOL_S
     while not calls.exists() or not calls.read_text().endswith('demo\n'):
         assert time.monotonic() < deadline, 'tidy never started'
         time.sleep(.01)
@@ -292,7 +293,7 @@ def closing_abandoned(lab):
     assert 'warning: cannot start tidy' not in output, output
     assert 'pushed' in output, output
     log = lab.tmp / 'logs/tidy.log'
-    deadline = time.monotonic() + 5
+    deadline = time.monotonic() + HUNG_TOOL_S
     while not log.exists() or 'No such file or directory' not in log.read_text():
         assert time.monotonic() < deadline, 'missing override did not log its failure'
         time.sleep(.01)
@@ -471,13 +472,13 @@ def different_files(lab):
                                             PATH=str(lab.pause_bin) + ':' + lab.env['PATH']),
                                    stdout=output, stderr=output)
         try:
-            until = time.monotonic() + 15
+            until = time.monotonic() + HUNG_TOOL_S
             while not pause.exists():
                 assert process.poll() is None and time.monotonic() < until
                 time.sleep(.02)
             lab.run('commit', 'director/direction.md', machine=lab.b)
             pause.with_suffix('.release').touch()
-            assert process.wait(timeout=20) == 0, (lab.root / 'log').read_text()
+            assert process.wait(timeout=HUNG_TOOL_S) == 0, (lab.root / 'log').read_text()
         finally:
             pause.with_suffix('.release').touch()
             if process.poll() is None:

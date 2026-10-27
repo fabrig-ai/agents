@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Offline runner stories: each case owns its origin, feed, queue stand-in and posts."""
+from case_runner import HUNG_TOOL_S
 import argparse
 from datetime import datetime, timedelta, timezone
 import fcntl
@@ -128,7 +129,7 @@ sys.exit(int((root / 'post-exit').read_text()) if (root / 'post-exit').exists() 
 def call(argv, cwd, env, status=0):
     result = subprocess.run([str(arg) for arg in argv], cwd=cwd, env=env,
                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE, text=True, timeout=30)
+                            stderr=subprocess.PIPE, text=True, timeout=HUNG_TOOL_S)
     assert result.returncode == status, (argv, result.returncode, result.stdout, result.stderr)
     return result
 

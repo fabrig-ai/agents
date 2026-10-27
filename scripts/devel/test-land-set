@@ -25,7 +25,7 @@ PYTHON = sys.executable
 # CLI rewrites this file-only prefix to that case's private origins.
 SOURCE = 'file:///land-set-fixture/origins/'
 # Guards that only catch hangs, never budgets: one generous bound, and one for a whole case.
-HANG = 60
+HANG = case_runner.HUNG_TOOL_S
 HEAVY = '#!/bin/sh\nexec "$@"\n'
 # Only the cases that read the argv log pay for logging each git call.
 GIT_TRACED = ('lock_conflict', 'outside_snapshot', 'kit_refusal', 'closure', 'refusal')

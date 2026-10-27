@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Isolated, offline tidy fixtures; select cases by name."""
+from case_runner import HUNG_TOOL_S
 from contextlib import ExitStack
 import fcntl
 import os
@@ -14,6 +15,8 @@ import case_runner
 
 SCRIPT = Path(__file__).resolve().with_name('tidy')
 GIT = shutil.which('git')
+# Hang detection, not a tidy performance requirement; see the measured commit.
+HUNG_TIDY_S = HUNG_TOOL_S
 REPOS = ('agents', 'skein', 'smith', 'jig', 'hearth', 'qa', 'temper')
 # Only these cases inspect the trace or inject fetch/push faults.
 GIT_TRACED = ('copies', 'fetch_failure', 'push_failure', 'order')
@@ -83,7 +86,7 @@ class Lab:
 
     def git(self, path, *args, check=True):
         result = subprocess.run([GIT, '-C', str(path), *args], env=self.env, text=True,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=HUNG_TOOL_S)
         assert not check or result.returncode == 0, (args, result.stdout, result.stderr)
         return result.stdout.strip() if check else result
 
@@ -151,7 +154,7 @@ class Lab:
     def run(self, *args, status=0, extra=None):
         result = subprocess.run([sys.executable, '-I', str(SCRIPT), *args], cwd=self.root,
                                 env=dict(self.env, **(extra or {})), text=True,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=HUNG_TIDY_S)
         assert result.returncode == status, (args, result.returncode, result.stdout, result.stderr)
         return result.stdout + result.stderr
 
@@ -163,7 +166,7 @@ class Lab:
                   '\nraise SystemExit(tool["main"]())\n')
         result = subprocess.run([sys.executable, '-I', '-S', '-c', driver], cwd=self.root,
                                 env=self.env, text=True, stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE, timeout=10)
+                                stderr=subprocess.PIPE, timeout=HUNG_TIDY_S)
         assert result.returncode == status, (result.returncode, result.stdout, result.stderr)
         return result.stdout + result.stderr
 
@@ -379,7 +382,7 @@ def dirty(lab):
         elif name == 'locked':
             lab.git(lab.a, 'worktree', 'lock', str(work))
         else:
-            process = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], cwd=work,
+            process = subprocess.Popen([sys.executable, '-c', 'import sys; sys.stdin.buffer.read()'], stdin=subprocess.PIPE, cwd=work,
                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
             text = lab.run('agents')
@@ -387,8 +390,8 @@ def dirty(lab):
             assert work.exists() and lab.exists(name)
         finally:
             if name == 'held':
-                process.terminate()
-                process.wait(timeout=5)
+                process.stdin.close()
+                process.wait(timeout=HUNG_TIDY_S)
         # Leave this worktree for subsequent runs: each remains guarded.
         if name == 'held':
             lab.git(lab.a, 'worktree', 'lock', str(work))
@@ -643,15 +646,15 @@ def held_file(lab):
     script = lab.put(mission / 'held.py')
     # Inherited descriptor proves open files count even with cwd elsewhere.
     with script.open() as source:
-        process = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], cwd=lab.root,
+        process = subprocess.Popen([sys.executable, '-c', 'import sys; sys.stdin.buffer.read()'], stdin=subprocess.PIPE, cwd=lab.root,
                                    pass_fds=(source.fileno(),), stdout=subprocess.DEVNULL,
                                    stderr=subprocess.DEVNULL)
         try:
             text = lab.run()
             assert script.exists() and f'kept script {script}: held by process' in text, text
         finally:
-            process.terminate()
-            process.wait(timeout=5)
+            process.stdin.close()
+            process.wait(timeout=HUNG_TIDY_S)
 
 
 def enclosing_git(lab):
@@ -907,7 +910,7 @@ def lock(lab):
                                    env=lab.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
             inode = str(os.fstat(source.fileno()).st_ino)
-            deadline = time.monotonic() + 5
+            deadline = time.monotonic() + HUNG_TIDY_S
             while True:
                 blocked = [line.split() for line in Path('/proc/locks').read_text().splitlines() if '->' in line]
                 if any(row[5] == str(process.pid) and row[6].rsplit(':', 1)[-1] == inode for row in blocked):
@@ -918,7 +921,7 @@ def lock(lab):
             # A preview never waits for the held machine lock.
             assert 'would delete' in lab.run('--dry-run', 'agents')
             fcntl.flock(source, fcntl.LOCK_UN)
-            stdout, stderr = process.communicate(timeout=10)
+            stdout, stderr = process.communicate(timeout=HUNG_TIDY_S)
             assert process.returncode == 0 and 'deleted branch agents:done' in stdout, (stdout, stderr)
         finally:
             if process.poll() is None:
@@ -949,15 +952,15 @@ def targets_beyond_two(lab):
 
 def targets_held(lab):
     target = lab.target('held', 3 * 3600)
-    process = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], cwd=target.parent,
+    process = subprocess.Popen([sys.executable, '-c', 'import sys; sys.stdin.buffer.read()'], stdin=subprocess.PIPE, cwd=target.parent,
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         text = lab.run('--targets')
         assert text == f'tidy: kept target {target}: held by process {process.pid} (idle 3 h)\n', text
         assert lab.target_exists(target)
     finally:
-        process.terminate()
-        process.wait(timeout=5)
+        process.stdin.close()
+        process.wait(timeout=HUNG_TIDY_S)
     assert f'deleted target {target}' in lab.run('--targets')
     assert not lab.target_exists(target)
 

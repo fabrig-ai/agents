@@ -252,9 +252,10 @@ json_expect() {
     fi
     checks=$((checks + 1))
 }
-# Only a hang guard: 30 s in microseconds, generous for a loaded machine.
+# Hang patience for scheduled fixture work, not a codex-run performance bound.
+HUNG_UNIT_S=300
 poll_until() {
-    local deadline=$((${EPOCHREALTIME//[.,]/} + 30000000))
+    local deadline=$((${EPOCHREALTIME//[.,]/} + HUNG_UNIT_S * 1000000))
     until "$@"; do
         ((${EPOCHREALTIME//[.,]/} < deadline)) || { echo "FAIL deadline: $*" >&2; return 1; }
         sleep 0.02
@@ -262,7 +263,7 @@ poll_until() {
 }
 wait_unit() {
     local unit=$1 finished
-    IFS= read -r -t 30 finished <&"$unit_events" || {
+    IFS= read -r -t "$HUNG_UNIT_S" finished <&"$unit_events" || {
         echo "FAIL deadline: unit $unit" >&2
         return 1
     }

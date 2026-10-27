@@ -82,6 +82,7 @@ shellcheck_tools() {
 }
 
 suite shellcheck shellcheck_tools
+suite test-fixture-waits scripts/devel/test-fixture-waits
 suite test-gate-budget scripts/devel/test-gate-budget
 suite test-post scripts/devel/test-post
 suite test-land-set scripts/devel/test-land-set

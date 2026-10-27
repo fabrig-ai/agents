@@ -5,6 +5,7 @@ No queue daemon is needed.
 No global queue/cache mutations, task-record APIs, or environment dumps.
 Raw evidence is retained in --evidence (a new directory).
 """
+from case_runner import HUNG_TOOL_S
 import argparse
 import fcntl
 import hashlib
@@ -26,9 +27,12 @@ os.umask(0o077)
 KIT = Path(__file__).resolve().parent
 HEAVY = KIT / 'heavy'
 RESULTS = []
+# Patience for fixture admission/completion under load; protocol bounds stay local.
+HUNG_HEAVY_S = HUNG_TOOL_S
+CHILD_STOP_S = 3  # Cleanup grace before escalating to SIGKILL.
 
 
-def wait_for(predicate, what, seconds=20):
+def wait_for(predicate, what, seconds=HUNG_HEAVY_S):
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
         value = predicate()
@@ -36,6 +40,14 @@ def wait_for(predicate, what, seconds=20):
             return value
         time.sleep(0.03)
     raise AssertionError('did not reach ' + what)
+
+
+def fixture_json(path):
+    """A fixture writer may have created the file before finishing its JSON."""
+    try:
+        return json.loads(path.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
 
 
 def live(pid):
@@ -67,7 +79,7 @@ class Lab:
         self.faults = self.path / 'tmp/faults'
         self.faults.mkdir()
         self.env = dict(os.environ)
-        for key in ('HEAVY_TASK', 'DEV_ROOT', 'DEV_TMP',
+        for key in ('HEAVY_TASK', 'HEAVY_CLASS', 'DEV_ROOT', 'DEV_TMP',
                     'HEAVY_FAULT_DIR', 'HEAVY_BOOT_ID_FILE', 'RUSTC_WRAPPER'):
             self.env.pop(key, None)
         # The old queue daemon is gone; discard its inherited selection.
@@ -197,7 +209,9 @@ class Lab:
             temporary.replace(self.base / 'state.json')
 
     def events(self):
-        return [json.loads(line) for line in (self.base / 'events.jsonl').read_text().splitlines()]
+        # A concurrent append can expose its last line before its newline.
+        return [json.loads(line) for line in (self.base / 'events.jsonl').read_bytes().splitlines(keepends=True)
+                if line.endswith(b'\n')]
 
     def event(self, label, name):
         return next((event for event in self.events() if event.get('label') == label and event['event'] == name), None)
@@ -220,12 +234,16 @@ class Lab:
         return child
 
     def done(self, client, expected=0):
-        code = client.wait(timeout=25)
+        code = client.wait(timeout=HUNG_HEAVY_S)
         assert code == expected, (code, expected, self.path)
 
     def released(self, label):
-        return wait_for(lambda: (task if (task := self.task(label)) and task['state'] == 'released' else None),
-                        label + ' release')
+        def complete():
+            task = self.task(label)
+            # The snapshot's outbox precedes its journal. Completion follows
+            # release_end there; neither is promised by the snapshot alone.
+            return task if task and task['state'] == 'released' and self.event(label, 'task_completion') else None
+        return wait_for(complete, label + ' release and journal')
 
     def arm(self, point):
         (self.faults / ('arm-' + point)).touch()
@@ -233,8 +251,8 @@ class Lab:
     def barrier(self, point, label):
         token = wait_for(lambda: self.task(label), label + ' token')['token']
         path = self.faults / (token + '-' + point)
-        wait_for(path.exists, point + ' barrier')
-        return int(path.read_text())
+        return wait_for(lambda: int(text) if path.exists() and (text := path.read_text()) else None,
+                        point + ' barrier PID')
 
     def disarm(self, point):
         (self.faults / ('arm-' + point)).unlink(missing_ok=True)
@@ -338,7 +356,7 @@ class Lab:
             if child.poll() is None:
                 child.terminate()
             try:
-                child.wait(timeout=3)
+                child.wait(timeout=CHILD_STOP_S)
             except subprocess.TimeoutExpired:
                 child.kill()
                 child.wait()
@@ -616,7 +634,7 @@ def gc_clients(lab, plans):
 
 def gc_expired(lab, label, serial=0):
     before = time.monotonic()
-    end = wait_for(lambda: lab.event(label, 'gc_end:' + str(serial)), 'GC expiry', seconds=75)
+    end = wait_for(lambda: lab.event(label, 'gc_end:' + str(serial)), 'GC expiry')
     assert (end['outcome'], end['reason']) == ('timeout', 'rpc'), end
     begin = lab.event(label, 'gc_begin:' + str(serial))
     span = (end['time_ns'] - begin['time_ns']) / 1e9
@@ -680,7 +698,7 @@ def gc_gate(lab):
     code = ('import os,time\nfrom pathlib import Path\nPath(' + repr(str(pidfile)) + ').write_text(str(os.getpid()))\n'
             'while not Path(' + repr(str(finish)) + ').exists(): time.sleep(.02)\nraise SystemExit(9)')
     gate = lab.start('stalled-gate', gate=True, code=code)
-    wait_for(lambda: lab.event('stalled-gate', 'gc_begin:0'), 'periodic gate GC', seconds=145)
+    wait_for(lambda: lab.event('stalled-gate', 'gc_begin:0'), 'periodic gate GC')
     build = lab.start('progress-build')
     gc_expired(lab, 'stalled-gate')
     assert live(int(pidfile.read_text())) and not lab.event('stalled-gate', 'payload_end')
@@ -701,7 +719,7 @@ def gc_errors(lab):
     gc_clients(lab, plans)
     for label, stage, code, plan, outcome in rows:
         client = lab.start(label, code='raise SystemExit(' + str(code) + ')')
-        end = wait_for(lambda: lab.event(label, 'gc_end:0'), label + ' GC end', seconds=75)
+        end = wait_for(lambda: lab.event(label, 'gc_end:0'), label + ' GC end')
         lab.done(client, code)
         assert (end['outcome'], end['reason']) == (outcome, stage)
         clients = [json.loads(p.read_text()) for p in lab.path.glob('gc-client-*.json')]
@@ -1244,8 +1262,10 @@ def descendants(lab, action='kill'):
     daemon_code = ('import json,os,time\nfrom pathlib import Path\n'
         'if os.fork(): os._exit(0)\nos.setsid()\n'
         'if os.fork(): os._exit(0)\n'
-        'Path(' + repr(str(daemon_marker)) + ').write_text(json.dumps({"pid":os.getpid(),'
-        '"cgroup":Path("/proc/self/cgroup").read_text()}))\ntime.sleep(120)\n')
+        'marker=Path(' + repr(str(daemon_marker)) + ')\n'
+        'temporary=marker.with_suffix(".new")\n'
+        'temporary.write_text(json.dumps({"pid":os.getpid(),'
+        '"cgroup":Path("/proc/self/cgroup").read_text()}))\ntemporary.replace(marker)\ntime.sleep(120)\n')
     code = ('import json,os,subprocess,time\nfrom pathlib import Path\n'
             'child=subprocess.Popen(["setsid","sleep","120"])\n'
             'launcher=subprocess.Popen([' + repr(sys.executable) + ',"-c",' + repr(daemon_code) + '])\n'
@@ -1258,8 +1278,7 @@ def descendants(lab, action='kill'):
             '"private_cgroup":private["cgroup"]}))\n'
             'time.sleep(' + ('0.15' if action == 'normal' else '120') + ')\n')
     gate = lab.start('gate', gate=True, code=code)
-    wait_for(marker.exists, 'setsid children started')
-    evidence = json.loads(marker.read_text())
+    evidence = wait_for(lambda: fixture_json(marker), 'setsid children JSON')
     assert evidence['payload_cgroup'] == evidence['child_cgroup'] == evidence['private_cgroup']
     shared_cgroup = Path(f'/proc/{shared}/cgroup').read_text()
     assert shared_cgroup != evidence['payload_cgroup']
@@ -1270,7 +1289,7 @@ def descendants(lab, action='kill'):
         # With the submitter gone too, only the independently installed timer
         # can recover the orphan and release its holds.
         gate.kill()
-        gate.wait(timeout=5)
+        gate.wait(timeout=HUNG_TOOL_S)
         lab.kill_wrapper('gate')
     elif action == 'stop':
         lab.call(['systemctl', '--user', 'stop', lab.wrapper_unit('gate')])
@@ -1423,7 +1442,8 @@ def late_launch(lab, release_crash=False):
     lab.env['PATH'] = str(shim) + ':' + lab.env['PATH']
     marker_payload = lab.path / 'must-not-run'
     gate = lab.start('gate', gate=True, args=['touch', str(marker_payload)])
-    wait_for(marker.exists, 'deferred scope creation')
+    wait_for(lambda: int(text) if marker.exists() and (text := marker.read_text()) else None,
+             'deferred scope launcher PID')
     lab.kill_wrapper('gate')
     if release_crash:
         reconciler = lab.barrier('release_saved', 'gate')
@@ -1438,9 +1458,9 @@ def late_launch(lab, release_crash=False):
         lab.released('gate')
     assert live(int(marker.read_text())), 'fixture lost its delayed request with the wrapper'
     proceed.touch()
-    wait_for(completed.exists, 'late creation attempted and completed')
+    completion = wait_for(lambda: fixture_json(completed), 'late creation result JSON')
     assert int(attempted.read_text()) > lab.event('gate', 'release_end')['time_ns']
-    assert json.loads(completed.read_text())['code'] != 0
+    assert completion['code'] != 0
     wait_for(lambda: not live(int(marker.read_text())), 'late launcher ended')
     if release_crash:
         assert not policy_marker.exists() and not helper_marker.exists(), 'late launch executed policy tools'
@@ -1472,8 +1492,10 @@ def late_launch(lab, release_crash=False):
 def policy_helper_descendants(lab):
     marker = lab.path / 'policy-helper.json'
     runtime = Path(lab.env['SKEIN_TEST_CHROMIUM'])
-    helper = ('import os,time,json; from pathlib import Path; Path(' + repr(str(marker)) +
-              ').write_text(json.dumps({"pid":os.getpid(),"cgroup":Path("/proc/self/cgroup").read_text()})); time.sleep(120)')
+    helper = ('import os,time,json; from pathlib import Path; marker=Path(' + repr(str(marker)) +
+              '); temporary=marker.with_suffix(".new"); '
+              'temporary.write_text(json.dumps({"pid":os.getpid(),"cgroup":Path("/proc/self/cgroup").read_text()})); '
+              'temporary.replace(marker); time.sleep(120)')
     runtime.write_text('#!/usr/bin/env python3\nimport os,subprocess,time\nfrom pathlib import Path\n'
         'if os.environ.get("HEAVY_TASK"):\n'
         '    subprocess.Popen([' + repr(sys.executable) + ', "-c", ' + repr(helper) + '], '
@@ -1664,7 +1686,7 @@ def queued_client_death(lab):
     gate = lab.start('gate', gate=True, args=['touch', str(marker)])
     lab.waiting('gate')
     gate.kill()
-    gate.wait(timeout=5)
+    gate.wait(timeout=HUNG_TOOL_S)
     lab.unhold('gate')
     task = lab.released('gate')
     assert task['code'] == 0 and task['outcome'] == 'completed' and marker.exists()
@@ -1726,8 +1748,7 @@ def cancel_running(lab, gate):
             'time.sleep(120)\n')
     label = 'running-gate' if gate else 'running-build'
     client = lab.start(label, gate=gate, code=code)
-    wait_for(marker.exists, 'payload running')
-    pids = json.loads(marker.read_text())
+    pids = wait_for(lambda: fixture_json(marker), 'payload PID JSON')
     token = lab.task(label)['token']
     if gate:
         assert lab.state()['gate'] == token
@@ -1808,7 +1829,7 @@ def land_interrupt(lab):
     lab.clients.append(land)
     wait_for(marker.exists, 'land gate running')
     os.killpg(land.pid, signal.SIGINT)
-    assert land.wait(timeout=25) == 4
+    assert land.wait(timeout=HUNG_TOOL_S) == 4
     text = output.read_text()
     assert 'Traceback' not in text and 'heavy: interrupted; cancelled task' in text, text
     task = lab.released('land repo')
