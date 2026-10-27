@@ -187,7 +187,7 @@ def source_disk(tmp, now):
     if host:
         free, total = map(int, (Path(host) / 'disk').read_text().split())
     else:
-        stat = os.statvfs(tmp)
+        stat = os.statvfs(tmp.parent)
         free, total = stat.f_bavail * stat.f_frsize, stat.f_blocks * stat.f_frsize
     return {'free': free, 'total': total}
 
@@ -454,6 +454,29 @@ TENDING = (('tidy', '--targets'), ('post', 'wake', '--older', '15'),
            ('codex-run', 'stale', '--post'))
 
 
+def tend_room(tmp):
+    try:
+        state = json.loads((tmp / 'heavy/state.json').read_text())
+    except (OSError, ValueError, UnicodeError, RecursionError):
+        return None
+    tasks = state.get('tasks') if isinstance(state, dict) else None
+    if not isinstance(tasks, dict):
+        return None
+    rooms = []
+    for task in tasks.values():
+        if not isinstance(task, dict):
+            continue
+        label, status = task.get('label'), task.get('state')
+        if not isinstance(label, str) or not re.fullmatch(r'land [a-z][a-z0-9-]*(?: prebuild)?', label):
+            continue
+        if not isinstance(status, str) or status not in LIVE or status in RUNNING or task.get('disk_wait') is None:
+            continue
+        floor, room = task.get('floor_gb'), task.get('room_gb')
+        if number(floor) and number(room) and number(floor + room):
+            rooms.append(floor + room)
+    return math.ceil(max(rooms)) if rooms else None
+
+
 def tend_command(kit, argv):
     result = {'argv': list(argv), 'exit': None, 'lines': [], 'more': 0}
     try:
@@ -511,7 +534,11 @@ def append_tend(tmp, record):
 def tend(tmp):
     start = iso(clock())
     kit = Path(__file__).resolve().parent
-    commands = [tend_command(kit, argv) for argv in TENDING]
+    tending = list(TENDING)
+    room = tend_room(tmp)
+    if room is not None:
+        tending[0] += ('--room', str(room))
+    commands = [tend_command(kit, argv) for argv in tending]
     record = {'start': start, 'end': iso(clock()), 'commands': commands}
     try:
         append_tend(tmp, record)

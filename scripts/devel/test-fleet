@@ -227,6 +227,17 @@ def reading_fields(lab):
     assert sum(c[0] == 'systemctl' for c in calls) == 1, calls
 
 
+def reading_disk_workspace(lab):
+    with patch.dict(os.environ):
+        os.environ.pop('FLEET_FIXTURE_HOST', None)
+        with patch.object(os, 'statvfs') as stat:
+            stat.return_value.f_bavail = 25
+            stat.return_value.f_frsize = 4096
+            stat.return_value.f_blocks = 100
+            assert API['source_disk'](lab.tmp(), NOW) == {'free': 25*4096, 'total': 100*4096}
+            stat.assert_called_once_with(lab.tmp().parent)
+
+
 def reading_floor(lab):
     path = write(lab.tmp() / 'machine.env', 'PLAN_MIN_DISK_GB=20\nPLAN_MIN_DISK_GB=35\nPLAN_MIN_DISK_GB=bad\nFLEET_QUIET=1\n')
     for env, expected in [({'PLAN_MIN_DISK_GB': '45'}, 45), ({}, 35)]:
@@ -518,6 +529,57 @@ def tend_read_by_probe(lab):
     assert lab.probe()['tend'] == records[1:]
 
 
+def tend_room_for_landing(lab):
+    lab.tend_kit()
+    tasks = {'temper': {'label': 'land temper prebuild', 'state': 'queued', 'disk_wait': NOW,
+                        'floor_gb': 40, 'room_gb': 30},
+             'skein': {'label': 'land skein', 'state': 'queued', 'disk_wait': 0,
+                       'floor_gb': 40, 'room_gb': 20.5}}
+    path = write(lab.tmp() / 'heavy/state.json', json.dumps({'tasks': tasks}))
+    lab.tend()
+    assert lab.tend_calls() == [['tidy', '--targets', '--room', '70'],
+                                ['post', 'wake', '--older', '15'], ['codex-run', 'stale', '--post']]
+    assert lab.tends()[-1]['commands'][0]['argv'] == ['tidy', '--targets', '--room', '70']
+    # The fractional request rounds up; disk_wait's presence, not truthiness, counts.
+    for status, wait in zip(('submitted', 'enqueuing', 'queued', 'waiting', 'queued'), (0, False, '', [], {})):
+        tasks['skein'].update(state=status, disk_wait=wait)
+        write(path, json.dumps({'tasks': {'skein': tasks['skein']}}))
+        lab.tend()
+        assert lab.tend_calls()[-3] == ['tidy', '--targets', '--room', '61']
+        assert lab.tends()[-1]['commands'][0]['argv'] == ['tidy', '--targets', '--room', '61']
+
+
+def tend_no_room(lab):
+    lab.tend_kit()
+    path = lab.tmp() / 'heavy/state.json'
+    landing = {'label': 'land temper prebuild', 'state': 'queued', 'disk_wait': NOW,
+               'floor_gb': 40, 'room_gb': 30}
+    rows = [dict(landing, state='active'), dict(landing, disk_wait=None),
+            dict(landing, label='build temper'), dict(landing, label='land Temper'),
+            dict(landing, label='land temper extra'), dict(landing, state='released'),
+            dict(landing, state=[]), dict(landing, label=[]),
+            {k: v for k, v in landing.items() if k != 'disk_wait'}]
+    for key in ('floor_gb', 'room_gb'):
+        rows.append({k: v for k, v in landing.items() if k != key})
+        rows.extend(dict(landing, **{key: value}) for value in ('40', None, True, float('nan'), float('inf')))
+    contents = [None, 'broken', '[]', '{"tasks": []}', '{"tasks": {"bad": []}}',
+                json.dumps({'tasks': {str(n): row for n, row in enumerate(rows)}})]
+    for content in contents:
+        if content is not None:
+            write(path, content)
+        result = lab.tend()
+        assert result.stdout == 'fleet tend: tidy 0, post 0, codex-run 0\n'
+        assert lab.tend_calls()[-3:] == [['tidy', '--targets'], ['post', 'wake', '--older', '15'],
+                                        ['codex-run', 'stale', '--post']]
+        assert lab.tends()[-1]['commands'][0]['argv'] == ['tidy', '--targets']
+    # A ledger that cannot be read also leaves the sweep running normally.
+    path.unlink()
+    path.mkdir()
+    lab.tend()
+    assert lab.tend_calls()[-3:] == [['tidy', '--targets'], ['post', 'wake', '--older', '15'],
+                                    ['codex-run', 'stale', '--post']]
+
+
 def tend_record_failure(lab):
     lab.tend_kit()
     path = lab.tmp() / 'fleet'
@@ -544,11 +606,11 @@ def tend_record_failure(lab):
     assert {p.name for p in path.iterdir()} == {'tend.jsonl', 'tend.lock'}
 
 
-CASES = [reading_fields, reading_floor, reading_absent, reading_source_fails, reading_no_text,
+CASES = [reading_fields, reading_disk_workspace, reading_floor, reading_absent, reading_source_fails, reading_no_text,
          reading_implementers_stale, reading_targets, reading_tend_since, room_verdicts,
          room_order_and_exit, room_unreached_why, room_new_machine, room_named, room_piped,
          room_targets, room_json, tend_order, tend_all_ok, tend_not_started, tend_lines,
-         tend_keeps_a_week, tend_read_by_probe, tend_record_failure]
+         tend_keeps_a_week, tend_read_by_probe, tend_room_for_landing, tend_no_room, tend_record_failure]
 
 
 def run(case, directory, built):
