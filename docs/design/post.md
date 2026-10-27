@@ -127,15 +127,23 @@ The commands:
   It returns when `new/` holds a message, at once if one is there
   already, and prints one line per message: id, sender, subject. On a
   timeout it exits 1 and prints nothing. A newer waiter for the same
-  name replaces it, and the older one exits 4.
+  name replaces it, and the older one exits 4. It records, beside its
+  pid and start, its **holder**: the id of the live Claude session
+  (`claude agents --json`) whose pid is among its parents
+  (`/proc/PID/stat`), or none outside a session. The waiter file keeps
+  the last holder after the waiter ends, until a newer waiter writes
+  its own: a session renamed at a resume by hand keeps its mailbox's
+  name as its `POST_NAME` but not as its display name (10-27: four of
+  them, o/tier-flakes among them), and the holder still names it.
 - **`post read NAME`** prints the new messages, oldest first, and moves
   them to `cur/`. Reading through it is what marks a message read.
 - **`post list [--older MINUTES]`** lists this machine's unread
   messages, for every name: their age, name, id, sender and subject, and
   whether the name's waiter is alive.
-- **`post waiters`** prints, for each name of this machine whose waiter
-  lives, the name and the waiter's pid, so that a reader can tell which
-  session holds it (fleet-watch.md 3.1).
+- **`post waiters`** prints, for each name of this machine with a
+  waiter file, `NAME PID alive|dead HOLDER`, HOLDER the last holder's
+  session id or `-`, so that a reader can tell which session is NAME's
+  (fleet-watch.md 3.1).
 - **`post wake NAME`** wakes NAME for the mail already in its `new/`,
   as delivery does (section 4), and prints `NAME` and what happened:
   `waiting`, `woken`, `queued`, or exit 3 with `queued, nobody will
@@ -171,7 +179,8 @@ overwrites another.
   - a Codex owner without a waiter: exit 3, since only its parent
     restarts its unit;
   - a Claude name: the newest session of that name in `claude agents
-    --json --all`. A `done` session with a pid still runs; a stopped
+    --json --all`, or, with none of that name, the session whose id
+    NAME's waiter file names as its last holder (section 3). A `done` session with a pid still runs; a stopped
     one stays `done` but has no pid and isn't woken. The tool checks a
     running `done` session again, stops it with `claude stop <short id>`
     and waits up to 10 seconds for its pid to go, then resumes it from

@@ -80,7 +80,7 @@ the others stand.
 | `disk`, `floor` | free and total bytes of the workspace's filesystem, where heavy measures its floor; the floor as heavy reads it: `PLAN_MIN_DISK_GB` in the environment, then in `tmp/machine.env`, else 40 GB (build-infrastructure.md 2) |
 | `kache` | `kache stats --json`: `disk.store_bytes` and `disk.store_limit_bytes`; absent without kache |
 | `heavy` | `tmp/heavy/state.json`'s live tasks, as the status page reads them: running, queued, the oldest queued one's wait, a gate's hold; absent without heavy |
-| `sessions` | `claude agents --json --all`: each live session's name, id and state, and the mailboxes whose waiter it holds: `post waiters` gives each live waiter's pid, whose parents (`/proc/PID/stat`) lead to the session's pid; and each Codex owner's unit that is active, `codex-owner-*` (post.md 5), by its name |
+| `sessions` | `claude agents --json --all`: each live session's name, id and state, and the mailboxes it holds: those whose last holder, by `post waiters`, is its id (post.md 3); and each Codex owner's unit that is active, `codex-owner-*` (post.md 5), by its name |
 | `implementers` | `tmp/codex-run/*/meta` without `ended` whose unit is active, counted by mission |
 | `mail` | `post list`: for each name with unread mail, how many, the oldest's age in minutes and whether its waiter lives |
 | `stale` | `codex-run stale`: the runs that will never post, and since when |
@@ -121,7 +121,7 @@ keeps that field's conditions as they were.
 | `deaf NAME` | its tend's `post wake` could not wake NAME (exit 3): raised in the round that reads it, since the mail has waited 15 minutes already | NAME's mail read |
 | `mail NAME` | NAME's oldest unread message 60 minutes old or more | none that old |
 | `stale RUN` | RUN listed by `codex-run stale`, its caller not told | no longer listed |
-| `session NAME` | an active mission's session absent from its machine: no live session named NAME, holding NAME's waiter, or last seen holding it | present, or the record no longer holds an active mission owned at that address (ended, paused, moved) |
+| `session NAME` | an active mission's session absent from its machine: no live session named NAME, nor the last holder of NAME's waiter | present, or the record no longer holds an active mission owned at that address (ended, paused, moved) |
 | `blind MACHINE SOURCE` | a source of the reading failing on that machine (its `errors`) | read |
 
 - **`session`** reads the record on the watch's machine, pulled once a
@@ -134,10 +134,10 @@ keeps that field's conditions as they were.
 - **A session renamed** at a resume by hand keeps its mailbox's name
   as its `POST_NAME` but not as its display name (10-27: three of
   hetzner2's ran as `restore-hetzner2-worktrees` and the like). So
-  NAME's session is the one named NAME, or the one whose process holds
-  NAME's live waiter; the watch keeps the session id it last saw
-  holding it, and counts that session present while it lives, through
-  a turn that runs without its waiter.
+  NAME's session is the one named NAME, or the last holder of NAME's
+  waiter, which post keeps in the waiter file after the waiter ends
+  (post.md 3): present while it lives, through a turn that runs
+  without its waiter, as delivery's wake finds it too (post.md 4).
 - **A condition's subject gone** clears it: a mailbox, a run's
   directory or a machine's line in the machines file that no longer
   exists, as the record's mission does for `session`.
@@ -178,8 +178,7 @@ mode 0600:
 
 - `watch.json`: per condition, the rounds its test has held and
   whether it is raised; the raises not yet posted; the last post's
-  time; per machine, the end of the last tend read; per mission's
-  address, the session id last seen holding its waiter. A round without
+  time; per machine, the end of the last tend read. A round without
   it starts from nothing, so a restart raises only what two of its own
   rounds confirm.
 - `rounds.jsonl`: each round's figures per machine (time, load,
