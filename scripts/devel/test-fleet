@@ -65,6 +65,7 @@ root=${DEV_TMP%/tmp}
 call='["'"$name"'"'
 for arg do call=$call', "'"$arg"'"'; done
 printf '%s]\\n' "$call" >> "$root/calls"
+if [ "$name" = post ] && [ "$1" = waiters ]; then name=post-waiters; fi
 . "$root/$name.reply"
 ''')
         shell_tool(self.bin, 'du', '''root=${DEV_TMP%/tmp}
@@ -111,7 +112,7 @@ sys.exit(subprocess.run([sys.executable, '-I', '-', *words[4:]], input=source, e
         self.figures(name)
         self.answer('claude', [], name)
         self.answer('kache', {'disk': {'store_bytes': 60 * GB, 'store_limit_bytes': 100 * GB}}, name)
-        for tool_name in ('post', 'codex-run', 'systemctl'):
+        for tool_name in ('post', 'post-waiters', 'codex-run', 'systemctl'):
             self.answer(tool_name, '', name)
         self.du_answers({}, name)
 
@@ -236,7 +237,7 @@ printf '%s\\n' '["kache", "gc"]' >> "$root/tend.calls"
 
 
 def reading_fields(lab):
-    lab.answer('claude', [{'pid': 12, 'name': 'director', 'state': 'working'}, {'name': 'dead'}])
+    lab.answer('claude', [{'pid': 12, 'name': 'director', 'state': 'working', 'sessionId': 'director-id'}, {'name': 'dead'}])
     lab.answer('systemctl', 'codex-owner-o-test\\x2dmission.service loaded active running\ncodex-run-live.service loaded active running\n')
     lab.run_meta('live', lab.tmp() / 'owners/test-m2/task.md')
     lab.heavy(720)
@@ -250,7 +251,7 @@ def reading_fields(lab):
     rows = [('cores', 8), ('load', [1, 2, 3]), ('pressure', {'cpu': 4.5, 'memory_some': 3.2, 'memory_full': 1}),
             ('memory', {'available': 12*GB, 'total': 16*GB}), ('disk', {'free': 200*GB, 'total': 600*GB}),
             ('floor', 40*GB), ('quiet', False), ('kache', {'store': 60*GB, 'limit': 100*GB}),
-            ('sessions', [{'name': 'director', 'state': 'working', 'kind': 'claude'}, {'name': 'o/test-mission', 'kind': 'codex'}]),
+            ('sessions', [{'name': 'director', 'state': 'working', 'kind': 'claude', 'id': 'director-id', 'holds': []}, {'name': 'o/test-mission', 'kind': 'codex'}]),
             ('implementers', {'test': 1}), ('mail', {'o/x': {'count': 2, 'oldest': 17, 'waiter': True}}),
             ('stale', [{'run': 'dead', 'why': 'post failed', 'caller': 'o/x@beta', 'since': API['iso'](NOW)}]),
             ('tend', [{'start': 'a', 'end': 'b', 'commands': []}]), ('errors', {})]
@@ -262,6 +263,27 @@ def reading_fields(lab):
     assert API['SCHEMAS']['time'](reading['time'])
     calls = [json.loads(x) for x in (lab.root / 'alpha/calls').read_text().splitlines()]
     assert sum(c[0] == 'systemctl' for c in calls) == 1, calls
+
+
+def reading_session_waiters(lab):
+    lab.answer('claude', [{'pid': 100, 'name': 'restore-x', 'sessionId': 'S1', 'id': 'old', 'state': 'idle'},
+                          {'pid': 665, 'name': 'other', 'id': 'fallback', 'status': 'working'}])
+    lab.answer('post-waiters', 'o/z 300 alive S1\no/x 300 dead S1\no/unheld 400 dead -\n'
+               'o/gone 500 dead absent-session\n')
+    r = lab.probe()
+    assert r['sessions'] == [
+        {'name': 'restore-x', 'state': 'idle', 'kind': 'claude', 'id': 'S1', 'holds': ['o/x', 'o/z']},
+        {'name': 'other', 'state': 'working', 'kind': 'claude', 'id': 'fallback', 'holds': []}], r
+    # Both fields are validated at the reading boundary; old probes remain usable.
+    session = r['sessions'][0]
+    for field, bad in (('id', 123), ('holds', 'o/x'), ('holds', [123])):
+        malformed = dict(session, **{field: bad})
+        assert API['checked']({'sessions': [malformed]}) == {'errors': {'sessions': 'shape'}}
+    old = {'name': 'o/x', 'state': 'idle', 'kind': 'claude'}
+    assert API['checked']({'sessions': [old]}) == {'errors': {}, 'sessions': [old]}
+    lab.answer('post-waiters', '', exit=2)
+    r = lab.probe()
+    assert r['errors'] == {'sessions': 'exit 2'} and 'sessions' not in r and 'mail' in r, r
 
 
 def reading_disk_workspace(lab):
@@ -874,6 +896,8 @@ def session_from_missions(lab):
     root = lab.root / 'records'
     active = write(root / 'missions/a/README.md', '---\nstate: active\nowner: o/x@alpha\n---\n')
     write(root / 'missions/b/README.md', '---\nstate: paused\nowner: o/y@alpha\n---\n')
+    write(root / 'missions/c/README.md', '---\nstate: active\nowner: codex-run@alpha\n---\n')
+    write(root / 'missions/d/README.md', '---\nstate: active\nowner: p/x@alpha\n---\n')
     missions = API['active_owners'](root)
     assert missions == {('o/x', 'alpha')}
     state = rounds(reading(), missions=missions)
@@ -881,6 +905,24 @@ def session_from_missions(lab):
     active.write_text('---\nstate: paused\nowner: o/x@alpha\n---\n')
     state = rounds(reading(), state, API['active_owners'](root), now=NOW+600, count=1)
     assert 'alpha session o/x' not in state['conditions'] and not state['pending'] and not state['cleared']
+
+
+def session_waiter_identity(lab):
+    missions = {('o/x', 'alpha'), ('codex-run', 'alpha'), ('p/x', 'alpha')}
+    session = {'name': 'restore-x', 'id': 'sid', 'holds': ['o/x']}
+    state = rounds(reading(sessions=[session]), missions=missions, count=3)
+    assert not any(' session ' in key for key in state['pending'])
+    assert 'holders' not in state
+    absent = reading(sessions=[], tend=[tend_record(NOW+900)])
+    state = rounds(absent, state, missions, now=NOW+900, count=1)
+    assert not any(' session ' in key for key in state['pending'])
+    state = rounds(absent, state, missions, now=NOW+1200, count=1)
+    assert state['pending'] == ['alpha session o/x']
+    state = rounds(reading(), state, (), now=NOW+1500, count=1)
+    assert not state['pending'] and not any(' session ' in key for key in state['conditions'])
+    # Designer sessions are watched too.
+    state = rounds(reading(sessions=[dict(session, holds=['design/x'])]), missions={('design/x', 'alpha')})
+    assert not state['pending']
 
 
 def subjects_gone(lab):
@@ -1056,6 +1098,18 @@ def round_posts_once(lab):
     lab.run('watch', status=2)
 
 
+def round_session_waiter(lab):
+    watch_kit(lab)
+    write(lab.root / 'records/missions/b/README.md', '---\nstate: active\nowner: o/x@beta\n---\n')
+    lab.answer('claude', [{'pid': 100, 'name': 'restore-x', 'sessionId': 'sid', 'state': 'idle'}], 'beta')
+    lab.answer('post-waiters', 'o/x 300 dead sid\n', 'beta')
+    for n in range(2):
+        watch_round(lab, n)
+    assert 'holders' not in watch_state(lab)
+    assert not watch_state(lab)['conditions']['beta session o/x']['raised']
+    assert all('session' not in sent['argv'][4] and 'session' not in sent['body'] for sent in sends(lab))
+
+
 def round_mail_minutes(lab):
     watch_kit(lab)
     lab.figures('beta')
@@ -1184,17 +1238,17 @@ def watch_write_failure(lab):
     assert path.read_bytes() == before and not list(path.parent.glob('watch.json.*'))
 
 
-CASES = [reading_fields, reading_disk_workspace, reading_floor, reading_absent, reading_source_fails, reading_no_text,
+CASES = [reading_fields, reading_session_waiters, reading_disk_workspace, reading_floor, reading_absent, reading_source_fails, reading_no_text,
          reading_implementers_stale, reading_targets, reading_tend_since, room_verdicts,
          room_order_and_exit, room_unreached_why, room_new_machine, room_named, room_piped,
          room_targets, room_fits_120, room_json, tend_order, tend_all_ok, tend_not_started, tend_lines,
          tend_kache_gc_past_limit, tend_kache_within_limit, tend_without_kache,
          tend_kache_stats_fails, tend_kache_gc_fails, tend_keeps_a_week, tend_read_by_probe, tend_room_for_landing, tend_room_for_regenerate, tend_no_room, tend_record_failure,
          raise_after_two_rounds, clear_after_two_rounds, between_changes_nothing, each_condition,
-         missing_field_keeps, session_from_missions, subjects_gone, untended_rows, tends_counted_once,
+         missing_field_keeps, session_from_missions, session_waiter_identity, subjects_gone, untended_rows, tends_counted_once,
          user_and_fleet_never, quiet_machine, no_state_first_round, gap_carries,
          cleared_before_post_dropped, subject_length, body_lines, round_posts_once,
-         round_mail_minutes, round_failed_post, round_reads_since, round_record_pull, round_rounds_pruned,
+         round_session_waiter, round_mail_minutes, round_failed_post, round_reads_since, round_record_pull, round_rounds_pruned,
          round_state_unreadable, room_shows_watch, malformed_watch_inputs, watch_write_failure]
 
 

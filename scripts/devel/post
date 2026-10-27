@@ -5,6 +5,7 @@
 #   post wait NAME [--timeout SECONDS] [--holder PID --kind KIND]
 #   post read NAME
 #   post list [--older MINUTES]
+#   post waiters
 #   post wake NAME | --older MINUTES
 # See docs/design/post.md for the addresses, delivery and waking rules.
 set -euo pipefail
@@ -30,7 +31,7 @@ scratch=
 trap '[[ -z $scratch ]] || rm -f -- "$scratch"' EXIT
 
 fail() { echo "post: ${error_prefix:-}$*" >&2; exit 2; }
-usage() { fail 'usage: post {send|deliver|wait|read|list|wake} (see docs/design/post.md)'; }
+usage() { fail 'usage: post {send|deliver|wait|read|list|waiters|wake} (see docs/design/post.md)'; }
 valid_name() { [[ $1 =~ $name_pattern ]]; }
 valid_machine() { [[ $1 =~ $machine_pattern ]]; }
 valid_subject() { [[ ${#1} -le 200 && ! $1 =~ [[:cntrl:]] ]]; }
@@ -94,10 +95,28 @@ waiter_alive() {
     [[ $current == "$wait_start" ]]
 }
 load_waiter() {
-    wait_pid='' wait_start='' wait_kind=''
+    wait_pid='' wait_start='' wait_kind='' wait_session='-'
     if [[ -f $box/waiter ]]; then
-        read -r wait_pid wait_start wait_kind <"$box/waiter" || true
+        read -r wait_pid wait_start wait_kind wait_session <"$box/waiter" || true
     fi
+    wait_session=${wait_session:--}
+}
+holder_session() {
+    local pid=$1 stat rest parents='' step
+    local -A seen=()
+    for ((step=0; step<64; step++)); do
+        [[ $pid =~ ^[1-9][0-9]*$ && $pid != 1 && ! -v seen[$pid] ]] || break
+        seen[$pid]=1
+        parents+="${parents:+ }$pid"
+        IFS= read -r stat 2>/dev/null <"/proc/$pid/stat" || break
+        rest=${stat##*) }
+        read -r _ pid _ <<<"$rest"
+    done
+    claude agents --json --all 2>/dev/null | jq -er --arg parents "$parents" '
+        . as $sessions | first($parents | split(" ")[] as $pid |
+            $sessions[] | select(.pid != null and (.pid | tostring) == $pid) |
+            (.sessionId // .id // empty)) |
+        select(type == "string" and test("^[^[:space:][:cntrl:]]+$"))' 2>/dev/null
 }
 session() {
     claude agents --json --all | jq -cer --arg value "$1" --arg field "${2:-name}" '
@@ -151,7 +170,7 @@ active_owner() {
     ' /dev/null "${missions[@]}"
 }
 wake() (
-    local name=$1 info state full_id short_id cwd stop_info attempt reason kind='' alive=0
+    local name=$1 info state full_id short_id cwd stop_info attempt reason lookup=$1 field=name kind='' alive=0
     exec 8>"$box/.wake.lock"
     flock -x 8 || fail 'cannot lock wake'
     {
@@ -164,7 +183,11 @@ wake() (
     if [[ $wait_kind == codex || $kind == codex ]]; then
         unwoken 'codex owner not running'; return $?
     fi
-    if ! info=$(session "$name"); then unwoken 'no session'; return $?; fi
+    if ! info=$(session "$lookup" "$field"); then
+        [[ $wait_session != - ]] || { unwoken 'no session'; return $?; }
+        lookup=$wait_session field=id
+        if ! info=$(session "$lookup" "$field"); then unwoken 'no session'; return $?; fi
+    fi
     state=$(jq -r '.state // "interactive session"' <<<"$info")
     case $state in
         working|blocked) echo queued ;;
@@ -172,7 +195,7 @@ wake() (
             if jq -e '.pid == null' <<<"$info" >/dev/null; then unwoken stopped; return $?; fi
             full_id=$(jq -r '.sessionId // .id // empty' <<<"$info")
             [[ -n $full_id ]] || { unwoken 'session has no id'; return $?; }
-            if ! info=$(session "$name"); then unwoken 'no session'; return $?; fi
+            if ! info=$(session "$lookup" "$field"); then unwoken 'no session'; return $?; fi
             state=$(jq -r '.state // "interactive session"' <<<"$info")
             case $state in
                 working|blocked) echo queued; return 0 ;;
@@ -203,7 +226,7 @@ wake() (
                 unwoken 'resume failed'; return $?
             fi
             sleep "${POST_RESUME_CHECK:-10}"
-            if info=$(session "$name"); then state=$(jq -r '.state // "interactive session"' <<<"$info"); else state='no session'; fi
+            if info=$(session "$lookup" "$field"); then state=$(jq -r '.state // "interactive session"' <<<"$info"); else state='no session'; fi
             case $state in
                 working|blocked) echo woken ;;
                 *) unwoken "$state" ;;
@@ -352,7 +375,7 @@ deliver() {
 }
 wait_mail() {
     (($#)) || usage
-    local name=$1 timeout='' holder=$$ kind=claude started=$SECONDS holder_start line delay whole
+    local name=$1 timeout='' holder=$$ kind=claude started=$SECONDS holder_start holder_id line delay whole
     shift
     valid_name "$name" || fail 'invalid mailbox name'
     while (($#)); do
@@ -370,8 +393,17 @@ wait_mail() {
     mailbox "$name"
     (
         flock -x 9 || fail 'cannot lock waiter'
-        printf '%s %s %s\n' "$holder" "$holder_start" "$kind" >"$box/waiter"
+        printf '%s %s %s -\n' "$holder" "$holder_start" "$kind" >"$box/waiter"
         printf '%s\n' "$kind" >"$box/kind"
+    ) 9>"$box/.lock"
+    holder_id=$(holder_session "$holder") || holder_id=-
+    (
+        flock -x 9 || fail 'cannot lock waiter'
+        load_waiter
+        # A newer waiter may have registered while Claude answered.
+        if [[ $wait_pid == "$holder" && $wait_start == "$holder_start" ]]; then
+            printf '%s %s %s %s\n' "$holder" "$holder_start" "$kind" "$holder_id" >"$box/waiter"
+        fi
     ) 9>"$box/.lock"
     while :; do
         line=$(
@@ -442,6 +474,33 @@ list_mail() {
     done < <(find "$post" -type f -path '*/new/*.md' -print0 | sort -z)
 }
 
+list_waiters() {
+    (($# == 0)) || usage
+    [[ -d $post ]] || return 0
+    local box name alive code=0
+    {
+        for box in "$post"/*; do
+            [[ -d $box ]] || continue
+            name=${box##*/}
+            name=${name//+/\/}
+            valid_name "$name" || continue
+            (
+                flock -x 9 || exit 2
+                [[ -f $box/waiter ]] || exit 0
+                load_waiter
+                if [[ ! $wait_pid =~ ^[1-9][0-9]*$ || ! $wait_start =~ ^[0-9]+$ ||
+                      ! $wait_kind =~ ^(claude|codex)$ || $wait_session == *[[:space:][:cntrl:]]* ]]; then
+                    echo "post: invalid waiter for $name" >&2; exit 2
+                fi
+                alive=dead
+                if waiter_alive; then alive=alive; fi
+                printf '%s %s %s %s\n' "$name" "$wait_pid" "$alive" "$wait_session"
+            ) 9>"$box/.lock" || code=2
+        done
+        return "$code"
+    } | LC_ALL=C sort
+}
+
 # Select under the mailbox lock, then let wake take its own locks and recheck.
 wake_existing() (
     local name=$1 older=${2:-} now=${3:-} message age found=0 status code=0
@@ -509,6 +568,7 @@ case $command in
     wait) wait_mail "$@" ;;
     read) read_mail "$@" ;;
     list) list_mail "$@" ;;
+    waiters) list_waiters "$@" ;;
     wake) wake_mail "$@" ;;
     *) usage ;;
 esac

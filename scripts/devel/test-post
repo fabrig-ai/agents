@@ -539,6 +539,72 @@ wake_command() {
     done
 }
 
+waiter_listing() {
+    expect 'no mailboxes means no waiters' "[$(capture post waiters)]" '[status=0]'
+    local parent=$BASHPID
+    session o/z working
+    jq --argjson pid "$parent" 'map(.pid=$pid)' "$t/sessions.json" >"$t/holder.json"
+    mv "$t/holder.json" "$t/sessions.json"
+    capture post wait o/z --timeout 0 --holder "$parent" >/dev/null
+    capture post wait o/a --timeout 0 --holder "$parent" >/dev/null
+    mkdir -p "$t/a/tmp/post/"{dead,old,empty}
+    printf '2147483647 1 claude full-session-id\n' >"$t/a/tmp/post/dead/waiter"
+    printf '2147483647 1 codex\n' >"$t/a/tmp/post/old/waiter"
+    expect 'live and dead waiters with holders, sorted by name' "[$(capture post waiters)]" "[status=0
+dead 2147483647 dead full-session-id
+o/a $parent alive full-session-id
+o/z $parent alive full-session-id
+old 2147483647 dead -]"
+    expect 'waiters takes no arguments' "$(capture post waiters x)" 'status=2' 'usage: post'
+    rm -rf "$t/a/tmp/post"
+    expect 'missing post directory means no waiters' "[$(capture post waiters)]" '[status=0]'
+}
+
+waiter_holder() {
+    local parent=$BASHPID pid kind id extra
+    session o/x working
+    jq --argjson pid "$parent" 'map(.pid=$pid)' "$t/sessions.json" >"$t/holder.json"
+    mv "$t/holder.json" "$t/sessions.json"
+    expect 'session waiter times out silently' "[$(capture post wait o/x --timeout 0)]" '[status=1]'
+    read -r pid _ kind id extra <"$t/a/tmp/post/o+x/waiter"
+    expect 'ancestor session recorded and retained after wait ends' "$id/$extra" 'full-session-id/'
+    expect 'one session query per registration' "$(wc -l <"$t/claude-calls")" 1
+    # The explicit holder path uses the same ancestry, and short ids are supported.
+    jq 'map(del(.sessionId))' "$t/sessions.json" >"$t/holder.json"
+    mv "$t/holder.json" "$t/sessions.json"
+    capture post wait explicit --timeout 0 --holder "$parent" --kind codex >/dev/null
+    read -r pid _ kind id <"$t/a/tmp/post/explicit/waiter"
+    expect 'explicit holder and id fallback' "$pid/$kind/$id" "$parent/codex/short"
+    echo '[]' >"$t/sessions.json"
+    capture post wait outside --timeout 0 >/dev/null
+    read -r pid _ kind id <"$t/a/tmp/post/outside/waiter"
+    expect 'outside any session has no holder' "$id" '-'
+    echo 'not JSON' >"$t/sessions.json"
+    expect 'failed Claude query does not fail registration' "[$(capture post wait failed --timeout 0)]" '[status=1]'
+    read -r pid _ kind id <"$t/a/tmp/post/failed/waiter"
+    expect 'failed query records no holder' "$id" '-'
+}
+
+renamed_wake() {
+    session o/x 'done'
+    jq 'map(.name="restore-x")' "$t/sessions.json" >"$t/renamed.json"
+    mv "$t/renamed.json" "$t/sessions.json"
+    mkdir -p "$t/a/tmp/post/o+x"
+    printf '2147483647 1 claude full-session-id\n' >"$t/a/tmp/post/o+x/waiter"
+    expect 'delivery wakes renamed session by last holder' "$(capture post send o/x renamed <<< body)" 'status=0' 'woken'
+    expect 'renamed session stopped by short id' "$(cat "$t/stops")" short
+    expect 'renamed session resumed by full id' "$(head -n1 "$t/resumes")" full-session-id
+    expect 'renamed session prompt uses mailbox name' "$(tail -n1 "$t/resumes")" 'Post for o/x: run post read o/x'
+    expect 'last holder survives delivery' "$(cat "$t/a/tmp/post/o+x/waiter")" 'full-session-id'
+    jq 'map(.state="done")' "$t/sessions.json" >"$t/renamed.json"
+    mv "$t/renamed.json" "$t/sessions.json"
+    mission o+x o/x@a paused
+    expect 'renamed session guard still uses mailbox owner' "$(capture post send o/x paused <<< body)" 'status=3' 'mission o+x is paused'
+    expect 'paused renamed session was not stopped again' "$(wc -l <"$t/stops")" 1
+    echo '[]' >"$t/sessions.json"
+    expect 'last holder gone is no session' "$(capture post send o/x gone <<< body)" 'status=3' 'queued, nobody will wake it: no session'
+}
+
 waiters_and_limits() {
     # Register a Codex holder, then substitute a definitely dead PID.
     expect 'holder registration times out without mail' "$(capture post wait codex --timeout 0 --holder "$$" --kind codex)" 'status=1'
@@ -743,7 +809,7 @@ STUB
 }
 
 # The parts share nothing, so they run at once; each reports its checks and failures.
-parts=(local_and_remote wake wake_guard wake_command waiters_and_limits names_and_order ids_and_transport)
+parts=(local_and_remote wake wake_guard wake_command waiter_listing waiter_holder renamed_wake waiters_and_limits names_and_order ids_and_transport)
 if (($#)); then parts=("$@"); fi
 for part in "${parts[@]}"; do
     (

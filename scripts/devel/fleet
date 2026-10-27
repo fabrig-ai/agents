@@ -136,7 +136,9 @@ SCHEMAS = {
     'kache': {'store': integer, 'limit': lambda x: integer(x) and x > 0},
     'heavy': {'running': integer, 'queued': integer, 'oldest_wait': number, 'gate': lambda x: type(x) is bool},
     'sessions': [lambda x: shape(x, {'name': text, 'kind': lambda k: k == 'codex'}) or
-                 shape(x, {'name': text, 'state': text, 'kind': lambda k: k == 'claude'})],
+                 shape(x, {'name': text, 'state': text, 'kind': lambda k: k == 'claude'}) or
+                 shape(x, {'name': text, 'state': text, 'kind': lambda k: k == 'claude',
+                           'id': text, 'holds': [text]})],
     'implementers': mapping(integer),
     'mail': mapping({'count': integer, 'oldest': integer, 'waiter': lambda x: type(x) is bool}),
     'stale': [{'run': text, 'why': text, 'caller': text, 'since': text}],
@@ -249,8 +251,19 @@ def source_sessions(tmp, now, units):
     sessions = json.loads(command(['claude', 'agents', '--json', '--all']))
     if not isinstance(sessions, list):
         raise Shape()
-    result = [{'name': s['name'], 'state': s.get('state', s.get('status', '')), 'kind': 'claude'}
-              for s in sessions if isinstance(s, dict) and s.get('pid') and s.get('name')]
+    live = [s for s in sessions if isinstance(s, dict) and s.get('pid') and s.get('name')]
+    result = [{'name': s['name'], 'state': s.get('state', s.get('status', '')), 'kind': 'claude',
+               'id': s.get('sessionId') or s.get('id', ''), 'holds': []} for s in live]
+    for line in command(['post', 'waiters']).decode().splitlines():
+        name, pid, alive, holder = line.split()
+        if not re.fullmatch(r'[1-9][0-9]*', pid) or alive not in ('alive', 'dead'):
+            raise Shape()
+        if holder != '-':
+            for row in result:
+                if row['id'] == holder:
+                    row['holds'].append(name)
+    for row in result:
+        row['holds'] = sorted(set(row['holds']))
     result.extend({'name': unescape(u[len('codex-owner-'):-len('.service')]), 'kind': 'codex'}
                   for u in sorted(units.result()) if u.startswith('codex-owner-') and u.endswith('.service'))
     return result
@@ -704,7 +717,7 @@ def tests(kind, subject, row, state, now, deaf):
     elif kind == 'stale':
         raised = subject in {x['run'] for x in r['stale']}
     elif kind == 'session':
-        raised = subject not in {x['name'] for x in r['sessions']}
+        raised = not any(x['name'] == subject or subject in x.get('holds', []) for x in r['sessions'])
     else:
         raised = subject in errors
     return raised, not raised
@@ -749,6 +762,7 @@ def judge(state, fleet, missions, now):
     state = json.loads(json.dumps(state))
     for field, default in (('conditions', {}), ('pending', []), ('cleared', []), ('tends', {}), ('done', {})):
         state.setdefault(field, default)
+    missions = {(name, host) for name, host in missions if name.startswith(('o/', 'design/'))}
     rows = {row['machine']: row for row in fleet}
     conditions = state['conditions']
     for key in list(conditions):
@@ -957,7 +971,8 @@ def active_owners(root):
             key, sep, value = line.partition(':')
             if sep:
                 fields[key.strip()] = value.strip()
-        if fields.get('state') == 'active' and re.fullmatch(ADDRESS, fields.get('owner', '')):
+        if (fields.get('state') == 'active' and re.fullmatch(ADDRESS, fields.get('owner', '')) and
+                fields['owner'].startswith(('o/', 'design/'))):
             owners.add(tuple(fields['owner'].split('@')))
     return owners
 
