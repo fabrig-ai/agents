@@ -955,8 +955,8 @@ def submit(args, lane, tail_lines, exclusive):
         time.sleep(0.1)
     if task.get('refusal') == FLOOR_REFUSAL and not task.get('payload_started'):
         result = run(['bash', '-c', 'set -euo pipefail; root=$1; tmp=$2; '
-                      'source "$3"; disk_floor heavy',
-                      'heavy-disk-floor', ROOT, TMP, KIT / 'kit.sh'])
+                      'source "$3"; disk_floor heavy "$4"',
+                      'heavy-disk-floor', ROOT, TMP, KIT / 'kit.sh', str(floor_of(task))])
         if result.stderr:
             say(result.stderr.rstrip(), sys.stderr)
     if task.get('refusal'):
@@ -1134,9 +1134,11 @@ def prepare_payload_policy(token):
 def payload_disk_floor(token):
     # Submission may have waited for room in its lane. Check again inside
     # the owned cgroup, outside the host lock, just before command start.
+    with locked() as ledger:
+        floor = floor_of(ledger.tasks[token])
     result = run(['bash', '-c', 'set -euo pipefail; root=$1; tmp=$2; '
-                  'source "$3"; disk_floor heavy',
-                  'heavy-disk-floor', ROOT, TMP, KIT / 'kit.sh'])
+                  'source "$3"; disk_floor heavy "$4"',
+                  'heavy-disk-floor', ROOT, TMP, KIT / 'kit.sh', str(floor)])
     if not result.returncode:
         return True
     print(result.stderr, end='', flush=True)

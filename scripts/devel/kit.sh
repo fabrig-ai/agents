@@ -24,7 +24,11 @@ machine_setting() {
 # directories that fill the disk, so that an owner frees them.
 disk_floor() {
     local tool=$1 floor source free
-    read -r floor source < <(machine_setting PLAN_MIN_DISK_GB 40)
+    if (($# > 1)); then
+        floor=$2 source='as submitted'
+    else
+        read -r floor source < <(machine_setting PLAN_MIN_DISK_GB 40)
+    fi
     free=$(df -BG --output=avail "$root" | tail -n1 | tr -dc 0-9)
     ((free < floor)) || return 0
     echo "$tool: $free GB free on $root, below the disk floor of $floor GB ($source); the largest directories:" >&2

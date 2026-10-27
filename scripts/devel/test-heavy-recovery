@@ -833,12 +833,12 @@ def missing_reconciler(lab):
     lab.done(gate)
 
 
-def land_disk_floor(lab, mode='refused', machine=False):
+def land_disk_floor(lab, mode='refused', machine=False, saved=None):
     # Real land/heavy, with the Lab's disposable units, ledger and free space.
     lab.env.pop('PLAN_MIN_DISK_GB')
     lab.env['PLAN_LAND_ROOM_GB'] = '30'
-    if machine:
-        (lab.path / 'tmp/machine.env').write_text('PLAN_MIN_DISK_GB=60\n')
+    if machine or saved is not None:
+        (lab.path / 'tmp/machine.env').write_text(f'PLAN_MIN_DISK_GB={saved or 60}\n')
     (lab.repo / 'Cargo.toml').write_text('# disk floor prebuild fixture\n')
     lab.call(['git', 'add', 'Cargo.toml'])
     lab.call(['git', 'commit', '-qm', 'prebuild fixture'])
@@ -860,18 +860,30 @@ def land_disk_floor(lab, mode='refused', machine=False):
     if mode == 'payload':
         lab.barrier('payload_floor', label)
         assert lab.event(label, 'admit') and not lab.task(label).get('payload_started')
-        lab.free(5)
+        if saved is not None:
+            assert lab.task(label)['floor_gb'] == saved
+            (lab.path / 'tmp/machine.env').write_text(f'PLAN_MIN_DISK_GB={40 if saved == 60 else 60}\n')
+        lab.free(45 if saved is not None else 5)
         lab.disarm('payload_floor')
     else:
         wait_for(lambda: (task := lab.task(label)) and task.get('disk_wait'), 'landing queued below floor')
         assert client.poll() is None and not lab.task(label).get('payload_started')
         lab.age(label, 1201)
+    if saved == 40:
+        wait_for(prebuilt.exists, 'prebuild uses its saved lower floor')
+        lab.free(100)
+        lab.done(client)
+        task = lab.released(label)
+        assert task['code'] == 0 and task['outcome'] == 'completed'
+        assert lab.event(label, 'payload_begin') and gated.exists()
+        return
     lab.done(client, 9)
     assert not prebuilt.exists(), 'below-floor prebuild ran'
     assert not gated.exists(), 'below-floor gate ran'
     text = output.read_text()
-    floor, source = (60, 'machine.env') if machine else (40, 'default')
-    assert f'5 GB free on {lab.path}, below the disk floor of {floor} GB ({source})' in text, text
+    floor = saved or (60 if machine else 40)
+    free = 45 if saved is not None else 5
+    assert f'{free} GB free on {lab.path}, below the disk floor of {floor} GB (as submitted)' in text, text
     assert 'heavy: disk floor refused before payload start' in text, text
     assert lab.call(['git', 'rev-parse', 'main']).stdout.strip() == base
     assert lab.call(['git', 'rev-parse', 'HEAD']).stdout.strip() == head
@@ -1991,6 +2003,8 @@ def main():
              ('land-floor-refused-client-killed', land_floor_client_killed),
              ('build-floor-refused', build_floor_refused),
              ('land-floor-payload', lambda lab: land_disk_floor(lab, 'payload')),
+             ('land-floor-payload-saved', lambda lab: land_disk_floor(lab, 'payload', saved=60)),
+             ('land-floor-payload-saved-low', lambda lab: land_disk_floor(lab, 'payload', saved=40)),
              ('normal', normal), ('unsupported', unsupported), ('configured-kache', configured_kache),
              ('enospc-snapshot', lambda lab: storage_failure(lab, 'snapshot')),
              ('enospc-journal', lambda lab: storage_failure(lab, 'journal')),
