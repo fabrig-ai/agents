@@ -224,8 +224,8 @@ temper's binding, `docs/design/qa.md` 3, is the source; as of 10-27:
   shows each pool's size, QA's holding and the reserve.
 - **A rung walk** is started by `qa walk REPO RUNG [--kind KIND]
   [--build REF] [--cap MINUTES]` (qa-flow.md 10.7; agents b844696):
-  REF `main`, `origin/<branch>` (the exact remote ref) or a unique
-  commit; it prints the walk's name, each login `NAME PATH` and its run.
+  REF `main`, `origin/<branch>`, a bare `<branch>` on origin, or a
+  unique commit, resolved before anything is taken (agents fe72017); it prints the walk's name, each login `NAME PATH` and its run.
   The default kind is ChatGPT+Forgejo's; `--kind claude` for Claude's.
   It paused, `qa walk REPO RUNG --resume NAME --build REF`, refused at
   once while its kind has no free slot or login. The service ends and
@@ -481,3 +481,5 @@ Newest last, times UTC.
 - 10-27 21:2xZ: QA's choosing by default (agents 45c713a) and triage by landing (agents 66efd32) built; section 4 updated (the director).
 - 10-27 21:4xZ: the stuck alert landed (agents 5330c8b): the last of
   the day's exempt QA kit (design/qa-evidence).
+- 10-27 22:3xZ: `qa walk` resolves `--build` first and takes a bare
+  branch on origin (agents fe72017; design/ladder's note).

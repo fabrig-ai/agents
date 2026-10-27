@@ -836,7 +836,11 @@ the kit only starts it and ends it, as the service ends a pass.
   anything: REF is a commit (unique), `origin/<branch>`, or a bare
   `<branch>` that names a branch on origin; one it can't resolve is
   refused at once, naming the form to try (design/ladder, 10-27: a
-  resume took and gave back a login before it refused its build). RUNG is the ladder's name
+  resume took and gave back a login before it refused its build). A
+  branch resolves by its exact ref on origin, never to a tag or a
+  local branch of that spelling, and the clones' fetch prunes, so that a
+  branch deleted on origin never resolves; the resolved commit is saved
+  and checked out even if the branch moves after (agents fe72017). RUNG is the ladder's name
   (`a`, `b0`), one namespace on the machine. Under the walks' lock,
   `tmp/qa/walks.lock`, one walk at a time:
   1. the walk is the rung's next number n of its kind, its name as
