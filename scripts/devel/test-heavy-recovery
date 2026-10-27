@@ -180,7 +180,7 @@ class Lab:
         temporary.write_text(str(gb))
         temporary.replace(self.available)
 
-    def age(self, label, seconds):
+    def age(self, label, seconds, changed_boot=False):
         with (self.base / 'host.lock').open('a') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             data = self.state()
@@ -188,6 +188,10 @@ class Lab:
             for key in ('submitted', 'payload_started', 'payload_ended', 'ended', 'disk_wait'):
                 if key in task:
                     task[key] -= seconds
+            if changed_boot:
+                # Stop only while we own the lock, so the timer can recover it.
+                os.kill(task['wrapper']['pid'], signal.SIGSTOP)
+                self.boot.write_text('fixture-next-boot\n')
             temporary = self.base / 'state.json.fixture-new'
             temporary.write_text(json.dumps(data) + '\n')
             temporary.replace(self.base / 'state.json')
@@ -1051,18 +1055,14 @@ def land_floor_wait_orphan(lab, changed_boot=False):
     lab.waiting(label)
     wait_for(lambda: lab.task(label).get('disk_wait'), 'disk wait before wrapper loss')
     lab.call(['systemctl', '--user', 'stop', lab.prefix + '-reconcile.timer'])
-    if changed_boot:
-        # Keep the wrapper from reconciling between the boot change and aging.
-        wrapper = lab.task(label)['wrapper']['pid']
-        os.kill(wrapper, signal.SIGSTOP)
-        lab.boot.write_text('fixture-next-boot\n')
-    else:
+    if not changed_boot:
         lab.kill_wrapper(label)
-    lab.age(label, 1201)
+    # Publish the boot change and aged wait under one lock, before any recovery.
+    lab.age(label, 1201, changed_boot)
     lab.call(['systemctl', '--user', 'start', lab.prefix + '-reconcile.timer'])
     task = lab.released(label)
     if changed_boot:
-        os.kill(wrapper, signal.SIGCONT)
+        os.kill(task['wrapper']['pid'], signal.SIGCONT)
     lab.done(client, 137)
     assert task['outcome'] == 'recovered' and task['code'] == 137
     assert not task.get('payload_started') and not lab.event(label, 'payload_begin')
@@ -1073,6 +1073,32 @@ def land_floor_wait_orphan(lab, changed_boot=False):
     receipt = lab.base / 'receipts' / (task['token'] + '.json')
     wait_for(receipt.exists, 'recovered waiting task receipt')
     assert json.loads(receipt.read_text())['outcome'] == 'recovered'
+    if changed_boot:
+        wait_for(lambda: any(event['event'].startswith('containment_probe:') and
+                             event['boot'] == 'fixture-next-boot' for event in lab.events()),
+                 'boot containment probe published before replay checks')
+
+
+def land_floor_refused_freed(lab):
+    label = 'land repo prebuild'
+    lab.env.update(PLAN_MIN_DISK_GB='40', PLAN_LAND_ROOM_GB='30')
+    lab.free(5)
+    client = lab.start(label)
+    lab.waiting(label)
+    wait_for(lambda: lab.task(label).get('disk_wait'), 'disk wait before refusal')
+    lab.arm('client_refusal')
+    lab.age(label, 1201)
+    lab.barrier('client_refusal', label)
+    assert lab.task(label)['state'] == 'released'
+    lab.free(100)
+    lab.disarm('client_refusal')
+    lab.done(client, 2)
+    task = lab.task(label)
+    assert task['outcome'] == 'refused' and task['code'] == 2
+    assert not task.get('payload_started') and not lab.event(label, 'payload_begin')
+    text = (lab.path / (label + '.client.txt')).read_text()
+    diagnostic = f"heavy: task {task['id']} stayed below its floor of 40 GB for 20 minutes; 100 GB free now"
+    assert diagnostic + '\nheavy: disk floor refused before payload start\n' in text, text
 
 
 def land_floor_client_killed(lab):
@@ -2036,6 +2062,7 @@ def main():
              ('land-floor-refused-machine', lambda lab: land_disk_floor(lab, machine=True)),
              ('land-floor-refused-gate', lambda lab: land_disk_floor(lab, 'gate')),
              ('land-floor-refused-client-killed', land_floor_client_killed),
+             ('land-floor-refused-freed', land_floor_refused_freed),
              ('build-floor-refused', build_floor_refused),
              ('land-floor-payload', lambda lab: land_disk_floor(lab, 'payload')),
              ('land-floor-payload-saved', lambda lab: land_disk_floor(lab, 'payload', saved=60)),

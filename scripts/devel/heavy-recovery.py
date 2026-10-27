@@ -955,11 +955,15 @@ def submit(args, lane, tail_lines, exclusive):
             break
         time.sleep(0.1)
     if task.get('refusal') == FLOOR_REFUSAL and not task.get('payload_started'):
+        fault('client_refusal', token)
         result = run(['bash', '-c', 'set -euo pipefail; root=$1; tmp=$2; '
                       'source "$3"; disk_floor heavy "$4"',
                       'heavy-disk-floor', ROOT, TMP, KIT / 'kit.sh', str(floor_of(task))])
         if result.stderr:
             say(result.stderr.rstrip(), sys.stderr)
+        else:
+            say(f"heavy: task {task['id']} stayed below its floor of {floor_of(task)} GB for 20 minutes; "
+                f"{free_gb()} GB free now", sys.stderr)
     if task.get('refusal'):
         print('heavy: ' + task['refusal'], file=sys.stderr, flush=True)
     if task.get('outcome') == 'cancelled' and not handled:
