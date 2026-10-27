@@ -832,7 +832,11 @@ the kit only starts it and ends it, as the service ends a pass.
   `<KIND>-<n>` in the clock's walk column.
 - **`qa walk REPO RUNG [--kind KIND] [--build REF] [--login POOL]...
   [--cap MINUTES]`,** on the logins' machine, by the rung's owner, whose
-  address (`POST_NAME`) it checks first. RUNG is the ladder's name
+  address (`POST_NAME`) and its REF it checks first, before it takes
+  anything: REF is a commit (unique), `origin/<branch>`, or a bare
+  `<branch>` that names a branch on origin; one it can't resolve is
+  refused at once, naming the form to try (design/ladder, 10-27: a
+  resume took and gave back a login before it refused its build). RUNG is the ladder's name
   (`a`, `b0`), one namespace on the machine. Under the walks' lock,
   `tmp/qa/walks.lock`, one walk at a time:
   1. the walk is the rung's next number n of its kind, its name as
