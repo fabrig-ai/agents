@@ -98,13 +98,13 @@ GitHub, and the sweep of the six machines' `tmp/` (section 6).
 
 ## 4. tidy
 
-`scripts/devel/tidy [--dry-run] [REPO... | --mission M | --targets [--room GB]]`,
+`scripts/devel/tidy [--dry-run] [REPO... | --mission M | --targets [--room GB] | --checkouts]`,
 Python, under a lock per machine (`tmp/logs/tidy.lock`; a second run
 waits for it), safe to run at any time. `--dry-run` takes no lock,
 deletes nothing and prints what it would do. With REPO, it runs steps 1
 to 3 and 7 for those repositories; with `--mission M`, step 4 for M;
-with `--targets`, step 9 alone, with no fetch and no pull; with none of
-them, every step.
+with `--targets`, step 9 alone, with no fetch and no pull; with
+`--checkouts`, step 10 alone, likewise; with none of them, every step.
 
 - **The repositories** are the workspace's seven (`agents`, `skein`,
   `smith`, `jig`, `hearth`, `qa`, `temper`), at their primary checkouts in
@@ -227,6 +227,28 @@ new work. There is no keep list: a landed branch's commits are on
    - On XFS a target shares its blocks with kache's store (reflinks),
      so clearing one frees what the store no longer holds; kache's own
      collection frees the rest ([build-cache.md](build-cache.md) 7).
+10. **Cargo's git checkouts no lock pins** (the director, 10-27: one
+    checkout per pinned revision of jig, skein and smith, never pruned;
+    hetzner held 28 GB, 494 revisions of which 95 were pinned, and
+    went under its floor): each `git/checkouts/<repo>-<hash>/<rev>/` in
+    Cargo's home (`CARGO_HOME`, else `~/.cargo`), only on a machine
+    where heavy is installed: a person's laptop keeps its own Cargo
+    home (build-infrastructure.md 12).
+    - **Pinned:** `<rev>` begins a commit that a `Cargo.lock` under the
+      workspace names in a `source = "git+…#<commit>"` line: the
+      primary checkouts', and every worktree's under `tmp/` and a
+      repository's `.claude/worktrees/`, never looking inside a
+      `target/`, a `.git` or a Cargo home.
+    - **Kept:** a pinned checkout; one changed in the last 6 hours (a
+      repin under way, before its lock names it); one held by a
+      process (section 4's sense).
+    - **Deleted:** the rest, each whole. Cargo checks a missing
+      checkout out again from its git database (`git/db/`, never
+      touched) when a build next pins it, so a deletion costs that
+      build a few seconds at most.
+    - **What it freed:** after the step, `tidy: checkouts: N deleted,
+      M pinned, K recent, X GB freed`, X the free space it gained on
+      the Cargo home's filesystem.
 
 - **`land`'s mark.** After a landing that pushed, or landed on the
   local `main` (`--local`), `land` sets `branch.<name>.landed` to the
@@ -250,8 +272,9 @@ new work. There is no keep list: a landed branch's commits are on
 - **Its output:** a line for each thing deleted or kept, `tidy: deleted
   KIND WHAT COMMIT (REASON)` or `tidy: kept KIND WHAT: REASON`, and
   `tidy: would delete` under `--dry-run`. KIND is `github-branch`,
-  `branch`, `worktree`, `mission`, `directory`, `script`, `entry` or
-  `target`; WHAT is `REPO:NAME` for a branch, else the path. A target
+  `branch`, `worktree`, `mission`, `directory`, `script`, `entry`,
+  `target` or `checkout`; WHAT is `REPO:NAME` for a branch, else the
+  path. A target
   has no commit: `tidy: deleted target PATH (idle 3 h)`, or `(beyond
   two of OWNER)`. New work prints nothing.
 - **Its exit:** 0 done; 1 something kept that needs a decision (step
@@ -278,8 +301,8 @@ new work. There is no keep list: a landed branch's commits are on
 - **The director's check** (director.md 7) runs `tidy` on each machine,
   for the machines with no landing, and takes a decision on each line
   of an exit 1.
-- **Each machine's tend,** every 5 minutes, runs `tidy --targets`
-  ([fleet-watch.md](fleet-watch.md) 4).
+- **Each machine's tend,** every 5 minutes, runs `tidy --targets`, and
+  once an hour `tidy --checkouts` ([fleet-watch.md](fleet-watch.md) 4).
 - No agent runs it, and no role holds a step of cleanup.
 
 ## 6. The sweep of 10-25

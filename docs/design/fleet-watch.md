@@ -195,6 +195,10 @@ commands, in this order, each whatever the others' exits:
    build-infrastructure.md 2 defines it) in heavy's ledger waits for
    its floor (`disk_wait`, build-infrastructure.md 2, "A
    landing's room"), GB that task's `floor_gb` plus its `room_gb`;
+   then, when the last `--checkouts` its record holds began an hour
+   ago or more, or never, `tidy --checkouts`: Cargo's git checkouts no
+   lock pins (cleanup.md 4, step 10), its line of what it freed among
+   what the watch's post reports;
 2. `post wake --older 15`: each name whose mail has waited 15 minutes
    with no waiter, woken as delivery would wake it (post.md 3, 4);
 3. `codex-run stale --post`: each run that will never post, told to its
