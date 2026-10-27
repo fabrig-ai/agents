@@ -4,6 +4,8 @@
 test-gate-policy 26 Proves policy identity, gate receipts, cache admission and candidate integrity before landing
 # test-land-set: 61.692 CPU-s, measured share 20.289%.
 test-land-set 26 Proves set ordering, all gates before pushes, pin propagation and recovery in isolated Git repositories
-# qa-real 2026-10-26, gate 8d4060d6673a4eb2a0122e330e4b1c36: 54 cases,
-# 54.684 CPU-s, share 16.697%; maximum = ceil(share * 1.25).
-test-qa 21 Proves QA selection and triage plus rung login custody, unit-stop ordering and crash recovery without real repositories
+# qa-evidence-keep 2026-10-27, 99 cases; heavy gates
+# c79bec87564d4e76a6b53fb42a74ecaa: 141.638 CPU-s, share 26.715%;
+# 6ac43512498e44cdbb35a1ede5acbcff: 138.977 CPU-s, share 26.224%.
+# maximum = ceil(larger measured share * 1.25).
+test-qa 34 Proves QA selection and triage, concurrent pass shares and slots, pool login custody, unit-stop ordering, bounded calls and crash recovery without real repositories
