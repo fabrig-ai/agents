@@ -258,6 +258,57 @@ class Lab:
         return tip
 
 
+def follower_adopts_an_orphan(lab):
+    # A real subreaper ancestor stands in for systemd --user; it catches a
+    # misdirected SIGTERM and records every adopted child before returning.
+    git = lab.root / 'bin/git'
+    git.write_text(f'#!{PYTHON} -S\n' + r'''import json, os, signal, time
+from pathlib import Path
+root = Path(os.environ['AFTER_LANDING_FIXTURE'])
+if os.fork() == 0:
+    parent = os.getpid()
+    if os.fork() != 0:
+        os._exit(0)
+    while os.getppid() == parent:
+        time.sleep(.01)
+    pid = os.getppid()
+    (root / 'orphan.json').write_text(json.dumps(dict(pid=os.getpid(), parent=pid)))
+    os.kill(pid, signal.SIGTERM)
+    os._exit(0)
+os.wait()
+# Keep command() open until the signal has reached the follower.
+time.sleep(1)
+''')
+    git.chmod(0o700)
+    manager = lab.root / 'manager.py'
+    manager.write_text(r'''import ctypes, json, os, signal, subprocess, sys
+from pathlib import Path
+root = Path(os.environ['AFTER_LANDING_FIXTURE'])
+records = []
+assert ctypes.CDLL(None).prctl(36, 1, 0, 0, 0) == 0
+signal.signal(signal.SIGTERM, lambda sig, frame: records.append(dict(signal=sig)))
+child = subprocess.Popen(sys.argv[1:])
+records.append(dict(manager=os.getpid(), follower=child.pid))
+while True:
+    try:
+        pid, status = os.waitpid(-1, 0)
+    except ChildProcessError:
+        break
+    code = os.waitstatus_to_exitcode(status)
+    records.append(dict(pid=pid, code=code))
+    if pid == child.pid:
+        child.returncode = code
+(root / 'manager.json').write_text(json.dumps(records))
+''')
+    call([PYTHON, '-I', '-B', manager, PYTHON, '-I', '-B', SCRIPT,
+          'follow', 'demo', '--origin', lab.origin, '--once'], lab.root, lab.env)
+    records = json.loads((lab.root / 'manager.json').read_text())
+    orphan = json.loads((lab.root / 'orphan.json').read_text())
+    assert orphan['parent'] == records[0]['follower'], records
+    assert not any('signal' in row for row in records), records
+    assert next(row['code'] for row in records if row.get('pid') == records[0]['follower']) == -15, records
+
+
 def polls(lab):
     head = lab.green()
     records = lab.records()
@@ -1205,7 +1256,7 @@ def part_refusals(lab):
         assert lab.calls() == [] and lab.records() == [] and lab.posts() == [], part
 
 
-CASES = (polls, target_past_its_cap_is_removed, cap_never_mid_run, cap_from_follow_line,
+CASES = (follower_adopts_an_orphan, polls, target_past_its_cap_is_removed, cap_never_mid_run, cap_from_follow_line,
          cap_removal_fails, cap_measure_fails, target_allocation, no_tier, flake, starved_pass, starved_with_a_rerun, red, bisect, baseline, already_red, fault, unwatched_red,
          meets_landings, parts_meet_landings, not_runner_machine, one_follower, refusals,
          multi_bisect, limits, nested_faults, unnamed, pending_delivery, stale_watch, history_reset,

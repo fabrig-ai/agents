@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Durable admission and cgroup recovery for heavy; build-infrastructure.md."""
 import contextlib
+import ctypes
 import errno
 import fcntl
 import functools
@@ -50,6 +51,14 @@ WEIGHTS = {'land': '10000', 'build': '1000', 'background': '100', 'idle': 'idle'
 
 class Refusal(Exception):
     pass
+
+
+def subreaper():
+    # An orphan's getppid() must name this guard, never systemd --user
+    # (build-infrastructure.md 3: the payload adopts its orphans).
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
+        raise Refusal('cannot become child subreaper: ' + os.strerror(ctypes.get_errno()))
 
 
 def run(args, **kw):
@@ -1203,10 +1212,23 @@ def payload(token):
         task['payload_started'] = time.time()
         ledger.event(task, 'payload_begin')
         ledger.save()
+    subreaper()
     child = subprocess.Popen(args, stdin=subprocess.DEVNULL)
     next_gc = time.monotonic() + 120
     serial = 0
-    while child.poll() is None:
+    while child.returncode is None:
+        # One waiter owns both the command's status and adopted orphans.
+        while True:
+            try:
+                pid, status = os.waitpid(-1, os.WNOHANG)
+            except ChildProcessError:
+                break
+            if not pid:
+                break
+            if pid == child.pid:
+                child.returncode = os.waitstatus_to_exitcode(status)
+        if child.returncode is not None:
+            break
         if lane == 'gate' and time.monotonic() >= next_gc:
             gc(token, serial)
             serial += 1
@@ -1228,8 +1250,13 @@ def payload(token):
         task['code'], task['state'] = code, 'finishing'
         ledger.save()
     fault('payload_finished', token)
-    # ExitType=cgroup holds any setsid children until the outside reconciler
-    # kills this service and proves it empty. No child can outlive release.
+    # Keep the adopting parent until all its children are reaped. A child
+    # that stays alive dies with this unit at the reconciler's release.
+    while True:
+        try:
+            os.waitpid(-1, 0)
+        except ChildProcessError:
+            break
     return code
 
 

@@ -5,6 +5,7 @@ With --part K/N, follow that part alone under the name REPO.KofN.
 """
 import argparse
 import copy
+import ctypes
 from datetime import datetime, timezone
 import fcntl
 import json
@@ -48,6 +49,24 @@ SHA = re.compile(r'[0-9a-f]{40}')
 SUMMARY = re.compile(r'^heavy: task \d+ \([^\n)]+\) exit (-?\d+), waited [0-9.]+s, ran ([0-9.]+)s, log (.+)$', re.M)
 
 
+def subreaper():
+    # An orphan of git/ssh/post must signal this follower, never systemd
+    # --user (build-infrastructure.md 11: the follower adopts its orphans).
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
+        raise OSError(ctypes.get_errno(), 'cannot become child subreaper')
+
+
+def reap():
+    while True:
+        try:
+            pid, _ = os.waitpid(-1, os.WNOHANG)
+        except ChildProcessError:
+            return
+        if not pid:
+            return
+
+
 def now():
     return datetime.now(timezone.utc).isoformat()
 
@@ -67,9 +86,12 @@ def seconds(value):
 
 
 def command(argv, cwd=None, env=None):
-    return subprocess.run([str(arg) for arg in argv], cwd=cwd, env=env,
-                          stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                          stderr=subprocess.STDOUT, text=True, errors='replace')
+    try:
+        return subprocess.run([str(arg) for arg in argv], cwd=cwd, env=env,
+                              stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                              stderr=subprocess.STDOUT, text=True, errors='replace')
+    finally:
+        reap()
 
 
 def git(clone, *args):
@@ -517,6 +539,11 @@ def pass_once(args, base, clone, state):
 
 
 def main():
+    try:
+        subreaper()
+    except OSError as error:
+        print(f'after-landing: {error}', file=sys.stderr)
+        return 2
     # The director names the runner's machine by this file (build-infrastructure.md 11).
     if ('AFTER_LANDING_FIXTURE' not in os.environ
             and not (Path.home() / '.config/agents-after-landing/director').is_file()):
@@ -586,6 +613,7 @@ def main():
         state = read_state(state_path, args.origin)
         while True:
             pass_once(args, base, clone, state)
+            reap()
             if args.once:
                 return 0
             time.sleep(args.poll)

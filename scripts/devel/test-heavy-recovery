@@ -337,6 +337,7 @@ class Lab:
                 'tasks': len(self.state()['tasks'])}
 
     def cleanup(self):
+        (self.path / 'guard-ended').touch()
         # Kill only this fixture's recorded wrapper identities and unit names.
         for injection in self.faults.glob('enospc-*'):
             injection.unlink()
@@ -404,6 +405,128 @@ class Lab:
             'unit_files_remaining': remaining_files,
             'private_environment_files_removed': not list(self.base.glob('*.env'))}, indent=2) + '\n')
         assert not remaining_files and not live_wrappers
+
+
+# The unit still owns the real guard and its real ledger; only its parent is
+# replaced. Never let a failed adoption send this fixture's signal to systemd.
+PAYLOAD_MANAGER = r'''import ctypes, json, os, signal, subprocess, sys, time
+from pathlib import Path
+kit = Path(__file__).resolve().parent
+log = Path(os.environ['DEV_ROOT']) / 'manager.jsonl'
+def record(**row):
+    with log.open('a') as out:
+        out.write(json.dumps(row) + '\n')
+assert ctypes.CDLL(None).prctl(36, 1, 0, 0, 0) == 0
+signal.signal(signal.SIGTERM, lambda sig, frame: record(signal=sig))
+# Keep the guard alive to reap the sender, even if the signal arrives before
+# the sender's exit. This story checks routing; the command supplies its code.
+def guard_signals():
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+child = subprocess.Popen([sys.executable, '-B', str(kit / 'heavy-recovery.py'), *sys.argv[1:]],
+                         preexec_fn=guard_signals)
+record(manager=os.getpid(), guard=child.pid)
+while True:
+    try:
+        pid, status = os.waitpid(-1, 0)
+    except ChildProcessError:
+        break
+    orphan = Path(os.environ['DEV_ROOT']) / 'orphan.json'
+    remains = orphan.exists() and Path(f"/proc/{json.loads(orphan.read_text())['pid']}").exists()
+    record(pid=pid, code=os.waitstatus_to_exitcode(status), time=time.monotonic(), orphan_remains=remains)
+    if pid == child.pid:
+        child.returncode = os.waitstatus_to_exitcode(status)
+        (Path(os.environ['DEV_ROOT']) / 'guard-ended').touch()
+sys.exit(child.returncode if child.returncode >= 0 else 128 - child.returncode)
+'''
+
+
+def payload_manager(lab):
+    kit = lab.path / 'kit'
+    shutil.copytree(KIT, kit)
+    manager = kit / 'payload-manager.py'
+    manager.write_text(PAYLOAD_MANAGER)
+    heavy = kit / 'heavy'
+    text = heavy.read_text().replace('exec python3 -B "$kit/heavy-recovery.py" "$@"',
+        'if [[ ${1:-} == --payload ]]; then exec python3 -B "$kit/payload-manager.py" "$@"; fi\n'
+        'exec python3 -B "$kit/heavy-recovery.py" "$@"')
+    temporary = heavy.with_suffix('.new')
+    temporary.write_text(text)
+    temporary.chmod(0o700)
+    temporary.replace(heavy)
+    # Let the stand-in record the guard's natural return before release kills
+    # the unit. The real systemctl still supplies every cgroup-empty proof.
+    systemctl = lab.path / 'fixture-bin/systemctl'
+    real_systemctl = shutil.which('systemctl')
+    systemctl.write_text(f'#!{sys.executable}\n' +
+        'import os, sys, time\nfrom pathlib import Path\n' +
+        f'root=Path({str(lab.path)!r})\n' +
+        f'unit_prefix={lab.prefix!r}\n' +
+        'if "kill" in sys.argv and "--signal=KILL" in sys.argv and sys.argv[-1].startswith(unit_prefix):\n'
+        '    deadline=time.monotonic()+' + str(HUNG_HEAVY_S) + '\n'
+        '    while not (root / "guard-ended").exists() and time.monotonic() < deadline: time.sleep(.01)\n' +
+        f'os.execv({real_systemctl!r}, [{real_systemctl!r}, *sys.argv[1:]])\n')
+    systemctl.chmod(0o700)
+    return heavy
+
+
+def payload_adopts_an_orphan_that_signals_its_parent(lab):
+    heavy = payload_manager(lab)
+    orphan = lab.path / 'orphan.json'
+    code = (f'import json, os, signal, time; from pathlib import Path\n'
+            f'path=Path({str(orphan)!r})\n'
+            'if os.fork() == 0:\n'
+            '    parent=os.getpid()\n'
+            '    if os.fork() != 0: os._exit(0)\n'
+            '    while os.getppid() == parent: time.sleep(.01)\n'
+            '    pid=os.getppid()\n'
+            '    path.write_text(json.dumps(dict(pid=os.getpid(), parent=pid)))\n'
+            '    os.kill(pid, signal.SIGTERM)\n'
+            '    os._exit(0)\n'
+            'os.wait()\n'
+            'while not path.exists(): time.sleep(.01)\n'
+            'pid=json.loads(path.read_text())["pid"]\n'
+            'while Path(f"/proc/{pid}").exists(): time.sleep(.01)\n'
+            'raise SystemExit(7)\n')
+    result = lab.call([heavy, '--', sys.executable, '-c', code], check=False, timeout=HUNG_HEAVY_S,
+                      environment=dict(lab.env, HEAVY_LABEL='adoption'))
+    assert result.returncode == 7, result.stdout + result.stderr
+    task = lab.released('adoption')
+    records = [json.loads(line) for line in (lab.path / 'manager.jsonl').read_text().splitlines()]
+    manager = records[0]
+    assert fixture_json(orphan)['parent'] == manager['guard'], records
+    assert not any('signal' in row or ('pid' in row and row['pid'] != manager['guard']) for row in records), records
+    assert task['code'] == 7
+
+
+def payload_reaps_adopted_before_it_ends(lab):
+    heavy = payload_manager(lab)
+    orphan = lab.path / 'orphan.json'
+    ended = lab.path / 'orphan-ended'
+    code = (f'import json, os, time; from pathlib import Path\n'
+            f'path=Path({str(orphan)!r}); ended=Path({str(ended)!r})\n'
+            f'events=Path({str(lab.base / "events.jsonl")!r})\n'
+            'if os.fork() == 0:\n'
+            '    parent=os.getpid()\n'
+            '    if os.fork() != 0: os._exit(0)\n'
+            '    while os.getppid() == parent: time.sleep(.01)\n'
+            '    path.write_text(json.dumps(dict(pid=os.getpid(), parent=os.getppid())))\n'
+            '    while not any(json.loads(line)["event"] == "payload_end" for line in events.read_text().splitlines()): time.sleep(.01)\n'
+            '    ended.write_text(str(time.monotonic()))\n'
+            '    os._exit(0)\n'
+            'os.wait()\n'
+            'while not path.exists(): time.sleep(.01)\n')
+    result = lab.call([heavy, '--', sys.executable, '-c', code], check=False, timeout=HUNG_HEAVY_S,
+                      environment=dict(lab.env, HEAVY_LABEL='reaping'))
+    assert result.returncode == 0, result.stdout + result.stderr
+    lab.released('reaping')
+    records = [json.loads(line) for line in (lab.path / 'manager.jsonl').read_text().splitlines()]
+    manager = records[0]
+    assert fixture_json(orphan)['parent'] == manager['guard'], records
+    assert ended.exists(), 'guard did not stay for its orphan'
+    assert not Path(f"/proc/{fixture_json(orphan)['pid']}").exists(), 'adopted child left a zombie'
+    assert [row['pid'] for row in records if 'pid' in row] == [manager['guard']], records
+    assert records[-1]['time'] >= float(ended.read_text()), records
+    assert not records[-1]['orphan_remains'], records
 
 
 def normal(lab):
@@ -2114,6 +2237,8 @@ def main():
              ('land-floor-payload', lambda lab: land_disk_floor(lab, 'payload')),
              ('land-floor-payload-saved', lambda lab: land_disk_floor(lab, 'payload', saved=60)),
              ('land-floor-payload-saved-low', lambda lab: land_disk_floor(lab, 'payload', saved=40)),
+             ('payload-adopts-an-orphan-that-signals-its-parent', payload_adopts_an_orphan_that_signals_its_parent),
+             ('payload-reaps-adopted-before-it-ends', payload_reaps_adopted_before_it_ends),
              ('normal', normal), ('unsupported', unsupported), ('configured-kache', configured_kache),
              ('enospc-snapshot', lambda lab: storage_failure(lab, 'snapshot')),
              ('enospc-journal', lambda lab: storage_failure(lab, 'journal')),
