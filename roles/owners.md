@@ -145,7 +145,12 @@ out. The security rules are director.md 10's.
   squashed commit), rebases on `main`, repins, proves the set and lands
   it, and repairs what the gates find. How a set lands is
   [landing-flow.md](../docs/design/landing-flow.md) 9.1's. The owner
-  decides when, and reads the outcome.
+  decides when, and reads the outcome. A landing that changes what a
+  world's stories rely on (its startup, its fixtures, a family's
+  layout) names that world's `qa` profile in its landing task, run
+  before the set proves: the gates skip `qa` tests, and after landing's
+  tier runs them only once the change is on `main` (part B of 10-27
+  turned temper's tier red on eleven of them).
 - **A failed landing** goes back to an implementer for repair. The
   owner escalates `main`'s own fault, an infrastructure fault that
   lasts 15 minutes, and a third failed landing.
