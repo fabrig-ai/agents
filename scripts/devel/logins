@@ -4,6 +4,8 @@
 logins add NAME PATH
 logins take NAME --as HOLDER [--note TEXT] [--wait SECONDS | --now]
 logins take POOL --any --as HOLDER [--note TEXT] [--wait SECONDS | --now]
+logins drop NAME --as HOLDER
+logins drop POOL --any --as HOLDER
 logins give NAME --as HOLDER
 logins list [NAME]
 """
@@ -267,6 +269,16 @@ class Workspace:
                       key=lambda name: (name != pool, int(name[len(pool) + 1:] or '0')
                                         if name != pool else 0, name))
 
+    def drop(self, request, pool, holder):
+        need(not pool or pool_of(request) == request, f'not a pool: {request}')
+        previous = len(self.waiting)
+        self.waiting = [row for row in self.waiting
+                        if (row['holder'], row['request'], row['pool']) != (holder, request, pool)]
+        if len(self.waiting) != previous:
+            self.write_waiting()
+            return True
+        return False
+
     def take(self, request, pool, holder, note, now_only=False):
         if pool:
             need(pool_of(request) == request, f'not a pool: {request}')
@@ -440,6 +452,10 @@ def main():
     timing = take.add_mutually_exclusive_group()
     timing.add_argument('--wait', type=seconds)
     timing.add_argument('--now', action='store_true')
+    drop = sub.add_parser('drop')
+    drop.add_argument('name')
+    drop.add_argument('--any', action='store_true', dest='pool')
+    drop.add_argument('--as', dest='holder', required=True)
     give = sub.add_parser('give')
     give.add_argument('name')
     give.add_argument('--as', dest='holder', required=True)
@@ -463,6 +479,10 @@ def main():
             need(reason is None, f'{args.path}: {reason}', 1)
             with workspace.locked(create=args.name):
                 workspace.login(args.name).add(args.path)
+        elif args.command == 'drop':
+            with workspace.locked():
+                dropped = workspace.drop(args.name, args.pool, args.holder)
+                print(('dropped: ' if dropped else 'not waiting: ') + args.name)
         elif args.command == 'give':
             with workspace.locked():
                 workspace.login(args.name).give(args.holder)
@@ -476,6 +496,9 @@ def main():
                 if reason is None:
                     break
                 remaining = deadline - time.monotonic()
+                if args.wait is not None and remaining <= 0:
+                    with workspace.locked():
+                        workspace.drop(args.name, args.pool, args.holder)
                 need(args.wait is not None and remaining > 0, reason, 1)
                 time.sleep(min(poll, remaining))
         return 0
