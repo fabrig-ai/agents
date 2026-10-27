@@ -2,8 +2,8 @@
 """A login is a private file or a program's configuration directory.
 
 logins add NAME PATH
-logins take NAME --as HOLDER [--note TEXT] [--wait SECONDS]
-logins take POOL --any --as HOLDER [--note TEXT] [--wait SECONDS]
+logins take NAME --as HOLDER [--note TEXT] [--wait SECONDS | --now]
+logins take POOL --any --as HOLDER [--note TEXT] [--wait SECONDS | --now]
 logins give NAME --as HOLDER
 logins list [NAME]
 """
@@ -168,7 +168,7 @@ class Workspace:
         return path
 
     @contextmanager
-    def locked(self, create=None, readonly=False):
+    def locked(self, create=None, readonly=False, queue_readonly=False):
         self.safe(self.tmp)
         self.safe(self.logins)
         self.logins.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -220,9 +220,9 @@ class Workspace:
                     self.waiting = [row for row in self.waiting
                                     if elapsed(now, row['seen']) <= STALE_SECONDS and not self.served(row)]
                     # Persist the merged queue before deleting any old copy: retries are safe.
-                    if legacy or self.waiting != previous:
+                    if not queue_readonly and (legacy or self.waiting != previous):
                         self.write_waiting()
-                    for old in legacy:
+                    for old in legacy if not queue_readonly else []:
                         old.unlink()
                 yield self
 
@@ -265,30 +265,31 @@ class Workspace:
                       key=lambda name: (name != pool, int(name[len(pool) + 1:] or '0')
                                         if name != pool else 0, name))
 
-    def take(self, request, pool, holder, note):
+    def take(self, request, pool, holder, note, now_only=False):
         if pool:
             need(pool_of(request) == request, f'not a pool: {request}')
             need(self.members(request), f'unknown pool: {request}')
         else:
             login = self.login(request)
             current = login.read('holder.json', None)
-            if current and current['holder'] == holder:
+            if not now_only and current and current['holder'] == holder:
                 need(login_check(login.path) is None,
                      f'{request} is held by {holder} and not at rest', 1)
                 print(login.path)
                 return None
         stamp = timestamp()
         now = utc(stamp)
-        entry = next((row for row in self.waiting
+        entry = None if now_only else next((row for row in self.waiting
                       if (row['holder'], row['request'], row['pool']) == (holder, request, pool)), None)
         if entry is None:
             entry = dict(holder=holder, request=request, pool=pool, note=note, since=stamp, seen=stamp)
-            self.waiting.append(entry)
+            if not now_only:
+                self.waiting.append(entry)
         entry['seen'] = stamp
         free = {name for name, login in self.logins_by_name.items()
                 if login.read('holder.json', None) is None and login_check(login.path) is None}
         reserved = {}
-        for row in sorted(self.waiting, key=order):
+        for row in [*sorted(self.waiting, key=order), entry] if now_only else sorted(self.waiting, key=order):
             choices = self.members(row['request']) if row['pool'] else [row['request']]
             available = next((name for name in choices if name in free and name not in reserved), None)
             if row is entry:
@@ -297,17 +298,19 @@ class Workspace:
                     event = login.event_text(stamp, 'take', holder, elapsed(now, entry['since']), entry['note'])
                     # Custody is saved before removing the request and printing the grant.
                     login.write('holder.json', dict(holder=holder, note=entry['note'], since=stamp))
-                    self.waiting.remove(entry)
-                    self.write_waiting()
+                    if not now_only:
+                        self.waiting.remove(entry)
+                        self.write_waiting()
                     replace(login.directory / 'log.tsv', event)
                     print(f'{available} {login.path}' if pool else login.path)
                     return None
                 break
             if available is not None:
                 reserved[available] = row['holder']
-        self.write_waiting()
+        if not now_only:
+            self.write_waiting()
         if pool:
-            return f'{request} has no free login available; waiting'
+            return f'{request} has no free login available' + ('' if now_only else '; waiting')
         current = login.read('holder.json', None)
         if current:
             return f'{request} held by {current["holder"]} since {current["since"]}'
@@ -432,7 +435,9 @@ def main():
     take.add_argument('--any', action='store_true', dest='pool')
     take.add_argument('--as', dest='holder', required=True)
     take.add_argument('--note', default='')
-    take.add_argument('--wait', type=seconds)
+    timing = take.add_mutually_exclusive_group()
+    timing.add_argument('--wait', type=seconds)
+    timing.add_argument('--now', action='store_true')
     give = sub.add_parser('give')
     give.add_argument('name')
     give.add_argument('--as', dest='holder', required=True)
@@ -464,8 +469,8 @@ def main():
             need(math.isfinite(poll) and poll > 0, 'LOGINS_POLL_SECONDS must be finite and positive')
             deadline = time.monotonic() + (args.wait or 0)
             while True:
-                with workspace.locked():
-                    reason = workspace.take(args.name, args.pool, args.holder, args.note)
+                with workspace.locked(queue_readonly=args.now):
+                    reason = workspace.take(args.name, args.pool, args.holder, args.note, args.now)
                 if reason is None:
                     break
                 remaining = deadline - time.monotonic()
