@@ -40,7 +40,7 @@ SHA = r'[0-9a-f]{40}'
 ADDRESS = r'[a-z][a-z0-9-]*(/[a-z0-9][a-z0-9-]*)*@[a-z][a-z0-9-]*'
 PASS_KEYS = 'repository main commits machine model effort started ended wall tokens outcome'.split()
 ATTEMPT_KEYS = ('attempt ref main cap started slot logins kinds pools requests run stage given released '
-                'start_logged end_logged posted capped decision pause_line resume_run report_attempt').split()
+                'start_logged end_logged posted capped decision pause_line resume_run report_attempt alerts').split()
 
 
 class Problem(Exception):
@@ -933,11 +933,7 @@ class Watch:
                          and all(isinstance(pool, str) and re.fullmatch(LOGIN, pool)
                                  and isinstance(name, str) and name in logins and pool_of(name) == pool
                                  for pool, name in state['pools'].items()), f'{path}: invalid pools', 4)
-                alerts = state.get('alerts', {})
-                need(isinstance(alerts, dict) and all(login in logins and isinstance(receipts, dict)
-                     and all(isinstance(address, str) and re.fullmatch(ADDRESS, address)
-                             and type(sent) is bool for address, sent in receipts.items())
-                     for login, receipts in alerts.items()), f'{path}: invalid alerts', 4)
+                check_alerts(state)
                 for key in ('notice', 'notice_pending'):
                     if key in state:
                         notice = state[key]
@@ -995,7 +991,7 @@ class Watch:
                 log(f'{state.get("walk", state.get("pass"))}: gave {name} back')
             else:
                 log(f'{state.get("walk", state.get("pass"))}: cannot give {name} back: {result.stderr.strip()}')
-                if result.returncode == 1 and kind == 'moved' and self.classes[directory] == 'pass':
+                if result.returncode == 1 and kind == 'moved':
                     alerts = state.setdefault('alerts', {})
                     if name not in alerts:
                         alerts[name] = dict.fromkeys(self.stuck, False)
@@ -1022,12 +1018,19 @@ class Watch:
         return sorted(addresses)
 
     def alert(self, directory, state, units):
+        kind = self.classes[directory]
+        name = state[kind]
         for login, receipts in state.get('alerts', {}).items():
             if all(receipts.values()):
                 continue
-            body = (f'Login {login} was stuck in pass {state["pass"]}: not back at {state["logins"][login]}.\n'
-                    f'Its deployment is in {directory}; qa watch gives it back once it is.\n'
-                    f'It counts against QA\'s logins of pool {pool_of(login)} until it is back.\n')
+            body = (f'Login {login} was stuck in {kind} {name}: not back at {state["logins"][login]}.\n'
+                    f'Its deployment is in {directory}; qa watch gives it back once it is.\n')
+            if kind == 'walk':
+                walk_kind = state.get('kind', next(iter(self.options['QA_WALK_KINDS'])))
+                body += (f'Holder: {state["holder"]}. Pool: {pool_of(login)}.\n'
+                         f'It counts against kind {walk_kind}\'s cap until it is back.\n')
+            else:
+                body += f'It counts against QA\'s logins of pool {pool_of(login)} until it is back.\n'
             body += ''.join(f'Unit {unit} is still up or of unknown state.\n'
                             for unit, status in (units or {}).items() if status != 'stopped')
             if units is None:
@@ -1039,7 +1042,7 @@ class Watch:
                 if sent:
                     continue
                 result = self.call('post', 'send', '--as', 'qa-watch', address,
-                                   f'qa: login {login} stuck in pass {state["pass"]}', message)
+                                   f'qa: login {login} stuck in {kind} {name}', message)
                 if result.returncode in (0, 3):
                     receipts[address] = True
                     try:
@@ -1048,7 +1051,7 @@ class Watch:
                         receipts[address] = False
                         raise
                 else:
-                    log(f'{state["pass"]}: alert for {login} to {address} failed; trying next check')
+                    log(f'{name}: alert for {login} to {address} failed; trying next check')
         return all(all(receipts.values()) for receipts in state.get('alerts', {}).values())
 
     def released_login(self, name):
@@ -1774,6 +1777,7 @@ class Watch:
             self.save(directory, state)
         # Confirm the session's stop even when recovering an interrupted end.
         if not self.unit_stopped(unit, self.options['QA_GIVE_BACK_SECONDS']):
+            self.alert(directory, state, None)
             return
         self.end(directory, state)
         missing = self.outstanding(state)
@@ -1813,7 +1817,8 @@ class Watch:
             if sent.returncode in (0, 3):
                 state['posted'] = True
                 self.save(directory, state)
-        if state.get('released') and state.get('end_logged') and state.get('posted') and not missing:
+        if (state.get('released') and state.get('end_logged') and state.get('posted') and not missing
+                and all(all(receipts.values()) for receipts in state.get('alerts', {}).values())):
             state['stage'] = 'paused' if paused else 'ended'
             self.save(directory, state)
 
@@ -1997,6 +2002,14 @@ class Watch:
                     log(f'{state["pass"]}: pruned')
 
 
+def check_alerts(state):
+    alerts = state.get('alerts', {})
+    need(isinstance(alerts, dict) and all(login in state.get('logins', {}) and isinstance(receipts, dict)
+         and all(isinstance(address, str) and re.fullmatch(ADDRESS, address)
+                 and type(sent) is bool for address, sent in receipts.items())
+         for login, receipts in alerts.items()), 'invalid alerts', 4)
+
+
 def walk_attempt(state):
     need(isinstance(state, dict), 'invalid walk attempt', 4)
     need(not state['run'] or re.fullmatch(r'[a-zA-Z0-9_-]+', state['run']), f'attempt: invalid run', 4)
@@ -2019,6 +2032,7 @@ def walk_attempt(state):
          and set(state['pools'].values()) == set(state['logins']), f'attempt: invalid custody', 4)
     need(all(type(state[key]) is bool for key in ('released', 'start_logged', 'end_logged', 'posted')),
          'invalid attempt progress', 4)
+    check_alerts(state)
     if 'report_attempt' in state:
         need(type(state['report_attempt']) is int and 1 <= state['report_attempt'] <= state.get('attempt', 1),
              'invalid report attempt', 4)
@@ -2126,7 +2140,7 @@ def walk(args, workspace):
                          started=timestamp(), slot=None, logins={}, kinds={}, pools={}, given=[],
                          requests=state['requests'], run='', holder='walk/' + kind + '/' + name,
                          stage='reserving', released=False, start_logged=False, end_logged=False,
-                         posted=False, capped=False, resume_run=previous_run)
+                         posted=False, capped=False, resume_run=previous_run, alerts={})
             state.pop('decision', None)
         else:
             kind = args.kind if args.kind is not None else next(iter(kinds))

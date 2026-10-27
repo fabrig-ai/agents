@@ -3795,6 +3795,74 @@ def the_service_ends_a_walk_at_its_cap(lab):
     assert ['send', '--as', 'qa-watch', state['starter'], 'qa: walk rung-b0-1 ended', str(directory / 'post-body')] in lab.calls('post')
 
 
+def a_stuck_walk_login_alerts_the_director_and_the_list(lab):
+    address = 'design/upgrades-draft@fixture'
+    path = lab.home / '.config/agents-qa/stuck'
+    path.parent.mkdir(parents=True)
+    path.write_text(address + '\ndirector@fixture\n')
+    for refused in (False, True):
+        resting(lab, CHATGPT)
+        lab.configure(logins_real=[CHATGPT], post_status={address: 1 if refused else 0})
+        lab.walk('b0', '--login', CHATGPT, '--cap', '1', now='2026-10-27T10:00:00Z')
+        directory, state = lab.walk_states()[-1]
+        if refused:
+            (directory / 'paused').write_text('blocked before deployment\n')
+            lab.end_run(state)
+            lab.watch(now='2026-10-27T10:00:01Z')
+            previous = lab.walk_states()[-1][1]['attempts'][0]
+            lab.run('walk', 'temper', 'b0', '--resume', state['walk'], '--build', 'main',
+                    now='2026-10-27T10:00:00Z')
+            state = lab.walk_states()[-1][1]
+            assert state['attempt'] == 2 and state['alerts'] == {}
+        unit, pid = deployment(lab, directory, login=CHATGPT)
+        executable(directory / 'give-back', 'raise SystemExit(1)\n')
+        before = len(lab.sent())
+        lab.watch(now='2026-10-27T10:01:01Z')
+        posts = lab.sent()[before:]
+        assert len(posts) == 3
+        alerts = posts[:2]
+        assert {post['args'][1] for post in alerts} == {address, 'director@fixture'}
+        for post in alerts:
+            assert post['args'][2] == f'qa: login {CHATGPT} stuck in walk {state["walk"]}'
+            for text in (state['walk'], state['holder'], str(directory), state['logins'][CHATGPT],
+                         unit, 'Pool: chatgpt.', "It counts against kind forgejo's cap until it is back"):
+                assert text in post['body']
+        assert posts[-1]['args'][1:3] == [state['starter'], f'qa: walk {state["walk"]} ended']
+        assert CHATGPT in posts[-1]['body'] and unit in posts[-1]['body']
+        state = lab.walk_states()[-1][1]
+        assert state['alerts'] == {CHATGPT: {address: not refused, 'director@fixture': True}}
+        assert state['attempts'][-1]['alerts'] == state['alerts']
+        assert alive(pid) and not state['given']
+        if not refused:
+            lab.watch()
+            assert lab.sent()[before:] == posts
+        (directory / 'box/login').rename(state['logins'][CHATGPT])
+        lab.watch()
+        dead(pid)
+        state = lab.walk_states()[-1][1]
+        if refused:
+            assert state['stage'] == 'ending' and state['released'] and state['given'] == [CHATGPT]
+            assert state['alerts'][CHATGPT][address] is False
+            # A saved delivery retries even while the run's stop cannot be confirmed.
+            lab.configure(unit_query_failure=True, post_status={address: 3})
+            lab.watch(extra={'QA_GIVE_BACK_SECONDS': '0'})
+            state = lab.walk_states()[-1][1]
+            assert state['alerts'][CHATGPT][address] is True
+            assert state['attempts'][-1]['alerts'] == state['alerts']
+            lab.configure(unit_query_failure=False)
+            lab.watch()
+        state = lab.walk_states()[-1][1]
+        assert state['stage'] == 'ended' and state['given'] == [CHATGPT]
+        if refused:
+            assert state['attempts'][0] == previous and not previous.get('alerts')
+        sent = lab.sent()[before:]
+        assert sum(post['args'][1] == 'director@fixture' for post in sent) == 1
+        assert sum(post['args'][1] == address for post in sent) == (3 if refused else 1)
+        assert sum(post['args'][1] == state['starter'] for post in sent) == 1
+        lab.watch()
+        assert lab.sent()[before:] == sent
+
+
 def a_stuck_walk_login_stays_held(lab):
     resting(lab, CHATGPT)
     lab.configure(logins_real=[CHATGPT])
@@ -3807,7 +3875,8 @@ def a_stuck_walk_login_stays_held(lab):
     assert state['stage'] == 'ending' and not state['released'] and not state['given'] and alive(pid)
     config = json.loads((lab.root / 'tools.json').read_text())
     assert config['login_holders'][CHATGPT] == state['holder']
-    post, = lab.sent()
+    alert, post = lab.sent()
+    assert alert == stuck_posts(lab)[0]
     assert unit in post['body'] and state['logins'][CHATGPT] in post['body']
     assert post['args'][1] == state['starter']
     lab.walk('b0')
@@ -3817,7 +3886,7 @@ def a_stuck_walk_login_stays_held(lab):
     state = lab.walk_states()[0][1]
     assert state['given'] == [CHATGPT] and state['released'] and state['stage'] == 'ended'
     dead(pid)
-    assert len(lab.sent()) == 1
+    assert len(lab.sent()) == 2
     lab.walk('b0')
     assert lab.walk_states()[-1][1]['slot'] == 1
 
@@ -4054,12 +4123,13 @@ def a_pause_with_a_login_out_ends_stuck(lab):
     executable(directory / 'give-back', 'raise SystemExit(1)\n')
     state = pause_walk(lab, directory, state)
     assert state['decision'] == 'walk-end' and state['stage'] == 'ending' and not state['released']
-    post, = lab.sent()
+    alert, post = lab.sent()
+    assert alert == stuck_posts(lab)[0]
     assert post['args'][2] == 'qa: walk rung-b0-1 ended' and CHATGPT in post['body'] and unit in post['body']
     (directory / 'box/login').rename(state['logins'][CHATGPT])
     lab.watch()
     assert lab.walk_state()[1]['decision'] == 'walk-end' and lab.walk_state()[1]['stage'] == 'ended'
-    assert len(lab.sent()) == 1
+    assert len(lab.sent()) == 2
     dead(pid)
 
 
@@ -4291,6 +4361,8 @@ def damaged_attempt_history_keeps_walk_custody(lab):
     saved = lab.tmp / 'qa/walks/rung-b0-1.json'
     original = saved.read_bytes()
     for corruption in (dict(state, attempts=[None]), dict(state, deployments=[None]),
+                       dict(state, alerts={CHATGPT: {'director@fixture': 'false'}}),
+                       dict(state, attempts=[dict(state['attempts'][0], alerts={CHATGPT: []})]),
                        dict(state, kind='', holder='walk/' + state['walk']),
                        dict(state, report_attempt='../outside'), dict(state, attempts=[{}])):
         saved.write_text(json.dumps(corruption))
@@ -5212,6 +5284,7 @@ CASES = (a_stuck_login_alerts_the_director_and_the_list, a_refused_alert_is_sent
          a_walk_takes_a_login_and_a_slot_and_starts,
          a_refused_login_starts_nothing, a_third_walk_is_refused_at_once,
          a_walk_grant_lost_in_a_crash_is_given_back, the_service_ends_a_walk_at_its_cap,
+         a_stuck_walk_login_alerts_the_director_and_the_list,
          a_stuck_walk_login_stays_held, a_walks_logins_leave_qas_cap_untouched,
          an_uncertain_grant_counts_before_another_repository_takes,
          qa_holds_at_most_the_pool_less_the_reserve,
