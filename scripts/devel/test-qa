@@ -1136,6 +1136,28 @@ tool['Record'].commit = commit
     assert len(finding_posts(lab)) == before + 1
 
 
+def a_later_finding_failure_keeps_accepted_triage_lines(lab):
+    lab.waiting(1)
+    lab.watch()
+    directory, state = lab.watch_state()
+    lab.end_run(report=finding_report('Commit: unknown', 'Commit: unknown'))
+    driven_watch(lab, '''
+original = tool['Watch'].call
+def call(self, name, *args):
+    if name == 'post' and args[0] == 'send' and str(args[-2]).endswith('2: Problem 2'):
+        raise OSError('fixture post launch failed')
+    return original(self, name, *args)
+tool['Watch'].call = call
+''')
+    assert len(finding_posts(lab)) == 1
+    assert lab.content('qa/triage.md').endswith(f'{state["pass"]} 1 director@fixture no commit')
+    assert set(json.loads((directory / 'pass.json').read_text())['routes']) == {'1', '2'}
+    lab.watch()
+    assert [p['args'][2] for p in finding_posts(lab)] == [
+        f'QA finding {state["pass"]} {n}: Problem {n}' for n in (1, 2)]
+    assert lab.run('findings').stdout == 'no findings waiting\n'
+
+
 def a_landings_failure_waits_for_the_next_check(lab):
     a, = lab.waiting(1)
     mission(lab, 'm')
@@ -4855,7 +4877,8 @@ def hex_walk_builds_refuse_ambiguous_and_non_commit_objects(lab):
     assert state['main'] == commit
 
 
-CASES = (a_finding_goes_to_the_designer_of_its_landing, the_director_keeps_the_exceptions,
+CASES = (a_later_finding_failure_keeps_accepted_triage_lines,
+         a_finding_goes_to_the_designer_of_its_landing, the_director_keeps_the_exceptions,
          a_refused_post_is_routed_again, a_landings_failure_waits_for_the_next_check,
          a_pass_from_before_is_never_routed, a_finding_triaged_by_hand_is_never_routed,
          default_on_chooses_the_marked_commits_after_it, default_off_keeps_what_it_covered,

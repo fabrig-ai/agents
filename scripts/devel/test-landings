@@ -274,6 +274,15 @@ def landed_names_the_landing_that_brought_a_commit(lab):
     assert 'feed unreadable' in lab.run('landed', 'agents', b, status=4).stderr
 
 
+def landed_skips_an_unrelated_unreadable_base(lab):
+    lab.repository('agents', tier=False)
+    a = lab.git(lab.workspace / 'agents', 'rev-parse', 'HEAD')
+    b = lab.land('agents', 'B')
+    lab.append(land_record(base='f' * 40, commit=a, branch='unrelated/old'),
+               land_record(1, base=a, commit=b, branch='first/plain'))
+    assert lab.run('landed', 'agents', b).stdout == f'land first/plain 2026-10-24T12:01:00Z {b}\n'
+
+
 def taught_shown(lab):
     lab.append(record(event='started'),
                record(event='landed', minute=1, repo='skein', commit='a' * 40,
@@ -2000,7 +2009,7 @@ def remote_watch(lab):
 
 def main():
     start = time.monotonic()
-    cases = (landed_names_the_landing_that_brought_a_commit,
+    cases = (landed_names_the_landing_that_brought_a_commit, landed_skips_an_unrelated_unreadable_base,
              status_view, taught_shown, taught_since, taught_malformed, last_two, already_done, retry_commits, latest_first_line,
              history_only, truncated_start, last_event, proving, report_proves, event_dates,
              verdicts_report_whole, verdicts_report_parts, verdicts_report_undecided,
