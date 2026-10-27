@@ -1429,6 +1429,29 @@ def watch_cuts_a_long_report(lab):
     assert 'outcome: done' in text and 'Some multibyte text: é.\n\n(Cut' in text
 
 
+def a_completion_cut_keeps_every_finding(lab):
+    lab.waiting(1)
+    lab.watch()
+    directory, state = lab.watch_state()
+    cases = '## Cases\n' + 'A completed case with multibyte detail: é.\n' * 500
+    findings = ('## Findings\n### 1. First finding\nCommit: unknown\nConcerns: security\nReproduce first.\n'
+                '### 2. Second finding\nCommit: unknown\nReproduce second.\n')
+    # Cases alone cannot free enough; content after Findings is cut next.
+    automation = '## Automation\n' + 'A later automation detail.\n' * 500
+    report = cases + findings + automation
+    lab.end_run(state, report=report)
+    driven_watch(lab, "tool['Watch'].route = lambda self, directory, state: False")
+    text = lab.content('qa/passes/' + state['pass'] + '.md')
+    assert len(text.encode()) <= 8192 and text.endswith(f'(Cut at 8 KiB: the report was {len(report.encode())} bytes.)')
+    assert findings in text and 'A completed case' not in text and '## Cases' not in text
+    assert 'A later automation detail.' in text
+    listing = lab.run('findings').stdout
+    for number, title in ((1, 'First finding'), (2, 'Second finding')):
+        assert f'{state["pass"]} {number} {title}' in listing
+    lab.watch()
+    assert len(finding_posts(lab)) == 2
+
+
 def watch_loops_on_its_mailbox(lab):
     lab.configure(wait=[0, 4])
     result = lab.run('watch', '--director', 'director@fixture', status=2, extra={'QA_INTERVAL_SECONDS': '7'})
@@ -3430,15 +3453,18 @@ def full_legacy_pass(lab):
     lab.waiting(1)
     lab.watch()
     directory, state = lab.watch_state()
-    report = ('## Cases\nPlain.\n## Findings\n### 1. Earlier finding\nReproduce.\n'
-              '## Automation\n' + 'More multibyte detail: é.\n' * 400)
-    state.update(finished=True, ended=lab.end_run(state, report=report), released=True)
+    finding = '## Findings\n### 1. Earlier finding\nCommit: unknown\nConcerns: security\nReproduce.\n'
+    report = '## Cases\n' + 'More multibyte detail: é.\n' * 400 + finding
+    state.update(finished=True, ended=lab.end_run(state, report=report), released=True, routes={}, routed={})
     (directory / 'pass.json').write_text(json.dumps(state))
     path = 'qa/passes/' + state['pass'] + '.md'
     legacy = lab.content(path).replace('outcome: running', 'outcome: done')
     legacy = re.sub(r'^evidence:.*\n', '', legacy, flags=re.M) + '\n'
-    legacy += report.encode()[:8192 - len(legacy.encode())].decode(errors='ignore')
-    legacy += 'x' * (8192 - len(legacy.encode()))
+    legacy += '## Cases\n'
+    budget = 8192 - len((legacy + finding).encode())
+    line = 'More multibyte detail: é.\n'
+    count, remainder = divmod(budget, len(line.encode()))
+    legacy += line * count + ('x' * (remainder - 1) + '\n' if remainder else '') + finding
     assert len(legacy.encode()) == 8192
     lab.publish(path, legacy)
     return directory, state, path, legacy
@@ -3447,7 +3473,8 @@ def full_legacy_pass(lab):
 def a_full_legacy_record_is_cut_to_name_its_evidence(lab):
     directory, state, path, legacy = full_legacy_pass(lab)
     later = (utc_fixture(state['started']) + timedelta(days=8)).strftime('%Y-%m-%dT%H:%M:%SZ')
-    lab.watch(now=later)
+    driven_watch(lab, f"tool['main'].__globals__['timestamp'] = lambda: {later!r}\n"
+                 "tool['Watch'].route = lambda self, directory, state: False")
     saved = lab.watch_state()[1]
     commit = saved['copy']['commit']
     assert saved['copy']['state'] == 'kept' and saved['copy']['recorded'] == commit
@@ -3457,10 +3484,15 @@ def a_full_legacy_record_is_cut_to_name_its_evidence(lab):
               + commit + ':passes/' + state['pass'] + '/report.md.)')
     assert result.endswith(suffix)
     kept = result[:-len(suffix)].split('---', 2)[2]
-    assert kept.endswith('\n') and legacy.split('---', 2)[2].startswith(kept)
-    assert '### 1. Earlier finding\nReproduce.\n' in kept
-    assert lab.evidence('show', 'evidence:passes/' + state['pass'] + '/report.md').endswith('More multibyte detail: é.')
+    original = iter(legacy.split('---', 2)[2].splitlines(keepends=True))
+    assert kept.endswith('\n') and all(any(line == candidate for candidate in original)
+                                        for line in kept.splitlines(keepends=True))
+    assert '### 1. Earlier finding\nCommit: unknown\nConcerns: security\nReproduce.\n' in kept
+    assert lab.evidence('show', 'evidence:passes/' + state['pass'] + '/report.md').endswith('Reproduce.')
+    assert f'{state["pass"]} 1 Earlier finding' in lab.run('findings').stdout
     lab.watch(now=later)
+    post, = finding_posts(lab)
+    assert post['args'][1] == 'director@fixture' and 'Earlier finding' in post['args'][2]
     assert not directory.exists()
 
 
@@ -3476,8 +3508,10 @@ def a_full_legacy_record_names_its_refused_evidence(lab):
     assert 'evidence: refused\n' in result and len(result.encode()) <= 8192
     assert result.endswith(suffix) and 'git show' not in result
     kept = result[:-len(suffix)].split('---', 2)[2]
-    assert kept.endswith('\n') and legacy.split('---', 2)[2].startswith(kept)
-    assert '### 1. Earlier finding\nReproduce.\n' in kept
+    original = iter(legacy.split('---', 2)[2].splitlines(keepends=True))
+    assert kept.endswith('\n') and all(any(line == candidate for candidate in original)
+                                        for line in kept.splitlines(keepends=True))
+    assert '### 1. Earlier finding\nCommit: unknown\nConcerns: security\nReproduce.\n' in kept
     lab.watch(now=later)
     assert not directory.exists()
 
@@ -6688,7 +6722,8 @@ def an_ambiguous_build_is_refused(lab):
     assert first[1]['main'] == fix and second[1]['main'] == commit
 
 
-CASES = (a_withheld_title_keeps_its_finding,
+CASES = (a_completion_cut_keeps_every_finding,
+         a_withheld_title_keeps_its_finding,
          a_record_refusal_keeps_its_evidence_field, a_full_legacy_record_is_cut_to_name_its_evidence,
          a_full_legacy_record_names_its_refused_evidence,
          an_unposted_refusal_is_not_pruned,
