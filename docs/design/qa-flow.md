@@ -24,10 +24,12 @@ whose future is open (section 9).
   wait in a backlog. It works from the user's priorities and the
   capacity and spend at hand, and records each choice with `qa decide`
   (section 3).
-- **A service starts the passes by itself.** When a slot is free and
-  chosen commits wait, it starts one pass over all of them, on the
-  newest `main` that after landing has cleared. Commits chosen while a
-  pass runs batch into the next one (section 4).
+- **A service starts the passes by itself.** When a slot and a login
+  of each of the rung's pools are free, and chosen commits wait, it
+  starts a pass over them, on the newest `main` that after landing has
+  cleared; passes run side by side, as many as slots and free logins
+  allow, sharing the waiting commits. Commits chosen while passes run
+  batch into the next ones (section 4).
 - **A pass is a Codex session.** It builds the product at that `main`,
   sets up a deployment with the product's own commands, and works with
   it as its users' agents do: the product's tool for the product
@@ -54,7 +56,10 @@ whose future is open (section 9).
   refreshes, so it is never copied: it rests on one machine, where the
   passes run, and a second tool, `logins`, keeps its custody. QA's
   passes and the director's other live runs take it in turn, and it is
-  free again only once it is back (section 10).
+  free again only once it is back (section 10). Logins of one kind make
+  a pool (`chatgpt`, `chatgpt-2`, ...): a pass or a walk takes any free
+  one, so that a stuck login leaves the others working (the user, 10-27:
+  four ChatGPT accounts).
 - **A pass's evidence is kept** (the user, 10-27): at its end, the
   service copies an allowlist of its scratch (its brief, plan, notes and
   report, the helpers it wrote, the outputs it captured) to the branch
@@ -104,7 +109,8 @@ whose future is open (section 9).
   It checks every five minutes, and at once when a pass ends: its loop
   is the waiter of the mailbox `qa-watch`, where each pass's `codex-run`
   posts its end. It starts a pass when all of these hold:
-  - a slot is free: one, for now (the settings' `slots`);
+  - a slot is free: `QA_SLOTS` of them, four on hetzner6 (the user,
+    10-27: as many passes as free logins);
   - commits chosen to run are in no pass;
   - the newest `main` that after landing has cleared holds the oldest
     of those commits: `landings cleared REPO`, the newest run of the
@@ -112,17 +118,34 @@ whose future is open (section 9).
     ([landing-flow.md](landing-flow.md) 4, step 8). Reds standing from
     older landings don't hold it back. A pass then spends no tokens
     finding again what the tier already showed;
-  - the held logins of the repository's rung are granted to the
-    service, `logins take` (section 10.3).
+  - one login of each of the repository's rung's pools is granted to
+    the service, `logins take POOL --any` (section 10.3).
 
-  The pass takes every chosen commit that `main` holds, oldest first,
-  up to the settings' `batch` (five, for now). The rest wait for the
-  next pass. A pass covers one repository: chosen commits of several
-  make a pass each, in turn, the repository with the oldest decision
-  first.
+  A pass takes chosen commits that `main` holds, oldest first, up to the
+  settings' `batch` (five, for now). Passes that start at one check
+  share the waiting commits: n is the repository's commits that `main`
+  holds and no pass has, k the passes for which a slot and every login
+  were reserved, at most n, and each takes ⌈n/k⌉ of them, oldest first,
+  at most the batch, so that free slots shorten the wait rather than
+  idle. Each pass's commits are saved in its `pass.json` before any
+  starts; a reservation that fails gives its share back to the next
+  check. The rest wait for the next passes. A pass covers one
+  repository, and a repository may have several at once, each on its
+  own commits: chosen commits of several repositories make passes in
+  turn, the repository with the oldest decision first.
 - **Its checkout:** one clone per repository on that machine,
-  `tmp/qa/repos/<repo>/`, kept with its target as after landing's are.
-  The service checks it out, detached, at the pass's `main`. The pass
+  `tmp/qa/repos/<repo>/`, and a worktree of it per further slot,
+  `tmp/qa/repos/<repo>-<n>/` (n from 2), each with its own `target/`
+  inside it, kept between passes, so that passes side by side never
+  share a working tree or a target. A pass takes its repository's
+  lowest free slot, named in its `pass.json`, and holds it until its
+  session's unit and every deployment unit of its own are confirmed
+  stopped (10.3), not merely until its report or its logins are back.
+  The service makes a slot's worktree under the clone's lock, and
+  before each pass checks it is a worktree of that clone at its path;
+  one half made (a crash, a failed checkout) is removed, the clone's
+  worktrees pruned, and made again at the next check. It checks the
+  slot out, detached, at the pass's `main`. The pass
   builds through `heavy` at `HEAVY_CLASS=background`. The service
   deletes a pass's scratch directory 7 days after it ends, once its
   evidence is kept or refused (section 11.4).
@@ -180,7 +203,8 @@ whose future is open (section 9).
 repository (`20261026-0915-temper`). The service writes the front
 matter: repository, `main`, commits, rung, machine, model, effort,
 started, ended, wall time, tokens, the outcome (`done`, `capped` or
-`failed`), and `evidence`, the commit that keeps its evidence (section
+`failed`), `logins` (the logins it took, comma-separated, or `-`), and
+`evidence`, the commit that keeps its evidence (section
 11.4). It commits the file twice: at the pass's start, `running`,
 so that the pass shows in `qa passes` and its commits are taken
 wherever the record is read; and at its end, completed, with the body.
@@ -238,7 +262,7 @@ takes a repository's name where it needs one.
 | `qa passes [--running]` | lists passes, with their commits, outcome, wall time and tokens |
 | `qa findings` | lists the queue |
 | `qa triage PASS N ROUTE [--why]` | routes one finding |
-| `qa rung REPO [RUNG [--login NAME]... [--why]]` | opens a rung, or shows the open one (section 10.1) |
+| `qa rung REPO [RUNG [--login POOL]... [--why]]` | opens a rung, or shows the open one (section 10.1) |
 | `qa watch` | runs the service (section 4) |
 | `qa keep --check DIRECTORY` | scans what a copy of DIRECTORY would hold, and writes nothing (section 11.5) |
 | `qa keep --walk NAME DIRECTORY` | keeps a focused walk's evidence (section 11.5) |
@@ -256,7 +280,7 @@ The record is committed with `record commit`, and its rows are in
 
 Times are UTC to the second, commits full SHAs. The settings are the
 kit's: the machine, named as section 4 says, and `machine.env`'s
-`QA_SLOTS` (1), `QA_BATCH` (5), `QA_CAP_MINUTES` (120),
+`QA_SLOTS` (1; 4 on hetzner6), `QA_BATCH` (5), `QA_CAP_MINUTES` (120),
 `QA_INTERVAL_SECONDS` (300), `QA_STOP_SECONDS` (50, section 10.5) and
 `QA_EVIDENCE_KIB` (2048, section 11.1).
 
@@ -306,10 +330,11 @@ the director says so to the user.
 
 - **The binding names the rungs,** lowest first: the product's fakes,
   then each real backend in turn, and for each the held logins a pass
-  takes, by their names in `logins` (temper's `docs/design/qa.md` 3:
-  fakes; a real model, with ChatGPT's login; GitHub).
+  takes, by their pools' names in `logins` (temper's `docs/design/qa.md`
+  3: fakes; a real model, with a ChatGPT login; GitHub).
 - **The director opens a rung** for a repository: `qa rung REPO RUNG
-  [--login NAME]... [--why TEXT]`, once the rung below has run clean,
+  [--login POOL]... [--why TEXT]`, each POOL a pool's name (10.2),
+  once the rung below has run clean,
   as the binding says, which `qa passes` shows, each pass with its
   rung. The latest opening holds every pass started after it; going
   back down is an opening too, when a rung's findings must be fixed
@@ -341,6 +366,31 @@ the director says so to the user.
   asks again within 15 minutes. `--wait SECONDS` waits, and exits 1
   past it. Every change is made under one lock, and `add` refuses a
   name that has a login or a holder.
+- **A pool:** a name that doesn't end in `-<digits>`, and its numbered
+  siblings: pool `chatgpt` is `chatgpt`, `chatgpt-2`, `chatgpt-3`,
+  `chatgpt-4`, logins of one kind, each its own account and each one
+  holder at a time. Two pools never share a login. `logins take POOL
+  --any --as HOLDER` grants one of them that is at rest and held by
+  nobody, this holder included, and prints its name and its resting
+  path; a take by name still takes that login alone.
+- **One order for every taker:** every change (`add`, `take`, `give`)
+  is made under one lock for the whole tool, `tmp/logins/lock`, and
+  every taker that waits is in one queue, `tmp/logins/waiting.json`,
+  each with its request (a name, or a pool), when it first asked, and
+  when it last asked. A request is granted a free login it matches
+  unless an earlier request that still waits matches that same login:
+  so a taker waiting for a stuck login by name never holds back a pool
+  taker from another, free one. Ties go by holder name. A waiter that
+  hasn't asked again within 15 minutes leaves the queue, as today.
+  A login not back stays held by its holder, as below, and the pool's
+  others go on serving: the notice and `logins list` name the one that
+  is stuck.
+- **A login comes from a box the user signs in:** on the logins'
+  machine, a box on real backends (temper's walk `box`, 2, 3, 5 and 8),
+  where the user signs the account in from a browser elsewhere through
+  `ssh -L` to the box's callback; its export to a private file, never
+  read; `logins add NAME FILE`. An agent may run the box and the moves,
+  by path alone; only the user's browser sees the account.
 - **Free only once back:** `logins give NAME --as HOLDER` checks, by
   `stat` alone, that the login is at its resting path, and only then
   frees it: a private (0600), non-empty regular file, or a private
@@ -353,8 +403,8 @@ the director says so to the user.
   is never handed on, and shows in `logins list`.
 - **Every live run takes it:** QA's passes through the service
   (10.3); the director's other runs on it (a ladder's rung, a focused
-  story) by `logins take` before their start and `logins give` after
-  their end, each started with `codex-run task --on-stop` and a brief
+  story) by `logins take POOL --any` before their start, their brief
+  naming the login granted, and `logins give NAME` after their end, each started with `codex-run task --on-stop` and a brief
   that writes the give-back file as 10.3 says. The director is their
   holder: it gives at the run's end post, and a give refused is its own
   to recover, as 10.3's last point says.
@@ -366,15 +416,24 @@ the director says so to the user.
 ### 10.3 A pass on a rung with held logins
 
 - **The service takes before it starts:** at a check where a pass
-  could start (section 4), it takes each of the rung's logins as
-  holder `qa-watch`, in name order. One refused gives back those
-  taken, still at rest, and the pass waits for a later check, its
-  commits still chosen, the service's place in the queue kept. A login
+  could start (section 4), it takes one login of each of the rung's
+  pools as the pass's own holder, `qa-watch/<pass>`, `logins take POOL
+  --any`, in the pools' name order, and saves each grant in the pass's
+  `pass.json` before it asks for the next: so two passes never hold
+  one login. One refused gives back those taken, still at rest, and
+  the pass waits for a later check, its commits still chosen, the
+  service's place in the queue kept. The brief names each login taken,
+  with its resting path, and the report's front matter its name
+  (section 5). An opening from before pools (`temper real-model
+  chatgpt`) names a pool already. A login
   is held from the pass's start, its build and plan included: minutes,
   where a session taking it itself would wait inside its cap.
-- **Nothing held without a pass:** at each check the service gives
-  back every rung's login it holds that no pass of its own still holds,
-  so that a crash between a take and a pass's start strands nothing.
+- **Nothing held without a pass:** at each check the service reads
+  `logins list` for the logins held by `qa-watch/…` (and by
+  `qa-watch`, from before), and gives back each that no saved pass
+  holds a grant of, so that a crash between a take and its save, or a
+  pass's start, strands nothing. A login out with one pass never holds
+  back another pass: the next takes another of the pool.
 - **The brief names** the rung, each login with its resting path, and
   the give-back file, `give-back` in the pass's scratch directory.
 - **The session borrows them:** it moves each login into its
@@ -463,6 +522,7 @@ held).
 |---|---|
 | `logins add NAME PATH` | moves PATH, a file or a program's configuration directory, in as NAME's login, at rest |
 | `logins take NAME --as HOLDER [--note TEXT] [--wait SECONDS]` | grants NAME in turn and prints its resting path; exit 1 while another holds it or waits first |
+| `logins take POOL --any --as HOLDER [--note TEXT] [--wait SECONDS]` | grants any free login of the pool, first come first served, and prints its name and resting path; exit 1 while none is free to HOLDER (10.2) |
 | `logins give NAME --as HOLDER` | frees NAME once its login is back; exit 1, still held, if it isn't |
 | `logins list [NAME]` | each login's holder, waiters and last 24 hours |
 
@@ -538,6 +598,42 @@ held).
   - a service restarted between steps goes on from the last one saved;
   - a pass with no login has its units stopped at its end;
   - a login used in place is given only after every unit has stopped.
+
+### 10.6 Passes side by side
+
+- **As many as slots and logins allow:** `QA_SLOTS` caps the passes at
+  once on the machine, and a rung with a pool runs no more passes than
+  the pool has free logins. A pass on the fakes needs a slot alone.
+- **Built where they run:** each pass builds in its slot's checkout,
+  through `heavy` at background weight, which queues builds so that
+  they never starve the machine's other work. Measured on hetzner6
+  (10-27): 8 cores, 15 GB with about 11 free, 232 GB of disk free over
+  a 40 GB floor; a pass's box peaked at 0.4 GB and used 26 seconds of
+  CPU in 15 minutes; a build in a warm target took 10 seconds to 2
+  minutes; a slot's target is about 8 GB, so four slots take about 32
+  GB, and a new slot's first build is cold once. Passes wait on the
+  model far more than they build, so four at once cost little there,
+  and building elsewhere would add a binary's transfer and a second
+  machine's state for minutes saved: they build on the logins'
+  machine.
+- **Its fixture,** `test-logins` and `test-qa`:
+  - a pool's take grants a free login and names it; never one already
+    held, by this holder or another; a name ending in `-<digits>` is no
+    pool;
+  - one queue: a take by name and a take of the pool wait in arrival
+    order, and a waiter for a stuck login holds back no take of a free
+    one; a waiter gone 15 minutes leaves it;
+  - a stuck login leaves the others taken and given, and the notice
+    names it;
+  - two passes start side by side in two slots, each with its own login
+    and its own share of the commits, and each brief and report names
+    its login and path;
+  - a crash after a grant and before its save leaves the login given
+    back at the next check; one half-made worktree is made again;
+  - a finished pass whose units are up or unknown keeps its slot, and
+    its logins as 10.3 says;
+  - a pass waits while no login of its pool is free, and starts once
+    one is given back.
 
 ## 11. The evidence, kept
 
