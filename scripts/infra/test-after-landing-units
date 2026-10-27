@@ -133,7 +133,7 @@ class AfterLandingUnits(unittest.TestCase):
     def test_parts_listed(self):
         names = WHOLE[:-1] + ['temper.1of2', 'temper.2of2']
         self.instances(WHOLE)
-        self.follow('\n# assigned here\n  # another comment\n' + '\n'.join(names) + '\n')
+        self.follow('\n# assigned here\n  # another comment\n' + '\n'.join(name + (' 60' if name == 'temper.1of2' else '') for name in names) + '\n')
         lines = self.check(fix=True)
         self.assertEqual(lines, ['ok    after-landing: temper stopped: not followed here'] +
                          [f'ok    after-landing: {name} enabled and active' for name in names])
@@ -181,6 +181,10 @@ class AfterLandingUnits(unittest.TestCase):
             ('# comment\n\nTemper\n', 3, 'Temper'),
             ('skein\ntemper 1of2\n', 2, 'temper 1of2'),
             ('skein\n# comment\nskein\n', 3, 'skein'),
+            ('temper 0\n', 1, 'temper 0'),
+            ('temper x\n', 1, 'temper x'),
+            ('temper 60 70\n', 1, 'temper 60 70'),
+            ('temper -5\n', 1, 'temper -5'),
             ('temper.0of2\n', 1, 'temper.0of2'),
             ('temper.01of2\n', 1, 'temper.01of2'),
             ('temper.2of02\n', 1, 'temper.2of02'),

@@ -13,7 +13,9 @@ import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -316,6 +318,41 @@ def whole_state(args, base, clone):
     return state, 'starting from whole state at ' + previous
 
 
+def cap(args):
+    path = args.fixture / 'follow' if args.fixture else Path.home() / '.config/agents-after-landing/follow'
+    default = 50 * args.gb
+    try:
+        lines = path.read_text().splitlines()
+    except FileNotFoundError:
+        return default
+    for number, line in enumerate(lines, 1):
+        words = line.split()
+        if not words or words[0] != args.name:
+            continue
+        match = re.fullmatch(re.escape(args.name) + r'(?:[ \t]([1-9][0-9]*))?', line)
+        if match is None:
+            print(f'after-landing: warning: {path} line {number}: invalid target cap; using 50 GB',
+                  file=sys.stderr)
+            return default
+        return int(match[1] or '50') * args.gb
+    return default
+
+
+def allocated(path):
+    total, seen, pending = 0, set(), [path]
+    while pending:
+        entry = pending.pop()
+        info = os.lstat(entry)
+        inode = (info.st_dev, info.st_ino)
+        if inode in seen:
+            continue
+        seen.add(inode)
+        total += info.st_blocks * 512
+        if stat.S_ISDIR(info.st_mode):
+            pending.extend(entry.iterdir())
+    return total
+
+
 def pass_once(args, base, clone, state):
     state_path = base / 'state' / (args.name + '.json')
     rows = read_feed(args.fixture)
@@ -361,7 +398,30 @@ def pass_once(args, base, clone, state):
                 return
     landings, docs, baseline = tips(clone, state['last_run'], main)
     baseline_fields = {'baseline': True} if baseline else {}
-    emit(args.fixture, token, args.name, 'running', commit=main, **{'from': state['last_run']})
+    target = clone / 'target'
+    limit = cap(args)
+    fresh = {}
+    try:
+        info = target.lstat()
+    except FileNotFoundError:
+        info = None
+    if info is not None and stat.S_ISDIR(info.st_mode):
+        size = allocated(target)
+        # A failed removal may already have deleted enough to fall below the cap.
+        retry = state['fault'] and state['fault']['reason'] == 'target past its cap could not be removed'
+        if size > limit or retry:
+            try:
+                shutil.rmtree(target)
+            except OSError:
+                fault(args, base, state, token, main, 'target past its cap could not be removed', log)
+                return
+            with log.open('a') as out:
+                action = 'past its cap' if size > limit else 'finishing removal past its cap'
+                out.write(f'target: {size / args.gb:g} GB allocated, {action} of '
+                          f'{limit / args.gb:g} GB: removed\n')
+            fresh['fresh'] = True
+    emit(args.fixture, token, args.name, 'running', commit=main,
+         **{'from': state['last_run']}, **fresh)
     ran = 0
 
     def run(commit, only):
@@ -485,6 +545,12 @@ def main():
     args.fixture = Path(fixture).resolve() if fixture else None
     if fixture is not None and (not fixture or not args.fixture.is_dir()):
         parser.error('AFTER_LANDING_FIXTURE must be an existing directory')
+    try:
+        args.gb = int(os.environ.get('AFTER_LANDING_GB', str(2 ** 30))) if args.fixture else 2 ** 30
+        if args.gb <= 0:
+            raise ValueError
+    except ValueError:
+        parser.error('AFTER_LANDING_GB must be a positive integer')
     agents = KIT.parent.parent
     root = Path(os.environ.get('DEV_ROOT', str(agents.parent if agents.name == 'agents'
                                              else Path.home() / 'src/rust')))

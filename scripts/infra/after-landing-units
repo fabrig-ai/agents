@@ -7,7 +7,7 @@
 check_after_landing() {
     local address_file=$HOME/.config/agents-after-landing/director
     local unit_dir=$HOME/.config/systemd/user unit=agents-after-landing@.service
-    local director expected sibling follower name k n line=0
+    local director expected sibling follower name entry k n line=0
     local follow_file=$HOME/.config/agents-after-landing/follow
     local running enabled service _load active rest
     local -a followers=(skein smith hearth jig temper) lines=() unlisted=()
@@ -32,14 +32,14 @@ check_after_landing() {
             return
         fi
         followers=()
-        for name in "${lines[@]}"; do
+        for entry in "${lines[@]}"; do
             line=$((line + 1))
-            [[ $name =~ ^[[:space:]]*(#.*)?$ ]] && continue
-            if [[ ! $name =~ ^[a-z][a-z0-9-]*(\.([1-9][0-9]*)of([1-9][0-9]*))?$ ]]; then
-                fail "after-landing: $follow_file line $line: $name is not a follower's name"
+            [[ $entry =~ ^[[:space:]]*(#.*)?$ ]] && continue
+            if [[ ! $entry =~ ^([a-z][a-z0-9-]*(\.([1-9][0-9]*)of([1-9][0-9]*))?)([\ $'\t'][1-9][0-9]*)?$ ]]; then
+                fail "after-landing: $follow_file line $line: $entry is not a follower's name"
                 return
             fi
-            k=${BASH_REMATCH[2]} n=${BASH_REMATCH[3]}
+            name=${BASH_REMATCH[1]} k=${BASH_REMATCH[3]} n=${BASH_REMATCH[4]}
             # Compare decimal strings without imposing the shell's integer limit.
             if [[ -n $k ]] && { [[ $n == 1 ]] || ((${#k} > ${#n})) ||
                 { ((${#k} == ${#n})) && [[ $k > $n ]]; }; }; then
