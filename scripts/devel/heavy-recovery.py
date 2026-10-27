@@ -37,6 +37,7 @@ UNCLAIMED = ('submitted', 'enqueuing', 'queued')
 LIVE = ('launching', 'active', 'finishing', 'closing')
 ROOM_AFTER = 120  # Reservation after release (build-infrastructure.md 2).
 DISK_WAIT_LIMIT = 20 * 60  # Time below a landing's floor (build-infrastructure.md 2).
+SNAPSHOT_READ_S = 1.0  # Waiting clients read at most once a second (build-infrastructure.md 3).
 FLOOR_REFUSAL = 'disk floor refused before payload start'
 CGROOT = Path('/sys/fs/cgroup')
 CANCELLED = 130  # A cancelled task's exit, as check.sh and codex-run exit on SIGINT.
@@ -953,7 +954,7 @@ def submit(args, lane, tail_lines, exclusive):
             room_spell = held
         if task['state'] == 'released' and (BASE / 'receipts' / (token + '.json')).is_file():
             break
-        time.sleep(0.1)
+        time.sleep(SNAPSHOT_READ_S)
     if task.get('refusal') == FLOOR_REFUSAL and not task.get('payload_started'):
         fault('client_refusal', token)
         result = run(['bash', '-c', 'set -euo pipefail; root=$1; tmp=$2; '
@@ -1000,7 +1001,7 @@ def wrapper(token):
                 return task['code']
             # A cancelled task still closing must never be admitted.
             if task['state'] != 'waiting':
-                time.sleep(0.1)
+                time.sleep(SNAPSHOT_READ_S)
                 continue
             if landing(task):
                 track_disk_wait(ledger, task, free_gb())
@@ -1052,15 +1053,18 @@ def wrapper(token):
                     '--working-directory=' + task['repo'], str(KIT / 'heavy'), '--payload', token],
                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 break
-        time.sleep(0.1)
+        time.sleep(SNAPSHOT_READ_S)
     while True:
+        try:
+            launcher.wait(timeout=SNAPSHOT_READ_S)
+            ended = True
+        except subprocess.TimeoutExpired:
+            ended = False
         current = json.loads((BASE / 'state.json').read_text())['tasks'][token]
         if current['state'] == 'released' and current.get('row_durable'):
             launcher.wait()
             return current['code']
-        ended = launcher.poll() is not None
         if current['state'] not in ('finishing', 'closing') and not ended:
-            time.sleep(0.1)
             continue
         with locked() as ledger:
             task = ledger.tasks[token]
@@ -1071,7 +1075,7 @@ def wrapper(token):
             reconcile(ledger)
             if task['state'] == 'released':
                 return task['code']
-        time.sleep(0.1)
+        time.sleep(SNAPSHOT_READ_S)
 
 
 def phase(token, name, **values):
