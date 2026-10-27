@@ -557,6 +557,11 @@ if name == 'codex-run':
     (state / 'meta').write_text(f'model=gpt-6.1-sol\neffort=high\nstarted={started}\ntask={task}\nreport={report}\non_stop={args[4]}\n')
     Path(report).write_text(f'codex-run: run {run} is writing this report.\n')
     hang('after')
+    if config.get('delay_before_unit'):
+        (root / 'launch-waiting').write_text(str(os.getpid()))
+        while not (root / 'allow-launch').exists():
+            time.sleep(0.01)
+    (state / 'unit').touch()
     if config.get('interrupt_launch'):
         os.kill(os.getppid(), 9)
     print(run, state)
@@ -629,12 +634,13 @@ elif name == 'systemctl':
                                                 'active' if saved and alive(saved['pid']) else 'inactive')))
             print('WorkingDirectory=' + (saved['directory'] if saved else ''))
             sys.exit(0)
+        present = (runs / run / 'unit').exists()
         active = config.get('unit_state', 'active' if config.get('unit_active') else
-                            'inactive' if config.get('inactive') or (runs / run / 'ended').exists() else 'active')
+                            'inactive' if not present or config.get('inactive') or (runs / run / 'ended').exists() else 'active')
         if config.get('unit_malformed'):
             print('LoadState=loaded')
         else:
-            print('LoadState=' + config.get('unit_load', 'loaded'))
+            print('LoadState=' + config.get('unit_load', 'loaded' if present else 'not-found'))
             print('ActiveState=' + active)
         sys.exit(0)
     if args[1] == '_finish-stop':
@@ -1081,7 +1087,7 @@ def watch_recovers_an_interrupted_start_commit(lab):
     assert json.loads((directory / 'pass.json').read_text())['finished']
     assert len(lab.sent()) == 1 and not lab.calls('codex-run')
     # The same pending state without a committed record is safe to discard.
-    pending = dict(state, **{'pass': state['pass'] + '-2'})
+    pending = dict(state, **{'pass': state['pass'] + '-2', 'holder': 'qa-watch/' + state['pass'] + '-2'})
     orphan = lab.tmp / 'qa' / pending['pass']
     orphan.mkdir()
     (orphan / 'pass.json').write_text(json.dumps(pending))
@@ -1978,7 +1984,8 @@ def finished_pair(lab):
     first_unit, first_pid = deployment(lab, first)
     second = first.with_name(first.name + '-2')
     second.mkdir()
-    other = dict(state, **{'pass': second.name, 'logins': {}, 'kinds': {}, 'given': [],
+    other = dict(state, **{'pass': second.name, 'holder': 'qa-watch/' + second.name,
+                          'logins': {}, 'kinds': {}, 'pools': {}, 'given': [],
                           'finished': True, 'ended': state['started']})
     (second / 'pass.json').write_text(json.dumps(other))
     second_unit, second_pid = deployment(lab, second)
@@ -1992,8 +1999,11 @@ def a_pass_never_stops_its_successors_unit(lab):
     successor = directory.with_name(directory.name + '-2')
     successor.mkdir()
     # Keep the successor's session running, independently of the first's end.
-    other = dict(state, **{'pass': successor.name, 'run': 'successor'})
+    other = dict(state, **{'pass': successor.name, 'holder': 'qa-watch/' + successor.name, 'run': 'successor'})
     (successor / 'pass.json').write_text(json.dumps(other))
+    session = lab.tmp / 'codex-run/successor'
+    session.mkdir()
+    (session / 'unit').touch()
     lab.pass_file(name=successor.name, commits=state['commits'], outcome='running', findings=0)
     next_unit, next_pid = deployment(lab, successor)
     lab.end_run(state)
@@ -3902,7 +3912,290 @@ def a_walk_reads_its_inventory_strictly(lab):
     assert lab.calls('logins') == [['list']] and not lab.walk_states() and not lab.calls('codex-run')
 
 
-CASES = (manual_kind_holders_stay_held_when_watcher_checks, kind_slots_are_shared_across_repositories,
+def a_surviving_launcher_keeps_custody_until_its_unit_exists(lab):
+    resting(lab, CHATGPT, in_place=True)
+    lab.env['QA_WALK_KINDS'] = 'forgejo=1:chatgpt'
+    focused = lab.tmp / 'qa-focused'
+    focused.mkdir()
+    (focused / 'rung-b0-brief.md').write_text('Delayed launch fixture.\n')
+    lab.configure(delay_before_unit=True, logins_real=[CHATGPT])
+    with (lab.root / 'starter-output').open('w') as output:
+        starter = subprocess.Popen([str(SCRIPT), 'walk', 'temper', 'b0', '--login', CHATGPT],
+                                   env=lab.env, cwd=lab.root, stdin=subprocess.DEVNULL,
+                                   stdout=output, stderr=output)
+        child = None
+        try:
+            waiting = lab.root / 'launch-waiting'
+            wait_for(waiting.exists)
+            child = int(waiting.read_text())
+            directory, state = lab.walk_state()
+            assert state['stage'] == 'starting' and not state['run']
+            os.kill(starter.pid, signal.SIGKILL)  # Only the starter; codex-run owns another session.
+            assert starter.wait(timeout=10) == -signal.SIGKILL and alive(child)
+            result = lab.watch()
+            state = lab.walk_state()[1]
+            assert 'launch may still start' in result.stdout
+            assert state['run'] == 'fixture-1' and state['stage'] == 'running'
+            assert not state['given'] and not state['released']
+            lab.walk('b0', '--login', CHATGPT, status=1)
+            assert not any(args[0] == 'give' for args in lab.calls('logins'))
+            (lab.root / 'allow-launch').touch()
+            wait_for((lab.tmp / 'codex-run/fixture-1/unit').exists)
+            dead(child)
+            lab.watch()
+            saved = json.loads((lab.tmp / 'qa/walks' / (state['walk'] + '.json')).read_text())
+            assert saved['stage'] == 'running' and not saved['given'] and not saved['released']
+            lab.end_run(saved)
+            lab.watch()
+            saved = json.loads((lab.tmp / 'qa/walks' / (state['walk'] + '.json')).read_text())
+            assert saved['stage'] == 'ended' and saved['given'] == [CHATGPT] and saved['released']
+            assert len(lab.calls('codex-run')) == 1
+        finally:
+            (lab.root / 'allow-launch').touch()
+            if starter.poll() is None:
+                starter.kill()
+                starter.wait(timeout=10)
+            if child is not None:
+                dead(child)
+
+
+def a_missing_walk_unit_is_ended_after_the_launch_grace(lab):
+    lab.walk('b0', '--login', CHATGPT, now='2026-10-27T08:00:00Z')
+    directory, state = lab.walk_state()
+    run = lab.tmp / 'codex-run' / state['run']
+    (run / 'unit').unlink()
+    clock = datetime(2026, 10, 27, 8, tzinfo=timezone.utc).timestamp()
+    os.utime(run / 'meta', (clock, clock))
+    lab.watch(now='2026-10-27T08:09:59Z')
+    saved = lab.walk_state()[1]
+    assert saved['stage'] == 'running' and not saved['given'] and not saved['released']
+    lab.watch(now='2026-10-27T08:11:00Z')
+    saved = lab.walk_state()[1]
+    assert saved['stage'] == 'ended' and saved['given'] == [CHATGPT] and saved['released']
+    assert not [args for args in lab.calls('systemctl') if args[1] == 'stop']
+
+
+def a_missing_pass_unit_keeps_its_grants_and_slot_for_ten_minutes(lab):
+    lab.rung('temper', REAL, CHATGPT)
+    lab.waiting(1)
+    lab.watch(now='2026-10-27T08:00:00Z')
+    directory, state = lab.watch_state()
+    run = lab.tmp / 'codex-run' / state['run']
+    (run / 'unit').unlink()
+    clock = datetime(2026, 10, 27, 8, tzinfo=timezone.utc).timestamp()
+    os.utime(run / 'meta', (clock, clock))
+    lab.watch(now='2026-10-27T08:09:59Z', extra={'QA_CAP_MINUTES': '0'})
+    saved = lab.watch_state()[1]
+    assert not saved['finished'] and not saved['given'] and not saved.get('released') and not saved['capped']
+    assert not [args for args in lab.calls('systemctl') if args[1] == 'stop']
+    (directory / 'pass.json').write_text(json.dumps(dict(saved, finished=True, ended='2026-10-27T08:09:00Z')))
+    lab.watch(now='2026-10-27T08:09:59Z')
+    finished = lab.watch_state()[1]
+    assert not finished['given'] and not finished.get('released')
+    (directory / 'pass.json').write_text(json.dumps(saved))
+    lab.watch(now='2026-10-27T08:11:00Z')
+    saved = json.loads((directory / 'pass.json').read_text())
+    assert saved['finished'] and saved['given'] == [CHATGPT] and saved['released']
+    assert 'unit vanished without its end' in lab.content('qa/passes/' + saved['pass'] + '.md')
+
+
+def a_resumed_launch_without_a_unit_keeps_its_new_grant(lab):
+    directory, state = walk_with_logins(lab, CHATGPT)
+    state = pause_walk(lab, directory, state)
+    previous = state['attempts'][0]
+    lab.configure(logins_held=[CHATGPT], login_holders={CHATGPT: 'director/manual'})
+    driven_walk(lab, '''Watch = tool['Watch']
+original = Watch.call
+def call(self, name, *args):
+    result = original(self, name, *args)
+    if name == 'codex-run':
+        os._exit(77)
+    return result
+Watch.call = call
+''', '--resume', state['walk'], '--build', 'main', status=77)
+    (lab.tmp / 'codex-run/fixture-2/unit').unlink()
+    lab.watch()
+    current = lab.walk_state()[1]
+    assert current['run'] == 'fixture-2' and current['stage'] == 'running' and not current['released']
+    assert current['pools'] == {CHATGPT: 'chatgpt-2'} and not current['given']
+    assert current['attempts'][0] == previous
+    assert not any(args[0] == 'give' and args[1] == 'chatgpt-2' for args in lab.calls('logins'))
+    (lab.tmp / 'codex-run/fixture-2/unit').touch()
+    lab.end_run(current)
+    lab.watch()
+    assert lab.walk_state()[1]['given'] == ['chatgpt-2'] and lab.walk_state()[1]['released']
+    assert lab.calls('logins').count(['give', CHATGPT, '--as', state['holder']]) == 1
+
+
+def a_pass_cannot_give_as_a_walk_or_another_pass(lab):
+    resting(lab, CHATGPT, in_place=True)
+    lab.configure(logins_real=[CHATGPT])
+    lab.walk('b0', '--login', CHATGPT)
+    walk = lab.walk_state()[1]
+    lab.rung('temper', REAL, CHATGPT)
+    lab.waiting(1)
+    lab.watch()
+    directory, original = lab.watch_state()
+    for holder in (walk['holder'], 'qa-watch/another-pass', 'qa-watch', None):
+        forged = dict(original, holder=holder, finished=True, logins=walk['logins'], kinds=walk['kinds'])
+        (directory / 'pass.json').write_text(json.dumps(forged))
+        result = lab.watch()
+        assert 'invalid pass state; keeping custody' in result.stdout
+        assert not any(args[0] == 'give' for args in lab.calls('logins'))
+        saved = lab.walk_state()[1]
+        assert saved['stage'] == 'running' and not saved['given']
+        config = json.loads((lab.root / 'tools.json').read_text())
+        assert config['login_holders'][CHATGPT] == walk['holder']
+    (directory / 'pass.json').write_text(json.dumps(original))
+    lab.end_run(original)
+    lab.watch()
+    assert lab.watch_state()[1]['given'] == ['chatgpt-2'] and not lab.walk_state()[1]['given']
+
+
+def conflicting_pass_and_walk_claims_give_for_neither(lab):
+    lab.walk('b0', '--login', CHATGPT)
+    walk = lab.walk_state()[1]
+    lab.rung('temper', REAL, CHATGPT)
+    lab.waiting(1)
+    lab.watch()
+    directory, original = lab.watch_state()
+    forged = dict(original, logins=walk['logins'], kinds=walk['kinds'], pools=walk['pools'])
+    (directory / 'pass.json').write_text(json.dumps(forged))
+    lab.end_run(original)
+    lab.end_run(walk)
+    result = lab.watch()
+    assert f'{CHATGPT}: conflicting custody claims' in result.stdout
+    assert original['pass'] in result.stdout and walk['walk'] in result.stdout
+    assert not any(args[0] == 'give' and args[1] == CHATGPT for args in lab.calls('logins'))
+    assert not lab.walk_state()[1]['given'] and not lab.watch_state()[1]['given']
+    (directory / 'pass.json').write_text(json.dumps(original))
+    lab.watch()
+    assert lab.watch_state()[1]['given'] == ['chatgpt-2']
+    assert lab.walk_state()[1]['given'] == [CHATGPT] and lab.walk_state()[1]['stage'] == 'ended'
+
+
+def a_new_walk_grant_checks_existing_claims_before_giving(lab):
+    lab.rung('temper', REAL, CHATGPT)
+    lab.waiting(1)
+    lab.watch()
+    directory, original = lab.watch_state()
+    claimed = 'chatgpt-2'
+    forged = dict(original, logins={claimed: str(lab.root / 'resting' / claimed)},
+                  kinds={claimed: 'moved'}, pools={CHATGPT: claimed})
+    (directory / 'pass.json').write_text(json.dumps(forged))
+    result = lab.walk('b0', '--login', CHATGPT, '--build', 'origin/missing', status=1)
+    assert f'{claimed}: conflicting custody claims' in result.stdout
+    walk = lab.walk_state()[1]
+    assert walk['pools'] == {CHATGPT: claimed} and walk['stage'] == 'cancelled'
+    assert not walk['given'] and not walk['released']
+    lab.watch()
+    assert not any(args[0] == 'give' and args[1] == claimed for args in lab.calls('logins'))
+    config = json.loads((lab.root / 'tools.json').read_text())
+    assert config['login_holders'][claimed] == walk['holder']
+    (directory / 'pass.json').write_text(json.dumps(original))
+    lab.watch()
+    assert lab.walk_state()[1]['given'] == [claimed] and lab.walk_state()[1]['stage'] == 'ended'
+
+
+def deeply_nested_and_oversized_states_keep_custody_without_stopping_checks(lab):
+    lab.walk('b0', '--login', CHATGPT)
+    lab.walk('b1', '--kind', 'claude', '--login', CLAUDE)
+    _, broken_walk = lab.walk_states()[0]
+    lab.rung('temper', REAL, CHATGPT)
+    lab.waiting(1)
+    lab.watch()
+    directory, broken_pass = lab.watch_state()
+    walk_path = lab.tmp / 'qa/walks' / (broken_walk['walk'] + '.json')
+    pass_path = directory / 'pass.json'
+    nested = '[' * 40001 + '0' + ']' * 40001
+    oversized = ' ' * (1024 * 1024) + '{}'
+    walk_path.write_text(nested)
+    pass_path.write_text(oversized)
+    jig = lab.commit('jig alongside damaged states', 'fixture', repo='jig')
+    lab.run('decide', 'jig', jig, 'run')
+    lab.configure(cleared={'jig': jig}, inactive=True)
+    result = lab.watch()
+    assert 'invalid walk state; keeping custody' in result.stdout
+    assert 'invalid pass state; keeping custody' in result.stdout
+    good_walk = json.loads((lab.tmp / 'qa/walks/rung-b1-claude-1.json').read_text())
+    assert good_walk['stage'] == 'ended' and good_walk['given'] == [CLAUDE]
+    jig_path, = (p for p in (lab.tmp / 'qa').glob('*/pass.json') if p != pass_path)
+    good_pass = json.loads(jig_path.read_text())
+    assert good_pass['repository'] == 'jig' and good_pass['run'] and not good_pass['finished']
+    # The same isolation covers either parser, integer conversion and an over-limit read.
+    lab.configure(inactive=False)
+    for walk_data, pass_data in ((oversized, nested), ('{"n":' + '9' * 5000 + '}', '{broken json'),
+                                 (nested, json.dumps(dict(broken_pass, kinds=[])))):
+        walk_path.write_text(walk_data)
+        pass_path.write_text(pass_data)
+        result = lab.watch(extra={'QA_CAP_MINUTES': '0'})
+        assert 'invalid walk state; keeping custody' in result.stdout
+        assert 'invalid pass state; keeping custody' in result.stdout
+    good_pass = json.loads(jig_path.read_text())
+    assert good_pass['finished'] and good_pass['capped'] and good_pass['released']
+    config = json.loads((lab.root / 'tools.json').read_text())
+    assert config['login_holders'][CHATGPT] == broken_walk['holder']
+    assert config['login_holders']['chatgpt-2'] == broken_pass['holder']
+    assert not any(args[0] == 'give' and args[1] in (CHATGPT, 'chatgpt-2') for args in lab.calls('logins'))
+
+
+def a_walk_resolves_remote_branches_despite_colliding_tags(lab):
+    old = lab.git(lab.products['temper'], 'rev-parse', 'HEAD')
+    main = lab.marked()
+    fix = lab.commit('remote fix', branch='fix')
+    origin = lab.origins / 'temper.git'
+    lab.git(origin, 'tag', 'origin/fix', old)
+    lab.git(origin, 'tag', 'origin/main', old)
+    lab.walk('b0', '--build', 'origin/fix')
+    lab.walk('b0')
+    first, second = lab.walk_states()
+    assert first[1]['main'] == fix and second[1]['main'] == main
+    assert lab.git(lab.tmp / 'qa/repos/temper-walk-forgejo-1', 'rev-parse', 'HEAD') == fix
+    assert lab.git(lab.tmp / 'qa/repos/temper-walk-forgejo-2', 'rev-parse', 'HEAD') == main
+
+
+def hex_walk_builds_refuse_ambiguous_and_non_commit_objects(lab):
+    seen = {}
+    for number in range(10000):
+        body = f'collision fixture {number}\n'.encode()
+        sha = hashlib.sha1(b'blob ' + str(len(body)).encode() + b'\0' + body).hexdigest()
+        if sha[:4] in seen:
+            first_sha, first_body = seen[sha[:4]]
+            break
+        seen[sha[:4]] = sha, body
+    else:
+        assert False, 'fixture did not find a four-digit object collision'
+    origin = lab.origins / 'temper.git'
+    for tag, expected, data in (('collision-one', first_sha, first_body), ('collision-two', sha, body)):
+        result = subprocess.run(['git', '-C', str(origin), 'hash-object', '-w', '--stdin'],
+                                input=data, env=lab.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                timeout=HUNG_TOOL_S)
+        assert result.returncode == 0 and result.stdout.decode().strip() == expected, result.stderr
+        lab.git(origin, 'tag', tag, expected)
+    lab.git(origin, 'tag', 'origin/main', sha)
+    # A hexadecimal tag must not redirect a commit's prefix either.
+    commit = lab.git(origin, 'rev-parse', 'HEAD')
+    lab.git(origin, 'tag', commit[:9], sha)
+    for ref in (sha[:4], sha, first_sha):
+        result = lab.walk('b0', '--build', ref, '--login', CHATGPT, status=1)
+        assert 'unresolvable build' in result.stderr
+    assert not lab.calls('codex-run')
+    assert all(state['given'] == [CHATGPT] and state['released'] for _, state in lab.walk_states())
+    lab.walk('b0', '--build', commit[:9].upper())
+    state = next(state for _, state in lab.walk_states() if state['run'])
+    assert state['main'] == commit
+
+
+CASES = (a_surviving_launcher_keeps_custody_until_its_unit_exists,
+         a_missing_walk_unit_is_ended_after_the_launch_grace,
+         a_missing_pass_unit_keeps_its_grants_and_slot_for_ten_minutes,
+         a_resumed_launch_without_a_unit_keeps_its_new_grant,
+         a_pass_cannot_give_as_a_walk_or_another_pass, conflicting_pass_and_walk_claims_give_for_neither,
+         a_new_walk_grant_checks_existing_claims_before_giving,
+         deeply_nested_and_oversized_states_keep_custody_without_stopping_checks,
+         a_walk_resolves_remote_branches_despite_colliding_tags,
+         hex_walk_builds_refuse_ambiguous_and_non_commit_objects,
+         manual_kind_holders_stay_held_when_watcher_checks, kind_slots_are_shared_across_repositories,
          walk_kind_settings_are_validated_and_follow_precedence, a_refused_now_take_reports_the_broken_caps,
          pre_kind_walks_drain_before_kind_admission, numbering_survives_a_change_of_default_kind,
          a_walk_reads_its_inventory_strictly, walks_of_two_kinds_take_their_own_slots_and_pools, a_kind_at_its_cap_refuses_at_once,

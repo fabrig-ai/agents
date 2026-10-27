@@ -770,6 +770,8 @@ class Watch:
         self.record = Record(workspace, log)
         self.repositories = Repositories(workspace)
         self.giving = True
+        self.conflicts = set()
+        self.states = {}
         self.pools, self.holders, self.queued = {}, {}, False
 
     def call(self, tool, *args):
@@ -789,25 +791,84 @@ class Watch:
         path = (self.directory / 'walks' / (state['walk'] + '.json') if 'walk' in state
                 else directory / 'pass.json')
         replace(path, (json.dumps(state, indent=2) + '\n').encode())
+        self.states[('walk' in state, state.get('walk', state.get('pass')))] = state
+
+    def read_state(self, path):
+        no_links(self.workspace.tmp, path)
+        with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), 'rb') as source:
+            info = os.fstat(source.fileno())
+            need(stat.S_ISREG(info.st_mode) and info.st_nlink == 1, f'{path}: invalid state file', 4)
+            data = source.read(1024 * 1024 + 1)
+        need(len(data) <= 1024 * 1024, f'{path}: state exceeds 1 MiB', 4)
+        return json.loads(data)
 
     def local_passes(self):
         result = []
+        self.passes_valid = True
         for path in sorted(self.directory.glob('*/pass.json')):
-            need(not path.is_symlink() and not path.parent.is_symlink(), f'{path}: symlink refused', 4)
-            state = json.loads(path.read_text())
-            need(state['pass'] == path.parent.name and re.fullmatch(NAME, state['pass'])
-                 and state['repository'] in REPOSITORIES, f'{path}: invalid pass', 4)
-            need(not state['run'] or re.fullmatch(r'[a-zA-Z0-9_-]+', state['run']), f'{path}: invalid run', 4)
-            result.append((path.parent, state))
+            try:
+                state = self.read_state(path)
+                need(state['pass'] == path.parent.name and re.fullmatch(NAME, state['pass'])
+                     and state['repository'] in REPOSITORIES, f'{path}: invalid pass', 4)
+                need('holder' not in state or state['holder'] == 'qa-watch/' + state['pass'],
+                     f'{path}: invalid holder', 4)
+                need(isinstance(state['run'], str) and (not state['run']
+                     or re.fullmatch(r'[a-zA-Z0-9_-]+', state['run'])), f'{path}: invalid run', 4)
+                need(type(state['finished']) is bool and isinstance(state['commits'], list)
+                     and all(isinstance(sha, str) and re.fullmatch(SHA, sha) for sha in state['commits'])
+                     and type(state.get('slot', 1)) is int and state.get('slot', 1) >= 1,
+                     f'{path}: invalid progress', 4)
+                logins, given = state.get('logins', {}), state.get('given', [])
+                need(isinstance(logins, dict) and isinstance(given, list)
+                     and all(isinstance(name, str) and re.fullmatch(LOGIN, name)
+                             and isinstance(rest, str) and Path(rest).is_absolute() for name, rest in logins.items())
+                     and all(isinstance(name, str) and name in logins for name in given),
+                     f'{path}: invalid custody', 4)
+                if 'kinds' in state:
+                    need(isinstance(state['kinds'], dict) and set(state['kinds']) == set(logins)
+                         and all(kind in ('moved', 'in-place') for kind in state['kinds'].values()),
+                         f'{path}: invalid login kinds', 4)
+                if 'pools' in state:
+                    need(isinstance(state['pools'], dict)
+                         and all(isinstance(pool, str) and re.fullmatch(LOGIN, pool)
+                                 and isinstance(name, str) and name in logins and pool_of(name) == pool
+                                 for pool, name in state['pools'].items()), f'{path}: invalid pools', 4)
+                for key in ('notice', 'notice_pending'):
+                    if key in state:
+                        notice = state[key]
+                        need(isinstance(notice, dict) and all(isinstance(notice.get(field), str)
+                             for field in ('subject', 'body')) and (key != 'notice_pending'
+                             or type(notice.get('required')) is bool), f'{path}: invalid notice', 4)
+                utc(state['started'])
+                if state['finished']:
+                    utc(state['ended'])
+                result.append((path.parent, state))
+            except (Problem, OSError, ValueError, RecursionError, KeyError, TypeError):
+                self.passes_valid = False
+                log(f'{path.parent.name}: invalid pass state; keeping custody')
         return result
+
+    def claims(self, states):
+        self.states.update({('walk' in state, state.get('walk', state.get('pass'))): state
+                            for _, state in states})
+        claimed = {}
+        for state in self.states.values():
+            for name in self.outstanding(state):
+                claimed.setdefault(name, []).append(state.get('walk', state.get('pass')))
+        self.conflicts = {name for name, owners in claimed.items() if len(owners) > 1}
+        for name in sorted(self.conflicts):
+            log(f'{name}: conflicting custody claims by {", ".join(claimed[name])}; keeping custody')
 
     def outstanding(self, state):
         return {name: path for name, path in state.get('logins', {}).items() if name not in state.get('given', [])}
 
     def give(self, directory, state, kind=None):
+        self.claims([(directory, state)])
         if not self.giving:
             return
         for name in self.outstanding(state):
+            if name in self.conflicts:
+                continue
             if kind and state.get('kinds', {}).get(name, 'moved') != kind:
                 continue
             result = self.call('logins', 'give', name, '--as', state.get('holder', 'qa-watch'))
@@ -842,7 +903,8 @@ class Watch:
             log("QA's rows from before --now still wait in the logins queue: no pass admitted until they expire")
         managed = {state['holder'] for _, state in passes if 'walk' in state}
         names = {name: holder for name, holder in self.holders.items()
-                 if (holder, name) not in held and (holder == 'qa-watch' or holder.startswith('qa-watch/')
+                 if name not in self.conflicts and (holder, name) not in held
+                 and (self.passes_valid and (holder == 'qa-watch' or holder.startswith('qa-watch/'))
                      or sweep_walks and holder in managed)}
         path = self.directory / 'strays.json'
         need(not path.is_symlink(), f'{path}: symlink refused', 4)
@@ -889,6 +951,17 @@ class Watch:
             if directory is not None and load == 'loaded' and fields['WorkingDirectory'] != str(directory):
                 log(f'{unit}: WorkingDirectory is not the pass directory; keeping logins held')
                 return 'unknown'
+            if load == 'not-found' and active == 'inactive' and unit.startswith('codex-run-'):
+                run = self.runs / unit.removeprefix('codex-run-')
+                if not (run / 'ended').exists():
+                    try:
+                        meta = (run / 'meta').stat()
+                    except FileNotFoundError:
+                        pass
+                    else:
+                        if utc(timestamp()).timestamp() - meta.st_mtime < 600:
+                            log(f'{unit}: launch may still start; keeping custody and slot')
+                            return 'launching'
             if (load == 'loaded' and active in ('inactive', 'failed')
                     or load == 'not-found' and active == 'inactive'):
                 return 'stopped'
@@ -904,7 +977,7 @@ class Watch:
             status = self.unit_status(unit, directory)
             if status == 'stopped':
                 return True
-            if status == 'unknown':
+            if status in ('unknown', 'launching'):
                 return False
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -941,6 +1014,9 @@ class Watch:
         return units
 
     def end(self, directory, state):
+        if (state['run'] and not (self.runs / state['run'] / 'ended').exists()
+                and self.unit_status('codex-run-' + state['run']) == 'launching'):
+            return False
         if 'stopped' in state:
             state.pop('stopped')
             self.save(directory, state)
@@ -1253,11 +1329,7 @@ class Watch:
         parent = self.directory / 'walks'
         for path in sorted(parent.glob('*.json')):
             try:
-                no_links(self.workspace.tmp, path)
-                with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)) as source:
-                    info = os.fstat(source.fileno())
-                    need(stat.S_ISREG(info.st_mode) and info.st_nlink == 1, f'{path}: invalid state file', 4)
-                    state = json.load(source)
+                state = self.read_state(path)
                 name = state['walk']
                 need(name == path.stem and re.fullmatch(r'rung-[a-z0-9][a-z0-9-]*-[1-9][0-9]*', name)
                      and state['repo'] in REPOSITORIES and name == 'rung-' + state['rung'] + '-' + state.get('clock_walk', name.rsplit('-', 1)[-1])
@@ -1288,7 +1360,7 @@ class Watch:
                 directory = self.workspace.tmp / 'qa-focused' / name
                 no_links(self.workspace.tmp, directory)
                 result.append((directory, state))
-            except (Problem, OSError, ValueError, UnicodeError, KeyError, TypeError):
+            except (Problem, OSError, ValueError, RecursionError, KeyError, TypeError):
                 if strict:
                     raise Problem(f'{path}: invalid walk state; keeping custody', 4) from None
                 self.walks_valid = False
@@ -1425,8 +1497,10 @@ class Watch:
         self.options = options
         complete = {}
         with self.record.locked(), self.walks_locked(wait=False) as walking:
+            self.states.clear()
             passes = self.local_passes()
             walks = self.local_walks(strict=False) if walking else []
+            self.claims(passes + walks)
             self.give_strays(passes + walks, sweep_walks=walking and self.walks_valid)
             for directory, state in passes:
                 try:
@@ -1456,7 +1530,7 @@ class Watch:
                         complete[state['pass']] = self.finish(directory, state, 'The service stopped before saving a run id.')
                     else:
                         status = self.unit_status('codex-run-' + state['run'])
-                        if status == 'unknown':
+                        if status in ('unknown', 'launching'):
                             continue
                         if status == 'stopped':
                             complete[state['pass']] = self.finish(directory, state, None if ended.exists() else 'The run unit vanished without its end.')
@@ -1472,7 +1546,7 @@ class Watch:
                             log(f'{state["pass"]}: stop failed: {stopped.stderr.strip()}')
                         else:
                             log(f'{state["pass"]}: capped run {run}')
-                except (Problem, OSError, ValueError, UnicodeError) as error:
+                except (Problem, OSError, ValueError, RecursionError, KeyError, TypeError, AttributeError) as error:
                     log(f'{state["pass"]}: cleanup failed ({type(error).__name__}); keeping logins and scratch')
             for directory, state in walks:
                 if state.get('stage') in ('ended', 'paused'):
@@ -1665,6 +1739,7 @@ def walk(args, workspace):
         no_links(workspace.tmp, focused)
         focused.mkdir(mode=0o700, parents=True, exist_ok=True)
         walks = service.local_walks()
+        service.claims(service.local_passes() + walks)
         kinds = options['QA_WALK_KINDS']
         need(not any('kind' not in state and not state.get('released') for _, state in walks),
              'pre-kind walks still hold slots; drain them before starting a kind', 1)
@@ -1726,7 +1801,7 @@ def walk(args, workspace):
         try:
             slot = f'{args.repo}-walk-{kind}-{state["slot"]}'
             with service.repositories.fetched(args.repo) as root:
-                service.repositories.checkout(root, args.repo, slot, 'origin/main')
+                service.repositories.checkout(root, args.repo, slot, 'refs/remotes/origin/main')
             for pool in state['requests']:
                 service.walk_room([pool], kind)
                 taken = service.call('logins', 'take', pool, '--any', '--now', '--as', state['holder'],
@@ -1748,14 +1823,20 @@ def walk(args, workspace):
                 ref = state['ref']
                 if ref == 'main':
                     ref = 'origin/main'
-                valid = re.fullmatch(r'[0-9a-fA-F]{4,40}', ref)
                 if ref.startswith('origin/'):
-                    valid = git(root, 'check-ref-format', 'refs/heads/' + ref[7:], check=False).returncode == 0
-                need(valid, f'unresolvable build: {state["ref"]}', 1)
-                resolved = git(root, 'rev-parse', '--verify', ref + '^{commit}', check=False)
-                need(resolved.returncode == 0 and re.fullmatch(SHA, resolved.stdout.strip()),
-                     f'unresolvable build: {state["ref"]}', 1)
-                state['main'] = resolved.stdout.strip()
+                    need(git(root, 'check-ref-format', 'refs/heads/' + ref[7:], check=False).returncode == 0,
+                         f'unresolvable build: {state["ref"]}', 1)
+                    resolved = git(root, 'rev-parse', '--verify', 'refs/remotes/' + ref + '^{commit}', check=False)
+                    need(resolved.returncode == 0 and re.fullmatch(SHA, resolved.stdout.strip()),
+                         f'unresolvable build: {state["ref"]}', 1)
+                    state['main'] = resolved.stdout.strip()
+                else:
+                    need(re.fullmatch(r'[0-9a-fA-F]{4,40}', ref), f'unresolvable build: {ref}', 1)
+                    resolved = git(root, 'rev-parse', '--disambiguate=' + ref.lower(), check=False)
+                    objects = resolved.stdout.splitlines()
+                    need(resolved.returncode == 0 and len(objects) == 1 and re.fullmatch(SHA, objects[0])
+                         and git(root, 'cat-file', '-t', objects[0]) == 'commit', f'unresolvable build: {ref}', 1)
+                    state['main'] = objects[0]
                 checkout = service.repositories.checkout(root, args.repo, slot, state['main'])
             service.save(directory, state)
             if args.resume is not None:
