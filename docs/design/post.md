@@ -133,6 +133,9 @@ The commands:
 - **`post list [--older MINUTES]`** lists this machine's unread
   messages, for every name: their age, name, id, sender and subject, and
   whether the name's waiter is alive.
+- **`post waiters`** prints, for each name of this machine whose waiter
+  lives, the name and the waiter's pid, so that a reader can tell which
+  session holds it (fleet-watch.md 3.1).
 - **`post wake NAME`** wakes NAME for the mail already in its `new/`,
   as delivery does (section 4), and prints `NAME` and what happened:
   `waiting`, `woken`, `queued`, or exit 3 with `queued, nobody will
