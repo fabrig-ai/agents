@@ -103,7 +103,7 @@ temper's `draft/v0.1.0.md` 5, each part from its own draft.
 
 | Part | What it produces for QA |
 |---|---|
-| configuring | rung D's golden: frozen copies of our own role files as the description; the settings temper proposes match a golden file; then C runs under them |
+| configuring | rung D's golden: `reference-case.md`'s process described to temper in words; the settings it proposes match a golden file; then C runs under them, leaving D's live story and its twin |
 | upgrades | the store's disk format frozen, with golden stores and a test that a later build opens a v0.1.0 store; a baseline rehearsal first |
 | the playground in the browser | story A walked in the gate and by the browser tier on the built playground; its bars (memory; the download, 6 MB gzipped) |
 | documentation for agents | generated pages checked against the code's tables at every gate; the `box` walk of `temper help` is rung A's walk |
