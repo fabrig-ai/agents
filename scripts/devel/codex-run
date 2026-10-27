@@ -2,6 +2,7 @@
 # Start Codex in a detached user unit and post its report when it ends.
 #   codex-run task [--model M] [--effort E] [--read-only] [--to ADDR] [--resume RUN] TASK DIR REPORT
 #   codex-run owner [--model M] [--effort E] NAME BRIEF
+#   codex-run stale [--post]
 # See docs/design/post.md, section 5.
 set -euo pipefail
 umask 077
@@ -113,8 +114,32 @@ terminate() {
     exit "$1"
 }
 finish_error() { printf '%s\n' "$*" >>"$state/finish-errors"; }
+post_subject() {
+    local status=$1 first='' summary_exit=0
+    first=$(head -n1 "$report" | tr -d '[:cntrl:]' | cut -c1-80) || summary_exit=$?
+    if [[ $status == 0 ]]; then printf 'run %s ok: %s\n' "$id" "$first"
+    else printf 'run %s failed %s: %s\n' "$id" "$status" "$first"; fi
+    return "$summary_exit"
+}
+post_body() {
+    printf 'Report: %s\nRun: %s\nThread: %s\nMinutes: %s\nTries: %s\n' \
+        "$report" "$state" "${thread:--}" "$minutes" "$tries"
+}
+stale_body() {
+    local started start_seconds
+    started=$(meta_get "$state/meta" started) || return
+    [[ -n $started ]] || return 1
+    start_seconds=$(date -d "$started" +%s) || return
+    minutes=$(( (now - start_seconds) / 60 ))
+    thread=''
+    if [[ -s $state/thread ]]; then thread=$(<"$state/thread") || return; fi
+    # turn() keeps its attempt count in memory; a dead worker leaves none.
+    tries='-'
+    post_body >"$state/post-body"
+}
+
 finish_task() {
-    local status=$1 ended tokens='-' thread='' subject first='' post_exit=0 minutes=0
+    local status=$1 ended tokens='-' thread='' subject post_exit=0 minutes=0
     trap - EXIT
     trap '' TERM INT
     # Each step must run even if another step or its diagnostics cannot be saved.
@@ -137,16 +162,16 @@ finish_task() {
          ([.[].output_tokens // 0] | add)] | map(tostring) | join("/") end' "$state/events.jsonl") || {
         tokens='-'; finish_error 'tokens failed'
     }
-    first=$(head -n1 "$report" | tr -d '[:cntrl:]' | cut -c1-80) || finish_error 'report summary failed'
-    if ((status == 0)); then subject="run $id ok: $first"; else subject="run $id failed $status: $first"; fi
+    subject=$(post_subject "$status") || finish_error 'report summary failed'
     minutes=$(( ($(date -d "$ended" +%s) - $(date -d "$started" +%s)) / 60 ))
-    printf 'Report: %s\nRun: %s\nThread: %s\nMinutes: %s\nTries: %s\n' \
-        "$report" "$state" "${thread:--}" "$minutes" "$tries" >"$state/post-body" || finish_error 'post body failed'
+    post_body >"$state/post-body" || finish_error 'post body failed'
     "$kit/post" send --as codex-run "$to" "$subject" "$state/post-body" >"$state/post-output" 2>&1 || post_exit=$?
     if ((post_exit != 0)); then
         finish_error "post failed: $post_exit"
-        cp "$state/post-output" "$state/post-failed" || printf 'post failed: %s\n' "$post_exit" >"$state/post-failed"
-        cat "$state/post-failed"
+        if ((post_exit != 3)); then
+            cp "$state/post-output" "$state/post-failed" || printf 'post failed: %s\n' "$post_exit" >"$state/post-failed"
+        fi
+        cat "$state/post-output"
     fi
     (
         flock 9 || exit
@@ -352,21 +377,79 @@ owner_run() {
     done
 }
 stale() {
-    (($# == 0)) || refuse 'usage: codex-run stale'
-    local state id why to
+    (($# == 0)) || { (($# == 1)) && [[ $1 == --post ]]; } || refuse 'usage: codex-run stale [--post]'
+    local state id why to now post=${1:-} status subject output result=0
+    local report thread minutes tries modified
+    now=$(date +%s)
     for state in "$runs/"*/; do
-        [[ -f $state/meta ]] || continue
+        [[ -f $state/meta && ! -f $state/told ]] || continue
         state=${state%/}
         id=${state##*/}
+        if ! modified=$(stat -c %Y "$state/meta"); then
+            printf '%s not told: meta age unavailable\n' "$id"
+            result=1
+            continue
+        fi
+        ((now - modified >= 120)) || continue
         why=''
-        if [[ -f $state/post-failed ]]; then why='post failed'
+        if [[ -f $state/post-failed ]]; then
+            status=0
+            grep -Fq 'queued, nobody will wake it' "$state/post-failed" || status=$?
+            if ((status == 0)); then continue; fi
+            if ((status != 1)); then
+                printf '%s not told: post failure marker unreadable\n' "$id"
+                result=1
+                continue
+            fi
+            why='post failed'
         elif [[ ! -f $state/ended ]] && ! systemctl --user is-active --quiet "codex-run-$id"; then
             why='unit inactive without end'
         fi
         [[ -n $why ]] || continue
-        to=$(meta_get "$state/meta" to)
-        printf '%s\t%s\t%s\t%s\n' "$id" "$why" "$state" "$to"
+        if ! to=$(meta_get "$state/meta" to) || ! valid_to "$to"; then
+            printf '%s not told: meta recipient unreadable or invalid\n' "$id"
+            result=1
+            continue
+        fi
+        if [[ -z $post ]]; then
+            printf '%s\t%s\t%s\t%s\n' "$id" "$why" "$state" "$to"
+            continue
+        fi
+        if ! report=$(meta_get "$state/meta" report) || [[ $report != /* ]]; then
+            printf '%s not told: meta report unreadable or invalid\n' "$id"
+            result=1
+            continue
+        fi
+        status=''
+        subject="run $id failed stale: $why"
+        if [[ $why == 'post failed' && -f $runs/runs.tsv && -r $runs/runs.tsv ]]; then
+            status=$(awk -F'\t' -v id="$id" '$1 == id { print $5; exit }' "$runs/runs.tsv" 2>/dev/null) || status=''
+        fi
+        if [[ $status =~ ^[0-9]+$ ]]; then subject=$(post_subject "$status") || true; fi
+        output=''
+        if [[ $why == 'unit inactive without end' ]] ||
+            { [[ ! $status =~ ^[0-9]+$ && ! -e $state/post-body && ! -L $state/post-body ]]; }; then
+            if ! stale_body; then output='post body failed'; fi
+        fi
+        if [[ -z $output && ( ! -f $state/post-body || ! -r $state/post-body ) ]]; then
+            output='post body unreadable'
+        fi
+        if [[ -n $output ]]; then
+            printf '%s not told: %s\n' "$id" "$output"
+            result=1
+            continue
+        fi
+        status=0
+        output=$("$kit/post" send --as codex-run "$to" "$subject" "$state/post-body" 2>&1) || status=$?
+        if ((status == 0 || status == 3)); then
+            printf '%s\n' "$output" >"$state/told" || result=1
+            printf '%s told: %s\n' "$id" "${output##*$'\n'}"
+        else
+            printf '%s not told: %s\n' "$id" "${output##*$'\n'}"
+            result=1
+        fi
     done
+    return "$result"
 }
 
 mode=${1:-}
@@ -378,5 +461,5 @@ case $mode in
     _run) task_run "$@" ;;
     _stop) task_stop "$@" ;;
     _owner) owner_run "$@" ;;
-    *) refuse 'usage: codex-run task|owner|stale ...' ;;
+    *) refuse 'usage: codex-run task|owner ... | stale [--post]' ;;
 esac

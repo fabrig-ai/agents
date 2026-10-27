@@ -186,7 +186,8 @@ case $1 in
         status=0
         [[ ! -f $fake/post-exit ]] || status=$(<"$fake/post-exit")
         if ((status == 0)); then echo 'message-fixture waiting'
-        else echo 'message-fixture queued, nobody will wake it: fixture'; fi
+        elif ((status == 3)); then echo 'message-fixture queued, nobody will wake it: fixture'
+        else echo 'message-fixture refused'; fi
         exit "$status" ;;
     wait)
         jq -nc --args '{args:$ARGS.positional}' -- "$@" >>"$fake/post.calls"
@@ -333,10 +334,20 @@ output=$("$kit/codex-run" task "$t/task file.md" "$t/work dir" "$t/reports/reser
 read -r reserved_id reserved_state <<<"$output"
 expect 'report reserved at launch' "$(cat "$t/reports/reserved.md")" "codex-run: run $reserved_id is writing this report."
 refusal 'second report launch refused' task "$t/task file.md" "$t/work dir" "$t/reports/reserved.md"
+expect 'fresh run not stale' "[$("$kit/codex-run" stale)]" '[]'
+touch -d '3 minutes ago' "$reserved_state/meta"
 expect 'inactive unfinished run is stale' "$("$kit/codex-run" stale)" "$reserved_id" 'unit inactive without end' "$reserved_state" 'o/caller'
 touch "$fake/active"
 expect 'active unfinished run omitted' "[$("$kit/codex-run" stale)]" '[]'
 rm "$fake/active" "$fake/hold-launch"
+
+# An old exit-3 marker predates the distinction between queued and refused.
+touch "$reserved_state/ended"
+printf 'queued, nobody will wake it: stopped\n' >"$reserved_state/post-failed"
+expect 'legacy queued post-failed counts as told' "[$("$kit/codex-run" stale)]" '[]'
+refusal 'stale usage rejects unknown option' stale --bogus
+refusal 'stale usage rejects extra argument' stale --post extra
+expect 'stale --post with no runs to tell' "[$("$kit/codex-run" stale --post)]" '[]'
 
 n=0
 has_row() { [[ -f $DEV_ROOT/tmp/codex-run/runs.tsv ]] && grep -q "^$id"$'\t' "$DEV_ROOT/tmp/codex-run/runs.tsv"; }
@@ -466,17 +477,144 @@ json_expect 'resumed writable invocation keeps bypass' \
 
 printf '3\n' >"$fake/post-exit"
 start_task success
-expect 'post failure is recorded and journalled' "$(cat "$state/post-failed")" 'nobody will wake it'
+touch -d '3 minutes ago' "$state/meta"
+expect 'exit 3 is told at the end' "$(test ! -e "$state/post-failed" && echo told),[$("$kit/codex-run" stale)]" 'told,[]'
+expect 'queued post failure still diagnosed' "$(cat "$state/finish-errors")" 'post failed: 3'
 expect 'journal includes post failure' "$(cat "$fake/codex-run-$id.log")" 'nobody will wake it'
 expect 'row includes post exit' "$(row)" $'\t30/6/8\t3'
 rm "$fake/post-exit"
 
 printf '2\n' >"$fake/post-exit"
 start_task success
+touch -d '3 minutes ago' "$state/meta"
 expect 'refused post surfaced by stale' "$("$kit/codex-run" stale)" "$id" 'post failed' "$state" 'o/caller'
 expect 'completion marker written even after post failure' "$(test -f "$state/ended" && echo ended)" ended
 expect 'post failure noted in finish-errors' "$(cat "$state/finish-errors")" 'post failed: 2'
 rm "$fake/post-exit"
+output=$("$kit/codex-run" stale --post)
+json_expect 'stale --post resends a refused end' \
+    'length == 2 and .[1].args == .[0].args and .[1].body == .[0].body and
+     .[1].args[0:4] == ["send", "--as", "codex-run", "o/caller"]' "$fake/post.calls"
+expect 'resent end is told once' "$output,$(cat "$state/told"),[$("$kit/codex-run" stale)],[$("$kit/codex-run" stale --post)]" \
+    "$id told: message-fixture waiting,message-fixture waiting,[],[]"
+
+# Unexpected post exits also leave an end retryable, with its original run exit.
+printf '7\n' >"$fake/post-exit"
+start_task failure
+touch -d '3 minutes ago' "$state/meta"
+expect 'unexpected post exit remains untold' "$(cat "$state/post-failed"),$(cat "$state/finish-errors")" \
+    'message-fixture refused,post failed: 7'
+rm "$fake/post-exit"
+"$kit/codex-run" stale --post >/dev/null
+json_expect 'resent failed subject uses run exit rather than post exit' \
+    'length == 2 and .[1].args == .[0].args and (.[1].args[4] | contains("failed 9:")) and
+     .[1].body == .[0].body' "$fake/post.calls"
+
+
+# Row loss cannot prevent an otherwise retryable end from reaching its caller.
+for missing in row file malformed unreadable; do
+    printf '2\n' >"$fake/post-exit"
+    start_task success
+    touch -d '3 minutes ago' "$state/meta"
+    rm "$fake/post-exit"
+    cp "$DEV_ROOT/tmp/codex-run/runs.tsv" "$fake/saved-runs.tsv"
+    case $missing in
+        row)
+            awk -F'\t' -v id="$id" '$1 != id' "$fake/saved-runs.tsv" >"$DEV_ROOT/tmp/codex-run/runs.tsv" ;;
+        file) rm "$DEV_ROOT/tmp/codex-run/runs.tsv" ;;
+        malformed)
+            awk -F'\t' -v OFS='\t' -v id="$id" '$1 == id { $5 = "unknown" } { print }' \
+                "$fake/saved-runs.tsv" >"$DEV_ROOT/tmp/codex-run/runs.tsv" ;;
+        unreadable)
+            rm "$DEV_ROOT/tmp/codex-run/runs.tsv"
+            mkdir "$DEV_ROOT/tmp/codex-run/runs.tsv" ;;
+    esac
+    output=$("$kit/codex-run" stale --post)
+    expect "stale --post without a row ($missing)" "$output,$(cat "$state/told")" \
+        "$id told: message-fixture waiting,message-fixture waiting"
+    json_expect "missing $missing keeps the end's body and uses a stale subject" \
+        'length == 2 and .[1].body == .[0].body and .[1].args[0:4] == .[0].args[0:4] and
+         (.[1].args[4] | test("^run .* failed stale: post failed$"))' "$fake/post.calls"
+    if [[ $missing == unreadable ]]; then rmdir "$DEV_ROOT/tmp/codex-run/runs.tsv"; fi
+    mv "$fake/saved-runs.tsv" "$DEV_ROOT/tmp/codex-run/runs.tsv"
+done
+
+printf '2\n' >"$fake/post-exit"
+start_task success
+touch -d '3 minutes ago' "$state/meta"
+rm "$fake/post-exit" "$state/post-body"
+mv "$DEV_ROOT/tmp/codex-run/runs.tsv" "$fake/saved-runs.tsv"
+output=$("$kit/codex-run" stale --post)
+[[ ! -e $DEV_ROOT/tmp/codex-run/runs.tsv && -f $state/ended ]]
+expect 'missing row and body rebuild only the body' "$output,$(cat "$state/post-body")" \
+    "$id told: message-fixture waiting" "Report: $report" "Run: $state" 'Thread: thread-fixture' 'Tries: -'
+json_expect 'rebuilt refused end uses stale subject' \
+    'length == 2 and (.[1].args[4] | test("^run .* failed stale: post failed$"))' "$fake/post.calls"
+mv "$fake/saved-runs.tsv" "$DEV_ROOT/tmp/codex-run/runs.tsv"
+
+# Synthetic dead units keep local failure cases independent of worker timing.
+make_stale_run() {
+    id=$1 state=$DEV_ROOT/tmp/codex-run/$1 report=$t/reports/$1.md
+    mkdir "$state"
+    printf 'fixture report\n' >"$report"
+    printf 'to=o/caller\nreport=%s\nstarted=%s\n' "$report" "$(date -u -d '3 minutes ago' +%FT%TZ)" >"$state/meta"
+    touch -d '3 minutes ago' "$state/meta"
+}
+make_stale_run stale-local-a
+first_id=$id first_state=$state
+mkdir "$state/post-body"
+make_stale_run stale-local-b
+second_id=$id second_state=$state
+printf 'saved-thread\n' >"$state/thread"
+: >"$fake/post.calls"
+status=0
+output=$("$kit/codex-run" stale --post 2>"$fake/local-errors") || status=$?
+[[ $output == "$first_id not told: post body failed"$'\n'"$second_id told: message-fixture waiting" &&
+   ! -e $first_state/told && -f $second_state/told ]]
+expect "stale --post goes on after one run's failure" "$status,$output" \
+    '1,' "$first_id not told: post body failed" "$second_id told: message-fixture waiting"
+json_expect 'only the second caller is posted with its saved thread and elapsed minutes' \
+    'length == 1 and (.[0].body | contains("Thread: saved-thread\n") and contains("Minutes: 3\n"))' "$fake/post.calls"
+rm -r "$first_state" "$second_state"
+
+# A refused end's existing body is never regenerated merely because it is unreadable.
+printf '2\n' >"$fake/post-exit"
+start_task success
+touch -d '3 minutes ago' "$state/meta"
+rm "$fake/post-exit" "$state/post-body"
+mkdir "$state/post-body"
+status=0
+output=$("$kit/codex-run" stale --post) || status=$?
+expect 'unreadable post-body is not told' "$status,$output,$(wc -l <"$fake/post.calls")" \
+    "1,$id not told: post body unreadable,1"
+[[ ! -e $state/told ]]
+rmdir "$state/post-body"
+printf 'original body restored\n' >"$state/post-body"
+"$kit/codex-run" stale --post >/dev/null
+
+make_stale_run stale-marker
+mkdir "$state/told"
+status=0
+output=$("$kit/codex-run" stale --post 2>"$fake/told-errors") || status=$?
+[[ -s $fake/told-errors && ! -f $state/told ]]
+expect 'delivered post with an unwritable told marker still reports told' "$status,$output" \
+    "1,$id told: message-fixture waiting"
+rmdir "$state/told"
+"$kit/codex-run" stale --post >/dev/null
+
+# Missing metadata is a local failure, rather than an invented timestamp or path.
+for missing in started report to; do
+    make_stale_run "stale-meta-$missing"
+    sed "/^$missing=/d" "$state/meta" >"$state/meta.new"
+    mv "$state/meta.new" "$state/meta"
+    touch -d '3 minutes ago' "$state/meta"
+    : >"$fake/post.calls"
+    status=0
+    output=$("$kit/codex-run" stale --post) || status=$?
+    [[ ! -e $state/told && ! -s $fake/post.calls ]]
+    expect "missing metadata $missing leaves run untold" "$status,$output" "1,$id not told: "
+    rm -r "$state"
+done
 
 start_task controls
 json_expect 'tab and CRLF removed only from subject' '.[0].args[4] | test("ok: Fixture task completed\\.$")' "$fake/post.calls"
@@ -552,11 +690,35 @@ for signal in TERM INT KILL; do
             json_expect 'signal post says failed' '.[0].args[4] | contains("failed ")' "$fake/post.calls"
             expect 'signal unit exit preserved' "$(cat "$fake/codex-run-$id.ended")" "$code" ;;
         KILL)
+            touch -d '3 minutes ago' "$state/meta"
             expect 'killed worker is stale' "$("$kit/codex-run" stale)" "$id" 'unit inactive without end' "$state"
             [[ ! -f $state/ended && ! -s $state/thread ]]
             killed_id=$id ;;
     esac
 done
+
+rows_before=$(cat "$DEV_ROOT/tmp/codex-run/runs.tsv")
+report_before=$(cat "$report")
+printf '2\n' >"$fake/post-exit"
+status=0
+output=$("$kit/codex-run" stale --post) || status=$?
+expect 'stale --post keeps an untold run' \
+    "$status,$output,$(test ! -e "$state/told" && echo untold),$("$kit/codex-run" stale)" \
+    "1,$id not told: message-fixture refused,untold,$id" 'unit inactive without end'
+json_expect "stale --post tells a dead unit's caller" \
+    'length == 1 and .[0].args[0:4] == ["send", "--as", "codex-run", "o/caller"] and
+     (.[0].args[4] | test("^run .* failed stale: unit inactive without end$")) and
+     (.[0].body | contains("Report: ") and contains("Run: ") and contains("Thread: -\n") and
+      contains("Minutes: 0\n") and contains("Tries: -\n"))' "$fake/post.calls"
+[[ $(cat "$DEV_ROOT/tmp/codex-run/runs.tsv") == "$rows_before" && ! -e $state/ended &&
+   $(cat "$report") == "$report_before" ]]
+expect 'dead unit post replays no other end step' "$(test ! -e "$state/report.md" && echo unchanged)" unchanged
+printf '3\n' >"$fake/post-exit"
+output=$("$kit/codex-run" stale --post)
+expect 'stale --post exit 3 marks told' \
+    "$output,$(cat "$state/told"),[$("$kit/codex-run" stale)]" \
+    "$id told: message-fixture queued, nobody will wake it: fixture,message-fixture queued, nobody will wake it: fixture,[]"
+rm "$fake/post-exit"
 start_task success --resume "$killed_id"
 json_expect 'killed thread recovered from events' '.[0].args[0:2] == ["exec", "resume"] and .[0].args[-2] == "thread-fixture"' "$fake/codex.calls"
 
