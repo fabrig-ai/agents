@@ -94,6 +94,18 @@ here. Durable know-how belongs here, not in the session's memory or in
   section; `landings taught --since` the last check; STATUS.md's "Asked
   in chat" (section 6); `tidy` on machines with no landing since the last
   check; a decision recording it.
+- **v0.1.0's progress page** (the user, 10-27), at each check: each
+  designer and each of the director's own owners sends one line per
+  mission, `MISSION | DONE% | QA% | WAITING | NOTE` (done toward its
+  end; the share of what a person can use that QA after landing has
+  run on, its findings fixed or triaged; what landed and waits for QA;
+  what would let QA catch up). From the replies and QA's record
+  (records `qa/passes/`, `qa/rungs.md`, the ladder of
+  [release-testing.md](../docs/design/release-testing.md) 4) the
+  director writes hel8's `/var/www/status/v0.1.0.html`, linked from the
+  status page: public, so missions by name and description, never a
+  session's or a person's name. Where QA lags development it acts: a
+  pass decided, a rung opened, a walk started.
 - **A session that stopped on its own** (state done, no pid, post says
   "nobody will wake it") is resumed in place with `claude --bg --resume
   <sessionId> "<what to read>"` and checked busy.
