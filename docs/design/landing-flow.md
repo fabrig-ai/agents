@@ -675,8 +675,10 @@ Beside the tool, the owner and its implementers do the rest:
   proves it and lands it again.
 - **One writer.** Every landing that pushes to skein, smith, hearth,
   jig or temper takes the set lock, plain and docs landings too (9.2),
-  on the machines the landing turn enables (build-infrastructure.md 8),
-  so no `main` moves under a set's run. A push around the tools still
+  on the machines the landing turn enables (build-infrastructure.md 8).
+  Both wait for a running set with the same message and no timeout; a
+  docs landing outside those repositories goes on. No `main` moves under
+  a set's run. A push around the tools still
   could: `land-set` checks every `main` again before its pushes and
   gates again what moved, so only a failure once the pushes have begun
   can leave a set half-landed: a gate run again that fails, a signal.

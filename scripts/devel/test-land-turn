@@ -488,7 +488,10 @@ def invocation_lock(lab):
 
 
 def docs_mockups(lab, rejected=None):
-    clone = lab.clones['a']
+    # Outside a set repository, docs need neither configuration nor a turn.
+    clone = lab.clones['a'].with_name('other')
+    lab.clones['a'].rename(clone)
+    lab.clones['a'] = clone
     git(clone, 'reset', '--hard', 'main')
     files = ['docs/design/mockups/index.html', 'docs/design/mockups/app.js',
              'docs/design/mockups/style.css', 'docs/design/a/b/mockups/index.html',
@@ -528,6 +531,52 @@ def docs_mockups(lab, rejected=None):
             'no_turn_state_transport_host_turn_heavy_prebuild_gate': True,
             'ordinary_nonforce_push': not rejected}
 
+
+
+def docs_set_wait(lab, repository, configured=False):
+    if configured:
+        config_hook(lab)
+        lab.switch.write_text('ssh\n')
+    clone = lab.clones['a'].with_name(repository)
+    if clone != lab.clones['a']:
+        lab.clones['a'].rename(clone)
+        lab.clones['a'] = clone
+    git(clone, 'reset', '--hard', 'main')
+    (clone / 'note.md').write_text('docs while a set holds its lock\n')
+    git(clone, 'add', '.')
+    git(clone, 'commit', '-qm', 'docs')
+    before = git(lab.origin, 'rev-parse', 'main')
+    blocker = holder(lab.path / 'tmp', '7' * 32, repo='set')
+    grant(blocker)
+    try:
+        client = lab.start_land(extra=['--docs'])
+        if repository != 'other':
+            wait_for(lambda: any(e['event'] == 'request' for e in lab.turn_events()), 'docs set request')
+            time.sleep(.15)
+            assert client.poll() is None, 'docs landed while the set held its lock'
+            assert git(lab.origin, 'rev-parse', 'main') == before
+            assert not any(e['event'] == 'grant' for e in lab.turn_events())
+            assert 'land: waiting for the set lock' in (lab.path / 'a.land.txt').read_text()
+            disconnect(blocker)
+            blocker = None
+        lab.done(client)
+        assert git(lab.origin, 'rev-parse', 'main') == git(clone, 'rev-parse', 'HEAD')
+        assert git(lab.origin, 'rev-parse', 'main') != before
+        assert not (clone / '.git/land-turn.lock').exists()
+        assert not list(lab.control.glob('*.json')) and not lab.state()['tasks']
+        if repository == 'other':
+            assert blocker.poll() is None, 'the unrelated landing needed the set to finish'
+            assert not lab.turn_events()
+        else:
+            requests = [e for e in lab.turn_events() if e['event'] == 'request']
+            assert len(requests) == 1 and requests[0]['repository'] == 'set'
+            own = [e['event'] for e in lab.turn_events() if e['token'] == requests[0]['token']]
+            assert own == ['request', 'grant', 'release'], own
+        return {'layer': 'actual-land-held-set', 'repository': repository,
+                'configured': configured, 'waited': repository != 'other', 'docs_landed': True}
+    finally:
+        if blocker is not None:
+            disconnect(blocker)
 
 def lost(lab, queued=False, kill_client=False):
     blocker = holder(lab.path / 'tmp', '9' * 32) if queued else None
@@ -588,7 +637,9 @@ def inert(lab, mode):
     if mode == 'off':
         env.pop('LAND_TURN')
     elif mode == 'docs':
-        clone = lab.clones['a']
+        clone = lab.clones['a'].with_name('other')
+        lab.clones['a'].rename(clone)
+        lab.clones['a'] = clone
         git(clone, 'reset', '--hard', 'main')
         (clone / 'note.md').write_text('note\n')
         git(clone, 'add', '.')
@@ -850,6 +901,9 @@ def main():
              ('failed-gate', failure), ('after-landing', after_landing), ('terminated-client', terminated)]
     cases += [('inert-' + mode, lambda lab, mode=mode: inert(lab, mode)) for mode in ('off', 'docs', 'local', 'other')]
     cases += [('inert-docs-mockups', docs_mockups)]
+    cases += [('docs-set-' + repo, lambda lab, repo=repo: docs_set_wait(lab, repo))
+              for repo in ('jig', 'temper', 'other')]
+    cases += [('docs-set-configured', lambda lab: docs_set_wait(lab, 'temper', True))]
     cases += [('config-' + mode, lambda lab, mode=mode: config_cycle(lab, mode))
               for mode in ('ssh', 'local')]
     cases += [('config-invalid-' + name, lambda lab, value=value: config_invalid(lab, value))

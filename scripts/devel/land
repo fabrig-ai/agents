@@ -157,6 +157,7 @@ if ((in_set && !local && !no_push)) && [[ ${LAND_TURN:-0} == 1 &&
     ${LAND_TURN_ACTIVE:-0} != 1 ]]; then
     turn=(python3 -I -B "$kit/land-turn.py" client "$tmp" set "$kit/land" "${original_args[@]}")
     if ((docs)); then
+        echo "land: waiting for the set lock" >&2
         LAND_LOCK=$lock LAND_RESULT=$result_file exec "${turn[@]}"
     fi
     # A code landing proves its tree without the lock, as land --no-push,
@@ -175,6 +176,7 @@ if ((in_set && !local && !no_push)) && [[ ${LAND_TURN:-0} == 1 &&
             cat "$shown" >&2
             [[ -z $result_file ]] || rm -f "$result_file"
             echo "land: proved; landing under the set lock" >&2
+            echo "land: waiting for the set lock" >&2
             LAND_LOCK=$lock LAND_RESULT=$result_file LAND_PROVED=$((round < 3)) \
                 "${turn[@]}" >"$shown" || status=$?
         fi
