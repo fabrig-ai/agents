@@ -596,6 +596,22 @@ def old_per_login_queues_are_migrated(lab):
     assert lab.run('take', CHATGPT, '--as', 'b')[0] == 0
 
 
+def a_request_granted_by_old_code_leaves_the_queue(lab):
+    lab.clock('2026-10-27T10:00:00Z')
+    lab.login()
+    # An old process granted b by name, writing holder.json alone; b's row stayed in the queue.
+    lab.write('waiting.json', [dict(holder='b', request=CHATGPT, pool=False, note='',
+                                    since='2026-10-27T09:58:00Z', seen='2026-10-27T09:59:00Z')])
+    lab.write('holder.json', dict(holder='b', note='', since='2026-10-27T09:59:30Z'))
+    assert lab.run('give', CHATGPT, '--as', 'b')[0] == 0
+    assert lab.read('waiting.json') == []
+    code, out, _ = lab.run('take', CHATGPT, '--any', '--as', 'c')
+    assert code == 0 and out.split()[0] == CHATGPT, out
+    os.link(lab.tmp / 'logins/waiting.json', lab.root / 'queue-link')
+    code, _, err = lab.run('take', CHATGPT, '--as', 'd')
+    assert code == 4 and 'one link' in err, err
+
+
 def an_old_process_lock_still_excludes(lab):
     path = lab.login()
     # Signal immediately before flock rather than guessing when the child has started.
@@ -728,7 +744,7 @@ sys.exit(module.main())
     assert lab.read('holder.json')['holder'] == 'b'
 
 
-CASES = (a_pool_take_grants_a_free_login_and_names_it, one_queue_in_arrival_order,
+CASES = (a_request_granted_by_old_code_leaves_the_queue, a_pool_take_grants_a_free_login_and_names_it, one_queue_in_arrival_order,
          a_waiter_for_a_stuck_login_holds_back_no_free_one, a_pool_waiter_keeps_one_free_login_not_all,
          a_stale_waiter_leaves_the_queue, two_takes_at_once_get_two_logins,
          old_per_login_queues_are_migrated, an_old_process_lock_still_excludes,

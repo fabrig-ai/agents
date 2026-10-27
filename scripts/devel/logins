@@ -163,8 +163,8 @@ class Workspace:
         path = self.safe(self.logins / filename)
         if path.exists():
             info = path.stat()
-            need(stat.S_ISREG(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o600,
-                 f'{path}: expected a private regular file (0600)', 4)
+            need(stat.S_ISREG(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o600 and info.st_nlink == 1,
+                 f'{path}: expected a private regular file (0600) with one link', 4)
         return path
 
     @contextmanager
@@ -218,13 +218,19 @@ class Workspace:
                     legacy.append(old)
                 if not readonly:
                     self.waiting = [row for row in self.waiting
-                                    if elapsed(now, row['seen']) <= STALE_SECONDS]
+                                    if elapsed(now, row['seen']) <= STALE_SECONDS and not self.served(row)]
                     # Persist the merged queue before deleting any old copy: retries are safe.
                     if legacy or self.waiting != previous:
                         self.write_waiting()
                     for old in legacy:
                         old.unlink()
                 yield self
+
+    def served(self, row):
+        # An old process grants by name outside this queue: its row then waits for nothing.
+        login = None if row['pool'] else self.logins_by_name.get(row['request'])
+        current = login.read('holder.json', None) if login else None
+        return bool(current) and current['holder'] == row['holder']
 
     def read_waiting(self):
         path = self.private('waiting.json')
