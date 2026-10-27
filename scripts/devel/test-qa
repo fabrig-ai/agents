@@ -948,7 +948,7 @@ elif name == 'post':
             sys.exit('fixture subject refused')
         with Path(os.environ['QA_POST_LOG']).open('a') as log:
             log.write(json.dumps(dict(args=['send', *rest], body=Path(rest[2]).read_text())) + '\n')
-        sys.exit(int(os.environ['QA_POST_STATUS']))
+        sys.exit(int(config.get('post_status', {}).get(rest[0], os.environ['QA_POST_STATUS'])))
     if args[0] == 'wait':
         waits = root / 'waits'
         index = int(waits.read_text()) if waits.exists() else 0
@@ -1783,6 +1783,157 @@ def watch_recovers_a_give_before_its_state_was_saved(lab):
     assert f'gave back {CHATGPT}: held without a pass' not in result.stdout
 
 
+def stuck_posts(lab):
+    return [post for post in lab.sent() if post['args'][2].startswith('qa: login ')]
+
+
+def start_stuck_pass(lab, *logins):
+    lab.rung('temper', REAL, *logins)
+    lab.waiting(1)
+    lab.watch()
+    directory, state = lab.watch_state()
+    lab.end_run()
+    lab.configure(logins_out=list(logins))
+    return directory, state
+
+
+def a_stuck_login_alerts_the_director_and_the_list(lab):
+    path = lab.home / '.config/agents-qa/stuck'
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b'design/upgrades-draft@fixture\n# recovery team\n\ndirector@fixture\nnot an address\n\xff\n')
+    directory, state = start_stuck_pass(lab, CHATGPT)
+    unit, pid = deployment(lab, directory)
+    result = driven_watch(lab, """import json
+original = tool['Watch'].call
+def call(self, name, *args):
+    if name == 'post' and args[0] == 'send':
+        saved = json.loads((self.directory / PASS / 'pass.json').read_text())
+        receipts = saved['alerts']['chatgpt']
+        if str(args[-2]).startswith('qa: login '):
+            assert set(receipts) == {'director@fixture', 'design/upgrades-draft@fixture'}
+            assert receipts[args[-3]] is False
+        else:
+            assert all(receipts.values())
+    return original(self, name, *args)
+tool['Watch'].call = call
+""".replace('PASS', repr(state['pass'])))
+    alerts = stuck_posts(lab)
+    recipients = {'director@fixture', 'design/upgrades-draft@fixture'}
+    assert len(alerts) == 2 and {post['args'][1] for post in alerts} == recipients
+    assert result.stdout.count('invalid stuck address; skipped') == 2
+    assert lab.sent()[:2] == alerts and lab.sent()[2]['args'][2].startswith('qa: pass ')
+    for post in alerts:
+        assert post['args'][2] == f'qa: login {CHATGPT} stuck in pass {state["pass"]}'
+        for text in (CHATGPT, state['logins'][CHATGPT], str(directory), unit,
+                     "It counts against QA's logins of pool chatgpt until it is back"):
+            assert text in post['body']
+    assert lab.watch_state()[1]['alerts'] == {CHATGPT: dict.fromkeys(recipients, True)}
+    lab.watch()
+    assert len(lab.sent()) == 3 and alive(pid)
+    assert all(call[1:3] == ['--as', 'qa-watch'] for call in lab.calls('post') if call[0] == 'send')
+
+
+def a_refused_alert_is_sent_again(lab):
+    path = lab.home / '.config/agents-qa/stuck'
+    path.parent.mkdir(parents=True)
+    address = 'design/upgrades-draft@fixture'
+    path.write_text(address + '\n')
+    directory, _ = start_stuck_pass(lab, CHATGPT)
+    lab.configure(post_status={address: 1})
+    lab.watch()
+    assert lab.watch_state()[1]['alerts'] == {CHATGPT: {address: False, 'director@fixture': True}}
+    assert len(stuck_posts(lab)) == 2
+    # Returning the login and changing the list cannot discard a saved delivery.
+    lab.configure(logins_out=[])
+    path.unlink()
+    path.mkdir()
+    aged(lab, directory)
+    result = lab.watch()
+    assert 'cannot read stuck addresses (IsADirectoryError)' in result.stdout
+    assert directory.exists() and lab.watch_state()[1]['given'] == [CHATGPT]
+    lab.configure(post_status={address: 3})
+    lab.watch()
+    assert not directory.exists()
+    alerts = stuck_posts(lab)
+    assert [post['args'][1] for post in alerts].count('director@fixture') == 1
+    assert [post['args'][1] for post in alerts].count(address) == 3
+    assert f'Login {CHATGPT} was stuck in pass ' in alerts[-1]['body']
+    lab.watch()
+    assert stuck_posts(lab) == alerts
+
+
+def an_alert_goes_once_per_stuck_login(lab):
+    path = lab.home / '.config/agents-qa/stuck'
+    path.parent.mkdir(parents=True)
+    address = 'design/upgrades-draft@fixture'
+    path.write_text(address + '\n')
+    _, state = start_stuck_pass(lab, CHATGPT, CLAUDE)
+    lab.watch()
+    alerts = stuck_posts(lab)
+    assert len(alerts) == 4
+    for login in (CHATGPT, CLAUDE):
+        selected = [post for post in alerts if post['args'][2] == f'qa: login {login} stuck in pass {state["pass"]}']
+        assert {post['args'][1] for post in selected} == {address, 'director@fixture'}
+    lab.configure(logins_out=[CLAUDE])
+    lab.watch()
+    assert lab.watch_state()[1]['given'] == [CHATGPT]
+    assert stuck_posts(lab) == alerts
+
+
+def no_list_alerts_the_director_alone(lab):
+    _, state = start_stuck_pass(lab, CHATGPT)
+    lab.watch()
+    alert, = stuck_posts(lab)
+    assert alert['args'][1:3] == ['director@fixture', f'qa: login {CHATGPT} stuck in pass {state["pass"]}']
+    assert lab.watch_state()[1]['alerts'] == {CHATGPT: {'director@fixture': True}}
+    lab.watch()
+    assert stuck_posts(lab) == [alert]
+
+
+def the_stuck_list_is_read_at_each_check(lab):
+    _, state = start_stuck_pass(lab, CHATGPT, CLAUDE)
+    lab.configure(logins_out=[CHATGPT], logins_refused=[CLAUDE], wait=[0, 4])
+    patch = """import json
+from pathlib import Path
+original = tool['Watch'].check
+def check(self, options):
+    original(self, options)
+    path = Path.home() / '.config/agents-qa/stuck'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('design/upgrades-draft@fixture\\n')
+    config = json.loads((self.workspace.root / 'tools.json').read_text())
+    config.update(logins_out=['chatgpt', 'claude'], logins_refused=[])
+    (self.workspace.root / 'tools.json').write_text(json.dumps(config))
+tool['Watch'].check = check
+"""
+    driven_watch(lab, patch, once=False, status=2)
+    alerts = stuck_posts(lab)
+    assert len(alerts) == 3
+    assert {(post['args'][2], post['args'][1]) for post in alerts} == {
+        (f'qa: login {login} stuck in pass {state["pass"]}', address)
+        for login, addresses in ((CHATGPT, ['director@fixture']),
+                                 (CLAUDE, ['director@fixture', 'design/upgrades-draft@fixture']))
+        for address in addresses}
+
+
+def saved_alerts_retry_when_the_run_state_is_unknown(lab):
+    directory, state = start_stuck_pass(lab, CHATGPT)
+    (lab.tmp / 'codex-run' / state['run'] / 'ended').unlink()
+    lab.configure(inactive=True)
+    lab.watch(extra={'QA_POST_STATUS': '1'})
+    assert lab.watch_state()[1]['finished']
+    assert lab.watch_state()[1]['alerts'] == {CHATGPT: {'director@fixture': False}}
+    before = len(lab.calls('logins'))
+    lab.configure(unit_query_failure=True)
+    lab.watch()
+    assert lab.watch_state()[1]['alerts'] == {CHATGPT: {'director@fixture': True}}
+    assert not lab.watch_state()[1]['given'] and directory.exists()
+    assert not any(args[0] == 'give' for args in lab.calls('logins')[before:])
+    assert len(stuck_posts(lab)) == 2 and 'Deployment units are unknown.' in stuck_posts(lab)[-1]['body']
+    lab.watch()
+    assert len(stuck_posts(lab)) == 2
+
+
 def a_login_not_back_is_posted_and_retried(lab):
     lab.rung('temper', REAL, CHATGPT)
     lab.waiting(1)
@@ -1791,7 +1942,8 @@ def a_login_not_back_is_posted_and_retried(lab):
     lab.end_run()
     lab.configure(logins_out=[CHATGPT])
     lab.watch()
-    sent, = lab.sent()
+    alert, sent = lab.sent()
+    assert alert == stuck_posts(lab)[0]
     path = state['logins'][CHATGPT]
     assert (f'Login {CHATGPT} is not back at {path}: its deployment is in {directory}; '
             'qa watch gives it back once it is.') in sent['body']
@@ -1799,7 +1951,7 @@ def a_login_not_back_is_posted_and_retried(lab):
     lab.configure(logins_out=[])
     result = lab.watch()
     assert f'{state["pass"]}: gave {CHATGPT} back' in result.stdout
-    assert lab.watch_state()[1]['given'] == [CHATGPT] and len(lab.sent()) == 1
+    assert lab.watch_state()[1]['given'] == [CHATGPT] and len(lab.sent()) == 2
 
 
 def watch_starts_no_pass_while_its_login_is_out(lab):
@@ -1830,7 +1982,7 @@ def watch_keeps_a_pass_whose_login_is_out(lab):
     state['ended'] = (datetime.now(timezone.utc) - timedelta(days=8)).strftime('%Y-%m-%dT%H:%M:%SZ')
     (directory / 'pass.json').write_text(json.dumps(state))
     lab.watch()
-    assert directory.exists() and len(lab.sent()) == 1
+    assert directory.exists() and len(lab.sent()) == 2
     lab.configure(logins_out=[])
     lab.watch()
     assert not directory.exists()
@@ -1957,7 +2109,7 @@ def watch_leaves_a_login_its_pass_holds(lab):
     before = len(lab.calls('logins'))
     result = lab.watch()
     assert lab.calls('logins')[before:] == [['list'], ['give', CHATGPT, '--as', lab.watch_state()[1]['holder']]]
-    assert f'{CHATGPT} is out with no pass' not in result.stdout and len(lab.sent()) == 1
+    assert f'{CHATGPT} is out with no pass' not in result.stdout and len(lab.sent()) == 2
     assert not (lab.tmp / 'qa/strays.json').exists()
 
 
@@ -2235,7 +2387,8 @@ def a_failed_export_leaves_the_unit_up(lab):
     state = lab.watch_state()[1]
     assert state['finished'] and not state['given'] and 'stopped' not in state and alive(pid)
     assert ['--user', 'stop', '--no-block', '--', unit] not in lab.calls('systemctl')
-    notice, = lab.sent()
+    alert, notice = lab.sent()
+    assert alert == stuck_posts(lab)[0]
     for text in (unit, CHATGPT, str(directory), state['logins'][CHATGPT], 'tries again at each check'):
         assert text in notice['body']
     aged(lab, directory)
@@ -2244,7 +2397,7 @@ def a_failed_export_leaves_the_unit_up(lab):
     (directory / 'box/login').rename(state['logins'][CHATGPT])
     lab.watch()
     dead(pid)
-    assert not directory.exists() and len(lab.sent()) == 1
+    assert not directory.exists() and len(lab.sent()) == 2
 
 
 def two_stops_take_turns(lab):
@@ -2329,12 +2482,13 @@ def a_deployment_that_exited_leaves_its_login_out(lab):
     state = lab.watch_state()[1]
     assert not state['given'] and 'stopped' not in state
     assert 'exit 1' in (directory / 'give-back.log').read_text()
-    notice, = lab.sent()
+    alert, notice = lab.sent()
+    assert alert == stuck_posts(lab)[0]
     assert CHATGPT in notice['body'] and state['logins'][CHATGPT] in notice['body']
     assert f'Unit {unit} is still up' not in notice['body']
     aged(lab, directory)
     lab.watch()
-    assert directory.exists() and len(lab.sent()) == 1
+    assert directory.exists() and len(lab.sent()) == 2
 
 
 def a_failed_stop_is_tried_again(lab):
@@ -2463,16 +2617,16 @@ def deployments_names_only_its_own_units(lab):
     dead(pid)
 
 
-def driven_watch(lab, patch):
+def driven_watch(lab, patch, once=True, status=0):
     driver = f'''import runpy, sys
 tool = runpy.run_path({str(SCRIPT)!r})
 {patch}
 sys.exit(tool['main']())
 '''
     result = subprocess.run([sys.executable, '-I', '-S', '-c', driver, 'watch', '--director',
-                             'director@fixture', '--once'], env=lab.env, capture_output=True,
+                             'director@fixture', *(['--once'] if once else [])], env=lab.env, capture_output=True,
                             text=True, timeout=HUNG_TOOL_S)
-    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert result.returncode == status, (result.stdout, result.stderr)
     return result
 
 
@@ -5002,7 +5156,10 @@ def hex_walk_builds_refuse_ambiguous_and_non_commit_objects(lab):
     assert state['main'] == commit
 
 
-CASES = (finding_metadata_stops_before_reproduction, accepted_findings_survive_refused_triage_commits,
+CASES = (a_stuck_login_alerts_the_director_and_the_list, a_refused_alert_is_sent_again,
+         an_alert_goes_once_per_stuck_login, no_list_alerts_the_director_alone, the_stuck_list_is_read_at_each_check,
+         saved_alerts_retry_when_the_run_state_is_unknown,
+         finding_metadata_stops_before_reproduction, accepted_findings_survive_refused_triage_commits,
          finding_subjects_fit_posts_bound, routing_shares_lookups_and_failures_within_a_check,
          a_routing_fetch_failure_is_shared_until_the_next_check,
          a_later_finding_failure_keeps_accepted_triage_lines,

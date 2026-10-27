@@ -933,6 +933,11 @@ class Watch:
                          and all(isinstance(pool, str) and re.fullmatch(LOGIN, pool)
                                  and isinstance(name, str) and name in logins and pool_of(name) == pool
                                  for pool, name in state['pools'].items()), f'{path}: invalid pools', 4)
+                alerts = state.get('alerts', {})
+                need(isinstance(alerts, dict) and all(login in logins and isinstance(receipts, dict)
+                     and all(isinstance(address, str) and re.fullmatch(ADDRESS, address)
+                             and type(sent) is bool for address, sent in receipts.items())
+                     for login, receipts in alerts.items()), f'{path}: invalid alerts', 4)
                 for key in ('notice', 'notice_pending'):
                     if key in state:
                         notice = state[key]
@@ -990,6 +995,61 @@ class Watch:
                 log(f'{state.get("walk", state.get("pass"))}: gave {name} back')
             else:
                 log(f'{state.get("walk", state.get("pass"))}: cannot give {name} back: {result.stderr.strip()}')
+                if result.returncode == 1 and kind == 'moved' and self.classes[directory] == 'pass':
+                    alerts = state.setdefault('alerts', {})
+                    if name not in alerts:
+                        alerts[name] = dict.fromkeys(self.stuck, False)
+                        self.save(directory, state)
+
+    def stuck_addresses(self):
+        addresses = {self.director}
+        path = Path.home() / '.config/agents-qa/stuck'
+        try:
+            lines = path.read_text(errors='replace').splitlines()
+        except FileNotFoundError:
+            return sorted(addresses)
+        except OSError as error:
+            log(f'{path}: cannot read stuck addresses ({type(error).__name__}); using director alone')
+            return sorted(addresses)
+        for number, line in enumerate(lines, 1):
+            address = line.split('#', 1)[0].strip()
+            if not address:
+                continue
+            if re.fullmatch(ADDRESS, address):
+                addresses.add(address)
+            else:
+                log(f'{path}:{number}: invalid stuck address; skipped')
+        return sorted(addresses)
+
+    def alert(self, directory, state, units):
+        for login, receipts in state.get('alerts', {}).items():
+            if all(receipts.values()):
+                continue
+            body = (f'Login {login} was stuck in pass {state["pass"]}: not back at {state["logins"][login]}.\n'
+                    f'Its deployment is in {directory}; qa watch gives it back once it is.\n'
+                    f'It counts against QA\'s logins of pool {pool_of(login)} until it is back.\n')
+            body += ''.join(f'Unit {unit} is still up or of unknown state.\n'
+                            for unit, status in (units or {}).items() if status != 'stopped')
+            if units is None:
+                body += 'Deployment units are unknown.\n'
+            body += f'Scratch: {directory}. The service tries again at each check.\n'
+            message = directory / 'alert-body'
+            replace(message, body.encode())
+            for address, sent in receipts.items():
+                if sent:
+                    continue
+                result = self.call('post', 'send', '--as', 'qa-watch', address,
+                                   f'qa: login {login} stuck in pass {state["pass"]}', message)
+                if result.returncode in (0, 3):
+                    receipts[address] = True
+                    try:
+                        self.save(directory, state)
+                    except BaseException:
+                        receipts[address] = False
+                        raise
+                else:
+                    log(f'{state["pass"]}: alert for {login} to {address} failed; trying next check')
+        return all(all(receipts.values()) for receipts in state.get('alerts', {}).values())
 
     def released_login(self, name):
         if name in self.holders:
@@ -1157,12 +1217,14 @@ class Watch:
     def end(self, directory, state):
         if (state['run'] and not (self.runs / state['run'] / 'ended').exists()
                 and self.unit_status('codex-run-' + state['run']) != 'stopped'):
+            self.alert(directory, state, None)
             return False
         if 'stopped' in state:
             state.pop('stopped')
             self.save(directory, state)
         self.give(directory, state, 'moved')
         units = self.deployments(directory, state)
+        alerted = self.alert(directory, state, units)
         moved = [name for name in self.outstanding(state)
                  if state.get('kinds', {}).get(name, 'moved') == 'moved']
         if not moved and units is not None:
@@ -1197,7 +1259,7 @@ class Watch:
             self.save(directory, state)
         self.notify(directory, state)
         routed = self.route(directory, state)
-        return complete and routed
+        return complete and routed and alerted
 
     def destination(self, report, number):
         fields = report.finding_fields(number)
@@ -1530,8 +1592,8 @@ class Watch:
         state.update(cancelled=True, finished=True, ended=timestamp())
         state.pop('stage', None)
         self.save(directory, state)
-        self.end(directory, state)
-        if state.get('released') and not self.outstanding(state):
+        complete = self.end(directory, state)
+        if complete and state.get('released') and not self.outstanding(state):
             shutil.rmtree(directory)
 
     def recover_run(self, directory, state):
@@ -1758,6 +1820,7 @@ class Watch:
     def check(self, options):
         log('checking')
         self.options = options
+        self.stuck = self.stuck_addresses()
         self.route_repos, self.route_commits, self.route_answers, self.route_failed = {}, {}, {}, set()
         complete = {}
         with self.record.locked(), self.walks_locked(wait=False) as walking:
@@ -1771,7 +1834,8 @@ class Watch:
                 try:
                     if state['finished']:
                         complete[state['pass']] = self.end(directory, state)
-                        if state.get('cancelled') and state.get('released') and not self.outstanding(state):
+                        if (complete[state['pass']] and state.get('cancelled')
+                                and state.get('released') and not self.outstanding(state)):
                             shutil.rmtree(directory)
                         continue
                     if state.get('stage') == 'reserving':
