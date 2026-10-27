@@ -117,9 +117,20 @@ the name it was given, and writes its clock by hand.
    against the walk only if it lies on the walk's path.
 6. **A walk that passes** is posted to design/ladder at once. design/ladder
    posts the director, and opens the next rung's walk.
+7. **Per rung, three walks in order** (the user, 10-27 19:0xZ): ChatGPT
+   with an owned Forgejo green first, then the same walk on Claude with
+   an owned Forgejo, then ChatGPT with GitHub; Claude with GitHub is not
+   planned. ChatGPT with Forgejo is never blocked by anything: `qa walk
+   temper RUNG --kind claude` (kinds `forgejo`, the default, and
+   `claude`; `github` later) has its own two walk slots and its own
+   logins, and a Claude walk's brief is
+   `tmp/qa-focused/rung-<RUNG>-claude-brief.md`, the rung's with its
+   step 2's model setup alone changed. Where an owner has both, a
+   ChatGPT with Forgejo fix goes first.
 
 **The clock:** each rung keeps `tmp/qa-focused/<rung>/loop.tsv` on the
-logins' machine, one line per event (`time rung walk event note`):
+logins' machine, one line per event (`time rung walk event note`; a
+Claude walk's number written `claude-<n>`):
 `walk-start`, `walk-end` (passed, or the step it stopped at), `filed`
 (each finding, with its task), `walk-pause`, `fix-start`, `fix-pushed`,
 `walk-resume`, `branch-walk-start`, `branch-walk-end`, `landed`, then the
@@ -405,3 +416,6 @@ Newest last, times UTC.
 - 10-27 19:1xZ: walk kinds with their own slots (`QA_WALK_KINDS`
   `forgejo=2 claude=2`), a pool shared out by caps, a second Claude
   login's steps (6.2a; qa-flow.md 10.6, 10.7; the user, design/qa-evidence).
+- 10-27 19:0xZ: per rung, ChatGPT+Forgejo, then Claude+Forgejo, then
+  ChatGPT+GitHub, each kind with its own walk slots (the user; agents
+  5bc4ad7): section 3, item 7.
