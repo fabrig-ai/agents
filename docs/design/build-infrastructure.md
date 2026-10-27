@@ -122,9 +122,11 @@ task builds with `HEAVY_BUILD_JOBS` jobs, the machine's CPU count by
 default, and its unit carries its class's `CPUWeight` (section 1).
 
 The disk floor is 40 GB by default, overridden by `PLAN_MIN_DISK_GB` in
-`DEV_TMP/machine.env`, with the environment taking precedence. Installed
-heavy checks it at submission and again inside the owned cgroup immediately
-before the requested command starts, after any lane wait or gate settling.
+`DEV_TMP/machine.env`, with the environment taking precedence, and measured
+on the workspace's filesystem (`DEV_ROOT`'s). Installed heavy checks it at
+submission (where a landing's task waits for it instead, "A landing's room"
+below) and again inside the owned cgroup immediately before the requested
+command starts, after any lane wait or gate settling.
 A below-floor landing therefore starts no prebuild, even when space fell
 while that prebuild waited. The refusal keeps heavy's exit 2, its free-space,
 floor and largest-directories diagnostic, and land's exit 9. The gate keeps
@@ -156,40 +158,69 @@ and the others wait for it:
   the ledger and not released, and for 2 minutes after the last one's
   release, so that a landing's next step (its gate after its prebuild,
   a set's next repository) finds its room. It is `PLAN_LAND_ROOM_GB`
-  (the environment, then `machine.env`, as the floor), 30 GB by
-  default: the swing of a temper build, with some margin.
+  (the environment, then `machine.env`, as the floor: `kit.sh`'s
+  settings take it), 30 GB by default: the swing of a temper build,
+  with some margin.
+- **Settings travel with the task.** Every task records at submission
+  the floor and the reservation it was submitted under, `floor_gb` and
+  `room_gb`, so that admission, the reconciler and the machine's tend
+  judge it by the settings its caller had, environment overrides
+  included, and not by their own environment.
 - **Others wait for room.** While the reservation holds, the build lane
-  admits a task that is not a landing's only with the floor plus the
-  reservation free; otherwise it stays queued, and the lane's order
-  holds behind it. Its submission's check and its payload's check stay
-  the floor's alone: a build is refused only below the floor, as
-  before. A build already running goes on.
+  admits a task that is not a landing's only with its `floor_gb` plus
+  the largest `room_gb` among the reserving landings' tasks free;
+  otherwise it stays queued, and the lane's order holds behind it. Its
+  submission's check and its payload's check stay the floor's alone: a
+  build is refused only below the floor, as before. A build already
+  running goes on.
+- **A landing goes first.** A landing's task is admitted on its own
+  floor, and the lane's order counts, for it, only the older landings'
+  tasks still queued: never the builds that wait for room, which would
+  otherwise hold back the landing that is to release them (with
+  `HEAVY_BUILD_SLOTS` set, a slot still counts its live tasks). Among
+  landings, submission order holds as before.
 - **A landing waits for its floor.** A landing's task below the floor
-  is not refused at submission: it is queued, and admitted once the
-  floor is free, past the builds that wait for room, its lane's other
-  rules unchanged. It records the time it began to wait, `disk_wait`,
-  in its ledger entry, which the machine's tend reads to make room
-  ([fleet-watch.md](fleet-watch.md) 4). Twenty minutes after that it is
-  refused as today, with the floor's diagnostic and exit 2 (land's 9).
-  Its payload's check stays the floor's, with no wait: a landing
-  admitted on the floor that finds less just before its command starts
+  at submission is not refused: it is queued, and admitted once its
+  floor is free. Its ledger entry's `disk_wait` is the time its current
+  spell below the floor began: set when admission or the reconciler
+  first finds it queued with its floor short, cleared when the floor is
+  free again (even while a lane hold keeps it queued), so that 20
+  minutes is the time below the floor alone. The machine's tend reads it
+  to make room ([fleet-watch.md](fleet-watch.md) 4).
+- **Refused after 20 minutes, durably.** The reconciler, under the host
+  lock, releases a queued landing's task whose `disk_wait` is 20
+  minutes old as refused (code 2, refusal `disk-floor`), through the
+  usual release and receipt path, as a queued refusal is today; a crash
+  of the client or the reconciler loses nothing, since the time is in
+  the ledger. Its wrapper, finding its token refused, prints the floor's
+  diagnostic and `heavy: disk floor refused before payload start`, the
+  line `land` maps to its exit 9, and exits 2. A wrapper dead before its
+  claim is cancelled as today (code 137, section 2).
+- **The payload's check** stays the floor's, with no wait: a landing
+  admitted on its floor that finds less just before its command starts
   is refused, as before.
 - **What it costs:** a landing's wait under the set lock holds other
   landings for as long, at most 20 minutes, where today the set stops
   and loses the lock. Others' builds wait while a landing reserves and
   the disk is short; the tend's clearing (cleanup.md 4, step 9) and the
   landing's end release them.
-- **Its format:** the ledger gains `disk_wait` on a task, a time or
-  absent; readers that don't know it ignore it. Reverting the change
-  leaves it unread.
+- **Its format:** the ledger gains, on a task, `floor_gb` and
+  `room_gb`, numbers, and `disk_wait`, a time or absent; readers that
+  don't know them ignore them, and a task without them (submitted
+  before) is judged by the machine's settings. Reverting the change
+  leaves them unread.
 - **Its fixture,** in `test-heavy-recovery`'s scratch ledger and a disk
   whose free space the fixture sets: a build queued behind a landing's
   task while the reservation is short, and admitted once it isn't; a
-  landing's prebuild admitted past it; the reservation held 2 minutes
-  after the last landing's task and not after; a landing below its floor
-  queued with `disk_wait`, admitted when the floor frees, refused with
-  exit 2 after 20 minutes; a build still refused only below the floor;
-  a landing's payload check refusing as before.
+  landing's prebuild admitted past it, with one build slot as with
+  none; the reservation held 2 minutes after the last landing's task
+  and not after; settings from the submitter's environment judged by
+  the reconciler without it; a landing below its floor queued with
+  `disk_wait`, the wait cleared when the floor frees under a lane hold,
+  admitted when the floor frees, refused by the reconciler after 20
+  minutes below it with exit 2 and the line that makes `land` exit 9,
+  also when the client was killed meanwhile; a build still refused only
+  below the floor; a landing's payload check refusing as before.
 
 ## 3. Durable state and release
 

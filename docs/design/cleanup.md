@@ -204,7 +204,8 @@ new work. There is no keep list: a landed branch's commits are on
      there. Each run first deletes what an interrupted one left in the
      trash.
    - **Room for a landing,** with `--room GB`: after the rules above,
-     while less than GB is free on `tmp/`'s filesystem, it clears the
+     while less than GB is free on the workspace's filesystem, where
+     heavy reads its floor (build-infrastructure.md 2), it clears the
      least recently built target that is not in use and was last built
      15 minutes ago or more, one at a time, reading the free space
      after each, and stops when none is left. Its line's reason is

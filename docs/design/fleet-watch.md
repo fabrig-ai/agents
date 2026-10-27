@@ -76,7 +76,7 @@ the others stand.
 | `cores`, `load` | `os.cpu_count()`; `/proc/loadavg`'s 1, 5 and 15 minutes |
 | `pressure` | `/proc/pressure/cpu`'s `some` and `/proc/pressure/memory`'s `some` and `full`, each `avg60` |
 | `memory` | `/proc/meminfo`'s `MemAvailable` and `MemTotal` |
-| `disk`, `floor` | free and total bytes of the filesystem holding `tmp/`; the floor as heavy reads it: `PLAN_MIN_DISK_GB` in the environment, then in `tmp/machine.env`, else 40 GB (build-infrastructure.md 2) |
+| `disk`, `floor` | free and total bytes of the workspace's filesystem, where heavy measures its floor; the floor as heavy reads it: `PLAN_MIN_DISK_GB` in the environment, then in `tmp/machine.env`, else 40 GB (build-infrastructure.md 2) |
 | `kache` | `kache stats --json`: `disk.store_bytes` and `disk.store_limit_bytes`; absent without kache |
 | `heavy` | `tmp/heavy/state.json`'s live tasks, as the status page reads them: running, queued, the oldest queued one's wait, a gate's hold; absent without heavy |
 | `sessions` | `claude agents --json --all`: each live session's name and state; and each Codex owner's unit that is active, `codex-owner-*` (post.md 5), by its name |
@@ -184,8 +184,7 @@ commands of the kit, in this order, each whatever the others' exits:
 1. `tidy --targets`: the build targets past their use (cleanup.md 4,
    step 9); with `--room GB` while a landing's task in heavy's ledger
    waits for its floor (`disk_wait`, build-infrastructure.md 2, "A
-   landing's room"), GB its floor plus its reservation, as heavy reads
-   them;
+   landing's room"), GB that task's `floor_gb` plus its `room_gb`;
 2. `post wake --older 15`: each name whose mail has waited 15 minutes
    with no waiter, woken as delivery would wake it (post.md 3, 4);
 3. `codex-run stale --post`: each run that will never post, told to its
