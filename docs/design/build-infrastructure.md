@@ -988,7 +988,10 @@ last run's commit:
   (below). Only between runs: a run's rerun and probes share its
   target. The runner keeps no receipt of what its builds use (kache's
   `clean --units`): what the tier builds is the repository's script's,
-  and the cap needs nothing from it.
+  and the cap needs nothing from it. A follower reads its cap from
+  its follow line each pass. A measurement or removal that fails is a
+  fault, and after a failed removal the next pass removes `target/`
+  whole whatever its size.
 - **The run** is `heavy -- scripts/after-landing.sh` at
   `HEAVY_CLASS=background`, in the clone checked out at M (forced,
   cleaned of untracked files but not of ignored ones). A part's run
@@ -1150,7 +1153,8 @@ landing turn's ssh, as `land-set` does.
 **Fixtures.** `AFTER_LANDING_FIXTURE=DIR` puts the runner's every path
 and its feed under DIR, lifts the machine check, and only then lets
 `AFTER_LANDING_HEAVY` and `AFTER_LANDING_POST` replace `heavy` and
-`post`; `AFTER_LANDING_FAULT_POST` and `AFTER_LANDING_RED_GRACE` replace
+`post`; `AFTER_LANDING_GB` replaces the cap's gigabyte, so that a
+story needs no real one; `AFTER_LANDING_FAULT_POST` and `AFTER_LANDING_RED_GRACE` replace
 the 15 minutes. `scripts/devel/test-after-landing` runs the runner on
 bare repositories as origins, with stand-ins for heavy and post and a
 tier script that fails what the commit names: a green run and a pass
