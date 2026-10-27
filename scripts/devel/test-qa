@@ -185,6 +185,12 @@ class Lab:
         text += f'- {stamp} {repo} {rung} {",".join(sorted(logins)) or "-"} fixture\n'
         self.publish('qa/rungs.md', text)
 
+    def default(self, switch, repo='temper', now='2026-10-27T10:00:00Z'):
+        path = self.records / 'qa/defaults.md'
+        text = path.read_text() if path.exists() else '# QA defaults\n\n'
+        main = self.git(self.products[repo], 'rev-parse', 'main')
+        self.publish('qa/defaults.md', text + f'- {now} {repo} {switch} {main} fixture\n')
+
     def watch(self, status=0, extra=None, now=None):
         return self.run('watch', '--director', 'director@fixture', '--once', status=status, extra=extra, now=now)
 
@@ -292,6 +298,170 @@ def a_pass_takes_its_commits(lab):
     now = lab.content('qa/decisions.md').splitlines()[-1].split(' ')[1]
     lab.pass_file(name=P + '-2', commits=[b], outcome='running', started=now)
     assert 'waiting: 0 commits chosen to run\n' in lab.run('passes').stdout
+
+
+def default_on_chooses_the_marked_commits_after_it(lab):
+    before = [lab.marked() for _ in range(3)]
+    now = '2026-10-27T10:00:00Z'
+    result = lab.run('default', 'temper', 'on', '--why', 'automatic QA', now=now)
+    assert result.stdout == f'default: temper on from {before[-1][:9]}\n'
+    assert lab.content('qa/defaults.md') == f'# QA defaults\n\n- {now} temper on {before[-1]} automatic QA'
+    assert 'qa default: temper on' in lab.git(lab.origin, 'log', '-1', '--format=%s')
+    after = [lab.marked() for _ in range(2)]
+    unmarked = lab.commit('no QA marker')
+    output = lab.run('candidates', 'temper').stdout
+    assert [line.split()[1] for line in output.splitlines() if line.startswith('temper ')] == [sha[:9] for sha in before]
+    output = lab.run('passes').stdout
+    assert 'waiting: 2 commits chosen to run' in output and all(sha[:9] in output for sha in after)
+    assert unmarked[:9] not in output
+    lab.configure(cleared={'temper': unmarked})
+    lab.watch(now=now)
+    assert lab.watch_state()[1]['commits'] == after
+
+
+def default_off_keeps_what_it_covered(lab):
+    lab.default('on')
+    covered = [lab.marked() for _ in range(2)]
+    result = lab.run('default', 'temper', 'off', now='2026-10-27T10:01:00Z')
+    assert result.stdout == f'default: temper off from {covered[-1][:9]}\n'
+    later = lab.marked()
+    output = lab.run('candidates', 'temper').stdout
+    assert later[:9] in output and all(sha[:9] not in output for sha in covered)
+    lab.configure(cleared={'temper': later})
+    lab.watch(now='2026-10-27T10:02:00Z')
+    assert lab.watch_state()[1]['commits'] == covered
+
+
+def a_later_decision_wins_over_a_default(lab):
+    now = '2026-10-27T10:00:00Z'
+    lab.default('on', now=now)
+    first, second = [lab.marked() for _ in range(2)]
+    # The equal-second decision wins too; the pass at that second wins over both.
+    lab.run('decide', 'temper', first, 'backlog', '--why', 'later', now=now)
+    output = lab.run('backlog').stdout
+    assert first[:9] in output and second[:9] not in output and 'why: later' in output
+    lab.configure(cleared={'temper': second})
+    lab.watch(now=now)
+    assert lab.watch_state()[1]['commits'] == [second]
+    lab.end_run()
+    lab.watch(now='2026-10-27T10:01:00Z')
+    lab.watch(now='2026-10-27T10:02:00Z')
+    assert len(lab.calls('codex-run')) == 1
+    assert 'waiting: 0 commits chosen to run' in lab.run('passes').stdout
+    assert first[:9] in lab.run('backlog', 'temper').stdout
+
+
+def coverage_is_by_ancestry_not_time(lab):
+    checkout = lab.products['temper']
+    lab.env['GIT_AUTHOR_DATE'] = lab.env['GIT_COMMITTER_DATE'] = '2030-01-01T00:00:00Z'
+    lab.git(checkout, 'commit', '--allow-empty', '-m', 'future date already landed', '-m', 'QA: already present')
+    before = lab.git(checkout, 'rev-parse', 'HEAD')
+    lab.git(checkout, 'push', 'origin', 'main')
+    old = lab.commit('old date branch', 'lands later', branch='side')
+    lab.run('default', 'temper', 'on', now='2026-10-27T10:00:00Z')
+    lab.git(checkout, 'checkout', 'main')
+    lab.git(checkout, 'merge', '--no-ff', 'side', '-m', 'land old branch')
+    lab.git(checkout, 'push', 'origin', 'main')
+    output = lab.run('candidates', 'temper').stdout
+    assert before[:9] in output and old[:9] not in output
+    output = lab.run('passes').stdout
+    assert 'waiting: 1 commits chosen to run' in output and old[:9] in output and before[:9] not in output
+
+
+def default_refuses_a_repeated_switch_and_shows_the_state(lab):
+    now = '2026-10-27T10:00:00Z'
+    assert lab.run('default', 'temper').stdout == 'temper off\n'
+    before = lab.head()
+    assert 'already off' in lab.run('default', 'temper', 'off', status=2).stderr
+    assert lab.head() == before and not (lab.records / 'qa/defaults.md').exists()
+    main = lab.marked()
+    lab.run('default', 'temper', 'on', now=now)
+    before = lab.head()
+    assert 'already on' in lab.run('default', 'temper', 'on', status=2).stderr
+    assert lab.head() == before and len(lab.content('qa/defaults.md').splitlines()) == 3
+    assert lab.run('default', 'temper').stdout == f'temper on since {now} at {main[:9]}\n'
+    lab.run('default', 'temper', 'off', now=now)
+    assert lab.run('default', 'temper').stdout == f'temper off since {now} at {main[:9]}\n'
+    before = lab.head()
+    for args, reason in [(('temper', 'off'), 'already off'), (('qa', 'on'), 'unknown repository'),
+                         (('temper', '--why', 'needs switch'), 'needs on or off'),
+                         (('temper', 'on', '--why', 'two\nlines'), 'newline')]:
+        assert reason in lab.run('default', *args, status=2).stderr
+        assert lab.head() == before
+
+
+def failed_default_coverage_keeps_reservations_and_other_repositories_running(lab):
+    lab.default('on')
+    temper = lab.marked()
+    lab.rung('temper', REAL, CHATGPT)
+    lab.configure(cleared={'temper': temper})
+    driven_watch(lab, """def fail(*args):
+    raise tool['Problem']('fixture checkout failed', 4)
+tool['Repositories'].checkout = fail
+""")
+    directory, before = lab.watch_state()
+    assert before['stage'] == 'reserving' and before['pools'] == {CHATGPT: CHATGPT}
+    lab.default('on', repo='jig')
+    jig = lab.commit('jig covered feature', 'jig feature', repo='jig')
+    lab.configure(cleared={'temper': temper, 'jig': jig})
+    origin = lab.origins / 'temper.git'
+    offline = lab.origins / 'temper-offline.git'
+    origin.rename(offline)
+    for args in [('candidates', 'temper'), ('backlog', 'temper'), ('passes',)]:
+        assert 'cannot fetch temper' in lab.run(*args, status=4).stderr
+    result = lab.watch(extra={'QA_SLOTS': '2'})
+    assert 'temper: preparation failed' in result.stdout and 'cannot fetch temper' in result.stdout
+    assert json.loads((directory / 'pass.json').read_text()) == before
+    assert [s['repository'] for _, s in lab.watch_states() if s['run']] == ['jig']
+    assert not any(args[0] == 'give' for args in lab.calls('logins'))
+    offline.rename(origin)
+    lab.watch(extra={'QA_SLOTS': '2'})
+    assert json.loads((directory / 'pass.json').read_text())['commits'] == [temper]
+
+
+def malformed_defaults_are_read_errors(lab):
+    main = lab.marked()
+    for line in [f'- yesterday temper on {main}',
+                 '- 2026-10-27T10:00:00Z temper on short',
+                 f'- 2026-10-27T10:00:00Z temper maybe {main}']:
+        lab.publish('qa/defaults.md', '# QA defaults\n\n' + line + '\n')
+        before = lab.head()
+        for args in [('default', 'temper', 'on'), ('candidates', 'temper'), ('backlog',), ('passes',)]:
+            result = lab.run(*args, status=4)
+            assert 'invalid' in result.stderr and lab.head() == before
+        lab.watch(status=4)
+        assert not lab.calls('codex-run')
+
+
+def refused_default_writes_restore_the_record(lab):
+    refusal = lab.root / 'refuse-record'
+    executable(refusal, "import sys\nif sys.argv[1] == 'pull':\n    sys.exit(0)\nprint('fixture refusal', file=sys.stderr)\nsys.exit(2)\n")
+    for existing in (False, True):
+        if existing:
+            lab.default('on')
+        path = lab.records / 'qa/defaults.md'
+        content = path.read_bytes() if existing else None
+        before = lab.head()
+        result = lab.run('default', 'temper', 'off' if existing else 'on', status=2,
+                         extra={'QA_RECORD': str(refusal)})
+        assert 'fixture refusal' in result.stderr and lab.head() == before
+        assert (path.read_bytes() if path.exists() else None) == content
+
+
+def overlapping_defaults_keep_the_first_openings_time(lab):
+    baseline = lab.git(lab.products['temper'], 'rev-parse', 'main')
+    lab.default('on', now='2026-10-27T10:00:00Z')
+    first = lab.marked()
+    lab.default('off', now='2026-10-27T10:01:00Z')
+    lab.run('decide', 'temper', first, 'backlog', now='2026-10-27T10:02:00Z')
+    # A later stretch can cover the same ancestry after main has been rewritten.
+    text = lab.content('qa/defaults.md') + f'\n- 2026-10-27T10:03:00Z temper on {baseline} rewritten main\n'
+    lab.publish('qa/defaults.md', text)
+    second = lab.marked()
+    output = lab.run('backlog').stdout
+    assert first[:9] in output and second[:9] not in output
+    output = lab.run('passes').stdout
+    assert 'waiting: 1 commits chosen to run' in output and second[:9] in output and first[:9] not in output
 
 
 def findings_wait_until_triaged(lab):
@@ -2979,7 +3149,13 @@ tool['Watch'].call = call
     assert not any(s.get('stage') == 'reserving' for _, s in lab.watch_states())
 
 
-CASES = (a_saved_reservation_past_the_cap_is_cancelled, qa_admits_nothing_while_its_old_rows_wait,
+CASES = (default_on_chooses_the_marked_commits_after_it, default_off_keeps_what_it_covered,
+         a_later_decision_wins_over_a_default, coverage_is_by_ancestry_not_time,
+         default_refuses_a_repeated_switch_and_shows_the_state,
+         failed_default_coverage_keeps_reservations_and_other_repositories_running,
+         malformed_defaults_are_read_errors, refused_default_writes_restore_the_record,
+         overlapping_defaults_keep_the_first_openings_time,
+         a_saved_reservation_past_the_cap_is_cancelled, qa_admits_nothing_while_its_old_rows_wait,
          a_listing_out_of_its_form_admits_and_gives_nothing, an_uncertain_grant_counts_before_another_repository_takes,
          qa_holds_at_most_the_pool_less_the_reserve,
          a_stuck_login_leaves_qa_one_pass,

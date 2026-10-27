@@ -68,7 +68,7 @@ def blocked(path, root):
 def cap_for(name):
     need(name != 'director/waiting.md',
          'director/waiting.md: retired: what waits on the user is a forge issue (user-issues.md)')
-    if name in ('qa/decisions.md', 'qa/triage.md', 'qa/rungs.md'):
+    if name in ('qa/decisions.md', 'qa/triage.md', 'qa/rungs.md', 'qa/defaults.md'):
         return 128 * 1024
     if re.fullmatch(rf'qa/passes/{NAME}\.md', name):
         return 8 * 1024
