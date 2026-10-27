@@ -2234,6 +2234,102 @@ def watch_leaves_a_login_its_pass_holds(lab):
     assert not (lab.tmp / 'qa/strays.json').exists()
 
 
+def keep_private(lab, values, *results):
+    outputs = [r.stdout + r.stderr for r in results]
+    outputs += [p.read_text(errors='replace') for p in lab.records.rglob('*.md')]
+    outputs += [p.read_text() for p in (lab.post_log, lab.root / 'tools.jsonl') if p.exists()]
+    assert all(value not in output for value in values for output in outputs)
+    assert not lab.sent() and not lab.calls('post')
+
+
+def keep_check_scans_whole_paths(lab):
+    value = secrets.token_hex(12)
+    for parent, rule in [('token=', 'assigned'), ('Authorization: Bearer ', 'header')]:
+        scratch = lab.scratch({f'evidence/{parent}/{value}/child': value})
+        result = lab.run('keep', '--check', str(scratch), status=2)
+        assert result.stdout == (f'qa keep: 0 files, 0 bytes\n'
+                                 f'refused: evidence/{parent}/, entry 1: {rule}\n')
+        assert result.stderr == 'qa: copy refused (1)\n'
+        keep_private(lab, [value], result)
+        shutil.rmtree(scratch / 'evidence')
+    scratch = lab.scratch({f'evidence/token=/{value}': value})
+    result = lab.run('keep', '--check', str(scratch), status=2)
+    assert '  evidence/token=/, entry 1 ' in result.stdout
+    assert 'refused: evidence/token=/, entry 1: assigned\n' in result.stdout
+    keep_private(lab, [value], result)
+
+
+def keep_check_hides_an_unopenable_root(lab):
+    value = secrets.token_hex(12)
+    path = lab.root / ('Authorization: Bearer ' + value)
+    for suffix in ('', '/'):
+        result = lab.run('keep', '--check', str(path) + suffix, status=2)
+        assert not result.stdout
+        assert result.stderr == 'qa: the scratch directory cannot be opened without following a link\n'
+        keep_private(lab, [value, str(path)], result)
+
+
+def keep_check_refuses_a_link_with_a_trailing_slash(lab):
+    scratch = lab.scratch({'brief.md': 'plain\n'})
+    link = lab.root / 'linked-scratch'
+    link.symlink_to(scratch, target_is_directory=True)
+    for path in (str(link), str(link) + '/', str(link) + '///'):
+        result = lab.run('keep', '--check', path, status=2)
+        assert result.stderr == 'qa: the scratch directory cannot be opened without following a link\n'
+        assert not result.stdout
+    result = lab.run('keep', '--check', str(scratch) + '/')
+    assert result.stdout == 'qa keep: 1 files, 6 bytes\n  brief.md 6\n'
+    # The operator owns ancestors: only the root's final component is checked.
+    parent = lab.root / 'linked-parent'
+    parent.symlink_to(scratch.parent, target_is_directory=True)
+    assert lab.run('keep', '--check', str(parent / scratch.name)).stdout == result.stdout
+
+
+def keep_check_marks_incomplete_omission_counts(lab):
+    for tree in ('scripts', 'evidence'):
+        scratch = lab.scratch({'scripts/z-huge': 'x' * 2048, f'{tree}/hidden/plain': 'plain\n'})
+        hidden = scratch / tree / 'hidden'
+        driver = f'''
+import os, runpy, sys
+tool = runpy.run_path({str(SCRIPT)!r})
+inode = os.stat({str(hidden)!r}).st_ino
+original = os.listdir
+def listing(fd):
+    if os.fstat(fd).st_ino == inode:
+        raise PermissionError('fixture unreadable directory')
+    return original(fd)
+os.listdir = listing
+sys.exit(tool['main']())
+'''
+        result = subprocess.run([sys.executable, '-I', '-S', '-c', driver,
+                                 'keep', '--check', str(scratch)],
+                                env=dict(lab.env, QA_EVIDENCE_KIB='1'),
+                                capture_output=True, text=True, timeout=HUNG_TOOL_S)
+        assert result.returncode == 0 and not result.stderr
+        expected = ['qa keep: 0 files, 0 bytes']
+        if tree == 'evidence':
+            expected.append('left out: evidence/, 0 files, 0 bytes, 1 entries unreadable')
+        ending = '1 entries unreadable' if tree == 'scripts' else 'past 1 KiB'
+        expected.append('left out: scripts/, 1 files, 2048 bytes, ' + ending)
+        assert result.stdout.splitlines() == expected, result.stdout
+        shutil.rmtree(scratch)
+
+
+def keep_check_hides_invalid_walk_settings(lab):
+    value = secrets.token_hex(12)
+    scratch = lab.scratch({'brief.md': 'plain\n'})
+    for word in (value, 'other=1:' + value):
+        for file_setting in (False, True):
+            kinds = 'forgejo=1:chatgpt  ' + word
+            extra = {} if file_setting else {'QA_WALK_KINDS': kinds}
+            if file_setting:
+                (lab.tmp / 'machine.env').write_text('QA_WALK_KINDS=' + kinds + '\n')
+            result = lab.run('keep', '--check', str(scratch), extra=extra, status=2)
+            assert result.stderr == 'qa: invalid QA_WALK_KINDS entry 2\n'
+            assert not result.stdout
+            keep_private(lab, [value, word], result)
+
+
 def keep_check_refuses_each_rule(lab):
     value = secrets.token_hex(8)
     token = 'gh' + 'p_' + secrets.token_hex(18)
@@ -2453,7 +2549,8 @@ def keep_check_writes_nothing(lab):
         elif name == 'regular':
             path.write_text('plain')
         result = lab.run('keep', '--check', str(path), status=2, extra=extra)
-        assert str(path) in result.stderr and not result.stdout
+        assert result.stderr == 'qa: the scratch directory cannot be opened without following a link\n'
+        assert not result.stdout
     lab.run('keep', status=2, extra=extra)
     lab.run('keep', '--check', str(scratch), status=2, extra=dict(extra, QA_EVIDENCE_KIB='bad'))
     assert not missing_records.exists() and not missing_tmp.exists()
@@ -5662,7 +5759,10 @@ def an_ambiguous_build_is_refused(lab):
     assert first[1]['main'] == fix and second[1]['main'] == commit
 
 
-CASES = (keep_check_refuses_each_rule, keep_check_passes_plain_captures,
+CASES = (keep_check_scans_whole_paths, keep_check_hides_an_unopenable_root,
+         keep_check_refuses_a_link_with_a_trailing_slash,
+         keep_check_marks_incomplete_omission_counts, keep_check_hides_invalid_walk_settings,
+         keep_check_refuses_each_rule, keep_check_passes_plain_captures,
          keep_check_reads_one_snapshot, keep_check_leaves_out_past_the_cap,
          keep_check_writes_nothing, keep_key_rule_is_records,
          a_build_never_resolves_through_a_tag_or_a_stale_ref,

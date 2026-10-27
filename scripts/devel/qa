@@ -817,16 +817,18 @@ class Snapshot:
     @classmethod
     def read(cls, directory, cap):
         flags = os.O_RDONLY | os.O_NOFOLLOW
+        directory = os.fspath(directory)
+        directory = directory.rstrip('/') or ('/' if directory else '')
         try:
             root = os.open(directory, flags | os.O_DIRECTORY)
         except OSError:
-            raise Problem(f'{directory}: cannot open directory without following links') from None
+            raise Problem('the scratch directory cannot be opened without following a link') from None
         files, left_out, refusals, names = {}, {}, [], {}
         used = 0
 
         def walk(parent, entries, budget, count_only=False):
             held, labels, refused = {}, {}, []
-            count = size = total = 0
+            count = size = total = unreadable = 0
             past = count_only
             # A stack keeps deep trees independent of Python's recursion limit.
             stack = [(parent, iter(entries), '', False)]
@@ -842,26 +844,27 @@ class Snapshot:
                     entry, part, tree = item
                     path = prefix + part
                     label = f'{prefix or "./"}, entry {entry}'
-                    rules = []
-                    if not past:
-                        try:
-                            part.encode('utf-8')
-                            binary = any(ord(c) < 32 or ord(c) == 127 for c in part)
-                        except UnicodeError:
-                            binary = True
-                        rules = ['binary'] if binary else list(dict.fromkeys(rule for _, rule in scan(part)))
-                        if not rules:
-                            label = path
-                            if refused_name(part):
-                                rules = ['name']
+                    try:
+                        part.encode('utf-8')
+                        binary = any(ord(c) < 32 or ord(c) == 127 for c in part)
+                    except UnicodeError:
+                        binary = True
+                    rules = ['binary'] if binary else list(dict.fromkeys(
+                        rule for value in (part, path) for _, rule in scan(value)))
+                    if not rules:
+                        label = path
+                        if refused_name(part):
+                            rules = ['name']
                     try:
                         before = os.stat(part, dir_fd=fd, follow_symlinks=False)
                     except FileNotFoundError:
                         if not prefix:  # Absent allowlist entries are normal.
                             continue
+                        unreadable += 1
                         refused.append(Refusal(label, 0, 'kind'))
                         continue
                     except OSError:
+                        unreadable += 1
                         refused.append(Refusal(label, 0, 'kind'))
                         continue
                     refused.extend(Refusal(label, 0, rule) for rule in rules)
@@ -886,6 +889,7 @@ class Snapshot:
                         after = os.fstat(child)
                         if any(getattr(before, key) != getattr(after, key) for key in
                                ('st_dev', 'st_ino', 'st_mode', 'st_nlink', 'st_size', 'st_mtime_ns', 'st_ctime_ns')):
+                            unreadable += 1
                             refused.append(Refusal(label, 0, 'kind'))
                             continue
                         if is_dir:
@@ -906,6 +910,7 @@ class Snapshot:
                             held[path] = data
                             labels[path] = label
                     except OSError:
+                        unreadable += 1
                         refused.append(Refusal(label, 0, 'kind'))
                     finally:
                         if child is not None:
@@ -914,7 +919,7 @@ class Snapshot:
                 for fd, _, _, close in stack:
                     if close:
                         os.close(fd)
-            return held, labels, refused, past, (count, size)
+            return held, labels, refused, past, (count, size, unreadable)
 
         try:
             docs, labels, refused, past, _ = walk(root, [(n, name, False) for n, name in enumerate(DOCUMENTS, 1)], cap)
@@ -926,7 +931,7 @@ class Snapshot:
             for tree in TREES:
                 held, labels, refused, over, counts = walk(root, [(1, tree, True)], cap - used, omit)
                 if over:
-                    if counts[0]:
+                    if counts[0] or counts[2]:
                         left_out[tree + '/'] = counts
                     omit = True
                 else:
@@ -962,8 +967,9 @@ def keep_check(directory, options):
     print(f'qa keep: {len(snapshot.files)} files, {snapshot.bytes()} bytes')
     for path, data in snapshot.files.items():
         print(f'  {snapshot.names[path]} {len(data)}')
-    for tree, (count, size) in snapshot.left_out.items():
-        print(f'left out: {tree}, {count} files, {size} bytes, past {cap} KiB')
+    for tree, (count, size, unreadable) in snapshot.left_out.items():
+        why = f'{unreadable} entries unreadable' if unreadable else f'past {cap} KiB'
+        print(f'left out: {tree}, {count} files, {size} bytes, {why}')
     for refusal in snapshot.refusals:
         print(f'refused: {refusal}')
     need(not snapshot.refusals, f'copy refused ({len(snapshot.refusals)})')
@@ -1023,15 +1029,13 @@ def settings(workspace):
     parsed, totals = {}, {}
     need(kinds.strip() and not any(ord(c) < 32 or 0x7f <= ord(c) < 0xa0 for c in kinds),
          'QA_WALK_KINDS needs KIND=SLOTS:POOL[,POOL...]')
-    for word in kinds.split(' '):
-        if not word:
-            continue
+    for position, word in enumerate(filter(None, kinds.split(' ')), 1):
         match = re.fullmatch(r'([a-z][a-z0-9]*)=([0-9]+):(.+)', word)
-        need(match, 'invalid QA_WALK_KINDS entry: ' + word)
+        need(match, f'invalid QA_WALK_KINDS entry {position}')
         kind, slots, pools = match[1], int(match[2]), match[3].split(',')
         need(kind not in parsed and slots > 0 and len(set(pools)) == len(pools)
              and all(re.fullmatch(LOGIN, pool) and pool_of(pool) == pool for pool in pools),
-             'invalid QA_WALK_KINDS entry: ' + word)
+             f'invalid QA_WALK_KINDS entry {position}')
         parsed[kind] = dict(slots=slots, pools=pools)
         for pool in pools:
             totals[pool] = totals.get(pool, 0) + slots
