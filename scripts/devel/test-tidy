@@ -942,7 +942,7 @@ def kept_proofs(lab):
         ('held', 25, False, 'held', False),
         ('unnamed', 25, False, 'unnamed', False),
         ('malformed', 25, False, 'malformed', False),
-        ('old-format', 25, False, 'no-path', False),
+        ('old-format', 25, False, 'no-worktree', False),
         ('outside', 25, False, 'outside', False),
         ('wrong-branch', 25, False, 'branch', False),
         ('unregistered', 25, False, 'unregistered', False),
@@ -970,21 +970,21 @@ def kept_proofs(lab):
                 lab.git(lab.a, 'merge', '--ff-only', branch)
                 lab.git(lab.a, 'push', 'origin', 'main')
             entry = dict(base=lab.base, commit=commit, tree=lab.git(path, 'rev-parse', 'HEAD^{tree}'),
-                         pin_only=mode != 'non-pin', path=str(path))
+                         pin_only=mode != 'non-pin', worktree=str(path))
             if mode == 'replacement-token':
                 lab.git(path, 'branch', '-m', f'land-set/{index + len(rows):032x}/agents')
                 branch = lab.git(path, 'branch', '--show-current')
             if mode == 'replacement-head':
                 entry['commit'] = lab.base
-            if mode == 'no-path':
-                entry.pop('path')
+            if mode == 'no-worktree':
+                entry.pop('worktree')
             if mode == 'symlink':
                 link = path.parent / 'link'
                 link.symlink_to(path, target_is_directory=True)
-                entry['path'] = str(link)
+                entry['worktree'] = str(link)
             if mode == 'unregistered':
-                entry['path'] = str(path.parent / 'not-a-worktree')
-                lab.put(Path(entry['path']) / 'evidence')
+                entry['worktree'] = str(path.parent / 'not-a-worktree')
+                lab.put(Path(entry['worktree']) / 'evidence')
             proof = dict(schema='other' if mode == 'schema' else 'land-set-proof-v1', set=label,
                          machine='fixture', token=f'{index:032x}',
                          time=(datetime.now(timezone.utc) - timedelta(hours=age)).isoformat(),

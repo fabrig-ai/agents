@@ -1136,16 +1136,16 @@ def proved(lab):
     assert 'land-set: proved; land it on ' in output, output
     assert not (lab.holder / 'set.lock').exists(), 'a prove took the set lock'
     proof = lab.proof()
-    assert {Path(entry['path']) for entry in proof['repos'].values() if entry['pin_only']} == set(lab.worktrees())
+    assert {Path(entry['worktree']) for entry in proof['repos'].values() if entry['pin_only']} == set(lab.worktrees())
     for name, entry in proof['repos'].items():
         if entry['pin_only']:
-            path = Path(entry['path'])
+            path = Path(entry['worktree'])
             assert path.is_absolute() and path.exists(), entry
             assert lab.git(path, 'rev-parse', 'HEAD') == entry['commit'], entry
             assert lab.git(path, 'branch', '--show-current') == f'land-set/{proof["token"]}/{name}'
             (path / 'target' / 'kept').write_text('proved target\n')
         else:
-            assert 'path' not in entry, entry
+            assert 'worktree' not in entry, entry
     assert proof['repos'].keys() == set(ORDER) and proof['token'] == events[0]['token']
     assert {name for name, entry in proof['repos'].items() if entry['pin_only']} == {'hearth', 'jig'}
     output = lab.run(spec)
@@ -1171,7 +1171,7 @@ def kept_replaced_by_next_prove(lab):
     spec = lab.spec()
     lab.run(spec, prove=True)
     first = lab.proof()
-    kept = {name: Path(entry['path']) for name, entry in first['repos'].items() if entry['pin_only']}
+    kept = {name: Path(entry['worktree']) for name, entry in first['repos'].items() if entry['pin_only']}
     for path in kept.values():
         (path / 'target' / 'old-proof').write_text('old target\n')
     lab.run(spec, prove=True)
@@ -1179,7 +1179,7 @@ def kept_replaced_by_next_prove(lab):
     assert second['token'] != first['token']
     assert set(lab.worktrees()) == set(kept.values())
     for name, path in kept.items():
-        assert second['repos'][name]['path'] == str(path)
+        assert second['repos'][name]['worktree'] == str(path)
         assert lab.git(path, 'rev-parse', 'HEAD') == second['repos'][name]['commit']
         assert not (path / 'target' / 'old-proof').exists(), 'previous target retained'
         assert lab.git(path, 'branch', '--show-current') == f'land-set/{second["token"]}/{name}'
