@@ -118,7 +118,7 @@ keeps that field's conditions as they were.
 | `kache` | the store at 1.5 times its limit or more | at 1.1 times or less |
 | `unreached` | the machine not read | read |
 | `untended` | its last tend ended 15 minutes ago or more, or never, or a command of it refused (exit 2) or could not start | a tend within 15 minutes whose commands ran |
-| `deaf NAME` | its tend's `post wake` could not wake NAME (exit 3) for a session's reason (stopped, failed, gone, a resume that failed): raised in the round that reads it, since the mail has waited 15 minutes already. Not for the guard's refusals (`mission M is STATE`, `no active mission here`, `record unreadable`, post.md 4): mail for an ended, paused or moved mission, or misaddressed, waits for `mail NAME` | NAME's mail read |
+| `deaf NAME` | its tend's `post wake` could not wake NAME (exit 3) for a session's reason, any but the guard's (stopped, failed, gone, a resume that failed, a Codex owner not running; one post adds later counts too): raised in the round that reads it, since the mail has waited 15 minutes already. Not for the guard's refusals (`mission M is STATE`, `no active mission here`, `record unreadable`, post.md 4): mail for an ended, paused or moved mission, or misaddressed, waits for `mail NAME` | NAME's mail read |
 | `mail NAME` | NAME's oldest unread message 60 minutes old or more | none that old |
 | `stale RUN` | RUN listed by `codex-run stale`, its caller not told | no longer listed |
 | `session NAME` | an active mission's session absent from its machine: no live session named NAME, nor the last holder of NAME's waiter | present, or the record no longer holds an active mission owned at that address (ended, paused, moved) |
