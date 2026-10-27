@@ -642,7 +642,16 @@ Beside the tool, the owner and its implementers do the rest:
   the landing (owners.md 4). It proves the set, `land-set --prove
   SETFILE` (9.2): it rebases, repins and gates every repository without
   the lock, and pushes no `main`. A conflict the tools don't settle
-  (section 3) stops it, and the task resolves it and proves again; a red it repairs. Then
+  (section 3) stops it, and the task resolves it and proves again; a red it repairs.
+  A set whose change reaches what a world's stories rely on runs that
+  world's `qa` profile at the proved tuple, after the proof and before
+  the landing (owners.md 4; the director, 10-27): the gates skip `qa`
+  tests. In a repository with a branch it runs in the set's worktree;
+  in a pin-only one, whose proved commit is the proof's own repin, in
+  the worktree the proof made and keeps for it,
+  `DEV_TMP/land-set/worktrees/<set>/<repo>`, which the proof file
+  names. What to run is the owner's, named in its landing task;
+  `land-set` runs no product's tests. Then
   it lands the set, `land-set --prove SETFILE && land-set SETFILE` on
   the same machine (9.2), and its report, posted to the owner when the
   run ends, says how. The owner starts the next milestone on the set's

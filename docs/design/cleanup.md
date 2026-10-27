@@ -180,7 +180,10 @@ new work. There is no keep list: a landed branch's commits are on
    `tmp/director/`, as step 3 finds them. Nothing else: not a primary
    checkout's, a session's or the user's worktree, after landing's
    runner (which caps its own, build-infrastructure.md 11), `qa/` or
-   `land-set/`.
+   `land-set/`, but for a pin-only worktree a set's proof kept
+   (build-infrastructure.md 10): `tidy` removes it whole, its target
+   with it, once its set has landed or its proof is over 24 hours old,
+   while no run of the set holds the set's file lock.
    - **Its owner** is the mission whose directory holds it, with its
      milestones' `owners/<m>-m<N>/` as one, or `director`.
    - **In use** while held by a process (section 4's sense, for its

@@ -849,7 +849,14 @@ hearth, jig, temper:
 
 A pin-only worktree is removed, its target with it, once its repository
 lands or is skipped, or when the run fails in another repository. The
-failing one is kept, and its path printed. Each child runs in its own
+failing one is kept, and its path printed. A successful `--prove` keeps
+every pin-only worktree, at its proved commit, so that the set can run
+what its owner names there before it lands (landing-flow.md 9.1); the
+proof file records each one's path beside its base and commit. The
+set's next run replaces it, as a leftover; the set's landing removes
+it; and `tidy` removes one whose set has since landed, or whose proof
+is over 24 hours old, while no run of the set holds the set's file lock
+(cleanup.md, step 9). Each child runs in its own
 process group, which a signal to the run reaches whole before the lock goes.
 
 The run appends its last feed event, then releases the lock, on every
