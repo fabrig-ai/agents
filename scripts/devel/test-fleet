@@ -402,7 +402,7 @@ def reading_tend_since(lab):
 def room_verdicts(lab):
     baseline = lab.probe()
     rows = [('disk', {'disk': {'free': 49*GB, 'total': 600*GB}}, 'full'),
-            ('load', {'load': [1, 2, 24]}, 'full'),
+            ('load', {'load': [1, 2, 32]}, 'full'),
             ('memory', {'memory': {'available': GB, 'total': 16*GB}}, 'full'),
             ('kache', {'kache': {'store': 150*GB, 'limit': 100*GB}}, 'full'),
             ('disk', {'disk': {'free': 99*GB, 'total': 600*GB}}, 'tight'),
@@ -421,7 +421,9 @@ def room_verdicts(lab):
     for condition, changes, raised, cleared in [
         ('disk', {'disk': {'free': 50*GB}}, False, False),
         ('disk', {'disk': {'free': 60*GB}}, False, True),
-        ('load', {'load': [0, 0, 16]}, False, False),
+        ('load', {'load': [0, 0, 20]}, False, False),
+        ('load', {'load': [0, 0, 19.2]}, False, True),
+        ('load', {'load': [0, 0, 32]}, True, False),
         ('memory', {'memory': {'available': 10, 'total': 100}}, False, False),
         ('memory', {'memory': {'available': 15, 'total': 100}}, False, True),
         ('kache', {'kache': {'store': 110, 'limit': 100}}, False, True)]:
@@ -433,11 +435,11 @@ def room_verdicts(lab):
 
 def room_order_and_exit(lab):
     for name, load, free in [('beta', (0, 0, 5), 99*GB), ('delta', (0, 0, 1), 200*GB),
-                             ('epsilon', (0, 0, 4), 200*GB), ('zeta', (0, 0, 25), 200*GB)]:
+                             ('epsilon', (0, 0, 4), 200*GB), ('zeta', (0, 0, 33), 200*GB)]:
         if name != 'beta': lab.machine(name)
         lab.figures(name, load=load, free=free)
     write(lab.tmp() / 'post/machines', 'zeta free@zeta\nbeta free@beta\nepsilon free@epsilon\nalpha local\ngamma free@gamma\ndelta free@delta\n')
-    lab.figures('alpha', load=(1, 2, 24))
+    lab.figures('alpha', load=(1, 2, 32))
     r = lab.rooms(status=1)
     assert [x['machine'] for x in r] == ['delta', 'epsilon', 'beta', 'alpha', 'zeta', 'gamma'], r
     text = lab.run('room', status=1).stdout
@@ -885,6 +887,44 @@ def between_changes_nothing(lab):
         assert key not in rounds(reading(**middle))['conditions']
 
 
+def load_thresholds(lab):
+    key = 'alpha load'
+    state = rounds(reading(load=[0, 0, 14]))
+    assert not state['conditions'].get(key, {}).get('raised', False) and state['pending'] == []
+    state = rounds(reading(load=[0, 0, 16], tend=[tend_record(NOW+600)]), state, now=NOW+600)
+    assert state['conditions'][key]['raised'] and state['pending'] == [key]
+    state = API['posted'](state, 0, NOW+900)
+    state = rounds(reading(load=[0, 0, 12], tend=[tend_record(NOW+1200)]), state, now=NOW+1200)
+    assert state['conditions'][key]['raised'] and state['cleared'] == []
+    state = rounds(reading(load=[0, 0, 9.6], tend=[tend_record(NOW+1800)]), state, now=NOW+1800)
+    assert not state['conditions'][key]['raised'] and state['cleared'] == [key]
+    assert API['verdict'](reading(load=[0, 0, 14])) == ('tight', ['load'])
+    assert API['verdict'](reading(load=[0, 0, 16])) == ('full', ['load'])
+
+
+def deaf_reasons(lab):
+    key = 'alpha deaf o/x'
+    for reason in ('stopped', 'failed', 'no session', 'resume failed'):
+        line = 'o/x queued, nobody will wake it: ' + reason
+        r = reading(tend=[tend_record(NOW, (0, 3, 0), ((), (line,), ()))],
+                    mail={'o/x': {'oldest': 20}})
+        state = rounds(r, count=1)
+        assert state['conditions'][key]['raised'], reason
+        assert state['pending'] == [key], reason
+    for reason in ('mission fleet-tool is ended', 'no active mission here', 'record unreadable'):
+        line = 'o/x queued, nobody will wake it: ' + reason
+        r = reading(tend=[tend_record(NOW, (0, 3, 0), ((), (line,), ()))],
+                    mail={'o/x': {'oldest': 20}})
+        state = rounds(r)
+        assert key not in state['conditions'] and state['pending'] == [], reason
+        for n, age in enumerate((60, 65)):
+            r['mail']['o/x']['oldest'] = age
+            state = rounds(r, state, now=NOW+2400+n*300, count=1)
+        assert state['conditions']['alpha mail o/x']['raised'], reason
+        assert 'alpha mail o/x' in state['pending'], reason
+        assert key not in state['conditions'], reason
+
+
 def each_condition(lab):
     bad_tend = tend_record(NOW, (0, 3, 0), ((), ('o/x queued, nobody will wake it: absent',), ()))
     examples = [
@@ -1290,7 +1330,7 @@ CASES = [reading_fields, reading_session_waiters, reading_disk_workspace, readin
          room_targets, room_fits_120, room_json, tend_order, tend_checkouts_hourly, tend_all_ok, tend_not_started, tend_lines, tend_checkout_lines,
          tend_kache_gc_past_limit, tend_kache_within_limit, tend_without_kache,
          tend_kache_stats_fails, tend_kache_gc_fails, tend_keeps_a_week, tend_read_by_probe, tend_room_for_landing, tend_room_for_regenerate, tend_no_room, tend_record_failure,
-         raise_after_two_rounds, clear_after_two_rounds, between_changes_nothing, each_condition,
+         raise_after_two_rounds, clear_after_two_rounds, between_changes_nothing, load_thresholds, deaf_reasons, each_condition,
          missing_field_keeps, session_from_missions, session_waiter_identity, subjects_gone, untended_rows, tends_counted_once,
          user_and_fleet_never, quiet_machine, no_state_first_round, gap_carries,
          cleared_before_post_dropped, subject_length, body_lines, round_posts_once,

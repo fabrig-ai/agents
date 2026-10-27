@@ -35,7 +35,7 @@ REPOS = ('agents', 'skein', 'smith', 'jig', 'hearth', 'qa', 'temper')
 GB = 2 ** 30
 # fleet-watch.md 3.1 and 5: first guesses of 10-26, shared with the watch.
 DISK_RAISE, DISK_CLEAR = 10 * GB, 20 * GB
-LOAD_RAISE, LOAD_CLEAR = 3.0, 2.0
+LOAD_RAISE, LOAD_CLEAR = 4.0, 2.5
 MEMORY_RAISE, MEMORY_CLEAR = 0.10, 0.15
 KACHE_RAISE, KACHE_CLEAR = 1.5, 1.1
 ROOM_DISK, ROOM_LOAD, ROOM_MEMORY, ROOM_WAIT = 60 * GB, 1.5, 0.25, 600
@@ -666,6 +666,8 @@ def verdict(reading):
 # Watch. The condition stories and the post are pure; the round owns the I/O.
 KINDS = 'disk load memory kache unreached untended deaf mail stale session blind'.split()
 ADDRESS = r'[a-z][a-z0-9-]*(?:/[a-z0-9][a-z0-9-]*)*@[a-z][a-z0-9-]*'
+# post.md 4: only these refusals belong to the wake guard.
+GUARD_REFUSALS = r'mission \S+ is \S+|no active mission here|record unreadable'
 
 
 def stamp(value):
@@ -721,8 +723,8 @@ def read_tends(state, machine, reading):
                     match = re.fullmatch(r'(\S+) woken', line)
                     if match and match[1] not in done['woken']:
                         done['woken'].append(match[1])
-                    match = re.fullmatch(r'(\S+) queued, nobody will wake it: .+', line)
-                    if match:
+                    match = re.fullmatch(r'(\S+) queued, nobody will wake it: (.+)', line)
+                    if match and not re.fullmatch(GUARD_REFUSALS, match[2]):
                         deaf.add(match[1])
                 if c['argv'][0] == 'codex-run' and re.match(r'\S+ told:', line):
                     done['told'] += 1
