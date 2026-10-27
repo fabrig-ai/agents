@@ -1135,8 +1135,17 @@ def proved(lab):
     assert all(f'{name}: proved ' in output for name in ORDER), output
     assert 'land-set: proved; land it on ' in output, output
     assert not (lab.holder / 'set.lock').exists(), 'a prove took the set lock'
-    assert not lab.worktrees(), 'pin-only worktree retained'
     proof = lab.proof()
+    assert {Path(entry['path']) for entry in proof['repos'].values() if entry['pin_only']} == set(lab.worktrees())
+    for name, entry in proof['repos'].items():
+        if entry['pin_only']:
+            path = Path(entry['path'])
+            assert path.is_absolute() and path.exists(), entry
+            assert lab.git(path, 'rev-parse', 'HEAD') == entry['commit'], entry
+            assert lab.git(path, 'branch', '--show-current') == f'land-set/{proof["token"]}/{name}'
+            (path / 'target' / 'kept').write_text('proved target\n')
+        else:
+            assert 'path' not in entry, entry
     assert proof['repos'].keys() == set(ORDER) and proof['token'] == events[0]['token']
     assert {name for name, entry in proof['repos'].items() if entry['pin_only']} == {'hearth', 'jig'}
     output = lab.run(spec)
@@ -1150,7 +1159,33 @@ def proved(lab):
     assert {r['repo']: r['commit'] for r in gated} == {
         name: entry['commit'] for name, entry in proof['repos'].items()} == heads
     assert lab.proof() is None, 'a landed set kept its proof'
+    assert not lab.worktrees(), 'a landed set kept its pin-only worktrees'
+    for name in ('hearth', 'jig'):
+        assert not lab.git(lab.primary[name], 'for-each-ref', 'refs/heads/land-set/')
     lab.assert_released()
+
+
+def kept_replaced_by_next_prove(lab):
+    """A second proof replaces the kept trees at the same gate-cache paths."""
+    lab.change('skein')
+    spec = lab.spec()
+    lab.run(spec, prove=True)
+    first = lab.proof()
+    kept = {name: Path(entry['path']) for name, entry in first['repos'].items() if entry['pin_only']}
+    for path in kept.values():
+        (path / 'target' / 'old-proof').write_text('old target\n')
+    lab.run(spec, prove=True)
+    second = lab.proof()
+    assert second['token'] != first['token']
+    assert set(lab.worktrees()) == set(kept.values())
+    for name, path in kept.items():
+        assert second['repos'][name]['path'] == str(path)
+        assert lab.git(path, 'rev-parse', 'HEAD') == second['repos'][name]['commit']
+        assert not (path / 'target' / 'old-proof').exists(), 'previous target retained'
+        assert lab.git(path, 'branch', '--show-current') == f'land-set/{second["token"]}/{name}'
+        assert not lab.git(lab.primary[name], 'for-each-ref', f'refs/heads/land-set/{first["token"]}/')
+    lab.run(spec)
+    assert not lab.worktrees() and lab.proof() is None
 
 
 def proved_then_moved(lab):
@@ -1551,7 +1586,7 @@ CASES = (tidy_hooks, tidy_hooks_partial, staging_cargo, rerun, advanced_main, re
          partial_set, split_source, tuple_explicit_worktrees, tuple_external_source, tuple_package_collision, tuple_source_refusal, tuple_new_crate, success, taught, moved_between_phases, moved_during_pushes,
          moved_earlier_in_second_round, regate_failure_resume, catch_up,
          pushed_then_failed, push_without_result_marks_unknown_range, lagging_fetch,
-         proved, proved_then_moved, prove_failure, same_set,
+         proved, kept_replaced_by_next_prove, proved_then_moved, prove_failure, same_set,
          outside_snapshot, moved_gate_base,
          interrupted_with_staging, interrupted_during_feed, interrupted_during_cleanup,
          feed_failure, cleanup_warning,
