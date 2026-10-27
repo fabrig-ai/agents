@@ -108,8 +108,10 @@ def room_of(task):
 
 def reservation(tasks) -> int | None:
     now = time.time()
-    return max((room_of(task) for task in tasks.values() if landing(task) and
-                (task['state'] != 'released' or now - task['ended'] < ROOM_AFTER)), default=None)
+    return max((room_of(task) for task in tasks.values()
+                if (task['state'] != 'released' or
+                    ('label' in task and now - task['ended'] < ROOM_AFTER))
+                and landing(task)), default=None)
 
 
 def track_disk_wait(ledger, task, free) -> None:
@@ -227,11 +229,23 @@ class Ledger:
             self.data = json.loads(self.path.read_text())
             if self.data.get('version') != 1:
                 raise Refusal('unsupported host ledger version')
-            take_over(self)
         else:
-            self.data = {'version': 1, 'queue': QUEUE, 'next_id': 1, 'tasks': {}, 'maintenance': {},
+            self.data = {'version': 1, 'queue': QUEUE, 'tasks': {}, 'maintenance': {},
                          'gate': None, 'pending': [], 'installation': None}
+        if not older_tasks(self):
+            self.seed_number()
+        take_over(self)
         self.flush()
+
+    def seed_number(self):
+        if 'next_id' not in self.data:
+            numbers = [int(task['id']) for task in self.tasks.values()
+                       if str(task.get('id', '')).isdigit()]
+            rows = LOGS / 'heavy.tsv'
+            if rows.exists():
+                numbers.extend(int(row.split('\t')[0]) for row in rows.read_text().splitlines()
+                               if len(row.split('\t')) == 11 and row.split('\t')[0].isdigit())
+            self.data['next_id'] = 1 + max(numbers, default=0)
 
     @property
     def tasks(self):
@@ -293,8 +307,7 @@ def locked():
 def take_over(ledger):
     if ledger.data['queue'] != QUEUE and all(task['state'] == 'released' for task in ledger.tasks.values()):
         previous = ledger.data['queue']
-        ledger.data['next_id'] = 1 + max((int(task['id']) for task in ledger.tasks.values()
-                                         if str(task.get('id', '')).isdigit()), default=0)
+        ledger.seed_number()
         ledger.data['queue'] = QUEUE
         ledger.event(None, 'migration:' + uuid.uuid4().hex, previous=previous,
                      tasks=len(ledger.tasks), holds=sorted(ledger.data['maintenance']))
@@ -439,11 +452,9 @@ def cleanup_transport(task):
 
 def publish_receipt(ledger, task):
     """Seal a separate log after release, then publish replayable evidence."""
-    if not task.get('row_durable') or not task.get('release_complete'):
-        return
     receipts = BASE / 'receipts'
     path = receipts / (task['token'] + '.json')
-    if path.exists():
+    if path.exists() or not task.get('row_durable') or not task.get('release_complete'):
         return
     receipts.mkdir(exist_ok=True, mode=0o700)
     sync_dir(BASE)
@@ -516,6 +527,23 @@ def say(text, stream=None):
         pass
 
 
+def completed_task(token):
+    receipt = json.loads((BASE / 'receipts' / (token + '.json')).read_text())
+    for line in (BASE / 'events.jsonl').read_text().splitlines(keepends=True):
+        if not line.endswith('\n'):
+            continue
+        event = json.loads(line)
+        if event['token'] == token and event['event'] == 'refusal':
+            reason = event['reason']
+            receipt['refusal'] = 'disk floor refused' if reason == 'disk-floor' else reason
+    for line in (LOGS / 'heavy.tsv').read_text().splitlines():
+        row = line.split('\t')
+        if len(row) == 11 and row[8] == receipt['log']:
+            return dict(receipt, state='released', row_durable=True, repo=row[7],
+                        waited=int(row[3]), ran=int(row[4]))
+    raise Refusal('released task has no durable history row')
+
+
 def cancel(token):
     received = defer_interrupts()
     if os.environ.get('HEAVY_TASK'):
@@ -526,6 +554,8 @@ def cancel(token):
         task = ledger.tasks.get(token)
         if task is None:
             raise Refusal('cancel refused: unknown token')
+        if task['state'] == 'released' and 'repo' not in task:
+            task = completed_task(token)
         # Only the submitting working directory may take a task back.
         if Path(task['repo']).resolve() != Path.cwd().resolve():
             raise Refusal('cancel refused: the task was submitted from another directory')
@@ -535,7 +565,9 @@ def cancel(token):
     deadline = time.monotonic() + 60
     while True:
         with locked() as ledger:
-            task = ledger.tasks[token]
+            task = ledger.tasks.get(token)
+            if task is None or (task['state'] == 'released' and 'lane' not in task):
+                task = completed_task(token)
             if task['state'] != 'released' or not receipt.is_file():
                 reconcile(ledger)
         name = f"task {task.get('id', '-')} ({task['lane']})"
@@ -584,16 +616,16 @@ def room(ledger, task):
         if ledger.data['gate']:
             return 0
         slots = int(os.environ.get('HEAVY_BUILD_SLOTS_EFFECTIVE', '0'))
-        return max(0, slots - sum(other['lane'] == 'build' and other['state'] in LIVE
+        return max(0, slots - sum(other['state'] in LIVE and other['lane'] == 'build'
                                  for other in ledger.tasks.values())) if slots else math.inf
     return int(ledger.data['gate'] in (None, token) and not any(
-        other['token'] != token and other['lane'] == 'gate' and other['state'] in LIVE
+        other['state'] in LIVE and other['token'] != token and other['lane'] == 'gate'
         for other in ledger.tasks.values()))
 
 
 def admissible(ledger, task) -> bool:
     is_landing = landing(task)
-    older = sum(other['lane'] == task['lane'] and other['state'] in ('queued', 'waiting')
+    older = sum(other['state'] in ('queued', 'waiting') and other['lane'] == task['lane']
                 and int(other['id']) < int(task['id']) and (not is_landing or landing(other))
                 for other in ledger.tasks.values())
     if older >= room(ledger, task):
@@ -604,7 +636,7 @@ def admissible(ledger, task) -> bool:
         free = free_gb()
         # Even unlimited slots keep younger builds behind one waiting for room.
         floors = [floor_of(other) for other in ledger.tasks.values()
-                  if other['lane'] == 'build' and other['state'] in ('queued', 'waiting')
+                  if other['state'] in ('queued', 'waiting') and other['lane'] == 'build'
                   and int(other['id']) < int(task['id']) and not landing(other)]
         return free >= max([floor_of(task), *floors]) + reserved
     return True
@@ -620,7 +652,7 @@ def reconcile(ledger):
             ledger.save()
         orphan = task['state'] not in (*UNCLAIMED, 'released') and (
             task['boot'] != boot() or not alive(task.get('wrapper')))
-        if landing(task) and task['state'] in ('queued', 'waiting') and not orphan:
+        if task['state'] in ('queued', 'waiting') and landing(task) and not orphan:
             if free is None:
                 free = free_gb()
             track_disk_wait(ledger, task, free)
@@ -880,9 +912,6 @@ def submit(args, lane, tail_lines, exclusive):
             raise Refusal(f'drain first: {n} task{"" if n == 1 else "s"} from the pueue generation')
         jobs = os.environ.get('HEAVY_BUILD_JOBS_EFFECTIVE', str(len(os.sched_getaffinity(0))))
         label = os.environ.get('HEAVY_LABEL', Path.cwd().name)
-        if 'next_id' not in ledger.data:
-            ledger.data['next_id'] = 1 + max((int(task['id']) for task in ledger.tasks.values()
-                                            if str(task.get('id', '')).isdigit()), default=0)
         number = ledger.data['next_id']
         ledger.data['next_id'] = number + 1
         task = {'token': token, 'id': str(number), 'wrapper_unit': wrapper_unit(token), 'lane': lane,
@@ -919,7 +948,8 @@ def submit(args, lane, tail_lines, exclusive):
         if received and not handled:
             # The cancel is durable before anything is printed.
             with locked() as ledger:
-                cancelled = request_cancel(ledger, ledger.tasks[token], 'interrupt', signal=received[0])
+                current = ledger.tasks.get(token)
+                cancelled = current is not None and request_cancel(ledger, current, 'interrupt', signal=received[0])
                 reconcile(ledger)
             handled = len(received)
             say(f"heavy: interrupted; {'cancelled' if cancelled else 'not cancelled, already ended:'} "
@@ -939,7 +969,9 @@ def submit(args, lane, tail_lines, exclusive):
         # with admission. The row marker follows the durable event/TSV flush.
         try:
             snapshot = json.loads((BASE / 'state.json').read_text())
-            task = snapshot['tasks'][token]
+            task = snapshot['tasks'].get(token)
+            if task is None or (task['state'] == 'released' and 'log' not in task):
+                task = completed_task(token)
         except (OSError, ValueError):
             print(RECOVERY_DIAGNOSTIC, file=sys.stderr, flush=True)
             return 2
@@ -952,7 +984,7 @@ def submit(args, lane, tail_lines, exclusive):
                     f"of {floor_of(task)} GB; refused after 20 minutes below it", sys.stderr)
             disk_spell = spell
             held = False
-            if not landing(task) and lane == 'build' and task['state'] in ('queued', 'waiting'):
+            if task['state'] in ('queued', 'waiting') and lane == 'build' and not landing(task):
                 reserved = reservation(snapshot['tasks'])
                 if reserved is not None:
                     free = free_gb() if free is None else free
@@ -994,8 +1026,8 @@ def wrapper(token):
     fault('claim', token)
     with locked() as ledger:
         reconcile(ledger)
-        task = ledger.tasks[token]
-        if not task.get('wrapper_unit') or task['state'] != 'queued':
+        task = ledger.tasks.get(token)
+        if task is None or not task.get('wrapper_unit') or task['state'] != 'queued':
             raise Refusal('token is not queued; refusing replay')
         task['wrapper'] = identity()
         task['boot'] = boot()
@@ -1005,7 +1037,7 @@ def wrapper(token):
     while True:
         with locked() as ledger:
             reconcile(ledger)
-            task = ledger.tasks[token]
+            task = ledger.tasks.get(token) or completed_task(token)
             if task['state'] == 'released':
                 return task['code']
             # A cancelled task still closing must never be admitted.
@@ -1069,14 +1101,14 @@ def wrapper(token):
             ended = True
         except subprocess.TimeoutExpired:
             ended = False
-        current = json.loads((BASE / 'state.json').read_text())['tasks'][token]
+        current = json.loads((BASE / 'state.json').read_text())['tasks'].get(token) or completed_task(token)
         if current['state'] == 'released' and current.get('row_durable'):
             launcher.wait()
             return current['code']
         if current['state'] not in ('finishing', 'closing') and not ended:
             continue
         with locked() as ledger:
-            task = ledger.tasks[token]
+            task = ledger.tasks.get(token) or completed_task(token)
             if ended and task['state'] in ('launching', 'active'):
                 task['state'], task['code'] = 'finishing', 2 if task['state'] == 'launching' else 137
                 ledger.event(task, 'refusal', reason='contained service failed before payload entry')
@@ -1172,8 +1204,8 @@ def payload_disk_floor(token):
 
 def payload(token):
     with locked() as ledger:
-        task = ledger.tasks[token]
-        if task['state'] != 'launching' or not alive(task['wrapper']) or task['boot'] != boot():
+        task = ledger.tasks.get(token)
+        if task is None or task['state'] != 'launching' or not alive(task['wrapper']) or task['boot'] != boot():
             return 137
         group = Path('/proc/self/cgroup').read_text().strip().split('::', 1)[1]
         if Path(group).name != task['unit']:
@@ -1272,6 +1304,8 @@ def main(args):
             raise Refusal('unknown refusal category')
         with locked() as ledger:
             task = ledger.tasks.get(args[2]) if len(args) == 3 else None
+            if task is not None and 'lane' not in task:
+                task = None
             ledger.event(task, 'refusal:' + uuid.uuid4().hex, reason=args[1])
             ledger.save()
         return 0

@@ -7,6 +7,7 @@ Raw evidence is retained in --evidence (a new directory).
 """
 from case_runner import HUNG_TOOL_S
 import argparse
+import contextlib
 import fcntl
 import hashlib
 import json
@@ -2204,6 +2205,146 @@ def overhead(lab, real_policy=False):
     (lab.path / 'overhead.json').write_text(json.dumps(data, indent=2) + '\n')
 
 
+@contextlib.contextmanager
+def released_ledger(lab):
+    lab.done(lab.start('land repo', land=True))
+    task = lab.released('land repo')
+    scratch = lab.path / 'ledger-copy'
+    scratch.mkdir()
+    base, logs = scratch / 'heavy', scratch / 'logs'
+    shutil.copytree(lab.base, base)
+    shutil.copytree(lab.path / 'tmp/logs', logs)
+    sys.path.insert(0, str(KIT))
+    try:
+        with patch.dict(os.environ, lab.env):
+            module = runpy.run_path(str(KIT / 'heavy-recovery.py'))
+    finally:
+        sys.path.pop(0)
+    scope = module['Ledger'].save.__globals__
+    with patch.dict(os.environ, lab.env), patch.dict(scope, BASE=base, LOGS=logs), \
+            patch.object(time, 'time', return_value=task['ended'] + 120):
+        ledger = module['Ledger']()
+        yield module, ledger, task
+
+
+def hand_shrink(ledger, task):
+    compact = {key: task[key] for key in ('token', 'id', 'state', 'code', 'row_durable', 'ended')}
+    ledger.tasks[task['token']] = compact
+    ledger.save()
+    assert json.loads(ledger.path.read_text())['tasks'][task['token']] == compact
+    return compact
+
+
+
+
+def delayed_client_reads_shrunk_history(lab):
+    with released_ledger(lab) as (module, ledger, task):
+        token = task['token']
+        hand_shrink(ledger, task)
+        # Refusals before launch may have no log output; their event keeps the remedy.
+        with (ledger.path.parent / 'events.jsonl').open('a') as out:
+            out.write(json.dumps({'token': token, 'event': 'refusal', 'reason': 'start the shared service'}) + '\n')
+        with (ledger.path.parent / 'events.jsonl').open('a') as out:
+            out.write('{"interrupted":')
+        assert module['completed_task'](token)['refusal'] == 'start the shared service'
+        # A delayed client/cancel still gets its summary from the receipt and row.
+        completed = module['completed_task'](token)
+        for key in ('code', 'lane', 'repo', 'log', 'waited', 'ran'):
+            assert completed[key] == task[key]
+        with patch('pathlib.Path.cwd', return_value=Path(task['repo'])):
+            assert module['cancel'](token) == 1
+
+
+def task_number_survives_retired_records(lab):
+    with released_ledger(lab) as (module, ledger, task):
+        token = task['token']
+        hand_shrink(ledger, task)
+        ledger.tasks.pop(token)
+        ledger.save()
+        # A queue takeover must preserve the allocator even with no retained task.
+        ledger.data['next_id'] = 50
+        ledger.data['queue'] = 'previous queue'
+        module['take_over'](ledger)
+        assert ledger.data['next_id'] == 50
+        # An old snapshot lacking the counter seeds from the TSV, even when empty.
+        rows = module['Ledger'].save.__globals__['LOGS'] / 'heavy.tsv'
+        fields = task['row'].split('\t')
+        fields[0] = '37'
+        with rows.open('a') as out:
+            out.write('\t'.join(fields) + '\n')
+        ledger.data.pop('next_id')
+        ledger.save()
+        restored = module['Ledger']()
+        assert restored.data['next_id'] == 38
+        # Submit through the production allocator; refuse before any unit starts.
+        scope = module['submit'].__globals__
+        with patch.dict(scope, ensure_reconciler=lambda ledger: None, start_wrapper=lambda task: False,
+                        kill_scope=lambda task: True):
+            try:
+                module['submit'](['true'], 'build', 0, False)
+            except module['Refusal'] as error:
+                assert str(error) == 'cannot start the task wrapper unit'
+            else:
+                raise AssertionError('fixture wrapper start must refuse')
+        fresh = module['Ledger']()
+        assert [int(t['id']) for t in fresh.tasks.values()] == [38]
+
+
+def late_wrapper_refused_by_a_shrunk_task(lab):
+    with released_ledger(lab) as (module, ledger, task):
+        compact = hand_shrink(ledger, task)
+        try:
+            module['wrapper'](task['token'])
+        except module['Refusal'] as error:
+            assert str(error) == 'token is not queued; refusing replay'
+        else:
+            raise AssertionError('late wrapper ran')
+        assert ledger.tasks[task['token']] == compact
+        with patch.object(time, 'time', return_value=task['ended'] + 86400):
+            ledger.tasks.pop(task['token'])
+            ledger.save()
+            try:
+                module['wrapper'](task['token'])
+            except module['Refusal'] as error:
+                assert str(error) == 'token is not queued; refusing replay'
+            else:
+                raise AssertionError('evicted wrapper ran')
+            assert module['payload'](task['token']) == 137
+        assert module['completed_task'](task['token'])['code'] == task['code']
+
+
+def release_replay_on_a_shrunk_task(lab):
+    with released_ledger(lab) as (module, ledger, task):
+        hand_shrink(ledger, task)
+        receipt = ledger.path.parent / 'receipts' / (task['token'] + '.json')
+        events = ledger.path.parent / 'events.jsonl'
+        rows = module['Ledger'].save.__globals__['LOGS'] / 'heavy.tsv'
+        before = [p.read_bytes() for p in (receipt, events, rows)]
+        ledger.data['pending'] = [lab.events()[-1]]
+        ledger.save()
+        transport = ledger.path.parent / (task['token'] + '.env')
+        transport.touch()
+        for _ in range(3):
+            module['reconcile'](module['Ledger']())
+        assert not transport.exists()
+        assert [p.read_bytes() for p in (receipt, events, rows)] == before
+
+
+def reservation_ignores_shrunk(lab):
+    with released_ledger(lab) as (module, ledger, task):
+        hand_shrink(ledger, task)
+        for now in (task['ended'] + 120, task['ended'] + 119, task['ended'] - 1):
+            with patch.object(time, 'time', return_value=now):
+                assert module['reservation'](ledger.tasks) is None
+        # Both lanes and FIFO readers ignore released records without lane/label.
+        with patch.dict(os.environ, HEAVY_BUILD_SLOTS_EFFECTIVE='2'):
+            for lane in ('build', 'gate'):
+                waiting = dict(task, token='waiting', id='2', state='waiting', lane=lane)
+                ledger.tasks['waiting'] = waiting
+                assert module['admissible'](ledger, waiting)
+                del ledger.tasks['waiting']
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--evidence', required=True, type=Path)
@@ -2212,7 +2353,12 @@ def main():
     root = opts.evidence.resolve()
     root.mkdir(parents=True, exist_ok=False)
     (root / 'EVIDENCE.TAG').write_text('agents fixture evidence\ntest-heavy-recovery\n')
-    cases = [('migrate-on-submit', migrate_on_submit),
+    cases = [('delayed_client_reads_shrunk_history', delayed_client_reads_shrunk_history),
+             ('task_number_survives_retired_records', task_number_survives_retired_records),
+             ('late_wrapper_refused_by_a_shrunk_task', late_wrapper_refused_by_a_shrunk_task),
+             ('release_replay_on_a_shrunk_task', release_replay_on_a_shrunk_task),
+             ('reservation_ignores_shrunk', reservation_ignores_shrunk),
+             ('migrate-on-submit', migrate_on_submit),
              ('migrate-drained', migrate_drained), ('migrate-undrained', migrate_undrained),
              ('rollback', rollback),
              ('client-before-wrapper', unclaimed_client),
