@@ -1173,8 +1173,12 @@ again at the next pass:
 **`landings`.** `landings` adds a `tiers:` section, a line per
 follower, by its name: green or red at its last run, a red's standing tests and
 the landing first charged, its last green, and a run in progress or a
-fault newer than the last state. It and each verdict line below name a
-run's starved passes as they name its flakes, `starved N: TESTS`. `landings wait --cleared TARGET
+fault newer than the last state. Per repository it shows only the
+followers of its newest split, the split whose newest record is the
+newest: a whole tier's line goes once its parts have run, and a
+split's once another has; the join still reads every split. It and
+each verdict line below name a run's starved passes as they name its
+flakes, `starved N: TESTS`. `landings wait --cleared TARGET
 [--timeout SECONDS] [--post ADDRESS]` waits for a landing's verdict:
 TARGET is a set, whose landings are its latest run's `landed` records,
 or a commit, 7 to 40 hex digits. A `landed` event's `base` and `commit`
