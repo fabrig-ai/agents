@@ -2,6 +2,7 @@
 """Offline login custody fixtures, each selectable by name in a fresh Lab."""
 from case_runner import HUNG_TOOL_S
 from datetime import datetime, timedelta, timezone
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -67,10 +68,12 @@ class Lab:
         return [line.split('\t') for line in (self.directory(name) / 'log.tsv').read_text().splitlines()]
 
     def read(self, filename, name=CHATGPT):
-        return json.loads((self.directory(name) / filename).read_text())
+        directory = self.tmp / 'logins' if filename == 'waiting.json' else self.directory(name)
+        return json.loads((directory / filename).read_text())
 
     def write(self, filename, value, name=CHATGPT):
-        (self.directory(name) / filename).write_text(json.dumps(value) + '\n')
+        directory = self.tmp / 'logins' if filename == 'waiting.json' else self.directory(name)
+        (directory / filename).write_text(json.dumps(value) + '\n')
 
     def driver(self, body):
         driver = self.root / 'driver.py'
@@ -138,7 +141,9 @@ class Lab:
 
             def scandir(path):
                 record('scandir', path, {})
-                return CountedEntries(originals['scandir'](path))
+                iterator = originals['scandir'](path)
+                target = descriptors.get(path, path) if isinstance(path, int) else os.fspath(path)
+                return CountedEntries(iterator) if target == login else iterator
 
             original_check = module.login_check
 
@@ -312,7 +317,9 @@ def a_second_taker_waits(lab):
 def the_first_waiter_is_served_first(lab):
     lab.login()
     lab.run('take', CHATGPT, '--as', QA)
+    lab.clock('2026-10-26T18:30:00Z')
     lab.run('take', CHATGPT, '--as', RUNG)
+    lab.clock('2026-10-26T18:30:01Z')
     lab.run('take', CHATGPT, '--as', 'another')
     lab.run('give', CHATGPT, '--as', QA)
     code, _, err = lab.run('take', CHATGPT, '--as', 'another')
@@ -325,7 +332,7 @@ def waiter_with_age(lab, age):
     lab.login()
     now = datetime(2026, 10, 26, 18, 30, tzinfo=timezone.utc)
     seen = (now - timedelta(seconds=age)).strftime('%Y-%m-%dT%H:%M:%SZ')
-    lab.write('waiting.json', [dict(holder=RUNG, note='', since=seen, seen=seen)])
+    lab.write('waiting.json', [dict(holder=RUNG, request=CHATGPT, pool=False, note='', since=seen, seen=seen)])
 
 
 def a_stale_waiter_loses_its_turn(lab):
@@ -355,11 +362,11 @@ def retaking_a_login_not_at_rest_is_refused(lab):
     path = lab.login()
     lab.run('take', CHATGPT, '--as', QA)
     path.rename(lab.root / 'imported')
-    waiting = (lab.directory() / 'waiting.json').read_bytes()
+    waiting = (lab.tmp / 'logins' / 'waiting.json').read_bytes()
     before = {p.name: p.stat().st_mtime_ns for p in lab.directory().iterdir()}
     code, out, err = lab.run('take', CHATGPT, '--as', QA)
     assert (code, out, err) == (1, '', f'logins: {CHATGPT} is held by {QA} and not at rest\n')
-    assert (lab.directory() / 'waiting.json').read_bytes() == waiting
+    assert (lab.tmp / 'logins' / 'waiting.json').read_bytes() == waiting
     assert before == {p.name: p.stat().st_mtime_ns for p in lab.directory().iterdir()}
 
 
@@ -436,7 +443,7 @@ def lists_holder_waiters_and_the_last_day(lab):
     lab.clock('2026-10-26T19:12:00Z')
     lab.login().rename(lab.root / 'imported')
     lab.write('holder.json', dict(holder=QA, note='20261026-1830-temper', since='2026-10-26T18:30:00Z'))
-    lab.write('waiting.json', [dict(holder=RUNG, note='', since='2026-10-26T18:45:00Z',
+    lab.write('waiting.json', [dict(holder=RUNG, request=CHATGPT, pool=False, note='', since='2026-10-26T18:45:00Z',
                                     seen='2026-10-26T18:45:00Z')])
     (lab.directory() / 'log.tsv').write_text(
         '2026-10-25T19:11:00Z\tgive\tqa-watch\t86400\t\n'
@@ -470,7 +477,265 @@ def refuses_a_symlinked_state_path(lab):
     assert not tuple(target.iterdir())
 
 
-CASES = (adds_a_directory_login_by_moving_it, add_refuses_an_empty_directory,
+def a_pool_take_grants_a_free_login_and_names_it(lab):
+    names = (CHATGPT, 'chatgpt-2', 'chatgpt-3')
+    paths = {name: lab.login(name) for name in (*names, 'chatgpt-tools')}
+    assert lab.run('take', CHATGPT, '--as', 'a')[0] == 0
+    for name in names[1:]:
+        assert lab.run('take', CHATGPT, '--any', '--as', 'b') == (0, f'{name} {paths[name]}\n', '')
+        assert lab.read('holder.json', name)['holder'] == 'b'
+    code, out, err = lab.run('take', CHATGPT, '--any', '--as', 'c')
+    assert code == 1 and not out and 'waiting' in err
+    assert lab.read('waiting.json')[0]['request'] == CHATGPT
+    for pool, reason in (('chatgpt-2', 'not a pool'), ('nopool', 'unknown pool')):
+        code, out, err = lab.run('take', pool, '--any', '--as', 'c')
+        assert (code, out) == (2, '') and f'{reason}: {pool}' in err
+    assert not (lab.directory('chatgpt-tools') / 'holder.json').exists()
+
+
+def one_queue_in_arrival_order(lab):
+    path = lab.login()
+    lab.run('take', CHATGPT, '--as', 'a')
+    lab.clock('2026-10-27T10:00:00Z')
+    assert lab.run('take', CHATGPT, '--as', 'b')[0] == 1
+    lab.clock('2026-10-27T10:00:01Z')
+    assert lab.run('take', CHATGPT, '--any', '--as', 'c')[0] == 1
+    assert [(r['holder'], r['pool']) for r in lab.read('waiting.json')] == [('b', False), ('c', True)]
+    lab.run('give', CHATGPT, '--as', 'a')
+    assert lab.run('take', CHATGPT, '--any', '--as', 'c')[0] == 1
+    assert lab.run('take', CHATGPT, '--as', 'b') == (0, f'{path}\n', '')
+    lab.run('give', CHATGPT, '--as', 'b')
+    assert lab.run('take', CHATGPT, '--any', '--as', 'c') == (0, f'{CHATGPT} {path}\n', '')
+    assert lab.read('waiting.json') == []
+
+
+def a_waiter_for_a_stuck_login_holds_back_no_free_one(lab):
+    stuck, free = lab.login(), lab.login('chatgpt-2')
+    lab.run('take', CHATGPT, '--as', 'a')
+    stuck.rename(lab.root / 'away')
+    lab.clock('2026-10-27T10:00:00Z')
+    assert lab.run('take', CHATGPT, '--as', 'b')[0] == 1
+    lab.clock('2026-10-27T10:00:01Z')
+    assert lab.run('take', CHATGPT, '--any', '--as', 'c') == (0, f'chatgpt-2 {free}\n', '')
+    assert lab.read('holder.json')['holder'] == 'a'
+    assert lab.read('waiting.json')[0]['holder'] == 'b'
+
+
+def a_pool_waiter_keeps_one_free_login_not_all(lab):
+    for name in (CHATGPT, 'chatgpt-2', 'chatgpt-3'):
+        lab.login(name)
+        assert lab.run('take', name, '--as', 'a')[0] == 0
+    lab.clock('2026-10-27T10:00:00Z')
+    assert lab.run('take', CHATGPT, '--any', '--as', 'b')[0] == 1
+    lab.clock('2026-10-27T10:00:01Z')
+    assert lab.run('take', CHATGPT, '--any', '--as', 'c')[0] == 1
+    for name in (CHATGPT, 'chatgpt-2'):
+        assert lab.run('give', name, '--as', 'a')[0] == 0
+    assert lab.run('take', CHATGPT, '--any', '--as', 'c') == (
+        0, f'chatgpt-2 {lab.directory("chatgpt-2") / "login"}\n', '')
+    assert lab.run('take', CHATGPT, '--any', '--as', 'b') == (
+        0, f'{CHATGPT} {lab.directory() / "login"}\n', '')
+
+
+def a_stale_waiter_leaves_the_queue(lab):
+    waiter_with_age(lab, 901)
+    assert lab.run('take', CHATGPT, '--any', '--as', 'another')[0] == 0
+    assert lab.read('waiting.json') == []
+    lab.run('give', CHATGPT, '--as', 'another')
+    waiter_with_age(lab, 900)
+    assert lab.run('take', CHATGPT, '--any', '--as', 'another')[0] == 1
+    assert lab.read('waiting.json')[0]['holder'] == RUNG
+
+
+def two_takes_at_once_get_two_logins(lab):
+    names = (CHATGPT, 'chatgpt-2', 'chatgpt-3', 'chatgpt-4')
+    for name in names:
+        lab.login(name)
+    procs = []
+    try:
+        for holder in ('a', 'b', 'c', 'd'):
+            proc = subprocess.Popen([*lab.argv, 'take', CHATGPT, '--any', '--as', holder, '--wait', '5'],
+                                    env=lab.env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            procs.append((holder, proc))
+        granted = set()
+        for holder, proc in procs:
+            out, err = proc.communicate(timeout=HUNG_TOOL_S)
+            assert proc.returncode == 0 and not err, (out, err)
+            name, path = out.strip().split(' ')
+            assert path == str(lab.directory(name) / 'login')
+            assert lab.read('holder.json', name)['holder'] == holder
+            granted.add(name)
+        assert granted == set(names) and lab.read('waiting.json') == []
+    finally:
+        for _, proc in procs:
+            if proc.poll() is None:
+                proc.kill()
+            proc.communicate()
+
+
+def old_per_login_queues_are_migrated(lab):
+    lab.clock('2026-10-27T10:00:00Z')
+    lab.login()
+    lab.login('other')
+    old = lab.directory() / 'waiting.json'
+    fresh = dict(holder='b', note='old request', since='2026-10-27T09:58:00Z', seen='2026-10-27T09:59:00Z')
+    stale = dict(holder='stale', note='', since='2026-10-27T09:40:00Z', seen='2026-10-27T09:44:59Z')
+    old.write_text(json.dumps([fresh, stale]))
+    assert lab.run('take', 'other', '--as', 'a')[0] == 0
+    assert not old.exists()
+    assert lab.read('waiting.json') == [dict(fresh, request=CHATGPT, pool=False)]
+    assert lab.run('take', CHATGPT, '--any', '--as', 'c')[0] == 1
+    assert lab.run('take', CHATGPT, '--as', 'b')[0] == 0
+    # A still-running old process writes later; merge without resetting the earlier turn.
+    lab.run('give', CHATGPT, '--as', 'b')
+    lab.write('waiting.json', [dict(fresh, request=CHATGPT, pool=False, since='2026-10-27T09:57:00Z')])
+    old.write_text(json.dumps([fresh]))
+    assert lab.run('give', 'other', '--as', 'a')[0] == 0
+    assert not old.exists()
+    assert lab.read('waiting.json')[0]['since'] == '2026-10-27T09:57:00Z'
+    assert lab.run('take', CHATGPT, '--as', 'b')[0] == 0
+
+
+def an_old_process_lock_still_excludes(lab):
+    path = lab.login()
+    # Signal immediately before flock rather than guessing when the child has started.
+    marker = lab.root / 'locking'
+    lab.driver(f'''original = module.fcntl.flock
+name = {str(lab.directory() / 'lock')!r}
+def flock(fd, operation):
+    if module.os.readlink('/proc/self/fd/' + str(fd.fileno())) == name:
+        module.Path({str(marker)!r}).touch()
+    return original(fd, operation)
+module.fcntl.flock = flock
+sys.exit(module.main())
+''')
+    proc = None
+    with (lab.directory() / 'lock').open('r') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            proc = subprocess.Popen([*lab.argv, 'take', CHATGPT, '--as', 'b'], env=lab.env,
+                                    text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            deadline = time.monotonic() + HUNG_TOOL_S
+            while not marker.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert marker.exists() and proc.poll() is None
+            assert not (lab.directory() / 'holder.json').exists()
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+            if proc is not None:
+                try:
+                    out, err = proc.communicate(timeout=HUNG_TOOL_S)
+                    assert (proc.returncode, out, err) == (0, f'{path}\n', '')
+                finally:
+                    if proc.poll() is None:
+                        proc.kill()
+                    proc.communicate()
+
+
+def list_names_pool_waiters_under_each_member(lab):
+    for name in (CHATGPT, 'chatgpt-2', 'chatgpt-tools'):
+        lab.login(name)
+        assert lab.run('take', name, '--as', 'a')[0] == 0
+    lab.clock('2026-10-27T10:00:00Z')
+    assert lab.run('take', CHATGPT, '--any', '--as', 'b')[0] == 1
+    queue = (lab.tmp / 'logins' / 'waiting.json').read_bytes()
+    code, out, err = lab.run('list')
+    assert code == 0 and not err
+    for name in (CHATGPT, 'chatgpt-2'):
+        section = out.split(f'{name}: ', 1)[1].split('  last 24 hours:', 1)[0]
+        assert section.startswith('held by a')
+        assert '  waiting: b since 2026-10-27T10:00:00Z (any of chatgpt)\n' in section
+    assert out.count('(any of chatgpt)') == 2
+    assert (lab.tmp / 'logins' / 'waiting.json').read_bytes() == queue
+
+
+def pool_members_are_numbered_and_ties_go_by_holder(lab):
+    for name in ('chatgpt-10', 'chatgpt-2', 'chatgpt-2-3', 'chatgpt-tools'):
+        lab.login(name)
+    lab.clock('2026-10-27T10:00:00Z')
+    assert lab.run('take', CHATGPT, '--any', '--as', 'a')[1].startswith('chatgpt-2 ')
+    assert lab.run('take', CHATGPT, '--any', '--as', 'a')[1].startswith('chatgpt-10 ')
+    assert lab.run('take', CHATGPT, '--any', '--as', 'z')[0] == 1
+    assert lab.run('take', CHATGPT, '--any', '--as', 'b')[0] == 1
+    lab.run('give', 'chatgpt-2', '--as', 'a')
+    assert lab.run('take', CHATGPT, '--any', '--as', 'z')[0] == 1
+    assert lab.run('take', CHATGPT, '--any', '--as', 'b')[1].startswith('chatgpt-2 ')
+    assert lab.run('take', 'chatgpt-2-3', '--any', '--as', 'b')[0] == 2
+    assert lab.run('take', 'chatgpt-2-3', '--as', 'b')[0] == 0
+
+
+def unsafe_global_state_is_refused(lab):
+    lab.login()
+    root = lab.tmp / 'logins'
+    for filename in ('lock', 'waiting.json'):
+        path = root / filename
+        path.unlink(missing_ok=True)
+        target = lab.root / ('outside-' + filename)
+        target.write_text('[]\n')
+        path.symlink_to(target)
+        for command in (('list',), ('take', CHATGPT, '--as', 'a')):
+            code, out, err = lab.run(*command)
+            assert code == 4 and not out and 'symlink refused' in err
+            assert target.read_text() == '[]\n'
+        path.unlink()
+        path.write_text('[]\n')
+        path.chmod(0o644)
+        assert lab.run('take', CHATGPT, '--as', 'a')[0] == 4
+        path.chmod(0o600)
+    assert not (lab.directory() / 'holder.json').exists()
+
+
+def invalid_queues_are_refused_before_migration(lab):
+    lab.login()
+    fresh = dict(holder='b', request=CHATGPT, pool=False, note='',
+                 since='2026-10-27T10:00:00Z', seen='2026-10-27T10:00:00Z')
+    bad_rows = ({}, [dict(fresh, pool=1)], [dict(fresh, request='chatgpt-2', pool=True)],
+                [fresh, fresh], [dict(fresh, since='2026-99-27T10:00:00Z')])
+    for value in bad_rows:
+        lab.write('waiting.json', value)
+        for command in (('list',), ('take', CHATGPT, '--as', 'a')):
+            code, out, err = lab.run(*command)
+            assert code == 4 and not out and err
+    lab.write('waiting.json', [])
+    old = lab.directory() / 'waiting.json'
+    old.write_text('[{}]')
+    assert lab.run('take', CHATGPT, '--as', 'a')[0] == 4
+    assert old.read_text() == '[{}]' and lab.read('waiting.json') == []
+    assert not (lab.directory() / 'holder.json').exists()
+
+
+def an_interrupted_queue_write_does_not_break_discovery(lab):
+    lab.login()
+    assert lab.run('take', CHATGPT, '--as', 'a')[0] == 0
+    queue = lab.tmp / 'logins' / 'waiting.json'
+    before = queue.read_bytes()
+    lab.driver(f'''original = module.os.replace
+queue = {str(queue)!r}
+def replace(source, target):
+    if str(target) == queue:
+        module.os._exit(77)
+    return original(source, target)
+module.os.replace = replace
+sys.exit(module.main())
+''')
+    assert lab.run('take', CHATGPT, '--as', 'b')[0] == 77
+    assert queue.read_bytes() == before
+    assert any(p.name.startswith('.waiting.json-') for p in queue.parent.iterdir())
+    lab.argv = [str(SCRIPT)]
+    assert lab.run('list')[0] == 0
+    assert lab.run('give', CHATGPT, '--as', 'a')[0] == 0
+    assert lab.run('take', CHATGPT, '--any', '--as', 'b')[0] == 0
+    assert lab.read('holder.json')['holder'] == 'b'
+
+
+CASES = (a_pool_take_grants_a_free_login_and_names_it, one_queue_in_arrival_order,
+         a_waiter_for_a_stuck_login_holds_back_no_free_one, a_pool_waiter_keeps_one_free_login_not_all,
+         a_stale_waiter_leaves_the_queue, two_takes_at_once_get_two_logins,
+         old_per_login_queues_are_migrated, an_old_process_lock_still_excludes,
+         list_names_pool_waiters_under_each_member, pool_members_are_numbered_and_ties_go_by_holder,
+         unsafe_global_state_is_refused, invalid_queues_are_refused_before_migration,
+         an_interrupted_queue_write_does_not_break_discovery,
+         adds_a_directory_login_by_moving_it, add_refuses_an_empty_directory,
          add_refuses_a_directory_that_is_not_private, add_refuses_a_link_to_a_directory,
          takes_and_gives_a_directory_login, a_directory_login_not_back_stays_held,
          give_reads_nothing_inside_a_directory, give_refuses_a_directory_replaced_by_a_link,
