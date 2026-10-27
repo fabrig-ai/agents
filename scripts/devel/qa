@@ -108,7 +108,7 @@ class Workspace:
         return socket.gethostname()
 
     def tool(self, name):
-        default = Path('systemctl') if name in ('systemctl', 'systemd-run') else self.kit / name
+        default = Path(name) if name in ('systemctl', 'systemd-run') else self.kit / name
         return Path(os.environ.get('QA_' + name.upper().replace('-', '_'), default)) if self.fixture else default
 
     def origin(self, repo):

@@ -1432,6 +1432,84 @@ def end_deployment_pass(lab):
     lab.watch()
 
 
+def deploy_runs_the_real_systemd_run(lab):
+    directory, state = deployment_pass(lab)
+    lab.end_run(state)
+    lab.watch()
+    assert lab.watch_state()[1]['finished'] and 'kinds' in state
+    binary = lab.root / 'system-bin'
+    binary.mkdir()
+    log = lab.root / 'system-programs.jsonl'
+    for name in ('systemd-run', 'systemctl'):
+        executable(binary / name, 'import json, sys\nfrom pathlib import Path\n'
+            + f'with Path({str(log)!r}).open("a") as log:\n'
+              '    log.write(json.dumps([Path(sys.argv[0]).name, sys.argv[1:]]) + "\\n")\n')
+    lab.env.pop('QA_SYSTEMD_RUN')
+    lab.env.pop('QA_SYSTEMCTL')
+    lab.env['PATH'] = str(binary) + os.pathsep + lab.env['PATH']
+    program = str(Path(shutil.which('true', path=lab.env['PATH'])).absolute())
+    unit = f'qa-{directory.name}-box'
+    assert lab.run('deploy', str(directory), 'box', '--', 'true').stdout == unit + '\n'
+    assert list(map(json.loads, log.read_text().splitlines())) == [['systemd-run', [
+        '--user', '--collect', '--quiet', '--unit', unit,
+        '--service-type=exec', '--expand-environment=no', f'--working-directory={directory}', '--setenv=PATH',
+        '--property=KillMode=control-group',
+        f'--property=StandardOutput=append:{directory}/box.log',
+        f'--property=StandardError=append:{directory}/box.log',
+        f'--property=ExecStop=-"{SCRIPT}" "_give-back" "{directory}" "50"',
+        '--property=TimeoutStopSec=110', '--', program]]]
+    log.write_text('')
+    lab.watch()
+    assert list(map(json.loads, log.read_text().splitlines())) == [['systemctl', [
+        '--user', 'list-units', '--all', '--plain', '--no-legend', '--full', f'qa-{directory.name}-*']]]
+
+
+def deploy_stops_a_real_unit_by_its_give_back_first(lab):
+    lab.env.pop('QA_SYSTEMD_RUN')
+    lab.env.pop('QA_SYSTEMCTL')
+    # The manager belongs to the caller; all qa state still belongs to the Lab.
+    lab.env.update({key: os.environ[key] for key in ('XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS')
+                    if key in os.environ})
+    manager = subprocess.run(['systemctl', '--user', 'is-system-running'], env=lab.env,
+                             capture_output=True, text=True, timeout=30)
+    if manager.returncode != 0 and manager.stdout.strip() not in ('running', 'degraded'):
+        print('skipped: no user manager')
+        return
+    directory = lab.root / ('qa-fixture-' + os.urandom(8).hex())
+    directory.mkdir()
+    assert not any(c in str(directory) for c in '$%"\\ \t\n')
+    executable(directory / 'give-back', 'import os\nfrom pathlib import Path\n'
+        + f'pid = int(Path({str(directory / "pid")!r}).read_text())\n'
+          'try:\n'
+          '    os.kill(pid, 0)\n'
+          '    state = "alive"\n'
+          'except ProcessLookupError:\n'
+          '    state = "gone"\n'
+        + f'Path({str(directory / "give-back-state")!r}).write_text(state)\n')
+    unit = f'qa-{directory.name}-sleeper'
+    try:
+        assert lab.run('deploy', str(directory), 'sleeper', '--', '/bin/sh', '-c',
+                       'echo $$ > pid; exec sleep 600').stdout == unit + '\n'
+        pid_file = directory / 'pid'
+        wait_for(lambda: pid_file.exists() and pid_file.read_text().strip())
+        pid = int(pid_file.read_text())
+        assert alive(pid)
+        stopped = subprocess.run(['systemctl', '--user', 'stop', unit], env=lab.env,
+                                 capture_output=True, text=True, timeout=120)
+        assert stopped.returncode == 0, stopped.stderr
+        assert (directory / 'give-back-state').read_text() == 'alive'
+        dead(pid)
+        lines = (directory / 'give-back.log').read_text().splitlines()
+        assert lines and lines[-1].endswith(' exit 0'), lines
+    finally:
+        try:
+            subprocess.run(['systemctl', '--user', 'stop', unit], env=lab.env,
+                           capture_output=True, timeout=120)
+        finally:
+            subprocess.run(['systemctl', '--user', 'reset-failed', unit], env=lab.env,
+                           capture_output=True, timeout=30)
+
+
 def deploy_records_then_starts_its_unit(lab):
     directory = lab.root / P
     directory.mkdir()
@@ -2051,6 +2129,8 @@ CASES = (a_pass_never_stops_its_successors_unit,
          deploy_passes_a_literal_dollar,
          a_linked_log_or_registry_writes_nowhere_else,
          a_linked_report_is_no_report,
+         deploy_runs_the_real_systemd_run,
+         deploy_stops_a_real_unit_by_its_give_back_first,
          deploy_records_then_starts_its_unit,
          a_stopped_pass_gives_its_login_back,
          a_failed_export_leaves_the_unit_up,
