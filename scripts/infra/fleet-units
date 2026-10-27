@@ -1,0 +1,107 @@
+# shellcheck shell=bash
+# shellcheck disable=SC2154 # setup supplies fix and bus
+# Sourced by setup: its caller supplies ok, warn and fail, and HOME.
+
+check_fleet_units() {
+    local address_file=$HOME/.config/agents-fleet/director
+    local unit_dir=$HOME/.config/systemd/user
+    local director expected sibling unit kind timer i changed=0 watch=0
+    local -a addresses=() units=(fleet-tend.service fleet-tend.timer) texts=()
+    local -A ready=([tend]=1 [watch]=1)
+    if ((!bus)); then
+        fail 'fleet: no user bus; cannot check or start the timers'
+        return
+    fi
+    texts+=("$(cat <<'UNIT'
+[Unit]
+Description=fleet tend's service (agents' fleet-watch.md 6)
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -lc 'exec fleet tend'
+UNIT
+)" "$(cat <<'UNIT'
+[Unit]
+Description=fleet tend's timer (agents' fleet-watch.md 6)
+
+[Timer]
+OnCalendar=*:0/5
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target
+UNIT
+)")
+    if [[ -e $address_file || -L $address_file ]]; then
+        if [[ ! -f $address_file || ! -r $address_file ]] ||
+            ! mapfile -t addresses < "$address_file" || ((${#addresses[@]} != 1)) ||
+            [[ ! ${addresses[0]} =~ ^[a-z][a-z0-9-]*(/[a-z0-9][a-z0-9-]*)*@[a-z][a-z0-9-]*$ ]]; then
+            fail "fleet watch: $address_file must hold one director address (NAME@MACHINE)"
+        else
+            watch=1 director=${addresses[0]}
+            units+=(fleet-watch.service fleet-watch.timer)
+            # Systemd consumes doubled dollars before bash reads its script.
+            texts+=("$(cat <<UNIT
+[Unit]
+Description=fleet watch's service (agents' fleet-watch.md 6)
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -lc 'exec fleet watch --director "\$\$1"' fleet-watch $director
+UNIT
+)" "$(cat <<'UNIT'
+[Unit]
+Description=fleet watch's timer (agents' fleet-watch.md 6)
+
+[Timer]
+OnCalendar=*:2/5
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target
+UNIT
+)")
+        fi
+    fi
+    for i in "${!units[@]}"; do
+        unit=${units[i]} expected=${texts[i]}
+        kind=${unit#fleet-} kind=${kind%.*}
+        if cmp -s "$unit_dir/$unit" <(printf '%s\n' "$expected"); then
+            ok "fleet $kind: $unit is current"
+        elif ((!fix)); then
+            fail "fleet $kind: $unit is missing or differs (--fix writes it)"
+        elif ! mkdir -p "$unit_dir" || ! sibling=$(mktemp "$unit_dir/$unit.XXXXXX"); then
+            fail "fleet $kind: cannot prepare $unit_dir/$unit"
+            ready[$kind]=0
+        elif ! printf '%s\n' "$expected" > "$sibling" || ! mv -fT "$sibling" "$unit_dir/$unit"; then
+            rm -f "$sibling"
+            fail "fleet $kind: cannot write $unit_dir/$unit"
+            ready[$kind]=0
+        else
+            changed=1
+        fi
+    done
+    if ((changed)) && ! systemctl --user daemon-reload; then
+        fail 'fleet: user daemon-reload failed'
+        return
+    fi
+    for kind in tend watch; do
+        [[ $kind != watch ]] || ((watch)) || continue
+        timer=fleet-$kind.timer
+        ((${ready[$kind]})) || continue
+        if ((fix)) && ! systemctl --user enable --now "$timer"; then
+            fail "fleet $kind: cannot start $timer (--fix starts it)"
+        elif systemctl --user is-enabled --quiet "$timer" &&
+            systemctl --user is-active --quiet "$timer"; then
+            ok "fleet $kind: $timer enabled and active"
+        else
+            fail "fleet $kind: $timer must be enabled and active (--fix starts it)"
+        fi
+    done
+    if [[ ! -e $address_file && ! -L $address_file ]]; then
+        ok "fleet watch: not this machine's watch"
+        if systemctl --user is-active --quiet fleet-watch.timer 2>/dev/null; then
+            warn 'fleet watch: fleet-watch.timer active on a machine without the address file'
+        fi
+    fi
+}

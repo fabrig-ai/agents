@@ -99,6 +99,7 @@ suite test-heavy-plain scripts/devel/test-heavy-plain
 suite test-repin scripts/devel/test-repin --evidence "$scratch/repin"
 suite test-kache-setup env DEV_TMP="$scratch" scripts/infra/test-kache-setup
 suite test-after-landing-units scripts/infra/test-after-landing-units
+suite test-fleet-units scripts/infra/test-fleet-units
 suite test-gate-policy scripts/devel/test-gate-policy
 suite test-status-page scripts/devel/test-status-page
 suite test-fleet scripts/devel/test-fleet

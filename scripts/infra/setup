@@ -19,6 +19,7 @@ claude_dir=${SETUP_CLAUDE_DIR:-$root}
 # shellcheck source=../devel/kit.sh
 source "$kit/../devel/kit.sh"
 source "$kit/after-landing-units"
+source "$kit/fleet-units"
 
 check() {
     local fix=0 failed=0
@@ -253,6 +254,7 @@ check_machine() {
 
     check_after_landing
     check_qa_watch
+    check_fleet_units
     # Installation is explicit: setup never probes/installs a new recovery
     # mechanism while repairing an existing queue.
     local heavy=$home/../devel/heavy installed_status=0
@@ -276,7 +278,7 @@ check_machine() {
     # The queue is heavy's ledger (build-infrastructure.md, 2 and 4).
     read -r slots slots_source < <(machine_setting HEAVY_BUILD_SLOTS 0)
     while IFS= read -r line; do warn "machine.env: ignored line $line"; done < <(
-        awk 'NF && $0 !~ /^(PLAN_MIN_MEM_GB|PLAN_MIN_DISK_GB|HEAVY_BUILD_SLOTS|HEAVY_BUILD_JOBS|KACHE_MAX_GB|KACHE_LOCAL_ONLY|QA_SLOTS|QA_BATCH|QA_CAP_MINUTES|QA_INTERVAL_SECONDS)=[0-9]+$/ { print NR ": " $0 }' "$tmp/machine.env" 2>/dev/null || true)
+        awk 'NF && $0 !~ /^(PLAN_MIN_MEM_GB|PLAN_MIN_DISK_GB|HEAVY_BUILD_SLOTS|HEAVY_BUILD_JOBS|KACHE_MAX_GB|KACHE_LOCAL_ONLY|QA_SLOTS|QA_BATCH|QA_CAP_MINUTES|QA_INTERVAL_SECONDS|FLEET_QUIET)=[0-9]+$/ { print NR ": " $0 }' "$tmp/machine.env" 2>/dev/null || true)
     if ((installed_status == 0)); then
         if [[ $slots == 0 ]]; then
             ok "builds: every task at once ($slots_source)"

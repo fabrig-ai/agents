@@ -1,0 +1,314 @@
+#!/usr/bin/env python3
+"""Exercise setup's fleet units with scratch homes and a fake service manager."""
+import json
+import os
+from pathlib import Path
+import shlex
+import subprocess
+import tempfile
+import unittest
+
+os.umask(0o077)
+KIT = Path(__file__).resolve().parent
+TEND_SERVICE = """[Unit]
+Description=fleet tend's service (agents' fleet-watch.md 6)
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -lc 'exec fleet tend'
+"""
+TEND_TIMER = """[Unit]
+Description=fleet tend's timer (agents' fleet-watch.md 6)
+
+[Timer]
+OnCalendar=*:0/5
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target
+"""
+WATCH_SERVICE = """[Unit]
+Description=fleet watch's service (agents' fleet-watch.md 6)
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -lc 'exec fleet watch --director "$$1"' fleet-watch director@hel8
+"""
+WATCH_TIMER = """[Unit]
+Description=fleet watch's timer (agents' fleet-watch.md 6)
+
+[Timer]
+OnCalendar=*:2/5
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target
+"""
+SYSTEMCTL = '''#!/usr/bin/env python3
+import json
+import os
+from pathlib import Path
+import sys
+
+args = sys.argv[1:]
+with open(os.environ['FIXTURE_TRACE'], 'a') as trace:
+    trace.write(json.dumps(args) + '\\n')
+assert args[0] == '--user', args
+op, *tail = args[1:]
+fault = os.environ.get('FIXTURE_FAIL')
+if fault == op or (tail and fault == op + ':' + tail[-1]):
+    sys.exit(1)
+path = Path(os.environ['FIXTURE_STATE'])
+state = json.loads(path.read_text())
+if op == 'show':
+    assert tail == ['--property=Version'], tail
+    print('Version=fixture')
+elif op == 'daemon-reload':
+    assert not tail, tail
+elif op in ('is-enabled', 'is-active'):
+    assert len(tail) == 2 and tail[0] == '--quiet', tail
+    key = 'enabled' if op == 'is-enabled' else 'active'
+    sys.exit(0 if state.get(tail[1], {}).get(key, False) else 1)
+elif op == 'enable':
+    assert len(tail) == 2 and tail[0] == '--now', tail
+    assert tail[1] in ('fleet-tend.timer', 'fleet-watch.timer'), tail
+    state[tail[1]] = dict(enabled=True, active=True)
+    path.write_text(json.dumps(state))
+else:
+    raise AssertionError(args)
+'''
+DRIVER = '''#!/bin/bash
+set -euo pipefail
+fix=$1 failed=0 bus=0
+ok() { echo "ok    $*"; }
+warn() { echo "warn  $*"; }
+fail() { echo "FAIL  $*"; failed=1; }
+source "$2"
+systemctl --user show --property=Version >/dev/null 2>&1 && bus=1
+check_fleet_units
+exit "$failed"
+'''
+
+
+class FleetUnits(unittest.TestCase):
+    def setUp(self):
+        scratch = tempfile.TemporaryDirectory(prefix='fleet-units-')
+        self.addCleanup(scratch.cleanup)
+        self.root = Path(scratch.name)
+        self.home, self.bin = self.root / 'home', self.root / 'bin'
+        self.bin.mkdir()
+        self.config = self.home / '.config/agents-fleet'
+        self.config.mkdir(parents=True)
+        self.address = self.config / 'director'
+        self.units = self.home / '.config/systemd/user'
+        self.state = self.root / 'state.json'
+        self.state.write_text('{}')
+        self.trace = self.root / 'calls'
+        self.driver = self.root / 'check'
+        self.driver.write_text(DRIVER)
+        systemctl = self.bin / 'systemctl'
+        systemctl.write_text(SYSTEMCTL)
+        systemctl.chmod(0o700)
+        self.env = dict(os.environ, HOME=str(self.home),
+                        PATH=f'{self.bin}:/usr/bin:/bin',
+                        FIXTURE_STATE=str(self.state), FIXTURE_TRACE=str(self.trace))
+        self.env.pop('FIXTURE_FAIL', None)
+        for key in ('BASH_ENV', 'ENV', 'SHELLOPTS', 'BASHOPTS', 'CDPATH'):
+            self.env.pop(key, None)
+
+    def check(self, fix=False, success=True, fault=None):
+        env = self.env | ({'FIXTURE_FAIL': fault} if fault else {})
+        result = subprocess.run(['/bin/bash', self.driver, str(int(fix)), KIT / 'fleet-units'],
+                                env=env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0 if success else 1, (result.stdout, result.stderr))
+        self.assertEqual(result.stderr, '')
+        return result.stdout.splitlines()
+
+    def calls(self, op=None):
+        calls = [json.loads(line) for line in self.trace.read_text().splitlines()]
+        return [call for call in calls if op is None or call[1] == op]
+
+    def mutations(self):
+        return [call for call in self.calls() if call[1] in ('enable', 'daemon-reload')]
+
+    def reset_trace(self):
+        self.trace.write_text('')
+
+    def assert_units(self, watch=False):
+        expected = {'fleet-tend.service': TEND_SERVICE, 'fleet-tend.timer': TEND_TIMER}
+        if watch:
+            expected |= {'fleet-watch.service': WATCH_SERVICE, 'fleet-watch.timer': WATCH_TIMER}
+        self.assertEqual({path.name: path.read_text() for path in self.units.iterdir()}, expected)
+
+    def test_tend_everywhere(self):
+        self.assertEqual(self.check(fix=True), [
+            'ok    fleet tend: fleet-tend.timer enabled and active',
+            "ok    fleet watch: not this machine's watch"])
+        self.assert_units()
+        self.assertEqual(self.calls('daemon-reload'), [['--user', 'daemon-reload']])
+        self.assertEqual(self.calls('enable'), [['--user', 'enable', '--now', 'fleet-tend.timer']])
+        self.reset_trace()
+        self.assertEqual(self.check(), [
+            'ok    fleet tend: fleet-tend.service is current',
+            'ok    fleet tend: fleet-tend.timer is current',
+            'ok    fleet tend: fleet-tend.timer enabled and active',
+            "ok    fleet watch: not this machine's watch"])
+        self.assertEqual(self.mutations(), [])
+        before = {path.name: path.stat().st_ino for path in self.units.iterdir()}
+        self.reset_trace()
+        self.check(fix=True)
+        self.assertEqual(self.calls('daemon-reload'), [])
+        self.assertEqual({path.name: path.stat().st_ino for path in self.units.iterdir()}, before)
+
+    def test_watch_with_address(self):
+        self.address.write_text('director@hel8\n')
+        self.assertEqual(self.check(fix=True), [
+            'ok    fleet tend: fleet-tend.timer enabled and active',
+            'ok    fleet watch: fleet-watch.timer enabled and active'])
+        self.assert_units(watch=True)
+        self.assertEqual(self.calls('daemon-reload'), [['--user', 'daemon-reload']])
+        self.assertEqual(self.calls('enable'), [
+            ['--user', 'enable', '--now', 'fleet-tend.timer'],
+            ['--user', 'enable', '--now', 'fleet-watch.timer']])
+
+    def test_unit_commands(self):
+        self.address.write_text('director@hel8\n')
+        self.check(fix=True)
+        fleet = self.bin / 'fleet'
+        fleet.write_text('#!/usr/bin/env python3\nimport json, sys\nprint(json.dumps(sys.argv[1:]))\n')
+        fleet.chmod(0o700)
+        # Login shells get the fixture's PATH from their scratch profile.
+        (self.home / '.bash_profile').write_text('export PATH=' + shlex.quote(self.env['PATH']) + '\n')
+        for kind, expected in [('tend', ['tend']),
+                               ('watch', ['watch', '--director', 'director@hel8'])]:
+            with self.subTest(kind=kind):
+                command = next(line.removeprefix('ExecStart=')
+                               for line in (self.units / f'fleet-{kind}.service').read_text().splitlines()
+                               if line.startswith('ExecStart='))
+                argv = shlex.split(command.replace('$$', '$').replace('%%', '%'))
+                self.assertEqual(argv[:2], ['/bin/bash', '-lc'])
+                result = subprocess.run(argv, env=self.env, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, (result.stdout, result.stderr))
+                self.assertEqual(result.stderr, '')
+                self.assertEqual(json.loads(result.stdout), expected)
+
+    def test_check_without_fix(self):
+        self.address.write_text('director@hel8\n')
+        lines = self.check(success=False)
+        for kind in ('tend', 'watch'):
+            for suffix in ('service', 'timer'):
+                self.assertIn(f'FAIL  fleet {kind}: fleet-{kind}.{suffix} is missing or differs (--fix writes it)', lines)
+        self.assertFalse(self.units.exists())
+        self.assertEqual(self.mutations(), [])
+
+    def test_unit_differs(self):
+        self.check(fix=True)
+        timer = self.units / 'fleet-tend.timer'
+        old = TEND_TIMER.replace('*:0/5', '*:0/10')
+        timer.write_text(old)
+        self.reset_trace()
+        self.assertIn('FAIL  fleet tend: fleet-tend.timer is missing or differs (--fix writes it)',
+                      self.check(success=False))
+        self.assertEqual(timer.read_text(), old)
+        self.assertEqual(self.mutations(), [])
+        service_inode = (self.units / 'fleet-tend.service').stat().st_ino
+        self.reset_trace()
+        self.check(fix=True)
+        self.assert_units()
+        self.assertEqual((self.units / 'fleet-tend.service').stat().st_ino, service_inode)
+        self.assertEqual(self.calls('daemon-reload'), [['--user', 'daemon-reload']])
+
+    def test_bad_address(self):
+        for text in ('director@hel8\nother@host\n', 'director\n', 'Director@hel8\n', '',
+                     'director@hel8\n\n', 'director@hel8%\n', 'director@$HOST\n'):
+            with self.subTest(text=text):
+                self.address.write_text(text)
+                for fix in (False, True):
+                    self.assertIn(f'FAIL  fleet watch: {self.address} must hold one director address (NAME@MACHINE)',
+                                  self.check(fix=fix, success=False))
+                    self.assertFalse((self.units / 'fleet-watch.service').exists())
+                    self.assertFalse((self.units / 'fleet-watch.timer').exists())
+                self.assert_units()
+
+    def test_non_file_address(self):
+        for kind in ('directory', 'broken-link', 'fifo'):
+            with self.subTest(kind=kind):
+                if kind == 'directory':
+                    self.address.mkdir()
+                elif kind == 'broken-link':
+                    self.address.symlink_to(self.root / 'missing')
+                else:
+                    os.mkfifo(self.address)
+                self.assertIn(f'FAIL  fleet watch: {self.address} must hold one director address (NAME@MACHINE)',
+                              self.check(fix=True, success=False))
+                self.assert_units()
+                if kind == 'directory':
+                    self.address.rmdir()
+                else:
+                    self.address.unlink()
+
+    def test_watch_active_elsewhere(self):
+        self.state.write_text(json.dumps({'fleet-watch.timer': dict(enabled=True, active=True)}))
+        self.assertIn('warn  fleet watch: fleet-watch.timer active on a machine without the address file',
+                      self.check(fix=True))
+        self.assert_units()
+
+    def test_no_bus(self):
+        self.address.write_text('director@hel8\n')
+        for fix in (False, True):
+            with self.subTest(fix=fix):
+                self.reset_trace()
+                self.assertEqual(self.check(fix=fix, success=False, fault='show'),
+                                 ['FAIL  fleet: no user bus; cannot check or start the timers'])
+                self.assertFalse(self.units.exists())
+                self.assertEqual(self.mutations(), [])
+
+    def test_service_manager_failures(self):
+        self.address.write_text('director@hel8\n')
+        self.assertEqual(self.check(fix=True, success=False, fault='daemon-reload'),
+                         ['FAIL  fleet: user daemon-reload failed'])
+        self.assertEqual(self.calls('enable'), [])
+        # enable implicitly reloads systemd too; an unchanged retry can recover.
+        self.reset_trace()
+        lines = self.check(fix=True, success=False, fault='enable:fleet-tend.timer')
+        self.assertIn('FAIL  fleet tend: cannot start fleet-tend.timer (--fix starts it)', lines)
+        self.assertIn('ok    fleet watch: fleet-watch.timer enabled and active', lines)
+        self.assertEqual(len(self.calls('enable')), 2)
+        self.assertEqual(self.calls('daemon-reload'), [])
+        self.reset_trace()
+        self.check(fix=True)
+        self.assertEqual(len(self.calls('enable')), 2)
+
+    def test_unit_write_failures(self):
+        self.address.write_text('director@hel8\n')
+        for command, action in (('mktemp', 'prepare'), ('mv', 'write')):
+            with self.subTest(command=command):
+                stand_in = self.bin / command
+                stand_in.write_text('#!/bin/bash\n'
+                                    'for arg; do\n'
+                                    '    [[ $arg != *fleet-tend.service* ]] || exit 1\n'
+                                    'done\n'
+                                    f'exec /usr/bin/{command} "$@"\n')
+                stand_in.chmod(0o700)
+                self.reset_trace()
+                self.assertIn(f'FAIL  fleet tend: cannot {action} {self.units / "fleet-tend.service"}',
+                              self.check(fix=True, success=False))
+                self.assertEqual(self.calls('enable'),
+                                 [['--user', 'enable', '--now', 'fleet-watch.timer']])
+                self.assertEqual({path.name for path in self.units.iterdir()},
+                                 {'fleet-tend.timer', 'fleet-watch.service', 'fleet-watch.timer'})
+                stand_in.unlink()
+
+    def test_timer_not_enabled_or_active(self):
+        self.check(fix=True)
+        for flags in (dict(enabled=False, active=True), dict(enabled=True, active=False)):
+            with self.subTest(flags=flags):
+                self.state.write_text(json.dumps({'fleet-tend.timer': flags}))
+                self.reset_trace()
+                self.assertIn('FAIL  fleet tend: fleet-tend.timer must be enabled and active (--fix starts it)',
+                              self.check(success=False))
+                self.assertEqual(self.mutations(), [])
+
+
+if __name__ == '__main__':
+    unittest.main(verbosity=2)
