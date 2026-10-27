@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Isolated, offline tidy fixtures; select cases by name."""
+from contextlib import ExitStack
 import fcntl
 import os
 from pathlib import Path
@@ -119,6 +120,27 @@ class Lab:
         self.git(self.primary[repo], 'worktree', 'add', str(path), name)
         return path
 
+    def target(self, name, age, owner='mission', path=None, triple=False, repo='agents'):
+        work = path or self.tmp / 'owners' / owner / name
+        self.git(self.primary[repo], 'worktree', 'add', '-b', name, str(work), self.base)
+        target = work / 'target'
+        self.put(target / 'CACHEDIR.TAG')
+        profile = target / 'x86_64-unknown-linux-gnu' / 'debug' if triple else target / 'debug'
+        for child in ('deps', '.fingerprint', 'build'):
+            (profile / child).mkdir(parents=True)
+        self.put(profile / '.cargo-lock', '')
+        self.age_target(target, age)
+        return target
+
+    def age_target(self, target, age):
+        stamp = time.time() - age
+        # Only fixture setup walks; the tool samples Cargo's directory timestamps.
+        for base, dirs, files in os.walk(target, topdown=False):
+            os.utime(base, (stamp, stamp))
+
+    def target_exists(self, target):
+        return target.is_dir()
+
     def readme(self, mission, state):
         self.put(self.records / 'missions' / mission / 'README.md',
                  f'---\nstate: {state}\nended: 2026-10-01\n---\n\nMission.\n')
@@ -131,6 +153,18 @@ class Lab:
                                 env=dict(self.env, **(extra or {})), text=True,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
         assert result.returncode == status, (args, result.returncode, result.stdout, result.stderr)
+        return result.stdout + result.stderr
+
+    def target_fault(self, code, *args, status=3):
+        # Faults live in a child interpreter, never in the tool or the machine.
+        driver = ('import errno, runpy, sys\n'
+                  f'tool = runpy.run_path({str(SCRIPT)!r})\n'
+                  f'sys.argv = {[str(SCRIPT), *args, "--targets"]!r}\n' + code +
+                  '\nraise SystemExit(tool["main"]())\n')
+        result = subprocess.run([sys.executable, '-I', '-S', '-c', driver], cwd=self.root,
+                                env=self.env, text=True, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, timeout=10)
+        assert result.returncode == status, (result.returncode, result.stdout, result.stderr)
         return result.stdout + result.stderr
 
     def exists(self, name, repo='agents', remote=False):
@@ -877,7 +911,237 @@ def lock(lab):
                 process.wait()
 
 
+def targets_idle(lab):
+    old = lab.target('old', 3 * 3600, owner='old-owner')
+    young = lab.target('young', 1800, owner='young-owner')
+    text = lab.run('--targets')
+    assert text == f'tidy: deleted target {old} (idle 3 h)\n', text
+    assert not lab.target_exists(old) and lab.target_exists(young)
+
+
+def targets_beyond_two(lab):
+    one, two, three = [lab.target(f'work-{n}', n * 600, owner='forge-domain-2') for n in (1, 2, 3)]
+    milestone = lab.target('milestone', 300, owner='forge-domain-2-m2')
+    director = [lab.target(f'director-{n}', n * 600,
+                           path=lab.tmp / 'director' / 'tasks' / f'work-{n}') for n in (1, 2, 3)]
+    text = lab.run('--targets')
+    for target in (two, three):
+        assert f'deleted target {target} (beyond two of forge-domain-2)' in text, text
+    assert f'deleted target {director[2]} (beyond two of director)' in text, text
+    assert all(lab.target_exists(t) for t in (one, milestone, *director[:2]))
+    assert all(not lab.target_exists(t) for t in (two, three, director[2]))
+
+
+def targets_held(lab):
+    target = lab.target('held', 3 * 3600)
+    process = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], cwd=target.parent,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        text = lab.run('--targets')
+        assert text == f'tidy: kept target {target}: held by process {process.pid} (idle 3 h)\n', text
+        assert lab.target_exists(target)
+    finally:
+        process.terminate()
+        process.wait(timeout=5)
+    assert f'deleted target {target}' in lab.run('--targets')
+    assert not lab.target_exists(target)
+
+
+def targets_cargo_lock(lab):
+    old = lab.target('old', 3 * 3600, owner='old-owner')
+    active = [lab.target(f'active-{n}', n * 600) for n in (1, 2, 3)]
+    with ExitStack() as locks:
+        for target in (old, *active):
+            source = locks.enter_context((target / 'debug' / '.cargo-lock').open('rb'))
+            fcntl.flock(source, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        text = lab.run('--targets')
+        assert f'kept target {old}: cargo lock held (idle 3 h)' in text, text
+        assert f'kept target {active[2]}: cargo lock held (beyond two of mission)' in text, text
+        assert text.count('kept target') == 2 and 'deleted target' not in text, text
+        assert all(lab.target_exists(t) for t in (old, *active))
+
+
+def targets_in_use_first(lab):
+    active = lab.target('active', 3 * 3600)
+    young = lab.target('young', 600)
+    older = lab.target('older', 1200)
+    with (active / 'debug' / '.cargo-lock').open('rb') as source:
+        fcntl.flock(source, fcntl.LOCK_EX)
+        text = lab.run('--targets')
+    assert f'kept target {active}: cargo lock held (idle 3 h)' in text, text
+    assert f'deleted target {older} (beyond two of mission)' in text, text
+    assert lab.target_exists(active) and lab.target_exists(young) and not lab.target_exists(older)
+
+
+def targets_triple(lab):
+    target = lab.target('triple', 3 * 3600, triple=True)
+    profile = target / 'x86_64-unknown-linux-gnu' / 'debug'
+    with (profile / '.cargo-lock').open('rb') as source:
+        fcntl.flock(source, fcntl.LOCK_EX)
+        assert 'cargo lock held (idle 3 h)' in lab.run('--targets')
+    # A new build changes only a profile's build metadata, not target itself.
+    os.utime(profile / 'deps', None)
+    assert lab.run('--targets') == '' and lab.target_exists(target)
+    lab.age_target(target, 3 * 3600)
+    assert f'deleted target {target} (idle 3 h)' in lab.run('--targets')
+    assert not lab.target_exists(target)
+
+
+def targets_left_alone(lab):
+    targets = [lab.target('outside-' + area, 3 * 3600, path=lab.tmp / area / 'work')
+               for area in ('after-landing', 'qa')]
+    missing = lab.target('missing-tag', 3 * 3600)
+    (missing / 'CACHEDIR.TAG').unlink()
+    targets.append(missing)
+    linked = lab.target('linked', 3 * 3600)
+    saved = lab.root / 'saved-target'
+    linked.rename(saved)
+    linked.symlink_to(saved, target_is_directory=True)
+    targets.append(linked)
+    locked = lab.target('locked', 3 * 3600)
+    lab.git(lab.a, 'worktree', 'lock', str(locked.parent))
+    targets.append(locked)
+    primary = lab.a / 'target'
+    lab.put(primary / 'CACHEDIR.TAG')
+    lab.age_target(primary, 3 * 3600)
+    targets.append(primary)
+    assert lab.run('--targets') == ''
+    assert all(lab.target_exists(t) for t in targets)
+
+
+def targets_trash(lab):
+    trash = lab.tmp / 'logs' / 'tidy-trash'
+    lab.put(trash / 'interrupted' / 'data')
+    target = lab.target('old', 3 * 3600)
+    assert f'deleted target {target}' in lab.run('--targets')
+    assert not lab.target_exists(target) and list(trash.iterdir()) == []
+
+
+def targets_dry_run(lab):
+    target = lab.target('old', 3 * 3600)
+    (target / 'debug' / '.cargo-lock').unlink()
+    text = lab.run('--dry-run', '--targets')
+    assert text == f'tidy: would delete target {target} (idle 3 h)\n', text
+    assert lab.target_exists(target)
+    assert not (target / 'debug' / '.cargo-lock').exists()
+    assert not (lab.tmp / 'logs' / 'tidy-trash').exists()
+    assert not (lab.tmp / 'logs' / 'tidy.lock').exists()
+    leftover = lab.put(lab.tmp / 'logs' / 'tidy-trash' / 'leftover')
+    lab.run('--dry-run', '--targets')
+    assert leftover.exists()
+
+
+def targets_scope(lab):
+    lab.landed()
+    lab.readme('mission', 'active')
+    target = lab.target('old', 3 * 3600)
+    origin = lab.origins['agents']
+    hidden = origin.with_name('unreachable')
+    origin.rename(hidden)
+    try:
+        text = lab.run('--targets')
+    finally:
+        hidden.rename(origin)
+    assert 'fetch' not in text and 'branch' not in text, text
+    assert lab.exists('done') and lab.exists('done', remote=True)
+    assert not (lab.records / 'pulls').exists() and not lab.target_exists(target)
+    lab.target('old-again', 3 * 3600)
+    target = lab.tmp / 'owners' / 'mission' / 'old-again' / 'target'
+    lab.run('agents')
+    assert lab.target_exists(target)
+    lab.run('--mission', 'mission')
+    assert lab.target_exists(target)
+    script = lab.put(lab.tmp / 'director' / 'probe.py')
+    text = lab.run()
+    assert not lab.target_exists(target) and not script.exists(), text
+    assert text.index('deleted script') < text.index('deleted target'), text
+    assert not lab.exists('done')
+
+
+def targets_root_lock(lab):
+    target = lab.target('root-lock', 3 * 3600)
+    lock = lab.put(target / '.cargo-lock', '')
+    lab.age_target(target, 3 * 3600)
+    with lock.open('rb') as source:
+        fcntl.flock(source, fcntl.LOCK_EX)
+        assert f'kept target {target}: cargo lock held (idle 3 h)' in lab.run('--targets')
+    assert lab.target_exists(target)
+
+
+def targets_preview_no_locks(lab):
+    target = lab.target('preview', 3 * 3600)
+    text = lab.target_fault('def refuse(*args):\n    raise AssertionError("preview took a lock")\n'
+                            'tool["fcntl"].flock = refuse', '--dry-run', status=0)
+    assert f'would delete target {target}' in text and lab.target_exists(target), text
+
+
+def targets_list_failure(lab):
+    skipped = lab.target('skipped', 3 * 3600)
+    other = lab.target('other', 3 * 3600, repo='smith')
+    wrapper = lab.bin / 'git'
+    lab.put(wrapper, '#!/bin/sh\ncase "$*" in *"-C $DEV_ROOT/agents worktree list"*) exit 7;; esac\n'
+                    'exec ' + shlex.quote(GIT) + ' "$@"\n')
+    wrapper.chmod(0o700)
+    text = lab.run('--targets', status=3)
+    assert 'worktree list failed; repository skipped' in text, text
+    assert lab.target_exists(skipped) and not lab.target_exists(other)
+
+
+def targets_rename_failure(lab):
+    target = lab.target('rename-fails', 3 * 3600)
+    text = lab.target_fault('def fail(*args):\n    raise OSError(errno.EXDEV, "fixture rename failure")\n'
+                            'tool["os"].rename = fail')
+    assert f'kept target {target}:' in text and 'fixture rename failure' in text, text
+    assert lab.target_exists(target)
+    # The failed rename released every Cargo lock; a later sweep can finish.
+    assert f'deleted target {target}' in lab.run('--targets')
+    assert not lab.target_exists(target)
+
+
+def targets_delete_failure(lab):
+    target = lab.target('delete-fails', 3 * 3600)
+    text = lab.target_fault('def fail(*args):\n    raise OSError("fixture deletion failure")\n'
+                            'tool["shutil"].rmtree = fail')
+    trash = lab.tmp / 'logs' / 'tidy-trash'
+    assert f'kept target {target}:' in text and 'fixture deletion failure' in text, text
+    assert not lab.target_exists(target) and len(list(trash.iterdir())) == 1
+    renamed = next(trash.iterdir())
+    with (renamed / 'debug' / '.cargo-lock').open('rb') as source:
+        fcntl.flock(source, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    assert lab.run('--targets') == '' and list(trash.iterdir()) == []
+
+
+def targets_trash_failure(lab):
+    trash = lab.tmp / 'logs' / 'tidy-trash'
+    lab.put(trash / 'leftover' / 'data')
+    target = lab.target('clear-anyway', 3 * 3600)
+    text = lab.target_fault('remove = tool["shutil"].rmtree\n'
+                            'def fail(path, *args, **kwargs):\n'
+                            '    if path.name == "leftover":\n'
+                            '        raise OSError("fixture trash failure")\n'
+                            '    return remove(path, *args, **kwargs)\n'
+                            'tool["shutil"].rmtree = fail')
+    assert 'fixture trash failure' in text and f'deleted target {target}' in text, text
+    assert not lab.target_exists(target) and (trash / 'leftover').exists()
+
+
+def targets_trash_invalid(lab):
+    lab.put(lab.tmp / 'logs' / 'tidy-trash')
+    target = lab.target('check-anyway', 3 * 3600)
+    text = lab.run('--targets', status=3)
+    assert 'kept directory' in text and f'kept target {target}:' in text, text
+    assert lab.target_exists(target)
+
+
+def fleet_is_a_tools_entry(lab):
+    path = lab.put(lab.tmp / 'fleet' / 'tend.json')
+    text = lab.run()
+    assert path.exists() and str(path.parent) not in text, text
+
+
 def usage(lab):
+    lab.run('--targets', 'agents', status=2)
+    lab.run('--targets', '--mission', 'm', status=2)
     lab.run('bogus', status=2)
     lab.run('--mission', '../outside', status=2)
     lab.run('--mission', 'ended', 'agents', status=2)
@@ -896,7 +1160,11 @@ CASES = (copies, lockfile_conflicts, lockfile_tree, lockfile_patches, lockfile_s
          enclosing_git, symlinks, qa_is_a_tools_entry, unknown, dry_run, scope, fetch_failure, push_failure,
          already_gone, remote_race, head_race, local_race, nested_repositories, evidence_race,
          evidence_ref_race, evidence_stash,
-         stale, deletion_failure, order, lock, usage, empty_tmp)
+         stale, deletion_failure, order, lock, usage, empty_tmp,
+         targets_idle, targets_beyond_two, targets_held, targets_cargo_lock, targets_in_use_first,
+         targets_triple, targets_left_alone, targets_trash, targets_dry_run, targets_scope,
+         fleet_is_a_tools_entry, targets_root_lock, targets_preview_no_locks, targets_list_failure,
+         targets_rename_failure, targets_delete_failure, targets_trash_failure, targets_trash_invalid)
 
 
 def build_baseline(directory):

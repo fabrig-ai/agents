@@ -2,6 +2,7 @@
 """Collect landed work and expired scratch, keeping anything uncertain."""
 import argparse
 from collections import defaultdict
+from contextlib import contextmanager, ExitStack
 import fcntl
 import os
 from pathlib import Path
@@ -10,10 +11,11 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 
 REPOS = ('agents', 'skein', 'smith', 'jig', 'hearth', 'qa', 'temper')
-TOOLS = set('heavy logs gates landing-turn land-set kache lab after-landing post codex-run qa git-fabrig'.split())
+TOOLS = set('heavy logs gates landing-turn land-set kache lab after-landing post codex-run qa git-fabrig fleet'.split())
 ALLOWED = TOOLS | {'machine.env', 'owners', 'director'}
 CONTENT = ('.', ':(exclude,glob)**/Cargo.lock')
 MARK, SIGNATURE = 'EVIDENCE.TAG', 'agents fixture evidence'
@@ -69,7 +71,7 @@ def worktree_list(path):
 def held(path):
     # Read links only, never another process's environment or file contents.
     for proc in Path('/proc').iterdir():
-        if not proc.name.isdigit():
+        if not proc.name.isdigit() or int(proc.name) == os.getpid():
             continue
         try:
             if proc.stat().st_uid != os.getuid():
@@ -209,7 +211,8 @@ class Tidy:
                 self.keep(kind, what, str(error), 3)
                 return False
         verb = 'would delete' if self.args.dry_run else 'deleted'
-        print(f'tidy: {verb} {kind} {what} {commit or "-"} ({reason})', flush=True)
+        identity = '' if kind == 'target' else f' {commit or "-"}'
+        print(f'tidy: {verb} {kind} {what}{identity} ({reason})', flush=True)
         return True
 
     def protected(self, path):
@@ -509,6 +512,138 @@ class Tidy:
                 except OSError as error:
                     self.keep('script', path, str(error), 3)
 
+    def target_profiles(self, target):
+        # Cargo profiles are at the top level or below a target triple, never deeper.
+        def directories(path):
+            with os.scandir(path) as entries:
+                return [Path(entry.path) for entry in entries if entry.is_dir(follow_symlinks=False)]
+        profiles = []
+        for child in directories(target):
+            if (child / '.fingerprint').is_dir() and not (child / '.fingerprint').is_symlink():
+                profiles.append(child)
+            for profile in directories(child):
+                if (profile / '.fingerprint').is_dir() and not (profile / '.fingerprint').is_symlink():
+                    profiles.append(profile)
+        return profiles
+
+    @contextmanager
+    def target_locks(self, target, profiles):
+        # Open existing locks only: a preview must not create Cargo's lock files.
+        with ExitStack() as locks:
+            busy = ''
+            for directory in (target, *profiles):
+                try:
+                    fd = os.open(directory / '.cargo-lock', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                except FileNotFoundError:
+                    continue
+                source = locks.enter_context(os.fdopen(fd, 'rb'))
+                if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+                    raise Failure(f'not a regular cargo lock: {directory / ".cargo-lock"}')
+                try:
+                    fcntl.flock(source, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    busy = 'cargo lock held'
+                    break
+            yield busy
+
+    def clear_target(self, work, target, reason, trash):
+        with self.target_locks(target, self.target_profiles(target)) as busy:
+            busy = busy or held(work)
+            if busy:
+                self.keep('target', target, f'{busy} ({reason})')
+                return
+            # Reserve a fresh empty name; rename replaces it on the same filesystem.
+            if trash.is_symlink():
+                raise Failure(f'symlink trash directory: {trash}')
+            trash.mkdir(mode=0o700, parents=True, exist_ok=True)
+            renamed = Path(tempfile.mkdtemp(prefix='target-', dir=trash))
+            os.rename(target, renamed)
+        shutil.rmtree(renamed)
+        self.delete('target', target, '', reason, lambda: None)
+
+    def targets(self):
+        trash = self.tmp / 'logs' / 'tidy-trash'
+        if not self.args.dry_run:
+            # A damaged trash entry must not stop the remaining targets being checked.
+            try:
+                if trash.is_symlink():
+                    raise Failure('symlink trash directory')
+                leftovers = sorted(trash.iterdir()) if trash.exists() else []
+            except (Failure, OSError) as error:
+                self.keep('directory', trash, str(error), 3)
+                leftovers = []
+            for path in leftovers:
+                try:
+                    if path.is_dir() and not path.is_symlink():
+                        shutil.rmtree(path)
+                    else:
+                        path.unlink()
+                except OSError as error:
+                    self.keep('directory', path, str(error), 3)
+        owners = defaultdict(list)
+        for name in REPOS:
+            repo = self.root / name
+            try:
+                worktrees = worktree_list(repo)
+            except (Failure, OSError) as error:
+                self.keep('entry', repo, f'worktree list failed; repository skipped: {error}', 3)
+                continue
+            for wt in worktrees[1:]:  # A primary checkout never loses its target.
+                work = wt['path']
+                target = work / 'target'
+                if 'locked' in wt or 'HEAD' not in wt:
+                    continue
+                owner = None
+                for area in ('owners', 'director'):
+                    parent = self.tmp / area
+                    if parent in work.parents:
+                        parts = work.relative_to(parent).parts
+                        owner = re.sub(r'-m[0-9]+$', '', parts[0]) if area == 'owners' else 'director'
+                        break
+                if owner is None:
+                    continue
+                try:
+                    if work.resolve() != work or target.is_symlink() or not target.is_dir():
+                        continue
+                    tag = target / 'CACHEDIR.TAG'
+                    if not stat.S_ISREG(tag.lstat().st_mode):
+                        continue
+                    profiles = self.target_profiles(target)
+                    newest = target.stat().st_mtime
+                    for profile in profiles:
+                        for child in ('deps', '.fingerprint', 'build'):
+                            path = profile / child
+                            if path.is_dir() and not path.is_symlink():
+                                newest = max(newest, path.stat().st_mtime)
+                    if self.args.dry_run:
+                        busy = held(work)
+                    else:
+                        with self.target_locks(target, profiles) as busy:
+                            busy = busy or held(work)
+                    owners[owner].append((busy, newest, work, target))
+                except FileNotFoundError:
+                    continue
+                except (Failure, OSError) as error:
+                    self.keep('target', target, str(error), 3)
+        now = time.time()
+        for owner, targets in sorted(owners.items()):
+            targets.sort(key=lambda item: (not bool(item[0]), -item[1], str(item[2])))
+            for number, (busy, newest, work, target) in enumerate(targets):
+                age = now - newest
+                reason = f'idle {int(age // 3600)} h' if age >= 7200 else (
+                    f'beyond two of {owner}' if number >= 2 else '')
+                if not reason:
+                    continue
+                if busy:
+                    self.keep('target', target, f'{busy} ({reason})')
+                elif self.args.dry_run:
+                    self.delete('target', target, '', reason, lambda: None)
+                else:
+                    try:
+                        self.clear_target(work, target, reason, trash)
+                    except (Failure, OSError) as error:
+                        self.keep('target', target, str(error), 3)
+
     def step(self, action):
         try:
             action()
@@ -516,6 +651,9 @@ class Tidy:
             self.keep('entry', self.tmp, f'{action.__name__} failed: {error}', 3)
 
     def run(self):
+        if self.args.targets:
+            self.step(self.targets)
+            return self.status
         # All workspace fetches precede deletion; their origin tips remain our backup snapshot.
         for name in (self.args.repos or REPOS):
             if self.args.mission:
@@ -574,6 +712,8 @@ class Tidy:
             for path in sorted(self.tmp.iterdir()):
                 if path.name not in ALLOWED:
                     self.keep('entry', path, 'outside the tmp layout', 1)
+        if not self.args.repos and not self.args.mission:
+            self.step(self.targets)
         return self.status
 
 
@@ -581,10 +721,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--dry-run', action='store_true')
     parser.add_argument('--mission')
+    parser.add_argument('--targets', action='store_true')
     parser.add_argument('repos', nargs='*', metavar='REPO')
     args = parser.parse_args()
-    if (args.mission and args.repos) or any(name not in REPOS for name in args.repos):
-        parser.error('choose repository names or --mission M')
+    if (args.mission and args.repos) or (args.targets and (args.repos or args.mission)) or any(
+            name not in REPOS for name in args.repos):
+        parser.error('choose repository names or --mission M or --targets')
     if args.mission and not re.fullmatch(r'[a-z0-9][a-z0-9_-]*', args.mission):
         parser.error('invalid mission name')
     args.repos = list(dict.fromkeys(args.repos))
