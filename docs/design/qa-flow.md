@@ -1112,7 +1112,20 @@ days. agents alone names qa's paths: the public repositories never do.
   all: past them the copy waits for the next try. The commit's author
   and committer are the writer's name at its machine (`qa-watch
   <qa-watch@hetzner6>`, the service's), and its subject `qa keep: <kind>
-  <name>`; the push goes with the machine's key.
+  <name>`; the push goes with the machine's key, within
+  `QA_EVIDENCE_SECONDS` (120).
+- **What the code settled** (agents 1d25b3b): the clone is made bare,
+  fetching `evidence` alone without blobs, and never fetches one
+  lazily; a commit is made from a temporary index with no base blob; a
+  copy already kept is the same set of files by tree, whatever its index
+  says; the index is scanned before any object is written, and the
+  clone's origin checked as git uses it, an `insteadOf` refused. A
+  withheld finding keeps its heading, `### N. (withheld: RULE)`, and a
+  report cut at 8 KiB loses its Cases first, its Findings kept; an old
+  report at 8 KiB is cut so as to name its evidence. Left as they are,
+  by decision: a refusal's notice sent twice after a crash between its
+  delivery and its save (at least once, as every post), and a copy's
+  timeout that can't end a process that left its session.
 
 ### 11.4 When, and the link
 

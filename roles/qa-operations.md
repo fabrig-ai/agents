@@ -366,7 +366,8 @@ The director's, on hetzner6:
   - `QA_BATCH` 5, `QA_CAP_MINUTES` 120 and `QA_INTERVAL_SECONDS` 300;
   - `QA_STOP_SECONDS` 50, the give-back wrapper's bound in a
     deployment's stop (qa-flow.md 10.5);
-  - `QA_EVIDENCE_KIB` 2048, read once the evidence's keeping lands.
+  - `QA_EVIDENCE_KIB` 2048, the copy's cap, and `QA_EVIDENCE_SECONDS`
+    120, its push's bound (qa-flow.md 11);
 
   qa-flow.md 7 lists them with their defaults.
 - **`~/.config/agents-qa/stuck`:** `design/upgrades-draft@hetzner6`;
@@ -403,13 +404,23 @@ login or a sign-in link.
   text; it writes nothing. Every pass and walk runs it on its own
   scratch before its report's last write (roles/qa.md 2, step 5), and
   moves out of `evidence/` and `scripts/` what it names.
-- **The copy** (slice 2, building): at a pass's end, to qa's branch
-  `evidence`, the record naming the commit; a refusal mended by name
-  and line, never by opening the file (qa-flow.md 11.4).
-- **Walks** (slice 3, after it): kept by the service at a walk's end.
-  The walks from before `qa walk` are the director's to keep by hand,
-  `qa keep --walk DATE-NAME DIR`, once slice 2 lands. Until then a
-  walk's evidence stays in its directory on the logins' machine.
+- **The copy** (agents 1d25b3b; qa 6d86471): at a pass's end, as the
+  first step of its end, its allowlist goes to `passes/<pass>/` on
+  fabrig-ai/qa's branch `evidence`, pushed with hetzner6's own key; its
+  record's front matter names `evidence:` (the commit, `refused`, or
+  `unknown` while it waits), and a refused line of the record's body is
+  withheld as `(withheld: RULE)`. A refusal reaches the director once,
+  each file, line and rule, and is mended on the machine by name and
+  line, never by opening the file: the file moved out of `evidence/` or
+  `scripts/`, or `sed -i 'Nd' FILE`; the next check tries again. A
+  pass's scratch is deleted at 7 days only once its copy is kept or
+  refused and its record names it. Rolling back: stop the service and
+  keep the scratch of every pass whose copy waits, then revert.
+- **Walks** (slice 3, building): kept by the service at a walk's end.
+  A walk from before `qa walk` is kept by hand on hetzner6, `qa keep
+  --walk YYYYMMDD-NAME DIR`: exit 0 prints the commit, 2 a refusal, 1
+  run it again; the director's for rung-a-1..5, rung-b0-1 and
+  github-land-1..2.
 
 ## 9. Open
 
@@ -498,3 +509,6 @@ Newest last, times UTC.
   branch on origin (agents fe72017; design/ladder's note).
 - 10-27 23:1xZ: the evidence's scan and `qa keep --check` landed (agents
   16c1655); section 8 as built (design/qa-evidence).
+- 10-27 23:2xZ: passes' evidence kept on qa's branch `evidence` (agents
+  1d25b3b, qa 6d86471), live once hetzner6's watch restarts; old walks
+  the director's to keep by hand (design/qa-evidence).
