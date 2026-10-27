@@ -390,7 +390,8 @@ stale() {
             result=1
             continue
         fi
-        ((now - modified >= 120)) || continue
+        # post.md 5: allow startup time, and leave day-old runs to tidy.
+        ((now - modified >= 120 && now - modified < 86400)) || continue
         why=''
         if [[ -f $state/post-failed ]]; then
             status=0

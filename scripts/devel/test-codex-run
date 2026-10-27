@@ -341,6 +341,16 @@ touch "$fake/active"
 expect 'active unfinished run omitted' "[$("$kit/codex-run" stale)]" '[]'
 rm "$fake/active" "$fake/hold-launch"
 
+touch -d '23 hours ago' "$reserved_state/meta"
+expect '23-hour unfinished run is stale' "$("$kit/codex-run" stale)" "$reserved_id" 'unit inactive without end'
+touch -d '25 hours ago' "$reserved_state/meta"
+expect '25-hour unfinished run omitted' "[$("$kit/codex-run" stale)]" '[]'
+: >"$fake/post.calls"
+expect '25-hour unfinished run not posted' "[$("$kit/codex-run" stale --post)]" '[]'
+expect '25-hour unfinished run leaves no post or told' \
+    "$(test ! -s "$fake/post.calls" && test ! -e "$reserved_state/told" && echo untouched)" untouched
+touch -d '3 minutes ago' "$reserved_state/meta"
+
 # An old exit-3 marker predates the distinction between queued and refused.
 touch "$reserved_state/ended"
 printf 'queued, nobody will wake it: stopped\n' >"$reserved_state/post-failed"
@@ -491,6 +501,12 @@ expect 'refused post surfaced by stale' "$("$kit/codex-run" stale)" "$id" 'post 
 expect 'completion marker written even after post failure' "$(test -f "$state/ended" && echo ended)" ended
 expect 'post failure noted in finish-errors' "$(cat "$state/finish-errors")" 'post failed: 2'
 rm "$fake/post-exit"
+touch -d '25 hours ago' "$state/meta"
+expect '25-hour refused end omitted' "[$("$kit/codex-run" stale)]" '[]'
+expect '25-hour refused end not posted' "[$("$kit/codex-run" stale --post)]" '[]'
+json_expect '25-hour refused end makes no additional post' 'length == 1' "$fake/post.calls"
+expect '25-hour refused end writes no told' "$(test ! -e "$state/told" && echo untold)" untold
+touch -d '3 minutes ago' "$state/meta"
 output=$("$kit/codex-run" stale --post)
 json_expect 'stale --post resends a refused end' \
     'length == 2 and .[1].args == .[0].args and .[1].body == .[0].body and

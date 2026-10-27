@@ -360,6 +360,33 @@ wake_command() {
     expect 'batch after lock failure resumes once' "stops=$(wc -l <"$t/stops") resumes=$(wc -l <"$t/resumes")" 'stops=1 resumes=2'
     unset -f flock
 
+    # A mixed mailbox qualifies on any message inside the day's window.
+    for name in o/fresh o/stale o/both; do
+        stage_wake_mail "$name"
+        printf '2147483647 1 claude\n' >"$t/a/tmp/post/${name//\//+}/waiter"
+    done
+    touch -d '20 minutes ago' "$t/a/tmp/post/o+fresh/new/"*.md
+    touch -d '25 hours ago' "$t/a/tmp/post/o+stale/new/"*.md
+    touch -d '26 hours ago' "$t/a/tmp/post/o+both/new/"*.md
+    cp "$t/a/tmp/post/o+both/new/20261024T213500Z-7f3a0000.md" "$t/a/tmp/post/o+both/new/20261024T213500Z-ffffffff.md"
+    touch -d '30 minutes ago' "$t/a/tmp/post/o+both/new/20261024T213500Z-ffffffff.md"
+    # Retire earlier mail so this batch checks just the three window stories.
+    for name in o/old o/gone o/z-gone; do
+        touch -d '25 hours ago' "$t/a/tmp/post/${name//\//+}/new/"*.md
+    done
+    session o/stale 'done'
+    jq '[.[0] as $session | ["o/fresh", "o/stale", "o/both"][] | $session + {name:.,id:.,sessionId:.}]' \
+        "$t/sessions.json" >"$t/window-sessions.json"
+    mv "$t/window-sessions.json" "$t/sessions.json"
+    : >"$t/resumes"
+    local output
+    output=$(capture post wake --older 15)
+    expect 'window wakes fresh mail' "$output" 'o/fresh woken'
+    expect 'window wakes mixed-age mail' "$output" 'o/both woken'
+    expect 'window skips expired mail silently' "[$output]" $'[status=0\no/both woken\no/fresh woken]'
+    expect 'window resumes only two names' "$(wc -l <"$t/resumes")" 4
+    expect 'named wake still wakes expired mail' "[$(capture post wake o/stale)]" $'[status=0\no/stale woken]'
+
     for args in 'wake' 'wake --older' 'wake --older x' 'wake Bad/Name' 'wake a b'; do
         read -r -a arguments <<<"$args"
         expect "usage: $args" "$(capture post "${arguments[@]}")" 'status=2' 'usage: post'

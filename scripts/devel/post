@@ -24,6 +24,8 @@ post=$root/tmp/post
 name_pattern='^[a-z][a-z0-9-]*(/[a-z0-9][a-z0-9-]*)*$'
 machine_pattern='^[a-z][a-z0-9-]*$'
 id_pattern='^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$'
+# post.md 3: automatic wakes consider only unread mail under a day old.
+wake_window_minutes=1440
 scratch=
 trap '[[ -z $scratch ]] || rm -f -- "$scratch"' EXIT
 
@@ -407,7 +409,7 @@ wake_existing() (
             [[ -f $message ]] || continue
             if [[ -n $older ]]; then
                 age=$(((now - $(stat -c %Y "$message")) / 60))
-                ((age >= older)) || continue
+                ((age >= older && age < wake_window_minutes)) || continue
             fi
             found=1
             break
