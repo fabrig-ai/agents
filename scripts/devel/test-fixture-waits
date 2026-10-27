@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """Hold fixture publications between create, write and journal completion."""
 import json
+import os
 from pathlib import Path
 import runpy
 import select
+import subprocess
 import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 
-from case_runner import HUNG_CASE_S
+from case_runner import HUNG_CASE_S, HUNG_TOOL_S
 
 
 SUPPORT = runpy.run_path(str(Path(__file__).with_name('test-heavy-recovery')))
@@ -165,6 +167,79 @@ class CodexPublications(unittest.TestCase):
         with patch.object(select, 'select', side_effect=AssertionError('expired')):
             with self.assertRaisesRegex(SystemExit, 'FAIL deadline: task publications in '):
                 self.wait(seconds=0)
+
+
+class CodexTermination(unittest.TestCase):
+    def setUp(self):
+        script = Path(__file__).with_name('codex-run').read_text()
+        self.handler = 'terminate() {' + script.split('\nterminate() {', 1)[1].split('\nfinish_error()', 1)[0]
+
+    def test_handler_releases_stamper_writer_before_child_wait(self):
+        events_r, events_w = os.pipe()
+        ready_r, ready_w = os.pipe()
+        release_r, release_w = os.pipe()
+        record_r, record_w = os.pipe()
+        opened = {events_r, events_w, ready_r, ready_w, release_r, release_w, record_r, record_w}
+        process = None
+
+        def close(fd):
+            if fd in opened:
+                opened.remove(fd)
+                os.close(fd)
+
+        # Inject the wait dependency captured in the orphan-case deadlock:
+        # cleanup waits for children while the stamper needs EOF. The parent
+        # acts as that reader. Hold the nested wait at entry, after any writer
+        # cleanup, so EOF is a kernel condition rather than a speed assertion.
+        # kill only records a fake target; this test sends no signals. Releasing
+        # the private control pipe also cleans up an unfixed worker on failure.
+        harness = self.handler + f'''
+kill() {{ printf '%s\\n' "$*" >&{record_w}; }}
+wait() {{
+    printf 'waiting\\n' >&{ready_w}
+    IFS= read -r -u {release_r} || :
+}}
+run() {{
+    local events={events_w} child=424242
+    terminate 143
+}}
+run
+'''
+        try:
+            os.set_blocking(events_r, False)
+            os.set_blocking(record_r, False)
+            process = subprocess.Popen(
+                ['/bin/bash', '--noprofile', '--norc', '-eu', '-c', harness],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                env={'PATH': '/usr/bin:/bin'},
+                pass_fds=(events_w, ready_w, release_r, record_w))
+            for fd in (events_w, ready_w, release_r, record_w):
+                close(fd)
+            self.assertTrue(select.select([ready_r], [], [], HUNG_TOOL_S)[0], 'handler did not enter wait')
+            self.assertEqual(os.read(ready_r, 4096), b'waiting\n')
+            self.assertEqual(os.read(record_r, 4096), b'-TERM 424242\n')
+            try:
+                ended = os.read(events_r, 1)
+            except BlockingIOError:
+                self.fail('termination retained the stamper writer while entering child wait')
+            self.assertEqual(ended, b'', 'stamper must receive EOF before cleanup waits')
+        finally:
+            close(release_w)
+            try:
+                if process is not None:
+                    stdout, stderr = process.communicate(timeout=HUNG_TOOL_S)
+            finally:
+                for fd in tuple(opened):
+                    close(fd)
+        self.assertEqual(process.returncode, 143, (stdout, stderr))
+
+    def test_handler_before_pipe_allocation(self):
+        process = subprocess.Popen(
+            ['/bin/bash', '--noprofile', '--norc', '-eu', '-c', self.handler + '\nterminate 143\n'],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env={'PATH': '/usr/bin:/bin'})
+        stdout, stderr = process.communicate(timeout=HUNG_TOOL_S)
+        self.assertEqual((process.returncode, stdout, stderr), (143, b'', b''))
 
 
 if __name__ == '__main__':

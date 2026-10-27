@@ -107,6 +107,9 @@ turn() {
 
 terminate() {
     trap - TERM INT
+    # A signal can reenter Bash's child wait. Drop our writer first: the
+    # stamper may be the only child left, and it cannot exit without EOF.
+    if [[ -n ${events:-} ]]; then exec {events}>&-; fi
     if [[ -n ${child:-} ]]; then
         kill -TERM "$child" 2>/dev/null || true
         wait "$child" 2>/dev/null || true
