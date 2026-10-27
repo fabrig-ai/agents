@@ -252,7 +252,13 @@ class Pass:
         section = re.search(r'^## Findings[ \t]*\n(.*?)(?=^##[ \t]+|\Z)', self.body, re.M | re.S)
         finding = re.search(rf'^### {number}\. [^\n]*\n(.*?)(?=^###[ \t]+|\Z)',
                             section[1], re.M | re.S) if section else None
-        return dict(re.findall(r'^(Commit|Concerns):[ \t]*([^\n]*)$', finding[1], re.M)) if finding else {}
+        fields = {}
+        for line in finding[1].splitlines() if finding else ():
+            field = re.fullmatch(r'([A-Za-z][A-Za-z0-9_-]*):[ \t]*(.*)', line)
+            if not field:
+                break
+            fields.setdefault(field[1], []).append(field[2].strip())
+        return fields
 
 
 class Record:
@@ -433,8 +439,14 @@ def findings(record):
 
 def finding_message(report, number, title, why):
     subject = f'QA finding {report.name} {number}: {title}'
+    # post's valid_subject: 200 characters, without control characters.
+    subject = re.sub(r'[\x00-\x1f\x7f-\x9f\u2028\u2029]', ' ', subject)
+    # A C-locale shell counts bytes, so keep that bound too.
+    if len(subject.encode()) > 200:
+        subject = subject.encode()[:197].decode(errors='ignore') + '…'
     body = (f'QA pass {report.name} on {report.fields["repository"]} found this, and the director routes it to you.\n'
-            f"The report is records' qa/passes/{report.name}.md, finding {number}: record pull, then read it.\n")
+            f"The report is records' qa/passes/{report.name}.md, finding {number}: record pull, then read it.\n"
+            f'Finding {number}: {title}\n')
     return subject, body + (why + '\n' if why else '')
 
 
@@ -728,6 +740,7 @@ class Watch:
         self.repositories = Repositories(workspace)
         self.giving = True
         self.pools, self.holders, self.queued = {}, {}, False
+        self.route_repos, self.route_commits, self.route_answers, self.route_failed = {}, {}, {}, set()
 
     def call(self, tool, *args):
         seconds = dict(systemctl=30, logins=60, post=60, landings=120, **{'codex-run': 120})
@@ -924,31 +937,52 @@ class Watch:
 
     def destination(self, report, number):
         fields = report.finding_fields(number)
-        commit = fields.get('Commit', '').strip()
-        concerns = fields.get('Concerns', '').strip()
-        if concerns in ('security', 'lost data'):
-            return dict(address=self.director, why='concerns: ' + concerns)
+        for concern in fields.get('Concerns', []):
+            if concern in ('security', 'lost data'):
+                return dict(address=self.director, why='concerns: ' + concern)
+        if any(len(values) > 1 for values in fields.values()):
+            return dict(address=self.director, why='ambiguous metadata')
+        commit = fields.get('Commit', [''])[0]
         if not commit or commit == 'unknown':
             return dict(address=self.director, why='no commit')
         if not re.fullmatch(r'[0-9a-fA-F]{7,40}', commit):
             return dict(address=self.director, why='not on main')
         repo = report.fields['repository']
-        with self.repositories.fetched(repo) as root:
-            full = git(root, 'rev-parse', '--verify', commit.lower() + '^{commit}', check=False)
-            need(full.returncode in (0, 1, 128), 'cannot read finding commit', 4)
-            if full.returncode:
+        if repo in self.route_failed:
+            return None
+        try:
+            if repo not in self.route_repos:
+                with self.repositories.fetched(repo) as root:
+                    main = git(root, 'rev-parse', '--verify', 'origin/main^{commit}')
+                    # Immutable objects remain readable after releasing the fetch lock.
+                    self.route_repos[repo] = root, main
+            root, main = self.route_repos[repo]
+            key = repo, commit.lower()
+            if key not in self.route_commits:
+                full = git(root, 'rev-parse', '--verify', commit.lower() + '^{commit}', check=False)
+                need(full.returncode in (0, 1, 128), 'cannot read finding commit', 4)
+                held = (git(root, 'merge-base', '--is-ancestor', full.stdout.strip(), main, check=False)
+                        if not full.returncode else None)
+                need(held is None or held.returncode in (0, 1), 'cannot read finding ancestry', 4)
+                self.route_commits[key] = full.stdout.strip() if held is not None and not held.returncode else None
+            full = self.route_commits[key]
+            if full is None:
                 return dict(address=self.director, why='not on main')
-            held = git(root, 'merge-base', '--is-ancestor', full.stdout.strip(), 'origin/main', check=False)
-            need(held.returncode in (0, 1), 'cannot read finding ancestry', 4)
-            if held.returncode:
-                return dict(address=self.director, why='not on main')
-        answer = self.call('landings', 'landed', repo, commit)
+            key = repo, full
+            if key not in self.route_answers:
+                self.route_answers[key] = self.call('landings', 'landed', repo, full)
+            answer = self.route_answers[key]
+        except (Problem, OSError, ValueError, UnicodeError):
+            self.route_failed.add(repo)
+            raise
         if answer.returncode == 1:
             return dict(address=self.director, why='brought by no landing')
         if answer.returncode:
+            self.route_failed.add(repo)
             return None
         match = re.fullmatch(r'(set|land) (\S+) (\S+) ([0-9a-f]{40})\n?', answer.stdout)
         if not match:
+            self.route_failed.add(repo)
             return None
         mission = match[2].split('/', 1)[0]
         try:
@@ -975,11 +1009,13 @@ class Watch:
             return True
         report = Pass.read(self.record.path(f'qa/passes/{state["pass"]}.md'))
         triaged = {(r['who'], int(r['item'])) for r in self.record.events('triage')}
-        lines = []
+        routed = state.setdefault('routed', {})
         for number, title in report.findings():
             if (report.name, number) in triaged:
                 continue
             key = str(number)
+            if key in routed:
+                continue
             try:
                 route = state['routes'].get(key)
                 if route is None:
@@ -996,14 +1032,20 @@ class Watch:
                 log(f'{report.name} {number}: route failed ({type(error).__name__}); trying next check')
                 continue
             if sent.returncode in (0, 3):
-                lines.append(f'- {timestamp()} {report.name} {number} {route["address"]} {route["why"]}')
-                triaged.add((report.name, number))
+                routed[key] = f'- {timestamp()} {report.name} {number} {route["address"]} {route["why"]}'
+                try:
+                    self.save(directory, state)
+                except BaseException:
+                    routed.pop(key)
+                    raise
             else:
                 log(f'{report.name} {number}: post failed; trying next check')
-        if lines:
+        pending = {key: line for key, line in routed.items() if (report.name, int(key)) not in triaged}
+        if pending:
             name = 'qa/triage.md'
-            self.record.commit({name: self.record.append(name, '\n'.join(lines), '# QA triage')},
+            self.record.commit({name: self.record.append(name, '\n'.join(pending.values()), '# QA triage')},
                                f'qa watch: route {report.name}')
+            triaged.update((report.name, int(key)) for key in pending)
         return all((report.name, n) in triaged for n, _ in report.findings())
 
     def notify(self, directory, state):
@@ -1079,7 +1121,7 @@ class Watch:
             self.record.commit({f'qa/passes/{name}.md': result.text()}, f'qa watch: {name} failed')
             log(f'{name}: report refused by record: {error}')
         count = len(result.findings())
-        state.update(finished=True, ended=ended, routes={})
+        state.update(finished=True, ended=ended, routes={}, routed={})
         state['notice_pending'] = dict(required=outcome in ('failed', 'capped') or bool(count),
             subject=f'qa: pass {name} {outcome}, {count} findings', body=(
                 f'QA pass {name} on {state["repository"]} ended {outcome} after {wall}, with {count} findings: '
@@ -1246,6 +1288,7 @@ class Watch:
     def check(self, options):
         log('checking')
         self.options = options
+        self.route_repos, self.route_commits, self.route_answers, self.route_failed = {}, {}, {}, set()
         complete = {}
         with self.record.locked():
             passes = self.local_passes()

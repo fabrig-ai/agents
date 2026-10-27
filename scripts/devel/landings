@@ -70,20 +70,22 @@ def count(value):
     return number
 
 
-def read_feed(timeout=15):
+def read_feed(timeout=15, complete=False):
     local = os.environ.get('LANDINGS_FEED')
     # Fixtures can force the remote branch without depending on this machine.
     host = os.environ.get('LANDINGS_FIXTURE_HOSTNAME', socket.gethostname())
     if local is not None or host == COORDINATOR:
         data = Path(local if local is not None else FEED).read_bytes()
     else:
-        result = subprocess.run([*SSH, TAIL], stdin=subprocess.DEVNULL,
+        result = subprocess.run([*SSH, 'cat ' + FEED if complete else TAIL], stdin=subprocess.DEVNULL,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 timeout=timeout)
         if result.returncode:
             reason = result.stderr.decode(errors='replace').strip()
             raise OSError(f'ssh exited {result.returncode}: {reason}')
         data = result.stdout
+    if complete and data and not data.endswith(b'\n'):
+        raise OSError('incomplete feed record')
     records, runner, lands = [], [], []
     for position, line in enumerate(data.splitlines()):
         try:
@@ -121,7 +123,9 @@ def read_feed(timeout=15):
                    for key in ('repo', 'commit', 'reason')):
                 continue
             records.append(record)
-        except (ValueError, UnicodeError, OverflowError, RecursionError):
+        except (ValueError, UnicodeError, OverflowError, RecursionError) as error:
+            if complete:
+                raise OSError('invalid or incomplete feed record') from error
             continue
     return records, runner, lands
 
@@ -1276,7 +1280,7 @@ def main():
         timeout = 7200 if args.cleared and args.timeout is None else args.timeout
         return wait_and_post(args.post, args.set, timeout, poll, unreachable, read, args.cleared)
     try:
-        records, runner, lands = read_feed()
+        records, runner, lands = read_feed(complete=args.command == 'landed')
     except (OSError, subprocess.TimeoutExpired) as error:
         print(f'landings: feed unreadable: {error}', file=sys.stderr)
         return 4

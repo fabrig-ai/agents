@@ -308,7 +308,7 @@ def triage_routes_a_finding(lab):
     sent = lab.sent()
     assert len(sent) == 1 and sent[0]['args'][:3] == ['send', 'o/x@hetzner2', f'QA finding {P} 1: Problem 1']
     assert sent[0]['body'] == (f'QA pass {P} on temper found this, and the director routes it to you.\n'
-                               f"The report is records' qa/passes/{P}.md, finding 1: record pull, then read it.\nctl\n")
+                               f"The report is records' qa/passes/{P}.md, finding 1: record pull, then read it.\nFinding 1: Problem 1\nctl\n")
     lab.run('triage', P, '2', 'backlog')
     assert lab.content('director/backlog.md').endswith(
         f"- QA pass {P}, finding 2: Problem 2. Source/repro: records' qa/passes/{P}.md, finding 2.")
@@ -725,6 +725,8 @@ elif name == 'logins':
 elif name == 'post':
     if args[0] == 'send':
         rest = args[3:] if args[1] == '--as' else args[1:]
+        if len(rest[1]) > 200 or any(ord(c) < 32 or 127 <= ord(c) <= 159 or c in '\u2028\u2029' for c in rest[1]):
+            sys.exit('fixture subject refused')
         with Path(os.environ['QA_POST_LOG']).open('a') as log:
             log.write(json.dumps(dict(args=['send', *rest], body=Path(rest[2]).read_text())) + '\n')
         sys.exit(int(os.environ['QA_POST_STATUS']))
@@ -808,12 +810,135 @@ def finding_posts(lab):
     return [post for post in lab.sent() if post['args'][2].startswith('QA finding ')]
 
 
+def finding_metadata_stops_before_reproduction(lab):
+    a, = lab.waiting(1)
+    mission(lab, 'm')
+    lab.configure(landed={a: f'land m/one 2026-10-27T13:25:00Z {a}'})
+    lab.watch()
+    lab.end_run(report=finding_report(
+        f'Commit: {a}\nConcerns: security\nReproduce, from a fresh deployment:\n```text\nConcerns: ordinary\nCommit: unknown\n```',
+        f'Commit: {a}\nCommit: unknown',
+        f'Commit: {a}\nConcerns: lost data\nConcerns: ordinary',
+        f'Commit: {a}\nExtra: one\nExtra: two',
+        f'Commit: {a}\n    Concerns: security\nCommit: unknown'))
+    lab.watch()
+    posts = finding_posts(lab)
+    assert [p['args'][1] for p in posts] == ['director@fixture'] * 4 + ['o/fixture@fixture']
+    reasons = ('concerns: security', 'ambiguous metadata', 'concerns: lost data',
+               'ambiguous metadata', 'landed by m')
+    assert [line.rsplit('fixture ', 1)[1] for line in lab.content('qa/triage.md').splitlines()[-5:]] == list(reasons)
+
+
+def accepted_findings_survive_refused_triage_commits(lab):
+    lab.waiting(1)
+    lab.watch()
+    directory, state = lab.watch_state()
+    lab.end_run(report=finding_report('Commit: unknown'))
+    refusal = '''
+original = tool['command']
+def command(argv, cwd=None, timeout=None):
+    if str(argv[0]).endswith('/record') and any(str(arg).startswith('qa watch: route ') for arg in argv):
+        return tool['subprocess'].CompletedProcess(argv, 2, '', 'fixture triage commit refused')
+    return original(argv, cwd=cwd, timeout=timeout)
+tool['main'].__globals__['command'] = command
+'''
+    for _ in range(2):
+        driven_watch(lab, refusal)
+        assert len(finding_posts(lab)) == 1
+        assert not (lab.records / 'qa/triage.md').exists()
+        saved = json.loads((directory / 'pass.json').read_text())
+        assert saved['routed']['1'].endswith(f'{state["pass"]} 1 director@fixture no commit')
+    lab.watch()
+    assert len(finding_posts(lab)) == 1
+    assert lab.content('qa/triage.md').count(f'{state["pass"]} 1 director@fixture no commit') == 1
+    lab.watch()
+    assert len(finding_posts(lab)) == 1
+
+
+def finding_subjects_fit_posts_bound(lab):
+    lab.waiting(1)
+    lab.watch()
+    titles = ('L' * 180, 'A title\twith a tab', 'A title\u2028with a separator')
+    lab.end_run(report='## Findings\n' + ''.join(
+        f'### {n}. {title}\nCommit: unknown\nReproduce.\n' for n, title in enumerate(titles, 1)))
+    lab.watch()
+    posts = finding_posts(lab)
+    assert len(posts) == 3
+    assert len(posts[0]['args'][2].encode()) == 200 and posts[0]['args'][2].endswith('…')
+    for post, title in zip(posts, titles):
+        assert title in post['body']
+        assert len(post['args'][2]) <= 200 and not any(ord(c) < 32 or 127 <= ord(c) <= 159 for c in post['args'][2])
+        valid = next(line for line in (KIT / 'post').read_text().splitlines() if line.startswith('valid_subject()'))
+        for locale in ('C', 'C.UTF-8'):
+            assert subprocess.run(['bash', '-c', valid + '\nvalid_subject "$1"', 'fixture', post['args'][2]],
+                                  env=dict(lab.env, LC_ALL=locale), timeout=HUNG_TOOL_S).returncode == 0
+    assert lab.run('findings').stdout == 'no findings waiting\n'
+
+
+def routing_shares_lookups_and_failures_within_a_check(lab):
+    a, b = lab.waiting(2)
+    mission(lab, 'm')
+    lab.env['QA_SLOTS'] = '2'
+    lab.configure(landed={a: 4, b: 4})
+    lab.watch()
+    for _, state in lab.watch_states():
+        lab.end_run(state, report=finding_report(f'Commit: {a}', f'Commit: {a}', f'Commit: {b}'))
+    counted = '''
+from contextlib import contextmanager
+original = tool['Repositories'].fetched
+@contextmanager
+def fetched(self, repo):
+    with (self.workspace.fixture / 'routing-fetches').open('a') as out:
+        out.write(repo + '\\n')
+    with original(self, repo) as root:
+        yield root
+tool['Repositories'].fetched = fetched
+'''
+    for count in (1, 2):
+        driven_watch(lab, counted)
+        calls = [args for args in lab.calls('landings') if args[0] == 'landed']
+        assert len(calls) == count and all(args[-1] == a for args in calls)
+        assert (lab.root / 'routing-fetches').read_text().splitlines() == ['temper'] * count
+        assert not finding_posts(lab)
+    lab.configure(landed={a: f'land m/one 2026-10-27T13:25:00Z {b}',
+                          b: f'land m/two 2026-10-27T13:25:00Z {b}'})
+    driven_watch(lab, counted)
+    assert len([args for args in lab.calls('landings') if args[0] == 'landed']) == 4
+    assert len((lab.root / 'routing-fetches').read_text().splitlines()) == 3
+    assert len(finding_posts(lab)) == 6
+
+
+def a_routing_fetch_failure_is_shared_until_the_next_check(lab):
+    a, = lab.waiting(1)
+    lab.watch()
+    directory, _ = lab.watch_state()
+    lab.end_run(report=finding_report(f'Commit: {a}', f'Commit: {a}'))
+    failed = '''
+from contextlib import contextmanager
+@contextmanager
+def fetched(self, repo):
+    with (self.workspace.fixture / 'failed-fetches').open('a') as out:
+        out.write(repo + '\\n')
+    raise tool['Problem']('fixture routing fetch refused', 4)
+    yield
+tool['Repositories'].fetched = fetched
+'''
+    for count in (1, 2):
+        driven_watch(lab, failed)
+        assert (lab.root / 'failed-fetches').read_text().splitlines() == ['temper'] * count
+        assert not json.loads((directory / 'pass.json').read_text())['routes']
+        assert not finding_posts(lab)
+    assert not [args for args in lab.calls('landings') if args[0] == 'landed']
+    lab.watch()
+    assert len(finding_posts(lab)) == 2
+
+
 def a_finding_goes_to_the_designer_of_its_landing(lab):
     a, b = lab.waiting(2)
     mission(lab, 'm1', parent='design/d1@fixture')
     mission(lab, 'd1')
     mission(lab, 'm2', owner='o/m2@fixture')
-    lab.configure(landed={a[:9]: f'set m1/first 2026-10-27T13:25:00Z {b}',
+    lab.configure(landed={a: f'set m1/first 2026-10-27T13:25:00Z {b}',
                           b: f'land m2/second 2026-10-27T13:26:00Z {b}'})
     lab.watch()
     directory, state = lab.watch_state()
@@ -896,18 +1021,18 @@ tool['Watch'].call = call
     assert not directory.exists()
     assert [p['args'][1] for p in finding_posts(lab)] == ['o/first@fixture'] * 3
     assert lab.content('qa/triage.md').endswith('1 o/first@fixture landed by m')
-    # Crash after acceptance, before the line: precisely that window repeats a post.
+    # Crash after acceptance, before saving the receipt: precisely that window repeats a post.
     lab.waiting(1)
     lab.watch()
     _, state = lab.watch_state()
     lab.end_run(report=finding_report('Commit: unknown'))
     driven_watch(lab, '''
-original = tool['Record'].commit
-def commit(self, changes, message):
-    if message.startswith('qa watch: route '):
+original = tool['Watch'].save
+def save(self, directory, state):
+    if state.get('routed'):
         sys.exit(0)
-    return original(self, changes, message)
-tool['Record'].commit = commit
+    return original(self, directory, state)
+tool['Watch'].save = save
 ''')
     assert state['pass'] not in lab.content('qa/triage.md')
     before = len(finding_posts(lab))
@@ -3175,7 +3300,10 @@ tool['Watch'].call = call
     assert not any(s.get('stage') == 'reserving' for _, s in lab.watch_states())
 
 
-CASES = (a_later_finding_failure_keeps_accepted_triage_lines,
+CASES = (finding_metadata_stops_before_reproduction, accepted_findings_survive_refused_triage_commits,
+         finding_subjects_fit_posts_bound, routing_shares_lookups_and_failures_within_a_check,
+         a_routing_fetch_failure_is_shared_until_the_next_check,
+         a_later_finding_failure_keeps_accepted_triage_lines,
          a_finding_goes_to_the_designer_of_its_landing, the_director_keeps_the_exceptions,
          a_refused_post_is_routed_again, a_landings_failure_waits_for_the_next_check,
          a_pass_from_before_is_never_routed, a_finding_triaged_by_hand_is_never_routed,

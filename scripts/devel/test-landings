@@ -283,6 +283,26 @@ def landed_skips_an_unrelated_unreadable_base(lab):
     assert lab.run('landed', 'agents', b).stdout == f'land first/plain 2026-10-24T12:01:00Z {b}\n'
 
 
+def remote_landed_reads_the_complete_feed(lab):
+    lab.repository('agents', tier=False)
+    a = lab.git(lab.workspace / 'agents', 'rev-parse', 'HEAD')
+    b = lab.land('agents', 'B')
+    lab.append(land_record(base=a, commit=b, branch='first/plain'),
+               *[record(event='done') for _ in range(5001)])
+    expected = f'land first/plain 2026-10-24T12:00:00Z {b}\n'
+    assert lab.run('landed', 'agents', b).stdout == expected
+    lab.ssh("data = Path(os.environ['FIXTURE_FEED']).read_bytes()\n"
+            "sys.stdout.buffer.write(data if sys.argv[-1].startswith('cat ') else b'\\n'.join(data.splitlines()[-5000:]) + b'\\n')\n")
+    env = dict(lab.env)
+    del env['LANDINGS_FEED']
+    assert lab.run('landed', 'agents', b, env=env).stdout == expected
+    assert json.loads(lab.trace.read_text())[-1] == 'cat /home/free/.local/state/agents-land-set/feed.jsonl'
+    lab.ssh("sys.stdout.buffer.write(b'{}\\n')\nsys.exit(1)\n")
+    assert 'feed unreadable' in lab.run('landed', 'agents', b, env=env, status=4).stderr
+    lab.feed.write_bytes(lab.feed.read_bytes() + b'{"time":')
+    assert 'feed unreadable' in lab.run('landed', 'agents', b, status=4).stderr
+
+
 def taught_shown(lab):
     lab.append(record(event='started'),
                record(event='landed', minute=1, repo='skein', commit='a' * 40,
@@ -2009,7 +2029,8 @@ def remote_watch(lab):
 
 def main():
     start = time.monotonic()
-    cases = (landed_names_the_landing_that_brought_a_commit, landed_skips_an_unrelated_unreadable_base,
+    cases = (remote_landed_reads_the_complete_feed,
+             landed_names_the_landing_that_brought_a_commit, landed_skips_an_unrelated_unreadable_base,
              status_view, taught_shown, taught_since, taught_malformed, last_two, already_done, retry_commits, latest_first_line,
              history_only, truncated_start, last_event, proving, report_proves, event_dates,
              verdicts_report_whole, verdicts_report_parts, verdicts_report_undecided,
