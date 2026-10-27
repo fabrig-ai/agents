@@ -659,6 +659,14 @@ def old_per_login_queues_are_migrated(lab):
     assert lab.run('take', CHATGPT, '--as', 'b')[0] == 0
 
 
+def a_note_with_a_control_character_is_refused(lab):
+    lab.login()
+    for note in ('a\x0bb', 'a\x85b', 'a\u2028b'):
+        code, _, err = lab.run('take', CHATGPT, '--as', 'b', '--note', note)
+        assert code == 2 and '--note' in err, (note, err)
+    assert not (lab.directory() / 'holder.json').exists()
+
+
 def a_request_granted_by_old_code_leaves_the_queue(lab):
     lab.clock('2026-10-27T10:00:00Z')
     lab.login()
@@ -807,7 +815,7 @@ sys.exit(module.main())
     assert lab.read('holder.json')['holder'] == 'b'
 
 
-CASES = (a_now_take_preserves_stale_and_legacy_queue_files, a_now_take_never_joins_the_queue, a_now_take_takes_a_free_unclaimed_login, a_request_granted_by_old_code_leaves_the_queue, a_pool_take_grants_a_free_login_and_names_it, one_queue_in_arrival_order,
+CASES = (a_note_with_a_control_character_is_refused, a_now_take_preserves_stale_and_legacy_queue_files, a_now_take_never_joins_the_queue, a_now_take_takes_a_free_unclaimed_login, a_request_granted_by_old_code_leaves_the_queue, a_pool_take_grants_a_free_login_and_names_it, one_queue_in_arrival_order,
          a_waiter_for_a_stuck_login_holds_back_no_free_one, a_pool_waiter_keeps_one_free_login_not_all,
          a_stale_waiter_leaves_the_queue, two_takes_at_once_get_two_logins,
          old_per_login_queues_are_migrated, an_old_process_lock_still_excludes,

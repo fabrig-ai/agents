@@ -478,21 +478,30 @@ def pool_of(name):
     return None if re.search(r'-[0-9]+$', stem) else stem
 
 
+LISTED = re.compile(r'(' + LOGIN + r'): (?:at rest|missing|held by (\S+)(?: \([^\n]*\))? since \S+, [0-9]+:[0-9]{2}, (?:at rest|not at rest))')
+
+
 def login_inventory(text):
-    pools, holders = {}, {}
-    for line in text.splitlines():
-        match = re.fullmatch(r'(' + LOGIN + r'): (.+)', line)
-        if not match:
+    """logins list, read strictly (qa-flow.md 10.6): None when a line isn't its form."""
+    pools, holders, names, waiting = {}, {}, set(), False
+    # Physical lines alone: a note's other line breaks must never make a login.
+    for line in text.split('\n'):
+        if not line:
             continue
-        name, status = match.groups()
-        pool = pool_of(name)
-        counts = pools.setdefault(pool, [0, 0])
+        if line.startswith('  '):
+            row = re.match(r'  waiting: (\S+) since ', line)
+            waiting = waiting or bool(row and re.fullmatch(r'qa-watch(?:/\S+)?', row[1]))
+            continue
+        match = LISTED.fullmatch(line)
+        if not match or match[1] in names:
+            return None
+        names.add(match[1])
+        counts = pools.setdefault(pool_of(match[1]), [0, 0])
         counts[0] += 1
-        held = re.fullmatch(r'held by (qa-watch(?:/\S+)?)(?: \([^\n]*\))? since \S+, .+', status)
-        if held:
+        if match[2] and re.fullmatch(r'qa-watch(?:/\S+)?', match[2]):
             counts[1] += 1
-            holders[name] = held[1]
-    return pools, holders
+            holders[match[1]] = match[2]
+    return pools, holders, waiting
 
 
 def passes(running, record, repositories):
@@ -514,8 +523,9 @@ def passes(running, record, repositories):
             listing = command([record.workspace.tool('logins'), 'list'], timeout=60)
         except OSError:
             return  # Elsewhere, the logins' machine alone can show its pools.
-        if listing.returncode == 0:
-            inventory, _ = login_inventory(listing.stdout)
+        inventory = login_inventory(listing.stdout) if listing.returncode == 0 else None
+        if inventory:
+            inventory = inventory[0]
             reserve = settings(record.workspace)['QA_LOGIN_RESERVE']
             for pool in sorted(pools & inventory.keys()):
                 size, held = inventory[pool]
@@ -699,7 +709,7 @@ class Watch:
         self.record = Record(workspace, log)
         self.repositories = Repositories(workspace)
         self.giving = True
-        self.pools, self.holders = {}, {}
+        self.pools, self.holders, self.queued = {}, {}, False
 
     def call(self, tool, *args):
         seconds = dict(systemctl=30, logins=60, post=60, landings=120, **{'codex-run': 120})
@@ -747,11 +757,16 @@ class Watch:
         held = {(state.get('holder', 'qa-watch'), name)
                 for _, state in passes for name in self.outstanding(state)}
         listing = self.call('logins', 'list')
-        self.giving = listing.returncode == 0
-        if listing.returncode:
-            log(f'cannot list stray logins: {listing.stderr.strip()}')
+        inventory = login_inventory(listing.stdout) if listing.returncode == 0 else None
+        self.giving = inventory is not None
+        if inventory is None:
+            self.pools, self.holders, self.queued = {}, {}, False
+            log('cannot list stray logins: ' + (listing.stderr.strip() if listing.returncode
+                                                else 'the listing is not in its form'))
             return
-        self.pools, self.holders = login_inventory(listing.stdout)
+        self.pools, self.holders, self.queued = inventory
+        if self.queued:
+            log("QA's rows from before --now still wait in the logins queue: no pass admitted until they expire")
         names = {name: holder for name, holder in self.holders.items() if (holder, name) not in held}
         path = self.directory / 'strays.json'
         need(not path.is_symlink(), f'{path}: symlink refused', 4)
@@ -990,10 +1005,16 @@ class Watch:
 
     def take(self, directory, state, opening):
         for pool in state['requests']:
-            if pool in state['pools']:
-                continue
             size, held = self.pools.get(pool, (0, 0))
-            if not self.giving or held >= size - self.options['QA_LOGIN_RESERVE']:
+            cap = size - self.options['QA_LOGIN_RESERVE']
+            if pool in state['pools']:
+                # A grant saved before the cap held, or before a crash: QA never keeps more than its share.
+                if held > cap:
+                    log(f'{state["repository"]}: QA holds {held} of pool {pool}, past its {max(cap, 0)}; cancelled')
+                    self.cancel(directory, state)
+                    return False
+                continue
+            if not self.giving or self.queued or held >= cap:
                 log(f'{state["repository"]}: no QA login available in pool {pool}; keeping the reserve for walks')
                 self.cancel(directory, state)
                 return False

@@ -658,6 +658,8 @@ elif name == 'logins':
             print(f'{login}: held by {holder}{note} since 2026-10-26T09:15:23Z, 0:01, {state}')
             print('  waiting: other since 2026-10-26T09:15:23Z (any of chatgpt)')
             print('  last 24 hours: 0:01 held')
+        for line in config.get('list_lines', []):
+            print(line)
         sys.exit(0)
     assert args[0] in ('take', 'give'), args
     login = args[1]
@@ -2868,6 +2870,55 @@ def a_pool_no_larger_than_the_reserve_runs_no_pass(lab):
     assert len(lab.calls('codex-run')) == 1
 
 
+def a_saved_reservation_past_the_cap_is_cancelled(lab):
+    reserved_pool(lab)
+    lab.waiting(3)
+    # The code before the reserve saved three full reservations, then stopped before their shares.
+    lab.env['QA_LOGIN_RESERVE'] = '0'
+    driven_watch(lab, """original = tool['Watch'].save
+def save(self, directory, state):
+    if state.get('stage') == 'starting':
+        sys.exit(0)
+    return original(self, directory, state)
+tool['Watch'].save = save
+""")
+    assert [len(s['pools']) for _, s in lab.watch_states()] == [1, 1, 1]
+    lab.env.pop('QA_LOGIN_RESERVE')
+    # Past the cap, the repository's saved reservations are cancelled; the next check admits within it.
+    result = lab.watch()
+    assert 'QA holds 3 of pool chatgpt, past its 2; cancelled' in result.stdout
+    assert not lab.calls('codex-run') and not json.loads((lab.root / 'tools.json').read_text())['logins_held']
+    lab.watch()
+    assert len(lab.calls('codex-run')) == 2
+    assert len(json.loads((lab.root / 'tools.json').read_text())['logins_held']) == 2
+
+
+def qa_admits_nothing_while_its_old_rows_wait(lab):
+    reserved_pool(lab)
+    lab.waiting(2)
+    lab.configure(list_lines=['  waiting: qa-watch/20261027-1800-temper since 2026-10-27T18:00:00Z (any of chatgpt)'])
+    result = lab.watch()
+    assert not lab.calls('codex-run') and 'still wait in the logins queue' in result.stdout
+    lab.configure(list_lines=[])
+    lab.watch()
+    assert len(lab.calls('codex-run')) == 2
+
+
+def a_listing_out_of_its_form_admits_and_gives_nothing(lab):
+    members = reserved_pool(lab)
+    lab.waiting(2)
+    lab.configure(logins_held=[members[3]], login_holders={members[3]: 'qa-watch/gone'})
+    # A note's vertical tab, then a login listed twice: neither may count as a pool's member.
+    for lines in (['chatgpt-5: at rest\x0bchatgpt-6: at rest'], [f'{CHATGPT}: at rest']):
+        lab.configure(list_lines=lines)
+        result = lab.watch()
+        assert not lab.calls('codex-run') and 'not in its form' in result.stdout, result.stdout
+        assert not [call for call in lab.calls('logins') if call[0] == 'give']
+    lab.configure(list_lines=[])
+    lab.watch()
+    assert ['give', members[3], '--as', 'qa-watch/gone'] in lab.calls('logins')
+
+
 def a_failed_listing_admits_no_pass(lab):
     reserved_pool(lab)
     lab.waiting(2)
@@ -2928,7 +2979,8 @@ tool['Watch'].call = call
     assert not any(s.get('stage') == 'reserving' for _, s in lab.watch_states())
 
 
-CASES = (an_uncertain_grant_counts_before_another_repository_takes,
+CASES = (a_saved_reservation_past_the_cap_is_cancelled, qa_admits_nothing_while_its_old_rows_wait,
+         a_listing_out_of_its_form_admits_and_gives_nothing, an_uncertain_grant_counts_before_another_repository_takes,
          qa_holds_at_most_the_pool_less_the_reserve,
          a_stuck_login_leaves_qa_one_pass,
          a_walks_take_finds_a_login_whatever_qa_asked,

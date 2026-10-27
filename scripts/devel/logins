@@ -104,7 +104,9 @@ def login_check(path):
 
 
 def note_ok(value):
-    return isinstance(value, str) and len(value) <= 120 and not any(c in value for c in '\t\n\r')
+    # No control character or line separator: `list` prints a note inside a login's own line.
+    return isinstance(value, str) and len(value) <= 120 and not any(
+        ord(c) < 32 or 0x7f <= ord(c) < 0xa0 or c in '\u2028\u2029' for c in value)
 
 
 def duration(seconds):
