@@ -254,16 +254,21 @@ machine, in a private directory `E`, with temper's binary copied in:
   leaves the other dead (jig's `llm.md` 5.6). A diagnosis runs the
   deployment's own commit (a debug build with throwaway diagnostics
   allowed, never landed), one opener at a time.
-- **The recovery,** on the director's yes: the deployment's own build,
-  with one setting raised (1008, 1202) or the cause's fix alone on top
-  of that commit (1659, on a throwaway branch, never landed); never a
-  later build, and no stored family moved. It runs once, alone, on the
-  deployment's own config, data and cache. A setting raised for it
+- **The recovery:** the deployment's own build, with one setting
+  raised (1008, 1202) or the cause's fix alone on top of that commit
+  (1659, on a throwaway branch, never landed); never a later build, and
+  no stored family moved. It runs once, alone, on the deployment's own
+  config, data and cache. A setting raised for it
   goes into that deployment's config only, and is restored byte for
   byte after. Then the export, checked by `stat` (a regular file, 0600,
   its size) and its sha256, and the box stopped with the login at rest.
   A deployment whose export hangs is stopped at once and never
   restarted until the fix is in.
+- **The director hears, and says yes only to a departure:** the owner
+  posts the director when a recovery starts and when the login is
+  back. A recovery that departs from this section (a later build, a
+  copy, a second opener, anything it does not name) waits for the
+  director's yes.
 - **An export from a stopped deployment** is parked, not for v0.1.0
   (design/upgrades-draft, 10-27; jig's `llm.md` 10).
 - **10-27's four,** each recovered:
@@ -355,3 +360,6 @@ Newest last, times UTC.
   or the fix alone on the deployment's own commit, in place and never
   copied, on the director's yes; the hand on the box the one
   design/upgrades-draft names (design/upgrades-draft).
+- 10-27 19:0xZ: a recovery by 6.4 needs no yes: the director hears when
+  it starts and when the login is back, and a departure from 6.4 waits
+  for its yes (the director, the user wanting it out of QA's routine).
