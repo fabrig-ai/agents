@@ -146,9 +146,10 @@ whose future is open (section 9).
   settings' `batch` (five, for now). Passes that start at one check
   share the waiting commits: n is the repository's commits that `main`
   holds and no pass has, k the passes for which a slot and every login
-  were reserved, at most n, and each takes ⌈n/k⌉ of them, oldest first,
-  at most the batch, so that free slots shorten the wait rather than
-  idle. Each pass's commits are saved in its `pass.json` before any
+  were reserved, at most n, and each takes ⌈n/k⌉ of them at most,
+  oldest first, at most the batch, leaving one for every later pass
+  (five over four slots are 2, 1, 1, 1, never an empty fourth), so that
+  free slots shorten the wait rather than idle. Each pass's commits are saved in its `pass.json` before any
   starts; a reservation that fails gives its share back to the next
   check. The rest wait for the next passes. A pass covers one
   repository, and a repository may have several at once, each on its
@@ -161,7 +162,14 @@ whose future is open (section 9).
   share a working tree or a target. A pass takes its repository's
   lowest free slot, named in its `pass.json`, and holds it until its
   session's unit and every deployment unit of its own are confirmed
-  stopped (10.3), not merely until its report or its logins are back.
+  stopped (10.3), not merely until its report or its logins are back;
+  a deployment stopped with a login still out releases the slot, its
+  custody and scratch kept. Every call the service makes outside
+  itself is bounded (`systemctl` 30 seconds, `logins` and `post` 60,
+  `landings` and `codex-run` 120, `record` and a fetch 300); a launch
+  that timed out is recovered from its run's meta, never taken for
+  none; and one repository's failure, or one refused start, never
+  stops the others.
   The service makes a slot's worktree under the clone's lock, and
   before each pass checks it is a worktree of that clone at its path;
   one half made (a crash, a failed checkout) is removed, the clone's
