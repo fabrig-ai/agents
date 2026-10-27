@@ -214,9 +214,11 @@ here. Durable know-how belongs here, not in the session's memory or in
 
 ## 9. The record
 
-- **Decisions** are numbered, a hundred to a file; the 101st opens the next
-  file with its `# Decisions N to M` heading. A call answering a post
-  cites the post's id.
+- **Decisions** are numbered, a hundred to a file or 128 KiB, whichever
+  comes first; the next opens the next file with its `# Decisions N to M`
+  heading (0014.md reached its cap at 1370, so 0015.md opens at 1371).
+  A call answering a post cites the post's id, in a few lines: the call
+  and its reason, never the post retold.
 - **Times** come from `date -u` before writing; what is not known is
   `unknown`, never the time of recording.
 - **Text with `%`** goes into records through a here-document or Python,
