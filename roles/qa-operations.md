@@ -149,10 +149,12 @@ to fix-start), the fix (fix-start to fix-pushed), the landing
 - **The mark:** an owner marks a landing commit a user meets through
   the product's tool with `QA:` ([owners.md](owners.md)). A commit that
   changes only tests, fixtures or figures carries none.
-- **Choosing:** once `qa default temper on` is set (qa-flow.md 3), every
-  marked commit landed after it runs, in landing order, batched (at most
-  `QA_BATCH`), and the director's `qa decide ... backlog` is the
-  exception. Until then the director decides at every wake, not only at
+- **Choosing:** once `qa default temper on` is set (qa-flow.md 3; built
+  10-27, agents 45c713a; the director sets it at the watch's restart),
+  every marked commit landed after it runs, by ancestry, in landing
+  order, batched (at most `QA_BATCH`), and the director's `qa decide ...
+  backlog` is the exception; `qa candidates` lists only what no default
+  covers. Until then the director decides at every wake, not only at
   its check: QA sat idle twice on 10-27 with nothing chosen. It runs
   what the rung's path and QA's findings' fixes landed, and backlogs
   repins and test-only commits.
@@ -160,14 +162,20 @@ to fix-start), the fix (fix-start to fix-pushed), the landing
   holds at most its size less `QA_LOGIN_RESERVE`, a stuck login counted
   against it, and its takes never queue, so a walk is never kept waiting
   behind QA (qa-flow.md 10.6).
-- **Triage:** once triage by landing is built (qa-flow.md 6), the tool
-  posts each finding to the designer of the mission that landed its
-  commit. The director gets a finding with no commit on `main`, or with
-  no mission it can read, one that concerns security or lost data, and
-  every stuck login. Until then, the director routes them the same way:
-  a finding on v0.1.0's happy path goes to its designer at once, any
+- **Triage, by landing** (qa-flow.md 6; built 10-27, agents 66efd32,
+  live on the logins' machine from its watch's restart after the roll):
+  at a pass's end, each new finding goes by post to the active designer,
+  else the active owner, of the mission that landed its commit
+  (`landings landed REPO COMMIT` names it), with its triage line written
+  once the post is accepted. The designer routes it on to its owner, or
+  to another designer if it isn't theirs. The director gets the rest: a
+  finding with no or an unknown commit, one not on `main` or with no
+  landing, a mission it can't read, ambiguous metadata, `Concerns:
+  security` or `lost data`, every stuck login, and every finding of a
+  pass that ended before the restart. The director routes those as
+  before: a finding on v0.1.0's happy path to its designer at once, any
   other to the backlog until v0.1.0 is out (the record's
-  `director/direction.md`, priority 3).
+  `director/direction.md`, priority 3). `qa triage` by hand still wins.
 - **Rungs:** design/ladder opens the next rung with `qa rung` once the
   rung below is green.
 
@@ -468,3 +476,4 @@ Newest last, times UTC.
 - 10-27 21:1xZ: findings routed by the landing of their commit (agents
   66efd32); passes ended before it stay the director's
   (design/qa-evidence).
+- 10-27 21:2xZ: QA's choosing by default (agents 45c713a) and triage by landing (agents 66efd32) built; section 4 updated (the director).
