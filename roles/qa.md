@@ -63,11 +63,11 @@ makes a finding there.
 
    **A held login,** when the brief names one, the service has taken
    for you: it rests at the path the brief gives. Move it into your
-   deployment as the binding says (for temper, `temper ctl import`; a
+   deployment as the binding says (for temper, `temper ctl account import`; a
    program's login, a directory, is used in place, never moved),
    and at once write the give-back file the brief names: an executable
    that moves each login back to its path by the product's export (for
-   temper, `temper ctl DIR export N PATH`), safe to run twice, every
+   temper, `temper ctl DIR account export N PATH`), safe to run twice, every
    program in it named by its absolute path: it runs outside your
    shell. Your
    unit runs it when it stops, whatever stops it, so keep it right as
