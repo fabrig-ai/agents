@@ -1341,8 +1341,11 @@ holds; and under parts: one part cleared and the other not yet, a red
 from either deciding at once, a commit a whole tier judged before the
 split, a part's records hidden from a reader that knows no parts,
 `landings cleared` over two parts, and the verdicts' report (landing-flow.md
-10). With the real heavy and origin, fixture
-mode is also how a live run goes before the runner does.
+10). Both suites hold under any load: a story proves a deadline
+with a stand-in that blocks until killed, never with work that must
+fit inside it, and waits on a handshake or the fixture's one clock,
+never on real work racing a timer. With the real heavy and origin,
+fixture mode is also how a live run goes before the runner does.
 
 ## 12. A machine without heavy
 
