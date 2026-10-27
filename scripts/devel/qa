@@ -291,6 +291,29 @@ class Pass:
         return fields
 
 
+def cut_body(body, budget):
+    lines = body.splitlines(keepends=True)
+    groups = [[], [], [], []]
+    section, after, size = '', False, 0
+    for index, line in enumerate(lines):
+        heading = re.fullmatch(r'##[ \t]+(.*)', line.rstrip('\r\n'))
+        if heading:
+            after |= section == 'Findings'
+            section = heading[1].strip()
+        group = 0 if section == 'Cases' else 1 if after else 3 if section == 'Findings' else 2
+        length = len(line.encode())
+        groups[group].append((index, length))
+        size += length
+    # Keep findings last; unsectioned text is the fallback for older reports.
+    for group in groups:
+        for index, length in reversed(group):
+            if size <= max(0, budget):
+                return ''.join(lines)
+            lines[index] = ''
+            size -= length
+    return ''.join(lines)
+
+
 class Record:
     def __init__(self, workspace, logger=None):
         self.workspace, self.root = workspace, workspace.records
@@ -2109,11 +2132,9 @@ class Watch:
                       + (': the whole report is in the evidence copy, git show '
                          f'{copy["commit"]}:passes/{state["pass"]}/report.md.'
                          if copy['state'] == 'kept' else '.') + ')\n')
-            body, report.body = report.body.encode(), ''
+            body, report.body = report.body, ''
             budget = max(0, 8192 - len((report.text() + suffix).encode()))
-            prefix = body[:budget]
-            prefix = prefix[:prefix.rfind(b'\n') + 1]
-            report.body = prefix.decode() + suffix
+            report.body = cut_body(body, budget) + suffix
         if self.record.commit({name: report.text()}, f'qa watch: {state["pass"]} evidence') is not False:
             copy['recorded'] = self.wanted(state)
             self.save(directory, state)
@@ -2179,10 +2200,7 @@ class Watch:
             suffix = f'\n(Cut at 8 KiB: the report was {len(report.encode())} bytes.)\n'
             result.body = f'# QA pass {name}\n\n'
             budget = limit - len((result.text() + suffix).encode())
-            prefix = report.encode()[:max(0, budget)]
-            # A long first line contributes nothing; no partial UTF-8 or partial line.
-            prefix = prefix[:prefix.rfind(b'\n') + 1]
-            result.body += prefix.decode() + suffix
+            result.body += cut_body(report, budget) + suffix
         try:
             pushed = self.record.commit({f'qa/passes/{name}.md': result.text()}, f'qa watch: {name} {outcome}')
         except Problem as error:
