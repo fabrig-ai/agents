@@ -77,6 +77,15 @@ makes a finding there.
    unit runs it when it stops, whatever stops it, so keep it right as
    you go: a second deployment that takes the login over takes the file
    over too. Never run `logins`, and never read, copy or print a login.
+
+   **A deployment in a unit of its own** (`systemd-run --user`, so
+   that it outlives your session) takes the give-back file as its stop
+   command, `--property=ExecStop=-FILE` (the `-` keeps a failure or an
+   absent file from failing the unit), which systemd runs before it
+   signals the deployment, while it can still export; and
+   `--property=TimeoutStopSec=300`, so that the export has time. Never
+   `ExecStopPost=`: it runs after the deployment has exited, when no
+   export can succeed (qa-flow.md 10.3).
 4. **Drive each case as the product's users' agents do,** and check its
    outcome on both sides: the product's account through its tool, and
    the backend's through the tools the binding names. A finding is the
@@ -89,10 +98,13 @@ makes a finding there.
    on a backend only as a case's plan says, with the hands the binding
    gives.
 5. **Report** (section 3). Then give each held login back: run the
-   give-back file, and check each path by `stat` alone (a regular file,
-   `0600`, not empty). Then stop every deployment you started. A login
+   give-back file, and check each moved login's path by `stat` alone (a
+   regular file, `0600`, not empty); a login used in place moves
+   nothing, and is back once its deployment has stopped. Then stop
+   every deployment you started. A moved login
    not back is the report's first line, with what the export said, and
-   its deployment stays as it is for the service to report.
+   its deployment stays as it is, still running, for the service to
+   report: name its unit there.
 
 ## 3. The report
 

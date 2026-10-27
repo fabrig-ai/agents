@@ -237,6 +237,7 @@ takes a repository's name where it needs one.
 | `qa watch` | runs the service (section 4) |
 | `qa keep --check DIRECTORY` | scans what a copy of DIRECTORY would hold, and writes nothing (section 11.5) |
 | `qa keep --walk NAME DIRECTORY` | keeps a focused walk's evidence (section 11.5) |
+| `qa deploy DIRECTORY NAME -- COMMAND...` | starts a pass's deployment in a unit of its own, stopped by its give-back (section 10.5) |
 
 The record is committed with `record commit`, and its rows are in
 [records.md](records.md) 3's table:
@@ -376,22 +377,66 @@ the director says so to the user.
   product's export, safe to run twice (the second export finds the
   file there and sends nothing). A login used in place moves nothing:
   the give-back has nothing to do for it, and the login is back once
-  the deployment that used it has stopped, which the unit's stop
-  ensures. It runs that file itself before it
-  stops its deployment, and checks each path by `stat`. It never runs
-  `logins`. A stop in the seconds between the import and the file is a
-  login lost in its deployment (below).
+  the deployment that used it has stopped. It runs that file itself
+  before it stops its deployment, and checks each path by `stat`. It
+  never runs `logins`. A stop in the seconds between the import and the
+  file is a login lost in its deployment (below).
+- **Each deployment is a unit of its own,** started with `qa deploy
+  DIRECTORY NAME -- COMMAND...` (10.5): the user unit
+  `qa-<pass>-<NAME>`, outside the session's unit, so that it outlives
+  the session and a login not back stays where it can still be
+  exported. Its stop command (`ExecStop=`) runs the give-back file,
+  which systemd runs before it signals the deployment, while the
+  deployment can still export; never only after it has exited
+  (`ExecStopPost=`), when no export can succeed (pass
+  20261027-1202-temper's box unit, 10-27). The file need not exist when
+  the unit starts.
+- **A failed export leaves the deployment up,** where the session or
+  the service decides: the session stops a deployment only once each
+  login it moved is back by `stat`, and otherwise leaves it running
+  and says so, in its report's first line with the unit's name
+  (roles/qa.md 2, step 5); the service stops one only as the last
+  bullet says. A stop nobody decided (a person's `systemctl stop`, a
+  shutdown) runs the give-back first, as the unit's stop command, but a
+  failed export can't hold that stop back: it is the best the unit
+  can do, and what it leaves is a login lost in a dead deployment
+  (below). So is a deployment that exits by itself or crashes: its stop
+  command then runs after it, and exports nothing.
 - **A stop gives back too:** the session runs under `codex-run task
   --on-stop` with the give-back file, so that its unit runs the file
-  before the deployment inside it is signalled: at the cap, a person's
-  stop, a shutdown, or a session that ended with its deployment up
-  ([post.md](post.md) 5).
+  at the cap, a person's stop, a shutdown, or a session that ended with
+  its deployment up ([post.md](post.md) 5), while the deployment's own
+  unit is still up; the session's stop never stops that unit. At a
+  shutdown the two units stop together, and each deployment's own stop
+  command is what gives its login back. The give-back is run through
+  one wrapper that takes a lock in the scratch directory (10.5), so
+  that two stops that run it at once take turns.
 - **The service gives after the end,** once the run's unit is
   inactive and its give-back done. A login not back stays the
-  service's: the pass's notice to the director names it and the
-  deployment's directories, and the service tries the give again at
-  each check, so that the login is free as soon as it is back. It
-  keeps that pass's scratch until then, past its 7 days.
+  service's: the pass's notice to the director names it, the
+  deployment's directories and its units, and the service tries the give
+  again at each check, so that the login is free as soon as it is back.
+  It keeps that pass's scratch until then, past its 7 days.
+- **A pass's end, in order,** each step saved in its `pass.json` before
+  the next, and each one not done tried again at the next check:
+  1. the report and the evidence (section 5, 11.4);
+  2. each moved login given back (`logins give`, which frees it once it
+     is back at rest);
+  3. once every moved login is back, each of the pass's units stopped,
+     those `qa deploy` recorded (10.5), and its stop confirmed by
+     `systemctl`; a pass that held no login has its units stopped at
+     once;
+  4. each login used in place given back, only once every unit of the
+     pass is confirmed stopped, so that no deployment still uses it
+     when it is free;
+  5. the notice, which says what is still out: a login not back, a
+     unit up or of unknown state.
+
+  A login's kind, moved or in place, is known from its resting path
+  when the service takes it (a file is moved, a directory used in
+  place, 10.2), and kept in `pass.json` with it. The scratch is never
+  deleted while a login is out or a unit of the pass is up or of
+  unknown state, past its 7 days.
 - **A login lost in a dead deployment** (one that died before its
   export: a crash, a session that stopped its deployment first) is in
   the deployment's state, kept with the pass's scratch. The director
@@ -414,6 +459,56 @@ held).
 | `logins take NAME --as HOLDER [--note TEXT] [--wait SECONDS]` | grants NAME in turn and prints its resting path; exit 1 while another holds it or waits first |
 | `logins give NAME --as HOLDER` | frees NAME once its login is back; exit 1, still held, if it isn't |
 | `logins list [NAME]` | each login's holder, waiters and last 24 hours |
+
+### 10.5 A deployment's unit
+
+- **`qa deploy DIRECTORY NAME -- COMMAND [ARG]...`** starts COMMAND as
+  the transient user unit `qa-<pass>-<NAME>`, `<pass>` DIRECTORY's
+  name, and prints the unit's name. DIRECTORY is a pass's scratch
+  directory, or a focused walk's, absolute and of the characters a stop
+  command may hold (codex-run's rule: no shell, no `$`); NAME is a
+  lowercase slug. Before it starts the unit, it appends the unit's name
+  to `DIRECTORY/deployments`, which the service reads (10.3), since a
+  collected unit leaves no trace in systemd.
+- **The unit:**
+  - `Type=exec`, COMMAND in the foreground, `KillMode=control-group`;
+  - works in DIRECTORY, its output appended to `DIRECTORY/<NAME>.log`;
+  - its stop command (`ExecStop=`) is `qa`'s give-back wrapper on
+    DIRECTORY: it runs `DIRECTORY/give-back` under a lock,
+    `DIRECTORY/give-back.lock`, so that runs take turns; an absent file
+    is nothing; a run is bounded, its output and exit appended to
+    `DIRECTORY/give-back.log`; and a failure never fails the unit, as
+    codex-run runs a stop command (post.md 5);
+  - `TimeoutStopSec=` above the wrapper's bound, so that systemd never
+    signals the deployment while its export runs;
+  - no `ExecStopPost=`;
+  - collected once stopped.
+- **The session's stop runs the same wrapper:** the service starts the
+  session with `--on-stop` on a file that runs it, so that both stops
+  take the one lock.
+- **It names no product:** COMMAND is the binding's (temper's `temper
+  box`, with its flags).
+- **Its fixture,** `test-qa`, under a fake systemctl whose stop runs the
+  stop command before it ends the process:
+  - `qa deploy` records the unit, then hands systemd its name, its
+    directory, its log, the wrapper as its stop command, the timeout,
+    and no `ExecStopPost=`; an unsafe DIRECTORY or NAME is refused;
+  - a deployment that can export only while it is up gets its login
+    back when the session is stopped at the cap, and the service stops
+    its unit after the give: a stopped pass's login is back;
+  - a failed export leaves the unit up and the login held; the notice
+    names the unit; once the login is back, the next check gives it and
+    stops the unit;
+  - two stops that run the wrapper at once take turns;
+  - a wrapper past its bound is ended, logged, and the unit still
+    stops;
+  - a deployment that exited by itself leaves its login out, and the
+    notice says so;
+  - a stop that `systemctl` fails, or a unit of unknown state, is tried
+    again at the next check, and the scratch is kept;
+  - a service restarted between steps goes on from the last one saved;
+  - a pass with no login has its units stopped at its end;
+  - a login used in place is given only after every unit has stopped.
 
 ## 11. The evidence, kept
 
