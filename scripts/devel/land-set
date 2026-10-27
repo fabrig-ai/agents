@@ -540,7 +540,7 @@ def write_proof(runner, path, label, host, token, spec, paths, candidates, bases
              for name, commit in candidates.items()}
     for name, entry in repos.items():
         if entry['pin_only']:
-            entry['path'] = str(paths[name].resolve())
+            entry['worktree'] = str(paths[name].resolve())
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     pending = path.with_suffix('.tmp')
     with pending.open('w') as out:
