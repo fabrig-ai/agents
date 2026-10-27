@@ -173,7 +173,9 @@ and the others wait for it:
 - **Others wait for room.** While the reservation holds, the build lane
   admits a task that is not a landing's only with its `floor_gb` plus
   the largest `room_gb` among the reserving landings' tasks free;
-  otherwise it stays queued, and the lane's order holds behind it. Its
+  otherwise it stays queued, and the lane's order holds behind it:
+  with unlimited slots too, admission checks the older builds' room
+  before a younger one's, so none passes a build that waits. Its
   submission's check and its payload's check stay the floor's alone: a
   build is refused only below the floor, as before. A build already
   running goes on.
@@ -196,13 +198,18 @@ and the others wait for it:
   minutes old as refused (code 2, refusal `disk-floor`), through the
   usual release and receipt path, as a queued refusal is today; a crash
   of the client or the reconciler loses nothing, since the time is in
-  the ledger. Its wrapper, finding its token refused, prints the floor's
-  diagnostic and `heavy: disk floor refused before payload start`, the
-  line `land` maps to its exit 9, and exits 2. A wrapper dead before its
+  the ledger. The waiting client, finding its token refused, prints the
+  floor's diagnostic and `heavy: disk floor refused before payload
+  start`, the line `land` maps to its exit 9, and exits 2; the wrapper's
+  unit writes only to the journal. A wrapper dead before its
   claim is cancelled as today (code 137, section 2).
 - **The payload's check** stays the floor's, with no wait: a landing
   admitted on its floor that finds less just before its command starts
-  is refused, as before.
+  is refused, as before. It judges by the task's `floor_gb`, as
+  submitted, and its diagnostic says so.
+- **Wall time.** The 2 and 20 minutes are wall-clock times, as the
+  ledger's others are: a clock step shifts them. A monotonic pair
+  would be a ledger change, not made.
 - **What it costs:** a landing's wait under the set lock holds other
   landings for as long, at most 20 minutes, where today the set stops
   and loses the lock. Others' builds wait while a landing reserves and
