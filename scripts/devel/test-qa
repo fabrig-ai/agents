@@ -188,6 +188,21 @@ class Lab:
     def watch(self, status=0, extra=None, now=None):
         return self.run('watch', '--director', 'director@fixture', '--once', status=status, extra=extra, now=now)
 
+    def walk(self, rung='b0', *args, status=0, now=None):
+        path = self.tmp / 'qa-focused' / ('rung-' + rung + '-brief.md')
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not path.exists():
+            path.write_bytes(b'Rung fixture brief.\n\x00Preserve these bytes.\n')
+        return self.run('walk', 'temper', rung, *args, status=status, now=now)
+
+    def walk_states(self):
+        return [(self.tmp / 'qa-focused' / path.stem, json.loads(path.read_text()))
+                for path in sorted((self.tmp / 'qa/walks').glob('*.json'))]
+
+    def walk_state(self):
+        state, = self.walk_states()
+        return state
+
     def watch_states(self):
         return [(path.parent, json.loads(path.read_text())) for path in sorted((self.tmp / 'qa').glob('*/pass.json'))]
 
@@ -659,6 +674,11 @@ elif name == 'logins':
             print('  waiting: other since 2026-10-26T09:15:23Z (any of chatgpt)')
             print('  last 24 hours: 0:01 held')
         sys.exit(0)
+    if args[0] == 'drop':
+        entry = dict(holder=args[args.index('--as') + 1], request=args[1], pool='--any' in args)
+        config['login_queue'] = [row for row in config.get('login_queue', []) if row != entry]
+        (root / 'tools.json').write_text(json.dumps(config))
+        sys.exit(0)
     assert args[0] in ('take', 'give'), args
     login = args[1]
     position = args.index('--as')
@@ -671,6 +691,9 @@ elif name == 'logins':
         now = '--now' in args
         if holder.startswith('qa-watch'):
             assert pool and now and args[position + 2] == '--note' and args[position + 3] in ('temper', 'jig'), args
+        if holder.startswith('walk/'):
+            assert pool and not now and args[-2:] == ['--wait', '900'], args
+            assert Path(args[args.index('--note') + 1]).is_dir(), args
         members = config.get('pools', {}).get(login, [login]) if pool else [login]
         queue = config.setdefault('login_queue', [])
         entry = dict(holder=holder, request=login, pool=pool)
@@ -692,6 +715,8 @@ elif name == 'logins':
             if choice:
                 reserved.add(choice)
         if login in config.get('logins_busy', []) or available is None:
+            if '--wait' in args:
+                queue.remove(entry)
             (root / 'tools.json').write_text(json.dumps(config))
             print('fixture login busy', file=sys.stderr)
             sys.exit(1)
@@ -2928,7 +2953,347 @@ tool['Watch'].call = call
     assert not any(s.get('stage') == 'reserving' for _, s in lab.watch_states())
 
 
-CASES = (an_uncertain_grant_counts_before_another_repository_takes,
+def a_walk_takes_a_login_and_a_slot_and_starts(lab):
+    main = lab.git(lab.products['temper'], 'rev-parse', 'HEAD')
+    path = resting(lab, CHATGPT)
+    result = lab.walk('b0', '--login', CHATGPT)
+    directory, state = lab.walk_state()
+    checkout = lab.tmp / 'qa/repos/temper-walk-1'
+    assert state['slot'] == 1 and state['holder'] == 'walk/rung-b0-1'
+    assert state['starter'] == 'o/fixture@' + socket.gethostname()
+    assert state['ref'] == 'main' and state['main'] == main and state['cap'] == 180
+    assert lab.git(checkout, 'rev-parse', 'HEAD') == main
+    assert lab.git(checkout, 'rev-parse', '--abbrev-ref', 'HEAD') == 'HEAD'
+    assert state['pools'] == {CHATGPT: CHATGPT} and state['logins'] == {CHATGPT: str(path)}
+    assert directory.stat().st_mode & 0o777 == 0o700
+    assert (directory / 'brief.md').read_bytes() == (directory.parent / 'rung-b0-brief.md').read_bytes()
+    task = (directory / 'task.md').read_text()
+    assert all(word in task for word in (str(path), CHATGPT, str(checkout), main,
+                                        str(directory / 'give-back'), str(directory / 'report.md'), 'qa deploy'))
+    rows = (directory.parent / 'b0/loop.tsv').read_text().splitlines()
+    assert rows[0] == 'time\trung\twalk\tevent\tnote'
+    assert len(rows) == 2 and rows[1].split('\t')[1:4] == ['b0', 'rung-b0-1', 'walk-start']
+    assert main[:9] in rows[1] and CHATGPT in rows[1]
+    assert lab.calls('logins') == [['take', CHATGPT, '--any', '--as', state['holder'],
+                                  '--note', str(directory), '--wait', '900']]
+    assert lab.calls('codex-run') == [['task', '--to', 'qa-watch', '--on-stop', str(directory / 'on-stop'),
+                                      str(directory / 'task.md'), str(checkout), str(directory / 'report.md')]]
+    assert result.stdout.splitlines() == ['walk rung-b0-1', f'{CHATGPT} {path}', 'run ' + state['run']]
+    before = lab.head()
+    lab.watch()
+    assert lab.walk_state()[1]['stage'] == 'running' and lab.head() == before and not lab.sent()
+
+
+def a_refused_login_starts_nothing(lab):
+    lab.configure(logins_busy=[CLAUDE])
+    lab.walk('b0', '--login', CLAUDE, '--login', CHATGPT, status=1)
+    directory, state = lab.walk_state()
+    assert state['stage'] == 'ended' and state['released'] and state['given'] == [CHATGPT]
+    assert ['give', CHATGPT, '--as', state['holder']] in lab.calls('logins')
+    assert not lab.calls('codex-run') and not (directory.parent / 'b0/loop.tsv').exists()
+    config = json.loads((lab.root / 'tools.json').read_text())
+    assert not config['logins_held'] and not config['login_queue']
+
+
+def a_third_walk_is_refused_at_once(lab):
+    lab.walk('b0')
+    lab.walk('b0')
+    before = lab.calls('logins')
+    result = lab.walk('b0', '--login', CHATGPT, status=1)
+    assert result.stderr == 'qa: no free walk slot for temper\n'
+    states = [state for _, state in lab.walk_states()]
+    assert [state['slot'] for state in states] == [1, 2, None]
+    assert states[-1]['stage'] == 'ended' and states[-1]['released']
+    assert lab.calls('logins') == before and len(lab.calls('codex-run')) == 2
+
+
+def driven_walk(lab, patch, *args, status=0):
+    brief = lab.tmp / 'qa-focused/rung-b0-brief.md'
+    brief.parent.mkdir(parents=True, exist_ok=True)
+    brief.write_text('fixture rung\n')
+    driver = f'import os, runpy, sys\ntool = runpy.run_path({str(SCRIPT)!r})\n' + patch + '\nsys.exit(tool["main"]())\n'
+    result = subprocess.run([sys.executable, '-I', '-S', '-c', driver, 'walk', 'temper', 'b0', *args],
+                            env=lab.env, capture_output=True, text=True, timeout=HUNG_TOOL_S)
+    assert result.returncode == status, (result.returncode, result.stdout, result.stderr)
+    return result
+
+
+def a_walk_grant_lost_in_a_crash_is_given_back(lab):
+    driven_walk(lab, '''Watch = tool['Watch']
+original = Watch.call
+def call(self, name, *args):
+    result = original(self, name, *args)
+    if name == 'logins' and args[0] == 'take' and result.returncode == 0:
+        os._exit(77)
+    return result
+Watch.call = call
+''', '--login', CHATGPT, status=77)
+    directory, state = lab.walk_state()
+    assert state['stage'] == 'reserving' and not state['logins'] and state['slot'] == 1
+    lab.watch()
+    state = lab.walk_state()[1]
+    assert state['stage'] == 'ended' and state['released']
+    assert ['give', CHATGPT, '--as', state['holder']] in lab.calls('logins')
+    assert not lab.calls('codex-run') and not lab.sent()
+    lab.walk('b0', '--login', CHATGPT)
+    assert lab.walk_states()[-1][1]['slot'] == 1
+
+
+def the_service_ends_a_walk_at_its_cap(lab):
+    resting(lab, CHATGPT)
+    lab.configure(logins_real=[CHATGPT])
+    lab.walk('b0', '--login', CHATGPT, '--cap', '1', now='2026-10-27T10:00:00Z')
+    directory, state = lab.walk_state()
+    unit, pid = deployment(lab, directory, login=CHATGPT)
+    before = lab.head()
+    lab.watch(now='2026-10-27T10:01:01Z', extra={'QA_POST_STATUS': '2'})
+    state = lab.walk_state()[1]
+    assert state['capped'] and state['released'] and state['given'] == [CHATGPT]
+    assert state['end_logged'] and not state['posted'] and state['stage'] == 'ending'
+    dead(pid)
+    lab.watch(extra={'QA_POST_STATUS': '3'})
+    lab.watch()
+    state = lab.walk_state()[1]
+    assert state['stage'] == 'ended' and state['posted'] and lab.head() == before
+    rows = (directory.parent / 'b0/loop.tsv').read_text().splitlines()
+    assert [row.split('\t')[3] for row in rows[1:]] == ['walk-start', 'walk-end']
+    assert 'exit 143' in rows[-1]
+    posts = lab.sent()
+    assert len(posts) == 2
+    assert posts[-1]['args'][1:3] == [state['starter'], 'qa: walk rung-b0-1 ended']
+    assert str(directory / 'report.md') in posts[-1]['body'] and 'exit 143' in posts[-1]['body']
+    calls = list(map(json.loads, (lab.root / 'tools.jsonl').read_text().splitlines()))
+    give = next(i for i, call in enumerate(calls) if call['tool'] == 'logins' and call['args'] == ['give', CHATGPT, '--as', state['holder']])
+    stop = next(i for i, call in enumerate(calls) if call['tool'] == 'systemctl' and call['args'] == ['--user', 'stop', '--no-block', '--', unit])
+    assert give < stop
+    assert ['send', '--as', 'qa-watch', state['starter'], 'qa: walk rung-b0-1 ended', str(directory / 'post-body')] in lab.calls('post')
+
+
+def a_stuck_walk_login_stays_held(lab):
+    resting(lab, CHATGPT)
+    lab.configure(logins_real=[CHATGPT])
+    lab.walk('b0', '--login', CHATGPT, '--cap', '1', now='2026-10-27T10:00:00Z')
+    directory, state = lab.walk_state()
+    unit, pid = deployment(lab, directory, login=CHATGPT)
+    executable(directory / 'give-back', 'raise SystemExit(1)\n')
+    lab.watch(now='2026-10-27T10:01:01Z')
+    state = lab.walk_state()[1]
+    assert state['stage'] == 'ending' and not state['released'] and not state['given'] and alive(pid)
+    config = json.loads((lab.root / 'tools.json').read_text())
+    assert config['login_holders'][CHATGPT] == state['holder']
+    post, = lab.sent()
+    assert unit in post['body'] and state['logins'][CHATGPT] in post['body']
+    assert post['args'][1] == state['starter']
+    lab.walk('b0')
+    assert lab.walk_states()[-1][1]['slot'] == 2
+    (directory / 'box/login').rename(state['logins'][CHATGPT])
+    lab.watch()
+    state = lab.walk_states()[0][1]
+    assert state['given'] == [CHATGPT] and state['released'] and state['stage'] == 'ended'
+    dead(pid)
+    assert len(lab.sent()) == 1
+    lab.walk('b0')
+    assert lab.walk_states()[-1][1]['slot'] == 1
+
+
+def a_walks_logins_leave_qas_cap_untouched(lab):
+    lab.configure(pools={CHATGPT: [CHATGPT, 'chatgpt-2', 'chatgpt-3', 'chatgpt-4']})
+    lab.walk('b0', '--login', CHATGPT)
+    lab.walk('b1', '--login', CHATGPT)
+    lab.rung('temper', REAL, CHATGPT)
+    lab.waiting(2)
+    lab.watch(extra={'QA_LOGIN_RESERVE': '2', 'QA_SLOTS': '2'})
+    passes = lab.watch_states()
+    assert len(passes) == 2 and all(state['run'] for _, state in passes)
+    assert {state['pools'][CHATGPT] for _, state in passes} == {'chatgpt-3', 'chatgpt-4'}
+    assert all(state['stage'] == 'running' for _, state in lab.walk_states())
+    assert not [call for call in lab.calls('logins') if call[0] == 'give']
+
+
+def a_walk_refuses_invalid_inputs_before_taking_anything(lab):
+    cases = [([], {'POST_NAME': ''}), ([], {'POST_NAME': 'bad@host'}),
+             (['--cap', '0'], {}), (['--login', 'chatgpt-2'], {}),
+             (['--login', CHATGPT, '--login', CHATGPT], {})]
+    for args, extra in cases:
+        lab.run('walk', 'temper', 'b0', *args, status=2, extra=extra)
+    lab.run('walk', 'temper', 'Bad', status=2)
+    assert not (lab.tmp / 'qa').exists() and not lab.calls('logins') and not lab.calls('codex-run')
+
+
+def a_walk_resolves_origin_branches_and_commit_prefixes(lab):
+    main = lab.marked()
+    branch = lab.commit('fix for confirmation', branch='confirm')
+    # An existing scratch number is part of the rung's namespace too.
+    focused = lab.tmp / 'qa-focused'
+    focused.mkdir()
+    (focused / 'rung-b0-4').mkdir()
+    lab.walk('b0', '--build', 'origin/confirm')
+    lab.walk('b0', '--build', main[:9])
+    first, second = lab.walk_states()
+    assert first[1]['walk'] == 'rung-b0-5' and first[1]['main'] == branch
+    assert second[1]['walk'] == 'rung-b0-6' and second[1]['main'] == main
+    assert lab.git(lab.tmp / 'qa/repos/temper-walk-1', 'rev-parse', 'HEAD') == branch
+    assert lab.git(lab.tmp / 'qa/repos/temper-walk-2', 'rev-parse', 'HEAD') == main
+
+
+def a_walk_preparation_refusal_returns_its_grants(lab):
+    for ref in ('origin/missing', 'HEAD~1'):
+        lab.walk('b0', '--build', ref, '--login', CHATGPT, status=1)
+    # Read the absent brief without Lab.walk creating one for this request.
+    lab.run('walk', 'temper', 'missing', '--login', CHATGPT, status=1)
+    assert all(state['stage'] == 'ended' and state['released'] and state['given'] == [CHATGPT]
+               for _, state in lab.walk_states())
+    assert not lab.calls('codex-run') and not lab.sent()
+    assert not list((lab.tmp / 'qa-focused').glob('*/loop.tsv'))
+    lab.configure(refuse_launch=True)
+    lab.walk('b0', '--login', CHATGPT, status=1)
+    state = next(state for _, state in lab.walk_states() if state['walk'] == 'rung-b0-3')
+    assert state['released'] and state['stage'] == 'ended' and state['given'] == [CHATGPT]
+
+
+def a_walk_launch_lost_in_a_crash_is_recovered(lab):
+    driven_walk(lab, '''Watch = tool['Watch']
+original = Watch.call
+def call(self, name, *args):
+    result = original(self, name, *args)
+    if name == 'codex-run' and result.returncode == 0:
+        os._exit(77)
+    return result
+Watch.call = call
+''', '--login', CHATGPT, status=77)
+    directory, state = lab.walk_state()
+    assert not state['run'] and state['stage'] == 'starting'
+    lab.watch()
+    state = lab.walk_state()[1]
+    assert state['run'] == 'fixture-1' and state['stage'] == 'running' and not state['given']
+    lab.configure(inactive=True)
+    lab.watch()
+    assert lab.walk_state()[1]['stage'] == 'ended' and len(lab.sent()) == 1
+    assert len(lab.calls('codex-run')) == 1
+
+
+def a_timed_out_walk_launch_keeps_custody_for_recovery(lab):
+    driven_walk(lab, '''Watch = tool['Watch']
+original = Watch.call
+def call(self, name, *args):
+    result = original(self, name, *args)
+    if name == 'codex-run':
+        result.returncode = 124
+    return result
+Watch.call = call
+''', '--login', CHATGPT, status=1)
+    assert lab.walk_state()[1]['stage'] == 'starting'
+    lab.watch()
+    state = lab.walk_state()[1]
+    assert state['run'] == 'fixture-1' and state['stage'] == 'running' and not state['given']
+    assert not [call for call in lab.calls('logins') if call[0] == 'give']
+
+
+def a_walk_end_append_survives_an_interrupted_save(lab):
+    lab.walk('b0')
+    directory, state = lab.walk_state()
+    lab.configure(inactive=True)
+    driven_watch(lab, '''import os
+Watch = tool['Watch']
+original = Watch.save
+def save(self, directory, state):
+    if 'walk' in state and state.get('end_logged'):
+        os._exit(0)
+    return original(self, directory, state)
+Watch.save = save
+''')
+    assert not lab.walk_state()[1]['end_logged'] and not lab.sent()
+    lab.watch()
+    assert lab.walk_state()[1]['stage'] == 'ended'
+    rows = (directory.parent / 'b0/loop.tsv').read_text().splitlines()
+    assert len([row for row in rows if row.split('\t')[3] == 'walk-end']) == 1
+    assert len(lab.sent()) == 1
+
+
+def a_walk_in_place_login_waits_for_its_unknown_unit(lab):
+    resting(lab, CLAUDE, in_place=True)
+    lab.walk('b0', '--login', CLAUDE)
+    directory, state = lab.walk_state()
+    unit, pid = deployment(lab, directory)
+    lab.configure(inactive=True, unit_states={unit: 'unknown'})
+    lab.watch()
+    state = lab.walk_state()[1]
+    assert state['kinds'] == {CLAUDE: 'in-place'} and not state['given'] and not state['released']
+    assert CLAUDE in lab.sent()[0]['body'] and unit in lab.sent()[0]['body']
+    lab.configure(unit_states={})
+    lab.watch()
+    assert lab.walk_state()[1]['given'] == [CLAUDE] and lab.walk_state()[1]['stage'] == 'ended'
+    dead(pid)
+
+
+def a_walk_start_does_not_block_the_services_pass_cleanup(lab):
+    lab.waiting(1)
+    lab.watch()
+    directory, state = lab.watch_state()
+    lab.configure(logins_held=[CHATGPT], login_holders={CHATGPT: 'walk/rung-b0-1'})
+    with (lab.tmp / 'qa/walks.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        lab.watch(extra={'QA_CAP_MINUTES': '0'})
+        lab.watch()
+    assert lab.watch_state()[1]['finished'] and lab.watch_state()[1]['released']
+    assert ['give', CHATGPT, '--as', 'walk/rung-b0-1'] not in lab.calls('logins')
+
+
+def a_damaged_walk_state_does_not_block_others_cleanup(lab):
+    lab.walk('b0', '--login', CHATGPT)
+    lab.walk('b1', '--login', CLAUDE)
+    directory, state = lab.walk_states()[0]
+    saved = lab.tmp / 'qa/walks' / (state['walk'] + '.json')
+    original = saved.read_bytes()
+    lab.configure(inactive=True)
+    lab.waiting(1)
+    corruptions = ['{broken json', json.dumps(dict(state, logins=[])), json.dumps(dict(state, given=None)),
+                   json.dumps({key: value for key, value in state.items() if key != 'logins'})]
+    for corrupt in corruptions:
+        saved.write_text(corrupt)
+        result = lab.watch()
+        assert 'invalid walk state; keeping custody' in result.stdout
+        assert ['give', CHATGPT, '--as', state['holder']] not in lab.calls('logins')
+    good = json.loads((lab.tmp / 'qa/walks/rung-b1-1.json').read_text())
+    assert good['stage'] == 'ended' and good['given'] == [CLAUDE]
+    assert lab.watch_state()[1]['run']
+    assert ['give', CHATGPT, '--as', state['holder']] not in lab.calls('logins')
+    saved.write_bytes(original)
+    lab.watch()
+    state = json.loads(saved.read_text())
+    assert state['stage'] == 'ended' and state['given'] == [CHATGPT]
+
+
+def a_linked_walk_state_keeps_its_grant_held(lab):
+    lab.walk('b0', '--login', CHATGPT)
+    directory, state = lab.walk_state()
+    saved = lab.tmp / 'qa/walks' / (state['walk'] + '.json')
+    outside = lab.root / 'outside-state'
+    original = saved.read_bytes()
+    saved.rename(outside)
+    saved.symlink_to(outside)
+    lab.configure(inactive=True)
+    result = lab.watch()
+    assert 'invalid walk state; keeping custody' in result.stdout
+    assert outside.read_bytes() == original and not lab.sent()
+    assert ['give', CHATGPT, '--as', state['holder']] not in lab.calls('logins')
+    saved.unlink()
+    outside.rename(saved)
+    lab.watch()
+    assert lab.walk_state()[1]['stage'] == 'ended'
+
+
+CASES = (a_damaged_walk_state_does_not_block_others_cleanup,
+         a_linked_walk_state_keeps_its_grant_held, a_walk_refuses_invalid_inputs_before_taking_anything,
+         a_walk_resolves_origin_branches_and_commit_prefixes,
+         a_walk_preparation_refusal_returns_its_grants, a_walk_launch_lost_in_a_crash_is_recovered,
+         a_timed_out_walk_launch_keeps_custody_for_recovery, a_walk_end_append_survives_an_interrupted_save,
+         a_walk_in_place_login_waits_for_its_unknown_unit, a_walk_start_does_not_block_the_services_pass_cleanup,
+         a_walk_takes_a_login_and_a_slot_and_starts,
+         a_refused_login_starts_nothing, a_third_walk_is_refused_at_once,
+         a_walk_grant_lost_in_a_crash_is_given_back, the_service_ends_a_walk_at_its_cap,
+         a_stuck_walk_login_stays_held, a_walks_logins_leave_qas_cap_untouched,
+         an_uncertain_grant_counts_before_another_repository_takes,
          qa_holds_at_most_the_pool_less_the_reserve,
          a_stuck_login_leaves_qa_one_pass,
          a_walks_take_finds_a_login_whatever_qa_asked,
