@@ -327,6 +327,7 @@ takes a repository's name where it needs one.
 | `qa keep --walk NAME DIRECTORY` | keeps a focused walk's evidence (section 11.5) |
 | `qa walk REPO RUNG [--kind KIND] [--build REF] [--login POOL]... [--cap MINUTES]` | starts a rung walk on a reserved login, ended by the service (section 10.7) |
 | `qa walk REPO RUNG --resume NAME --build REF [--cap MINUTES]` | resumes a paused walk from its kept state, at a fix's build (section 10.7) |
+| `qa take KIND [--login POOL] --as walk/<kind>/<what> [--note TEXT]`, `qa give NAME --as HOLDER` | a take by hand, admitted below the kind's cap (section 10.6) |
 | `qa deploy DIRECTORY NAME -- COMMAND...` | starts a pass's deployment in a unit of its own, stopped by its give-back (section 10.5) |
 
 The record is committed with `record commit`, and its rows are in
@@ -709,8 +710,12 @@ held).
   `qa-watch/…`, whose cap is the size less `QA_LOGIN_RESERVE`; and each
   kind of walk, holders `walk/<kind>/…`, whose cap is its walk slots
   (10.7), one login of a pool per walk. A take by hand (a live story,
-  a recovery) is made as a kind's holder, `walk/<kind>/<what>`, and
-  counts against that kind. A class's count is every login its holders
+  a recovery) goes through `qa take KIND [--login POOL] --as
+  walk/<kind>/<what> [--note TEXT]`, which admits it as `qa walk` admits
+  a walk, under the walks' lock, below the kind's cap, with `--now`, and
+  prints the name and path granted; `qa give NAME --as HOLDER` gives it
+  back. `logins take` by hand would count without being admitted, and
+  could take a kind past its cap (o/qa-evidence-keep, 10-27). A class's count is every login its holders
   hold in `logins list`, whatever their state: a stuck one, a grant
   saved but not yet started, a walk ended with a login still out. Each
   class admits below its cap alone, machine-wide, under its own lock

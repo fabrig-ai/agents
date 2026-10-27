@@ -211,8 +211,12 @@ temper's binding, `docs/design/qa.md` 3, is the source; as of 10-27:
   stranded included (qa-flow.md 10.6; agents 86f918b). `qa passes`
   shows each pool's size, QA's holding and the reserve.
 - **By hand,** a walk or a live story takes as a kind's holder, so that
-  it counts against that kind's cap (qa-flow.md 10.6): `logins take
-  chatgpt --any --now --as walk/forgejo/WHAT --note DIR`, which prints the name and
+  it counts against that kind's cap (qa-flow.md 10.6). Once piece W2
+  lands, through `qa take KIND --as walk/KIND/WHAT --note DIR`, which
+  admits it below the cap, and `qa give NAME --as walk/KIND/WHAT`.
+  Until then, read `qa passes` first: take only while the kind holds
+  fewer than its slots, never as `walk/forgejo/…` beyond two: `logins
+  take chatgpt --any --now --as walk/forgejo/WHAT --note DIR`, which prints the name and
   path it grants, and gives back `logins give NAME --as HOLDER`. Once
   piece W lands, `qa walk` does both for a rung walk (qa-flow.md 10.7),
   and a queued take is dropped with `logins drop chatgpt --any --as
@@ -348,7 +352,8 @@ The director's, on hetzner6:
   pool.
 - **Once piece 3 is built:** `qa default temper on`.
 - **What lands, in order** (o/qa-evidence-keep, each alone): W, `qa
-  walk` with pause and resume and `logins drop`; 3, marked commits by
+  walk` with pause and resume, kinds and `logins drop`; W2, `qa take`
+  and `qa give`, a take by hand admitted below its kind's cap; 3, marked commits by
   default; 4, triage by landing; 5, the stuck alert. Each landing's post
   says what hetzner6 needs. Landed: the pool (b3abf0e), passes side by
   side (8935bc9), the reserve and `--now` (86f918b).
@@ -426,3 +431,6 @@ Newest last, times UTC.
   5bc4ad7): section 3, item 7.
 - 10-27 19:2xZ: `claude-2` signed in, two Claude logins; 6.1's pool list
   (design/qa-evidence).
+- 10-27 19:5xZ: a take by hand admitted by `qa take` below its kind's
+  cap, after W (qa-flow.md 10.6; o/qa-evidence-keep's finding); until
+  then, `qa passes` read first (design/qa-evidence).
