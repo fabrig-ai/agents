@@ -37,6 +37,12 @@ its draft reaches. The security rules are director.md 10's.
   down, and reports at the end. It escalates to the director only what
   changes the draft's goal, or would be hard to reverse beyond its
   repositories. Budgets are the user's.
+- **It settles what crosses drafts with the other designers** (the
+  user, 10-27; director.md 11): a technical point its draft needs of
+  another (a limit, a stock value, a shared file's order, a transcript
+  wanted) goes by post straight to that draft's designer; the director
+  hears only a tie, a machine or spend, a landing hold, or what goes to
+  the user.
 - **It triages the user's questions,** its own and those its owners
   bring that it can't answer: the director's go to the director, and
   what is the user's becomes an issue that it asks, closes and answers

@@ -178,8 +178,9 @@ out. The security rules are director.md 10's.
   exit, `systemd-run --user --collect --quiet bash -lc 'landings wait
   --cleared TARGET --post o/<m>'`, TARGET the set, or a plain landing's
   commit. A red comes back as a failed landing does, for a repair; a
-  cleared verdict that names flakes, each filed with the director as a
-  finding.
+  cleared verdict that names flakes, each sent straight to the flakes'
+  owner named in the record's `director/direction.md` (with the test,
+  the log's path, the machine and its load), not to the director.
 - **Cleanup is `tidy`'s** ([cleanup.md](../docs/design/cleanup.md) 4):
   `land` runs it after each landing, and the owner may run `tidy
   --mission <m>` at its end. Nothing is deleted by hand.

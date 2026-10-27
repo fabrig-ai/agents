@@ -474,8 +474,8 @@ a time, with the owners who build it.
 - **What stays the director's:** the user; machines, placement and
   spend; security; the landing flow; a tie between drafts; starting and
   stopping designers.
-- **Designers settle what crosses drafts with each other,** by post,
-  the director in copy (the user, 10-27): a technical point one draft
+- **Designers settle what crosses drafts with each other,** by post
+  (the user, 10-27; their mailboxes are the record): a technical point one draft
   needs of another (a limit, a stock value, a shared file's order, a
   transcript wanted) goes from designer to designer. The director steps
   in only on a tie, a machine or spend, a landing hold, or what goes to
