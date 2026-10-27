@@ -2422,10 +2422,11 @@ import runpy, time
 tool = runpy.run_path({str(SCRIPT)!r})
 size = 2 * 1024 * 1024
 text = 'password: "' + ' ' * size + '"'
-start = time.perf_counter()
+# Bound scan CPU work even when the gate shares the machine.
+start = time.process_time()
 tool['scan'](text)
-elapsed = time.perf_counter() - start
-assert elapsed < 2, f'2 MiB scan took {{elapsed:.3f}} seconds'
+elapsed = time.process_time() - start
+assert elapsed < 2, f'2 MiB scan took {{elapsed:.3f}} CPU seconds'
 '''
     result = subprocess.run([sys.executable, '-I', '-S', '-c', driver], env=lab.env,
                             capture_output=True, text=True, timeout=HUNG_TOOL_S)
@@ -2692,11 +2693,12 @@ tool = runpy.run_path({str(SCRIPT)!r})
 marker = '-----' + 'BEGIN '
 size = 2 * 1024 * 1024
 text = (marker * (size // len(marker) + 1))[:size]
-start = time.perf_counter()
+# Bound scan CPU work even when the gate shares the machine.
+start = time.process_time()
 assert tool['scan'](text) == []
-elapsed = time.perf_counter() - start
-assert elapsed < 2, f'2 MiB scan took {{elapsed:.3f}} seconds'
-print(f'2 MiB scan: {{elapsed:.3f}} seconds')
+elapsed = time.process_time() - start
+assert elapsed < 2, f'2 MiB scan took {{elapsed:.3f}} CPU seconds'
+print(f'2 MiB scan: {{elapsed:.3f}} CPU seconds')
 '''
     result = subprocess.run([sys.executable, '-I', '-S', '-c', driver], env=lab.env,
                             capture_output=True, text=True, timeout=HUNG_TOOL_S)
