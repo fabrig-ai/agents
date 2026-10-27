@@ -667,7 +667,7 @@ KEY = re.compile(r'-----BEGIN [^\n]*PRIVATE KEY-----|(?<![\w-])(?:gh[pousr]_[A-Z
 JWT = re.compile(r'(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+')
 HEADER = re.compile(r'''(?<![\w-])(["']?)(?:Proxy-)?Authorization(["']?)\s*:\s*(["']?)[A-Za-z][A-Za-z0-9_-]*[ \t]+''', re.I)
 COOKIE = re.compile(r'''(?<![\w-])(["']?)(Set-)?Cookie(["']?)\s*:\s*(["']?)''', re.I)
-COOKIE_PAIR = re.compile(r'''[ \t]*[^\s=;"']+=''')
+COOKIE_PAIR = re.compile(r'''[ \t]*[^\s=;"']+[ \t]*=[ \t]*''')
 JAR_HEADING = re.compile(r'^# (?:Netscape HTTP|HTTP) Cookie File\s*$')
 JAR = re.compile(r'^(?:#HttpOnly_)?[^\t]+\t(?:TRUE|FALSE)\t[^\t]+\t(?:TRUE|FALSE)\t[0-9]+\t[^\t]+\t([^\t]*)$')
 URL = re.compile(r'''(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]*://[^\s"'<>]+''')
@@ -675,8 +675,9 @@ URL_USER = re.compile(r'^[^:/?#]+://[^/@:?#]*:([^/@?#]*)@[^/?#]+')
 PARAMETER = re.compile(r'[?&#;](?:code|token|secret|key|password|access_token|refresh_token|id_token|client_secret|signature)=([^&#;]*)', re.I)
 ASSIGN_NAME = r'(?:password|passwd|secret|token|api_key|client_secret|access_token|refresh_token|private_key)'
 ASSIGNED = re.compile(r'''(?<![\w])(?:(?P<json>["']''' + ASSIGN_NAME + r'''["']\s*:\s*)(?=["'])|''' + ASSIGN_NAME + r'(?![\w])\s*=\s*)', re.I)
+JSON_KEY = re.compile(r'''(?<![\w])["']''' + ASSIGN_NAME + r'''["']\s*:\s*$''', re.I)
 COLON = re.compile(r'^\s*' + ASSIGN_NAME + r'\s*:\s*(.*)$', re.I)
-USER = re.compile(r'(?<!\S)(?:--user(?:[ \t]+|=)|-u(?:[ \t]+|=)?)')
+USER = re.compile(r'''(?<!\S)(?:--user(?:[ \t]+|=)|(?:"-u"|'-u')[ \t]+|-[A-Za-z]*?u(?:[ \t]+|=)?)''')
 PLACEHOLDER = re.compile(r'(?:null|true|false|[A-Z][A-Z0-9_]*|<[^\n]*>|\$[A-Za-z_][A-Za-z0-9_]*|\$\{[A-Za-z_][A-Za-z0-9_]*\}|@[^\s]+|…|\.\.\.|\*+)?')
 NAME_PART = re.compile(r'(?:^|[-_.])(?:cookies?|password|passwd|secret|token|credentials?|netrc)(?:$|[-_.])', re.I)
 NAME_END = re.compile(r'(?:^auth\.json$|^id_rsa$|^id_ed25519$|^login(?:\..*)?$|\.(?:headers?|pem|key|env)$)', re.I)
@@ -693,6 +694,9 @@ class Refusal(NamedTuple):
 
 
 def placeholder(value):
+    value = re.split(r'[ \t]+#', value, maxsplit=1)[0].rstrip()
+    if value.endswith((',', ';', ')', '.', ':')) and value != '...':
+        value = value[:-1]
     if len(value) >= 2 and value[0] in ('"', "'") and value[-1] == value[0]:
         value = value[1:-1]
     return PLACEHOLDER.fullmatch(value) is not None
@@ -736,9 +740,18 @@ def value_at(text, start, stops='', wrapper='', string=False):
 
 
 def scan(text):
-    result = []
-    for number, line in enumerate(text.split('\n'), 1):
+    lines, chunks, first = [], [], 1
+    physical = text.split('\n')
+    for number, line in enumerate(physical, 1):
         line = line.removesuffix('\r')
+        continued = line.endswith('\\') and number < len(physical)
+        chunks.append(line[:-1] if continued else line)
+        if not continued:
+            lines.append((first, ''.join(chunks)))
+            chunks = []
+            first = number + 1
+    result = []
+    for index, (number, line) in enumerate(lines):
         rules = []
         if KEY.search(line):
             rules.append('key')
@@ -746,26 +759,29 @@ def scan(text):
             rules.append('jwt')
         header = False
         end = 0
-        for match in HEADER.finditer(line):
+        shell = line.replace('\\ ', ' ')
+        for match in HEADER.finditer(shell):
             if match.start() < end:
                 continue
             wrapper = match[3] or (match[1] if not match[2] else '')
-            value, end = value_at(line, match.end(), wrapper=wrapper)
+            value, end = value_at(shell, match.end(), wrapper=wrapper)
             if not placeholder(value):
                 header = True
                 break
         end = 0
-        for cookie in COOKIE.finditer(line):
+        for cookie in COOKIE.finditer(shell):
             if header:
                 break
             if cookie.start() < end:
                 continue
             wrapper = cookie[4] or (cookie[1] if not cookie[3] else '')
             offset = cookie.end()
-            while pair := COOKIE_PAIR.match(line, offset):
-                value, end = value_at(line, pair.end(), stops=';', wrapper=wrapper)
+            while pair := COOKIE_PAIR.match(shell, offset):
+                value, end = value_at(shell, pair.end(), stops=';', wrapper=wrapper)
                 header |= not placeholder(value)
-                if header or cookie[2] or line[end:end + 1] != ';':
+                while end < len(shell) and shell[end] in ' \t':
+                    end += 1
+                if header or cookie[2] or shell[end:end + 1] != ';':
                     break  # Set-Cookie's remaining pairs are attributes, not cookies.
                 offset = end + 1
         if header:
@@ -775,12 +791,20 @@ def scan(text):
             rules.append('cookie-jar')
         for url in URL.finditer(line):
             user = URL_USER.match(url[0])
+            start = re.search(r'[?#]', url[0])
+            parameters = url[0][start.start():] if start else ''
             if ((user and not placeholder(user[1]))
-                    or any(not placeholder(m[1]) for m in PARAMETER.finditer(url[0]))):
+                    or any(not placeholder(m[1]) for m in PARAMETER.finditer(parameters))):
                 rules.append('link')
                 break
         colon = COLON.fullmatch(line)
         assigned = bool(colon and not placeholder(colon[1].rstrip()))
+        if JSON_KEY.search(line):
+            following = next((lines[i][1].lstrip() for i in range(index + 1, len(lines))
+                              if lines[i][1].strip()), '')
+            if following.startswith(('"', "'")):
+                value, _ = value_at(following, 0, string=True)
+                assigned |= not placeholder(value)
         end = 0
         for match in ASSIGNED.finditer(line):
             if assigned:
@@ -792,10 +816,10 @@ def scan(text):
         if assigned:
             rules.append('assigned')
         end = 0
-        for user in USER.finditer(line):
+        for user in USER.finditer(shell):
             if user.start() < end:
                 continue
-            value, end = value_at(line, user.end(), stops='&;')
+            value, end = value_at(shell, user.end(), stops='&;')
             if value[:1] in ('"', "'") and value[-1:] == value[:1]:
                 value = value[1:-1]
             if ':' in value and not placeholder(value.partition(':')[2]):

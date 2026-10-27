@@ -2330,6 +2330,96 @@ def keep_check_hides_invalid_walk_settings(lab):
             keep_private(lab, [value, word], result)
 
 
+def keep_shapes(lab, value, shapes):
+    for text, line, rule in shapes:
+        scratch = lab.scratch({'evidence/capture.txt': text})
+        result = lab.run('keep', '--check', str(scratch), status=2)
+        rules = (rule,) if isinstance(rule, str) else rule
+        assert [row for row in result.stdout.splitlines() if row.startswith('refused:')] == [
+            f'refused: evidence/capture.txt, line {line}: {name}' for name in sorted(rules)]
+        assert result.stderr == f'qa: copy refused ({len(rules)})\n'
+        keep_private(lab, [value], result)
+
+
+def keep_check_reads_spaced_cookie_pairs(lab):
+    value = secrets.token_hex(12)
+    shapes = []
+    for name in ('Cookie', 'Set-Cookie'):
+        for space in (' =', '= ', ' = ', '\t=\t'):
+            shapes.append((f'{name}: sid{space}{value}; Path=/\n', 1, 'header'))
+    shapes.append((f'Cookie: first = VALUE ; sid = {value}\n', 1, 'header'))
+    keep_shapes(lab, value, shapes)
+    plain = 'Cookie: first = VALUE ; second = TOKEN\nSet-Cookie: sid = VALUE ; Path=/; HttpOnly\n'
+    scratch = lab.scratch({'evidence/capture.txt': plain})
+    assert 'refused:' not in lab.run('keep', '--check', str(scratch)).stdout
+
+
+def keep_check_reads_json_values_on_later_lines(lab):
+    value = secrets.token_hex(12)
+    keep_shapes(lab, value, [
+        (f'{{\n  "token":\n\n    "{value}"\n}}\n', 2, 'assigned'),
+        (f'{{\r\n  "client_secret": \r\n \t\r\n    "{value}"\r\n}}\r\n', 2, 'assigned'),
+        (f'"before": "plain", "password":\n "{value}",\n', 1, 'assigned')])
+    scratch = lab.scratch({'evidence/capture.txt': '"token":\n\n "TOKEN",\n"password":\n ""\n'})
+    assert 'refused:' not in lab.run('keep', '--check', str(scratch)).stdout
+
+
+def keep_check_joins_shell_continuations(lab):
+    value = secrets.token_hex(12)
+    join = '\\' + '\n'
+    keep_shapes(lab, value, [
+        (f'plain\ncurl -u {join}qa:{value}\n', 2, 'user'),
+        (f'plain\nAuthorization: {join}Bearer {join}{value}\n', 2, 'header'),
+        (f'Set-Cookie: sid={join} {value}\n', 1, 'header'),
+        (f'tok{join}en={value}\n', 1, 'assigned')])
+
+
+def keep_check_reads_shell_escaped_spaces(lab):
+    value = secrets.token_hex(12)
+    keep_shapes(lab, value, [
+        (f'curl -H Authorization:\\ Bearer\\ {value}\n', 1, 'header'),
+        (f'curl -H Proxy-Authorization:\\ Basic\\ {value}\n', 1, 'header'),
+        (f'curl -u\\ qa:{value}\n', 1, 'user'),
+        (f'curl\\ -u\\ qa:{value}\n', 1, 'user')])
+
+
+def keep_check_reads_combined_and_quoted_user_flags(lab):
+    value = secrets.token_hex(12)
+    keep_shapes(lab, value, [(f'curl {flag}{value}\n', 1, 'user') for flag in
+                            ('-su qa:', '-suqa:', '-sSuqa:', '"-u" qa:', "'-u' qa:",
+                             '-vu=qa:', '--user=qa:')])
+    scratch = lab.scratch({'evidence/capture.txt': 'plain\n',
+                           'scripts/capture.sh': 'curl -su qa:PASSWORD\ncurl "-u" qa:<password>\n'})
+    assert 'refused:' not in lab.run('keep', '--check', str(scratch)).stdout
+
+
+def keep_check_limits_link_parameters_to_query_or_fragment(lab):
+    value = secrets.token_hex(12)
+    plain = ('https://forge.test/assets;code=200\nhttps://forge.test/assets&code=200\n'
+             'https://forge.test/assets&signature=ok\n')
+    scratch = lab.scratch({'evidence/capture.txt': plain})
+    assert 'refused:' not in lab.run('keep', '--check', str(scratch)).stdout
+    keep_shapes(lab, value, [(f'https://forge.test/assets{tail}{value}\n', 1, 'link') for tail in
+                            ('?code=', '#signature=', '#page=1;key=')]
+                + [(f'https://forge.test/assets?page=1&token={value}\n', 1, ('assigned', 'link'))])
+
+
+def keep_check_accepts_punctuated_placeholders(lab):
+    value = secrets.token_hex(12)
+    plain = ('token=TOKEN,\ntoken=TOKEN)\npassword: "" # help\n'
+             'Authorization: Bearer TOKEN;\nhttps://forge.test/cb?code=TOKEN.\n'
+             'password: null # comment\npassword: ...\n')
+    plain += ''.join('token=TOKEN' + char + '\n' for char in (',', ';', ')', '.', ':'))
+    scratch = lab.scratch({'evidence/capture.txt': plain})
+    assert 'refused:' not in lab.run('keep', '--check', str(scratch)).stdout
+    shapes = [(f'token={value}{char}\n', 1, 'assigned') for char in (',', ';', ')', '.', ':')]
+    shapes += [(f'password: "{value}" # help\n', 1, 'assigned'),
+               (f'Authorization: Bearer {value};\n', 1, 'header'),
+               (f'https://forge.test/cb?code={value}.\n', 1, 'link'),
+               (f'token=TOKEN,{value}\n', 1, 'assigned')]
+    keep_shapes(lab, value, shapes)
+
+
 def keep_check_refuses_each_rule(lab):
     value = secrets.token_hex(8)
     token = 'gh' + 'p_' + secrets.token_hex(18)
@@ -5759,7 +5849,12 @@ def an_ambiguous_build_is_refused(lab):
     assert first[1]['main'] == fix and second[1]['main'] == commit
 
 
-CASES = (keep_check_scans_whole_paths, keep_check_hides_an_unopenable_root,
+CASES = (keep_check_reads_spaced_cookie_pairs, keep_check_reads_json_values_on_later_lines,
+         keep_check_joins_shell_continuations, keep_check_reads_shell_escaped_spaces,
+         keep_check_reads_combined_and_quoted_user_flags,
+         keep_check_limits_link_parameters_to_query_or_fragment,
+         keep_check_accepts_punctuated_placeholders,
+         keep_check_scans_whole_paths, keep_check_hides_an_unopenable_root,
          keep_check_refuses_a_link_with_a_trailing_slash,
          keep_check_marks_incomplete_omission_counts, keep_check_hides_invalid_walk_settings,
          keep_check_refuses_each_rule, keep_check_passes_plain_captures,
