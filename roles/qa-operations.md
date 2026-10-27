@@ -183,11 +183,11 @@ temper's binding, `docs/design/qa.md` 3, is the source; as of 10-27:
 - **One account each:** an account signed in twice gives a second login
   but shares the first's usage limits, so a new held login is another
   account wherever one is to hand.
-- **Two are the walks'** (section 3), the rest QA's (section 4). Once
-  piece 2b lands, QA's passes take only a login free and claimed by no
-  waiter (`--now`), and hold at most the pool's size less
-  `QA_LOGIN_RESERVE`, a login one stranded included (qa-flow.md 10.6);
-  until then `QA_SLOTS` stays 1.
+- **Two are the walks'** (section 3), the rest QA's (section 4): QA's
+  passes take only a login free and claimed by no waiter (`--now`), and
+  hold at most the pool's size less `QA_LOGIN_RESERVE`, a login one
+  stranded included (qa-flow.md 10.6; agents 86f918b). `qa passes`
+  shows each pool's size, QA's holding and the reserve.
 - **By hand,** a walk or a live story takes `logins take chatgpt --any
   --as HOLDER --note DIR [--wait SECONDS]`, which prints the name and
   path it grants, and gives back `logins give NAME --as HOLDER`. Once
@@ -285,11 +285,11 @@ The director's, on hetzner6:
 
 - **`agents-qa-watch.service`,** a user unit, which runs `qa watch`.
 - **`machine.env`:**
-  - `QA_SLOTS`: 1 until the reserve (piece 2b) lands, then 2: every
-    temper pass needs a login, and the reserve keeps the walks' two
-    whatever the slots;
-  - `QA_LOGIN_RESERVE` 2 (from piece 2b) and `QA_WALK_SLOTS` 2 (from
-    piece W), the walks';
+  - `QA_SLOTS` 2, set once agents 86f918b runs there: every temper
+    pass needs a login, and the reserve keeps the walks' two whatever
+    the slots;
+  - `QA_LOGIN_RESERVE` 2 and `QA_WALK_SLOTS` 2 (from piece W), the
+    walks';
   - `QA_BATCH` 5, `QA_CAP_MINUTES` 120 and `QA_INTERVAL_SECONDS` 300;
   - `QA_STOP_SECONDS` 50, the give-back wrapper's bound in a
     deployment's stop (qa-flow.md 10.5);
@@ -301,10 +301,11 @@ The director's, on hetzner6:
 - **The open rung:** `qa rung temper real-model --login chatgpt`, the
   pool.
 - **Once piece 3 is built:** `qa default temper on`.
-- **What lands, in order** (o/qa-evidence-keep, each alone): 2b, the
-  reserve and `--now`; W, `qa walk` with pause and resume and `logins
-  drop`; 3, marked commits by default; 4, triage by landing; 5, the
-  stuck alert. Each landing's post says what hetzner6 needs.
+- **What lands, in order** (o/qa-evidence-keep, each alone): W, `qa
+  walk` with pause and resume and `logins drop`; 3, marked commits by
+  default; 4, triage by landing; 5, the stuck alert. Each landing's post
+  says what hetzner6 needs. Landed: the pool (b3abf0e), passes side by
+  side (8935bc9), the reserve and `--now` (86f918b).
 
 ## 8. The evidence
 
@@ -367,3 +368,6 @@ Newest last, times UTC.
   it starts and when the login is back, and a departure from 6.4 waits
   for its yes (the director, the user wanting it out of QA's routine).
 - 10-27 18:5xZ: the held Claude login in custody (agents#11, the user's sign-in); its walks wait for the user's word.
+- 10-27 19:0xZ: the reserve and `--now` landed (agents 86f918b): QA holds
+  at most two of the four logins; `QA_SLOTS` 2 once it runs on hetzner6
+  (design/qa-evidence).

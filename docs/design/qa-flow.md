@@ -705,7 +705,16 @@ held).
   --any --now`, granted only a login that is free and that no waiter
   claims, refused at once otherwise without a place in the queue
   (10.4). So QA never holds a reservation a walk would need, and a walk
-  that waits goes before it.
+  that waits goes before it. While a `qa-watch` row from before `--now`
+  still waits in the queue, QA admits no pass, so that an abandoned row
+  never keeps a walk's login.
+- **The count is strict:** it comes from one `logins list` per check,
+  read line by line; a line out of its form or a login listed twice
+  admits no pass and gives back no stray, and a note refuses every
+  control character. A grant saved counts at once, and one past the cap
+  is cancelled with the rest of its repository's reservations, the next
+  check admitting within the cap; a take whose answer was lost counts
+  until the next listing.
 - **Built where they run:** each pass builds in its slot's checkout,
   through `heavy` at background weight, which queues builds so that
   they never starve the machine's other work. Measured on hetzner6
