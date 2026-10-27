@@ -41,7 +41,7 @@ shows each machine's room before an owner is placed. `fleet`, in
 - **The watch wakes the director only past a threshold** (section 3).
   `fleet watch`, a timer every 5 minutes on the director's machine,
   reads every machine and raises a condition when its threshold holds
-  two rounds running: disk near its floor, load past 3 per core, memory
+  two rounds running: disk near its floor, load past 4 per core, memory
   under a tenth, kache's store past half again its cap, a machine
   unreached or untended, a session its wake could not reach, mail
   unread an hour, a dead run nobody was told of, an active mission's
@@ -113,7 +113,7 @@ keeps that field's conditions as they were.
 | Condition | Raised when | Cleared when |
 |---|---|---|
 | `disk` | free under its floor plus 10 GB | free at its floor plus 20 GB or more |
-| `load` | the 15-minute load at 3 per core or more | under 2 per core |
+| `load` | the 15-minute load at 4 per core or more | under 2.5 per core |
 | `memory` | available under 10 % of total | 15 % or more |
 | `kache` | the store at 1.5 times its limit or more | at 1.1 times or less |
 | `unreached` | the machine not read | read |
@@ -372,4 +372,7 @@ machine's own.
   with no landing (cleanup.md 5): whether a tend runs it, every few
   hours, and the watch raises its exit 1.
 - **The thresholds** are first guesses from 10-26: the director tunes
-  them from what the watch raises in its first days.
+  them from what the watch raises in its first days. Load moved from 3
+  and 2 per core to 4 and 2.5 after its first three hours (10-27: 14
+  posts, most for builders swinging across 2 to 3 per core all night;
+  the gates starved on 10-26 at 4 to 5).
