@@ -1238,7 +1238,11 @@ trusts that ref, and again, at most once per poll, where a commit it
 needs is missing; one still missing after a fetch stays missing. Each
 git call is killed with its children at its timeout, cut to the wait's
 deadline with no floor, and none starts past it: a wait with
-`--timeout 0` decides by its records alone. The display and `landings
+`--timeout 0` decides by its records alone. A call its timeout cut
+answers nothing: not an absence, not a checkout missing, not a run
+that doesn't hold the commit; the question stays open for the next
+poll, and a run whose relation to the commit is unread keeps an older
+run from deciding, newest first. The display and `landings
 cleared`, which have no deadline, keep each call's own timeout. A landing with no checkout, or a commit no checkout has, ends
 only with its own verdict under the legacy single-commit judgement;
 a recorded range whose ancestry git can't answer waits.
