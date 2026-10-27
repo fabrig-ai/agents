@@ -1416,6 +1416,81 @@ def unknown_ancestry_leaves_the_landing_undecided(lab):
                for argv in calls) == 2, calls
 
 
+def cut_read_once(lab, repo, args):
+    polls = lab.root / 'polls'
+    attempts = lab.root / 'cut-read-polls'
+    call = ['-C', str(lab.workspace / repo), *args]
+    lab.standin_git(f'if sys.argv[1:] == {call!r}:\n'
+                    f'    attempts = Path({str(attempts)!r})\n'
+                    '    first = not attempts.exists()\n'
+                    f'    with attempts.open("a") as out: out.write(Path({str(polls)!r}).read_text() + "\\n")\n'
+                    '    if first:\n'
+                    '        import signal; signal.pause()\n')
+    return f"""
+from pathlib import Path
+read = tool['read_feed']
+polls = 0
+def observed_read(*args):
+    global polls
+    polls += 1
+    Path({str(polls)!r}).write_text(str(polls))
+    return read(*args)
+tool['wait'].__globals__['read_feed'] = observed_read
+"""
+
+
+def read_cut_waits_for_poll(lab):
+    attempts = [int(value) for value in (lab.root / 'cut-read-polls').read_text().splitlines()]
+    assert len(attempts) >= 2 and attempts[0] == 1, attempts
+    assert int((lab.root / 'polls').read_text()) > 1, attempts
+
+
+def discovery_read_cut(lab, shallow):
+    lab.repository('agents', tier=False)
+    commit = lab.land('agents', 'only checkout with this commit')
+    lab.repository('temper')
+    args = (['rev-parse', '--is-shallow-repository'] if shallow else
+            ['rev-parse', '--verify', commit[:9] + '^{commit}'])
+    hook = cut_read_once(lab, 'temper', args)
+    result = lab.run('wait', '--cleared', commit[:9], '--timeout', str(HUNG_LANDINGS_S), code=hook)
+    assert f'agents {commit[:9]} cleared on landing: agents has no tier' in result.stdout, result
+    assert result.stderr == '', result
+    read_cut_waits_for_poll(lab)
+
+
+def cut_checkout_read_keeps_discovery_pending(lab):
+    discovery_read_cut(lab, shallow=True)
+
+
+def cut_commit_read_keeps_discovery_pending(lab):
+    discovery_read_cut(lab, shallow=False)
+
+
+def run_read_cut(lab, start):
+    lab.repository('temper')
+    previous = lab.land('temper', 'before landing')
+    commit = lab.land('temper', 'inside both runs')
+    older = lab.advance('temper', 'older clean baseline')
+    main = lab.advance('temper', 'newer red run')
+    lab.append(*tier_run('temper', older, None, 10, [(older, [])], baseline=True),
+               *tier_run('temper', main, previous, 10 if start else 20, [(main, ['newer failure'])]))
+    hook = cut_read_once(lab, 'temper',
+                         ['merge-base', '--is-ancestor', commit, previous if start else main])
+    result = lab.run('wait', '--cleared', commit[:9], '--timeout', str(HUNG_LANDINGS_S), status=1, code=hook)
+    assert (f'temper {commit[:9]} red by run {main[:9]}, which holds it in landing {main[:9]}: newer failure'
+            in result.stdout), result
+    assert result.stderr == '', result
+    read_cut_waits_for_poll(lab)
+
+
+def cut_run_end_read_keeps_newest_run_pending(lab):
+    run_read_cut(lab, start=False)
+
+
+def cut_run_start_read_keeps_newest_run_pending(lab):
+    run_read_cut(lab, start=True)
+
+
 def git_calls_cut_to_the_deadline(lab):
     lab.repository('agents', tier=False)
     commit = lab.land('agents', 'slow ancestry')
@@ -1723,7 +1798,10 @@ def main():
              own_red_stays_red_under_later_clean_runs, waits_while_no_run_holds_it,
              commit_no_main_holds_ends_the_wait, failed_fetch_leaves_the_landing_undecided,
              fetch_touches_only_origin_main, stale_tracking_ref_is_fetched_first,
-             unknown_ancestry_leaves_the_landing_undecided, git_calls_cut_to_the_deadline,
+             unknown_ancestry_leaves_the_landing_undecided,
+             cut_checkout_read_keeps_discovery_pending, cut_commit_read_keeps_discovery_pending,
+             cut_run_end_read_keeps_newest_run_pending, cut_run_start_read_keeps_newest_run_pending,
+             git_calls_cut_to_the_deadline,
              no_git_call_past_the_deadline, display_keeps_full_git_timeouts, prefix_in_two_landings_counts_each,
              shallow_checkout_is_no_checkout, hung_fetch_ends_at_the_timeout,
              run_without_its_start_judges_nothing, posted_not_landed)

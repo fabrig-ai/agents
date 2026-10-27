@@ -420,11 +420,13 @@ class Checkouts:
             return None
 
     def available(self, repo):
+        if not (self.root / repo / '.git').exists():
+            return False
         if repo not in self.checkouts:
             result = self.git(repo, 'rev-parse', '--is-shallow-repository')
             if result is not None and result.returncode == 0:
                 self.checkouts[repo] = result.stdout.strip() == 'false'
-        return self.checkouts.get(repo, False)
+        return self.checkouts.get(repo)
 
     def fetch(self, repo):
         if repo not in self.fetched:
@@ -438,20 +440,26 @@ class Checkouts:
         return self.fetched[repo]
 
     def resolve(self, repo, commit, after_fetch=False):
+        """Return the full commit, False when absent, or None for an unread answer."""
         key = repo, commit.lower()
-        if key not in self.commits and key not in self.missing:
+        if key in self.missing:
+            return False
+        if key not in self.commits:
             result = self.git(repo, 'rev-parse', '--verify', commit + '^{commit}')
-            if result is not None and result.returncode == 0:
-                self.commits[key] = result.stdout.strip()
-            elif result is not None and after_fetch:
-                self.missing.add(key)
-        return self.commits.get(key)
+            if result is None:
+                return None
+            if result.returncode:
+                if after_fetch:
+                    self.missing.add(key)
+                return False
+            self.commits[key] = result.stdout.strip()
+        return self.commits[key]
 
     def need(self, repo, commit):
         full = self.resolve(repo, commit)
-        if full is None and (repo, commit.lower()) not in self.missing and self.fetch(repo):
+        if not full and (repo, commit.lower()) not in self.missing and self.fetch(repo):
             full = self.resolve(repo, commit, after_fetch=True)
-        return full
+        return full or None
 
     def find(self, commit, repo=None):
         if not re.fullmatch(r'[0-9a-fA-F]{7,40}', commit):
@@ -459,11 +467,17 @@ class Checkouts:
         found = []
         names = CHECKOUTS if repo is None else (repo,) if repo in CHECKOUTS else ()
         for name in names:
-            if not self.available(name):
+            available = self.available(name)
+            if available is None:
+                return []
+            if not available:
                 continue
             full = (self.resolve(name, commit.lower()) if repo is None
                     else self.need(name, commit.lower()))
-            if full is not None:
+            # An unread candidate cannot establish a unique checkout.
+            if full is None:
+                return []
+            if full:
                 found.append((name, full))
         return found
 
@@ -570,17 +584,25 @@ def judge(runner, checkouts, repo, commit):
     mine = [r for r in mine if follower(r['tier'])[0] == repo]
 
     def run_answer(records):
-        runs = []
-        for end in records:
-            if end['event'] != 'tier':
+        end = None
+        for candidate in sorted((r for r in reversed(records) if r['event'] == 'tier'),
+                                key=lambda r: r['utc'], reverse=True):
+            start = newest([r for r in records if r['event'] == 'running' and r['token'] == candidate['token']])
+            if start is None:
                 continue
-            start = newest([r for r in records if r['event'] == 'running' and r['token'] == end['token']])
-            if start is None or checkouts.holds(repo, end['commit'], commit) is not True:
+            held = checkouts.holds(repo, candidate['commit'], commit)
+            if held is None:
+                return None
+            if not held:
                 continue
-            if start['from'] is not None and checkouts.holds(repo, start['from'], commit) is not False:
-                continue
-            runs.append(end)
-        end = newest(runs)
+            if start['from'] is not None:
+                held = checkouts.holds(repo, start['from'], commit)
+                if held is None:
+                    return None
+                if held:
+                    continue
+            end = candidate
+            break
         if end is None:
             return None
         if end.get('baseline'):
