@@ -953,7 +953,7 @@ def parts_join_run_verdicts(lab):
     # Both followers use the same run token; their verdicts must remain separate.
     lab.append(*tier_run('temper.1of2', main, previous, 10, [(tip, []), (main, ['later'])]),
                *tier_run('temper.2of2', main, previous, 11, [(tip, ['TEST']), (main, [])]))
-    result = lab.run('wait', '--cleared', commit[:9], '--timeout', '20', status=1)
+    result = lab.run('wait', '--cleared', commit[:9], '--timeout', str(HUNG_LANDINGS_S), status=1)
     assert result.stdout == (f'10-26 05:11Z temper.2of2 {commit[:9]} red by run {main[:9]}, '
                              f'which holds it in landing {tip[:9]}: TEST; log fixture-host:/fixture/log\n'
                              '    first failure\n    second failure\n'), result
@@ -965,7 +965,7 @@ def part_own_verdict_combines_with_other_run(lab):
     main = lab.advance('temper', 'part two baseline')
     lab.append(tier_record('verdict', 'temper.1of2', commit, 1),
                *tier_run('temper.2of2', main, None, 2, [(main, [])], baseline=True))
-    result = lab.run('wait', '--cleared', commit[:9], '--timeout', '20')
+    result = lab.run('wait', '--cleared', commit[:9], '--timeout', str(HUNG_LANDINGS_S))
     assert result.stdout.splitlines() == [
         f'10-26 05:01Z temper.1of2 {commit[:9]} cleared by run {commit[:9]}',
         f'10-26 05:02Z temper.2of2 {commit[:9]} cleared by run {main[:9]}, which holds it; baseline'], result
@@ -1073,28 +1073,28 @@ def pushed_range(lab, resolver_tests=(), tip_tests=(), field='base'):
 
 def resolver_red_counts_against_the_set(lab):
     base, resolver, tip = pushed_range(lab, resolver_tests=['resolver regression'])
-    result = lab.run('wait', '--cleared', 'fixture/m1', '--timeout', '20', status=1)
+    result = lab.run('wait', '--cleared', 'fixture/m1', '--timeout', str(HUNG_LANDINGS_S), status=1)
     assert f'temper {tip[:9]} red over pushed range {base[:9]}..{tip[:9]}' in result.stdout, result
     assert f'temper {resolver[:9]} red by run {tip[:9]}: resolver regression' in result.stdout, result
     assert 'first failure\n    second failure' in result.stdout, result
     # Status and a commit-prefix wait use the same range as a set wait.
     assert f'{tip[:9]} red over pushed range' in lab.run().stdout
-    lab.run('wait', '--cleared', tip[:9], '--timeout', '20', status=1)
+    lab.run('wait', '--cleared', tip[:9], '--timeout', str(HUNG_LANDINGS_S), status=1)
     # A later clean landing never clears this landing's own red.
     later = lab.advance('temper', 'later clean landing')
     lab.append(*tier_run('temper', later, tip, 20, [(later, [])]))
-    lab.run('wait', '--cleared', 'fixture/m1', '--timeout', '20', status=1)
+    lab.run('wait', '--cleared', 'fixture/m1', '--timeout', str(HUNG_LANDINGS_S), status=1)
 
 
 def tip_red_still_counts_against_the_set(lab):
     _, _, tip = pushed_range(lab, tip_tests=['tip regression'])
-    result = lab.run('wait', '--cleared', 'fixture/m1', '--timeout', '20', status=1)
+    result = lab.run('wait', '--cleared', 'fixture/m1', '--timeout', str(HUNG_LANDINGS_S), status=1)
     assert f'temper {tip[:9]} red by run {tip[:9]}: tip regression' in result.stdout, result
 
 
 def push_result_also_supplies_the_range(lab):
     pushed_range(lab, resolver_tests=['resolver regression'], field='result')
-    lab.run('wait', '--cleared', 'fixture/m1', '--timeout', '20', status=1)
+    lab.run('wait', '--cleared', 'fixture/m1', '--timeout', str(HUNG_LANDINGS_S), status=1)
 
 
 def legacy_landing_keeps_its_tip_verdict(lab):
@@ -1108,7 +1108,7 @@ def plain_landing_uses_its_range(lab):
     base, _, tip = pushed_range(lab, resolver_tests=['resolver regression'], field=None)
     lab.append(dict(time='2026-10-26T05:00:00+00:00', kind='land', event='landed',
                     host='fixture-host', token='plain', repo='temper', branch='plain', base=base, commit=tip))
-    lab.run('wait', '--cleared', tip[:9], '--timeout', '20', status=1)
+    lab.run('wait', '--cleared', tip[:9], '--timeout', str(HUNG_LANDINGS_S), status=1)
     assert f'{tip[:9]} red over pushed range' in lab.run().stdout
 
 
@@ -1119,7 +1119,7 @@ def range_excludes_an_inherited_red(lab):
                            verdict='red', tests=['inherited'], excerpt='old failure'),
                tier_record(tier='temper', commit=tip, minute=20, state='red', last_green=None,
                            reds=[dict(landing=base, tests=['inherited'])]))
-    result = lab.run('wait', '--cleared', 'fixture/m1', '--timeout', '20')
+    result = lab.run('wait', '--cleared', 'fixture/m1', '--timeout', str(HUNG_LANDINGS_S))
     assert f'temper {tip[:9]} cleared by run' in result.stdout, result
     assert 'inherited' not in result.stdout, result
 
@@ -1219,10 +1219,10 @@ def stopped_run_superseded(lab):
 def waits_for_verdict(lab):
     landed_set(lab)
     lab.append(tier_record('verdict'))
-    result = lab.run('wait', '--cleared', 'fixture/m1', '--timeout', '.3', status=3)
-    assert 'no verdict for temper ' + 'b' * 40 in result.stderr, result
-    assert 'no verdict for jig' not in result.stderr, result
-    with subprocess.Popen([PYTHON, '-I', '-B', str(SCRIPT), 'wait', '--cleared', 'fixture/m1', '--timeout', '10'],
+    result = lab.run('wait', '--cleared', 'fixture/m1', '--timeout', '0', status=3)
+    assert result.stdout == '' and result.stderr == (
+        'landings: timed out waiting for fixture/m1\nlandings: no verdict for temper ' + 'b' * 40 + '\n'), result
+    with subprocess.Popen([PYTHON, '-I', '-B', str(SCRIPT), 'wait', '--cleared', 'fixture/m1', '--timeout', str(HUNG_LANDINGS_S)],
                           cwd=lab.root, env=lab.env, stdin=subprocess.DEVNULL,
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as proc:
         try:
@@ -1257,7 +1257,7 @@ def commit_target(lab):
 def no_tier_clears_on_landing(lab):
     lab.repository('agents', tier=False)
     commit = lab.land('agents', 'no tier')
-    result = lab.run('wait', '--cleared', commit[:9], '--timeout', '20')
+    result = lab.run('wait', '--cleared', commit[:9], '--timeout', str(HUNG_LANDINGS_S))
     assert re.fullmatch(r'\d{2}-\d{2} \d{2}:\d{2}Z ' +
                         f'agents {commit[:9]} cleared on landing: agents has no tier\n', result.stdout), result
     assert result.stderr == '', result
@@ -1272,7 +1272,7 @@ def baseline_clears_an_older_landing(lab):
     rows = tier_run('temper', main, None, 10, [(main, [])], baseline=True)
     rows[-1].update(state='red', reds=[dict(landing=None, tests=['standing'])])
     lab.append(*rows)
-    result = lab.run('wait', '--cleared', 'fixture/m1', '--timeout', '20')
+    result = lab.run('wait', '--cleared', 'fixture/m1', '--timeout', str(HUNG_LANDINGS_S))
     assert result.stdout == f'10-26 05:10Z temper {commit[:9]} cleared by run {main[:9]}, which holds it; baseline\n', result
     assert result.stderr == '', result
 
@@ -1291,7 +1291,7 @@ def range_run(lab, red=False):
 
 def commit_in_a_range_takes_its_landing_verdict(lab):
     commit, tip, main = range_run(lab)
-    result = lab.run('wait', '--cleared', commit[:9], '--timeout', '20')
+    result = lab.run('wait', '--cleared', commit[:9], '--timeout', str(HUNG_LANDINGS_S))
     assert result.stdout == (f'10-26 05:10Z temper {commit[:9]} cleared by run {main[:9]}, '
                              f'which holds it in landing {tip[:9]}\n'), result
     assert result.stderr == '', result
@@ -1299,7 +1299,7 @@ def commit_in_a_range_takes_its_landing_verdict(lab):
 
 def held_in_a_red_landing_is_red(lab):
     commit, tip, main = range_run(lab, red=True)
-    result = lab.run('wait', '--cleared', commit[:9], '--timeout', '20', status=1)
+    result = lab.run('wait', '--cleared', commit[:9], '--timeout', str(HUNG_LANDINGS_S), status=1)
     assert result.stdout == (f'10-26 05:10Z temper {commit[:9]} red by run {main[:9]}, '
                              f'which holds it in landing {tip[:9]}: TEST; log fixture-host:/fixture/log\n'
                              '    first failure\n    second failure\n'), result
@@ -1321,20 +1321,35 @@ def own_red_stays_red_under_later_clean_runs(lab):
     assert result.stderr == '', result
 
 
+def undecided_landing(lab, repo, base, commit):
+    # A no-git pass names only the requested prefix until the feed names the landing.
+    result = lab.run('wait', '--cleared', commit[:9], '--timeout', '0', status=3)
+    assert result.stdout == '' and result.stderr == (
+        f'landings: timed out waiting for {commit[:9]}\nlandings: no verdict for {commit[:9]}\n'), result
+    lab.append(record(event='started'), record(event='landed', repo=repo, base=base, commit=commit),
+               record(event='done'))
+    result = lab.run('wait', '--cleared', 'fixture/m1', '--timeout', '0', status=3)
+    assert result.stdout == '' and result.stderr == (
+        f'landings: timed out waiting for fixture/m1\nlandings: no verdict for {repo} {commit}\n'), result
+    # The display judges the landing with full Git timeouts, without a wait deadline.
+    result = lab.run()
+    assert (f'10-24 12:00Z fixture/m1 landed {repo} {commit[:9]} fixture-host\n'
+            '    verdict pending over pushed range\n') in result.stdout, result
+    assert result.stderr == '', result
+
+
 def waits_while_no_run_holds_it(lab):
     lab.repository('temper')
     previous = lab.advance('temper', 'baseline')
     lab.append(*tier_run('temper', previous, None, 1, [(previous, [])], baseline=True))
     commit = lab.land('temper', 'not run yet')
-    result = lab.run('wait', '--cleared', commit[:9], '--timeout', '20', status=3)
-    assert result.stdout == '' and result.stderr == (
-        f'landings: timed out waiting for {commit[:9]}\nlandings: no verdict for temper {commit}\n'), result
+    undecided_landing(lab, 'temper', previous, commit)
 
 
 def commit_no_main_holds_ends_the_wait(lab):
     lab.repository('agents', tier=False)
     commit = lab.unlanded('agents', 'never pushed')
-    result = lab.run('wait', '--cleared', commit[:9], '--timeout', '20', status=2)
+    result = lab.run('wait', '--cleared', commit[:9], '--timeout', str(HUNG_LANDINGS_S), status=2)
     assert result.stdout == '' and result.stderr == (
         f'landings: agents {commit[:9]} is not on main: wait on the commit that landed\n'), result
 
@@ -1342,12 +1357,13 @@ def commit_no_main_holds_ends_the_wait(lab):
 def failed_fetch_leaves_the_landing_undecided(lab):
     lab.repository('agents', tier=False)
     commit = lab.unlanded('agents', 'unavailable origin')
+    base = lab.git(lab.workspace / 'agents', 'rev-parse', commit + '^')
     lab.standin_git("if sys.argv[3] == 'fetch':\n"
                     "    os.write(2, b'origin unavailable: \\xff\\n')\n"
                     "    raise SystemExit(1)\n")
-    result = lab.run('wait', '--cleared', commit[:9], '--timeout', '20', status=3)
-    assert result.stdout == '' and result.stderr == (
-        f'landings: timed out waiting for {commit[:9]}\nlandings: no verdict for agents {commit}\n'), result
+    undecided_landing(lab, 'agents', base, commit)
+    calls = [json.loads(line) for line in (lab.root / 'git.jsonl').read_text().splitlines()]
+    assert sum(argv[2] == 'fetch' for argv in calls) == 1, calls
 
 
 def fetch_touches_only_origin_main(lab):
@@ -1365,7 +1381,7 @@ def fetch_touches_only_origin_main(lab):
     lab.repository('agents', tier=False)
     lab.standin_git('')
     lab.append(*tier_run('temper', main, None, 10, [(main, [])], baseline=True))
-    result = lab.run('wait', '--cleared', commit[:9], '--timeout', '20')
+    result = lab.run('wait', '--cleared', commit[:9], '--timeout', str(HUNG_LANDINGS_S))
     assert result.stdout == f'10-26 05:10Z temper {commit[:9]} cleared by run {main[:9]}, which holds it; baseline\n', result
     assert result.stderr == '', result
     assert lab.git(work, 'rev-parse', '--verify', main) == main
@@ -1383,18 +1399,17 @@ def stale_tracking_ref_is_fetched_first(lab):
     lab.repository('agents', tier=False)
     commit = lab.unlanded('agents', 'stale tracking main')
     lab.git(lab.workspace / 'agents', 'update-ref', 'refs/remotes/origin/main', commit)
-    result = lab.run('wait', '--cleared', commit[:9], '--timeout', '20', status=2)
+    result = lab.run('wait', '--cleared', commit[:9], '--timeout', str(HUNG_LANDINGS_S), status=2)
     assert result.stdout == '' and result.stderr == (
         f'landings: agents {commit[:9]} is not on main: wait on the commit that landed\n'), result
 
 
 def unknown_ancestry_leaves_the_landing_undecided(lab):
     commit, tip, main = range_run(lab)
+    base = lab.git(lab.workspace / 'temper', 'rev-parse', commit + '^')
     lab.append(tier_record('verdict', 'temper', 'f' * 40, 10, token=main[:32], run=main))
     lab.standin_git('')
-    result = lab.run('wait', '--cleared', commit[:9], '--timeout', '10', status=3)
-    assert result.stdout == '' and result.stderr == (
-        f'landings: timed out waiting for {commit[:9]}\nlandings: no verdict for temper {commit}\n'), result
+    undecided_landing(lab, 'temper', base, commit)
     calls = [json.loads(line) for line in (lab.root / 'git.jsonl').read_text().splitlines()]
     assert sum(argv[2] == 'fetch' for argv in calls) == 1, calls
     assert sum(argv[2:] == ['rev-parse', '--verify', 'f' * 40 + '^{commit}']
@@ -1528,7 +1543,7 @@ def posted_not_landed(lab):
     lab.repository('agents', tier=False)
     commit = lab.unlanded('agents', 'never pushed')
     post_standin(lab)
-    result = lab.run('wait', '--cleared', commit[:9], '--timeout', '20',
+    result = lab.run('wait', '--cleared', commit[:9], '--timeout', str(HUNG_LANDINGS_S),
                      '--post', 'owner@fixture', status=2)
     body = f'landings: agents {commit[:9]} is not on main: wait on the commit that landed\n'
     assert result.stdout == '' and result.stderr == body, result
