@@ -151,9 +151,13 @@ other owners' builds swung the free disk by about 25 GB at a time
 the build that took its room goes on. So the room is the landing's,
 and the others wait for it:
 
-- **A landing's task** is one labelled `land REPO` or `land REPO
-  prebuild` (`HEAVY_LABEL`, as `land` and `land-set` submit them), in
-  either lane.
+- **A landing's task** is one labelled `land REPO`, or `land REPO
+  STEP` for a step of a landing, `prebuild` or `regenerate`
+  (`HEAVY_LABEL`, as `land`, `land-set` and `land-resolve
+  --regenerate` submit them), in either lane. A regeneration is a
+  landing's step: as a build it would wait on its own set's
+  reservation, or outlive it before the next prebuild (o/land-room's
+  review, 10-27).
 - **The reservation** holds on a machine while a landing's task is in
   the ledger and not released, and for 2 minutes after the last one's
   release, so that a landing's next step (its gate after its prebuild,

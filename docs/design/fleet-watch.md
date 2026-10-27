@@ -183,8 +183,9 @@ mode 0600:
 commands, in this order, each whatever the others' exits:
 
 1. `tidy --targets`: the build targets past their use (cleanup.md 4,
-   step 9); with `--room GB` while a landing's task in heavy's ledger
-   waits for its floor (`disk_wait`, build-infrastructure.md 2, "A
+   step 9); with `--room GB` while a landing's task (its label as
+   build-infrastructure.md 2 defines it) in heavy's ledger waits for
+   its floor (`disk_wait`, build-infrastructure.md 2, "A
    landing's room"), GB that task's `floor_gb` plus its `room_gb`;
 2. `post wake --older 15`: each name whose mail has waited 15 minutes
    with no waiter, woken as delivery would wake it (post.md 3, 4);
