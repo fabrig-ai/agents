@@ -6,8 +6,8 @@ qa passes [--running]
 qa findings
 qa rung REPO [RUNG [--login POOL]... [--why TEXT]]
 qa triage PASS N owner ADDRESS|backlog|drop [--why TEXT]
-qa walk REPO RUNG [--build REF] [--login POOL]... [--cap MINUTES]
-qa walk REPO RUNG --resume N --build REF [--login POOL]... [--cap MINUTES]
+qa walk REPO RUNG [--kind KIND] [--build REF] [--login POOL]... [--cap MINUTES]
+qa walk REPO RUNG --resume NAME --build REF [--cap MINUTES]
 qa watch --director ADDRESS [--once]
 qa deploy DIRECTORY NAME -- COMMAND...
 """
@@ -510,6 +510,7 @@ def login_inventory(text):
 
 
 def passes(running, record, repositories):
+    options = settings(record.workspace)
     lines = [f'{p.name} {p.fields["repository"]} {p.fields["rung"]} {p.fields["outcome"]} {p.fields["wall"]} {p.fields["tokens"]} '
              + ' '.join(s[:9] for s in p.fields['commits'].split()) for p in record.passes()
              if not running or p.fields['outcome'] == 'running']
@@ -518,7 +519,8 @@ def passes(running, record, repositories):
     print(f'waiting: {len(selected)} commits chosen to run')
     for commit, _ in show_commits(repositories, selected):
         print(first_line(commit))
-    pools = set()
+    kinds = options['QA_WALK_KINDS']
+    pools = {pool for data in kinds.values() for pool in data['pools']}
     for repo in {repo for repo, _, _ in selected}:
         opening = rung(record, repo)
         if opening:
@@ -530,12 +532,14 @@ def passes(running, record, repositories):
             return  # Elsewhere, the logins' machine alone can show its pools.
         inventory = login_inventory(listing.stdout) if listing.returncode == 0 else None
         if inventory:
-            inventory = inventory[0]
-            reserve = settings(record.workspace)['QA_LOGIN_RESERVE']
+            inventory, holders, _ = inventory
+            reserve = options['QA_LOGIN_RESERVE']
             for pool in sorted(pools & inventory.keys()):
                 size, held = inventory[pool]
-                print(f'pool {pool}: {size} logins, QA holds {held}, keeps {reserve} for walks'
-                      + (': no QA pass runs' if size <= reserve else ''))
+                line = f'pool {pool}: {size} logins, QA holds {held} of {size - reserve}'
+                line += ''.join(f', {kind} walks hold {walk_count(holders, pool, kind)} of {data["slots"]}'
+                                for kind, data in kinds.items() if pool in data['pools'])
+                print(line + (': no QA pass runs' if size <= reserve else ''))
 
 
 BRIEF = '''# QA pass {name}
@@ -568,23 +572,53 @@ def log(message):
 def settings(workspace):
     # Same precedence and valid machine.env lines as kit.sh's machine_setting.
     values = dict(QA_SLOTS='1', QA_BATCH='5', QA_CAP_MINUTES='120', QA_INTERVAL_SECONDS='300',
-                  QA_GIVE_BACK_SECONDS='90', QA_STOP_SECONDS='50', QA_LOGIN_RESERVE='2', QA_WALK_SLOTS='2')
+                  QA_GIVE_BACK_SECONDS='90', QA_STOP_SECONDS='50', QA_LOGIN_RESERVE='2', QA_WALK_KINDS='forgejo=2:chatgpt claude=2:claude')
     path = workspace.tmp / 'machine.env'
     try:
         text = path.read_text(errors='replace')
     except OSError:
         text = ''  # kit.sh ignores an absent or unreadable machine file.
     for line in text.split('\n'):
-        match = re.fullmatch(r'(QA_SLOTS|QA_BATCH|QA_CAP_MINUTES|QA_INTERVAL_SECONDS|QA_GIVE_BACK_SECONDS|QA_STOP_SECONDS|QA_LOGIN_RESERVE|QA_WALK_SLOTS)=([0-9]+)', line)
+        match = re.fullmatch(r'(QA_SLOTS|QA_BATCH|QA_CAP_MINUTES|QA_INTERVAL_SECONDS|QA_GIVE_BACK_SECONDS|QA_STOP_SECONDS|QA_LOGIN_RESERVE)=([0-9]+)', line)
         if match:
             values[match[1]] = match[2]
+        if line.startswith('QA_WALK_KINDS='):
+            values['QA_WALK_KINDS'] = line.partition('=')[2]
+    kinds = os.environ.get('QA_WALK_KINDS', values.pop('QA_WALK_KINDS'))
     for key in values:
         value = os.environ.get(key, values[key])
         need(re.fullmatch(r'[0-9]+', value), f'{key} must be a nonnegative integer')
         values[key] = int(value)
     need(values['QA_BATCH'] > 0, 'QA_BATCH must be positive')
     need(0 < values['QA_STOP_SECONDS'] < 60, 'QA_STOP_SECONDS must be positive and below 60')
+    parsed, totals = {}, {}
+    need(kinds.strip() and not any(ord(c) < 32 or 0x7f <= ord(c) < 0xa0 for c in kinds),
+         'QA_WALK_KINDS needs KIND=SLOTS:POOL[,POOL...]')
+    for word in kinds.split(' '):
+        if not word:
+            continue
+        match = re.fullmatch(r'([a-z][a-z0-9]*)=([0-9]+):(.+)', word)
+        need(match, 'invalid QA_WALK_KINDS entry: ' + word)
+        kind, slots, pools = match[1], int(match[2]), match[3].split(',')
+        need(kind not in parsed and slots > 0 and len(set(pools)) == len(pools)
+             and all(re.fullmatch(LOGIN, pool) and pool_of(pool) == pool for pool in pools),
+             'invalid QA_WALK_KINDS entry: ' + word)
+        parsed[kind] = dict(slots=slots, pools=pools)
+        for pool in pools:
+            totals[pool] = totals.get(pool, 0) + slots
+    for pool, slots in totals.items():
+        reserve = values['QA_LOGIN_RESERVE']
+        need(reserve >= slots,
+             f'QA_LOGIN_RESERVE ({reserve}) is below the walk slots of pool {pool} ({slots}): '
+             + ' '.join(f'{kind}={data["slots"]}' for kind, data in parsed.items() if pool in data['pools']))
+    values['QA_WALK_KINDS'] = parsed
     return values
+
+
+def walk_count(holders, pool, kind):
+    # Old walk grants stay occupied until the pre-kind runs have drained.
+    return sum(pool_of(name) == pool and (holder.startswith('walk/' + kind + '/')
+               or holder.startswith('walk/rung-')) for name, holder in holders.items())
 
 
 def stop_path(path):
@@ -740,8 +774,7 @@ class Watch:
 
     def call(self, tool, *args):
         seconds = dict(systemctl=30, logins=60, post=60, landings=120, **{'codex-run': 120})
-        timeout = 960 if tool == 'logins' and '--wait' in args else seconds[tool]
-        return command([self.workspace.tool(tool), *args], timeout=timeout)
+        return command([self.workspace.tool(tool), *args], timeout=seconds[tool])
 
     def save(self, directory, state):
         if 'walk' in state:
@@ -807,9 +840,10 @@ class Watch:
         self.pools, self.holders, self.queued = inventory
         if self.queued:
             log("QA's rows from before --now still wait in the logins queue: no pass admitted until they expire")
+        managed = {state['holder'] for _, state in passes if 'walk' in state}
         names = {name: holder for name, holder in self.holders.items()
                  if (holder, name) not in held and (holder == 'qa-watch' or holder.startswith('qa-watch/')
-                     or sweep_walks and holder.startswith('walk/'))}
+                     or sweep_walks and holder in managed)}
         path = self.directory / 'strays.json'
         need(not path.is_symlink(), f'{path}: symlink refused', 4)
         strays = json.loads(path.read_text()) if path.exists() else {}
@@ -1226,8 +1260,12 @@ class Watch:
                     state = json.load(source)
                 name = state['walk']
                 need(name == path.stem and re.fullmatch(r'rung-[a-z0-9][a-z0-9-]*-[1-9][0-9]*', name)
-                     and state['repo'] in REPOSITORIES and name.rsplit('-', 1)[0] == 'rung-' + state['rung']
-                     and state['holder'] == 'walk/' + name, f'{path}: invalid walk', 4)
+                     and state['repo'] in REPOSITORIES and name == 'rung-' + state['rung'] + '-' + state.get('clock_walk', name.rsplit('-', 1)[-1])
+                     and (state['holder'] == 'walk/' + name or isinstance(state.get('kind'), str)
+                          and re.fullmatch(r'[a-z][a-z0-9]*', state['kind'])
+                          and state['holder'] == 'walk/' + state['kind'] + '/' + name), f'{path}: invalid walk', 4)
+                need('kind' not in state or isinstance(state['kind'], str)
+                     and re.fullmatch(r'[a-z][a-z0-9]*', state['kind']), 'invalid saved walk kind', 4)
                 walk_attempt(state)
                 if 'attempts' in state or 'attempt' in state:
                     need(type(state['attempt']) is int and state['attempt'] >= 1
@@ -1270,17 +1308,29 @@ class Watch:
             text = out.read()
             # The append can survive a crash before the state's progress save.
             attempt = state.get('attempt', 1)
-            prefix = f'attempt {attempt}: '
-            if not any(row.split('\t')[2:4] == [state['walk'], event]
-                       and (attempt == 1 or row.split('\t')[-1].startswith(prefix))
+            prefix = f'kind {state["kind"]} attempt {attempt}: ' if 'kind' in state else f'attempt {attempt}: '
+            clock = state.get('clock_walk', state['walk'].rsplit('-', 1)[-1])
+            if not any(row.split('\t')[2:4] in ([clock, event], [state['walk'], event])
+                       and (row.split('\t')[-1].startswith(prefix)
+                            or 'kind' not in state and attempt == 1)
                        for row in text.splitlines()):
                 if not text:
                     out.write('time\trung\twalk\tevent\tnote\n')
-                out.write(f'{timestamp()}\t{state["rung"]}\t{state["walk"]}\t{event}\t{prefix}{note}\n')
+                out.write(f'{timestamp()}\t{state["rung"]}\t{clock}\t{event}\t{prefix}{note}\n')
                 out.flush()
                 os.fsync(out.fileno())
         state['start_logged' if event in ('walk-start', 'walk-resume') else 'end_logged'] = True
         self.save(directory, state)
+
+    def walk_room(self, pools, kind):
+        listing = self.call('logins', 'list')
+        inventory = login_inventory(listing.stdout) if listing.returncode == 0 else None
+        need(inventory is not None, 'cannot read login inventory for walk admission', 1)
+        holders = inventory[1]
+        slots = self.options['QA_WALK_KINDS'][kind]['slots']
+        for pool in pools:
+            held = walk_count(holders, pool, kind)
+            need(held < slots, f'kind {kind} holds {held} of its {slots} logins of pool {pool}', 1)
 
     def cancel_walk(self, directory, state, drop=True):
         state['stage'] = 'cancelled'
@@ -1601,7 +1651,9 @@ def walk(args, workspace):
          'POST_NAME must be set to a valid starter name')
     need(re.fullmatch(r'[a-z0-9][a-z0-9-]*', args.rung), 'invalid rung name')
     need(args.cap is None or args.cap >= 1, '--cap must be at least 1')
-    need(args.resume is None or args.resume >= 1 and args.build is not None, '--resume needs a positive N and --build')
+    need(args.resume is None or re.fullmatch(r'rung-[a-z0-9][a-z0-9-]*-[1-9][0-9]*', args.resume)
+         and args.build is not None and not args.login and args.kind is None,
+         '--resume needs a walk NAME and --build, without --login or --kind')
     need(all(re.fullmatch(LOGIN, pool) and pool_of(pool) == pool for pool in args.login), 'invalid login pool')
     need(len(set(args.login)) == len(args.login), 'repeated login pool')
     workspace.origin(args.repo)
@@ -1613,50 +1665,74 @@ def walk(args, workspace):
         no_links(workspace.tmp, focused)
         focused.mkdir(mode=0o700, parents=True, exist_ok=True)
         walks = service.local_walks()
-        prefix = 'rung-' + args.rung + '-'
+        kinds = options['QA_WALK_KINDS']
+        need(not any('kind' not in state and not state.get('released') for _, state in walks),
+             'pre-kind walks still hold slots; drain them before starting a kind', 1)
         if args.resume is not None:
-            name = prefix + str(args.resume)
+            name = args.resume
             match = next(((path, state) for path, state in walks if state['walk'] == name), None)
-            need(match and match[1]['repo'] == args.repo, 'resume needs a saved walk of this repository')
+            need(match and match[1]['repo'] == args.repo and match[1]['rung'] == args.rung,
+                 'resume needs a saved walk of this repository and rung')
             directory, state = match
             need(state['stage'] == 'paused' and state.get('released') and state.get('end_logged')
                  and state.get('posted') and not service.outstanding(state), 'walk pause is not complete')
+            kind = state.get('kind', next(iter(kinds)))
+            need(kind in kinds and set(state['requests']) <= set(kinds[kind]['pools']),
+                 'saved walk kind or pools are no longer configured')
+            state['kind'] = kind
+            service.walk_room(state['requests'], kind)
             service.save(directory, state)
             previous_run = next((a['run'] for a in reversed(state['attempts']) if a.get('run')), '')
             need(previous_run, 'paused walk has no earlier run')
             state.update(attempt=state['attempt'] + 1, ref=args.build, cap=args.cap or state['cap'],
                          started=timestamp(), slot=None, logins={}, kinds={}, pools={}, given=[],
-                         requests=sorted(args.login) if args.login else state['requests'], run='',
+                         requests=state['requests'], run='', holder='walk/' + kind + '/' + name,
                          stage='reserving', released=False, start_logged=False, end_logged=False,
                          posted=False, capped=False, resume_run=previous_run)
             state.pop('decision', None)
         else:
-            names = [state['walk'] for _, state in walks] + [p.name for p in focused.iterdir()]
-            numbers = [int(name[len(prefix):]) for name in names
-                       if name.startswith(prefix) and re.fullmatch(r'[1-9][0-9]*', name[len(prefix):])]
-            name = prefix + str(max(numbers, default=0) + 1)
+            kind = args.kind if args.kind is not None else next(iter(kinds))
+            need(kind in kinds, 'unknown walk kind: ' + kind)
+            requests = sorted(args.login or kinds[kind]['pools'])
+            need(set(requests) <= set(kinds[kind]['pools']), 'login is not a pool of kind ' + kind)
+            service.walk_room(requests, kind)
+            prefix = 'rung-' + args.rung + '-' + ('' if kind == next(iter(kinds)) else kind + '-')
+            known = {state['walk'] for _, state in walks}
+            names = [state['walk'].rsplit('-', 1)[-1] for _, state in walks
+                     if state['rung'] == args.rung and state.get('kind', next(iter(kinds))) == kind]
+            prefixes = {prefix, f'rung-{args.rung}-{kind}-', f'rung-{args.rung}-'}
+            names += [path.name[len(candidate):] for path in focused.iterdir()
+                      for candidate in prefixes if path.name not in known and path.name.startswith(candidate)]
+            numbers = [int(number) for number in names if re.fullmatch(r'[1-9][0-9]*', number)]
+            number = max(numbers, default=0) + 1
+            while (focused / (prefix + str(number))).exists() or (service.directory / 'walks' / (prefix + str(number) + '.json')).exists():
+                number += 1
+            name = prefix + str(number)
             directory = focused / name
             directory.mkdir(mode=0o700)
-            state = dict(walk=name, repo=args.repo, rung=args.rung, ref=args.build if args.build is not None else 'main',
+            state = dict(walk=name, repo=args.repo, rung=args.rung, kind=kind,
+                         clock_walk=name[len('rung-' + args.rung + '-'):], ref=args.build if args.build is not None else 'main',
                          starter=starter + '@' + workspace.machine(), cap=args.cap or 180, started=timestamp(),
-                         slot=None, holder='walk/' + name, logins={}, kinds={}, pools={}, run='',
-                         stage='reserving', requests=sorted(args.login), given=[], released=False,
+                         slot=None, holder='walk/' + kind + '/' + name, logins={}, kinds={}, pools={}, run='',
+                         stage='reserving', requests=requests, given=[], released=False,
                          start_logged=False, end_logged=False, posted=False, report_attempt=1)
         service.save(directory, state)
-        held = {s['slot'] for _, s in walks if s['repo'] == args.repo and not s.get('released')}
-        state['slot'] = next((k for k in range(1, options['QA_WALK_SLOTS'] + 1) if k not in held), None)
+        held = {s['slot'] for _, s in walks if s.get('kind', next(iter(kinds))) == kind and not s.get('released')}
+        state['slot'] = next((k for k in range(1, kinds[kind]['slots'] + 1) if k not in held), None)
         if state['slot'] is None:
             service.cancel_walk(directory, state, drop=False)
-            raise Problem(f'no free walk slot for {args.repo}', 1)
+            raise Problem(f'no free walk slot for kind {kind}', 1)
         service.save(directory, state)
         try:
-            slot = f'{args.repo}-walk-{state["slot"]}'
+            slot = f'{args.repo}-walk-{kind}-{state["slot"]}'
             with service.repositories.fetched(args.repo) as root:
                 service.repositories.checkout(root, args.repo, slot, 'origin/main')
             for pool in state['requests']:
-                taken = service.call('logins', 'take', pool, '--any', '--as', state['holder'],
-                                     '--note', directory, '--wait', '900')
-                need(taken.returncode == 0, taken.stderr.strip() or taken.stdout.strip() or f'cannot take {pool}', 1)
+                service.walk_room([pool], kind)
+                taken = service.call('logins', 'take', pool, '--any', '--now', '--as', state['holder'],
+                                     '--note', directory)
+                need(taken.returncode == 0, 'the caps are broken: ' + (taken.stderr.strip() or taken.stdout.strip()
+                     or f'cannot take {pool}'), 1)
                 login, sep, path = taken.stdout.strip().partition(' ')
                 need(sep and re.fullmatch(LOGIN, login) and pool_of(login) == pool and Path(path).is_absolute(),
                      f'{name}: invalid login grant', 4)
@@ -1698,7 +1774,10 @@ def walk(args, workspace):
                 no_links(workspace.tmp, directory / 'brief.md')
                 need((directory / 'brief.md').is_file(), 'saved rung brief missing', 1)
             else:
-                brief = focused / ('rung-' + args.rung + '-brief.md')
+                brief = focused / ('rung-' + args.rung + '-' + kind + '-brief.md')
+                no_links(workspace.tmp, brief)
+                if not brief.exists():
+                    brief = focused / ('rung-' + args.rung + '-brief.md')
                 no_links(workspace.tmp, brief)
                 need(brief.is_file(), f'rung brief missing: {brief}', 1)
                 replace(directory / 'brief.md', brief.read_bytes())
@@ -1841,7 +1920,8 @@ def main():
     walking.add_argument('repo')
     walking.add_argument('rung')
     walking.add_argument('--build')
-    walking.add_argument('--resume', type=int)
+    walking.add_argument('--resume')
+    walking.add_argument('--kind')
     walking.add_argument('--login', action='append', default=[])
     walking.add_argument('--cap', type=int)
     service = sub.add_parser('watch')

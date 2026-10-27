@@ -45,7 +45,7 @@ class Lab:
                         DEV_TMP=str(self.tmp), RECORDS=str(self.records), QA_FIXTURE=str(root),
                         QA_RECORD=str(KIT / 'record'), QA_POST=str(self.post),
                         QA_POST_LOG=str(self.post_log), QA_POST_STATUS='0',
-                        QA_LOGIN_RESERVE='0', USER='fixture', POST_NAME='o/fixture', RECORD_TIDY='',
+                        QA_LOGIN_RESERVE='2', USER='fixture', POST_NAME='o/fixture', RECORD_TIDY='',
                         GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1',
                         GIT_AUTHOR_NAME='Fixture', GIT_AUTHOR_EMAIL='fixture@invalid',
                         GIT_COMMITTER_NAME='Fixture', GIT_COMMITTER_EMAIL='fixture@invalid',
@@ -59,7 +59,7 @@ class Lab:
             self.env[f'GIT_CONFIG_KEY_{count + index}'] = key
             self.env[f'GIT_CONFIG_VALUE_{count + index}'] = value
         self.env['GIT_CONFIG_COUNT'] = str(count + 4)
-        self.configure(cleared={}, pools={CHATGPT: [CHATGPT], CLAUDE: [CLAUDE]})
+        self.configure(cleared={}, pools={CHATGPT: [CHATGPT, 'chatgpt-2', 'chatgpt-3'], CLAUDE: [CLAUDE, 'claude-2', 'claude-3']})
         for name in ('post', 'codex-run', 'landings', 'systemctl', 'systemd-run', 'logins'):
             tool = root / name
             tool.write_text(f'#!{sys.executable} -S\n' + WATCH_TOOLS)
@@ -706,7 +706,7 @@ elif name == 'logins':
         if holder.startswith('qa-watch'):
             assert pool and now and args[position + 2] == '--note' and args[position + 3] in ('temper', 'jig'), args
         if holder.startswith('walk/'):
-            assert pool and not now and args[-2:] == ['--wait', '900'], args
+            assert pool and now and '--wait' not in args, args
             assert Path(args[args.index('--note') + 1]).is_dir(), args
         members = config.get('pools', {}).get(login, [login]) if pool else [login]
         queue = config.setdefault('login_queue', [])
@@ -2238,7 +2238,7 @@ def a_linked_report_is_no_report(lab):
 
 def two_passes_start_side_by_side(lab):
     lab.rung('temper', REAL, CHATGPT)
-    lab.configure(pools={CHATGPT: [CHATGPT, 'chatgpt-2']}, capture_launch=True)
+    lab.configure(pools={CHATGPT: [CHATGPT, 'chatgpt-2', 'chatgpt-3', 'chatgpt-4']}, capture_launch=True)
     commits = lab.waiting(7)
     lab.watch(extra={'QA_SLOTS': '2'})
     first, second = lab.watch_states()
@@ -2319,7 +2319,7 @@ tool['Watch'].take = take
 
 def a_stuck_login_holds_back_only_its_pass(lab):
     lab.rung('temper', REAL, CHATGPT)
-    lab.configure(pools={CHATGPT: [CHATGPT, 'chatgpt-2']})
+    lab.configure(pools={CHATGPT: [CHATGPT, 'chatgpt-2', 'chatgpt-3', 'chatgpt-4']})
     lab.waiting(1)
     lab.watch(extra={'QA_SLOTS': '2'})
     directory, state = lab.watch_state()
@@ -2336,7 +2336,7 @@ def a_stuck_login_holds_back_only_its_pass(lab):
 
 def a_grant_lost_in_a_crash_is_given_back(lab):
     lab.rung('temper', REAL, CHATGPT)
-    lab.configure(pools={CHATGPT: [CHATGPT, 'chatgpt-2', 'chatgpt-3']})
+    lab.configure(pools={CHATGPT: [CHATGPT, 'chatgpt-2', 'chatgpt-3', 'chatgpt-4', 'chatgpt-5']})
     lab.waiting(1)
     patch = """Watch = tool['Watch']
 original = Watch.call
@@ -2410,7 +2410,7 @@ def a_finished_pass_with_units_up_keeps_its_slot(lab):
 
 def a_pass_from_before_ends_and_holds_slot_1(lab):
     lab.rung('temper', REAL, CHATGPT)
-    lab.configure(pools={CHATGPT: [CHATGPT, 'chatgpt-2']})
+    lab.configure(pools={CHATGPT: [CHATGPT, 'chatgpt-2', 'chatgpt-3', 'chatgpt-4']})
     lab.waiting(1)
     lab.watch()
     directory, state = lab.watch_state()
@@ -2533,8 +2533,8 @@ def a_finished_pass_waits_for_its_session_to_stop(lab):
 
 def all_reservations_survive_a_crash_before_their_shares(lab):
     lab.rung('temper', REAL, CHATGPT, CLAUDE)
-    lab.configure(pools={CHATGPT: [CHATGPT, 'chatgpt-2', 'chatgpt-3', 'chatgpt-4'],
-                         CLAUDE: [CLAUDE, 'claude-2', 'claude-3']})
+    lab.configure(pools={CHATGPT: [CHATGPT, 'chatgpt-2', 'chatgpt-3', 'chatgpt-4', 'chatgpt-5', 'chatgpt-6'],
+                         CLAUDE: [CLAUDE, 'claude-2', 'claude-3', 'claude-4', 'claude-5']})
     commits = lab.waiting(4)
     lab.env['QA_SLOTS'] = '4'
     driven_watch(lab, """original = tool['Watch'].save
@@ -2558,7 +2558,7 @@ tool['Watch'].save = save
 
 def later_incomplete_reservations_are_cancelled(lab):
     lab.rung('temper', REAL, CHATGPT, CLAUDE)
-    lab.configure(pools={CHATGPT: [CHATGPT, 'chatgpt-2'], CLAUDE: [CLAUDE]}, logins_busy=[CLAUDE])
+    lab.configure(pools={CHATGPT: [CHATGPT, 'chatgpt-2', 'chatgpt-3', 'chatgpt-4'], CLAUDE: [CLAUDE, 'claude-2', 'claude-3']}, logins_busy=[CLAUDE])
     lab.waiting(2)
     lab.env['QA_SLOTS'] = '2'
     driven_watch(lab, """def take(*args):
@@ -2856,7 +2856,7 @@ def qa_holds_at_most_the_pool_less_the_reserve(lab):
     assert 'keeping the reserve for walks' in result.stdout
     assert sum(args == ['list'] for args in lab.calls('logins')) == 1
     lab.waiting(1)
-    assert 'pool chatgpt: 4 logins, QA holds 2, keeps 2 for walks' in lab.run('passes').stdout
+    assert 'pool chatgpt: 4 logins, QA holds 2 of 2, forgejo walks hold 0 of 2' in lab.run('passes').stdout
 
 
 def a_stuck_login_leaves_qa_one_pass(lab):
@@ -2898,11 +2898,11 @@ def a_pool_no_larger_than_the_reserve_runs_no_pass(lab):
     lab.watch()
     assert not lab.watch_states() and not lab.calls('codex-run')
     assert lab.calls('logins') == [['list']]
-    expected = 'pool chatgpt: 2 logins, QA holds 0, keeps 2 for walks: no QA pass runs'
+    expected = 'pool chatgpt: 2 logins, QA holds 0 of 0, forgejo walks hold 0 of 2: no QA pass runs'
     assert expected in lab.run('passes').stdout
     lab.run('passes', status=2, extra={'QA_LOGIN_RESERVE': '-1'})
-    (lab.tmp / 'machine.env').write_text('QA_LOGIN_RESERVE=1\n')
-    assert 'keeps 1 for walks' in lab.run('passes').stdout
+    (lab.tmp / 'machine.env').write_text('QA_LOGIN_RESERVE=1\nQA_WALK_KINDS=forgejo=1:chatgpt claude=1:claude\n')
+    assert 'QA holds 0 of 1' in lab.run('passes').stdout
     lab.watch()
     assert len(lab.calls('codex-run')) == 1
 
@@ -2911,7 +2911,8 @@ def a_saved_reservation_past_the_cap_is_cancelled(lab):
     reserved_pool(lab)
     lab.waiting(3)
     # The code before the reserve saved three full reservations, then stopped before their shares.
-    lab.env['QA_LOGIN_RESERVE'] = '0'
+    lab.env['QA_LOGIN_RESERVE'] = '1'
+    lab.env['QA_WALK_KINDS'] = 'forgejo=1:chatgpt claude=1:claude'
     driven_watch(lab, """original = tool['Watch'].save
 def save(self, directory, state):
     if state.get('stage') == 'starting':
@@ -2921,6 +2922,7 @@ tool['Watch'].save = save
 """)
     assert [len(s['pools']) for _, s in lab.watch_states()] == [1, 1, 1]
     lab.env.pop('QA_LOGIN_RESERVE')
+    lab.env.pop('QA_WALK_KINDS')
     # Past the cap, the repository's saved reservations are cancelled; the next check admits within it.
     result = lab.watch()
     assert 'QA holds 3 of pool chatgpt, past its 2; cancelled' in result.stdout
@@ -3021,8 +3023,8 @@ def a_walk_takes_a_login_and_a_slot_and_starts(lab):
     path = resting(lab, CHATGPT)
     result = lab.walk('b0', '--login', CHATGPT)
     directory, state = lab.walk_state()
-    checkout = lab.tmp / 'qa/repos/temper-walk-1'
-    assert state['slot'] == 1 and state['holder'] == 'walk/rung-b0-1'
+    checkout = lab.tmp / 'qa/repos/temper-walk-forgejo-1'
+    assert state['slot'] == 1 and state['holder'] == 'walk/forgejo/rung-b0-1'
     assert state['starter'] == 'o/fixture@' + socket.gethostname()
     assert state['ref'] == 'main' and state['main'] == main and state['cap'] == 180
     assert lab.git(checkout, 'rev-parse', 'HEAD') == main
@@ -3035,10 +3037,10 @@ def a_walk_takes_a_login_and_a_slot_and_starts(lab):
                                         str(directory / 'give-back'), str(directory / 'report.md'), 'qa deploy'))
     rows = (directory.parent / 'b0/loop.tsv').read_text().splitlines()
     assert rows[0] == 'time\trung\twalk\tevent\tnote'
-    assert len(rows) == 2 and rows[1].split('\t')[1:4] == ['b0', 'rung-b0-1', 'walk-start']
+    assert len(rows) == 2 and rows[1].split('\t')[1:4] == ['b0', '1', 'walk-start']
     assert main[:9] in rows[1] and CHATGPT in rows[1]
-    assert lab.calls('logins') == [['take', CHATGPT, '--any', '--as', state['holder'],
-                                  '--note', str(directory), '--wait', '900']]
+    assert lab.calls('logins') == [['list'], ['list'], ['take', CHATGPT, '--any', '--now', '--as', state['holder'],
+                                  '--note', str(directory)]]
     assert lab.calls('codex-run') == [['task', '--to', 'qa-watch', '--on-stop', str(directory / 'on-stop'),
                                       str(directory / 'task.md'), str(checkout), str(directory / 'report.md')]]
     assert result.stdout.splitlines() == ['walk rung-b0-1', f'{CHATGPT} {path}', 'run ' + state['run']]
@@ -3048,6 +3050,7 @@ def a_walk_takes_a_login_and_a_slot_and_starts(lab):
 
 
 def a_refused_login_starts_nothing(lab):
+    lab.env['QA_WALK_KINDS'] = 'forgejo=2:chatgpt,claude'
     lab.configure(logins_busy=[CLAUDE])
     lab.walk('b0', '--login', CLAUDE, '--login', CHATGPT, status=1)
     directory, state = lab.walk_state()
@@ -3063,11 +3066,10 @@ def a_third_walk_is_refused_at_once(lab):
     lab.walk('b0')
     before = lab.calls('logins')
     result = lab.walk('b0', '--login', CHATGPT, status=1)
-    assert result.stderr == 'qa: no free walk slot for temper\n'
+    assert result.stderr == 'qa: kind forgejo holds 2 of its 2 logins of pool chatgpt\n'
     states = [state for _, state in lab.walk_states()]
-    assert [state['slot'] for state in states] == [1, 2, None]
-    assert states[-1]['stage'] == 'ended' and states[-1]['released']
-    assert lab.calls('logins') == before and len(lab.calls('codex-run')) == 2
+    assert [state['slot'] for state in states] == [1, 2]
+    assert lab.calls('logins') == before + [['list']] and len(lab.calls('codex-run')) == 2
 
 
 def driven_walk(lab, patch, *args, status=0):
@@ -3195,8 +3197,8 @@ def a_walk_resolves_origin_branches_and_commit_prefixes(lab):
     first, second = lab.walk_states()
     assert first[1]['walk'] == 'rung-b0-5' and first[1]['main'] == branch
     assert second[1]['walk'] == 'rung-b0-6' and second[1]['main'] == main
-    assert lab.git(lab.tmp / 'qa/repos/temper-walk-1', 'rev-parse', 'HEAD') == branch
-    assert lab.git(lab.tmp / 'qa/repos/temper-walk-2', 'rev-parse', 'HEAD') == main
+    assert lab.git(lab.tmp / 'qa/repos/temper-walk-forgejo-1', 'rev-parse', 'HEAD') == branch
+    assert lab.git(lab.tmp / 'qa/repos/temper-walk-forgejo-2', 'rev-parse', 'HEAD') == main
 
 
 def a_walk_preparation_refusal_returns_its_grants(lab):
@@ -3275,7 +3277,7 @@ Watch.save = save
 
 def a_walk_in_place_login_waits_for_its_unknown_unit(lab):
     resting(lab, CLAUDE, in_place=True)
-    lab.walk('b0', '--login', CLAUDE)
+    lab.walk('b0', '--kind', 'claude', '--login', CLAUDE)
     directory, state = lab.walk_state()
     unit, pid = deployment(lab, directory)
     lab.configure(inactive=True, unit_states={unit: 'unknown'})
@@ -3293,18 +3295,18 @@ def a_walk_start_does_not_block_the_services_pass_cleanup(lab):
     lab.waiting(1)
     lab.watch()
     directory, state = lab.watch_state()
-    lab.configure(logins_held=[CHATGPT], login_holders={CHATGPT: 'walk/rung-b0-1'})
+    lab.configure(logins_held=[CHATGPT], login_holders={CHATGPT: 'walk/forgejo/rung-b0-1'})
     with (lab.tmp / 'qa/walks.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         lab.watch(extra={'QA_CAP_MINUTES': '0'})
         lab.watch()
     assert lab.watch_state()[1]['finished'] and lab.watch_state()[1]['released']
-    assert ['give', CHATGPT, '--as', 'walk/rung-b0-1'] not in lab.calls('logins')
+    assert ['give', CHATGPT, '--as', 'walk/forgejo/rung-b0-1'] not in lab.calls('logins')
 
 
 def a_damaged_walk_state_does_not_block_others_cleanup(lab):
     lab.walk('b0', '--login', CHATGPT)
-    lab.walk('b1', '--login', CLAUDE)
+    lab.walk('b1', '--kind', 'claude', '--login', CLAUDE)
     directory, state = lab.walk_states()[0]
     saved = lab.tmp / 'qa/walks' / (state['walk'] + '.json')
     original = saved.read_bytes()
@@ -3317,7 +3319,7 @@ def a_damaged_walk_state_does_not_block_others_cleanup(lab):
         result = lab.watch()
         assert 'invalid walk state; keeping custody' in result.stdout
         assert ['give', CHATGPT, '--as', state['holder']] not in lab.calls('logins')
-    good = json.loads((lab.tmp / 'qa/walks/rung-b1-1.json').read_text())
+    good = json.loads((lab.tmp / 'qa/walks/rung-b1-claude-1.json').read_text())
     assert good['stage'] == 'ended' and good['given'] == [CLAUDE]
     assert lab.watch_state()[1]['run']
     assert ['give', CHATGPT, '--as', state['holder']] not in lab.calls('logins')
@@ -3414,13 +3416,13 @@ def a_paused_walk_resumes_at_a_branch_with_another_login(lab):
     lab.walk('other', '--login', CHATGPT)
     fix = lab.commit('fix before landing', branch='fix')
     report = (directory / 'report.md').read_bytes()
-    lab.run('walk', 'temper', 'b0', '--resume', '1', '--build', 'origin/fix', now='2026-10-27T09:00:00Z')
+    lab.run('walk', 'temper', 'b0', '--resume', 'rung-b0-1', '--build', 'origin/fix', now='2026-10-27T09:00:00Z')
     resumed = next(saved for _, saved in lab.walk_states() if saved['walk'] == state['walk'])
     assert resumed['walk'] == state['walk'] and resumed['attempt'] == 2 and len(resumed['attempts']) == 2
     assert resumed['attempts'][0] == previous and resumed['run'] != state['run']
     assert resumed['pools'] == {CHATGPT: 'chatgpt-2'} and resumed['slot'] == 2
     assert resumed['main'] == fix and resumed['cap'] == 7 and resumed['started'] == '2026-10-27T09:00:00Z'
-    assert lab.git(lab.tmp / 'qa/repos/temper-walk-2', 'rev-parse', 'HEAD') == fix
+    assert lab.git(lab.tmp / 'qa/repos/temper-walk-forgejo-2', 'rev-parse', 'HEAD') == fix
     assert not (directory / 'paused').exists() and not (directory / 'give-back').exists()
     assert (directory / 'report-1.md').read_bytes() == report and kept.read_text() == 'kept deployment data\n'
     task = (directory / 'task.md').read_text()
@@ -3429,7 +3431,7 @@ def a_paused_walk_resumes_at_a_branch_with_another_login(lab):
         'configuration', 'stored family', 'fresh deployment', 'main at the landed commit'))
     call = lab.calls('codex-run')[-1]
     assert call[:6] == ['task', '--resume', state['run'], '--to', 'qa-watch', '--on-stop']
-    assert call[-3:] == [str(directory / 'task.md'), str(lab.tmp / 'qa/repos/temper-walk-2'), str(directory / 'report.md')]
+    assert call[-3:] == [str(directory / 'task.md'), str(lab.tmp / 'qa/repos/temper-walk-forgejo-2'), str(directory / 'report.md')]
     lab.watch(now='2026-10-27T09:06:59Z')
     current = next(saved for _, saved in lab.walk_states() if saved['walk'] == state['walk'])
     assert current['stage'] == 'running' and not current['capped']
@@ -3446,7 +3448,7 @@ def a_failed_resume_launch_gives_back_and_stays_paused(lab):
     directory, state = walk_with_logins(lab, CHATGPT)
     state = pause_walk(lab, directory, state)
     lab.configure(resume_refusal='resume run has no thread', refuse_launch=True)
-    lab.run('walk', 'temper', 'b0', '--resume', '1', '--build', 'main', status=1)
+    lab.run('walk', 'temper', 'b0', '--resume', 'rung-b0-1', '--build', 'main', status=1)
     failed = lab.walk_state()[1]
     assert failed['stage'] == 'paused' and failed['released'] and failed['given'] == [CHATGPT]
     assert failed['attempt'] == 2 and len(failed['attempts']) == 2 and not failed['run']
@@ -3454,7 +3456,7 @@ def a_failed_resume_launch_gives_back_and_stays_paused(lab):
     assert (directory / 'paused').read_text().strip() == state['pause_line']
     assert (directory / 'report-1.md').read_text() == 'Blocking finding at step 4.\n'
     lab.configure(refuse_launch=False, resume_refusal='')
-    lab.run('walk', 'temper', 'b0', '--resume', '1', '--build', 'main')
+    lab.run('walk', 'temper', 'b0', '--resume', 'rung-b0-1', '--build', 'main')
     current = lab.walk_state()[1]
     assert current['attempt'] == 3 and len(current['attempts']) == 3 and current['stage'] == 'running'
     assert lab.calls('codex-run')[-1][1:3] == ['--resume', state['run']]
@@ -3464,7 +3466,7 @@ def a_resume_before_the_pause_is_complete_is_refused(lab):
     directory, state = walk_with_logins(lab, CHATGPT)
     pause_walk(lab, directory, state, post_status='2')
     before = lab.calls('logins')
-    lab.run('walk', 'temper', 'b0', '--resume', '1', '--build', 'main', status=2)
+    lab.run('walk', 'temper', 'b0', '--resume', 'rung-b0-1', '--build', 'main', status=2)
     assert lab.calls('logins') == before and len(lab.calls('codex-run')) == 1
     assert lab.walk_state()[1]['attempt'] == 1
 
@@ -3473,7 +3475,7 @@ def a_resume_whose_thread_is_gone_starts_fresh(lab):
     directory, state = walk_with_logins(lab, CHATGPT)
     state = pause_walk(lab, directory, state)
     (lab.tmp / 'codex-run' / state['run'] / 'thread').unlink()
-    lab.run('walk', 'temper', 'b0', '--resume', '1', '--build', 'main')
+    lab.run('walk', 'temper', 'b0', '--resume', 'rung-b0-1', '--build', 'main')
     current = lab.walk_state()[1]
     calls = lab.calls('codex-run')
     assert len(calls) == 3 and calls[1][1:3] == ['--resume', state['run']]
@@ -3486,14 +3488,14 @@ def a_resume_whose_thread_is_gone_starts_fresh(lab):
 def resume_refuses_a_walk_not_paused(lab):
     directory, state = walk_with_logins(lab, CHATGPT)
     before = lab.calls('logins')
-    for args in [('--resume', '1', '--build', 'main'), ('--resume', '1'),
+    for args in [('--resume', 'rung-b0-1', '--build', 'main'), ('--resume', 'rung-b0-1'),
                  ('--resume', '0', '--build', 'main')]:
         lab.run('walk', 'temper', 'b0', *args, status=2)
     assert lab.calls('logins') == before
     lab.end_run(state)
     lab.watch()
     before = lab.calls('logins')
-    lab.run('walk', 'temper', 'b0', '--resume', '1', '--build', 'main', status=2)
+    lab.run('walk', 'temper', 'b0', '--resume', 'rung-b0-1', '--build', 'main', status=2)
     assert lab.calls('logins') == before and lab.walk_state()[1]['stage'] == 'ended'
 
 
@@ -3524,19 +3526,19 @@ def a_linked_pause_marker_is_not_read(lab):
 def a_second_pause_has_its_own_clock_event(lab):
     directory, state = walk_with_logins(lab)
     state = pause_walk(lab, directory, state, line='attempt 2: this is user text')
-    lab.run('walk', 'temper', 'b0', '--resume', '1', '--build', 'main')
+    lab.run('walk', 'temper', 'b0', '--resume', 'rung-b0-1', '--build', 'main')
     state = lab.walk_state()[1]
     # The bound is characters, with the terminating newline outside it.
     state = pause_walk(lab, directory, state, line='x' * 200)
     assert state['stage'] == 'paused' and state['attempt'] == 2
     rows = [row.split('\t') for row in (directory.parent / 'b0/loop.tsv').read_text().splitlines()[1:]]
     assert [row[3] for row in rows] == ['walk-start', 'walk-pause', 'walk-resume', 'walk-pause']
-    assert rows[-1][4] == 'attempt 2: ' + 'x' * 200
-    lab.run('walk', 'temper', 'b0', '--resume', '1', '--build', 'main')
+    assert rows[-1][4] == 'kind forgejo attempt 2: ' + 'x' * 200
+    lab.run('walk', 'temper', 'b0', '--resume', 'rung-b0-1', '--build', 'main')
     lab.end_run(lab.walk_state()[1])
     lab.watch()
     rows = [row.split('\t') for row in (directory.parent / 'b0/loop.tsv').read_text().splitlines()[1:]]
-    assert rows[-2][3] == 'walk-resume' and rows[-2][4].startswith('attempt 3: ')
+    assert rows[-2][3] == 'walk-resume' and rows[-2][4].startswith('kind forgejo attempt 3: ')
     assert rows[-1][3] == 'walk-end' and (directory / 'report-2.md').is_file()
 
 
@@ -3552,7 +3554,7 @@ def call(self, name, *args):
         os._exit(77)
     return result
 Watch.call = call
-''', '--resume', '1', '--build', 'main', status=77)
+''', '--resume', 'rung-b0-1', '--build', 'main', status=77)
     assert not lab.walk_state()[1]['logins'] and lab.walk_state()[1]['attempt'] == 2
     lab.watch()
     current = lab.walk_state()[1]
@@ -3573,7 +3575,7 @@ def call(self, name, *args):
         result.returncode = 124
     return result
 Watch.call = call
-''', '--resume', '1', '--build', 'main', status=1)
+''', '--resume', 'rung-b0-1', '--build', 'main', status=1)
     assert lab.walk_state()[1]['stage'] == 'starting'
     lab.watch()
     current = lab.walk_state()[1]
@@ -3586,7 +3588,7 @@ def a_resume_without_its_meta_starts_fresh(lab):
     directory, state = walk_with_logins(lab)
     state = pause_walk(lab, directory, state)
     (lab.tmp / 'codex-run' / state['run'] / 'meta').unlink()
-    lab.run('walk', 'temper', 'b0', '--resume', '1', '--build', 'main')
+    lab.run('walk', 'temper', 'b0', '--resume', 'rung-b0-1', '--build', 'main')
     assert lab.walk_state()[1]['stage'] == 'running' and lab.walk_state()[1]['run'] == 'fixture-2'
     assert len(lab.calls('codex-run')) == 3
 
@@ -3618,7 +3620,7 @@ def a_refused_walk_deployment_preserves_its_saved_command(lab):
     state = pause_walk(lab, directory, lab.walk_state()[1])
     dead(pid)
     lab.configure(deploy_failure=False)
-    lab.run('walk', 'temper', 'b0', '--resume', '1', '--build', 'main')
+    lab.run('walk', 'temper', 'b0', '--resume', 'rung-b0-1', '--build', 'main')
     task = (directory / 'task.md').read_text()
     assert str(directory / 'box/server') in task and '/bin/true' not in task
 
@@ -3628,6 +3630,7 @@ def damaged_attempt_history_keeps_walk_custody(lab):
     saved = lab.tmp / 'qa/walks/rung-b0-1.json'
     original = saved.read_bytes()
     for corruption in (dict(state, attempts=[None]), dict(state, deployments=[None]),
+                       dict(state, kind='', holder='walk/' + state['walk']),
                        dict(state, report_attempt='../outside'), dict(state, attempts=[{}])):
         saved.write_text(json.dumps(corruption))
         result = lab.watch()
@@ -3658,18 +3661,19 @@ Watch.save = save
     assert 'original paused step' in lab.sent()[0]['body']
 
 
-def a_resume_can_change_its_pools_and_cap(lab):
+def a_resume_refuses_pool_changes_but_accepts_its_cap(lab):
     directory, state = walk_with_logins(lab, CHATGPT)
     state = pause_walk(lab, directory, state)
-    resting(lab, CLAUDE)
-    lab.run('walk', 'temper', 'b0', '--resume', '1', '--build', 'main', '--login', CLAUDE, '--cap', '1')
+    before = lab.calls('logins')
+    lab.run('walk', 'temper', 'b0', '--resume', state['walk'], '--build', 'main', '--login', CLAUDE, status=2)
+    assert lab.calls('logins') == before
+    lab.run('walk', 'temper', 'b0', '--resume', state['walk'], '--build', 'main', '--cap', '1')
     current = lab.walk_state()[1]
-    assert current['cap'] == 1 and current['requests'] == [CLAUDE] and current['pools'] == {CLAUDE: CLAUDE}
+    assert current['cap'] == 1 and current['requests'] == [CHATGPT] and current['pools'] == {CHATGPT: CHATGPT}
     assert current['attempts'][0] == state['attempts'][0]
     lab.end_run(current)
     lab.watch()
-    assert lab.walk_state()[1]['given'] == [CLAUDE]
-    assert lab.calls('logins').count(['give', CHATGPT, '--as', state['holder']]) == 1
+    assert lab.walk_state()[1]['given'] == [CHATGPT]
 
 
 def an_old_pending_end_does_not_turn_into_a_pause(lab):
@@ -3688,7 +3692,222 @@ def an_old_pending_end_does_not_turn_into_a_pause(lab):
     assert all(post['args'][2] == 'qa: walk rung-b0-1 ended' for post in lab.sent())
 
 
-CASES = (a_resume_can_change_its_pools_and_cap, an_old_pending_end_does_not_turn_into_a_pause, invalid_pause_lines_end_the_walk, a_linked_pause_marker_is_not_read,
+def walks_of_two_kinds_take_their_own_slots_and_pools(lab):
+    focused = lab.tmp / 'qa-focused'
+    focused.mkdir()
+    (focused / 'rung-b0-claude-brief.md').write_bytes(b'Claude-specific rung brief.\n')
+    lab.walk('b0')
+    lab.walk('b0', '--kind', 'claude')
+    first, second = lab.walk_states()
+    assert first[1]['walk'] == 'rung-b0-1' and first[1]['kind'] == 'forgejo'
+    assert first[1]['holder'] == 'walk/forgejo/rung-b0-1' and first[1]['pools'] == {CHATGPT: CHATGPT}
+    assert second[1]['walk'] == 'rung-b0-claude-1' and second[1]['kind'] == 'claude'
+    assert second[1]['holder'] == 'walk/claude/rung-b0-claude-1' and second[1]['pools'] == {CLAUDE: CLAUDE}
+    assert [call[-2] for call in lab.calls('codex-run')] == [
+        str(lab.tmp / 'qa/repos/temper-walk-forgejo-1'), str(lab.tmp / 'qa/repos/temper-walk-claude-1')]
+    assert (second[0] / 'brief.md').read_bytes() == (focused / 'rung-b0-claude-brief.md').read_bytes()
+    rows = [row.split('\t') for row in (focused / 'b0/loop.tsv').read_text().splitlines()[1:]]
+    assert [row[2] for row in rows] == ['1', 'claude-1']
+    assert all('--now' in call and '--wait' not in call for call in lab.calls('logins') if call[0] == 'take')
+
+
+def a_kind_at_its_cap_refuses_at_once(lab):
+    lab.walk('b0')
+    lab.walk('b0')
+    before = [call for call in lab.calls('logins') if call[0] == 'take']
+    result = lab.walk('another', status=1)
+    assert 'kind forgejo holds 2 of its 2 logins of pool chatgpt' in result.stderr
+    assert [call for call in lab.calls('logins') if call[0] == 'take'] == before
+    directory, state = lab.walk_states()[0]
+    lab.end_run(state)
+    lab.configure(logins_out=[CHATGPT])
+    lab.watch()
+    current = lab.walk_states()[0][1]
+    assert current['released'] and current['decision'] == 'walk-end' and not current['given']
+    result = lab.walk('another', status=1)
+    assert 'kind forgejo holds 2 of its 2 logins of pool chatgpt' in result.stderr
+    assert [call for call in lab.calls('logins') if call[0] == 'take'] == before
+
+
+def the_first_kind_is_never_blocked(lab):
+    reserved_pool(lab)
+    lab.waiting(2)
+    lab.watch()
+    lab.configure(pools={CHATGPT: [CHATGPT, 'chatgpt-2', 'chatgpt-3', 'chatgpt-4'],
+                         CLAUDE: [CLAUDE, 'claude-2']})
+    lab.walk('b0', '--kind', 'claude')
+    lab.walk('b0')
+    lab.walk('b0')
+    states = [state for _, state in lab.walk_states()]
+    forgejo = [state for state in states if state['kind'] == 'forgejo']
+    assert [state['pools'][CHATGPT] for state in forgejo] == ['chatgpt-3', 'chatgpt-4']
+    assert [state['slot'] for state in forgejo] == [1, 2]
+    assert len(lab.watch_states()) == 2 and len(states) == 3
+    assert not json.loads((lab.root / 'tools.json').read_text())['login_queue']
+    assert all('--now' in call and '--wait' not in call for call in lab.calls('logins') if call[0] == 'take')
+
+
+def a_reserve_below_the_walk_slots_is_refused(lab):
+    lab.env['QA_WALK_KINDS'] = 'forgejo=2:chatgpt github=1:chatgpt'
+    result = lab.run('passes', status=2)
+    expected = 'QA_LOGIN_RESERVE (2) is below the walk slots of pool chatgpt (3)'
+    assert expected in result.stderr
+    assert expected in lab.watch(status=2).stderr
+    assert not lab.calls('logins') and not lab.calls('codex-run')
+    lab.env['QA_LOGIN_RESERVE'] = '3'
+    assert 'QA holds 0 of 0' in lab.run('passes').stdout
+    lab.watch()
+
+
+def login_refuses_another_kinds_pool(lab):
+    lab.walk('b0', '--kind', 'claude', '--login', CHATGPT, status=2)
+    lab.walk('b0', '--kind', '', status=2)
+    lab.walk('b0', '--kind', 'unknown', status=2)
+    assert not lab.calls('logins') and not lab.calls('codex-run') and not lab.walk_states()
+
+
+def a_resume_by_name_keeps_its_kind(lab):
+    resting(lab, CLAUDE)
+    lab.walk('b0', '--kind', 'claude')
+    directory, state = lab.walk_state()
+    state = pause_walk(lab, directory, state)
+    lab.walk('b1', '--kind', 'claude')
+    lab.walk('b2', '--kind', 'claude')
+    before = [call for call in lab.calls('logins') if call[0] == 'take']
+    result = lab.run('walk', 'temper', 'b0', '--resume', state['walk'], '--build', 'main', status=1)
+    assert 'kind claude holds 2 of its 2 logins of pool claude' in result.stderr
+    assert [call for call in lab.calls('logins') if call[0] == 'take'] == before
+    lab.end_run(lab.walk_states()[1][1])
+    lab.watch()
+    lab.run('walk', 'temper', 'b0', '--resume', state['walk'], '--build', 'main')
+    current = lab.walk_states()[0][1]
+    assert current['kind'] == 'claude' and current['pools'] == {CLAUDE: CLAUDE}
+    assert current['slot'] == 1 and current['holder'] == state['holder'] and current['attempt'] == 2
+    assert lab.calls('codex-run')[-1][-2] == str(lab.tmp / 'qa/repos/temper-walk-claude-1')
+
+
+def passes_shows_each_class_beside_its_cap(lab):
+    lab.configure(pools={CHATGPT: [CHATGPT, 'chatgpt-2', 'chatgpt-3', 'chatgpt-4']},
+                  logins_held=[CHATGPT, 'chatgpt-2'],
+                  login_holders={CHATGPT: 'qa-watch/p', 'chatgpt-2': 'walk/forgejo/manual'})
+    line = 'pool chatgpt: 4 logins, QA holds 1 of 2, forgejo walks hold 1 of 2'
+    assert line in lab.run('passes').stdout.splitlines()
+    lab.env['QA_WALK_KINDS'] = 'forgejo=1:chatgpt github=1:chatgpt'
+    assert 'forgejo walks hold 1 of 1, github walks hold 0 of 1' in lab.run('passes').stdout
+
+
+def manual_kind_holders_stay_held_when_watcher_checks(lab):
+    resting(lab, CHATGPT, in_place=True)
+    lab.configure(logins_held=[CHATGPT], login_holders={CHATGPT: 'walk/forgejo/manual'})
+    lab.watch()
+    assert not [call for call in lab.calls('logins') if call[0] == 'give']
+    lab.walk('b0')
+    directory, state = lab.walk_state()
+    assert state['pools'] == {CHATGPT: 'chatgpt-2'}
+    result = lab.walk('b1', status=1)
+    assert 'kind forgejo holds 2 of its 2 logins' in result.stderr
+    lab.end_run(state)
+    lab.watch()
+    config = json.loads((lab.root / 'tools.json').read_text())
+    assert config['logins_held'] == [CHATGPT] and config['login_holders'][CHATGPT] == 'walk/forgejo/manual'
+    assert len(lab.sent()) == 1 and lab.sent()[0]['args'][1] == state['starter']
+
+
+def kind_slots_are_shared_across_repositories(lab):
+    lab.walk('b0')
+    focused = lab.tmp / 'qa-focused'
+    (focused / 'rung-b1-brief.md').write_text('jig rung\n')
+    lab.run('walk', 'jig', 'b1')
+    first, second = lab.walk_states()
+    assert first[1]['slot'] == 1 and second[1]['slot'] == 2 and second[1]['repo'] == 'jig'
+    assert lab.calls('codex-run')[-1][-2] == str(lab.tmp / 'qa/repos/jig-walk-forgejo-2')
+    lab.run('walk', 'hearth', 'b2', status=1)
+    (focused / 'rung-b2-brief.md').write_text('hearth rung\n')
+    lab.run('walk', 'hearth', 'b2', '--kind', 'claude')
+    assert lab.calls('codex-run')[-1][-2] == str(lab.tmp / 'qa/repos/hearth-walk-claude-1')
+
+
+def walk_kind_settings_are_validated_and_follow_precedence(lab):
+    invalid = ('', 'Forgejo=2:chatgpt', 'forge-jo=2:chatgpt', 'forgejo=0:chatgpt',
+               'forgejo=2:chatgpt-2', 'forgejo=2:chatgpt,chatgpt',
+               'forgejo=1:chatgpt forgejo=1:claude', 'forgejo=1:', 'forgejo=1:chatgpt\nclaude=1:claude')
+    for value in invalid:
+        lab.run('passes', status=2, extra={'QA_WALK_KINDS': value})
+    assert not lab.calls('logins')
+    lab.env.pop('QA_LOGIN_RESERVE')
+    (lab.tmp / 'machine.env').write_text('QA_LOGIN_RESERVE=1\nQA_WALK_KINDS=github=1:chatgpt\n')
+    assert 'github walks hold 0 of 1' in lab.run('passes').stdout
+    lab.env['QA_WALK_KINDS'] = 'forgejo=1:claude'
+    output = lab.run('passes').stdout
+    assert 'forgejo walks hold 0 of 1' in output and 'github walks' not in output
+
+
+def a_refused_now_take_reports_the_broken_caps(lab):
+    lab.configure(logins_busy=[CHATGPT])
+    result = lab.walk('b0', status=1)
+    assert 'the caps are broken: fixture login busy' in result.stderr
+    state = lab.walk_state()[1]
+    assert state['released'] and state['stage'] == 'ended' and not state['run']
+    takes = [call for call in lab.calls('logins') if call[0] == 'take']
+    assert len(takes) == 1 and '--now' in takes[0] and '--wait' not in takes[0]
+    assert not json.loads((lab.root / 'tools.json').read_text())['login_queue']
+
+
+def pre_kind_walks_drain_before_kind_admission(lab):
+    lab.walk('b0')
+    directory, state = lab.walk_state()
+    for key in ('kind', 'clock_walk'):
+        state.pop(key)
+    state['holder'] = 'walk/' + state['walk']
+    saved = lab.tmp / 'qa/walks' / (state['walk'] + '.json')
+    saved.write_text(json.dumps(state))
+    lab.configure(login_holders={CHATGPT: state['holder']})
+    before = lab.calls('logins')
+    assert 'pre-kind walks still hold slots' in lab.walk('b1', status=1).stderr
+    assert lab.calls('logins') == before
+    lab.end_run(state)
+    lab.watch()
+    assert ['give', CHATGPT, '--as', state['holder']] in lab.calls('logins')
+    lab.walk('b1')
+    assert lab.walk_states()[-1][1]['kind'] == 'forgejo'
+
+
+def numbering_survives_a_change_of_default_kind(lab):
+    lab.walk('b0')
+    lab.end_run(lab.walk_state()[1])
+    lab.watch()
+    lab.env['QA_WALK_KINDS'] = 'claude=2:claude forgejo=2:chatgpt'
+    lab.walk('b0', '--kind', 'forgejo')
+    state = next(state for _, state in lab.walk_states() if state['walk'] == 'rung-b0-forgejo-2')
+    lab.end_run(state)
+    lab.watch()
+    lab.walk('b0')
+    state = next(state for _, state in lab.walk_states() if state['kind'] == 'claude')
+    assert state['walk'] == 'rung-b0-2'  # The first filename is occupied by the earlier default.
+    lab.end_run(state)
+    lab.watch()
+    rows = [row.split('\t') for row in (lab.tmp / 'qa-focused/b0/loop.tsv').read_text().splitlines()[1:]]
+    assert [row[3] for row in rows] == ['walk-start', 'walk-end'] * 3
+    assert [row[2] for row in rows[::2]] == ['1', 'forgejo-2', '2']
+    (lab.tmp / 'qa-focused/rung-b0-claude-7').mkdir()
+    lab.walk('b0')
+    current = next(state for _, state in lab.walk_states() if state['walk'] == 'rung-b0-8')
+    assert current['kind'] == 'claude'
+
+
+def a_walk_reads_its_inventory_strictly(lab):
+    lab.configure(list_lines=[f'{CHATGPT}: at rest'])
+    result = lab.walk('b0', status=1)
+    assert 'cannot read login inventory for walk admission' in result.stderr
+    assert lab.calls('logins') == [['list']] and not lab.walk_states() and not lab.calls('codex-run')
+
+
+CASES = (manual_kind_holders_stay_held_when_watcher_checks, kind_slots_are_shared_across_repositories,
+         walk_kind_settings_are_validated_and_follow_precedence, a_refused_now_take_reports_the_broken_caps,
+         pre_kind_walks_drain_before_kind_admission, numbering_survives_a_change_of_default_kind,
+         a_walk_reads_its_inventory_strictly, walks_of_two_kinds_take_their_own_slots_and_pools, a_kind_at_its_cap_refuses_at_once,
+         the_first_kind_is_never_blocked, a_reserve_below_the_walk_slots_is_refused,
+         login_refuses_another_kinds_pool, a_resume_by_name_keeps_its_kind, passes_shows_each_class_beside_its_cap, a_resume_refuses_pool_changes_but_accepts_its_cap, an_old_pending_end_does_not_turn_into_a_pause, invalid_pause_lines_end_the_walk, a_linked_pause_marker_is_not_read,
          a_second_pause_has_its_own_clock_event, an_interrupted_resume_releases_only_its_new_grant,
          an_accepted_resume_recovers_only_its_new_run, a_resume_without_its_meta_starts_fresh,
          a_refused_walk_deployment_preserves_its_saved_command, damaged_attempt_history_keeps_walk_custody,
