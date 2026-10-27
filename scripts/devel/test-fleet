@@ -21,6 +21,7 @@ PYTHON = sys.executable
 GB = 2 ** 30
 NOW = 1793068800
 API = runpy.run_path(str(SCRIPT))
+FIRST_TENDING = [list(API['TENDING'][0]), ['tidy', '--checkouts'], *[list(a) for a in API['TENDING'][1:]]]
 
 
 def write(path, value, mode=None):
@@ -557,21 +558,37 @@ def tend_order(lab):
     lab.answer('tend-tidy', 'tidy output\n', exit=1)
     lab.answer('tend-post', 'post output\n', exit=3)
     result = lab.tend(status=1)
-    assert result.stdout == 'fleet tend: tidy 1, post 3, codex-run 0, kache gc skipped: store within its limit\n' and result.stderr == ''
-    expected = [['tidy', '--targets'], ['post', 'wake', '--older', '15'], ['codex-run', 'stale', '--post']]
+    assert result.stdout == 'fleet tend: tidy 1, tidy 1, post 3, codex-run 0, kache gc skipped: store within its limit\n' and result.stderr == ''
+    expected = FIRST_TENDING
     assert lab.tend_calls() == expected
     record, = lab.tends()
     assert record == {'start': API['iso'](NOW), 'end': API['iso'](NOW), 'commands': [
         {'argv': argv, 'exit': code, 'lines': lines, 'more': 0}
-        for argv, code, lines in zip(expected, [1, 3, 0], [['tidy output'], ['post output'], []])],
+        for argv, code, lines in zip(expected, [1, 1, 3, 0], [['tidy output'], ['tidy output'], ['post output'], []])],
         'skipped': [{'argv': ['kache', 'gc'], 'why': 'store within its limit'}]}, record
+
+
+def tend_checkouts_hourly(lab):
+    lab.tend_kit()
+    lab.tend()
+    assert lab.tend_calls() == FIRST_TENDING
+    lab.tend(now=NOW+1800)
+    assert [c['argv'] for c in lab.tends()[-1]['commands']] == [list(a) for a in API['TENDING']]
+    lab.tend(now=NOW+3660)
+    assert [c['argv'] for c in lab.tends()[-1]['commands']] == FIRST_TENDING
+    # Checkout refusal counts in the tend's exit, and later commands still run.
+    lab.answer('tend-tidy', 'checkout refused\n', exit=2)
+    lab.tend(now=NOW+7320, status=1)
+    record = lab.tends()[-1]
+    assert record['commands'][1]['argv'] == ['tidy', '--checkouts'] and record['commands'][1]['exit'] == 2
+    assert record['commands'][-1]['argv'] == ['codex-run', 'stale', '--post']
 
 
 def tend_all_ok(lab):
     lab.tend_kit()
     result = lab.tend()
-    assert result.stdout == 'fleet tend: tidy 0, post 0, codex-run 0, kache gc skipped: store within its limit\n' and result.stderr == ''
-    assert [c['exit'] for c in lab.tends()[0]['commands']] == [0, 0, 0]
+    assert result.stdout == 'fleet tend: tidy 0, tidy 0, post 0, codex-run 0, kache gc skipped: store within its limit\n' and result.stderr == ''
+    assert [c['exit'] for c in lab.tends()[0]['commands']] == [0, 0, 0, 0]
     assert (lab.tmp() / 'fleet').stat().st_mode & 0o777 == 0o700
     assert (lab.tmp() / 'fleet/tend.jsonl').stat().st_mode & 0o777 == 0o600
     for args in [('tend', 'extra'), ('tend', '--sizes')]:
@@ -582,8 +599,8 @@ def tend_not_started(lab):
     lab.tend_kit()
     (lab.kit / 'codex-run').unlink()
     result = lab.tend(status=1)
-    assert result.stdout == 'fleet tend: tidy 0, post 0, codex-run -, kache gc skipped: store within its limit\n'
-    assert lab.tend_calls() == [['tidy', '--targets'], ['post', 'wake', '--older', '15']]
+    assert result.stdout == 'fleet tend: tidy 0, tidy 0, post 0, codex-run -, kache gc skipped: store within its limit\n'
+    assert lab.tend_calls() == FIRST_TENDING[:-1]
     assert lab.tends()[0]['commands'][-1] == {'argv': ['codex-run', 'stale', '--post'], 'exit': None,
                                            'error': 'FileNotFoundError', 'lines': [], 'more': 0}
     # A launch failure in the first command still reaches both later ones.
@@ -598,8 +615,8 @@ def tend_kache_gc_past_limit(lab):
     lab.answer('kache', {'disk': {'store_bytes': 37*GB, 'store_limit_bytes': 20*GB}})
     lab.answer('tend-kache', 'collected\n')
     result = lab.tend()
-    assert result.stdout == 'fleet tend: tidy 0, post 0, codex-run 0, kache gc 0\n'
-    assert lab.tend_calls() == [list(argv) for argv in API['TENDING']] + [['kache', 'gc']]
+    assert result.stdout == 'fleet tend: tidy 0, tidy 0, post 0, codex-run 0, kache gc 0\n'
+    assert lab.tend_calls() == FIRST_TENDING + [['kache', 'gc']]
     record, = lab.tends()
     assert record['commands'][-1] == {'argv': ['kache', 'gc'], 'exit': 0, 'lines': ['collected'], 'more': 0}
     assert 'skipped' not in record
@@ -608,11 +625,13 @@ def tend_kache_gc_past_limit(lab):
 
 
 def kache_skipped(lab, why):
+    first = not (lab.tmp() / 'fleet/tend.jsonl').exists()
+    expected = FIRST_TENDING if first else [list(argv) for argv in API['TENDING']]
     result = lab.tend()
-    assert result.stdout == 'fleet tend: tidy 0, post 0, codex-run 0, kache gc skipped: ' + why + '\n'
+    assert result.stdout == 'fleet tend: tidy 0, ' + ('tidy 0, ' if first else '') + 'post 0, codex-run 0, kache gc skipped: ' + why + '\n'
     record = lab.tends()[-1]
     assert record['skipped'] == [{'argv': ['kache', 'gc'], 'why': why}]
-    assert [c['argv'] for c in record['commands']] == [list(argv) for argv in API['TENDING']]
+    assert [c['argv'] for c in record['commands']] == expected
     assert ['kache', 'gc'] not in lab.tend_calls()
     state = rounds(reading(tend=[record]))
     assert state['tends']['alpha']['ran'] and not state['pending']
@@ -630,7 +649,7 @@ def tend_without_kache(lab):
     (lab.bin / 'kache').unlink()
     lab.env['PATH'] = str(lab.bin)
     kache_skipped(lab, 'no kache')
-    assert lab.tend_calls() == [list(argv) for argv in API['TENDING']]
+    assert lab.tend_calls() == FIRST_TENDING
 
 
 def tend_kache_stats_fails(lab):
@@ -655,7 +674,7 @@ def tend_kache_gc_fails(lab):
     lab.answer('kache', {'disk': {'store_bytes': 37*GB, 'store_limit_bytes': 20*GB}})
     lab.answer('tend-kache', 'gc failed\n', exit=2)
     result = lab.tend(status=1)
-    assert result.stdout == 'fleet tend: tidy 0, post 0, codex-run 0, kache gc 2\n'
+    assert result.stdout == 'fleet tend: tidy 0, tidy 0, post 0, codex-run 0, kache gc 2\n'
     record, = lab.tends()
     assert record['commands'][-1]['exit'] == 2 and 'skipped' not in record
     first = rounds(reading(tend=[record]), count=1)
@@ -674,6 +693,20 @@ def tend_lines(lab):
     lab.tend()
     command = lab.tends()[0]['commands'][0]
     assert command['lines'] == [line for _, line in lines[:200]] and command['more'] == 50, command
+
+
+def tend_checkout_lines(lab):
+    lab.tend_kit()
+    summary = 'tidy: checkouts: 399 deleted, 95 pinned, 0 recent, 12.3 GB freed'
+    output = [f'tidy: deleted checkout rev{n} (unpinned)' for n in range(399)] + [summary]
+    lab.answer('tend-tidy', '\n'.join(output) + '\n')
+    lab.tend()
+    record, = lab.tends()
+    command = record['commands'][1]
+    assert command['argv'] == ['tidy', '--checkouts']
+    assert command['lines'] == output[:199] + [summary] and command['more'] == 200, command
+    state = rounds(reading(tend=[record]), count=1)
+    assert state['done']['alpha']['checkouts'] == 12.3
 
 
 def tend_keeps_a_week(lab):
@@ -710,7 +743,7 @@ def tend_room_for_landing(lab):
                        'floor_gb': 40, 'room_gb': 20.5}}
     path = write(lab.tmp() / 'heavy/state.json', json.dumps({'tasks': tasks}))
     lab.tend()
-    assert lab.tend_calls() == [['tidy', '--targets', '--room', '70'],
+    assert lab.tend_calls() == [['tidy', '--targets', '--room', '70'], ['tidy', '--checkouts'],
                                 ['post', 'wake', '--older', '15'], ['codex-run', 'stale', '--post']]
     assert lab.tends()[-1]['commands'][0]['argv'] == ['tidy', '--targets', '--room', '70']
     # The fractional request rounds up; disk_wait's presence, not truthiness, counts.
@@ -728,7 +761,7 @@ def tend_room_for_regenerate(lab):
             'floor_gb': 40, 'room_gb': 45}
     write(lab.tmp() / 'heavy/state.json', json.dumps({'tasks': {'temper': task}}))
     lab.tend()
-    assert lab.tend_calls() == [['tidy', '--targets', '--room', '85'],
+    assert lab.tend_calls() == [['tidy', '--targets', '--room', '85'], ['tidy', '--checkouts'],
                                 ['post', 'wake', '--older', '15'], ['codex-run', 'stale', '--post']]
     assert lab.tends()[-1]['commands'][0]['argv'] == ['tidy', '--targets', '--room', '85']
 
@@ -752,10 +785,10 @@ def tend_no_room(lab):
     for content in contents:
         if content is not None:
             write(path, content)
+        first = content is None
         result = lab.tend()
-        assert result.stdout == 'fleet tend: tidy 0, post 0, codex-run 0, kache gc skipped: store within its limit\n'
-        assert lab.tend_calls()[-3:] == [['tidy', '--targets'], ['post', 'wake', '--older', '15'],
-                                        ['codex-run', 'stale', '--post']]
+        assert result.stdout == 'fleet tend: tidy 0, ' + ('tidy 0, ' if first else '') + 'post 0, codex-run 0, kache gc skipped: store within its limit\n'
+        assert lab.tend_calls()[-len(FIRST_TENDING if first else API['TENDING']):] == (FIRST_TENDING if first else [list(a) for a in API['TENDING']])
         assert lab.tends()[-1]['commands'][0]['argv'] == ['tidy', '--targets']
     # A ledger that cannot be read also leaves the sweep running normally.
     path.unlink()
@@ -941,6 +974,15 @@ def untended_rows(lab):
         assert 'alpha untended' in state['pending'], tends
         fresh = reading(tend=[tend_record(NOW+600)])
         assert not rounds(fresh, state, now=NOW+600)['conditions']['alpha untended']['raised']
+    five = tend_record(NOW)
+    five['commands'].insert(1, {'argv': ['tidy', '--checkouts'], 'exit': 0})
+    five['commands'].insert(2, {'argv': ['kache', 'gc'], 'exit': 0})
+    assert not rounds(reading(tend=[five]))['pending']
+    five['commands'][1]['exit'] = 2
+    assert 'alpha untended' in rounds(reading(tend=[five]))['pending']
+    five['commands'][1]['exit'] = 0
+    five['commands'][0], five['commands'][3] = five['commands'][3], five['commands'][0]
+    assert not API['tend_ran'](five)
     # Exits 1 and 3 mean the commands ran; they do not make the tend untended.
     assert not rounds(reading(tend=[tend_record(NOW, (1, 3, 1))]))['pending']
 
@@ -1022,13 +1064,17 @@ def body_lines(lab):
     state = API['judge'](state, fleet, set(), NOW+300)
     state['pending'].remove('beta load')
     state['cleared'] = ['beta memory']
+    record = tend_record(NOW+300)
+    record['commands'].insert(1, {'argv': ['tidy', '--checkouts'], 'exit': 0, 'lines': [
+        'tidy: checkouts: 40 deleted, 95 pinned, 3 recent, 12.3 GB freed']})
     state['done'] = {'alpha': {'cleared': 3, 'woken': ['o/x'], 'told': 1}}
+    API['read_tends'](state, 'alpha', reading(tend=[record]))
     sized = [row(reading(targets=[{'owner': name, 'size': size*GB} for name, size in
                                   [('small', 1), ('large', 40), ('medium', 12), ('large', 1)]]))]
     _, body = API['compose'](state, fleet, sized, NOW+300)
     lines = body.splitlines()
     assert lines[1] == '  targets: large 41 GB (2), medium 12 GB (1), small 1 GB (1)', body
-    assert 'alpha tends: cleared 3 targets (disk now 38 GB free), woke o/x, told 1 caller' in lines
+    assert 'alpha tends: cleared 3 targets (disk now 38 GB free), freed 12.3 GB of checkouts, woke o/x, told 1 caller' in lines
     assert 'Still raised: beta load' in lines and 'Cleared since: beta memory' in lines
     state['pending'] += ['alpha stale extra'+str(n) for n in range(6)]
     for key in state['pending']:
@@ -1241,7 +1287,7 @@ def watch_write_failure(lab):
 CASES = [reading_fields, reading_session_waiters, reading_disk_workspace, reading_floor, reading_absent, reading_source_fails, reading_no_text,
          reading_implementers_stale, reading_targets, reading_tend_since, room_verdicts,
          room_order_and_exit, room_unreached_why, room_new_machine, room_named, room_piped,
-         room_targets, room_fits_120, room_json, tend_order, tend_all_ok, tend_not_started, tend_lines,
+         room_targets, room_fits_120, room_json, tend_order, tend_checkouts_hourly, tend_all_ok, tend_not_started, tend_lines, tend_checkout_lines,
          tend_kache_gc_past_limit, tend_kache_within_limit, tend_without_kache,
          tend_kache_stats_fails, tend_kache_gc_fails, tend_keeps_a_week, tend_read_by_probe, tend_room_for_landing, tend_room_for_regenerate, tend_no_room, tend_record_failure,
          raise_after_two_rounds, clear_after_two_rounds, between_changes_nothing, each_condition,

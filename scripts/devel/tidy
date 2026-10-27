@@ -214,7 +214,7 @@ class Tidy:
                 self.keep(kind, what, str(error), 3)
                 return False
         verb = 'would delete' if self.args.dry_run else 'deleted'
-        identity = '' if kind == 'target' else f' {commit or "-"}'
+        identity = '' if kind in ('target', 'checkout') else f' {commit or "-"}'
         print(f'tidy: {verb} {kind} {what}{identity} ({reason})', flush=True)
         return True
 
@@ -789,6 +789,73 @@ class Tidy:
         if self.args.room is not None:
             self.target_room(candidates, trash, kept)
 
+    def checkouts(self):
+        try:
+            installed = command(['heavy', '--installed']).returncode
+        except OSError:
+            installed = 3
+        if installed:
+            failed = installed != 1
+            print('tidy: checkouts: heavy is not installed here; nothing done' +
+                  (' (heavy --installed failed)' if failed else ''), flush=True)
+            self.status = max(self.status, 3 if failed else 0)
+            return
+        home = Path(os.environ.get('CARGO_HOME', Path.home() / '.cargo')).expanduser().absolute()
+        checkouts = home / 'git' / 'checkouts'
+        # Gather every pin before deleting: an unreadable lock makes the sweep unsafe.
+        pins = set()
+        for base, dirs, files in self.scan(self.root):
+            if 'registry' in dirs and 'git' in dirs:
+                dirs[:] = []
+                continue
+            dirs[:] = [d for d in dirs if d not in ('target', '.git')]
+            lock = base / 'Cargo.lock'
+            if 'Cargo.lock' in files and not lock.is_symlink():
+                try:
+                    pins.update(m.lower() for m in re.findall(
+                        r'^source = "git\+[^"\n]+#([0-9a-fA-F]{40})"\s*$', lock.read_text(), re.M))
+                except (OSError, UnicodeError) as error:
+                    raise Failure(f'cannot read {lock}: {error}') from error
+        deleted = pinned = recent = 0
+        before = shutil.disk_usage(home).free if home.exists() else 0
+        if checkouts.is_dir() and not any(p.is_symlink() for p in (home, home / 'git', checkouts)):
+            for repo in sorted(checkouts.iterdir()):
+                if not repo.is_dir() or repo.is_symlink():
+                    continue
+                try:
+                    revisions = sorted(repo.iterdir())
+                except OSError as error:
+                    self.keep('checkout', repo, str(error), 3)
+                    continue
+                for path in revisions:
+                    try:
+                        if not path.is_dir() or path.is_symlink():
+                            continue
+                        if any(commit.startswith(path.name.lower()) for commit in pins):
+                            pinned += 1
+                            continue
+                        newest = path.stat().st_mtime
+                        try:
+                            newest = max(newest, (path / '.cargo-ok').lstat().st_mtime)
+                        except FileNotFoundError:
+                            pass
+                        if time.time() - newest < 6 * 3600:
+                            recent += 1
+                            continue
+                        busy = held(path)
+                        if busy:
+                            self.keep('checkout', path, busy)
+                        elif self.delete('checkout', path, '', 'unpinned', lambda: shutil.rmtree(path)):
+                            deleted += 1
+                    except OSError as error:
+                        self.keep('checkout', path, str(error), 3)
+        if self.args.dry_run:
+            print(f'tidy: checkouts: {deleted} to delete, {pinned} pinned, {recent} recent', flush=True)
+        else:
+            freed = (shutil.disk_usage(home).free - before) / 2**30 if home.exists() else 0
+            print(f'tidy: checkouts: {deleted} deleted, {pinned} pinned, {recent} recent, '
+                  f'{freed:.1f} GB freed', flush=True)
+
     def step(self, action):
         try:
             action()
@@ -796,6 +863,9 @@ class Tidy:
             self.keep('entry', self.tmp, f'{action.__name__} failed: {error}', 3)
 
     def run(self):
+        if self.args.checkouts:
+            self.step(self.checkouts)
+            return self.status
         if self.args.targets:
             self.step(self.targets)
             return self.status
@@ -860,6 +930,7 @@ class Tidy:
                     self.keep('entry', path, 'outside the tmp layout', 1)
         if not self.args.repos and not self.args.mission:
             self.step(self.targets)
+            self.step(self.checkouts)
         return self.status
 
 
@@ -868,12 +939,13 @@ def main():
     parser.add_argument('--dry-run', action='store_true')
     parser.add_argument('--mission')
     parser.add_argument('--targets', action='store_true')
+    parser.add_argument('--checkouts', action='store_true')
     parser.add_argument('--room', type=int, metavar='GB')
     parser.add_argument('repos', nargs='*', metavar='REPO')
     args = parser.parse_args()
-    if (args.mission and args.repos) or (args.targets and (args.repos or args.mission)) or any(
+    if (args.checkouts and (args.repos or args.mission is not None or args.targets)) or (args.mission and args.repos) or (args.targets and (args.repos or args.mission)) or any(
             name not in REPOS for name in args.repos):
-        parser.error('choose repository names or --mission M or --targets')
+        parser.error('choose repository names or --mission M or --targets or --checkouts')
     if args.room is not None and (not args.targets or args.room < 1):
         parser.error('--room needs --targets and a whole number of GB, 1 or more')
     if args.mission and not re.fullmatch(r'[a-z0-9][a-z0-9_-]*', args.mission):

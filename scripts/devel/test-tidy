@@ -52,6 +52,8 @@ class Lab:
                         GIT_AUTHOR_DATE='2026-10-01T12:00:00+00:00',
                         GIT_COMMITTER_DATE='2026-10-01T12:00:00+00:00',
                         GIT_ALLOW_PROTOCOL='file', LC_ALL='C.UTF-8')
+        heavy = self.put(self.bin / 'heavy', '#!/bin/sh\n[ \"$1\" = --installed ] || exit 9\nexit \"${HEAVY_INSTALLED:-1}\"\n')
+        heavy.chmod(0o700)
         self.record = self.bin / 'record'
         self.record.write_text('#!/bin/sh\n[ "$1" = pull ] || exit 9\n'
                                'echo pull >>"$RECORDS/pulls"\nexit "${FAIL_PULL:-0}"\n')
@@ -1492,7 +1494,127 @@ def fleet_is_a_tools_entry(lab):
     assert path.exists() and str(path.parent) not in text, text
 
 
+def checkout(lab, rev, age=7*3600):
+    lab.env['CARGO_HOME'] = str(lab.root / 'cargo')
+    lab.env['HEAVY_INSTALLED'] = '0'
+    path = Path(lab.env['CARGO_HOME']) / 'git/checkouts/skein-abc' / rev
+    lab.put(path / '.cargo-ok', '')
+    lab.put(Path(lab.env['CARGO_HOME']) / 'git/db/skein-abc/object', 'database')
+    for entry in (path, path / '.cargo-ok'):
+        os.utime(entry, (time.time() - age, time.time() - age))
+    return path
+
+
+def pin(lab, path, rev):
+    lab.put(path / 'Cargo.lock', f'[[package]]\nsource = "git+https://example.invalid/skein#{rev}"\n')
+
+
+def checkouts_pinned_kept(lab):
+    paths = [checkout(lab, digit * 7) for digit in '1234']
+    for directory, digit in zip((lab.tmp / 'owners/m/wt', lab.a, lab.a / '.claude/worktrees/wt'), '123'):
+        pin(lab, directory, digit * 40)
+    text = lab.run('--checkouts')
+    assert all(p.exists() for p in paths[:3]) and not paths[3].exists(), text
+    assert f'deleted checkout {paths[3]} (unpinned)' in text, text
+    assert 'checkouts: 1 deleted, 3 pinned, 0 recent,' in text and ' GB freed' in text, text
+    assert not (lab.records / 'pulls').exists()
+
+
+def checkouts_recent_and_held(lab):
+    recent = checkout(lab, '1'*7, 3600)
+    ok_recent = checkout(lab, '2'*7)
+    os.utime(ok_recent / '.cargo-ok', None)
+    held = checkout(lab, '3'*7)
+    process = subprocess.Popen([sys.executable, '-S', '-c', 'import sys; sys.stdin.buffer.read()'],
+                               stdin=subprocess.PIPE, cwd=held, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        text = lab.run('--checkouts')
+        assert all(p.exists() for p in (recent, ok_recent, held)), text
+        assert f'kept checkout {held}: held by process {process.pid}' in text, text
+        assert '0 deleted, 0 pinned, 2 recent,' in text, text
+    finally:
+        process.stdin.close()
+        process.wait(timeout=HUNG_TIDY_S)
+
+
+def checkouts_not_in_target(lab):
+    paths = [checkout(lab, digit*7) for digit in '12345']
+    pin(lab, lab.a / 'target', '1'*40)
+    cargo = lab.tmp / 'owners/m/cargo'
+    (cargo / 'registry').mkdir(parents=True)
+    (cargo / 'git').mkdir()
+    pin(lab, cargo, '2'*40)
+    pin(lab, lab.a / '.git', '3'*40)
+    outside = lab.root / 'outside'
+    pin(lab, outside, '4'*40)
+    (lab.a / 'linked').symlink_to(outside, target_is_directory=True)
+    lab.put(outside / 'lock', 'source = "git+https://example.invalid/#' + '5'*40 + '"\n')
+    (lab.a / 'Cargo.lock').symlink_to(outside / 'lock')
+    text = lab.run('--checkouts')
+    assert all(not p.exists() for p in paths), text
+    assert '5 deleted, 0 pinned, 0 recent,' in text, text
+
+
+def checkouts_no_heavy(lab):
+    path = checkout(lab, '1'*7)
+    line = 'tidy: checkouts: heavy is not installed here; nothing done'
+    assert lab.run('--checkouts', extra={'HEAVY_INSTALLED': '1'}) == line + '\n'
+    assert lab.run('--checkouts', status=3, extra={'HEAVY_INSTALLED': '2'}) == line + ' (heavy --installed failed)\n'
+    (lab.bin / 'heavy').unlink()
+    assert lab.run('--checkouts', status=3, extra={'PATH': str(lab.bin)}) == line + ' (heavy --installed failed)\n'
+    assert path.exists()
+
+
+def checkouts_dry_run(lab):
+    path = checkout(lab, '1'*7)
+    text = lab.run('--dry-run', '--checkouts')
+    assert text == (f'tidy: would delete checkout {path} (unpinned)\n'
+                    'tidy: checkouts: 1 to delete, 0 pinned, 0 recent\n'), text
+    assert path.exists() and not (lab.tmp / 'logs/tidy.lock').exists()
+
+
+def checkouts_db_untouched(lab):
+    path = checkout(lab, '1'*7)
+    db = Path(lab.env['CARGO_HOME']) / 'git/db'
+    before = [(p.relative_to(db), p.stat().st_mtime_ns, p.read_bytes() if p.is_file() else None)
+              for p in sorted(db.rglob('*'))]
+    lab.run('--checkouts')
+    assert not path.exists()
+    assert before == [(p.relative_to(db), p.stat().st_mtime_ns, p.read_bytes() if p.is_file() else None)
+                      for p in sorted(db.rglob('*'))]
+
+
+def checkouts_failure_continues(lab):
+    first, second = (checkout(lab, digit*7) for digit in '12')
+    driver = ('import runpy, sys\n'
+              f'tool = runpy.run_path({str(SCRIPT)!r})\n'
+              f'sys.argv = {[str(SCRIPT), "--checkouts"]!r}\n'
+              'remove = tool["shutil"].rmtree\n'
+              'def fail(path, *args, **kwargs):\n'
+              f'    if str(path) == {str(first)!r}: raise OSError("fixture checkout failure")\n'
+              '    return remove(path, *args, **kwargs)\n'
+              'tool["shutil"].rmtree = fail\n'
+              'raise SystemExit(tool["main"]())\n')
+    result = subprocess.run([sys.executable, '-I', '-S', '-c', driver], env=lab.env,
+                            capture_output=True, text=True, timeout=HUNG_TIDY_S)
+    assert result.returncode == 3, result
+    assert f'kept checkout {first}: fixture checkout failure' in result.stdout, result
+    assert first.exists() and not second.exists()
+    assert '1 deleted, 0 pinned, 0 recent,' in result.stdout, result
+
+
+def checkouts_bad_lock(lab):
+    path = checkout(lab, '1'*7)
+    lock = lab.put(lab.a / 'Cargo.lock', '')
+    lock.write_bytes(b'\xff')
+    text = lab.run('--checkouts', status=3)
+    assert 'cannot read' in text and str(lock) in text, text
+    assert path.exists() and 'deleted checkout' not in text
+
+
 def usage(lab):
+    for args in (('--checkouts', 'agents'), ('--checkouts', '--targets'), ('--checkouts', '--mission', 'm'), ('--checkouts', '--room', '30')):
+        lab.run(*args, status=2)
     lab.run('--room', '30', status=2)
     lab.run('--targets', '--room', '0', status=2)
     lab.run('--targets', '--room', 'x', status=2)
@@ -1510,10 +1632,12 @@ def usage(lab):
 
 def empty_tmp(lab):
     shutil.rmtree(lab.tmp)
-    assert lab.run('--dry-run') == '' and not lab.tmp.exists()
+    assert lab.run('--dry-run') == 'tidy: checkouts: heavy is not installed here; nothing done\n' and not lab.tmp.exists()
 
 
-CASES = (copies, lockfile_conflicts, lockfile_tree, lockfile_patches, lockfile_source,
+CASES = (checkouts_pinned_kept, checkouts_recent_and_held, checkouts_not_in_target,
+         checkouts_no_heavy, checkouts_dry_run, checkouts_db_untouched,
+         checkouts_failure_continues, checkouts_bad_lock, copies, lockfile_conflicts, lockfile_tree, lockfile_patches, lockfile_source,
          amended, conflict_copy, marks, patch_fallback, worktrees, dirty, detached, outside_worktrees, missions,
          mission_work, evidence, mission_clone_worktrees, old_directories, old_work, scripts, held_file,
          script_boundaries, cargo_home_scripts, fixture_evidence, evidence_marks, evidence_unreadable,

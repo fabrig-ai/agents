@@ -506,6 +506,9 @@ def tend_command(kit, argv):
             if len(result['lines']) < 200:
                 result['lines'].append(line.decode(errors='replace').rstrip('\r\n'))
             else:
+                # Large checkout sweeps still need their final freed-space summary.
+                if list(argv) == ['tidy', '--checkouts']:
+                    result['lines'][-1] = line.decode(errors='replace').rstrip('\r\n')
                 result['more'] += 1
         result['exit'] = process.wait()
     return result
@@ -561,6 +564,30 @@ def append_tend(tmp, record):
                 sibling.unlink(missing_ok=True)
 
 
+def tend_checkouts(tmp, now):
+    directory = tmp / 'fleet'
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    latest = None
+    with (directory / 'tend.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            with (directory / 'tend.jsonl').open(encoding='utf-8', errors='replace') as records:
+                for line in records:
+                    try:
+                        record = json.loads(line)
+                        if not isinstance(record, dict) or not isinstance(record.get('commands'), list):
+                            continue
+                        start = stamp(record.get('start'))
+                        if start is not None and any(isinstance(c, dict) and c.get('argv') == ['tidy', '--checkouts']
+                                                     for c in record['commands']):
+                            latest = start if latest is None else max(start, latest)
+                    except (ValueError, RecursionError):
+                        continue
+        except FileNotFoundError:
+            pass
+    return latest is None or now - latest >= 3600
+
+
 def tend(tmp):
     start = iso(clock())
     kit = Path(__file__).resolve().parent
@@ -568,6 +595,12 @@ def tend(tmp):
     room = tend_room(tmp)
     if room is not None:
         tending[0] += ('--room', str(room))
+    failed = None
+    try:
+        if tend_checkouts(tmp, stamp(start)):
+            tending.insert(1, ('tidy', '--checkouts'))
+    except OSError as error:
+        failed = str(error)
     commands = [tend_command(kit, argv) for argv in tending]
     why = tend_kache(tmp)
     if why is None:
@@ -580,12 +613,14 @@ def tend(tmp):
     except OSError as error:
         print(f'fleet tend: cannot write record: {error}', file=sys.stderr)
         return 2
+    if failed is not None:
+        print(f'fleet tend: cannot read record: {failed}', file=sys.stderr)
     summary = [f'{"kache gc" if c["argv"] == ["kache", "gc"] else c["argv"][0]} '
                f'{c["exit"] if c["exit"] is not None else "-"}' for c in commands]
     if why is not None:
         summary.append('kache gc skipped: ' + why)
     print('fleet tend: ' + ', '.join(summary))
-    return int(any(c['exit'] != 0 for c in commands))
+    return int(failed is not None or any(c['exit'] != 0 for c in commands))
 
 
 # Judging. The watch reuses holds; the room uses only the raise tests.
@@ -644,13 +679,19 @@ def stamp(value):
 
 def tend_ran(tend):
     commands = tend.get('commands', [])
-    return (isinstance(commands, list) and len(commands) in (3, 4) and
-            all(isinstance(c, dict) and isinstance(c.get('argv'), list) and c['argv'][:1] == [name] and
-                type(c.get('exit')) is int and c['exit'] != 2
-                for c, (name, *_) in zip(commands, TENDING)) and
-            (len(commands) == 3 or
-             (isinstance(commands[3], dict) and commands[3].get('argv') == ['kache', 'gc'] and
-              type(commands[3].get('exit')) is int and commands[3]['exit'] != 2)))
+    if not isinstance(commands, list) or not all(
+            isinstance(c, dict) and isinstance(c.get('argv'), list) and
+            type(c.get('exit')) is int and c['exit'] != 2 for c in commands):
+        return False
+    required = iter(TENDING)
+    wanted = next(required)
+    for c in commands:
+        argv = c['argv']
+        if argv == list(wanted) or (wanted == TENDING[0] and argv[:2] == list(wanted)):
+            wanted = next(required, None)
+            if wanted is None:
+                return True
+    return False
 
 
 def read_tends(state, machine, reading):
@@ -672,6 +713,10 @@ def read_tends(state, machine, reading):
                     continue
                 if c['argv'][0] == 'tidy' and line.startswith('tidy: deleted target '):
                     done['cleared'] += 1
+                if c['argv'][0] == 'tidy':
+                    match = re.fullmatch(r'tidy: checkouts: \d+ deleted, \d+ pinned, \d+ recent, (-?\d+\.\d+) GB freed', line)
+                    if match:
+                        done['checkouts'] = done.get('checkouts', 0) + float(match[1])
                 if c['argv'][0] == 'post':
                     match = re.fullmatch(r'(\S+) woken', line)
                     if match and match[1] not in done['woken']:
@@ -854,6 +899,8 @@ def compose(state, fleet, sized, now):
         if done.get('cleared'):
             free = row.get('reading', {}).get('disk', {}).get('free')
             actions.append(f'cleared {done["cleared"]} targets' + (f' (disk now {free/GB:.0f} GB free)' if free is not None else ''))
+        if done.get('checkouts'):
+            actions.append(f'freed {done["checkouts"]:.1f} GB of checkouts')
         if done.get('woken'):
             actions.append('woke ' + ', '.join(done['woken']))
         if done.get('told'):
