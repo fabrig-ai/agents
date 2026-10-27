@@ -914,7 +914,7 @@ class Snapshot:
         self.modes = {}
 
     @classmethod
-    def read(cls, directory, cap):
+    def read(cls, directory, cap, extra=()):
         flags = os.O_RDONLY | os.O_NOFOLLOW
         directory = os.fspath(directory)
         directory = directory.rstrip('/') or ('/' if directory else '')
@@ -1025,7 +1025,10 @@ class Snapshot:
             return held, labels, refused, past, (count, size, unreadable), bits
 
         try:
-            docs, labels, refused, past, _, bits = walk(root, [(n, name, False) for n, name in enumerate(DOCUMENTS, 1)], cap)
+            # Discover walk reports through the descriptor whose bytes the snapshot reads.
+            if callable(extra):
+                extra = extra(root)
+            docs, labels, refused, past, _, bits = walk(root, [(n, name, False) for n, name in enumerate((*DOCUMENTS, *extra), 1)], cap)
             files.update(docs)
             modes.update(bits)
             names.update(labels)
@@ -1273,9 +1276,19 @@ class Evidence:
                 raise
 
 
+def walk_copy_name(state):
+    first = (state.get('attempts') or [state])[0]
+    return utc(first['started']).strftime('%Y%m%d') + '-' + state['walk']
+
+
+def walk_reports(root):
+    names = [name for name in os.listdir(root) if re.fullmatch(r'report-[1-9][0-9]*\.md', name)]
+    return sorted(names, key=lambda name: (len(name), name))
+
+
 def keep_walk(name, directory, workspace, options):
     directory = Path(os.path.abspath(directory))
-    snapshot = Snapshot.read(directory, options['QA_EVIDENCE_KIB'] * 1024)
+    snapshot = Snapshot.read(directory, options['QA_EVIDENCE_KIB'] * 1024, walk_reports)
     if snapshot.refusals:
         for refusal in snapshot.refusals:
             print(f'refused: {refusal}')
@@ -1620,22 +1633,7 @@ class Watch:
                                  and isinstance(name, str) and name in logins and pool_of(name) == pool
                                  for pool, name in state['pools'].items()), f'{path}: invalid pools', 4)
                 check_alerts(state)
-                if 'copy' in state:
-                    copy = state['copy']
-                    need(isinstance(copy, dict) and set(copy) ==
-                         {'state', 'tree', 'commit', 'digest', 'posted', 'recorded'}
-                         and copy['state'] in ('waiting', 'kept', 'refused')
-                         and all(copy[k] is None or isinstance(copy[k], str) and re.fullmatch(SHA, copy[k])
-                                 for k in ('tree', 'commit'))
-                         and all(copy[k] is None or isinstance(copy[k], str) and re.fullmatch(r'[0-9a-f]{64}', copy[k])
-                                 for k in ('digest', 'posted'))
-                         and isinstance(copy['recorded'], str)
-                         and (copy['recorded'] in ('unknown', 'refused') or re.fullmatch(SHA, copy['recorded']))
-                         and (copy['state'] != 'kept' or copy['commit'] is not None)
-                         and (copy['state'] == 'kept' or copy['commit'] is None)
-                         and (copy['state'] == 'refused' or copy['digest'] is None)
-                         and (copy['state'] != 'refused' or copy['digest'] is not None),
-                         f'{path}: invalid copy', 4)
+                check_copy(state)
                 for key in ('notice', 'notice_pending'):
                     if key in state:
                         notice = state[key]
@@ -2130,20 +2128,32 @@ class Watch:
             'refused' if copy.get('state') == 'refused' else 'unknown')
 
     def keep(self, directory, state):
-        if not self.record.path(f'qa/passes/{state["pass"]}.md').exists():
+        kind = self.classes[directory]
+        name = state[kind]
+        if kind == 'pass' and not self.record.path(f'qa/passes/{name}.md').exists():
             return
-        copy = state.setdefault('copy', dict(state='waiting', tree=None, commit=None,
-                                            digest=None, posted=None, recorded='unknown'))
-        if copy['state'] == 'kept' or self.copy_waiting:
+        if 'copy' not in state:
+            state['copy'] = dict(state='waiting', tree=None, commit=None,
+                                 digest=None, posted=None, recorded='unknown')
+            self.save(directory, state)
+        copy = state['copy']
+        if copy['state'] == 'kept' or self.copy_waiting and kind == 'pass':
             return
         copy.update(state='waiting', commit=None, digest=None)
         self.save(directory, state)
         try:
-            snapshot = Snapshot.read(directory, self.options['QA_EVIDENCE_KIB'] * 1024)
-            held = Copy('pass', state['pass'], snapshot, directory, state['run'] or 'unknown',
-                        f'qa/passes/{state["pass"]}.md', self.workspace.machine())
+            extra = walk_reports if kind == 'walk' else ()
+            snapshot = Snapshot.read(directory, self.options['QA_EVIDENCE_KIB'] * 1024, extra)
+            if kind == 'walk':
+                attempts = state.get('attempts') or [state]
+                name = walk_copy_name(state)
+                run = ','.join(a['run'] for a in attempts if a['run']) or 'unknown'
+                record = '-'
+            else:
+                run, record = state['run'] or 'unknown', f'qa/passes/{name}.md'
+            held = Copy(kind, name, snapshot, directory, run, record, self.workspace.machine())
             refusals = sorted(set(snapshot.refusals + held.refusals()))
-            if not refusals:
+            if not refusals and not self.copy_waiting:
                 try:
                     commit, tree = Evidence(self.workspace, 'qa-watch', self.options['QA_EVIDENCE_SECONDS']).keep(held)
                     copy.update(state='kept' if commit else 'waiting', tree=tree, commit=commit)
@@ -2151,27 +2161,57 @@ class Watch:
                 except Problem as error:
                     if error.code != 2:
                         raise
-                    refusals = [Refusal('passes/' + state['pass'], 0, 'taken')]
+                    refusals = [Refusal(held.directory(), 0, 'taken')]
             if refusals:
                 lines = '\n'.join(map(str, refusals))
                 copy.update(state='refused', tree=None, commit=None,
                             digest=hashlib.sha256(lines.encode()).hexdigest())
-                self.copy_refusals[state['pass']] = refusals
+                self.copy_refusals[(kind, state[kind])] = refusals
         except (Problem, OSError, ValueError, UnicodeError):
             self.copy_waiting = True
-            log(f'{state["pass"]}: evidence not kept; trying next check')
+            log(f'{state[kind]}: evidence not kept; trying next check')
         self.save(directory, state)
 
     def copy_notice(self, state):
         copy = state.get('copy', {})
         if copy.get('state') != 'refused' or copy.get('digest') == copy.get('posted'):
             return ''
-        lines = self.copy_refusals.get(state['pass'])
+        lines = self.copy_refusals.get(('pass', state['pass']))
         if not lines:
             return ''
         copy['posted'] = copy['digest']
         return ("Its evidence is refused (qa-flow.md 11.4): mend it by name and line, never opening a file, or leave it refused.\n"
                 + ''.join(f'  refused: {line}\n' for line in lines))
+
+    def walk_copy_notice(self, state):
+        copy = state.get('copy', {})
+        if copy.get('state') == 'kept':
+            commit = copy['commit']
+            return (f'evidence kept: {commit}\n'
+                    f'git show {commit}:walks/{walk_copy_name(state)}/\n',
+                    hashlib.sha256(('kept:' + commit).encode()).hexdigest())
+        if copy.get('state') == 'refused':
+            lines = self.copy_refusals.get(('walk', state['walk']), [])
+            if lines:
+                return ('evidence refused\n' + ''.join(f'  refused: {line}\n' for line in lines)
+                        + 'Mend it by name and line, never opening a file: move the named file out of the '
+                          'allowlist into the scratch root, or delete the named line (sed -i \'Nd\' FILE).\n',
+                        copy['digest'])
+        return 'evidence waiting: tried again at each check\n', None
+
+    def post_walk_copy(self, directory, state):
+        body, receipt = self.walk_copy_notice(state)
+        if receipt is None or receipt == state['copy']['posted']:
+            return
+        copy = state['copy']
+        subject = f'qa: walk {state["walk"]} evidence ' + (
+            'kept ' + copy['commit'] if copy['state'] == 'kept' else 'refused')
+        message = directory / 'post-body'
+        replace(message, body.encode())
+        sent = self.call('post', 'send', '--as', 'qa-watch', state['starter'], subject, message)
+        if sent.returncode in (0, 3):
+            copy['posted'] = receipt
+            self.save(directory, state)
 
     def link(self, directory, state):
         copy = state.get('copy')
@@ -2486,6 +2526,7 @@ class Watch:
                 need('kind' not in state or isinstance(state['kind'], str)
                      and re.fullmatch(r'[a-z][a-z0-9]*', state['kind']), 'invalid saved walk kind', 4)
                 walk_attempt(state)
+                check_copy(state)
                 if 'attempts' in state or 'attempt' in state:
                     need(type(state['attempt']) is int and state['attempt'] >= 1
                          and isinstance(state['attempts'], list) and len(state['attempts']) == state['attempt'],
@@ -2600,6 +2641,12 @@ class Watch:
         if not self.unit_stopped(unit, self.options['QA_GIVE_BACK_SECONDS']):
             self.alert(directory, state, None)
             return
+        if ('decision' not in state and (state.get('end_logged') or state.get('posted')
+                                        or pause_line(directory) is None)):
+            state['decision'] = 'walk-end'
+            self.save(directory, state)
+        if state.get('decision') == 'walk-end':
+            self.keep(directory, state)
         self.end(directory, state)
         missing = self.outstanding(state)
         units = self.deployments(directory, state)
@@ -2612,6 +2659,8 @@ class Watch:
             if state['decision'] == 'walk-pause':
                 state['pause_line'] = line
             self.save(directory, state)
+            if state['decision'] == 'walk-end':
+                self.keep(directory, state)
         paused = state['decision'] == 'walk-pause'
         facts = self.facts(state['run'])
         note = f'exit {facts["exit"]}; out: ' + (', '.join(missing) or 'none')
@@ -2625,6 +2674,10 @@ class Watch:
                     f'Report: {directory}/report.md\n')
             if paused:
                 body += f'Paused at: {state["pause_line"]}\n'
+            receipt = None
+            if not paused:
+                evidence, receipt = self.walk_copy_notice(state)
+                body += evidence
             body += ''.join(f'Login {name} is not back at {path}.\n' for name, path in missing.items())
             body += ''.join(f'Unit {unit} is still up or of unknown state.\n' for unit in remaining)
             if units is None:
@@ -2637,6 +2690,8 @@ class Watch:
                              f'qa: walk {state["walk"]} {outcome}', message)
             if sent.returncode in (0, 3):
                 state['posted'] = True
+                if receipt is not None:
+                    state['copy']['posted'] = receipt
                 self.save(directory, state)
         if (state.get('released') and state.get('end_logged') and state.get('posted') and not missing
                 and all(all(receipts.values()) for receipts in state.get('alerts', {}).values())):
@@ -2724,10 +2779,14 @@ class Watch:
                 except (Problem, OSError, ValueError, RecursionError, KeyError, TypeError, AttributeError) as error:
                     log(f'{state["pass"]}: cleanup failed ({type(error).__name__}); keeping logins and scratch')
             for directory, state in walks:
-                if state.get('stage') in ('ended', 'paused'):
-                    continue
                 try:
-                    self.check_walk(directory, state)
+                    if state.get('stage') == 'ended':
+                        if state.get('decision') == 'walk-end' and directory.exists():
+                            self.keep(directory, state)
+                    elif state.get('stage') != 'paused':
+                        self.check_walk(directory, state)
+                    if state.get('decision') == 'walk-end' and state.get('posted') and directory.exists():
+                        self.post_walk_copy(directory, state)
                 except (Problem, OSError, ValueError, UnicodeError, KeyError, TypeError) as error:
                     log(f'{state["walk"]}: cleanup failed ({type(error).__name__}); keeping logins and scratch')
             local = self.local_passes()
@@ -2847,6 +2906,25 @@ class Watch:
                         and (utc(timestamp()) - utc(state['ended'])).total_seconds() >= 7 * 86400):
                     shutil.rmtree(directory)
                     log(f'{state["pass"]}: pruned')
+
+
+def check_copy(state):
+    if 'copy' in state:
+        copy = state['copy']
+        need(isinstance(copy, dict) and set(copy) ==
+             {'state', 'tree', 'commit', 'digest', 'posted', 'recorded'}
+             and copy['state'] in ('waiting', 'kept', 'refused')
+             and all(copy[k] is None or isinstance(copy[k], str) and re.fullmatch(SHA, copy[k])
+                     for k in ('tree', 'commit'))
+             and all(copy[k] is None or isinstance(copy[k], str) and re.fullmatch(r'[0-9a-f]{64}', copy[k])
+                     for k in ('digest', 'posted'))
+             and isinstance(copy['recorded'], str)
+             and (copy['recorded'] in ('unknown', 'refused') or re.fullmatch(SHA, copy['recorded']))
+             and (copy['state'] != 'kept' or copy['commit'] is not None)
+             and (copy['state'] == 'kept' or copy['commit'] is None)
+             and (copy['state'] == 'refused' or copy['digest'] is None)
+             and (copy['state'] != 'refused' or copy['digest'] is not None),
+             'invalid copy', 4)
 
 
 def check_alerts(state):

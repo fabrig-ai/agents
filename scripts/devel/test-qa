@@ -2931,8 +2931,8 @@ def the_copy_is_the_snapshot(lab):
     driven_keep(lab, f'''
 Snapshot = tool['Snapshot']
 original = Snapshot.read
-def read(cls, directory, cap):
-    snapshot = original(directory, cap)
+def read(cls, directory, cap, extra=()):
+    snapshot = original(directory, cap, extra)
     (Path(directory) / 'evidence/a.txt').write_text('changed a\\n')
     (Path(directory) / 'evidence/b.txt').unlink()
     (Path(directory) / 'evidence/b.txt').symlink_to({str(target)!r})
@@ -5509,6 +5509,188 @@ def pause_walk(lab, directory, state, line='step 4: blocked by a finding', post_
     return next(saved for _, saved in lab.walk_states() if saved['walk'] == state['walk'])
 
 
+def evidence_walk(lab):
+    brief = lab.tmp / 'qa-focused/rung-b0-brief.md'
+    brief.parent.mkdir(parents=True, exist_ok=True)
+    brief.write_text('A walk with evidence.\n')
+    return walk_with_logins(lab, CHATGPT)
+
+
+def an_ended_walk_keeps_its_evidence(lab):
+    directory, first = evidence_walk(lab)
+    first = pause_walk(lab, directory, first)
+    assert first['stage'] == 'paused' and 'copy' not in first
+    assert lab.evidence('for-each-ref', '--format=%(refname)') == ''
+    earlier = (directory / 'report.md').read_text()
+    lab.run('walk', 'temper', 'b0', '--resume', first['walk'], '--build', 'main',
+            now='2026-10-28T09:00:00Z')
+    directory, last = lab.walk_state()
+    files = {'brief.md': 'A walk with evidence.\n', 'plan.md': 'Plan.\n',
+             'notes.md': 'Notes.\n', 'report-1.md': earlier, 'report.md': 'Walk complete.\n',
+             'scripts/run.sh': '#!/bin/sh\necho fixture\n', 'evidence/result.txt': 'capture\n'}
+    lab.scratch(dict(files, **{'report-0.md': 'outside', 'report-01.md': 'outside',
+                              'report-2.md.bak': 'outside', 'deployment/bin': b'\0',
+                              'forge.header': 'outside'}), directory)
+    (directory / 'scripts/run.sh').chmod(0o700)
+    lab.end_run(last, report=files['report.md'])
+    hook = lab.origins / 'qa.git/hooks/pre-receive'
+    executable(hook, 'import json\nfrom pathlib import Path\n'
+                    f'with Path({str(lab.root / "tools.jsonl")!r}).open("a") as out:\n'
+                    '    out.write(json.dumps(dict(tool="evidence", args=["keep"])) + "\\n")\n')
+    # A crash after saving the copy must recover without giving or pushing twice.
+    driven_watch(lab, '''import os
+Watch = tool['Watch']
+original = Watch.save
+def save(self, directory, state):
+    original(self, directory, state)
+    if state.get('copy', {}).get('state') == 'kept':
+        os._exit(0)
+Watch.save = save
+''')
+    saved = lab.walk_state()[1]
+    commit = lab.evidence('rev-parse', 'evidence')
+    assert saved['decision'] == 'walk-end' and saved['copy']['commit'] == commit
+    assert not saved['given'] and not saved['posted']
+    assert lab.calls('logins').count(['give', CHATGPT, '--as', first['holder']]) == 1
+    lab.watch()
+    saved = lab.walk_state()[1]
+    assert saved['stage'] == 'ended' and saved['given'] == [CHATGPT]
+    assert lab.calls('logins').count(['give', CHATGPT, '--as', first['holder']]) == 2
+    calls = [json.loads(line) for line in (lab.root / 'tools.jsonl').read_text().splitlines()]
+    gives = [number for number, call in enumerate(calls) if call == dict(
+        tool='logins', args=['give', CHATGPT, '--as', first['holder']])]
+    kept = calls.index(dict(tool='evidence', args=['keep']))
+    assert gives[0] < kept < gives[1]
+    prefix = 'walks/20261027-rung-b0-1/'
+    assert lab.evidence('ls-tree', '-r', '--name-only', commit, prefix).splitlines() == [
+        prefix + name for name in sorted(['README.md', *files])]
+    for name, text in files.items():
+        assert lab.evidence('show', commit + ':' + prefix + name) == text.strip()
+    index = lab.evidence('show', commit + ':' + prefix + 'README.md')
+    assert 'kind: walk\n' in index and 'record: -\n' in index
+    assert f'run: {first["run"]},{last["run"]}\n' in index
+    assert f'source: {directory}\n' in index
+    assert lab.evidence('ls-tree', commit, prefix + 'scripts/run.sh').startswith('100755 blob ')
+    ended = lab.sent()[-1]
+    assert ended['args'][1:3] == [saved['starter'], 'qa: walk rung-b0-1 ended']
+    assert f'evidence kept: {commit}' in ended['body']
+    assert f'git show {commit}:{prefix}' in ended['body']
+    lab.watch()
+    assert len(lab.sent()) == 2 and lab.evidence('rev-list', '--count', 'evidence') == '1'
+
+
+def a_paused_walk_keeps_nothing(lab):
+    directory, state = evidence_walk(lab)
+    # Even a refused capture in a paused directory must never start a copy.
+    value = secrets.token_hex(24)
+    lab.scratch({'evidence/http.txt': 'Authorization: Bearer ' + value + '\n'}, directory)
+    state = pause_walk(lab, directory, state)
+    assert state['stage'] == 'paused' and state['decision'] == 'walk-pause'
+    assert 'copy' not in state
+    lab.watch()
+    assert 'copy' not in lab.walk_state()[1]
+    assert lab.evidence('for-each-ref', '--format=%(refname)') == ''
+    assert not (lab.tmp / 'qa/repos/qa.git').exists()
+    assert len(lab.sent()) == 1 and 'evidence' not in lab.sent()[0]['body']
+    assert_walk_private(lab, value)
+
+
+def assert_walk_private(lab, value, *results):
+    outputs = [result.stdout + result.stderr for result in results]
+    outputs += [path.read_text() for path in (lab.tmp / 'qa/walks').glob('*.json')]
+    outputs += [path.read_text() for path in (lab.post_log, lab.root / 'tools.jsonl') if path.exists()]
+    outputs += [path.read_text() for path in (lab.tmp / 'qa-focused').glob('*/post-body')]
+    assert all(value not in output for output in outputs)
+    assert_pass_private(lab, [value], *results)
+
+
+def a_refused_walk_is_mended(lab):
+    directory, state = evidence_walk(lab)
+    value = secrets.token_hex(24)
+    capture = directory / 'evidence/http.txt'
+    lab.scratch({'evidence/http.txt': 'HTTP fixture\nAuthorization: Bearer ' + value + '\n'}, directory)
+    lab.end_run(state)
+    first = lab.watch()
+    saved = lab.walk_state()[1]
+    assert saved['stage'] == 'ended' and saved['copy']['state'] == 'refused'
+    assert lab.evidence('for-each-ref', '--format=%(refname)') == ''
+    post, = lab.sent()
+    assert post['args'][1:3] == [state['starter'], 'qa: walk rung-b0-1 ended']
+    assert 'evidence refused\n' in post['body'] and 'refused: evidence/http.txt, line 2: header' in post['body']
+    assert 'move the named file' in post['body'] and 'delete the named line' in post['body']
+    again = lab.watch()
+    assert len(lab.sent()) == 1
+    capture.write_text('HTTP fixture\n\nAuthorization: Bearer ' + value + '\n')
+    changed = lab.watch(extra={'QA_POST_STATUS': '2'})
+    assert lab.walk_state()[1]['copy']['posted'] != lab.walk_state()[1]['copy']['digest']
+    # A preceding hung copy suppresses pushes, not this refused walk's pending notice.
+    retried = driven_watch(lab, '''Watch = tool['Watch']
+original = Watch.keep
+def keep(self, directory, state):
+    self.copy_waiting = True
+    return original(self, directory, state)
+Watch.keep = keep
+''')
+    assert len(lab.sent()) == 3
+    assert lab.sent()[-1]['args'][2] == 'qa: walk rung-b0-1 evidence refused'
+    assert 'refused: evidence/http.txt, line 3: header' in lab.sent()[-1]['body']
+    lab.watch()
+    assert len(lab.sent()) == 3
+    # Earlier attempts' reports are scanned as documents too.
+    (directory / 'report-1.md').write_text('Authorization: Bearer ' + value + '\n')
+    capture.rename(directory / 'left-http.txt')
+    earlier = lab.watch()
+    assert 'refused: report-1.md, line 1: header' in lab.sent()[-1]['body']
+    (directory / 'report-1.md').unlink()
+    mended = lab.watch(extra={'QA_POST_STATUS': '2'})
+    saved = lab.walk_state()[1]
+    commit = lab.evidence('rev-parse', 'evidence')
+    assert saved['copy']['state'] == 'kept' and saved['copy']['commit'] == commit
+    lab.watch(extra={'QA_POST_STATUS': '3'})
+    count = len(lab.sent())
+    assert lab.sent()[-1]['args'][1:3] == [state['starter'], 'qa: walk rung-b0-1 evidence kept ' + commit]
+    assert f'git show {commit}:walks/20261027-rung-b0-1/' in lab.sent()[-1]['body']
+    lab.watch()
+    assert len(lab.sent()) == count and lab.evidence('rev-list', '--count', 'evidence') == '1'
+    assert_walk_private(lab, value, first, again, changed, retried, earlier, mended)
+
+
+def a_walk_copy_waits_on_a_hung_remote(lab):
+    directory, state = evidence_walk(lab)
+    # Two walks share the check's one hung-push allowance.
+    lab.walk('b0', '--login', CHATGPT, now='2026-10-27T09:00:00Z')
+    states = lab.walk_states()
+    for directory, state in states:
+        lab.end_run(state)
+    lab.env['QA_EVIDENCE_SECONDS'] = '3'
+    marker, attempts = lab.root / 'hook.pid', lab.root / 'hook.attempts'
+    hook = lab.origins / 'qa.git/hooks/pre-receive'
+    executable(hook, f'import os, time\nfrom pathlib import Path\n'
+                    f'Path({str(marker)!r}).write_text(str(os.getpid()))\n'
+                    f'with open({str(attempts)!r}, "a") as out: out.write("try\\n")\n'
+                    'time.sleep(60)\nraise SystemExit(1)\n')
+    started = time.monotonic()
+    lab.watch()
+    assert time.monotonic() - started < 15
+    assert attempts.read_text().splitlines() == ['try']
+    dead(int(marker.read_text()))
+    for directory, saved in lab.walk_states():
+        assert saved['stage'] == 'ended' and saved['copy']['state'] == 'waiting'
+        assert saved['released'] and set(saved['given']) == set(saved['logins'])
+    assert len(lab.sent()) == 2
+    assert all('evidence waiting: tried again at each check' in post['body'] for post in lab.sent())
+    lab.watch(now='2026-11-05T10:00:00Z')
+    assert len(attempts.read_text().splitlines()) == 2
+    dead(int(marker.read_text()))
+    assert all(directory.is_dir() for directory, _ in lab.walk_states())
+    hook.unlink()
+    lab.watch()
+    assert all(saved['copy']['state'] == 'kept' for _, saved in lab.walk_states())
+    assert len(lab.sent()) == 4
+    lab.watch()
+    assert len(lab.sent()) == 4 and lab.evidence('rev-list', '--count', 'evidence') == '2'
+
+
 def a_paused_walk_frees_its_slot_and_logins(lab):
     directory, state = walk_with_logins(lab, CHATGPT)
     state = pause_walk(lab, directory, state, post_status='2')
@@ -5528,6 +5710,65 @@ def a_paused_walk_frees_its_slot_and_logins(lab):
     other = lab.walk_states()[-1][1]
     assert other['slot'] == 1 and other['logins'][CHATGPT] == state['logins'][CHATGPT]
     assert state['attempts'][0]['decision'] == 'walk-pause'
+
+
+def a_failed_pause_keeps_its_evidence_after_its_decision(lab):
+    directory, state = evidence_walk(lab)
+    unit, pid = deployment(lab, directory, login=CHATGPT)
+    executable(directory / 'give-back', 'raise SystemExit(1)\n')
+    (directory / 'paused').write_text('blocked with an export still out\n')
+    (directory / 'notes.md').write_text('Blocking finding with a failed export.\n')
+    lab.run('_give-back', str(directory), '5')
+    lab.end_run(state, report='A stuck walk with evidence.\n')
+    hook = lab.origins / 'qa.git/hooks/pre-receive'
+    executable(hook, 'import json\nfrom pathlib import Path\n'
+                    f'saved = json.loads(Path({str(lab.tmp / "qa/walks/rung-b0-1.json")!r}).read_text())\n'
+                    'assert saved["decision"] == "walk-end" and saved["copy"]["state"] == "waiting"\n'
+                    'assert not saved["given"] and not saved["posted"]\n'
+                    f'with Path({str(lab.root / "tools.jsonl")!r}).open("a") as out:\n'
+                    '    out.write(json.dumps(dict(tool="evidence", args=["keep"])) + "\\n")\n')
+    driven_watch(lab, '''import json
+Watch = tool['Watch']
+original = Watch.save
+decided = False
+def save(self, directory, state):
+    global decided
+    if 'copy' in state:
+        assert state.get('decision') == 'walk-end'
+    original(self, directory, state)
+    if state.get('decision') == 'walk-end' and not decided:
+        assert 'copy' not in state
+        decided = True
+        with (self.workspace.root / 'tools.jsonl').open('a') as out:
+            out.write(json.dumps(dict(tool='decision', args=['walk-end'])) + '\\n')
+Watch.save = save
+''')
+    saved = lab.walk_state()[1]
+    commit = lab.evidence('rev-parse', 'evidence')
+    assert saved['decision'] == 'walk-end' and saved['stage'] == 'ending'
+    assert not saved['given'] and not saved['released']
+    assert saved['copy']['state'] == 'kept' and saved['copy']['commit'] == commit
+    holders = json.loads((lab.root / 'tools.json').read_text())['login_holders']
+    assert holders[CHATGPT] == saved['holder']
+    alert, post = lab.sent()
+    assert alert == stuck_posts(lab)[0] and CHATGPT in alert['body']
+    assert post['args'][1:3] == [saved['starter'], 'qa: walk rung-b0-1 ended']
+    assert f'evidence kept: {commit}' in post['body'] and unit in post['body']
+    assert f'git show {commit}:walks/20261027-rung-b0-1/' in post['body']
+    calls = [json.loads(line) for line in (lab.root / 'tools.jsonl').read_text().splitlines()]
+    give = calls.index(dict(tool='logins', args=['give', CHATGPT, '--as', saved['holder']]))
+    decision = calls.index(dict(tool='decision', args=['walk-end']))
+    copy = calls.index(dict(tool='evidence', args=['keep']))
+    end_post = next(number for number, call in enumerate(calls) if call['tool'] == 'post'
+                    and 'qa: walk rung-b0-1 ended' in call['args'])
+    assert give < decision < copy < end_post
+    # Repairing custody completes the same end without another copy or end post.
+    (directory / 'box/login').rename(saved['logins'][CHATGPT])
+    lab.watch()
+    saved = lab.walk_state()[1]
+    assert saved['stage'] == 'ended' and saved['given'] == [CHATGPT]
+    assert len(lab.sent()) == 2 and lab.evidence('rev-list', '--count', 'evidence') == '1'
+    dead(pid)
 
 
 def a_pause_with_a_login_out_ends_stuck(lab):
@@ -6722,7 +6963,10 @@ def an_ambiguous_build_is_refused(lab):
     assert first[1]['main'] == fix and second[1]['main'] == commit
 
 
-CASES = (a_completion_cut_keeps_every_finding,
+CASES = (a_failed_pause_keeps_its_evidence_after_its_decision,
+         an_ended_walk_keeps_its_evidence, a_paused_walk_keeps_nothing,
+         a_refused_walk_is_mended, a_walk_copy_waits_on_a_hung_remote,
+         a_completion_cut_keeps_every_finding,
          a_withheld_title_keeps_its_finding,
          a_record_refusal_keeps_its_evidence_field, a_full_legacy_record_is_cut_to_name_its_evidence,
          a_full_legacy_record_names_its_refused_evidence,
