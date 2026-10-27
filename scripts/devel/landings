@@ -204,6 +204,8 @@ def runner_record(row):
         return 'from' in row and nullable(row['from'])
     if event not in ('tier', 'verdict') or not strings(row.get('flakes')) or not text(row.get('log')):
         return False
+    if 'starved' in row and not strings(row['starved']):
+        return False
     if 'baseline' in row and not isinstance(row['baseline'], bool):
         return False
     if event == 'verdict':
@@ -220,7 +222,7 @@ def runner_record(row):
 
 def more_counts(row):
     return all(key not in row or (type(row[key]) is int and row[key] >= 0)
-               for key in ('tests_more', 'flakes_more'))
+               for key in ('tests_more', 'flakes_more', 'starved_more'))
 
 
 def newest(records):
@@ -308,7 +310,7 @@ def show_tiers(records, set_records):
                                     and r['state'] == 'green' and r['commit'] == state['last_green']])
                     if green:
                         line += f" ({green['date']} {green['clock']})"
-            parts.append(line)
+            parts.append(line + starved_line(state))
         print(f"  {repo}: " + ('; '.join(parts) or 'no completed run'))
 
 
@@ -333,6 +335,12 @@ def watch(target, timeout):
         print(f'landings: warning: feed append failed: {error}', file=sys.stderr)
 
 
+def starved_line(row):
+    names = row.get('starved', [])
+    total = len(names) + row.get('starved_more', 0)
+    return f"; starved {total}: " + '; '.join(names) if total else ''
+
+
 def verdict_line(row):
     line = (f"{row['date']} {row['clock']} {row['tier']} {row['commit'][:9]} "
             f"{row['verdict']} by run {row['run'][:9]}")
@@ -345,6 +353,7 @@ def verdict_line(row):
         line += '; flakes: ' + '; '.join(row['flakes'])
     if row.get('flakes_more'):
         line += f"; {row['flakes_more']} more flakes"
+    line += starved_line(row)
     if row.get('baseline'):
         line += '; baseline'
     print(line)
@@ -907,11 +916,111 @@ def table(head, rows):
                         for i, (c, w) in enumerate(zip(row, widths))).rstrip())
 
 
-def report(records, repo, tsv):
+def report_verdicts(records, runner, lands):
+    mine = [r for r in runner if r['kind'] == 'tier' and r['event'] in ('tier', 'verdict')]
+    if not mine:
+        print('no after landing runs')
+        return
+    landings = {}
+    for row in [r for r in records if r['event'] == 'landed'] + lands:
+        if row.get('repo') and row.get('commit'):
+            key = row['repo'], row['commit']
+            landings[key] = min(landings.get(key, row['utc']), row['utc'])
+    verdicts, runs, judged = {}, {}, {}
+    for row in mine:
+        name = row['tier']
+        if row['event'] == 'verdict':
+            verdicts.setdefault((name, row['commit']), []).append(row)
+            judged.setdefault((name, row['token']), set()).add(row['commit'])
+        else:
+            runs[name, row['token']] = row
+    rows = []
+    for repo in sorted({follower(r['tier'])[0] for r in mine}):
+        names = sorted({r['tier'] for r in mine if follower(r['tier'])[0] == repo},
+                       key=lambda name: (follower(name)[2], follower(name)[1]))
+        own = {name: [] for name in names}
+        joined_times = []
+        for (repository, commit), landed in landings.items():
+            if repository != repo:
+                continue
+            reds, splits = [], {}
+            for name in names:
+                answers = verdicts.get((name, commit), [])
+                if answers:
+                    first = min(r['utc'] for r in answers)
+                    own[name].append((first - landed).total_seconds())
+                reds.extend(r['utc'] for r in answers if r['verdict'] == 'red')
+                cleared = [r['utc'] for r in answers if r['verdict'] == 'cleared']
+                if cleared:
+                    _, part, parts = follower(name)
+                    splits.setdefault(parts, {})[part] = min(cleared)
+            cleared = [max(split.values()) for parts, split in splits.items() if len(split) == parts]
+            decided = min(reds) if reds else min(cleared) if cleared else None
+            if decided is not None:
+                joined_times.append((decided - landed).total_seconds())
+        def timing(name, times):
+            return [name, len(times), median(times), p90(times)]
+        def run_costs(name):
+            completed = [r for (tier, _), r in runs.items() if tier == name]
+            per_run = [len(judged.get((name, r['token']), ())) for r in completed]
+            ran = [r['ran_s'] for r in completed]
+            return [len(completed), median(per_run, show=lambda n: f'{n:g}'), median(ran), p90(ran)]
+        if names == [repo]:
+            rows.append(timing(repo, joined_times) + run_costs(repo))
+        else:
+            rows.append(timing(repo, joined_times) + ['', '', '', ''])
+            rows.extend(timing('  ' + name, own[name]) + run_costs(name) for name in names)
+    print("after landing's verdicts (verdict: landed to the record that decided it; "
+          "per run: landings a run judged; m:ss)")
+    table(['tier', 'landings', 'verdict', 'p90', 'runs', 'per run', 'ran', 'p90'], rows)
+
+
+def report_starved(results, runner, lands):
+    totals, tests = {}, {}
+    sources, seen = [], set()
+    for record, result in results:
+        # Push reconciliation can put the same result on landed and stopped.
+        key = record['set'], record['token'], json.dumps(result, sort_keys=True)
+        if key not in seen:
+            seen.add(key)
+            sources.append((result['repo'], result, 0))
+    plain = {(row['repo'], row['token']): row for row in lands}
+    sources.extend((row['repo'], row, 0) for row in plain.values())
+    # Verdicts repeat a run's names for each landing; only the run's end counts.
+    runs = {(row['tier'], row['token']): row for row in runner
+            if row['kind'] == 'tier' and row['event'] == 'tier'}
+    sources.extend((follower(row['tier'])[0], row, 1) for row in runs.values())
+    for repo, row, column in sources:
+        names = row.get('starved', [])
+        if not isinstance(names, list) or not all(isinstance(n, str) and n for n in names):
+            continue
+        names = set(names)
+        more = row.get('starved_more', 0)
+        if type(more) is not int or more < 0:
+            continue
+        total = len(names) + more
+        if not total:
+            continue
+        totals.setdefault(repo, [0, 0])[column] += total
+        for name in names:
+            tests.setdefault((repo, name), [0, 0])[column] += 1
+    if not totals:
+        print('no starved passes')
+        return
+    print('starved passes (once per gate or run)')
+    table(['repo', 'gates', 'runs'], [[repo, *counts] for repo, counts in sorted(totals.items())])
+    table(['test', 'repo', 'gates', 'runs'],
+          [[name, repo, *counts] for (repo, name), counts in sorted(
+              tests.items(), key=lambda item: (-sum(item[1]), item[0][1], item[0][0]))])
+
+
+def report(records, runner, lands, repo, tsv):
     results = [(r, r['result']) for r in records if isinstance(r.get('result'), dict)
                and isinstance(r['result'].get('repo'), str)]
     if repo is not None:
         results = [(r, x) for r, x in results if x['repo'] == repo]
+        runner = [r for r in runner if r['kind'] == 'tier' and follower(r['tier'])[0] == repo]
+        lands = [r for r in lands if r['repo'] == repo]
     if tsv:
         columns = ['prebuild_wait_s', 'prebuild_run_s', 'gate_wait_s', 'gate_run_s',
                    'gate_exit', 'failed_step', *STEPS, 'other']
@@ -977,7 +1086,6 @@ def report(records, repo, tsv):
     print()
     if not sets and not proves:
         print('no set runs')
-        return
     naming = f' naming {repo}' if repo is not None else ''
     longest = lambda values: mss(max(values)) if values else '-'
     if sets:
@@ -994,6 +1102,11 @@ def report(records, repo, tsv):
         table(['set', 'runs', 'proved', 'stopped', 'run', 'longest'],
               [[name, e['runs'], e['proved'], e['stopped'], median(e['run']), longest(e['run'])]
                for name, e in sorted(proves.items())])
+
+    print()
+    report_verdicts(records, runner, lands)
+    print()
+    report_starved(results, runner, lands)
 
 
 def main():
@@ -1044,7 +1157,9 @@ def main():
     if args.command == 'report':
         if args.since is not None:
             records = [r for r in records if r['utc'] >= args.since]
-        report(records, args.repo, args.tsv)
+            runner = [r for r in runner if r['utc'] >= args.since]
+            lands = [r for r in lands if r['utc'] >= args.since]
+        report(records, runner, lands, args.repo, args.tsv)
         return 0
     show(records, lands, args.last, runner, Checkouts(workspace()))
     show_tiers(runner, records)
