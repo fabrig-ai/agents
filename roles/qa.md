@@ -65,6 +65,13 @@ makes a finding there.
    each other share one deployment; a case that would disturb others
    gets a fresh one.
 
+   **Before a deployment's first start, and before every restart,** run
+   the checks its binding names on its configuration (for temper,
+   `docs/design/qa.md` 3's `jq -e` lines on CONFIG), and stop if one
+   prints other than `true`: that is a setup to redo, never a finding,
+   and one you can't redo goes under Blocked, with the check that
+   failed.
+
    **A held login,** when the brief names one, the service has taken
    for you: it rests at the path the brief gives. Move it into your
    deployment as the binding says (for temper, `temper ctl account import`; a

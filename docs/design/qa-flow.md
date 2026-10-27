@@ -150,7 +150,10 @@ whose future is open (section 9).
      scratch directory, `temper ctl`'s sign-in, and the forge's hands
      from the files the box names. Cases that don't disturb each other
      share one deployment. A case that would disturb others gets a
-     fresh one.
+     fresh one. Before a deployment's first start and every restart, it
+     runs the checks the binding names on its configuration (temper's
+     `qa.md` 3), and stops if one fails: a setup to redo, never a
+     finding.
   4. Works each case as the product's users' agents do: the product
      through its tool (for temper, `temper ctl`, whose `help` is
      temper's guide for agents), its backends through tools of the
