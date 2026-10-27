@@ -197,6 +197,11 @@ temper's binding, `docs/design/qa.md` 3, is the source; as of 10-27:
   `chatgpt-4`, at rest in `tmp/logins/` on hetzner6, in `logins`'
   custody (qa-flow.md 10.2 and 10.4). The user signed in the last three
   on 10-27 between 18:16 and 18:21Z.
+- **Two Claude logins,** `claude` and `claude-2`, Claude Code's
+  configuration directories, used in place (6.2a): the Claude walks'
+  pool, one each for its two walk slots. The user signed in `claude` at
+  18:56Z and `claude-2` at 19:2xZ on 10-27. Until piece W lands, a
+  Claude walk takes one by name (`logins take claude-2 --as HOLDER`).
 - **One account each:** an account signed in twice gives a second login
   but shares the first's usage limits, so a new held login is another
   account wherever one is to hand.
@@ -419,3 +424,5 @@ Newest last, times UTC.
 - 10-27 19:0xZ: per rung, ChatGPT+Forgejo, then Claude+Forgejo, then
   ChatGPT+GitHub, each kind with its own walk slots (the user; agents
   5bc4ad7): section 3, item 7.
+- 10-27 19:2xZ: `claude-2` signed in, two Claude logins; 6.1's pool list
+  (design/qa-evidence).
