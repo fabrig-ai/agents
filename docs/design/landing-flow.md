@@ -292,7 +292,9 @@ cite:
      Forgejo, says so, and the runner takes it as a fault, not a red:
      agents names no product, so `setup` can't check for them. Each
      follower keeps one clone and target on its machine and nowhere
-     else, and runs its tier at `HEAVY_CLASS=background`, not `--gate`
+     else, the target bounded by a cap past which the follower removes
+     it between runs (build-infrastructure.md 11), and runs its tier at
+     `HEAVY_CLASS=background`, not `--gate`
      (build-efficiency.md 8, change 5). A tier that fails only under
      load has a test to fix, not a claim on an exclusive lane. The
      runner's machines carry little else (the user, 10-26;

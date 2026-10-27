@@ -979,6 +979,16 @@ last run's commit:
   `Gate-Tree:` trailer, which `land` and `land-set` push, and M itself;
   only M when P is null or not an ancestor. One whose `Gate-Result:`
   starts `none` is a docs landing: never probed, never red.
+- **Its target is bounded** (the director, 10-27: temper's grew
+  unpruned to 180 GB and took hetzner3 under its floor). Before a run,
+  a follower whose clone's `target/` holds more than its cap, its files'
+  allocated bytes, removes that `target/` whole, so that the run builds
+  afresh from the build cache ([build-cache.md](build-cache.md)). The
+  cap is 50 GB, or what the follower's line in the `follow` file gives
+  (below). Only between runs: a run's rerun and probes share its
+  target. The runner keeps no receipt of what its builds use (kache's
+  `clean --units`): what the tier builds is the repository's script's,
+  and the cap needs nothing from it.
 - **The run** is `heavy -- scripts/after-landing.sh` at
   `HEAVY_CLASS=background`, in the clone checked out at M (forced,
   cleaned of untracked files but not of ignored ones). A part's run
@@ -1017,7 +1027,8 @@ None has a `set` key, so the readers of sets skip them. Each has `time`,
   of REPO's in a part's, so it waits on a landing rather than clear it
   on one part; but it takes any verdict on a bare commit, so parts go
   live once every machine's `landings` knows them:
-  - `running`: `commit` M and `from` P;
+  - `running`: `commit` M and `from` P; `fresh` is true when the
+    run starts on a target the cap removed;
   - `verdict`: `commit` the landing, `run` M, `verdict`, `tests`,
     `flakes`, `starved`, `landing_set` (the set whose `landed` record names the
     landing, or null), `log`, and a red's `excerpt`, its failing output's
@@ -1124,8 +1135,9 @@ its subject the outcome.
 runner's machines by writing its own address in
 `~/.config/agents-after-landing/director` there, and what the machine
 follows in `~/.config/agents-after-landing/follow`, a follower's name
-per line; with no such file, the five repositories whole (skein, smith,
-hearth, jig, temper). A follower runs on one machine at a time, which
+per line, then optionally its target's cap in GB (`temper.1of2 60`);
+with no such file, the five repositories whole (skein, smith, hearth,
+jig, temper), each at the default cap. A follower runs on one machine at a time, which
 only the director's files ensure. On a runner's machine `setup` checks
 the user unit `agents-after-landing@.service`, whose instance per
 follower, by its name, runs `after-landing follow REPO [--part K/N]
@@ -1150,7 +1162,9 @@ meeting with `landings wait --cleared` on the same feed; and a tier in
 two parts, each followed apart: `--part` passed only on runs that name
 no test, a red in one part bisected while the other clears, and a part
 started from a whole tier's copied state, or not, for a `*` standing;
-and a starved pass, green and recorded.
+and a starved pass, green and recorded; and a target past its cap,
+removed before the next run and never during one, the run marked
+`fresh`.
 `test-landings` covers the `tiers:` lines, `wait --cleared` on a set
 and on a commit, and `--post`; and, on scratch repositories as origins
 and checkouts, the verdicts by ancestry: a repository with no tier, a
