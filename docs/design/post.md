@@ -183,6 +183,25 @@ overwrites another.
     then would start a copy (director.md 5). If it's stopped, failed,
     interactive or absent: exit 3. A stopped session was ended on purpose,
     and its parent decides.
+  - **only an active mission's session is resumed** (the director,
+    10-27: a paused mission resumes only on the user's yes, an ended one
+    never). Before a resume, and only then, the tool pulls the record
+    (`record pull`; on failure it reads its clone as it stands) and
+    reads each `missions/*/README.md`'s front matter. NAME is resumed
+    when a mission whose `owner` is `NAME@MACHINE`, MACHINE this
+    machine, says `state: active`; or when no mission's `owner` names
+    NAME on any machine, nor could: `director` and the director's
+    helpers, `d/<what>`. A name that owns missions here, none of them
+    active, is not resumed: exit 3, `queued, nobody will wake it:
+    mission M is STATE` (paused, ended, abandoned, unknown). So is a
+    mission's name (`o/`, `design/`, `p/`) that owns none here, its
+    mission moved or never recorded (`no active mission here`), and any
+    name but `director`'s and `d/`'s when the record cannot be read at
+    all (`record unreadable`). The mail stays in `new/`; the fleet
+    watch raises it (fleet-watch.md 3.1). NAME is the mailbox's name,
+    the session's `POST_NAME`, which a session resumed by hand keeps as
+    its name. This holds for every wake: delivery's, `post wake`'s and
+    so `codex-run stale --post`'s, whose posts are deliveries.
 - **At a handover** the outgoing session doesn't restart its waiter.
   The new session starts one, which replaces any that is left.
 - **Stuck mail.** Each machine's tend runs `post wake --older 15` every
