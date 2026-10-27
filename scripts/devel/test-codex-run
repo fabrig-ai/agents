@@ -537,6 +537,10 @@ for signal in TERM INT KILL; do
     output=$("$kit/codex-run" task "$t/task file.md" "$t/work dir" "$report")
     read -r id state <<<"$output"
     poll_until test -f "$state/codex.pid"
+    # The PID is published before Codex emits its thread. Wait for the
+    # stamper to record the event before killing the unit, so KILL leaves a
+    # thread to recover even though turn() never writes the thread file.
+    poll_until grep -Fq '"thread_id": "thread-fixture"}' "$state/events.jsonl"
     worker=$(cat "$state/worker.pid")
     if [[ $signal == TERM ]]; then kill -TERM "$worker"
     else kill -"$signal" -- "-$worker"; fi
