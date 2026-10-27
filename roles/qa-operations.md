@@ -35,8 +35,14 @@ The director reads this file against what it sees at each check.
   as soon as the fix is ready, even before it lands (the user, 10-27
   18:4xZ) (section 3).
 - **Real backends, as planned** (the user, 10-27 10:2xZ): ChatGPT with
-  the box's owned Forgejo, and no walk on fakes. GitHub and Claude come a
-  rung behind, on the user's word.
+  the box's owned Forgejo, and no walk on fakes.
+- **Each rung walks three ways, in order** (the user, 10-27 19:0xZ):
+  ChatGPT+Forgejo green first, then the same walk on Claude+Forgejo, then,
+  once that clears, ChatGPT+GitHub. Claude+GitHub is not planned unless
+  capacity allows. ChatGPT+Forgejo "should never be blocked by anything":
+  its two logins and walk slots are its own, and the other walks get two
+  slots of their own (section 6); where an owner has fixes for both, the
+  ChatGPT+Forgejo walk's goes first.
 - **The box under test runs gpt-6.1-sol at effort high,** its budgets
   raised as a person would, so that a budget never stops a walk (the
   user, 10-27 10:2xZ) (section 5).
@@ -371,3 +377,4 @@ Newest last, times UTC.
 - 10-27 19:0xZ: the reserve and `--now` landed (agents 86f918b): QA holds
   at most two of the four logins; `QA_SLOTS` 2 once it runs on hetzner6
   (design/qa-evidence).
+- 10-27 19:0xZ: each rung walks ChatGPT+Forgejo, then Claude+Forgejo, then ChatGPT+GitHub; ChatGPT+Forgejo never blocked; two more walk slots for the others (the user).
