@@ -1050,7 +1050,9 @@ green at every commit. Run from the root of a checkout:
   together, a phase they need (a build) may run in several, and a part
   with nothing in it is green. It splits by phase, weighed by times
   measured once and written in the script, ties broken by the phases'
-  order. A NAME keeps its meaning across parts. A commit that moves a
+  order; phases that share a build may be dealt as one group, so that
+  no part builds what another already does (temper's QA and browser
+  tiers, its bundle). A NAME keeps its meaning across parts. A commit that moves a
   test to another part lands while that test is green: a red standing
   in its old part drops there, and its new part, which never saw it,
   would bisect it anew onto an innocent landing;

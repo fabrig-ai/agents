@@ -312,10 +312,10 @@ cite:
      at once, and it clears once every part has cleared it. A split
      changes nothing else: the rerun, the bisect and their attribution,
      the posts, and the range rule below hold per part.
-     - temper's tier is in two (10-26): the QA tier, and the process
-       and browser tiers (the QA and browser tiers, and the process
-       tier with the lab's tests, until the lab's retirement of 10-27),
-       about 7 and 8 minutes on a quiet machine. Whole, a run took 25 minutes at the
+     - temper's tier is in two, live on hetzner3 since 10-27 04:41Z:
+       the QA and browser tiers, which share a build, and the process
+       tier, about 8 and 7 minutes on a quiet machine. Until the lab's
+       retirement (10-27) the process part also ran the lab's tests. Whole, a run took 25 minutes at the
        median and a verdict 46, over five landings a run (hetzner3's
        feed, 10-26 16:31-22:15Z). A follower always busy gives a
        verdict in about one and a half runs: about 15 minutes, over one
