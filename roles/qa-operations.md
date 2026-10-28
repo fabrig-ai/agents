@@ -431,6 +431,13 @@ login or a sign-in link.
   --walk YYYYMMDD-NAME DIR`: exit 0 prints the commit, 2 a refusal, 1
   run it again. The eight from before it (rung-a-1..5, rung-b0-1,
   github-land-1..2) were kept by the director on 10-27 at 23:5xZ.
+- **Redaction masks, never drops** (the director, 10-28 10:0xZ, after R19):
+  a pass or walk that filters a log into `evidence/` replaces the matched
+  word or value with `[masked]` and keeps the line. A line dropped whole
+  hides what it said: B2's walk 1 dropped the store's refusal (it named a
+  secrets path) with every line naming `http`, `secret` or `sign-in`, and
+  the walker saw an unnamed exit 1 (R19, closed as no box defect). The
+  scan still refuses what a mask missed.
 - **Live since 10-28 00:0xZ** on hetzner6: the first check kept 25 of
   the 31 old passes and refused 6, the director's to mend by name and
   line or leave; the first pass after it, 20261028-0010-temper, names
@@ -438,13 +445,9 @@ login or a sign-in link.
 
 ## 9. Open
 
-- **The GitHub and Claude walks** of rungs A and B0 wait for the user's
-  word. So do the ladder's paused owners: rung B2, the Claude pair, and
-  GitHub's remaining tasks.
-- **A held Claude login,** `claude`, is at rest in `logins` since 10-27
-  18:5xZ (the user signed Claude Code in, agents#11): a program's login,
-  used in place (qa-flow.md 10.2). The Claude walks it serves wait for
-  the user's word, as above.
+- **The GitHub walks** follow each rung's Claude walk, by the user's
+  per-rung order (10-27 19:0xZ): ChatGPT with an owned Forgejo, then
+  Claude Code with it, then ChatGPT with GitHub.
 
 ## 10. Changes
 
@@ -534,3 +537,5 @@ Newest last, times UTC.
 - 10-28 00:4xZ: the box under test back to gpt-6-luna at effort medium, after its cost on the held accounts (the user); 10-27 23:5xZ: restores and switches only open, the checks are tests, an unresolved reference panics (the user; direction.md).
 - 10-28 01:1xZ: Claude+Forgejo walks on Sonnet at medium; luna at high allowed where medium proves the problem (the user).
 - 10-28 02:4xZ: Claude walks on Sonnet at high (the user).
+- 10-28 10:0xZ: evidence redaction masks the matched word, never drops
+  the line (the director, after R19); section 9 brought up to date.
