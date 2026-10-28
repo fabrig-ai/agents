@@ -89,6 +89,16 @@ here. Durable know-how belongs here, not in the session's memory or in
 
 ## 3. Watching
 
+- **One unattended handover a day** (the user, 10-28): once a day, at a
+  quiet moment and without asking, the director hands over to a fresh
+  session: it brings the record up to date (STATUS.md, direction.md, the
+  decisions), writes `tmp/director/notes/handover.md` with what only it
+  holds (in flight, held, paused and how to resume, the raises granted,
+  the questions open with the user), stops its waiter and deletes its
+  cron, then runs `~/src/rust/agents/scripts/devel/start-director
+  --handover`. The new session reads the notes, starts its cron and
+  waiter, and stops the old one. A director session always runs with
+  remote control on (start-director passes `--remote-control`).
 - **The waiter** is `post wait director`, started as a tracked background
   task (the harness's background run), never with `&` in a shell: an
   untracked waiter wakes nobody. After each wake: `post read director`,
