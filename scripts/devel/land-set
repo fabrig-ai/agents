@@ -464,11 +464,12 @@ def repin(runner, path, name, label, landed, candidates, root, mains, paths):
         runner.git(path, 'commit', '-m', message)
 
 
-def land(runner, path, *args, **options):
+def land(runner, path, *args, base=None, **options):
     """Run land; return its status, its output and the land-result-v1 object it wrote, or None."""
     target = runner.results / secrets.token_hex(8)
     code, output = runner.run(path, ['land', *args], check=False,
-                             env=dict(LAND_RESULT=str(target), LAND_TIDY='', LAND_FEED=''), **options)
+                             env=dict(LAND_RESULT=str(target), LAND_TIDY='', LAND_FEED='',
+                                      LAND_SET_BASE=base or ''), **options)
     try:
         result = json.loads(target.read_text())
         target.unlink()
@@ -568,9 +569,11 @@ def reuse(runner, path, proved):
         runner.git(path, 'reset', '--soft', proved)
 
 
-def gate_step(runner, path, name, label, landed, candidates, root, mains, paths, proved=None):
-    fetch(runner, path)
-    base = runner.git(path, 'rev-parse', 'origin/main')
+def gate_step(runner, path, name, label, landed, candidates, root, mains, paths, proved=None, base=None):
+    sampled = base
+    if base is None:
+        fetch(runner, path)
+        base = runner.git(path, 'rev-parse', 'origin/main')
     tip, generated = rebase(runner, path, base)
     repin(runner, path, name, label, landed, candidates, root, mains, paths)
     if generated:
@@ -589,7 +592,7 @@ def gate_step(runner, path, name, label, landed, candidates, root, mains, paths,
         require(not any(up in landed or up in candidates for up in UPSTREAM[name]),
                 f'{name}: no change after an upstream landed or gated; set is incomplete', 1)
         return None
-    code, _, result = land(runner, path, '--no-push')
+    code, _, result = land(runner, path, '--no-push', base=sampled)
     if code:
         raise Failure(code if code > 0 else 128 - code, f'{name}: land --no-push failed ({code})', result)
     return (runner.git(path, 'rev-parse', 'HEAD'), base, result)
@@ -669,20 +672,33 @@ def main():
                 summary[name] = 'invalidated ' + commit + ' (not pushed)'
             bases.pop(name, None)
 
-    def gates(start):
+    def gates(start, sample=False):
         nonlocal current
+        sampled = {}
+        if sample:
+            # Resolve every main before any gate, including skipped and
+            # recorded repositories. Shared refs may move after this point.
+            for name in names:
+                lock.boundary()
+                current = name
+                fetch(runner, paths[name])
+                sampled[name] = runner.git(paths[name], 'rev-parse', 'origin/main')
+                current = None
         # Three gate/check rounds, including the first, bound a moving main.
         for attempt in range(3):
             invalidate(start)
-            mains, moved = {}, []
+            snapshot = sampled if attempt == 0 else {}
+            mains, moved = dict(snapshot), []
             for name in names[start:]:
                 lock.boundary()
                 current = name
                 if name in landed:
                     path = paths[name]
-                    fetch(runner, path)
+                    if name not in snapshot:
+                        fetch(runner, path)
                     commit = landed[name]
-                    code, _ = runner.run(path, ['git', 'merge-base', '--is-ancestor', commit, 'origin/main'],
+                    code, _ = runner.run(path, ['git', 'merge-base', '--is-ancestor', commit,
+                                               snapshot.get(name, 'origin/main')],
                                          check=False, quiet=True)
                     require(code == 0, f'{name}: recorded commit {commit} is not on origin/main', 1)
                     summary[name] = 'recorded landed ' + commit
@@ -708,21 +724,24 @@ def main():
                         runner.run(primary, ['git', 'branch', '-D', leftover.removeprefix('refs/heads/')],
                                    check=False, quiet=True)
                     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-                    fetch(runner, primary)
+                    if name not in snapshot:
+                        fetch(runner, primary)
                     runner.git(primary, 'worktree', 'add', '-b', f'land-set/{token}/{name}',
-                               str(path), 'origin/main')
+                               str(path), snapshot.get(name, 'origin/main'))
                     paths[name] = path
                     made.add(name)
                 path = paths[name]
                 result = gate_step(runner, path, name, spec['set'], landed, candidates, root, mains, paths,
-                                   proved.get(name) if spec['repos'][name] == 'pin-only' else None)
+                                   proved.get(name) if spec['repos'][name] == 'pin-only' else None,
+                                   base=snapshot.get(name))
                 if result is None:
                     summary[name] = 'skipped'
                     remove_pin_only(name)
                 else:
                     commit, base, outcome = result
-                    # land may itself have fetched and rebased after our repin.
-                    if runner.git(path, 'merge-base', commit, 'origin/main') != base:
+                    # Outside the sampled first round, land may itself have
+                    # fetched and rebased after our repin.
+                    if not snapshot and runner.git(path, 'merge-base', commit, 'origin/main') != base:
                         summary[name] = 'invalidated ' + commit + ' (not pushed)'
                         moved.append(names.index(name))
                         break
@@ -737,6 +756,8 @@ def main():
                         runner.git(path, 'push', '--force-with-lease=' + ref + ':' + previous,
                                    'origin', commit + ':' + ref)
                 current = None
+            if prove:
+                return
             for index, name in enumerate(names):
                 if name not in candidates:
                     continue
@@ -798,7 +819,7 @@ def main():
             lock.acquire()
             event('started', **(dict(proof=proof_token) if proof_token else {}))
         landed = read_state(state, spec['set'], paths)
-        gates(0)
+        gates(0, sample=True)
         if prove:
             write_proof(runner, proof, spec['set'], host, token, spec, paths, candidates, bases)
             # Keep the proved tuple available for the owner's checks. The next

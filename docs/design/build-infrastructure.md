@@ -785,6 +785,11 @@ With `--prove`, it runs phase 1 (below) without the lock and pushes no
 `main`; a later run of the set on the same machine then lands it
 (**Proving a set**, below).
 
+A proof samples every repository's main once, at its start: it fetches all of
+them, then builds and gates that tuple alone. A main that moves during the
+proof is the locked run's re-gate's to catch, never the proof's to chase (10-28:
+two proofs failed on tuples of mains that no one had made).
+
 The set file is JSON with exactly two keys:
 
 ```json
@@ -856,6 +861,14 @@ hearth, jig, temper:
    `refs/heads/land-set/TOKEN/<repo>` on origin, a new name, so that the
    downstream's Cargo can fetch it. A later round replaces only this run's
    previous staging tip, with a lease on that tip.
+
+The first round fetches every repository of the set and resolves its
+`origin/main` before any of these steps. Steps 1 and 2 use those commits
+without fetching again, and step 5 passes the sampled commit to `land
+--no-push` as `LAND_SET_BASE`, so that its rebase uses the same base without
+a fetch. A skipped repository's sampled main also supplies downstream
+pins. A proof ends after this round; a locked run checks for moved mains
+and re-gates as below, with fresh fetches in those later rounds.
 
 **Phase 2, the pushes.**
 1. Fetch every repository with a candidate. If any `origin/main` is no

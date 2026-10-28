@@ -46,6 +46,8 @@
 # LAND_PREBUILD is the build lane's command before the gate, in a Cargo
 # repository: by default formatting, clippy as the gates run it, and the
 # tests' build. Empty, there is none.
+# LAND_SET_BASE is land-set's sampled main commit for --no-push: rebase
+# and gate against it without fetching a newer main.
 #
 # Once it has rebased, land ends with one line on stdout, `land: result
 # JSON` (landing-flow.md, 10), and writes the same JSON to the file
@@ -102,6 +104,10 @@ done
 die() { echo "land: $2" >&2; exit "$1"; }
 trap 'echo "land: line $LINENO failed" >&2; exit 8' ERR
 ((!no_push || (!docs && !local))) || die 2 "--no-push cannot be combined with --docs or --local"
+if [[ -n ${LAND_SET_BASE:-} ]]; then
+    ((no_push)) && [[ $LAND_SET_BASE =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] ||
+        die 2 "LAND_SET_BASE requires --no-push and a full commit ID"
+fi
 
 top=$(git rev-parse --show-toplevel)
 cd "$top"
@@ -691,6 +697,8 @@ while :; do
     if [[ -n ${commit:-} ]]; then candidate_check "$commit"; fi
     if ((local)); then
         base=$(git rev-parse main)
+    elif [[ -n ${LAND_SET_BASE:-} ]]; then
+        base=$(git rev-parse --verify "$LAND_SET_BASE^{commit}")
     else
         fetch
         base=$(git rev-parse origin/main)

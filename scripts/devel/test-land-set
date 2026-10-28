@@ -28,7 +28,7 @@ SOURCE = 'file:///land-set-fixture/origins/'
 HANG = case_runner.HUNG_TOOL_S
 HEAVY = '#!/bin/sh\nexec "$@"\n'
 # Only the cases that read the argv log pay for logging each git call.
-GIT_TRACED = ('lock_conflict', 'outside_snapshot', 'kit_refusal', 'closure', 'refusal')
+GIT_TRACED = ('lock_conflict', 'outside_snapshot', 'prove_start_snapshot', 'kit_refusal', 'closure', 'refusal')
 LAND = r'''#!{python} -IS
 import os, sys
 args = sys.argv[1:]
@@ -146,9 +146,11 @@ def move():
     marker.write_text(str(count + 1))
 if not os.environ.get('MOVE_AFTER_REBASE'):
     move()
-git('fetch', 'origin')
-git('rebase', 'origin/main')
-base = git('rev-parse', 'origin/main')
+base = os.environ.get('LAND_SET_BASE') if phase == 'gate' else None
+if not base:
+    git('fetch', 'origin')
+    base = git('rev-parse', 'origin/main')
+git('rebase', base)
 if os.environ.get('MOVE_AFTER_REBASE'):
     move()
 # The gate cache: one gate per tree and worktree, as land's own, whose
@@ -1241,6 +1243,49 @@ def proved_then_moved(lab):
     assert {r['repo']: r['result']['gate']['kind'] for r in gated} == {'jig': 'cached', 'temper': 'ran'}
 
 
+def prove_start_snapshot(lab):
+    """A later repository's main moves after the first gate starts: leave it for landing."""
+    lab.change('jig')
+    spec = lab.spec({'jig': str(lab.work['jig']), 'temper': 'pin-only'})
+    output = lab.run(spec, prove=True, env=dict(MOVE_AT='gate:jig', MOVE_REPO='temper'))
+    assert lab.heads()['temper'] != lab.base['temper'], 'fixture did not move main'
+    proof = lab.proof()
+    assert {name: entry['base'] for name, entry in proof['repos'].items()} == {
+        name: lab.base[name] for name in ('jig', 'temper')}, proof
+    assert lab.trace.read_text().splitlines() == ['jig', 'temper']
+    # Two initial fetches, plus the fixture's concurrent publisher; neither
+    # gate nor the pin-only worktree creation fetches again during the proof.
+    assert sum(command[-2:] == ['fetch', 'origin'] for command in lab.git_commands()) == 3
+    assert 'main moved; gating again' not in output, output
+    temper = Path(proof['repos']['temper']['worktree'])
+    assert not (temper / 'race.txt').exists(), 'proof chased the later main'
+    lock = tomllib.loads((temper / 'Cargo.lock').read_text())
+    assert {p['source'].rsplit('#', 1)[1] for p in lock['package']
+            if p.get('source', '').split('#')[0].endswith('/jig.git')} == {proof['repos']['jig']['commit']}
+    # Exercise the real Bash land too, with only its build/runtime stubbed.
+    # The publisher has already advanced the shared origin/main ref.
+    assert lab.git(temper, 'rev-parse', 'origin/main') != lab.base['temper']
+    kit = lab.root / 'snapshot-kit'
+    kit.mkdir()
+    shutil.copy2(SCRIPT.with_name('land'), kit / 'land')
+    (kit / 'gate-policy.sh').write_text('gate_policy_prepare() { SKEIN_GATE_POLICY_ID=snapshot-fixture; }\n')
+    (kit / 'heavy').write_text('#!/bin/sh\nexit 1\n')
+    (kit / 'heavy').chmod(0o700)
+    result = lab.root / 'snapshot-result.json'
+    env = dict(lab.env, LAND_SET_BASE=lab.base['temper'], LAND_PREBUILD='', LAND_RESULT=str(result))
+    fetches = sum('fetch' in command for command in lab.git_commands())
+    execute(temper, [str(kit / 'land'), '--no-push', '--gate', 'true'], env)
+    assert json.loads(result.read_text())['base'] == lab.base['temper']
+    assert not (temper / 'race.txt').exists()
+    assert sum('fetch' in command for command in lab.git_commands()) == fetches
+    refused = execute(temper, [str(kit / 'land')], env, check=False)
+    assert refused.returncode == 2 and 'LAND_SET_BASE requires --no-push' in refused.stdout
+    # The locked run, rather than the proof, incorporates that moved main.
+    lab.run(spec)
+    lab.verify(('jig', 'temper'))
+    assert lab.git(lab.origin['temper'], 'show', 'main:race.txt') == 'race'
+
+
 def prove_failure(lab):
     lab.change('skein')
     output = lab.run(prove=True, status=4, env=dict(FAIL_REPO='jig'))
@@ -1307,7 +1352,8 @@ def moved_gate_base(lab):
         assert 'jig: main moved; gating again' in output
         assert lab.trace.read_text().splitlines().count('jig') == 3  # two gates, one push
         gated = [r['repo'] for r in lab.records('gated')[first:]]
-        assert gated == (['jig', 'temper', 'jig', 'temper'] if after_rebase else ['jig', 'temper'])
+        # The first round finishes its sampled tuple before checking mains.
+        assert gated == ['jig', 'temper', 'jig', 'temper']
         lab.verify(('jig', 'temper'))
     lab.change('jig', 'bound.txt')
     (lab.tmp / 'moved').unlink()
@@ -1626,7 +1672,7 @@ CASES = (tidy_hooks, tidy_hooks_partial, staging_cargo, rerun, advanced_main, re
          moved_earlier_in_second_round, regate_failure_resume, catch_up,
          pushed_then_failed, push_without_result_marks_unknown_range, lagging_fetch,
          proved, kept_replaced_by_next_prove, prove_after_prove_keeps_the_tuple, prove_after_main_moved,
-         proved_then_moved, prove_failure, same_set,
+         proved_then_moved, prove_start_snapshot, prove_failure, same_set,
          outside_snapshot, moved_gate_base,
          interrupted_with_staging, interrupted_during_feed, interrupted_during_cleanup,
          feed_failure, cleanup_warning,
