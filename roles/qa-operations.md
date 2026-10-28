@@ -187,7 +187,11 @@ temper's binding, `docs/design/qa.md` 3, is the source; as of 10-27:
 - **The model:** gpt-6-luna, effort medium (the user, 10-28 00:4xZ),
   the shipped ChatGPT model; from 10-27 10:2xZ to then, gpt-6.1-sol at
   effort high with an output of 32,000. A rung that can't pass on luna
-  goes to the user with its walk's evidence.
+  goes to the user with its walk's evidence. Effort high where medium
+  proves the problem, design/ladder's call per rung (the user, 10-28).
+- **The Claude walks' model:** Claude Code on Sonnet (claude-sonnet-5-5)
+  at effort medium (the user, 10-28 01:1xZ: "please use sonnet at medium
+  from QA Claude+Forgejo").
 - **Capacity:** the people's request table and the loads are raised
   (`people.requests`, `root.loads.loads`). QA runs 1008 and 1202 left the
   login inside a box whose table of 32 answers was full.
@@ -528,3 +532,4 @@ Newest last, times UTC.
 - 10-28 00:0xZ: QA's evidence live on hetzner6; the old walks kept by
   hand, 25 old passes kept and 6 refused (design/qa-evidence).
 - 10-28 00:4xZ: the box under test back to gpt-6-luna at effort medium, after its cost on the held accounts (the user); 10-27 23:5xZ: restores and switches only open, the checks are tests, an unresolved reference panics (the user; direction.md).
+- 10-28 01:1xZ: Claude+Forgejo walks on Sonnet at medium; luna at high allowed where medium proves the problem (the user).
