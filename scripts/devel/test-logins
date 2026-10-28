@@ -298,6 +298,151 @@ def add_refuses_a_second_login_at_rest(lab):
     assert code == 1 and source.exists() and len(lab.log()) == 1
 
 
+def replaces_a_login_without_opening_the_old_one(lab):
+    path = lab.login()
+    old_inode = path.stat().st_ino
+    source = lab.source()
+    new_inode = source.stat().st_ino
+    trace = lab.root / 'renames.json'
+    lab.driver(f'''
+import json, os
+login = {str(path)!r}
+renames = []
+original = os.rename
+def audit(event, args):
+    if event == 'open' and args[0] == login:
+        raise AssertionError('opened the old login')
+sys.addaudithook(audit)
+def rename(source, target):
+    renames.append([str(source), str(target)])
+    return original(source, target)
+os.rename = rename
+status = module.main()
+with open({str(trace)!r}, 'w') as output:
+    json.dump(renames, output)
+sys.exit(status)
+''')
+    assert lab.run('replace', CHATGPT, str(source)) == (0, f'replaced: {CHATGPT} at {path}\n', '')
+    assert not source.exists() and path.stat().st_ino == new_inode != old_inode
+    assert json.loads(trace.read_text()) == [[str(source), str(path)]]
+    assert [row[1:] for row in lab.log()] == [['add', '', '0', ''], ['replace', '', '0', '']]
+    lab.argv = [str(SCRIPT)]
+    code, out, err = lab.run('list', CHATGPT)
+    assert code == 0 and 'at rest' in out and '0 takes' in out and not err
+    assert lab.run('take', CHATGPT, '--as', QA) == (0, f'{path}\n', '')
+
+
+def replace_refuses_a_held_login_even_at_rest(lab):
+    path = lab.login()
+    lab.run('take', CHATGPT, '--as', QA)
+    inode = path.stat().st_ino
+    source = lab.source()
+    code, out, err = lab.run('replace', CHATGPT, str(source))
+    assert code == 1 and not out and f'held by {QA}' in err
+    assert source.exists() and path.stat().st_ino == inode
+    assert lab.read('holder.json')['holder'] == QA
+    assert [row[1] for row in lab.log()] == ['add', 'take']
+
+
+def replace_refuses_a_by_name_waiter(lab):
+    waiter_with_age(lab, 0)
+    source = lab.source()
+    code, out, err = lab.run('replace', CHATGPT, str(source))
+    assert code == 1 and not out and f'claimed by waiter {RUNG}' in err
+    assert source.exists() and [row[1] for row in lab.log()] == ['add']
+    assert lab.read('waiting.json')[0]['holder'] == RUNG
+
+
+def replace_respects_only_the_pool_members_actually_reserved(lab):
+    waiter_with_age(lab, 0)
+    lab.login('chatgpt-2')
+    lab.login('chatgpt-3')
+    # The named waiter reserves chatgpt; the later pool waiter reserves chatgpt-2.
+    rows = lab.read('waiting.json')
+    rows.append(dict(rows[0], holder='z', pool=True))
+    lab.write('waiting.json', rows)
+    source = lab.source()
+    code, out, err = lab.run('replace', 'chatgpt-2', str(source))
+    assert code == 1 and not out and 'claimed by waiter z' in err
+    assert source.exists() and [row[1] for row in lab.log('chatgpt-2')] == ['add']
+    path = lab.directory('chatgpt-3') / 'login'
+    assert lab.run('replace', 'chatgpt-3', str(source)) == (0, f'replaced: chatgpt-3 at {path}\n', '')
+    assert lab.read('waiting.json') == rows
+
+
+def replace_ignores_a_stale_waiter(lab):
+    waiter_with_age(lab, 901)
+    assert lab.run('replace', CHATGPT, str(lab.source()))[0] == 0
+    assert lab.read('waiting.json') == []
+
+
+def replace_refuses_a_missing_login(lab):
+    source = lab.source()
+    code, out, err = lab.run('replace', CHATGPT, str(source))
+    assert code == 1 and not out and 'no login at rest' in err and source.exists()
+    path = lab.login()
+    path.rename(lab.root / 'away')
+    code, out, err = lab.run('replace', CHATGPT, str(source))
+    assert code == 1 and not out and 'no login at rest' in err and source.exists()
+    assert [row[1] for row in lab.log()] == ['add']
+
+
+def replace_refuses_bad_sources_and_the_resting_login_itself(lab):
+    path = lab.login()
+    inode = path.stat().st_ino
+    missing = lab.root / 'missing'
+    empty = lab.source()
+    empty.write_bytes(b'')
+    link = lab.root / 'link'
+    link.symlink_to(path)
+    fifo = lab.root / 'fifo'
+    os.mkfifo(fifo)
+    alias = lab.root / 'alias'
+    os.link(path, alias)
+    for source, reason in ((missing, 'missing'), (empty, 'empty'),
+                           (lab.source(0o644), 'not private'), (link, 'a link'),
+                           (fifo, 'not a regular file or directory'),
+                           (path, 'already the resting login'), (alias, 'already the resting login')):
+        code, out, err = lab.run('replace', CHATGPT, str(source))
+        assert code == 1 and not out and reason in err, (source, code, err)
+        assert path.stat().st_ino == inode and [row[1] for row in lab.log()] == ['add']
+
+
+def replace_refuses_cross_filesystem_moves(lab):
+    path = lab.login()
+    inode = path.stat().st_ino
+    source = lab.source()
+    lab.driver('''
+def rename(source, target):
+    raise OSError(module.errno.EXDEV, 'fixture cross-device rename')
+module.os.rename = rename
+sys.exit(module.main())
+''')
+    code, out, err = lab.run('replace', CHATGPT, str(source))
+    assert code == 1 and not out and 'same filesystem' in err
+    assert source.exists() and path.stat().st_ino == inode
+    assert [row[1] for row in lab.log()] == ['add']
+
+
+def replace_refuses_directories_without_opening_the_old_one(lab):
+    path = lab.directory_login()
+    inode = path.stat().st_ino
+    source = lab.source_directory()
+    trace = lab.observe_login(path)
+    code, out, err = lab.run('replace', CHATGPT, str(source))
+    assert code == 1 and not out and 'directory login' in err and 'atomic rename' in err
+    evidence = json.loads(trace.read_text())
+    assert not any(operation in ('open', 'scandir') and target == str(path)
+                   for operation, target in evidence['calls'])
+    assert source.is_dir() and path.stat().st_ino == inode
+    assert [row[1] for row in lab.log()] == ['add']
+    lab.argv = [str(SCRIPT)]
+    path.rename(lab.root / 'old-directory')
+    lab.login()
+    code, out, err = lab.run('replace', CHATGPT, str(source))
+    assert code == 1 and not out and 'directory login' in err and source.is_dir()
+
+
 def takes_a_login_at_rest(lab):
     path = lab.login()
     code, out, err = lab.run('take', CHATGPT, '--as', QA)
@@ -836,7 +981,12 @@ def drop_removes_a_waiters_row(lab):
     assert lab.run('drop', CHATGPT, '--any', '--as', 'c') == (0, 'not waiting: chatgpt\n', '')
 
 
-CASES = (a_note_with_a_control_character_is_refused, a_wait_that_runs_out_leaves_the_queue, drop_removes_a_waiters_row, a_now_take_preserves_stale_and_legacy_queue_files, a_now_take_never_joins_the_queue, a_now_take_takes_a_free_unclaimed_login, a_request_granted_by_old_code_leaves_the_queue, a_pool_take_grants_a_free_login_and_names_it, one_queue_in_arrival_order,
+CASES = (replaces_a_login_without_opening_the_old_one, replace_refuses_a_held_login_even_at_rest,
+         replace_refuses_a_by_name_waiter, replace_respects_only_the_pool_members_actually_reserved,
+         replace_ignores_a_stale_waiter, replace_refuses_a_missing_login,
+         replace_refuses_bad_sources_and_the_resting_login_itself,
+         replace_refuses_cross_filesystem_moves, replace_refuses_directories_without_opening_the_old_one,
+         a_note_with_a_control_character_is_refused, a_wait_that_runs_out_leaves_the_queue, drop_removes_a_waiters_row, a_now_take_preserves_stale_and_legacy_queue_files, a_now_take_never_joins_the_queue, a_now_take_takes_a_free_unclaimed_login, a_request_granted_by_old_code_leaves_the_queue, a_pool_take_grants_a_free_login_and_names_it, one_queue_in_arrival_order,
          a_waiter_for_a_stuck_login_holds_back_no_free_one, a_pool_waiter_keeps_one_free_login_not_all,
          a_stale_waiter_leaves_the_queue, two_takes_at_once_get_two_logins,
          old_per_login_queues_are_migrated, an_old_process_lock_still_excludes,

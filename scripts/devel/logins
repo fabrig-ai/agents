@@ -2,6 +2,7 @@
 """A login is a private file or a program's configuration directory.
 
 logins add NAME PATH
+logins replace NAME PATH
 logins take NAME --as HOLDER [--note TEXT] [--wait SECONDS | --now]
 logins take POOL --any --as HOLDER [--note TEXT] [--wait SECONDS | --now]
 logins drop NAME --as HOLDER
@@ -279,6 +280,17 @@ class Workspace:
             return True
         return False
 
+    def grants(self, rows):
+        free = {name for name, login in self.logins_by_name.items()
+                if login.read('holder.json', None) is None and login_check(login.path) is None}
+        reserved = set()
+        for row in rows:
+            choices = self.members(row['request']) if row['pool'] else [row['request']]
+            available = next((name for name in choices if name in free and name not in reserved), None)
+            yield row, available
+            if available is not None:
+                reserved.add(available)
+
     def take(self, request, pool, holder, note, now_only=False):
         if pool:
             need(pool_of(request) == request, f'not a pool: {request}')
@@ -300,12 +312,9 @@ class Workspace:
             if not now_only:
                 self.waiting.append(entry)
         entry['seen'] = stamp
-        free = {name for name, login in self.logins_by_name.items()
-                if login.read('holder.json', None) is None and login_check(login.path) is None}
         reserved = {}
-        for row in [*sorted(self.waiting, key=order), entry] if now_only else sorted(self.waiting, key=order):
-            choices = self.members(row['request']) if row['pool'] else [row['request']]
-            available = next((name for name in choices if name in free and name not in reserved), None)
+        rows = [*sorted(self.waiting, key=order), entry] if now_only else sorted(self.waiting, key=order)
+        for row, available in self.grants(rows):
             if row is entry:
                 if available is not None:
                     login = self.logins_by_name[available]
@@ -379,6 +388,33 @@ class Login:
         replace(self.directory / 'log.tsv', event)
         print(f'added: {self.name} at {self.path}')
 
+    def replace(self, source, workspace):
+        current = self.read('holder.json', None)
+        need(current is None, f'{self.name} is held by {current["holder"]}' if current else '', 1)
+        need(self.path.exists(), f'{self.name} has no login at rest', 1)
+        # POSIX rename cannot atomically overwrite a nonempty directory. Never open it.
+        need(not self.path.is_dir(),
+             f'{self.name}: directory login cannot be replaced with one atomic rename', 1)
+        reason = login_check(self.path)
+        need(reason is None, f'{self.name} has no login at rest: {reason}', 1)
+        for row, available in workspace.grants(sorted(workspace.waiting, key=order)):
+            need(available != self.name,
+                 f'{self.name} is claimed by waiter {row["holder"]}', 1)
+        reason = login_check(source)
+        need(reason is None, f'{source}: {reason}', 1)
+        need(not source.is_dir(),
+             f'{source}: directory login cannot be replaced with one atomic rename', 1)
+        need(not source.samefile(self.path), f'{source}: already the resting login', 1)
+        event = self.event_text(timestamp(), 'replace')
+        try:
+            os.rename(source, self.path)
+        except OSError as error:
+            if error.errno == errno.EXDEV:
+                raise Problem('move it on the same filesystem', 1) from None
+            raise
+        replace(self.directory / 'log.tsv', event)
+        print(f'replaced: {self.name} at {self.path}')
+
     def give(self, holder):
         current = self.read('holder.json', None)
         if current is not None:
@@ -413,7 +449,7 @@ class Login:
             fields = line.split('\t')
             need(len(fields) == 5, f'{path}: invalid event', 4)
             stamp, event, holder, seconds, note = fields
-            need(event in ('add', 'take', 'give') and seconds.isdecimal()
+            need(event in ('add', 'replace', 'take', 'give') and seconds.isdecimal()
                  and (not holder or re.fullmatch(HOLDER, holder)) and note_ok(note),
                  f'{path}: invalid event', 4)
             age = (now - utc(stamp)).total_seconds()
@@ -444,6 +480,9 @@ def main():
     add = sub.add_parser('add')
     add.add_argument('name')
     add.add_argument('path', type=Path, help="private file or program's configuration directory")
+    replacement = sub.add_parser('replace')
+    replacement.add_argument('name')
+    replacement.add_argument('path', type=Path, help='private replacement login')
     take = sub.add_parser('take')
     take.add_argument('name')
     take.add_argument('--any', action='store_true', dest='pool')
@@ -479,6 +518,10 @@ def main():
             need(reason is None, f'{args.path}: {reason}', 1)
             with workspace.locked(create=args.name):
                 workspace.login(args.name).add(args.path)
+        elif args.command == 'replace':
+            with workspace.locked():
+                need(args.name in workspace.logins_by_name, f'{args.name} has no login at rest', 1)
+                workspace.login(args.name).replace(args.path, workspace)
         elif args.command == 'drop':
             with workspace.locked():
                 dropped = workspace.drop(args.name, args.pool, args.holder)

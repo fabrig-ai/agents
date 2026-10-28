@@ -622,17 +622,21 @@ the director says so to the user.
 `scripts/devel/logins`, with its fixture, names no product. Its state
 is the machine's, in `tmp/logins/NAME/`, private: `login` at rest,
 `holder.json` while taken, `waiting.json`, the queue, and `log.tsv`,
-one line per `add`, `take` (with its wait) and `give` (with the time
+one line per `add`, `replace`, `take` (with its wait) and `give` (with the time
 held).
 
 | Command | What it does |
 |---|---|
 | `logins add NAME PATH` | moves PATH, a file or a program's configuration directory, in as NAME's login, at rest |
+| `logins replace NAME PATH` | swaps NAME's login at rest for PATH, a rename that unlinks the old one unread; refused while NAME is held or claimed by a waiter (the user, 10-28: logins re-signed to other accounts) |
 | `logins take NAME --as HOLDER [--note TEXT] [--wait SECONDS]` | grants NAME in turn and prints its resting path; exit 1 while another holds it or waits first |
 | `logins take POOL --any --as HOLDER [--note TEXT] [--wait SECONDS \| --now]` | grants any free login of the pool, first come first served, and prints its name and resting path; exit 1 while none is free to HOLDER (10.2); `--now` never joins the queue (10.6) |
 | `logins drop NAME --as HOLDER`, `logins drop POOL --any --as HOLDER` | removes HOLDER's place in the queue for that request (10.2) |
 | `logins give NAME --as HOLDER` | frees NAME once its login is back; exit 1, still held, if it isn't |
 | `logins list [NAME]` | each login's holder, waiters and last 24 hours |
+
+`replace` refuses directory logins: a nonempty configuration directory
+cannot be overwritten by the single atomic rename that replacement requires.
 
 ### 10.5 A deployment's unit
 
