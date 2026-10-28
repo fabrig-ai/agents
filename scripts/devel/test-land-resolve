@@ -576,7 +576,7 @@ def land_feed(directory):
     assert datetime.fromisoformat(row['time']).utcoffset().total_seconds() == 0, row
     assert re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}', row['host']), row
     assert re.fullmatch('[0-9a-f]{32}', row['token']), row
-    assert (row['kind'], row['event'], row['repo'], row['branch']) == ('land', 'landed', 'repo', 'branch'), row
+    assert (row['kind'], row['event'], row['repo'], row['branch']) == ('land', 'landed', 'origin', 'branch'), row
     after = lab.git('rev-parse', 'origin/main').stdout.strip()
     assert row['base'] == before and row['commit'] == after and before != after, row
     expected = ['first'] + values[:9]
@@ -596,6 +596,33 @@ def land_feed(directory):
     rows = [json.loads(line) for line in feed.read_text().splitlines()]
     assert len(rows) == 2 and rows[-1]['branch'] == 'follow-fails', rows
     assert rows[-1]['commit'] == lab.git('rev-parse', 'origin/main').stdout.strip(), rows
+
+
+def land_feed_origin(directory):
+    lab = feed_lab(directory, 'seed')
+    lab.env['LAND_TURN_ACTIVE'] = '1'  # No live set lock in this fixture.
+    origin = directory / 'temper.git'
+    (directory / 'origin.git').rename(origin)
+    clone = directory / 'clone-temper'
+    lab.git('clone', '--quiet', origin.as_uri(), str(clone))
+    lab.root = clone
+    lab.git('checkout', '-b', 'owner-branch')
+    feed = directory / 'feed.jsonl'
+    for name in ('clone-temper', 'owner-worktree'):
+        if name == 'owner-worktree':
+            linked = directory / name
+            lab.git('worktree', 'add', '-b', 'linked-branch', str(linked), 'origin/main')
+            lab.root = linked
+        lab.write({'branch.md': name + '\n'})
+        lab.git('commit', '-m', 'land from ' + name)
+        result = lab.run([str(lab.kit / 'land'), '--docs'], env=dict(LAND_FEED=str(feed)))
+        row = json.loads(feed.read_text().splitlines()[-1])
+        assert row['repo'] == 'temper', row
+        assert row['commit'] == lab.git('rev-parse', 'origin/main').stdout.strip(), row
+        outcome = json.loads(next(line.removeprefix('land: result ') for line in result.stdout.splitlines()
+                                  if line.startswith('land: result ')))
+        assert outcome['repo'] == row['repo'] and outcome['pushed'], outcome
+    assert len(feed.read_text().splitlines()) == 2
 
 
 def land_feed_starved(directory):
@@ -693,7 +720,8 @@ CASES = (rows_kept, row_added, added_in_one_place, same_row, deleted_and_changed
          outside_rows, code_file, all_or_nothing, not_stopped, land_rows, land_same_row,
          generated_kept, generated_and_rows, generated_no_change, generated_refused, heavy_refused, heavy_floor_refused,
          generated_touches_declaration, generated_then_stop, rows_then_stop, no_script,
-         cargo_lock, later, regenerate_refused, land_undone, land_feed, land_feed_starved, land_feed_none)
+         cargo_lock, later, regenerate_refused, land_undone, land_feed, land_feed_origin,
+         land_feed_starved, land_feed_none)
 
 
 def run(case, directory, built):

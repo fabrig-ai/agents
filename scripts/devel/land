@@ -118,9 +118,13 @@ for state in rebase-merge rebase-apply MERGE_HEAD; do
     [[ ! -e $(git rev-parse --git-path "$state") ]] || die 2 "a rebase or merge is in progress; finish it and rerun land"
 done
 common=$(git rev-parse --path-format=absolute --git-common-dir)
-# The repository: its checkout's directory, or a bare clone's name less
-# .git, as an owner's jig.git (configuring-3, 10-25).
-if [[ $(basename "$common") == .git ]]; then
+# The repository: origin's last path component, without .git. Without
+# origin, keep the checkout's directory or a bare clone's name.
+if origin=$(git remote get-url origin 2>/dev/null); then
+    repo=$(basename "$origin")
+    repo=${repo##*:}
+    repo=${repo%.git}
+elif [[ $(basename "$common") == .git ]]; then
     repo=$(basename "$(dirname "$common")")
 else
     repo=$(basename "$common" .git)
@@ -146,12 +150,9 @@ fi
 
 # Every write to a set repository's main holds the set lock, land-set's
 # (landing-flow.md, 9.2), so that no main moves under a set's run. The
-# connection spans retries, before the host turn. A repository is the
-# set's by its checkout's name or by origin's.
+# connection spans retries, before the host turn.
 in_set=0
-for name in "$repo" "$(basename "$(git remote get-url origin 2>/dev/null || true)" .git)"; do
-    case $name in skein | smith | hearth | jig | temper) in_set=1 ;; esac
-done
+case $repo in skein | smith | hearth | jig | temper) in_set=1 ;; esac
 if ((in_set && !local && !no_push)) && [[ ${LAND_TURN_ACTIVE:-0} != 1 &&
     -f $HOME/.config/agents-land-turn/enabled ]]; then
     export LAND_TURN=1 LAND_TURN_HOLDER="$kit/land-turn.py"

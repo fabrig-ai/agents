@@ -817,7 +817,8 @@ tool that sees it; the reports only read.
             "exit": 0, "steps": {"fmt": 4.213, "clippy": 25.3}, "cpu": {}, "failed_step": null},
    "pushed": true, "exit": 0}
   ```
-  - `repo` is the primary checkout's directory name (the parent of
+  - `repo` is origin's last path component without `.git`. Without
+    origin, it is the primary checkout's directory name (the parent of
     `git rev-parse --git-common-dir`), or a bare clone's name less
     `.git`; `machine` is the host name, `commit` the tip `land` gated
     or took from the cache.
@@ -940,6 +941,12 @@ that a routine landing needs no post. Built 10-26 (o/landing-taught).
   If publication is recovered without that result, `base` is null:
   the new range is unknown and stays pending, never judged by its tip
   alone as an old record without a range would be.
+
+A landing names its repository by its origin, the remote URL's last path
+component, never by the checkout's directory: an owner's clone or worktree
+lands under the repository's own name (10-28: two temper landings from a clone
+were fed as clone-temper, and their verdicts went unfound).
+
 - **`land`'s own record.** Before this, a plain `land` reached the feed
   only inside a set. Now a `land` that pushes, `--docs` included, appends
   one line once its push has succeeded, whether or not its local `main`
