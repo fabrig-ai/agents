@@ -65,6 +65,13 @@ here. Durable know-how belongs here, not in the session's memory or in
    survey's data, a drafted task) goes into the record beside the
    closing note before the README says `ended`: `tidy` deletes an ended
    mission's scratch at once (agents-gate-speed's surveys, 10-26).
+   A designer's brief, and an owner's under a designer, asks nothing
+   of the owners toward the director: they write to their designer
+   only (director.md 11); held files go in the designer's record; the
+   designer posts the director only what is its by role and can't
+   wait (a machine, a red on a shared repository, a walk or a login, a
+   landing hold or raise). On 10-28 a brief asking owners to name
+   their files to the director drew ten posts in fifteen minutes.
 2. **Commit it** with `record commit -m ... <path>` and read the output:
    "pushed", or the refusal to fix before anything starts.
 3. **Pull it on the machine** (`record pull` there), then start the
