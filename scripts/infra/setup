@@ -110,6 +110,45 @@ check_lingering() {
         warn "no lingering: heavy's reconciler, task wrappers and payloads stop when $USER logs out (loginctl enable-linger)"
 }
 
+# Heavy's installation marks a builder; post's local route also names a fleet
+# machine whose heavy installation may have been lost in provisioning.
+check_land_turn() {
+    local installed_status=$1 dir=$HOME/.config/agents-land-turn
+    local file=$dir/enabled expected=ssh sibling
+    if ((installed_status == 1)) && ! awk '
+        { sub(/#.*/, "") }
+        NF == 2 && $2 == "local" { found = 1 }
+        END { exit !found }' "$tmp/post/machines" 2>/dev/null; then
+        ok 'landing turn: not a fleet machine (heavy is not installed)'
+        return
+    fi
+    [[ $(hostname) != debian-16gb-hel1-3 ]] || expected=local
+    if [[ -L $dir || ( -e $dir && ! -d $dir ) ]]; then
+        fail "landing turn: $dir must be a directory of its own"
+    elif [[ -d $dir && -f $file && ! -L $file ]] &&
+        cmp -s "$file" <(printf '%s\n' "$expected") &&
+        [[ $(stat -c %a "$dir") == 700 && $(stat -c %a "$file") == 600 ]]; then
+        ok "landing turn: $file holds $expected (0600 in a 0700 directory)"
+    elif ((!fix)); then
+        fail "landing turn: $file must hold $expected (0600 in a 0700 directory; --fix repairs it)"
+    elif ! mkdir -p "$dir" || ! chmod 700 "$dir" || ! sibling=$(mktemp "$dir/enabled.XXXXXX"); then
+        fail "landing turn: cannot prepare $file"
+    elif ! printf '%s\n' "$expected" > "$sibling" || ! chmod 600 "$sibling" ||
+        ! mv -fT "$sibling" "$file"; then
+        rm -f "$sibling"
+        fail "landing turn: cannot write $file"
+    else
+        ok "landing turn: wrote $file with $expected (0600 in a 0700 directory)"
+    fi
+    # Do not update trust, even when --fix is repairing the opt-in file.
+    if ssh -T -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=5 \
+        -o UpdateHostKeys=no free@2.29.124.199 true </dev/null >/dev/null 2>&1; then
+        ok 'landing turn: strict ssh to free@2.29.124.199 works'
+    else
+        fail 'landing turn: strict ssh to free@2.29.124.199 failed (ssh -T -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=5 -o UpdateHostKeys=no free@2.29.124.199 true)'
+    fi
+}
+
 # Only the machine named by the director installs QA's service.
 check_qa_watch() {
     local address_file=$HOME/.config/agents-qa/director
@@ -265,6 +304,7 @@ check_machine() {
     # mechanism while repairing an existing queue.
     local heavy=$home/../devel/heavy installed_status=0
     "$heavy" --installed >/dev/null 2>&1 || installed_status=$?
+    check_land_turn "$installed_status"
     case $installed_status in
         0)
             check_lingering

@@ -639,12 +639,13 @@ remote command is shell-quoted from validated argv and starts
 configuration is changed. Trust/auth/connect/start failures surface on
 the caller as fixed fail-open reasons without raw remote output.
 
-Director-owned per-host configuration: hetzner, hetzner2 and hel8 use
-`LAND_TURN_MODE=ssh`; hetzner3 uses `LAND_TURN_MODE=local`, allowed only on
-hostname `debian-16gb-hel1-3`. Every host sets the explicit coordinator
-`LAND_TURN_HOLDER`. A wrong local hostname fails open. Hetzner4 uses
-strict SSH too and fails open until the director verifies its trust and
-auth; no setup is attempted by the client.
+Per-host configuration, kept by setup (the director, 10-28): every fleet
+machine has `~/.config/agents-land-turn/enabled`, `local` on hetzner3
+(hostname `debian-16gb-hel1-3`, the coordinator) and `ssh` on every other
+builder and hel8; `setup` checks it and its strict ssh to the coordinator,
+and `--fix` writes a missing file. On 10-28 four builders had lost it in
+their redeploys and provisioning, and their single landings moved `main`s
+under three sets' runs. A person's laptop without heavy takes no turn.
 Until every machine's kit carries the set lock, an older kit's temper
 landing takes the `temper` turn instead, which orders temper landings
 only among themselves, and its other landings take none.

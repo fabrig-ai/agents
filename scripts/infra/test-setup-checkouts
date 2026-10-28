@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise setup's checkout check with real Git and offline scratch remotes."""
+"""Exercise setup's checkouts and landing turn in an offline scratch workspace."""
 import os
 from pathlib import Path
 import shutil
@@ -15,6 +15,21 @@ warn() { echo "warn  $*"; }
 fail() { echo "FAIL  $*"; failed=1; }
 check_checkouts
 exit "$failed"'''
+
+
+def setup_driver(root, driver):
+    kit = root / 'kit/scripts'
+    (kit / 'infra').mkdir(parents=True)
+    (kit / 'devel').mkdir()
+    shutil.copyfile(KIT.parent / 'devel/kit.sh', kit / 'devel/kit.sh')
+    for name in ('after-landing-units', 'fleet-units'):
+        shutil.copyfile(KIT / name, kit / 'infra' / name)
+    source = (KIT / 'setup').read_text()
+    if source.count('check "$@"') != 1:
+        raise AssertionError('setup must have one entry point')
+    path = kit / 'infra/setup'
+    path.write_text(source.replace('check "$@"', driver))
+    return path
 
 
 class SetupCheckouts(unittest.TestCase):
@@ -41,16 +56,7 @@ class SetupCheckouts(unittest.TestCase):
         self.git(self.root, 'clone', self.origin.as_uri(), str(self.checkout))
         self.git(self.checkout, 'commit', '--allow-empty', '-m', 'initial')
         self.git(self.checkout, 'push', 'origin', 'main')
-        kit = self.root / 'kit/scripts'
-        (kit / 'infra').mkdir(parents=True)
-        (kit / 'devel').mkdir()
-        shutil.copyfile(KIT.parent / 'devel/kit.sh', kit / 'devel/kit.sh')
-        for name in ('after-landing-units', 'fleet-units'):
-            shutil.copyfile(KIT / name, kit / 'infra' / name)
-        source = (KIT / 'setup').read_text()
-        self.assertEqual(source.count('check "$@"'), 1)
-        self.driver = kit / 'infra/setup'
-        self.driver.write_text(source.replace('check "$@"', DRIVER))
+        self.driver = setup_driver(self.root, DRIVER)
 
     def git(self, directory, *args):
         result = subprocess.run(['git', '-C', str(directory), *args], env=self.env,
@@ -103,6 +109,168 @@ class SetupCheckouts(unittest.TestCase):
                           'FAIL  agents: origin refuses a push from here: '
                           f'git -C {self.checkout} push --dry-run origin '
                           'origin/main:refs/heads/setup-push-check'])
+
+
+class SetupLandTurn(unittest.TestCase):
+    def setUp(self):
+        scratch = tempfile.TemporaryDirectory(prefix='setup-land-turn-')
+        self.addCleanup(scratch.cleanup)
+        self.root = Path(scratch.name)
+        self.home = self.root / 'home'
+        self.home.mkdir()
+        self.directory = self.home / '.config/agents-land-turn'
+        self.enabled = self.directory / 'enabled'
+        self.machines = self.root / 'tmp/post/machines'
+        self.ssh_calls = self.root / 'ssh.calls'
+        self.driver = setup_driver(self.root, DRIVER.replace(
+            'check_checkouts', 'check_land_turn "${INSTALLED_STATUS:-0}"'))
+        bin_dir = self.root / 'bin'
+        bin_dir.mkdir()
+        for name, body in {
+                'hostname': 'printf "%s\\n" "$FIXTURE_HOSTNAME"',
+                'ssh': 'printf "%s\\n" "$@" > "$SSH_CALLS"\nexit "$SSH_STATUS"',
+        }.items():
+            script = bin_dir / name
+            script.write_text('#!/bin/sh\n' + body + '\n')
+            script.chmod(0o700)
+        # Nothing in the caller's HOME, shell startup or SSH configuration is used.
+        self.env = dict(HOME=str(self.home), PATH=f'{bin_dir}:{os.defpath}',
+                        DEV_ROOT=str(self.root), DEV_TMP=str(self.root / 'tmp'),
+                        FIXTURE_HOSTNAME='builder', SSH_CALLS=str(self.ssh_calls),
+                        SSH_STATUS='0')
+
+    def write_enabled(self, mode='ssh'):
+        self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.enabled.write_text(mode + '\n')
+        self.enabled.chmod(0o600)
+
+    def check(self, fix=False, success=True, **env):
+        self.ssh_calls.unlink(missing_ok=True)
+        result = subprocess.run(['bash', str(self.driver)],
+                                env=dict(self.env, FIX=str(int(fix)), **env),
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0 if success else 1,
+                         (result.stdout, result.stderr))
+        self.assertEqual(result.stderr, '')
+        return result.stdout.splitlines()
+
+    def assert_ssh(self):
+        self.assertEqual(self.ssh_calls.read_text().splitlines(),
+                         ['-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
+                          '-o', 'ConnectTimeout=5', '-o', 'UpdateHostKeys=no',
+                          'free@2.29.124.199', 'true'])
+
+    def assert_enabled(self, mode='ssh'):
+        self.assertEqual(self.enabled.read_text(), mode + '\n')
+        self.assertEqual(self.enabled.stat().st_mode & 0o7777, 0o600)
+        self.assertEqual(self.directory.stat().st_mode & 0o7777, 0o700)
+
+    def test_missing_then_fixed(self):
+        lines = self.check(success=False)
+        self.assertTrue(lines[0].startswith('FAIL  landing turn: ' + str(self.enabled)))
+        self.assertFalse(self.enabled.exists())
+        self.assert_ssh()
+        self.check(fix=True)
+        self.assert_enabled()
+        self.assert_ssh()
+        self.check()
+
+    def test_wrong_then_fixed(self):
+        for content in ('local\n', 'invalid\n', 'ssh\nextra\n', 'ssh\n\n', ''):
+            with self.subTest(content=content):
+                self.write_enabled()
+                self.enabled.write_text(content)
+                lines = self.check(success=False)
+                self.assertIn(str(self.enabled), lines[0])
+                self.assertIn('must hold ssh', lines[0])
+                self.assertEqual(self.enabled.read_text(), content)
+                self.check(fix=True)
+                self.assert_enabled()
+
+    def test_right_unchanged(self):
+        self.write_enabled()
+        before = self.enabled.stat()
+        for fix in (False, True):
+            lines = self.check(fix=fix)
+            self.assertTrue(lines[0].startswith('ok    landing turn: '))
+            self.assert_enabled()
+            self.assertEqual(self.enabled.stat().st_ino, before.st_ino)
+            self.assertEqual(self.enabled.stat().st_mtime_ns, before.st_mtime_ns)
+            self.assert_ssh()
+
+    def test_permissions_then_fixed(self):
+        self.write_enabled()
+        for path, mode in ((self.directory, 0o755), (self.enabled, 0o644)):
+            with self.subTest(path=path):
+                path.chmod(mode)
+                self.check(success=False)
+                self.check(fix=True)
+                self.assert_enabled()
+
+    def test_coordinator_needs_local(self):
+        host = dict(FIXTURE_HOSTNAME='debian-16gb-hel1-3')
+        self.write_enabled()
+        lines = self.check(success=False, **host)
+        self.assertIn('must hold local', lines[0])
+        self.check(fix=True, **host)
+        self.assert_enabled('local')
+        self.check(**host)
+        self.assert_ssh()
+
+    def test_laptop_skips_even_with_fix(self):
+        for fix in (False, True):
+            self.check(fix=fix, INSTALLED_STATUS='1')
+            self.assertFalse(self.enabled.exists())
+            self.assertFalse(self.ssh_calls.exists())
+
+    def test_local_post_route_requires_turn_without_heavy(self):
+        self.machines.parent.mkdir(parents=True)
+        self.machines.write_text('# fleet\nother free@other\nhel8 local # this host\n')
+        self.check(success=False, INSTALLED_STATUS='1')
+        self.check(fix=True, INSTALLED_STATUS='1')
+        self.assert_enabled()
+        self.assert_ssh()
+
+    def test_remote_post_routes_do_not_make_a_laptop_fleet(self):
+        self.machines.parent.mkdir(parents=True)
+        self.machines.write_text('# hel8 local\nhel8 free@hel8\n')
+        self.check(fix=True, INSTALLED_STATUS='1')
+        self.assertFalse(self.enabled.exists())
+        self.assertFalse(self.ssh_calls.exists())
+
+    def test_unknown_heavy_status_does_not_skip(self):
+        self.check(success=False, INSTALLED_STATUS='2')
+        self.assert_ssh()
+
+    def test_ssh_failure_also_under_fix(self):
+        for fix in (False, True):
+            self.write_enabled()
+            lines = self.check(fix=fix, success=False, SSH_STATUS='255')
+            self.assertTrue(lines[-1].startswith('FAIL  landing turn: strict ssh'))
+            self.assertIn('free@2.29.124.199', lines[-1])
+            self.assert_ssh()
+        self.enabled.unlink()
+        self.check(fix=True, success=False, SSH_STATUS='255')
+        self.assert_enabled()
+
+    def test_directory_conflict_still_checks_ssh(self):
+        self.directory.parent.mkdir(parents=True)
+        self.directory.write_text('keep\n')
+        self.check(fix=True, success=False)
+        self.assertEqual(self.directory.read_text(), 'keep\n')
+        self.assert_ssh()
+
+    def test_symlink_is_replaced_without_changing_target(self):
+        self.write_enabled()
+        target = self.home / 'target'
+        self.enabled.rename(target)
+        self.enabled.symlink_to(target)
+        before = target.stat()
+        self.check(success=False)
+        self.check(fix=True)
+        self.assertFalse(self.enabled.is_symlink())
+        self.assert_enabled()
+        self.assertEqual(target.stat(), before)
 
 
 if __name__ == '__main__':
