@@ -36,7 +36,7 @@ its draft reaches. The security rules are director.md 10's.
 - **Unattended,** as an owner is: it decides, writes each decision
   down, and reports at the end. It escalates to the director only what
   changes the draft's goal, or would be hard to reverse beyond its
-  repositories. Budgets are the user's.
+  repositories. Budgets and timeouts are the user's.
 - **It settles what crosses drafts with the other designers** (the
   user, 10-27; director.md 11): a technical point its draft needs of
   another (a limit, a stock value, a shared file's order, a transcript
@@ -67,7 +67,8 @@ what of the draft remains.
 - **The project as designed,** never a change, a task or a finding:
   contracts, not history. No task reports, spikes, benchmark figures,
   line numbers in code, or who was told what. A testing document states
-  the worlds, the stories and what they prove, not how a run goes.
+  the worlds, the stories and what they prove, each in the lowest tier
+  that shows it.
 - **Nothing of how we work,** in a project's design: no roles,
   owners, tasks, tools or landings. The process is an implementation
   detail of the project; only agents' own designs describe it.

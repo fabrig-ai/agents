@@ -130,9 +130,8 @@ out. The security rules are director.md 10's.
 ## 4. Landing
 
 - **When something new works end to end,** and someone who didn't
-  build it can try it: a QA agent walking it in temper's lab, or,
-  where a repository has no lab, its CLI or a story through the real
-  binary. The first slice lands as early as the design allows (the
+  build it can try it: a QA agent walking it through `temper ctl`,
+  or elsewhere its CLI: a walk, not a new test. The first slice lands as early as the design allows (the
   meeting point first), then each next one. Not before: `main` stays
   coherent, and work against pinned revisions is cheap. Not later:
   conflicts grow.
@@ -217,7 +216,7 @@ out. The security rules are director.md 10's.
   recommendation, and the turn ends. Only what changes the mission's
   goal or end, reaches into another mission's code, or would be hard to
   reverse: a stored format, an interface between repositories, a budget
-  (budgets are the user's). A tool the kit lacks is such a question.
+  (budgets and timeouts are the user's). A tool the kit lacks is such a question.
 - **The user's questions.** An owner with a designer asks its designer
   alone. An owner without one triages each question first: what
   director.md 8 keeps the user's (budgets, sign-ins and credentials,
