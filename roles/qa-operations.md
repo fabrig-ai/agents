@@ -422,8 +422,12 @@ login or a sign-in link.
   show COMMIT:walks/NAME/`), the refusal, or the wait.
   A walk from before `qa walk` is kept by hand on hetzner6, `qa keep
   --walk YYYYMMDD-NAME DIR`: exit 0 prints the commit, 2 a refusal, 1
-  run it again; the director's for rung-a-1..5, rung-b0-1 and
-  github-land-1..2.
+  run it again. The eight from before it (rung-a-1..5, rung-b0-1,
+  github-land-1..2) were kept by the director on 10-27 at 23:5xZ.
+- **Live since 10-28 00:0xZ** on hetzner6: the first check kept 25 of
+  the 31 old passes and refused 6, the director's to mend by name and
+  line or leave; the first pass after it, 20261028-0010-temper, names
+  its evidence (f56a0d5).
 
 ## 9. Open
 
@@ -518,3 +522,5 @@ Newest last, times UTC.
 - 10-28 00:0xZ: walks' evidence kept at their end (agents d9446fd); the
   three evidence pieces in, live once hetzner6's watch restarts
   (design/qa-evidence).
+- 10-28 00:0xZ: QA's evidence live on hetzner6; the old walks kept by
+  hand, 25 old passes kept and 6 refused (design/qa-evidence).
