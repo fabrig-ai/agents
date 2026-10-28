@@ -43,9 +43,10 @@ The director reads this file against what it sees at each check.
   its two logins and walk slots are its own, and the other walks get two
   slots of their own (section 6); where an owner has fixes for both, the
   ChatGPT+Forgejo walk's goes first.
-- **The box under test runs gpt-6.1-sol at effort high,** its budgets
-  raised as a person would, so that a budget never stops a walk (the
-  user, 10-27 10:2xZ) (section 5).
+- **The box under test runs gpt-6-luna at effort medium,** the shipped
+  model (the user, 10-28 00:4xZ: "let's switch back to luna then, and
+  we'll evaluate again if luna is not enough"), its budgets raised as a
+  person would, so that a budget never stops a walk (section 5).
 - **A held login is never read, printed or copied:** it moves in and out
   by the product's import and export, and is checked by `stat` and
   sha256 alone (section 6).
@@ -183,8 +184,10 @@ to fix-start), the fix (fix-start to fix-pushed), the landing
 
 temper's binding, `docs/design/qa.md` 3, is the source; as of 10-27:
 
-- **The model:** gpt-6.1-sol, effort high, output 32,000 (the user, 10-27
-  10:2xZ).
+- **The model:** gpt-6-luna, effort medium (the user, 10-28 00:4xZ),
+  the shipped ChatGPT model; from 10-27 10:2xZ to then, gpt-6.1-sol at
+  effort high with an output of 32,000. A rung that can't pass on luna
+  goes to the user with its walk's evidence.
 - **Capacity:** the people's request table and the loads are raised
   (`people.requests`, `root.loads.loads`). QA runs 1008 and 1202 left the
   login inside a box whose table of 32 answers was full.
@@ -524,3 +527,4 @@ Newest last, times UTC.
   (design/qa-evidence).
 - 10-28 00:0xZ: QA's evidence live on hetzner6; the old walks kept by
   hand, 25 old passes kept and 6 refused (design/qa-evidence).
+- 10-28 00:4xZ: the box under test back to gpt-6-luna at effort medium, after its cost on the held accounts (the user); 10-27 23:5xZ: restores and switches only open, the checks are tests, an unresolved reference panics (the user; direction.md).
