@@ -416,7 +416,10 @@ login or a sign-in link.
   pass's scratch is deleted at 7 days only once its copy is kept or
   refused and its record names it. Rolling back: stop the service and
   keep the scratch of every pass whose copy waits, then revert.
-- **Walks** (slice 3, building): kept by the service at a walk's end.
+- **Walks** (agents d9446fd): kept by the service at a walk's end,
+  never at a pause, in `walks/<first start date>-<name>/`, its earlier
+  attempts' reports with it; its `walk-end` post names the commit (`git
+  show COMMIT:walks/NAME/`), the refusal, or the wait.
   A walk from before `qa walk` is kept by hand on hetzner6, `qa keep
   --walk YYYYMMDD-NAME DIR`: exit 0 prints the commit, 2 a refusal, 1
   run it again; the director's for rung-a-1..5, rung-b0-1 and
@@ -512,3 +515,6 @@ Newest last, times UTC.
 - 10-27 23:2xZ: passes' evidence kept on qa's branch `evidence` (agents
   1d25b3b, qa 6d86471), live once hetzner6's watch restarts; old walks
   the director's to keep by hand (design/qa-evidence).
+- 10-28 00:0xZ: walks' evidence kept at their end (agents d9446fd); the
+  three evidence pieces in, live once hetzner6's watch restarts
+  (design/qa-evidence).

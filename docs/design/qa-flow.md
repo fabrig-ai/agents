@@ -1178,8 +1178,14 @@ days. agents alone names qa's paths: the public repositories never do.
   its end (10.7), as step 1 of its end, before its logins are given
   back, and its `walk-end` post names the commit or the refusal; a
   pause keeps nothing, and the walk's end after its last resume keeps
-  the whole of it. A walk's allowlist adds its earlier attempts'
-  reports, `report-<k>.md`. A walk from before `qa walk` (the ladder's
+  the whole of it. A run that asked to pause keeps 10.7's order (its
+  logins, its units, then its one decision); when that decision is a
+  stuck end, its copy is kept right after the decision, before its end
+  post. A walk's allowlist adds its earlier attempts' reports,
+  `report-<k>.md`, and its index names every attempt's run; NAME's date
+  is its first attempt's start. A refused or waiting copy is tried
+  again at each check while the walk's directory is there, a copy kept
+  later or a new refusal posting the starter once (agents d9446fd). A walk from before `qa walk` (the ladder's
   rung-a and github-land walks of 10-26 and 10-27) is kept by hand,
   with `qa keep --walk NAME DIRECTORY` on its machine once its run has
   ended.
