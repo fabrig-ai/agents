@@ -857,16 +857,18 @@ the kit only starts it and ends it, as the service ends a pass.
   2. it takes the lowest free walk slot of its kind, a worktree of the
      service's clone, `tmp/qa/repos/<repo>-walk-<kind>-<k>/` (k from 1 to
      the kind's slots), made and checked as a pass's slot is (section
-     4); with none free it refuses at once, having taken nothing;
+     4); with none free it refuses at once, having taken nothing. It
+     checks out the resolved REF detached and runs `cargo fetch --locked`
+     there, bounded to 300 seconds, before taking any login. A failed
+     fetch refuses at once, naming REF and the error and freeing the slot;
   3. it takes one login of each of its kind's pools, `logins take POOL
      --any --now --as walk/<kind>/<name> --note DIRECTORY`, saving each
      grant before the next; with the caps kept (10.6), a kind below its
      cap finds a free login at once; one not granted gives back those
      taken, frees the slot, nothing starts, and the refusal names the
      broken cap;
-  4. it checks the slot out, detached, at REF: a commit or a branch on
-     origin, `main` by default (a fix's branch, for its confirming
-     walk);
+  4. the slot is ready at REF: a commit or a branch on origin, `main`
+     by default (a fix's branch, for its confirming walk);
   5. it copies the rung's brief, `tmp/qa-focused/rung-<RUNG>-brief.md`,
      unchanged into the directory as `brief.md`, and writes beside it
      the session's task: read `brief.md`, then the walk's facts (its
@@ -926,13 +928,13 @@ the kit only starts it and ends it, as the service ends a pass.
   walks' lock and only once its pause's end is complete. It saves a new
   attempt in the walk's state (its run, start, slot, grants and end
   progress, so that nothing of the attempt before is given or ended
-  twice), takes a free walk slot of its kind and one free login of each
-  of its pools, one refused undoing all as at a start (steps 2 and 3
-  above): a pause frees its kind's slot and logins for other walks, so
-  a resume refuses at once while the kind has none free, and its owner
-  asks again, checks the slot out at REF
+  twice), takes a free walk slot of its kind, checks it out at REF
   (the fix's branch, before it lands, or `main` for the walk that
-  counts), removes `paused`, writes the session's task (the walk's
+  counts), and fetches its locked sources before taking one free login
+  of each of its pools, one refused undoing all as at a start (steps 2
+  and 3 above): a pause frees its kind's slot and logins for other walks,
+  so a resume refuses at once while the kind has none free, and its owner
+  asks again. It removes `paused`, writes the session's task (the walk's
   facts, each kept deployment's saved command and directories to start
   again with REF's binary through `qa deploy` on their own data, the
   binding's configuration checks before that start, each login to
@@ -1077,6 +1079,10 @@ days. agents alone names qa's paths: the public repositories never do.
 - **What has no shape** (a forge's new token, shown once in its answer
   or its page) the scan can't know: keeping such a capture out of
   `evidence/` is the pass's rule (roles/qa.md 4).
+- **A template, not a value:** a value that is only a template expression
+  (`${{ ... }}`) or an unexpanded shell variable (`$name`, `${name}`) holds
+  no secret and passes, as the rung briefs' workflow appendix needs (the
+  director, 10-28); a literal beside it still refuses.
 
 ### 11.3 Where
 

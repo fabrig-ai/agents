@@ -43,7 +43,7 @@ class Lab:
         self.post = root / 'post'
         for path in (self.home, self.tmp, self.records, self.origins):
             path.mkdir(exist_ok=True)
-        self.env = dict(PATH=os.environ['PATH'], HOME=str(self.home), DEV_ROOT=str(root),
+        self.env = dict(PATH=str(root) + os.pathsep + os.environ['PATH'], HOME=str(self.home), DEV_ROOT=str(root),
                         DEV_TMP=str(self.tmp), RECORDS=str(self.records), QA_FIXTURE=str(root),
                         QA_RECORD=str(KIT / 'record'), QA_POST=str(self.post),
                         QA_POST_LOG=str(self.post_log), QA_POST_STATUS='0',
@@ -62,7 +62,7 @@ class Lab:
             self.env[f'GIT_CONFIG_VALUE_{count + index}'] = value
         self.env['GIT_CONFIG_COUNT'] = str(count + 4)
         self.configure(cleared={}, pools={CHATGPT: [CHATGPT, 'chatgpt-2', 'chatgpt-3'], CLAUDE: [CLAUDE, 'claude-2', 'claude-3']})
-        for name in ('post', 'codex-run', 'landings', 'systemctl', 'systemd-run', 'logins'):
+        for name in ('post', 'codex-run', 'landings', 'systemctl', 'systemd-run', 'logins', 'cargo'):
             tool = root / name
             tool.write_text(f'#!{sys.executable} -S\n' + WATCH_TOOLS)
             tool.chmod(0o700)
@@ -678,7 +678,7 @@ root = Path(os.environ['QA_FIXTURE'])
 args = sys.argv[1:]
 name = Path(sys.argv[0]).name
 with (root / 'tools.jsonl').open('a') as log:
-    log.write(json.dumps(dict(tool=name, args=args)) + '\n')
+    log.write(json.dumps(dict(tool=name, args=args, **({'cwd': os.getcwd()} if name == 'cargo' else {}))) + '\n')
 config = json.loads((root / 'tools.json').read_text())
 runs = root / 'tmp/codex-run'
 units = root / 'units'
@@ -717,7 +717,13 @@ def end(run, report, code=0):
         out.write('\t'.join(row) + '\n')
     (state / 'ended').touch()
 
-if name == 'codex-run':
+if name == 'cargo':
+    assert args == ['fetch', '--locked'], args
+    if 'cargo_lock' in config:
+        assert Path('Cargo.lock').read_text() == config['cargo_lock']
+    if config.get('cargo_refusal'):
+        sys.exit(config['cargo_refusal'])
+elif name == 'codex-run':
     if args[1:2] == ['--resume']:
         previous = runs / args[2]
         if config.get('resume_refusal'):
@@ -2578,6 +2584,59 @@ def keep_check_refuses_each_rule(lab):
         for path in (lab.post_log, lab.root / 'tools.jsonl'):
             assert not path.exists() or planted not in path.read_text()
     assert not lab.sent() and not lab.calls('post')
+
+
+def keep_check_passes_only_whole_templates(lab):
+    expressions = ('$auth', '${auth}', '${{ github.token }}', '${{github.token}}',
+                   "${{ secrets['TOKEN'] }}")
+    plain = []
+    for expression in expressions:
+        plain += [f'git -c "http.extraHeader=Authorization: basic {expression}"',
+                  f'Authorization: Bearer {expression}',
+                  f'curl -H "Authorization: Bearer {expression}"',
+                  f'token={expression}', f'password: {expression}',
+                  f'Cookie: sid={expression}', f'Set-Cookie: sid={expression}; Path=/',
+                  f'curl -u qa:{expression}',
+                  f'https://forge.test/cb?code={expression}',
+                  json.dumps({'client_secret': expression})]
+    scratch = lab.scratch({'brief.md': '\n'.join(plain) + '\n'})
+    assert 'refused:' not in lab.run('keep', '--check', str(scratch)).stdout
+    (scratch / 'brief.md').unlink()
+    value = secrets.token_hex(12)
+    shapes = []
+    for expression in expressions:
+        for mixed in (value + expression, expression + '/' + value, expression + ' ' + value,
+                      value + ' ' + expression):
+            shapes += [(f'git -c "http.extraHeader=Authorization: basic {mixed}"\n', 1, 'header'),
+                       (f'curl -H "Authorization: Bearer {mixed}"\n', 1, 'header'),
+                       (f'Authorization: Bearer {mixed}\n', 1, 'header'),
+                       (f'Cookie: sid={mixed}\n', 1, 'header'),
+                       (f'password: {mixed}\n', 1, 'assigned'),
+                       (json.dumps({'token': mixed}) + '\n', 1, 'assigned')]
+        for mixed in (value + expression, expression + '/' + value):
+            shapes.append((f'https://forge.test/cb?code={mixed}\n', 1, 'link'))
+    # A second expression or an incomplete expression is no single template value.
+    shapes += [(f'token=${{{{ github.token }}}}{value}${{{{ github.token }}}}\n', 1, 'assigned'),
+               ('token=${{ github.token\n', 1, 'assigned')]
+    keep_shapes(lab, value, shapes)
+
+
+def keep_check_bounds_incomplete_templates(lab):
+    driver = f'''
+import runpy, time
+tool = runpy.run_path({str(SCRIPT)!r})
+tail = '${{{{' * 100000
+start = time.process_time()
+for text, expected in [('https://forge.test/' + tail, []),
+                       ('https://forge.test/cb?code=' + tail, [(1, 'link')]),
+                       ('Authorization: basic ' + tail, [(1, 'header')])]:
+    assert tool['scan'](text) == expected
+elapsed = time.process_time() - start
+assert elapsed < 2, f'incomplete template scan took {{elapsed:.3f}} CPU seconds'
+'''
+    result = subprocess.run([sys.executable, '-I', '-S', '-c', driver], env=lab.env,
+                            capture_output=True, text=True, timeout=HUNG_TOOL_S)
+    assert result.returncode == 0, result.stderr
 
 
 def keep_check_passes_plain_captures(lab):
@@ -5346,6 +5405,84 @@ def a_walk_resolves_origin_branches_and_commit_prefixes(lab):
     assert lab.git(lab.tmp / 'qa/repos/temper-walk-forgejo-2', 'rev-parse', 'HEAD') == main
 
 
+def walk_fetch_build(lab):
+    checkout = lab.products['temper']
+    lab.git(checkout, 'checkout', '-b', 'needs-fetch')
+    lock = '# fixture branch needs upstream sources absent from the cache\n'
+    (checkout / 'Cargo.lock').write_text(lock)
+    lab.git(checkout, 'add', 'Cargo.lock')
+    commit = lab.commit('branch with uncached sources', branch='needs-fetch')
+    lab.configure(cargo_lock=lock)
+    return commit
+
+
+def a_walk_fetches_its_build_before_taking_a_login(lab):
+    commit = walk_fetch_build(lab)
+    lab.walk('b0', '--build', 'origin/needs-fetch')
+    directory, state = lab.walk_state()
+    checkout = lab.tmp / 'qa/repos/temper-walk-forgejo-1'
+    calls = list(map(json.loads, (lab.root / 'tools.jsonl').read_text().splitlines()))
+    fetch, = [row for row in calls if row['tool'] == 'cargo']
+    take, = [row for row in calls if row['tool'] == 'logins' and row['args'][0] == 'take']
+    assert fetch['args'] == ['fetch', '--locked'] and fetch['cwd'] == str(checkout)
+    assert calls.index(fetch) < calls.index(take)
+    assert state['main'] == lab.git(checkout, 'rev-parse', 'HEAD') == commit
+    assert state['stage'] == 'running' and state['logins']
+
+
+def a_failed_walk_fetch_takes_no_login(lab):
+    walk_fetch_build(lab)
+    lab.configure(cargo_refusal='fixture locked sources unavailable')
+    result = lab.walk('b0', '--build', 'origin/needs-fetch', status=4)
+    assert 'cannot fetch build origin/needs-fetch: fixture locked sources unavailable' in result.stderr
+    assert lab.calls('cargo') == [['fetch', '--locked']]
+    assert not any(args[0] == 'take' for args in lab.calls('logins'))
+    assert not lab.calls('codex-run')
+    state = lab.walk_state()[1]
+    assert state['released'] and state['stage'] == 'ended' and not state['logins']
+
+
+def a_walk_fetch_is_bounded_before_taking_a_login(lab):
+    lab.configure(hang={'cargo:fetch': 'before'})
+    result = driven_walk(lab, '''original = tool['command']
+def command(argv, cwd=None, timeout=None, **kwargs):
+    if argv[0] == 'cargo':
+        assert argv == ['cargo', 'fetch', '--locked'] and timeout == 300
+        timeout = 0.3
+    return original(argv, cwd=cwd, timeout=timeout, **kwargs)
+tool['main'].__globals__['command'] = command
+''', '--build', 'main', status=4)
+    assert 'cannot fetch build main: command timed out' in result.stderr
+    assert not any(args[0] == 'take' for args in lab.calls('logins'))
+    assert not lab.calls('codex-run') and lab.walk_state()[1]['released']
+
+
+def a_resumed_walk_fetches_before_taking_a_login(lab):
+    directory, state = walk_with_logins(lab, CHATGPT)
+    state = pause_walk(lab, directory, state)
+    commit = walk_fetch_build(lab)
+    before = lab.calls('logins')
+    report = (directory / 'report.md').read_bytes()
+    lab.configure(cargo_refusal='fixture resumed sources unavailable')
+    args = ('walk', 'temper', 'b0', '--resume', state['walk'], '--build', 'needs-fetch')
+    result = lab.run(*args, status=4)
+    assert 'cannot fetch build needs-fetch: fixture resumed sources unavailable' in result.stderr
+    assert not any(row[0] == 'take' for row in lab.calls('logins')[len(before):])
+    failed = lab.walk_state()[1]
+    assert failed['stage'] == 'paused' and failed['released'] and not failed['logins']
+    assert (directory / 'report.md').read_bytes() == report
+    assert (directory / 'paused').read_text().strip() == state['pause_line']
+    lab.configure(cargo_refusal='')
+    lab.run(*args)
+    resumed = lab.walk_state()[1]
+    assert resumed['stage'] == 'running' and resumed['main'] == commit
+    calls = list(map(json.loads, (lab.root / 'tools.jsonl').read_text().splitlines()))
+    fetches = [index for index, row in enumerate(calls) if row['tool'] == 'cargo']
+    takes = [index for index, row in enumerate(calls) if row['tool'] == 'logins' and row['args'][0] == 'take']
+    assert len(fetches) == 3 and len(takes) == 2 and fetches[-1] < takes[-1]
+    assert calls[fetches[-1]]['cwd'] == str(lab.tmp / 'qa/repos/temper-walk-forgejo-1')
+
+
 def a_walk_preparation_refusal_returns_its_grants(lab):
     # Read the absent brief without Lab.walk creating one for this request.
     lab.run('walk', 'temper', 'missing', '--login', CHATGPT, status=1)
@@ -7103,7 +7240,11 @@ def an_ambiguous_build_is_refused(lab):
     assert first[1]['main'] == fix and second[1]['main'] == commit
 
 
-CASES = (a_walk_cleans_up_after_its_first_copy_save_fails,
+CASES = (a_walk_fetches_its_build_before_taking_a_login, a_failed_walk_fetch_takes_no_login,
+         a_walk_fetch_is_bounded_before_taking_a_login, a_resumed_walk_fetches_before_taking_a_login,
+         keep_check_passes_only_whole_templates,
+         keep_check_bounds_incomplete_templates,
+         a_walk_cleans_up_after_its_first_copy_save_fails,
          a_walk_cleans_up_after_its_waiting_copy_save_fails,
          a_walk_cleans_up_after_its_last_copy_save_fails,
          an_old_ended_walk_gets_its_evidence, an_old_refused_walk_posts_its_copy_once,

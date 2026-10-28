@@ -709,20 +709,24 @@ TREES = ('scripts', 'evidence')
 # record's SECRET (records.md 2)
 KEY = re.compile(r'-----BEGIN [^\n-]*PRIVATE KEY-----|(?<![\w-])(?:gh[pousr]_[A-Za-z0-9_-]{20,}|github_pat_[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9_-]{20,})|xox[abpr]-|AKIA[A-Z0-9]{16}')
 JWT = re.compile(r'(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+')
-HEADER = re.compile(r'''(?<![\w-])(["']?)(?:Proxy-)?Authorization(["']?)\s*:\s*(["']?)[A-Za-z][A-Za-z0-9_-]*[ \t]+''', re.I)
+HEADER = re.compile(r'''(?<![\w-])(["']?)(?:http\.extraHeader=)?(?:Proxy-)?Authorization(["']?)\s*:\s*(["']?)[A-Za-z][A-Za-z0-9_-]*[ \t]+''', re.I)
 COOKIE = re.compile(r'''(?<![\w-])(["']?)(Set-)?Cookie(["']?)\s*:\s*(["']?)''', re.I)
 COOKIE_PAIR = re.compile(r'''[ \t]*[^\s=;"']+[ \t]*=[ \t]*''')
 JAR_HEADING = re.compile(r'^# (?:Netscape HTTP|HTTP) Cookie File\s*$')
 JAR = re.compile(r'^(?:#HttpOnly_)?[^\t]+\t(?:TRUE|FALSE)\t[^\t]+\t(?:TRUE|FALSE)\t[0-9]+\t[^\t]+\t([^\t]*)$')
-URL = re.compile(r'''(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]*://[^\s"'<>]+''')
+TEMPLATE = r'\$\{\{(?:[^}\n]|\}(?!\}))*\}\}'
+# Consume an incomplete template's tail once, rather than retrying every nested opener.
+# PLACEHOLDER still requires a complete expression.
+TEMPLATE_CHUNK = TEMPLATE + r'|\$\{\{[^\n]*$'
+URL = re.compile(r'''(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]*://(?:''' + TEMPLATE_CHUNK + r'''|[^\s"'<>])+''')
 URL_USER = re.compile(r'^[^:/?#]+://[^/@:?#]*:([^/@?#]*)@[^/?#]+')
-PARAMETER = re.compile(r'[?&#;](?:code|token|secret|key|password|access_token|refresh_token|id_token|client_secret|signature)=([^&#;]*)', re.I)
+PARAMETER = re.compile(r'[?&#;](?:code|token|secret|key|password|access_token|refresh_token|id_token|client_secret|signature)=((?:' + TEMPLATE_CHUNK + r'|[^&#;])*)', re.I)
 ASSIGN_NAME = r'(?:password|passwd|secret|token|api_key|client_secret|access_token|refresh_token|private_key)'
 ASSIGNED = re.compile(r'''(?<![\w])(?:(?P<json>["']''' + ASSIGN_NAME + r'''["']\s*:\s*)(?=["'])|''' + ASSIGN_NAME + r'(?![\w])\s*=\s*)', re.I)
 JSON_KEY = re.compile(r'''(?<![\w])["']''' + ASSIGN_NAME + r'''["']\s*:\s*$''', re.I)
 COLON = re.compile(r'^\s*' + ASSIGN_NAME + r'\s*:\s*(.*)$', re.I)
 USER = re.compile(r'''(?<!\S)(?:--user(?:[ \t]+|=)|(?:"-u"|'-u')[ \t]+|-[sSkvLfiINqgjnRZ]*u(?:[ \t]+|=)?)''')
-PLACEHOLDER = re.compile(r'(?:null|true|false|[A-Z][A-Z0-9_]*|<[^\n]*>|\$[A-Za-z_][A-Za-z0-9_]*|\$\{[A-Za-z_][A-Za-z0-9_]*\}|@[^\s]+|…|\.\.\.|\*+)?')
+PLACEHOLDER = re.compile(r'(?:null|true|false|[A-Z][A-Z0-9_]*|<[^\n]*>|\$[A-Za-z_][A-Za-z0-9_]*|\$\{[A-Za-z_][A-Za-z0-9_]*\}|' + TEMPLATE + r'|@[^\s]+|…|\.\.\.|\*+)?')
 NAME_PART = re.compile(r'(?:^|[-_.])(?:cookies?|password|passwd|secret|token|credentials?|netrc)(?:$|[-_.])', re.I)
 NAME_END = re.compile(r'(?:^auth\.json$|^id_rsa$|^id_ed25519$|^login(?:\..*)?$|\.(?:headers?|pem|key|env)$)', re.I)
 
@@ -750,14 +754,19 @@ def refused_name(part):
     return bool(NAME_PART.search(part) or NAME_END.search(part))
 
 
-def value_at(text, start, stops='', wrapper='', string=False):
+def value_at(text, start, stops='', wrapper='', string=False, spaces=False):
     """One whole value, including adjacent chunks; an unmatched opener consumes its tail."""
     end = start
     while end < len(text):
         char = text[end]
-        if char.isspace() or char in stops or (wrapper and char == wrapper):
+        if (char.isspace() and not (wrapper or spaces)) or char in stops or (wrapper and char == wrapper):
             break
-        if char in ('"', "'"):
+        if text.startswith('${{', end):
+            finish = text.find('}}', end + 3)
+            if finish < 0:
+                return text[start:], len(text)
+            end = finish + 2
+        elif char in ('"', "'"):
             quote = char
             finish = end + 1
             while finish < len(text):
@@ -812,7 +821,7 @@ def scan(text):
             if match.start() < end:
                 continue
             wrapper = match[3] or (match[1] if not match[2] else '')
-            value, end = value_at(line, match.end(), wrapper=wrapper)
+            value, end = value_at(line, match.end(), wrapper=wrapper, spaces=True)
             if not placeholder(value):
                 header = True
                 break
@@ -833,7 +842,7 @@ def scan(text):
             wrapper = cookie[4] or (cookie[1] if not cookie[3] else '')
             offset = cookie.end()
             while pair := COOKIE_PAIR.match(shell, offset):
-                value, end = value_at(shell, pair.end(), stops=';', wrapper=wrapper)
+                value, end = value_at(shell, pair.end(), stops=';', wrapper=wrapper, spaces=True)
                 header |= not placeholder(value)
                 while end < len(shell) and shell[end] in ' \t':
                     end += 1
@@ -3137,6 +3146,13 @@ def walk(args, workspace):
             slot = f'{args.repo}-walk-{kind}-{state["slot"]}'
             with service.repositories.fetched(args.repo) as root:
                 checkout = service.repositories.checkout(root, args.repo, slot, state['main'])
+            try:
+                fetched = command(['cargo', 'fetch', '--locked'], cwd=checkout, timeout=300)
+            except OSError as error:
+                raise Problem(f'cannot fetch build {ref}: {error}', 4) from None
+            need(fetched.returncode == 0,
+                 f'cannot fetch build {ref}: ' + (fetched.stderr.strip() or fetched.stdout.strip()
+                                                or f'cargo fetch exited {fetched.returncode}'), 4)
             for pool in state['requests']:
                 service.walk_room([pool], kind)
                 taken = service.call('logins', 'take', pool, '--any', '--now', '--as', state['holder'],
