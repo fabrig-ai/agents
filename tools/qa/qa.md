@@ -416,9 +416,10 @@ Run `python3 -I -B tools/qa/test_qa.py`. Every unittest case runs in its own
 process, session and temporary HOME/DEV_ROOT with local git origins, fake
 services, fake local and remote claims, fake disk observations, slot clones
 under the temporary HOME and fixture launcher observations; descendants are
-killed and reaped. Fixture drivers poll fake stop observations every 20 ms
-while retaining real monotonic deadlines and all unit/export completion
-assertions; installed polling remains two seconds. Standard read-only fake
+killed and reaped. Fixture drivers cap sleeps during fake stop confirmation
+at 10 ms while retaining real monotonic deadlines and all unit/export completion
+assertions; installed polling remains two seconds. Exporter contention uses
+readiness FIFOs to establish ordering. Standard read-only fake
 inventory, claim-list, disk and manager observations execute the identical
 fake program in the fixture interpreter, with parity checks against external
 execution. Mutations, SSH, launchers, stop/export actors, modified executables,
