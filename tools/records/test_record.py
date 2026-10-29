@@ -2,6 +2,7 @@
 """Offline contract tests. Each case owns a temporary HOME and bare origin."""
 
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
@@ -9,6 +10,7 @@ import runpy
 import shlex
 import subprocess
 import tempfile
+import tomllib
 import unittest
 from unittest.mock import patch
 
@@ -372,6 +374,7 @@ class RecordTests(unittest.TestCase):
 
     def race(self, other, arguments, inputs):
         processes = []
+        outputs = []
         try:
             for clone, args, data in zip((self.clone, other), arguments, inputs):
                 process = subprocess.Popen([str(TOOL), *args], stdin=subprocess.PIPE,
@@ -384,6 +387,7 @@ class RecordTests(unittest.TestCase):
             for process in processes:
                 stdout, stderr = process.communicate(timeout=20)
                 self.assertEqual(process.returncode, 0, stdout.decode() + stderr.decode())
+                outputs.append(stdout)
         finally:
             for process in processes:
                 if process.poll() is None:
@@ -393,6 +397,7 @@ class RecordTests(unittest.TestCase):
         self.run_record('pull', repo=other)
         self.assert_clean()
         self.assert_clean(other)
+        return outputs
 
     def test_concurrent_appends_different_hosts(self):
         with self.racing_clones() as other:
@@ -410,6 +415,203 @@ class RecordTests(unittest.TestCase):
                 paths = list((self.clone / directory).glob(f'*.{suffix}'))
                 self.assertEqual({p.stem for p in paths}, {'0001', '0002'})
                 self.assertEqual(len({p.read_bytes() for p in paths}), 2)
+
+    def draft(self, name='example', **options):
+        args = ['draft', name, '--as', 'director', '--coordinator', 'multi',
+                '--mailbox', 's/multi', '--source', 'skein/docs/design/draft/example.md']
+        for key, value in options.items():
+            args.extend(['--' + key, str(value)])
+        return self.run_record(*args)
+
+    def fields(self, name):
+        data = (self.clone / name).read_bytes()
+        API['validate'](self.clone, name, data)
+        return tomllib.loads(data.decode())
+
+    def ask(self, text='What next?', deadline='+2'):
+        return self.run_record('ask', '--as', 'director', '--question', text,
+                               '--option', 'a', '--option', 'b',
+                               '--recommendation', 'a', '--deadline', deadline)
+
+    def decide_args(self, target='--director', name=None, **texts):
+        args = ['decide', '--as', 'director', target]
+        if name:
+            args.append(name)
+        for field in ('title', 'context', 'options', 'decision', 'why'):
+            args.extend(['--' + field, texts.get(field, 'choice')])
+        return args
+
+    def test_director_draft_states_and_defaults(self):
+        self.draft(priority=3)
+        fields = self.fields('drafts/example/draft.toml')
+        self.assertEqual((fields['state'], fields['priority']), ('queued', 3))
+        self.assertLess(abs((datetime.now(timezone.utc) - API['utc'](fields['updated'], 'updated')).total_seconds()), 10)
+        self.draft()
+        self.assertEqual(self.fields('drafts/example/draft.toml')['priority'], 3)
+        transitions = {'queued': {'queued', 'active'}, 'active': {'active', 'paused', 'done'},
+                       'paused': {'paused', 'active'}, 'done': {'done'}}
+        for initial, allowed in transitions.items():
+            for state in transitions:
+                with self.subTest(initial=initial, state=state):
+                    name = initial + '-' + state
+                    self.draft(name, state=initial)
+                    result = self.run_record('draft', name, '--as', 'director',
+                                             '--coordinator', 'multi', '--mailbox', 's/multi',
+                                             '--source', 'draft.md', '--state', state,
+                                             code=0 if state in allowed else 1)
+                    if state not in allowed:
+                        self.assertIn(b'allowed changes:', result.stderr)
+                    self.assertEqual(self.fields(f'drafts/{name}/draft.toml')['state'],
+                                     state if state in allowed else initial)
+        for option, value in (('--state', 'invalid'), ('--state', ''), ('--priority', '0'), ('--mailbox', 'ops')):
+            self.run_record('draft', 'bad', '--as', 'director', '--coordinator', 'multi',
+                            '--mailbox', 's/multi', '--source', 'draft.md', option, value, code=1)
+        self.run_record('check')
+        self.assert_clean()
+
+    def test_director_priorities_order_since_and_unknown(self):
+        self.run_record('priority', 'show', '--as', 'director')
+        for name in ('one', 'two', 'three'):
+            self.draft(name)
+        self.run_record('priority', 'set', '--as', 'director', 'one', 'two', 'three', '--reason', 'first')
+        old = self.fields('director/priorities.toml')
+        # Give since values a fixed past so moved timestamps can be distinguished.
+        for entry in old['draft']:
+            entry['since'] = STAMP
+        body = ''.join('[[draft]]\n' + API['toml_fields'](entry) for entry in old['draft']).encode()
+        self.run_record('write', '--as', 'director', 'director/priorities.toml', data=body)
+        self.run_record('priority', 'set', '--as', 'director', 'one', 'three', 'two', '--reason', 'move')
+        entries = self.fields('director/priorities.toml')['draft']
+        self.assertEqual([e['name'] for e in entries], ['one', 'three', 'two'])
+        self.assertEqual(entries[0]['since'], STAMP)
+        self.assertTrue(all(e['since'] != STAMP for e in entries[1:]))
+        self.assertTrue(all(e['reason'] == 'move' for e in entries))
+        shown = self.run_record('priority', 'show', '--as', 'director')
+        self.assertEqual(shown.stdout, (self.clone / 'director/priorities.toml').read_bytes())
+        head = self.git(self.clone, 'rev-parse', 'HEAD')
+        self.run_record('priority', 'set', '--as', 'director', 'missing', '--reason', 'bad', code=1)
+        self.run_record('priority', 'set', '--as', 'director', 'one', 'one', '--reason', 'bad', code=1)
+        self.assertEqual(head, self.git(self.clone, 'rev-parse', 'HEAD'))
+        self.assert_clean()
+
+    def test_director_ask_answer_applied_and_questions(self):
+        before = datetime.now(timezone.utc)
+        result = self.ask('What next? "quoted"\nline')
+        self.assertEqual(result.stdout.splitlines()[-1], b'0001')
+        fields = self.fields('director/questions/0001.toml')
+        self.assertEqual(fields['by'], 'director')
+        self.assertEqual(fields['options'], ['a', 'b'])
+        self.assertEqual(fields['question'], 'What next? "quoted"\nline')
+        due = API['utc'](fields['deadline'], 'deadline')
+        self.assertLess(abs((due - before - timedelta(hours=2)).total_seconds()), 5)
+        self.ask('Past question', '2020-01-01T00:00:00Z')
+        questions = self.run_record('questions', '--as', 'ops', '--open').stdout
+        self.assertIn(b'0001', questions)
+        self.assertIn(b'0002', questions)
+        self.assertIn(b'OVERDUE by director: Past question', questions)
+        self.run_record('answer', '1', '--as', 'director', '--applied', 'commit:a', code=1)
+        self.run_record('answer', '9999', '--as', 'director', '--answer', 'a', code=1)
+        self.run_record('answer', '../1', '--as', 'director', '--answer', 'a', code=1)
+        self.run_record('answer', '1', '--as', 'director', code=1)
+        self.run_record('answer', '1', '--as', 'director', '--answer', 'a')
+        answered = self.fields('director/questions/0001.toml')['answered']
+        self.run_record('answer', '0001', '--as', 'ops', '--applied', 'commit:abc')
+        fields = self.fields('director/questions/0001.toml')
+        self.assertEqual((fields['answer'], fields['applied'], fields['answered']), ('a', 'commit:abc', answered))
+        self.run_record('answer', '2', '--as', 'director', '--answer', 'b', '--applied', 'event:two')
+        self.assertEqual(self.fields('director/questions/0002.toml')['applied'], 'event:two')
+        self.assertEqual(self.run_record('questions', '--as', 'director', '--open').stdout, b'')
+        self.assertIn(b'0001', self.run_record('questions', '--as', 'director').stdout)
+        for value in ('+bad', '+0', '+999999999999999', 'tomorrow', '2020-01-01T01:00:00+01:00'):
+            self.run_record('ask', '--as', 'director', '--question', 'Q', '--option', 'a',
+                            '--recommendation', 'a', '--deadline', value, code=1)
+        self.run_record('check')
+        self.assert_clean()
+
+    def test_director_question_numbering_concurrently(self):
+        with self.racing_clones() as other:
+            arguments = [('ask', '--as', 'director', '--question', question, '--option', 'a',
+                          '--recommendation', 'a', '--deadline', '+1') for question in ('First?', 'Second?')]
+            outputs = self.race(other, arguments, [b'', b''])
+            self.assertEqual({output.splitlines()[-1] for output in outputs}, {b'0001', b'0002'})
+            fields = [self.fields(f'director/questions/{n:04d}.toml') for n in (1, 2)]
+            self.assertEqual({f['question'] for f in fields}, {'First?', 'Second?'})
+
+    def test_director_decisions_files_cap_and_file_arguments(self):
+        self.draft()
+        incoming = self.home / 'decision.txt'
+        incoming.write_text('from a file: ü\nsecond line')
+        self.run_record(*self.decide_args('--draft', 'example', context='@' + str(incoming)))
+        path = 'drafts/example/decisions/0001.md'
+        API['validate'](self.clone, path, (self.clone / path).read_bytes())
+        self.assertIn(incoming.read_bytes(), (self.clone / path).read_bytes())
+        # Fixed-width timestamp metadata makes the exact byte cap reproducible.
+        self.run_record(*self.decide_args())
+        base = (self.clone / 'director/decisions/0001.md').stat().st_size
+        text = 'x' * (4096 - base + len('choice'))
+        self.run_record(*self.decide_args(why=text))
+        exact = self.clone / 'director/decisions/0002.md'
+        self.assertEqual(exact.stat().st_size, 4096)
+        API['validate'](self.clone, 'director/decisions/0002.md', exact.read_bytes())
+        self.run_record(*self.decide_args(why=text + 'x'), code=1)
+        self.assertFalse((self.clone / 'director/decisions/0003.md').exists())
+        self.run_record(*self.decide_args('--draft', 'missing'), code=1)
+        for field in ('title', 'options', 'decision', 'why'):
+            incoming.write_text('File choice')
+            self.run_record(*self.decide_args(**{field: '@' + str(incoming)}))
+        self.run_record(*self.decide_args(title='bad\nheading'), code=1)
+        for content in (b'CR\r\n', b'\xff', b'sk-ant-secret'):
+            incoming.write_bytes(content)
+            self.run_record(*self.decide_args(context='@' + str(incoming)), code=1)
+        self.run_record('check')
+        self.assert_clean()
+
+    def test_director_status_json_events_and_fresh_pull(self):
+        for path in ('director/decisions/README.md', 'drafts/one/decisions/README.md'):
+            target = self.seed / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text('Decisions go here.\n')
+        self.seed_commit('document decision directories')
+        empty = json.loads(self.run_record('status', '--as', 'director', '--json').stdout)
+        self.assertEqual(empty, dict(drafts=[], questions=[], decisions=[], events_last_hour={}))
+        self.assertNotIn(b'Events', self.run_record('status', '--as', 'director').stdout)
+        self.draft('one', state='active', priority=1)
+        self.draft('two', priority=2)
+        self.run_record('priority', 'set', '--as', 'director', 'two', 'one', '--reason', 'order')
+        self.ask('Future question')
+        self.ask('Overdue question', '2020-01-01T00:00:00Z')
+        self.ask('Answered question')
+        self.run_record('answer', '3', '--as', 'director', '--answer', 'a')
+        # Several commits share a second: history order must still give the last five.
+        for number in range(7):
+            self.run_record(*self.decide_args('--director' if number % 2 else '--draft',
+                                             None if number % 2 else 'one', title=f'Choice {number}'))
+        without = json.loads(self.run_record('status', '--as', 'director', '--json').stdout)
+        self.assertEqual([r['name'] for r in without['drafts']], ['two', 'one'])
+        self.assertEqual([r['number'] for r in without['questions']], ['0002', '0001'])
+        self.assertEqual([r['title'] for r in without['decisions']], [f'Choice {n}' for n in range(6, 1, -1)])
+        self.assertTrue(all(r['age_seconds'] >= 0 for r in without['drafts'] + without['questions']))
+        now = datetime.now(timezone.utc)
+        stamps = [now, now - timedelta(minutes=30), now - timedelta(hours=2), now + timedelta(hours=2)]
+        events = b''.join(self.event(str(i), stamp=t.isoformat()) for i, t in enumerate(stamps))
+        self.run_record('append', '--as', 'ops', 'queue', 'hel8', data=events)
+        run_event = json.dumps(dict(id='run1', source='runs', host='hel8', kind='end', time=now.isoformat())).encode()
+        self.run_record('append', '--as', 'ops', 'runs', 'hel8', data=run_event)
+        # A second clone supplies data this reader has not fetched yet.
+        other = self.home / 'other-status'
+        self.run_record('draft', 'fresh', '--as', 'director', '--coordinator', 'multi',
+                        '--mailbox', 's/multi', '--source', 'draft.md', repo=other)
+        head = self.git(self.origin, 'rev-parse', 'main')
+        status = json.loads(self.run_record('status', '--as', 'director', '--json').stdout)
+        self.assertEqual(status['events_last_hour'], {'queue': 2, 'runs': 1})
+        self.assertIn('fresh', [r['name'] for r in status['drafts']])
+        output = self.run_record('status', '--as', 'director').stdout
+        self.assertLess(output.index(b'two queued'), output.index(b'one active'))
+        self.assertLess(output.index(b'Overdue question'), output.index(b'Future question'))
+        self.assertIn(b'queue=2, runs=1', output)
+        self.assertNotIn(b'Answered question', output)
+        self.assertEqual(head, self.git(self.clone, 'rev-parse', 'HEAD'))
+        self.assert_clean()
 
     def test_usage_and_operational_exit_codes(self):
         self.run_record('write', 'README.md', code=2)
