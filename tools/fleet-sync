@@ -197,7 +197,8 @@ class Runner:
         self.lock_fd = None
 
     def item(self, name, result, reason):
-        self.state["items"].append({"item": name, "result": result, "reason": reason})
+        self.state["items"].append({"item": name, "result": result,
+                                    "reason": " ".join(str(reason).split())[:600]})
 
     def cmd(self, *argv, timeout=60, binary=False):
         path = f"{self.home}/.local/bin:{self.home}/.cargo/bin:" + os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")
@@ -658,11 +659,14 @@ def status(args, declarations, name):
             if result.returncode not in (0, 1):
                 raise ValueError(result.stderr.strip() or f"ssh exited {result.returncode}")
             data = json.loads(result.stdout)
-            if data.get("host") != host or not isinstance(data.get("items"), list):
+            if not isinstance(data, dict) or data.get("host") != host or not isinstance(data.get("items"), list):
                 raise ValueError("invalid host response")
+            for item in data["items"]:
+                if not isinstance(item, dict) or not all(isinstance(item.get(key), str) for key in ("item", "result", "reason")):
+                    raise ValueError("invalid item in host response")
             return data
         except (OSError, ValueError, subprocess.SubprocessError) as error:
-            return {"host": host, "unreachable": str(error)}
+            return {"host": host, "unreachable": " ".join(str(error).split())[:600]}
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(declarations.hosts)) as pool:
         futures = {host: pool.submit(remote, host) for host in declarations.hosts if host != name}
