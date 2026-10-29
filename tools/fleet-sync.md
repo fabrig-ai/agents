@@ -12,14 +12,19 @@ literal KEY=VALUE with only $HOME expansion; host env overrides globals.
 Expanded values may contain no whitespace, quotes, backslashes or remaining $.
 environment.d is plain KEY=VALUE. POSIX env.sh adds each local/cargo bin directory
 only when absent; nested shells retain PATH. Other competing env assignments
-warn; PATH assignments never conflict. repositories.toml names fabrig's origin;
-agents discovers its invoking git origin, retained in release metadata.
+warn; PATH assignments never conflict. repositories.toml declares both origins.
+Agents uses release metadata first, then the invoking checkout's git origin.
+Plain archives fall back to the declared agents origin with source SHA `unknown`.
 units/roles.toml maps every unit to roles (`["*"]` means all roles).
 The recovery service and timer must both have exactly `["*"]`, always render
 for every host, and are never eligible for removal. This is enforced in code.
 policy.toml maps managed paths to write (default) or check. post/machines is
 check-only pending ops/coordinator agreement: differences warn, without backups
-or writes. Invalid declarations/unknown hosts exit 2 before changing anything.
+or writes. Routing compares name-to-target mappings, ignoring order, blank lines
+and comments; a bare target equals `$USER@target`. Equal mappings are ok;
+otherwise warnings list missing, extra or changed names. Conflicting duplicate
+names and malformed entries also warn. Invalid declarations/unknown hosts exit 2
+before changing anything.
 
 A hold file suppresses all writes, even bookkeeping. Otherwise an exclusive
 flock on ~/.local/state/fleet-sync/lock serializes runs; a busy timer exits
@@ -124,6 +129,8 @@ and a list of new files. Check-only files retain their original contents and
 report differences as warnings. Hold suppresses preview too. All preview writes
 stay inside DIR; preview accepts only --host alongside --preview.
 
+`--check` and `--preview` continue checking other items after an agents failure;
+normal deployment still stops on that failure.
 `--check` creates no files/locks/state and calls no systemctl. Its only write
 exception is fetching/comparing an EXISTING private fabrig mirror; an absent
 mirror stays absent and falls back to HEAD equality. Unit checks inspect files,

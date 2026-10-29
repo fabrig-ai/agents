@@ -109,7 +109,9 @@ class FleetTest(unittest.TestCase):
         shutil.copytree(ROOT / "fleet", self.source / "fleet")
         put(self.source / "tools/fleet-sync", (ROOT / "tools/fleet-sync").read_text(), True)
         put(self.source / "tools/installed", (ROOT / "tools/installed").read_text())
-        put(self.source / "fleet/repositories.toml", f"fabrig = {json.dumps(str(self.fabrig_origin))}\n")
+        put(self.source / "fleet/repositories.toml",
+            f"agents = {json.dumps(str(self.directory / 'agents-origin.git'))}\n"
+            f"fabrig = {json.dumps(str(self.fabrig_origin))}\n")
         put(self.source / "old/forbidden", "must not be deployed\n")
         self.origin = self.repository(self.source, "agents-origin.git")
         self.sha = self.git(self.source, "rev-parse", "HEAD").strip()
@@ -654,7 +656,9 @@ class FleetTest(unittest.TestCase):
         for flags in ((), ("--check",)):
             state = self.sync(*flags)
             item = next(i for i in state["items"] if i["item"] == "src/rust/tmp/post/machines")
-            self.assertEqual((item["result"], item["reason"]), ("warn", "differs; check-only"))
+            self.assertEqual(item["result"], "warn")
+            self.assertIn("names differ:", item["reason"])
+            self.assertIn("ops", item["reason"])
             self.assertEqual(path.read_text(), "ops routing\n")
             self.assertEqual(path.stat().st_mtime_ns, before)
             self.assertFalse(path.with_name("machines.pre-fleet-sync").exists())

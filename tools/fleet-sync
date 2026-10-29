@@ -387,9 +387,11 @@ class Declarations:
                 raise ValueError(f"invalid version declaration: {name}")
             if command[0] in ("claude", "codex") and command != [command[0], "--version"]:
                 raise ValueError("Claude and Codex may only run with --version")
+        self.agents_origin = parsed["repositories.toml"]["agents"]
         self.fabrig_origin = parsed["repositories.toml"]["fabrig"]
-        if not isinstance(self.fabrig_origin, str) or not self.fabrig_origin or self.fabrig_origin.startswith("-"):
-            raise ValueError("invalid fabrig origin")
+        for name, origin in (("agents", self.agents_origin), ("fabrig", self.fabrig_origin)):
+            if not isinstance(origin, str) or not origin or origin.startswith("-"):
+                raise ValueError(f"invalid {name} origin")
         self.unit_roles = parsed["units/roles.toml"]["units"]
         self.units = {Path(k).name: v for k, v in parsed.items() if k.startswith("units/") and k.endswith((".service", ".timer"))}
         if self.units.keys() != self.unit_roles.keys():
@@ -542,7 +544,18 @@ class Runner:
             if not SHA.fullmatch(metadata["sha"]):
                 raise ValueError("invalid release metadata")
             return metadata["origin"], metadata["sha"]
-        return self.git(ROOT, "remote", "get-url", "origin"), self.git(ROOT, "rev-parse", "HEAD")
+        try:
+            # An archive nested inside another checkout must not inherit its origin.
+            if Path(self.git(ROOT, "rev-parse", "--show-toplevel")).resolve() != ROOT.resolve():
+                return self.d.agents_origin, "unknown"
+            origin = self.git(ROOT, "remote", "get-url", "origin")
+        except (OSError, ValueError, subprocess.SubprocessError):
+            return self.d.agents_origin, "unknown"
+        try:
+            sha = self.git(ROOT, "rev-parse", "HEAD")
+        except (OSError, ValueError, subprocess.SubprocessError):
+            sha = "unknown"
+        return origin, sha
 
     def release(self):
         origin, _ = self.source()
@@ -942,6 +955,38 @@ class Runner:
                     if value != env[match[1]]:
                         self.item(f"conflict:{relative}:{number}", "warn", f"sets {match[1]} to a different value")
 
+    @staticmethod
+    def machine_map(data, user):
+        mapping = {}
+        for line in data.decode().splitlines():
+            fields = line.partition("#")[0].split()
+            if not fields:
+                continue
+            name = fields[0]
+            target = fields[1] if len(fields) == 2 else None
+            if target is not None and "@" not in target and user:
+                target = f"{user}@{target}"
+            # Ambiguous duplicate names and malformed entries cannot compare equal.
+            if name in mapping and mapping[name] != target:
+                target = None
+            mapping[name] = target
+        return mapping
+
+    def machines(self):
+        relative = "src/rust/tmp/post/machines"
+        desired = f"{self.name} local\n" + "".join(f"{name} {h['ssh']}\n" for name, h in self.d.hosts.items() if name != self.name)
+        if self.d.file_policy.get(relative, "write") != "check":
+            return self.write(relative, desired)
+        user = os.environ.get("USER", "")
+        actual = self.machine_map(self.safe.read(relative) or b"", user)
+        wanted = self.machine_map(desired.encode(), user)
+        different = sorted(name for name in actual.keys() | wanted.keys()
+                           if name not in actual or name not in wanted or actual[name] != wanted[name])
+        if different:
+            self.item(relative, "warn", f"names differ: {', '.join(different)}; check-only")
+        else:
+            self.item(relative, "ok", "routing mapping current")
+
     def render(self):
         host = self.d.hosts[self.name]
         env = self.environment()
@@ -962,8 +1007,7 @@ class Runner:
             cargo = cargo.replace("[build]\n", f"[build]\njobs = {host['cargo_jobs']}\n", 1)
         self.attempt(".cargo/config.toml", lambda: self.write(".cargo/config.toml", cargo))
         self.attempt("machine.env", lambda: self.write("src/rust/tmp/machine.env", "".join(f"{k}={v}\n" for k, v in host["machine_env"].items())))
-        machines = f"{self.name} local\n" + "".join(f"{name} {h['ssh']}\n" for name, h in self.d.hosts.items() if name != self.name)
-        self.attempt("post/machines", lambda: self.write("src/rust/tmp/post/machines", machines))
+        self.attempt("post/machines", self.machines)
         self.attempt(".profile", lambda: self.shell_block(".profile", False))
         self.attempt(".bashrc", lambda: self.shell_block(".bashrc", True))
         self.attempt(".codex/config.toml", self.codex)
@@ -1275,7 +1319,9 @@ class Runner:
             reason = self.backoff_reason()
             if reason:
                 self.item("backoff", "held", reason)
-        if any(i["result"] == "failed" for i in self.state["items"]):
+        inspecting = self.args.check or getattr(self.args, "preview", None) is not None
+        if any(i["result"] == "failed" and not (inspecting and i["item"] == "agents")
+               for i in self.state["items"]):
             return self.finish(False)
         try:
             hold = self.safe.read(".config/fleet-sync/hold")
@@ -1307,7 +1353,7 @@ class Runner:
                     return self.finish()
             if self.args.resume_fd is None:
                 self.attempt("agents", self.release)
-            if not any(i["result"] == "failed" for i in self.state["items"]):
+            if self.args.check or not any(i["result"] == "failed" for i in self.state["items"]):
                 self.attempt("fabrig", self.fabrig)
                 self.attempt("links", self.links)
                 self.render()

@@ -90,11 +90,11 @@ class FleetSync2Test(fixture.FleetTest):
     def test_check_and_status_show_wait_without_consuming_retry(self):
         self.fail_timer()
         fixture.put(self.home / ".config/fleet-sync/retry", "operator\n")
-        before = self.snapshot()
+        before = self.snapshot(exclude_mirror=True)
         state = self.sync("--check", expected=1)
         reason = next(i["reason"] for i in state["items"] if i["item"] == "backoff")
         self.assertRegex(reason, r"backoff until \d\d:\d\dZ \(1 failures\)")
-        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(self.snapshot(exclude_mirror=True), before)
         result = self.process("python3", "-I", "-B", self.source / "tools/fleet-sync", "status", "--host", "hel8", expected=1)
         self.assertIn(reason, result.stdout)
         self.assertTrue((self.home / ".config/fleet-sync/retry").exists())
