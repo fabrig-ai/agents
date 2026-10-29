@@ -12,6 +12,8 @@ class ManifestActivationTest(fixture.FleetTest):
         legacy.parent.mkdir(parents=True)
         legacy.symlink_to(self.directory / "legacy-record")
         (self.home / ".local/bin/logins").symlink_to(self.directory / "legacy-logins")
+        legacy_qa = self.home / ".local/bin/qa"
+        legacy_qa.symlink_to(self.home / "src/rust/agents/scripts/devel/qa")
         fixture.put(self.home / ".config/fleet-sync/defer-fabrig", "preserve legacy installer links\n")
         self.sync()
         self.assertEqual(os.readlink(legacy), str(self.directory / "legacy-record"))
@@ -19,7 +21,7 @@ class ManifestActivationTest(fixture.FleetTest):
         expected = {"fleet-sync": "fleet-sync", "lease": "lease", "session-start": "session/start",
                     "fabrig-record": "records/record", "record-collect": "records/record-collect",
                     "pipeline-watch": "records/watch", "status-page": "records/status-page",
-                    "logins": "qa/logins"}
+                    "logins": "qa/logins", "qa": "qa/qa"}
         for name, path in expected.items():
             self.assertEqual(os.readlink(self.home / ".local/bin" / name),
                              str(self.home / "src/fabrig/current/tools" / path))
