@@ -1132,7 +1132,26 @@ def give(args, workspace):
     need(re.fullmatch(LOGIN, args.name), 'invalid login name')
     need(re.fullmatch(r'walk/[a-z][a-z0-9]*/[a-z0-9][a-z0-9-]*', args.holder),
          'holder must be walk/KIND/WHAT')
-    result = Watch(workspace, '').call('logins', 'give', args.name, '--as', args.holder)
+    service = Watch(workspace, '')
+    # Share admission's lock through the give: a concurrent start cannot claim
+    # a hand holder or name between the custody check and the release.
+    try:
+        with service.walks_locked():
+            walks = service.local_walks()
+            for state in [*(state for _, state in walks), *service.legacy_walks]:
+                holders = {state['holder']}
+                if state.get('kind'):
+                    holders.add('walk/' + state['kind'] + '/' + state['walk'])
+                claimed = set()
+                for attempt in [state, *state.get('attempts', [])]:
+                    if attempt.get('holder'):
+                        holders.add(attempt['holder'])
+                    claimed.update(attempt.get('logins', {}))
+                need(args.holder not in holders and args.name not in claimed,
+                     'saved walk custody is released only by service cleanup')
+            result = service.call('logins', 'give', args.name, '--as', args.holder)
+    except (Problem, OSError, ValueError, RecursionError, KeyError, TypeError, AttributeError) as error:
+        raise Problem(f'{error}; keeping custody') from None
     sys.stdout.write(result.stdout)
     sys.stderr.write(result.stderr)
     return result.returncode

@@ -2965,7 +2965,9 @@ def an_edited_deployments_trace_never_controls_custody(lab):
 
 def a_walk_with_no_login_stops_its_units(lab):
     directory, state = deployment_pass(lab)
-    lab.run('give', CHATGPT, '--as', state['holder'])
+    result = subprocess.run([str(lab.root / 'logins'), 'give', CHATGPT, '--as', state['holder']],
+                            env=lab.env, capture_output=True, text=True, timeout=HUNG_TOOL_S)
+    assert result.returncode == 0, result.stderr
     state.update(logins={}, kinds={}, pools={}, given=[])
     write_walk(lab, state)
     unit, pid = deployment(lab, directory)
@@ -2973,6 +2975,52 @@ def a_walk_with_no_login_stops_its_units(lab):
     lab.watch()
     dead(pid)
     assert lab.walk_state()[1]['stage'] == 'ended'
+
+
+def hand_give_cannot_release_a_saved_walk_holder_or_claim(lab):
+    directory, state = walk_with_logins(lab, CHATGPT)
+    before = lab.calls('logins')
+    for name, holder in ((CHATGPT, state['holder']),
+                         ('claude', state['holder']),
+                         (CHATGPT, 'walk/forgejo/manual')):
+        result = lab.run('give', name, '--as', holder, status=2,
+                         extra={'QA_WALK_KINDS': 'invalid'})
+        assert 'service cleanup' in result.stderr
+        assert lab.calls('logins') == before
+    lab.end_run(state)
+    lab.watch()
+    assert lab.walk_state()[1]['given'] == [CHATGPT]
+    # Historical grants also remain reserved for cleanup.
+    lab.run('give', CHATGPT, '--as', 'walk/forgejo/manual', status=2)
+    assert lab.calls('logins').count(['give', CHATGPT, '--as', state['holder']]) == 1
+
+
+def hand_give_protects_foreign_walks_and_saved_attempts(lab):
+    parent = lab.tmp / 'qa/walks'
+    parent.mkdir(parents=True)
+    state = dict(walk='rung-a-12', repo='temper', rung='a', kind='retired',
+                 holder='walk/retired/rung-a-12', logins={},
+                 attempts=[dict(logins={'chatgpt': str(lab.root / 'unused-rest')},
+                                holder='walk/earlier/rung-a-12')])
+    write_walk(lab, state)
+    original = (parent / 'rung-a-12.json').read_bytes()
+    for holder in (state['holder'], 'walk/earlier/rung-a-12', 'walk/forgejo/manual'):
+        result = lab.run('give', CHATGPT, '--as', holder, status=2)
+        assert 'service cleanup' in result.stderr
+        assert not lab.calls('logins')
+    lab.run('give', CLAUDE, '--as', state['holder'], status=2)
+    assert not lab.calls('logins')
+    assert (parent / 'rung-a-12.json').read_bytes() == original
+    # An unrelated hand holder still uses logins give's output and status.
+    assert lab.run('give', CLAUDE, '--as', 'walk/retired/manual').stdout == 'already free: claude\n'
+
+
+def hand_give_refuses_unreadable_saved_custody(lab):
+    parent = lab.tmp / 'qa/walks'
+    parent.mkdir(parents=True)
+    (parent / 'rung-a-1.json').write_text('{broken')
+    result = lab.run('give', CHATGPT, '--as', 'walk/forgejo/manual', status=2)
+    assert 'keeping custody' in result.stderr and not lab.calls('logins')
 
 
 def conflicting_walk_claims_give_for_neither(lab):
@@ -3061,6 +3109,9 @@ def pass_states_are_left_untouched(lab):
     assert lab.walk_state()[1]['stage'] == 'ended'
 
 CASES = (
+    hand_give_cannot_release_a_saved_walk_holder_or_claim,
+    hand_give_protects_foreign_walks_and_saved_attempts,
+    hand_give_refuses_unreadable_saved_custody,
     the_first_kind_is_never_blocked,
     pass_states_are_left_untouched,
     workspace_defaults_and_fixture_overrides_are_gated,

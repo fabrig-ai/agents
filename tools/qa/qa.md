@@ -67,8 +67,12 @@ broken cap and undoes the attempt's requests and saved grants.
 `qa take` selects the kind's first pool unless `--login` selects another of
 its pools. WHAT is a lowercase slug and cannot belong to a saved walk.
 It prints the granted name and resting path, without reading its contents.
-`qa give` validates the name and holder and passes through `logins give`'s
-output and status, even if current kind settings are invalid or retired.
+`qa give` validates the name and holder under the admission lock. It refuses
+with exit 2, without calling logins, if any saved walk owns the holder or
+claims the login name, including foreign repositories and saved attempts.
+Unreadable custody also refuses. These holdings are released only by service
+cleanup. An unclaimed hand holder passes through `logins give`'s output and
+status, even if current kind settings are invalid or retired.
 Manual holders remain held across watcher checks.
 
 ## State, start and resume
