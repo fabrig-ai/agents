@@ -31,57 +31,84 @@ The page reloads after five minutes and carries `noindex`.
 
 ## Records and event payloads
 
-The records writer currently validates the common envelope, not individual
-collector payloads. These are the reader's supported payloads; collectors must
-agree on them before populated events can be accepted in production. Until then,
-missing `events/` directories or empty source directories render **no events
-yet**. A missing records repository, malformed JSON/TOML, unreadable source or
-failed probe renders **unknown**, with a fixed error classification. Sources
-fail independently. Raw exceptions, command output and paths are never rendered.
+The collector in [record-collect](record-collect) is the source of truth, with
+its usage and limits in [record-collect.md](record-collect.md). The page consumes
+that output directly. No alternative snapshot or invented ready/landing event
+format is supported. Missing `events/` directories or empty source directories
+render **no events yet**. A missing repository, malformed JSON/TOML, unreadable
+source or failed probe renders **unknown** with a fixed error classification.
+Sources fail independently. Raw exceptions, command output and paths never
+render.
 
-All event files are `events/<source>/<host>/*.jsonl`; an event has `id`, `source`,
-`host`, `kind` and UTC `time`. Identical `(host, id)` events are counted once,
-then ordered by time. Unknown envelope fields are ignored. These fields are
-read only for joins or converted to numbers/enums; identities never render.
+Events live at `events/<source>/<host>/*.jsonl` and have `id`, `source`, `host`,
+`kind` and UTC `time`. Identical `(host, id)` events count once and are ordered
+by time. Joins and other private fields are never displayed as text.
 
 - **Drafts:** `drafts/*/draft.toml` supplies `source`, `state` and `priority`.
-  Ordered `[[draft]]` entries with `name` in `director/priorities.toml` come
-  first; unlisted drafts follow by their numeric priority, then name. The draft
-  directory's name is public. Its description is the first ATX or setext heading
-  of `FABRIG_REPO/<source>`, never the body. Absolute paths outside that root,
-  traversals and escaping symlinks are refused. An unreadable heading leaves
-  only that description unknown. Queue landings joined by `draft` supply the
-  last-landing age. No matching landing says no events yet.
-- **Queue:** `kind=ready` records a branch/task's ready time. `land`, `landed` or
-  `landing` is one landing; `draft` joins it to a draft. Six consecutive one-hour
-  intervals cover exactly the preceding six hours, with UTC labels and counts.
-  `ready_to_landing_s`, `ready_at` or `ready` gives elapsed time where present;
-  otherwise a prior ready event joined by `branch` or `task` does. The median
-  and sample count show the available timings only.
-  `batch-start`, `batch-end` or `batch` uses `batch` as the private identity
-  (otherwise `id`), `outcome`, and `duration_s` or `started`; paired starts/ends
-  also yield duration. The latest 20 batches show outcome/duration, never names
-  or branches. A landed batch counts as one landing if it has no explicit
-  branch landing in that batch, preventing double counting. `reject`/`rejected`
-  or `outcome=rejected` groups rejections by a fixed step enum; other steps say
-  `other`. Outcomes outside the fixed enum say unknown. Free text logs and
-  rejection messages are discarded. Unknown kinds contribute no metric.
-- **Runs and sessions:** `kind=snapshot` replaces that host's state with a `runs`
-  or `sessions` list. Alternatively `start`/`started`/`running`/`run-start`/
-  `session-start` and `end`/`ended`/`completed`/`failed`/`stopped`/`run-end`/
-  `session-stop` update private `run` or `session` join keys. Live states are
-  running, active, busy, idle and waiting. Sessions use `role=lead|coordinator`,
-  or infer the role from private `name`/`session` prefixes. Only counts render.
-  These are last collected states, so freshness depends on the collectors.
-- **Claims:** events show only their count (or no events yet); current held and
-  total slots always come from live `claim list`, never reconstructed from an
-  incomplete event history. Its host/slot/reservation/holder text is discarded.
-- **Questions:** `director/questions/*.toml`, without `answer` or `answered`,
-  contribute one question and their `asked` timestamp. Only count and oldest
-  age render. Bodies, options, asking identity, recommendations and answers
-  never leave the reader.
-- **Links:** `v0.1.0.html` is linked only when a regular file (or symlink to one)
-  exists beside `--out`. Its contents are never read. No link without `--out`.
+  Ordered `[[draft]]` entries with `name` in `director/priorities.toml` come first;
+  unlisted drafts follow by numeric priority and name. Directory names are
+  public. Descriptions use the first ATX or setext heading in
+  `FABRIG_REPO/<source>`, never the body. Escaping paths/symlinks are refused.
+  An unreadable heading leaves only that description unknown. A queue attempt's
+  `draft`, if present, joins its landing to a draft. The current collector
+  does not supply this join: landings without it leave draft ages unknown,
+  rather than inferring a draft from a branch, coordinator or run.
+- **Queue:** `kind=batch` gives `start`, `end`, `outcome`, `dry`, `branches` and
+  top-level `steps` (which can contain nested `suites`). Duration is end minus
+  start. The latest 20 batches display their fixed outcome (green, red, conflict,
+  failed, cancelled, skipped; other values unknown) and duration.
+  `kind=attempt` joins its batch by `(host, batch_start)`. A green attempt
+  in a non-dry batch is one branch landing. Batch rows themselves never add
+  landings. Six consecutive one-hour intervals cover exactly the preceding
+  six hours. Red/conflict attempts count rejections by `rejected_step`;
+  unknown/private step names render as `other`. No branch, suite name or log
+  is rendered. Missing batch records cannot establish dry status and contribute
+  no landing. Ready-to-landing time is **unknown: ready timestamps not
+  collected**. Neither batch start nor branch history is substituted for ready.
+- **Runs:** `run-start` and `run-end` update private `(host, run)` identities.
+  A start without a later end counts as running, with no guessed expiry.
+- **Sessions:** `session-start`, `session-name` and `context` supply the latest
+  name/role for a private `(host, session)` identity; `session-end` removes it.
+  Context events also establish current membership for sessions whose start
+  predates `--since`. Recognized roles match the collector: `lead/...`,
+  `coordinator/...`, `s/...`, coordinator, coord-next and coordinator-next.
+  Only lead/coordinator counts render. These are last collected lifecycle facts,
+  not independent process probes; missed stops remain a collector limitation.
+- **Claims:** claim/release events show only their count; held/total slots
+  always come from live `claim list`. Its host/slot/holder text is discarded.
+- **Questions:** unanswered `director/questions/*.toml` contribute one question
+  and their `asked` time. Only count and oldest age render. Bodies, options,
+  asking identities, recommendations and answers never leave the reader.
+- **Links:** a sibling regular file (or symlink to one) `v0.1.0.html` is linked
+  beside `--out` if present. Its contents are never read. No link without --out.
+- **Post/leases:** the page does not read their private metadata at all.
+
+### Costs
+
+Costs show **Last 24 hours** and **Last hour**, using event completion times.
+A completed event contributes its full measurements to each applicable window;
+running work is not estimated or prorated. Future and older events are excluded.
+Tables contain only global totals and per-draft aggregates. The event's own
+`draft` is the sole attribution source; missing or unsafe draft ids become
+`unattributed`. Joins via run, branch, coordinator or session never infer a draft.
+
+- **Codex runs:** `run-end.minutes`, `tokens_in`, `tokens_cached`, `tokens_out`,
+  grouped by fixed `effort` (minimal/low/medium/high/xhigh/max/ultra, else other).
+  Both all-effort totals and effort subtotals appear globally and per draft.
+  A missing measurement makes that aggregate cell unknown, not zero.
+- **Heavy:** `command.run_s` and `wait_s` become minutes. `lane=build` and
+  `lane=test` have separate run/wait columns; other lanes have other/run-wait
+  columns. Labels and commands are never used to guess classification. The
+  collector currently supplies no draft join, so current costs are unattributed.
+- **Queue gates:** sum only top-level `batch.steps[].duration` in seconds,
+  converted to minutes. Nested suites are already included in their parent
+  gate and are not counted again. Batch wall time is displayed separately and
+  is not substituted for gate time. Missing/invalid durations give unknown.
+  Attempts never add gate minutes. Dry-run gate work, if recorded, still costs
+  time. The collector currently supplies no draft join, so these are unattributed.
+
+Empty source directories say no events yet; a source with no completions in the
+window says so. Failed cost sources show unknown while the others still render.
 
 Draft names and source headings are explicitly public fields. Their producers
 must keep people's names and private prose out of them. As additional protection,
@@ -100,8 +127,8 @@ names cannot reach the HTML.
   no collector reads the legacy feed location.
 - Mission READMEs, their history and blocked/ended mission tables: missions moved
   into frozen `old/`; current work comes from drafts, priorities and questions.
-- Legacy heavy-command and Codex-run cost tables: their per-mission joins no
-  longer exist; the new page shows queue timing and records work counts.
+- Legacy heavy TSV and Codex-run file readers: costs now come from collected
+  heavy/run/queue events, with no legacy per-mission joins.
 - Forgejo waiting-on-user issue counts: private director question records are
   now the authoritative source of user waits; no Forgejo token is read.
 - Legacy `install`/unit writer and `--json`: outside this port's interface.
@@ -109,16 +136,19 @@ names cannot reach the HTML.
 
 ## Verification and deployment boundary
 
-Fixtures cover each source, priority ordering, public descriptions, question
-age, queue buckets/batch duration/wait, live slots, snapshots and transitions,
-subscription sampling and rate, fake Claude/Codex probes, poisoned private fields,
-malformed sources, empty events, and atomic replacement/failure cleanup.
+Fixtures cover each source, public descriptions/order, question age, queue
+buckets/batches/rejections/dry runs, live slots, real session transitions,
+cost windows/attribution/missing measurements, subscription sampling and rate,
+fake Claude/Codex probes, poisoned fields, partial failures, empty events and
+atomic replacement. The contract test reuses test_record_collect.py's producer
+fixture builders and actually executes record-collect and record against a local
+bare origin before rendering, including session renames/stops and green attempts.
 
-For acceptance, clone the real records into a fresh temporary directory and
-render with `RECORDS_REPO=<clone> --no-pull --out <temporary index.html>` using the
-real machines/probes. Compare its h1/h2 headings to `/var/www/status/index.html`
-read only, record the byte size, and inspect matches of
-`grep -E 'lead/|s/[a-z]|coord-next|@|sessionId'`.
-
-This change never writes `/var/www/status/`, changes the timer, or deploys the
-page. Fleet deployment and collector payload agreement remain follow-up work.
+For acceptance, create a temporary bare clone of real records, then a scratch
+clone of that local origin. Run `record-collect runs sessions claims post --since
+2026-10-29T11:00Z` with RECORDS_REPO/RECORDS_ORIGIN pointing only to the scratch
+repositories. Isolate the collector's HOME/cursors, exposing real producer trees
+read only and using the real Claude/session-context probes with their real HOME.
+Render the scratch records with --no-pull and real machine/subscription probes.
+Record the headings, work counts, cost tables and privacy grep, excluding CSS.
+Never write `/var/www/status/`. Fleet deployment remains separate.
