@@ -8,6 +8,7 @@ import datetime as dt
 import difflib
 import errno
 import fcntl
+import hashlib
 import io
 import json
 import os
@@ -39,6 +40,7 @@ SERVICE_START = 'ExecStart=/bin/bash -lc \'exec "$$HOME/src/fabrig/current/tools
 RENDERED_FILES = frozenset((
     ".config/fabrig/env.sh", ".config/environment.d/90-fabrig.conf",
     ".claude/settings.json", ".cargo/config.toml", "src/rust/tmp/machine.env",
+    ".config/kache/config.toml", ".config/systemd/user/kache.service.d/20-shared-store.conf",
     "src/rust/tmp/post/machines", ".profile", ".bashrc", ".codex/config.toml",
 ))
 RECOVERY_UNITS = frozenset(("fleet-sync.service", "fleet-sync.timer"))
@@ -314,6 +316,70 @@ def env_value(value, home):
     return value
 
 
+def relative_asset(value):
+    if (not isinstance(value, str) or not value or Path(value).is_absolute()
+            or any(p in (".", "..") for p in value.split("/")) or "\\" in value):
+        raise ValueError(f"invalid provision path: {value}")
+    return value
+
+
+def validate_install(name, install):
+    kind = install.get("kind")
+    if kind not in ("rustup", "tar", "binary", "opt-tar", "codex-package", "claude-script", "kache-source"):
+        raise ValueError(f"invalid installer for {name}")
+    required = {
+        "rustup": ("toolchain", "profile", "components", "targets", "extra_toolchains"),
+        "tar": ("member", "destination"), "binary": ("destination",),
+        "opt-tar": ("release", "entrypoint"), "codex-package": ("release", "entrypoint"),
+        "claude-script": (), "kache-source": ("repository", "rev", "patches", "destination"),
+    }
+    if any(key not in install for key in required[kind]):
+        raise ValueError(f"incomplete installer for {name}")
+    downloads = [("musl_url", "musl_sha256")] if kind == "kache-source" else []
+    if kind not in ("rustup", "kache-source"):
+        downloads.append(("url", "sha256"))
+    if kind == "claude-script":
+        downloads.append(("payload_url", "payload_sha256"))
+    for url, digest in downloads:
+        for key in (url, digest):
+            value = install[key]
+            if not isinstance(value, str):
+                raise ValueError(f"invalid {key} for {name}")
+        if not install[url].startswith(("https://", "TODO-USER:")):
+            raise ValueError(f"HTTPS download required for {name}")
+        if not (re.fullmatch(r"[0-9a-f]{64}", install[digest]) or install[digest].startswith("TODO-USER:")):
+            raise ValueError(f"SHA256 required for {name}")
+    if kind == "kache-source":
+        if not SHA.fullmatch(install["rev"]) or not install["repository"].startswith("https://"):
+            raise ValueError("kache requires a pinned source commit over HTTPS")
+        if install["patches"] != ["git-checkout-rev.patch", "upload-bound.patch"]:
+            raise ValueError("kache requires the fleet patches in order")
+    if kind == "rustup":
+        if name != "rustc" or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", install["toolchain"]):
+            raise ValueError("invalid Rust toolchain")
+        if install["profile"] not in ("minimal", "default", "complete"):
+            raise ValueError("invalid Rust profile")
+        for field in ("components", "targets", "extra_toolchains"):
+            if not isinstance(install[field], list) or not all(re.fullmatch(r"[A-Za-z0-9_.-]+", v) for v in install[field]):
+                raise ValueError(f"invalid Rust {field}")
+    for key in ("member", "entrypoint", "destination", "release"):
+        if key in install:
+            relative_asset(install[key])
+    if "destination" in install and not install["destination"].startswith((".local/bin/", ".local/opt/", ".cargo/bin/")):
+        raise ValueError("provision destination outside tool directories")
+    if "release" in install and not install["release"].startswith((".local/opt/", ".codex/packages/standalone/releases/")):
+        raise ValueError("provision release outside tool directories")
+
+
+FLEET_ASSETS = frozenset((
+    "bootstrap/README.md", "bootstrap/inventory.md", "bootstrap/packages.txt",
+    "bootstrap/root.sh", "bootstrap/user.sh", "bootstrap/bootstrap.py",
+    "kache/README.md", "kache/build", "kache/git-checkout-rev.patch",
+    "kache/upload-bound.patch", "kache/config.toml", "kache/remote.toml",
+    "kache/20-shared-store.conf",
+))
+
+
 class Declarations:
     def __init__(self, root, home):
         self.root = root
@@ -327,6 +393,8 @@ class Declarations:
             if not path.is_file():
                 continue
             name = path.relative_to(fleet).as_posix()
+            if name in FLEET_ASSETS:
+                continue
             content = path.read_text()
             if name.endswith(".toml"):
                 parsed[name] = tomllib.loads(content)
@@ -389,6 +457,9 @@ class Declarations:
                 raise ValueError(f"invalid version declaration: {name}")
             if command[0] in ("claude", "codex") and command != [command[0], "--version"]:
                 raise ValueError("Claude and Codex may only run with --version")
+            install = pin.get("install")
+            if install is not None:
+                validate_install(name, install)
         self.agents_origin = parsed["repositories.toml"]["agents"]
         self.fabrig_origin = parsed["repositories.toml"]["fabrig"]
         for name, origin in (("agents", self.agents_origin), ("fabrig", self.fabrig_origin)):
@@ -1077,6 +1148,7 @@ class Runner:
         self.attempt(".cargo/config.toml", lambda: self.write(".cargo/config.toml", cargo))
         self.attempt("machine.env", lambda: self.write("src/rust/tmp/machine.env", "".join(f"{k}={v}\n" for k, v in host["machine_env"].items())))
         self.attempt("post/machines", self.machines)
+        self.attempt("kache:config", self.kache_config)
         self.attempt(".profile", lambda: self.shell_block(".profile", False))
         self.attempt(".bashrc", lambda: self.shell_block(".bashrc", True))
         self.attempt(".codex/config.toml", self.codex)
@@ -1241,12 +1313,258 @@ class Runner:
         if self.safe.json(relative, None) != intent:
             self.safe.save(relative, json.dumps(intent) + "\n")
 
+    def version_matches(self, pin, command=None):
+        output = self.cmd(*(command or pin["command"]), timeout=10)
+        found = re.findall(r"(?<![A-Za-z0-9])v?(\d+(?:\.\d+){2,3}(?:[-+][A-Za-z0-9.-]+)?)", output)
+        return any(pin["version"] in (value, value.partition("+")[0]) for value in found)
+
+    def download(self, url, digest, destination):
+        # No download is ever executed/extracted before its declared SHA256 passes.
+        self.cmd("curl", "--fail", "--silent", "--show-error", "--location",
+                 "--proto", "=https", "--proto-redir", "=https", "--connect-timeout", "10",
+                 "--max-time", "300", "--output", destination, "--", url, timeout=310)
+        with destination.open("rb") as stream:
+            actual = hashlib.file_digest(stream, "sha256").hexdigest()
+        if actual != digest:
+            raise ValueError("download SHA256 mismatch")
+
+    def extracted(self, archive, directory):
+        # Data filter bounds links; disallow links altogether for installation
+        # so entrypoint checks and subsequent copies cannot escape staging.
+        with tarfile.open(archive) as tar:
+            members = tar.getmembers()
+            if any(not (m.isfile() or m.isdir()) or Path(m.name).is_absolute()
+                   or ".." in Path(m.name).parts for m in members):
+                raise ValueError("unsafe provision archive member")
+            tar.extractall(directory, members=members, filter="data")
+
+    def install_file(self, relative, source):
+        self.safe.save(relative, source.read_bytes(), 0o755)
+
+    def install_tree(self, relative, source):
+        # Only versioned tool directories may be replaced. Quarantine the previous
+        # directory until the sibling promotion succeeds; never edit its binaries.
+        with self.safe.parent(relative, create=True) as (directory, leaf):
+            try:
+                info = os.stat(leaf, dir_fd=directory, follow_symlinks=False)
+            except FileNotFoundError:
+                info = None
+            if info is not None and not stat.S_ISDIR(info.st_mode):
+                raise ValueError("refusing non-directory provision release")
+            sibling = f".{leaf}.{secrets.token_hex(12)}"
+            # Copy into a sibling on the destination filesystem, before any rename.
+            parent = Path(f"/proc/self/fd/{directory}")
+            shutil.copytree(source, parent / sibling)
+            previous = sibling + ".previous"
+            try:
+                if info is not None:
+                    os.rename(leaf, previous, src_dir_fd=directory, dst_dir_fd=directory)
+                try:
+                    os.rename(sibling, leaf, src_dir_fd=directory, dst_dir_fd=directory)
+                except BaseException:
+                    if info is not None:
+                        os.rename(previous, leaf, src_dir_fd=directory, dst_dir_fd=directory)
+                    raise
+                os.fsync(directory)
+            finally:
+                for name in (sibling, previous):
+                    if (parent / name).exists():
+                        shutil.rmtree(parent / name)
+
+    def rust_current(self, install):
+        toolchain = install["toolchain"]
+        active = self.cmd("rustup", "show", "active-toolchain")
+        if not active.startswith(toolchain + "-"):
+            return False
+        tools = self.cmd("rustup", "toolchain", "list").splitlines()
+        if any(not any(row.startswith(extra + "-") for row in tools) for extra in install["extra_toolchains"]):
+            return False
+        components = self.cmd("rustup", "component", "list", "--installed", "--toolchain", toolchain).splitlines()
+        targets = self.cmd("rustup", "target", "list", "--installed", "--toolchain", toolchain).splitlines()
+        return (all(any(row == c or row.startswith(c + "-") for row in components) for c in install["components"])
+                and set(install["targets"]) <= set(targets))
+
+    def install_rust(self, install):
+        toolchain = install["toolchain"]
+        options = ["--profile", install["profile"]]
+        for component in install["components"]:
+            options += ["--component", component]
+        for target in install["targets"]:
+            options += ["--target", target]
+        # Rustup verifies Rust's per-component SHA256s. Disable self-update: the
+        # prerequisite manager comes from Debian's authenticated apt repository.
+        self.cmd("rustup", "toolchain", "install", toolchain, *options, "--no-self-update", timeout=1800)
+        self.cmd("rustup", "default", toolchain)
+        for extra in install["extra_toolchains"]:
+            self.cmd("rustup", "toolchain", "install", extra, "--profile", install["profile"],
+                     "--no-self-update", timeout=1800)
+
+    def install_pin(self, name, pin, work):
+        install = pin["install"]
+        kind = install["kind"]
+        if kind == "rustup":
+            self.install_rust(install)
+            return
+        archive = work / "download"
+        if kind == "kache-source":
+            source = work / "source"
+            self.cmd("git", "init", "--", source)
+            self.git(source, "fetch", "--depth", "1", install["repository"], install["rev"])
+            self.git(source, "checkout", "--detach", "FETCH_HEAD")
+            if self.git(source, "rev-parse", "HEAD") != install["rev"]:
+                raise ValueError("kache source revision mismatch")
+            for patch in install["patches"]:
+                path = self.d.root / "fleet/kache" / patch
+                self.git(source, "apply", "--check", path)
+                self.git(source, "apply", path)
+            self.download(install["musl_url"], install["musl_sha256"], archive)
+            self.extracted(archive, work)
+            self.cmd("bash", self.d.root / "fleet/kache/build", work, timeout=1800)
+            artifact = work / "out/kache"
+            if not self.version_matches(pin, [str(artifact), "--version"]):
+                raise ValueError("built kache version differs")
+            self.install_file(install["destination"], artifact)
+            return
+        self.download(install["url"], install["sha256"], archive)
+        if kind == "claude-script":
+            payload = work / "payload"
+            self.download(install["payload_url"], install["payload_sha256"], payload)
+            # Run the approved vendor installer in an isolated HOME; only its
+            # checked versioned output is copied into the user's real HOME.
+            stage_home = work / "home"
+            stage_home.mkdir()
+            self.cmd("bash", archive, pin["version"], timeout=600,
+                     extra_env={"HOME": str(stage_home), "XDG_CONFIG_HOME": str(stage_home / ".config"),
+                                "XDG_DATA_HOME": str(stage_home / ".local/share"),
+                                "XDG_CACHE_HOME": str(stage_home / ".cache"),
+                                "CLAUDE_CONFIG_DIR": str(stage_home / ".claude"), "BASH_ENV": "/dev/null"})
+            relative = f".local/share/claude/versions/{pin['version']}"
+            artifact = stage_home / relative
+            if artifact.is_symlink() or hashlib.sha256(artifact.read_bytes()).hexdigest() != install["payload_sha256"]:
+                raise ValueError("Claude installer output SHA256 differs")
+            self.install_file(relative, artifact)
+            self.safe.link(".local/bin/claude", self.home / relative)
+            return
+        if kind in ("tar", "opt-tar", "codex-package"):
+            unpack = work / "unpack"
+            unpack.mkdir()
+            self.extracted(archive, unpack)
+            if kind == "tar":
+                artifact = unpack / install["member"]
+            else:
+                artifact = unpack / install["entrypoint"]
+        else:
+            artifact = archive
+        if not artifact.is_file() or artifact.is_symlink():
+            raise ValueError("provision entrypoint is not a regular file")
+        artifact.chmod(0o755)
+        if not self.version_matches(pin, [str(artifact), *pin["command"][1:]]):
+            raise ValueError("downloaded tool version differs")
+        if kind in ("opt-tar", "codex-package"):
+            if kind == "codex-package":
+                metadata = json.loads((unpack / "codex-package.json").read_text())
+                if (metadata.get("version") != pin["version"] or metadata.get("entrypoint") != "bin/codex"
+                        or metadata.get("target") != "x86_64-unknown-linux-musl"
+                        or metadata.get("layoutVersion") != 1 or metadata.get("variant") != "codex"
+                        or metadata.get("resourcesDir") != "codex-resources" or metadata.get("pathDir") != "codex-path"
+                        or not (unpack / "bin/codex-code-mode-host").is_file()
+                        or not (unpack / "codex-resources").is_dir() or not (unpack / "codex-path").is_dir()):
+                    raise ValueError("Codex standalone package metadata differs")
+            self.install_tree(install["release"], unpack)
+            if kind == "codex-package":
+                self.safe.link(".codex/packages/standalone/current", self.home / install["release"])
+                target = self.home / ".codex/packages/standalone/current/bin/codex"
+            else:
+                target = self.home / install["release"] / install["entrypoint"]
+            self.safe.link(f".local/bin/{name}", target)
+        else:
+            self.install_file(install["destination"], artifact)
+            if kind == "binary" and install["destination"] != f".local/bin/{name}":
+                self.safe.link(f".local/bin/{name}", self.home / install["destination"])
+
+    def provision(self):
+        # Called only from an explicit manual run under the ordinary fleet lock.
+        # Bootstrap Rust before kache, regardless of declaration order.
+        names = sorted(self.d.versions, key=lambda name: name != "rustc")
+        for name in names:
+            pin = self.d.versions[name]
+            install = pin.get("install")
+            item = f"provision:{name}"
+            try:
+                try:
+                    current = self.version_matches(pin)
+                except (OSError, ValueError, subprocess.SubprocessError):
+                    current = False
+                if current and install and install["kind"] == "rustup":
+                    current = self.rust_current(install)
+                if install is None or any(isinstance(v, str) and v.startswith("TODO-USER:") for v in install.values()):
+                    self.item(item, "warn", f"manual: TODO-USER {name} {pin['version']}; approve URL and SHA256 in fleet/versions.toml")
+                    continue
+                if current:
+                    self.item(item, "ok", f"{pin['version']} already installed")
+                    continue
+                self.safe.directory(".local/state/fleet-sync", create=True)
+                with tempfile.TemporaryDirectory(prefix=".provision-", dir=self.state_dir) as directory:
+                    self.install_pin(name, pin, Path(directory))
+                if not self.version_matches(pin):
+                    raise ValueError("installed version differs from pin")
+                self.item(item, "changed", f"installed {pin['version']}")
+            except (OSError, ValueError, subprocess.SubprocessError, tarfile.TarError) as error:
+                self.item(item, "failed", str(error))
+
+    def kache_config(self):
+        values = self.d.hosts[self.name]["machine_env"]
+        cap = values.get("KACHE_MAX_GB", 12)
+        floor = values.get("PLAN_MIN_DISK_GB", 40)
+        local_only = values.get("KACHE_LOCAL_ONLY", 0)
+        config = (self.d.root / "fleet/kache/config.toml").read_text()
+        config = config.replace("@CAP@", str(cap)).replace("@RECOVERY@", str((floor + max(cap, 1)) * 1024**3))
+        config = config.replace("@LOCAL_ONLY@", "true" if local_only else "false")
+        # Inspect credential metadata ONLY. Never open it, even in preview/check.
+        safe = getattr(self, "real_safe", self.safe)
+        try:
+            with safe.parent(".config/kache/store.env", create=False) as (directory, leaf):
+                info = os.stat(leaf, dir_fd=directory, follow_symlinks=False)
+        except FileNotFoundError:
+            info = None
+        if info is not None:
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600:
+                raise ValueError("kache store.env must be user-owned regular 0600; contents were not read")
+            config += (self.d.root / "fleet/kache/remote.toml").read_text()
+            self.write(".config/systemd/user/kache.service.d/20-shared-store.conf",
+                       (self.d.root / "fleet/kache/20-shared-store.conf").read_text())
+        elif self.safe.read(".config/systemd/user/kache.service.d/20-shared-store.conf") is not None:
+            self.item("kache:shared-store", "warn", "manual: drop-in exists without store.env; USER must remove the stale drop-in")
+        if info is None and not local_only:
+            # Fresh session hosts without shared credentials still work locally.
+            config = config.replace("local_only = false", "local_only = true")
+        self.write(".config/kache/config.toml", config)
+
+    def start_kache(self):
+        if not self.version_matches(self.d.versions["kache"]):
+            raise ValueError("kache pin unavailable; service was not started")
+        relative = ".config/systemd/user/default.target.wants/kache.service"
+        target = self.safe.readlink(relative)
+        enabled = target == str(self.home / ".config/systemd/user/kache.service") or target == "../kache.service"
+        if target is not None and not enabled:
+            raise ValueError("conflicting kache enablement link; repair manually")
+        active = True
+        try:
+            self.cmd("systemctl", "--user", "is-active", "--quiet", "kache.service")
+        except CommandError as error:
+            if error.code not in (1, 3, 4):
+                raise
+            active = False
+        if not active or not enabled:
+            self.cmd("systemctl", "--user", "enable", "--now", "--no-reload", "kache.service")
+        self.item("kache:activation", "ok", "service enabled and started; existing daemon was not restarted")
+
     def versions(self):
         for name, pin in self.d.versions.items():
             try:
                 output = self.cmd(*pin["command"], timeout=10)
-                found = re.findall(r"(?<![A-Za-z0-9])\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.]+)?", output)
-                match = pin["version"] in found
+                found = re.findall(r"(?<![A-Za-z0-9])v?(\d+(?:\.\d+){2,3}(?:[-+][A-Za-z0-9.-]+)?)", output)
+                match = any(pin["version"] in (value, value.partition("+")[0]) for value in found)
                 self.item(f"version:{name}", "ok" if match else "warn", f"want {pin['version']}; got {output[:160]}")
             except (OSError, ValueError, subprocess.TimeoutExpired) as error:
                 self.item(f"version:{name}", "warn", str(error))
@@ -1519,7 +1837,11 @@ class Runner:
                 self.attempt("fabrig", self.fabrig)
                 self.attempt("links", self.links)
                 self.render()
+                if getattr(self.args, "provision", False):
+                    self.provision()
                 self.attempt("units", self.units)
+                if getattr(self.args, "provision", False):
+                    self.attempt("kache:activation", self.start_kache)
                 self.versions()
             return self.finish()
         finally:
@@ -1599,6 +1921,7 @@ def main():
     os.umask(0o077)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", nargs="?", choices=["status"])
+    parser.add_argument("--provision", action="store_true", help="explicitly install pinned tools (never in timer)")
     parser.add_argument("--check", action="store_true")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--timer", action="store_true")
@@ -1611,6 +1934,9 @@ def main():
     args.smoke_fd = int(smoke_fd) if smoke_fd is not None else None
     if args.smoke_fd is not None and not args.check:
         parser.error("smoke lock requires --check")
+    if args.provision and (args.command or args.check or args.timer or args.preview is not None
+                           or args.self_check or args.smoke_fd is not None):
+        parser.error("--provision accepts only --host and --json")
     if args.preview is not None and (args.command or args.check or args.timer or args.json or args.self_check
                                      or args.resume_fd is not None or args.smoke_fd is not None):
         parser.error("--preview accepts only --host")

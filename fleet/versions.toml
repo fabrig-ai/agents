@@ -17,3 +17,73 @@ command = ["kache", "--version"]
 [rustc]
 version = "1.95.0"
 command = ["rustc", "--version"]
+
+# Rustup verifies toolchain/component downloads against Rust distribution SHA256s.
+[rustc.install]
+kind = "rustup"
+toolchain = "1.95.0"
+profile = "default"
+components = ["clippy", "rustfmt", "rust-docs"]
+targets = ["x86_64-unknown-linux-gnu", "wasm32-unknown-unknown", "aarch64-apple-darwin", "x86_64-unknown-linux-musl"]
+extra_toolchains = ["nightly-2026-10-21"]
+
+[cargo-nextest.install]
+kind = "tar"
+url = "TODO-USER: cargo-nextest 0.9.148 x86_64 Linux release tarball URL"
+sha256 = "TODO-USER: SHA256 of that release tarball (not the installed binary)"
+member = "cargo-nextest"
+destination = ".cargo/bin/cargo-nextest"
+
+[kache.install]
+kind = "kache-source"
+repository = "https://github.com/kunobi-ninja/kache.git"
+rev = "96052b4842239bb216f6c4812054203c21550788"
+patches = ["git-checkout-rev.patch", "upload-bound.patch"]
+musl_url = "https://musl.libc.org/releases/musl-1.2.5.tar.gz"
+musl_sha256 = "a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4"
+# Historical output only; the source build is not byte-for-byte reproducible.
+reference_sha256 = "91fb6aa7d7ddd427e3e2732aa346ce116fbf075df0c871e1148bf309aaadafaf"
+destination = ".local/bin/kache"
+
+[claude.install]
+kind = "claude-script"
+url = "TODO-USER: Claude 2.1.312 install.sh URL"
+sha256 = "TODO-USER: SHA256 of the approved install.sh"
+# The script also downloads a versioned binary; approve its payload digest.
+payload_url = "TODO-USER: Claude 2.1.312 linux-x64 payload URL"
+payload_sha256 = "TODO-USER: SHA256 of the versioned Claude payload"
+
+[codex.install]
+kind = "codex-package"
+url = "TODO-USER: Codex 0.162.1 x86_64-unknown-linux-musl standalone package URL"
+sha256 = "TODO-USER: SHA256 of the complete standalone package"
+release = ".codex/packages/standalone/releases/0.162.1-x86_64-unknown-linux-musl"
+entrypoint = "bin/codex"
+
+[chromium]
+version = "147.0.7727.101"
+command = ["chromium", "--version"]
+[chromium.install]
+kind = "opt-tar"
+url = "TODO-USER: Chromium 147.0.7727.101 extracted Debian bundle URL"
+sha256 = "TODO-USER: SHA256 of that bundle including bin/chromium launcher"
+release = ".local/opt/chromium-147.0.7727.101"
+entrypoint = "usr/lib/chromium/chromium"
+
+[forgejo]
+version = "17.0.0"
+command = ["forgejo", "--version"]
+[forgejo.install]
+kind = "binary"
+url = "TODO-USER: Forgejo 17.0.0 linux-amd64 binary URL"
+sha256 = "TODO-USER: SHA256 of that binary"
+destination = ".local/opt/forgejo-17.0.0/forgejo"
+
+[forgejo-runner]
+version = "13.2.0"
+command = ["forgejo-runner", "--version"]
+[forgejo-runner.install]
+kind = "binary"
+url = "TODO-USER: Forgejo runner 13.2.0 linux-amd64 binary URL"
+sha256 = "TODO-USER: SHA256 of that binary"
+destination = ".local/opt/forgejo-runner-13.2.0/forgejo-runner"

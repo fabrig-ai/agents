@@ -2,7 +2,21 @@
 
 Run `python3 -I -B tools/fleet-sync` from a checkout for the first deployment,
 then use `~/.local/bin/fleet-sync`. Python 3.13 and git are prerequisites.
-Provisioning and version installation are deferred; version probes only warn.
+The fresh-machine procedure is fleet/bootstrap/README.md. Explicit manual
+`--provision` installs missing/different pins from fleet/versions.toml; it is
+incompatible with timer/check/preview/status. Normal runs only probe versions.
+Missing provenance reports `warn: manual` for the exact TODO-USER pin. URL
+artifacts require HTTPS plus SHA256 before extraction/execution; Rustup and
+Cargo verify their distribution/locked registry checksums, and kache source is
+fetched at the exact declared git revision with vendored patches. Source builds
+have a 30-minute bound. The full Codex standalone layout is preserved.
+Only the explicit provision run enables/starts kache, never restarting a live
+daemon. Kache config/units are fleet-owned; store.env is inspected by stat only,
+never opened. Its optional selectors/drop-in require a user-owned 0600 file.
+A fresh host uses the local store. Operators restart a running kache on a
+drained host after config/binary updates. No cache or operational ledger is reset.
+The first rollout requires invoking the updated checkout manually: older
+runners reject the new bootstrap/kache declaration asset paths.
 `tools/land` gates a clean branch, fetches/rebases, gates again if HEAD moved,
 and pushes main without force. Machine-action commits say what must happen.
 

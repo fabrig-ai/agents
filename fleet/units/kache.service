@@ -1,0 +1,12 @@
+[Unit]
+Description=kache build cache daemon
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/kache daemon run
+Restart=always
+RestartSec=5s
+Environment=KACHE_LOG=kache=info
+
+[Install]
+WantedBy=default.target
