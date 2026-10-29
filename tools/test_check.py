@@ -24,7 +24,7 @@ class GateTests(unittest.TestCase):
                 path.write_text(content)
             result = subprocess.run(["bash", str(tools / "check.sh"), *files],
                                     env={k: v for k, v in dict(os.environ, HOME=str(home)).items()
-                                         if k != "AGENTS_GATE_HELD"},
+                                         if k not in ("AGENTS_GATE_HELD", "AGENTS_GATE_LOCK")},
                                     capture_output=True, text=True)
             self.assertFalse(list(root.rglob("__pycache__")))
             return result
@@ -131,3 +131,36 @@ class GateLockTests(unittest.TestCase):
             out, err = gate.communicate(timeout=120)
             self.assertEqual(gate.returncode, 0, err)
             self.assertIn("Checked 1 files", err)
+
+    def test_a_parent_lock_override_does_not_reach_the_fixture(self):
+        source = "import unittest\nclass T(unittest.TestCase):\n def test_ok(self): pass\n"
+        with tempfile.TemporaryDirectory(prefix="gate-parent-") as temp:
+            lock = Path(temp) / "parent.lock"
+            with open(lock, "w") as held:
+                fcntl.flock(held, fcntl.LOCK_EX)
+                previous = os.environ.get("AGENTS_GATE_LOCK")
+                os.environ["AGENTS_GATE_LOCK"] = str(lock)
+                try:
+                    result = GateTests.run_gate(self, {"test_ok.py": source})
+                finally:
+                    if previous is None:
+                        os.environ.pop("AGENTS_GATE_LOCK")
+                    else:
+                        os.environ["AGENTS_GATE_LOCK"] = previous
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_invoked_from_tools_by_relative_name(self):
+        source = "import unittest\nclass T(unittest.TestCase):\n def test_ok(self): pass\n"
+        with tempfile.TemporaryDirectory(prefix="gate-relative-") as temp:
+            root = Path(temp)
+            (root / "home").mkdir()
+            tools = root / "tools"
+            tools.mkdir()
+            (tools / "check.sh").write_bytes(GATE.read_bytes())
+            (tools / "test_ok.py").write_text(source)
+            env = {k: v for k, v in os.environ.items() if k != "AGENTS_GATE_HELD"}
+            env.update(HOME=str(root / "home"), AGENTS_GATE_LOCK=str(root / "gate.lock"))
+            result = subprocess.run(["bash", "check.sh"], cwd=tools, env=env,
+                                    capture_output=True, text=True, timeout=120)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Checked 1 files", result.stderr)
