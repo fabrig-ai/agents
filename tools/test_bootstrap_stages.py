@@ -28,7 +28,13 @@ class BootstrapStagesTest(unittest.TestCase):
         self.hosts = tuple(tomllib.loads(self.hosts_toml)["hosts"])
 
     def legacy_fleet(self):
-        archive = subprocess.check_output(["git", "-C", str(fixture.ROOT), "archive", DEPLOYED, "fleet"], env=self.f.env)
+        # The declarations live before stage B: main's own fleet tree, so units
+        # that main already declares (after-landing) are not stage B's changes.
+        marker = subprocess.check_output(
+            ["git", "-C", str(fixture.ROOT), "log", "-1", "--format=%H", "--fixed-strings",
+             "--grep=Enable bootstrap declarations after the compatibility rollout"], env=self.f.env, text=True).strip()
+        base = marker + "^" if marker else "HEAD"
+        archive = subprocess.check_output(["git", "-C", str(fixture.ROOT), "archive", base, "fleet"], env=self.f.env)
         stage = self.f.directory / "fleet-stage"
         stage.mkdir()
         with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
