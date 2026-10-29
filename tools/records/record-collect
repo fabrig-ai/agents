@@ -597,7 +597,21 @@ def publish(transactions, host, dry):
             result = subprocess.run([str(Path(__file__).with_name('record')), 'append', '--as', 'collect', '--batch', host],
                                     input=payload, capture_output=True, text=True)
             if result.returncode:
-                raise ValueError(f'record append failed (exit {result.returncode}); cursors unchanged')
+                reason = ' '.join(result.stderr.splitlines()) or f'record append exited {result.returncode}'
+                counts = []
+                for _, _, pending, _, rows in transactions:
+                    if not rows:
+                        continue
+                    transaction = json.loads(pending.read_text())
+                    count = transaction.get('deferrals', 0) + 1 if result.returncode == 3 else 0
+                    transaction['deferrals'] = count
+                    atomic(pending, transaction)
+                    counts.append(count)
+                if result.returncode == 3:
+                    count = max(counts)
+                    print(f'record-collect: deferred: {reason} ({count} consecutive runs)', file=sys.stderr)
+                    return 2 if count >= 6 else 0
+                raise ValueError(f'record append failed (exit {result.returncode}); cursors unchanged: {reason}')
             if result.stdout:
                 print(result.stdout, end='')
         for _, path, pending, state, _ in transactions:
@@ -605,11 +619,12 @@ def publish(transactions, host, dry):
             pending.unlink(missing_ok=True)
     for source, _, _, _, rows in transactions:
         print(f'{source}: {len(rows)} events', file=sys.stderr)
+    return 0
 
 
 def collect(source, args, host, since):
     with stage(source, args, host, since) as transaction:
-        publish([transaction], host, args.dry_run)
+        return publish([transaction], host, args.dry_run)
 
 
 def main():
@@ -641,7 +656,7 @@ def main():
                 print(f'{source}: error: {error}', file=sys.stderr)
                 failed = True
         try:
-            publish(transactions, host, args.dry_run)
+            failed = publish(transactions, host, args.dry_run) == 2 or failed
         except Exception as error:
             print(f'record-collect: error: {error}', file=sys.stderr)
             failed = True

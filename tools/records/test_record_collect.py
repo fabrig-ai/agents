@@ -582,10 +582,116 @@ print('12345678: 125,000 of 1,000,000 tokens (12%) at 2026-10-29T11:00:00Z; 42 c
         self.assertEqual(self.git(self.origin, 'rev-parse', 'main'), head)
         self.assertFalse(list(self.state.glob('*.pending.json')))
 
+    def publication_tool(self, retry_clock=False):
+        tool = self.home / 'publication-tool' / TOOL.name
+        self.write(tool, TOOL.read_text()).chmod(0o700)
+        record = TOOL.with_name('record')
+        program = ("#!/usr/bin/env -S python3 -I -B\n"
+                   "import json, os, sys\nfrom pathlib import Path\n"
+                   "reply = Path(os.environ['HOME']) / 'publication.json'\n"
+                   "if sys.argv[1] == 'append' and reply.exists():\n"
+                   " settings = json.loads(reply.read_text())\n"
+                   " print(settings['reason'], file=sys.stderr)\n"
+                   " sys.exit(settings['code'])\n"
+                   f"os.execv({str(record)!r}, [{str(record)!r}] + sys.argv[1:])\n")
+        if retry_clock:
+            program = ("#!/usr/bin/env -S python3 -I -B\n"
+                       "import runpy, sys\nfrom unittest.mock import patch\n"
+                       "with patch('time.sleep') as sleep:\n"
+                       f" status = runpy.run_path({str(record)!r})['main']()\n"
+                       " assert all(1 <= call.args[0] <= 5 for call in sleep.call_args_list)\n"
+                       " sys.exit(status)\n")
+        self.write(tool.with_name('record'), program).chmod(0o700)
+        return tool
+
+    def test_push_races_publish_or_defer_in_one_collector_run(self):
+        row = self.queue_fixture()
+        self.run_collect('queue')
+        cursor = self.state / 'queue.json'
+        counter = self.home / 'push-attempts'
+        hook = self.write(self.clone / '.git/hooks/pre-push',
+            '#!/usr/bin/env -S python3 -I -B\n'
+            'import os, subprocess, sys\nfrom pathlib import Path\n'
+            f'counter = Path({str(counter)!r})\n'
+            'count = int(counter.read_text()) + 1 if counter.exists() else 1\n'
+            'counter.write_text(str(count))\n'
+            'if count <= int(os.environ["RACE_LIMIT"]):\n'
+            f' seed = Path({str(self.seed)!r})\n'
+            ' def git(*args): subprocess.run(["git", "-C", str(seed), *args], check=True, stdout=sys.stderr)\n'
+            ' git("pull", "--ff-only", "origin", "main")\n'
+            ' (seed / "AGENTS.md").write_text("# Remote " + str(count) + "\\n")\n'
+            ' git("add", "AGENTS.md")\n'
+            ' git("commit", "-m", "advance origin")\n'
+            ' git("push", "origin", "main")\n')
+        hook.chmod(0o700)
+        tool = self.publication_tool(retry_clock=True)
+        with patch(__name__ + '.TOOL', tool):
+            for rejections, minute in ((2, '03'), (5, '05')):
+                with self.subTest(rejections=rejections):
+                    before = cursor.read_bytes()
+                    row.update(start=f'2026-10-29T11:{minute}:00Z', end=f'2026-10-29T11:{minute}:30Z')
+                    path = self.fabrig / 'notes/queue.jsonl'
+                    self.write(path, path.read_text() + json.dumps(row) + '\n')
+                    result = self.run_collect('queue', RACE_LIMIT=str(rejections))
+                    self.assertEqual(int(counter.read_text()), 3 if rejections == 2 else 5)
+                    pending = self.state / 'queue.pending.json'
+                    if rejections == 2:
+                        self.assertIn('record: pushed', result.stdout)
+                        self.assertNotEqual(cursor.read_bytes(), before)
+                        self.assertFalse(pending.exists())
+                    else:
+                        self.assertIn('record-collect: deferred:', result.stderr)
+                        self.assertIn('five attempts', result.stderr)
+                        self.assertEqual(cursor.read_bytes(), before)
+                        self.assertTrue(json.loads(pending.read_text())['events'])
+                        self.assertEqual(json.loads(pending.read_text())['deferrals'], 1)
+                    self.assertEqual(self.git(self.clone, 'status', '--porcelain'), '')
+                    counter.unlink()
+
+    def test_deferrals_keep_cursors_and_outbox_until_sixth_run(self):
+        row = self.queue_fixture()
+        self.run_collect('queue')
+        cursor = self.state / 'queue.json'
+        before = cursor.read_bytes()
+        path = self.fabrig / 'notes/queue.jsonl'
+        row.update(start='2026-10-29T11:03:00Z', end='2026-10-29T11:04:00Z')
+        self.write(path, path.read_text() + json.dumps(row) + '\n')
+        reply = self.json(self.home / 'publication.json', dict(code=3, reason='record: origin busy'))
+        tool = self.publication_tool()
+        with patch(__name__ + '.TOOL', tool):
+            events = None
+            for count in range(1, 8):
+                result = self.run_collect('queue', code=2 if count >= 6 else 0)
+                self.assertIn('record-collect: deferred: record: origin busy', result.stderr)
+                self.assertIn(f'({count} consecutive runs)', result.stderr)
+                self.assertEqual(cursor.read_bytes(), before)
+                pending = self.state / 'queue.pending.json'
+                transaction = json.loads(pending.read_text())
+                self.assertEqual(transaction['deferrals'], count)
+                if events is None:
+                    events = transaction['events']
+                self.assertEqual(transaction['events'], events)
+                pending_before = pending.read_bytes()
+                self.dry('queue')
+                self.assertEqual(pending.read_bytes(), pending_before)
+            # A real error still exits 2 and breaks the consecutive-deferral run.
+            self.json(reply, dict(code=2, reason='record: transport broken'))
+            self.assertIn('transport broken', self.run_collect('queue', code=2).stderr)
+            self.json(reply, dict(code=3, reason='record: origin busy'))
+            self.assertIn('(1 consecutive runs)', self.run_collect('queue').stderr)
+            reply.unlink()
+            self.run_collect('queue')
+            self.assertFalse(pending.exists())
+            self.assertNotEqual(cursor.read_bytes(), before)
+            published = {event['id'] for event in self.events('queue')}
+            self.assertTrue({event['id'] for event in events} <= published)
+
     def test_append_failure_replays_durable_outbox_and_cursor_unchanged(self):
         self.claim_fixture()
         bad_origin = str(self.home / 'absent.git')
-        self.run_collect('claims', code=2, RECORDS_ORIGIN=bad_origin)
+        result = self.run_collect('claims', code=2, RECORDS_ORIGIN=bad_origin)
+        self.assertIn('record:', result.stderr)
+        self.assertIn('absent.git', result.stderr)
         self.assertFalse((self.state / 'claims.json').exists())
         pending = self.state / 'claims.pending.json'
         transaction = json.loads(pending.read_text())

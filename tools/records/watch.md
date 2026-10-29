@@ -105,8 +105,14 @@ changes, including recovery. Changing only an error's text does not trigger one.
 The first run publishes a heartbeat. The two-minute poll observes the fifteen-
 minute threshold on the next run (normally sixteen minutes). Each run still
 persists its evaluation state. Events and any pending retries share one append;
-quiet runs with an empty outbox do not append. Automatic writers make at most
-one push attempt per run, retaining failed publications until the next poll.
+quiet runs with an empty outbox do not append. Record makes up to five attempts
+on push races, pausing a random 1–5 seconds between tries. At most one push
+succeeds per run; retries cost only rejected attempts. Exhaustion or a rebase
+conflict retains pending events and prints `watch: deferred: <record's reason>`.
+State counts consecutive deferrals in `deferrals`: the first five exit 0, the
+sixth and later exit 2. Successful publication or a real publication error resets
+the count; real failures exit 2 immediately. Error and deferral lines include
+record's stderr. The pipeline-watch timer adds up to 60 seconds of random delay.
 `watch` is an append-only writer. Like post itself, sending and local state
 commit cannot be one transaction: a process death immediately after send and
 before state persistence can repeat that send after restart.
