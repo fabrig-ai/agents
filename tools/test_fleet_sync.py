@@ -875,10 +875,23 @@ class FleetTest(unittest.TestCase):
     def test_integer_machine_env_matches_main_runner_for_every_host(self):
         # Pin the main runner used when this schema expansion was branched.
         baseline = "f7334e8aa68c325076c5c0eda16f6ae6c0c217fa"
-        hosts = (ROOT / "fleet/hosts.toml").read_bytes()
-        self.assertEqual(hosts, (self.source / "fleet/hosts.toml").read_bytes())
-        baseline_hosts = self.process("git", "-C", ROOT, "show", f"{baseline}:fleet/hosts.toml").stdout
-        self.assertEqual(hosts, baseline_hosts.encode())
+        hosts = tomllib.loads((ROOT / "fleet/hosts.toml").read_text())["hosts"]
+        # Use today's declarations, including roles, while keeping the old
+        # runner's integer-only schema. Future string settings are excluded
+        # from both candidates rather than pinning the declaration bytes.
+        lines = []
+        for name, host in hosts.items():
+            lines.append(f"[hosts.{name}]\n")
+            for key, value in host.items():
+                if key == "machine_env":
+                    value = {k: v for k, v in value.items() if not isinstance(v, str)}
+                if isinstance(value, dict):
+                    literal = "{ " + ", ".join(f"{json.dumps(k)} = {json.dumps(v)}"
+                                               for k, v in value.items()) + " }"
+                else:
+                    literal = json.dumps(value)
+                lines.append(f"{key} = {literal}\n")
+        put(self.source / "fleet/hosts.toml", "".join(lines))
         script = self.source / "tools/fleet-sync"
         current = script.read_text()
         old = self.process("git", "-C", ROOT, "show", f"{baseline}:tools/fleet-sync").stdout
@@ -903,7 +916,8 @@ class FleetTest(unittest.TestCase):
                     rendered.append(result)
         finally:
             put(script, current, True)
-        self.assertEqual(len(rendered[0]), HOST_COUNT)
+        self.assertEqual(set(rendered[0]), set(hosts))
+        self.assertEqual(set(rendered[1]), set(hosts))
         self.assertEqual(rendered[0], rendered[1])
 
     def test_posix_path_idempotence_in_nested_shells(self):
