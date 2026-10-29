@@ -5,20 +5,24 @@ import argparse
 import concurrent.futures
 from contextlib import contextmanager
 import datetime as dt
+import errno
 import fcntl
 import io
 import json
 import os
 from pathlib import Path
 import re
+import secrets
 import shlex
 import shutil
 import socket
+import signal
 import stat
 import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import tomllib
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -27,6 +31,7 @@ END = "# <<< fleet-sync <<<"
 BLOCK = BEGIN + '\n[ ! -f "$HOME/.config/fabrig/env.sh" ] || . "$HOME/.config/fabrig/env.sh"\n' + END + "\n"
 KEY = re.compile(r"[A-Za-z_][A-Za-z_0-9]*\Z")
 SHA = re.compile(r"[0-9a-f]{40}\Z")
+SERVICE_START = 'ExecStart=/bin/bash -lc \'exec "$$HOME/src/fabrig/current/tools/fleet-sync" --timer\''
 
 
 class CommandError(ValueError):
@@ -39,11 +44,214 @@ def now():
     return dt.datetime.now(dt.UTC).isoformat()
 
 
+def run_child(argv, timeout, env=None, pass_fds=()):
+    process = subprocess.Popen([str(v) for v in argv], stdin=subprocess.DEVNULL,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               start_new_session=True, env=env, pass_fds=pass_fds)
+    try:
+        out, err = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        deadline = time.monotonic() + 5
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            process.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+        # A descendant can outlive its parent and close its inherited pipes.
+        try:
+            os.killpg(process.pid, 0)
+        except ProcessLookupError:
+            pass
+        else:
+            time.sleep(max(0, deadline - time.monotonic()))
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        process.communicate()
+        raise
+    return subprocess.CompletedProcess(argv, process.returncode, out, err)
+
+
 def read_json(path, default):
     try:
-        return json.loads(path.read_text())
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+        with os.fdopen(fd, "rb") as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                raise ValueError(f"not a regular file: {path}")
+            return json.loads(stream.read())
     except FileNotFoundError:
         return default
+
+
+class SafeHome:
+    """Resolve HOME paths through pinned directory descriptors, never symlinks."""
+    def __init__(self, home):
+        self.home = home
+
+    @contextmanager
+    def parent(self, relative, create=False):
+        parts = Path(relative).parts
+        if not parts or Path(relative).is_absolute() or ".." in parts:
+            raise ValueError(f"invalid HOME path: {relative}")
+        fd = os.open(self.home, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            for part in parts[:-1]:
+                try:
+                    child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                except FileNotFoundError:
+                    if not create:
+                        raise
+                    try:
+                        os.mkdir(part, mode=0o700, dir_fd=fd)
+                    except FileExistsError:
+                        pass
+                    child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                except OSError as error:
+                    raise ValueError(f"refusing symlink or non-directory parent: {relative}") from error
+                os.close(fd)
+                fd = child
+            yield fd, parts[-1]
+        finally:
+            os.close(fd)
+
+    def open_regular(self, directory, leaf, flags=os.O_RDONLY, mode=0o600):
+        try:
+            fd = os.open(leaf, flags | os.O_NONBLOCK | os.O_NOFOLLOW, mode, dir_fd=directory)
+        except OSError as error:
+            if error.errno == errno.ELOOP:
+                raise ValueError(f"refusing symlink: {leaf}") from error
+            raise
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            os.close(fd)
+            raise ValueError(f"not a regular file: {leaf}")
+        return fd
+
+    def snapshot_at(self, directory, leaf):
+        try:
+            fd = self.open_regular(directory, leaf)
+        except FileNotFoundError:
+            return None, None
+        with os.fdopen(fd, "rb") as stream:
+            data = stream.read()
+            info = os.fstat(stream.fileno())
+        return data, (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_size)
+
+    def snapshot(self, relative):
+        try:
+            with self.parent(relative) as (directory, leaf):
+                return self.snapshot_at(directory, leaf)
+        except FileNotFoundError:
+            return None, None
+
+    def read(self, relative):
+        return self.snapshot(relative)[0]
+
+    def json(self, relative, default):
+        data = self.read(relative)
+        return default if data is None else json.loads(data)
+
+    def stage(self, directory, leaf, data, mode):
+        sibling = f".{leaf}.{secrets.token_hex(12)}"
+        fd = self.open_regular(directory, sibling, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+        try:
+            with os.fdopen(fd, "wb") as stream:
+                os.fchmod(stream.fileno(), mode)
+                stream.write(data)
+                stream.flush()
+                os.fsync(stream.fileno())
+        except BaseException:
+            os.unlink(sibling, dir_fd=directory)
+            raise
+        return sibling
+
+    def commit(self, relative, snapshot, data, mode=0o600, backup=False):
+        with self.parent(relative, create=True) as (directory, leaf):
+            if self.snapshot_at(directory, leaf) != snapshot:
+                return False
+            if backup and snapshot[0] is not None:
+                backup_leaf = leaf + ".pre-fleet-sync"
+                backup_snapshot = self.snapshot_at(directory, backup_leaf)
+                if backup_snapshot[0] is None:
+                    sibling = self.stage(directory, backup_leaf, snapshot[0], mode)
+                    try:
+                        if self.snapshot_at(directory, leaf) != snapshot:
+                            return False
+                        if self.snapshot_at(directory, backup_leaf) == backup_snapshot:
+                            os.replace(sibling, backup_leaf, src_dir_fd=directory, dst_dir_fd=directory)
+                    finally:
+                        try:
+                            os.unlink(sibling, dir_fd=directory)
+                        except FileNotFoundError:
+                            pass
+            sibling = self.stage(directory, leaf, data, mode)
+            try:
+                if self.snapshot_at(directory, leaf) != snapshot:
+                    return False
+                os.replace(sibling, leaf, src_dir_fd=directory, dst_dir_fd=directory)
+                return True
+            finally:
+                try:
+                    os.unlink(sibling, dir_fd=directory)
+                except FileNotFoundError:
+                    pass
+
+    def save(self, relative, data, mode=0o600):
+        data = data.encode() if isinstance(data, str) else data
+        if not self.commit(relative, self.snapshot(relative), data, mode):
+            raise ValueError(f"{relative}: busy; retry next run")
+        with self.parent(relative) as (directory, _):
+            os.fsync(directory)
+
+    def directory(self, relative, create=False):
+        with self.parent(str(relative) + "/.probe", create=create):
+            pass
+
+    def guard(self, relative):
+        try:
+            with self.parent(relative):
+                pass
+        except FileNotFoundError:
+            pass
+
+    def names(self, relative):
+        try:
+            with self.parent(relative + "/.probe") as (directory, _):
+                return os.listdir(directory)
+        except FileNotFoundError:
+            return []
+
+    def readlink(self, relative):
+        try:
+            with self.parent(relative) as (directory, leaf):
+                info = os.stat(leaf, dir_fd=directory, follow_symlinks=False)
+                if not stat.S_ISLNK(info.st_mode):
+                    raise ValueError(f"refusing non-symlink: {relative}")
+                return os.readlink(leaf, dir_fd=directory)
+        except FileNotFoundError:
+            return None
+
+    def link(self, relative, target):
+        with self.parent(relative, create=True) as (directory, leaf):
+            self.readlink(relative)  # Refuse a non-symlink before any replacement.
+            sibling = f".{leaf}.{secrets.token_hex(12)}"
+            os.symlink(str(target), sibling, dir_fd=directory)
+            try:
+                self.readlink(relative)
+                os.replace(sibling, leaf, src_dir_fd=directory, dst_dir_fd=directory)
+            finally:
+                try:
+                    os.unlink(sibling, dir_fd=directory)
+                except FileNotFoundError:
+                    pass
+
+    def unlink(self, relative):
+        with self.parent(relative) as (directory, leaf):
+            if self.snapshot_at(directory, leaf)[0] is not None:
+                os.unlink(leaf, dir_fd=directory)
 
 
 def expand(value, home):
