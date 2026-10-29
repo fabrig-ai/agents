@@ -46,7 +46,7 @@ or unreadable settings refuse the command.
 | `QA_WALK_SLOTS` | empty | Comma-separated `KIND=N[,N...]` mappings; legacy spaces between kinds still parse |
 | `QA_SLOT_HOST` | `hetzner6` | This builder's inventory host name |
 | `QA_CLAIM_OWNER` | `s/qa` | Owner of the walk's claims |
-| `QA_CLAIM_SSH` | `hel8` | Claims host's SSH target; empty runs installed `claim` locally |
+| `QA_CLAIM_SSH` | `free@204.168.210.29` | Claims host's SSH target; empty runs installed `claim` locally |
 | `QA_STOP_SECONDS` | 50 | Wrapper's lock wait and exporter share this bound; positive and below 60 |
 | `QA_GIVE_BACK_SECONDS` | 90 | Wait for a unit's stop confirmation; nonnegative |
 | `QA_INTERVAL_SECONDS` | 300 | Mailbox wait between checks; nonnegative |
@@ -78,7 +78,7 @@ QA_WALK_KINDS=forgejo=2:chatgpt,claude=2:claude
 QA_WALK_SLOTS=forgejo=8,claude=4
 QA_SLOT_HOST=hetzner6
 QA_CLAIM_OWNER=s/qa
-QA_CLAIM_SSH=hel8
+QA_CLAIM_SSH=free@204.168.210.29
 ```
 
 In `fleet/hosts.toml`, add these entries to hetzner6's existing inline
@@ -89,9 +89,10 @@ QA_WALK_KINDS = "forgejo=2:chatgpt,claude=2:claude"
 QA_WALK_SLOTS = "forgejo=8,claude=4"
 QA_SLOT_HOST = "hetzner6"
 QA_CLAIM_OWNER = "s/qa"
-QA_CLAIM_SSH = "hel8"
+QA_CLAIM_SSH = "free@204.168.210.29"
 ```
 
+Hetzner6 uses this numeric SSH target because it cannot resolve `hel8`.
 The fleet supplies clean fabrig clones in slots 8 and 4, and installed
 `claim` on hel8 reads the fleet's current inventory. The SSH target must
 provide noninteractive access and a login shell with `claim` on PATH.
@@ -169,8 +170,23 @@ explicitly invokes local `claim`.
 A slot must have the exact fabrig origin and no tracked changes or untracked
 files outside `target/` (including ignored files). Missing, dirty, wrong-origin
 or linked checkouts are refused and preserved. Preparation fetches and prunes
-origin, resolves REF there and switches detached to the saved SHA without
-forcing or cleaning. It runs `python3 -I -B SLOT/tools/slots/trim SLOT`, bounded
+origin, then checks the existing HEAD before resolving REF or switching.
+HEAD must be contained in a `refs/remotes/origin/` ref (including an ancestor),
+or equal this tool's last saved successful checkout for this host/slot.
+A clean local branch or detached unpublished commit otherwise refuses
+preparation, names its SHA, returns the claim and takes no login. A tag
+alone cannot establish origin publication. Clean detached published HEADs
+are allowed.
+
+After HEAD passes, the tool resolves REF and switches detached to the saved
+SHA without forcing or cleaning. Successful checkout saves its SHA and an
+increasing per-slot sequence in the attempt immediately after the switch,
+before trim or cargo fetch.
+Only the latest sequence authorizes an unpublished HEAD; an earlier walk's
+commit cannot authorize replacing later work. Older numeric-slot states
+with a saved start event establish a successful checkout too; an ambiguous
+latest history grants no exception. Failed preparation and an intended
+build SHA alone never establish checkout ownership. Preparation runs `python3 -I -B SLOT/tools/slots/trim SLOT`, bounded
 to 300 seconds; output and status go to `prepare-ATTEMPT.log` in the walk's
 directory. Trim failure is advisory. Then `df -B1 --output=avail /` (30-second
 bound) must show at least 80000000000 available bytes, and

@@ -4127,11 +4127,61 @@ tool['Watch'].slot_call = slot_call
     assert len([c for c in lab.calls('claim') if c[0] == 'release']) == 1
 
 
+def clean_unpublished_slot_heads_are_preserved_and_named(lab):
+    checkout = lab.slots / '1'
+    for rung, branch in (('detached', None), ('branch', 'private-work')):
+        if branch:
+            lab.git(checkout, 'switch', '-c', branch)
+        else:
+            lab.git(checkout, 'switch', '--detach')
+        lab.git(checkout, 'commit', '--allow-empty', '-m', 'unpublished fixture work ' + rung)
+        head = lab.git(checkout, 'rev-parse', 'HEAD')
+        result = lab.walk(rung, status=4)
+        assert head in result.stderr and 'unpublished' in result.stderr
+        assert lab.git(checkout, 'rev-parse', 'HEAD') == head
+        assert not lab.calls('cargo') and not lab.calls('trim') and not lab.calls('codex-run')
+        assert not [c for c in lab.calls('logins') if c[0] == 'take']
+        assert not slot_claims(lab)
+    assert all(state['slot_claim']['released'] for _, state in lab.walk_states())
+
+
+def only_the_last_saved_walk_checkout_can_authorize_an_unpublished_head(lab):
+    old = lab.commit('first temporary branch', branch='temporary-one')
+    lab.walk('one', '--build', 'temporary-one')
+    first = lab.walk_state()[1]
+    lab.end_run(first)
+    lab.watch()
+    lab.git(lab.products['fabrig'], 'push', 'origin', ':temporary-one')
+    # The previous walk's detached commit is now unpublished but still ours.
+    lab.walk('two', '--build', 'main')
+    second = lab.walk_states()[1][1]
+    lab.end_run(second)
+    lab.watch()
+    checkout = lab.slots / '1'
+    lab.git(checkout, 'switch', '--detach', old)
+    # That earlier commit is not the slot's last saved checkout any more.
+    result = lab.walk('three', status=4)
+    assert old in result.stderr and lab.git(checkout, 'rev-parse', 'HEAD') == old
+    assert len(lab.calls('codex-run')) == 2 and not slot_claims(lab)
+
+
+def detached_heads_contained_in_origin_history_are_accepted(lab):
+    old = lab.head()
+    new = lab.marked()
+    lab.git(lab.slots / '1', 'switch', '--detach', old)
+    lab.walk()
+    assert lab.git(lab.slots / '1', 'rev-parse', 'HEAD') == new
+    assert lab.walk_state()[1]['main'] == new
+
+
 CASES = (
     a_launcher_without_metadata_keeps_custody_and_admission,
     a_missing_launch_keeps_grace_and_unknown_custody,
     slot_release_refuses_without_the_walks_lock,
     release_preflight_and_delete_exclude_other_walks,
+    clean_unpublished_slot_heads_are_preserved_and_named,
+    only_the_last_saved_walk_checkout_can_authorize_an_unpublished_head,
+    detached_heads_contained_in_origin_history_are_accepted,
 
     an_unreadable_grant_keeps_the_claim_until_inventory_confirms_give_back,
     fleet_settings_accept_commas_and_plus_without_whitespace,

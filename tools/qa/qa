@@ -32,7 +32,7 @@ LOGIN = r'[a-z][a-z0-9-]*'
 SHA = r'[0-9a-f]{40}'
 UNIT_POLL_SECONDS = 2
 ADDRESS = r'[a-z][a-z0-9-]*(/[a-z0-9][a-z0-9-]*)*@[a-z][a-z0-9-]*'
-ATTEMPT_KEYS = ('attempt holder ref main cap started slot slot_claim launch_complete logins kinds pools requests run stage given released '
+ATTEMPT_KEYS = ('attempt holder ref main cap started slot slot_claim checkout launch_complete logins kinds pools requests run stage given released '
                 'start_logged end_logged posted capped decision pause_line resume_run report_attempt alerts').split()
 
 
@@ -195,6 +195,13 @@ class Repositories:
         need(result.returncode == 0, f'cannot fetch {repo}: {result.stderr.strip()}', 4)
         return root
 
+    def protect_head(self, root, previous):
+        head = git(root, 'rev-parse', '--verify', 'HEAD')
+        published = git(root, 'for-each-ref', '--contains=' + head,
+                        '--format=%(refname)', 'refs/remotes/origin/')
+        need(published or head == previous,
+             f'{root}: unpublished HEAD {head} is not the last saved walk checkout; refusing to switch', 4)
+
     def build(self, root, ref):
         why = f'build {ref}: no branch origin/{ref} and no commit; try origin/<branch> or a commit'
         branch = ref[7:] if ref.startswith('origin/') else ref
@@ -273,7 +280,7 @@ def settings(workspace):
     # Same precedence and valid machine.env lines as kit.sh's machine_setting.
     values = dict(QA_INTERVAL_SECONDS='300', QA_GIVE_BACK_SECONDS='90', QA_STOP_SECONDS='50',
                   QA_WALK_KINDS='forgejo=2:chatgpt claude=2:claude',
-                  QA_WALK_SLOTS='', QA_SLOT_HOST='hetzner6', QA_CLAIM_OWNER='s/qa', QA_CLAIM_SSH='hel8')
+                  QA_WALK_SLOTS='', QA_SLOT_HOST='hetzner6', QA_CLAIM_OWNER='s/qa', QA_CLAIM_SSH='free@204.168.210.29')
     path = workspace.tmp / 'machine.env'
     try:
         text = read_text(path, errors='replace')
@@ -1100,6 +1107,25 @@ class Watch:
         state['start_logged' if event in ('walk-start', 'walk-resume') else 'end_logged'] = True
         self.save(directory, state)
 
+    def last_checkout(self, state):
+        records = []
+        for saved in self.states.values():
+            for attempt in [saved, *saved.get('attempts', [])]:
+                if (attempt.get('slot') != state['slot']
+                        or attempt.get('slot_claim', {}).get('host') != state['slot_claim']['host']):
+                    continue
+                checkout = attempt.get('checkout')
+                if checkout:
+                    records.append(((checkout['sequence'], ''), checkout['main']))
+                elif attempt.get('start_logged') and re.fullmatch(SHA, attempt.get('main', '')):
+                    # Older states saved the start event only after checkout.
+                    records.append(((0, attempt['started']), attempt['main']))
+        if not records:
+            return None, 0
+        latest = max(order for order, _ in records)
+        commits = {commit for order, commit in records if order == latest}
+        return (next(iter(commits)) if len(commits) == 1 else None), latest[0]
+
     def walk_room(self, pools, kind):
         listing = self.call('logins', 'list')
         inventory = login_inventory(listing.stdout) if listing.returncode == 0 else None
@@ -1307,6 +1333,13 @@ def walk_attempt(state):
              and (claim.get('release_status') is None or (claim['release_status'] == 'released') == claim['released'])
              and (claim.get('release_status') != 'release unconfirmed' or not claim['released']
                   and 'release_result' in claim), 'invalid saved release result', 4)
+    if 'checkout' in state:
+        checkout = state['checkout']
+        need(isinstance(checkout, dict) and set(checkout) == {'main', 'sequence'}
+             and isinstance(checkout['main'], str) and re.fullmatch(SHA, checkout['main'])
+             and checkout['main'] == state['main'] and state['slot'] is not None
+             and type(checkout['sequence']) is int and checkout['sequence'] >= 1,
+             'invalid saved checkout', 4)
     need('launch_complete' not in state or type(state['launch_complete']) is bool,
          'invalid saved launch completion', 4)
     check_alerts(state)
@@ -1445,6 +1478,7 @@ def walk(args, workspace):
                          posted=False, capped=False, resume_run=previous_run, alerts={})
             state.pop('decision', None)
             state.pop('slot_claim', None)
+            state.pop('checkout', None)
             state.pop('launch_complete', None)
         else:
             kind = args.kind if args.kind is not None else next(iter(kinds))
@@ -1499,9 +1533,13 @@ def walk(args, workspace):
             state.update(slot=number, slot_claim=claim)
             service.save(directory, state)
             checkout = service.repositories.fetch(args.repo, state['slot'])
+            previous, sequence = service.last_checkout(state)
+            service.repositories.protect_head(checkout, previous)
             state['main'] = service.repositories.build(checkout, ref)
             service.save(directory, state)
             service.repositories.checkout(checkout, state['main'])
+            state['checkout'] = dict(main=state['main'], sequence=sequence + 1)
+            service.save(directory, state)
             try:
                 trimmed = command(['python3', '-I', '-B', checkout / 'tools/slots/trim', checkout], timeout=300)
                 trim_log = trimmed.stdout + trimmed.stderr + f'trim exit {trimmed.returncode}\n'
