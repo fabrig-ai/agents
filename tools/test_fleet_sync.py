@@ -37,6 +37,23 @@ if os.environ.get("FAKE_NO_BUS"):
     sys.exit(1)
 args = sys.argv[2:]
 directory = home / ".config/systemd/user"
+def enablement(name):
+    if name.endswith(".timer"):
+        return [directory / "timers.target.wants" / name]
+    links, section = [], ""
+    for line in (directory / name).read_text().splitlines():
+        line = line.strip()
+        if line.startswith("["):
+            section = line
+        key, sep, value = line.partition("=")
+        if section == "[Install]" and sep:
+            for target in value.split():
+                if key in ("WantedBy", "RequiredBy"):
+                    suffix = "wants" if key == "WantedBy" else "requires"
+                    links.append(directory / (target + "." + suffix) / name)
+                elif key == "Alias":
+                    links.append(directory / target)
+    return links
 if args[0] == "daemon-reload":
     record = home / "unit-reloads.json"
     reloads = json.loads(record.read_text()) if record.exists() else []
@@ -47,13 +64,18 @@ if args[0] == "daemon-reload":
     (home / "manager-needs-reload").unlink(missing_ok=True)
 elif args[0] == "enable":
     name = args[-1]
-    link = directory / "timers.target.wants" / name
-    link.parent.mkdir(parents=True, exist_ok=True)
-    if link.is_symlink() and link.resolve() != directory / name:
-        print("conflicting enablement symlink", file=sys.stderr)
-        sys.exit(1)
-    if not link.is_symlink():
-        link.symlink_to(directory / name)
+    for link in enablement(name):
+        link.parent.mkdir(parents=True, exist_ok=True)
+        if link.is_symlink() and link.resolve() != directory / name:
+            print("conflicting enablement symlink", file=sys.stderr)
+            sys.exit(1)
+        if not link.is_symlink():
+            link.symlink_to(directory / name)
+    if name.endswith(".service") and "--now" in args:
+        active = home / (name + ".active")
+        sibling = active.with_suffix(".new")
+        sibling.write_text("active")
+        sibling.replace(active)
     if os.environ.get("FAKE_ENABLE_TIMER_RUN"):
         result = subprocess.run([sys.executable, "-I", "-B",
             str(home / "src/fabrig/current/tools/fleet-sync"), "--host", "hel8", "--timer"],
@@ -63,7 +85,8 @@ elif args[0] == "enable":
         sibling.write_text(json.dumps([result.returncode, result.stdout, result.stderr]))
         sibling.replace(record)
 elif args[0] == "disable":
-    (directory / "timers.target.wants" / args[-1]).unlink(missing_ok=True)
+    for link in enablement(args[-1]):
+        link.unlink(missing_ok=True)
 elif args[0] == "show":
     if "NeedDaemonReload" in args:
         for name in args[3:]:
@@ -72,6 +95,9 @@ elif args[0] == "show":
     else:
         print("Version=fake")
 elif args[0] == "is-active":
+    if args[-1].endswith(".service"):
+        state = os.environ.get("FAKE_SERVICE_STATE", "active" if (home / (args[-1] + ".active")).exists() else "inactive")
+        sys.exit(0 if state == "active" else 1 if state == "failed" else 3)
     sys.exit(3 if os.environ.get("FAKE_INACTIVE") or not (directory / "timers.target.wants" / args[-1]).is_symlink() else 0)
 '''
 

@@ -97,6 +97,28 @@ Hold and a busy lock leave retry untouched; checks and previews never consume it
    A conflicting enablement symlink for a journal-owned timer is replaced by
    sibling rename before enable; unrelated links/files are never forced.
    Changed long-running services warn restart pending; never restart them.
+
+   A service opts into one initial start when its first line is exactly
+   `# fleet-sync: start-once` and it has an `[Install]` section (for example,
+   `WantedBy=default.target`). The marker on a timer or a unit without [Install]
+   is refused by self-check (exit 2). Older runners, including release 1148127,
+   accept the comment and treat the unit as an ordinary service.
+   After writing a previously absent or unowned service, fleet-sync runs
+   `enable --now --no-reload` after daemon-reload. Journal-owned units whose
+   first enablement never completed are retried when their enablement link is
+   missing. The journal records completed initial enablement so later missing
+   or wrong links are repaired with `enable --no-reload`, without starting it.
+   It never stops or restarts a start-once service. Later content changes warn
+   `restart pending`, including oneshot services. Inactive or failed services
+   warn `start-once service not active; its owner restarts it` and stay inactive.
+   Role removal disables without --now, removes the owned file, and reports
+   `stopped by its owner`; a running service is left running.
+   **The service owner must coordinate its first start:** fleet-sync starts it
+   at the first run after landing on a host whose role selects it. Further
+   starts, restarts and shutdowns belong to that owner. `--check` and `--preview`
+   report first-start intent, enablement drift, content changes and activity
+   without systemctl writes; existing start-once services get a read-only
+   `is-active` probe.
 5. Probe versions, save state.json/run.log atomically, and retain seven days of
    changed/failed JSONL records. State includes actual/desired SHAs, items and
    last timer completion, which manual checks preserve. Later steps continue
@@ -143,7 +165,8 @@ DIR/home using no-follow reads, then converges that copy. It refuses unsafe
 managed files; installed tool symlinks are inspected and reproduced as links.
 Rendered paths and link targets name the real HOME, even inside the copy.
 Preview uses the invoking checkout's declarations without fetching/deploying a
-release, defers fabrig, and runs no systemctl, lock, journal or state writes.
+release, defers fabrig, and makes no systemctl writes or live lock, journal or
+state writes. Existing start-once services may be probed with is-active.
 Conflict checks use the real HOME and environment. Version probes are skipped:
 `versions: not probed in preview; see --check`. `--check` still probes versions.
 Preview prints unified diffs (including additions, removals and backups),
@@ -154,10 +177,11 @@ stay inside DIR; preview accepts only --host alongside --preview.
 
 `--check` and `--preview` continue checking other items after an agents failure;
 normal deployment still stops on that failure.
-`--check` creates no files/locks/state and calls no systemctl. Its only write
+`--check` creates no files/locks/state and makes no systemctl writes. Its only write
 exception is fetching/comparing an EXISTING private fabrig mirror; an absent
 mirror stays absent and falls back to HEAD equality. Unit checks inspect files,
-enablement links and advertised bus availability, not timer runtime activity.
+enablement links and advertised bus availability; start-once services also get
+a read-only activity probe. Timer runtime activity is not probed.
 `status [--json]` checks locally in-process and others in parallel, using strict
 existing SSH trust without updates; outside the fleet, all checks are remote.
 Unreachable hosts are individual lines. Status names the newest marked previous

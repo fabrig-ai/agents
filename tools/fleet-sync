@@ -401,10 +401,15 @@ class Declarations:
         for name in RECOVERY_UNITS:
             if self.unit_roles.get(name) != ["*"]:
                 raise ValueError(f"{name} must belong to exactly [\"*\"]")
+        self.start_once = set()
         for name, roles in self.unit_roles.items():
             if not isinstance(roles, list) or not roles or not all(isinstance(r, str) for r in roles):
                 raise ValueError(f"invalid unit roles: {name}")
             text = self.units[name]
+            if text.partition("\n")[0] == "# fleet-sync: start-once":
+                if not name.endswith(".service") or not any(line.strip() == "[Install]" for line in text.splitlines()):
+                    raise ValueError(f"start-once requires a service with [Install]: {name}")
+                self.start_once.add(name)
             if "[Unit]" not in text or (name.endswith(".service") and "[Service]" not in text) or (name.endswith(".timer") and "[Timer]" not in text):
                 raise ValueError(f"invalid unit: {name}")
         section, starts = "", []
@@ -506,9 +511,11 @@ class Runner:
         self.owned = set(self.old.get("managed_files", []))
         self.link_owned = set(self.old.get("managed_links", []))
         self.unit_owned = set(self.old.get("managed_units", []))
+        self.start_once_started = set()
         self.reload_pending = self.old.get("unit_reload_pending", False)
         if intent is not None:
             self.unit_owned = set(intent["units"])
+            self.start_once_started = set(intent.get("start_once_started", []))
             self.reload_pending = intent["reload_pending"]
         self.log = json.loads(os.environ.pop("FLEET_SYNC_LOG", "[]")) if resume else []
         self.lock_fd = None
@@ -1086,33 +1093,50 @@ class Runner:
             existing[name] = data is not None
             if name in wanted:
                 differs[name] = data != self.d.units[name].encode()
+        start_once = wanted & self.d.start_once
+        first_start = {name for name in start_once
+                       if not existing[name] or name not in self.unit_owned
+                       or (name not in self.start_once_started and not self.service_enabled(name))}
         stale = self.unit_owned - wanted - RECOVERY_UNITS
         if not self.args.check and not self.previewing:
             # Journal ownership AND reload intent before the first unit mutation.
+            self.start_once_started.difference_update(first_start)
             self.unit_owned.update(wanted)
             self.reload_pending |= any(differs.values()) or bool(stale)
             self.save_unit_intent()
         for name in sorted(wanted):
             relative = f".config/systemd/user/{name}"
             different = self.write(relative, self.d.units[name])
-            if different and name.endswith(".service") and not re.search(r"(?m)^Type=oneshot\s*$", self.d.units[name]):
+            if (different and name not in first_start and name.endswith(".service")
+                    and (name in start_once or not re.search(r"(?m)^Type=oneshot\s*$", self.d.units[name]))):
                 self.item(name, "warn", "restart pending; service was not restarted")
         for name in sorted(stale):
             if self.args.check:
-                self.item(name, "drift", "previously managed unit no longer belongs to this role")
+                self.item(name, "drift", "previously managed unit no longer belongs to this role"
+                          + ("; stopped by its owner" if name.endswith(".service") else ""))
             else:
                 # Do not stop services, including services paired with removed timers.
                 if existing[name] and not self.previewing:
                     self.cmd("systemctl", "--user", "disable", "--no-reload", *(["--now"] if name.endswith(".timer") else []), name)
                 self.safe.unlink(f".config/systemd/user/{name}")
                 self.unit_owned.remove(name)
+                self.start_once_started.discard(name)
                 self.owned.discard(f".config/systemd/user/{name}")
-                self.item(name, "changed", "disabled and removed previously managed unit")
+                self.item(name, "changed", "disabled and removed previously managed unit"
+                          + ("; stopped by its owner" if name.endswith(".service") else ""))
+        if self.args.check or self.previewing:
+            for name in sorted(start_once):
+                enabled = self.service_enabled(name)
+                self.item(f"enabled:{name}", "ok" if enabled else "drift", "service enablement symlink")
+                if name in first_start:
+                    self.item(name, "drift", "start-once service first start pending")
+                else:
+                    self.start_once_status(name)
         if self.previewing:
-            self.item("units:activation", "deferred", "preview: systemctl is not run")
+            self.item("units:activation", "deferred", "preview: no systemctl writes")
             return
         if self.args.check:
-            # --check must not run systemctl (including during the live acceptance check).
+            # Timers remain filesystem-only; start-once services get a read-only activity probe.
             if self.reload_pending:
                 self.item("units:reload", "drift", "daemon-reload pending after a failed run")
             for name in sorted(wanted):
@@ -1149,11 +1173,45 @@ class Runner:
                         self.safe.link(relative, directory / name)
                     self.cmd("systemctl", "--user", "enable", "--now", "--no-reload", name)
                 self.item(f"enabled:{name}", "ok", "timer enabled and started")
+        for name in sorted(start_once):
+            enabled = self.service_enabled(name)
+            if name in first_start or not enabled:
+                for relative in self.service_enablement(name):
+                    if self.safe.readlink(relative) is not None:
+                        self.safe.link(relative, directory / name)
+                self.cmd("systemctl", "--user", "enable", *(["--now"] if name in first_start else []),
+                         "--no-reload", name)
+            self.start_once_started.add(name)
+            self.save_unit_intent()
+            self.item(f"enabled:{name}", "ok", "start-once service enabled"
+                      + (" and started" if name in first_start else ""))
+            self.start_once_status(name)
         self.save_unit_intent()
 
-    def timer_enabled(self, name):
-        relative = f".config/systemd/user/timers.target.wants/{name}"
-        target = self.safe.readlink(relative)
+    def service_enablement(self, name):
+        links, section = set(), ""
+        for line in self.d.units[name].splitlines():
+            line = line.strip()
+            if line.startswith("[") and line.endswith("]"):
+                section = line
+            key, sep, value = line.partition("=")
+            if section != "[Install]" or not sep or key.strip() not in ("WantedBy", "RequiredBy", "Alias"):
+                continue
+            key = key.strip()
+            for target in value.split():
+                if Path(target).name != target or target in (".", "..") or "%" in target:
+                    raise ValueError(f"unsupported start-once enablement target: {target}")
+                suffix = {"WantedBy": "wants", "RequiredBy": "requires"}.get(key)
+                links.add(f".config/systemd/user/{target}.{suffix}/{name}" if suffix
+                          else f".config/systemd/user/{target}")
+        return sorted(links)
+
+    def service_enabled(self, name):
+        safe = getattr(self, "real_safe", self.safe)
+        return all(self.enablement_link(safe, relative, name) for relative in self.service_enablement(name))
+
+    def enablement_link(self, safe, relative, name):
+        target = safe.readlink(relative)
         if target is None:
             return False
         path = Path(target)
@@ -1161,9 +1219,25 @@ class Runner:
             path = (self.home / relative).parent / path
         return Path(os.path.normpath(path)) == self.home / ".config/systemd/user" / name
 
+    def start_once_status(self, name):
+        try:
+            self.cmd("systemctl", "--user", "is-active", "--quiet", name)
+        except CommandError as error:
+            if error.code not in (1, 3, 4):
+                raise
+            self.item(name, "warn", "start-once service not active; its owner restarts it")
+        else:
+            self.item(name, "ok", "start-once service active")
+
+    def timer_enabled(self, name):
+        relative = f".config/systemd/user/timers.target.wants/{name}"
+        return self.enablement_link(self.safe, relative, name)
+
     def save_unit_intent(self):
         relative = ".local/state/fleet-sync/units.json"
         intent = {"units": sorted(self.unit_owned), "reload_pending": self.reload_pending}
+        if self.start_once_started:
+            intent["start_once_started"] = sorted(self.start_once_started)
         if self.safe.json(relative, None) != intent:
             self.safe.save(relative, json.dumps(intent) + "\n")
 
