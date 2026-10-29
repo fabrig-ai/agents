@@ -281,7 +281,10 @@ only after moved logins are back, confirms every stop, and gives in-place
 logins afterward. Discovery requires exact unit names and the scratch working
 directory; failed, duplicate or malformed observations keep custody. Stops
 are nonblocking followed by bounded show polls. Every systemctl call has a
-30-second bound; login and post calls 60 seconds, codex-run 120 seconds.
+30-second bound; login and ordinary post calls 60 seconds, codex-run 120
+seconds. The mailbox wait is bounded by its requested `--timeout` plus
+`POST_WAIT_MARGIN_SECONDS` (5 seconds). A failed wait still sleeps the
+configured interval before retrying.
 The slot stays held until session and deployment units are confirmed stopped.
 Local `released` records unit stop confirmation. Claim release also waits
 for every grant to be returned. A strict login inventory must show no

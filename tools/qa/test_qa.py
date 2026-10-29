@@ -421,8 +421,22 @@ elif name == 'post':
         waits.write_text(str(index + 1))
         if index == 0 and config.get('wait_settings'):
             (root / 'tmp/machine.env').write_text(config['wait_settings'])
+        if 'wait_scale' in config and index < 2:
+            started = time.monotonic()
+            publish_marker('wait-started-' + str(index), str(started))
+            deadline = started + int(args[args.index('--timeout') + 1]) * config['wait_scale']
+            while time.monotonic() < deadline:
+                if (root / 'mail-delivered').exists():
+                    sys.exit(0)
+                time.sleep(0.01)
+            publish_marker('wait-elapsed', str(time.monotonic() - started))
+            sys.exit(1)
         sys.exit(config.get('wait', [4])[index])
     assert args == ['read', 'qa-watch']
+    if config.get('wait_scale'):
+        delivered = float((root / 'mail-delivered').read_text())
+        publish_marker('mail-read-delay', str(time.monotonic() - delivered))
+        (root / 'mail-delivered').unlink()
     print('fixture end mail')
 '''
 
@@ -3205,6 +3219,49 @@ def watch_runs_once_per_machine_and_loops_on_its_mailbox(lab):
 
 
 
+def watch_wait_outlasts_the_post_cap_and_reads_mail_promptly(lab):
+    # Scale only mailbox time: 120 s becomes 1.2 s, the old cap 0.6 s.
+    # Keep real subprocess deadlines and an independently delivered mailbox file.
+    lab.env['QA_INTERVAL_SECONDS'] = '120'
+    lab.configure(wait=[1, 0, 4], wait_scale=0.01)
+
+    def deliver():
+        marker = lab.root / 'wait-started-1'
+        deadline = time.monotonic() + 10
+        while not marker.exists():
+            assert time.monotonic() < deadline, 'second mailbox wait never started'
+            time.sleep(0.01)
+        time.sleep(0.8)
+        path = lab.root / 'mail-delivered'
+        temporary = path.with_suffix('.new')
+        temporary.write_text(str(time.monotonic()))
+        temporary.replace(path)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        delivery = pool.submit(deliver)
+        result = driven_watch(lab, """original = tool['main'].__globals__['command']
+def command(argv, cwd=None, timeout=None, pass_fds=(), **kwargs):
+    if str(argv[0]).endswith('/post'):
+        if argv[1] == 'wait':
+            interval = int(argv[argv.index('--timeout') + 1])
+            # Preserve command grace for process startup under suite load.
+            timeout = min(timeout, interval) * 0.01 + max(0, timeout - interval)
+        else:
+            assert timeout == 60, (argv, timeout)
+    return original(argv, cwd=cwd, timeout=timeout, pass_fds=pass_fds, **kwargs)
+tool['main'].__globals__['command'] = command
+# Also scale the failure backoff, so the broken implementation fails promptly.
+sleep = tool['time'].sleep
+tool['time'].sleep = lambda seconds: sleep(seconds * 0.01 if seconds == 120 else seconds)
+""", once=False, status=2)
+        delivery.result()
+    assert 'post wait failed' not in result.stdout, result.stdout
+    assert 'fixture end mail' in result.stdout
+    assert float((lab.root / 'wait-elapsed').read_text()) >= 1.2
+    assert float((lab.root / 'mail-read-delay').read_text()) < 0.4
+    assert [call[0] for call in lab.calls('post')] == ['wait', 'wait', 'read', 'wait']
+
+
 def unsupported_commands_are_refused_without_state(lab):
     for name in ('candidates', 'decide', 'default', 'backlog', 'passes', 'findings', 'rung', 'triage', 'keep'):
         lab.run(name, status=2)
@@ -4605,6 +4662,7 @@ CASES = (
     a_hung_systemctl_bounds_the_check,
     unsupported_commands_are_refused_without_state,
     watch_runs_once_per_machine_and_loops_on_its_mailbox,
+    watch_wait_outlasts_the_post_cap_and_reads_mail_promptly,
     deeply_nested_and_oversized_states_keep_custody_without_stopping_checks,
     walk_kind_settings_are_validated_and_follow_precedence,
     a_resume_recovers_its_thread_from_events,

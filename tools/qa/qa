@@ -33,6 +33,7 @@ LOGIN = r'[a-z][a-z0-9-]*'
 SHA = r'[0-9a-f]{40}'
 CLAIM_WHAT = r'qa walk (rung-[a-z0-9-]+-[1-9][0-9]*) attempt ([1-9][0-9]*)(?: claim [0-9a-f]{32})?'
 UNIT_POLL_SECONDS = 2
+POST_WAIT_MARGIN_SECONDS = 5
 ADDRESS = r'[a-z][a-z0-9-]*(/[a-z0-9][a-z0-9-]*)*@[a-z][a-z0-9-]*'
 ATTEMPT_KEYS = ('attempt holder ref main cap started slot slot_claim checkout launch_complete logins kinds pools requests run stage given released '
                 'start_logged end_logged posted capped decision pause_line resume_run report_attempt alerts').split()
@@ -499,6 +500,8 @@ class Watch:
 
     def call(self, tool, *args):
         seconds = dict(systemctl=30, logins=60, post=60, **{'codex-run': 120})
+        if tool == 'post' and args[:1] == ('wait',):
+            seconds['post'] = int(args[args.index('--timeout') + 1]) + POST_WAIT_MARGIN_SECONDS
         options = {}
         if tool == 'codex-run' and args[:1] == ('task',):
             need(self.walk_lock is not None, 'task launch needs its admission lock', 4)
