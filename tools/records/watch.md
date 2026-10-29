@@ -1,7 +1,10 @@
 # Pipeline watch
 
-`watch --once` evaluates section 3b of `director-records.md`; a hel8 timer
-should run it every two minutes. Without `--once` it repeats every 120 seconds.
+`tools/records/watch --once` evaluates section 3b of `director-records.md`.
+The hel8 `pipeline-watch.timer` runs `pipeline-watch.service` every two minutes,
+using the release's `tools/records/watch` executable. The installed command name
+is reserved as `pipeline-watch` so it does not shadow procps `watch`.
+Without `--once` the tool repeats every 120 seconds.
 `watch --dry-run --once` prints the exact proposed post commands, bounded
 metadata evidence and JSONL publication. It never calls send, wake or append,
 changes the watch state, or advances the live records clone. Its one `record
@@ -86,9 +89,17 @@ one first action, one escalation, and a close event after two successful clear
 runs. A recurrence alerts again. Post exit 0 or 3 counts as delivered; failed
 sends are retried, while wake is attempted only once. There is no additional
 global throttle: independent subjects must not suppress one another. Persisted
-pending events form an outbox; append retries reuse stable event ids. Every run
-publishes a heartbeat and all alert-open/escalate/close events through `record
-append --as watch watch hel8`, with owner, supervisor and available join keys.
+pending events form an outbox; append retries reuse stable event ids. All
+alert-open/escalate/close events publish immediately through `record append --as
+watch watch hel8`, with owner, supervisor and available join keys. A heartbeat
+publishes at most once per `[watch] heartbeat_seconds` (900 seconds by default),
+unless an alert opens, escalates or closes, or the set of failed input names
+changes, including recovery. Changing only an error's text does not trigger one.
+The first run publishes a heartbeat. The two-minute poll observes the fifteen-
+minute threshold on the next run (normally sixteen minutes). Each run still
+persists its evaluation state. Events and any pending retries share one append;
+quiet runs with an empty outbox do not append. Automatic writers make at most
+one push attempt per run, retaining failed publications until the next poll.
 `watch` is an append-only writer. Like post itself, sending and local state
 commit cannot be one transaction: a process death immediately after send and
 before state persistence can repeat that send after restart.

@@ -13,6 +13,7 @@ record pull
 record write --as s/multi drafts/example/draft.toml --from /tmp/draft.toml
 record write --as director director/decisions/next.md < /tmp/decision.md
 record append --as ops queue hel8 < /tmp/events.jsonl
+record append --as collect --batch hel8 < /tmp/all-sources.jsonl
 record check [PATH ...]
 record show director/priorities.toml
 ```
@@ -50,6 +51,12 @@ and resulting file is validated; existing bytes remain intact. All changed files
 are written to a temporary sibling, flushed and renamed over their destinations,
 then committed together and pushed once. An idempotent call creates no commit.
 
+`record append --as collect --batch HOST` takes each line's `source` instead of
+a positional source and groups all source/date files into that one commit.
+Every line must supply a valid source and match HOST; any invalid line refuses
+the whole batch before any file is changed. The per-source form stays available.
+Duplicate ids are scoped to each source/host/date file in both forms.
+
 Every event has string `id`, UTC `time`, `source`, `host`, and `kind` fields.
 Optional string joins are `coordinator`, `draft`, `area`, `part`, `task`,
 `branch`, `run`, `session`; other fields hold each producer's facts.
@@ -70,9 +77,35 @@ part = "collect"
 previews local facts. See [collector usage and limits](record-collect.md) for all
 eight sources, cursors, joins and snapshot/timestamp semantics.
 
+## Scheduled push rate
+
+With the declared timers, each collector invocation makes at most one push,
+regardless of its source count. These are upper bounds in a steady scheduled
+hour, excluding boot catch-up, manual invocations and other records writers:
+
+| Host/role | Collector runs/hour | Quiet watch heartbeats/hour | Worst-case pushes/hour |
+|---|---:|---:|---:|
+| hel8 / session | 30 | at most 4 | 60 (30 collector + 30 watch) |
+| builder (for example hetzner6) | 12 | 0 | 12 |
+| hetzner8 / gate | 30 | 0 | 30 |
+
+Hel8 normally has up to 34 pushes/hour while alerts and failed-input sets stay
+unchanged: sessions emits fresh context readings each poll and watch publishes
+only its heartbeat. Alert transitions or changes in the failed-input set can
+make watch publish on every two-minute poll, giving the 60/hour worst case.
+Builders and the gate push only when their batch contains new facts, so idle
+runs can produce zero pushes. Status-page only pulls records (six times/hour);
+fleet-sync also contributes no records pushes. A rejected automatic push waits
+for the next scheduled run instead of adding retries within the same run.
+
 ## Races and recovery
 
-Every publish starts from origin/main. A rejected push triggers a fetch; only
+Every publish starts from origin/main. Automated `collect` and `watch` appends
+make at most one push attempt. On rejection they reset safely to origin and leave
+the caller's durable outbox for its next poll, preserving exact ids and timestamps.
+Other writers retain the retry behavior below.
+
+A rejected push triggers a fetch; only
 an advanced remote branch warrants a retry. The unpublished commit is rebased,
 the resulting files are validated again, and push is attempted at most five
 times, with exponential jittered backoff. A conflict aborts the rebase, resets

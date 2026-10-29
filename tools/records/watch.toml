@@ -4,6 +4,7 @@ post = false
 
 [watch]
 interval_seconds = 120
+heartbeat_seconds = 900
 
 [rules.deaf]
 enabled = true

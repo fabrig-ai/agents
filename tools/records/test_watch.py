@@ -379,6 +379,22 @@ class Rules(unittest.TestCase):
 
 
 
+class Heartbeats(unittest.TestCase):
+    def test_interval_boundaries_and_alert_exceptions(self):
+        due = API['heartbeat_due']
+        state = {'heartbeat': {'time': NOW, 'failed_inputs': []}}
+        self.assertTrue(due({}, [], {}, NOW, 900))
+        self.assertFalse(due(state, [], {}, NOW + 899, 900))
+        self.assertTrue(due(state, [], {}, NOW + 900, 900))
+        self.assertFalse(due(state, [], {}, NOW - 1, 900))
+        for kind in ('alert-open', 'alert-escalate', 'alert-close'):
+            self.assertTrue(due(state, [{'kind': kind}], {}, NOW + 1, 900))
+        self.assertTrue(due(state, [], {'agents': 'failed'}, NOW + 1, 900))
+        state['heartbeat']['failed_inputs'] = ['agents']
+        self.assertFalse(due(state, [], {'agents': 'different failure reason'}, NOW + 1, 900))
+        self.assertTrue(due(state, [], {}, NOW + 1, 900))
+
+
 class Integration(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory(prefix='watch-test-')
@@ -489,7 +505,7 @@ else: sys.exit(1 if sys.argv[2] in os.environ.get('UNOWNED','').split(',') else 
         self.invoke()
         events = self.events()
         self.assertEqual(sum(e['kind']=='alert-open' for e in events), 1)
-        self.assertEqual(sum(e['kind']=='heartbeat' for e in events), 2)
+        self.assertEqual(sum(e['kind']=='heartbeat' for e in events), 1)
         self.assertEqual(json.loads((self.home/'post.log').read_text()), ['wake', 'lead/jig'])
         state = self.home/'.local/state/watch/state.json'
         self.assertEqual(state.stat().st_mode & 0o777, 0o600)
@@ -528,6 +544,49 @@ else: sys.exit(1 if sys.argv[2] in os.environ.get('UNOWNED','').split(',') else 
         self.assertTrue(any(e['kind'] == 'alert-escalate' for e in self.events()))
         self.assertFalse((self.home/'post.log').exists())
         self.assertEqual(sum(e['kind'] == 'heartbeat' for e in self.events()), 2)
+
+    def test_alerts_and_heartbeat_use_one_push_per_poll(self):
+        pushes = self.home/'pushes'
+        hook = self.write(self.origin/'hooks/post-receive',
+            '#!/usr/bin/env python3\nfrom pathlib import Path\n'
+            f'with Path({str(pushes)!r}).open("a") as out: out.write("push\\n")\n')
+        hook.chmod(0o700)
+        mail = self.mail()
+        self.invoke()
+        self.assertEqual(pushes.read_text().splitlines(), ['push'])
+        self.invoke()
+        self.assertEqual(pushes.read_text().splitlines(), ['push'])
+        mail.unlink()
+        self.invoke()
+        self.assertEqual(pushes.read_text().splitlines(), ['push'])
+        self.invoke()
+        self.assertEqual(pushes.read_text().splitlines(), ['push', 'push'])
+        self.assertEqual(sum(e['kind'] == 'alert-close' for e in self.events()), 1)
+        state = self.state()
+        state['heartbeat']['time'] -= 900
+        API['atomic'](self.home/'.local/state/watch/state.json', state)
+        self.invoke()
+        self.assertEqual(pushes.read_text().splitlines(), ['push'] * 3)
+
+    def test_heartbeat_interval_and_failed_input_changes(self):
+        self.invoke()
+        self.assertEqual(len(self.events()), 1)
+        head = self.git('--git-dir', str(self.origin), 'rev-parse', 'main')
+        self.invoke()
+        self.assertEqual(self.git('--git-dir', str(self.origin), 'rev-parse', 'main'), head)
+        state = self.state()
+        state['heartbeat']['time'] -= 900
+        API['atomic'](self.home/'.local/state/watch/state.json', state)
+        self.invoke()
+        self.assertEqual(len(self.events()), 2)
+        self.invoke(FAIL_INPUT='claude')
+        self.assertEqual(len(self.events()), 3)
+        self.assertIn('agents', self.events()[-1]['inputs_failed'])
+        self.invoke(FAIL_INPUT='claude')
+        self.assertEqual(len(self.events()), 3)
+        self.invoke()
+        self.assertEqual(len(self.events()), 4)
+        self.assertFalse(self.events()[-1]['inputs_failed'])
 
     def test_failure_isolation_and_paused_names(self):
         self.mail()
