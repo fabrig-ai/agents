@@ -593,8 +593,8 @@ def reconcile(state, candidates, errors, config, now, action):
     episodes = state.setdefault('episodes', {})
     events = []
     def emit(kind, episode):
-        fields = {k: v for k, v in episode.items() if k in JOIN + ['rule', 'subject', 'owner', 'supervisor', 'wake']}
-        identity = [kind, episode['rule'], episode['subject'], episode['opened']]
+        fields = {k: v for k, v in episode.items() if k in JOIN + ['rule', 'subject', 'owner', 'supervisor', 'wake', 'episode']}
+        identity = [kind, episode['rule'], episode['subject'], episode['opened'], episode.get('episode', 0)]
         events.append(dict(fields, id='watch:' + hashlib.sha256(json.dumps(identity).encode()).hexdigest(),
                            time=iso(now), source='watch', host='hel8', kind=kind))
     for key, candidate in sorted(candidates.items()):
@@ -604,7 +604,8 @@ def reconcile(state, candidates, errors, config, now, action):
             continue
         episode = episodes.get(key)
         if episode is None:
-            episode = dict(candidate, opened=now, clear=0, escalated=False, notified=False)
+            state['next_episode'] = state.get('next_episode', 0) + 1
+            episode = dict(candidate, episode=state['next_episode'], opened=now, clear=0, escalated=False, notified=False)
             if candidate['rule'] == 'deaf':
                 episode['wake'] = action('wake', candidate['owner'], candidate)
                 episode['notified'] = True

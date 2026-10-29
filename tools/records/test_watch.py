@@ -252,6 +252,18 @@ class Rules(unittest.TestCase):
         self.assertEqual(events[0]['kind'], 'alert-open')
         self.assertEqual(self.calls[-1], ('wake', 'lead/tools', 'deaf'))
 
+    def test_recurrence_event_ids_are_distinct_with_a_frozen_clock(self):
+        self.live()
+        self.mail(11)
+        first = self.round()[0]
+        self.data['mail'] = []
+        self.round()
+        self.round()
+        self.mail(11)
+        recurrence = self.round()[0]
+        self.assertNotEqual(first['id'], recurrence['id'])
+        self.assertNotEqual(first['episode'], recurrence['episode'])
+
     def test_failed_round_breaks_consecutive_clear_streak(self):
         self.live()
         self.mail(11)
