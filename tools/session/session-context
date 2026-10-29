@@ -7,7 +7,7 @@ input, cache read, cache creation and output tokens, against --window.
 Codex threads: reads the thread's rollout (~/.codex/sessions/**/rollout-*-<thread>.jsonl)
 and its latest token count, against the window the rollout records.
 
-  session-context                  the newest Claude session started from this directory
+  session-context                  CLAUDE_CODE_SESSION_ID, or the sole recent Claude session
   session-context SESSION_ID       a Claude session by (a prefix of) its id
   session-context --name lead/jig  a running background Claude session by its name
   session-context --codex THREAD   a Codex thread by its id
@@ -24,7 +24,10 @@ Repeatable --watch ABSOLUTE_PATH adds notices when role sections change, with a
 silent first baseline. Notices use UserPromptSubmit, SessionStart resume/compact,
 or inactive Stop. Seen copies expire after seven idle days, checked once a day.
 Options: --window N (Claude; default 1000000), --threshold F (default 0.75).
-Exit 0 below the threshold, 3 at or past it (a hook exits 0 and says so in JSON).
+Without an id or CLAUDE_CODE_SESSION_ID, exactly one session must have written
+to this directory's project folder in the last 30 minutes; otherwise pass an id.
+Exit 2 for ambiguous or absent recent sessions; 0 below the threshold, 3 at or
+past it (a hook exits 0 and says so in JSON).
 """
 import glob, json, os, subprocess, sys, tempfile
 import fcntl, hashlib, re, shutil, time
@@ -59,7 +62,16 @@ def claude_transcript(session, cwd):
     files = [os.path.join(d, f) for f in os.listdir(d) if f.endswith('.jsonl')] if os.path.isdir(d) else []
     if not files:
         sys.exit(f'session-context: no transcript under {d}')
-    return max(files, key=os.path.getmtime)
+    recent = sorted((os.path.getmtime(path), path) for path in files
+                    if os.path.getmtime(path) >= time.time() - 30 * 60)
+    if len(recent) != 1:
+        print('session-context: expected one session written in the last 30 minutes; '
+              'pass a session id', file=sys.stderr)
+        for mtime, path in recent:
+            stamp = datetime.fromtimestamp(mtime, UTC).isoformat(timespec='seconds')
+            print(f'  {os.path.basename(path)[:8]} mtime {stamp}', file=sys.stderr)
+        sys.exit(2)
+    return recent[0][1]
 
 
 def records(path, tail=False):
@@ -519,6 +531,7 @@ def dispatch(argv):
         else: session = a; i += 1
     if as_hook:
         return hook(threshold, window, role, names, prefixes, coordinator, handover, handle, watches)
+    session = session or os.environ.get('CLAUDE_CODE_SESSION_ID')
     usage = codex_usage(codex) if codex else claude_usage(claude_transcript(session, cwd), window)
     reached, line = report(*usage, threshold)
     print(line)

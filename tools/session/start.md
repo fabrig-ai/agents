@@ -62,6 +62,11 @@ Prepare hooks, then run `claude --bg --name NAME [--model M] --effort E PROMPT`
 from the start directory. Print its session id or unrecognized launch report.
 Exit codes: 0 success, 1 refused, 2 usage/configuration/command error.
 
+Manual context measurements run `session-context` from the session's start
+directory. It selects `CLAUDE_CODE_SESSION_ID` when set. Without that variable,
+exactly one transcript must have been written in the project's last 30 minutes;
+if several have, pass a session id explicitly (exit 2 lists their ids and mtimes).
+
 ## Hooks and compatibility
 
 `start` writes `<start dir>/.claude/settings.json`; `wire` refreshes the
