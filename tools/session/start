@@ -11,20 +11,22 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from session_lib import (ROOT, AREAS, clone, create_empty, session_capabilities, list_sessions,
                          live_session, names, owns, publish_settings, recent_warmup, record_warmup,
-                         render, session_id, state_time)
+                         render, session_id, state_time, watched)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="role", required=True)
-    for role in ("lead", "coordinator"):
+    for role in ("lead", "coordinator", "director"):
         command = commands.add_parser(role)
-        command.add_argument("handle")
+        if role != "director":
+            command.add_argument("handle")
         if role == "lead":
             command.add_argument("area")
         else:
             command.add_argument("--next", action="store_true")
-        command.add_argument("--model")
+        if role != "director":
+            command.add_argument("--model")
         command.add_argument("--effort", default="high" if role == "lead" else "xhigh")
         command.add_argument("--dry-run", action="store_true")
     wire = commands.add_parser("wire", help="refresh project hooks without starting sessions")
@@ -39,9 +41,13 @@ def main():
             if not owned:
                 print("start: " + " ".join(reason.split()), file=sys.stderr)
             return 0 if owned else 1
-        values = names(args.handle, getattr(args, "area", None))
+        handle = "director" if args.role == "director" else args.handle
+        values = names(handle, getattr(args, "area", None))
         if args.role == "wire":
             capabilities = session_capabilities()
+            if handle == "director":
+                publish_settings(values, "director", capabilities, args.dry_run)
+                return 0
             publish_settings(values, "coordinator", capabilities, args.dry_run)
             for area in AREAS:
                 lead = names(args.handle, area)
@@ -58,13 +64,15 @@ def main():
             cwd = values["lead_start_dir"]
             template = "lead.md"
         else:
-            name = values["coordinator_name"]
-            cwd = values["coordinator_start_dir"]
-            template = "coordinator-next.md" if args.next else "coordinator.md"
+            name = values[f"{args.role}_name"]
+            cwd = values[f"{args.role}_start_dir"]
+            template = args.role + ("-next.md" if args.next else ".md")
+            if args.role == "director":
+                values["director_role"], values["director_records"] = watched("director", handle)
         values["name"] = name
         prompt = render(ROOT / "prompts" / template, values)
         argv = ["claude", "--bg", "--name", name]
-        if args.model is not None:
+        if getattr(args, "model", None) is not None:
             argv += ["--model", args.model]
         argv += ["--effort", args.effort, prompt]
         capabilities = session_capabilities()
@@ -75,11 +83,13 @@ def main():
             publish_settings(values, args.role, capabilities, True)
         sessions = list_sessions()
         live = live_session(name, sessions)
+        if args.role == "director" and not args.next:
+            live = live or live_session(values["director_legacy_name"], sessions)
         if live is not None:
-            print(f"start: refused: live session {name} ({live.get('sessionId', live.get('id', 'unknown'))})", file=sys.stderr)
+            print(f"start: refused: live session {live.get('name', name)} ({live.get('sessionId', live.get('id', 'unknown'))})", file=sys.stderr)
             return 1
-        if args.role == "coordinator" and args.next:
-            warmup = recent_warmup(values, sessions)
+        if args.role in ("coordinator", "director") and args.next:
+            warmup = recent_warmup(values, sessions, args.role)
             if warmup:
                 print(f"start: refused: recent live warm-up {warmup}", file=sys.stderr)
                 return 1
@@ -91,7 +101,7 @@ def main():
                 create_empty(scratch / filename)
             for directory in ("repo", "survey"):
                 clone(scratch / directory)
-        elif not args.next:
+        elif args.role == "coordinator" and not args.next:
             clone(Path(values["coordinator_clone"]))
         publish_settings(values, args.role, capabilities, False)
         started_at = time.time()
@@ -100,7 +110,7 @@ def main():
             raise RuntimeError(f"claude launch failed ({result.returncode}):\n{result.stdout}{result.stderr}")
         output = result.stdout + result.stderr
         identifier = session_id(output)
-        if args.role == "coordinator" and args.next:
+        if args.role in ("coordinator", "director") and args.next:
             record_warmup(name, identifier, started_at)
         print(identifier or output, end="" if output.endswith("\n") and not identifier else "\n")
         return 0

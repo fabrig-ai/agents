@@ -464,5 +464,35 @@ sys.exit(int(os.environ.get("FAKE_EXIT", "0")))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("End now", json.loads(result.stdout)["reason"])
 
+    def test_director_handover_message_for_current_and_legacy_names(self):
+        path = self.transcript("director-id", [call((0, 800_000, 0, 0))])
+        expected = ("Hand over now: bring ~/src/rust/tmp/supervise/director/handover.md and state.md current, "
+                    "start your successor with `tools/session/start director --next`, then warm-up and takeover. "
+                    "If your handover is already under way, carry on with it.")
+        for name, kind, extra in (("director/20261029T1200Z", "Stop", {}), ("director", "SessionStart", {"source": "compact"})):
+            # Use different session ids so each event exercises its own gate lookup.
+            identity = name.replace("/", "-")
+            self.env["FAKE_AGENTS"] = json.dumps([{"name": name, "sessionId": identity}])
+            result = self.hook({"hook_event_name": kind, "session_id": identity, "transcript_path": str(path), **extra},
+                               "--role", "director", "--name-prefix", "director/", "--name", "director")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            answer = json.loads(result.stdout)
+            message = answer["reason"] if kind == "Stop" else answer["hookSpecificOutput"]["additionalContext"]
+            self.assertTrue(message.endswith(expected))
+            self.assertNotIn("End now", message)
+
+    def test_director_handover_combines_with_role_drift(self):
+        self.prepare_drift()
+        self.env["FAKE_AGENTS"] = '[{"sessionId":"drift-id","name":"director/20261029T1200Z"}]'
+        args = ("--role", "director", "--name-prefix", "director/", "--watch", str(self.role_file))
+        event = {"hook_event_name": "SessionStart", "source": "startup", "session_id": "drift-id", "transcript_path": str(self.drift_transcript)}
+        self.assertEqual(self.hook(event, *args).stdout, "")
+        self.role_file.write_text(self.role_file.read_text() + "Rule added.\n")
+        self.transcript("drift-id", [call((0, 800_000, 0, 0))])
+        result = self.hook({**event, "hook_event_name": "Stop"}, *args)
+        message = json.loads(result.stdout)["reason"]
+        self.assertLess(message.index("Hand over now"), message.index("changed since"))
+        self.assertIn("tools/session/start director --next", message)
+
 if __name__ == "__main__":
     unittest.main()

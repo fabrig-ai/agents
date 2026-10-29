@@ -46,6 +46,17 @@ def registry(path=None):
 def names(handle, area=None):
     """Derive every identity and path here, including the incumbent exceptions."""
     entries = registry()
+    if handle == "director":
+        if area is not None:
+            raise ValueError("the director has no area")
+        start = Path.home() / "src/rust/tmp/supervise/director"
+        return {
+            "handle": "director", "director_mailbox": "director", "director_address": "director@hel8",
+            "director_name": f"director/{datetime.now(UTC):%Y%m%dT%H%MZ}",
+            "director_name_prefix": "director/", "director_legacy_name": "director",
+            "warmup_name": "director-next", "director_start_dir": str(start),
+            "director_handover": str(start / "handover.md"), "director_state": str(start / "state.md"),
+        }
     if handle not in entries:
         raise ValueError(f"unknown coordinator: {handle}")
     if area is not None and area not in AREAS:
@@ -164,6 +175,9 @@ def session_capabilities():
 def watched(role, handle, area=None):
     """All live role paths live here, ready for the factory's eventual move."""
     values = names(handle, area)
+    if role == "director":
+        root = Path.home() / "src/rust/tmp/supervise/monorepo"
+        return [str(root / "director-role.md"), str(root / "director-records.md")]
     root = Path.home() / "src/fabrig/main"
     paths = [root / "AGENTS.md", root / "agents" / f"{role}.md", root / "agents/operations.md"]
     if role == "lead":
@@ -178,7 +192,7 @@ def watched(role, handle, area=None):
 
 
 def hook_settings(values, role, capabilities):
-    directory = values["lead_start_dir" if role == "lead" else "coordinator_start_dir"]
+    directory = values[f"{role}_start_dir"]
     path = Path(directory) / ".claude/settings.json"
     settings = json.loads(path.read_text()) if path.exists() else {}
     if not isinstance(settings, dict) or not isinstance(settings.get("hooks", {}), dict):
@@ -191,11 +205,13 @@ def hook_settings(values, role, capabilities):
         if role == "lead":
             command += ["--name", values["lead_name"]]
         else:
-            command += ["--name-prefix", values["coordinator_name_prefix"]]
-            if values["coordinator_legacy_name"]:
-                command += ["--name", values["coordinator_legacy_name"]]
-        command += ["--coordinator", values["coordinator_address"],
-                    "--handover", values["coordinator_handover"], "--handle", values["handle"]]
+            command += ["--name-prefix", values[f"{role}_name_prefix"]]
+            if values[f"{role}_legacy_name"]:
+                command += ["--name", values[f"{role}_legacy_name"]]
+        if role != "director":
+            command += ["--coordinator", values["coordinator_address"]]
+        command += ["--handover", values["director_handover" if role == "director" else "coordinator_handover"],
+                    "--handle", values["handle"]]
         drift = "role-drift" in capabilities
         if drift:
             for watch_path in watched(role, values["handle"], values.get("area")):
@@ -210,7 +226,7 @@ def hook_settings(values, role, capabilities):
         hooks["Stop"] = [{"hooks": [{"type": "command", "command": "session-context --hook", "timeout": 30}]}]
         reason = "PATH session-context lacks hook-gating; using the plain legacy Stop hook"
     else:
-        reason = "coordinator hooks skipped: PATH session-context lacks hook-gating"
+        reason = f"{role} hooks skipped: PATH session-context lacks hook-gating"
     if not hooks:
         settings.pop("hooks")
     return path, settings, reason
@@ -220,7 +236,7 @@ def publish_settings(values, role, capabilities, dry_run):
     path, settings, reason = hook_settings(values, role, capabilities)
     print(f"settings={path}: {reason}")
     if dry_run:
-        print(json.dumps(settings, indent=2))
+        print(json.dumps(settings, indent=2), flush=True)
     else:
         atomic_json(path, settings)
 
@@ -237,12 +253,12 @@ def warmup_records():
     return records
 
 
-def recent_warmup(values, sessions):
+def recent_warmup(values, sessions, role="coordinator"):
     records = warmup_records()
     for session in sessions:
         name = session.get("name", "")
         record = records.get(name, {})
-        if (name.startswith(values["coordinator_name_prefix"])
+        if (name.startswith(values[f"{role}_name_prefix"])
                 and record.get("next") is True
                 and time.time() - record.get("started_at", 0) < 7200
                 and live_session(name, [session]) is not None):
