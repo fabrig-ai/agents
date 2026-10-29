@@ -1875,9 +1875,14 @@ class Runner:
         values = self.d.hosts[self.name]["machine_env"]
         cap = values.get("KACHE_MAX_GB", 12)
         floor = values.get("PLAN_MIN_DISK_GB", 40)
-        if type(cap) is not int or type(floor) is not int:
-            # machine_env may hold strings (QA settings); kache's sizes must be numbers.
-            raise ValueError("KACHE_MAX_GB and PLAN_MIN_DISK_GB must be integers for kache")
+        # machine_env may hold literal strings; kache's sizes must read as whole numbers.
+        try:
+            cap, floor = (v if type(v) is int else int(v, 10) if isinstance(v, str) and v.isdigit() else None
+                          for v in (cap, floor))
+        except ValueError:
+            cap = floor = None
+        if cap is None or floor is None:
+            raise ValueError("KACHE_MAX_GB and PLAN_MIN_DISK_GB must be whole numbers for kache")
         config = (self.d.root / "fleet/kache/config.toml").read_text()
         config = config.replace("@CAP@", str(cap)).replace("@RECOVERY@", str((floor + max(cap, 1)) * 1024**3))
         # Keep the existing non-secret remote selection in a comparison only.
