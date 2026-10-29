@@ -12,6 +12,8 @@ import unittest
 import sys
 import hashlib
 import time
+from io import StringIO
+from contextlib import redirect_stdout
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
@@ -148,7 +150,7 @@ sys.exit(int(os.environ.get("FAKE_EXIT", "0")))
         self.assertIn("no transcript", result.stderr)
 
     def test_capabilities_and_existing_by_name_mode(self):
-        self.assertEqual(self.run_tool("--capabilities").stdout, "hook-gating\nrole-drift\n")
+        self.assertEqual(self.run_tool("--capabilities").stdout, "hook-gating\nrole-drift\nfired-markers\n")
         self.transcript("named-session", [call((0, 300_000, 0, 0))])
         self.env["FAKE_AGENTS"] = json.dumps([{"name": "lead/jig", "sessionId": "named-session", "cwd": str(self.cwd)}])
         result = self.run_tool("--name", "lead/jig")
@@ -169,7 +171,7 @@ sys.exit(int(os.environ.get("FAKE_EXIT", "0")))
         self.assertEqual(json.loads(cache.read_text()), {"gate": "lead/jig"})
         self.assertEqual(cache.stat().st_mode & 0o777, 0o600)
         self.assertEqual(len(self.log.read_text().splitlines()), 1)
-        self.assertEqual([p.name for p in self.state.iterdir()], ["names.json"])
+        self.assertEqual(sorted(p.name for p in self.state.iterdir()), ["fired", "names.json"])
 
     def test_name_prefix_and_mismatch(self):
         path = self.transcript("coord-id", [call((0, 800_000, 0, 0))])
@@ -493,6 +495,106 @@ sys.exit(int(os.environ.get("FAKE_EXIT", "0")))
         message = json.loads(result.stdout)["reason"]
         self.assertLess(message.index("Hand over now"), message.index("changed since"))
         self.assertIn("tools/session/start director --next", message)
+
+    def test_fired_marker_first_timestamp_survives_later_firings(self):
+        path = self.transcript("fired-id", [call((0, 800_000, 0, 0))])
+        self.env["FAKE_AGENTS"] = '[{"sessionId":"fired-id","name":"lead/jig"}]'
+        event = {"session_id": "fired-id", "transcript_path": str(path)}
+        options = ("--name", "lead/jig", "--role", "lead", "--coordinator", "s/draft@hel8")
+        first = self.hook(event, *options)
+        marker = self.state / "fired/fired-id.json"
+        original = json.loads(marker.read_text())
+        self.assertEqual(set(original), {"session_id", "name", "role", "reason", "first_fired", "last_fired"})
+        self.assertEqual(original["session_id"], "fired-id")
+        self.assertEqual(original["name"], "lead/jig")
+        self.assertEqual(original["role"], "lead")
+        self.assertEqual(original["reason"], json.loads(first.stdout)["reason"])
+        self.assertEqual(original["first_fired"], original["last_fired"])
+        context.datetime.fromisoformat(original["first_fired"])
+        self.assertTrue(original["first_fired"].endswith("Z"))
+        second = self.hook(event, *options)
+        updated = json.loads(marker.read_text())
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(updated["first_fired"], original["first_fired"])
+        self.assertGreater(updated["last_fired"], original["last_fired"])
+        self.assertEqual(marker.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(marker.parent.stat().st_mode & 0o777, 0o700)
+        self.assertEqual([entry.name for entry in marker.parent.iterdir()], ["fired-id.json"])
+        self.assertEqual(len(self.log.read_text().splitlines()), 1)
+
+    def test_fired_markers_for_compaction_and_compact_session_start(self):
+        path = self.transcript("compact-id", [{"type": "system", "subtype": "compact_boundary"}, call((0, 10_000, 0, 0))])
+        self.env["FAKE_AGENTS"] = '[{"sessionId":"compact-id","name":"coordinator/q/20261029T1200Z"}]'
+        event = {"session_id": "compact-id", "transcript_path": str(path)}
+        options = ("--role", "coordinator", "--name-prefix", "coordinator/q/", "--handle", "q", "--handover", "/handover.md")
+        for kind, extra in (("Stop", {}), ("SessionStart", {"source": "compact"})):
+            result = self.hook({**event, "hook_event_name": kind, **extra}, *options)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            marker = json.loads((self.state / "fired/compact-id.json").read_text())
+            self.assertEqual(marker["role"], "coordinator")
+            self.assertIn("compaction detected", marker["reason"])
+            self.assertEqual(marker["name"], "coordinator/q/20261029T1200Z")
+
+    def test_fired_write_failure_preserves_hook_output(self):
+        path = self.transcript("write-id", [call((0, 800_000, 0, 0))])
+        self.env["FAKE_AGENTS"] = '[{"sessionId":"write-id","name":"lead/jig"}]'
+        event = {"hook_event_name": "Stop", "session_id": "write-id", "transcript_path": str(path)}
+        options = ["--name", "lead/jig", "--role", "lead", "--coordinator", "s/draft@hel8"]
+        expected = json.loads(self.hook(event, *options).stdout)
+        marker = self.state / "fired/write-id.json"
+        before = marker.read_bytes()
+        for failure in (PermissionError("unwritable"), RuntimeError("fault injection")):
+            output = StringIO()
+            with patch.dict(os.environ, self.env), patch.object(context, "atomic_write", side_effect=failure), patch.object(sys, "stdin", StringIO(json.dumps(event))), redirect_stdout(output):
+                code = context.main(["--hook", *options])
+            self.assertEqual(code, 0)
+            self.assertEqual(json.loads(output.getvalue()), expected)
+            self.assertEqual(marker.read_bytes(), before)
+
+    def test_no_fired_marker_for_below_threshold_active_stop_or_wrong_gate(self):
+        path = self.transcript("quiet-id", [call((0, 100_000, 0, 0))])
+        self.env["FAKE_AGENTS"] = '[{"sessionId":"quiet-id","name":"lead/jig"}]'
+        event = {"session_id": "quiet-id", "transcript_path": str(path)}
+        for extra, options in (({}, ("--name", "lead/jig")), ({"stop_hook_active": True}, ()), ({}, ("--name", "wrong"))):
+            result = self.hook({**event, **extra}, *options)
+            self.assertEqual((result.returncode, result.stdout), (0, ""))
+            self.assertFalse((self.state / "fired").exists())
+
+    def test_drift_only_notice_is_not_a_handover_marker(self):
+        self.prepare_drift()
+        self.drift()
+        self.role_file.write_text(self.role_file.read_text() + "Rule added.\n")
+        self.assertIn("changed since", self.drift().stdout)
+        self.assertFalse((self.state / "fired").exists())
+
+    def test_fired_listing_is_read_only_and_skips_bad_markers(self):
+        self.assertEqual(self.run_tool("--fired", "--json").stdout, "[]\n")
+        self.assertFalse(self.state.exists())
+        with patch.dict(os.environ, self.env):
+            context.record_fired("b-id", "director", "director", "Second handover")
+            context.record_fired("a-id", "lead/jig", "lead", "First handover")
+        (self.state / "fired/bad.json").write_text("invalid json")
+        before = {str(path): path.read_bytes() for path in self.state.rglob("*") if path.is_file()}
+        result = self.run_tool("--fired", "--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([row["session_id"] for row in json.loads(result.stdout)], ["a-id", "b-id"])
+        plain = self.run_tool("--fired")
+        self.assertEqual(plain.returncode, 0, plain.stderr)
+        self.assertIn("a-id name=lead/jig role=lead", plain.stdout)
+        self.assertIn("Second handover", plain.stdout)
+        after = {str(path): path.read_bytes() for path in self.state.rglob("*") if path.is_file()}
+        self.assertEqual(before, after)
+        self.assertFalse(self.log.exists())
+
+    def test_ungated_due_hook_still_fires_if_name_lookup_fails(self):
+        path = self.transcript("no-name-id", [call((0, 800_000, 0, 0))])
+        self.env["FAKE_AGENTS"] = "invalid json"
+        result = self.hook({"session_id": "no-name-id", "transcript_path": str(path)})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["decision"], "block")
+        marker = json.loads((self.state / "fired/no-name-id.json").read_text())
+        self.assertIsNone(marker["name"])
+        self.assertIsNone(marker["role"])
 
 if __name__ == "__main__":
     unittest.main()

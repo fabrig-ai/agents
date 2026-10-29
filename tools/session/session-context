@@ -15,6 +15,7 @@ and its latest token count, against the window the rollout records.
   session-context --hook           as a Claude Code Stop hook: reads the hook's JSON on
                                    stdin; at the threshold, asks the session to hand over
   session-context --capabilities   print supported integration capabilities
+  session-context --fired [--json] list recorded handover firings (read only)
 Hook options: --role lead|coordinator|director, repeatable --name NAME / --name-prefix PREFIX,
 --coordinator MAILBOX, --handover PATH, --handle H. Stop also acts after a compaction;
 SessionStart source=compact adds the role's handover message. Name lookups are cached
@@ -28,6 +29,7 @@ Exit 0 below the threshold, 3 at or past it (a hook exits 0 and says so in JSON)
 import glob, json, os, subprocess, sys, tempfile
 import fcntl, hashlib, re, shutil, time
 from contextlib import contextmanager
+from datetime import datetime, UTC
 
 TAIL = 4 << 20  # the latest call is near the end: find it in the tail first
 
@@ -376,6 +378,53 @@ def handover_message(event, threshold, window, role, coordinator, handover, hand
             'a lead ends as agents/lead.md 4 says).')
 
 
+def record_fired(session, name, role, reason):
+    """Best effort: failure here must never change an already-due hook response."""
+    if not isinstance(session, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]*', session):
+        return
+    try:
+        state = state_directory()
+        directory = os.path.join(state, 'fired')
+        for path in (state, directory):
+            os.makedirs(path, mode=0o700, exist_ok=True)
+        path = os.path.join(directory, session + '.json')
+        with directory_lock(directory):
+            try:
+                with open(path) as stream:
+                    previous = json.load(stream)
+                if not isinstance(previous, dict):
+                    previous = {}
+            except (OSError, ValueError):
+                previous = {}
+            now = datetime.now(UTC).isoformat(timespec='microseconds').replace('+00:00', 'Z')
+            marker = {'session_id': session, 'name': name if name is not None else previous.get('name'),
+                      'role': role if role is not None else previous.get('role'), 'reason': reason,
+                      'first_fired': previous.get('first_fired', now), 'last_fired': now}
+            atomic_write(path, (json.dumps(marker) + '\n').encode())
+    except Exception:
+        pass
+
+
+def fired_markers():
+    directory = os.path.join(state_directory(), 'fired')
+    try:
+        with os.scandir(directory) as entries:
+            paths = [entry.path for entry in entries if entry.name.endswith('.json') and entry.is_file(follow_symlinks=False)]
+    except FileNotFoundError:
+        return []
+    markers = []
+    for path in sorted(paths):
+        try:
+            with open(path) as stream:
+                marker = json.load(stream)
+            if (isinstance(marker, dict) and isinstance(marker.get('session_id'), str)
+                    and {'name', 'role', 'reason', 'first_fired', 'last_fired'} <= marker.keys()):
+                markers.append(marker)
+        except (OSError, ValueError):
+            continue
+    return markers
+
+
 def hook(threshold, window, role=None, names=(), prefixes=(), coordinator=None, handover=None, handle=None, watches=()):
     try:
         event = json.load(sys.stdin)
@@ -387,6 +436,7 @@ def hook(threshold, window, role=None, names=(), prefixes=(), coordinator=None, 
     active_stop = kind == 'Stop' and event.get('stop_hook_active')
     if active_stop and not watches:
         return 0  # the session is already continuing because of this hook: never loop
+    name = None
     if names or prefixes:
         name = hook_name(event.get('session_id'))
         if name is None or not (name in names or any(name.startswith(prefix) for prefix in prefixes)):
@@ -394,6 +444,11 @@ def hook(threshold, window, role=None, names=(), prefixes=(), coordinator=None, 
     deliver = not active_stop and (kind in ('UserPromptSubmit', 'Stop') or
                                   (kind == 'SessionStart' and event.get('source') in ('resume', 'compact')))
     message = '' if active_stop else handover_message(event, threshold, window, role, coordinator, handover, handle)
+    identity = event.get('session_id')
+    if message and isinstance(identity, str) and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]*', identity):
+        if name is None:
+            name = hook_name(identity)
+        record_fired(identity, name, role, message)
     try:
         notices = role_drift(event.get('session_id'), watches, deliver)
     except (OSError, ValueError, TypeError):
@@ -422,6 +477,16 @@ def dispatch(argv):
     if argv == ['--capabilities']:
         print('hook-gating')
         print('role-drift')
+        print('fired-markers')
+        return 0
+    if argv in (['--fired'], ['--fired', '--json'], ['--json', '--fired']):
+        markers = fired_markers()
+        if '--json' in argv:
+            print(json.dumps(markers))
+        else:
+            for marker in markers:
+                print(f"{marker['session_id']} name={marker['name']} role={marker['role']} "
+                      f"first_fired={marker['first_fired']} last_fired={marker['last_fired']}: {marker['reason']}")
         return 0
     window, threshold, session, cwd, codex, as_hook = 1_000_000, 0.75, None, os.getcwd(), None, False
     as_hook = '--hook' in argv

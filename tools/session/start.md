@@ -117,6 +117,15 @@ ops and s/deploy have always_watched=true and supervisor director. Pause state
 uses the same local records reader as owns, also inherited by leads. No network
 or session query; target latency under 150 ms. `tools/session/names` is unchanged.
 
+Due handovers record `fired/SESSION_ID.json` under SESSION_CONTEXT_STATE, with
+session_id, name, role, reason and first_fired/last_fired (UTC RFC3339). First
+firing stays fixed; later firings update the last time. Reason is the handover
+message, excluding drift. Ungated lookups may leave name/role null. Files are
+0600, sibling-renamed under a directory lock; write failures preserve hook output.
+`session-context --fired [--json]` lists them read-only (JSON array; malformed
+files skipped). Capability: fired-markers. These are local evidence, not records
+sessions-stream events; a collector must adapt them for watch's event input.
+
 Dry runs print settings instead of writing; launch previews also print cwd,
 argv and prompt before refusal. They run only capabilities and session listing;
 wire previews run only capabilities. They create nothing and start nothing.
