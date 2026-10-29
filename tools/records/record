@@ -1,0 +1,533 @@
+#!/usr/bin/env -S python3 -I -B
+"""Validate and publish facts and judgement to fabrig's records repository."""
+
+import argparse
+from contextlib import contextmanager
+from datetime import date, datetime, timedelta
+import fcntl
+import json
+import os
+from pathlib import Path
+import random
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import tomllib
+
+ORIGIN = 'git@github.com:fabrig-ai/records.git'
+NAME = r'[a-z0-9][a-z0-9_-]*'
+POST = rf'(?:s/{NAME}|lead/{NAME}|director|ops)'
+HOST = r'[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?'
+SECRET = re.compile(
+    r'-----BEGIN [^\n-]*PRIVATE KEY-----|'
+    r'(?<![\w-])(?:gh[pousr]_[A-Za-z0-9_-]{20,}|'
+    r'github_pat_[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9_-]{20,})|'
+    r'sk-ant-|xox[abpr]-|AKIA[A-Z0-9]{16}')
+JOIN_KEYS = 'coordinator draft area part task branch run session'.split()
+
+
+class Refusal(Exception):
+    """Invalid input or a clone that must not be changed (exit 1)."""
+
+
+class Failure(Exception):
+    """An operational error (exit 2)."""
+
+
+def need(condition, message):
+    if not condition:
+        raise Refusal(message)
+
+
+def git(root, *args, check=True, data=None):
+    result = subprocess.run(
+        ['git', '-C', str(root), *args], input=data, capture_output=True,
+        env=dict(os.environ, GIT_TERMINAL_PROMPT='0', GIT_EDITOR='true',
+                 GIT_SEQUENCE_EDITOR='true', GIT_MERGE_AUTOEDIT='no'))
+    if check and result.returncode:
+        raise Failure(result.stderr.decode(errors='replace').strip() or 'git failed')
+    return result
+
+
+def out(root, *args):
+    return git(root, *args).stdout.decode().strip()
+
+
+def no_symlinks(path):
+    for component in (path, *path.parents):
+        need(not component.is_symlink(), f'{path}: symlink refused')
+
+
+def safe(root, name):
+    need(isinstance(name, str) and name and not name.startswith('/') and
+         all(p not in ('', '.', '..', '.git') for p in name.split('/')) and
+         '\\' not in name and not any(ord(c) < 32 for c in name),
+         f'{name}: expected a relative records file path')
+    need(name.split('/')[0] != 'old', f'{name}: frozen archive refused')
+    path = root / name
+    no_symlinks(path)
+    return path
+
+
+def host_name(value):
+    return isinstance(value, str) and len(value) <= 253 and bool(
+        re.fullmatch(rf'{HOST}(?:\.{HOST})*', value))
+
+
+def path_class(name):
+    if re.fullmatch(r'events/[^/]+/[^/]+/\d{4}-\d{2}-\d{2}\.jsonl', name):
+        _, source, host, stamp = name.split('/')
+        need(re.fullmatch('[a-z][a-z0-9-]*', source) and host_name(host),
+             f'{name}: invalid event source or host')
+        try:
+            date.fromisoformat(stamp[:-6])
+        except ValueError as error:
+            raise Refusal(f'{name}: invalid file date') from error
+        return 'events', 8 * 1024 * 1024
+    if re.fullmatch(rf'drafts/{NAME}/draft\.toml', name):
+        return 'draft', None
+    part = rf'drafts/{NAME}/parts/{NAME}-{NAME}/'
+    if re.fullmatch(part + r'brief\.md', name):
+        return 'markdown', 32 * 1024
+    if re.fullmatch(part + r'closing\.toml', name):
+        return 'closing', None
+    if re.fullmatch(part + r'closing\.md', name):
+        return 'markdown', 16 * 1024
+    if re.fullmatch(rf'(?:drafts/{NAME}|director)/decisions/[0-9]{{4}}\.md', name):
+        return 'decision', 4 * 1024
+    if name == 'director/priorities.toml':
+        return 'priorities', None
+    if re.fullmatch(r'director/questions/[0-9]{4}\.toml', name):
+        return 'question', None
+    match = re.fullmatch(
+        r'sessions/(coordinator|lead|director|ops)/([^/]+)/'
+        r'([0-9]{8}T[0-9]{4}Z)-(handover|state|common)\.md', name)
+    if match:
+        need(re.fullmatch(POST, match[2].replace('+', '/')),
+             f'{name}: invalid session post name')
+        try:
+            datetime.strptime(match[3], '%Y%m%dT%H%MZ')
+        except ValueError as error:
+            raise Refusal(f'{name}: invalid session stamp') from error
+        return 'markdown', 64 * 1024
+    if name == 'AGENTS.md' or name == 'README.md' or name.endswith('/README.md'):
+        return 'markdown', 16 * 1024
+    raise Refusal(f'{name}: unknown records path')
+
+
+def utc(value, label):
+    if isinstance(value, str):
+        need(re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|\+00:00)', value),
+             f'{label}: expected ISO 8601 UTC time')
+        try:
+            value = datetime.fromisoformat(value)
+        except ValueError as error:
+            raise Refusal(f'{label}: invalid UTC time') from error
+    need(isinstance(value, datetime) and value.utcoffset() == timedelta(0),
+         f'{label}: expected UTC time')
+    return value
+
+
+def string(value, label):
+    need(isinstance(value, str) and bool(value.strip()), f'{label}: expected nonempty string')
+
+
+def strings(value, label):
+    need(isinstance(value, list) and all(isinstance(s, str) and s.strip() for s in value),
+         f'{label}: expected array of strings')
+
+
+def branch_name(value):
+    return (isinstance(value, str) and value and value != '@' and
+            not value.startswith(('-', '/')) and not value.endswith(('/', '.')) and
+            not re.search(r'[\x00-\x20\x7f~^:?*\[\\]|\.\.|@\{|//', value) and
+            all(not p.startswith('.') and not p.endswith('.lock') for p in value.split('/')))
+
+
+def event(row, source, host, label):
+    need(isinstance(row, dict), f'{label}: event must be an object')
+    for key in ('id', 'kind'):
+        string(row.get(key), f'{label}: {key}')
+    need(row.get('source') == source and row.get('host') == host,
+         f'{label}: source/host must match directory')
+    for key in JOIN_KEYS:
+        if key in row:
+            need(isinstance(row[key], str), f'{label}: {key} must be a string')
+    return utc(row.get('time'), f'{label}: time').date().isoformat()
+
+
+def json_object(line, label):
+    try:
+        return json.loads(line, parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)))
+    except (ValueError, RecursionError) as error:
+        raise Refusal(f'{label}: invalid JSON') from error
+
+
+def text_content(data, name):
+    try:
+        text = data.decode('utf-8')
+    except UnicodeDecodeError as error:
+        raise Refusal(f'{name}: invalid UTF-8') from error
+    need('\r' not in text, f'{name}: CR line endings refused')
+    need(not SECRET.search(text), f'{name}: secret refused')
+    return text
+
+
+def validate(root, name, data):
+    safe(root, name)
+    kind, cap = path_class(name)
+    need(cap is None or len(data) <= cap, f'{name}: exceeds {cap} byte cap')
+    text = text_content(data, name)
+    if kind == 'events':
+        _, source, host, stamp = name.split('/')
+        seen = set()
+        for number, line in enumerate(data.splitlines(), 1):
+            label = f'{name}:{number}'
+            need(len(line) <= 16 * 1024, f'{label}: line exceeds 16 KB')
+            row = json_object(line, label)
+            need(event(row, source, host, label) == stamp[:-6], f'{label}: event date differs from file')
+            need(row['id'] not in seen, f'{label}: duplicate event id')
+            seen.add(row['id'])
+        return
+    if kind == 'decision':
+        need(re.match(r'\A# \S[^\n]*(?:\n|$)', text), f'{name}: first line must be # title')
+        for section in ('Context', 'Options', 'Decision', 'Why'):
+            need(re.search(rf'^## {section}[ \t]*$', text, re.M), f'{name}: missing ## {section}')
+    if kind in ('markdown', 'decision'):
+        return
+    try:
+        fields = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as error:
+        raise Refusal(f'{name}: invalid TOML: {error}') from error
+
+    def required(key):
+        string(fields.get(key), f'{name}: {key}')
+
+    def timestamp(key):
+        utc(fields.get(key), f'{name}: {key}')
+
+    if kind == 'draft':
+        for key in ('coordinator', 'mailbox', 'source'):
+            required(key)
+        need(re.fullmatch(rf'(?:s/)?{NAME}', fields['coordinator']), f'{name}: invalid coordinator handle')
+        need(re.fullmatch(rf's/{NAME}', fields['mailbox']), f'{name}: mailbox must be s/NAME')
+        need(fields.get('state') in ('queued', 'active', 'paused', 'done'), f'{name}: invalid state')
+        priority = fields.get('priority')
+        need(type(priority) is int and priority >= 1, f'{name}: priority must be integer >= 1')
+        timestamp('updated')
+    elif kind == 'closing':
+        timestamp('ended')
+        required('lead')
+        need(re.fullmatch(rf'lead/{NAME}', fields['lead']), f'{name}: invalid lead session')
+        need(fields.get('outcome') in ('done', 'handed-over', 'stopped'), f'{name}: invalid outcome')
+        for key in ('landed', 'withdrawn', 'open'):
+            strings(fields.get(key), f'{name}: {key}')
+            need(all(branch_name(b) for b in fields[key]), f'{name}: {key} contains invalid branch')
+    elif kind == 'question':
+        for key in ('question', 'recommendation', 'by'):
+            required(key)
+        need(re.fullmatch(POST, fields['by']), f'{name}: invalid asking post')
+        for key in ('asked', 'deadline'):
+            timestamp(key)
+        strings(fields.get('options'), f'{name}: options')
+        for key in ('answer', 'applied'):
+            if key in fields:
+                required(key)
+        if 'answered' in fields:
+            timestamp('answered')
+    elif kind == 'priorities':
+        drafts = fields.get('draft')
+        need(isinstance(drafts, list), f'{name}: expected [[draft]] entries')
+        for entry in drafts:
+            need(isinstance(entry, dict), f'{name}: invalid draft entry')
+            string(entry.get('name'), f'{name}: draft name')
+            need(re.fullmatch(NAME, entry['name']), f'{name}: invalid draft name')
+            directory = safe(root, f'drafts/{entry["name"]}')
+            need(directory.is_dir(), f'{name}: draft {entry["name"]} does not exist')
+            string(entry.get('reason'), f'{name}: reason')
+            utc(entry.get('since'), f'{name}: since')
+
+
+def atomic_write(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=path.parent, prefix='.' + path.name + '.', delete=False) as target:
+            temporary = Path(target.name)
+            target.write(data)
+            target.flush()
+            os.fsync(target.fileno())
+        temporary.chmod(0o644)
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+@contextmanager
+def file_lock(path):
+    need(not path.is_symlink(), f'{path}: symlink lock refused')
+    with path.open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
+def clone_checks(root, origin, branch):
+    no_symlinks(root)
+    need((root / '.git').is_dir() and not (root / '.git').is_symlink(),
+         f'{root}: expected a dedicated clone with a .git directory')
+    need(out(root, 'rev-parse', '--show-toplevel') == str(root), 'expected clone root')
+    for flags in (('--all',), ('--push', '--all')):
+        url = git(root, 'remote', 'get-url', *flags, 'origin', check=False)
+        need(url.returncode == 0 and url.stdout.decode().strip() == origin,
+             'missing or foreign origin refused (including push URL)')
+    head = git(root, 'symbolic-ref', '--quiet', '--short', 'HEAD', check=False)
+    need(head.returncode == 0 and head.stdout.decode().strip() == branch,
+         f'clone must be on {branch}')
+    need(not any((root / '.git' / p).exists() for p in
+                 ('MERGE_HEAD', 'rebase-merge', 'rebase-apply', 'CHERRY_PICK_HEAD', 'REVERT_HEAD')),
+         'unfinished git operation refused')
+    need(not git(root, 'status', '--porcelain', '--untracked-files=all', '--ignored').stdout,
+         'dirty clone refused (including untracked or ignored files)')
+    # Includes tracked directory links and archive links; never follow them.
+    for entry in git(root, 'ls-files', '--stage', '-z').stdout.split(b'\0'):
+        if entry:
+            metadata, name = entry.split(b'\t', 1)
+            need(metadata.split()[0] in (b'100644', b'100755'),
+                 f'{name.decode(errors="replace")}: non-file refused')
+            no_symlinks(root / os.fsdecode(name))
+
+
+@contextmanager
+def repository(root, origin, branch):
+    no_symlinks(root)
+    root.parent.mkdir(parents=True, exist_ok=True)
+    # Creation must also serialize: the per-clone lock does not exist yet.
+    with file_lock(root.parent / ('.' + root.name + '.record-init.lock')):
+        if not root.exists():
+            temporary = Path(tempfile.mkdtemp(prefix='.' + root.name + '.clone-', dir=root.parent))
+            try:
+                git(root.parent, 'clone', '--quiet', '--origin', 'origin', '--branch', branch,
+                    '--single-branch', '--', origin, str(temporary))
+                os.rename(temporary, root)
+            finally:
+                if temporary.exists():
+                    shutil.rmtree(temporary)
+        no_symlinks(root / '.git')
+        need((root / '.git').is_dir(), f'{root}: expected dedicated clone')
+        with file_lock(root / '.git' / 'record.lock'):
+            clone_checks(root, origin, branch)
+            yield
+
+
+def fetch(root, branch):
+    git(root, 'fetch', '--quiet', 'origin',
+        f'+refs/heads/{branch}:refs/remotes/origin/{branch}')
+
+
+def pull(root, branch):
+    fetch(root, branch)
+    remote = f'refs/remotes/origin/{branch}'
+    need(git(root, 'merge-base', '--is-ancestor', 'HEAD', remote, check=False).returncode == 0,
+         'clone has unpublished/divergent commits; fast-forward refused')
+    git(root, 'merge', '--quiet', '--ff-only', remote)
+
+
+def next_path(root, name):
+    pattern = (r'(?:drafts/' + NAME + r'|director)/decisions/next\.md|'
+               r'director/questions/next\.toml')
+    need(re.fullmatch(pattern, name), f'{name}: invalid next path')
+    safe(root, name)
+    directory = (root / name).parent
+    suffix = Path(name).suffix
+    used = {int(p.stem) for p in directory.iterdir()
+            if re.fullmatch(r'[0-9]{4}' + re.escape(suffix), p.name)} if directory.exists() else set()
+    number = next((n for n in range(1, 10000) if n not in used), None)
+    need(number is not None, f'{name}: numbering exhausted')
+    return str(Path(name).with_name(f'{number:04d}{suffix}'))
+
+
+def commit(root, files, writer, message):
+    for name, data in files.items():
+        validate(root, name, data)
+    for name, data in files.items():
+        atomic_write(safe(root, name), data)
+    git(root, 'add', '--', *files)
+    if git(root, 'diff', '--cached', '--quiet', check=False).returncode == 0:
+        return False
+    git(root, '-c', 'user.name=' + writer, '-c', 'user.email=record@fabrig.ai',
+        'commit', '--quiet', '-m', message)
+    return True
+
+
+def check_tree(root, names):
+    if not names:
+        names = [os.fsdecode(p) for p in git(root, 'ls-files', '-z').stdout.split(b'\0')
+                 if p and not p.startswith(b'old/')]
+    failures = []
+    for name in names:
+        try:
+            path = safe(root, name)
+            _, cap = path_class(name)
+            need(path.is_file(), f'{name}: missing file')
+            need(cap is None or path.stat().st_size <= cap, f'{name}: exceeds {cap} byte cap')
+            validate(root, name, path.read_bytes())
+        except Refusal as error:
+            failures.append(str(error))
+    for failure in failures:
+        print('record: ' + failure, file=sys.stderr)
+    print(f'record: check: {len(names)} files, {len(failures)} refused (old/ archive excluded)')
+    return 1 if failures else 0
+
+
+def append_files(root, source, host, data):
+    need(re.fullmatch('[a-z][a-z0-9-]*', source) and host_name(host), 'invalid event source or host')
+    text_content(data, 'append input')
+    groups = {}
+    for number, line in enumerate(data.splitlines(), 1):
+        label = f'append input:{number}'
+        need(len(line) <= 16 * 1024, f'{label}: line exceeds 16 KB')
+        row = json_object(line, label)
+        stamp = event(row, source, host, label)
+        name = f'events/{source}/{host}/{stamp}.jsonl'
+        groups.setdefault(name, []).append((row['id'], line))
+    files = {}
+    for name, rows in groups.items():
+        path = safe(root, name)
+        existing = path.read_bytes() if path.exists() else b''
+        validate(root, name, existing)
+        seen = {json_object(line, name)['id'] for line in existing.splitlines()}
+        content = existing
+        for identity, line in rows:
+            if identity not in seen:
+                if content and not content.endswith(b'\n'):
+                    content += b'\n'
+                content += line + b'\n'
+                seen.add(identity)
+        validate(root, name, content)
+        if content != existing:
+            files[name] = content
+    return files
+
+
+def publish(root, branch, args, data):
+    numbered = args.command == 'write' and args.path.endswith(('/next.md', '/next.toml'))
+    name = next_path(root, args.path) if numbered else getattr(args, 'path', None)
+    if args.command == 'write':
+        need(path_class(name)[0] != 'events', 'use append for events')
+        files = {name: data}
+        message = args.message or f'{args.writer}: write {name}'
+    else:
+        files = append_files(root, args.source, args.host, data)
+        message = args.message or f'{args.writer}: append {args.source}/{args.host}'
+    # Validate before any mutation. Keep bytes for exact recovery on every failure.
+    for path, content in files.items():
+        validate(root, path, content)
+    if not files:
+        print('record: no new events')
+        return 0
+    base = out(root, 'rev-parse', 'HEAD')
+    remote = f'refs/remotes/origin/{branch}'
+    try:
+        if not commit(root, files, args.writer, message):
+            print('record: unchanged')
+            return 0
+        for attempt in range(5):
+            result = git(root, 'push', '--porcelain', 'origin', f'HEAD:refs/heads/{branch}', check=False)
+            if result.returncode == 0:
+                print('record: pushed ' + (name if name else ', '.join(files)))
+                return 0
+            # Concurrent receive-pack processes can report either a non-fast-forward
+            # or a ref-lock failure. Retry only if the fetched branch advanced.
+            previous = out(root, 'rev-parse', remote)
+            fetch(root, branch)
+            base = out(root, 'rev-parse', remote)
+            if base == previous:
+                raise Failure(result.stderr.decode(errors='replace').strip() or 'push failed')
+            if attempt == 4:
+                raise Refusal('push refused after five attempts')
+            if numbered and git(root, 'cat-file', '-e', f'{remote}:{name}', check=False).returncode == 0:
+                # Reallocate a claimed number; never merge two distinct judgements.
+                git(root, 'reset', '--hard', remote)
+                name = next_path(root, args.path)
+                files = {name: data}
+                message = args.message or f'{args.writer}: write {name}'
+                commit(root, files, args.writer, message)
+            else:
+                rebased = git(root, '-c', 'rebase.autoStash=false', 'rebase', remote, check=False)
+                if rebased.returncode:
+                    git(root, 'rebase', '--abort', check=False)
+                    raise Refusal('rebase conflict; local write undone')
+                # A clean textual merge may still violate a size cap or schema.
+                for path in files:
+                    validate(root, path, safe(root, path).read_bytes())
+            time.sleep(random.uniform(0.02, 0.08) * (2 ** attempt))
+    except (Refusal, Failure, OSError):
+        git(root, 'rebase', '--abort', check=False)
+        git(root, 'reset', '--hard', base)
+        # Remove only this operation's untracked files after a pre-commit failure.
+        for path in files:
+            if git(root, 'ls-files', '--error-unmatch', '--', path, check=False).returncode:
+                safe(root, path).unlink(missing_ok=True)
+        print('record: input not published; original input follows:', file=sys.stderr)
+        sys.stderr.flush()
+        sys.stderr.buffer.write(data)
+        if data and not data.endswith(b'\n'):
+            sys.stderr.buffer.write(b'\n')
+        raise
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest='command', required=True)
+    sub.add_parser('pull')
+    write = sub.add_parser('write')
+    write.add_argument('path')
+    append = sub.add_parser('append')
+    append.add_argument('source')
+    append.add_argument('host')
+    for command in (write, append):
+        command.add_argument('--as', dest='writer', required=True)
+        command.add_argument('--from', dest='input_file')
+        command.add_argument('--message')
+    check = sub.add_parser('check')
+    check.add_argument('paths', nargs='*')
+    show = sub.add_parser('show')
+    show.add_argument('path')
+    args = parser.parse_args()
+    try:
+        branch_override = os.environ.get('RECORDS_BRANCH')
+        need(not branch_override or args.command == 'check', 'RECORDS_BRANCH is for check only')
+        branch = branch_override or 'main'
+        need(branch_name(branch), 'invalid records branch')
+        if args.command in ('write', 'append'):
+            need(re.fullmatch(POST, args.writer), 'invalid writer post name')
+        root = Path(os.environ.get('RECORDS_REPO', '~/src/fabrig/records')).expanduser().absolute()
+        origin = os.environ.get('RECORDS_ORIGIN', ORIGIN)
+        with repository(root, origin, branch):
+            pull(root, branch)
+            if args.command == 'pull':
+                print('record: pulled origin/' + branch)
+                return 0
+            if args.command == 'check':
+                return check_tree(root, args.paths)
+            if args.command == 'show':
+                path = safe(root, args.path)
+                validate(root, args.path, path.read_bytes())
+                sys.stdout.buffer.write(path.read_bytes())
+                return 0
+            data = Path(args.input_file).read_bytes() if args.input_file else sys.stdin.buffer.read()
+            return publish(root, branch, args, data)
+    except Refusal as error:
+        print(f'record: {error}', file=sys.stderr)
+        return 1
+    except (Failure, OSError, ValueError) as error:
+        print(f'record: {error}', file=sys.stderr)
+        return 2
+
+
+if __name__ == '__main__':
+    sys.exit(main())
