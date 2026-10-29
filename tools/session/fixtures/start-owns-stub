@@ -1,0 +1,15 @@
+#!/usr/bin/env python3
+"""Offline post-wake fixture: allow and paused are space-separated exact names."""
+import os
+import sys
+
+if len(sys.argv) != 2:
+    print("start-owns-stub: usage: start-owns-stub NAME", file=sys.stderr)
+    sys.exit(2)
+name = sys.argv[1]
+if name in os.environ.get("START_OWNS_PAUSED", "").split():
+    print(f"start-owns-stub: paused: {name}", file=sys.stderr)
+    sys.exit(1)
+if name not in os.environ.get("START_OWNS_ALLOW", "").split():
+    print(f"start-owns-stub: not ours: {name}", file=sys.stderr)
+    sys.exit(1)

@@ -97,6 +97,30 @@ def render(template, values):
     return Template(template.read_text()).substitute(values)
 
 
+def owns(name):
+    """Local-only ownership contract for post wake; never fetch records or sessions."""
+    entries = registry()
+    if name == "director" or name.startswith("director/"):
+        return True, ""
+    owner = None
+    for handle in entries:
+        values = names(handle)
+        if (name in (values["coordinator_mailbox"], values["warmup_name"])
+                or name.startswith(values["coordinator_name_prefix"])
+                or any(name == names(handle, area)["lead_name"] for area in AREAS)):
+            owner = handle
+            break
+    if owner is None:
+        return False, f"not ours: {name}"
+    records = Path(os.environ.get("RECORDS_REPO", Path.home() / "src/fabrig/records")).expanduser()
+    for path in (records / "drafts").glob("*/draft.toml"):
+        with path.open("rb") as stream:
+            draft = tomllib.load(stream)
+        if draft.get("coordinator") == owner and draft.get("state") == "paused":
+            return False, f"paused: {name} (coordinator {owner})"
+    return True, ""
+
+
 def list_sessions():
     result = subprocess.run(["claude", "agents", "--json"], capture_output=True, text=True, check=True)
     sessions = json.loads(result.stdout)
