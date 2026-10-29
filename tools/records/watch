@@ -223,32 +223,27 @@ def claims(text):
 
 
 def identities(text):
-    """The launcher owns naming; accept an array or a mailbox-keyed object."""
-    value = json.loads(text)
-    if isinstance(value, dict):
-        value = [dict(row, mailbox=name) for name, row in value.items()]
-    if not isinstance(value, list):
-        raise ValueError('names must return JSON identities')
+    """Consume session-start names --json's array without inventing identities."""
     result = {}
-    for row in value:
-        name = row.get('mailbox') or row['name']
+    for row in json_rows(text):
+        name = row.get('mailbox')
         if not isinstance(name, str) or not name or any(c.isspace() for c in name):
             raise ValueError('invalid mailbox')
         if name in result:
             raise ValueError('duplicate mailbox')
-        supervisor = row.get('supervisor')
-        if name == 'director':
+        if 'supervisor' not in row:
+            raise ValueError('names lacks supervisor')
+        supervisor = row['supervisor']
+        if supervisor is None and row.get('role') == 'director':
             supervisor = ''
-        elif name in ('ops', 's/deploy') or row.get('role') == 'coordinator':
-            supervisor = 'director'
-        if name.startswith('lead/') and not supervisor:
-            supervisor = row.get('coordinator_mailbox')
         if not isinstance(supervisor, str):
             raise ValueError('names lacks supervisor')
         if not isinstance(row.get('aliases', []), list) or any(not isinstance(v, str) for v in row.get('aliases', [])):
             raise ValueError('invalid aliases')
         if 'name_prefix' in row and not isinstance(row['name_prefix'], str):
             raise ValueError('invalid name prefix')
+        if 'paused' in row and type(row['paused']) is not bool:
+            raise ValueError('invalid pause state')
         result[name] = dict(row, name=name, supervisor=supervisor)
     return result
 
@@ -266,7 +261,7 @@ class Inputs:
     def records(self, root):
         checked([str(Path(__file__).with_name('record')), 'pull'],
                 env=dict(os.environ, RECORDS_REPO=str(root)))
-        for source in ('queue', 'heavy', 'sessions', 'post'):
+        for source in ('queue', 'heavy', 'sessions', 'post', 'post-sent'):
             def events(source=source):
                 directory = root / 'events' / source
                 if not directory.is_dir():
@@ -304,10 +299,8 @@ class Inputs:
 
     def collect(self, records):
         self.read('records', lambda: self.records(records))
-        self.read('names', lambda: identities(checked(['session-start', 'names'])))
+        self.read('names', lambda: identities(checked(['session-start', 'names', '--json'])))
         self.data.setdefault('names', {})
-        for name in ('ops', 's/deploy'):
-            self.data['names'].setdefault(name, dict(name=name, supervisor='director', aliases=[]))
         self.read('agents', lambda: agent_rows(checked(['claude', 'agents', '--json'])))
         self.read('waiters', lambda: waiters(checked(['post', 'waiters'])))
         self.read('mail', mailboxes)
@@ -370,8 +363,8 @@ class Inputs:
         with ThreadPoolExecutor(max_workers=8) as pool:
             list(pool.map(read_host, pairs.items()))
         self.data['owned'] = {}
-        for name in self.data['names']:
-            if name in ('ops', 's/deploy'):
+        for name, identity in self.data['names'].items():
+            if identity.get('always_watched'):
                 self.data['owned'][name] = True
                 continue
             try:
@@ -390,7 +383,8 @@ def evaluate(data, state, config, now):
     names = data.get('names', {})
     owned = data.get('owned', {})
     def allowed(owner):
-        return owner in ('ops', 's/deploy') or owned.get(owner, False)
+        identity = names.get(owner, {})
+        return not identity.get('paused', False) and (identity.get('always_watched', False) or owned.get(owner, False))
     def add(rule, subject, owner, evidence, deps, supervisor=None, **joins):
         if not config[rule]['enabled'] or not allowed(owner):
             return
@@ -398,9 +392,9 @@ def evaluate(data, state, config, now):
         # Joins are carried from the launcher's identity and the actual producer.
         keys = {k: identity[k] for k in JOIN if isinstance(identity.get(k), str)}
         keys.update({k: v for k, v in joins.items() if k in JOIN and isinstance(v, str)})
-        dependencies = list(deps)
-        if owner not in ('ops', 's/deploy'):
-            dependencies += ['names', 'owns/' + owner]
+        dependencies = list(deps) + ['names']
+        if not identity.get('always_watched', False):
+            dependencies.append('owns/' + owner)
         candidates[rule + '\t' + subject] = dict(rule=rule, subject=subject, owner=owner,
             supervisor=identity.get('supervisor', ''),
             escalate_to=identity.get('supervisor', '') if supervisor is None else supervisor,
@@ -545,7 +539,8 @@ def evaluate(data, state, config, now):
             add('lease stall', subject, owner, [f'waiters={len(waiting)}; oldest waiter={iso(oldest)}',
                 f'last package event/lease start={iso(max(activity))}'],
                 ['leases'] + ([] if wait_past else activity_deps), supervisor='director')
-    session_events = data.get('records/sessions', [])
+    session_events = [dict(e, time=e['first_fired']) if e.get('kind') == 'handover-needed' and e.get('first_fired') else e
+                      for e in data.get('records/sessions', [])]
     for name, identity in names.items():
         aliases = identity.get('aliases', []) + [name]
         prefix = identity.get('name_prefix')
@@ -557,7 +552,8 @@ def evaluate(data, state, config, now):
         # prove the lead posted files current, so use collected post events.
         events += [dict(e, kind='files-current') for e in data.get('records/post', [])
                    if e.get('kind') == 'mail' and e.get('from', '').split('@')[0] in aliases
-                   and re.fullmatch(r'files current[.!]?', e.get('subject', '').strip(), re.IGNORECASE)]
+                   and identity.get('role') == 'lead'
+                   and e.get('subject', '').strip().casefold().startswith('files current')]
         hook = None
         for event in sorted(events, key=lambda e: stamp(e['time'])):
             kind = event.get('kind')
@@ -572,19 +568,22 @@ def evaluate(data, state, config, now):
                 hook = event
         if hook and older(hook['time'], config['handover late']['minutes']):
             add('handover late', name, name, [f'context hook={hook["time"]}; no successor or files current'],
-                ['records/sessions', 'records/post'], **{k: hook[k] for k in JOIN if k in hook})
+                ['records/sessions'], **{k: hook[k] for k in JOIN if k in hook})
     for row in data.get('questions', []):
         if not row.get('answer') and now > stamp(row['deadline']):
             add('question due', row['subject'], 'director', [f'question={row["subject"]}; deadline={iso(stamp(row["deadline"]))}'],
                 ['questions'], supervisor='')
     deliveries = {}
-    for row in sorted(data.get('records/post', []), key=lambda r: stamp(r['time'])):
-        if row.get('kind') in ('send', 'delivery', 'delivery-failed') and 'exit' in row:
-            deliveries[row.get('message_id', row['id'])] = row
-    for message, row in deliveries.items():
+    for source in ('records/post', 'records/post-sent'):
+        for row in data.get(source, []):
+            if row.get('kind') in ('send', 'delivery', 'delivery-failed') and 'exit' in row:
+                message = row.get('message_id', row['id'])
+                if message not in deliveries or stamp(row['time']) >= stamp(deliveries[message][0]['time']):
+                    deliveries[message] = (row, source)
+    for message, (row, source) in deliveries.items():
         if row.get('exit') == 2:
             add('delivery failed', message, row['from'].split('@')[0], ['post send exited 2; message_id=' + message],
-                ['records/post'], supervisor='ops', **{k: row[k] for k in JOIN if k in row})
+                [source], supervisor='ops', **{k: row[k] for k in JOIN if k in row})
     return candidates
 
 
@@ -658,7 +657,7 @@ def run(dry, config):
         inputs = Inputs(dry).collect(records)
         data, errors = inputs.data, inputs.errors
         # Missing dependencies must not be interpreted as a quiet input.
-        for source in ('drafts', 'questions', 'records/queue', 'records/heavy', 'records/sessions', 'records/post'):
+        for source in ('drafts', 'questions', 'records/queue', 'records/heavy', 'records/sessions', 'records/post', 'records/post-sent'):
             if source not in data:
                 errors.setdefault(source, 'unavailable')
         for episode in state.get('episodes', {}).values():
@@ -694,7 +693,7 @@ def run(dry, config):
             'idle claim': ['claims', 'records/heavy', 'records/queue'],
             'unqueued': ['refs', 'records/queue'],
             'lease stall': ['names', 'leases'],
-            'handover late': ['names', 'records/sessions', 'records/post'],
+            'handover late': ['names', 'records/sessions'],
             'question due': ['names', 'questions'], 'delivery failed': [],
         }
         skipped = {rule: [dep for dep in dependencies[rule] if dep in errors]

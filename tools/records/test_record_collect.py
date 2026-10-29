@@ -65,10 +65,16 @@ assert __import__('sys').argv[1:] == ['agents', '--json']
 print((Path(os.environ['HOME']) / 'agents.json').read_text())
 """)
         self.fake('session-context', """import sys
+if sys.argv[1:] == ['--fired', '--json']:
+ from pathlib import Path
+ import os
+ print((Path(os.environ['HOME']) / 'fired.json').read_text())
+ sys.exit(0)
 assert sys.argv[1] == '--name'
 print('12345678: 125,000 of 1,000,000 tokens (12%) at 2026-10-29T11:00:00Z; 42 calls; 0 compaction(s); threshold 75%')
 """)
         self.write(self.home / 'agents.json', '[]')
+        self.write(self.home / 'fired.json', '[]')
         self.write(self.tmp / 'post/machines', 'hel8 local\nhetzner8 user@host.invalid\n')
 
     def git(self, root, *args):
@@ -322,13 +328,14 @@ print('12345678: 125,000 of 1,000,000 tokens (12%) at 2026-10-29T11:00:00Z; 42 c
         self.session_fixture()
         self.lease_fixture()
         self.post_fixture()
+        self.post_sent_fixture()
         events = self.dry(*API['SOURCES'])
         self.assertEqual(set(e['source'] for e in events), set(API['SOURCES']))
         self.assertFalse(self.state.exists())
         self.assertFalse(self.clone.exists())
         # Each source also publishes to a real local bare origin in one run.
         self.run_collect(*API['SOURCES'])
-        self.assertEqual(len(self.git(self.clone, 'log', '--format=%s').splitlines()), 8)
+        self.assertEqual(len(self.git(self.clone, 'log', '--format=%s').splitlines()), 1 + len(API['SOURCES']))
         result = subprocess.run([str(TOOL.with_name('record')), 'check'], env=self.env, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('0 refused', result.stdout)
@@ -452,6 +459,112 @@ print('12345678: 125,000 of 1,000,000 tokens (12%) at 2026-10-29T11:00:00Z; 42 c
         self.run_collect('claims')
         self.assertEqual(self.events('claims'), pending['events'])
         self.assertEqual(self.git(self.clone, 'rev-parse', 'HEAD'), head)
+
+    def post_sent_fixture(self, code=2, time=STAMP):
+        row = dict(time=time, subject_sha256='a' * 64, message_id=MESSAGE, exit=code,
+                   **{'from': 'lead/H/tools@hel8', 'to': 's/example@hel8'})
+        self.write(self.tmp / 'post/sent.jsonl', json.dumps(row) + '\n')
+        return row
+
+    def test_post_sent_missing_partial_retry_rotation_and_hash_only(self):
+        self.assertIn('skip post-sent', self.run_collect('post-sent').stdout)
+        row = self.post_sent_fixture()
+        path = self.tmp / 'post/sent.jsonl'
+        success = dict(row, time=END, exit=0)
+        encoded = json.dumps(success)
+        self.write(path, json.dumps(row) + '\n' + encoded[:20])
+        self.run_collect('post-sent')
+        failed, = self.events('post-sent')
+        self.assertEqual((failed['kind'], failed['exit'], failed['message_id']), ('send', 2, MESSAGE))
+        self.assertEqual(failed['subject_sha256'], 'a' * 64)
+        self.assertNotIn('subject', failed)
+        self.assertNotIn('body', failed)
+        self.assertIn('post-sent: 0 events', self.run_collect('post-sent').stderr)
+        self.write(path, path.read_text() + encoded[20:] + '\n')
+        self.run_collect('post-sent')
+        self.assertEqual([e['exit'] for e in self.events('post-sent')], [2, 0])
+        replacement = path.with_name('sent.new')
+        self.write(replacement, json.dumps(row) + '\n' + encoded + '\n')
+        replacement.replace(path)
+        self.assertIn('post-sent: 0 events', self.run_collect('post-sent').stderr)
+
+    def test_post_sent_invalid_input_preserves_cursor(self):
+        row = self.post_sent_fixture()
+        self.run_collect('post-sent')
+        before = (self.state / 'post-sent.json').read_bytes()
+        row['subject_sha256'] = 'invalid'
+        self.write(self.tmp / 'post/sent.jsonl', json.dumps(row) + '\n')
+        self.run_collect('post-sent', code=2)
+        self.assertEqual((self.state / 'post-sent.json').read_bytes(), before)
+
+    def test_fired_first_updates_replay_and_lead_end_ack_drive_watch(self):
+        import tomllib
+        watch = runpy.run_path(str(TOOL.with_name('watch')))
+        config = tomllib.loads(TOOL.with_name('watch.toml').read_text())['rules']
+        self.session_fixture()
+        marker = dict(session_id=SESSION, name='lead/H/tools', role='lead', reason='threshold',
+                      first_fired=STAMP, last_fired=STAMP)
+        self.json(self.home / 'fired.json', [marker])
+        self.run_collect('sessions')
+        hooks = lambda: [e for e in self.events('sessions') if e['kind'] == 'handover-needed']
+        first, = hooks()
+        self.assertEqual(first['time'], STAMP)
+        self.assertEqual(first['session'], SESSION)
+        self.run_collect('sessions')
+        self.assertEqual(len(hooks()), 1)
+        marker['last_fired'] = END
+        self.json(self.home / 'fired.json', [marker])
+        self.run_collect('sessions')
+        self.assertEqual(len(hooks()), 2)
+        self.assertNotEqual(hooks()[0]['id'], hooks()[1]['id'])
+        self.assertEqual(hooks()[1]['first_fired'], STAMP)
+        data = dict(names={'lead/H/tools': dict(role='lead', supervisor='s/example')},
+                    owned={'lead/H/tools': True}, **{'records/sessions': self.events('sessions')})
+        now = API['timestamp'](STAMP).timestamp() + 1300
+        late = lambda: [c for c in watch['evaluate'](data, {}, config, now).values()
+                        if c['rule'] == 'handover late']
+        self.assertEqual(len(late()), 1)
+        episodes = {}
+        events = watch['reconcile'](episodes, watch['evaluate'](data, {}, config, now),
+                                    {'records/post': 'absent'}, config, now, lambda *args: 0)
+        self.assertEqual([e['kind'] for e in events], ['alert-open'])
+        # Replaying from a fresh cursor must not duplicate append-only hook facts.
+        (self.state / 'sessions.json').unlink()
+        self.run_collect('sessions')
+        self.assertEqual(len(hooks()), 2)
+        mail = self.post_fixture()
+        self.write(mail, mail.read_text().replace('From: s/example@hel8', 'From: lead/H/tools@hel8')
+                   .replace('Subject: Synthetic status', 'Subject: files current: closing complete'))
+        seconds = API['timestamp'](END).timestamp()
+        os.utime(mail, (seconds, seconds))
+        self.run_collect('sessions')
+        ack, = [e for e in self.events('sessions') if e['kind'] == 'files-current']
+        self.assertEqual(ack['name'], 'lead/H/tools')
+        self.assertEqual(ack['message_id'], MESSAGE)
+        data['records/sessions'] = self.events('sessions')
+        self.assertFalse(late())
+        self.run_collect('sessions')
+        self.assertEqual(sum(e['kind'] == 'files-current' for e in self.events('sessions')), 1)
+
+    def test_files_current_requires_a_lead_sender(self):
+        mail = self.post_fixture()
+        self.write(mail, mail.read_text().replace('Subject: Synthetic status', 'Subject: files current: done'))
+        self.assertFalse(self.dry('sessions'))
+
+    def test_director_sessions_and_markers_without_live_sessions(self):
+        self.session_fixture('director/20261029T1100Z')
+        self.run_collect('sessions')
+        self.assertEqual([e['kind'] for e in self.events('sessions')], ['session-start', 'context'])
+        self.json(self.home / 'agents.json', [])
+        self.json(self.home / 'fired.json', [
+            dict(session_id=SESSION, name='director/20261029T1100Z', role='director', reason='compaction',
+                 first_fired=STAMP, last_fired=END),
+            dict(session_id='unresolved', name=None, role=None, reason='threshold',
+                 first_fired=STAMP, last_fired=STAMP)])
+        self.run_collect('sessions')
+        hooks = [e for e in self.events('sessions') if e['kind'] == 'handover-needed']
+        self.assertEqual(len(hooks), 2)
+        self.assertTrue(all(e['role'] == 'director' for e in hooks))
 
 
 if __name__ == '__main__':

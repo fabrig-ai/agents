@@ -1,7 +1,7 @@
 # Local records collection
 
 `record-collect SOURCE... [--host NAME] [--dry-run] [--since ISO]` reads
-`runs`, `queue`, `heavy`, `sessions`, `claims`, `leases`, and `post`. Paths
+`runs`, `queue`, `heavy`, `sessions`, `claims`, `leases`, `post`, and `post-sent`. Paths
 are relative to HOME: `src/rust/tmp/{codex-run,logs/heavy.tsv,heavy,post}`
 and `src/fabrig/{notes/queue.jsonl,claims,leases}`. Queue area mappings come
 from `src/fabrig/main/tools/queue/leads.txt`. Default host resolution uses
@@ -45,3 +45,25 @@ Run `python3 -I -B tools/records/test_record_collect.py`. Fixtures use synthetic
 identities and headers only, a temporary HOME, a bare local origin, and fake
 Claude/context commands. Tests cover every source, joins, cursor advance,
 partial lines, rotation, publication retries, read boundaries, and isolation.
+
+The sessions source also reads `session-context --fired --json` once per
+collection. Each resolved marker yields a `handover-needed` event for its
+first firing and an append-only update for each later observed last firing.
+Ids join session id, first firing and the observed firing timestamp; replay
+keeps the same ids. Fields include `session`, `name`, `role`, `reason`,
+`first_fired` and `last_fired`. Unresolved names are skipped. Polling cannot
+recover intermediate firings overwritten between observations. Context
+readings alone are never hook-fired evidence.
+
+Sessions also projects lead end posts into `files-current` events: the
+sender must be a lead and the subject must start with `files current`
+(case-insensitive). Only the post header is read. The event carries the
+sender as `name`, message id and delivery time, and replays idempotently.
+
+`post-sent` reads `src/rust/tmp/post/sent.jsonl`, skipping the source while
+absent. Its agreed rows are `{time, from, to, subject_sha256, message_id, exit}`;
+the subject hash is 64 lowercase hex characters. It emits `send` events,
+with sender joins, stable ids, and only those metadata fields. Complete-line
+cursors, rotation replay and pending publication recovery work as for other
+logs. Exit 2 is delivery failure; a later row for the same message id can
+record success. This source reads neither subjects nor bodies.

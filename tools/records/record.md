@@ -17,7 +17,7 @@ record check [PATH ...]
 record show director/priorities.toml
 ```
 
-Writers are post names: `s/NAME`, `lead/NAME`, `director`, or `ops`;
+Writers are post names: `s/NAME`, `lead/[HANDLE/]NAME`, `director`, or `ops`;
 `collect` and `watch` are permitted for `append` only.
 `write` accepts one judgement file and `append` accepts JSON objects, one per
 line. Both read stdin unless `--from FILE` is supplied. `--message TEXT` sets
@@ -68,7 +68,7 @@ part = "collect"
 
 `record-collect runs sessions claims post --dry-run --since 2026-10-29T11:00Z`
 previews local facts. See [collector usage and limits](record-collect.md) for all
-seven sources, cursors, joins and snapshot/timestamp semantics.
+eight sources, cursors, joins and snapshot/timestamp semantics.
 
 ## Races and recovery
 
