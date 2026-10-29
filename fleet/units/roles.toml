@@ -13,3 +13,4 @@
 "status-page.service" = ["session"]
 "status-page.timer" = ["session"]
 "after-landing.service" = ["after-landing"]
+"qa-watch.service" = ["qa"]
