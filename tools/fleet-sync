@@ -5,6 +5,7 @@ import argparse
 import concurrent.futures
 from contextlib import contextmanager
 import datetime as dt
+import difflib
 import errno
 import fcntl
 import io
@@ -33,6 +34,11 @@ BLOCK = BEGIN + '\n[ ! -f "$HOME/.config/fabrig/env.sh" ] || . "$HOME/.config/fa
 KEY = re.compile(r"[A-Za-z_][A-Za-z_0-9]*\Z")
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 SERVICE_START = 'ExecStart=/bin/bash -lc \'exec "$$HOME/src/fabrig/current/tools/fleet-sync" --timer\''
+RENDERED_FILES = frozenset((
+    ".config/fabrig/env.sh", ".config/environment.d/90-fabrig.conf",
+    ".claude/settings.json", ".cargo/config.toml", "src/rust/tmp/machine.env",
+    "src/rust/tmp/post/machines", ".profile", ".bashrc", ".codex/config.toml",
+))
 RECOVERY_UNITS = frozenset(("fleet-sync.service", "fleet-sync.timer"))
 ACTIVE_CHILDREN = set()
 CHILDREN_LOCK = threading.Lock()
@@ -482,6 +488,9 @@ class Runner:
         self.state = resume or {"host": name, "agents_sha": self.old.get("agents_sha"), "fabrig_sha": self.old.get("fabrig_sha"),
                                 "start": now(), "end": None, "items": [],
                                 "last_timer_end": self.old.get("last_timer_end")}
+        # Releases predating backoff can hand off a state without these fields.
+        self.state.setdefault("consecutive_failures", self.old.get("consecutive_failures", 0))
+        self.state.setdefault("last_failure", self.old.get("last_failure"))
         self.owned = set(self.old.get("managed_files", []))
         self.unit_owned = set(self.old.get("managed_units", []))
         self.reload_pending = self.old.get("unit_reload_pending", False)
@@ -490,6 +499,8 @@ class Runner:
             self.reload_pending = intent["reload_pending"]
         self.log = json.loads(os.environ.pop("FLEET_SYNC_LOG", "[]")) if resume else []
         self.lock_fd = None
+        self.previewing = False
+        self.waiting = False
         if startup_error:
             self.item("state", "failed", startup_error)
 
@@ -902,13 +913,14 @@ class Runner:
         host = self.d.hosts[self.name]
         return {**self.d.env, **{k: expand(v, self.home) for k, v in host["env"].items()}}
 
-    def conflicts(self, env):
+    def conflicts(self, env, safe=None):
+        safe = safe or self.safe
         paths = [".profile", ".bashrc", ".config/plan/environment.sh"]
-        paths += [".config/environment.d/" + name for name in sorted(self.safe.names(".config/environment.d")) if name.endswith(".conf")]
+        paths += [".config/environment.d/" + name for name in sorted(safe.names(".config/environment.d")) if name.endswith(".conf")]
         for relative in paths:
             if Path(relative).name == "90-fabrig.conf":
                 continue
-            data = self.safe.read(relative)
+            data = safe.read(relative)
             if data is None:
                 continue
             in_block = False
@@ -955,7 +967,7 @@ class Runner:
         self.attempt(".profile", lambda: self.shell_block(".profile", False))
         self.attempt(".bashrc", lambda: self.shell_block(".bashrc", True))
         self.attempt(".codex/config.toml", self.codex)
-        self.attempt("conflicts", lambda: self.conflicts(env))
+        self.attempt("conflicts", lambda: self.conflicts(env, getattr(self, "real_safe", self.safe)))
 
     def units(self):
         wanted = self.d.host_units(self.name)
@@ -969,7 +981,7 @@ class Runner:
             if name in wanted:
                 differs[name] = data != self.d.units[name].encode()
         stale = self.unit_owned - wanted - RECOVERY_UNITS
-        if not self.args.check:
+        if not self.args.check and not self.previewing:
             # Journal ownership AND reload intent before the first unit mutation.
             self.unit_owned.update(wanted)
             self.reload_pending |= any(differs.values()) or bool(stale)
@@ -984,12 +996,15 @@ class Runner:
                 self.item(name, "drift", "previously managed unit no longer belongs to this role")
             else:
                 # Do not stop services, including services paired with removed timers.
-                if existing[name]:
+                if existing[name] and not self.previewing:
                     self.cmd("systemctl", "--user", "disable", "--no-reload", *(["--now"] if name.endswith(".timer") else []), name)
                 self.safe.unlink(f".config/systemd/user/{name}")
                 self.unit_owned.remove(name)
                 self.owned.discard(f".config/systemd/user/{name}")
                 self.item(name, "changed", "disabled and removed previously managed unit")
+        if self.previewing:
+            self.item("units:activation", "deferred", "preview: systemctl is not run")
+            return
         if self.args.check:
             # --check must not run systemctl (including during the live acceptance check).
             if self.reload_pending:
@@ -1095,8 +1110,16 @@ class Runner:
         self.state["managed_units"] = sorted(self.unit_owned)
         self.state["unit_reload_pending"] = self.reload_pending
         if persist and not self.args.check:
+            failed = any(i["result"] == "failed" for i in self.state["items"])
             if self.args.timer:
                 self.state["last_timer_end"] = self.state["end"]
+                if failed:
+                    self.state["consecutive_failures"] += 1
+                    self.state["last_failure"] = self.state["end"]
+            if not failed:
+                self.state["consecutive_failures"] = 0
+                self.state["last_failure"] = None
+            self.state["backoff_until"] = self.backoff_until()
             self.safe.save(".local/state/fleet-sync/state.json", json.dumps(self.state, indent=2) + "\n")
             self.safe.save(".local/state/fleet-sync/run.log", "\n".join(self.log)[-262144:])
             history = ".local/state/fleet-sync/runs.jsonl"
@@ -1114,7 +1137,144 @@ class Runner:
                 self.safe.save(history, "".join(json.dumps(r) + "\n" for r in records))
         return 1 if any(i["result"] in ("drift", "failed") for i in self.state["items"]) else 0
 
+    def backoff_until(self):
+        failures = self.state.get("consecutive_failures", 0)
+        stamp = self.state.get("last_failure")
+        if not failures or not stamp:
+            return None
+        if type(failures) is not int or failures < 0:
+            raise ValueError("invalid consecutive_failures")
+        failure = dt.datetime.fromisoformat(stamp)
+        if failure.tzinfo is None:
+            raise ValueError("last_failure must include a timezone")
+        minutes = min(60, 2 ** min(failures - 1, 6))
+        return (failure + dt.timedelta(minutes=minutes)).isoformat()
+
+    def backoff_reason(self):
+        until = self.backoff_until()
+        self.state["backoff_until"] = until
+        if until and dt.datetime.fromisoformat(until) > dt.datetime.now(dt.UTC):
+            clock = dt.datetime.fromisoformat(until).astimezone(dt.UTC).strftime("%H:%MZ")
+            return f"backoff until {clock} ({self.state['consecutive_failures']} failures)"
+        return None
+
+    def timer_wait(self):
+        # Read under the fleet lock; a prior run may have finished while we started.
+        saved = self.safe.json(".local/state/fleet-sync/state.json", {})
+        for key, default in (("consecutive_failures", 0), ("last_failure", None)):
+            self.state[key] = saved.get(key, default)
+        retry = ".config/fleet-sync/retry"
+        if self.safe.read(retry) is not None:
+            self.safe.unlink(retry)
+            return False
+        reason = self.backoff_reason()
+        if not reason:
+            return False
+        try:
+            origin, _ = self.source()
+            fields = self.cmd("git", "ls-remote", "--exit-code", origin, "refs/heads/main").split()
+            remote = fields[0] if fields else ""
+            if not SHA.fullmatch(remote):
+                raise ValueError("invalid agents origin/main sha")
+            if remote != saved.get("agents_sha"):
+                return False
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            reason += "; origin/main probe failed: " + " ".join(str(error).split())[:600]
+        log = self.safe.read(".local/state/fleet-sync/run.log") or b""
+        self.safe.save(".local/state/fleet-sync/run.log",
+                       (log.rstrip(b"\n") + f"\n{now()} {reason}\n".encode())[-262144:])
+        self.waiting = True
+        return True
+
+    def preview(self, destination):
+        """Converge only a private HOME copy, retaining real HOME for rendering/probes."""
+        destination = Path(os.path.abspath(destination))
+        copy_home = destination / "home"
+        if self.home == copy_home or self.home.is_relative_to(copy_home):
+            raise ValueError("preview HOME must not contain the real HOME")
+        output = SafeHome(Path(destination.anchor))
+        relative = str(destination.relative_to(destination.anchor))
+        # Only DIR itself may be created: missing ancestors are outside its scope.
+        with output.parent(relative) as (directory, leaf):
+            try:
+                os.mkdir(leaf, mode=0o700, dir_fd=directory)
+            except FileExistsError:
+                pass
+        if output.names(relative):
+            raise ValueError("preview DIR must be empty")
+        output.directory(relative + "/home", create=True)
+        self.real_safe = self.safe
+        copy = SafeHome(copy_home)
+        units = self.d.host_units(self.name) | self.unit_owned
+        if any(Path(name).name != name or not name.endswith((".timer", ".service")) for name in units):
+            raise ValueError("invalid unit ownership record")
+        paths = set(RENDERED_FILES) | {f".config/systemd/user/{name}" for name in units}
+        for path in self.owned - paths:
+            if Path(path).parent != Path(".config/systemd/user") or Path(path).suffix not in (".timer", ".service"):
+                raise ValueError("unrecognized managed file in state")
+        paths |= self.owned
+        # Existing backups also matter to an accurate first-run preview.
+        paths |= {path + ".pre-fleet-sync" for path in paths}
+        before = {}
+        for path in sorted(paths):
+            data = self.real_safe.read(path)
+            before[path] = data
+            if data is not None:
+                copy.save(path, data)
+        link_before = {}
+        for tool in self.d.tools:
+            path = f".local/bin/{tool}"
+            try:
+                target = self.real_safe.readlink(path)
+            except ValueError:
+                # Preserve regular-file conflicts so links() reports the real refusal.
+                data = self.real_safe.read(path)
+                before[path] = data
+                copy.save(path, data)
+            else:
+                link_before[path] = target
+                if target is not None:
+                    copy.link(path, target)
+        self.safe, self.previewing = copy, True
+        try:
+            self.item("agents", "deferred", "preview: using invoking checkout declarations; no release deployment")
+            self.item("fabrig", "deferred", "preview: fabrig installer is not run")
+            self.attempt("links", self.links)
+            self.render()
+            self.attempt("units", self.units)
+            self.versions()
+            new = []
+            for path, original in sorted(before.items()):
+                rendered = copy.read(path)
+                if original == rendered:
+                    continue
+                if original is None:
+                    new.append(path)
+                # Decode invalid text visibly without ever following a managed symlink.
+                old_lines = (original or b"").decode(errors="backslashreplace").splitlines(keepends=True)
+                new_lines = (rendered or b"").decode(errors="backslashreplace").splitlines(keepends=True)
+                for line in difflib.unified_diff(old_lines, new_lines,
+                        fromfile=str(self.home / path) if original is not None else "/dev/null",
+                        tofile=str(copy_home / path) if rendered is not None else "/dev/null"):
+                    sys.stdout.write(line if line.endswith("\n") else line + "\n\\ No newline at end of file\n")
+            for path, original in sorted(link_before.items()):
+                target = copy.readlink(path)
+                if target != original:
+                    print(f"link {self.home / path}: {original or '(absent)'} -> {target}")
+                    if original is None:
+                        new.append(path)
+            print("New files:")
+            for path in sorted(new):
+                print(path)
+        finally:
+            self.safe, self.previewing = self.real_safe, False
+        return self.finish(False)
+
     def run(self):
+        if self.args.check:
+            reason = self.backoff_reason()
+            if reason:
+                self.item("backoff", "held", reason)
         if any(i["result"] == "failed" for i in self.state["items"]):
             return self.finish(False)
         try:
@@ -1126,6 +1286,8 @@ class Runner:
             lines = hold.decode().splitlines()
             self.item("hold", "held", lines[0] if lines else "hold file exists")
             return self.finish(False)
+        if getattr(self.args, "preview", None) is not None:
+            return self.preview(self.args.preview)
         try:
             acquired = self.acquire()
         except (OSError, ValueError) as error:
@@ -1136,6 +1298,13 @@ class Runner:
                 return 0
             return self.finish(False)
         try:
+            if self.args.timer and not self.args.check and self.args.resume_fd is None:
+                try:
+                    if self.timer_wait():
+                        return 0
+                except (OSError, ValueError, subprocess.SubprocessError) as error:
+                    self.item("backoff", "failed", str(error))
+                    return self.finish()
             if self.args.resume_fd is None:
                 self.attempt("agents", self.release)
             if not any(i["result"] == "failed" for i in self.state["items"]):
@@ -1225,6 +1394,7 @@ def main():
     parser.add_argument("--check", action="store_true")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--timer", action="store_true")
+    parser.add_argument("--preview", metavar="DIR", help="render changes into DIR/home without deployment")
     parser.add_argument("--host")
     parser.add_argument("--self-check", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--resume-fd", type=int, help=argparse.SUPPRESS)
@@ -1233,6 +1403,9 @@ def main():
     args.smoke_fd = int(smoke_fd) if smoke_fd is not None else None
     if args.smoke_fd is not None and not args.check:
         parser.error("smoke lock requires --check")
+    if args.preview is not None and (args.command or args.check or args.timer or args.json or args.self_check
+                                     or args.resume_fd is not None or args.smoke_fd is not None):
+        parser.error("--preview accepts only --host")
     if args.command and (args.check or args.timer or args.self_check or args.resume_fd is not None):
         parser.error("status accepts only --json and --host")
     try:
@@ -1249,7 +1422,7 @@ def main():
         parser.error("invalid release handoff")
     runner = Runner(args, declarations, name, json.loads(handoff) if handoff else None)
     code = runner.run()
-    if not (args.timer and not runner.state["items"]):
+    if not runner.waiting and not (args.timer and not runner.state["items"]):
         print_state(runner.state, args.json)
     return code
 

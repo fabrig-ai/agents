@@ -24,6 +24,9 @@ or writes. Invalid declarations/unknown hosts exit 2 before changing anything.
 A hold file suppresses all writes, even bookkeeping. Otherwise an exclusive
 flock on ~/.local/state/fleet-sync/lock serializes runs; a busy timer exits
 quietly. Controls hold, pin and defer-fabrig are never created or removed by us.
+The sole removable control is retry: after acquiring the lock, a timer reads
+and removes ~/.config/fleet-sync/retry, bypassing its current backoff once.
+Hold and a busy lock leave retry untouched; checks and previews never consume it.
 
 1. Validate the dedicated agents clone, fetch, and detach at origin/main or the
    full lowercase SHA in pin. Archive into a sibling, excluding old/, and rename.
@@ -75,7 +78,17 @@ quietly. Controls hold, pin and defer-fabrig are never created or removed by us.
 5. Probe versions, save state.json/run.log atomically, and retain seven days of
    changed/failed JSONL records. State includes actual/desired SHAs, items and
    last timer completion, which manual checks preserve. Later steps continue
-   after fabrig failure. Child commands have private process groups; a timeout
+   after fabrig failure. A completed timer run with any failed item increments
+   consecutive_failures and records last_failure. Its next timer waits 1, 2, 4,
+   8, 16, 32, then 60 minutes (capped) from that failure. While waiting it exits 0
+   without console output, appends one line to run.log, and leaves state and
+   timer completion unchanged. Each waiting timer uses git ls-remote to check
+   agents origin/main: a SHA different from the last deployed SHA bypasses the
+   wait immediately, as does retry. A failed remote probe keeps the wait and is
+   included in that log line. Completed runs without failed items reset the
+   counter; manual runs never wait. Manual failures preserve the timer counter.
+   Checks and status show `backoff until HH:MMZ (n failures)` while it is active.
+   Child commands have private process groups; a timeout
    sends TERM, allows five seconds, KILLs survivors and waits before unlocking.
    KeyboardInterrupt and SIGINT/TERM/HUP use that same cleanup, including
    status's parallel children. Exit after unlocking: INT 130, TERM/HUP 143.
@@ -95,6 +108,21 @@ instructions; never modify/depend on old/. Claude/Codex run only --version.
 Never touch src/fabrig/{claims,leases,queue,slots}, heavy state/units,
 src/rust/tmp/{codex-run,owners}, or anything under post/ except machines.
 Never touch ~/src/rust/tmp/logins/: held QA logins must be kept.
+
+For step 0 on each host, run
+`python3 -I -B tools/fleet-sync --preview DIR [--host NAME]` from the checkout.
+DIR must be new or empty, with existing parents and no symlinks in its path.
+Preview copies existing managed regular files and their existing backups to
+DIR/home using no-follow reads, then converges that copy. It refuses unsafe
+managed files; installed tool symlinks are inspected and reproduced as links.
+Rendered paths and link targets name the real HOME, even inside the copy.
+Preview uses the invoking checkout's declarations without fetching/deploying a
+release, defers fabrig, and runs no systemctl, lock, journal or state writes.
+Version probes and conflict checks use the real HOME and environment. It prints
+unified diffs (including additions, removals and backups), tool-link changes,
+and a list of new files. Check-only files retain their original contents and
+report differences as warnings. Hold suppresses preview too. All preview writes
+stay inside DIR; preview accepts only --host alongside --preview.
 
 `--check` creates no files/locks/state and calls no systemctl. Its only write
 exception is fetching/comparing an EXISTING private fabrig mirror; an absent
