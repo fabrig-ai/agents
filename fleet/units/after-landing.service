@@ -4,7 +4,7 @@ Description=Check fabrig slow tiers after landing
 
 [Service]
 Type=exec
-ExecStart=/bin/bash -lc 'exec "$$HOME/src/fabrig/current/tools/after-landing/after-landing" follow'
+ExecStart=/bin/bash -lc 'exec "$$HOME/src/fabrig/current/tools/after-landing/after-landing" --slot "$$HOME/src/fabrig/slots/4" --host hetzner7 follow'
 Restart=on-failure
 RestartSec=60
 RestartPreventExitStatus=2
