@@ -55,6 +55,13 @@ all identity-dependent episodes, including fixed watched roles.
 Active drafts and unfinished briefs (no closing, open work, or handed-over
 closing) come from records.
 
+Watch resolves `session-start` on PATH, falling back to `../session/start`
+relative to this script's resolved directory; both names and owns use that
+executable. Likewise, `lease` on PATH takes precedence over sibling `../lease`.
+A selected executable's failure is reported without trying another copy. Each
+heartbeat's `inputs` object records the selected paths as `session-start` and
+`lease`.
+
 Inputs are independent. A failed command, malformed reading or unavailable
 records stream freezes dependent episodes; it never opens an alert on its own.
 A heartbeat names failed inputs and skipped rules. Missing lease is a skipped

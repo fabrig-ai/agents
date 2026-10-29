@@ -677,8 +677,49 @@ else: sys.exit(1 if sys.argv[2] in os.environ.get('UNOWNED','').split(',') else 
         heartbeat = next(json.loads(line) for line in result.stdout.splitlines()
                          if line.startswith('{') and json.loads(line)['kind'] == 'heartbeat')
         self.assertIn('names', heartbeat['inputs_failed'])
+        self.assertEqual(heartbeat['inputs']['session-start'], str(self.bin / 'session-start'))
         self.assertEqual(heartbeat['alerts_open'], 0)
         self.assertNotIn('would post ', result.stdout)
+
+    def test_sibling_resolution_and_heartbeat_paths(self):
+        global TOOL
+        original_tool = TOOL
+        self.env['PATH'] = str(self.bin) + os.pathsep + '/usr/bin:/bin'
+        release = self.home / 'release/tools'
+        for name in ('watch', 'record', 'watch.toml'):
+            target = release / 'records' / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(original_tool.with_name(name), target)
+        for name, relative in (('session-start', 'session/start'), ('lease', 'lease')):
+            target = release / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(self.bin / name, target)
+        self.mail()
+        launcher = release / 'session/start'
+        program = launcher.read_text().split('\n', 1)[1]
+        self.write(launcher, '#!/usr/bin/env python3\nimport json,os,sys\nfrom pathlib import Path\n'
+                   "with (Path(os.environ['HOME'])/'launcher.log').open('a') as out: out.write(json.dumps(sys.argv[1:])+'\\n')\n" + program)
+        launcher.chmod(0o700)
+        try:
+            TOOL = release / 'records/watch'
+            for fallback in (False, True):
+                with self.subTest(fallback=fallback):
+                    if fallback:
+                        (self.bin / 'session-start').unlink()
+                        (self.bin / 'lease').unlink()
+                    result = self.invoke(dry=True)
+                    heartbeat = next(json.loads(line) for line in result.stdout.splitlines()
+                                     if line.startswith('{') and json.loads(line)['kind'] == 'heartbeat')
+                    expected = {'session-start': str(launcher if fallback else self.bin / 'session-start'),
+                                'lease': str(release / 'lease' if fallback else self.bin / 'lease')}
+                    self.assertEqual(heartbeat['inputs'], expected)
+                    self.assertFalse(heartbeat['inputs_failed'])
+                    self.assertIn('would post wake lead/jig', result.stdout)
+            calls = [json.loads(line) for line in (self.home / 'launcher.log').read_text().splitlines()]
+            self.assertIn(['names', '--json'], calls)
+            self.assertIn(['owns', 'lead/jig'], calls)
+        finally:
+            TOOL = original_tool
 
     def test_writer_watch_append_only(self):
         record = TOOL.with_name('record')

@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import statistics
 import subprocess
 import sys
@@ -251,6 +252,11 @@ def identities(text):
 class Inputs:
     def __init__(self, dry):
         self.dry, self.data, self.errors = dry, {}, {}
+        directory = Path(__file__).resolve().parent.parent
+        self.executables = {
+            name: shutil.which(name) or str(directory / sibling)
+            for name, sibling in (('session-start', 'session/start'), ('lease', 'lease'))
+        }
 
     def read(self, name, operation):
         try:
@@ -299,13 +305,13 @@ class Inputs:
 
     def collect(self, records):
         self.read('records', lambda: self.records(records))
-        self.read('names', lambda: identities(checked(['session-start', 'names', '--json'])))
+        self.read('names', lambda: identities(checked([self.executables['session-start'], 'names', '--json'])))
         self.data.setdefault('names', {})
         self.read('agents', lambda: agent_rows(checked(['claude', 'agents', '--json'])))
         self.read('waiters', lambda: waiters(checked(['post', 'waiters'])))
         self.read('mail', mailboxes)
         self.read('claims', lambda: claims(checked(['claim', 'list'])))
-        self.read('leases', lambda: lease_rows(checked(['lease', 'list', '--json'])))
+        self.read('leases', lambda: lease_rows(checked([self.executables['lease'], 'list', '--json'])))
         def refs():
             rows = {}
             for line in checked(['git', 'ls-remote', 'git@github.com:fabrig-ai/fabrig.git',
@@ -368,7 +374,7 @@ class Inputs:
                 self.data['owned'][name] = True
                 continue
             try:
-                result = command(['session-start', 'owns', name], env=dict(os.environ, RECORDS_REPO=str(records)))
+                result = command([self.executables['session-start'], 'owns', name], env=dict(os.environ, RECORDS_REPO=str(records)))
                 if result.returncode not in (0, 1):
                     raise ValueError('owns exited ' + str(result.returncode))
                 self.data['owned'][name] = result.returncode == 0
@@ -709,7 +715,7 @@ def run(dry, config, post, heartbeat_seconds):
             events.append(dict(id='watch:heartbeat:' + str(time.time_ns()), time=iso(now), source='watch', host='hel8',
                                kind='heartbeat', rules_evaluated=[r for r in RULES if config[r]['enabled'] and r not in skipped],
                                rules_skipped=skipped,
-                               alerts_open=len(state['episodes']), inputs_failed=errors))
+                               alerts_open=len(state['episodes']), inputs=inputs.executables, inputs_failed=errors))
             state['heartbeat'] = dict(time=now, failed_inputs=sorted(errors))
         pending = state.setdefault('pending', [])
         pending.extend(events)
