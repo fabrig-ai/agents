@@ -19,7 +19,7 @@ import tomllib
 
 ORIGIN = 'git@github.com:fabrig-ai/records.git'
 NAME = r'[a-z0-9][a-z0-9_-]*'
-POST = rf'(?:s/{NAME}|lead/{NAME}|director|ops)'
+POST = rf'(?:s/{NAME}|lead/(?:{NAME}/)?{NAME}|director|ops)'
 HOST = r'[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?'
 SECRET = re.compile(
     r'-----BEGIN [^\n-]*PRIVATE KEY-----|'
@@ -221,7 +221,7 @@ def validate(root, name, data):
     elif kind == 'closing':
         timestamp('ended')
         required('lead')
-        need(re.fullmatch(rf'lead/{NAME}', fields['lead']), f'{name}: invalid lead session')
+        need(re.fullmatch(rf'lead/(?:{NAME}/)?{NAME}', fields['lead']), f'{name}: invalid lead session')
         need(fields.get('outcome') in ('done', 'handed-over', 'stopped'), f'{name}: invalid outcome')
         for key in ('landed', 'withdrawn', 'open'):
             strings(fields.get(key), f'{name}: {key}')

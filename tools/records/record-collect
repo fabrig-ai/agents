@@ -18,7 +18,7 @@ import tempfile
 import tomllib
 
 UTC = timezone.utc
-SOURCES = ('runs', 'queue', 'heavy', 'sessions', 'claims', 'leases', 'post')
+SOURCES = ('runs', 'queue', 'heavy', 'sessions', 'claims', 'leases', 'post', 'post-sent')
 JOIN = ('task', 'branch', 'coordinator', 'draft', 'area', 'part')
 
 
@@ -304,7 +304,7 @@ class Collector:
         for row in rows:
             name = row.get('name', '')
             keys = names(name)
-            if not keys:
+            if not keys and not (name == 'director' or name.startswith('director/') or name in ('ops', 's/deploy')):
                 continue
             session = row.get('sessionId') or row['id']
             started = datetime.fromtimestamp(row['startedAt'] / 1000, UTC)
@@ -327,12 +327,59 @@ class Collector:
                       tokens=int(used.replace(',', '')), window=int(window.replace(',', '')),
                       percent=int(percent), measured=measured, calls=int(calls.replace(',', '')),
                       compactions=int(compactions))
+        self.fired()
+        if (self.tmp / 'post').is_dir():
+            self.post(files_current=True)
         for session, prior in old.items():
             if session not in current:
                 self.emit('session-end', [session, self.state.get('generation', 0)], self.now,
                           session=session, name=prior['name'], **names(prior['name']), observed=True)
         self.state['snapshot'] = current
         self.state['generation'] = self.state.get('generation', 0) + 1
+
+    def fired(self):
+        result = subprocess.run(['session-context', '--fired', '--json'],
+                                capture_output=True, text=True, timeout=30)
+        if result.returncode:
+            raise ValueError('session-context --fired failed')
+        markers = json.loads(result.stdout)
+        if not isinstance(markers, list):
+            raise ValueError('fired markers must return an array')
+        for marker in markers:
+            session = marker['session_id']
+            first, last = timestamp(marker['first_fired']), timestamp(marker['last_fired'])
+            if not isinstance(session, str) or not session or last < first:
+                raise ValueError('invalid fired marker')
+            name = marker['name']
+            # Ungated hooks can lack a resolved name; never guess an owner.
+            if name is None:
+                continue
+            if not isinstance(name, str) or not name:
+                raise ValueError('invalid fired name')
+            fields = dict(session=session, name=name, role=marker['role'], reason=marker['reason'],
+                          first_fired=iso(first), last_fired=iso(last), **names(name))
+            # Append-only updates get their own stable ids; first_fired stays fixed.
+            for firing in dict.fromkeys((first, last)):
+                self.emit('handover-needed', [session, iso(first), iso(firing)], firing, **fields)
+
+    def post_sent(self):
+        path = self.tmp / 'post/sent.jsonl'
+        if not path.is_file():
+            raise Skip('no post/sent.jsonl')
+        for line in self.lines(path):
+            row = json.loads(line)
+            if not isinstance(row, dict):
+                raise ValueError('invalid post send')
+            for field in ('time', 'from', 'to', 'subject_sha256', 'message_id'):
+                if not isinstance(row.get(field), str) or not row[field]:
+                    raise ValueError('invalid post send ' + field)
+            if not re.fullmatch(r'[0-9a-f]{64}', row['subject_sha256']):
+                raise ValueError('invalid post subject hash')
+            if type(row.get('exit')) is not int or not 0 <= row['exit'] <= 255:
+                raise ValueError('invalid post exit')
+            when = timestamp(row['time'])
+            fields = {key: row[key] for key in ('from', 'to', 'subject_sha256', 'message_id', 'exit')}
+            self.emit('send', row, when, **fields, **names(row['from']))
 
     def claims(self):
         root = self.fabrig / 'claims'
@@ -404,7 +451,7 @@ class Collector:
             self.state['generation'] = generation + 1
         self.state['snapshot'] = current
 
-    def post(self):
+    def post(self, files_current=False):
         root = self.tmp / 'post'
         if not root.is_dir():
             raise Skip('no post directory')
@@ -415,8 +462,8 @@ class Collector:
                 for location in ('new', 'cur'):
                     for path in sorted((box / location).glob('*.md')):
                         key = [box.name, path.stem]
-                        kinds = ('mail', 'read') if location == 'cur' else ('mail',)
-                        if all(f'post:{self.host}:{digest([kind, key])}' in self.seen for kind in kinds):
+                        kinds = ('files-current',) if files_current else (('mail', 'read') if location == 'cur' else ('mail',))
+                        if all(f'{self.source}:{self.host}:{digest([kind, key])}' in self.seen for kind in kinds):
                             continue
                         # Unbuffered reads stop at the header separator, even for
                         # a binary/very large body. Bodies never enter this process.
@@ -445,6 +492,13 @@ class Collector:
                         delivered = datetime.fromtimestamp(stat.st_mtime, UTC)
                         fields = dict(message_id=header['Id'], **{'from': header['From'], 'to': header['To']},
                                       **(names(header['From']) | names(header['To'])))
+                        if files_current:
+                            sender = header['From'].split('@', 1)[0]
+                            if (re.fullmatch(r'lead/(?:[^/\s]+/)?[^/\s]+', sender) and
+                                    header['Subject'].strip().casefold().startswith('files current')):
+                                self.emit('files-current', key, delivered, **fields,
+                                          name=sender, subject=header['Subject'])
+                            continue
                         self.emit('mail', key, delivered, **fields, subject=header['Subject'], delivered=iso(delivered))
                         if location == 'cur':
                             self.emit('read', key, datetime.fromtimestamp(stat.st_ctime, UTC), **fields,
@@ -481,7 +535,7 @@ def collect(source, args, host, since):
                 raise ValueError('pending cursor version or host differs')
         else:
             reader = Collector(source, host, state, since, datetime.now(UTC))
-            getattr(reader, source)()
+            getattr(reader, source.replace('-', '_'))()
             events = reader.finish()
         payload = ''.join(json.dumps(e, sort_keys=True) + '\n' for e in events)
         if args.dry_run:

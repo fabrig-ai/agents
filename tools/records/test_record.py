@@ -634,6 +634,20 @@ class RecordTests(unittest.TestCase):
         self.assertIn(b'input not published', rejected.stderr)
         self.assert_clean()
 
+    def test_nested_launcher_leads_can_write_close_and_ask(self):
+        self.prepare()
+        self.run_record('write', '--as', 'lead/q/jig', 'README.md', data=b'# Lead update\n')
+        self.run_record('write', '--as', 'lead/q/jig',
+                        'drafts/example/parts/tools-records/closing.toml',
+                        data=CLOSING.replace(b'lead/tools', b'lead/q/jig'))
+        self.run_record('write', '--as', 'lead/q/jig', 'director/questions/next.toml',
+                        data=QUESTION.replace(b'by = "director"', b'by = "lead/q/jig"'))
+        self.run_record('check')
+        for writer in ('collect', 'watch'):
+            self.run_record('ask', '--as', writer, '--question', 'Scope?', '--option', 'a',
+                            '--recommendation', 'a', '--deadline', '+1', code=1)
+
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

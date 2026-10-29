@@ -29,17 +29,20 @@ to director; the director batches the question to the user.
 | question due | unanswered question past its deadline; director | director handles the user |
 | delivery failed | send exit 2 without successful retry/told marker; sender (run's session owner for codex-run) | ops |
 
-The launcher supplies identity, aliases and supervisors. `session-start names`
-is called by PATH name and is expected to return a JSON array of identities
-(or an object keyed by mailbox). Each row has `mailbox` (or `name`),
-`supervisor`, optional `role`, `aliases`, `name_prefix`, `coordinator_mailbox`,
-`area`, `unfinished`, and string join keys. Coordinators, ops and
-s/deploy have supervisor director; director has none. Leads use the launcher's
-coordinator mailbox. Timestamped sessions match the launcher's prefix, and
-renamed sessions also match the last waiter holder's session id. Each listed
-name is checked with `session-start owns NAME`: exit 1 skips it, exit 2 freezes
-its episodes. Ops and s/deploy always bypass owns. Active drafts and unfinished
-briefs (no closing, open work, or handed-over closing) come from records.
+The launcher supplies identities and supervisors through
+`session-start names --json`, an array of rows with `mailbox` and
+`supervisor`, plus role-specific aliases, prefixes, handles, areas and paths.
+Watch uses that contract directly: it does not infer supervisors, accept a
+mailbox-keyed object, or add identities missing from the inventory. The
+director's null supervisor becomes an empty escalation destination.
+`paused` suppresses the role and its alerts; `always_watched` bypasses owns
+for the launcher's fixed ops/deploy rows. Timestamped sessions match the
+launcher's prefix, and renamed sessions also match the last waiter holder's
+session id. Other names are checked with `session-start owns NAME`: exit 1
+skips the role, while exit 2 freezes its episodes. A failed inventory freezes
+all identity-dependent episodes, including fixed watched roles.
+Active drafts and unfinished briefs (no closing, open work, or handed-over
+closing) come from records.
 
 Inputs are independent. A failed command, malformed reading or unavailable
 records stream freezes dependent episodes; it never opens an alert on its own.
@@ -55,12 +58,19 @@ observation of the same tip. A new tip starts its clock again; historical
 attempts for another tip do not hide it. Run medians use completed runs in the
 available producer ledgers. Lease activity requires explicit package/subject
 keys or an event for a branch lent by that lease; unrelated coordinator activity
-does not prove package activity. Existing collectors provide periodic context
-readings, not a durable hook-fired event. A high percentage alone cannot prove
-the hook fired; handover detection requires `context-hook` or `handover-needed`
-events in the sessions stream. The launcher/hook producer must supply them. `files current` uses only a post
-subject header; mail bodies are never read or quoted. Repeated hook notifications do
-not restart the handover clock. An explicit successor/session-start clears it.
+does not prove package activity. The sessions collector supplies durable `handover-needed` events from
+`session-context --fired --json`, including updates with the same
+`first_fired`. Watch uses that first time for ordering and the lateness
+clock: later firings do not reset it or reopen an acknowledged handover.
+Legacy `context-hook` events remain supported. A context sample alone never
+proves firing. Sessions' `files-current` projection and lead post subjects
+starting with `files current` acknowledge handover using header metadata;
+mail bodies are never read. An explicit successor/session-start also clears it.
+The `post-sent` stream supplies send exits from the port's `sent.jsonl`
+metadata; exit 2 alerts the sender and escalates to ops, and a later successful
+row for the same message clears the condition. Existing run completion/told
+evidence and post delivery events remain supported.
+
 
 The private `~/.local/state/watch/state.json` has mode 0600, written to a sibling,
 flushed and renamed under a process lock. Each `(rule, subject)` has one episode:

@@ -34,7 +34,7 @@ class Rules(unittest.TestCase):
         }
         self.data = dict(names=self.names, owned={n: True for n in self.names}, agents=[], waiters={}, mail=[],
                          claims=[], leases=[], refs={}, questions=[], drafts=[])
-        self.data.update({k: [] for k in ('runs/hel8', 'heavy/hel8', 'records/queue', 'records/heavy', 'records/sessions', 'records/post')})
+        self.data.update({k: [] for k in ('runs/hel8', 'heavy/hel8', 'records/queue', 'records/heavy', 'records/sessions', 'records/post', 'records/post-sent')})
         self.calls = []
     def judge(self, now=NOW):
         return API['evaluate'](self.data, self.state, self.config, now)
@@ -327,6 +327,57 @@ class Rules(unittest.TestCase):
         API['reconcile'](state, candidates, {}, self.config, NOW+2, self.action)
         self.assertEqual(len(self.calls), 1)
 
+    def test_handover_updates_keep_first_clock_and_do_not_reopen_after_ack(self):
+        first = ISO(NOW-1300)
+        self.data['records/sessions'] = [
+            dict(kind='handover-needed', name='lead/tools', session='old', time=ISO(NOW-10),
+                 first_fired=first, last_fired=ISO(NOW-10))]
+        self.assertTrue(self.rule('handover late'))
+        self.data['records/sessions'].append(dict(kind='files-current', name='lead/tools', time=ISO(NOW-100)))
+        self.assertFalse(self.rule('handover late'))
+
+    def test_post_sent_failures_retry_and_missing_stream_freeze(self):
+        row = dict(id='send-fail', kind='send', time=ISO(NOW), message_id='mail',
+                   **{'from': 's/default@hel8', 'exit': 2})
+        self.data['records/post-sent'] = [row]
+        candidates = self.rule('delivery failed')
+        self.assertEqual(len(candidates), 1)
+        self.assertIn('records/post-sent', candidates[0]['deps'])
+        self.assertEqual(candidates[0]['owner'], 's/default')
+        self.assertEqual(candidates[0]['escalate_to'], 'ops')
+        self.round()
+        self.assertEqual(self.calls, [('send', 's/default', 'delivery failed')])
+        self.data.pop('records/post-sent')
+        self.round(NOW+1, errors={'records/post-sent': 'missing'})
+        self.assertTrue(self.state['episodes'])
+        self.data['records/post-sent'] = [row, dict(row, id='send-ok', exit=0, time=ISO(NOW+1))]
+        self.assertFalse(self.rule('delivery failed'))
+        self.round(NOW+2)
+        self.round(NOW+3)
+        self.assertFalse(self.state['episodes'])
+
+    def test_launcher_pause_and_supervisor_are_authoritative(self):
+        self.live()
+        self.mail(11)
+        self.names['lead/tools']['paused'] = True
+        self.assertFalse(self.rule('deaf'))
+        self.names['lead/tools']['paused'] = False
+        self.names['lead/tools']['supervisor'] = 'custom-supervisor'
+        self.assertEqual(self.rule('deaf')[0]['supervisor'], 'custom-supervisor')
+
+
+    def test_fixed_identity_episodes_freeze_when_names_is_unavailable(self):
+        self.names['ops']['always_watched'] = True
+        self.data['records/post-sent'] = [dict(id='fixed-fail', kind='send', time=ISO(NOW),
+                                             message_id='fixed-mail', **{'from': 'ops', 'exit': 2})]
+        self.round()
+        self.assertTrue(self.state['episodes'])
+        self.data['names'] = {}
+        for offset in (1, 2, 3):
+            self.round(NOW+offset, errors={'names': 'unavailable'})
+        self.assertTrue(self.state['episodes'])
+
+
 
 class Integration(unittest.TestCase):
     def setUp(self):
@@ -349,7 +400,7 @@ class Integration(unittest.TestCase):
         self.git('init', '--bare', '--initial-branch=main', str(self.origin))
         self.git('clone', str(self.origin), str(self.seed))
         self.write(self.seed / 'README.md', '# Synthetic\n')
-        for source in ('queue', 'heavy', 'sessions', 'post'):
+        for source in ('queue', 'heavy', 'sessions', 'post', 'post-sent'):
             self.write(self.seed / f'events/{source}/README.md', '# Synthetic\n')
         self.git('-C', str(self.seed), 'add', '.')
         self.git('-C', str(self.seed), 'commit', '-m', 'seed')
@@ -358,9 +409,11 @@ class Integration(unittest.TestCase):
         self.write(self.tmp / 'post/machines', 'hel8 local\nbuilder fake.invalid\n')
         (self.tmp / 'codex-run').mkdir(parents=True)
         self.write(self.tmp / 'heavy/state.json', '{"tasks":{}}')
-        self.write(self.home / 'names.json', json.dumps([
-            dict(mailbox='lead/tools', supervisor='s/default'), dict(mailbox='s/default', role='coordinator'),
-            dict(mailbox='director')]))
+        inventory = subprocess.run([str(TOOL.parents[1] / 'session/start'), 'names', '--json'],
+                                   env=dict(os.environ, RECORDS_REPO=str(self.home/'records')),
+                                   text=True, capture_output=True)
+        self.assertEqual(inventory.returncode, 0, inventory.stderr)
+        self.write(self.home / 'names.json', inventory.stdout)
         self.write(self.home / 'agents.json', '[]')
         self.write(self.home / 'refs', '')
         self.write(self.home / 'claims', '')
@@ -381,7 +434,10 @@ else:
         self.fake('session-start', """import os,sys
 from pathlib import Path
 home=Path(os.environ['HOME'])
-if sys.argv[1]=='names': print((home/'names.json').read_text())
+if os.environ.get('FAIL_INPUT')=='session-start': sys.exit(2)
+if sys.argv[1]=='names':
+ assert sys.argv[1:]==['names','--json']
+ print((home/'names.json').read_text())
 else: sys.exit(1 if sys.argv[2] in os.environ.get('UNOWNED','').split(',') else 0)
 """)
         for name, file in [('claude','agents.json'), ('claim','claims'), ('lease','leases'), ('ssh','remote')]:
@@ -403,9 +459,9 @@ else: sys.exit(1 if sys.argv[2] in os.environ.get('UNOWNED','').split(',') else 
         self.assertEqual(result.returncode, code, result.stdout+result.stderr)
         return result
     def mail(self):
-        self.write(self.home/'agents.json', '[{"name":"lead/tools","sessionId":"session","status":"busy"}]')
-        path = self.write(self.tmp/'post/lead+tools/new/synthetic.md',
-                          'Id: synthetic\nFrom: test@hel8\nTo: lead/tools@hel8\nSubject: synthetic\n\nPRIVATE BODY MUST NEVER APPEAR\n')
+        self.write(self.home/'agents.json', '[{"name":"lead/jig","sessionId":"session","status":"busy"}]')
+        path = self.write(self.tmp/'post/lead+jig/new/synthetic.md',
+                          'Id: synthetic\nFrom: test@hel8\nTo: lead/jig@hel8\nSubject: synthetic\n\nPRIVATE BODY MUST NEVER APPEAR\n')
         old = datetime.now(timezone.utc).timestamp()-660
         os.utime(path, (old, old))
         return path
@@ -418,7 +474,7 @@ else: sys.exit(1 if sys.argv[2] in os.environ.get('UNOWNED','').split(',') else 
         self.mail()
         before = self.git('--git-dir', str(self.origin), 'rev-parse', 'main')
         result = self.invoke(dry=True)
-        self.assertIn('would post wake lead/tools', result.stdout)
+        self.assertIn('would post wake lead/jig', result.stdout)
         self.assertIn('"kind": "alert-open"', result.stdout)
         self.assertNotIn('PRIVATE BODY', result.stdout)
         self.assertFalse((self.home/'.local').exists())
@@ -432,7 +488,7 @@ else: sys.exit(1 if sys.argv[2] in os.environ.get('UNOWNED','').split(',') else 
         events = self.events()
         self.assertEqual(sum(e['kind']=='alert-open' for e in events), 1)
         self.assertEqual(sum(e['kind']=='heartbeat' for e in events), 2)
-        self.assertEqual(json.loads((self.home/'post.log').read_text()), ['wake', 'lead/tools'])
+        self.assertEqual(json.loads((self.home/'post.log').read_text()), ['wake', 'lead/jig'])
         state = self.home/'.local/state/watch/state.json'
         self.assertEqual(state.stat().st_mode & 0o777, 0o600)
         self.assertEqual(next(iter(self.state()['episodes'].values()))['wake'], 'queued')
@@ -451,7 +507,7 @@ else: sys.exit(1 if sys.argv[2] in os.environ.get('UNOWNED','').split(',') else 
         self.assertFalse(self.state()['episodes'])
         heartbeat = self.events()[-1]
         self.assertIn('agents', heartbeat['inputs_failed'])
-        self.invoke(UNOWNED='lead/tools')
+        self.invoke(UNOWNED='lead/jig')
         self.assertFalse(self.state()['episodes'])
         self.invoke(FAIL_INPUT='ssh')
         self.assertTrue(self.state()['episodes'])
@@ -485,7 +541,7 @@ else: sys.exit(1 if sys.argv[2] in os.environ.get('UNOWNED','').split(',') else 
 
     def test_bad_remote_runs_and_leases_are_failed_inputs(self):
         self.write(self.home/'remote', '{"runs":[{}],"heavy":[],"errors":[]}')
-        self.write(self.home/'leases', '[{"subject":"pkg:example","owner":"s/default","since":"bad","waiters":[]}]')
+        self.write(self.home/'leases', '[{"subject":"pkg:example","owner":"s/dynamic-memory","since":"bad","waiters":[]}]')
         self.invoke()
         heartbeat = self.events()[-1]
         self.assertIn('runs/builder', heartbeat['inputs_failed'])
@@ -495,9 +551,9 @@ else: sys.exit(1 if sys.argv[2] in os.environ.get('UNOWNED','').split(',') else 
     def test_probe_real_producer_shapes_and_header_joins(self):
         task = self.write(self.home/'task.md', '+++\ntask="test"\nbranch="mc/example"\ndraft="wave"\n+++\n')
         run = self.tmp/'codex-run/synthetic'
-        self.write(run/'meta', f'to=lead/tools@hel8\nstarted={ISO(NOW)}\neffort=high\ndir=/synthetic/slots/1\ntask={task}\n')
+        self.write(run/'meta', f'to=lead/jig@hel8\nstarted={ISO(NOW)}\neffort=high\ndir=/synthetic/slots/1\ntask={task}\n')
         self.write(run/'events.jsonl', '')
-        self.write(self.tmp/'codex-run/runs.tsv', '\t'.join(['synthetic','lead/tools',ISO(NOW),ISO(NOW+60),'0','1','model','high',str(task),'report','thread','1/0/1','2'])+'\n')
+        self.write(self.tmp/'codex-run/runs.tsv', '\t'.join(['synthetic','lead/jig',ISO(NOW),ISO(NOW+60),'0','1','model','high',str(task),'report','thread','1/0/1','2'])+'\n')
         result = API['probe']()
         self.assertFalse(result['errors'])
         row = result['runs'][0]
@@ -507,25 +563,36 @@ else: sys.exit(1 if sys.argv[2] in os.environ.get('UNOWNED','').split(',') else 
         self.assertEqual(row['end']-row['started'], 60)
         self.assertNotIn('task_body', row)
     def test_launcher_identity_contract_supervisors_and_prefix(self):
-        rows = API['identities'](json.dumps([
-            dict(mailbox='lead/tools', coordinator_mailbox='s/default'),
-            dict(mailbox='lead/H/tools', coordinator_mailbox='s/second'),
-            dict(mailbox='s/second', role='coordinator', name_prefix='coordinator/H/'),
-            dict(mailbox='ops'), dict(mailbox='s/deploy'), dict(mailbox='director')]))
-        self.assertEqual(rows['lead/tools']['supervisor'], 's/default')
-        self.assertEqual(rows['lead/H/tools']['supervisor'], 's/second')
-        for name in ('s/second', 'ops', 's/deploy'):
+        rows = API['identities']((self.home/'names.json').read_text())
+        self.assertEqual(rows['lead/jig']['supervisor'], 's/dynamic-memory')
+        self.assertEqual(rows['lead/q/jig']['supervisor'], 's/qa')
+        for name in ('s/qa', 'ops', 's/deploy'):
             self.assertEqual(rows[name]['supervisor'], 'director')
         self.assertEqual(rows['director']['supervisor'], '')
-        with self.assertRaises(ValueError):
-            API['identities']('[{"mailbox":"lead/unmapped"}]')
+        self.assertEqual(rows['s/qa']['name_prefix'], 'coordinator/q/')
+        self.assertTrue(rows['ops']['always_watched'])
+        for text in ('{"lead/unmapped": {}}', '[{"mailbox":"lead/unmapped"}]'):
+            with self.assertRaises(ValueError):
+                API['identities'](text)
+        # Preserve the launcher-supplied supervisor rather than inferring one.
+        custom = API['identities']('[{"mailbox":"s/custom","role":"coordinator","supervisor":"other"}]')
+        self.assertEqual(custom['s/custom']['supervisor'], 'other')
 
     def test_claim_and_waiter_parsers_reject_malformed(self):
-        rows = API['claims']('builder 1 [pool]: lead/tools: synthetic (since '+ISO(NOW)+'); held 0d 00:00:00\n')
+        rows = API['claims']('builder 1 [pool]: lead/jig: synthetic (since '+ISO(NOW)+'); held 0d 00:00:00\n')
         self.assertEqual(rows[0]['host'], 'builder')
-        self.assertEqual(API['waiters']('lead/tools 1 dead session')['lead/tools']['alive'], False)
-        for parser, value in [('claims','nonsense'), ('waiters','lead/tools invalid')]:
+        self.assertEqual(API['waiters']('lead/jig 1 dead session')['lead/jig']['alive'], False)
+        for parser, value in [('claims','nonsense'), ('waiters','lead/jig invalid')]:
             with self.assertRaises(ValueError): API[parser](value)
+    def test_names_failure_does_not_invent_fixed_identities(self):
+        self.mail()
+        result = self.invoke(dry=True, FAIL_INPUT='session-start')
+        heartbeat = next(json.loads(line) for line in result.stdout.splitlines()
+                         if line.startswith('{') and json.loads(line)['kind'] == 'heartbeat')
+        self.assertIn('names', heartbeat['inputs_failed'])
+        self.assertEqual(heartbeat['alerts_open'], 0)
+        self.assertNotIn('would post ', result.stdout)
+
     def test_writer_watch_append_only(self):
         record = TOOL.with_name('record')
         row = dict(id='synthetic', time=ISO(NOW), source='watch', host='hel8', kind='heartbeat')

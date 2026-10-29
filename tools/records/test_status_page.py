@@ -34,7 +34,7 @@ class StatusPage(unittest.TestCase):
         self.fabrig.mkdir()
         self.bin = self.base/'bin'
         self.bin.mkdir()
-        self.env = dict(os.environ, PATH=str(self.bin)+':/usr/bin:/bin', STATUS_NOW=str(NOW),
+        self.env = dict(os.environ, HOME=str(self.base), PATH=str(self.bin)+':/usr/bin:/bin', STATUS_NOW=str(NOW),
                         RECORDS_REPO=str(self.root), FABRIG_REPO=str(self.fabrig), DEV_TMP=str(self.base))
         self.fake('claim', "print('node 1 [lead/private-worker]: s/private-coordinator')\nprint('node 2 [pool]: free')")
         self.fake('record', "print('pulled')")
