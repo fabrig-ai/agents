@@ -939,7 +939,7 @@ def a_failed_export_leaves_the_unit_up(lab):
     lab.watch()
     assert directory.exists() and alive(pid)
     (directory / 'box/login').rename(state['logins'][CHATGPT])
-    lab.watch()
+    settled_watch(lab, unit)
     dead(pid)
     assert directory.exists() and lab.walk_state()[1]['stage'] == 'ended' and len(lab.sent()) == 2
 
@@ -1035,10 +1035,37 @@ def a_wrapper_past_its_bound_is_ended(lab):
     unit, pid = deployment(lab, directory)
     executable(directory / 'give-back', 'import os, subprocess, time\nfrom pathlib import Path\n'
         + f'child = subprocess.Popen([{sys.executable!r}, "-I", "-B", "-c", "import time; time.sleep(60)"])\n'
-          "Path('export-pids').write_text(f'{os.getpid()} {child.pid}')\n"
+          "marker = Path('export-pids.new')\n"
+          "marker.write_text(f'{os.getpid()} {child.pid}')\n"
+          "marker.replace('export-pids')\n"
           'time.sleep(60)\n')
+    # Use the same handshake for the direct wrapper and its manager invocation.
+    # The wrapper still passes its unchanged two-second wait to Popen.wait().
+    driver = f"""import runpy, sys, time
+from pathlib import Path
+tool = runpy.run_path({str(SCRIPT)!r})
+subprocess = tool['subprocess']
+original_popen = subprocess.Popen
+class ReadyPopen(original_popen):
+    def wait(self, timeout=None):
+        if timeout is not None:
+            marker = Path({str(directory / 'export-pids')!r})
+            deadline = time.monotonic() + 10
+            while not (marker.exists() and marker.read_text().split()[:1] == [str(self.pid)]):
+                if self.poll() is not None or time.monotonic() >= deadline:
+                    self.kill()
+                    super().wait()
+                    raise AssertionError('fixture exporter never reached its hang')
+                time.sleep(0.01)
+        return super().wait(timeout=timeout)
+subprocess.Popen = ReadyPopen
+sys.exit(tool['main']())
+"""
+    ready_qa = executable(lab.root / 'ready-qa', driver)
     started = resource.getrusage(resource.RUSAGE_CHILDREN)
-    lab.run('_give-back', str(directory), '2')
+    result = subprocess.run([str(ready_qa), '_give-back', str(directory), '2'],
+                            env=lab.env, capture_output=True, text=True, timeout=HUNG_TOOL_S)
+    assert result.returncode == 0, result.stderr
     ended = resource.getrusage(resource.RUSAGE_CHILDREN)
     # Idle child CPU 85 ms; 4x rounded up to the 500 ms minimum.
     assert ended.ru_utime + ended.ru_stime - started.ru_utime - started.ru_stime < 0.5
@@ -1050,6 +1077,11 @@ def a_wrapper_past_its_bound_is_ended(lab):
     metadata = json.loads(saved.read_text())
     assert metadata['stop'][-1] == '2'
     assert '--property=TimeoutStopSec=62' in lab.calls('systemd-run')[0]
+    # The fake manager executes the same wrapper with the readiness driver.
+    metadata['stop'][0] = str(ready_qa)
+    temporary = saved.with_suffix('.new')
+    temporary.write_text(json.dumps(metadata))
+    temporary.replace(saved)
     result = subprocess.run([str(lab.root / 'systemctl'), '--user', 'stop', '--', unit],
                             env=lab.env, capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stderr
@@ -1135,7 +1167,7 @@ sys.exit(tool['main']())
     state = lab.watch_state()[1]
     assert state['stage'] in ('ending', 'ended') and state['given'] == [CHATGPT] and 'stopped' not in state and alive(pid)
     assert not lab.sent()
-    lab.watch()
+    settled_watch(lab, unit)
     state = lab.watch_state()[1]
     assert 'stopped' not in state and state['given'] == [CHATGPT, CLAUDE]
     dead(pid)
@@ -1189,7 +1221,7 @@ def deployments_names_only_its_own_units(lab):
     dead(pid)
 
 
-def driven_watch(lab, patch, once=True, status=0):
+def driven_watch(lab, patch, once=True, status=0, extra=None, now=None):
     lab.prune_dead_launchers()
     driver = f'''import runpy, sys
 tool = runpy.run_path({str(SCRIPT)!r})
@@ -1198,11 +1230,36 @@ tool = runpy.run_path({str(SCRIPT)!r})
 {patch}
 sys.exit(tool['main']())
 '''
+    if now is not None:
+        driver = driver.replace("sys.exit(tool['main']())", f'tool["main"].__globals__["timestamp"] = lambda: {now!r}\nsys.exit(tool["main"]())')
     result = subprocess.run([sys.executable, '-I', '-B', '-c', driver, 'watch', '--director',
-                             'director@fixture', *(['--once'] if once else [])], env=lab.env, capture_output=True,
+                             'director@fixture', *(['--once'] if once else [])], env=dict(lab.env, **(extra or {})), capture_output=True,
                             text=True, timeout=HUNG_TOOL_S)
     assert result.returncode == status, (result.stdout, result.stderr)
     return result
+
+
+def settled_watch(lab, *units, **kwargs):
+    # A successful stop can race show() reading the disappearing fake record.
+    # Retry only these known-to-stop deployments, after their manager records
+    # disappear. Keep one check's notification/clock assertions intact; tests
+    # of unknown/refused stops still use the unmodified bounded observation.
+    patch = f"""import time
+from pathlib import Path
+original = tool['Watch'].unit_stopped
+def settled(self, unit, seconds, directory=None):
+    stopped = original(self, unit, seconds, directory)
+    if not stopped and unit in {units!r}:
+        record = Path(tool['os'].environ['QA_FIXTURE']) / 'units' / (unit + '.json')
+        deadline = time.monotonic() + 10
+        while record.exists():
+            assert time.monotonic() < deadline, 'fixture stop did not settle'
+            time.sleep(0.01)
+        return original(self, unit, seconds, directory)
+    return stopped
+tool['Watch'].unit_stopped = settled
+"""
+    return driven_watch(lab, patch, **kwargs)
 
 
 def a_unit_of_another_directory_is_not_stopped(lab):
@@ -1232,7 +1289,7 @@ def a_unit_of_another_directory_is_not_stopped(lab):
     lab.configure(list_failures=[], list_output={}, show_output={})
     metadata['directory'] = str(directory)
     path.write_text(json.dumps(metadata))
-    lab.watch()
+    settled_watch(lab, unit)
     dead(pid)
     assert directory.exists() and lab.walk_state()[1]['stage'] == 'ended'
 
@@ -1381,7 +1438,7 @@ def the_service_ends_a_walk_at_its_cap(lab):
     directory, state = lab.walk_state()
     unit, pid = deployment(lab, directory, login=CHATGPT)
     before = lab.head()
-    lab.watch(now='2026-10-27T10:01:01Z', extra={'QA_POST_STATUS': '2'})
+    settled_watch(lab, unit, now='2026-10-27T10:01:01Z', extra={'QA_POST_STATUS': '2'})
     state = lab.walk_state()[1]
     assert state['capped'] and state['released'] and state['given'] == [CHATGPT]
     assert state['end_logged'] and not state['posted'] and state['stage'] == 'ending'
@@ -1446,7 +1503,7 @@ def a_stuck_walk_login_alerts_the_director_and_the_list(lab):
             lab.watch()
             assert lab.sent()[before:] == posts
         (directory / 'box/login').rename(state['logins'][CHATGPT])
-        lab.watch()
+        settled_watch(lab, unit)
         dead(pid)
         state = lab.walk_states()[-1][1]
         if refused:
@@ -1491,7 +1548,7 @@ def a_stuck_walk_login_stays_held(lab):
     lab.walk('b0')
     assert lab.walk_states()[-1][1]['slot'] == 2
     (directory / 'box/login').rename(state['logins'][CHATGPT])
-    lab.watch()
+    settled_watch(lab, unit)
     state = lab.walk_states()[0][1]
     assert state['given'] == [CHATGPT] and state['released'] and state['stage'] == 'ended'
     dead(pid)
@@ -1565,14 +1622,9 @@ def a_failed_walk_fetch_takes_no_login(lab):
 
 def a_walk_fetch_is_bounded_before_taking_a_login(lab):
     lab.configure(hang={'cargo:fetch': 'before'})
-    result = driven_walk(lab, '''original = tool['command']
-def command(argv, cwd=None, timeout=None, **kwargs):
-    if argv[0] == 'cargo':
-        assert argv == ['cargo', 'fetch', '--locked'] and timeout == 300
-        timeout = 0.3
-    return original(argv, cwd=cwd, timeout=timeout, **kwargs)
-tool['main'].__globals__['command'] = command
-''', '--build', 'main', status=4)
+    result = driven_walk(lab, "HUNG = {'cargo:fetch'}\n" + TIMEOUT_DRIVER,
+                         '--build', 'main', status=4)
+    assert lab.calls('cargo') == [['fetch', '--locked']]
     assert 'cannot fetch build main: command timed out' in result.stderr
     assert not any(args[0] == 'take' for args in lab.calls('logins'))
     assert not lab.calls('codex-run') and lab.walk_state()[1]['released']
@@ -1687,7 +1739,7 @@ def a_walk_in_place_login_waits_for_its_unknown_unit(lab):
     assert state['kinds'] == {CLAUDE: 'in-place'} and not state['given'] and not state['released']
     assert CLAUDE in lab.sent()[0]['body'] and unit in lab.sent()[0]['body']
     lab.configure(unit_states={})
-    lab.watch()
+    settled_watch(lab, unit)
     assert lab.walk_state()[1]['given'] == [CLAUDE] and lab.walk_state()[1]['stage'] == 'ended'
     dead(pid)
 
@@ -1744,12 +1796,15 @@ def walk_with_logins(lab, *pools, cap=180):
     return lab.walk_state()
 
 
-def pause_walk(lab, directory, state, line='step 4: blocked by a finding', post_status='0'):
+def pause_walk(lab, directory, state, line='step 4: blocked by a finding', post_status='0', settle=()):
     (directory / 'paused').write_text(line + '\n')
     (directory / 'notes.md').write_text('Finding: keep the deployment data and continue step 4.\n')
     lab.run('_give-back', str(directory), '5')
     lab.end_run(state, report='Blocking finding at step 4.\n')
-    lab.watch(extra={'QA_POST_STATUS': post_status})
+    if settle:
+        settled_watch(lab, *settle, extra={'QA_POST_STATUS': post_status})
+    else:
+        lab.watch(extra={'QA_POST_STATUS': post_status})
     return next(saved for _, saved in lab.walk_states() if saved['walk'] == state['walk'])
 
 
@@ -1790,7 +1845,7 @@ def a_pause_with_a_login_out_ends_stuck(lab):
     assert alert == stuck_posts(lab)[0]
     assert post['args'][2] == 'qa: walk rung-b0-1 ended' and CHATGPT in post['body'] and unit in post['body']
     (directory / 'box/login').rename(state['logins'][CHATGPT])
-    lab.watch()
+    settled_watch(lab, unit)
     assert lab.walk_state()[1]['decision'] == 'walk-end' and lab.walk_state()[1]['stage'] == 'ended'
     assert len(lab.sent()) == 2
     dead(pid)
@@ -1803,7 +1858,7 @@ def a_paused_walk_resumes_at_a_branch_with_another_login(lab):
     unit, pid = deployment(lab, directory, login=CHATGPT)
     kept = directory / 'box/data'
     kept.write_text('kept deployment data\n')
-    state = pause_walk(lab, directory, state)
+    state = pause_walk(lab, directory, state, settle=(unit,))
     previous = state['attempts'][0]
     assert state['deployments'] == [dict(name='box', unit=unit, argv=[str(directory / 'box/server')])]
     dead(pid)
@@ -3217,8 +3272,9 @@ tool['main'].__globals__['command'] = command
         expected = 'units unknown' if operation == 'list-units' else 'cannot establish unit state'
         assert expected in result.stdout
     dead(other_pid)
+    wait_for(lambda: not (lab.root / 'units' / (other_unit + '.json')).exists())
     lab.configure(hung_systemctl={})
-    lab.watch()
+    settled_watch(lab, unit)
     dead(pid)
     assert all(state['stage'] == 'ended' for _, state in lab.walk_states())
 
@@ -3237,6 +3293,7 @@ tool['Watch'].end = end
     assert first.name in result.stdout and 'OSError' in result.stdout and marker not in result.stdout + result.stderr
     assert first.exists() and alive(pid) and not lab.walk_states()[0][1]['given']
     dead(other_pid)
+    wait_for(lambda: not (lab.root / 'units' / (other_unit + '.json')).exists())
     assert not (lab.root / 'units' / (other_unit + '.json')).exists()
 
 
@@ -3281,6 +3338,8 @@ def an_edited_deployments_trace_never_controls_custody(lab):
         lab.end_run(state)
         lab.watch()
         dead(pid)
+        wait_for(lambda: not (lab.root / 'units' / (unit + '.json')).exists())
+        lab.watch()
         current = next(state for _, state in lab.walk_states() if state['walk'] == directory.name)
         assert current['given'] == [CLAUDE] and current['released']
         assert outside.read_text() == 'outside trace'
@@ -3300,7 +3359,7 @@ def a_walk_with_no_login_stops_its_units(lab):
     write_walk(lab, state)
     unit, pid = deployment(lab, directory)
     lab.end_run(state)
-    lab.watch()
+    settled_watch(lab, unit)
     dead(pid)
     assert lab.walk_state()[1]['stage'] == 'ended'
 
@@ -3728,7 +3787,7 @@ def claim_release_waits_for_session_and_deployment_stop(lab):
     assert not [c for c in lab.calls('claim') if c[0] == 'release']
     assert slot_claims(lab) and lab.walk_state()[1]['given'] == [CHATGPT]
     lab.configure(unit_states={})
-    lab.watch()
+    settled_watch(lab, unit)
     assert lab.walk_state()[1]['slot_claim']['released'] and not slot_claims(lab)
     dead(pid)
 

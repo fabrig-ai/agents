@@ -418,7 +418,11 @@ services, fake local and remote claims, fake disk observations, slot clones
 under the temporary HOME and fixture launcher observations; descendants are
 killed and reaped. Fixture drivers cap sleeps during fake stop confirmation
 at 10 ms while retaining real monotonic deadlines and all unit/export completion
-assertions; installed polling remains two seconds. Exporter contention uses
+assertions; installed polling remains two seconds. Successful-stop cases wait
+for the fake manager's unit record to disappear before retrying an inconclusive
+observation or asserting custody. Cases that check one notification attempt retry
+the stop observation within that check; unknown/refused-stop cases retain their
+original bounded observations. Exporter contention uses
 readiness FIFOs to establish ordering. Standard read-only fake
 inventory, claim-list, disk and manager observations execute the identical
 fake program in the fixture interpreter, with parity checks against external
@@ -430,6 +434,8 @@ four times the supplied idle measurement with a 500 ms minimum (500 ms
 for all three); command deadlines, exit results and descendant/completion
 assertions stay in place. The detached-pipe fixture publishes its PID atomically
 after creating its session; its short command timeout starts only after that
-readiness marker appears. Deliberate manager hangs use a ready marker before
-their shortened timeout starts. The suite runs at
+readiness marker appears. The hanging exporter publishes both PIDs atomically;
+its wrapper wait starts after a marker matching that invocation's PID, including
+the fake manager's invocation. The bounded cargo fetch and deliberate manager
+hangs use a ready marker before their shortened timeout starts. The suite runs at
 most eight cases concurrently. It never uses real logins, a real manager or network.
