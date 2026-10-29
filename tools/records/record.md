@@ -115,8 +115,15 @@ of randomized delay to spread hosts' publications.
 
 ## Races and recovery
 
-Every publish starts from origin/main. A rejected push triggers a fetch; only
-an advanced remote branch warrants a retry. The unpublished commit is rebased,
+Every publish starts from origin/main. The single-writer clone lock stays held
+through fetch, rebase, every push attempt and any reset. Each push is followed
+by a fetch: publication is confirmed only when origin contains the local commit.
+A lost acknowledgement is therefore successful if origin confirms it, including
+on the fifth attempt. Automatic writers replay the exact saved batch against the
+confirmed tree and skip ids already present; they never recollect within retries.
+A reported success without origin confirmation fails and retains the outbox.
+
+A rejected push triggers a fetch; only an advanced remote branch warrants a retry. The unpublished commit is rebased,
 the resulting files are validated again, and push is attempted at most five
 times. Declared append-only producers pause a random 1–5 seconds between tries;
 other writers use exponential jittered backoff. At most one push succeeds.
@@ -125,7 +132,8 @@ A conflict aborts the rebase and resets the clone to the fetched origin. After
 conflict or retry exhaustion, automatic writers exit 3 (publication deferred),
 leaving the caller's durable outbox for its next poll with exact ids and
 timestamps. Other writers exit 1. Other publication failures also undo the local
-write and report its input; operational failures exit 2. Inputs rejected during
+write; manual writers report the input for recovery, while automatic callers
+retain it in their outboxes. Operational failures exit 2. Inputs rejected during
 validation are not echoed. Collect and watch report record's stderr and treat
 five consecutive deferrals as successful runs; the sixth and later exit 2 until
 publication succeeds. Real failures exit 2 immediately.
