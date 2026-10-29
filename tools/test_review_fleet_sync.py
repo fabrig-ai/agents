@@ -2,6 +2,7 @@
 
 import fcntl
 import json
+import errno
 import os
 from pathlib import Path
 import select
@@ -189,6 +190,12 @@ time.sleep(120)
                         fd = os.pidfd_open(child)
                     except ProcessLookupError:
                         fd = None  # The entire group has already been reaped.
+                    except OSError as error:
+                        # EINVAL: the pid is gone and its number no longer names a
+                        # thread-group leader, which is also proof it was killed.
+                        if error.errno != errno.EINVAL:
+                            raise
+                        fd = None
                     if fd is not None:
                         poll = select.poll()
                         poll.register(fd, select.POLLIN)
