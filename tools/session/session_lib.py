@@ -66,6 +66,7 @@ def names(handle, area=None):
     home = Path.home()
     supervise = home / "src/rust/tmp/supervise"
     start = supervise / ("coordinator" if default else f"coordinators/{handle}")
+    scratch = home / "src/fabrig/coord" / handle
     result = {
         "handle": handle,
         "coordinator_mailbox": entry["mailbox"],
@@ -76,8 +77,8 @@ def names(handle, area=None):
         "coordinator_start_dir": str(start),
         "coordinator_handover": str(supervise / "handover.md" if default else start / "handover.md"),
         "coordinator_branch_prefix": "coord" if default else handle,
-        "coordinator_clone": str(start / "repo"),
-        "coordinator_brief": str(start / "brief.md"),
+        "coordinator_clone": str(home / "src/fabrig/coord/next2" if default else scratch / "repo"),
+        "coordinator_brief": str(scratch / "brief.md"),
         "warmup_name": "coord-next" if default else f"{handle}-next",
     }
     if area is not None:

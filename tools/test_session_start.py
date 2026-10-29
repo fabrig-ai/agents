@@ -107,6 +107,10 @@ class NamesTests(Sandbox):
                 self.assertEqual(value["lead_start_dir"], str(supervise / "leads" / key))
                 self.assertEqual(value["coordinator_start_dir"], str(supervise / coord))
                 self.assertEqual(value["coordinator_handover"], str(supervise / handover))
+                scratch = self.home / "src/fabrig/coord" / handle
+                clone = self.home / "src/fabrig/coord/next2" if handle == "dm" else scratch / "repo"
+                self.assertEqual(value["coordinator_clone"], str(clone))
+                self.assertEqual(value["coordinator_brief"], str(scratch / "brief.md"))
                 self.assertEqual(value["coordinator_branch_prefix"], branch)
                 self.assertEqual(value["coordinator_mailbox"], mailbox)
                 self.assertEqual(value["coordinator_address"], mailbox + "@hel8")
@@ -270,15 +274,34 @@ class LaunchTests(Sandbox):
         self.assertIn("written (unknown)", launch["argv"][-1])
 
     def test_fresh_coordinator_reads_own_clone_and_brief(self):
-        value = lib.names("ab")
-        result = self.command("start", "coordinator", "ab")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        launch = self.calls()[-1]
-        self.assertEqual(launch["cwd"], value["coordinator_start_dir"])
-        self.assertEqual(launch["argv"][:-1], ["--bg", "--name", value["coordinator_name"], "--effort", "xhigh"])
-        for text in (value["coordinator_handover"], value["coordinator_clone"], value["coordinator_brief"], "agents/coordinator.md", "post wait s/another-draft", "plan files it names"):
-            self.assertIn(text, launch["argv"][-1])
-        self.assertTrue(Path(value["coordinator_clone"]).is_dir())
+        for handle in ("dm", "ab"):
+            with self.subTest(handle=handle):
+                value = lib.names(handle)
+                result = self.command("start", "coordinator", handle)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                launch = self.calls()[-1]
+                self.assertEqual(launch["cwd"], value["coordinator_start_dir"])
+                self.assertEqual(launch["argv"][:-1], ["--bg", "--name", value["coordinator_name"], "--effort", "xhigh"])
+                for text in (value["coordinator_handover"], value["coordinator_clone"], value["coordinator_brief"], "agents/coordinator.md", "post wait " + value["coordinator_mailbox"], "plan files it names"):
+                    self.assertIn(text, launch["argv"][-1])
+                self.assertTrue(Path(value["coordinator_clone"]).is_dir())
+                self.assertTrue(Path(value["coordinator_brief"]).parent.is_dir())
+                self.assertFalse((Path(value["coordinator_start_dir"]) / "repo").exists())
+
+    def test_coordinator_reuses_existing_clone_and_brief(self):
+        for handle in ("dm", "ab"):
+            value = lib.names(handle)
+            checkout = Path(value["coordinator_clone"])
+            checkout.mkdir(parents=True)
+            (checkout / "sentinel").write_text("Keep this checkout.\n")
+            brief = Path(value["coordinator_brief"])
+            brief.parent.mkdir(parents=True, exist_ok=True)
+            brief.write_text("Keep this brief.\n")
+            result = self.command("start", "coordinator", handle)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual((checkout / "sentinel").read_text(), "Keep this checkout.\n")
+            self.assertEqual(brief.read_text(), "Keep this brief.\n")
+        self.assertFalse(any(call["tool"] == "git" for call in self.calls()))
 
     def test_warmup_uses_incumbent_handover_and_its_own_name(self):
         for handle in ("dm", "ab"):
@@ -290,6 +313,8 @@ class LaunchTests(Sandbox):
             self.assertEqual(launch["cwd"], value["coordinator_start_dir"])
             self.assertIn(value["coordinator_address"], launch["argv"][-1])
             self.assertIn(value["coordinator_handover"], launch["argv"][-1])
+            self.assertIn(value["coordinator_clone"], launch["argv"][-1])
+            self.assertIn(value["coordinator_brief"], launch["argv"][-1])
             self.assertIn("post wait " + value["warmup_name"], launch["argv"][-1])
         self.assertFalse(any(call["tool"] == "git" for call in self.calls()))
 
