@@ -58,7 +58,16 @@ if name == 'registry':
     print(json.dumps(scenario['registry']))
 elif name in ('post', 'record'):
     body = Path(sys.argv[-1]).read_text() if name == 'post' else sys.stdin.read()
-    log(dict(tool=name, args=sys.argv[1:], body=body))
+    accepted = True
+    if name == 'record':
+        writers = tomllib.loads(Path(os.environ['RECORD_WRITERS']).read_text())
+        writer = sys.argv[sys.argv.index('--as') + 1]
+        allowed = writers.get(writer, {}).get('sources', [])
+        accepted = bool(allowed) and all(json.loads(line)['source'] in allowed and len(line.encode()) + 1 < 16384 for line in body.splitlines())
+    log(dict(tool=name, args=sys.argv[1:], body=body, accepted=accepted))
+    if not accepted:
+        print('record: writer/source refused or event exceeds cap', file=sys.stderr)
+        sys.exit(1)
     if scenario.get(name + '_wait'):
         write(home / (name + '-entered'), '')
         while not (home / (name + '-release')).exists():
@@ -83,6 +92,12 @@ elif name == 'run':
     rerun = '-E' in sys.argv
     pair = scenario['pairs'][profile]
     chosen = pair.get('rerun', pair.get('main', [])) if rerun else pair.get('main', [])
+    override = {}
+    if rerun and pair.get('reruns'):
+        expression = sys.argv[sys.argv.index('-E') + 1]
+        test = json.loads(expression.partition(' & test(=')[2][:-1])
+        override = pair['reruns'][test]
+        chosen = override['tests']
     log(dict(tool='tiers', profile=profile, rerun=rerun, args=sys.argv[1:],
              head=__import__('subprocess').check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
              heavy_class=os.environ.get('HEAVY_CLASS'),
@@ -110,7 +125,7 @@ elif name == 'run':
             elif result == 'skip':
                 ET.SubElement(case, 'skipped')
     write(target, ET.tostring(suites, encoding='unicode'))
-    code = pair.get('rerun_code' if rerun else 'code', 100 if any(row.get('result') == 'fail' for row in chosen) else 0)
+    code = override.get('code', pair.get('rerun_code' if rerun else 'code', 100 if any(row.get('result') == 'fail' for row in chosen) else 0))
     sys.exit(code)
 '''
 
@@ -162,7 +177,7 @@ class Sandbox(unittest.TestCase):
             HOME=str(self.home), GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL='/dev/null',
             GIT_AUTHOR_NAME='test', GIT_AUTHOR_EMAIL='test@example.invalid',
             GIT_COMMITTER_NAME='test', GIT_COMMITTER_EMAIL='test@example.invalid',
-            PYTHONDONTWRITEBYTECODE='1'), clear=True)
+            PYTHONDONTWRITEBYTECODE='1', RECORD_WRITERS=str(HERE.parent / 'records/writers.toml')), clear=True)
         self.environment.start()
         # Retain only a safe system PATH, with no personal wrappers/services.
         os.environ['PATH'] = '/usr/local/bin:/usr/bin:/bin'
@@ -457,7 +472,7 @@ class VerdictTests(Sandbox):
             self.poll_run()
             self.assertIsNotNone(self.events('after-landing-run')[-1]['routing_fault'])
             self.assertEqual(self.calls('post')[-1]['args'][3], 'ops@hel8')
-        self.assertEqual(len(self.calls('post')), 2)
+        self.assertTrue(all(call['args'][3] == 'ops@hel8' for call in self.calls('post')))
 
     def test_records_before_posts_stable_ids_and_accept_post_three(self):
         self.single()
@@ -677,6 +692,230 @@ class SupervisionTests(Sandbox):
         self.assertIsNotNone(self.runner.state['active'])
         self.assertFalse(self.calls('tiers'))
         self.assertIn('completion unknown', self.runner.state['outbox'][0]['posts'][0]['body'])
+
+
+class ReviewTests(Sandbox):
+    def test_record_fake_enforces_checked_in_writer_allowlist(self):
+        real = os.environ['RECORD_WRITERS']
+        self.poll_run()
+        self.assertTrue(self.calls('record')[-1]['accepted'])
+        refused = self.home / 'writers.toml'
+        app.atomic(refused, '[collect]\nsources=["queue"]\n')
+        os.environ['RECORD_WRITERS'] = str(refused)
+        self.advance('skein')
+        self.poll_run()
+        self.assertFalse(self.calls('record')[-1]['accepted'])
+        self.assertTrue(self.runner.state['outbox'])
+        batch = self.calls('record')[-1]['body']
+        os.environ['RECORD_WRITERS'] = real
+        self.runner = app.Runner(self.args)
+        self.runner.poll()
+        self.assertTrue(self.calls('record')[-1]['accepted'])
+        self.assertEqual(self.calls('record')[-1]['body'], batch)
+        self.assertFalse(self.runner.state['outbox'])
+
+    def test_large_events_use_detail_files_without_poisoning_poll(self):
+        self.runner.poll()
+        self.runner.prepare()
+        active = self.runner.state['active']
+        suspects = [dict(kind='other', commit=str(n), subject='subject ' + 'x'*600) for n in range(100)]
+        suspects += [dict(kind='branch', key='skein', branch='ready/skein/bulk', tip=self.base)]
+        self.runner.state['queue'][0].update(suspects=suspects, coalesced=[str(n) for n in range(1000)])
+        logs = [str(self.home / ('log-' + str(n) + '-' + 'x'*100)) for n in range(1000)]
+        alerts = [dict(identity=['qa-skein', 'pkg::qa', 'test-' + str(n) + 'x'*500],
+                       error='failure ' + 'x'*400, logs=logs[:2], id='test-' + str(n)) for n in range(100)]
+        active['pairs']['qa-skein'] = dict(status='ran', selected=1000, executed=1000, failed=1000,
+                                         red=['test-' + str(n) for n in range(1000)], new=alerts, logs=logs, wall=1)
+        event = self.runner.event('after-landing-test', 'large-test', commit=active['tip'],
+                                  identity=['qa-skein', 'pkg::qa', 'one'], state='new', logs=logs)
+        active['events']['large-test'] = event
+        self.runner.finish()
+        self.assertFalse(self.runner.state['outbox'])
+        batch = self.calls('record')[-1]['body']
+        self.assertTrue(all(len(line.encode()) + 1 < 16384 for line in batch.splitlines()))
+        events = [json.loads(line) for line in batch.splitlines()]
+        for event in events:
+            detail = json.loads(Path(event['details']).read_text())
+            if event['kind'] == 'after-landing-run':
+                self.assertEqual(len(detail['suspects']), 101)
+                self.assertEqual(len(detail['pairs']['qa-skein']['red']), 1000)
+                self.assertEqual(event['confirmed_red_count'], 1000)
+            else:
+                self.assertEqual(len(detail['logs']), 1000)
+        post = self.calls('post')[-1]['body']
+        self.assertLess(len(post.encode()), 64000)
+        self.assertLess(len(post.splitlines()), 15)
+        detail_path = next(line.removeprefix('details: ') for line in post.splitlines() if line.startswith('details: '))
+        self.assertEqual(len(json.loads(Path(detail_path).read_text())['new']), 100)
+        # Existing oversized outboxes from an earlier version are normalized too.
+        legacy = self.runner.event('after-landing-run', 'legacy', commit=self.base, suspects=suspects)
+        self.runner.state['outbox'].append(dict(id='legacy', records=[legacy], posts=[], recorded=False))
+        self.runner.save()
+        tip, _ = self.advance('skein')
+        self.runner.poll()
+        self.assertEqual(self.runner.state['seen'], tip)
+        self.assertFalse(self.runner.state['outbox'])
+        huge = self.runner.event('after-landing-test', 'id' + 'x'*20000, commit=self.base,
+                                 identity=['qa-skein', 'pkg::qa', 'x'*20000], state='new', logs=logs)
+        bounded = self.runner.bounded_event(huge)
+        self.assertLess(len(json.dumps(bounded).encode()), 16384)
+        self.assertEqual(json.loads(Path(bounded['details']).read_text())['id'], huge['id'])
+        self.assertEqual(bounded['id'], self.runner.bounded_event(huge)['id'])
+
+    def test_confirmed_identity_survives_later_confirmation_fault(self):
+        self.passing_history()
+        for test in ('a', 'b'):
+            key = json.dumps(['qa-skein', 'pkg::qa', test], separators=(',', ':'))
+            self.runner.state['tests'][key] = dict(result='pass', commit=self.base)
+        tip, _ = self.advance('skein')
+        self.scenario['pairs']['qa-skein'] = dict(
+            main=[dict(test='a', result='fail'), dict(test='b', result='fail')],
+            reruns={'a': dict(tests=[dict(test='a', result='fail')]),
+                    'b': dict(tests=[dict(test='b', result='fail')], code=2)})
+        self.save_scenario()
+        self.poll_run()
+        self.assertEqual(self.runner.state['last_run']['verdict'], 'red')
+        self.assertEqual(self.runner.state['last_run']['faulted'], ['qa-skein'])
+        self.assertEqual(self.runner.state['cursor'], self.base)
+        a = json.dumps(['qa-skein', 'pkg::qa', 'a'], separators=(',', ':'))
+        self.assertEqual(self.runner.state['tests'][a]['result'], 'red')
+        self.assertEqual(self.states(), ['new'])
+        self.assertEqual({post['args'][3] for post in self.calls('post')}, {'s/dynamic-memory@hel8', 'ops@hel8'})
+        event = self.events('after-landing-run')[-1]
+        self.assertTrue(event['pairs']['qa-skein']['red'])
+        self.scenario['pairs']['qa-skein']['reruns']['b'] = dict(tests=[dict(test='b')])
+        self.save_scenario()
+        self.poll_run()
+        self.assertEqual(self.runner.state['cursor'], tip)
+        self.assertEqual(self.runner.state['last_run']['verdict'], 'red')
+        self.assertEqual(self.states()[-2:], ['standing', 'flake'])
+
+    def test_unresolved_new_red_is_retried_after_restart(self):
+        self.passing_history()
+        self.advance('skein')
+        self.scenario.update(registry_fault=True)
+        self.scenario['pairs']['qa-skein'] = dict(main=[dict(test='one', result='fail')])
+        self.save_scenario()
+        self.poll_run()
+        pending = self.runner.state['outbox'][0]
+        identifier = pending['id']
+        self.assertFalse(pending['notification']['resolved'])
+        self.assertTrue(pending['recorded'])
+        self.assertTrue(all(post['args'][3] == 'ops@hel8' for post in self.calls('post')))
+        records = len(self.calls('record'))
+        self.scenario['registry_fault'] = False
+        self.save_scenario()
+        self.runner = app.Runner(self.args)
+        self.runner.poll()
+        self.assertFalse(self.runner.state['outbox'])
+        self.assertEqual(len(self.calls('record')), records)
+        routed = [post for post in self.calls('post') if post['args'][3] != 'ops@hel8']
+        self.assertEqual(len(routed), 1)
+        self.assertIn('id: ' + identifier, routed[0]['body'])
+        self.advance('skein')
+        self.poll_run()
+        self.assertEqual(self.states()[-1], 'standing')
+        self.assertEqual(len([post for post in self.calls('post') if post['args'][3] != 'ops@hel8']), 1)
+
+    def test_conflicting_and_hostless_routes_are_faults(self):
+        original_rows = list(self.scenario['registry'])
+        leads = self.slot / 'tools/queue/leads.txt'
+        original_leads = leads.read_text()
+        cases = [
+            (original_rows + [dict(role='lead', branch_key='skein', coordinator_mailbox='s/other')], original_leads, 'skein'),
+            (original_rows + [dict(role='lead', branch_key='q', coordinator_mailbox='s/other')], original_leads, 'q'),
+            (original_rows, original_leads + 'ops ops@other-host\n', 'ops'),
+            (original_rows, 'ops ops\n', 'ops'),
+            (original_rows, original_leads + 'extra s/dynamic-memory@other-host\n', 'skein'),
+        ]
+        for rows, text, key in cases:
+            with self.subTest(key=key, rows=rows, text=text):
+                self.scenario['registry'] = rows
+                self.save_scenario()
+                app.atomic(leads, text)
+                with self.assertRaises(app.Fault):
+                    self.runner.resolve({key})
+        self.scenario['registry'] = original_rows
+        self.save_scenario()
+        # leads.txt can legitimately address the lead while the registry
+        # selects that lead's coordinator. Registry ownership takes precedence.
+        app.atomic(leads, original_leads + 'skein lead/skein@hel8\n')
+        self.assertEqual(self.runner.resolve({'skein'}), {'skein': 's/dynamic-memory@hel8'})
+
+    def test_completion_and_fault_notice_are_one_atomic_save(self):
+        class Crash(BaseException):
+            pass
+        self.runner.poll()
+        self.scenario['pairs']['qa-skein']['code'] = 2
+        self.save_scenario()
+        real_save = self.runner.save
+        completed = []
+        def crash_after_completion():
+            real_save()
+            state = json.loads(self.runner.path.read_text())
+            if state['active'] is None and state['last_run'] is not None:
+                completed.append(state)
+                raise Crash()
+        with mock.patch.object(self.runner, 'save', side_effect=crash_after_completion):
+            with self.assertRaises(Crash):
+                self.runner.run()
+        self.assertEqual(len(completed), 1)
+        snapshot = completed[0]
+        self.assertIsNotNone(snapshot['fault_episode'])
+        self.assertEqual(snapshot['outbox'][0]['posts'][0]['to'], 'ops@hel8')
+        self.assertFalse(snapshot['outbox'][0]['posts'][0]['delivered'])
+        self.scenario['pairs']['qa-skein'].pop('code')
+        self.save_scenario()
+        self.runner = app.Runner(self.args)
+        self.poll_run()
+        self.assertEqual(self.runner.state['cursor'], self.base)
+        self.assertEqual(len(self.calls('post')), 1)
+        self.assertIn(snapshot['fault_episode'], self.calls('post')[0]['body'])
+
+    def test_replay_compares_passing_skipped_and_red_outcomes(self):
+        class Crash(BaseException):
+            pass
+        self.passing_history()
+        tip, _ = self.advance('skein')
+        self.scenario['pairs']['qa-skein'] = dict(main=[dict(test='one', result='fail')])
+        self.save_scenario()
+        self.runner.poll()
+        with mock.patch.object(self.runner, 'finish', side_effect=Crash()):
+            with self.assertRaises(Crash):
+                self.runner.run()
+        saved = json.loads(self.runner.path.read_text())
+        event = next(iter(saved['active']['events'].values()))
+        self.scenario['pairs']['qa-skein'] = dict(main=[dict(test='one')])
+        self.save_scenario()
+        self.runner = app.Runner(self.args)
+        self.runner.run()
+        key = json.dumps(['qa-skein', 'pkg::qa', 'one'], separators=(',', ':'))
+        self.assertEqual(self.runner.state['tests'][key]['result'], 'red')
+        self.assertEqual(self.runner.state['last_run']['verdict'], 'red')
+        self.assertEqual(self.runner.state['last_run']['faulted'], ['qa-skein'])
+        self.assertEqual(self.events('after-landing-test')[-1]['id'], event['id'])
+        self.assertEqual(self.runner.state['cursor'], self.base)
+        self.poll_run()
+        self.assertEqual(self.states()[-1], 'recovered')
+        self.assertEqual(self.runner.state['cursor'], tip)
+        # Passing and skipped observations have no event but must still be
+        # checked on replay, including changes in the selected identity set.
+        self.advance('skein')
+        self.runner.poll()
+        self.runner.prepare()
+        active = self.runner.state['active']
+        active['pairs']['qa-skein'] = dict(red=[], new=[])
+        for result, state in [('pass', 'passing'), ('unobserved', 'unobserved')]:
+            name = key + state
+            observation = dict(result=result, state=state, logs=[], event=None, alert=None)
+            self.runner.stage_observation('qa-skein', name, observation)
+            changed = dict(observation, result='red', state='new')
+            with self.assertRaises(app.Fault):
+                self.runner.stage_observation('qa-skein', name, changed)
+            self.assertEqual(active['observations']['qa-skein'][name]['result'], result)
+        active['selections']['qa-skein'] = [key, 'missing identity']
+        with self.assertRaises(app.Fault):
+            self.runner.pair('qa-skein')
 
 
 class ParserTests(unittest.TestCase):

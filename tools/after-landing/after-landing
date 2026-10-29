@@ -6,6 +6,7 @@ from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 import fcntl
 import importlib.util
+import hashlib
 import json
 import math
 import os
@@ -291,6 +292,7 @@ class Runner:
         self.state['slot'] = str(args.slot)
         self.lease_fds = []
         self.delivery_attempted = set()
+        self.resolution_attempted = set()
         self.lifetime = None
         self.state.setdefault('lease_holds', [])
         self.next_poll = time.monotonic() + args.poll_interval
@@ -328,27 +330,119 @@ class Runner:
                                          recorded=not records))
         self.save()
 
-    def fault(self, reason, identifier=None, group=None):
+    def artifact(self, kind, value):
+        data = json.dumps(value, separators=(',', ':'), ensure_ascii=True, sort_keys=True) + '\n'
+        directory = self.directory / 'details'
+        private_directory(directory)
+        path = directory / (kind + '-' + hashlib.sha256(data.encode()).hexdigest() + '.json')
+        if not path.exists():
+            atomic(path, data)
+        return str(path)
+
+    def bounded_event(self, event):
+        encoded = json.dumps(event, separators=(',', ':'), ensure_ascii=True, sort_keys=True)
+        if len(encoded.encode()) + 1 < 16384:
+            return event
+        detail = self.artifact('event', event)
+        # Complete evidence remains in the immutable detail file. The wire
+        # envelope contains only bounded joins, counts and human-sized previews.
+        bounded = {key: event[key] for key in ('id', 'time', 'source', 'host', 'kind')}
+        if len(bounded['id'].encode()) > 1024:
+            bounded['id'] = 'sha256:' + hashlib.sha256(event['id'].encode()).hexdigest()
+        for key in ('commit', 'attempt', 'verdict', 'state', 'wall'):
+            if key in event:
+                bounded[key] = event[key]
+        if event.get('branch'):
+            if len(json.dumps(event['branch']).encode()) < 2048:
+                bounded['branch'] = event['branch']
+            else:
+                bounded['branch_preview'] = event['branch'][:256]
+        if event.get('routing_fault'):
+            bounded['routing_fault'] = event['routing_fault'][:256]
+        if 'identity' in event:
+            bounded['identity_preview'] = [part[:256] for part in event['identity']]
+        for key in ('suspects', 'coalesced', 'pairs', 'logs', 'branches'):
+            if key in event:
+                bounded[key + '_count'] = len(event[key])
+        if 'pairs' in event:
+            bounded['pairs'] = {
+                profile: {key: result[key] for key in ('status', 'selected', 'executed', 'failed', 'wall') if key in result}
+                for profile, result in list(event['pairs'].items())[:12]
+            }
+            bounded['confirmed_red_count'] = sum(len(result.get('red', [])) for result in event['pairs'].values())
+        bounded.update(details=detail, payload_bytes=len(encoded.encode()))
+        if len(json.dumps(bounded, ensure_ascii=True).encode()) + 1 >= 16384:
+            # Unusual config/profile names can also be large. The essential
+            # envelope and detail reference suffice without those previews.
+            bounded.pop('pairs', None)
+        for preview in ('identity_preview', 'routing_fault', 'branch_preview'):
+            if len(json.dumps(bounded, ensure_ascii=True).encode()) + 1 >= 16384:
+                bounded.pop(preview, None)
+        return bounded
+
+    def fault(self, reason, identifier=None, group=None, *, save=True):
         if self.state['fault_episode'] is not None:
             return
         identifier = identifier or f"fault:{self.state['seen']}:{time.time_ns()}"
         self.state['fault_episode'] = identifier
+        if len(reason) > 2000:
+            detail = self.artifact('fault', dict(reason=reason))
+            reason = reason[:1000] + '; details: ' + detail
         body = f'id: {identifier}\n{reason}\nbuilder: {self.args.host}'
-        if group is not None:
-            group['posts'].append(dict(to=self.args.ops, body=body, delivered=False))
+        post = dict(to=self.args.ops, body=body, delivered=False)
+        if group is None:
+            group = dict(id=identifier, records=[], posts=[], recorded=True)
+            self.state['outbox'].append(group)
+        group['posts'].append(post)
+        if save:
             self.save()
-        else:
-            self.post(identifier, self.args.ops, body)
+
+    def route_notification(self, group):
+        notification = group.get('notification')
+        if not notification or notification['resolved']:
+            return None
+        self.resolution_attempted.add(group['id'])
+        detail = json.loads(Path(notification['details']).read_text())
+        branch_suspects = [suspect for suspect in detail['suspects'] if suspect['kind'] == 'branch']
+        try:
+            routes = self.resolve({suspect['key'] for suspect in branch_suspects}) if branch_suspects else {}
+        except Fault as error:
+            notification['error'] = str(error)
+            return str(error)
+        for destination in sorted(set(routes.values())):
+            branches = [suspect['branch'] for suspect in branch_suspects if routes[suspect['key']] == destination]
+            body = [f'id: {group["id"]}', f'tip: {detail["tip"]}; builder: {self.args.host}',
+                    'single suspect' if len(detail['suspects']) == 1 else 'several suspects',
+                    'suspects: ' + json.dumps(detail['suspects'], separators=(',', ':')),
+                    'new reds: ' + json.dumps(detail['new'], separators=(',', ':'))]
+            if len('\n'.join(body).encode()) > 60000:
+                body = body[:3] + [f'new reds: {len(detail["new"])}; suspects: {len(detail["suspects"])}',
+                                   'details: ' + notification['details'],
+                                   'branches: ' + ', '.join(branch[:160] for branch in branches[:5])]
+                body += ['red: ' + json.dumps(dict(identity=[part[:100] for part in test['identity']],
+                                                   error=test['error'][:200], logs=test['logs'][:2]))
+                         for test in detail['new'][:5]]
+            group['posts'].append(dict(to=destination, body='\n'.join(body), delivered=False))
+        notification.update(resolved=True, error=None)
+        return None
 
     def deliver(self):
         for item in self.state['outbox'][:]:
             if item['id'] in self.delivery_attempted:
                 continue
             self.delivery_attempted.add(item['id'])
+            notification = item.get('notification')
+            if notification and not notification['resolved'] and item['id'] not in self.resolution_attempted:
+                error = self.route_notification(item)
+                if error:
+                    self.fault(error, item['id'] + ':fault', group=item, save=False)
+                self.save()
             if not item['recorded']:
+                # Normalize pre-upgrade outboxes as well as newly built batches;
+                # an oversized old item must never poison polling forever.
+                item['records'] = [self.bounded_event(event) for event in item['records']]
+                self.save()
                 lines = [json.dumps(event, separators=(',', ':'), ensure_ascii=True, sort_keys=True) for event in item['records']]
-                if any(len(line.encode()) > 16384 for line in lines):
-                    raise Fault('records event exceeds 16 KB; publication retained')
                 try:
                     result = command([self.args.record, 'append', '--as', 'after-landing',
                                       '--batch', self.args.host], data='\n'.join(lines) + '\n')
@@ -371,13 +465,15 @@ class Runner:
                 if result.returncode in (0, 3):
                     item['posts'][index]['delivered'] = True
                     self.save()
-            if all(post['delivered'] for post in item['posts']):
+            if (all(post['delivered'] for post in item['posts']) and
+                    (notification is None or notification['resolved'])):
                 self.state['outbox'].remove(item)
                 self.save()
 
     def poll(self):
         self.next_poll = time.monotonic() + self.args.poll_interval
         self.delivery_attempted.clear()
+        self.resolution_attempted.clear()
         self.deliver()
         if self.state['stopped']:
             return
@@ -419,29 +515,39 @@ class Runner:
             raise Fault('launcher registry unreadable')
         try:
             rows = json.loads(result.stdout)
-            if not isinstance(rows, list):
+            if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
                 raise ValueError('expected list')
-            routes = {row['branch_key']: row['coordinator_mailbox'] for row in rows if row.get('role') == 'lead'}
+            routes, fallback = {}, {}
+            def add(mapping, key, value):
+                if not isinstance(key, str) or not key or not isinstance(value, str) or not value:
+                    raise ValueError('invalid route entry')
+                if key in mapping and mapping[key] != value:
+                    raise ValueError('conflicting route for ' + key)
+                mapping[key] = value
             for row in rows:
-                if row.get('role') == 'coordinator':
-                    # Registry inventory provides handle + mailbox. The default
-                    # coordinator's branch prefix is coord, other handles own theirs.
-                    routes['coord' if row['mailbox'].split('@')[0] == 's/dynamic-memory' else row['handle']] = row['mailbox']
-            fallback = {}
+                if row.get('role') == 'lead':
+                    add(routes, row['branch_key'], row['coordinator_mailbox'])
+                elif row.get('role') == 'coordinator':
+                    key = 'coord' if row['mailbox'].split('@')[0] == 's/dynamic-memory' else row['handle']
+                    add(routes, key, row['mailbox'])
             for line in (self.args.slot / 'tools/queue/leads.txt').read_text().splitlines():
                 if line.strip() and not line.lstrip().startswith('#'):
                     key, address = line.split()
-                    fallback[key] = address
+                    add(fallback, key, address)
+            def qualified(mailbox):
+                return bool(re.fullmatch(r'[^@\s]+@[A-Za-z0-9][A-Za-z0-9.-]*', mailbox))
             resolved = {}
             for key in keys:
                 mailbox = routes.get(key, fallback.get(key))
                 if not isinstance(mailbox, str) or not mailbox:
                     raise ValueError('no route for ' + key)
-                if '@' not in mailbox:
-                    addresses = {address for address in fallback.values() if address.split('@')[0] == mailbox}
+                if '@' not in mailbox and key in routes:
+                    addresses = {address for address in fallback.values() if address.split('@')[0] == mailbox and qualified(address)}
                     if len(addresses) != 1:
                         raise ValueError('no unique transport address for ' + mailbox)
                     mailbox = addresses.pop()
+                if not qualified(mailbox):
+                    raise ValueError('host-qualified route required for ' + key)
                 resolved[key] = mailbox
             return resolved
         except (OSError, ValueError, KeyError, TypeError) as error:
@@ -469,7 +575,7 @@ class Runner:
         pending = [p for p in profiles if item['pairs'].get(p, {}).get('status') != 'ran']
         self.state['active'] = dict(tip=item['tip'], attempt=item['attempt'] + 1, profiles=pending,
                                     baseline=self.state['tests'].copy(), pairs={}, updates={}, events={},
-                                    invocation=None, started=time.time())
+                                    invocation=None, started=time.time(), observations={}, selections={})
         self.save()
 
     def event(self, kind, identifier, **fields):
@@ -599,60 +705,81 @@ sys.exit(code if code >= 0 else 128 - code)
             raise Fault('nextest exit and executed results disagree or select zero tests', logs=[logs['log']], wall=logs['elapsed'])
         return selected, results, logs
 
+    def stage_observation(self, profile, key, observation):
+        active = self.state['active']
+        observations = active.setdefault('observations', {}).setdefault(profile, {})
+        previous = observations.get(key)
+        if previous is not None:
+            if (previous['result'], previous['state']) != (observation['result'], observation['state']):
+                raise Fault('replayed outcome changed; retaining prior evidence', logs=observation['logs'])
+            return previous
+        observations[key] = observation
+        if observation['result'] != 'unobserved':
+            active['updates'][key] = dict(result=observation['result'], commit=active['tip'])
+        event = observation.get('event')
+        if event:
+            active['events'][event['id']] = event
+        self.summarize_pair(profile)
+        self.save()
+        return observation
+
+    def summarize_pair(self, profile):
+        active = self.state['active']
+        observations = active.get('observations', {}).get(profile, {})
+        pair = active['pairs'][profile]
+        pair['red'] = [key for key, observation in observations.items() if observation['result'] == 'red']
+        pair['new'] = [observation['alert'] for observation in observations.values() if observation.get('alert')]
+
     def pair(self, profile):
         active = self.state['active']
         selected, results, first = self.launch(profile)
-        updates, events, red, new = {}, {}, [], []
-        pair_logs, pair_wall = [first['log']], first['elapsed']
+        selections = active.setdefault('selections', {})
+        if profile in selections and set(selections[profile]) != set(results):
+            raise Fault('replayed test selection changed; retaining prior evidence', logs=[first['log']])
+        selections[profile] = list(results)
+        outcome = active['pairs'].setdefault(profile, dict(red=[], new=[]))
+        outcome.update(status='running', selected=selected,
+                       executed=sum(result['result'] != 'unobserved' for result in results.values()),
+                       failed=sum(result['result'] == 'fail' for result in results.values()),
+                       logs=[first['log']], wall=first['elapsed'])
+        self.save()
         for key, result in results.items():
-            if result['result'] == 'unobserved':
-                continue
             old = active['baseline'].get(key)
             rerun = None
-            state = None
+            state, last = 'unobserved', 'unobserved'
             if result['result'] == 'fail':
                 _, binary, test = result['identity']
                 count, repeated, rerun = self.launch(profile, binary, test)
-                pair_logs.append(rerun['log'])
-                pair_wall += rerun['elapsed']
-                try:
-                    validate_rerun(key, count, repeated)
-                except Fault as error:
-                    raise Fault(str(error), logs=pair_logs, wall=pair_wall) from error
+                outcome['logs'].append(rerun['log'])
+                outcome['wall'] += rerun['elapsed']
+                validate_rerun(key, count, repeated)
                 if repeated[key]['result'] == 'pass':
                     state, last = 'flake', 'pass'
                 else:
                     state = 'unattributed' if old is None else 'standing' if old['result'] == 'red' else 'new'
                     last = 'red'
-                    red.append(key)
-            else:
+            elif result['result'] == 'pass':
+                state = 'recovered' if old and old['result'] == 'red' else 'passing'
                 last = 'pass'
-                if old and old['result'] == 'red':
-                    state = 'recovered'
-            updates[key] = dict(result=last, commit=active['tip'])
-            if state:
+            logs = [first['log'], rerun['log'] if rerun else first['log']]
+            observation = dict(result=last, state=state, logs=logs, event=None, alert=None)
+            if state not in ('passing', 'unobserved'):
                 identifier = f'{active["tip"]}:{active["attempt"]}:' + ':'.join(result['identity'])
-                event = self.event('after-landing-test', identifier, commit=active['tip'],
-                                   identity=result['identity'], state=state,
-                                   logs=[first['log'], rerun['log'] if rerun else first['log']])
-                previous = active['events'].get(identifier)
-                if previous and previous['state'] != state:
-                    raise Fault('replayed verdict changed; retaining prior evidence', logs=pair_logs, wall=pair_wall)
-                events[identifier] = previous or event
+                observation['event'] = self.event('after-landing-test', identifier, commit=active['tip'],
+                                                  identity=result['identity'], state=state, logs=logs)
                 if state == 'new':
-                    new.append(dict(identity=result['identity'], error=result['error'],
-                                    logs=events[identifier]['logs'], id=identifier))
-        return dict(status='ran', selected=selected, executed=sum(r['result'] != 'unobserved' for r in results.values()),
-                    failed=sum(r['result'] == 'fail' for r in results.values()), red=red, new=new,
-                    logs=pair_logs, wall=pair_wall), updates, events
+                    observation['alert'] = dict(identity=result['identity'], error=result['error'], logs=logs, id=identifier)
+            self.stage_observation(profile, key, observation)
+        outcome['status'] = 'ran'
+        outcome.pop('error', None)
+        self.save()
+        return outcome
 
     def run(self):
         self.prepare()
         active = self.state['active']
         if active is None:
             return
-        # Interrupted attempts redo their selected pairs. Global executed history
-        # changes only at finish, so replay cannot turn a new red into standing.
         if active['invocation']:
             if self.await_invocation(active['invocation']) is None:
                 return
@@ -662,17 +789,18 @@ sys.exit(code if code >= 0 else 128 - code)
         git(self.args.slot, 'clean', '-fd')
         for profile in active['profiles']:
             try:
-                outcome, updates, events = self.pair(profile)
-                active['updates'].update(updates)
-                for identifier, event in events.items():
-                    active['events'].setdefault(identifier, event)
+                outcome = self.pair(profile)
             except (Fault, OSError, ValueError, KeyError) as error:
                 if active['invocation']:
-                    # Unknown completion must never start another pair/tip.
                     self.fault(str(error))
                     self.save()
                     return
-                outcome = dict(status='faulted', error=str(error), logs=getattr(error, 'logs', []), wall=getattr(error, 'wall', 0))
+                # Each completed identity was already saved. Preserve its red,
+                # updates and alert even when a later confirmation cannot run.
+                outcome = active['pairs'].setdefault(profile, dict(red=[], new=[], logs=[], wall=0))
+                outcome.update(status='faulted', error=str(error))
+                outcome['logs'] = list(dict.fromkeys(outcome['logs'] + getattr(error, 'logs', [])))
+                outcome['wall'] = max(outcome['wall'], getattr(error, 'wall', 0))
             active['pairs'][profile] = outcome
             self.save()
         self.finish()
@@ -680,37 +808,26 @@ sys.exit(code if code >= 0 else 128 - code)
     def finish(self):
         active, item = self.state['active'], self.state['queue'][0]
         item['pairs'].update(active['pairs'])
-        faulted = [p for p, outcome in item['pairs'].items() if outcome['status'] == 'faulted']
-        red = (any(outcome.get('red') for outcome in item['pairs'].values()) or
-               any(event['state'] in ('new', 'standing', 'unattributed') for event in active['events'].values()))
+        faulted = [profile for profile, outcome in item['pairs'].items() if outcome['status'] == 'faulted']
+        red = any(outcome.get('red') for outcome in item['pairs'].values())
         verdict = 'red' if red else 'partial' if faulted else 'green'
         identifier = f'{active["tip"]}:{active["attempt"]}'
         new = [test for outcome in active['pairs'].values() for test in outcome.get('new', [])]
-        posts = []
-        routing_error = None
+        branches = [suspect['branch'] for suspect in item['suspects'] if suspect['kind'] == 'branch']
+        for event in active['events'].values():
+            if event['state'] == 'new' and branches:
+                event.update(branch=branches[0], branches=branches)
+        group = dict(id=identifier, records=[], posts=[], recorded=False)
         if new:
-            try:
-                routes = self.resolve({s['key'] for s in item['suspects'] if s['kind'] == 'branch'})
-                for destination in sorted(set(routes.values())):
-                    branches = [s['branch'] for s in item['suspects'] if s['kind'] == 'branch' and routes[s['key']] == destination]
-                    for event in active['events'].values():
-                        if event['state'] == 'new':
-                            event.setdefault('branch', branches[0])
-                            event['branches'] = sorted(set(event.get('branches', []) + branches))
-                    # Keep every identity and suspect, with bounded line count.
-                    body = [f'id: {identifier}', f'tip: {active["tip"]}; builder: {self.args.host}',
-                            'single suspect' if len(item['suspects']) == 1 else 'several suspects',
-                            'suspects: ' + json.dumps(item['suspects'], separators=(',', ':')),
-                            'new reds: ' + json.dumps(new, separators=(',', ':'))]
-                    posts.append(dict(to=destination, body='\n'.join(body), delivered=False))
-            except Fault as error:
-                routing_error = str(error)
+            detail = self.artifact('notification', dict(tip=active['tip'], suspects=item['suspects'], new=new))
+            group['notification'] = dict(details=detail, resolved=False, error=None)
+        routing_error = self.route_notification(group)
         event = self.event('after-landing-run', identifier, commit=active['tip'], attempt=active['attempt'],
                            suspects=item['suspects'], coalesced=item['coalesced'], verdict=verdict,
-                           pairs=item['pairs'], wall=time.time() - active['started'], routing_fault=routing_error)
-        # First-error excerpts belong only in posts, never records log contents.
-        event['pairs'] = {p: {k: v for k, v in result.items() if k != 'new'} for p, result in item['pairs'].items()}
-        group = dict(id=identifier, records=[*active['events'].values(), event], posts=posts, recorded=False)
+                           pairs={profile: {key: value for key, value in result.items() if key != 'new'}
+                                  for profile, result in item['pairs'].items()},
+                           wall=time.time() - active['started'], routing_fault=routing_error)
+        group['records'] = [self.bounded_event(record) for record in [*active['events'].values(), event]]
         self.state['outbox'].append(group)
         self.state['tests'].update(active['updates'])
         self.state['last_run'] = dict(id=identifier, verdict=verdict, faulted=faulted)
@@ -719,11 +836,14 @@ sys.exit(code if code >= 0 else 128 - code)
             self.state['cursor'] = item['tip']
             self.state['queue'].pop(0)
             self.state['hour']['completed'] += 1
+        if not faulted and not routing_error:
             self.state['fault_episode'] = None
         self.state['active'] = None
-        self.save()
         if faulted or routing_error:
-            self.fault('faulted pairs: ' + ', '.join(faulted) + ('; ' + routing_error if routing_error else ''), identifier + ':fault', group=group)
+            self.fault('faulted pairs: ' + ', '.join(faulted) + ('; ' + routing_error if routing_error else ''),
+                       identifier + ':fault', group=group, save=False)
+        # Completion, episode and its undelivered alert are one transaction.
+        self.save()
         self.deliver()
 
 
