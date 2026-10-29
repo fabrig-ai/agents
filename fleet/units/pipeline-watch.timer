@@ -1,5 +1,5 @@
 [Unit]
-Description=Run watch every 2 minutes
+Description=Run pipeline watch every 2 minutes
 
 [Timer]
 OnBootSec=1min

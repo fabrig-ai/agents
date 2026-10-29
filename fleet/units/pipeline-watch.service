@@ -1,5 +1,5 @@
 [Unit]
-Description=Run watch
+Description=Run pipeline watch
 
 [Service]
 Type=oneshot

@@ -148,7 +148,7 @@ class FleetSync2Test(fixture.FleetTest):
 
     def test_records_units_render_by_role_without_activation(self):
         expected = {
-            "hel8": {"fleet-sync", "record-collect-session", "watch", "status-page"},
+            "hel8": {"fleet-sync", "record-collect-session", "pipeline-watch", "status-page"},
             "hetzner6": {"fleet-sync", "record-collect-builder"},
             "hetzner8": {"fleet-sync", "record-collect-gate"},
             "hetzner2": {"fleet-sync"},
@@ -190,7 +190,7 @@ class FleetSync2Test(fixture.FleetTest):
         before = self.calls()
         self.sync()
         self.assertEqual(self.calls()[len(before):], [["--user", "show", "--property=Version"]] + [["--user", "is-active", "--quiet", name]
-                         for name in sorted(("fleet-sync.timer", "record-collect-session.timer", "watch.timer", "status-page.timer"))])
+                         for name in sorted(("fleet-sync.timer", "record-collect-session.timer", "pipeline-watch.timer", "status-page.timer"))])
 
     def test_preview_first_run_renders_real_home_without_deployment(self):
         fixture.put(self.home / ".bashrc", "# personal\n")
