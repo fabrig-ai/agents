@@ -32,6 +32,7 @@ BEGIN = "# >>> fleet-sync >>>"
 END = "# <<< fleet-sync <<<"
 BLOCK = BEGIN + '\n[ ! -f "$HOME/.config/fabrig/env.sh" ] || . "$HOME/.config/fabrig/env.sh"\n' + END + "\n"
 KEY = re.compile(r"[A-Za-z_][A-Za-z_0-9]*\Z")
+SYSTEM_TOOL_DIRS = (Path("/usr/bin"), Path("/bin"))
 TOOL_NAME = re.compile(r"[a-z][a-z0-9-]*\Z")
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 SERVICE_START = 'ExecStart=/bin/bash -lc \'exec "$$HOME/src/fabrig/current/tools/fleet-sync" --timer\''
@@ -429,6 +430,9 @@ class Declarations:
             if (not TOOL_NAME.fullmatch(name) or name in self.tools
                     or Path(path).is_absolute() or ".." in Path(path).parts):
                 raise ValueError(f"invalid installed tool: {line}")
+            if any((directory / name).is_file() and os.access(directory / name, os.X_OK)
+                   for directory in SYSTEM_TOOL_DIRS):
+                raise ValueError(f"installed tool shadows system command: {name}")
             tool = root / "tools" / path
             if not tool.is_file() or not os.access(tool, os.X_OK) or not tool.resolve().is_relative_to(root.resolve()):
                 raise ValueError(f"missing executable tool: {line}")
@@ -1203,16 +1207,19 @@ class Runner:
         except BlockingIOError:
             os.close(self.lock_fd)
             self.lock_fd = None
-            if not self.args.timer:
+            if self.args.check:
+                self.item("lock", "busy", "a run is in progress; check again")
+            elif not self.args.timer:
                 self.item("lock", "failed", "another run holds the lock")
             return False
 
     def finish(self, persist=True):
         self.state["end"] = now()
-        try:
-            self.state["previous_release"] = self.previous_release()
-        except (OSError, ValueError) as error:
-            self.item("releases", "failed", str(error))
+        if not any(i["result"] == "busy" for i in self.state["items"]):
+            try:
+                self.state["previous_release"] = self.previous_release()
+            except (OSError, ValueError) as error:
+                self.item("releases", "failed", str(error))
         self.state["managed_files"] = sorted(self.owned)
         self.state["managed_links"] = sorted(self.link_owned)
         self.state["managed_units"] = sorted(self.unit_owned)
@@ -1396,10 +1403,6 @@ class Runner:
         return self.finish(False)
 
     def run(self):
-        if self.args.check:
-            reason = self.backoff_reason()
-            if reason:
-                self.item("backoff", "held", reason)
         inspecting = self.args.check or getattr(self.args, "preview", None) is not None
         if any(i["result"] == "failed" and not (inspecting and i["item"] == "agents")
                for i in self.state["items"]):
@@ -1421,10 +1424,14 @@ class Runner:
             self.item("lock", "failed", str(error))
             return self.finish(False)
         if not acquired:
-            if self.args.timer:
+            if self.args.timer and not self.args.check:
                 return 0
             return self.finish(False)
         try:
+            if self.args.check:
+                reason = self.backoff_reason()
+                if reason:
+                    self.item("backoff", "held", reason)
             if self.args.timer and not self.args.check and self.args.resume_fd is None:
                 try:
                     if self.timer_wait():
@@ -1454,7 +1461,7 @@ def print_state(state, as_json):
         if item["result"] != "ok":
             print(f"{item['result']:7} {item['item']}: {item['reason']}")
     counts = {result: sum(i["result"] == result for i in state["items"])
-              for result in ("ok", "changed", "drift", "warn", "failed", "held", "deferred")}
+              for result in ("ok", "changed", "drift", "warn", "failed", "held", "busy", "deferred")}
     print(f"{state['host']}: " + ", ".join(f"{n} {r}" for r, n in counts.items() if n))
 
 

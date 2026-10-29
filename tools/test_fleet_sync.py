@@ -125,6 +125,10 @@ class FleetTest(unittest.TestCase):
         # Transport semantics avoid local-clone object hardlinks changing main's
         # mtimes when the fixture origin receives unrelated commits.
         self.fabrig_origin = fabrig_origin.as_uri()
+        self.system_bins = (self.directory / "system/usr/bin", self.directory / "system/bin")
+        for directory in self.system_bins:
+            directory.mkdir(parents=True)
+        put(self.system_bins[0] / "watch", "#!/bin/sh\nexit 0\n", True)
         self.source = self.directory / "agents-source"
         self.source.mkdir()
         shutil.copytree(ROOT / "fleet", self.source / "fleet")
@@ -132,6 +136,11 @@ class FleetTest(unittest.TestCase):
             if line.strip() and not line.lstrip().startswith("#"):
                 path = line.split()[-1]
                 put(self.source / "tools" / path, (ROOT / "tools" / path).read_text(), True)
+        # Isolate manifest system-command checks from the machine running tests.
+        script = self.source / "tools/fleet-sync"
+        put(script, script.read_text().replace(
+            'SYSTEM_TOOL_DIRS = (Path("/usr/bin"), Path("/bin"))',
+            f'SYSTEM_TOOL_DIRS = tuple(map(Path, {json.dumps([str(p) for p in self.system_bins])}))'), True)
         put(self.source / "tools/installed", (ROOT / "tools/installed").read_text())
         put(self.source / "fleet/repositories.toml",
             f"agents = {json.dumps(str(self.directory / 'agents-origin.git'))}\n"
@@ -364,7 +373,8 @@ class FleetTest(unittest.TestCase):
             before = self.snapshot()
             self.assertIsNone(self.sync("--timer"))
             self.assertEqual(before, self.snapshot())
-            self.assertEqual(self.sync("--check", expected=1)["items"][0]["item"], "lock")
+            self.assertEqual(self.sync("--check")["items"], [
+                {"item": "lock", "result": "busy", "reason": "a run is in progress; check again"}])
 
     def test_units_reload_only_on_change(self):
         self.sync()
