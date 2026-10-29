@@ -1,0 +1,7 @@
+[Unit]
+Description=Run record-collect-builder
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h
+ExecStart=/bin/bash -lc 'exec "$$HOME/src/fabrig/current/tools/records/record-collect" runs heavy'

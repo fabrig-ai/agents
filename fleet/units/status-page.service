@@ -1,0 +1,8 @@
+[Unit]
+Description=Run status-page
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h
+TimeoutStartSec=8min
+ExecStart=/bin/bash -lc 'exec "$$HOME/src/fabrig/current/tools/records/status-page" --out /var/www/status/index.html --samples %h/.local/state/status-page/usage.jsonl'

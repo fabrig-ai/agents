@@ -146,6 +146,52 @@ class FleetSync2Test(fixture.FleetTest):
         self.sync("--timer", expected=1)
         self.assertTrue(retry.exists())
 
+    def test_records_units_render_by_role_without_activation(self):
+        expected = {
+            "hel8": {"fleet-sync", "record-collect-session", "watch", "status-page"},
+            "hetzner6": {"fleet-sync", "record-collect-builder"},
+            "hetzner8": {"fleet-sync", "record-collect-gate"},
+            "hetzner2": {"fleet-sync"},
+        }
+        before = self.snapshot()
+        for host, names in expected.items():
+            with self.subTest(host=host):
+                directory = self.directory / ("preview-" + host)
+                self.process("python3", "-I", "-B", self.source / "tools/fleet-sync",
+                             "--host", host, "--preview", directory)
+                units = directory / "home/.config/systemd/user"
+                self.assertEqual({p.name for p in units.iterdir()},
+                                 {name + suffix for name in names for suffix in (".service", ".timer")})
+                for name in names - {"fleet-sync"}:
+                    service = (units / (name + ".service")).read_text()
+                    timer = (units / (name + ".timer")).read_text()
+                    self.assertIn("Type=oneshot\nWorkingDirectory=%h\n", service)
+                    self.assertIn('ExecStart=/bin/bash -lc \'exec "$$HOME/src/fabrig/current/tools/records/', service)
+                    self.assertIn("Persistent=true", timer)
+                    self.assertIn("OnBootSec=", timer)
+                    self.assertIn("AccuracySec=", timer)
+                    self.assertIn("WantedBy=timers.target", timer)
+        self.assertEqual(before, self.snapshot())
+        self.assertFalse((self.home / "systemctl.log").exists())
+
+    def test_status_page_takes_over_legacy_units_once(self):
+        units = self.home / ".config/systemd/user"
+        legacy = "# legacy status page\n"
+        for suffix in ("service", "timer"):
+            fixture.put(units / ("status-page." + suffix), legacy)
+        self.sync()
+        for suffix in ("service", "timer"):
+            name = "status-page." + suffix
+            self.assertEqual((units / name).read_text(), (self.source / "fleet/units" / name).read_text())
+            self.assertEqual((units / (name + ".pre-fleet-sync")).read_text(), legacy)
+        self.assertIn("TimeoutStartSec=8min", (units / "status-page.service").read_text())
+        self.assertIn("OnCalendar=*:0/10", (units / "status-page.timer").read_text())
+        self.assertIn(["--user", "enable", "--now", "--no-reload", "status-page.timer"], self.calls())
+        before = self.calls()
+        self.sync()
+        self.assertEqual(self.calls()[len(before):], [["--user", "show", "--property=Version"]] + [["--user", "is-active", "--quiet", name]
+                         for name in sorted(("fleet-sync.timer", "record-collect-session.timer", "watch.timer", "status-page.timer"))])
+
     def test_preview_first_run_renders_real_home_without_deployment(self):
         fixture.put(self.home / ".bashrc", "# personal\n")
         fixture.put(self.home / ".codex/config.toml", '# personal\n[projects."/tmp/example"]\ntrust_level = "trusted"\n')
