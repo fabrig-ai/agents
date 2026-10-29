@@ -3,6 +3,7 @@
 
 import argparse
 import concurrent.futures
+from contextlib import contextmanager
 import datetime as dt
 import fcntl
 import io
@@ -13,6 +14,7 @@ import re
 import shlex
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import tarfile
@@ -25,6 +27,12 @@ END = "# <<< fleet-sync <<<"
 BLOCK = BEGIN + '\n[ ! -f "$HOME/.config/fabrig/env.sh" ] || . "$HOME/.config/fabrig/env.sh"\n' + END + "\n"
 KEY = re.compile(r"[A-Za-z_][A-Za-z_0-9]*\Z")
 SHA = re.compile(r"[0-9a-f]{40}\Z")
+
+
+class CommandError(ValueError):
+    def __init__(self, code, reason):
+        super().__init__(reason)
+        self.code = code
 
 
 def now():
@@ -46,12 +54,19 @@ def expand(value, home):
     return value.replace("$HOME", str(home))
 
 
+def env_value(value, home):
+    value = expand(value, home)
+    if any(c.isspace() or c in "\"'\\$" for c in value):
+        raise ValueError("env values cannot contain whitespace, quotes, backslashes or $ after expansion")
+    return value
+
+
 class Declarations:
     def __init__(self, root, home):
         self.root = root
         fleet = root / "fleet"
         known = {"hosts.toml", "env", "claude/settings.json", "codex/config.toml",
-                 "cargo/config.toml", "versions.toml", "repositories.toml", "units/roles.toml"}
+                 "cargo/config.toml", "versions.toml", "repositories.toml", "units/roles.toml", "policy.toml"}
         parsed = {}
         for path in sorted(fleet.rglob("*")):
             if path.is_symlink():
@@ -88,7 +103,7 @@ class Declarations:
             for key, value in host["env"].items():
                 if not KEY.fullmatch(key) or key == "PATH":
                     raise ValueError(f"invalid env key: {key}")
-                expand(value, home)
+                env_value(value, home)
             if "cargo_jobs" in host and (type(host["cargo_jobs"]) is not int or host["cargo_jobs"] < 1):
                 raise ValueError(f"invalid cargo_jobs for {name}")
         self.env = {}
@@ -98,7 +113,11 @@ class Declarations:
             key, sep, value = line.partition("=")
             if not sep or not KEY.fullmatch(key) or key == "PATH" or key in self.env:
                 raise ValueError(f"invalid fleet/env line: {line}")
-            self.env[key] = expand(value, home)
+            self.env[key] = env_value(value, home)
+        self.file_policy = parsed["policy.toml"]["files"]
+        for path, policy in self.file_policy.items():
+            if Path(path).is_absolute() or ".." in Path(path).parts or policy not in ("check", "write"):
+                raise ValueError(f"invalid file policy: {path} = {policy}")
         self.claude = parsed["claude/settings.json"]
         if not isinstance(self.claude, dict) or "env" in self.claude:
             raise ValueError("Claude settings must be an object without env")
@@ -212,7 +231,7 @@ class Runner:
         out = result.stdout.decode(errors="replace") if not binary else "[binary output]"
         self.log.append(f"$ {shlex.join([str(v) for v in argv])}\n{out}{err}")
         if result.returncode:
-            raise ValueError(f"{Path(str(argv[0])).name} exited {result.returncode}: {(err or out).strip()[-600:]}")
+            raise CommandError(result.returncode, f"{Path(str(argv[0])).name} exited {result.returncode}: {(err or out).strip()[-600:]}")
         return result.stdout if binary else out.strip()
 
     def git(self, repo, *args):
@@ -309,12 +328,91 @@ class Runner:
                     *sys.argv[1:], "--resume-fd", str(self.lock_fd)]
             os.execve(sys.executable, argv, env)
 
+    def fabrig_deferred(self):
+        path = self.config / "defer-fabrig"
+        if not os.path.lexists(path):
+            return False
+        lines = path.read_text().splitlines()
+        self.item("fabrig", "deferred", lines[0] if lines else "defer-fabrig exists")
+        return True
+
+    @contextmanager
+    def install_lock(self):
+        """Ops and fleet share this inode. Never unlink or replace it."""
+        directory = self.home / ".local/state/fabrig"
+        path = directory / "install.lock"
+        if self.args.check and not os.path.lexists(path):
+            yield True
+            return
+        if not self.args.check:
+            directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        fd = None
+        try:
+            flags = os.O_NOFOLLOW | os.O_NONBLOCK | (os.O_RDONLY if self.args.check else os.O_RDWR | os.O_CREAT)
+            fd = os.open("install.lock", flags, 0o600, dir_fd=directory_fd)
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise ValueError("install lock is not a regular file")
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                yield False
+                return
+            if self.args.check:
+                if stat.S_IMODE(os.fstat(fd).st_mode) != 0o600 or stat.S_IMODE(os.fstat(directory_fd).st_mode) != 0o700:
+                    raise ValueError("install lock must be 0600 in a 0700 directory")
+            else:
+                if stat.S_IMODE(os.fstat(directory_fd).st_mode) != 0o700:
+                    os.fchmod(directory_fd, 0o700)
+                if stat.S_IMODE(os.fstat(fd).st_mode) != 0o600:
+                    os.fchmod(fd, 0o600)
+            yield True
+        finally:
+            if fd is not None:
+                os.close(fd)
+            os.close(directory_fd)
+
+    def fabrig_mirror(self):
+        directory = self.base / ".fleet-sync"
+        mirror = directory / "fabrig.git"
+        if directory.is_symlink() or mirror.is_symlink():
+            raise ValueError("refusing symlink fabrig mirror")
+        if not mirror.exists():
+            if self.args.check:
+                return None
+            directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+            directory.chmod(0o700)
+            self.cmd("git", "clone", "--bare", "--filter=blob:none", "--", self.d.fabrig_origin, mirror)
+        if self.git(mirror, "rev-parse", "--is-bare-repository") != "true":
+            raise ValueError("fabrig mirror must be bare")
+        if self.git(mirror, "remote", "get-url", "origin") != self.d.fabrig_origin:
+            raise ValueError("foreign origin: fabrig mirror")
+        if not self.args.check:
+            directory.chmod(0o700)
+            mirror.chmod(0o700)
+        # Bare clones have no default origin/main fetch refspec; name it explicitly.
+        self.git(mirror, "fetch", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main")
+        return mirror
+
     def fabrig(self):
+        if self.fabrig_deferred():
+            return
+        with self.install_lock() as acquired:
+            if not acquired:
+                self.item("fabrig", "held", "install lock busy")
+                return
+            if self.fabrig_deferred():
+                return
+            self.fabrig_locked()
+
+    def fabrig_locked(self):
         clone = self.base / "main"
         origin = self.d.fabrig_origin
         if clone.is_symlink():
             raise ValueError("refusing symlink fabrig clone")
-        remote = self.cmd("git", "ls-remote", "--exit-code", origin, "refs/heads/main").split()[0]
+        mirror = self.fabrig_mirror()
+        remote = self.git(mirror, "rev-parse", "origin/main") if mirror else self.cmd("git", "ls-remote", "--exit-code", origin, "refs/heads/main").split()[0]
+        self.state["desired_fabrig_sha"] = remote
         if not clone.exists():
             if self.args.check:
                 self.item("fabrig", "drift", "dedicated clone is absent")
@@ -324,13 +422,34 @@ class Runner:
             with tempfile.TemporaryDirectory(prefix=".fabrig-install-", dir=self.base) as temporary:
                 checkout = Path(temporary) / "checkout"
                 self.cmd("git", "clone", "--depth=1", "--branch", "main", "--", origin, checkout)
+                if self.fabrig_deferred():
+                    return
                 self.cmd(sys.executable, "-I", "-B", checkout / "tools/install")
             self.state["fabrig_sha"] = self.git(clone, "rev-parse", "HEAD")
             self.item("fabrig", "changed", "bootstrapped through fabrig installer")
             return
-        self.validate_clone(clone, origin)
+        # Only the installer may write to main, including its refs and index.
+        if Path(self.git(clone, "rev-parse", "--show-toplevel")).resolve() != clone.resolve():
+            raise ValueError("not a dedicated fabrig clone")
+        if self.git(clone, "remote", "get-url", "origin") != origin:
+            raise ValueError("foreign origin: fabrig clone")
         head = self.git(clone, "rev-parse", "HEAD")
         self.state["fabrig_sha"] = head
+        changed = head != remote
+        if changed and mirror:
+            try:
+                self.git(mirror, "cat-file", "-e", f"{head}^{{commit}}")
+            except CommandError:
+                pass  # An installed commit missing from the mirror counts as changed.
+            else:
+                try:
+                    self.git(mirror, "diff", "--quiet", head, "origin/main", "--", "tools/")
+                    changed = False
+                except CommandError as error:
+                    if error.code != 1:
+                        raise
+        if self.fabrig_deferred():
+            return
         wrong = False
         for line in (clone / "tools/installed").read_text().splitlines():
             if not line.strip() or line.lstrip().startswith("#"):
@@ -340,16 +459,21 @@ class Runner:
                 raise ValueError("invalid fabrig tools/installed")
             tool, directory = fields
             link = self.home / ".local/bin" / tool
+            if self.fabrig_deferred():
+                return
             wrong |= not link.is_symlink() or os.readlink(link) != str(clone / "tools" / directory / tool)
-        if head != remote or wrong:
+        if changed or wrong:
             if self.args.check:
-                self.item("fabrig", "drift", "HEAD or installed links differ")
+                self.item("fabrig", "drift", "tools changed or installed links differ")
             else:
+                if self.fabrig_deferred():
+                    return
                 self.cmd(sys.executable, "-I", "-B", clone / "tools/install")
                 self.state["fabrig_sha"] = self.git(clone, "rev-parse", "HEAD")
                 self.item("fabrig", "changed", "ran fabrig installer (output in run.log)")
         else:
-            self.item("fabrig", "ok", "HEAD and links current")
+            reason = f"main ahead, tools unchanged ({head[:7]} -> {remote[:7]})" if head != remote else "HEAD and links current"
+            self.item("fabrig", "ok", reason)
 
     def links(self):
         for tool in self.d.tools:
@@ -376,6 +500,9 @@ class Runner:
                 pass
         if equal:
             self.item(relative, "ok", "content current")
+            return False
+        if self.d.file_policy.get(relative, "write") == "check":
+            self.item(relative, "warn", "differs; check-only")
             return False
         if self.args.check:
             self.item(relative, "drift", "file is absent or differs")
@@ -463,7 +590,7 @@ class Runner:
                     in_block = False
                 elif not in_block:
                     match = re.match(r"\s*(?:export\s+)?([A-Za-z_][A-Za-z_0-9]*)=(.*)", line)
-                    if not match or match[1] not in env:
+                    if not match or match[1] == "PATH" or match[1] not in env:
                         continue
                     value = match[2].strip()
                     try:
@@ -478,10 +605,14 @@ class Runner:
         host = self.d.hosts[self.name]
         env = self.environment()
         path = f"{self.home}/.local/bin:{self.home}/.cargo/bin:/usr/local/bin:/usr/bin:/bin"
-        shell = 'export PATH="$HOME/.local/bin:$HOME/.cargo/bin:${PATH:-/usr/local/bin:/usr/bin:/bin}"\n'
+        shell = 'PATH=${PATH-/usr/local/bin:/usr/bin:/bin}\n'
+        # Add cargo first so local/bin comes first when both are absent.
+        for directory in (".cargo/bin", ".local/bin"):
+            shell += f'case ":$PATH:" in\n  *":$HOME/{directory}:"*) ;;\n  *) PATH="$HOME/{directory}:$PATH" ;;\nesac\n'
+        shell += "export PATH\n"
         shell += "".join(f"export {k}={shlex.quote(v)}\n" for k, v in env.items())
         self.attempt(".config/fabrig/env.sh", lambda: self.write(".config/fabrig/env.sh", shell, 0o644))
-        systemd_env = "".join(f"{k}={json.dumps(v, ensure_ascii=False)}\n" for k, v in {"PATH": path, **env}.items())
+        systemd_env = "".join(f"{k}={v}\n" for k, v in {"PATH": path, **env}.items())
         self.attempt(".config/environment.d/90-fabrig.conf", lambda: self.write(".config/environment.d/90-fabrig.conf", systemd_env))
         settings = json.dumps({**self.d.claude, "env": env}, indent=2) + "\n"
         self.attempt(".claude/settings.json", lambda: self.write(".claude/settings.json", settings, semantic=True))
@@ -495,7 +626,7 @@ class Runner:
         self.attempt(".profile", lambda: self.shell_block(".profile", False))
         self.attempt(".bashrc", lambda: self.shell_block(".bashrc", True))
         self.attempt(".codex/config.toml", self.codex)
-        self.attempt("conflicts", lambda: self.conflicts({**env, "PATH": path}))
+        self.attempt("conflicts", lambda: self.conflicts(env))
 
     def units(self):
         wanted = {name for name, roles in self.d.unit_roles.items() if "*" in roles or set(roles) & set(self.d.hosts[self.name]["roles"])}
@@ -645,7 +776,7 @@ def print_state(state, as_json):
         if item["result"] != "ok":
             print(f"{item['result']:7} {item['item']}: {item['reason']}")
     counts = {result: sum(i["result"] == result for i in state["items"])
-              for result in ("ok", "changed", "drift", "warn", "failed", "held")}
+              for result in ("ok", "changed", "drift", "warn", "failed", "held", "deferred")}
     print(f"{state['host']}: " + ", ".join(f"{n} {r}" for r, n in counts.items() if n))
 
 

@@ -1,0 +1,3 @@
+[files]
+# Ops and the coordinator still own routing changes.
+"src/rust/tmp/post/machines" = "check"
