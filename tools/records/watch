@@ -648,7 +648,7 @@ def state_file(dry):
         yield path, json.loads(path.read_text()) if path.exists() else {}
 
 
-def run(dry, config):
+def run(dry, config, post):
     now = time.time()
     with state_file(dry) as (path, state), tempfile.TemporaryDirectory(prefix='watch-records-') as temp:
         # Even record pull creates locks and may fast-forward. In a preview its
@@ -668,11 +668,11 @@ def run(dry, config):
             argv = ['post', 'wake', to] if kind == 'wake' else [
                 'post', 'send', '--as', 'watch', to, 'watch: ' + candidate['rule'] + ' ' + candidate['subject']]
             body = '\n'.join(candidate['evidence']) + '\n'
-            if dry:
+            if dry or not post:
                 print('would ' + shlex.join(argv))
                 if kind == 'send':
                     print(body, end='')
-                return 'dry-run' if kind == 'wake' else 0
+                return ('dry-run' if dry else 'suppressed') if kind == 'wake' else 0
             try:
                 result = command(argv, data=body if kind == 'send' else None)
                 if kind == 'wake':
@@ -736,12 +736,15 @@ def main():
     try:
         with args.config.open('rb') as stream:
             config = tomllib.load(stream)
+        post = config['alerts']['post']
+        if type(post) is not bool:
+            raise ValueError('alerts.post must be boolean')
         for rule in RULES:
             row = config['rules'][rule]
             if type(row['enabled']) is not bool or any(type(v) not in (int, float) or v < 0 for k, v in row.items() if k != 'enabled'):
                 raise ValueError('invalid rule configuration')
         while True:
-            status = run(args.dry_run, config['rules'])
+            status = run(args.dry_run, config['rules'], post)
             if args.once or args.dry_run or status:
                 return status
             time.sleep(config['watch']['interval_seconds'])

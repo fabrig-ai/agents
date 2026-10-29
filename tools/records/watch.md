@@ -8,6 +8,14 @@ changes the watch state, or advances the live records clone. Its one `record
 pull` uses a disposable clone, deleted on exit. All publications use the
 sibling `record` executable from this checkout. No legacy code is imported.
 
+`watch.toml` starts with `[alerts] post = false`. In this mode watch evaluates
+conditions, persists episodes, and appends alert events and heartbeats as usual.
+It logs the proposed post commands and evidence, but never sends or wakes.
+Suppressed actions count as handled for episode deduplication; enabling posts
+does not replay earlier actions. After reviewing a day of alert events, the
+designer changes `post = true` in a commit to enable future sends and wakes.
+Unlike `--dry-run`, silent mode still updates state and publishes records.
+
 `watch.toml` enables each of the ten rules and holds every timing threshold.
 Conditions use strict "older than" comparisons; escalation is due at its
 interval after opening, regardless of the wake result. For escalations whose

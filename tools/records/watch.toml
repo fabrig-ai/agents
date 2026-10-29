@@ -1,4 +1,7 @@
 # Minutes; conditions use strict 'older than' comparisons. Disable any rule.
+[alerts]
+post = false
+
 [watch]
 interval_seconds = 120
 

@@ -453,8 +453,10 @@ else: sys.exit(1 if sys.argv[2] in os.environ.get('UNOWNED','').split(',') else 
         return result.stdout
     def fake(self, name, program):
         self.write(self.bin / name, '#!/usr/bin/env python3\n'+program).chmod(0o700)
-    def invoke(self, dry=False, code=0, **env):
-        result = subprocess.run([str(TOOL), '--once'] + (['--dry-run'] if dry else []),
+    def invoke(self, dry=False, code=0, post=True, **env):
+        config = self.write(self.home/'watch.toml', TOOL.with_suffix('.toml').read_text().replace(
+            'post = false', 'post = true' if post else 'post = false'))
+        result = subprocess.run([str(TOOL), '--once', '--config', str(config)] + (['--dry-run'] if dry else []),
                                 env=dict(self.env, **env), capture_output=True, text=True)
         self.assertEqual(result.returncode, code, result.stdout+result.stderr)
         return result
@@ -501,6 +503,32 @@ else: sys.exit(1 if sys.argv[2] in os.environ.get('UNOWNED','').split(',') else 
         self.mail()
         self.invoke()
         self.assertEqual(sum(e['kind']=='alert-open' for e in self.events()), 2)
+    def test_silent_mode_publishes_without_sending_or_waking(self):
+        self.assertFalse(tomllib.loads(TOOL.with_suffix('.toml').read_text())['alerts']['post'])
+        self.mail()
+        self.write(self.home/'remote', json.dumps({'runs': [dict(
+            run='hung', owner='lead/jig', cwd='/synthetic/slots/1', started=0, changed=0, effort='high', ended=False)], 'heavy': [], 'errors': []}))
+        result = self.invoke(post=False)
+        self.assertIn('would post wake lead/jig', result.stdout)
+        self.assertIn('would post send --as watch lead/jig', result.stdout)
+        self.assertNotIn('PRIVATE BODY', result.stdout)
+        self.assertFalse((self.home/'post.log').exists())
+        events = self.events()
+        self.assertTrue(any(e['kind'] == 'alert-open' for e in events))
+        self.assertEqual(events[-1]['kind'], 'heartbeat')
+        self.assertEqual(next(e['wake'] for e in events if e.get('rule') == 'deaf'), 'suppressed')
+        state = self.state()
+        self.assertTrue(state['episodes'])
+        for episode in state['episodes'].values():
+            episode['opened'] -= 3600
+        self.write(self.home/'.local/state/watch/state.json', json.dumps(state))
+        result = self.invoke(post=False)
+        supervisor = next(e['supervisor'] for e in events if e.get('rule') == 'deaf')
+        self.assertIn('would post send --as watch ' + supervisor, result.stdout)
+        self.assertTrue(any(e['kind'] == 'alert-escalate' for e in self.events()))
+        self.assertFalse((self.home/'post.log').exists())
+        self.assertEqual(sum(e['kind'] == 'heartbeat' for e in self.events()), 2)
+
     def test_failure_isolation_and_paused_names(self):
         self.mail()
         self.invoke(FAIL_INPUT='claude')
