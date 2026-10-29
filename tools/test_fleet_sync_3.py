@@ -15,19 +15,26 @@ class FleetSync3Test(fixture.FleetTest):
         manifest = self.source / "tools/installed"
         original = manifest.read_text()
         enabled = original
-        for name, path in {"session-start": "session/start", "record": "records/record",
-                           "record-collect": "records/record-collect", "watch": "records/watch",
+        for name, path in {"session-start": "session/start", "fabrig-record": "records/record",
+                           "record-collect": "records/record-collect", "pipeline-watch": "records/watch",
                            "status-page": "records/status-page"}.items():
-            enabled = enabled.replace(f"# {name} {path}", f"{name} {path}")
+            previous = {"fabrig-record": "record", "pipeline-watch": "watch"}.get(name, name)
+            enabled = enabled.replace(f"# {previous} {path}", f"{name} {path}")
             fixture.put(self.source / "tools" / path, (fixture.ROOT / "tools" / path).read_text(), True)
         if enabled != original:
             fixture.put(manifest, enabled)
             self.sha = self.publish()
 
     def test_nested_links_follow_manifest_paths(self):
+        legacy = self.home / ".local/bin/record"
+        legacy.parent.mkdir(parents=True)
+        legacy.symlink_to(self.directory / "legacy-record")
+        fixture.put(self.home / ".config/fleet-sync/defer-fabrig", "preserve legacy installer links\n")
         self.sync()
-        expected = {"session-start": "session/start", "record": "records/record",
-                    "record-collect": "records/record-collect", "watch": "records/watch",
+        self.assertEqual(os.readlink(legacy), str(self.directory / "legacy-record"))
+        self.assertFalse((self.home / ".local/bin/watch").is_symlink())
+        expected = {"session-start": "session/start", "fabrig-record": "records/record",
+                    "record-collect": "records/record-collect", "pipeline-watch": "records/watch",
                     "status-page": "records/status-page", "fleet-sync": "fleet-sync", "lease": "lease"}
         for name, path in expected.items():
             self.assertEqual(os.readlink(self.home / ".local/bin" / name),
@@ -73,12 +80,12 @@ class FleetSync3Test(fixture.FleetTest):
         release = self.current()
         links = self.home / ".local/bin"
         # Record at a release rather than current; both forms must be removed.
-        (links / "record").unlink()
-        (links / "record").symlink_to(release / "tools/records/record")
+        (links / "fabrig-record").unlink()
+        (links / "fabrig-record").symlink_to(release / "tools/records/record")
         (links / "record-collect").unlink()
         (links / "record-collect").symlink_to("../../src/fabrig/current/tools/records/record-collect")
-        (links / "watch").unlink()
-        (links / "watch").symlink_to("/personal/watch")
+        (links / "pipeline-watch").unlink()
+        (links / "pipeline-watch").symlink_to("/personal/watch")
         (links / "status-page").unlink()
         fixture.put(links / "status-page", "user file\n")
         (links / "unowned").symlink_to(self.home / "src/fabrig/current/tools/fleet-sync")
@@ -88,19 +95,19 @@ class FleetSync3Test(fixture.FleetTest):
         with patch.dict(os.environ, self.env, clear=True):
             _, runner = self.runner(check=True)
             runner.links()
-            self.assertTrue(any(i["item"] == "link:record" and i["result"] == "drift"
+            self.assertTrue(any(i["item"] == "link:fabrig-record" and i["result"] == "drift"
                                 for i in runner.state["items"]))
         before = self.snapshot()
         preview = self.process("python3", "-I", "-B", self.source / "tools/fleet-sync", "--host", "hel8",
                                "--preview", self.directory / "cleanup-preview")
-        self.assertIn(".local/bin/record:", preview.stdout)
+        self.assertIn(".local/bin/fabrig-record:", preview.stdout)
         self.assertIn("-> None", preview.stdout)
         self.assertEqual(before, self.snapshot())
-        self.assertTrue((links / "record").is_symlink())
+        self.assertTrue((links / "fabrig-record").is_symlink())
         self.sync(script=release / "tools/fleet-sync")
-        for name in ("record", "record-collect", "session-start"):
+        for name in ("fabrig-record", "record-collect", "session-start"):
             self.assertFalse((links / name).is_symlink())
-        self.assertEqual(os.readlink(links / "watch"), "/personal/watch")
+        self.assertEqual(os.readlink(links / "pipeline-watch"), "/personal/watch")
         self.assertEqual((links / "status-page").read_text(), "user file\n")
         self.assertTrue((links / "unowned").is_symlink())
         self.assertEqual(self.state()["managed_links"], ["fleet-sync", "lease", "status-page"])

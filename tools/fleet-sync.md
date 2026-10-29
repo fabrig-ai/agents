@@ -29,7 +29,10 @@ before changing anything.
 
 A hold file suppresses all writes, even bookkeeping. Otherwise an exclusive
 flock on ~/.local/state/fleet-sync/lock serializes runs; a busy timer exits
-quietly. Controls hold, pin and defer-fabrig are never created or removed by us.
+quietly. A check (including each host checked by status) reports only `busy`
+with "a run is in progress; check again" and exits 0 while converge holds the
+lock. Busy checks preserve state and backoff. Controls hold, pin and defer-fabrig
+are never created or removed by us.
 The sole removable control is retry: after acquiring the lock, a timer reads
 and removes ~/.config/fleet-sync/retry, bypassing its current backoff once.
 Hold and a busy lock leave retry untouched; checks and previews never consume it.
@@ -65,7 +68,9 @@ Hold and a busy lock leave retry untouched; checks and previews never consume it
    (tools/NAME) or NAME PATH (relative to tools/); names are unique lowercase
    letters/digits/hyphens starting with a letter. Paths cannot be absolute or
    contain ..; executable regular targets must resolve inside the candidate.
-   Self-check validates before promotion. Journal created links in links.json;
+   Names matching executable files in /usr/bin or /bin are refused, so fleet
+   tools cannot shadow system commands. Self-check validates before promotion.
+   Journal created links in links.json;
    remove obsolete recorded links only while they still target current/releases.
    Older change history provides ownership evidence during migration; unrelated
    links and user replacements are retained. Roll out parser support with the
