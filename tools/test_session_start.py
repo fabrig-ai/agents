@@ -77,24 +77,42 @@ else:
         self.addCleanup(patch.stopall)
         patch.dict(os.environ, {"HOME": str(self.home)}).start()
         patch.object(lib, "REGISTRY", self.registry).start()
+        # Parent expectations and child launches must share a minute even when
+        # scheduling crosses a real clock boundary.
+        self.now = lib.datetime.now(lib.UTC)
+        now = self.now
+        class Clock(lib.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return now.astimezone(tz) if tz is not None else now.replace(tzinfo=None)
+        patch.object(lib, "datetime", Clock).start()
 
     def command(self, tool, *args):
         command = [sys.executable, "-I", "-B", str(self.checkout / "tools/session" / tool), *args]
+        driver = f"""import runpy, sys
+from datetime import datetime
+from pathlib import Path
+script = sys.argv.pop(1)
+sys.argv[0] = script
+sys.path.insert(0, {str(self.checkout / "tools/session")!r})
+import session_lib
+now = datetime.fromisoformat({self.now.isoformat()!r})
+class Clock(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return now.astimezone(tz) if tz is not None else now.replace(tzinfo=None)
+session_lib.datetime = Clock
+"""
         if tool == "start" and args[:1] in (("owns",), ("names",)):
             # Enforce locality inside the child, including calls outside fake PATH.
-            driver = """import runpy, sys
-from pathlib import Path
-def local_only(event, args):
+            driver += """def local_only(event, args):
     if (event.startswith(('subprocess.', 'socket.', 'os.exec', 'os.spawn'))
             or event in ('os.system', 'os.posix_spawn', 'os.fork', 'os.forkpty')):
         raise AssertionError('local command attempted ' + event)
 sys.addaudithook(local_only)
-script = sys.argv.pop(1)
-sys.argv[0] = script
-sys.path.insert(0, str(Path(script).parent))
-runpy.run_path(script, run_name='__main__')
 """
-            command = command[:3] + ["-c", driver] + command[3:]
+        driver += "runpy.run_path(script, run_name='__main__')\n"
+        command = command[:3] + ["-c", driver] + command[3:]
         return subprocess.run(
             command,
             env=self.env, cwd=self.checkout, input="", text=True, capture_output=True,
