@@ -16,7 +16,7 @@ env = {}
 [hosts.hetzner6]
 hostname = "debian-16gb-hel1-6"
 ssh = "free@2.29.120.8"
-roles = ["builder"]
+roles = ["builder", "qa"]
 machine_env = { PLAN_MIN_DISK_GB = 40, KACHE_MAX_GB = 50, KACHE_LOCAL_ONLY = 1, QA_SLOTS = 2, HEAVY_BUILD_SLOTS = 3 }
 env = {}
 
