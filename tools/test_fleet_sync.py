@@ -47,6 +47,8 @@ elif args[0] == "disable":
     (directory / "timers.target.wants" / args[-1]).unlink(missing_ok=True)
 elif args[0] == "show":
     print("Version=fake")
+elif args[0] == "is-active":
+    sys.exit(3 if os.environ.get("FAKE_INACTIVE") or not (directory / "timers.target.wants" / args[-1]).is_symlink() else 0)
 '''
 
 SSH = '''#!/usr/bin/env python3
@@ -80,6 +82,7 @@ class FleetTest(unittest.TestCase):
         for key in ("FLEET_HOST", "FLEET_SYNC_HANDOFF", "FLEET_SYNC_LOG", "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"):
             self.env.pop(key, None)
         put(self.bin / "systemctl", SYSTEMCTL, True)
+        put(self.bin / "systemd-analyze", "#!/bin/bash\nexit 0\n", True)
         put(self.bin / "ssh", SSH, True)
         for command, output in {"claude": "2.1.312 (Claude Code)", "codex": "codex-cli 0.162.1",
                                 "cargo-nextest": "cargo-nextest 0.9.148", "kache": "kache 1.2.2-gitrev.2", "rustc": "rustc 1.95.0 (fixture)"}.items():
@@ -360,7 +363,7 @@ class FleetTest(unittest.TestCase):
         self.assertFalse((units / "role.service").exists())
         self.assertFalse((units / "role.timer").exists())
         self.assertEqual((units / "personal.service").read_text(), "keep\n")
-        self.assertIn(["--user", "disable", "role.service"], self.calls())
+        self.assertIn(["--user", "disable", "--no-reload", "role.service"], self.calls())
 
     def test_no_bus_fails(self):
         state = self.sync(expected=1, env={**self.env, "FAKE_NO_BUS": "1"})
@@ -490,6 +493,7 @@ class FleetTest(unittest.TestCase):
             observed = []
             def assert_locked(*args, **kwargs):
                 if str(args[-1]).endswith("tools/install"):
+                    self.assertEqual(kwargs.get("timeout"), 300)
                     with path.open("r") as stream:
                         with self.assertRaises(BlockingIOError):
                             fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -501,7 +505,7 @@ class FleetTest(unittest.TestCase):
             inode = path.stat().st_ino
             real_readlink = os.readlink
             def readlink_checked(link, *args, **kwargs):
-                if Path(link).parent == self.home / ".local/bin":
+                if Path(link).parent == self.home / ".local/bin" or "dir_fd" in kwargs:
                     with path.open("r") as stream:
                         with self.assertRaises(BlockingIOError):
                             fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -615,7 +619,7 @@ class FleetTest(unittest.TestCase):
             seen = []
             def readlink_then_defer(path, *args, **kwargs):
                 result = readlink(path, *args, **kwargs)
-                if Path(path).parent == self.home / ".local/bin":
+                if Path(path).parent == self.home / ".local/bin" or "dir_fd" in kwargs:
                     seen.append(str(path))
                     put(self.home / ".config/fleet-sync/defer-fabrig", "ops deferred link checks\n")
                 return result
