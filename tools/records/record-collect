@@ -2,7 +2,7 @@
 """Read local pipeline facts and publish them through the records writer."""
 
 import argparse
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from datetime import datetime, timedelta, timezone
 import fcntl
 import hashlib
@@ -505,7 +505,8 @@ class Collector:
                                       read_time_basis='inode-ctime')
 
 
-def collect(source, args, host, since):
+@contextmanager
+def stage(source, args, host, since):
     directory = Path.home() / '.local/state/record-collect'
     path = directory / (source + '.json')
     pending = directory / (source + '.pending.json')
@@ -537,28 +538,39 @@ def collect(source, args, host, since):
             reader = Collector(source, host, state, since, datetime.now(UTC))
             getattr(reader, source.replace('-', '_'))()
             events = reader.finish()
-        payload = ''.join(json.dumps(e, sort_keys=True) + '\n' for e in events)
-        if args.dry_run:
-            sys.stdout.write(payload)
-        else:
-            if events:
-                # Keep the exact timestamps across publication/cursor failures,
-                # including retries after UTC midnight and context readings.
-                if not pending.exists():
-                    atomic(pending, dict(state=state, events=events))
-                result = subprocess.run([str(Path(__file__).with_name('record')), 'append', '--as', 'collect', source, host],
-                                        input=payload, capture_output=True, text=True)
-                if result.returncode:
-                    # Do not echo rejected event data (particularly mail subjects).
-                    raise ValueError(f'record append failed (exit {result.returncode}); cursor unchanged')
-                if result.stdout:
-                    print(result.stdout, end='')
-            atomic(path, state)
-            pending.unlink(missing_ok=True)
-        print(f'{source}: {len(events)} events', file=sys.stderr)
+        if not args.dry_run and events and not pending.exists():
+            # Stage every source before the shared append. Retrying preserves
+            # exact timestamps even after publication or cursor-write failures.
+            atomic(pending, dict(state=state, events=events))
+        yield source, path, pending, state, events
     finally:
         if lock:
             lock.close()
+
+
+def publish(transactions, host, dry):
+    events = [event for _, _, _, _, rows in transactions for event in rows]
+    payload = ''.join(json.dumps(e, sort_keys=True) + '\n' for e in events)
+    if dry:
+        sys.stdout.write(payload)
+    else:
+        if events:
+            result = subprocess.run([str(Path(__file__).with_name('record')), 'append', '--as', 'collect', '--batch', host],
+                                    input=payload, capture_output=True, text=True)
+            if result.returncode:
+                raise ValueError(f'record append failed (exit {result.returncode}); cursors unchanged')
+            if result.stdout:
+                print(result.stdout, end='')
+        for _, path, pending, state, _ in transactions:
+            atomic(path, state)
+            pending.unlink(missing_ok=True)
+    for source, _, _, _, rows in transactions:
+        print(f'{source}: {len(rows)} events', file=sys.stderr)
+
+
+def collect(source, args, host, since):
+    with stage(source, args, host, since) as transaction:
+        publish([transaction], host, args.dry_run)
 
 
 def main():
@@ -578,13 +590,21 @@ def main():
         print(f'record-collect: {error}', file=sys.stderr)
         return 2
     failed = False
-    for source in dict.fromkeys(args.sources):
+    with ExitStack() as stack:
+        transactions = []
+        # A stable lock order prevents deadlocks between overlapping source sets.
+        for source in sorted(set(args.sources)):
+            try:
+                transactions.append(stack.enter_context(stage(source, args, host, since)))
+            except Skip as error:
+                print(f'skip {source}: {error}')
+            except Exception as error:
+                print(f'{source}: error: {error}', file=sys.stderr)
+                failed = True
         try:
-            collect(source, args, host, since)
-        except Skip as error:
-            print(f'skip {source}: {error}')
+            publish(transactions, host, args.dry_run)
         except Exception as error:
-            print(f'{source}: error: {error}', file=sys.stderr)
+            print(f'record-collect: error: {error}', file=sys.stderr)
             failed = True
     return 2 if failed else 0
 

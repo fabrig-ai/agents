@@ -197,7 +197,7 @@ print('12345678: 125,000 of 1,000,000 tokens (12%) at 2026-10-29T11:00:00Z; 42 c
         self.assertEqual(head, self.git(self.clone, 'rev-parse', 'HEAD'))
         self.assertEqual(self.cursor('runs')['files'][str(self.tmp / 'codex-run/runs.tsv')]['offset'], len(self.run_row.encode()))
         self.assertEqual((self.state / 'runs.json').stat().st_mode & 0o777, 0o600)
-        self.assertEqual(self.git(self.clone, 'log', '-1', '--format=%s'), 'collect: append runs/hel8')
+        self.assertEqual(self.git(self.clone, 'log', '-1', '--format=%s'), 'collect: append batch/hel8')
 
     def test_task_fallback_and_invalid_header(self):
         task = self.runs_fixture(header=False)
@@ -333,9 +333,9 @@ print('12345678: 125,000 of 1,000,000 tokens (12%) at 2026-10-29T11:00:00Z; 42 c
         self.assertEqual(set(e['source'] for e in events), set(API['SOURCES']))
         self.assertFalse(self.state.exists())
         self.assertFalse(self.clone.exists())
-        # Each source also publishes to a real local bare origin in one run.
+        # All sources publish together to a real local bare origin in one run.
         self.run_collect(*API['SOURCES'])
-        self.assertEqual(len(self.git(self.clone, 'log', '--format=%s').splitlines()), 1 + len(API['SOURCES']))
+        self.assertEqual(len(self.git(self.clone, 'log', '--format=%s').splitlines()), 2)
         result = subprocess.run([str(TOOL.with_name('record')), 'check'], env=self.env, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('0 refused', result.stdout)
@@ -408,6 +408,67 @@ print('12345678: 125,000 of 1,000,000 tokens (12%) at 2026-10-29T11:00:00Z; 42 c
         replacement.replace(path)
         self.assertIn('queue: 0 events', self.run_collect('queue').stderr)
         self.assertEqual(len(self.events('queue')), 4)
+
+    def test_multiple_sources_publish_one_push_per_run(self):
+        claim = self.claim_fixture()
+        row = self.queue_fixture()
+        self.session_fixture()
+        pushes = self.home/'pushes'
+        hook = self.write(self.origin/'hooks/post-receive',
+            '#!/usr/bin/env python3\nfrom pathlib import Path\n'
+            f'with Path({str(pushes)!r}).open("a") as out: out.write("push\\n")\n')
+        hook.chmod(0o700)
+        self.run_collect('queue', 'sessions', 'claims')
+        self.assertEqual(pushes.read_text().splitlines(), ['push'])
+        self.assertEqual(set(self.git(self.clone, 'show', '--format=', '--name-only', 'HEAD').splitlines()),
+                         {f'events/{s}/hel8/2026-10-29.jsonl' for s in ('queue', 'claims')} |
+                         {p.relative_to(self.clone).as_posix() for p in (self.clone/'events/sessions/hel8').glob('*.jsonl')})
+        before = {s: len(self.events(s)) for s in ('queue', 'sessions', 'claims')}
+        claim.unlink()
+        row.update(start='2026-10-29T11:03:00Z', end='2026-10-29T11:04:00Z')
+        path = self.fabrig/'notes/queue.jsonl'
+        self.write(path, path.read_text() + json.dumps(row) + '\n')
+        self.run_collect('claims', 'sessions', 'queue')
+        self.assertEqual(pushes.read_text().splitlines(), ['push', 'push'])
+        self.assertTrue(all(len(self.events(s)) > before[s] for s in before))
+        self.assertEqual(self.git(self.origin, 'rev-list', '--count', 'main'), '3')
+
+    def test_multi_source_publication_failure_preserves_all_outboxes(self):
+        self.claim_fixture()
+        self.queue_fixture()
+        self.run_collect('queue', 'claims', code=2, RECORDS_ORIGIN=str(self.home/'absent.git'))
+        pending = {}
+        for source in ('queue', 'claims'):
+            self.assertFalse((self.state/(source + '.json')).exists())
+            pending[source] = json.loads((self.state/(source + '.pending.json')).read_text())['events']
+        self.run_collect('claims', 'queue')
+        for source, events in pending.items():
+            self.assertEqual(self.events(source), events)
+            self.assertFalse((self.state/(source + '.pending.json')).exists())
+        self.assertEqual(self.git(self.origin, 'rev-list', '--count', 'main'), '2')
+
+    def test_multi_source_cursor_failure_replays_without_another_commit(self):
+        self.claim_fixture()
+        self.queue_fixture()
+        namespace = API['argparse'].Namespace(dry_run=False)
+        original_atomic = API['atomic']
+        def fail_cursor(path, value):
+            if path.name == 'queue.json':
+                raise OSError('simulated cursor write failure')
+            original_atomic(path, value)
+        with patch.dict(os.environ, self.env), patch.dict(API['collect'].__globals__, atomic=fail_cursor):
+            with API['ExitStack']() as stack:
+                transactions = [stack.enter_context(API['stage'](s, namespace, 'hel8', STAMP))
+                                for s in ('claims', 'queue')]
+                with self.assertRaises(OSError):
+                    API['publish'](transactions, 'hel8', False)
+        self.assertTrue((self.state/'claims.json').exists())
+        self.assertFalse((self.state/'queue.json').exists())
+        self.assertTrue((self.state/'queue.pending.json').exists())
+        head = self.git(self.origin, 'rev-parse', 'main')
+        self.run_collect('queue', 'claims')
+        self.assertEqual(self.git(self.origin, 'rev-parse', 'main'), head)
+        self.assertFalse(list(self.state.glob('*.pending.json')))
 
     def test_append_failure_replays_durable_outbox_and_cursor_unchanged(self):
         self.claim_fixture()

@@ -384,15 +384,20 @@ def check_tree(root, names):
 
 
 def append_files(root, source, host, data):
-    need(re.fullmatch('[a-z][a-z0-9-]*', source) and host_name(host), 'invalid event source or host')
+    need((source is None or re.fullmatch('[a-z][a-z0-9-]*', source)) and host_name(host),
+         'invalid event source or host')
     text_content(data, 'append input')
     groups = {}
     for number, line in enumerate(data.splitlines(), 1):
         label = f'append input:{number}'
         need(len(line) <= 16 * 1024, f'{label}: line exceeds 16 KB')
         row = json_object(line, label)
-        stamp = event(row, source, host, label)
-        name = f'events/{source}/{host}/{stamp}.jsonl'
+        need(isinstance(row, dict), f'{label}: event must be an object')
+        row_source = source if source is not None else row.get('source')
+        need(isinstance(row_source, str) and re.fullmatch('[a-z][a-z0-9-]*', row_source),
+             f'{label}: invalid or missing source')
+        stamp = event(row, row_source, host, label)
+        name = f'events/{row_source}/{host}/{stamp}.jsonl'
         groups.setdefault(name, []).append((row['id'], line))
     files = {}
     for name, rows in groups.items():
@@ -632,7 +637,7 @@ def publish(root, branch, args, data):
         message = args.message or f'{args.writer}: write {name}'
     else:
         files = append_files(root, args.source, args.host, data)
-        message = args.message or f'{args.writer}: append {args.source}/{args.host}'
+        message = args.message or f'{args.writer}: append {args.source or "batch"}/{args.host}'
     # Validate before any mutation. Keep bytes for exact recovery on every failure.
     for path, content in files.items():
         validate(root, path, content)
@@ -645,7 +650,10 @@ def publish(root, branch, args, data):
         if not commit(root, files, args.writer, message):
             print('record: unchanged')
             return 0
-        for attempt in range(5):
+        # Automatic publishers retry their durable outboxes on the next poll,
+        # keeping even push races to one push attempt per run.
+        attempts = 1 if args.command == 'append' and args.writer in ('collect', 'watch') else 5
+        for attempt in range(attempts):
             result = git(root, 'push', '--porcelain', 'origin', f'HEAD:refs/heads/{branch}', check=False)
             if result.returncode == 0:
                 print('record: pushed ' + (name if name else ', '.join(files)))
@@ -659,8 +667,8 @@ def publish(root, branch, args, data):
             base = out(root, 'rev-parse', remote)
             if base == previous:
                 raise Failure(result.stderr.decode(errors='replace').strip() or 'push failed')
-            if attempt == 4:
-                raise Refusal('push refused after five attempts')
+            if attempt == attempts - 1:
+                raise Refusal('push refused after one attempt' if attempts == 1 else 'push refused after five attempts')
             if numbered and git(root, 'cat-file', '-e', f'{remote}:{name}', check=False).returncode == 0:
                 # Reallocate a claimed number; never merge two distinct judgements.
                 git(root, 'reset', '--hard', remote)
@@ -699,8 +707,9 @@ def main():
     write = sub.add_parser('write')
     write.add_argument('path')
     append = sub.add_parser('append')
-    append.add_argument('source')
-    append.add_argument('host')
+    append.add_argument('source', nargs='?')
+    append.add_argument('host', nargs='?')
+    append.add_argument('--batch', metavar='HOST')
     for command in (write, append):
         command.add_argument('--as', dest='writer', required=True)
         command.add_argument('--from', dest='input_file')
@@ -745,6 +754,12 @@ def main():
         command.add_argument('--as', dest='writer', required=True)
     args = parser.parse_args()
     try:
+        if args.command == 'append':
+            if args.batch is not None:
+                need(args.source is None and args.host is None, 'batch takes HOST only through --batch')
+                args.host = args.batch
+            else:
+                need(args.source is not None and args.host is not None, 'append requires SOURCE HOST or --batch HOST')
         branch_override = os.environ.get('RECORDS_BRANCH')
         need(not branch_override or args.command == 'check', 'RECORDS_BRANCH is for check only')
         branch = branch_override or 'main'

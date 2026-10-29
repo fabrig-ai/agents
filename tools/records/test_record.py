@@ -210,6 +210,53 @@ class RecordTests(unittest.TestCase):
         self.run_record('write', '--as', 'ops', 'events/queue/hel8/2026-10-29.jsonl', data=self.event(), code=1)
         self.run_record('append', '--as', 'ops', 'Queue', 'hel8', data=self.event(), code=1)
 
+    def test_batch_append_is_atomic_and_idempotent(self):
+        first = self.event()
+        second = json.dumps(dict(id='one', time=STAMP, source='heavy', host='hel8', kind='command')).encode() + b'\n'
+        before = self.git(self.origin, 'rev-list', '--count', 'main')
+        self.run_record('append', '--as', 'collect', '--batch', 'hel8', data=first + second + first)
+        self.assertEqual(int(self.git(self.origin, 'rev-list', '--count', 'main')), int(before) + 1)
+        head = self.git(self.origin, 'rev-parse', 'main')
+        for source in ('queue', 'heavy'):
+            self.assertEqual(len((self.clone/f'events/{source}/hel8/2026-10-29.jsonl').read_bytes().splitlines()), 1)
+        self.run_record('append', '--as', 'collect', '--batch', 'hel8', data=first + second)
+        self.assertEqual(self.git(self.origin, 'rev-parse', 'main'), head)
+        self.assert_clean()
+
+    def test_batch_refuses_all_lines_if_any_source_is_missing_or_invalid(self):
+        self.prepare()
+        head = self.git(self.origin, 'rev-parse', 'main')
+        good = self.event()
+        for row in (dict(id='bad', time=STAMP, host='hel8', kind='command'),
+                    dict(id='bad', time=STAMP, source='../bad', host='hel8', kind='command'),
+                    dict(id='bad', time=STAMP, source='heavy', host='wrong', kind='command'), []):
+            with self.subTest(row=row):
+                self.run_record('append', '--as', 'collect', '--batch', 'hel8',
+                                data=good + json.dumps(row).encode() + b'\n', code=1)
+                self.assertFalse((self.clone/'events').exists())
+                self.assertEqual(self.git(self.origin, 'rev-parse', 'main'), head)
+                self.assert_clean()
+
+    def test_automatic_append_defers_push_races_to_next_run(self):
+        self.prepare()
+        for writer in ('collect', 'watch'):
+            with self.subTest(writer=writer):
+                self.git(self.seed, 'pull', '--ff-only', 'origin', 'main')
+                (self.seed/'AGENTS.md').write_text('# ' + writer + '\n')
+                self.git(self.seed, 'add', 'AGENTS.md')
+                self.git(self.seed, 'commit', '-m', 'other writer')
+                counter = self.home/(writer + '-attempts')
+                hook = self.hook(self.clone,
+                    f'echo attempt >> {shlex.quote(str(counter))}\n'
+                    f'git -C {shlex.quote(str(self.seed))} push origin main >&2\n')
+                data = self.event(writer)
+                self.run_record('append', '--as', writer, 'queue', 'hel8', data=data, code=1)
+                self.assertEqual(counter.read_text().splitlines(), ['attempt'])
+                self.assert_clean()
+                hook.unlink()
+                self.run_record('append', '--as', writer, 'queue', 'hel8', data=data)
+                self.assert_clean()
+
     def test_collector_identity_is_append_only(self):
         data = VALID['events/queue/hel8/2026-10-29.jsonl']
         self.run_record('append', '--as', 'collect', 'queue', 'hel8', data=data)

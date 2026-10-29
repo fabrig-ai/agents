@@ -9,12 +9,20 @@ from `src/fabrig/main/tools/queue/leads.txt`. Default host resolution uses
 `--host` overrides it. Absent inputs print `skip SOURCE: reason`. Errors
 name the source and return 2 after trying the others; success returns 0.
 
-Each source publishes once via `record append --as collect SOURCE HOST`.
+All successfully read sources in a run publish together via the sibling
+`record append --as collect --batch HOST`: one commit and at most one push
+attempt for the run. Empty or wholly duplicate batches make no commit or push.
+A failed source does not prevent the others from publishing.
 SHA-256 ids include source, host, kind and the producer's natural identity.
 The private `~/.local/state/record-collect/SOURCE.json` cursor stores log
 offsets, seen ids and snapshots. Source locks serialize runs; 0600 files
 are flushed to siblings and renamed. A private pending outbox preserves
 exact events through publication/cursor failures, including UTC midnight.
+All selected source locks are acquired in a fixed order and held through
+publication and cursor updates. A failed batch leaves every staged outbox and
+cursor unchanged. After a successful push, a cursor-write failure leaves the
+remaining outboxes for idempotent replay without another commit for those ids.
+Push races are retried on the next poll rather than within this run.
 Only successful publication advances the cursor. `--dry-run` prints JSONL
 without creating state or invoking `record`. Source counts go to stderr.
 The first cursor uses `--since` or seven days ago; later runs retain that
