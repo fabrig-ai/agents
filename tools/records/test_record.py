@@ -210,6 +210,11 @@ class RecordTests(unittest.TestCase):
         self.run_record('write', '--as', 'ops', 'events/queue/hel8/2026-10-29.jsonl', data=self.event(), code=1)
         self.run_record('append', '--as', 'ops', 'Queue', 'hel8', data=self.event(), code=1)
 
+    def test_collector_identity_is_append_only(self):
+        data = VALID['events/queue/hel8/2026-10-29.jsonl']
+        self.run_record('append', '--as', 'collect', 'queue', 'hel8', data=data)
+        self.run_record('write', '--as', 'collect', 'README.md', data=b'# No\n', code=1)
+
     def test_write_show_pull_and_numbering(self):
         self.run_record('write', '--as', 's/multi', 'drafts/example/draft.toml', data=DRAFT)
         self.run_record('write', '--as', 'director', 'director/priorities.toml', data=PRIORITIES)
