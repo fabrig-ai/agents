@@ -30,8 +30,9 @@ REPOSITORIES = ('fabrig',)
 NAME = r'[a-z0-9][a-z0-9_-]*'
 LOGIN = r'[a-z][a-z0-9-]*'
 SHA = r'[0-9a-f]{40}'
+UNIT_POLL_SECONDS = 2
 ADDRESS = r'[a-z][a-z0-9-]*(/[a-z0-9][a-z0-9-]*)*@[a-z][a-z0-9-]*'
-ATTEMPT_KEYS = ('attempt holder ref main cap started slot slot_claim logins kinds pools requests run stage given released '
+ATTEMPT_KEYS = ('attempt holder ref main cap started slot slot_claim launch_complete logins kinds pools requests run stage given released '
                 'start_logged end_logged posted capped decision pause_line resume_run report_attempt alerts').split()
 
 
@@ -490,6 +491,9 @@ class Watch:
     def call(self, tool, *args):
         seconds = dict(systemctl=30, logins=60, post=60, **{'codex-run': 120})
         options = {}
+        if tool == 'codex-run' and args[:1] == ('task',):
+            need(self.walk_lock is not None, 'task launch needs its admission lock', 4)
+            options['pass_fds'] = (self.walk_lock,)
         if tool == 'logins' and args[:1] == ('take',):
             lock = self.watch_lock if self.watch_lock is not None else self.walk_lock
             need(lock is not None, 'login take needs its admission lock', 4)
@@ -779,9 +783,11 @@ class Watch:
                    for attempt in [state, *state.get('attempts', [])]}
         if not sweep_walks:
             return
+        pending = {state['holder'] for _, state in walks
+                   if state['stage'] == 'starting' and not state['run']}
         unknown = {}
         for name, holder in sorted(self.holders.copy().items()):
-            if not holder.startswith('walk/') or holder in foreign:
+            if not holder.startswith('walk/') or holder in foreign or holder in pending:
                 continue
             if holder not in managed:
                 unknown.setdefault(holder, []).append(name)
@@ -849,7 +855,9 @@ class Watch:
 
     def launcher_alive(self, meta):
         fields = dict(line.split('=', 1) for line in read_text(meta).splitlines() if '=' in line)
-        task = fields.get('task', '')
+        return self.task_launcher_alive(fields.get('task', ''))
+
+    def task_launcher_alive(self, task):
         need(task and Path(task).is_absolute(), 'cannot establish launcher task; keeping custody', 4)
         expected = os.fsencode(task)
         unknown = False
@@ -889,7 +897,7 @@ class Watch:
             if remaining <= 0:
                 log(f'{unit}: waiting for unit to stop before giving logins back')
                 return False
-            time.sleep(min(2, remaining))
+            time.sleep(min(UNIT_POLL_SECONDS, remaining))
 
     def deployments(self, directory, state):
         result = self.call('systemctl', '--user', 'list-units', '--all', '--plain', '--no-legend',
@@ -1102,7 +1110,30 @@ class Watch:
             need(held < slots, f'kind {kind} holds {held} of its {slots} logins of pool {pool}', 1)
         return holders
 
+    def admission_ready(self, walks):
+        for _, state in walks:
+            need(state['stage'] != 'starting' or state['run'],
+                 f'{state["walk"]}: launch outcome is still unknown; admission waits for the watcher', 1)
+
+    def launch_cancelled(self, directory, state):
+        # An acknowledged command exit may be checked immediately. Otherwise
+        # absence means nothing until the existing ten-minute launch grace ends.
+        if (not state.get('launch_complete')
+                and (utc(timestamp()) - utc(state['started'])).total_seconds() < 600):
+            log(f'{state["walk"]}: awaiting launch metadata within grace; keeping custody')
+            return False
+        if self.task_launcher_alive(directory / 'task.md') is not False:
+            log(f'{state["walk"]}: launcher live or unknown; keeping custody')
+            return False
+        # A launcher can publish metadata and exit during the process scan.
+        self.recover_run(directory, state)
+        return not state['run']
+
     def cancel_walk(self, directory, state, drop=True):
+        if state['stage'] == 'starting':
+            self.recover_run(directory, state)
+            if state['run'] or not self.launch_cancelled(directory, state):
+                return
         state['stage'] = 'cancelled'
         self.save(directory, state)
         # A take may have left a waiter or a grant without a reply.
@@ -1275,6 +1306,8 @@ def walk_attempt(state):
              and (claim.get('release_status') is None or (claim['release_status'] == 'released') == claim['released'])
              and (claim.get('release_status') != 'release unconfirmed' or not claim['released']
                   and 'release_result' in claim), 'invalid saved release result', 4)
+    need('launch_complete' not in state or type(state['launch_complete']) is bool,
+         'invalid saved launch completion', 4)
     check_alerts(state)
     if 'report_attempt' in state:
         need(type(state['report_attempt']) is int and 1 <= state['report_attempt'] <= state.get('attempt', 1),
@@ -1318,6 +1351,7 @@ def take(args, workspace):
     service.options = options
     with service.walks_locked():
         name = args.holder.rsplit('/', 1)[-1]
+        service.admission_ready(service.local_walks())
         saved = service.directory / 'walks' / (name + '.json')
         need(not saved.exists() and not saved.is_symlink(), 'holder name already belongs to a saved walk: ' + name, 1)
         service.walk_room([pool], args.kind)
@@ -1381,6 +1415,7 @@ def walk(args, workspace):
         focused.mkdir(mode=0o700, parents=True, exist_ok=True)
         walks = service.local_walks()
         service.claims(walks)
+        service.admission_ready(walks)
         kinds = options['QA_WALK_KINDS']
         need(not any('kind' not in state and not state.get('released') for _, state in walks),
              'pre-kind walks still hold slots; drain them before starting a kind', 1)
@@ -1409,6 +1444,7 @@ def walk(args, workspace):
                          posted=False, capped=False, resume_run=previous_run, alerts={})
             state.pop('decision', None)
             state.pop('slot_claim', None)
+            state.pop('launch_complete', None)
         else:
             kind = args.kind if args.kind is not None else next(iter(kinds))
             need(kind in kinds, 'unknown walk kind: ' + kind)
@@ -1570,7 +1606,7 @@ def walk(args, workspace):
             on_stop = '#!/bin/sh\nexec ' + ' '.join(shlex.quote(str(word)) for word in
                        (script, '_give-back', directory, options['QA_STOP_SECONDS'])) + '\n'
             replace(directory / 'on-stop', on_stop.encode(), 0o700)
-            state.update(stage='starting', started=timestamp())
+            state.update(stage='starting', started=timestamp(), launch_complete=False)
             service.save(directory, state)
             launch = ['task', '--to', 'qa-watch', '--on-stop', directory / 'on-stop',
                       directory / 'task.md', checkout, directory / 'report.md']
@@ -1584,6 +1620,8 @@ def walk(args, workspace):
             if launched.returncode == 124:
                 log(f'{name}: launch timed out; keeping custody for run recovery')
                 return 1
+            state['launch_complete'] = launched.returncode != 0
+            service.save(directory, state)
             words = launched.stdout.split()
             need(launched.returncode == 0 and words and re.fullmatch(r'[a-zA-Z0-9_-]+', words[0]),
                  launched.stderr.strip() or 'codex-run refused launch', 1)

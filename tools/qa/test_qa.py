@@ -164,6 +164,14 @@ elif name == 'codex-run':
     assert Path(args[4]).is_absolute()
     task, checkout, report = args[5:]
     assert not Path(report).exists(), 'REPORT already exists'
+    process = root / 'proc' / str(os.getpid())
+    process.mkdir(parents=True)
+    (process / 'cmdline').write_bytes(b'\0'.join(os.fsencode(word) for word in sys.argv) + b'\0')
+    atexit.register(shutil.rmtree, process)
+    if config.get('delay_before_meta'):
+        (root / 'meta-waiting').write_text(str(os.getpid()))
+        while not (root / 'allow-meta').exists():
+            time.sleep(0.01)
     runs.mkdir(parents=True, exist_ok=True)
     run = 'fixture-' + str(len(list(runs.glob('fixture-*'))) + 1)
     state = runs / run
@@ -172,11 +180,9 @@ elif name == 'codex-run':
     (state / 'thread').write_text('fixture thread')
     (state / 'meta').write_text(f'model=gpt-6.1-sol\neffort=high\nstarted={started}\ntask={task}\nreport={report}\non_stop={args[4]}\n')
     Path(report).write_text(f'codex-run: run {run} is writing this report.\n')
-    process = root / 'proc' / str(os.getpid())
-    process.mkdir(parents=True)
-    (process / 'cmdline').write_bytes(b'\0'.join(os.fsencode(word) for word in sys.argv) + b'\0')
-    atexit.register(shutil.rmtree, process)
     hang('after')
+    if config.get('close_admission'):
+        os.closerange(3, 256)  # Deliberately lose kernel exclusion to exercise observation fallback.
     if config.get('delay_before_unit'):
         (root / 'launch-waiting').write_text(str(os.getpid()))
         while not (root / 'allow-launch').exists():
@@ -2403,7 +2409,7 @@ def a_surviving_launcher_keeps_custody_until_its_unit_exists(lab, past_grace=Fal
     focused = lab.tmp / 'qa-focused'
     focused.mkdir()
     (focused / 'rung-b0-brief.md').write_text('Delayed launch fixture.\n')
-    lab.configure(delay_before_unit=True, logins_real=[CHATGPT])
+    lab.configure(delay_before_unit=True, logins_real=[CHATGPT], close_admission=True)
     with (lab.root / 'starter-output').open('w') as output:
         starter = subprocess.Popen([str(SCRIPT), 'walk', 'fabrig', 'b0', '--login', CHATGPT],
                                    env=lab.env, cwd=lab.root, stdin=subprocess.DEVNULL,
@@ -3079,14 +3085,35 @@ def finished_pair(lab):
 
 def a_hung_systemctl_bounds_the_check(lab):
     first, unit, pid, second, other_unit, other_pid = finished_pair(lab)
-    bounded = """original = tool['command']
+    bounded = """import time
+from pathlib import Path
+subprocess = tool['subprocess']
+original_popen = subprocess.Popen
+class ReadyPopen(original_popen):
+    def communicate(self, input=None, timeout=None):
+        if timeout == 0.3:
+            marker = Path(tool['os'].environ['QA_FIXTURE']) / ('hung-' + OWNER)
+            deadline = time.monotonic() + 10
+            while not (marker.exists() and marker.read_text().split()[:1] == [str(self.pid)]):
+                if self.poll() is not None or time.monotonic() >= deadline:
+                    self.kill()
+                    super().communicate()
+                    raise AssertionError('fixture manager never reached its hang')
+                time.sleep(0.01)
+        return super().communicate(input=input, timeout=timeout)
+subprocess.Popen = ReadyPopen
+original = tool['command']
 def command(argv, cwd=None, timeout=None, pass_fds=(), **kwargs):
     if str(argv[0]).endswith('/systemctl'):
         assert timeout == 30
-        timeout = 0.3
+        config = tool['json'].loads((Path(tool['os'].environ['QA_FIXTURE']) / 'tools.json').read_text())
+        if any(argv[2] == operation and str(argv[-1]).startswith('qa-' + owner + '-')
+               for owner, operation in config.get('hung_systemctl', {}).items()):
+            timeout = 0.3
     return original(argv, cwd=cwd, timeout=timeout, pass_fds=pass_fds, **kwargs)
 tool['main'].__globals__['command'] = command
 """
+    bounded = 'OWNER = ' + repr(first.name) + '\n' + bounded
     for operation in ('list-units', 'show'):
         lab.configure(hung_systemctl={first.name: operation})
         result = driven_watch(lab, bounded)
@@ -3968,7 +3995,94 @@ tool['Watch'].call = call
     assert len([c for c in lab.calls('claim') if c[0] == 'release']) == 1
 
 
+def a_launcher_without_metadata_keeps_custody_and_admission(lab):
+    lab.configure(delay_before_meta=True)
+    brief = lab.tmp / 'qa-focused/rung-b0-brief.md'
+    brief.parent.mkdir(parents=True)
+    brief.write_text('Early launcher fixture.\n')
+    with (lab.root / 'starter-output').open('w') as output:
+        starter = subprocess.Popen([str(SCRIPT), 'walk', 'fabrig', 'b0'], env=lab.env,
+                                   stdin=subprocess.DEVNULL, stdout=output, stderr=output)
+        child = None
+        try:
+            wait_for((lab.root / 'meta-waiting').exists)
+            child = int((lab.root / 'meta-waiting').read_text())
+            directory, state = lab.walk_state()
+            assert state['stage'] == 'starting' and not state['run']
+            assert not list((lab.tmp / 'codex-run').glob('*/meta'))
+            starter.kill()
+            assert starter.wait(timeout=10) == -signal.SIGKILL and alive(child)
+            future = (datetime.fromisoformat(state['started'].replace('Z', '+00:00'))
+                      + timedelta(minutes=11)).strftime('%Y-%m-%dT%H:%M:%SZ')
+            lab.watch(now=future)
+            saved = lab.walk_state()[1]
+            assert saved['stage'] == 'starting' and not saved['given'] and not saved['released']
+            assert slot_claims(lab) and not [c for c in lab.calls('claim') if c[0] == 'release']
+            with (lab.tmp / 'qa/walks.lock').open('a') as probe:
+                try:
+                    fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    pass
+                else:
+                    raise AssertionError('launcher did not inherit admission exclusion')
+            (lab.root / 'allow-meta').touch()
+            wait_for((lab.tmp / 'codex-run/fixture-1/unit').exists)
+            dead(child)
+            lab.watch()
+            saved = lab.walk_state()[1]
+            assert saved['run'] == 'fixture-1' and not saved['given']
+            lab.end_run(saved)
+            lab.watch()
+            assert lab.walk_state()[1]['slot_claim']['released']
+        finally:
+            (lab.root / 'allow-meta').touch()
+            if starter.poll() is None:
+                starter.kill()
+                starter.wait(timeout=10)
+            if child is not None:
+                dead(child)
+
+
+def a_missing_launch_keeps_grace_and_unknown_custody(lab):
+    driven_walk(lab, '''def call(self, name, *args):
+    if name == 'codex-run':
+        os._exit(77)
+    return original(self, name, *args)
+original = tool['Watch'].call
+tool['Watch'].call = call
+''', status=77)
+    directory, state = lab.walk_state()
+    started = datetime.fromisoformat(state['started'].replace('Z', '+00:00'))
+    before = (started + timedelta(seconds=599)).strftime('%Y-%m-%dT%H:%M:%SZ')
+    after = (started + timedelta(seconds=601)).strftime('%Y-%m-%dT%H:%M:%SZ')
+    lab.watch(now=before)
+    assert lab.walk_state()[1]['stage'] == 'starting'
+    assert not lab.walk_state()[1]['given'] and slot_claims(lab)
+    result = lab.run('take', 'forgejo', '--as', 'walk/forgejo/manual', status=1)
+    assert 'launch' in result.stderr
+    result = lab.walk('other', status=1)
+    assert 'launch' in result.stderr
+    unknown = lab.root / 'proc' / str(os.getpid()) / 'cmdline'
+    unknown.parent.mkdir()
+    unknown.mkdir()  # Same descriptor reader refuses this observation.
+    lab.watch(now=after)
+    assert lab.walk_state()[1]['stage'] == 'starting' and not lab.walk_state()[1]['given']
+    unknown.rmdir()
+    unknown.write_bytes(b'\0'.join(os.fsencode(word) for word in
+                        (lab.root / 'codex-run', 'task', directory / 'task.md')) + b'\0')
+    lab.watch(now=after)
+    assert lab.walk_state()[1]['stage'] == 'starting' and not lab.walk_state()[1]['given']
+    unknown.unlink()
+    unknown.parent.rmdir()
+    lab.watch(now=after)
+    saved = lab.walk_state()[1]
+    assert saved['stage'] == 'ended' and saved['given'] == [CHATGPT] and saved['slot_claim']['released']
+
+
 CASES = (
+    a_launcher_without_metadata_keeps_custody_and_admission,
+    a_missing_launch_keeps_grace_and_unknown_custody,
+
     an_unreadable_grant_keeps_the_claim_until_inventory_confirms_give_back,
     fleet_settings_accept_commas_and_plus_without_whitespace,
     failed_remote_or_unreadable_claim_never_prepares_or_falls_back,

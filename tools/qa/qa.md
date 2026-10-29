@@ -104,8 +104,10 @@ takes. A kind holds at most its slots' number of logins of each pool,
 counting every holder `walk/KIND/...`, including stuck or manual holdings.
 Pre-kind holders `walk/rung-...` count too; managed pre-kind walks must drain
 before a new kind starts. Takes are `logins take POOL --any --now --as HOLDER`
-and never wait in the login queue. The child inherits the admission lock,
-so an orphan take still excludes another admission. A refused take names the
+and never wait in the login queue. Login takes and `codex-run task` launchers inherit the walks admission lock,
+so an orphan take or launcher still excludes another admission. A starting
+walk without recovered run metadata also blocks starts, resumes and hand
+takes through its saved state, even if the descriptor has been lost. A refused take names the
 broken cap and undoes the attempt's requests and saved grants.
 
 `qa take` selects the kind's first pool unless `--login` selects another of
@@ -333,7 +335,20 @@ Fabrig's `ID RUN_DIRECTORY` output identifies the run. Recovery matches
 completion, before unit stop necessarily completes. Facts read the unchanged
 13-column `runs.tsv` layout. A missing unit is a possible launch for ten
 minutes after meta, and afterward while a matching launcher survives; the
-unit is rechecked after scanning launchers. `--resume RUN` supplies the new
+unit is rechecked after scanning launchers.
+
+A crash can precede run metadata. The saved `starting` attempt retains all
+logins and its slot claim while recovery waits. An unacknowledged launch
+keeps the existing ten-minute grace from its saved launch start; afterward,
+cleanup must establish that no `codex-run task` launcher for the exact task
+file survives. The same ownership-checked process scanner works with or
+without meta. Live or unknown observations preserve custody and admission.
+After a negative scan, recovery checks metadata again before cancelling,
+covering a launcher that publishes meta and exits during the scan. A
+refused foreground command records `launch_complete`; it may be cancelled without the grace only after the same negative launcher
+scan and metadata recheck. Recovering metadata returns the attempt to the
+normal unit/job/launcher stop checks. Cleanup cannot cancel a pending launch
+merely because no run id is saved. `--resume RUN` supplies the new
 checkout, recipient, callback, task and report explicitly. Codex-run can recover
 a thread from events; qa delegates that decision to it. Only its missing-thread
 or missing-meta refusal falls back to a fresh session. REPORT must not exist,
@@ -354,4 +369,8 @@ Run `python3 -I -B tools/qa/test_qa.py`. Every unittest case runs in its own
 process, session and temporary HOME/DEV_ROOT with local git origins, fake
 services, fake local and remote claims, fake disk observations, slot clones
 under the temporary HOME and fixture launcher observations; descendants are
-killed and reaped. The suite runs at most eight cases concurrently. It never uses real logins, a real manager or network.
+killed and reaped. Fixture drivers poll fake stop observations every 20 ms
+while retaining real monotonic deadlines and all unit/export completion
+assertions; installed polling remains two seconds. Deliberate manager hangs
+use a ready marker before their shortened timeout starts. The suite runs at
+most eight cases concurrently. It never uses real logins, a real manager or network.
