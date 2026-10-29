@@ -4079,9 +4079,59 @@ tool['Watch'].call = call
     assert saved['stage'] == 'ended' and saved['given'] == [CHATGPT] and saved['slot_claim']['released']
 
 
+def slot_release_refuses_without_the_walks_lock(lab):
+    lab.walk()
+    lab.configure(logins_held=[], inactive=True)
+    driver = f'''import runpy
+from pathlib import Path
+tool = runpy.run_path({str(SCRIPT)!r})
+service = tool['Watch'](tool['Workspace'](), 'director@fixture')
+service.options = tool['settings'](service.workspace)
+with service.walks_locked():
+    (directory, state), = service.local_walks()
+    state['given'] = list(state['logins'])
+    state['released'] = True
+try:
+    service.release_slot(directory, state)
+except tool['Problem'] as error:
+    assert 'walks lock' in str(error)
+else:
+    raise AssertionError('unlocked claim verification/release was allowed')
+'''
+    result = subprocess.run([sys.executable, '-I', '-B', '-c', driver], env=lab.env,
+                            capture_output=True, text=True, timeout=HUNG_TOOL_S)
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert slot_claims(lab) and not [c for c in lab.calls('claim') if c[0] == 'release']
+
+
+def release_preflight_and_delete_exclude_other_walks(lab):
+    lab.walk()
+    lab.configure(inactive=True)
+    driven_watch(lab, '''import subprocess
+original = tool['Watch'].slot_call
+def slot_call(self, claim, *args):
+    result = original(self, claim, *args)
+    if args[0] == 'list' and 'release unconfirmed' in str(self.states):
+        assert self.walk_lock is not None
+        path = str(self.directory / 'walks.lock')
+        code = "import fcntl,sys; f=open(sys.argv[1], 'a'); "
+        code += "\\ntry: fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)"
+        code += "\\nexcept BlockingIOError: sys.exit(0)"
+        code += "\\nraise AssertionError('a successor could enter during release')"
+        checked = subprocess.run([tool['sys'].executable, '-I', '-B', '-c', code, path], capture_output=True)
+        assert checked.returncode == 0, checked.stderr
+    return result
+tool['Watch'].slot_call = slot_call
+''')
+    assert lab.walk_state()[1]['slot_claim']['released']
+    assert len([c for c in lab.calls('claim') if c[0] == 'release']) == 1
+
+
 CASES = (
     a_launcher_without_metadata_keeps_custody_and_admission,
     a_missing_launch_keeps_grace_and_unknown_custody,
+    slot_release_refuses_without_the_walks_lock,
+    release_preflight_and_delete_exclude_other_walks,
 
     an_unreadable_grant_keeps_the_claim_until_inventory_confirms_give_back,
     fleet_settings_accept_commas_and_plus_without_whitespace,

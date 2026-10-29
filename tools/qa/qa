@@ -546,6 +546,7 @@ class Watch:
                          'Reconcile this exact claim on its host before reusing the slot.\n')
 
     def release_slot(self, directory, state):
+        need(self.walk_lock is not None, 'slot release requires the walks lock', 4)
         claim = state.get('slot_claim')
         if not state.get('released') or self.outstanding(state) or not claim or claim['released']:
             return

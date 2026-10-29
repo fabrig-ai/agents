@@ -263,11 +263,20 @@ The slot stays held until session and deployment units are confirmed stopped.
 Local `released` records unit stop confirmation. Claim release also waits
 for every grant to be returned. A strict login inventory must show no
 holdings under this walk or its saved attempt holders, including a grant
-whose reply was lost before its name could be saved. Through the saved SSH path, `claim list`
+whose reply was lost before its name could be saved. The same walks lock used by all starts, resumes and hand takes is required
+by the release entry point and stays held across `claim list` and the
+immediately following release. Through the saved SSH path, `claim list`
 must show the exact saved owner and WHAT; free, changed, missing, malformed
 or failed observations do not authorize release. Only then may
 `claim release HOST N OWNER` run, once. Exit zero and the exact
 `HOST-N released by OWNER` acknowledgement confirm release.
+
+Once installed, only this tool claims the `s/qa` share slots: hand claims
+or reconciliation that changes them during this critical section break the
+exclusion guarantee. The native claim tool checks only OWNER at release;
+the walks lock excludes cooperating local qa admissions, but cannot make
+verification/deletion atomic against external claim users. Atomic
+compare-and-release by WHAT or claim token requires claim-tool support.
 
 Before the preflight/command, state durably records `release_status` as
 `release unconfirmed`, with a result describing possible interruption.
