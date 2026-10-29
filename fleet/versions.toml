@@ -8,7 +8,7 @@ command = ["codex", "--version"]
 
 [cargo-nextest]
 version = "0.9.148"
-command = ["cargo", "nextest", "--version"]
+command = ["cargo-nextest", "nextest", "--version"]
 
 [kache]
 version = "1.2.2-gitrev.2"

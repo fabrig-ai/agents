@@ -1,0 +1,732 @@
+#!/usr/bin/env python3
+"""Converge a user's machine to the fleet declarations; see fleet-sync.md."""
+
+import argparse
+import concurrent.futures
+import datetime as dt
+import fcntl
+import io
+import json
+import os
+from pathlib import Path
+import re
+import shlex
+import shutil
+import socket
+import subprocess
+import sys
+import tarfile
+import tempfile
+import tomllib
+
+ROOT = Path(__file__).resolve().parent.parent
+BEGIN = "# >>> fleet-sync >>>"
+END = "# <<< fleet-sync <<<"
+BLOCK = BEGIN + '\n[ ! -f "$HOME/.config/fabrig/env.sh" ] || . "$HOME/.config/fabrig/env.sh"\n' + END + "\n"
+KEY = re.compile(r"[A-Za-z_][A-Za-z_0-9]*\Z")
+SHA = re.compile(r"[0-9a-f]{40}\Z")
+
+
+def now():
+    return dt.datetime.now(dt.UTC).isoformat()
+
+
+def read_json(path, default):
+    try:
+        return json.loads(path.read_text())
+    except FileNotFoundError:
+        return default
+
+
+def expand(value, home):
+    if not isinstance(value, str) or any(c in value for c in "\n\r\0"):
+        raise ValueError("environment values must be single-line strings")
+    if "$" in value.replace("$HOME", "") or re.search(r"\$HOME[A-Za-z_0-9]", value):
+        raise ValueError("only $HOME expansion is allowed")
+    return value.replace("$HOME", str(home))
+
+
+class Declarations:
+    def __init__(self, root, home):
+        self.root = root
+        fleet = root / "fleet"
+        known = {"hosts.toml", "env", "claude/settings.json", "codex/config.toml",
+                 "cargo/config.toml", "versions.toml", "repositories.toml", "units/roles.toml"}
+        parsed = {}
+        for path in sorted(fleet.rglob("*")):
+            if path.is_symlink():
+                raise ValueError(f"symlink in fleet declarations: {path}")
+            if not path.is_file():
+                continue
+            name = path.relative_to(fleet).as_posix()
+            content = path.read_text()
+            if name.endswith(".toml"):
+                parsed[name] = tomllib.loads(content)
+            elif name.endswith(".json"):
+                parsed[name] = json.loads(content)
+            elif name == "env" or (path.parent == fleet / "units" and path.suffix in (".service", ".timer")):
+                parsed[name] = content
+            else:
+                raise ValueError(f"unknown fleet declaration: {name}")
+        if not known <= parsed.keys():
+            raise ValueError(f"missing declarations: {sorted(known - parsed.keys())}")
+        self.hosts = parsed["hosts.toml"]["hosts"]
+        hostnames = set()
+        for name, host in self.hosts.items():
+            if not re.fullmatch(r"[a-z][a-z0-9-]*", name):
+                raise ValueError(f"invalid host name: {name}")
+            if host["hostname"] in hostnames:
+                raise ValueError("duplicate hostname")
+            hostnames.add(host["hostname"])
+            if not re.fullmatch(r"[a-zA-Z0-9_.@:-]+", host["ssh"]) or host["ssh"].startswith("-"):
+                raise ValueError(f"invalid ssh address for {name}")
+            if not isinstance(host["roles"], list) or not all(isinstance(r, str) for r in host["roles"]):
+                raise ValueError(f"invalid roles for {name}")
+            for key, value in host["machine_env"].items():
+                if not KEY.fullmatch(key) or type(value) is not int or value < 0:
+                    raise ValueError(f"invalid machine_env for {name}")
+            for key, value in host["env"].items():
+                if not KEY.fullmatch(key) or key == "PATH":
+                    raise ValueError(f"invalid env key: {key}")
+                expand(value, home)
+            if "cargo_jobs" in host and (type(host["cargo_jobs"]) is not int or host["cargo_jobs"] < 1):
+                raise ValueError(f"invalid cargo_jobs for {name}")
+        self.env = {}
+        for line in parsed["env"].splitlines():
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            key, sep, value = line.partition("=")
+            if not sep or not KEY.fullmatch(key) or key == "PATH" or key in self.env:
+                raise ValueError(f"invalid fleet/env line: {line}")
+            self.env[key] = expand(value, home)
+        self.claude = parsed["claude/settings.json"]
+        if not isinstance(self.claude, dict) or "env" in self.claude:
+            raise ValueError("Claude settings must be an object without env")
+        self.codex = parsed["codex/config.toml"]
+        if not self.codex or any(not KEY.fullmatch(k) or not isinstance(v, str) for k, v in self.codex.items()):
+            raise ValueError("Codex declarations must be top-level string keys")
+        cargo = (fleet / "cargo/config.toml").read_text()
+        if "$" in cargo.replace("$HOME", ""):
+            raise ValueError("only $HOME expansion is allowed in Cargo config")
+        self.cargo = cargo.replace("$HOME", str(home))
+        tomllib.loads(self.cargo)
+        self.versions = parsed["versions.toml"]
+        for name, pin in self.versions.items():
+            command = pin["command"]
+            if not isinstance(pin["version"], str) or not isinstance(command, list) or not command or not all(isinstance(v, str) for v in command):
+                raise ValueError(f"invalid version declaration: {name}")
+            if command[0] in ("claude", "codex") and command != [command[0], "--version"]:
+                raise ValueError("Claude and Codex may only run with --version")
+        self.fabrig_origin = parsed["repositories.toml"]["fabrig"]
+        if not isinstance(self.fabrig_origin, str) or not self.fabrig_origin or self.fabrig_origin.startswith("-"):
+            raise ValueError("invalid fabrig origin")
+        self.unit_roles = parsed["units/roles.toml"]["units"]
+        self.units = {Path(k).name: v for k, v in parsed.items() if k.startswith("units/") and k.endswith((".service", ".timer"))}
+        if self.units.keys() != self.unit_roles.keys():
+            raise ValueError("every unit must have exactly one roles declaration")
+        for name, roles in self.unit_roles.items():
+            if not isinstance(roles, list) or not roles or not all(isinstance(r, str) for r in roles):
+                raise ValueError(f"invalid unit roles: {name}")
+            text = self.units[name]
+            if "[Unit]" not in text or (name.endswith(".service") and "[Service]" not in text) or (name.endswith(".timer") and "[Timer]" not in text):
+                raise ValueError(f"invalid unit: {name}")
+        self.tools = []
+        for line in (root / "tools/installed").read_text().splitlines():
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            if not re.fullmatch(r"[a-zA-Z0-9_-]+", line) or line in self.tools:
+                raise ValueError(f"invalid installed tool: {line}")
+            tool = root / "tools" / line
+            if not tool.is_file() or not os.access(tool, os.X_OK) or not tool.resolve().is_relative_to(root.resolve()):
+                raise ValueError(f"missing executable tool: {line}")
+            self.tools.append(line)
+
+    def host(self, name, allow_unknown=False):
+        name = name or os.environ.get("FLEET_HOST")
+        if name:
+            if name not in self.hosts:
+                raise ValueError(f"unknown host: {name}")
+            return name
+        for name, host in self.hosts.items():
+            if host["hostname"] == socket.gethostname():
+                return name
+        if allow_unknown:
+            return None
+        raise ValueError(f"unknown hostname: {socket.gethostname()}")
+
+
+def atomic(path, data, mode=0o600):
+    """All regular-file writes, including bookkeeping, use a sibling rename."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, sibling = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            os.fchmod(stream.fileno(), mode)
+            stream.write(data if isinstance(data, bytes) else data.encode())
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(sibling, path)
+    finally:
+        if os.path.lexists(sibling):
+            os.unlink(sibling)
+
+
+def atomic_link(path, target):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=f".{path.name}.", dir=path.parent) as directory:
+        sibling = Path(directory) / "link"
+        sibling.symlink_to(target)
+        os.replace(sibling, path)
+
+
+class Runner:
+    def __init__(self, args, declarations, name, resume=None):
+        self.args, self.d, self.name = args, declarations, name
+        self.home = Path.home()
+        self.base = self.home / "src/fabrig"
+        self.state_dir = self.home / ".local/state/fleet-sync"
+        self.config = self.home / ".config/fleet-sync"
+        self.old = read_json(self.state_dir / "state.json", {})
+        self.state = resume or {"host": name, "agents_sha": self.old.get("agents_sha"), "fabrig_sha": self.old.get("fabrig_sha"),
+                                "start": now(), "end": None, "items": [],
+                                "last_timer_end": self.old.get("last_timer_end")}
+        self.owned = set(self.old.get("managed_files", []))
+        self.unit_owned = set(self.old.get("managed_units", []))
+        self.reload_pending = self.old.get("unit_reload_pending", False)
+        self.log = json.loads(os.environ.pop("FLEET_SYNC_LOG", "[]")) if resume else []
+        self.lock_fd = None
+
+    def item(self, name, result, reason):
+        self.state["items"].append({"item": name, "result": result, "reason": reason})
+
+    def cmd(self, *argv, timeout=60, binary=False):
+        path = f"{self.home}/.local/bin:{self.home}/.cargo/bin:" + os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")
+        result = subprocess.run([str(v) for v in argv], stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                timeout=timeout, env={**os.environ, **self.environment(), "PATH": path,
+                                                      "GIT_TERMINAL_PROMPT": "0",
+                                                      "GIT_SSH_COMMAND": "ssh -T -o BatchMode=yes -o StrictHostKeyChecking=yes -o UpdateHostKeys=no -o ConnectTimeout=5",
+                                                      "GIT_OPTIONAL_LOCKS": "0", "PYTHONDONTWRITEBYTECODE": "1"})
+        err = result.stderr.decode(errors="replace")
+        out = result.stdout.decode(errors="replace") if not binary else "[binary output]"
+        self.log.append(f"$ {shlex.join([str(v) for v in argv])}\n{out}{err}")
+        if result.returncode:
+            raise ValueError(f"{Path(str(argv[0])).name} exited {result.returncode}: {(err or out).strip()[-600:]}")
+        return result.stdout if binary else out.strip()
+
+    def git(self, repo, *args):
+        return self.cmd("git", "-C", repo, *args)
+
+    def validate_clone(self, path, origin):
+        if path.is_symlink():
+            raise ValueError(f"refusing symlink clone: {path}")
+        if Path(self.git(path, "rev-parse", "--show-toplevel")).resolve() != path.resolve():
+            raise ValueError(f"not a dedicated clone: {path}")
+        if self.git(path, "remote", "get-url", "origin") != origin:
+            raise ValueError(f"foreign origin: {path}")
+        if self.git(path, "status", "--porcelain", "--untracked-files=all"):
+            raise ValueError(f"dirty clone: {path}")
+
+    def source(self):
+        metadata = read_json(ROOT / ".fleet-release.json", None)
+        if metadata is not None:
+            if not SHA.fullmatch(metadata["sha"]):
+                raise ValueError("invalid release metadata")
+            return metadata["origin"], metadata["sha"]
+        return self.git(ROOT, "remote", "get-url", "origin"), self.git(ROOT, "rev-parse", "HEAD")
+
+    def release(self):
+        origin, _ = self.source()
+        clone = self.base / "agents"
+        current = self.base / "current"
+        releases_dir = self.base / "releases"
+        actual = current.resolve() if current.is_symlink() else None
+        self.state["agents_sha"] = actual.name[7:] if actual and actual.parent == releases_dir and re.fullmatch(r"agents-[0-9a-f]{40}", actual.name) else None
+        pin_path = self.config / "pin"
+        pin = pin_path.read_text().strip() if pin_path.exists() else None
+        if pin is not None and not SHA.fullmatch(pin):
+            raise ValueError("pin must contain a full lowercase commit sha")
+        if clone.is_symlink():
+            raise ValueError(f"refusing symlink clone: {clone}")
+        if self.args.check:
+            if not clone.exists():
+                self.item("agents", "drift", "dedicated clone is absent")
+                return
+            self.validate_clone(clone, origin)
+            remote = self.cmd("git", "ls-remote", "--exit-code", origin, "refs/heads/main").split()[0]
+            sha = pin or remote
+        else:
+            if clone.exists():
+                self.validate_clone(clone, origin)
+                self.git(clone, "fetch", "origin")
+            else:
+                clone.parent.mkdir(parents=True, exist_ok=True)
+                self.cmd("git", "clone", "--", origin, clone)
+            sha = self.git(clone, "rev-parse", f"{pin or 'origin/main'}^{{commit}}")
+        self.state["desired_agents_sha"] = sha
+        release = self.base / "releases" / f"agents-{sha}"
+        if current.exists() and not current.is_symlink():
+            raise ValueError("refusing non-symlink current")
+        if release.is_symlink():
+            raise ValueError("refusing symlink release")
+        right = current.is_symlink() and current.resolve() == release
+        detached = self.git(clone, "rev-parse", "HEAD") == sha and not self.git(clone, "branch", "--show-current")
+        if self.args.check:
+            self.item("agents", "ok" if right and release.is_dir() and detached else "drift",
+                      "release and checkout current" if right and detached else "release or detached checkout differs")
+            return
+        self.git(clone, "switch", "--detach", sha)
+        created = not release.exists()
+        if created:
+            release.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(prefix=".agents-", dir=release.parent) as temporary:
+                stage = Path(temporary) / "release"
+                stage.mkdir()
+                archive = self.cmd("git", "-C", clone, "archive", "--format=tar", sha, binary=True)
+                with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
+                    members = [m for m in tar.getmembers() if m.name.split("/")[0] != "old"]
+                    tar.extractall(stage, members=members, filter="data")
+                atomic(stage / ".fleet-release.json", json.dumps({"origin": origin, "sha": sha}))
+                os.rename(stage, release)
+        self.cmd(sys.executable, "-I", "-B", release / "tools/fleet-sync", "--self-check", "--host", self.name)
+        if not right:
+            atomic_link(current, release)
+        self.state["agents_sha"] = sha
+        self.item("agents", "changed" if created or not right or not detached else "ok", f"release {sha}")
+        releases = sorted((p for p in release.parent.iterdir() if re.fullmatch(r"agents-[0-9a-f]{40}", p.name)
+                           and p.is_dir() and not p.is_symlink()), key=lambda p: p.stat().st_mtime_ns, reverse=True)
+        for stale in releases[10:]:
+            if stale != current.resolve():
+                shutil.rmtree(stale)
+        if ROOT != release:
+            if self.args.resume_fd is not None:
+                raise ValueError("refusing release exec loop")
+            os.set_inheritable(self.lock_fd, True)
+            env = {**os.environ, "FLEET_SYNC_HANDOFF": json.dumps(self.state),
+                   "FLEET_SYNC_LOG": json.dumps([entry[-4000:] for entry in self.log][-12:])}
+            argv = [sys.executable, "-I", "-B", str(release / "tools/fleet-sync"),
+                    *sys.argv[1:], "--resume-fd", str(self.lock_fd)]
+            os.execve(sys.executable, argv, env)
+
+    def fabrig(self):
+        clone = self.base / "main"
+        origin = self.d.fabrig_origin
+        if clone.is_symlink():
+            raise ValueError("refusing symlink fabrig clone")
+        remote = self.cmd("git", "ls-remote", "--exit-code", origin, "refs/heads/main").split()[0]
+        if not clone.exists():
+            if self.args.check:
+                self.item("fabrig", "drift", "dedicated clone is absent")
+                return
+            # Bootstrap only the installer; it alone creates the dedicated clone and links.
+            self.base.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(prefix=".fabrig-install-", dir=self.base) as temporary:
+                checkout = Path(temporary) / "checkout"
+                self.cmd("git", "clone", "--depth=1", "--branch", "main", "--", origin, checkout)
+                self.cmd(sys.executable, "-I", "-B", checkout / "tools/install")
+            self.state["fabrig_sha"] = self.git(clone, "rev-parse", "HEAD")
+            self.item("fabrig", "changed", "bootstrapped through fabrig installer")
+            return
+        self.validate_clone(clone, origin)
+        head = self.git(clone, "rev-parse", "HEAD")
+        self.state["fabrig_sha"] = head
+        wrong = False
+        for line in (clone / "tools/installed").read_text().splitlines():
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            fields = line.split()
+            if len(fields) != 2 or any(not re.fullmatch(r"[a-zA-Z0-9_-]+", v) for v in fields):
+                raise ValueError("invalid fabrig tools/installed")
+            tool, directory = fields
+            link = self.home / ".local/bin" / tool
+            wrong |= not link.is_symlink() or os.readlink(link) != str(clone / "tools" / directory / tool)
+        if head != remote or wrong:
+            if self.args.check:
+                self.item("fabrig", "drift", "HEAD or installed links differ")
+            else:
+                self.cmd(sys.executable, "-I", "-B", clone / "tools/install")
+                self.state["fabrig_sha"] = self.git(clone, "rev-parse", "HEAD")
+                self.item("fabrig", "changed", "ran fabrig installer (output in run.log)")
+        else:
+            self.item("fabrig", "ok", "HEAD and links current")
+
+    def links(self):
+        for tool in self.d.tools:
+            link = self.home / ".local/bin" / tool
+            target = self.base / "current/tools" / tool
+            if link.is_symlink() and os.readlink(link) == str(target):
+                self.item(f"link:{tool}", "ok", "current")
+            elif os.path.lexists(link) and not link.is_symlink():
+                self.item(f"link:{tool}", "failed", "refusing non-symlink")
+            elif self.args.check:
+                self.item(f"link:{tool}", "drift", "link is absent or differs")
+            else:
+                atomic_link(link, target)
+                self.item(f"link:{tool}", "changed", "linked to current release")
+
+    def write(self, relative, content, mode=0o600, semantic=False):
+        path = self.home / relative
+        old = path.read_bytes() if path.exists() else None
+        equal = old == content.encode()
+        if semantic and old is not None:
+            try:
+                equal = json.loads(old) == json.loads(content)
+            except (ValueError, UnicodeError):
+                pass
+        if equal:
+            self.item(relative, "ok", "content current")
+            return False
+        if self.args.check:
+            self.item(relative, "drift", "file is absent or differs")
+            return True
+        backup = Path(str(path) + ".pre-fleet-sync")
+        if old is not None and relative not in self.owned and not os.path.lexists(backup):
+            atomic(backup, old, mode)
+        atomic(path, content, mode)
+        self.owned.add(relative)
+        self.item(relative, "changed", "wrote file")
+        return True
+
+    def shell_block(self, relative, first):
+        path = self.home / relative
+        content = path.read_bytes().decode() if path.exists() else ""
+        if content.count(BEGIN) != content.count(END) or content.count(BEGIN) > 1:
+            raise ValueError(f"ambiguous fleet-sync block in {relative}")
+        match = re.search(r"(?m)^" + re.escape(BEGIN) + r"\r?\n.*?^" + re.escape(END) + r"\r?(?:\n|$)", content, re.S)
+        if BEGIN in content and not match:
+            raise ValueError(f"malformed fleet-sync block in {relative}")
+        # Relocate an existing block only if needed; outside bytes retain their order.
+        outside = content[:match.start()] + content[match.end():] if match else content
+        if first:
+            result = BLOCK + outside
+        else:
+            result = outside + ("\n" if outside and not outside.endswith("\n") else "") + BLOCK
+        self.write(relative, result, 0o644)
+
+    def codex(self):
+        path = self.home / ".codex/config.toml"
+        content = path.read_bytes().decode() if path.exists() else ""
+        # Parse first: never damage a config whose syntax we cannot understand.
+        original = tomllib.loads(content)
+        lines = content.splitlines(keepends=True)
+        boundary = len(lines)
+        prefix, statement = [], []
+        found = set()
+        for i, line in enumerate(lines):
+            if not statement and line.lstrip().startswith("["):
+                boundary = i
+                break
+            statement.append(line)
+            try:
+                parsed = tomllib.loads("".join(statement))
+            except tomllib.TOMLDecodeError:
+                continue  # A multiline string/array is one statement, including apparent headers.
+            owned = parsed.keys() & self.d.codex.keys()
+            if owned:
+                for key in owned:
+                    prefix.append(f"{key} = {json.dumps(self.d.codex[key])}\n")
+                    found.add(key)
+            else:
+                prefix.extend(statement)
+            statement = []
+        if statement:
+            raise ValueError("could not safely split Codex top-level statements")
+        for key, value in self.d.codex.items():
+            if key not in found:
+                if prefix and not prefix[-1].endswith("\n"):
+                    prefix[-1] += "\n"
+                prefix.append(f"{key} = {json.dumps(value)}\n")
+        result = "".join(prefix + lines[boundary:])
+        merged = tomllib.loads(result)
+        if any(merged.get(k) != v for k, v in self.d.codex.items()) or {k: v for k, v in original.items() if k not in self.d.codex} != {k: v for k, v in merged.items() if k not in self.d.codex}:
+            raise ValueError("could not safely update Codex top-level keys")
+        self.write(".codex/config.toml", result)
+
+    def environment(self):
+        host = self.d.hosts[self.name]
+        return {**self.d.env, **{k: expand(v, self.home) for k, v in host["env"].items()}}
+
+    def conflicts(self, env):
+        paths = [self.home / p for p in (".profile", ".bashrc", ".config/plan/environment.sh")]
+        paths += sorted((self.home / ".config/environment.d").glob("*.conf"))
+        for path in paths:
+            if path.name == "90-fabrig.conf":
+                continue
+            if not path.is_file():
+                continue
+            in_block = False
+            for number, line in enumerate(path.read_text().splitlines(), 1):
+                if line == BEGIN:
+                    in_block = True
+                elif line == END:
+                    in_block = False
+                elif not in_block:
+                    match = re.match(r"\s*(?:export\s+)?([A-Za-z_][A-Za-z_0-9]*)=(.*)", line)
+                    if not match or match[1] not in env:
+                        continue
+                    value = match[2].strip()
+                    try:
+                        words = shlex.split(value, comments=True)
+                        value = expand(words[0], self.home) if len(words) == 1 else value
+                    except ValueError:
+                        pass
+                    if value != env[match[1]]:
+                        self.item(f"conflict:{path.relative_to(self.home)}:{number}", "warn", f"sets {match[1]} to a different value")
+
+    def render(self):
+        host = self.d.hosts[self.name]
+        env = self.environment()
+        path = f"{self.home}/.local/bin:{self.home}/.cargo/bin:/usr/local/bin:/usr/bin:/bin"
+        shell = 'export PATH="$HOME/.local/bin:$HOME/.cargo/bin:${PATH:-/usr/local/bin:/usr/bin:/bin}"\n'
+        shell += "".join(f"export {k}={shlex.quote(v)}\n" for k, v in env.items())
+        self.attempt(".config/fabrig/env.sh", lambda: self.write(".config/fabrig/env.sh", shell, 0o644))
+        systemd_env = "".join(f"{k}={json.dumps(v, ensure_ascii=False)}\n" for k, v in {"PATH": path, **env}.items())
+        self.attempt(".config/environment.d/90-fabrig.conf", lambda: self.write(".config/environment.d/90-fabrig.conf", systemd_env))
+        settings = json.dumps({**self.d.claude, "env": env}, indent=2) + "\n"
+        self.attempt(".claude/settings.json", lambda: self.write(".claude/settings.json", settings, semantic=True))
+        cargo = self.d.cargo
+        if "cargo_jobs" in host:
+            cargo = cargo.replace("[build]\n", f"[build]\njobs = {host['cargo_jobs']}\n", 1)
+        self.attempt(".cargo/config.toml", lambda: self.write(".cargo/config.toml", cargo))
+        self.attempt("machine.env", lambda: self.write("src/rust/tmp/machine.env", "".join(f"{k}={v}\n" for k, v in host["machine_env"].items())))
+        machines = f"{self.name} local\n" + "".join(f"{name} {h['ssh']}\n" for name, h in self.d.hosts.items() if name != self.name)
+        self.attempt("post/machines", lambda: self.write("src/rust/tmp/post/machines", machines))
+        self.attempt(".profile", lambda: self.shell_block(".profile", False))
+        self.attempt(".bashrc", lambda: self.shell_block(".bashrc", True))
+        self.attempt(".codex/config.toml", self.codex)
+        self.attempt("conflicts", lambda: self.conflicts({**env, "PATH": path}))
+
+    def units(self):
+        wanted = {name for name, roles in self.d.unit_roles.items() if "*" in roles or set(roles) & set(self.d.hosts[self.name]["roles"])}
+        directory = self.home / ".config/systemd/user"
+        changed = False
+        for name in sorted(wanted):
+            relative = f".config/systemd/user/{name}"
+            different = self.write(relative, self.d.units[name])
+            changed |= different
+            if different and not self.args.check:
+                self.reload_pending = True
+            if not self.args.check and (different or relative in self.owned):
+                self.unit_owned.add(name)
+            if different and name.endswith(".service") and not re.search(r"(?m)^Type=oneshot\s*$", self.d.units[name]):
+                self.item(name, "warn", "restart pending; service was not restarted")
+        stale = self.unit_owned - wanted
+        for name in sorted(stale):
+            if Path(name).name != name or not name.endswith((".timer", ".service")):
+                raise ValueError("invalid unit ownership record")
+            if self.args.check:
+                self.item(name, "drift", "previously managed unit no longer belongs to this role")
+            else:
+                # Do not stop services, including services paired with removed timers.
+                self.cmd("systemctl", "--user", "disable", *(["--now"] if name.endswith(".timer") else []), name)
+                (directory / name).unlink(missing_ok=True)
+                self.unit_owned.remove(name)
+                self.owned.discard(f".config/systemd/user/{name}")
+                changed = True
+                self.reload_pending = True
+                self.item(name, "changed", "disabled and removed previously managed unit")
+        if self.args.check:
+            # --check must not run systemctl (including during the live acceptance check).
+            if self.reload_pending:
+                self.item("units:reload", "drift", "daemon-reload pending after a failed run")
+            for name in sorted(wanted):
+                if name.endswith(".timer"):
+                    enabled = directory / "timers.target.wants" / name
+                    self.item(f"enabled:{name}", "ok" if enabled.is_symlink() and enabled.resolve() == directory / name else "drift", "timer enablement symlink")
+            if not (os.environ.get("DBUS_SESSION_BUS_ADDRESS") or (Path(os.environ.get("XDG_RUNTIME_DIR", "/nonexistent")) / "bus").exists()):
+                self.item("units:bus", "failed", "no user bus advertised")
+            return
+        if changed or self.reload_pending:
+            self.cmd("systemctl", "--user", "daemon-reload")
+            self.reload_pending = False
+        # Calling enable --now is idempotent; never restart or stop any service.
+        self.cmd("systemctl", "--user", "show", "--property=Version")
+        for name in sorted(wanted):
+            if name.endswith(".timer"):
+                self.cmd("systemctl", "--user", "enable", "--now", name)
+                self.item(f"enabled:{name}", "ok", "timer enabled and started")
+
+    def versions(self):
+        for name, pin in self.d.versions.items():
+            try:
+                output = self.cmd(*pin["command"], timeout=10)
+                found = re.findall(r"(?<![A-Za-z0-9])\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.]+)?", output)
+                match = pin["version"] in found
+                self.item(f"version:{name}", "ok" if match else "warn", f"want {pin['version']}; got {output[:160]}")
+            except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+                self.item(f"version:{name}", "warn", str(error))
+
+    def attempt(self, name, function):
+        try:
+            return function()
+        except (OSError, ValueError, subprocess.SubprocessError, tarfile.TarError) as error:
+            self.item(name, "failed", str(error))
+            return False
+
+    def acquire(self):
+        path = self.state_dir / "lock"
+        if self.args.resume_fd is not None:
+            self.lock_fd = self.args.resume_fd
+            if os.fstat(self.lock_fd).st_ino != path.stat().st_ino or os.fstat(self.lock_fd).st_dev != path.stat().st_dev:
+                raise ValueError("invalid inherited lock")
+            fcntl.flock(self.lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            os.set_inheritable(self.lock_fd, False)
+            return True
+        if self.args.check and not path.exists():
+            return True
+        if not self.args.check:
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+        self.lock_fd = os.open(path, (os.O_RDONLY if self.args.check else os.O_WRONLY | os.O_CREAT) | os.O_NOFOLLOW, 0o600)
+        try:
+            fcntl.flock(self.lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except BlockingIOError:
+            os.close(self.lock_fd)
+            self.lock_fd = None
+            if not self.args.timer:
+                self.item("lock", "failed", "another run holds the lock")
+            return False
+
+    def finish(self, persist=True):
+        self.state["end"] = now()
+        self.state["managed_files"] = sorted(self.owned)
+        self.state["managed_units"] = sorted(self.unit_owned)
+        self.state["unit_reload_pending"] = self.reload_pending
+        if persist and not self.args.check:
+            if self.args.timer:
+                self.state["last_timer_end"] = self.state["end"]
+            atomic(self.state_dir / "state.json", json.dumps(self.state, indent=2) + "\n")
+            atomic(self.state_dir / "run.log", "\n".join(self.log)[-262144:])
+            history = self.state_dir / "runs.jsonl"
+            cutoff = dt.datetime.now(dt.UTC) - dt.timedelta(days=7)
+            records = []
+            if history.exists():
+                for line in history.read_text().splitlines():
+                    record = json.loads(line)
+                    if dt.datetime.fromisoformat(record["end"]) >= cutoff:
+                        records.append(record)
+            if any(i["result"] in ("changed", "failed") for i in self.state["items"]):
+                records.append(self.state)
+            if records or history.exists():
+                atomic(history, "".join(json.dumps(r) + "\n" for r in records))
+        return 1 if any(i["result"] in ("drift", "failed") for i in self.state["items"]) else 0
+
+    def run(self):
+        hold = self.config / "hold"
+        if hold.exists():
+            lines = hold.read_text().splitlines()
+            self.item("hold", "held", lines[0] if lines else "hold file exists")
+            return self.finish(False)
+        if not self.acquire():
+            if self.args.timer:
+                return 0
+            return self.finish(False)
+        try:
+            if self.args.resume_fd is None:
+                self.attempt("agents", self.release)
+            if not any(i["result"] == "failed" for i in self.state["items"]):
+                self.attempt("fabrig", self.fabrig)
+                self.attempt("links", self.links)
+                self.render()
+                self.attempt("units", self.units)
+                self.versions()
+            return self.finish()
+        finally:
+            if self.lock_fd is not None:
+                os.close(self.lock_fd)
+
+
+def print_state(state, as_json):
+    if as_json:
+        print(json.dumps(state))
+        return
+    for item in state["items"]:
+        if item["result"] != "ok":
+            print(f"{item['result']:7} {item['item']}: {item['reason']}")
+    counts = {result: sum(i["result"] == result for i in state["items"])
+              for result in ("ok", "changed", "drift", "warn", "failed", "held")}
+    print(f"{state['host']}: " + ", ".join(f"{n} {r}" for r, n in counts.items() if n))
+
+
+def status(args, declarations, name):
+    def remote(host):
+        try:
+            result = subprocess.run(["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
+                                     "-o", "StrictHostKeyChecking=yes", "-o", "UpdateHostKeys=no",
+                                     declarations.hosts[host]["ssh"], 'bash -lc "fleet-sync --check --json"'],
+                                    stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
+            if result.returncode not in (0, 1):
+                raise ValueError(result.stderr.strip() or f"ssh exited {result.returncode}")
+            data = json.loads(result.stdout)
+            if data.get("host") != host or not isinstance(data.get("items"), list):
+                raise ValueError("invalid host response")
+            return data
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            return {"host": host, "unreachable": str(error)}
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(declarations.hosts)) as pool:
+        futures = {host: pool.submit(remote, host) for host in declarations.hosts if host != name}
+        states = {}
+        if name is not None:
+            local_args = argparse.Namespace(**vars(args))
+            local_args.check, local_args.timer = True, False
+            local = Runner(local_args, declarations, name)
+            local.run()
+            states[name] = local.state
+        states.update({host: future.result() for host, future in futures.items()})
+    rows = [states[host] for host in declarations.hosts]
+    if args.json:
+        print(json.dumps({"hosts": rows}))
+    else:
+        for row in rows:
+            if "unreachable" in row:
+                print(f"{row['host']}: unreachable ({row['unreachable']})")
+                continue
+            stamp = row.get("last_timer_end")
+            try:
+                age = f"{max(0, int((dt.datetime.now(dt.UTC) - dt.datetime.fromisoformat(stamp)).total_seconds()))}s" if stamp else "never"
+            except (ValueError, TypeError):
+                age = "unknown"
+            problems = "; ".join(f"{i['result']} {i['item']}: {i['reason']}" for i in row["items"] if i["result"] != "ok")
+            print(f"{row['host']}: agents={row.get('agents_sha') or '?'} fabrig={row.get('fabrig_sha') or '?'} timer-age={age} {problems or 'ok'}")
+    return int(any("unreachable" in r or any(i["result"] in ("drift", "failed") for i in r.get("items", [])) for r in rows))
+
+
+def main():
+    os.umask(0o077)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("command", nargs="?", choices=["status"])
+    parser.add_argument("--check", action="store_true")
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--timer", action="store_true")
+    parser.add_argument("--host")
+    parser.add_argument("--self-check", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--resume-fd", type=int, help=argparse.SUPPRESS)
+    args = parser.parse_args()
+    if args.command and (args.check or args.timer or args.self_check or args.resume_fd is not None):
+        parser.error("status accepts only --json and --host")
+    try:
+        declarations = Declarations(ROOT, Path.home())
+        name = declarations.host(args.host, allow_unknown=bool(args.command))
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        parser.error(str(error))
+    if args.self_check:
+        return 0
+    if args.command:
+        return status(args, declarations, name)
+    handoff = os.environ.pop("FLEET_SYNC_HANDOFF", None)
+    if (args.resume_fd is None) != (handoff is None) or (args.resume_fd is not None and args.check):
+        parser.error("invalid release handoff")
+    runner = Runner(args, declarations, name, json.loads(handoff) if handoff else None)
+    code = runner.run()
+    if not (args.timer and not runner.state["items"]):
+        print_state(runner.state, args.json)
+    return code
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        print(f"fleet-sync: {error}", file=sys.stderr)
+        sys.exit(1)
