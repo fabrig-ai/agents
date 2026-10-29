@@ -463,7 +463,7 @@ def evaluate(data, state, config, now):
             unfinished = identity.get('unfinished', False) or any(
                 part.startswith(identity.get('area', name.rsplit('/', 1)[-1]) + '-')
                 for part in draft.get('unfinished_parts', []))
-            registered = bool(draft) and (identity.get('kind') == 'codex' or unfinished)
+            registered = bool(draft) and unfinished
         codex = identity.get('kind') == 'codex'
         absent = data.get('unit/' + name) is False if codex else name not in live
         if registered and absent:
@@ -472,7 +472,7 @@ def evaluate(data, state, config, now):
             joins = {k: v for k, v in identity.items() if k in JOIN}
             if draft:
                 joins.update(draft=draft.get('draft', ''), coordinator=draft['mailbox'])
-            evidence = 'registered active role has inactive Codex owner unit' if codex else 'registered unfinished role absent from claude agents'
+            evidence = 'registered unfinished role has inactive Codex owner unit' if codex else 'registered unfinished role absent from claude agents'
             add('gone', name, name, [evidence],
                 ['unit/' + name if codex else 'agents', 'drafts'], supervisor='director', **joins)
             if 'gone\t' + name in candidates:

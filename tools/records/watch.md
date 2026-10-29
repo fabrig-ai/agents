@@ -116,8 +116,15 @@ fake producer commands/SSH, and a local bare records origin. The existing
 `test_record.py` and `test_record_collect.py` suites remain required.
 
 For leads with `kind="codex"`, live state comes from their registered user unit,
-independently of Claude and post waiters. `gone` means an inactive unit for a
-lead whose coordinator has an active, unpaused draft. `deaf` means unread mail
+independently of Claude and post waiters. For both Claude and Codex, `gone`
+requires an unfinished part for the lead's area in an active, unpaused draft;
+registry presence alone never requires a lead to run. Part `brief.md` and
+`closing.toml` in records supply this predicate: no closing, open work, or
+handed-over outcome means unfinished; a completed closing removes that
+expectation, including after a `files current` post. Scratch `brief.md` and
+`state.md` are not read by this rule; `files current` alone acknowledges
+handover, not completion of remaining work. Codex liveness uses its user unit.
+`deaf` means unread mail
 older than the configured threshold while the unit is inactive: skip `post wake`
 and notify the coordinator immediately. Failed unit queries freeze dependent
 episodes. Codex `handover-needed` threshold events drive the same handover clock

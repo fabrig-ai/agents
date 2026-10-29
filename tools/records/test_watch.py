@@ -61,10 +61,12 @@ class Rules(unittest.TestCase):
         self.names['lead/tools'].update(kind='codex', unit='codex-owner-lead-tools')
         self.data['unit/lead/tools'] = active
 
-    def test_codex_gone_active_draft_even_without_unfinished_part(self):
+    def test_codex_gone_requires_unfinished_part(self):
         self.codex()
         self.live()  # Stale Claude inventory does not make a Codex unit live.
         self.data['drafts'] = [dict(mailbox='s/default', state='active', unfinished_parts=[])]
+        self.assertFalse([c for c in self.rule('gone') if c['owner'] == 'lead/tools'])
+        self.data['drafts'][0]['unfinished_parts'] = ['tools-parser']
         gone = next(c for c in self.rule('gone') if c['owner'] == 'lead/tools')
         self.assertEqual(gone['first_to'], 's/default')
         self.assertEqual(gone['supervisor'], 's/default')
@@ -557,6 +559,56 @@ else: sys.exit(1 if sys.argv[2] in os.environ.get('UNOWNED','').split(',') else 
     def events(self):
         self.git('-C', str(self.seed), 'pull', '--ff-only')
         return [json.loads(line) for path in (self.seed/'events/watch/hel8').glob('*.jsonl') for line in path.read_text().splitlines()]
+    def test_gone_part_lifecycle_for_claude_and_codex(self):
+        draft = self.seed / 'drafts/experiment'
+        for kind, name, handle, coordinator in (
+                ('claude', 'lead/jig', 'dm', 's/dynamic-memory'),
+                ('codex', 'lead/u/jig', 'u', 's/upgrades')):
+            with self.subTest(kind=kind):
+                self.write(draft / 'draft.toml',
+                           f'mailbox="{coordinator}"\ncoordinator="{handle}"\nstate="active"\n')
+                part = draft / 'parts/jig-parser'
+                brief = part / 'brief.md'
+                closing = part / 'closing.toml'
+                brief.unlink(missing_ok=True)
+                closing.unlink(missing_ok=True)
+                post_events = self.seed / 'events/post/hel8/2026-10-29.jsonl'
+                post_events.unlink(missing_ok=True)
+                scratch = self.home / 'src/fabrig/leads' / ('jig' if kind == 'claude' else 'u-jig')
+
+                def publish():
+                    self.git('-C', str(self.seed), 'add', '.')
+                    self.git('-C', str(self.seed), 'commit', '-m', 'synthetic part state')
+                    self.git('-C', str(self.seed), 'push', 'origin', 'main')
+
+                def gone():
+                    result = self.invoke(dry=True, UNIT_EXIT='3')
+                    return [row for line in result.stdout.splitlines() if line.startswith('{')
+                            and (row := json.loads(line)).get('rule') == 'gone' and row.get('owner') == name]
+
+                # Registered but never started: neither a scratch brief nor a part brief.
+                publish()
+                self.assertFalse((scratch / 'brief.md').exists())
+                self.assertEqual(gone(), [])
+                # An unfinished records part expects a running lead of either kind.
+                self.write(brief, 'Synthetic unfinished jig part.\n')
+                self.write(scratch / 'brief.md', 'Work on jig-parser.\n')
+                self.write(scratch / 'state.md', 'Part jig-parser is in progress.\n')
+                publish()
+                self.assertTrue(gone())
+                # Files current with a handed-over/open part still needs a successor.
+                self.write(post_events, json.dumps(dict(id='synthetic-ack', kind='mail', time=ISO(NOW),
+                           subject='files current', **{'from': name+'@hel8', 'to': coordinator+'@hel8'}))+'\n')
+                self.write(closing, 'outcome="handed-over"\nopen=["remaining work"]\n')
+                publish()
+                self.assertTrue(gone())
+                # Completion is authoritative even while inherited scratch files remain.
+                self.write(closing, 'outcome="done"\nopen=[]\n')
+                self.write(scratch / 'state.md', 'Part jig-parser is done; files current posted.\n')
+                publish()
+                self.assertTrue((scratch / 'brief.md').exists())
+                self.assertEqual(gone(), [])
+
     def test_codex_cli_reads_unit_and_sends_deaf_directly_to_coordinator(self):
         path = self.write(self.tmp/'post/lead+u+jig/new/owner-mail.md',
                           'Id: owner-mail\nFrom: test@hel8\nTo: lead/u/jig@hel8\nSubject: synthetic\n\n')
