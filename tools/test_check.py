@@ -9,7 +9,7 @@ GATE = Path(__file__).with_name("check.sh")
 
 
 class GateTests(unittest.TestCase):
-    def run_gate(self, sources):
+    def run_gate(self, sources, *files):
         with tempfile.TemporaryDirectory(prefix="gate-test-") as temp:
             root = Path(temp)
             home = root / "home"
@@ -21,7 +21,7 @@ class GateTests(unittest.TestCase):
                 path = tools / name
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(content)
-            result = subprocess.run(["bash", str(tools / "check.sh")],
+            result = subprocess.run(["bash", str(tools / "check.sh"), *files],
                                     env=dict(os.environ, HOME=str(home)),
                                     capture_output=True, text=True)
             self.assertFalse(list(root.rglob("__pycache__")))
@@ -32,7 +32,64 @@ class GateTests(unittest.TestCase):
         result = self.run_gate({name: source for name in
                                ("test_same.py", "records/test_same.py", "session/deep/test_same.py")})
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("Ran 3 tests", result.stderr)
+        self.assertEqual(result.stderr.count("Ran 1 test"), 3)
+        self.assertIn("Checked 3 files", result.stderr)
+
+    def test_focused_files_are_sorted_and_deduplicated(self):
+        source = "import unittest\nclass T(unittest.TestCase):\n def test_ok(self): pass\n"
+        result = self.run_gate({"test_z.py": source, "test_a.py": source,
+                                "test_unselected.py": "raise RuntimeError('unselected')"},
+                               "tools/test_z.py", "tools/test_a.py", "tools/test_z.py")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Checked 2 files", result.stderr)
+        self.assertLess(result.stderr.index("=== tools/test_a.py"),
+                        result.stderr.index("=== tools/test_z.py"))
+        self.assertNotIn("unselected", result.stderr)
+
+    def test_invalid_focused_file_fails_before_running_tests(self):
+        for path in ("tools/missing.py", "tools/helper.py", "../test_outside.py"):
+            with self.subTest(path=path):
+                result = self.run_gate({"test_valid.py": "raise RuntimeError('should not run')",
+                                        "helper.py": ""}, path)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("expected a tools/test_*.py file", result.stderr)
+                self.assertNotIn("should not run", result.stderr)
+
+    @unittest.skipIf((os.cpu_count() or 1) < 2, "parallelism needs two CPUs")
+    def test_files_overlap_with_separate_homes_and_temp_roots(self):
+        # Both imports must reach a barrier before either can complete. The
+        # marker directory belongs to run_gate's disposable fixture tree.
+        source = r'''import os
+from pathlib import Path
+import tempfile
+import time
+import unittest
+root = Path(__file__).parent
+name = Path(__file__).stem
+home, temp = Path.home(), Path(tempfile.gettempdir())
+assert home.parent == temp and home.is_dir()
+marker = root / (name + ".ready")
+sibling = marker.with_suffix(".new")
+sibling.write_text(str(home))
+sibling.replace(marker)
+deadline = time.monotonic() + 10
+while len(list(root.glob("*.ready"))) != 2:
+    assert time.monotonic() < deadline, "files did not overlap"
+    time.sleep(0.01)
+assert len({p.read_text() for p in root.glob("*.ready")}) == 2
+class T(unittest.TestCase):
+    def test_ok(self): pass
+'''
+        result = self.run_gate({"test_first.py": source, "test_second.py": source})
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_output_is_grouped_and_sorted_after_early_failure(self):
+        result = self.run_gate({"test_a.py": "raise RuntimeError('first failed')",
+                                "test_z.py": "print('last still ran')"})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("last still ran", result.stderr)
+        self.assertLess(result.stderr.index("first failed"), result.stderr.index("last still ran"))
+        self.assertIn("1 failed", result.stderr)
 
     def test_nested_failure_fails_gate(self):
         result = self.run_gate({"records/deep/test_bad.py":

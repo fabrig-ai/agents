@@ -47,7 +47,7 @@ class Lab:
         self.home.mkdir()
         self.tmp.mkdir()
         self.env = dict(PATH=os.environ['PATH'], HOME=str(self.home), DEV_ROOT=str(root),
-                        DEV_TMP=str(self.tmp), LOGINS_POLL_SECONDS='0.05', LC_ALL='C.UTF-8')
+                        DEV_TMP=str(self.tmp), LOGINS_POLL_SECONDS='0.01', LC_ALL='C.UTF-8')
         self.argv = [sys.executable, '-I', '-B', str(SCRIPT)]
         self.serial = 0
 

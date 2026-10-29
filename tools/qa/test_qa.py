@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import select
 import shutil
 import signal
 import socket
@@ -26,6 +27,21 @@ P = '20261026-0915-fabrig'
 CHATGPT = 'chatgpt'
 CLAUDE = 'claude'
 REAL = 'real-model'
+
+# Exercise real stop deadlines but poll the fake manager at fixture speed.
+# Only unit_stopped uses the shorter interval; CLI settings and timeout
+# assertions still see production values and the real monotonic clock.
+FAST_POLL = """import time
+unit_stopped = tool['Watch'].unit_stopped
+sleep = time.sleep
+def fast_unit_stopped(self, *args, **kwargs):
+    try:
+        time.sleep = lambda seconds: sleep(min(seconds, 0.01))
+        return unit_stopped(self, *args, **kwargs)
+    finally:
+        time.sleep = sleep
+tool['Watch'].unit_stopped = fast_unit_stopped
+"""
 
 WATCH_TOOLS = r'''import atexit, fnmatch, json, os, sys, shlex, shutil, signal, subprocess, time
 from pathlib import Path
@@ -410,13 +426,12 @@ class Lab:
         return self.commit('B: refuses a frame', 'a task past the page is refused by name')
 
     def run(self, *args, status=0, extra=None, now=None):
-        command = [sys.executable, '-I', '-B', str(SCRIPT), *args]
+        driver = f'import runpy, sys\ntool = runpy.run_path({str(SCRIPT)!r})\n' + FAST_POLL
         if now is not None:
             # Own the clock only in the fixture interpreter, never in qa's CLI.
-            driver = (f'import runpy, sys; tool = runpy.run_path({str(SCRIPT)!r}); '
-                      f'tool["main"].__globals__["timestamp"] = lambda: {now!r}; '
-                      'sys.exit(tool["main"]())')
-            command = [sys.executable, '-I', '-B', '-c', driver, *args]
+            driver += f'tool["main"].__globals__["timestamp"] = lambda: {now!r}\n'
+        driver += 'sys.exit(tool["main"]())'
+        command = [sys.executable, '-I', '-B', '-c', driver, *args]
         result = subprocess.run(command, env=dict(self.env, **(extra or {})), cwd=self.root,
                                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 text=True, timeout=HUNG_TOOL_S)
@@ -778,12 +793,58 @@ def a_failed_export_leaves_the_unit_up(lab):
 def two_stops_take_turns(lab):
     directory = lab.root / P
     directory.mkdir()
-    executable(directory / 'give-back', 'import time\nfrom pathlib import Path\n'
-               "with Path('runs').open('a') as out:\n out.write('start\\n'); out.flush()\n"
-               'time.sleep(1)\n'
+    # Keep the first exporter in its critical section until the second
+    # wrapper reports an actual failed lock attempt, rather than sleeping.
+    for name in ('export-ready', 'lock-busy', 'release-export'):
+        os.mkfifo(directory / name)
+    ready = os.open(directory / 'export-ready', os.O_RDWR | os.O_NONBLOCK)
+    busy = os.open(directory / 'lock-busy', os.O_RDWR | os.O_NONBLOCK)
+    release = os.open(directory / 'release-export', os.O_RDWR)
+    executable(directory / 'give-back', 'import os\nfrom pathlib import Path\n'
+               "with Path('runs').open('a') as out: out.write('start\\n')\n"
+               "with open('export-ready', 'wb', buffering=0) as out: out.write(b'r')\n"
+               "with open('release-export', 'rb', buffering=0) as source: source.read(1)\n"
                "with Path('runs').open('a') as out: out.write('end\\n')\n")
-    processes = [subprocess.Popen([str(SCRIPT), '_give-back', str(directory), '5'], env=lab.env) for _ in range(2)]
-    assert [proc.wait(timeout=10) for proc in processes] == [0, 0]
+    driver = f'''import runpy, sys
+from pathlib import Path
+tool = runpy.run_path({str(SCRIPT)!r})
+flock = tool['fcntl'].flock
+def observed_flock(*args):
+    try:
+        return flock(*args)
+    except BlockingIOError:
+        with open({str(directory / 'lock-busy')!r}, 'wb', buffering=0) as out:
+            out.write(b'b')
+        raise
+tool['fcntl'].flock = observed_flock
+sys.exit(tool['main']())
+'''
+    processes = []
+    def receive(fd):
+        poll = select.poll()
+        poll.register(fd, select.POLLIN)
+        assert poll.poll(10_000), 'fixture readiness was not announced'
+        assert os.read(fd, 1)
+    try:
+        processes.append(subprocess.Popen([str(SCRIPT), '_give-back', str(directory), '30'], env=lab.env))
+        receive(ready)
+        processes.append(subprocess.Popen([sys.executable, '-I', '-B', '-c', driver,
+                                          '_give-back', str(directory), '30'], env=lab.env))
+        receive(busy)
+        assert (directory / 'runs').read_text().splitlines() == ['start']
+        os.write(release, b'r')
+        receive(ready)
+        assert (directory / 'runs').read_text().splitlines() == ['start', 'end', 'start']
+        os.write(release, b'r')
+        assert [proc.wait(timeout=10) for proc in processes] == [0, 0]
+    finally:
+        os.write(release, b'rr')
+        for proc in processes:
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait()
+        for fd in (ready, busy, release):
+            os.close(fd)
     assert (directory / 'runs').read_text().splitlines() == ['start', 'end', 'start', 'end']
     assert (directory / 'give-back.log').read_text().count('exit 0') == 2
     with (directory / 'give-back.lock').open('a') as lock:
@@ -968,6 +1029,7 @@ def driven_watch(lab, patch, once=True, status=0):
     lab.prune_dead_launchers()
     driver = f'''import runpy, sys
 tool = runpy.run_path({str(SCRIPT)!r})
+{FAST_POLL}
 {patch}
 sys.exit(tool['main']())
 '''
