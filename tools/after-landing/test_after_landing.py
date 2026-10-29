@@ -10,6 +10,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
@@ -168,6 +169,33 @@ class Lease:
 """
 
 
+# Run the production guardian with a file-controlled clock in its own process.
+# Only skein expires, after the test has observed its fake's acknowledgement;
+# jig keeps a frozen clock regardless of CPU scheduling or process startup cost.
+CLOCK_GUARDIAN = r"""import importlib.machinery
+import importlib.util
+import json
+from pathlib import Path
+import sys
+import time
+from types import SimpleNamespace
+
+loader = importlib.machinery.SourceFileLoader('guardian_subject', TOOL_PATH)
+spec = importlib.util.spec_from_loader(loader.name, loader)
+app = importlib.util.module_from_spec(spec)
+loader.exec_module(app)
+path = Path(sys.argv[2])
+invocation = json.loads(path.read_text())
+def now():
+    if invocation['command'][1] == 'skein' and (Path.home() / 'expire-skein').exists():
+        return invocation['bound'] + 1
+    return 0
+app.time = SimpleNamespace(monotonic=now, sleep=time.sleep)
+app.atomic(path.parent / 'started', '')
+sys.exit(app.supervise(path, int(sys.argv[3])))
+"""
+
+
 class Sandbox(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix='after-landing-test-')
@@ -281,12 +309,20 @@ class Sandbox(unittest.TestCase):
     def states(self):
         return [event['state'] for event in self.events('after-landing-test')]
 
-    def wait_file(self, path, timeout=5):
-        end = time.monotonic() + timeout
-        while not path.exists():
+    def wait_for(self, condition, description, worker=None):
+        # Conditions determine progress. This generous watchdog only diagnoses a
+        # broken handshake; it never drives a tier timeout or a test transition.
+        end = time.monotonic() + 120
+        while not condition():
+            if worker is not None:
+                alive = worker.poll() is None if isinstance(worker, subprocess.Popen) else worker.is_alive()
+                self.assertTrue(alive, 'worker exited while waiting for ' + description)
             if time.monotonic() >= end:
-                self.fail('timed out waiting for ' + str(path))
+                self.fail('timed out waiting for ' + description)
             time.sleep(.01)
+
+    def wait_file(self, path, worker=None):
+        self.wait_for(path.exists, str(path), worker)
 
 
 class QueueTests(Sandbox):
@@ -536,10 +572,15 @@ class SupervisionTests(Sandbox):
         self.save_scenario()
         parent = subprocess.Popen([sys.executable, '-I', '-B', str(TOOL), *self.argv],
                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        self.addCleanup(lambda: parent.kill() if parent.poll() is None else None)
-        self.wait_file(self.home / 'tier-entered')
+        def finish_parent():
+            app.atomic(self.home / 'tier-release', '')
+            if parent.poll() is None:
+                parent.kill()
+            parent.wait(timeout=120)
+        self.addCleanup(finish_parent)
+        self.wait_file(self.home / 'tier-entered', parent)
         parent.kill()
-        parent.wait(timeout=5)
+        parent.wait(timeout=120)
         active = json.loads(self.runner.path.read_text())['active']
         self.assertEqual(active['attempt'], 1)
         written = next(iter(active['events'].values()))
@@ -548,7 +589,7 @@ class SupervisionTests(Sandbox):
         self.scenario['pairs']['qa-jig']['wait'] = False
         self.save_scenario()
         restart = subprocess.run([sys.executable, '-I', '-B', str(TOOL), *self.argv],
-                                 text=True, capture_output=True, timeout=10)
+                                 text=True, capture_output=True, timeout=120)
         self.assertEqual(restart.returncode, 0, restart.stderr)
         self.runner = app.Runner(self.args)
         self.assertEqual(list((self.home / 'lease').glob('*.hold')), [])
@@ -563,27 +604,45 @@ class SupervisionTests(Sandbox):
         # Both pairs are redone, retaining the first pair's already-written ids.
         self.assertEqual(len(self.calls('tiers')), 6)
 
+    def start_clocked_run(self):
+        guardian = self.home / 'clock-guardian.py'
+        app.atomic(guardian, CLOCK_GUARDIAN.replace('TOOL_PATH', repr(str(TOOL))))
+        self.failures = []
+        def run():
+            try:
+                with mock.patch.object(app, '__file__', str(guardian)):
+                    self.runner.run()
+            except BaseException as error:
+                self.failures.append(error)
+        thread = threading.Thread(target=run)
+        thread.start()
+        def finish():
+            app.atomic(self.home / 'allow-end', '')
+            thread.join(timeout=120)
+            self.assertFalse(thread.is_alive(), 'runner did not finish after fake release')
+        self.addCleanup(finish)
+        return thread
+
+    def expire_skein(self, thread):
+        # Both fakes print a queued token. Wait for that acknowledgement before
+        # moving the guardian clock past the real configured bound.
+        def queued():
+            active = self.runner.state['active']
+            invocation = active and active['invocation']
+            return invocation and bool(app.heavy_tokens(invocation['log'])[0])
+        self.wait_for(queued, 'skein heavy queued token', thread)
+        app.atomic(self.home / 'expire-skein', '')
+        self.wait_for(lambda: self.calls('heavy'), 'heavy cancellation acknowledgement', thread)
+
     def test_wall_bound_waits_for_heavy_end_before_next_pair(self):
         self.two()
         self.runner.poll()
         self.scenario['pairs']['qa-skein'] = dict(hang=True)
         self.save_scenario()
         self.runner.prepare()
-        # Exercise the production guardian with a shortened bound, without a
-        # test-only environment switch in the installed executable.
-        import threading
-        failures = []
-        def run():
-            try:
-                with mock.patch.object(app, 'duration', return_value=-1799.3):
-                    self.runner.run()
-            except BaseException as error:
-                failures.append(error)
-        thread = threading.Thread(target=run)
-        thread.start()
-        end = time.monotonic() + 5
-        while (not self.calls('heavy') or not self.calls('post')) and time.monotonic() < end:
-            time.sleep(.02)
+        thread = self.start_clocked_run()
+        self.expire_skein(thread)
+        self.wait_for(lambda: self.calls('post'), 'waiting-for-heavy notice', thread)
         try:
             self.assertTrue(self.calls('heavy'))
             self.assertEqual({c['profile'] for c in self.calls('tiers')}, {'qa-skein'})
@@ -592,9 +651,9 @@ class SupervisionTests(Sandbox):
             self.assertIn('heavy command to end', self.calls('post')[0]['body'])
         finally:
             app.atomic(self.home / 'allow-end', '')
-            thread.join(timeout=5)
+            thread.join(timeout=120)
         self.assertFalse(thread.is_alive())
-        self.assertFalse(failures, failures)
+        self.assertFalse(self.failures, self.failures)
         self.assertEqual([c['profile'] for c in self.calls('tiers')], ['qa-skein', 'qa-jig'])
         self.assertEqual(self.runner.state['last_run']['faulted'], ['qa-skein'])
         for call in self.calls('heavy'):
@@ -613,30 +672,23 @@ class SupervisionTests(Sandbox):
         custom.chmod(0o755)
         self.args.tiers_run = custom
         self.runner.poll()
-        import threading
-        failures = []
-        def run():
-            try:
-                with mock.patch.object(app, 'duration', return_value=-1799.3):
-                    self.runner.run()
-            except BaseException as error:
-                failures.append(error)
-        thread = threading.Thread(target=run)
-        thread.start()
+        thread = self.start_clocked_run()
         try:
-            deadline = time.monotonic() + 5
-            while not self.calls('heavy') and time.monotonic() < deadline:
-                time.sleep(.02)
-            self.assertTrue(self.calls('heavy'))
+            self.expire_skein(thread)
             self.assertEqual(len(self.calls('heavy-submit')), 1)
             self.assertTrue(thread.is_alive())
         finally:
             app.atomic(self.home / 'allow-end', '')
-            thread.join(timeout=5)
+            thread.join(timeout=120)
         self.assertFalse(thread.is_alive())
-        self.assertFalse(failures, failures)
+        self.assertFalse(self.failures, self.failures)
         self.assertEqual([c['args'] for c in self.calls('heavy-submit')], [['first']])
         self.assertEqual(self.runner.state['last_run']['faulted'], ['qa-skein'])
+        event = self.events('after-landing-run')[-1]
+        self.assertEqual(event['pairs']['qa-skein']['error'], 'pair wall bound passed')
+        self.assertEqual(event['pairs']['qa-jig']['status'], 'ran')
+        self.assertEqual(event['pairs']['qa-jig']['wall'], 0)
+        self.assertEqual([c['profile'] for c in self.calls('tiers')], ['qa-jig'])
 
     def test_follow_polls_during_a_long_pair(self):
         self.single()
@@ -646,16 +698,13 @@ class SupervisionTests(Sandbox):
         self.scenario['pairs']['qa-skein']['wait'] = True
         self.save_scenario()
         self.runner.poll()
-        import threading
         failures = []
         def publish():
             try:
                 self.wait_file(self.home / 'tier-entered')
                 self.advance('skein')
                 self.advance('q-jig')
-                deadline = time.monotonic() + 5
-                while self.runner.state['hour']['seen'] < 2 and time.monotonic() < deadline:
-                    time.sleep(.02)
+                self.wait_for(lambda: self.runner.state['hour']['seen'] >= 2, 'follow poll of new tips')
             except BaseException as error:
                 failures.append(error)
             finally:
@@ -663,7 +712,7 @@ class SupervisionTests(Sandbox):
         publisher = threading.Thread(target=publish)
         publisher.start()
         self.runner.run()
-        publisher.join(timeout=5)
+        publisher.join(timeout=120)
         self.assertFalse(failures, failures)
         self.assertEqual(self.runner.state['cursor'], self.base)
         self.assertGreaterEqual(self.runner.state['hour']['seen'], 2)
