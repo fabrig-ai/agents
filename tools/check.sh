@@ -1,6 +1,15 @@
 #!/bin/bash
 set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
+# One agents gate at a time per host: concurrent gates starve each other and
+# the sessions sharing the host. tools/land holds the same lock across its runs.
+if [[ -z ${AGENTS_GATE_HELD:-} ]]; then
+    lock=${AGENTS_GATE_LOCK:-$HOME/.local/state/agents-gate.lock}
+    mkdir -p -- "$(dirname -- "$lock")"
+    export AGENTS_GATE_HELD=1
+    flock -n -o "$lock" true || echo "check.sh: waiting for another agents gate on this host ($lock)" >&2
+    exec flock -o "$lock" bash "$0" "$@"
+fi
 export PYTHONDONTWRITEBYTECODE=1
 bash -n tools/check.sh
 python3 -I -B - "$@" <<'PYCODE'

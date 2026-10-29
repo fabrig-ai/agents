@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Check, rebase, check if changed, and fast-forward origin/main."""
 
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -13,6 +14,14 @@ def run(*args):
 def main():
     if len(sys.argv) != 1:
         sys.exit("usage: tools/land")
+    if not os.environ.get("AGENTS_GATE_HELD"):
+        # Hold the host's gate lock across both checks, the rebase and the push.
+        lock = os.environ.get("AGENTS_GATE_LOCK", str(Path.home() / ".local/state/agents-gate.lock"))
+        Path(lock).parent.mkdir(parents=True, exist_ok=True)
+        if subprocess.run(["flock", "-n", "-o", lock, "true"]).returncode:
+            print(f"land: waiting for another agents gate on this host ({lock})", file=sys.stderr, flush=True)
+        os.environ["AGENTS_GATE_HELD"] = "1"
+        os.execvp("flock", ["flock", "-o", lock, sys.executable, *sys.argv])
     root = Path(run("git", "rev-parse", "--show-toplevel"))
     if run("git", "status", "--porcelain", "--untracked-files=all"):
         sys.exit("land: refusing a dirty tree")

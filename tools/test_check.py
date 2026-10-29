@@ -1,4 +1,5 @@
 """The gate discovers nested tests and propagates failures in disposable trees."""
+import fcntl
 import os
 from pathlib import Path
 import subprocess
@@ -22,7 +23,8 @@ class GateTests(unittest.TestCase):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(content)
             result = subprocess.run(["bash", str(tools / "check.sh"), *files],
-                                    env=dict(os.environ, HOME=str(home)),
+                                    env={k: v for k, v in dict(os.environ, HOME=str(home)).items()
+                                         if k != "AGENTS_GATE_HELD"},
                                     capture_output=True, text=True)
             self.assertFalse(list(root.rglob("__pycache__")))
             return result
@@ -105,3 +107,27 @@ class T(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GateLockTests(unittest.TestCase):
+    def test_a_second_gate_waits_for_the_host_lock(self):
+        source = "import unittest\nclass T(unittest.TestCase):\n def test_ok(self): pass\n"
+        with tempfile.TemporaryDirectory(prefix="gate-lock-") as temp:
+            root = Path(temp)
+            (root / "home").mkdir()
+            tools = root / "tools"
+            tools.mkdir()
+            (tools / "check.sh").write_bytes(GATE.read_bytes())
+            (tools / "test_ok.py").write_text(source)
+            lock = root / "gate.lock"
+            env = {k: v for k, v in os.environ.items() if k != "AGENTS_GATE_HELD"}
+            env.update(HOME=str(root / "home"), AGENTS_GATE_LOCK=str(lock))
+            with open(lock, "w") as held:
+                fcntl.flock(held, fcntl.LOCK_EX)
+                gate = subprocess.Popen(["bash", str(tools / "check.sh")], env=env, text=True,
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                self.assertIn("waiting for another agents gate", gate.stderr.readline())
+                self.assertIsNone(gate.poll())
+            out, err = gate.communicate(timeout=120)
+            self.assertEqual(gate.returncode, 0, err)
+            self.assertIn("Checked 1 files", err)
