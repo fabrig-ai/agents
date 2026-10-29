@@ -65,6 +65,9 @@ assert __import__('sys').argv[1:] == ['agents', '--json']
 print((Path(os.environ['HOME']) / 'agents.json').read_text())
 """)
         self.fake('session-context', """import sys
+if sys.argv[1:] == ['--capabilities']:
+ print('fired-markers')
+ sys.exit(0)
 if sys.argv[1:] == ['--fired', '--json']:
  from pathlib import Path
  import os
@@ -269,6 +272,60 @@ print('12345678: 125,000 of 1,000,000 tokens (12%) at 2026-10-29T11:00:00Z; 42 c
         self.assertIn('sessions: 0 events', self.run_collect('sessions').stderr)
         self.assertEqual(API['names']('coord-next'), {'coordinator': 'coord-next'})
         self.assertEqual(API['names']('lead/tools'), {'area': 'tools'})
+
+    def test_optional_fired_capability_preserves_session_lifecycle(self):
+        original = (self.bin / 'session-context').read_text().split('\n', 1)[1]
+        for capability in ("print('hook-gating')", 'sys.exit(2)'):
+            with self.subTest(capability=capability):
+                self.fake('session-context', original.replace("print('fired-markers')", capability).replace(
+                    "if sys.argv[1:] == ['--fired', '--json']:",
+                    "if sys.argv[1:] == ['--fired', '--json']:\n raise AssertionError('must not request fired markers')"))
+                self.session_fixture()
+                result = self.run_collect('sessions', options=('--dry-run',))
+                self.assertIn('skip sessions/fired:', result.stderr)
+                self.assertEqual([json.loads(line)['kind'] for line in result.stdout.splitlines()],
+                                 ['session-start', 'context'])
+                self.run_collect('sessions')
+                self.session_fixture('coordinator/H/next')
+                self.run_collect('sessions')
+                self.json(self.home / 'agents.json', [])
+                self.run_collect('sessions')
+                self.assertEqual([e['kind'] for e in self.events('sessions')],
+                                 ['session-start', 'context', 'session-name', 'context', 'session-end'])
+                # Reset only the isolated fixture for the next capability case.
+                self.git(self.clone, 'rm', '-r', 'events/sessions')
+                self.git(self.clone, 'commit', '-m', 'reset synthetic sessions')
+                self.git(self.clone, 'push', 'origin', 'main')
+                for path in self.state.iterdir():
+                    path.unlink()
+
+    def test_real_context_and_advertised_fired_failures_return_two(self):
+        self.session_fixture()
+        original = (self.bin / 'session-context').read_text().split('\n', 1)[1]
+        for failed in ("['--fired', '--json']", "['--name', 'lead/H/tools']"):
+            with self.subTest(failed=failed):
+                self.fake('session-context', f'import sys\nif sys.argv[1:] == {failed}: sys.exit(2)\n' + original)
+                result = self.run_collect('sessions', options=('--dry-run',), code=2)
+                self.assertIn('sessions: error:', result.stderr)
+                self.assertFalse(result.stdout)
+
+    def test_capability_command_exceptions_skip_only_fired(self):
+        reader = API['Collector']('sessions', 'hel8', {}, STAMP, API['timestamp'](END))
+        for error in (FileNotFoundError(), subprocess.TimeoutExpired('session-context', 30)):
+            with self.subTest(error=error), patch('subprocess.run', side_effect=error), patch('sys.stderr') as stderr:
+                reader.fired()
+                self.assertIn('skip sessions/fired:', ''.join(call.args[0] for call in stderr.write.call_args_list))
+
+    def test_exit_policy_success_skips_and_failure(self):
+        self.session_fixture()
+        self.run_collect('sessions', 'runs', options=('--dry-run',))
+        self.run_collect('runs', 'queue', options=('--dry-run',))
+        self.json(self.fabrig / 'notes/queue.jsonl', {'invalid': True})
+        result = self.run_collect('sessions', 'queue', 'runs', options=('--dry-run',), code=2)
+        self.assertIn('skip runs:', result.stdout)
+        self.assertIn('queue: error:', result.stderr)
+        self.assertEqual([json.loads(line)['kind'] for line in result.stdout.splitlines() if line.startswith('{')],
+                         ['session-start', 'context'])
 
     def test_claim_release_and_repeat(self):
         path = self.claim_fixture()

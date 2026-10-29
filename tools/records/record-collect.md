@@ -7,7 +7,9 @@ and `src/fabrig/{notes/queue.jsonl,claims,leases}`. Queue area mappings come
 from `src/fabrig/main/tools/queue/leads.txt`. Default host resolution uses
 `post/machines` (`local` names this machine, otherwise match its hostname);
 `--host` overrides it. Absent inputs print `skip SOURCE: reason`. Errors
-name the source and return 2 after trying the others; success returns 0.
+name the source after trying the others. Exit policy: 0 when every selected
+source succeeds or skips; 2 when any source fails, including publication or
+cursor errors. An optional-part skip is also successful.
 
 All successfully read sources in a run publish together via the sibling
 `record append --as collect --batch HOST`: one commit and at most one push
@@ -54,9 +56,12 @@ identities and headers only, a temporary HOME, a bare local origin, and fake
 Claude/context commands. Tests cover every source, joins, cursor advance,
 partial lines, rotation, publication retries, read boundaries, and isolation.
 
-The sessions source also reads `session-context --fired --json` once per
-collection. Each resolved marker yields a `handover-needed` event for its
-first firing and an append-only update for each later observed last firing.
+The sessions source checks `session-context --capabilities` once per
+collection. If the check fails or omits `fired-markers`, it prints
+`skip sessions/fired: <why>` to stderr and still collects session lifecycle,
+name, context and files-current events. Otherwise it reads
+`session-context --fired --json`; failures or invalid markers are real errors.
+Each resolved marker yields a `handover-needed` event for its first firing and an append-only update for each later observed last firing.
 Ids join session id, first firing and the observed firing timestamp; replay
 keeps the same ids. Fields include `session`, `name`, `role`, `reason`,
 `first_fired` and `last_fired`. Unresolved names are skipped. Polling cannot

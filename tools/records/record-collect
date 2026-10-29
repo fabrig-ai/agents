@@ -1,5 +1,5 @@
 #!/usr/bin/env -S python3 -I -B
-"""Read local pipeline facts and publish them through the records writer."""
+"""Collect local pipeline facts; exit 0 for success/skips, 2 for any failure."""
 
 import argparse
 from contextlib import ExitStack, contextmanager
@@ -338,6 +338,18 @@ class Collector:
         self.state['generation'] = self.state.get('generation', 0) + 1
 
     def fired(self):
+        try:
+            capabilities = subprocess.run(['session-context', '--capabilities'],
+                                          capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.SubprocessError) as error:
+            print(f'skip sessions/fired: capability check failed ({type(error).__name__})', file=sys.stderr)
+            return
+        if capabilities.returncode:
+            print(f'skip sessions/fired: capability check exited {capabilities.returncode}', file=sys.stderr)
+            return
+        if 'fired-markers' not in capabilities.stdout.split():
+            print('skip sessions/fired: session-context lacks fired-markers', file=sys.stderr)
+            return
         result = subprocess.run(['session-context', '--fired', '--json'],
                                 capture_output=True, text=True, timeout=30)
         if result.returncode:
