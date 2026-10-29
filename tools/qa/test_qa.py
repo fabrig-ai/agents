@@ -89,7 +89,44 @@ def end(run, report, code=0):
         out.write('\t'.join(row) + '\n')
     (state / 'ended').touch()
 
-if name == 'cargo':
+if name == 'ssh':
+    assert args[:2] == ['-o', 'BatchMode=yes'] and len(args) == 4, args
+    remote = shlex.split(args[3])
+    assert remote[:2] == ['bash', '-lc'] and len(remote) == 3, remote
+    words = shlex.split(remote[2])
+    assert Path(words[0]).name == 'claim', words
+    os.execv(words[0], words)
+elif name == 'claim':
+    path = root / 'claims.json'
+    claims = json.loads(path.read_text()) if path.exists() else {}
+    if args[0] == 'list':
+        if config.get('claim_list_refusal'):
+            sys.exit(1)
+        for number in range(1, 10):
+            record = claims.get(str(number))
+            prefix = f'hetzner6 {number} [s/qa]: '
+            print(prefix + (f"{record['owner']}: {record['what']} (since 2026-10-29T00:00:00+00:00); held 0d 00:00:00" if record else 'free'))
+    else:
+        action, host, number, owner, *what = args
+        assert host == 'hetzner6', args
+        if action == 'claim':
+            if number in claims:
+                sys.exit(1)
+            claims[number] = dict(owner=owner, what=what[0])
+        else:
+            assert action == 'release' and not what, args
+            if config.get('claim_release_refusal') or number not in claims or claims[number]['owner'] != owner:
+                sys.exit(1)
+            del claims[number]
+        temporary = path.with_suffix('.new')
+        temporary.write_text(json.dumps(claims))
+        temporary.replace(path)
+        hang('after')
+elif name == 'df':
+    assert args == ['-B1', '--output=avail', '/'], args
+    print('Avail')
+    print(config.get('disk_available', 90000000000))
+elif name == 'cargo':
     assert args == ['fetch', '--locked'], args
     if 'cargo_lock' in config:
         assert Path('Cargo.lock').read_text() == config['cargo_lock']
@@ -365,7 +402,8 @@ class Lab:
             path.mkdir(exist_ok=True)
         self.env = dict(PATH=str(root) + os.pathsep + os.environ['PATH'], HOME=str(self.home), DEV_ROOT=str(root),
                         DEV_TMP=str(self.tmp), QA_FIXTURE=str(root), QA_POST_LOG=str(self.post_log), QA_POST_STATUS='0',
-                        USER='fixture', POST_NAME='o/fixture', GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1',
+                        QA_WALK_SLOTS='forgejo=1,2 claude=3,4 github=5 both=6,7',
+                        QA_CLAIM_SSH='', USER='fixture', POST_NAME='o/fixture', GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1',
                         GIT_AUTHOR_NAME='Fixture', GIT_AUTHOR_EMAIL='fixture@invalid',
                         GIT_COMMITTER_NAME='Fixture', GIT_COMMITTER_EMAIL='fixture@invalid',
                         GIT_ALLOW_PROTOCOL='file', LC_ALL='C.UTF-8', PYTHONDONTWRITEBYTECODE='1')
@@ -375,7 +413,7 @@ class Lab:
             self.env[f'GIT_CONFIG_VALUE_{index}'] = value
         self.env['GIT_CONFIG_COUNT'] = '4'
         self.configure(pools={CHATGPT: [CHATGPT, 'chatgpt-2', 'chatgpt-3'], CLAUDE: [CLAUDE, 'claude-2', 'claude-3']})
-        for name in ('post', 'codex-run', 'systemctl', 'systemd-run', 'logins', 'cargo'):
+        for name in ('post', 'codex-run', 'systemctl', 'systemd-run', 'logins', 'cargo', 'claim', 'ssh', 'df'):
             tool = root / name
             executable(tool, WATCH_TOOLS)
             self.env['QA_' + name.upper().replace('-', '_')] = str(tool)
@@ -386,11 +424,20 @@ class Lab:
             shutil.copytree(built / 'fabrig', checkout)
             shutil.copytree(built / 'origins/fabrig.git', self.origins / 'fabrig.git')
             self.git(checkout, 'remote', 'set-url', 'origin', str(self.origins / 'fabrig.git'))
-            return
-        self.git(root, 'init', '-b', 'main', str(checkout))
-        self.git(checkout, 'commit', '--allow-empty', '-m', 'baseline')
-        self.git(root, 'clone', '--bare', str(checkout), str(self.origins / 'fabrig.git'))
-        self.git(checkout, 'remote', 'add', 'origin', str(self.origins / 'fabrig.git'))
+        else:
+            self.git(root, 'init', '-b', 'main', str(checkout))
+            trim = checkout / 'tools/slots/trim'
+            trim.parent.mkdir(parents=True)
+            trim.write_text("import json, os, sys\nfrom pathlib import Path\nroot = Path(os.environ['QA_FIXTURE'])\nwith (root / 'tools.jsonl').open('a') as out:\n    out.write(json.dumps(dict(tool='trim', args=sys.argv[1:])) + '\\n')\nprint('fixture trim')\nsys.exit(json.loads((root / 'tools.json').read_text()).get('trim_status', 0))\n")
+            self.git(checkout, 'add', 'tools')
+            self.git(checkout, 'commit', '-m', 'baseline')
+            self.git(root, 'clone', '--bare', str(checkout), str(self.origins / 'fabrig.git'))
+            self.git(checkout, 'remote', 'add', 'origin', str(self.origins / 'fabrig.git'))
+        self.slots = self.home / 'src/fabrig/slots'
+        self.slots.mkdir(parents=True)
+        for number in range(1, 8):
+            shutil.copytree(checkout, self.slots / str(number))
+
 
 
     def git(self, root, *args):
@@ -1128,7 +1175,7 @@ def a_walk_takes_a_login_and_a_slot_and_starts(lab):
     path = resting(lab, CHATGPT)
     result = lab.walk('b0', '--login', CHATGPT)
     directory, state = lab.walk_state()
-    checkout = lab.tmp / 'qa/repos/fabrig-walk-forgejo-1'
+    checkout = lab.slots / '1'
     assert state['slot'] == 1 and state['holder'] == 'walk/forgejo/rung-b0-1'
     assert state['starter'] == 'o/fixture@' + socket.gethostname()
     assert state['ref'] == 'main' and state['main'] == main and state['cap'] == 180
@@ -1357,8 +1404,8 @@ def a_walk_resolves_origin_branches_and_commit_prefixes(lab):
     first, second = lab.walk_states()
     assert first[1]['walk'] == 'rung-b0-5' and first[1]['main'] == branch
     assert second[1]['walk'] == 'rung-b0-6' and second[1]['main'] == main
-    assert lab.git(lab.tmp / 'qa/repos/fabrig-walk-forgejo-1', 'rev-parse', 'HEAD') == branch
-    assert lab.git(lab.tmp / 'qa/repos/fabrig-walk-forgejo-2', 'rev-parse', 'HEAD') == main
+    assert lab.git(lab.slots / '1', 'rev-parse', 'HEAD') == branch
+    assert lab.git(lab.slots / '2', 'rev-parse', 'HEAD') == main
 
 
 def walk_fetch_build(lab):
@@ -1376,7 +1423,7 @@ def a_walk_fetches_its_build_before_taking_a_login(lab):
     commit = walk_fetch_build(lab)
     lab.walk('b0', '--build', 'origin/needs-fetch')
     directory, state = lab.walk_state()
-    checkout = lab.tmp / 'qa/repos/fabrig-walk-forgejo-1'
+    checkout = lab.slots / '1'
     calls = list(map(json.loads, (lab.root / 'tools.jsonl').read_text().splitlines()))
     fetch, = [row for row in calls if row['tool'] == 'cargo']
     take, = [row for row in calls if row['tool'] == 'logins' and row['args'][0] == 'take']
@@ -1436,7 +1483,7 @@ def a_resumed_walk_fetches_before_taking_a_login(lab):
     fetches = [index for index, row in enumerate(calls) if row['tool'] == 'cargo']
     takes = [index for index, row in enumerate(calls) if row['tool'] == 'logins' and row['args'][0] == 'take']
     assert len(fetches) == 3 and len(takes) == 2 and fetches[-1] < takes[-1]
-    assert calls[fetches[-1]]['cwd'] == str(lab.tmp / 'qa/repos/fabrig-walk-forgejo-1')
+    assert calls[fetches[-1]]['cwd'] == str(lab.slots / '1')
 
 
 def a_walk_preparation_refusal_returns_its_grants(lab):
@@ -1651,7 +1698,7 @@ def a_paused_walk_resumes_at_a_branch_with_another_login(lab):
     assert resumed['attempts'][0] == previous and resumed['run'] != state['run']
     assert resumed['pools'] == {CHATGPT: 'chatgpt-2'} and resumed['slot'] == 2
     assert resumed['main'] == fix and resumed['cap'] == 7 and resumed['started'] == '2026-10-27T09:00:00Z'
-    assert lab.git(lab.tmp / 'qa/repos/fabrig-walk-forgejo-2', 'rev-parse', 'HEAD') == fix
+    assert lab.git(lab.slots / '2', 'rev-parse', 'HEAD') == fix
     assert not (directory / 'paused').exists() and not (directory / 'give-back').exists()
     assert (directory / 'report-1.md').read_bytes() == report and kept.read_text() == 'kept deployment data\n'
     task = (directory / 'task.md').read_text()
@@ -1660,7 +1707,7 @@ def a_paused_walk_resumes_at_a_branch_with_another_login(lab):
         'configuration', 'stored family', 'fresh deployment', 'main at the landed commit'))
     call = lab.calls('codex-run')[-1]
     assert call[:6] == ['task', '--resume', state['run'], '--to', 'qa-watch', '--on-stop']
-    assert call[-3:] == [str(directory / 'task.md'), str(lab.tmp / 'qa/repos/fabrig-walk-forgejo-2'), str(directory / 'report.md')]
+    assert call[-3:] == [str(directory / 'task.md'), str(lab.slots / '2'), str(directory / 'report.md')]
     lab.watch(now='2026-10-27T09:06:59Z')
     current = next(saved for _, saved in lab.walk_states() if saved['walk'] == state['walk'])
     assert current['stage'] == 'running' and not current['capped']
@@ -1935,7 +1982,7 @@ def walks_of_two_kinds_take_their_own_slots_and_pools(lab):
     assert second[1]['walk'] == 'rung-b0-claude-1' and second[1]['kind'] == 'claude'
     assert second[1]['holder'] == 'walk/claude/rung-b0-claude-1' and second[1]['pools'] == {CLAUDE: CLAUDE}
     assert [call[-2] for call in lab.calls('codex-run')] == [
-        str(lab.tmp / 'qa/repos/fabrig-walk-forgejo-1'), str(lab.tmp / 'qa/repos/fabrig-walk-claude-1')]
+        str(lab.slots / '1'), str(lab.slots / '3')]
     assert (second[0] / 'brief.md').read_bytes() == (focused / 'rung-b0-claude-brief.md').read_bytes()
     rows = [row.split('\t') for row in (focused / 'b0/loop.tsv').read_text().splitlines()[1:]]
     assert [row[2] for row in rows] == ['1', 'claude-1']
@@ -1964,7 +2011,8 @@ def login_refuses_another_kinds_pool(lab):
     lab.walk('b0', '--kind', 'claude', '--login', CHATGPT, status=2)
     lab.walk('b0', '--kind', '', status=2)
     lab.walk('b0', '--kind', 'unknown', status=2)
-    assert not lab.calls('logins') and not lab.calls('codex-run') and not lab.walk_states()
+    assert all(row == ['list'] for row in lab.calls('logins')) and not lab.calls('codex-run')
+    assert all(s['released'] and s['slot_claim']['released'] for _, s in lab.walk_states())
 
 
 def a_resume_by_name_keeps_its_kind(lab):
@@ -1983,8 +2031,8 @@ def a_resume_by_name_keeps_its_kind(lab):
     lab.run('walk', 'fabrig', 'b0', '--resume', state['walk'], '--build', 'main')
     current = lab.walk_states()[0][1]
     assert current['kind'] == 'claude' and current['pools'] == {CLAUDE: CLAUDE}
-    assert current['slot'] == 1 and current['holder'] == state['holder'] and current['attempt'] == 2
-    assert lab.calls('codex-run')[-1][-2] == str(lab.tmp / 'qa/repos/fabrig-walk-claude-1')
+    assert current['slot'] == 3 and current['holder'] == state['holder'] and current['attempt'] == 2
+    assert lab.calls('codex-run')[-1][-2] == str(lab.slots / '3')
 
 
 def manual_kind_holders_stay_held_when_watcher_checks(lab):
@@ -2092,6 +2140,7 @@ tool['main'].__globals__['timestamp'] = lambda: '2026-10-27T08:11:00Z'
 
 
 def orphaned_take_keeps_admission(lab, mode):
+    lab.env['QA_WALK_SLOTS'] = 'forgejo=1 claude=3,4'
     lab.env['QA_WALK_KINDS'] = 'forgejo=1:chatgpt'
     if mode == 'take':
         args = ['take', 'forgejo', '--as', 'walk/forgejo/manual']
@@ -2199,6 +2248,7 @@ def an_orphan_resume_take_keeps_its_admission_lock(lab):
 
 
 def a_take_by_hand_is_refused_past_its_kinds_cap(lab):
+    lab.env['QA_WALK_SLOTS'] = 'forgejo=1 github=5'
     lab.env['QA_WALK_KINDS'] = 'forgejo=1:chatgpt github=1:chatgpt'
     lab.configure(pools={CHATGPT: [CHATGPT, 'chatgpt-2', 'chatgpt-3', 'chatgpt-4']})
     head = lab.head()
@@ -2328,6 +2378,7 @@ def hung_manual_inventory_and_takes_are_bounded(lab):
 
 def a_surviving_launcher_keeps_custody_until_its_unit_exists(lab, past_grace=False, loaded=False):
     resting(lab, CHATGPT, in_place=True)
+    lab.env['QA_WALK_SLOTS'] = 'forgejo=1 claude=3,4'
     lab.env['QA_WALK_KINDS'] = 'forgejo=1:chatgpt'
     focused = lab.tmp / 'qa-focused'
     focused.mkdir()
@@ -2394,6 +2445,7 @@ def a_loaded_inactive_unit_keeps_a_surviving_launcher(lab):
 
 def queued_and_running_start_jobs_keep_custody(lab):
     directory, state = walk_with_logins(lab, CHATGPT)
+    lab.env['QA_WALK_SLOTS'] = 'forgejo=1 claude=3,4'
     lab.env['QA_WALK_KINDS'] = 'forgejo=1:chatgpt'
     for job in ('42', '43', ''):
         lab.configure(unit_load='loaded', unit_state='inactive', unit_job=job)
@@ -2487,8 +2539,8 @@ def a_walk_resolves_remote_branches_despite_colliding_tags(lab):
     lab.walk('b0')
     first, second = lab.walk_states()
     assert first[1]['main'] == fix and second[1]['main'] == main
-    assert lab.git(lab.tmp / 'qa/repos/fabrig-walk-forgejo-1', 'rev-parse', 'HEAD') == fix
-    assert lab.git(lab.tmp / 'qa/repos/fabrig-walk-forgejo-2', 'rev-parse', 'HEAD') == main
+    assert lab.git(lab.slots / '1', 'rev-parse', 'HEAD') == fix
+    assert lab.git(lab.slots / '2', 'rev-parse', 'HEAD') == main
 
 
 def hex_walk_builds_refuse_ambiguous_and_non_commit_objects(lab):
@@ -2516,7 +2568,8 @@ def hex_walk_builds_refuse_ambiguous_and_non_commit_objects(lab):
     for ref in (sha[:4], sha, first_sha):
         result = lab.walk('b0', '--build', ref, '--login', CHATGPT, status=2)
         assert 'try origin/<branch> or a commit' in result.stderr
-    assert not lab.calls('codex-run') and not lab.calls('logins') and not lab.walk_states()
+    assert not lab.calls('codex-run') and all(row == ['list'] for row in lab.calls('logins'))
+    assert all(s['released'] and s['slot_claim']['released'] for _, s in lab.walk_states())
     lab.walk('b0', '--build', commit[:9].upper())
     state = next(state for _, state in lab.walk_states() if state['run'])
     assert state['main'] == commit
@@ -2527,9 +2580,9 @@ def a_bare_branch_resolves_to_origins(lab):
     fix = lab.commit('bare branch fix', branch='fix')
     # A branch moving after resolution must not change the saved build.
     driver = f'''original = tool['Repositories'].checkout
-def checkout(self, root, repo, slot, main):
+def checkout(self, root, main):
     tool['git'](root, 'update-ref', 'refs/remotes/origin/fix', {main!r})
-    return original(self, root, repo, slot, main)
+    return original(self, root, main)
 tool['Repositories'].checkout = checkout
 '''
     lab.walk('b0', '--build', 'fix')
@@ -2538,34 +2591,38 @@ tool['Repositories'].checkout = checkout
     assert first[1]['ref'] == 'fix' and second[1]['ref'] == 'origin/fix'
     assert first[1]['main'] == second[1]['main'] == fix
     for slot in (1, 2):
-        assert lab.git(lab.tmp / f'qa/repos/fabrig-walk-forgejo-{slot}', 'rev-parse', 'HEAD') == fix
-    assert lab.git(lab.tmp / 'qa/repos/fabrig', 'rev-parse', 'refs/remotes/origin/fix') == main
+        assert lab.git(lab.slots / str(slot), 'rev-parse', 'HEAD') == fix
+    assert lab.git(lab.slots / '2', 'rev-parse', 'refs/remotes/origin/fix') == main
 
 
 def an_unresolvable_build_takes_nothing(lab):
     for ref in ('nosuch', 'origin/missing', 'HEAD~1', '../main', 'bad..branch', 'abc', '1234'):
-        result = lab.walk('b0', '--build', ref, '--login', CHATGPT, status=2)
+        result = lab.walk('bad-ref', '--build', ref, '--login', CHATGPT, status=2)
         assert result.stderr == (f'qa: build {ref}: no branch origin/{ref} and no commit; '
                                  'try origin/<branch> or a commit\n')
-    assert not lab.calls('logins') and not lab.calls('codex-run') and not lab.walk_states()
-    assert not (lab.tmp / 'qa/walks').exists()
+    assert all(row == ['list'] for row in lab.calls('logins')) and not lab.calls('codex-run')
+    assert all(s['released'] and s['slot_claim']['released'] for _, s in lab.walk_states())
+    assert not (lab.tmp / 'qa/repos').exists()
     assert not list((lab.tmp / 'qa/repos').glob('fabrig-walk-*'))
     assert not list((lab.tmp / 'qa-focused').glob('*/loop.tsv'))
-    assert not list((lab.tmp / 'qa-focused').glob('rung-b0-1'))
-    directory, state = walk_with_logins(lab, CHATGPT)
+    assert all(not s['run'] for _, s in lab.walk_states())
+    lab.walk('b0', '--login', CHATGPT)
+    directory, state = next((d, s) for d, s in lab.walk_states() if s['run'])
     pause_walk(lab, directory, state)
     saved = lab.tmp / 'qa/walks' / (state['walk'] + '.json')
     paths = [saved, directory / 'paused', directory / 'report.md', directory / 'notes.md',
              directory.parent / 'b0/loop.tsv']
     before = [path.read_bytes() for path in paths]
-    calls = lab.calls('logins')
-    slots = lab.git(lab.tmp / 'qa/repos/fabrig', 'worktree', 'list', '--porcelain')
+    takes = [row for row in lab.calls('logins') if row[0] == 'take']
+    slots = lab.git(lab.slots / '1', 'worktree', 'list', '--porcelain')
     result = lab.run('walk', 'fabrig', 'b0', '--resume', state['walk'], '--build', 'nosuch', status=2)
     assert 'try origin/<branch> or a commit' in result.stderr
-    assert lab.calls('logins') == calls and len(lab.calls('codex-run')) == 1
-    assert [path.read_bytes() for path in paths] == before
-    assert lab.git(lab.tmp / 'qa/repos/fabrig', 'worktree', 'list', '--porcelain') == slots
-    assert len(lab.walk_states()) == 1 and not (directory / 'report-1.md').exists()
+    assert [row for row in lab.calls('logins') if row[0] == 'take'] == takes and len(lab.calls('codex-run')) == 1
+    assert [path.read_bytes() for path in paths[1:]] == before[1:]
+    current = json.loads(saved.read_text())
+    assert current['stage'] == 'paused' and current['attempt'] == 2 and current['slot_claim']['released']
+    assert lab.git(lab.slots / '1', 'worktree', 'list', '--porcelain') == slots
+    assert len([s for _, s in lab.walk_states() if s['run']]) == 0 and not (directory / 'report-1.md').exists()
 
 
 def a_build_never_resolves_through_a_tag_or_a_stale_ref(lab):
@@ -2579,11 +2636,12 @@ def a_build_never_resolves_through_a_tag_or_a_stale_ref(lab):
     # A branch fetched once, then deleted on origin.
     gone = lab.commit('a fix branch later deleted', branch='gone')
     lab.walk('unused', '--build', 'missing', status=2)
-    assert lab.git(lab.tmp / 'qa/repos/fabrig', 'rev-parse', 'refs/remotes/origin/gone') == gone
+    assert lab.git(lab.slots / '1', 'rev-parse', 'refs/remotes/origin/gone') == gone
     lab.git(checkout, 'push', 'origin', ':gone')
     result = lab.walk('b0', '--build', 'gone', '--login', CHATGPT, status=2)
     assert 'no branch origin/gone and no commit' in result.stderr
-    assert not lab.calls('logins') and not lab.calls('codex-run') and not lab.walk_states()
+    assert all(row == ['list'] for row in lab.calls('logins')) and not lab.calls('codex-run')
+    assert all(s['released'] and s['slot_claim']['released'] for _, s in lab.walk_states())
 
 
 def an_ambiguous_build_is_refused(lab):
@@ -2592,13 +2650,14 @@ def an_ambiguous_build_is_refused(lab):
     result = lab.walk('b0', '--build', commit[:9], '--login', CHATGPT, status=2)
     assert 'ambiguous branch and commit' in result.stderr
     assert 'origin/' + commit[:9] in result.stderr and 'full commit ' + commit in result.stderr
-    assert not lab.calls('logins') and not lab.calls('codex-run') and not lab.walk_states()
-    assert not (lab.tmp / 'qa/walks').exists()
+    assert all(row == ['list'] for row in lab.calls('logins')) and not lab.calls('codex-run')
+    assert all(s['released'] and s['slot_claim']['released'] for _, s in lab.walk_states())
+    assert not (lab.tmp / 'qa/repos').exists()
     assert not list((lab.tmp / 'qa/repos').glob('fabrig-walk-*'))
     assert not list((lab.tmp / 'qa-focused').glob('*/loop.tsv'))
     lab.walk('b0', '--build', 'origin/' + commit[:9])
     lab.walk('b0', '--build', commit)
-    first, second = lab.walk_states()
+    first, second = [(d, s) for d, s in lab.walk_states() if s['run']]
     assert first[1]['main'] == fix and second[1]['main'] == commit
 
 
@@ -2625,7 +2684,7 @@ subprocess.Popen = ReadyPopen
 original = tool['command']
 def command(argv, cwd=None, timeout=None, pass_fds=(), **kwargs):
     name = str(argv[0]).rsplit('/', 1)[-1]
-    expected = {'git': 300, 'systemctl': 30, 'logins': 60, 'post': 60, 'codex-run': 120}
+    expected = {'claim': 60, 'ssh': 60, 'df': 30, 'python3': 300, 'cargo': 300, 'git': 300, 'systemctl': 30, 'logins': 60, 'post': 60, 'codex-run': 120}
     if kwargs.get('env', {}).get('GIT_NO_LAZY_FETCH') == '1':
         assert name == 'git' and 0 < timeout <= 120
     else:
@@ -3374,6 +3433,7 @@ def pass_states_are_left_untouched(lab):
     assert lab.walk_state()[1]['stage'] == 'ended'
 
 CASES = (
+
     a_hard_linked_rung_brief_is_never_read_or_copied,
     hard_linked_metadata_is_never_read,
     unowned_metadata_is_never_read,

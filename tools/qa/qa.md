@@ -14,11 +14,14 @@ qa watch --director NAME@MACHINE [--once]
 ```
 
 Only `fabrig` is a repository, with origin
-`git@github.com:fabrig-ai/fabrig.git`. The origin is fetched and pruned into
-`tmp/qa/repos/fabrig/`, with an exclusive clone lock, origin validation and
-symlink refusal. REF defaults to `main`. An exact origin branch (bare or
+`git@github.com:fabrig-ai/fabrig.git`. Each walk uses an existing fleet clone
+at `~/src/fabrig/slots/N`, independent of DEV_ROOT. The tool never creates,
+replaces or deletes a slot checkout, clone or worktree, and never uses or
+creates `tmp/qa/repos`. A claimed slot's origin is validated, fetched and
+pruned in place before REF resolution. Symlink slot paths are refused.
+REF defaults to `main`. An exact origin branch (bare or
 `origin/BRANCH`) or a unique 4–40 digit hexadecimal commit resolves before
-admission. Tags, stale tracking refs and revision expressions do not supply
+login admission. Tags, stale tracking refs and revision expressions do not supply
 branches; ambiguous branch/commit spellings require an explicit origin
 branch or full commit. A hexadecimal object must be a commit. The saved SHA
 is checked out even if its branch subsequently moves.
@@ -39,19 +42,41 @@ or unreadable settings refuse the command.
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `QA_WALK_KINDS` | `forgejo=2:chatgpt claude=2:claude` | Ordered `KIND=SLOTS:POOL[,POOL...]` entries |
+| `QA_WALK_KINDS` | `forgejo=2:chatgpt claude=2:claude` | Ordered `KIND=COUNT:POOL[,POOL...]` entries; COUNT is accepted for compatibility, caps come from named slots |
+| `QA_WALK_SLOTS` | empty | `KIND=N[,N...]` entries; each kind tries its named slots in this order |
+| `QA_SLOT_HOST` | `hetzner6` | This builder's inventory host name |
+| `QA_CLAIM_OWNER` | `s/qa` | Owner of the walk's claims |
+| `QA_CLAIM_SSH` | `hel8` | Claims host's SSH target; empty runs installed `claim` locally |
 | `QA_STOP_SECONDS` | 50 | Wrapper's lock wait and exporter share this bound; positive and below 60 |
 | `QA_GIVE_BACK_SECONDS` | 90 | Wait for a unit's stop confirmation; nonnegative |
 | `QA_INTERVAL_SECONDS` | 300 | Mailbox wait between checks; nonnegative |
 
 A walk's cap is `--cap`, 180 minutes at a start and the saved cap at a resume;
 it must be positive. Its clock starts again on resume. Kinds start with a
-lowercase letter and contain lowercase letters and digits. Slots are
-positive; pools are unique login pool names, never numbered members.
-Duplicate kinds, controls and malformed entries refuse the configuration.
+lowercase letter and contain lowercase letters and digits. Slot numbers and
+the compatibility COUNT are positive; pools are unique login pool names,
+never numbered members. Duplicate kinds, duplicate slot numbers (including
+across kinds), controls and malformed entries refuse the configuration.
+Mappings for a currently unconfigured kind are unused. Each configured kind's
+slot count is its cap, including hand-held logins; a kind without named slots
+cannot walk or take another login. The old COUNT does not limit that cap.
 The first kind is the default. Pass settings, including `QA_LOGIN_RESERVE`,
 are unused: no pass is admitted, so there is no pass reserve to validate.
 An undersized login pool remains a broken-cap refusal at take time.
+
+For hetzner6's shares, the data lines in `~/src/rust/tmp/machine.env` are:
+
+```
+QA_WALK_KINDS=forgejo=1:chatgpt claude=1:claude
+QA_WALK_SLOTS=forgejo=8 claude=4
+QA_SLOT_HOST=hetzner6
+QA_CLAIM_OWNER=s/qa
+QA_CLAIM_SSH=hel8
+```
+
+The fleet supplies clean fabrig clones in slots 8 and 4, and installed
+`claim` on hel8 reads the fleet's current inventory. The SSH target must
+provide noninteractive access and a login shell with `claim` on PATH.
 
 `POST_NAME` supplies the starter's name; the machine comes from the `local`
 entry in `DEV_ROOT/tmp/post/machines`, else the hostname. The starter, rung,
@@ -104,12 +129,31 @@ recipients. Other users' processes are excluded from launcher discovery; own
 process cmdlines receive the same descriptor checks.
 
 Each managed change is saved through a sibling file and rename. Attempts
-retain REF/SHA, cap, start, slot, grants, pools, moved/in-place kinds, run,
-cleanup progress, alert receipts and pause decision. The lowest free slot
-of the kind is a detached worktree at
-`tmp/qa/repos/fabrig-walk-KIND-K/`. A broken slot is recreated. Its checkout
-runs `cargo fetch --locked`, bounded to 300 seconds, before any login is
-taken. Failed preparation releases that attempt's grants and slot.
+retain REF/SHA, cap, start, numeric slot and claim, grants, pools,
+moved/in-place kinds, run, cleanup progress, alert receipts and pause decision.
+Admission first saves an attempt without a slot, then tries the kind's
+configured numbers with `claim claim HOST N OWNER 'qa walk NAME attempt A'`.
+A refusal, including a claim by the same owner, tries the next number;
+when all refuse, the attempt takes no slot or login. A timeout or uncertain
+transport result refuses the attempt for orphan repair rather than risking a second claim. Every claim
+command has a 60-second bound. With QA_CLAIM_SSH set, the command runs through
+`ssh -o BatchMode=yes TARGET` and `bash -lc`, quoting every claim word and
+the login shell's command separately. An empty target invokes local `claim`.
+The accepted claim, including host, owner, target and WHAT, is saved before
+checkout preparation.
+
+A slot must have the exact fabrig origin and no tracked changes or untracked
+files outside `target/` (including ignored files). Missing, dirty, wrong-origin
+or linked checkouts are refused and preserved. Preparation fetches and prunes
+origin, resolves REF there and switches detached to the saved SHA without
+forcing or cleaning. It runs `python3 -I -B SLOT/tools/slots/trim SLOT`, bounded
+to 300 seconds; output and status go to `prepare-ATTEMPT.log` in the walk's
+directory. Trim failure is advisory. Then `df -B1 --output=avail /` (30-second
+bound) must show at least 80000000000 available bytes, and
+`cargo fetch --locked` (300-second bound) must succeed before any login take.
+A preparation refusal cancels the attempt and releases its claim, retrying
+release through the watcher when necessary. REF refusals therefore retain a
+cancelled start or a failed resume attempt, with no login taken.
 
 Pools are taken in name order, each grant saved before the next. Resting
 paths are inspected by stat alone: directory logins are used in place,
@@ -119,8 +163,14 @@ byte for byte to `brief.md`. `task.md` names the checkout, resolved build,
 cap, report, grant paths, give-back protocol and `qa deploy`. The session
 must plan and follow the brief and product binding, keep notes and report,
 give moved logins back before stopping deployments, and check configuration
-before every start. A branch confirms a fix; the rung's final walk ends on
-main at the landed commit. No login is read, copied or printed by the tool;
+before every start. The task requires
+`HEAVY_CLASS=background heavy cargo build --locked --offline -p temper`, forbids
+`--release`, `--target-dir`, target cleaning and other checkout changes, and
+requires the 80000000000-byte root disk check before each heavy command.
+Below the floor, the session waits five minutes and checks again. Deployment
+data and a private copy of its binary stay in the walk directory so a paused
+box does not depend on the slot's executable. A branch confirms a fix; the
+rung's final walk ends on main at the landed commit. No login is read, copied or printed by the tool;
 only its name and resting path are printed.
 
 The clock is `tmp/qa-focused/RUNG/loop.tsv`, headed
@@ -136,7 +186,8 @@ After complete cleanup, a pause frees the slot and logins but retains
 scratch, notes, deployment commands and the paused line in state. Resume
 requires the same repository and rung, a completed and posted pause, an
 explicit build, and no pool or kind changes. It preserves the walk's number
-and prior attempts, takes fresh grants and a free slot, archives the current
+and prior attempts, reclaims and prepares a kind slot through the same
+protocol before taking fresh grants, archives the current
 report as `report-ATTEMPT.md`, removes `paused` and the old give-back, and
 writes a task carrying notes, earlier findings and saved deployment commands.
 It tells the session to restart kept data with REF's binary, check its
@@ -185,6 +236,21 @@ directory; failed, duplicate or malformed observations keep custody. Stops
 are nonblocking followed by bounded show polls. Every systemctl call has a
 30-second bound; login and post calls 60 seconds, codex-run 120 seconds.
 The slot stays held until session and deployment units are confirmed stopped.
+At that point local `released` records the stop confirmation, and
+`claim release HOST N OWNER` releases the saved attempt's claim through its
+saved SSH target. Claim release has its own saved `slot_claim.released` flag;
+errors retry at every check, even for ended or paused states, and never gate
+login returns or the pause/end notice. Resume waits for its prior claim's
+release. Before releasing, `claim list` must still identify the same owner
+and WHAT. A free slot or successor claim confirms that the old claim is gone;
+a successor is never released, including one with the same owner.
+
+Under the admission lock, each check also lists claims on this builder's
+configured kind slots. This owner's exact `qa walk NAME attempt A` claim with
+no saved slot for that attempt is released, repairing a crash after claim
+acceptance and before state save. Unrelated descriptions, other owners,
+other slots and foreign repository walks are preserved. Unreadable saved
+custody disables orphan repair; list/release failures retry on the next check.
 A queued or running unit job, including on a loaded inactive unit, keeps
 custody and the slot. A live or uncertain task launcher also prevents stop
 confirmation, even with an ended marker; the unit and job are rechecked after
@@ -210,8 +276,9 @@ The rung owner reads the report and files findings; the tool commits no record.
 
 ## codex-run and installation
 
-Dependencies (`codex-run`, `logins`, `post`, `systemctl`, `systemd-run`, `cargo`
-and `git`) resolve on PATH. The deployed codex-run is fabrig's
+Dependencies (`codex-run`, `logins`, `post`, `systemctl`, `systemd-run`, `cargo`,
+`git`, `claim`, `ssh`, `df` and `python3`) resolve on PATH. The deployed
+codex-run is fabrig's
 `~/.local/bin/codex-run`; qa lives at current's `tools/qa/qa` and assumes no
 adjacent legacy executables. The task call supplies absolute TASK, DIR and
 REPORT, explicit `--to qa-watch` and an executable `--on-stop` callback.
@@ -225,8 +292,9 @@ unit is rechecked after scanning launchers. `--resume RUN` supplies the new
 checkout, recipient, callback, task and report explicitly. Codex-run can recover
 a thread from events; qa delegates that decision to it. Only its missing-thread
 or missing-meta refusal falls back to a fresh session. REPORT must not exist,
-so resumes archive it first. These named worktrees are outside fabrig's numeric
-slots and do not invoke numeric-slot trimming or slot leases.
+so resumes archive it first. The checkout is a fabrig numeric slot;
+qa prepares it with trim and codex-run applies its numeric-slot lifetime
+interlock and normal startup trimming.
 
 `tools/installed` links `qa` to `tools/qa/qa` through fleet-sync. Installation
 does not start a watcher. A deployment stops the legacy agents-qa-watch unit
@@ -239,5 +307,6 @@ test keeps systemd programs on PATH with no executable override.
 
 Run `python3 -I -B tools/qa/test_qa.py`. Every unittest case runs in its own
 process, session and temporary HOME/DEV_ROOT with local git origins, fake
-services and fixture launcher observations; descendants are killed and reaped. The suite runs at most eight
-cases concurrently. It never uses real logins, a real manager or network.
+services, fake local and remote claims, fake disk observations, slot clones
+under the temporary HOME and fixture launcher observations; descendants are
+killed and reaped. The suite runs at most eight cases concurrently. It never uses real logins, a real manager or network.

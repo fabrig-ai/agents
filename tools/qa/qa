@@ -30,7 +30,7 @@ NAME = r'[a-z0-9][a-z0-9_-]*'
 LOGIN = r'[a-z][a-z0-9-]*'
 SHA = r'[0-9a-f]{40}'
 ADDRESS = r'[a-z][a-z0-9-]*(/[a-z0-9][a-z0-9-]*)*@[a-z][a-z0-9-]*'
-ATTEMPT_KEYS = ('attempt ref main cap started slot logins kinds pools requests run stage given released '
+ATTEMPT_KEYS = ('attempt ref main cap started slot slot_claim logins kinds pools requests run stage given released '
                 'start_logged end_logged posted capped decision pause_line resume_run report_attempt alerts').split()
 
 
@@ -172,76 +172,50 @@ class Repositories:
     def __init__(self, workspace):
         self.workspace = workspace
 
-    @contextmanager
-    def fetched(self, repo):
-        origin = self.workspace.origin(repo)
-        parent = self.workspace.tmp / 'qa/repos'
-        no_links(self.workspace.tmp, parent)
-        parent.mkdir(parents=True, exist_ok=True)
-        root = parent / repo
-        with (parent / (repo + '.lock')).open('a') as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            no_links(self.workspace.tmp, root)
-            if not root.exists():
-                # A failed clone leaves no half-built repository at the shared path.
-                with tempfile.TemporaryDirectory(prefix=repo + '-', dir=parent) as directory:
-                    clone = Path(directory) / 'repo'
-                    result = command(['git', 'clone', '--filter=blob:none', '--no-checkout', origin, clone], timeout=300)
-                    need(result.returncode == 0, f'cannot clone {repo}: {result.stderr.strip()}', 4)
-                    clone.rename(root)
-            need(git(root, 'config', '--get', 'remote.origin.url') == origin,
-                 f'{root}: unexpected origin', 4)
-            # Prune: a branch deleted on origin never resolves from a stale tracking ref.
-            result = git(root, 'fetch', '--quiet', '--prune', 'origin', '+refs/heads/*:refs/remotes/origin/*', check=False)
-            need(result.returncode == 0, f'cannot fetch {repo}: {result.stderr.strip()}', 4)
-            yield root
+    def checkout(self, root, main):
+        git(root, 'switch', '--detach', main)
+        return root
 
-    def checkout(self, root, repo, slot, main):
-        # The caller holds the clone lock throughout validation and add.
-        path = root.with_name(slot)
-        no_links(self.workspace.tmp, path)
-        listed = git(root, 'worktree', 'list', '--porcelain').splitlines()
-        common = git(root, 'rev-parse', '--path-format=absolute', '--git-common-dir')
-        own = (git(path, 'rev-parse', '--path-format=absolute', '--git-common-dir', check=False)
-               if path.is_dir() and not path.is_symlink() else None)
-        valid = (f'worktree {path}' in listed and own is not None
-                 and own.returncode == 0 and own.stdout.strip() == common)
-        if not valid:
-            no_links(self.workspace.tmp, path)
-            if path.exists() and not path.is_dir():
-                path.unlink()
-            elif path.exists():
-                shutil.rmtree(path)
-            git(root, 'worktree', 'prune')
-            git(root, 'worktree', 'add', '--detach', str(path), main)
-        git(path, 'checkout', '--detach', '--force', main)
-        git(path, 'clean', '-fdq')
-        return path
+    def fetch(self, repo, slot):
+        root = Path.home() / 'src/fabrig/slots' / str(slot)
+        no_links(Path.home(), root)
+        need(root.is_dir(), f'{root}: slot checkout is missing', 4)
+        need(git(root, 'rev-parse', '--show-toplevel') == str(root)
+             and git(root, 'config', '--get', 'remote.origin.url') == self.workspace.origin(repo),
+             f'{root}: unexpected origin or checkout', 4)
+        status = git(root, 'status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignored', check=False)
+        need(status.returncode == 0, f'{root}: cannot check checkout cleanliness', 4)
+        entries = status.stdout.split('\0')
+        need(all(not entry or entry[:3] in ('?? ', '!! ') and entry[3:].startswith('target/')
+                 for entry in entries), f'{root}: dirty slot checkout', 4)
+        result = git(root, 'fetch', '--quiet', '--prune', 'origin',
+                     '+refs/heads/*:refs/remotes/origin/*', check=False)
+        need(result.returncode == 0, f'cannot fetch {repo}: {result.stderr.strip()}', 4)
+        return root
 
-    def build(self, repo, ref):
+    def build(self, root, ref):
         why = f'build {ref}: no branch origin/{ref} and no commit; try origin/<branch> or a commit'
-        with self.fetched(repo) as root:
-            branch = ref[7:] if ref.startswith('origin/') else ref
-            remote = None
-            if git(root, 'check-ref-format', 'refs/heads/' + branch, check=False).returncode == 0:
-                # The exact ref alone: rev-parse would fall back to a tag or a local branch of that spelling.
-                shown = git(root, 'show-ref', '--verify', '--hash', 'refs/remotes/origin/' + branch, check=False)
-                sha = shown.stdout.strip() if shown.returncode == 0 else ''
-                if re.fullmatch(SHA, sha) and git(root, 'cat-file', '-t', sha, check=False).stdout.strip() == 'commit':
-                    remote = sha
-            if ref.startswith('origin/') or ref == 'main':
-                need(remote, why)
-                return remote
-            if re.fullmatch(r'[0-9a-fA-F]{4,40}', ref):
-                resolved = git(root, 'rev-parse', '--disambiguate=' + ref.lower(), check=False)
-                objects = resolved.stdout.splitlines()
-                need(resolved.returncode == 0 and len(objects) == 1 and re.fullmatch(SHA, objects[0])
-                     and git(root, 'cat-file', '-t', objects[0]) == 'commit', why)
-                need(not remote, f'build {ref}: ambiguous branch and commit; try origin/{ref} for the branch '
-                     f'or the full commit {objects[0]}')
-                return objects[0]
-            need(not re.fullmatch(r'[0-9a-fA-F]+', ref) and remote, why)
+        branch = ref[7:] if ref.startswith('origin/') else ref
+        remote = None
+        if git(root, 'check-ref-format', 'refs/heads/' + branch, check=False).returncode == 0:
+            # The exact ref alone: rev-parse would fall back to a tag or a local branch of that spelling.
+            shown = git(root, 'show-ref', '--verify', '--hash', 'refs/remotes/origin/' + branch, check=False)
+            sha = shown.stdout.strip() if shown.returncode == 0 else ''
+            if re.fullmatch(SHA, sha) and git(root, 'cat-file', '-t', sha, check=False).stdout.strip() == 'commit':
+                remote = sha
+        if ref.startswith('origin/') or ref == 'main':
+            need(remote, why)
             return remote
+        if re.fullmatch(r'[0-9a-fA-F]{4,40}', ref):
+            resolved = git(root, 'rev-parse', '--disambiguate=' + ref.lower(), check=False)
+            objects = resolved.stdout.splitlines()
+            need(resolved.returncode == 0 and len(objects) == 1 and re.fullmatch(SHA, objects[0])
+                 and git(root, 'cat-file', '-t', objects[0]) == 'commit', why)
+            need(not remote, f'build {ref}: ambiguous branch and commit; try origin/{ref} for the branch '
+                 f'or the full commit {objects[0]}')
+            return objects[0]
+        need(not re.fullmatch(r'[0-9a-fA-F]+', ref) and remote, why)
+        return remote
 
 
 def replace(path, data, mode=0o600):
@@ -288,7 +262,8 @@ def log(message):
 def settings(workspace):
     # Same precedence and valid machine.env lines as kit.sh's machine_setting.
     values = dict(QA_INTERVAL_SECONDS='300', QA_GIVE_BACK_SECONDS='90', QA_STOP_SECONDS='50',
-                  QA_WALK_KINDS='forgejo=2:chatgpt claude=2:claude')
+                  QA_WALK_KINDS='forgejo=2:chatgpt claude=2:claude',
+                  QA_WALK_SLOTS='', QA_SLOT_HOST='hetzner6', QA_CLAIM_OWNER='s/qa', QA_CLAIM_SSH='hel8')
     path = workspace.tmp / 'machine.env'
     try:
         text = read_text(path, errors='replace')
@@ -298,9 +273,12 @@ def settings(workspace):
         match = re.fullmatch(r'(QA_INTERVAL_SECONDS|QA_GIVE_BACK_SECONDS|QA_STOP_SECONDS)=([0-9]+)', line)
         if match:
             values[match[1]] = match[2]
-        if line.startswith('QA_WALK_KINDS='):
-            values['QA_WALK_KINDS'] = line.partition('=')[2]
+        key, sep, value = line.partition('=')
+        if sep and key in ('QA_WALK_KINDS', 'QA_WALK_SLOTS', 'QA_SLOT_HOST', 'QA_CLAIM_OWNER', 'QA_CLAIM_SSH'):
+            values[key] = value
     kinds = os.environ.get('QA_WALK_KINDS', values.pop('QA_WALK_KINDS'))
+    text_values = {key: os.environ.get(key, values.pop(key)) for key in
+                   ('QA_WALK_SLOTS', 'QA_SLOT_HOST', 'QA_CLAIM_OWNER', 'QA_CLAIM_SSH')}
     for key in values:
         value = os.environ.get(key, values[key])
         need(re.fullmatch(r'[0-9]+', value), f'{key} must be a nonnegative integer')
@@ -317,6 +295,25 @@ def settings(workspace):
              and all(re.fullmatch(LOGIN, pool) and pool_of(pool) == pool for pool in pools),
              f'invalid QA_WALK_KINDS entry {position}')
         parsed[kind] = dict(slots=slots, pools=pools)
+    named, used = {}, set()
+    for word in text_values['QA_WALK_SLOTS'].split(' '):
+        if not word:
+            continue
+        match = re.fullmatch(r'([a-z][a-z0-9]*)=([1-9][0-9]*(?:,[1-9][0-9]*)*)', word)
+        need(match and match[1] not in named, 'invalid QA_WALK_SLOTS entry: ' + word)
+        numbers = [int(number) for number in match[2].split(',')]
+        need(len(set(numbers)) == len(numbers) and not used.intersection(numbers),
+             'duplicate QA_WALK_SLOTS slot: ' + word)
+        named[match[1]] = numbers
+        used.update(numbers)
+    need(re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9-]*', text_values['QA_SLOT_HOST']), 'invalid QA_SLOT_HOST')
+    need(re.fullmatch(r'[a-z][a-z0-9-]*(/[a-z0-9][a-z0-9-]*)*', text_values['QA_CLAIM_OWNER']),
+         'invalid QA_CLAIM_OWNER')
+    need(not text_values['QA_CLAIM_SSH'] or re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_.@-]*',
+                                                     text_values['QA_CLAIM_SSH']), 'invalid QA_CLAIM_SSH')
+    for kind, config in parsed.items():
+        config.update(numbers=named.get(kind, []), slots=len(named.get(kind, [])))
+    values.update(text_values)
     values['QA_WALK_KINDS'] = parsed
     return values
 
@@ -489,6 +486,77 @@ class Watch:
             need(lock is not None, 'login take needs its admission lock', 4)
             options['pass_fds'] = (lock,)
         return command([self.workspace.tool(tool), *args], timeout=seconds[tool], **options)
+
+    def slot_call(self, claim, *args):
+        words = [str(self.workspace.tool('claim')), *map(str, args)]
+        if claim['ssh']:
+            # ssh joins its remote arguments into shell text: quote both shell levels.
+            quote = lambda word: "'" + word.replace("'", "'\"'\"'") + "'"
+            remote = ' '.join(quote(word) for word in words)
+            words = [self.workspace.tool('ssh'), '-o', 'BatchMode=yes', claim['ssh'],
+                     'bash -lc ' + quote(remote)]
+        return command(words, timeout=60)
+
+    def release_slot(self, directory, state):
+        claim = state.get('slot_claim')
+        if not state.get('released') or not claim or claim['released']:
+            return
+        try:
+            listed = self.slot_call(claim, 'list')
+            prefix = f"{claim['host']} {state['slot']} ["
+            rows = [row for row in listed.stdout.splitlines() if row.startswith(prefix)]
+            need(listed.returncode == 0 and len(rows) == 1, 'cannot verify slot claim before release', 4)
+            match = re.fullmatch(re.escape(prefix) + r'[^]\r\n]+\]: (free|.+ \(since [^()\r\n]+\); held .+)', rows[0])
+            need(match, 'invalid slot claim listing', 4)
+            expected = claim['owner'] + ': ' + claim['what'] + ' (since '
+            if not match[1].startswith(expected):
+                # A release accepted before a crash, possibly followed by another
+                # walk's claim. Never release that successor, even with our owner.
+                accepted = True
+            else:
+                result = self.slot_call(claim, 'release', claim['host'], state['slot'], claim['owner'])
+                accepted = result.returncode == 0
+            if accepted:
+                claim['released'] = True
+                self.save(directory, state)
+            else:
+                log(f'{state["walk"]}: slot claim release pending; trying next check')
+        except (OSError, Problem):
+            log(f'{state["walk"]}: slot claim release failed; trying next check')
+
+    def repair_slot_claims(self, walks):
+        if not self.walks_valid:
+            return
+        config = self.options
+        claim = dict(host=config['QA_SLOT_HOST'], owner=config['QA_CLAIM_OWNER'], ssh=config['QA_CLAIM_SSH'])
+        numbers = {n for kind in config['QA_WALK_KINDS'].values() for n in kind['numbers']}
+        if not numbers:
+            return
+        try:
+            listed = self.slot_call(claim, 'list')
+            if listed.returncode:
+                log('cannot list slot claims; orphan repair waits for next check')
+                return
+            pattern = (re.escape(claim['host']) + r' ([1-9][0-9]*) \[[^]\r\n]+\]: '
+                       + re.escape(claim['owner']) + r': (qa walk (rung-[a-z0-9-]+-[1-9][0-9]*) attempt ([1-9][0-9]*))'
+                       + r' \(since [^()\r\n]+\); held .+')
+            for row in listed.stdout.splitlines():
+                match = re.fullmatch(pattern, row)
+                if not match or int(match[1]) not in numbers:
+                    continue
+                number, name, attempt = int(match[1]), match[3], int(match[4])
+                if any(s['walk'] == name for s in self.legacy_walks):
+                    continue
+                state = next((s for _, s in walks if s['walk'] == name), None)
+                # Any saved slot for this attempt belongs to normal cleanup, even
+                # if its claim's last successful release was not saved.
+                saved = ([state, *state.get('attempts', [])] if state else [])
+                if any(a.get('attempt', 1) == attempt and a.get('slot') is not None for a in saved):
+                    continue
+                result = self.slot_call(claim, 'release', claim['host'], number, claim['owner'])
+                log(f'{name}: orphan slot {number} claim ' + ('released' if result.returncode == 0 else 'release pending'))
+        except (OSError, Problem):
+            log('slot claim repair failed; trying next check')
 
     def save(self, directory, state):
         need(state['repo'] in REPOSITORIES, 'cannot save an unmanaged walk', 4)
@@ -801,6 +869,7 @@ class Watch:
                 or self.unit_status('codex-run-' + state['run']) == 'stopped')):
             state['released'] = True
             self.save(directory, state)
+        self.release_slot(directory, state)
         return complete and alerted
 
 
@@ -972,6 +1041,7 @@ class Watch:
                 state.update(stage='paused', decision='walk-pause', end_logged=True, posted=True)
                 replace(directory / 'paused', (state['pause_line'] + '\n').encode())
             self.save(directory, state)
+        self.release_slot(directory, state)
 
     def check_walk(self, directory, state):
         if state.get('stage') == 'cancelled':
@@ -1071,10 +1141,13 @@ class Watch:
                     if state.get('stage') not in ('ended', 'paused'):
                         self.alert(directory, state, None)
                         self.check_walk(directory, state)
+                    else:
+                        self.release_slot(directory, state)
                 except (Problem, OSError, ValueError, RecursionError, UnicodeError,
                         KeyError, TypeError, AttributeError) as error:
                     why = str(error) if isinstance(error, Problem) else type(error).__name__
                     log(f'{state["walk"]}: cleanup failed ({why}); keeping logins and scratch')
+            self.repair_slot_claims(walks)
 
 
 
@@ -1108,6 +1181,15 @@ def walk_attempt(state):
          and set(state['pools'].values()) == set(state['logins']), f'attempt: invalid custody', 4)
     need(all(type(state[key]) is bool for key in ('released', 'start_logged', 'end_logged', 'posted')),
          'invalid attempt progress', 4)
+    claim = state.get('slot_claim')
+    if claim is not None:
+        need(isinstance(claim, dict) and set(claim) == {'host', 'owner', 'ssh', 'what', 'released'}
+             and isinstance(claim['host'], str) and re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9-]*', claim['host'])
+             and isinstance(claim['owner'], str) and re.fullmatch(r'[a-z][a-z0-9-]*(/[a-z0-9][a-z0-9-]*)*', claim['owner'])
+             and isinstance(claim['ssh'], str) and (not claim['ssh'] or re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_.@-]*', claim['ssh']))
+             and isinstance(claim['what'], str) and re.fullmatch(r'qa walk rung-[a-z0-9-]+-[1-9][0-9]* attempt [1-9][0-9]*', claim['what'])
+             and type(claim['released']) is bool and state['slot'] is not None,
+             'invalid saved slot claim', 4)
     check_alerts(state)
     if 'report_attempt' in state:
         need(type(state['report_attempt']) is int and 1 <= state['report_attempt'] <= state.get('attempt', 1),
@@ -1207,7 +1289,7 @@ def walk(args, workspace):
     service = Watch(workspace, '')
     service.options = options
     ref = args.build if args.build is not None else 'main'
-    main = service.repositories.build(args.repo, ref)
+    main = ''
     with service.walks_locked():
         focused = workspace.tmp / 'qa-focused'
         no_links(workspace.tmp, focused)
@@ -1225,10 +1307,12 @@ def walk(args, workspace):
             directory, state = match
             need(state['stage'] == 'paused' and state.get('released') and state.get('end_logged')
                  and state.get('posted') and not service.outstanding(state), 'walk pause is not complete')
+            need(not state.get('slot_claim') or state['slot_claim']['released'], 'slot claim release is still pending', 1)
             kind = state.get('kind', next(iter(kinds)))
             need(kind in kinds and set(state['requests']) <= set(kinds[kind]['pools']),
                  'saved walk kind or pools are no longer configured')
             state['kind'] = kind
+            need(kinds[kind]['numbers'], f'no walk slots configured for kind {kind}', 1)
             service.walk_room(state['requests'], kind)
             service.save(directory, state)
             previous_run = next((a['run'] for a in reversed(state['attempts']) if a.get('run')), '')
@@ -1239,11 +1323,13 @@ def walk(args, workspace):
                          stage='reserving', released=False, start_logged=False, end_logged=False,
                          posted=False, capped=False, resume_run=previous_run, alerts={})
             state.pop('decision', None)
+            state.pop('slot_claim', None)
         else:
             kind = args.kind if args.kind is not None else next(iter(kinds))
             need(kind in kinds, 'unknown walk kind: ' + kind)
             requests = sorted(args.login or kinds[kind]['pools'])
             need(set(requests) <= set(kinds[kind]['pools']), 'login is not a pool of kind ' + kind)
+            need(kinds[kind]['numbers'], f'no walk slots configured for kind {kind}', 1)
             holders = service.walk_room(requests, kind)
             prefix = 'rung-' + args.rung + '-' + ('' if kind == next(iter(kinds)) else kind + '-')
             numbering = [state for _, state in walks] + service.legacy_walks
@@ -1270,16 +1356,33 @@ def walk(args, workspace):
                          start_logged=False, end_logged=False, posted=False, report_attempt=1)
         service.classes[directory] = 'walk'
         service.save(directory, state)
-        held = {s['slot'] for _, s in walks if s.get('kind', next(iter(kinds))) == kind and not s.get('released')}
-        state['slot'] = next((k for k in range(1, kinds[kind]['slots'] + 1) if k not in held), None)
-        if state['slot'] is None:
-            service.cancel_walk(directory, state, drop=False)
-            raise Problem(f'no free walk slot for kind {kind}', 1)
-        service.save(directory, state)
+        taking = False
         try:
-            slot = f'{args.repo}-walk-{kind}-{state["slot"]}'
-            with service.repositories.fetched(args.repo) as root:
-                checkout = service.repositories.checkout(root, args.repo, slot, state['main'])
+            claim = dict(host=options['QA_SLOT_HOST'], owner=options['QA_CLAIM_OWNER'],
+                         ssh=options['QA_CLAIM_SSH'], what=f'qa walk {name} attempt {state.get("attempt", 1)}', released=False)
+            for number in kinds[kind]['numbers']:
+                claimed = service.slot_call(claim, 'claim', claim['host'], number, claim['owner'], claim['what'])
+                need(claimed.returncode != 124, 'slot claim timed out; check will repair any unsaved claim', 4)
+                need(claimed.returncode in (0, 1), 'cannot confirm slot claim; check will repair any unsaved claim', 4)
+                if claimed.returncode == 0:
+                    state.update(slot=number, slot_claim=claim)
+                    service.save(directory, state)
+                    break
+            need(state['slot'] is not None, f'no free walk slot for kind {kind}', 1)
+            checkout = service.repositories.fetch(args.repo, state['slot'])
+            state['main'] = service.repositories.build(checkout, ref)
+            service.save(directory, state)
+            service.repositories.checkout(checkout, state['main'])
+            try:
+                trimmed = command(['python3', '-I', '-B', checkout / 'tools/slots/trim', checkout], timeout=300)
+                trim_log = trimmed.stdout + trimmed.stderr + f'trim exit {trimmed.returncode}\n'
+            except OSError as error:
+                trim_log = f'trim failed: {error}\n'
+            replace(directory / f'prepare-{state.get("attempt", 1)}.log', trim_log.encode())
+            disk = command(['df', '-B1', '--output=avail', '/'], timeout=30)
+            available = disk.stdout.split()
+            need(disk.returncode == 0 and len(available) == 2 and available[1].isdigit()
+                 and int(available[1]) >= 80000000000, 'slot refused: root disk needs at least 80000000000 bytes available', 4)
             try:
                 fetched = command(['cargo', 'fetch', '--locked'], cwd=checkout, timeout=300)
             except OSError as error:
@@ -1287,6 +1390,7 @@ def walk(args, workspace):
             need(fetched.returncode == 0,
                  f'cannot fetch build {ref}: ' + (fetched.stderr.strip() or fetched.stdout.strip()
                                                 or f'cargo fetch exited {fetched.returncode}'), 4)
+            taking = True
             for pool in state['requests']:
                 service.walk_room([pool], kind)
                 taken = service.call('logins', 'take', pool, '--any', '--now', '--as', state['holder'],
@@ -1334,6 +1438,11 @@ def walk(args, workspace):
                     f'Cap: {state["cap"]} minutes. Report: {directory}/report.md\n\nHeld logins:\n')
             task += ''.join(f'- {login} (pool {pool}): {state["logins"][login]} ({state["kinds"][login]})\n'
                             for pool, login in state['pools'].items()) or 'None.\n'
+            task += ('\nBuild only in this slot: HEAVY_CLASS=background heavy cargo build --locked --offline -p temper.\n'
+                     'Never use --release or --target-dir, never clean the target, and touch nothing else in the checkout.\n'
+                     'Before each heavy command run df -B1 --output=avail / and require at least 80000000000 bytes.\n'
+                     'Below that floor, wait 5 minutes and check again until enough space is available.\n'
+                     'Keep the deployed box in the walk directory with its own binary, independent of the slot.\n')
             task += (f'\nMove file logins into deployments as the binding says; directory logins are used in place.\n'
                      f'At once after moving a login, write {directory}/give-back: an executable\n'
                      'that exports each moved login back to its resting path, every program named by\n'
@@ -1392,7 +1501,7 @@ def walk(args, workspace):
             if state['stage'] == 'starting':
                 service.recover_run(directory, state)
             if not state['run']:
-                service.cancel_walk(directory, state)
+                service.cancel_walk(directory, state, drop=taking)
             raise
         print('walk ' + name)
         for login, path in state['logins'].items():
