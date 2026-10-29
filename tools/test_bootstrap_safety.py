@@ -19,7 +19,7 @@ class BootstrapSafetyTest(unittest.TestCase):
         self.f, self.runner, self.module = self.h.f, self.h.runner, self.h.module
 
     def test_live_roles_timer_leaves_ops_kache_bytes_modes_links_and_ownership_unchanged(self):
-        for host in ("hel8", "hetzner2", "hetzner3", "hetzner7"):
+        for host in tomllib.loads((self.f.source / "fleet/hosts.toml").read_text())["hosts"]:
             with self.subTest(host=host):
                 self.f.sync("--host", host)
                 for relative, text in {
