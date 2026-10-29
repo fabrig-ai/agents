@@ -51,6 +51,7 @@ Large event lists are kept in referenced private JSON detail files; the wire eve
 ## 7. Where it runs
 
 - **Slot:** ops claims one pool slot (`claim claim HOST N ops after-landing`; the slot ops names, proposed hetzner7 slot 4) in the activation window after fresh idle and space checks, and keeps it; its target stays warm; the slot guard's rules apply, and the tool frees disk only in that slot's target.
+  After each verdict and its events/outbox are durably saved, before the next checkout and only with all heavy completions known, it runs `python3 -I <slot>/tools/slots/trim --older 0 <slot>` (`--trim` overrides the script); trim failures are saved and posted to ops once until a successful trim, never block the next run, and hourly coverage includes the reported bytes freed (rounded to one MB).
 - **Builds:** every cargo command through heavy (via `tools/tiers/run`) with `HEAVY_CLASS=background`; the 80 GB rule is `tools/tiers/run`'s, bounded by section 2's wall bound.
 - **Unit** (s/deploy's conventions, 10-29): a single-host role `after-landing` in `fleet/units/roles.toml`, given in `fleet/hosts.toml` to ops's host; first line `# fleet-sync: start-once`, so fleet-sync starts it once when it first appears and ops starts and stops it afterwards; `Type=exec`, `ExecStart=/bin/bash -lc 'exec "$$HOME/src/fabrig/current/tools/after-landing/after-landing" follow'`, `Restart=on-failure`, `RestartSec=60`, `RestartPreventExitStatus=2`, `WorkingDirectory=%h`. Shipped as an agents branch for s/deploy's review, landed in a window agreed with ops.
 

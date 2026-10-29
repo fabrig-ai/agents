@@ -275,7 +275,8 @@ def initial():
     now = time.time()
     return dict(version=1, slot=None, seen=None, cursor=None, queue=[], tests={}, active=None,
                 outbox=[], stopped=False, fault_episode=None,
-                hour=dict(start=now, seen=0, completed=0, coalesced=0), last_run=None, lease_holds=[])
+                hour=dict(start=now, seen=0, completed=0, coalesced=0, trim_bytes=0),
+                last_run=None, lease_holds=[], trim_pending=None, trim_fault_episode=None, last_trim=None)
 
 
 class Runner:
@@ -295,6 +296,10 @@ class Runner:
         self.resolution_attempted = set()
         self.lifetime = None
         self.state.setdefault('lease_holds', [])
+        self.state.setdefault('trim_pending', None)
+        self.state.setdefault('trim_fault_episode', None)
+        self.state.setdefault('last_trim', None)
+        self.state['hour'].setdefault('trim_bytes', 0)
         self.next_poll = time.monotonic() + args.poll_interval
 
     def save(self):
@@ -380,11 +385,11 @@ class Runner:
                 bounded.pop(preview, None)
         return bounded
 
-    def fault(self, reason, identifier=None, group=None, *, save=True):
-        if self.state['fault_episode'] is not None:
+    def fault(self, reason, identifier=None, group=None, *, save=True, episode='fault_episode'):
+        if self.state[episode] is not None:
             return
         identifier = identifier or f"fault:{self.state['seen']}:{time.time_ns()}"
-        self.state['fault_episode'] = identifier
+        self.state[episode] = identifier
         if len(reason) > 2000:
             detail = self.artifact('fault', dict(reason=reason))
             reason = reason[:1000] + '; details: ' + detail
@@ -503,10 +508,11 @@ class Runner:
         lag = max(0, time.time() - waiting[0]['seen_at']) if waiting else 0
         identifier = f"coverage:{int(hour['start'])}"
         body = (f'id: {identifier}\npublished tips seen: {hour["seen"]}; runs completed: {hour["completed"]}; '
-                f'tips coalesced: {hour["coalesced"]}; oldest waiting lag seconds: {lag:.0f}')
+                f'tips coalesced: {hour["coalesced"]}; oldest waiting lag seconds: {lag:.0f}; '
+                f'trim bytes freed: {hour["trim_bytes"]}')
         for destination in dict.fromkeys([self.args.ops, self.args.coordinator]):
             self.post(identifier + ':' + destination, destination, body)
-        self.state['hour'] = dict(start=time.time(), seen=0, completed=0, coalesced=0)
+        self.state['hour'] = dict(start=time.time(), seen=0, completed=0, coalesced=0, trim_bytes=0)
         self.save()
 
     def resolve(self, keys):
@@ -775,7 +781,43 @@ sys.exit(code if code >= 0 else 128 - code)
         self.save()
         return outcome
 
+    def trim(self):
+        pending = self.state['trim_pending']
+        active = self.state['active']
+        if pending is None or (active and active['invocation']):
+            return
+        # The verdict/outbox and this intent were saved together. Mark the
+        # attempt before launch so a restart never repeats an uncertain trim.
+        started = pending['started']
+        pending['started'] = True
+        self.save()
+        outcome = dict(id=pending['id'], bytes_freed=0, error=None)
+        try:
+            if started:
+                raise Fault('trim interrupted; completion unknown; not repeated')
+            result = command([sys.executable, '-I', '-B', self.args.trim or self.args.slot / 'tools/slots/trim',
+                              '--older', '0', self.args.slot], cwd=self.args.slot)
+            outcome.update(code=result.returncode, stdout=result.stdout, stderr=result.stderr)
+            if result.returncode:
+                raise Fault(f'trim exit {result.returncode}: {result.stderr.strip()}')
+            # Fabrig reports decimal GB rounded to three places (one MB).
+            match = re.fullmatch(re.escape(str(self.args.slot))
+                                 + r': \d+ executables, (\d+)\.(\d{3}) GB freed; [^\n]+\n?', result.stdout)
+            if not match:
+                raise Fault('trim returned an unrecognized freed-space report')
+            outcome['bytes_freed'] = int(match[1]) * 1_000_000_000 + int(match[2]) * 1_000_000
+        except Fault as error:
+            outcome['error'] = str(error)
+            self.fault(str(error), pending['id'] + ':trim-fault', save=False, episode='trim_fault_episode')
+        else:
+            self.state['trim_fault_episode'] = None
+        self.state['last_trim'] = outcome
+        self.state['hour']['trim_bytes'] += outcome['bytes_freed']
+        self.state['trim_pending'] = None
+        self.save()
+
     def run(self):
+        self.trim()
         self.prepare()
         active = self.state['active']
         if active is None:
@@ -839,11 +881,13 @@ sys.exit(code if code >= 0 else 128 - code)
         if not faulted and not routing_error:
             self.state['fault_episode'] = None
         self.state['active'] = None
+        self.state['trim_pending'] = dict(id=identifier, started=False)
         if faulted or routing_error:
             self.fault('faulted pairs: ' + ', '.join(faulted) + ('; ' + routing_error if routing_error else ''),
                        identifier + ':fault', group=group, save=False)
         # Completion, episode and its undelivered alert are one transaction.
         self.save()
+        self.trim()
         self.deliver()
 
 
@@ -867,13 +911,14 @@ def arguments(argv=None):
     parser.add_argument('--registry', default=str(installed / 'session/start'))
     parser.add_argument('--heavy', default=str(Path.home() / 'src/fabrig/main/tools/heavy/heavy'))
     parser.add_argument('--tiers-run', type=Path)
+    parser.add_argument('--trim', type=Path)
     parser.add_argument('--lifetime', type=Path, default=Path.home() / 'src/fabrig/main/tools/slots/lifetime.py')
     parser.add_argument('--ops', default='ops@hel8')
     parser.add_argument('--coordinator', default='s/dynamic-memory@hel8')
     parser.add_argument('--host', default=socket.gethostname())
     parser.add_argument('--dry-run', action='store_true')
     args = parser.parse_args(argv)
-    for name in ('slot', 'state_dir', 'tiers', 'lifetime', 'tiers_run'):
+    for name in ('slot', 'state_dir', 'tiers', 'lifetime', 'tiers_run', 'trim'):
         if getattr(args, name) is not None:
             setattr(args, name, getattr(args, name).expanduser().absolute())
     for name in ('post', 'record', 'registry', 'heavy'):

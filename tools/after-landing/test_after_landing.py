@@ -58,6 +58,17 @@ if name == 'registry':
     if scenario.get('registry_fault'):
         sys.exit(2)
     print(json.dumps(scenario['registry']))
+elif name == 'trim':
+    state = json.loads((home / 'state/state.json').read_text())
+    slot = Path(sys.argv[-1])
+    log(dict(tool=name, args=sys.argv[1:], active=state['active'],
+             last_run=state['last_run'], pending=state['trim_pending'],
+             records=[event for group in state['outbox'] for event in group['records']],
+             head=__import__('subprocess').check_output(['git', '-C', slot, 'rev-parse', 'HEAD'], text=True).strip()))
+    if scenario.get('trim_code', 0):
+        print('fake trim failed', file=sys.stderr)
+        sys.exit(scenario['trim_code'])
+    print(f'{slot}: 2 executables, 1.234 GB freed; 100.000 GB free; 0 processes skipped')
 elif name in ('post', 'record'):
     body = Path(sys.argv[-1]).read_text() if name == 'post' else sys.stdin.read()
     accepted = True
@@ -236,7 +247,9 @@ class Sandbox(unittest.TestCase):
                    '[profile.qa-jig]\nglobal-timeout="1s"\n')
         (self.seed / 'tools/tiers').mkdir(parents=True)
         (self.seed / 'tools/queue').mkdir()
+        (self.seed / 'tools/slots').mkdir()
         app.atomic(self.seed / 'tools/tiers/run', FAKE)
+        app.atomic(self.seed / 'tools/slots/trim', FAKE)
         (self.seed / 'tools/tiers/run').chmod(0o755)
         app.atomic(self.seed / 'tools/queue/leads.txt', 'ops ops@hel8\nmc s/multi-coord@hel8\ncoord s/dynamic-memory@hel8\nq s/qa@hel8\nu s/upgrades@hel8\n')
         self.git(self.seed, 'add', '.')
@@ -247,7 +260,7 @@ class Sandbox(unittest.TestCase):
         self.git(self.home, 'clone', '-q', '-b', 'main', self.origin, self.slot)
         self.bin = self.home / 'bin'
         self.bin.mkdir()
-        for name in ('post', 'record', 'registry', 'heavy'):
+        for name in ('post', 'record', 'registry', 'heavy', 'trim'):
             app.atomic(self.bin / name, FAKE)
             (self.bin / name).chmod(0o755)
         self.tiers = self.home / 'tiers.toml'
@@ -262,7 +275,7 @@ class Sandbox(unittest.TestCase):
         self.save_scenario()
         self.argv = ['once', '--slot', str(self.slot), '--state-dir', str(self.home / 'state'),
                      '--tiers', str(self.tiers), '--host', 'test-builder']
-        for name in ('post', 'record', 'registry', 'heavy'):
+        for name in ('post', 'record', 'registry', 'heavy', 'trim'):
             self.argv += ['--' + name, str(self.bin / name)]
         self.args = app.arguments(self.argv)
         app.private_directory(self.args.state_dir)
@@ -385,6 +398,8 @@ class QueueTests(Sandbox):
         self.assertEqual(len(bodies), 2)
         self.assertIn('published tips seen: 5; runs completed: 2; tips coalesced: 2', bodies[0])
         self.assertIn('oldest waiting lag seconds:', bodies[0])
+        self.assertIn('trim bytes freed: 2468000000', bodies[0])
+        self.assertEqual(self.runner.state['hour']['trim_bytes'], 0)
         self.assertEqual({p['args'][3] for p in self.calls('post')}, {'ops@hel8', 's/dynamic-memory@hel8'})
 
     def test_rewritten_history_stops_polling_and_alerts_once(self):
@@ -423,6 +438,161 @@ class QueueTests(Sandbox):
         self.assertEqual(len(plan['suspects']), 3)
         self.assertEqual(self.calls(), [])
         self.assertFalse(self.runner.path.exists())
+
+
+class TrimTests(Sandbox):
+    def assert_trim_after_saved_verdict(self, verdict):
+        # A failed publisher leaves the saved event/outbox available for the
+        # fake trim to inspect, independently of remote record durability.
+        self.scenario['record_code'] = 1
+        self.save_scenario()
+        self.poll_run()
+        calls = self.calls('trim')
+        self.assertEqual(len(calls), 1)
+        call = calls[0]
+        self.assertEqual(call['args'], ['--older', '0', str(self.slot)])
+        self.assertIsNone(call['active'])
+        self.assertEqual(call['last_run']['verdict'], verdict)
+        self.assertEqual(call['pending'], dict(id=call['last_run']['id'], started=True))
+        event = next(event for event in call['records'] if event['kind'] == 'after-landing-run')
+        self.assertEqual(event['verdict'], verdict)
+        self.assertEqual(event['id'], call['last_run']['id'])
+        self.assertEqual(self.runner.state['last_trim']['id'], event['id'])
+        self.assertEqual(self.runner.state['last_trim']['bytes_freed'], 1_234_000_000)
+        self.runner.run()
+        # Partial attempts retain their tip; a second attempt is a new run.
+        expected = 2 if verdict == 'partial' else 1
+        self.assertEqual(len(self.calls('trim')), expected)
+
+    def test_trim_once_after_saved_green(self):
+        self.assert_trim_after_saved_verdict('green')
+
+    def test_trim_once_after_saved_red(self):
+        self.scenario['pairs']['qa-skein']['main'] = [dict(test='one', result='fail')]
+        self.assert_trim_after_saved_verdict('red')
+
+    def test_trim_once_after_saved_partial(self):
+        self.scenario['pairs']['qa-skein']['code'] = 2
+        self.assert_trim_after_saved_verdict('partial')
+
+    def test_trim_precedes_next_checkout(self):
+        self.poll_run()
+        next_tip, _ = self.advance()
+        self.runner.poll()
+        real_git = app.git
+        checkouts = []
+        def git(slot, *argv):
+            if argv[0] == 'checkout':
+                checkouts.append(argv[-1])
+                self.assertEqual(len(self.calls('trim')), 1)
+                self.assertEqual(self.calls('trim')[0]['head'], self.base)
+                self.assertEqual(self.runner.state['last_trim']['id'], self.base + ':1')
+            return real_git(slot, *argv)
+        with mock.patch.object(app, 'git', side_effect=git):
+            self.runner.run()
+        self.assertEqual(checkouts, [next_tip])
+        self.assertEqual(len(self.calls('trim')), 2)
+
+    def test_trim_failure_episode_survives_restart_and_runs_proceed(self):
+        self.scenario['trim_code'] = 1
+        self.save_scenario()
+        for attempt in range(2):
+            if attempt:
+                self.runner = app.Runner(self.args)
+                self.advance()
+            self.poll_run()
+            self.assertEqual(self.runner.state['last_run']['verdict'], 'green')
+            self.assertEqual(self.runner.state['last_run']['faulted'], [])
+            self.assertIsNone(self.runner.state['fault_episode'])
+            self.assertEqual(self.runner.state['last_trim']['code'], 1)
+            self.assertIn('fake trim failed', self.runner.state['last_trim']['error'])
+            self.assertEqual(len(self.calls('post')), 1)
+        self.scenario['trim_code'] = 0
+        self.save_scenario()
+        self.advance()
+        self.poll_run()
+        self.assertIsNone(self.runner.state['trim_fault_episode'])
+        self.scenario['trim_code'] = 1
+        self.save_scenario()
+        self.advance()
+        self.poll_run()
+        self.assertEqual(len(self.calls('tiers')), 4)
+        self.assertEqual(len(self.calls('trim')), 4)
+        self.assertEqual(len(self.calls('post')), 2)
+        self.assertTrue(all(call['args'][3] == 'ops@hel8' for call in self.calls('post')))
+        self.assertTrue(all('trim exit 1' in call['body'] for call in self.calls('post')))
+
+    def test_saved_pending_trim_resumes_before_checkout(self):
+        class Crash(BaseException):
+            pass
+        real_trim = self.runner.trim
+        def trim():
+            if self.runner.state['trim_pending']:
+                raise Crash()
+            real_trim()
+        with mock.patch.object(self.runner, 'trim', side_effect=trim):
+            with self.assertRaises(Crash):
+                self.poll_run()
+        self.assertEqual(self.calls('trim'), [])
+        self.runner = app.Runner(self.args)
+        tip, _ = self.advance()
+        real_git = app.git
+        def git(slot, *argv):
+            if argv[0] == 'checkout':
+                self.assertEqual(len(self.calls('trim')), 1)
+                self.assertEqual(self.calls('trim')[0]['head'], self.base)
+            return real_git(slot, *argv)
+        with mock.patch.object(app, 'git', side_effect=git):
+            self.poll_run()
+        self.assertEqual(self.runner.state['cursor'], tip)
+        self.assertEqual(len(self.calls('trim')), 2)
+
+    def test_interrupted_trim_is_not_repeated_or_blocking(self):
+        class Crash(BaseException):
+            pass
+        real_save = self.runner.save
+        def save():
+            if self.runner.state['last_trim'] is not None:
+                raise Crash()
+            real_save()
+        with mock.patch.object(self.runner, 'save', side_effect=save):
+            with self.assertRaises(Crash):
+                self.poll_run()
+        self.assertEqual(len(self.calls('trim')), 1)
+        self.runner = app.Runner(self.args)
+        self.runner.run()
+        self.assertEqual(len(self.calls('trim')), 1)
+        self.assertIn('completion unknown', self.runner.state['last_trim']['error'])
+        self.runner.deliver()
+        self.assertEqual(len(self.calls('post')), 1)
+        tip, _ = self.advance()
+        self.poll_run()
+        self.assertEqual(self.runner.state['cursor'], tip)
+        self.assertEqual(len(self.calls('trim')), 2)
+
+    def test_existing_state_loads_without_migration(self):
+        self.passing_history()
+        old = json.loads(self.runner.path.read_text())
+        for key in ('last_trim', 'trim_pending', 'trim_fault_episode'):
+            old.pop(key)
+        old['hour'].pop('trim_bytes')
+        app.write_json(self.runner.path, old)
+        before = self.runner.path.read_bytes()
+        self.runner = app.Runner(self.args)
+        self.assertEqual(self.runner.path.read_bytes(), before)
+        self.assertEqual(self.runner.state['tests'], old['tests'])
+        self.assertEqual(self.runner.state['hour']['trim_bytes'], 0)
+        self.assertIsNone(self.runner.state['trim_pending'])
+        tip, _ = self.advance()
+        self.poll_run()
+        self.assertEqual(self.runner.state['cursor'], tip)
+        self.assertEqual(len(self.calls('trim')), 1)
+
+    def test_default_trim_path_is_in_the_slot(self):
+        self.args.trim = None
+        self.poll_run()
+        self.assertEqual(len(self.calls('trim')), 1)
+        self.assertIsNone(self.runner.state['last_trim']['error'])
 
 
 class VerdictTests(Sandbox):
@@ -664,6 +834,7 @@ class SupervisionTests(Sandbox):
             self.assertEqual({c['profile'] for c in self.calls('tiers')}, {'qa-skein'})
             self.assertTrue(thread.is_alive())
             self.assertIsNone(self.runner.state['cursor'])
+            self.assertEqual(self.calls('trim'), [])
             self.assertIn('heavy command to end', self.calls('post')[0]['body'])
         finally:
             app.atomic(self.home / 'allow-end', '')
@@ -672,6 +843,7 @@ class SupervisionTests(Sandbox):
         self.assertFalse(self.failures, self.failures)
         self.assertEqual([c['profile'] for c in self.calls('tiers')], ['qa-skein', 'qa-jig'])
         self.assertEqual(self.runner.state['last_run']['faulted'], ['qa-skein'])
+        self.assertEqual(len(self.calls('trim')), 1)
         for call in self.calls('heavy'):
             self.assertEqual(call['args'], ['--cancel', 'a'*32])
             self.assertEqual(call['cwd'], str(self.slot))
@@ -762,6 +934,7 @@ class SupervisionTests(Sandbox):
         self.runner.run()
         self.assertIsNotNone(self.runner.state['active'])
         self.assertFalse(self.calls('tiers'))
+        self.assertEqual(self.calls('trim'), [])
         self.assertIn('completion unknown', self.runner.state['outbox'][0]['posts'][0]['body'])
 
 
