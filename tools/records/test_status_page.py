@@ -34,10 +34,13 @@ class StatusPage(unittest.TestCase):
         self.fabrig.mkdir()
         self.bin = self.base/'bin'
         self.bin.mkdir()
-        self.env = dict(os.environ, HOME=str(self.base), PATH=str(self.bin)+':/usr/bin:/bin', STATUS_NOW=str(NOW),
-                        RECORDS_REPO=str(self.root), FABRIG_REPO=str(self.fabrig), DEV_TMP=str(self.base))
+        env = {k: v for k, v in os.environ.items() if not k.startswith(('GIT_', 'RECORDS_'))}
+        self.env = dict(env, HOME=str(self.base), PATH=str(self.bin)+':/usr/bin:/bin', STATUS_NOW=str(NOW),
+                        RECORDS_REPO=str(self.root), RECORDS_ORIGIN=str(self.base/'missing-origin.git'),
+                        GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM='1',
+                        FABRIG_REPO=str(self.fabrig), DEV_TMP=str(self.base))
         self.fake('claim', "print('node 1 [lead/private-worker]: s/private-coordinator')\nprint('node 2 [pool]: free')")
-        self.fake('record', "print('pulled')")
+        self.fake('record', 'import sys\nsys.exit(99)')
         self.fake('claude', """import sys, json
 if sys.argv[1:3] == ['auth', 'status']:
  print(json.dumps({'loggedIn':True, 'subscriptionType':'max', 'orgId':'secret-token-value', 'email':'private@example.net', 'name':'Private Person'}))
@@ -204,8 +207,28 @@ for line in sys.stdin:
         rows[1]['time'] = NOW-6*3600-1
         self.assertEqual(sum(n for _,_,n in sp.queue_data(rows,NOW)['hours']),0)
 
+    def test_pull_uses_sibling_record_instead_of_path(self):
+        origin, seed, clone = (self.base/name for name in ('origin.git', 'seed', 'pulled'))
+        env = {k: v for k, v in self.env.items() if not k.startswith(('GIT_', 'RECORDS_'))}
+        env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM='1',
+                   GIT_AUTHOR_NAME='Test', GIT_AUTHOR_EMAIL='test@example.invalid',
+                   GIT_COMMITTER_NAME='Test', GIT_COMMITTER_EMAIL='test@example.invalid',
+                   RECORDS_REPO=str(clone), RECORDS_ORIGIN=str(origin))
+        def git(*args):
+            result = subprocess.run(['git', *args], env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+        git('init', '--bare', '--initial-branch=main', str(origin))
+        git('clone', str(origin), str(seed))
+        (seed/'README.md').write_text('# Synthetic records\n')
+        git('-C', str(seed), 'add', '.')
+        git('-C', str(seed), 'commit', '-m', 'seed records')
+        git('-C', str(seed), 'push', 'origin', 'main')
+        # The PATH record exits 99; only the real sibling can pull this origin.
+        with patch.dict(os.environ, env, clear=True):
+            self.assertIsNone(sp.pull())
+        self.assertEqual((clone/'README.md').read_text(), '# Synthetic records\n')
+
     def test_pull_and_ssh_failure_do_not_stop_render(self):
-        self.fake('record', 'import sys\nsys.exit(1)')
         self.fake('ssh', 'import sys\nprint('+repr(POISON)+', file=sys.stderr)\nsys.exit(255)')
         with patch.dict(os.environ, self.env, clear=True):
             data = sp.gather_page(self.root, self.fabrig, self.machines, True, b'')
