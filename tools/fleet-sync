@@ -22,6 +22,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import time
 import tomllib
 
@@ -32,6 +33,10 @@ BLOCK = BEGIN + '\n[ ! -f "$HOME/.config/fabrig/env.sh" ] || . "$HOME/.config/fa
 KEY = re.compile(r"[A-Za-z_][A-Za-z_0-9]*\Z")
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 SERVICE_START = 'ExecStart=/bin/bash -lc \'exec "$$HOME/src/fabrig/current/tools/fleet-sync" --timer\''
+RECOVERY_UNITS = frozenset(("fleet-sync.service", "fleet-sync.timer"))
+ACTIVE_CHILDREN = set()
+CHILDREN_LOCK = threading.Lock()
+CLEANUP_THREADS = set()
 
 
 class CommandError(ValueError):
@@ -40,24 +45,31 @@ class CommandError(ValueError):
         self.code = code
 
 
+class RunInterrupted(KeyboardInterrupt):
+    def __init__(self, signum):
+        self.exit_code = 130 if signum == signal.SIGINT else 143
+
+
+def interrupt_run(signum, frame):
+    if threading.get_ident() not in CLEANUP_THREADS:
+        raise RunInterrupted(signum)
+
+
 def now():
     return dt.datetime.now(dt.UTC).isoformat()
 
 
-def run_child(argv, timeout, env=None, pass_fds=()):
-    process = subprocess.Popen([str(v) for v in argv], stdin=subprocess.DEVNULL,
-                               stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                               start_new_session=True, env=env, pass_fds=pass_fds)
+def terminate_group(process):
+    identity = threading.get_ident()
+    CLEANUP_THREADS.add(identity)
     try:
-        out, err = process.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
         deadline = time.monotonic() + 5
         try:
             os.killpg(process.pid, signal.SIGTERM)
         except ProcessLookupError:
             pass
         try:
-            process.communicate(timeout=5)
+            process.wait(timeout=5)
         except subprocess.TimeoutExpired:
             pass
         # A descendant can outlive its parent and close its inherited pipes.
@@ -71,8 +83,33 @@ def run_child(argv, timeout, env=None, pass_fds=()):
                 os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+        process.wait()
+    finally:
+        CLEANUP_THREADS.discard(identity)
+
+
+def terminate_children():
+    with CHILDREN_LOCK:
+        children = list(ACTIVE_CHILDREN)
+    for process in children:
+        terminate_group(process)
+
+
+def run_child(argv, timeout, env=None, pass_fds=()):
+    process = subprocess.Popen([str(v) for v in argv], stdin=subprocess.DEVNULL,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               start_new_session=True, env=env, pass_fds=pass_fds)
+    try:
+        with CHILDREN_LOCK:
+            ACTIVE_CHILDREN.add(process)
+        out, err = process.communicate(timeout=timeout)
+    except (subprocess.TimeoutExpired, KeyboardInterrupt):
+        terminate_group(process)
         process.communicate()
         raise
+    finally:
+        with CHILDREN_LOCK:
+            ACTIVE_CHILDREN.discard(process)
     return subprocess.CompletedProcess(argv, process.returncode, out, err)
 
 
@@ -351,6 +388,9 @@ class Declarations:
         self.units = {Path(k).name: v for k, v in parsed.items() if k.startswith("units/") and k.endswith((".service", ".timer"))}
         if self.units.keys() != self.unit_roles.keys():
             raise ValueError("every unit must have exactly one roles declaration")
+        for name in RECOVERY_UNITS:
+            if self.unit_roles.get(name) != ["*"]:
+                raise ValueError(f"{name} must belong to exactly [\"*\"]")
         for name, roles in self.unit_roles.items():
             if not isinstance(roles, list) or not roles or not all(isinstance(r, str) for r in roles):
                 raise ValueError(f"invalid unit roles: {name}")
@@ -392,6 +432,13 @@ class Declarations:
         if allow_unknown:
             return None
         raise ValueError(f"unknown hostname: {socket.gethostname()}")
+
+    def host_units(self, name):
+        wanted = {unit for unit, assigned in self.unit_roles.items()
+                  if "*" in assigned or set(assigned) & set(self.hosts[name]["roles"])}
+        if not RECOVERY_UNITS <= wanted or not RECOVERY_UNITS <= self.units.keys():
+            raise ValueError("host rendering must retain both fleet-sync recovery units")
+        return wanted
 
 
 def atomic(path, data, mode=0o600):
@@ -544,6 +591,7 @@ class Runner:
         self.cmd(sys.executable, "-I", "-B", release / "tools/fleet-sync", "--self-check", "--host", self.name)
         candidate = Declarations(release, self.home)
         candidate.host(self.name)
+        candidate.host_units(self.name)
         self.verify_units(candidate)
         smoke = self.cmd(sys.executable, "-I", "-B", release / "tools/fleet-sync", "--check", "--json", "--host", self.name,
                          extra_env={"FLEET_SYNC_SMOKE_FD": str(self.lock_fd)}, pass_fds=(self.lock_fd,), allowed=(0, 1))
@@ -594,9 +642,7 @@ class Runner:
         if executable is None:
             self.item("units:verify", "warn", "systemd-analyze unavailable; verification skipped")
             return
-        roles = set(declarations.hosts[self.name]["roles"])
-        units = [declarations.root / "fleet/units" / name for name, assigned in declarations.unit_roles.items()
-                 if "*" in assigned or roles & set(assigned)]
+        units = [declarations.root / "fleet/units" / name for name in sorted(declarations.host_units(self.name))]
         self.cmd(executable, "--user", "verify", *units)
 
     def fabrig_deferred(self):
@@ -675,6 +721,7 @@ class Runner:
 
     def fabrig_locked(self):
         self.safe.guard("src/fabrig/main")
+        self.safe.guard(".local/bin/.probe")
         clone = self.base / "main"
         origin = self.d.fabrig_origin
         if clone.is_symlink():
@@ -693,6 +740,7 @@ class Runner:
                 self.cmd("git", "clone", "--depth=1", "--branch", "main", "--", origin, checkout)
                 if self.fabrig_deferred():
                     return
+                self.safe.guard(".local/bin/.probe")
                 self.cmd(sys.executable, "-I", "-B", checkout / "tools/install", timeout=300)
             self.state["fabrig_sha"] = self.git(clone, "rev-parse", "HEAD")
             self.item("fabrig", "changed", "bootstrapped through fabrig installer")
@@ -731,16 +779,14 @@ class Runner:
             link = self.home / ".local/bin" / tool
             if self.fabrig_deferred():
                 return
-            try:
-                wrong |= self.safe.readlink(str(link.relative_to(self.home))) != str(clone / "tools" / directory / tool)
-            except ValueError:
-                wrong = True  # The installer reports/refuses regular-file collisions.
+            wrong |= self.safe.readlink(str(link.relative_to(self.home))) != str(clone / "tools" / directory / tool)
         if changed or wrong:
             if self.args.check:
                 self.item("fabrig", "drift", "tools changed or installed links differ")
             else:
                 if self.fabrig_deferred():
                     return
+                self.safe.guard(".local/bin/.probe")
                 self.cmd(sys.executable, "-I", "-B", clone / "tools/install", timeout=300)
                 self.state["fabrig_sha"] = self.git(clone, "rev-parse", "HEAD")
                 self.item("fabrig", "changed", "ran fabrig installer (output in run.log)")
@@ -912,7 +958,7 @@ class Runner:
         self.attempt("conflicts", lambda: self.conflicts(env))
 
     def units(self):
-        wanted = {name for name, roles in self.d.unit_roles.items() if "*" in roles or set(roles) & set(self.d.hosts[self.name]["roles"])}
+        wanted = self.d.host_units(self.name)
         directory = self.home / ".config/systemd/user"
         differs, existing = {}, {}
         for name in wanted | self.unit_owned:
@@ -922,7 +968,7 @@ class Runner:
             existing[name] = data is not None
             if name in wanted:
                 differs[name] = data != self.d.units[name].encode()
-        stale = self.unit_owned - wanted
+        stale = self.unit_owned - wanted - RECOVERY_UNITS
         if not self.args.check:
             # Journal ownership AND reload intent before the first unit mutation.
             self.unit_owned.update(wanted)
@@ -970,6 +1016,11 @@ class Runner:
                         raise
                     active = False
                 if not self.timer_enabled(name) or not active:
+                    relative = f".config/systemd/user/timers.target.wants/{name}"
+                    if not self.timer_enabled(name) and self.safe.readlink(relative) is not None:
+                        if name not in self.unit_owned:
+                            raise ValueError("refusing enablement repair without unit ownership")
+                        self.safe.link(relative, directory / name)
                     self.cmd("systemctl", "--user", "enable", "--now", "--no-reload", name)
                 self.item(f"enabled:{name}", "ok", "timer enabled and started")
         self.save_unit_intent()
@@ -1131,15 +1182,19 @@ def status(args, declarations, name):
             return {"host": host, "unreachable": " ".join(str(error).split())[:600]}
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(declarations.hosts)) as pool:
-        futures = {host: pool.submit(remote, host) for host in declarations.hosts if host != name}
-        states = {}
-        if name is not None:
-            local_args = argparse.Namespace(**vars(args))
-            local_args.check, local_args.timer = True, False
-            local = Runner(local_args, declarations, name)
-            local.run()
-            states[name] = local.state
-        states.update({host: future.result() for host, future in futures.items()})
+        try:
+            futures = {host: pool.submit(remote, host) for host in declarations.hosts if host != name}
+            states = {}
+            if name is not None:
+                local_args = argparse.Namespace(**vars(args))
+                local_args.check, local_args.timer = True, False
+                local = Runner(local_args, declarations, name)
+                local.run()
+                states[name] = local.state
+            states.update({host: future.result() for host, future in futures.items()})
+        except KeyboardInterrupt:
+            terminate_children()
+            raise
     rows = [states[host] for host in declarations.hosts]
     if args.json:
         print(json.dumps({"hosts": rows}))
@@ -1200,8 +1255,12 @@ def main():
 
 
 if __name__ == "__main__":
+    for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(signum, interrupt_run)
     try:
         sys.exit(main())
+    except KeyboardInterrupt as error:
+        sys.exit(getattr(error, "exit_code", 130))
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         print(f"fleet-sync: {error}", file=sys.stderr)
         sys.exit(1)

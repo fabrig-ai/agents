@@ -15,6 +15,8 @@ only when absent; nested shells retain PATH. Other competing env assignments
 warn; PATH assignments never conflict. repositories.toml names fabrig's origin;
 agents discovers its invoking git origin, retained in release metadata.
 units/roles.toml maps every unit to roles (`["*"]` means all roles).
+The recovery service and timer must both have exactly `["*"]`, always render
+for every host, and are never eligible for removal. This is enforced in code.
 policy.toml maps managed paths to write (default) or check. post/machines is
 check-only pending ops/coordinator agreement: differences warn, without backups
 or writes. Invalid declarations/unknown hosts exit 2 before changing anything.
@@ -47,6 +49,9 @@ quietly. Controls hold, pin and defer-fabrig are never created or removed by us.
    landings are ok, reporting both short SHAs. Only the installer writes main;
    fleet uses read-only rev-parse/remote get-url there. Bootstrap a missing main
    through its installer in a temporary origin/main checkout. Log output.
+   Validate .local/bin and all its parents without following symlinks before
+   inspecting links and immediately before either installer invocation; unsafe
+   destinations fail the fabrig step. Fabrig's installer itself is unchanged.
 3. Link tools/installed through current, refusing non-symlinks. Render env,
    Claude settings, Cargo config, machine.env and policy-controlled routing.
    Prepend bashrc's source block, append profile's, and edit only declared Codex
@@ -64,12 +69,17 @@ quietly. Controls hold, pin and defer-fabrig are never created or removed by us.
    files or journaled intent; clear intent after success. Read is-active, then
    enable --now --no-reload only if a timer is inactive or its enablement link
    is absent/wrong. Unchanged runs make no state-changing systemctl calls.
+   A conflicting enablement symlink for a journal-owned timer is replaced by
+   sibling rename before enable; unrelated links/files are never forced.
    Changed long-running services warn restart pending; never restart them.
 5. Probe versions, save state.json/run.log atomically, and retain seven days of
    changed/failed JSONL records. State includes actual/desired SHAs, items and
    last timer completion, which manual checks preserve. Later steps continue
    after fabrig failure. Child commands have private process groups; a timeout
    sends TERM, allows five seconds, KILLs survivors and waits before unlocking.
+   KeyboardInterrupt and SIGINT/TERM/HUP use that same cleanup, including
+   status's parallel children. Exit after unlocking: INT 130, TERM/HUP 143.
+   Repeated termination signals during cleanup do not cut the grace period short.
    Installers get 300 seconds; version probes ten; SSH status sixty.
 
 Every managed HOME path is walked with directory descriptors and O_NOFOLLOW.
@@ -84,6 +94,7 @@ Never read credentials, ~/.claude.json, SSH keys/config/trust or personal
 instructions; never modify/depend on old/. Claude/Codex run only --version.
 Never touch src/fabrig/{claims,leases,queue,slots}, heavy state/units,
 src/rust/tmp/{codex-run,owners}, or anything under post/ except machines.
+Never touch ~/src/rust/tmp/logins/: held QA logins must be kept.
 
 `--check` creates no files/locks/state and calls no systemctl. Its only write
 exception is fetching/comparing an EXISTING private fabrig mirror; an absent
