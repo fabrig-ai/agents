@@ -632,15 +632,23 @@ else: sys.exit(1 if sys.argv[2] in os.environ.get('UNOWNED','').split(',') else 
 
     def test_publication_defers_until_sixth_run_and_recovers(self):
         self.mail()
+        self.write(self.home / '.local/state/record-collect/queue.publication.json',
+                   json.dumps(dict(deferrals=4, status='deferred', reason='record: collector busy')))
         reply = self.write(self.home / 'publication.json', json.dumps(dict(code=3, reason='record: origin busy')))
         tool = self.publication_tool()
         with patch(__name__ + '.TOOL', tool):
             ids = None
             for count in range(1, 8):
                 result = self.invoke(code=2 if count >= 6 else 0)
-                self.assertIn('watch: deferred: record: origin busy', result.stderr)
-                self.assertIn(f'({count} consecutive runs)', result.stderr)
+                self.assertIn(f'watch: deferred ({count}/6): record: origin busy', result.stderr)
                 self.assertEqual(self.state()['deferrals'], count)
+                self.assertNotIn('published ', result.stdout)
+                heartbeat = [e for e in self.state()['pending'] if e['kind'] == 'heartbeat'][-1]
+                self.assertEqual(heartbeat['inputs']['publication']['deferrals'], count - 1)
+                self.assertEqual(heartbeat['inputs']['record-collect']['queue']['deferrals'], 4)
+                if count > 1:
+                    self.assertIn('publication', heartbeat['inputs_failed'])
+                    self.assertEqual(heartbeat['inputs']['publication']['reason'], 'record: origin busy')
                 current = {event['id'] for event in self.state()['pending']}
                 if ids is None:
                     ids = current
@@ -648,15 +656,46 @@ else: sys.exit(1 if sys.argv[2] in os.environ.get('UNOWNED','').split(',') else 
             self.write(reply, json.dumps(dict(code=2, reason='record: transport broken')))
             self.assertIn('transport broken', self.invoke(code=2).stderr)
             self.write(reply, json.dumps(dict(code=3, reason='record: origin busy')))
-            self.assertIn('(1 consecutive runs)', self.invoke().stderr)
+            self.assertIn('deferred (1/6):', self.invoke().stderr)
             reply.unlink()
-            self.invoke()
+            result = self.invoke()
+            self.assertRegex(result.stdout, r'watch: published [1-9][0-9]* events')
             self.assertEqual(self.state()['deferrals'], 0)
             self.assertFalse(self.state()['pending'])
         events = self.events()
         self.assertTrue(ids <= {event['id'] for event in events})
         self.assertEqual(len(events), len({event['id'] for event in events}))
         self.assertEqual((self.home / 'post.log').read_text().count('wake'), 1)
+
+    def test_watch_outbox_waits_for_origin_confirmation(self):
+        self.mail()
+        self.fake('git', f"""import os, subprocess, sys
+from pathlib import Path
+args = sys.argv[1:]
+if args[0] == 'ls-remote':
+ print((Path(os.environ['HOME'])/'refs').read_text(), end='')
+ sys.exit(0)
+push = len(args) > 2 and args[2] == 'push' and args[1] == {str(self.home / 'records')!r}
+if push and os.environ.get('PUSH_REPLY') == 'false-success': sys.exit(0)
+result = subprocess.run([{self.real_git!r}, *args])
+if push and result.returncode == 0 and os.environ.get('PUSH_REPLY') == 'lost-ack':
+ print('synthetic acknowledgement lost', file=sys.stderr)
+ sys.exit(1)
+sys.exit(result.returncode)
+""")
+        result = self.invoke(code=2, PUSH_REPLY='false-success')
+        self.assertIn('not confirmed by origin', result.stderr)
+        self.assertNotIn('published ', result.stdout)
+        saved = [event['id'] for event in self.state()['pending']]
+        self.assertTrue(saved)
+        before = self.git('--git-dir', str(self.origin), 'rev-parse', 'main')
+        result = self.invoke(PUSH_REPLY='lost-ack')
+        self.assertRegex(result.stdout, r'watch: published [1-9][0-9]* events')
+        self.assertFalse(self.state()['pending'])
+        self.assertNotEqual(self.git('--git-dir', str(self.origin), 'rev-parse', 'main'), before)
+        ids = [event['id'] for event in self.events()]
+        for identity in saved:
+            self.assertEqual(ids.count(identity), 1)
 
     def test_dry_run_keeps_existing_state_bytes_unchanged(self):
         self.mail()
@@ -756,7 +795,9 @@ else: sys.exit(1 if sys.argv[2] in os.environ.get('UNOWNED','').split(',') else 
                                      if line.startswith('{') and json.loads(line)['kind'] == 'heartbeat')
                     expected = {'session-start': str(launcher if fallback else self.bin / 'session-start'),
                                 'lease': str(release / 'lease' if fallback else self.bin / 'lease')}
-                    self.assertEqual(heartbeat['inputs'], expected)
+                    self.assertEqual({key: heartbeat['inputs'][key] for key in expected}, expected)
+                    self.assertEqual(heartbeat['inputs']['publication']['deferrals'], 0)
+                    self.assertEqual(heartbeat['inputs']['record-collect'], {})
                     self.assertFalse(heartbeat['inputs_failed'])
                     self.assertIn('would post wake lead/jig', result.stdout)
             calls = [json.loads(line) for line in (self.home / 'launcher.log').read_text().splitlines()]

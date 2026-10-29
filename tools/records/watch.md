@@ -102,17 +102,30 @@ watch watch hel8`, with owner, supervisor and available join keys. A heartbeat
 publishes at most once per `[watch] heartbeat_seconds` (900 seconds by default),
 unless an alert opens, escalates or closes, or the set of failed input names
 changes, including recovery. Changing only an error's text does not trigger one.
+Changes in watch's publication-deferral count also make a heartbeat due.
 The first run publishes a heartbeat. The two-minute poll observes the fifteen-
 minute threshold on the next run (normally sixteen minutes). Each run still
 persists its evaluation state. Events and any pending retries share one append;
 quiet runs with an empty outbox do not append. Record makes up to five attempts
 on push races, pausing a random 1–5 seconds between tries. At most one push
 succeeds per run; retries cost only rejected attempts. Exhaustion or a rebase
-conflict retains pending events and prints `watch: deferred: <record's reason>`.
+conflict retains pending events and prints `watch: deferred (k/6): <record's reason>`.
 State counts consecutive deferrals in `deferrals`: the first five exit 0, the
 sixth and later exit 2. Successful publication or a real publication error resets
 the count; real failures exit 2 immediately. Error and deferral lines include
-record's stderr. The pipeline-watch timer adds up to 60 seconds of random delay.
+record's stderr. A confirmed publication prints `watch: published N events`;
+empty runs print `published 0 events`. Pending events drain only after record
+fetches origin and confirms that it contains the commit, even after a lost
+acknowledgement.
+
+Heartbeat `inputs.publication` exposes watch's preceding deferral count and
+reason, and `inputs.record-collect` exposes each collector's publication status
+and `deferrals`. A change in watch's count also makes a heartbeat due. These are
+snapshots taken before the current publication attempt; queued heartbeats are
+never rewritten during a retry. Reasons in heartbeat inputs are capped at 1024
+characters, and automatic record errors omit the saved event payload to avoid
+embedding earlier heartbeats recursively. The pipeline-watch timer adds up to 60
+seconds of random delay.
 `watch` is an append-only writer. Like post itself, sending and local state
 commit cannot be one transaction: a process death immediately after send and
 before state persistence can repeat that send after restart.

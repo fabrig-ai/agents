@@ -11,7 +11,10 @@ name the source after trying the others. Exit policy: 0 when every selected
 source succeeds, skips or defers publication; 2 when any source fails, including
 publication or cursor errors, or publication defers for six consecutive runs.
 An optional-part skip is also successful. A deferred run prints
-`record-collect: deferred: <record's reason>`; errors also include record's stderr.
+`record-collect: deferred (k/6): <record's reason>`; errors also include record's
+stderr. A confirmed publication prints `record-collect: published N events`,
+including `published 0 events` for an empty run; exit 0 alone is not a publication
+receipt.
 
 All successfully read sources in a run publish together via the sibling
 `record append --as collect --batch HOST`: one commit and at most one successful
@@ -31,9 +34,15 @@ remaining outboxes for idempotent replay without another commit for those ids.
 After record exhausts its retries or encounters a rebase conflict, publication
 is deferred to the next poll. Each pending transaction stores a `deferrals`
 counter outside its cursor state; the sixth consecutive deferral exits 2.
+`SOURCE.publication.json` also exposes `deferrals`, `status` and the last reason
+for local inspection and watch heartbeats, under the same source lock.
 A real publication error resets the counter and exits 2 immediately. Successful
 publication removes the outbox and its counter.
-Only successful publication advances the cursor. `--dry-run` prints JSONL
+Only a publication confirmed by fetching origin and checking commit containment
+advances the cursor or drains its pending outbox. A lost acknowledgement can
+therefore complete safely without publishing duplicate ids. The saved batch is
+unchanged even if a producer appends new input while record is retrying; that
+input is collected on the following run. `--dry-run` prints JSONL
 without creating state or invoking `record`. Source counts go to stderr.
 The first cursor uses `--since` or seven days ago; later runs retain that
 bound. Complete log lines alone advance offsets; rotation safely replays ids.

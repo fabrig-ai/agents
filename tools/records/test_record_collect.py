@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import runpy
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -604,6 +605,83 @@ print('12345678: 125,000 of 1,000,000 tokens (12%) at 2026-10-29T11:00:00Z; 42 c
         self.write(tool.with_name('record'), program).chmod(0o700)
         return tool
 
+    def push_transport(self, mode):
+        real_git = shutil.which('git')
+        self.fake('git',
+            'import subprocess, sys\n'
+            'args = sys.argv[1:]\n'
+            f'push = len(args) > 2 and args[2] == "push" and args[1] == {str(self.clone)!r}\n'
+            f'mode = {mode!r}\n'
+            'if push and mode == "false-success": sys.exit(0)\n'
+            f'result = subprocess.run([{real_git!r}, *args])\n'
+            'if push and result.returncode == 0 and mode == "lost-ack":\n'
+            ' print("synthetic acknowledgement lost", file=sys.stderr)\n'
+            ' sys.exit(1)\n'
+            'sys.exit(result.returncode)\n')
+
+    def test_cursors_and_outbox_wait_for_origin_confirmation(self):
+        row = self.queue_fixture()
+        self.run_collect('queue')
+        cursor = self.state / 'queue.json'
+        before = cursor.read_bytes()
+        origin_before = self.git(self.origin, 'rev-parse', 'main')
+        row.update(start='2026-10-29T11:03:00Z', end='2026-10-29T11:04:00Z')
+        path = self.fabrig / 'notes/queue.jsonl'
+        self.write(path, path.read_text() + json.dumps(row) + '\n')
+        self.push_transport('false-success')
+        result = self.run_collect('queue', code=2)
+        self.assertIn('not confirmed by origin', result.stderr)
+        self.assertNotIn('published ', result.stdout)
+        self.assertEqual(cursor.read_bytes(), before)
+        self.assertEqual(self.git(self.origin, 'rev-parse', 'main'), origin_before)
+        pending = self.state / 'queue.pending.json'
+        saved = json.loads(pending.read_text())['events']
+        self.push_transport('lost-ack')
+        result = self.run_collect('queue')
+        self.assertIn(f'published {len(saved)} events', result.stdout)
+        self.assertFalse(pending.exists())
+        self.assertNotEqual(cursor.read_bytes(), before)
+        rows = [json.loads(line) for line in self.git(self.origin, 'show',
+                'main:events/queue/hel8/2026-10-29.jsonl').splitlines()]
+        for event in saved:
+            self.assertEqual(sum(row['id'] == event['id'] for row in rows), 1)
+        self.assertEqual(self.git(self.clone, 'rev-parse', 'HEAD'), self.git(self.origin, 'rev-parse', 'main'))
+
+    def test_retry_uses_saved_batch_when_producer_changes_mid_push(self):
+        row = self.queue_fixture()
+        self.run_collect('queue')
+        row.update(start='2026-10-29T11:03:00Z', end='2026-10-29T11:04:00Z')
+        path = self.fabrig / 'notes/queue.jsonl'
+        self.write(path, path.read_text() + json.dumps(row) + '\n')
+        row.update(start='2026-10-29T11:05:00Z', end='2026-10-29T11:06:00Z')
+        saved = self.home / 'saved-batch.json'
+        hook = self.write(self.clone / '.git/hooks/pre-push',
+            '#!/usr/bin/env -S python3 -I -B\n'
+            'import json, subprocess, sys\nfrom pathlib import Path\n'
+            f'saved = Path({str(saved)!r})\n'
+            'if not saved.exists():\n'
+            f' saved.write_bytes(Path({str(self.state / "queue.pending.json")!r}).read_bytes())\n'
+            f' with Path({str(path)!r}).open("a") as stream: stream.write({(json.dumps(row) + chr(10))!r})\n'
+            f' seed = Path({str(self.seed)!r})\n'
+            ' def git(*args): subprocess.run(["git", "-C", str(seed), *args], check=True, stdout=sys.stderr)\n'
+            ' git("pull", "--ff-only", "origin", "main")\n'
+            ' (seed / "AGENTS.md").write_text("# Other host\\n")\n'
+            ' git("add", "AGENTS.md")\n'
+            ' git("commit", "-m", "race saved batch")\n'
+            ' git("push", "origin", "main")\n')
+        hook.chmod(0o700)
+        before = {event['id'] for event in self.events('queue')}
+        tool = self.publication_tool(retry_clock=True)
+        with patch(__name__ + '.TOOL', tool):
+            result = self.run_collect('queue')
+        original = json.loads(saved.read_text())['events']
+        ids = {event['id'] for event in original}
+        self.assertEqual({event['id'] for event in self.events('queue')} - before, ids)
+        self.assertIn(f'published {len(original)} events', result.stdout)
+        self.assertLess(self.cursor('queue')['files'][str(path)]['offset'], path.stat().st_size)
+        self.run_collect('queue')
+        self.assertGreater(len(self.events('queue')), len(before | ids))
+
     def test_push_races_publish_or_defer_in_one_collector_run(self):
         row = self.queue_fixture()
         self.run_collect('queue')
@@ -640,7 +718,7 @@ print('12345678: 125,000 of 1,000,000 tokens (12%) at 2026-10-29T11:00:00Z; 42 c
                         self.assertNotEqual(cursor.read_bytes(), before)
                         self.assertFalse(pending.exists())
                     else:
-                        self.assertIn('record-collect: deferred:', result.stderr)
+                        self.assertIn('record-collect: deferred (1/6):', result.stderr)
                         self.assertIn('five attempts', result.stderr)
                         self.assertEqual(cursor.read_bytes(), before)
                         self.assertTrue(json.loads(pending.read_text())['events'])
@@ -662,12 +740,15 @@ print('12345678: 125,000 of 1,000,000 tokens (12%) at 2026-10-29T11:00:00Z; 42 c
             events = None
             for count in range(1, 8):
                 result = self.run_collect('queue', code=2 if count >= 6 else 0)
-                self.assertIn('record-collect: deferred: record: origin busy', result.stderr)
-                self.assertIn(f'({count} consecutive runs)', result.stderr)
+                self.assertIn(f'record-collect: deferred ({count}/6): record: origin busy', result.stderr)
                 self.assertEqual(cursor.read_bytes(), before)
                 pending = self.state / 'queue.pending.json'
                 transaction = json.loads(pending.read_text())
                 self.assertEqual(transaction['deferrals'], count)
+                status = json.loads((self.state / 'queue.publication.json').read_text())
+                self.assertEqual(status['deferrals'], count)
+                self.assertEqual(status['status'], 'deferred')
+                self.assertNotIn('published ', result.stdout)
                 if events is None:
                     events = transaction['events']
                 self.assertEqual(transaction['events'], events)
@@ -678,10 +759,11 @@ print('12345678: 125,000 of 1,000,000 tokens (12%) at 2026-10-29T11:00:00Z; 42 c
             self.json(reply, dict(code=2, reason='record: transport broken'))
             self.assertIn('transport broken', self.run_collect('queue', code=2).stderr)
             self.json(reply, dict(code=3, reason='record: origin busy'))
-            self.assertIn('(1 consecutive runs)', self.run_collect('queue').stderr)
+            self.assertIn('deferred (1/6):', self.run_collect('queue').stderr)
             reply.unlink()
             self.run_collect('queue')
             self.assertFalse(pending.exists())
+            self.assertEqual(json.loads((self.state / 'queue.publication.json').read_text())['deferrals'], 0)
             self.assertNotEqual(cursor.read_bytes(), before)
             published = {event['id'] for event in self.events('queue')}
             self.assertTrue({event['id'] for event in events} <= published)
