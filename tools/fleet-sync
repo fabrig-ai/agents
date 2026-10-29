@@ -32,6 +32,7 @@ BEGIN = "# >>> fleet-sync >>>"
 END = "# <<< fleet-sync <<<"
 BLOCK = BEGIN + '\n[ ! -f "$HOME/.config/fabrig/env.sh" ] || . "$HOME/.config/fabrig/env.sh"\n' + END + "\n"
 KEY = re.compile(r"[A-Za-z_][A-Za-z_0-9]*\Z")
+TOOL_NAME = re.compile(r"[a-z][a-z0-9-]*\Z")
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 SERVICE_START = 'ExecStart=/bin/bash -lc \'exec "$$HOME/src/fabrig/current/tools/fleet-sync" --timer\''
 RENDERED_FILES = frozenset((
@@ -417,16 +418,21 @@ class Declarations:
                 starts.append((section, value.strip()))
         if starts != [("Service", SERVICE_START.partition("=")[2])] or "*" not in self.unit_roles.get("fleet-sync.service", []):
             raise ValueError("fleet-sync.service must retain the fixed login-shell current/tools/fleet-sync --timer launcher")
-        self.tools = []
+        self.tools = {}
         for line in (root / "tools/installed").read_text().splitlines():
             if not line.strip() or line.lstrip().startswith("#"):
                 continue
-            if not re.fullmatch(r"[a-zA-Z0-9_-]+", line) or line in self.tools:
+            fields = line.split()
+            if len(fields) not in (1, 2):
                 raise ValueError(f"invalid installed tool: {line}")
-            tool = root / "tools" / line
+            name, path = fields[0], fields[-1]
+            if (not TOOL_NAME.fullmatch(name) or name in self.tools
+                    or Path(path).is_absolute() or ".." in Path(path).parts):
+                raise ValueError(f"invalid installed tool: {line}")
+            tool = root / "tools" / path
             if not tool.is_file() or not os.access(tool, os.X_OK) or not tool.resolve().is_relative_to(root.resolve()):
                 raise ValueError(f"missing executable tool: {line}")
-            self.tools.append(line)
+            self.tools[name] = path
 
     def host(self, name, allow_unknown=False):
         name = name or os.environ.get("FLEET_HOST")
@@ -494,6 +500,7 @@ class Runner:
         self.state.setdefault("consecutive_failures", self.old.get("consecutive_failures", 0))
         self.state.setdefault("last_failure", self.old.get("last_failure"))
         self.owned = set(self.old.get("managed_files", []))
+        self.link_owned = set(self.old.get("managed_links", []))
         self.unit_owned = set(self.old.get("managed_units", []))
         self.reload_pending = self.old.get("unit_reload_pending", False)
         if intent is not None:
@@ -505,6 +512,8 @@ class Runner:
         self.waiting = False
         if startup_error:
             self.item("state", "failed", startup_error)
+        else:
+            self.attempt("links:ownership", self.load_link_ownership)
 
     def item(self, name, result, reason):
         self.state["items"].append({"item": name, "result": result,
@@ -818,12 +827,57 @@ class Runner:
             reason = f"main ahead, tools unchanged ({head[:7]} -> {remote[:7]})" if head != remote else "HEAD and links current"
             self.item("fabrig", "ok", reason)
 
+    def save_link_intent(self):
+        relative = ".local/state/fleet-sync/links.json"
+        names = sorted(self.link_owned)
+        if not self.args.check and self.safe.json(relative, None) != names:
+            self.safe.save(relative, json.dumps(names) + "\n")
+
+    def load_link_ownership(self):
+        recorded = self.safe.json(".local/state/fleet-sync/links.json", None)
+        if recorded is not None:
+            self.link_owned = set(recorded)
+        elif "managed_links" not in self.old:
+            # Older runners kept proof of created links in their change history.
+            history = self.safe.read(".local/state/fleet-sync/runs.jsonl") or b""
+            for run in [self.old, *(json.loads(line) for line in history.splitlines())]:
+                for item in run.get("items", []):
+                    if (item.get("item", "").startswith("link:") and item.get("result") == "changed"
+                            and item.get("reason") == "linked to current release"):
+                        self.link_owned.add(item["item"][5:])
+        if any(not TOOL_NAME.fullmatch(name) for name in self.link_owned):
+            raise ValueError("invalid tool link ownership record")
+
     def links(self):
-        for tool in self.d.tools:
-            link = self.home / ".local/bin" / tool
-            target = self.base / "current/tools" / tool
+        for tool in sorted(self.link_owned - self.d.tools.keys()):
+            relative = f".local/bin/{tool}"
             try:
-                old = self.safe.readlink(str(link.relative_to(self.home)))
+                old = self.safe.readlink(relative)
+                target = Path(os.path.normpath(self.home / ".local/bin" / old)) if old else None
+                managed = target is not None and any(target.is_relative_to(parent)
+                    for parent in (self.base / "current", self.base / "releases"))
+                if managed and self.args.check:
+                    self.item(f"link:{tool}", "drift", "previously managed tool is no longer installed")
+                    continue
+                if managed:
+                    with self.safe.parent(relative) as (directory, leaf):
+                        if os.readlink(leaf, dir_fd=directory) != old:
+                            self.item(f"link:{tool}", "warn", "link changed; retry next run")
+                            continue
+                        os.unlink(leaf, dir_fd=directory)
+                    self.item(f"link:{tool}", "changed", "removed obsolete tool link")
+            except ValueError as error:
+                # A regular file replacing an old link belongs to the user now.
+                self.item(f"link:{tool}", "warn", str(error))
+                continue
+            if not self.args.check:
+                self.link_owned.discard(tool)
+                self.save_link_intent()
+        for tool, path in self.d.tools.items():
+            relative = f".local/bin/{tool}"
+            target = self.base / "current/tools" / path
+            try:
+                old = self.safe.readlink(relative)
             except (OSError, ValueError) as error:
                 self.item(f"link:{tool}", "failed", str(error))
                 continue
@@ -832,8 +886,12 @@ class Runner:
             elif self.args.check:
                 self.item(f"link:{tool}", "drift", "link is absent or differs")
             else:
-                self.safe.link(str(link.relative_to(self.home)), target)
+                self.safe.link(relative, target)
+                # Persist each successful creation without waiting for final state.
+                self.link_owned.add(tool)
+                self.save_link_intent()
                 self.item(f"link:{tool}", "changed", "linked to current release")
+        self.save_link_intent()
 
     def write(self, relative, content=None, mode=0o600, semantic=False, transform=None):
         for _ in range(2):
@@ -1060,11 +1118,16 @@ class Runner:
             if not (os.environ.get("DBUS_SESSION_BUS_ADDRESS") or (Path(os.environ.get("XDG_RUNTIME_DIR", "/nonexistent")) / "bus").exists()):
                 self.item("units:bus", "failed", "no user bus advertised")
             return
+        # A previous run may have completed while the manager still held stale
+        # units. Read its view even when our bytes and journal are current.
+        manager = self.cmd("systemctl", "--user", "show", "-p", "NeedDaemonReload", *sorted(self.unit_owned))
+        if "NeedDaemonReload=yes" in manager.splitlines():
+            self.reload_pending = True
+            self.save_unit_intent()
         if self.reload_pending:
             self.cmd("systemctl", "--user", "daemon-reload")
             self.reload_pending = False
             self.save_unit_intent()
-        self.cmd("systemctl", "--user", "show", "--property=Version")
         for name in sorted(wanted):
             if name.endswith(".timer"):
                 try:
@@ -1151,6 +1214,7 @@ class Runner:
         except (OSError, ValueError) as error:
             self.item("releases", "failed", str(error))
         self.state["managed_files"] = sorted(self.owned)
+        self.state["managed_links"] = sorted(self.link_owned)
         self.state["managed_units"] = sorted(self.unit_owned)
         self.state["unit_reload_pending"] = self.reload_pending
         if persist and not self.args.check:
@@ -1280,7 +1344,7 @@ class Runner:
             if data is not None:
                 copy.save(path, data)
         link_before = {}
-        for tool in self.d.tools:
+        for tool in self.d.tools.keys() | self.link_owned:
             path = f".local/bin/{tool}"
             try:
                 target = self.real_safe.readlink(path)
@@ -1293,6 +1357,9 @@ class Runner:
                 link_before[path] = target
                 if target is not None:
                     copy.link(path, target)
+        recorded = self.real_safe.read(".local/state/fleet-sync/links.json")
+        if recorded is not None:
+            copy.save(".local/state/fleet-sync/links.json", recorded)
         self.safe, self.previewing = copy, True
         try:
             self.item("agents", "deferred", "preview: using invoking checkout declarations; no release deployment")

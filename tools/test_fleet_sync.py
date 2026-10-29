@@ -29,7 +29,7 @@ def put(path, content, executable=False):
 
 
 SYSTEMCTL = '''#!/usr/bin/env python3
-import json, os, pathlib, sys
+import json, os, pathlib, subprocess, sys
 home = pathlib.Path.home()
 with (home / "systemctl.log").open("a") as f:
     f.write(json.dumps(sys.argv[1:]) + "\\n")
@@ -37,7 +37,15 @@ if os.environ.get("FAKE_NO_BUS"):
     sys.exit(1)
 args = sys.argv[2:]
 directory = home / ".config/systemd/user"
-if args[0] == "enable":
+if args[0] == "daemon-reload":
+    record = home / "unit-reloads.json"
+    reloads = json.loads(record.read_text()) if record.exists() else []
+    reloads.append({p.name: p.stat().st_mtime_ns for p in directory.iterdir() if p.is_file()})
+    sibling = record.with_suffix(".new")
+    sibling.write_text(json.dumps(reloads))
+    sibling.replace(record)
+    (home / "manager-needs-reload").unlink(missing_ok=True)
+elif args[0] == "enable":
     name = args[-1]
     link = directory / "timers.target.wants" / name
     link.parent.mkdir(parents=True, exist_ok=True)
@@ -46,10 +54,23 @@ if args[0] == "enable":
         sys.exit(1)
     if not link.is_symlink():
         link.symlink_to(directory / name)
+    if os.environ.get("FAKE_ENABLE_TIMER_RUN"):
+        result = subprocess.run([sys.executable, "-I", "-B",
+            str(home / "src/fabrig/current/tools/fleet-sync"), "--host", "hel8", "--timer"],
+            capture_output=True, text=True, timeout=10)
+        record = home / "timer-race.json"
+        sibling = record.with_suffix(".new")
+        sibling.write_text(json.dumps([result.returncode, result.stdout, result.stderr]))
+        sibling.replace(record)
 elif args[0] == "disable":
     (directory / "timers.target.wants" / args[-1]).unlink(missing_ok=True)
 elif args[0] == "show":
-    print("Version=fake")
+    if "NeedDaemonReload" in args:
+        for name in args[3:]:
+            needed = (home / "manager-needs-reload").read_text().splitlines() if (home / "manager-needs-reload").exists() else []
+            print("NeedDaemonReload=" + ("yes" if name in needed else "no"))
+    else:
+        print("Version=fake")
 elif args[0] == "is-active":
     sys.exit(3 if os.environ.get("FAKE_INACTIVE") or not (directory / "timers.target.wants" / args[-1]).is_symlink() else 0)
 '''
@@ -107,9 +128,10 @@ class FleetTest(unittest.TestCase):
         self.source = self.directory / "agents-source"
         self.source.mkdir()
         shutil.copytree(ROOT / "fleet", self.source / "fleet")
-        for tool in (ROOT / "tools/installed").read_text().splitlines():
-            if tool.strip() and not tool.lstrip().startswith("#"):
-                put(self.source / "tools" / tool, (ROOT / "tools" / tool).read_text(), True)
+        for line in (ROOT / "tools/installed").read_text().splitlines():
+            if line.strip() and not line.lstrip().startswith("#"):
+                path = line.split()[-1]
+                put(self.source / "tools" / path, (ROOT / "tools" / path).read_text(), True)
         put(self.source / "tools/installed", (ROOT / "tools/installed").read_text())
         put(self.source / "fleet/repositories.toml",
             f"agents = {json.dumps(str(self.directory / 'agents-origin.git'))}\n"
@@ -375,8 +397,9 @@ class FleetTest(unittest.TestCase):
     def test_no_bus_fails(self):
         state = self.sync(expected=1, env={**self.env, "FAKE_NO_BUS": "1"})
         self.assertTrue(any(i["item"] == "units" and i["result"] == "failed" for i in state["items"]))
+        self.assertTrue(self.state()["unit_reload_pending"])
         self.sync()
-        self.assertEqual(self.calls().count(["--user", "daemon-reload"]), 2)
+        self.assertEqual(self.calls().count(["--user", "daemon-reload"]), 1)
         self.assertFalse(self.state()["unit_reload_pending"])
 
     def test_status_from_outside_fleet(self):
