@@ -9,7 +9,10 @@ All source/install pins live in ../versions.toml. Git verifies the source commit
 Cargo --locked verifies registry dependency checksums; fleet-sync verifies the
 musl 1.2.5 download against its declared SHA256 before extracting it.
 
-Only explicit `fleet-sync --provision` builds, on a fresh/drained host. It uses
+Only explicit `fleet-sync --provision` builds, on a fresh/drained host whose
+kache is absent. Any existing binary (including on PATH), config, service,
+drop-in or cache footprint leaves the installation entirely to ops, even if
+its version differs. A lost binary with retained state is not a fresh install. It uses
 Rust 1.95.0 with the musl target, native musl headers, clang and Rust's rust-lld.
 The compiler wrapper is disabled and CARGO_HOME and target are private staging
 directories. No heavy/reconciler installation is required to bootstrap itself.
@@ -20,10 +23,13 @@ source build: the legacy recipe documented non-reproducibility. A build may
 take about eight minutes; its timeout is 30 minutes. No cache is cleared.
 
 config.toml renders the declared per-host cap and (floor + max(cap, 1)) GiB
-recovery threshold. Existing user-owned regular 0600 store.env is inspected
-with stat only: when present the non-secret remote selectors and unit drop-in
-are rendered. A fresh machine needs no shared credentials and runs local-only.
-The optional shared credential is restored by the operator outside git.
-An existing drop-in without that file needs operator removal before starting
-the service. Fleet never opens, copies or removes store.env. Changes to an
-already-running daemon require an operator restart on a drained host.
+recovery threshold. fleet/policy.toml makes this config and kache.service
+check-only: normal runs compare and warn, without writes, ownership adoption,
+enablement or restarts. The unit is excluded from candidate unit verification.
+Only the same invocation that successfully installs an absent kache may write
+these two files and enable/start the service. Subsequent runs leave it to ops.
+A fresh machine runs local-only without shared credentials. Existing non-secret
+remote selectors are compared only when its config already has [cache.remote].
+Fleet never inspects store.env or drop-ins, and never changes existing cache or
+store contents. Ops must agree host by host before any existing-install takeover;
+shared-store setup and any drained-host restart remain operator procedures.

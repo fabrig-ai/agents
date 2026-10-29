@@ -161,7 +161,7 @@ class FleetSync2Test(fixture.FleetTest):
                              "--host", host, "--preview", directory)
                 units = directory / "home/.config/systemd/user"
                 self.assertEqual({p.name for p in units.iterdir()},
-                                 {name + suffix for name in names for suffix in (".service", ".timer")} | {"kache.service"})
+                                 {name + suffix for name in names for suffix in (".service", ".timer")})
                 for name in names - {"fleet-sync"}:
                     service = (units / (name + ".service")).read_text()
                     timer = (units / (name + ".timer")).read_text()

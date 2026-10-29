@@ -20,11 +20,15 @@ complete manifest. No credential/config/state is seeded. Rustup and
 Cargo verify their distribution/locked registry checksums, and kache source is
 fetched at the exact declared git revision with vendored patches. Source builds
 have a 30-minute bound. The full Codex standalone layout is preserved.
-Only the explicit provision run enables/starts kache, never restarting a live
-daemon. Kache config/units are fleet-owned; store.env is inspected by stat only,
-never opened. Its optional selectors/drop-in require a user-owned 0600 file.
-A fresh host uses the local store. Operators restart a running kache on a
-drained host after config/binary updates. No cache or operational ledger is reset.
+Only a successful explicit provision of absent kache may create its local-only
+config/unit and enable/start it. Existing binaries (also on PATH), config,
+service, drop-in or cache footprints prevent takeover even under --provision.
+Its config and unit are check-only in policy.toml: normal runs only compare and
+warn, without ownership adoption, unit verification or lifecycle operations.
+No store.env or drop-in is inspected; existing stores/caches are never changed.
+Ops agrees any takeover host by host and manages shared-store setup/restarts.
+Chromium uses h3's canonical tree with a hetzner3-only seed_hosts allowlist;
+hel8's own copy gets a version-only warning, without normal reinstallation.
 The first rollout requires invoking the updated checkout manually: older
 runners reject the new bootstrap/kache declaration asset paths.
 `tools/land` gates a clean branch, fetches/rebases, gates again if HEAD moved,
@@ -44,7 +48,9 @@ The recovery service and timer must both have exactly `["*"]`, always render
 for every host, and are never eligible for removal. This is enforced in code.
 policy.toml maps managed paths to write (default) or check. post/machines is
 check-only pending ops/coordinator agreement: differences warn, without backups
-or writes. Routing compares name-to-target mappings, ignoring order, blank lines
+or writes. Check-only units are also excluded from ownership, verification,
+enablement, removal and manager queries; the first successful absent-kache
+provision is the sole exception for its config/unit. Routing compares name-to-target mappings, ignoring order, blank lines
 and comments; a bare SSH target equals `$USER@target`. The `local` sentinel
 never receives a username and differs from the SSH target `free@local`.
 Equal mappings are ok; otherwise warnings list missing, extra or changed names. Conflicting duplicate

@@ -41,9 +41,10 @@ SERVICE_START = 'ExecStart=/bin/bash -lc \'exec "$$HOME/src/fabrig/current/tools
 RENDERED_FILES = frozenset((
     ".config/fabrig/env.sh", ".config/environment.d/90-fabrig.conf",
     ".claude/settings.json", ".cargo/config.toml", "src/rust/tmp/machine.env",
-    ".config/kache/config.toml", ".config/systemd/user/kache.service.d/20-shared-store.conf",
+    ".config/kache/config.toml",
     "src/rust/tmp/post/machines", ".profile", ".bashrc", ".codex/config.toml",
 ))
+PROVISION_KACHE_FILES = frozenset((".config/kache/config.toml", ".config/systemd/user/kache.service"))
 RECOVERY_UNITS = frozenset(("fleet-sync.service", "fleet-sync.timer"))
 ACTIVE_CHILDREN = set()
 CHILDREN_LOCK = threading.Lock()
@@ -358,6 +359,9 @@ def validate_install(name, install, version=None):
                 raise ValueError("peer file requires mode")
         elif install.get("manifest") != f"seeds/{name}.sha256":
             raise ValueError("peer tree requires its named manifest")
+        if "seed_hosts" in install and (not isinstance(install["seed_hosts"], list) or not install["seed_hosts"]
+                or not all(isinstance(host, str) and re.fullmatch(r"[a-z][a-z0-9-]*", host) for host in install["seed_hosts"])):
+            raise ValueError("invalid seed host allowlist")
         if "url" in install and (not install["url"].startswith("https://")
                 or not re.fullmatch(r"[0-9a-f]{64}", install.get("sha256", ""))):
             raise ValueError("optional upstream URL requires HTTPS and SHA256 pin")
@@ -531,7 +535,7 @@ FLEET_ASSETS = frozenset((
     "kache/README.md", "kache/build", "kache/git-checkout-rev.patch",
     "kache/upload-bound.patch", "kache/config.toml", "kache/remote.toml",
     "kache/20-shared-store.conf", "seeds/README.md", "seeds/codex.sha256",
-    "seeds/chromium.sha256", "seeds/chromium-hetzner3.sha256", "seeds/chromium-hel8.sha256",
+    "seeds/chromium.sha256",
 ))
 
 
@@ -614,9 +618,14 @@ class Declarations:
                 raise ValueError(f"invalid version declaration: {name}")
             if command[0] in ("claude", "codex") and command != [command[0], "--version"]:
                 raise ValueError("Claude and Codex may only run with --version")
+            version_only = pin.get("version_only_hosts", [])
+            if not isinstance(version_only, list) or any(host not in self.hosts for host in version_only):
+                raise ValueError("invalid version-only host list")
             install = pin.get("install")
             if install is not None:
                 validate_install(name, install, pin["version"])
+                if any(host not in self.hosts or not self.hosts[host].get("seed", False) for host in install.get("seed_hosts", [])):
+                    raise ValueError("seed host allowlist must name declared seed hosts")
                 if install.get("seed") == "peer" and not install.get("disagreement"):
                     seed_entries(root, install)  # Fail malformed pins before any writes.
         self.agents_origin = parsed["repositories.toml"]["agents"]
@@ -750,6 +759,7 @@ class Runner:
         self.log = json.loads(os.environ.pop("FLEET_SYNC_LOG", "[]")) if resume else []
         self.lock_fd = None
         self.previewing = False
+        self.kache_bootstrapped = False
         self.waiting = False
         if startup_error:
             self.item("state", "failed", startup_error)
@@ -916,7 +926,8 @@ class Runner:
         if executable is None:
             self.item("units:verify", "warn", "systemd-analyze unavailable; verification skipped")
             return
-        units = [declarations.root / "fleet/units" / name for name in sorted(declarations.host_units(self.name))]
+        units = [declarations.root / "fleet/units" / name for name in sorted(declarations.host_units(self.name))
+                 if declarations.file_policy.get(f".config/systemd/user/{name}", "write") != "check"]
         self.cmd(executable, "--user", "verify", *units)
 
     def fabrig_deferred(self):
@@ -1149,7 +1160,8 @@ class Runner:
             if equal:
                 self.item(relative, "ok", "content current")
                 return False
-            if self.d.file_policy.get(relative, "write") == "check":
+            if (self.d.file_policy.get(relative, "write") == "check"
+                    and not (self.kache_bootstrapped and relative in PROVISION_KACHE_FILES)):
                 self.item(relative, "warn", "differs; check-only")
                 return False
             if self.args.check:
@@ -1314,10 +1326,16 @@ class Runner:
         self.attempt("conflicts", lambda: self.conflicts(env, getattr(self, "real_safe", self.safe)))
 
     def units(self):
-        wanted = self.d.host_units(self.name)
+        declared = self.d.host_units(self.name)
+        readonly = {name for name in declared | self.unit_owned
+                    if self.d.file_policy.get(f".config/systemd/user/{name}", "write") == "check"
+                    and not (self.kache_bootstrapped and f".config/systemd/user/{name}" in PROVISION_KACHE_FILES)}
+        for name in sorted(readonly & declared):
+            self.write(f".config/systemd/user/{name}", self.d.units[name])
+        wanted = declared - readonly
         directory = self.home / ".config/systemd/user"
         differs, existing = {}, {}
-        for name in wanted | self.unit_owned:
+        for name in wanted | (self.unit_owned - readonly):
             if Path(name).name != name or not name.endswith((".timer", ".service")):
                 raise ValueError("invalid unit ownership record")
             data = self.safe.read(f".config/systemd/user/{name}")
@@ -1328,7 +1346,7 @@ class Runner:
         first_start = {name for name in start_once
                        if not existing[name] or name not in self.unit_owned
                        or (name not in self.start_once_started and not self.service_enabled(name))}
-        stale = self.unit_owned - wanted - RECOVERY_UNITS
+        stale = self.unit_owned - wanted - RECOVERY_UNITS - readonly
         if not self.args.check and not self.previewing:
             # Journal ownership AND reload intent before the first unit mutation.
             self.start_once_started.difference_update(first_start)
@@ -1379,7 +1397,7 @@ class Runner:
             return
         # A previous run may have completed while the manager still held stale
         # units. Read its view even when our bytes and journal are current.
-        manager = self.cmd("systemctl", "--user", "show", "-p", "NeedDaemonReload", *sorted(self.unit_owned))
+        manager = self.cmd("systemctl", "--user", "show", "-p", "NeedDaemonReload", *sorted(self.unit_owned - readonly))
         if "NeedDaemonReload=yes" in manager.splitlines():
             self.reload_pending = True
             self.save_unit_intent()
@@ -1750,7 +1768,8 @@ class Runner:
             self.item(item, "changed" if changed else "ok", f"content pin matches; {'repaired links' if changed else 'no transfer or writes'}")
             return
         self.safe.directory(".local/state/fleet-sync", create=True)
-        peers = sorted((n for n, host in self.d.hosts.items() if host.get("seed", False) and n != self.name),
+        peers = sorted((n for n, host in self.d.hosts.items() if host.get("seed", False) and n != self.name
+                        and n in install.get("seed_hosts", self.d.hosts)),
                        key=lambda n: (n != "hetzner3", n))
         candidates = [None] if install.get("url") else peers
         failures = []
@@ -1790,6 +1809,7 @@ class Runner:
         raise ValueError("no verified seed available: " + ("; ".join(failures) or "no other seed hosts declared"))
 
     def provision(self):
+        self.kache_bootstrapped = False
         # Called only from an explicit manual run under the ordinary fleet lock.
         # Bootstrap Rust before kache, regardless of declaration order.
         names = sorted(self.d.versions, key=lambda name: name != "rustc")
@@ -1798,6 +1818,9 @@ class Runner:
             install = pin.get("install")
             item = f"provision:{name}"
             try:
+                if name == "kache" and self.kache_present():
+                    self.item(item, "ok", "existing kache left to ops; no binary/config/unit takeover")
+                    continue
                 if install and install.get("seed") == "peer":
                     self.provision_seed(name, pin)
                     continue
@@ -1818,39 +1841,40 @@ class Runner:
                     self.install_pin(name, pin, Path(directory))
                 if not self.version_matches(pin):
                     raise ValueError("installed version differs from pin")
+                if name == "kache":
+                    self.kache_bootstrapped = True
                 self.item(item, "changed", f"installed {pin['version']}")
             except (OSError, ValueError, subprocess.SubprocessError, tarfile.TarError) as error:
                 self.item(item, "failed", str(error))
+
+    def kache_present(self):
+        # Metadata only. Presence, including a broken/user-owned link, forbids a
+        # takeover. PATH may contain an older installation outside .local/bin.
+        self.safe.guard(".local/bin/kache")
+        path = f"{self.home}/.local/bin:{self.home}/.cargo/bin:" + os.environ.get("PATH", "/usr/bin:/bin")
+        footprints = (".local/bin/kache", ".config/kache", ".cache/kache", ".local/share/kache",
+                      ".config/systemd/user/kache.service", ".config/systemd/user/kache.service.d")
+        return any(os.path.lexists(self.home / p) for p in footprints) or shutil.which("kache", path=path) is not None
 
     def kache_config(self):
         values = self.d.hosts[self.name]["machine_env"]
         cap = values.get("KACHE_MAX_GB", 12)
         floor = values.get("PLAN_MIN_DISK_GB", 40)
-        local_only = values.get("KACHE_LOCAL_ONLY", 0)
         config = (self.d.root / "fleet/kache/config.toml").read_text()
         config = config.replace("@CAP@", str(cap)).replace("@RECOVERY@", str((floor + max(cap, 1)) * 1024**3))
+        # Keep the existing non-secret remote selection in a comparison only.
+        # Never inspect store.env, cache/store directories or service drop-ins.
+        existing = self.safe.read(".config/kache/config.toml") or b""
+        remote = b"[cache.remote]" in existing
+        local_only = values.get("KACHE_LOCAL_ONLY", 0) or not remote
         config = config.replace("@LOCAL_ONLY@", "true" if local_only else "false")
-        # Inspect credential metadata ONLY. Never open it, even in preview/check.
-        safe = getattr(self, "real_safe", self.safe)
-        try:
-            with safe.parent(".config/kache/store.env", create=False) as (directory, leaf):
-                info = os.stat(leaf, dir_fd=directory, follow_symlinks=False)
-        except FileNotFoundError:
-            info = None
-        if info is not None:
-            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600:
-                raise ValueError("kache store.env must be user-owned regular 0600; contents were not read")
+        if remote:
             config += (self.d.root / "fleet/kache/remote.toml").read_text()
-            self.write(".config/systemd/user/kache.service.d/20-shared-store.conf",
-                       (self.d.root / "fleet/kache/20-shared-store.conf").read_text())
-        elif self.safe.read(".config/systemd/user/kache.service.d/20-shared-store.conf") is not None:
-            self.item("kache:shared-store", "warn", "manual: drop-in exists without store.env; USER must remove the stale drop-in")
-        if info is None and not local_only:
-            # Fresh session hosts without shared credentials still work locally.
-            config = config.replace("local_only = false", "local_only = true")
         self.write(".config/kache/config.toml", config)
 
     def start_kache(self):
+        if not self.kache_bootstrapped:
+            return  # Existing installations and later runs remain ops-owned.
         if not self.version_matches(self.d.versions["kache"]):
             raise ValueError("kache pin unavailable; service was not started")
         relative = ".config/systemd/user/default.target.wants/kache.service"
@@ -1875,7 +1899,9 @@ class Runner:
                 output = self.cmd(*pin["command"], timeout=10)
                 found = re.findall(r"(?<![A-Za-z0-9])v?(\d+(?:\.\d+){2,3}(?:[-+][A-Za-z0-9.-]+)?)", output)
                 match = any(pin["version"] in (value, value.partition("+")[0]) for value in found)
-                self.item(f"version:{name}", "ok" if match else "warn", f"want {pin['version']}; got {output[:160]}")
+                version_only = self.name in pin.get("version_only_hosts", [])
+                reason = ("version-only; canonical tree is for builders; " if version_only else "")
+                self.item(f"version:{name}", "ok" if match and not version_only else "warn", reason + f"want {pin['version']}; got {output[:160]}")
             except (OSError, ValueError, subprocess.TimeoutExpired) as error:
                 self.item(f"version:{name}", "warn", str(error))
 
@@ -2149,8 +2175,10 @@ class Runner:
                 self.render()
                 if getattr(self.args, "provision", False):
                     self.provision()
+                    if self.kache_bootstrapped:
+                        self.attempt("kache:config", self.kache_config)
                 self.attempt("units", self.units)
-                if getattr(self.args, "provision", False):
+                if self.kache_bootstrapped:
                     self.attempt("kache:activation", self.start_kache)
                 self.versions()
             return self.finish()

@@ -8,10 +8,10 @@ the bootstrap task does not execute machine changes or the acceptance builds.
 
 The six native tool installers use pinned peer artifacts; no upstream URL is
 needed. See [seed provenance](../seeds/README.md) for peer comparisons.
-**Chromium is blocked by a same-version tree disagreement**, recorded there;
-no canonical tree was selected. Ops must review that difference before a
-fresh host can pass acceptance. Legacy post/fleet/QA/landing tools are also not
-ported here; any required workflows need their own migration before readmission.
+Chromium uses h3's canonical tree; hel8 is excluded as its seed and only gets
+a version warning for its own differing copy. Main supplies the new QA/login
+and landing tools; legacy post/fleet workflows still need their own migration
+and acceptance before readmission.
 
 ## USER preparation (in order)
 
@@ -105,7 +105,7 @@ ported here; any required workflows need their own migration before readmission.
    **USER — authorize temporary seed access before user.sh.** The new host's
    SSH public key must be in free's authorized_keys on at least one eligible
    seed host: h3 (2.29.124.199) or hel8 (204.168.210.29). h3 is needed for the
-   pinned nextest and Codex versions today; hel8 has nextest 0.9.137 and no
+   pinned nextest, Codex and Chromium trees today; hel8 has nextest 0.9.137 and no
    pinned standalone Codex tree. Using existing trusted admin access, add the
    new public key as its own authorized_keys line, with a distinctive comment
    such as bootstrap-hetzner2. Preserve existing lines, use a sibling file,
@@ -153,11 +153,15 @@ verified SHA256; tree downloads must also match their full manifest.
 
 Rust components/targets are checked even if rustc's version matches. Kache is
 built from exact source with vendored patches and checked musl SHA256, wrapper
-disabled; its isolated build may take eight minutes. Normal convergence renders
-config/units and installs fabrig via its installer. Only explicit provision
-starts/enables kache; a running daemon is not restarted. Timer/check/preview
-never seed or provision. A disagreement reports warn: manual and blocks
-acceptance, rather than picking one peer's content.
+disabled; its isolated build may take eight minutes. Kache provisioning runs
+only when no binary, config, service, drop-in or cache footprint exists.
+Normal convergence compares its config/unit as check-only via policy.toml;
+it neither writes them nor adopts or activates the unit. Only the invocation
+that successfully installs absent kache creates its local-only config/unit and
+enables/starts it. Existing installations stay ops-owned even under --provision;
+ops agrees any takeover host by host. Fleet never inspects store.env or changes
+existing store/cache contents. Timer/check/preview never seed or provision.
+Other normal convergence and fabrig installation follow the existing policy.
 
 7. **USER — Claude login.** After its pinned binary is seeded, open a new
    free login shell, run `claude` and complete interactive authentication.
@@ -195,9 +199,10 @@ heavy --check-recovery
 ```
 
 No shared cache login is needed on h2 (KACHE_LOCAL_ONLY=1). If ops later restores
-its private, user-owned 0600 ~/.config/kache/store.env, convergence renders only
-non-secret remote selectors/drop-in. On a drained machine, ops then restarts
-kache explicitly. Bootstrap never opens that credential or clears the cache.
+its private, user-owned 0600 ~/.config/kache/store.env, ops must also install the
+non-secret remote selectors/drop-in and coordinate a drained-host restart.
+Convergence only compares config/unit; it never inspects that credential or
+changes an existing cache/store.
 
 ## Wipe losses — ops checklist
 
@@ -261,7 +266,9 @@ prover or synthesize its evidence, credentials, messages, sessions or holds.
 Existing hosts need a manual first invocation from an updated agents checkout
 on a drained machine: older fleet-sync runners reject the new declaration asset
 paths. Fetch/switch the dedicated agents clone to reviewed origin/main and run
-`python3 -I -B ~/src/fabrig/agents/tools/fleet-sync --provision --host NAME` once;
-subsequent timers use the promoted runner. Review config diffs/daemon restart
-needs on each host. To revert, land the revert through tools/land and invoke
+`python3 -I -B ~/src/fabrig/agents/tools/fleet-sync --host NAME` once;
+subsequent timers use the promoted runner. This invocation does not provision
+new tools or take over kache. Fresh-host provisioning is a separate explicit
+operator action; existing kache takeover requires host-by-host agreement.
+To revert, land the revert through tools/land and invoke
 its runner manually; keep private logins and operational evidence intact.

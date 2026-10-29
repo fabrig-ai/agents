@@ -235,7 +235,7 @@ elif args[:2] == ["toolchain", "install"]:
     def test_kache_source_uses_exact_commit_patches_and_checked_musl(self):
         pin = self.module.Declarations(self.f.source, self.f.home).versions["kache"]
         self.runner.d.versions = {"kache": pin}
-        fixture.put(self.f.bin / "kache", "#!/bin/bash\necho 0.0.1\n", True)
+        (self.f.bin / "kache").unlink()
         archive = self.archive("musl.tgz", {"musl-1.2.5/README": "fixture"})
         pin["install"]["musl_url"], pin["install"]["musl_sha256"] = self.download(archive)
         rev = pin["install"]["rev"]
@@ -269,10 +269,19 @@ sibling.replace(work / "out/kache")
         self.assertEqual([Path(r[-1]).name for r in rows],
                          ["git-checkout-rev.patch"] * 2 + ["upload-bound.patch"] * 2)
         self.assertFalse((self.f.home / "src/rust/tmp/heavy").exists())
+        self.assertTrue(self.runner.kache_bootstrapped)
+        self.runner.kache_config()
+        self.runner.units()
+        self.runner.start_kache()
+        self.assertTrue((self.f.home / ".config/kache/config.toml").exists())
+        self.assertTrue((self.f.home / ".config/systemd/user/default.target.wants/kache.service").is_symlink())
 
-    def test_kache_secret_metadata_only_and_host_specific_config(self):
+    def test_kache_config_comparison_never_reads_or_changes_credentials(self):
         secret = self.f.home / ".config/kache/store.env"
         fixture.put(secret, "fixture secret contents never consumed")
+        config_path = self.f.home / ".config/kache/config.toml"
+        fixture.put(config_path, '[cache]\nlocal_max_size = "25GiB"\n[cache.remote]\ntype = "s3"\n')
+        before = self.f.snapshot()
         original = self.runner.safe.open_regular
         def forbid(directory, leaf, *args, **kwargs):
             self.assertNotEqual(leaf, "store.env", "credential contents were opened")
@@ -280,15 +289,15 @@ sibling.replace(work / "out/kache")
         self.runner.name = "hetzner2"
         with patch.object(self.runner.safe, "open_regular", side_effect=forbid):
             self.runner.kache_config()
-        config = (self.f.home / ".config/kache/config.toml").read_text()
-        self.assertIn('local_max_size = "25GiB"', config)
-        self.assertIn("69793218560", config)
-        self.assertIn('[cache.remote]', config)
-        self.assertNotIn("fixture secret", config)
-        self.assertTrue((self.f.home / ".config/systemd/user/kache.service.d/20-shared-store.conf").is_file())
+        self.assertEqual(before, self.f.snapshot())
+        self.assertTrue(any(i["item"] == ".config/kache/config.toml" and i["result"] == "warn" for i in self.runner.state["items"]))
+        self.assertFalse((self.f.home / ".config/systemd/user/kache.service.d/20-shared-store.conf").exists())
 
-    def test_kache_fresh_home_needs_no_shared_credential(self):
+    def test_kache_fresh_home_config_is_only_created_after_first_install(self):
         self.runner.name = "hetzner3"
+        self.runner.kache_config()
+        self.assertFalse((self.f.home / ".config/kache").exists())
+        self.runner.kache_bootstrapped = True  # A successful first install only.
         self.runner.kache_config()
         config = (self.f.home / ".config/kache/config.toml").read_text()
         self.assertIn('local_max_size = "40GiB"', config)
@@ -296,6 +305,7 @@ sibling.replace(work / "out/kache")
         self.assertNotIn("[cache.remote]", config)
         self.assertFalse((self.f.home / ".config/kache/store.env").exists())
         before = self.f.snapshot()
+        self.runner.kache_bootstrapped = False
         self.runner.kache_config()
         self.assertEqual(before, self.f.snapshot())
 
@@ -330,7 +340,8 @@ sibling.replace(work / "out/kache")
         self.assertEqual(len(rows), 2)
         self.assertTrue(all(row["result"] == "ok" for row in rows), rows)
         self.assertEqual(next(r for r in rows if r["item"] == "provision:kache")["result"], "ok")
-        self.assertTrue((self.f.home / ".config/systemd/user/default.target.wants/kache.service").is_symlink())
+        self.assertFalse((self.f.home / ".config/systemd/user/default.target.wants/kache.service").exists())
+        self.assertFalse((self.f.home / ".config/kache/config.toml").exists())
         count = len(self.f.calls())
         self.f.sync("--provision")
         self.assertFalse(any(row[1] in ("enable", "daemon-reload", "start", "restart") for row in self.f.calls()[count:]))

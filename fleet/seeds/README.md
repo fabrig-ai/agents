@@ -14,7 +14,7 @@ install.lock/history, other releases, authentication or sessions.
 | Forgejo 17.0.0 | 5a3b07e124ed70b4e46ee3939515f003bd3cc85352257a9a4607a527251042ca | same | agree; h3 preferred |
 | runner 13.2.0 | fadaec897f5e6641c363f87ecaf75f866f99c81b7097ec6b433e4c48123fcad1 | same | agree; h3 preferred |
 | Codex 0.162.1 standalone | codex.sha256: 44 files, 11 directories, 1 symlink | pinned standalone release absent | h3 only |
-| Chromium 147.0.7727.101 | chromium-hetzner3.sha256 | chromium-hel8.sha256 | disagreement; no canonical pin selected |
+| Chromium 147.0.7727.101 | chromium.sha256 (canonical) | different launcher/extensions | h3 only; hel8 excluded |
 
 Chromium has 49 files, 42 directories, one symlink on each peer. All binary
 and resource files agree except these two text files:
@@ -26,12 +26,11 @@ and resource files agree except these two text files:
 
 h3's launcher/config selects the bundle's config/extensions and CHROME_WRAPPER;
 hel8's launcher sources /etc/chromium.d and uses system extensions/wrapper.
-Both observed manifests are retained. The Chromium installer reports
-`warn: manual: peer disagreement` and transfers nothing until a reviewed choice
-copies the approved manifest to chromium.sha256 and replaces disagreement in
-versions.toml with `manifest = "seeds/chromium.sha256"`. No tree was chosen merely
-because that peer was reachable first. A matching pin is always required;
-hel8's older nextest will be refused, never silently accepted as a fallback.
+Builders run browser tests, so h3's tree is canonical in chromium.sha256;
+hel8's manifest is removed. Chromium's seed_hosts allowlist contains only h3.
+hel8's own copy gets a version-only warning during --check and is never
+reinstalled by normal runs. A matching pin is always required for explicit
+provisioning; hel8's older nextest will also be refused as a fallback.
 
 ## Manifest format
 
@@ -53,7 +52,8 @@ opens unlisted files. The receiver streams to private staging, checks tar
 headers, every hash, link and mode, then promotes a sibling and recreates links.
 No copied program is run before verification. A failed peer can fall back to
 another declared seed only if its contents match the exact same pins.
-Only seed=true hosts are eligible and a host never transfers from itself.
+Only seed=true hosts allowed by an optional seed_hosts list are eligible,
+and a host never transfers from itself. Chromium allows only hetzner3.
 
 URL remains optional. For a single file it must serve the raw binary whose
 SHA256 is the same content pin. A tree URL must serve a tar with the exact pinned

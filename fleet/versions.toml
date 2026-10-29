@@ -70,6 +70,7 @@ entrypoint = "bin/codex"
 
 [chromium]
 version = "147.0.7727.101"
+version_only_hosts = ["hel8"]
 command = ["chromium", "--version"]
 [chromium.install]
 kind = "opt-tar"
@@ -77,8 +78,8 @@ seed = "peer"
 source = ".local/opt/chromium-147.0.7727.101"
 release = ".local/opt/chromium-147.0.7727.101"
 entrypoint = "usr/lib/chromium/chromium"
-# Both observed trees are recorded under fleet/seeds; no canonical pin chosen.
-disagreement = "Chromium 147.0.7727.101: hel8 and h3 differ in bin/chromium and etc/chromium.d/extensions; review before selecting a manifest"
+manifest = "seeds/chromium.sha256"
+seed_hosts = ["hetzner3"]
 
 
 [forgejo]
