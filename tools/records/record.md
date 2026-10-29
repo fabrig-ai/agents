@@ -18,7 +18,7 @@ record show director/priorities.toml
 ```
 
 Writers are post names: `s/NAME`, `lead/NAME`, `director`, or `ops`;
-`collect` is permitted for `append` only.
+`collect` and `watch` are permitted for `append` only.
 `write` accepts one judgement file and `append` accepts JSON objects, one per
 line. Both read stdin unless `--from FILE` is supplied. `--message TEXT` sets
 the complete commit message; otherwise subjects name the writer and operation.
