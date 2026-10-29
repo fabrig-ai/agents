@@ -247,6 +247,7 @@ class StartOnceTest(fixture.FleetTest):
         old_script = self.process("git", "-C", fixture.ROOT, "show", "1148127:tools/fleet-sync").stdout
         old_script = old_script.replace('SYSTEM_TOOL_DIRS = (Path("/usr/bin"), Path("/bin"))',
                                         f'SYSTEM_TOOL_DIRS = tuple(map(Path, {json.dumps([str(p) for p in self.system_bins])}))')
+        self.assertGreater(self.prepare_integer_machine_env(), 0)
         fixture.put(self.source / "tools/fleet-sync", old_script, True)
         self.process("python3", "-I", "-B", self.source / "tools/fleet-sync", "--host", "hel8", "--self-check")
         self.reset_calls()

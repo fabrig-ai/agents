@@ -227,6 +227,28 @@ class FleetTest(unittest.TestCase):
         args = argparse.Namespace(check=check, timer=False, resume_fd=None)
         return module, module.Runner(args, module.Declarations(self.source, self.home), "hel8")
 
+    def prepare_integer_machine_env(self):
+        """Retain current host declarations with the historical integer schema."""
+        path = self.source / "fleet/hosts.toml"
+        hosts = tomllib.loads(path.read_text())["hosts"]
+        lines = []
+        removed = 0
+        for name, host in hosts.items():
+            lines.append(f"[hosts.{name}]\n")
+            for key, value in host.items():
+                if key == "machine_env":
+                    integers = {k: v for k, v in value.items() if not isinstance(v, str)}
+                    removed += len(value) - len(integers)
+                    value = integers
+                if isinstance(value, dict):
+                    literal = "{ " + ", ".join(f"{json.dumps(k)} = {json.dumps(v)}"
+                                               for k, v in value.items()) + " }"
+                else:
+                    literal = json.dumps(value)
+                lines.append(f"{key} = {literal}\n")
+        put(path, "".join(lines))
+        return removed
+
     def snapshot(self, exclude_mirror=False, root=None):
         root = root or self.home
         rows = {}
@@ -805,11 +827,8 @@ class FleetTest(unittest.TestCase):
             "QA_CLAIM_OWNER": "s/qa",
             "QA_CLAIM_SSH": "free@204.168.210.29",
         }
-        prefix, rest = original.split("[hosts.hetzner6]", 1)
-        entries = ", ".join(f"{key} = {json.dumps(value)}" for key, value in values.items())
-        put(hosts, prefix + "[hosts.hetzner6]" + rest.replace(
-            'machine_env = { ', f'machine_env = {{ {entries}, ', 1))
         existing = tomllib.loads(original)["hosts"]["hetzner6"]["machine_env"]
+        self.assertEqual({key: existing[key] for key in values}, values)
         with patch.dict(os.environ, self.env, clear=True):
             module, _ = self.runner()
             declarations = module.Declarations(self.source, self.home)
@@ -817,10 +836,11 @@ class FleetTest(unittest.TestCase):
                                    declarations, "hetzner6")
             runner.render()
         self.assertFalse([i for i in runner.state["items"] if i["result"] == "failed"])
-        expected = "".join(f"{key}={value}\n" for key, value in {**values, **existing}.items())
+        expected = "".join(f"{key}={value}\n" for key, value in existing.items())
         self.assertEqual((self.home / "src/rust/tmp/machine.env").read_bytes(), expected.encode())
 
     def test_env_value_behavior_matches_main(self):
+        self.assertGreater(self.prepare_integer_machine_env(), 0)
         baseline = "f7334e8aa68c325076c5c0eda16f6ae6c0c217fa"
         script = self.source / "tools/fleet-sync"
         current = script.read_text()
