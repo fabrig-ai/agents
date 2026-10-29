@@ -12,3 +12,4 @@
 "pipeline-watch.timer" = ["session"]
 "status-page.service" = ["session"]
 "status-page.timer" = ["session"]
+"qa-watch.service" = ["qa"]
