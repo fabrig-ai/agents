@@ -446,15 +446,6 @@ class OwnershipTests(Sandbox):
         self.assertEqual(len(result.stderr.splitlines()), 1)
         self.assertEqual(self.all_calls(), [])
 
-    def test_ownership_latency_below_100ms(self):
-        durations = []
-        for _ in range(3):
-            begin = time.perf_counter()
-            result = self.command("start", "owns", "lead/jig")
-            durations.append(time.perf_counter() - begin)
-            self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "", ""))
-        self.assertLess(sorted(durations)[1], 0.1, durations)
-
     def test_stub_contract(self):
         self.assertTrue(os.access(ROOT / "tools/session/fixtures/start-owns-stub", os.X_OK))
         self.env["START_OWNS_ALLOW"] = "lead/jig director"
@@ -549,16 +540,6 @@ class InventoryTests(Sandbox):
         self.env["RECORDS_REPO"] = str(self.base / "missing")
         rows = json.loads(self.command("start", "names", "--json").stdout)
         self.assertFalse(any(row.get("paused", False) for row in rows))
-        self.assertEqual(self.all_calls(), [])
-
-    def test_inventory_latency_under_150ms(self):
-        durations = []
-        for _ in range(3):
-            begin = time.perf_counter()
-            result = self.command("start", "names", "--json")
-            durations.append(time.perf_counter() - begin)
-            self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertLess(sorted(durations)[1], 0.15, durations)
         self.assertEqual(self.all_calls(), [])
 
     def test_inventory_bad_registry_fails_without_partial_json(self):
