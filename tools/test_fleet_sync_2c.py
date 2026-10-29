@@ -34,7 +34,8 @@ class FleetSync2cTest(fixture.FleetTest):
         state = self.sync("--check", expected=1)
         for name in versions:
             self.assertTrue((self.home / ("probe-" + name)).exists())
-            self.assertTrue(any(i["item"] == "version:" + name and i["result"] == "ok" for i in state["items"]))
+            expected = "warn" if "hel8" in versions[name].get("version_only_hosts", []) else "ok"
+            self.assertTrue(any(i["item"] == "version:" + name and i["result"] == expected for i in state["items"]))
 
     def test_preview_accepts_existing_private_dir_and_creates_private_relative_dir(self):
         existing = self.directory / "existing-preview"

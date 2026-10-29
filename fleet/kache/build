@@ -1,0 +1,40 @@
+#!/bin/bash
+# Called by fleet-sync after verifying source rev, patches and musl's SHA256.
+# The machine must be fresh/drained: this bootstrap build predates reconciler setup.
+set -euo pipefail
+umask 077
+[[ $# == 1 && $1 == /* ]] || { echo 'usage: build ABSOLUTE-STAGING-DIRECTORY' >&2; exit 2; }
+work=$1
+musl=$work/musl-1.2.5
+mkdir -p "$work/cargo-home" "$work/out"
+make -C "$musl" ARCH=x86_64 obj/include/bits/alltypes.h obj/include/bits/syscall.h
+resource=$(clang -print-resource-dir)
+{
+    printf '#!/bin/bash\nexec '
+    printf '%q ' "$(command -v clang)" --target=x86_64-unknown-linux-musl -nostdinc \
+        -isystem "$resource/include" -isystem "$musl/obj/include" \
+        -isystem "$musl/arch/x86_64" -isystem "$musl/arch/generic" -isystem "$musl/include"
+    printf '"$@"\n'
+} >"$work/.clang-musl.new"
+chmod 700 "$work/.clang-musl.new"
+mv -f "$work/.clang-musl.new" "$work/clang-musl"
+compiler=$(rustup which --toolchain 1.95.0 rustc)
+toolchain=$(dirname "$(dirname "$compiler")")
+export RUSTUP_TOOLCHAIN=1.95.0 RUSTC_WRAPPER='' CARGO_HOME="$work/cargo-home"
+unset RUSTFLAGS CARGO_ENCODED_RUSTFLAGS RUSTC_WORKSPACE_WRAPPER
+export RUSTC="$compiler" CARGO_INCREMENTAL=0
+export CARGO_TARGET_DIR="$work/target" CARGO_BUILD_JOBS=2
+export CC_x86_64_unknown_linux_musl="$work/clang-musl"
+export AR_x86_64_unknown_linux_musl
+AR_x86_64_unknown_linux_musl=$(command -v ar)
+export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER="$toolchain/lib/rustlib/x86_64-unknown-linux-gnu/bin/rust-lld"
+export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS='-C target-feature=+crt-static -C linker-flavor=ld.lld -C link-self-contained=yes'
+cd "$work/source"
+cargo build --locked --release --bin kache --target x86_64-unknown-linux-musl -j2
+install -m 755 "$work/target/x86_64-unknown-linux-musl/release/kache" "$work/out/.kache.new"
+mv -f "$work/out/.kache.new" "$work/out/kache"
+[[ $("$work/out/kache" --version) == 'kache 1.2.2-gitrev.2' ]]
+if readelf -l "$work/out/kache" | grep -q INTERP; then
+    echo 'kache/build: unexpected dynamic interpreter' >&2; exit 1
+fi
+sha256sum "$work/out/kache"
