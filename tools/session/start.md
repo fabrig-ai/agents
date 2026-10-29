@@ -103,3 +103,20 @@ cwd, full argv and prompt before live-session refusal; they run only the capabil
 probe and session listing. Wire dry runs run only the probe. Neither creates files
 or starts sessions. Tests: `python3 -I -B tools/test_session_start.py` and
 `python3 -I -B tools/session/test_session_context.py`, with temporary HOME and fakes.
+
+## Ownership for post wake
+
+`tools/session/start owns NAME` is a local check, with no session query or network.
+Exit 0 is silent: NAME belongs to an unpaused pipeline. Exit 1 prints one stderr
+line saying `not ours` or `paused`; exit 2 prints one stderr line for an error.
+Owned names are every registered lead, coordinator mailbox, warm-up name and
+`coordinator/H/` prefix, plus `director` and the `director/` prefix. Match names
+exactly except those explicit prefixes; post addresses with `@hel8` are not names.
+A matching `coordinator = "H"`, `state = "paused"` in any
+`drafts/*/draft.toml` pauses that coordinator and its leads. Read `RECORDS_REPO`,
+default `~/src/fabrig/records`, without pulling. Missing records/drafts mean active;
+the director is never paused. Target latency is below 100 ms.
+
+For post's offline tests, executable `fixtures/start-owns-stub NAME` implements
+the same exit/output contract using space-separated exact names from
+`START_OWNS_ALLOW` and `START_OWNS_PAUSED`; paused wins. Wrong arity exits 2.

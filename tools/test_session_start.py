@@ -351,6 +351,102 @@ class LaunchTests(Sandbox):
         self.assertEqual(self.calls(), [])
 
 
+class OwnershipTests(Sandbox):
+    def draft(self, handle, state, directory="draft"):
+        records = Path(self.env.get("RECORDS_REPO", self.home / "src/fabrig/records"))
+        path = records / "drafts" / directory / "draft.toml"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f'coordinator = "{handle}"\nstate = "{state}"\n')
+        return path
+
+    def test_every_owned_name_class_is_silent_and_local(self):
+        for name in ["director", "director/", "director/20261029T1200Z"] + [
+            name for handle in ("dm", "ab") for name in [
+                lib.names(handle)["coordinator_mailbox"], lib.names(handle)["warmup_name"],
+                lib.names(handle)["coordinator_name_prefix"], lib.names(handle)["coordinator_name"],
+                *(lib.names(handle, area)["lead_name"] for area in lib.AREAS),
+            ]
+        ]:
+            with self.subTest(name=name):
+                result = self.command("start", "owns", name)
+                self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "", ""))
+        self.assertEqual(self.all_calls(), [])
+        self.assertEqual(list(self.home.iterdir()), [])
+
+    def test_unknown_names_refuse_on_one_stderr_line(self):
+        for name in ("o/dm-window-jig", "lead/unknown", "lead/ab/unknown", "coordinator/unknown/time", "coordinator/dm", "directorship", "director-next", "lead/jig@hel8", ""):
+            result = self.command("start", "owns", name)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertEqual(result.stdout, "")
+            self.assertEqual(len(result.stderr.splitlines()), 1)
+            self.assertIn("not ours", result.stderr)
+        self.assertEqual(self.all_calls(), [])
+
+    def test_paused_pipeline_including_leads_and_mail_names(self):
+        path = self.draft("dm", "paused")
+        for name in ("lead/jig", "lead/skein", "s/dynamic-memory", "coord-next", "coordinator/dm/20261029T1200Z"):
+            result = self.command("start", "owns", name)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertEqual(result.stdout, "")
+            self.assertEqual(len(result.stderr.splitlines()), 1)
+            self.assertIn("paused", result.stderr)
+        for name in ("lead/ab/jig", "s/another-draft", "director", "director/next"):
+            self.assertEqual(self.command("start", "owns", name).returncode, 0)
+        path.write_text('coordinator="dm"\nstate="active"\n')
+        self.assertEqual(self.command("start", "owns", "lead/jig").returncode, 0)
+        self.assertEqual(self.all_calls(), [])
+
+    def test_records_override_absent_drafts_and_any_matching_paused_draft(self):
+        self.draft("dm", "paused")
+        self.env["RECORDS_REPO"] = str(self.base / "alternate-records")
+        self.assertEqual(self.command("start", "owns", "lead/jig").returncode, 0)
+        self.draft("dm", "active", "first")
+        self.draft("ab", "paused", "second")
+        self.assertEqual(self.command("start", "owns", "lead/jig").returncode, 0)
+        self.assertEqual(self.command("start", "owns", "lead/ab/jig").returncode, 1)
+        self.draft("dm", "paused", "third")
+        self.assertEqual(self.command("start", "owns", "lead/jig").returncode, 1)
+        self.assertEqual(self.all_calls(), [])
+
+    def test_bad_registry_or_draft_is_error_two_on_one_line(self):
+        self.registry.write_text('bad [ toml')
+        for name in ("lead/jig", "director", "unknown"):
+            result = self.command("start", "owns", name)
+            self.assertEqual((result.returncode, result.stdout), (2, ""))
+            self.assertEqual(len(result.stderr.splitlines()), 1)
+        self.registry.write_text('[dm]\nmailbox="s/dynamic-memory"\ndefault=true\n')
+        self.draft("dm", "active").write_text('bad [ toml')
+        result = self.command("start", "owns", "lead/jig")
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(len(result.stderr.splitlines()), 1)
+        self.assertEqual(self.all_calls(), [])
+
+    def test_ownership_latency_below_100ms(self):
+        durations = []
+        for _ in range(3):
+            begin = time.perf_counter()
+            result = self.command("start", "owns", "lead/jig")
+            durations.append(time.perf_counter() - begin)
+            self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "", ""))
+        self.assertLess(sorted(durations)[1], 0.1, durations)
+
+    def test_stub_contract(self):
+        self.assertTrue(os.access(ROOT / "tools/session/fixtures/start-owns-stub", os.X_OK))
+        self.env["START_OWNS_ALLOW"] = "lead/jig director"
+        self.env["START_OWNS_PAUSED"] = "lead/jig"
+        for name, code, reason in (("director", 0, ""), ("lead/jig", 1, "paused"), ("unknown", 1, "not ours")):
+            result = self.command("fixtures/start-owns-stub", name)
+            self.assertEqual((result.returncode, result.stdout), (code, ""))
+            if code:
+                self.assertIn(reason, result.stderr)
+                self.assertEqual(len(result.stderr.splitlines()), 1)
+            else:
+                self.assertEqual(result.stderr, "")
+        result = self.command("fixtures/start-owns-stub")
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(len(result.stderr.splitlines()), 1)
+
+
 class WiringTests(Sandbox):
     def test_watched_paths_for_both_coordinators_and_roles(self):
         root = self.home / "src/fabrig/main"

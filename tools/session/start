@@ -10,7 +10,7 @@ import time
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from session_lib import (ROOT, AREAS, clone, create_empty, session_capabilities, list_sessions,
-                         live_session, names, publish_settings, recent_warmup, record_warmup,
+                         live_session, names, owns, publish_settings, recent_warmup, record_warmup,
                          render, session_id, state_time)
 
 
@@ -30,8 +30,15 @@ def main():
     wire = commands.add_parser("wire", help="refresh project hooks without starting sessions")
     wire.add_argument("handle")
     wire.add_argument("--dry-run", action="store_true")
+    ownership = commands.add_parser("owns", help="local-only ownership check for post wake")
+    ownership.add_argument("name")
     args = parser.parse_args()
     try:
+        if args.role == "owns":
+            owned, reason = owns(args.name)
+            if not owned:
+                print("start: " + " ".join(reason.split()), file=sys.stderr)
+            return 0 if owned else 1
         values = names(args.handle, getattr(args, "area", None))
         if args.role == "wire":
             capabilities = session_capabilities()
@@ -98,7 +105,8 @@ def main():
         print(identifier or output, end="" if output.endswith("\n") and not identifier else "\n")
         return 0
     except (OSError, ValueError, KeyError, subprocess.SubprocessError, RuntimeError) as error:
-        print(f"start: {error}", file=sys.stderr)
+        message = " ".join(str(error).split()) if args.role == "owns" else str(error)
+        print(f"start: {message}", file=sys.stderr)
         return 2
 
 
