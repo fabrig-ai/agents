@@ -31,16 +31,36 @@ shutil.copyfile(source, sys.argv[sys.argv.index("--output") + 1])
 '''
 
 
+FIXTURE_HOST = "bootstrap-fixture"
+
+
+def add_fixture_host(source):
+    """Add an independent provisioning target only to a temporary source copy."""
+    path = source / "fleet/hosts.toml"
+    fixture.put(path, path.read_text() + f"""
+[hosts.{FIXTURE_HOST}]
+hostname = "bootstrap-fixture"
+ssh = "free@bootstrap-fixture.invalid"
+roles = ["fixture"]
+machine_env = {{ PLAN_MIN_DISK_GB = 40, KACHE_MAX_GB = 25, KACHE_LOCAL_ONLY = 1 }}
+env = {{}}
+""")
+    return FIXTURE_HOST
+
+
 class ProvisionTest(unittest.TestCase):
     def setUp(self):
         # Composition avoids running FleetTest's inherited tests twice.
         self.f = fixture.FleetTest(methodName="runTest")
         self.f.setUp()
         self.addCleanup(self.f.doCleanups)
+        self.host = add_fixture_host(self.f.source)
+        self.f.sha = self.f.publish()
         self.environment = patch.dict(os.environ, self.f.env, clear=True)
         self.environment.start()
         self.addCleanup(self.environment.stop)
         self.module, self.runner = self.f.runner()
+        self.runner.name = self.host
         self.runner.d.versions = {}
         fixture.put(self.f.bin / "curl", CURL, True)
         self.downloads = {}
@@ -286,7 +306,7 @@ sibling.replace(work / "out/kache")
         def forbid(directory, leaf, *args, **kwargs):
             self.assertNotEqual(leaf, "store.env", "credential contents were opened")
             return original(directory, leaf, *args, **kwargs)
-        self.runner.name = "hetzner2"
+        self.runner.name = self.host
         with patch.object(self.runner.safe, "open_regular", side_effect=forbid):
             self.runner.kache_config()
         self.assertEqual(before, self.f.snapshot())
@@ -294,13 +314,13 @@ sibling.replace(work / "out/kache")
         self.assertFalse((self.f.home / ".config/systemd/user/kache.service.d/20-shared-store.conf").exists())
 
     def test_kache_fresh_home_config_is_only_created_after_first_install(self):
-        self.runner.name = "hetzner3"
+        self.runner.name = self.host
         self.runner.kache_config()
         self.assertFalse((self.f.home / ".config/kache").exists())
         self.runner.kache_bootstrapped = True  # A successful first install only.
         self.runner.kache_config()
         config = (self.f.home / ".config/kache/config.toml").read_text()
-        self.assertIn('local_max_size = "40GiB"', config)
+        self.assertIn('local_max_size = "25GiB"', config)
         self.assertIn("local_only = true", config)
         self.assertNotIn("[cache.remote]", config)
         self.assertFalse((self.f.home / ".config/kache/store.env").exists())
@@ -335,7 +355,7 @@ sibling.replace(work / "out/kache")
         }
         fixture.put(self.f.bin / "rustup", "#!/usr/bin/env python3\nimport sys\n"
                     f"print({outputs!r}[' '.join(sys.argv[1:])])\n", True)
-        state = self.f.sync("--provision")
+        state = self.f.sync("--provision", "--host", self.host)
         rows = [row for row in state["items"] if row["item"].startswith("provision:")]
         self.assertEqual(len(rows), 2)
         self.assertTrue(all(row["result"] == "ok" for row in rows), rows)
@@ -343,7 +363,7 @@ sibling.replace(work / "out/kache")
         self.assertFalse((self.f.home / ".config/systemd/user/default.target.wants/kache.service").exists())
         self.assertFalse((self.f.home / ".config/kache/config.toml").exists())
         count = len(self.f.calls())
-        self.f.sync("--provision")
+        self.f.sync("--provision", "--host", self.host)
         self.assertFalse(any(row[1] in ("enable", "daemon-reload", "start", "restart") for row in self.f.calls()[count:]))
         self.assertFalse((self.f.home / "downloads.json").exists())
 
@@ -361,7 +381,7 @@ sibling.replace(work / "out/kache")
         spec = importlib.util.spec_from_file_location("bootstrap_fixture", self.f.source / "fleet/bootstrap/bootstrap.py")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-        bootstrap = module.Bootstrap(argparse.Namespace(dry_run=False, host="hel8"))
+        bootstrap = module.Bootstrap(argparse.Namespace(dry_run=False, host=self.host))
         def run(*argv, capture=False):
             return self.f.process(*argv).stdout
         # Exercise actual cloning, validation, directory creation and both fleet
@@ -403,8 +423,8 @@ sibling.replace(work / "out/kache")
         for name in ("root", "user"):
             script = self.f.source / f"fleet/bootstrap/{name}.sh"
             self.f.process("bash", "-n", script)
-            first = self.f.process("bash", script, "--dry-run", "--host", "hetzner2")
-            second = self.f.process("bash", script, "--dry-run", "--host", "hetzner2")
+            first = self.f.process("bash", script, "--dry-run", "--host", self.host)
+            second = self.f.process("bash", script, "--dry-run", "--host", self.host)
             self.assertEqual(first.stdout, second.stdout)
             self.assertIn("rustup" if name == "user" else "enable-linger", first.stdout)
         self.assertEqual(before, self.f.snapshot())

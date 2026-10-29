@@ -58,7 +58,7 @@ class PeerSeedTest(unittest.TestCase):
         self.h.setUp()
         self.addCleanup(self.h.doCleanups)
         self.f, self.runner, self.module = self.h.f, self.h.runner, self.h.module
-        self.runner.name = "hetzner2"
+        self.runner.name = self.h.host
         self.peers = {}
         for name in ("hetzner3", "hel8"):
             home = self.f.directory / ("peer-" + name)
@@ -339,11 +339,11 @@ class PeerSeedTest(unittest.TestCase):
         fixture.put(self.f.source / "fleet/versions.toml", "\n".join(rows) + "\n")
         self.f.publish()
         self.f.env["FAKE_SEED_PEERS"] = os.environ["FAKE_SEED_PEERS"]
-        state = self.f.sync("--provision", "--host", "hetzner2")
+        state = self.f.sync("--provision", "--host", self.h.host)
         item = next(row for row in state["items"] if row["item"] == "provision:forgejo")
         self.assertEqual(item["result"], "changed", item)
         calls = len(self.calls())
-        state = self.f.sync("--provision", "--host", "hetzner2")
+        state = self.f.sync("--provision", "--host", self.h.host)
         item = next(row for row in state["items"] if row["item"] == "provision:forgejo")
         self.assertEqual(item["result"], "ok", item)
         self.assertEqual(len(self.calls()), calls)
