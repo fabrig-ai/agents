@@ -152,15 +152,19 @@ class FleetSync2Test(fixture.FleetTest):
             "hetzner6": {"fleet-sync", "record-collect-builder"},
             "hetzner8": {"fleet-sync", "record-collect-gate"},
         }
+        # Long-running services, started once by fleet-sync: a preview shows their first start pending.
+        services = {"hetzner6": {"qa-watch.service"}}
         before = self.snapshot()
         for host, names in expected.items():
             with self.subTest(host=host):
                 directory = self.directory / ("preview-" + host)
                 self.process("python3", "-I", "-B", self.source / "tools/fleet-sync",
-                             "--host", host, "--preview", directory)
+                             "--host", host, "--preview", directory,
+                             expected=1 if host in services else 0)
                 units = directory / "home/.config/systemd/user"
                 self.assertEqual({p.name for p in units.iterdir()},
-                                 {name + suffix for name in names for suffix in (".service", ".timer")})
+                                 {name + suffix for name in names for suffix in (".service", ".timer")}
+                                 | services.get(host, set()))
                 for name in names - {"fleet-sync"}:
                     service = (units / (name + ".service")).read_text()
                     timer = (units / (name + ".timer")).read_text()
