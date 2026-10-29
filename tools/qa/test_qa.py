@@ -43,7 +43,7 @@ def fast_unit_stopped(self, *args, **kwargs):
 tool['Watch'].unit_stopped = fast_unit_stopped
 """
 
-WATCH_TOOLS = r'''import atexit, fnmatch, json, os, sys, shlex, shutil, signal, subprocess, time
+WATCH_TOOLS = r'''import json, os, sys, signal, time
 from pathlib import Path
 from datetime import datetime, timezone
 root = Path(os.environ['QA_FIXTURE'])
@@ -90,7 +90,10 @@ def end(run, report, code=0):
     (state / 'ended').touch()
 
 if name == 'ssh':
+    import shlex
     assert args[:2] == ['-o', 'BatchMode=yes'] and len(args) == 4, args
+    if config.get('ssh_refusal'):
+        sys.exit('fixture ssh unavailable')
     remote = shlex.split(args[3])
     assert remote[:2] == ['bash', '-lc'] and len(remote) == 3, remote
     words = shlex.split(remote[2])
@@ -102,6 +105,9 @@ elif name == 'claim':
     if args[0] == 'list':
         if config.get('claim_list_refusal'):
             sys.exit(1)
+        if 'claim_list_lines' in config:
+            print('\n'.join(config['claim_list_lines']))
+            sys.exit(0)
         for number in range(1, 10):
             record = claims.get(str(number))
             prefix = f'hetzner6 {number} [s/qa]: '
@@ -121,7 +127,16 @@ elif name == 'claim':
         temporary = path.with_suffix('.new')
         temporary.write_text(json.dumps(claims))
         temporary.replace(path)
+        if action == 'claim':
+            if not config.get('claim_empty_reply'):
+                print(f'{host}-{number} claimed by {owner}: {what[0]}', flush=True)
+        elif not config.get('release_empty_reply'):
+            print(f'{host}-{number} released by {owner}', flush=True)
         hang('after')
+        if config.get('claim_unknown_exit') and action == 'claim':
+            sys.exit(config['claim_unknown_exit'])
+        if config.get('release_unknown_exit') and action == 'release':
+            sys.exit(config['release_unknown_exit'])
 elif name == 'df':
     assert args == ['-B1', '--output=avail', '/'], args
     print('Avail')
@@ -133,6 +148,7 @@ elif name == 'cargo':
     if config.get('cargo_refusal'):
         sys.exit(config['cargo_refusal'])
 elif name == 'codex-run':
+    import atexit, shutil
     if args[1:2] == ['--resume']:
         previous = runs / args[2]
         if config.get('resume_refusal'):
@@ -170,6 +186,7 @@ elif name == 'codex-run':
         os.kill(os.getppid(), 9)
     print(run, state)
 elif name == 'systemd-run':
+    import shlex, subprocess
     unit = args[args.index('--unit') + 1]
     directory = Path(next(arg.split('=', 1)[1] for arg in args if arg.startswith('--working-directory=')))
     # Recording must precede the manager call, including a refused start.
@@ -187,6 +204,7 @@ elif name == 'systemd-run':
     (units / (unit + '.json')).write_text(json.dumps(dict(pid=child.pid,
         stop=shlex.split(properties['ExecStop'].removeprefix('-')), directory=str(directory))))
 elif name == 'systemctl':
+    import fnmatch
     unit = args[-1].removesuffix('.service')
     run = unit.removeprefix('codex-run-')
     deployment = unit.startswith('qa-')
@@ -195,6 +213,7 @@ elif name == 'systemctl':
     pass_name = unit.removeprefix('qa-').removesuffix('-*') if args[1] == 'list-units' else ''
     for owner, operation in config.get('hung_systemctl', {}).items():
         if args[1] == operation and (pass_name == owner or fnmatch.fnmatchcase(unit, 'qa-' + owner + '-[a-z]*')):
+            import subprocess
             child = subprocess.Popen([sys.executable, '-I', '-B', '-c', 'import time; time.sleep(600)'])
             (root / ('hung-' + owner)).write_text(f'{os.getpid()} {child.pid}')
             time.sleep(600)
@@ -245,6 +264,7 @@ elif name == 'systemctl':
             if '--property=Job' in args:
                 print('Job=' + config.get('unit_job', '0'))
         sys.exit(0)
+    import subprocess
     if args[1] == '_finish-stop':
         assert deployment and saved
         subprocess.run(saved['stop'], stdin=subprocess.DEVNULL, check=True)
@@ -2049,7 +2069,7 @@ def manual_kind_holders_stay_held_when_watcher_checks(lab):
     lab.watch()
     config = json.loads((lab.root / 'tools.json').read_text())
     assert config['logins_held'] == [CHATGPT] and config['login_holders'][CHATGPT] == 'walk/forgejo/manual'
-    assert len(lab.sent()) == 1 and lab.sent()[0]['args'][1] == state['starter']
+    assert [row['args'][1] for row in lab.sent()] == ['director@fixture', state['starter']]
 
 
 def a_refused_now_take_reports_the_broken_caps(lab):
@@ -3453,18 +3473,15 @@ def no_walk_resources_taken(lab):
     assert all(not state['logins'] and state['released'] for _, state in lab.walk_states())
 
 
-def a_held_named_slot_falls_through_in_configured_order(lab):
+def a_held_named_slot_refuses_without_falling_through(lab):
     lab.env['QA_WALK_SLOTS'] = 'forgejo=2,1'
-    hold_slot(lab, 2)  # This owner's claim is a refusal too.
-    lab.walk()
-    _, state = lab.walk_state()
-    assert state['slot'] == 1 and state['slot_claim']['what'] == 'qa walk rung-b0-1 attempt 1'
-    assert lab.calls('claim')[:2] == [
-        ['claim', 'hetzner6', '2', 's/qa', 'qa walk rung-b0-1 attempt 1'],
-        ['claim', 'hetzner6', '1', 's/qa', 'qa walk rung-b0-1 attempt 1']]
-    assert slot_claims(lab)['2']['what'] == 'another task'
-    assert lab.calls('codex-run')[0][-2] == str(lab.slots / '1')
-    assert not (lab.tmp / 'qa/repos').exists()
+    hold_slot(lab, 2)
+    before = slot_claims(lab)
+    result = lab.walk(status=1)
+    assert 'claim claim hetzner6 2: exit 1' in result.stderr
+    no_walk_resources_taken(lab)
+    assert slot_claims(lab) == before
+    assert lab.calls('claim') == [['claim', 'hetzner6', '2', 's/qa', 'qa walk rung-b0-1 attempt 1']]
 
 
 def all_named_slots_held_refuses_without_taking_anything(lab):
@@ -3472,7 +3489,7 @@ def all_named_slots_held_refuses_without_taking_anything(lab):
     hold_slot(lab, 2)
     before = slot_claims(lab)
     result = lab.walk(status=1)
-    assert 'no free walk slot' in result.stderr
+    assert 'claim claim hetzner6 1: exit 1' in result.stderr
     no_walk_resources_taken(lab)
     assert slot_claims(lab) == before
     assert not [call for call in lab.calls('claim') if call[0] == 'release']
@@ -3593,23 +3610,25 @@ def claim_release_waits_for_session_and_deployment_stop(lab):
     dead(pid)
 
 
-def claim_release_retries_without_delaying_login_returns(lab):
+def claim_release_failure_is_alerted_once_without_retry(lab):
     lab.walk()
     lab.configure(inactive=True, claim_release_refusal=True)
     lab.watch()
     _, state = lab.walk_state()
     assert state['stage'] == 'ended' and state['released'] and state['given'] == [CHATGPT]
+    assert state['slot_claim']['release_status'] == 'release unconfirmed'
     assert not state['slot_claim']['released'] and slot_claims(lab)
     releases = lambda: [c for c in lab.calls('claim') if c[0] == 'release']
-    before = len(releases())
-    lab.watch()
-    assert len(releases()) > before and not lab.walk_state()[1]['slot_claim']['released']
+    assert len(releases()) == 1
     lab.configure(claim_release_refusal=False)
     lab.watch()
-    assert lab.walk_state()[1]['slot_claim']['released'] and not slot_claims(lab)
+    lab.watch()
+    assert len(releases()) == 1 and not lab.walk_state()[1]['slot_claim']['released']
+    notices = [row for row in lab.sent() if 'slot release unconfirmed' in row['args'][2]]
+    assert len(notices) == 1 and notices[0]['args'][1] == 'director@fixture'
 
 
-def a_claim_lost_between_acceptance_and_save_is_repaired(lab):
+def a_claim_lost_between_acceptance_and_save_is_alerted(lab):
     driven_walk(lab, '''Watch = tool['Watch']
 original = Watch.slot_call
 def slot_call(self, claim, *args):
@@ -3625,21 +3644,21 @@ Watch.slot_call = slot_call
     hold_slot(lab, 2, what='manual work')
     hold_slot(lab, 7, what='qa walk rung-unrelated-1 attempt 1')
     lab.watch()
-    assert set(slot_claims(lab)) == {'2', '7'}
+    assert set(slot_claims(lab)) == {'1', '2', '7'}
     assert lab.walk_state()[1]['released']
-    lab.walk('next')
-    assert lab.walk_states()[1][1]['slot'] == 1
+    lab.watch()
+    assert len(lab.sent()) == 1 and lab.sent()[0]['args'][1] == 'director@fixture'
+    assert not [c for c in lab.calls('claim') if c[0] == 'release']
 
 
-def an_orphan_claim_without_any_state_is_retried(lab):
+def an_orphan_claim_without_any_state_is_alert_only(lab):
     hold_slot(lab, 1, what='qa walk rung-crashed-1 attempt 1')
     hold_slot(lab, 2, owner='ops', what='qa walk rung-other-1 attempt 1')
-    lab.configure(claim_release_refusal=True)
+    lab.watch()
     lab.watch()
     assert set(slot_claims(lab)) == {'1', '2'}
-    lab.configure(claim_release_refusal=False)
-    lab.watch()
-    assert set(slot_claims(lab)) == {'2'}
+    assert len(lab.sent()) == 1 and 'Unsaved claim:' in lab.sent()[0]['body']
+    assert not [c for c in lab.calls('claim') if c[0] == 'release']
 
 
 def a_saved_claim_precedes_any_checkout_preparation(lab):
@@ -3648,7 +3667,9 @@ def fetch(self, repo, slot):
     state, = (self.workspace.tmp / 'qa/walks').glob('*.json')
     import json
     saved = json.loads(state.read_text())
-    assert saved['slot'] == slot and saved['slot_claim']['what'] == 'qa walk rung-b0-1 attempt 1'
+    assert saved['slot'] == saved['slot_claim']['slot'] == slot
+    assert saved['slot_claim']['host'] == 'hetzner6' and saved['slot_claim']['owner'] == 's/qa'
+    assert saved['slot_claim']['what'] == 'qa walk rung-b0-1 attempt 1'
     os._exit(77)
 Repositories.fetch = fetch
 ''', status=77)
@@ -3674,10 +3695,10 @@ Watch.slot_call = slot_call
     assert not slot_claims(lab) and not lab.walk_state()[1]['slot_claim']['released']
     hold_slot(lab, 1, what='qa walk rung-successor-1 attempt 1')
     before = len([c for c in lab.calls('claim') if c[0] == 'release'])
-    # Exclude this slot from orphan repair to isolate the saved-release retry.
+    # The durable release reservation stays terminal, even after the old claim vanished.
     lab.env['QA_WALK_SLOTS'] = 'forgejo=2'
     lab.watch()
-    assert lab.walk_state()[1]['slot_claim']['released']
+    assert lab.walk_state()[1]['slot_claim']['release_status'] == 'release unconfirmed'
     assert slot_claims(lab)['1']['what'] == 'qa walk rung-successor-1 attempt 1'
     assert len([c for c in lab.calls('claim') if c[0] == 'release']) == before
 
@@ -3687,43 +3708,48 @@ def a_pause_releases_and_resume_reclaims_a_named_slot(lab):
     paused = pause_walk(lab, directory, state)
     assert paused['slot_claim']['released'] and not slot_claims(lab)
     hold_slot(lab, 1)
+    lab.run('walk', 'fabrig', 'b0', '--resume', state['walk'], '--build', 'main', status=1)
+    assert lab.walk_state()[1]['stage'] == 'paused'
+    assert len(lab.calls('codex-run')) == 1
+    lab.env['QA_WALK_SLOTS'] = 'forgejo=2,1'
     lab.run('walk', 'fabrig', 'b0', '--resume', state['walk'], '--build', 'main')
     resumed = lab.walk_state()[1]
-    assert resumed['attempt'] == 2 and resumed['slot'] == 2
-    assert resumed['slot_claim']['what'] == 'qa walk rung-b0-1 attempt 2'
+    assert resumed['attempt'] == 3 and resumed['slot'] == 2
+    assert resumed['slot_claim']['what'] == 'qa walk rung-b0-1 attempt 3'
     assert resumed['attempts'][0]['slot_claim']['released']
-    assert (directory / 'prepare-2.log').is_file()
+    assert (directory / 'prepare-3.log').is_file()
     assert lab.calls('codex-run')[-1][-2] == str(lab.slots / '2')
     assert not (lab.tmp / 'qa/repos').exists()
 
 
-def a_pause_with_pending_release_keeps_retrying_before_resume(lab):
+def a_pause_with_unconfirmed_release_stays_blocked_without_retry(lab):
     directory, state = walk_with_logins(lab, CHATGPT)
     lab.configure(claim_release_refusal=True)
     state = pause_walk(lab, directory, state)
     assert state['stage'] == 'paused' and state['given'] == [CHATGPT]
-    assert not state['slot_claim']['released']
+    assert state['slot_claim']['release_status'] == 'release unconfirmed'
     result = lab.run('walk', 'fabrig', 'b0', '--resume', state['walk'], '--build', 'main', status=1)
     assert 'slot claim release is still pending' in result.stderr
     lab.configure(claim_release_refusal=False)
     lab.watch()
-    assert lab.walk_state()[1]['slot_claim']['released']
-    lab.run('walk', 'fabrig', 'b0', '--resume', state['walk'], '--build', 'main')
-    assert lab.walk_state()[1]['attempt'] == 2
+    assert not lab.walk_state()[1]['slot_claim']['released']
+    assert len([c for c in lab.calls('claim') if c[0] == 'release']) == 1
+    assert len(lab.calls('codex-run')) == 1
 
 
-def local_and_remote_claims_are_bounded_and_unknown_acceptance_is_repaired(lab):
+def local_and_remote_claims_are_bounded_and_unknown_acceptance_is_alerted(lab):
     for remote, when in (('', 'before'), ('claims@hel8', 'after')):
         lab.env['QA_CLAIM_SSH'] = remote
         lab.configure(hang={'claim:claim': when})
         result = driven_walk(lab, "HUNG = {'claim:claim', 'ssh:-o'}\n" + TIMEOUT_DRIVER,
-                             status=4)
-        assert 'slot claim timed out' in result.stderr
+                             status=1)
+        assert 'exit 124' in result.stderr
         assert not lab.calls('cargo') and not lab.calls('codex-run')
         assert all(state['slot'] is None for _, state in lab.walk_states())
         lab.configure(hang={})
         lab.watch()
-        assert not slot_claims(lab)
+        assert bool(slot_claims(lab)) == (when == 'after')
+        assert not [c for c in lab.calls('claim') if c[0] == 'release']
 
 
 def named_slot_settings_validate_and_override_the_old_counts(lab):
@@ -3768,15 +3794,193 @@ def fleet_settings_accept_commas_and_plus_without_whitespace(lab):
     assert set(state['requests']) == {CHATGPT, CLAUDE} and state['slot'] == 1
     lab.walk('other', '--kind', 'claude')
     assert lab.walk_states()[1][1]['slot'] == 3
+    assert state['slot_claim']['slot'] == 1 and state['slot_claim']['what'] == 'qa walk rung-b0-1 attempt 1'
     # Legacy whitespace kinds and comma pools still work under the same parser.
     lab.env['QA_WALK_KINDS'] = 'forgejo=2:chatgpt,claude claude=2:claude'
     lab.walk('legacy')
     assert set(lab.walk_states()[1][1]['requests']) == {CHATGPT, CLAUDE}
 
 
+def failed_remote_or_unreadable_claim_never_prepares_or_falls_back(lab):
+    lab.env['QA_CLAIM_SSH'] = 'claims@hel8'
+    lab.configure(ssh_refusal=True)
+    before = [lab.git(lab.slots / str(n), 'rev-parse', 'HEAD') for n in (1, 2)]
+    result = lab.walk(status=1)
+    assert 'fixture ssh unavailable' in result.stderr
+    assert len(lab.calls('ssh')) == 1 and not lab.calls('claim')
+    no_walk_resources_taken(lab)
+    lab.configure(ssh_refusal=False)
+    result = driven_walk(lab, '''def slot_call(self, claim, *args):
+    raise UnicodeError('fixture undecodable result')
+tool['Watch'].slot_call = slot_call
+''', status=4)
+    assert 'UnicodeError: fixture undecodable result' in result.stderr
+    no_walk_resources_taken(lab)
+    assert [lab.git(lab.slots / str(n), 'rev-parse', 'HEAD') for n in (1, 2)] == before
+    assert not lab.calls('trim')
+
+
+def empty_and_unknown_claim_results_refuse_even_if_record_was_created(lab):
+    lab.configure(claim_empty_reply=True)
+    result = lab.walk('empty', status=1)
+    assert 'unreadable or empty result' in result.stderr
+    no_walk_resources_taken(lab)
+    assert set(slot_claims(lab)) == {'1'}
+    # A reply lost after recording is not permission to use another candidate.
+    lab.env['QA_WALK_SLOTS'] = 'forgejo=2,1'
+    lab.configure(claim_empty_reply=False, claim_unknown_exit=255)
+    result = lab.walk('unknown', status=1)
+    assert 'exit 255' in result.stderr
+    no_walk_resources_taken(lab)
+    assert set(slot_claims(lab)) == {'1', '2'}
+    assert [c[2] for c in lab.calls('claim') if c[0] == 'claim'] == ['1', '2']
+
+
+def release_preflight_mismatch_is_alerted_once_and_never_released(lab):
+    lab.walk()
+    lab.configure(inactive=True, claim_list_lines=['hetzner6 1 [s/qa]: free'])
+    lab.watch()
+    assert lab.walk_state()[1]['slot_claim']['release_status'] == 'release unconfirmed'
+    assert not [c for c in lab.calls('claim') if c[0] == 'release']
+    lab.configure(claim_list_lines=[])
+    lab.watch()
+    lab.configure(claim_list_lines=['hetzner6 1 [s/qa]: s/qa: different WHAT (since 2026-10-29T00:00:00+00:00); held 0d 00:00:00'])
+    lab.watch()
+    assert not [c for c in lab.calls('claim') if c[0] == 'release']
+    assert len([m for m in lab.sent() if 'slot release unconfirmed' in m['args'][2]]) == 1
+    assert slot_claims(lab)
+
+
+def release_waits_for_give_back_even_when_all_units_are_stopped(lab):
+    directory, state = walk_with_logins(lab, CHATGPT)
+    lab.configure(inactive=True, logins_out=[CHATGPT])
+    lab.watch()
+    current = lab.walk_state()[1]
+    assert current['released'] and not current['given']
+    assert not [c for c in lab.calls('claim') if c[0] == 'release']
+    assert current['slot_claim']['release_status'] == 'held'
+    lab.configure(logins_out=[])
+    lab.watch()
+    assert lab.walk_state()[1]['slot_claim']['released']
+    assert len([c for c in lab.calls('claim') if c[0] == 'release']) == 1
+
+
+def remote_release_timeout_after_effect_is_terminal(lab):
+    lab.env['QA_CLAIM_SSH'] = 'claims@hel8'
+    lab.walk()
+    lab.configure(inactive=True, hang={'claim:release': 'after'})
+    # Only remote release is shortened; other SSH operations retain the real 60-second bound.
+    patch = TIMEOUT_DRIVER.replace("if operation in HUNG:", "if operation in HUNG and 'release' in str(argv[-1]):")
+    driven_watch(lab, "HUNG = {'ssh:-o'}\n" + patch)
+    assert not slot_claims(lab)
+    current = lab.walk_state()[1]
+    assert current['slot_claim']['release_status'] == 'release unconfirmed'
+    assert 'exit 124' in current['slot_claim']['release_result']
+    hold_slot(lab, 1, what='a newer claim')
+    lab.configure(hang={})
+    lab.watch()
+    lab.watch()
+    assert slot_claims(lab)['1']['what'] == 'a newer claim'
+    assert len([c for c in lab.calls('claim') if c[0] == 'release']) == 1
+    assert len([m for m in lab.sent() if 'slot release unconfirmed' in m['args'][2]]) == 1
+
+
+def a_release_crash_before_call_never_retries_the_durable_intent(lab):
+    lab.walk()
+    lab.configure(inactive=True)
+    driven_watch(lab, '''import os
+original = tool['Watch'].slot_call
+def slot_call(self, claim, *args):
+    if args[0] == 'release':
+        os._exit(77)
+    return original(self, claim, *args)
+tool['Watch'].slot_call = slot_call
+''', status=77)
+    assert lab.walk_state()[1]['slot_claim']['release_status'] == 'release unconfirmed'
+    lab.watch()
+    lab.watch()
+    assert slot_claims(lab) and not [c for c in lab.calls('claim') if c[0] == 'release']
+    assert len([m for m in lab.sent() if 'slot release unconfirmed' in m['args'][2]]) == 1
+
+
+def unknown_walk_holders_alert_once_and_hand_holders_are_untouched(lab):
+    holder = 'walk/forgejo/no-state'
+    hand = 'q/manual'
+    lab.configure(logins_held=[CHATGPT, 'chatgpt-2', CLAUDE],
+                  login_holders={CHATGPT: holder, 'chatgpt-2': holder, CLAUDE: hand})
+    lab.watch()
+    lab.watch()
+    assert not [c for c in lab.calls('logins') if c[0] == 'give']
+    assert len(lab.sent()) == 1 and lab.sent()[0]['args'][1] == 'director@fixture'
+    assert holder in lab.sent()[0]['body'] and hand not in lab.sent()[0]['body']
+    assert 'chatgpt-2' in lab.sent()[0]['body']
+    config = json.loads((lab.root / 'tools.json').read_text())
+    assert set(config['logins_held']) == {CHATGPT, 'chatgpt-2', CLAUDE}
+    # A different holder receives one distinct notice; a new login for the old holder does not.
+    lab.configure(login_holders={CHATGPT: holder, 'chatgpt-2': 'walk/forgejo/another', CLAUDE: hand})
+    lab.watch()
+    lab.watch()
+    assert len(lab.sent()) == 2
+
+
+def a_saved_attempt_holder_authorizes_only_its_exact_stray(lab):
+    lab.walk()
+    directory, state = lab.walk_state()
+    lab.configure(inactive=True)
+    lab.watch()
+    state = lab.walk_state()[1]
+    state['attempts'][0]['holder'] = 'walk/forgejo/earlier'
+    write_walk(lab, state)
+    lab.configure(logins_held=[CHATGPT, 'chatgpt-2', CLAUDE],
+                  login_holders={CHATGPT: state['holder'], 'chatgpt-2': 'walk/forgejo/earlier',
+                                 CLAUDE: 'walk/forgejo/unclaimed'})
+    lab.watch()
+    gives = [c for c in lab.calls('logins') if c[0] == 'give']
+    assert ['give', CHATGPT, '--as', state['holder']] in gives
+    assert ['give', 'chatgpt-2', '--as', 'walk/forgejo/earlier'] in gives
+    assert not any(c[1] == CLAUDE for c in gives)
+    assert len([m for m in lab.sent() if 'unsaved walk login holder' in m['args'][2]]) == 1
+
+
+def an_unreadable_grant_keeps_the_claim_until_inventory_confirms_give_back(lab):
+    result = driven_walk(lab, """original = tool['Watch'].call
+def call(self, name, *args):
+    result = original(self, name, *args)
+    if name == 'logins' and args[0] == 'take' and result.returncode == 0:
+        path = self.workspace.fixture / 'tools.json'
+        config = tool['json'].loads(path.read_text())
+        config['logins_out'] = [result.stdout.split()[0]]
+        temporary = path.with_suffix('.new')
+        temporary.write_text(tool['json'].dumps(config))
+        temporary.replace(path)
+        result.stdout = 'unreadable grant'
+    return result
+tool['Watch'].call = call
+""", status=4)
+    assert 'invalid login grant' in result.stderr
+    assert lab.walk_state()[1]['stage'] == 'ended'
+    lab.watch()
+    assert not lab.walk_state()[1]['slot_claim']['released']
+    assert not [c for c in lab.calls('claim') if c[0] == 'release']
+    lab.configure(logins_out=[])
+    lab.watch()
+    assert lab.walk_state()[1]['slot_claim']['released']
+    assert len([c for c in lab.calls('claim') if c[0] == 'release']) == 1
+
+
 CASES = (
+    an_unreadable_grant_keeps_the_claim_until_inventory_confirms_give_back,
     fleet_settings_accept_commas_and_plus_without_whitespace,
-    a_held_named_slot_falls_through_in_configured_order,
+    failed_remote_or_unreadable_claim_never_prepares_or_falls_back,
+    empty_and_unknown_claim_results_refuse_even_if_record_was_created,
+    release_preflight_mismatch_is_alerted_once_and_never_released,
+    release_waits_for_give_back_even_when_all_units_are_stopped,
+    remote_release_timeout_after_effect_is_terminal,
+    a_release_crash_before_call_never_retries_the_durable_intent,
+    unknown_walk_holders_alert_once_and_hand_holders_are_untouched,
+    a_saved_attempt_holder_authorizes_only_its_exact_stray,
+
+    a_held_named_slot_refuses_without_falling_through,
     all_named_slots_held_refuses_without_taking_anything,
     dirty_slots_are_preserved_refused_and_released,
     a_slot_is_never_created_replaced_or_used_with_the_wrong_origin,
@@ -3784,14 +3988,14 @@ CASES = (
     target_stays_warm_and_trim_failure_is_logged_before_fetch,
     claims_over_ssh_quote_both_shell_levels_and_use_saved_endpoint,
     claim_release_waits_for_session_and_deployment_stop,
-    claim_release_retries_without_delaying_login_returns,
-    a_claim_lost_between_acceptance_and_save_is_repaired,
-    an_orphan_claim_without_any_state_is_retried,
+    claim_release_failure_is_alerted_once_without_retry,
+    a_claim_lost_between_acceptance_and_save_is_alerted,
+    an_orphan_claim_without_any_state_is_alert_only,
     a_saved_claim_precedes_any_checkout_preparation,
     a_release_saved_after_a_crash_never_releases_a_successor,
     a_pause_releases_and_resume_reclaims_a_named_slot,
-    a_pause_with_pending_release_keeps_retrying_before_resume,
-    local_and_remote_claims_are_bounded_and_unknown_acceptance_is_repaired,
+    a_pause_with_unconfirmed_release_stays_blocked_without_retry,
+    local_and_remote_claims_are_bounded_and_unknown_acceptance_is_alerted,
     named_slot_settings_validate_and_override_the_old_counts,
 
     a_hard_linked_rung_brief_is_never_read_or_copied,
@@ -3927,7 +4131,7 @@ class WalkTests(unittest.TestCase):
         cls.baseline = tempfile.TemporaryDirectory(prefix='qa-baseline-')
         baseline = Path(cls.baseline.name)
         Lab(baseline)
-        cls.pool = ThreadPoolExecutor(max_workers=min(8, len(os.sched_getaffinity(0))))
+        cls.pool = ThreadPoolExecutor(max_workers=8)
         cls.futures = {case.__name__: cls.pool.submit(cls.child, case.__name__, baseline) for case in CASES}
 
     @staticmethod

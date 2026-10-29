@@ -10,6 +10,7 @@ import argparse
 from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -30,7 +31,7 @@ NAME = r'[a-z0-9][a-z0-9_-]*'
 LOGIN = r'[a-z][a-z0-9-]*'
 SHA = r'[0-9a-f]{40}'
 ADDRESS = r'[a-z][a-z0-9-]*(/[a-z0-9][a-z0-9-]*)*@[a-z][a-z0-9-]*'
-ATTEMPT_KEYS = ('attempt ref main cap started slot slot_claim logins kinds pools requests run stage given released '
+ATTEMPT_KEYS = ('attempt holder ref main cap started slot slot_claim logins kinds pools requests run stage given released '
                 'start_logged end_logged posted capped decision pause_line resume_run report_attempt alerts').split()
 
 
@@ -218,7 +219,7 @@ class Repositories:
         return remote
 
 
-def replace(path, data, mode=0o600):
+def replace(path, data, mode=0o600, durable=False):
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as target:
         temporary = Path(target.name)
@@ -226,7 +227,15 @@ def replace(path, data, mode=0o600):
             target.write(data)
             target.flush()
             os.chmod(temporary, mode)
+            if durable:
+                os.fsync(target.fileno())
             os.replace(temporary, path)
+            if durable:
+                descriptor = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
         finally:
             temporary.unlink(missing_ok=True)
 
@@ -497,32 +506,81 @@ class Watch:
                      'bash -lc ' + quote(remote)]
         return command(words, timeout=60)
 
+    def notify_once(self, key, subject, body):
+        # Reserve durably before sending: an interrupted alert is never repeated.
+        parent = self.directory / 'attention'
+        path = parent / (hashlib.sha256(key.encode()).hexdigest() + '.json')
+        no_links(self.workspace.tmp, path)
+        try:
+            receipt = json.loads(read_bytes(path, 1024 * 1024 + 1))
+            need(isinstance(receipt, dict) and receipt.get('key') == key
+                 and receipt.get('attempted') is True, f'{path}: invalid alert receipt', 4)
+            return
+        except FileNotFoundError:
+            pass
+        receipt = dict(key=key, attempted=True, subject=subject, body=body, time=timestamp())
+        replace(path, (json.dumps(receipt) + '\n').encode(), durable=True)
+        message = parent / (path.stem + '.body')
+        replace(message, body.encode())
+        try:
+            sent = self.call('post', 'send', '--as', 'qa-watch', self.director, subject, message)
+            receipt['result'] = f'exit {sent.returncode}'
+        except (OSError, Problem, UnicodeError) as error:
+            receipt['result'] = type(error).__name__
+        replace(path, (json.dumps(receipt) + '\n').encode())
+
+    def claim_notice(self, state):
+        if not self.director:
+            return  # A failed start has no director; the watcher sends this notice.
+        claim = state['slot_claim']
+        self.notify_once(f'slot release {state["walk"]} attempt {state.get("attempt", 1)}',
+                         f'qa: slot release unconfirmed for {state["walk"]}',
+                         f'Walk {state["walk"]}, attempt {state.get("attempt", 1)}: release unconfirmed.\n'
+                         f'Claim: {claim["host"]} {claim.get("slot", state["slot"])} {claim["owner"]}; '
+                         f'WHAT: {claim["what"]}; SSH: {claim["ssh"] or "local"}.\n'
+                         f'Result: {claim["release_result"]}. No automatic release retry.\n'
+                         'Reconcile this exact claim on its host before reusing the slot.\n')
+
     def release_slot(self, directory, state):
         claim = state.get('slot_claim')
-        if not state.get('released') or not claim or claim['released']:
+        if not state.get('released') or self.outstanding(state) or not claim or claim['released']:
             return
+        if claim.get('release_status') == 'release unconfirmed':
+            self.claim_notice(state)
+            return
+        # A take can have succeeded without a readable grant reply. Confirm
+        # that even those unsaved grants are back before reserving release.
+        listing = self.call('logins', 'list')
+        inventory = login_inventory(listing.stdout) if listing.returncode == 0 else None
+        holders = {a.get('holder', state['holder']) for a in [state, *state.get('attempts', [])]}
+        if inventory is None or any(holder in holders for holder in inventory.values()):
+            return
+        claim.update(slot=state['slot'], release_status='release unconfirmed',
+                     release_result='interrupted before a confirmed result; release may have run')
+        # A crash after this durable reservation must never cause a second release.
+        self.save(directory, state)
         try:
             listed = self.slot_call(claim, 'list')
-            prefix = f"{claim['host']} {state['slot']} ["
+            prefix = f"{claim['host']} {claim['slot']} ["
             rows = [row for row in listed.stdout.splitlines() if row.startswith(prefix)]
-            need(listed.returncode == 0 and len(rows) == 1, 'cannot verify slot claim before release', 4)
-            match = re.fullmatch(re.escape(prefix) + r'[^]\r\n]+\]: (free|.+ \(since [^()\r\n]+\); held .+)', rows[0])
-            need(match, 'invalid slot claim listing', 4)
-            expected = claim['owner'] + ': ' + claim['what'] + ' (since '
-            if not match[1].startswith(expected):
-                # A release accepted before a crash, possibly followed by another
-                # walk's claim. Never release that successor, even with our owner.
-                accepted = True
-            else:
-                result = self.slot_call(claim, 'release', claim['host'], state['slot'], claim['owner'])
-                accepted = result.returncode == 0
-            if accepted:
-                claim['released'] = True
-                self.save(directory, state)
-            else:
-                log(f'{state["walk"]}: slot claim release pending; trying next check')
-        except (OSError, Problem):
-            log(f'{state["walk"]}: slot claim release failed; trying next check')
+            need(listed.returncode == 0 and len(rows) == 1,
+                 f'claim list exit {listed.returncode}: {listed.stderr.strip() or listed.stdout.strip()}', 4)
+            pattern = (re.escape(prefix) + r'[^]\r\n]+\]: '
+                       + re.escape(claim['owner'] + ': ' + claim['what'])
+                       + r' \(since [^()\r\n]+\); held .+')
+            need(re.fullmatch(pattern, rows[0]), f'claim list does not match saved owner and WHAT: {rows[0]}', 4)
+            result = self.slot_call(claim, 'release', claim['host'], claim['slot'], claim['owner'])
+            claim['release_result'] = f'exit {result.returncode}: {result.stderr.strip() or result.stdout.strip()}'
+            expected = f"{claim['host']}-{claim['slot']} released by {claim['owner']}"
+            need(result.returncode == 0 and result.stdout.strip() == expected,
+                 'release unconfirmed: ' + claim['release_result'], 4)
+            claim.update(released=True, release_status='released')
+        except (OSError, Problem, UnicodeError, AttributeError, TypeError) as error:
+            claim['release_result'] = str(error) if isinstance(error, Problem) else type(error).__name__ + ': ' + str(error)
+            log(f'{state["walk"]}: release unconfirmed; automatic retry disabled')
+        self.save(directory, state)
+        if not claim['released']:
+            self.claim_notice(state)
 
     def repair_slot_claims(self, walks):
         if not self.walks_valid:
@@ -535,7 +593,7 @@ class Watch:
         try:
             listed = self.slot_call(claim, 'list')
             if listed.returncode:
-                log('cannot list slot claims; orphan repair waits for next check')
+                log('cannot list slot claims; orphan observation waits for next check')
                 return
             pattern = (re.escape(claim['host']) + r' ([1-9][0-9]*) \[[^]\r\n]+\]: '
                        + re.escape(claim['owner']) + r': (qa walk (rung-[a-z0-9-]+-[1-9][0-9]*) attempt ([1-9][0-9]*))'
@@ -544,19 +602,19 @@ class Watch:
                 match = re.fullmatch(pattern, row)
                 if not match or int(match[1]) not in numbers:
                     continue
-                number, name, attempt = int(match[1]), match[3], int(match[4])
+                number, what, name, attempt = int(match[1]), match[2], match[3], int(match[4])
                 if any(s['walk'] == name for s in self.legacy_walks):
                     continue
                 state = next((s for _, s in walks if s['walk'] == name), None)
-                # Any saved slot for this attempt belongs to normal cleanup, even
-                # if its claim's last successful release was not saved.
                 saved = ([state, *state.get('attempts', [])] if state else [])
                 if any(a.get('attempt', 1) == attempt and a.get('slot') is not None for a in saved):
                     continue
-                result = self.slot_call(claim, 'release', claim['host'], number, claim['owner'])
-                log(f'{name}: orphan slot {number} claim ' + ('released' if result.returncode == 0 else 'release pending'))
-        except (OSError, Problem):
-            log('slot claim repair failed; trying next check')
+                self.notify_once(f'orphan slot {claim["host"]} {number} {claim["owner"]} {what}',
+                                 f'qa: unsaved slot claim for {name}',
+                                 f'Unsaved claim: {claim["host"]} {number} {claim["owner"]}; WHAT: {what}.\n'
+                                 'No saved slot proves unit and give-back completion. Claim left held; reconcile on its host.\n')
+        except (OSError, Problem, ValueError, UnicodeError):
+            log('slot claim observation failed; claims left held')
 
     def save(self, directory, state):
         need(state['repo'] in REPOSITORIES, 'cannot save an unmanaged walk', 4)
@@ -569,7 +627,8 @@ class Watch:
             need(len(attempts) == state['attempt'], 'invalid walk attempt history', 4)
             attempts[-1] = snapshot
         path = self.directory / 'walks' / (state['walk'] + '.json')
-        replace(path, (json.dumps(state, indent=2) + '\n').encode())
+        replace(path, (json.dumps(state, indent=2) + '\n').encode(),
+                durable=state.get('slot_claim', {}).get('release_status') == 'release unconfirmed')
         self.states[('walk', state['walk'])] = state
 
 
@@ -714,11 +773,20 @@ class Watch:
                                                 else 'the listing is not in its form'))
             return
         self.holders = inventory
-        managed = {state['holder'] for _, state in walks}
+        managed = {attempt.get('holder', state['holder']) for _, state in walks
+                   for attempt in [state, *state.get('attempts', [])]}
+        foreign = {attempt.get('holder', state['holder']) for state in self.legacy_walks
+                   for attempt in [state, *state.get('attempts', [])]}
         if not sweep_walks:
             return
+        unknown = {}
         for name, holder in sorted(self.holders.copy().items()):
-            if name in self.conflicts or (holder, name) in held or holder not in managed:
+            if not holder.startswith('walk/') or holder in foreign:
+                continue
+            if holder not in managed:
+                unknown.setdefault(holder, []).append(name)
+                continue
+            if name in self.conflicts or (holder, name) in held:
                 continue
             result = self.call('logins', 'give', name, '--as', holder)
             if result.returncode == 0:
@@ -726,6 +794,13 @@ class Watch:
                 log(f'gave back {name}: held without a saved grant')
             elif result.returncode not in (1, 2):
                 log(f'{name}: cannot give stray login back: {result.stderr.strip()}')
+        for holder, names in unknown.items():
+            try:
+                self.notify_once('stray holder ' + holder, 'qa: unsaved walk login holder',
+                                 f'Holder {holder} has no saved fabrig walk state.\n'
+                                 f'Logins: {", ".join(names)}. Left held; reconcile with the holder.\n')
+            except (OSError, Problem, ValueError, UnicodeError):
+                log(f'{holder}: cannot record stray alert; logins left held')
 
 
     def unit_status(self, unit, directory=None, launch_checked=False):
@@ -1161,6 +1236,8 @@ def check_alerts(state):
 
 def walk_attempt(state):
     need(isinstance(state, dict), 'invalid walk attempt', 4)
+    need('holder' not in state or isinstance(state['holder'], str)
+         and re.fullmatch(r'walk/[a-z0-9][a-z0-9/_-]*', state['holder']), 'invalid attempt holder', 4)
     need(not state['run'] or re.fullmatch(r'[a-zA-Z0-9_-]+', state['run']), f'attempt: invalid run', 4)
     need(state['stage'] in ('reserving', 'starting', 'running', 'ending', 'cancelled', 'ended', 'paused')
          and type(state['cap']) is int and state['cap'] >= 1
@@ -1183,13 +1260,21 @@ def walk_attempt(state):
          'invalid attempt progress', 4)
     claim = state.get('slot_claim')
     if claim is not None:
-        need(isinstance(claim, dict) and set(claim) == {'host', 'owner', 'ssh', 'what', 'released'}
+        need(isinstance(claim, dict) and {'host', 'owner', 'ssh', 'what', 'released'} <= set(claim)
+             and set(claim) <= {'host', 'slot', 'owner', 'ssh', 'what', 'released', 'release_status', 'release_result'}
              and isinstance(claim['host'], str) and re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9-]*', claim['host'])
              and isinstance(claim['owner'], str) and re.fullmatch(r'[a-z][a-z0-9-]*(/[a-z0-9][a-z0-9-]*)*', claim['owner'])
              and isinstance(claim['ssh'], str) and (not claim['ssh'] or re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_.@-]*', claim['ssh']))
              and isinstance(claim['what'], str) and re.fullmatch(r'qa walk rung-[a-z0-9-]+-[1-9][0-9]* attempt [1-9][0-9]*', claim['what'])
              and type(claim['released']) is bool and state['slot'] is not None,
              'invalid saved slot claim', 4)
+        need('slot' not in claim or type(claim['slot']) is int and claim['slot'] == state['slot'],
+             'invalid saved claim slot', 4)
+        need(claim.get('release_status') in (None, 'held', 'released', 'release unconfirmed')
+             and ('release_result' not in claim or isinstance(claim['release_result'], str))
+             and (claim.get('release_status') is None or (claim['release_status'] == 'released') == claim['released'])
+             and (claim.get('release_status') != 'release unconfirmed' or not claim['released']
+                  and 'release_result' in claim), 'invalid saved release result', 4)
     check_alerts(state)
     if 'report_attempt' in state:
         need(type(state['report_attempt']) is int and 1 <= state['report_attempt'] <= state.get('attempt', 1),
@@ -1360,15 +1445,22 @@ def walk(args, workspace):
         try:
             claim = dict(host=options['QA_SLOT_HOST'], owner=options['QA_CLAIM_OWNER'],
                          ssh=options['QA_CLAIM_SSH'], what=f'qa walk {name} attempt {state.get("attempt", 1)}', released=False)
-            for number in kinds[kind]['numbers']:
+            held_slots = {saved['slot'] for _, saved in walks
+                          if not saved.get('released') or saved.get('slot_claim')
+                          and not saved['slot_claim']['released']}
+            number = next((n for n in kinds[kind]['numbers'] if n not in held_slots), None)
+            need(number is not None, f'no free walk slot for kind {kind}', 1)
+            try:
                 claimed = service.slot_call(claim, 'claim', claim['host'], number, claim['owner'], claim['what'])
-                need(claimed.returncode != 124, 'slot claim timed out; check will repair any unsaved claim', 4)
-                need(claimed.returncode in (0, 1), 'cannot confirm slot claim; check will repair any unsaved claim', 4)
-                if claimed.returncode == 0:
-                    state.update(slot=number, slot_claim=claim)
-                    service.save(directory, state)
-                    break
-            need(state['slot'] is not None, f'no free walk slot for kind {kind}', 1)
+                expected = f"{claim['host']}-{number} claimed by {claim['owner']}: {claim['what']}"
+                need(claimed.returncode == 0 and claimed.stdout.strip() == expected,
+                     f'claim claim {claim["host"]} {number}: exit {claimed.returncode}: '
+                     + (claimed.stderr.strip() or claimed.stdout.strip() or 'unreadable or empty result'), 1)
+            except (OSError, UnicodeError, AttributeError, TypeError) as error:
+                raise Problem(f'claim claim {claim["host"]} {number}: {type(error).__name__}: {error}', 4) from None
+            claim.update(slot=number, release_status='held')
+            state.update(slot=number, slot_claim=claim)
+            service.save(directory, state)
             checkout = service.repositories.fetch(args.repo, state['slot'])
             state['main'] = service.repositories.build(checkout, ref)
             service.save(directory, state)

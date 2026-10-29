@@ -117,7 +117,8 @@ claims the login name, including foreign repositories and saved attempts.
 Unreadable custody also refuses. These holdings are released only by service
 cleanup. An unclaimed hand holder passes through `logins give`'s output and
 status, even if current kind settings are invalid or retired.
-Manual holders remain held across watcher checks.
+Manual holders remain held across watcher checks; an unsaved `walk/...`
+holder receives the one-time director notice described below.
 
 ## State, start and resume
 
@@ -149,16 +150,19 @@ process cmdlines receive the same descriptor checks.
 Each managed change is saved through a sibling file and rename. Attempts
 retain REF/SHA, cap, start, numeric slot and claim, grants, pools,
 moved/in-place kinds, run, cleanup progress, alert receipts and pause decision.
-Admission first saves an attempt without a slot, then tries the kind's
-configured numbers with `claim claim HOST N OWNER 'qa walk NAME attempt A'`.
-A refusal, including a claim by the same owner, tries the next number;
-when all refuse, the attempt takes no slot or login. A timeout or uncertain
-transport result refuses the attempt for orphan repair rather than risking a second claim. Every claim
-command has a 60-second bound. With QA_CLAIM_SSH set, the command runs through
-`ssh -o BatchMode=yes TARGET` and `bash -lc`, quoting every claim word and
-the login shell's command separately. An empty target invokes local `claim`.
-The accepted claim, including host, owner, target and WHAT, is saved before
-checkout preparation.
+Admission first saves an attempt without a slot, then selects the first
+configured number not already held by a saved local walk or unconfirmed
+release. It invokes `claim claim HOST N OWNER 'qa walk NAME attempt A'` once.
+Any failure, timeout, unreadable/empty or mismatched success reply refuses
+admission, naming the result; there is no fallback to another slot, a local
+claim or an unclaimed checkout. A resume remains paused without new grants.
+A confirmed success requires exit zero and the claim tool's exact
+`HOST-N claimed by OWNER: WHAT` acknowledgement. The accepted host, numeric
+slot, owner, WHAT and SSH target are saved before any checkout access or
+build. Every claim command has a 60-second bound. With QA_CLAIM_SSH set, the
+command runs through `ssh -o BatchMode=yes TARGET` and `bash -lc`, quoting
+every claim word and the login shell's command separately. An empty target
+explicitly invokes local `claim`.
 
 A slot must have the exact fabrig origin and no tracked changes or untracked
 files outside `target/` (including ignored files). Missing, dirty, wrong-origin
@@ -169,8 +173,8 @@ to 300 seconds; output and status go to `prepare-ATTEMPT.log` in the walk's
 directory. Trim failure is advisory. Then `df -B1 --output=avail /` (30-second
 bound) must show at least 80000000000 available bytes, and
 `cargo fetch --locked` (300-second bound) must succeed before any login take.
-A preparation refusal cancels the attempt and releases its claim, retrying
-release through the watcher when necessary. REF refusals therefore retain a
+A preparation refusal cancels the attempt and attempts verified claim
+release once. An unconfirmed release is retained for reconciliation. REF refusals therefore retain a
 cancelled start or a failed resume attempt, with no login taken.
 
 Pools are taken in name order, each grant saved before the next. Resting
@@ -254,27 +258,50 @@ directory; failed, duplicate or malformed observations keep custody. Stops
 are nonblocking followed by bounded show polls. Every systemctl call has a
 30-second bound; login and post calls 60 seconds, codex-run 120 seconds.
 The slot stays held until session and deployment units are confirmed stopped.
-At that point local `released` records the stop confirmation, and
-`claim release HOST N OWNER` releases the saved attempt's claim through its
-saved SSH target. Claim release has its own saved `slot_claim.released` flag;
-errors retry at every check, even for ended or paused states, and never gate
-login returns or the pause/end notice. Resume waits for its prior claim's
-release. Before releasing, `claim list` must still identify the same owner
-and WHAT. A free slot or successor claim confirms that the old claim is gone;
-a successor is never released, including one with the same owner.
+Local `released` records unit stop confirmation. Claim release also waits
+for every grant to be returned. A strict login inventory must show no
+holdings under this walk or its saved attempt holders, including a grant
+whose reply was lost before its name could be saved. Through the saved SSH path, `claim list`
+must show the exact saved owner and WHAT; free, changed, missing, malformed
+or failed observations do not authorize release. Only then may
+`claim release HOST N OWNER` run, once. Exit zero and the exact
+`HOST-N released by OWNER` acknowledgement confirm release.
 
-Under the admission lock, each check also lists claims on this builder's
-configured kind slots. This owner's exact `qa walk NAME attempt A` claim with
-no saved slot for that attempt is released, repairing a crash after claim
-acceptance and before state save. Unrelated descriptions, other owners,
-other slots and foreign repository walks are preserved. Unreadable saved
-custody disables orphan repair; list/release failures retry on the next check.
+Before the preflight/command, state durably records `release_status` as
+`release unconfirmed`, with a result describing possible interruption.
+Any failure, timeout, ambiguous reply or crash leaves that terminal status:
+the service never retries the release, even after a free slot or successor
+claim appears. It alerts the director once. Successful confirmation saves
+`slot_claim.released=true` and `release_status=released`. This bookkeeping
+does not gate login returns or pause/end notices. Resume stays blocked while
+its old claim is unconfirmed; the director reconciles it before further use.
+
+Each check also observes this owner's walk/attempt claims on configured kind
+slots. A claim without a saved slot is alert-only and remains held: absent
+custody cannot prove unit and give-back completion. Other owners,
+descriptions, slots and foreign repositories remain untouched. Unreadable
+saved custody disables these observations. There is no automatic orphan
+claim release.
+
+One-time director notices use durable reservations in `tmp/qa/attention/`,
+one hashed JSON receipt and body per release attempt, orphan claim or unknown
+login holder. The reservation precedes `post`, so a service restart or crash
+cannot repeat the post attempt. An interrupted or failed post is recorded
+without retry; its receipt remains available for reconciliation. Ordinary
+stuck-login and starter-post retry rules below are separate.
+
 A queued or running unit job, including on a loaded inactive unit, keeps
 custody and the slot. A live or uncertain task launcher also prevents stop
 confirmation, even with an ended marker; the unit and job are rechecked after
 the launcher scan. Unknown state keeps it held. A strict `logins list` precedes gives; invalid
-inventory gives nothing. A grant missing from its managed owner's state after
-a crash is returned, while manual and unknown-repository owners are protected.
+inventory gives nothing. A `walk/...` login with a missing saved grant is
+returned only if a saved fabrig state's holder, or a saved attempt's exact
+holder, matches it, whatever stage that walk reached. Every unknown
+`walk/...` holder is left held and alerted to the director once per holder,
+including holders created by hand with qa take. A holder outside `walk/...`,
+such as `q/manual`, is never given or alerted by this sweep. Foreign
+repository holders remain protected. Unreadable saved state disables the
+sweep so it cannot misclassify custody.
 
 Each stuck moved login alerts the director and addresses from
 `~/.config/agents-qa/stuck`: one per line, comments allowed, at most 16 valid
