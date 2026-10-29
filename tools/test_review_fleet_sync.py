@@ -256,7 +256,8 @@ time.sleep(120)
             unlink = runner.safe.unlink
             def unlink_then_interrupt(relative):
                 unlink(relative)
-                raise OSError("interrupted after unlink")
+                if relative == ".config/systemd/user/role.service":
+                    raise OSError("interrupted after unlink")
             with patch.object(runner.safe, "unlink", side_effect=unlink_then_interrupt), self.assertRaises(OSError):
                 runner.units()
             _, recovered = self.runner()
