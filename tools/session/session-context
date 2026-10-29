@@ -1,0 +1,176 @@
+#!/usr/bin/env python3
+"""session-context: how full a session's context window is (agents/operations.md, 7).
+
+Claude Code sessions: reads the session's own transcript
+(~/.claude/projects/<cwd>/<session>.jsonl) and counts its latest model call:
+input, cache read, cache creation and output tokens, against --window.
+Codex threads: reads the thread's rollout (~/.codex/sessions/**/rollout-*-<thread>.jsonl)
+and its latest token count, against the window the rollout records.
+
+  session-context                  the newest Claude session started from this directory
+  session-context SESSION_ID       a Claude session by (a prefix of) its id
+  session-context --name lead/jig  a running background Claude session by its name
+  session-context --codex THREAD   a Codex thread by its id
+  session-context --owner ops      a codex-run owner's thread
+  session-context --hook           as a Claude Code Stop hook: reads the hook's JSON on
+                                   stdin; at the threshold, asks the session to hand over
+Options: --window N (Claude; default 1000000), --threshold F (default 0.75).
+Exit 0 below the threshold, 3 at or past it (a hook exits 0 and says so in JSON).
+"""
+import glob, json, os, subprocess, sys
+
+TAIL = 4 << 20  # the latest call is near the end: find it in the tail first
+
+
+def project_dir(cwd):
+    return os.path.expanduser('~/.claude/projects/') + cwd.replace('/', '-').replace('.', '-')
+
+
+def by_name(name):
+    out = subprocess.run(['claude', 'agents', '--json'], capture_output=True, text=True,
+                         timeout=30).stdout
+    for a in json.loads(out or '[]'):
+        if a.get('name') == name and a.get('sessionId'):
+            return a['sessionId'], a.get('cwd')
+    sys.exit(f'session-context: no running session named {name}')
+
+
+def claude_transcript(session, cwd):
+    d = project_dir(cwd)
+    if session:
+        for root in ([d] if os.path.isdir(d) else []) + [os.path.expanduser('~/.claude/projects/')]:
+            for dirpath, _, files in os.walk(root):
+                for f in files:
+                    if f.startswith(session) and f.endswith('.jsonl'):
+                        return os.path.join(dirpath, f)
+        sys.exit(f'session-context: no transcript for {session}')
+    files = [os.path.join(d, f) for f in os.listdir(d) if f.endswith('.jsonl')] if os.path.isdir(d) else []
+    if not files:
+        sys.exit(f'session-context: no transcript under {d}')
+    return max(files, key=os.path.getmtime)
+
+
+def records(path, tail=False):
+    with open(path, 'rb') as f:
+        size = f.seek(0, 2)
+        start = max(0, size - TAIL) if tail else 0
+        f.seek(start)
+        data = f.read()
+    if start:
+        data = data.split(b'\n', 1)[-1]
+    for line in data.split(b'\n'):
+        try:
+            yield json.loads(line)
+        except ValueError:
+            continue
+
+
+def claude_call(d):
+    m = d.get('message')
+    return m.get('usage') if isinstance(m, dict) else None
+
+
+def claude_usage(path, window, counts=True):
+    last = None
+    for tail in (True, False):
+        for d in records(path, tail):
+            u = claude_call(d)
+            if u:
+                last = (d.get('timestamp', ''), u)
+        if last:
+            break
+    if not last:
+        sys.exit(f'session-context: no model call yet in {path}')
+    extra = ''
+    if counts:
+        calls = compactions = 0
+        for d in records(path):
+            if d.get('type') == 'system' and d.get('subtype') == 'compact_boundary':
+                compactions += 1
+            if claude_call(d):
+                calls += 1
+        extra = f'; {calls} calls; {compactions} compaction(s)'
+    ts, u = last
+    used = (u.get('input_tokens', 0) + u.get('cache_read_input_tokens', 0)
+            + u.get('cache_creation_input_tokens', 0) + u.get('output_tokens', 0))
+    return os.path.basename(path)[:8], used, window, ts, extra
+
+
+def owner_thread(name):
+    root = os.path.realpath(os.environ.get('DEV_ROOT', os.path.expanduser('~/src/rust')))
+    events = os.path.join(root, 'tmp/owners', name.split('/')[-1], 'codex/events.jsonl')
+    for d in records(events) if os.path.exists(events) else ():
+        if d.get('type') == 'thread.started' and d.get('thread_id'):
+            return d['thread_id']
+    sys.exit(f'session-context: no Codex thread for owner {name}')
+
+
+def codex_usage(thread):
+    found = glob.glob(os.path.expanduser(f'~/.codex/sessions/**/rollout-*-{thread}.jsonl'),
+                      recursive=True)
+    if not found:
+        sys.exit(f'session-context: no Codex rollout for {thread}')
+    path = max(found, key=os.path.getmtime)
+    last = None; compactions = 0
+    for d in records(path):
+        if d.get('type') == 'compacted':
+            compactions += 1
+        p = d.get('payload')
+        if isinstance(p, dict) and p.get('type') == 'token_count' and p.get('info'):
+            last = (d.get('timestamp', ''), p['info'])
+    if not last:
+        sys.exit(f'session-context: no token count yet in {path}')
+    ts, info = last
+    used = (info.get('last_token_usage') or {}).get('total_tokens', 0)
+    window = info.get('model_context_window') or 1
+    return thread[:8], used, window, ts, f'; {compactions} compaction(s)'
+
+
+def report(name, used, window, ts, extra, threshold):
+    share = used / window
+    line = (f'{name}: {used:,} of {window:,} tokens ({share:.0%}) at {ts[:19]}Z{extra}; '
+            f'threshold {threshold:.0%}' + (' REACHED: hand over now' if share >= threshold else ''))
+    return share >= threshold, line
+
+
+def hook(threshold, window):
+    try:
+        event = json.load(sys.stdin)
+    except ValueError:
+        return 0
+    if event.get('stop_hook_active'):
+        return 0  # the session is already continuing because of this hook: never loop
+    path = event.get('transcript_path')
+    if not path or not os.path.exists(path):
+        return 0
+    reached, line = report(*claude_usage(path, window, counts=False), threshold)
+    if reached:
+        print(json.dumps({'decision': 'block', 'reason': (
+            f'{line}. Start your handover now, as your role says (agents/operations.md 7; '
+            'a lead ends as agents/lead.md 4 says).')}))
+    return 0
+
+
+def main(argv):
+    window, threshold, session, cwd, codex, as_hook = 1_000_000, 0.75, None, os.getcwd(), None, False
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == '--window': window = int(argv[i + 1]); i += 2
+        elif a == '--threshold': threshold = float(argv[i + 1]); i += 2
+        elif a == '--name': session, cwd = by_name(argv[i + 1]); i += 2
+        elif a == '--codex': codex = argv[i + 1]; i += 2
+        elif a == '--owner': codex = owner_thread(argv[i + 1]); i += 2
+        elif a == '--hook': as_hook = True; i += 1
+        elif a in ('-h', '--help'): print(__doc__); return 0
+        else: session = a; i += 1
+    if as_hook:
+        return hook(threshold, window)
+    usage = codex_usage(codex) if codex else claude_usage(claude_transcript(session, cwd), window)
+    reached, line = report(*usage, threshold)
+    print(line)
+    return 3 if reached else 0
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1:]))
