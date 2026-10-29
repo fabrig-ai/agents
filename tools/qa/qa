@@ -94,6 +94,37 @@ def utc(value):
     return datetime.fromisoformat(value.replace('Z', '+00:00'))
 
 
+def check_file(source, path, code=4):
+    """Validate the descriptor before reading even one byte from metadata."""
+    info = os.fstat(source.fileno())
+    need(stat.S_ISREG(info.st_mode), f'{path}: not a regular file', code)
+    need(info.st_nlink == 1, f'{path}: hard-linked file refused', code)
+    need(info.st_uid == os.getuid(), f'{path}: file is not owned by this user', code)
+    return info
+
+
+@contextmanager
+def reading(path, mode='rb'):
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        raise
+    except OSError as error:
+        raise Problem(f'{path}: cannot open safely ({error.strerror})', 4) from None
+    with os.fdopen(descriptor, mode) as source:
+        check_file(source, path)
+        yield source
+
+
+def read_bytes(path, limit=-1):
+    with reading(path) as source:
+        return source.read(limit)
+
+
+def read_text(path, errors='strict'):
+    return read_bytes(path).decode('utf-8', errors=errors)
+
+
 class Workspace:
     def __init__(self):
         self.root = Path(os.environ.get('DEV_ROOT', Path.home() / 'src/rust')).expanduser().absolute()
@@ -104,7 +135,7 @@ class Workspace:
 
     def machine(self):
         try:
-            lines = (self.root / 'tmp/post/machines').read_text().splitlines()
+            lines = read_text(self.root / 'tmp/post/machines').splitlines()
         except OSError:
             lines = []
         for line in lines:
@@ -260,9 +291,9 @@ def settings(workspace):
                   QA_WALK_KINDS='forgejo=2:chatgpt claude=2:claude')
     path = workspace.tmp / 'machine.env'
     try:
-        text = path.read_text(errors='replace')
+        text = read_text(path, errors='replace')
     except OSError:
-        text = ''  # kit.sh ignores an absent or unreadable machine file.
+        text = ''  # An absent machine file supplies no settings.
     for line in text.split('\n'):
         match = re.fullmatch(r'(QA_INTERVAL_SECONDS|QA_GIVE_BACK_SECONDS|QA_STOP_SECONDS)=([0-9]+)', line)
         if match:
@@ -334,11 +365,9 @@ def deploy(args, workspace):
                 descriptor = os.open(directory / 'deployments', os.O_RDWR | os.O_CREAT | os.O_APPEND
                                      | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
             except OSError:
-                raise Problem('cannot open deployments safely') from None
+                raise Problem(f'{directory / "deployments"}: cannot open safely') from None
             with os.fdopen(descriptor, 'r') as recorded:
-                info = os.fstat(recorded.fileno())
-                need(stat.S_ISREG(info.st_mode) and info.st_nlink == 1,
-                     'deployments must be a regular file with one link')
+                check_file(recorded, directory / 'deployments', code=2)
                 fcntl.flock(recorded, fcntl.LOCK_EX)
                 text = recorded.read()
                 if unit not in text.splitlines():
@@ -478,10 +507,7 @@ class Watch:
 
     def read_state(self, path):
         no_links(self.workspace.tmp, path)
-        with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), 'rb') as source:
-            info = os.fstat(source.fileno())
-            need(stat.S_ISREG(info.st_mode) and info.st_nlink == 1, f'{path}: invalid state file', 4)
-            data = source.read(1024 * 1024 + 1)
+        data = read_bytes(path, 1024 * 1024 + 1)
         need(len(data) <= 1024 * 1024, f'{path}: state exceeds 1 MiB', 4)
         return json.loads(data)
 
@@ -538,9 +564,7 @@ class Watch:
         addresses = []
         path = Path.home() / '.config/agents-qa/stuck'
         try:
-            with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), 'rb') as source:
-                need(stat.S_ISREG(os.fstat(source.fileno()).st_mode), 'not a regular file', 4)
-                data = source.read(16 * 1024 + 1)
+            data = read_bytes(path, 16 * 1024 + 1)
             need(len(data) <= 16 * 1024, 'exceeds 16 KiB', 4)
         except FileNotFoundError:
             return [self.director]
@@ -681,17 +705,20 @@ class Watch:
         return 'unknown'
 
     def launcher_alive(self, meta):
-        fields = dict(line.split('=', 1) for line in meta.read_text().splitlines() if '=' in line)
+        fields = dict(line.split('=', 1) for line in read_text(meta).splitlines() if '=' in line)
         task = fields.get('task', '')
         need(task and Path(task).is_absolute(), 'cannot establish launcher task; keeping custody', 4)
         expected = os.fsencode(task)
         unknown = False
-        for process in Path('/proc').iterdir():
+        processes = self.workspace.fixture / 'proc' if self.workspace.fixture else Path('/proc')
+        for process in processes.iterdir():
             if not process.name.isdecimal():
                 continue
             try:
-                with (process / 'cmdline').open('rb') as source:
-                    data = source.read(1024 * 1024 + 1)
+                # Other users' launchers cannot own our user-manager task.
+                if process.stat().st_uid != os.getuid():
+                    continue
+                data = read_bytes(process / 'cmdline', 1024 * 1024 + 1)
             except (FileNotFoundError, ProcessLookupError):
                 continue
             except OSError:
@@ -781,7 +808,7 @@ class Watch:
         exit_code = 'unknown'
         rows = self.runs / 'runs.tsv'
         if run and rows.exists():
-            for line in rows.read_text().splitlines():
+            for line in read_text(rows).splitlines():
                 row = line.split('\t')
                 if len(row) >= 13 and row[0] == run:
                     exit_code = row[4]
@@ -792,7 +819,7 @@ class Watch:
         # launch even if this service died before saving the returned id.
         matches = []
         for path in self.runs.glob('*/meta'):
-            fields = dict(line.split('=', 1) for line in path.read_text().splitlines() if '=' in line)
+            fields = dict(line.split('=', 1) for line in read_text(path).splitlines() if '=' in line)
             earlier = {a.get('run') for a in state.get('attempts', [])[:-1]}
             if (path.parent.name not in earlier
                     and fields.get('task') == str(directory / 'task.md')
@@ -891,7 +918,7 @@ class Watch:
                 if strict:
                     raise Problem(f'{path}: invalid walk state; keeping custody', 4) from None
                 self.walks_valid = False
-                log(f'{path.name}: invalid walk state; keeping custody')
+                log(f'{path}: invalid walk state; keeping custody')
         return result
 
     def walk_event(self, directory, state, event, note):
@@ -901,8 +928,7 @@ class Watch:
         parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         descriptor = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
         with os.fdopen(descriptor, 'r+') as out:
-            info = os.fstat(out.fileno())
-            need(stat.S_ISREG(info.st_mode) and info.st_nlink == 1, f'{path}: expected a regular file with one link', 4)
+            check_file(out, path)
             fcntl.flock(out, fcntl.LOCK_EX)
             text = out.read()
             # The append can survive a crash before the state's progress save.
@@ -1047,7 +1073,8 @@ class Watch:
                         self.check_walk(directory, state)
                 except (Problem, OSError, ValueError, RecursionError, UnicodeError,
                         KeyError, TypeError, AttributeError) as error:
-                    log(f'{state["walk"]}: cleanup failed ({type(error).__name__}); keeping logins and scratch')
+                    why = str(error) if isinstance(error, Problem) else type(error).__name__
+                    log(f'{state["walk"]}: cleanup failed ({why}); keeping logins and scratch')
 
 
 
@@ -1097,18 +1124,18 @@ def walk_attempt(state):
 
 
 def pause_line(directory):
+    path = directory / 'paused'
     try:
-        descriptor = os.open(directory / 'paused', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-        with os.fdopen(descriptor, 'r') as source:
-            info = os.fstat(source.fileno())
-            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
-                return None
+        with reading(path, 'r') as source:
             line = source.readline(202).removesuffix('\n')
             if not line or len(line) > 200 or any(
                     ord(c) < 32 or 0x7f <= ord(c) < 0xa0 or c in '\u2028\u2029' for c in line):
                 return None
             return line
-    except (OSError, UnicodeError):
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeError, Problem) as error:
+        log(f'{path}: cannot read pause marker ({error})')
         return None
 
 
@@ -1291,7 +1318,8 @@ def walk(args, workspace):
                 # The earlier exporter names grants that may now belong to another walk.
                 (directory / 'give-back').unlink(missing_ok=True)
                 no_links(workspace.tmp, directory / 'brief.md')
-                need((directory / 'brief.md').is_file(), 'saved rung brief missing', 1)
+                with reading(directory / 'brief.md'):
+                    pass
             else:
                 brief = focused / ('rung-' + args.rung + '-' + kind + '-brief.md')
                 no_links(workspace.tmp, brief)
@@ -1299,7 +1327,7 @@ def walk(args, workspace):
                     brief = focused / ('rung-' + args.rung + '-brief.md')
                 no_links(workspace.tmp, brief)
                 need(brief.is_file(), f'rung brief missing: {brief}', 1)
-                replace(directory / 'brief.md', brief.read_bytes())
+                replace(directory / 'brief.md', read_bytes(brief))
             task = (f'Read {directory}/brief.md first.\n\nWalk {name} on {args.repo}, rung {args.rung}.\n'
                     f'Directory: {directory}\nCheckout: {checkout}\n'
                     f'Build: {state["ref"]}, commit {state["main"]}\n'

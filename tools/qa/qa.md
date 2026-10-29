@@ -34,7 +34,8 @@ Walk scratch and reports stay on the machine; the tool does not prune them.
 
 Settings come from environment variables, then `DEV_TMP/machine.env`, then
 these defaults. The file is data, never shell code. Numeric file entries
-must be exact `KEY=DIGITS` lines; absent or unreadable files supply no values.
+must be exact `KEY=DIGITS` lines; an absent file supplies no values. Unsafe
+or unreadable settings refuse the command.
 
 | Setting | Default | Meaning |
 |---|---|---|
@@ -92,6 +93,15 @@ the watcher isolates it, disables stray sweeping and continues other valid
 walks' cleanup. State reads refuse links, nonregular or multiply linked
 files, reads above 1 MiB and invalid custody or attempt histories. Conflicting
 claims return a login for neither owner. No existing pass state is managed.
+
+Every content read or copy opens the file without following its final link,
+then checks that same descriptor for a regular file, exactly one link and
+ownership by the current user before reading any byte. This includes machine
+and settings metadata, state, briefs, pause markers, stuck addresses, run meta
+and facts, deployment traces and clocks. Unsafe files are refused by path;
+optional pause and stuck files log the refusal and supply no marker or extra
+recipients. Other users' processes are excluded from launcher discovery; own
+process cmdlines receive the same descriptor checks.
 
 Each managed change is saved through a sibling file and rename. Attempts
 retain REF/SHA, cap, start, slot, grants, pools, moved/in-place kinds, run,
@@ -228,6 +238,6 @@ without it `QA_*` executable overrides are ignored. The real-command-line
 test keeps systemd programs on PATH with no executable override.
 
 Run `python3 -I -B tools/qa/test_qa.py`. Every unittest case runs in its own
-process, session and temporary HOME/DEV_ROOT with local git origins and fake
-services; descendants are killed and reaped. The suite runs at most eight
+process, session and temporary HOME/DEV_ROOT with local git origins, fake
+services and fixture launcher observations; descendants are killed and reaped. The suite runs at most eight
 cases concurrently. It never uses real logins, a real manager or network.

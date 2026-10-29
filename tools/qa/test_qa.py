@@ -27,7 +27,7 @@ CHATGPT = 'chatgpt'
 CLAUDE = 'claude'
 REAL = 'real-model'
 
-WATCH_TOOLS = r'''import fnmatch, json, os, sys, shlex, signal, subprocess, time
+WATCH_TOOLS = r'''import atexit, fnmatch, json, os, sys, shlex, shutil, signal, subprocess, time
 from pathlib import Path
 from datetime import datetime, timezone
 root = Path(os.environ['QA_FIXTURE'])
@@ -103,6 +103,10 @@ elif name == 'codex-run':
     (state / 'thread').write_text('fixture thread')
     (state / 'meta').write_text(f'model=gpt-6.1-sol\neffort=high\nstarted={started}\ntask={task}\nreport={report}\non_stop={args[4]}\n')
     Path(report).write_text(f'codex-run: run {run} is writing this report.\n')
+    process = root / 'proc' / str(os.getpid())
+    process.mkdir(parents=True)
+    (process / 'cmdline').write_bytes(b'\0'.join(os.fsencode(word) for word in sys.argv) + b'\0')
+    atexit.register(shutil.rmtree, process)
     hang('after')
     if config.get('delay_before_unit'):
         (root / 'launch-waiting').write_text(str(os.getpid()))
@@ -341,7 +345,7 @@ class Lab:
         self.origins = root / 'origins'
         self.post_log = root / 'post.jsonl'
         self.post = root / 'post'
-        for path in (self.home, self.tmp, self.origins):
+        for path in (self.home, self.tmp, self.origins, root / 'proc'):
             path.mkdir(exist_ok=True)
         self.env = dict(PATH=str(root) + os.pathsep + os.environ['PATH'], HOME=str(self.home), DEV_ROOT=str(root),
                         DEV_TMP=str(self.tmp), QA_FIXTURE=str(root), QA_POST_LOG=str(self.post_log), QA_POST_STATUS='0',
@@ -436,7 +440,14 @@ class Lab:
         path = self.root / 'tools.jsonl'
         return [row['args'] for row in map(json.loads, path.read_text().splitlines()) if row['tool'] == tool] if path.exists() else []
 
+    def prune_dead_launchers(self):
+        # Only fixture children have entries; SIGKILL cannot run their atexit.
+        for path in (self.root / 'proc').iterdir():
+            if not alive(int(path.name)):
+                shutil.rmtree(path)
+
     def watch(self, status=0, extra=None, now=None):
+        self.prune_dead_launchers()
         return self.run('watch', '--director', 'director@fixture', '--once', status=status, extra=extra, now=now)
 
     def walk(self, rung='b0', *args, status=0, now=None):
@@ -954,6 +965,7 @@ def deployments_names_only_its_own_units(lab):
 
 
 def driven_watch(lab, patch, once=True, status=0):
+    lab.prune_dead_launchers()
     driver = f'''import runpy, sys
 tool = runpy.run_path({str(SCRIPT)!r})
 {patch}
@@ -2573,7 +2585,8 @@ def a_fifo_stuck_list_does_not_block_cleanup(lab):
     path.symlink_to(target)
     before = lab.sent()
     result = lab.watch()
-    assert 'cannot read stuck addresses (OSError); using director alone' in result.stdout
+    assert str(path) in result.stdout and 'cannot open safely' in result.stdout
+    assert 'using director alone' in result.stdout
     assert lab.sent() == before and target.read_text() == 'design/linked@fixture\n'
 
 
@@ -2800,7 +2813,8 @@ def unsafe_stuck_list(lab, shape):
         path.write_bytes(b'design/overflow@fixture\n' * 1000)
     result = lab.watch()
     reason = 'not a regular file' if shape == 'fifo' else 'exceeds 16 KiB'
-    assert f'cannot read stuck addresses ({reason}); using director alone' in result.stdout
+    assert 'cannot read stuck addresses (' in result.stdout and reason in result.stdout
+    assert str(path) in result.stdout and 'using director alone' in result.stdout
     states = dict((state['walk'], state) for _, state in lab.walk_states())
     assert states[first['walk']]['alerts'] == {CHATGPT: {'director@fixture': True}}
     assert states[second['walk']]['stage'] == 'ended'
@@ -3031,6 +3045,141 @@ def a_walk_with_no_login_stops_its_units(lab):
     assert lab.walk_state()[1]['stage'] == 'ended'
 
 
+def a_hard_linked_rung_brief_is_never_read_or_copied(lab):
+    focused = lab.tmp / 'qa-focused'
+    focused.mkdir()
+    alias = lab.root / 'ordinary-fixture-data'
+    alias.write_bytes(b'Fixture alias bytes, never a login.\n')
+    for rung, suffix in (('default', ''), ('specific', '-forgejo')):
+        brief = focused / f'rung-{rung}{suffix}-brief.md'
+        os.link(alias, brief)
+        result = lab.run('walk', 'fabrig', rung, status=4)
+        assert str(brief) in result.stderr
+        state = next(state for _, state in lab.walk_states() if state['rung'] == rung)
+        assert not (focused / state['walk'] / 'brief.md').exists()
+        assert state['released'] and not lab.calls('codex-run')
+
+
+def unsafe_metadata_is_rejected_without_reading(lab, shape):
+    from contextlib import redirect_stdout
+    import io
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    tool = runpy.run_path(str(SCRIPT))
+    with patch.dict(os.environ, lab.env, clear=True):
+        workspace = tool['Workspace']()
+        watch = tool['Watch'](workspace, 'director@fixture')
+        directory = lab.tmp / 'qa-focused/rung-a-1'
+        state = dict(walk='rung-a-1', rung='a', kind='forgejo', attempts=[])
+        safe_meta = lab.root / 'safe-meta'
+        safe_meta.write_text(f'task={lab.root}/task.md\n')
+        readers = (
+            ('machine', lab.root / 'tmp/post/machines', workspace.machine),
+            ('settings', lab.tmp / 'machine.env', lambda: tool['settings'](workspace)),
+            ('state', lab.tmp / 'qa/walks/rung-a-1.json', lambda: watch.read_state(target)),
+            ('stuck', lab.home / '.config/agents-qa/stuck', watch.stuck_addresses),
+            ('launcher', watch.runs / 'fixture/meta', lambda: watch.launcher_alive(target)),
+            ('cmdline', lab.root / 'proc/123/cmdline', lambda: watch.launcher_alive(safe_meta)),
+            ('facts', watch.runs / 'runs.tsv', lambda: watch.facts('fixture')),
+            ('recovery', watch.runs / 'fixture/meta', lambda: watch.recover_run(directory, state)),
+            ('pause', lab.root / 'marker/paused', lambda: tool['pause_line'](target.parent)),
+            ('deployments', lab.root / 'scratch/deployments', lambda: tool['deploy'](
+                SimpleNamespace(directory=str(target.parent), name='box', argv=['/bin/true']), workspace)),
+            ('clock', directory.parent / 'a/loop.tsv', lambda: watch.walk_event(directory, state, 'walk-end', 'fixture')),
+            ('brief', lab.tmp / 'qa-focused/rung-brief-brief.md', lambda: tool['walk'](
+                SimpleNamespace(repo='fabrig', rung='brief', cap=None, login=[], resume=None, kind=None, build=None),
+                workspace)),
+        )
+        for label, target, read in readers:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.unlink(missing_ok=True)
+            target.write_text('Ordinary fixture data, never a login.\n')
+            alias = target.with_name(target.name + '.alias')
+            alias.unlink(missing_ok=True)
+            if shape == 'hardlink':
+                os.link(target, alias)
+            elif shape == 'symlink':
+                target.rename(alias)
+                target.symlink_to(alias)
+            info = target.stat()
+            real_fstat, real_fdopen, real_open = os.fstat, os.fdopen, io.open
+
+            def fstat(fd):
+                actual = real_fstat(fd)
+                if shape == 'unowned' and (actual.st_dev, actual.st_ino) == (info.st_dev, info.st_ino):
+                    return SimpleNamespace(st_mode=actual.st_mode, st_nlink=actual.st_nlink,
+                                           st_uid=os.getuid() + 1, st_dev=actual.st_dev, st_ino=actual.st_ino)
+                return actual
+
+            class Unreadable:
+                def __init__(self, source): self.source = source
+                def __enter__(self): return self
+                def __exit__(self, *args): return self.source.__exit__(*args)
+                def __getattr__(self, name): return getattr(self.source, name)
+                def read(self, *args, **kwargs):
+                    raise AssertionError(f'{label}: unsafe file bytes read')
+                readline = read
+                readlines = read
+                __iter__ = read
+
+            def guarded(source):
+                actual = real_fstat(source.fileno())
+                if (actual.st_dev, actual.st_ino) == (info.st_dev, info.st_ino):
+                    return Unreadable(source)
+                return source
+
+            output = io.StringIO()
+            with patch('os.fstat', fstat), patch('os.fdopen', lambda *a, **kw: guarded(real_fdopen(*a, **kw))), \
+                    patch('io.open', lambda *a, **kw: guarded(real_open(*a, **kw))), redirect_stdout(output):
+                try:
+                    read()
+                except tool['Problem'] as error:
+                    assert str(target) in str(error), (label, error)
+                else:
+                    assert str(target) in output.getvalue(), (label, output.getvalue())
+            target.unlink()
+            alias.unlink(missing_ok=True)
+
+
+def hard_linked_metadata_is_never_read(lab):
+    unsafe_metadata_is_rejected_without_reading(lab, 'hardlink')
+
+
+def unowned_metadata_is_never_read(lab):
+    unsafe_metadata_is_rejected_without_reading(lab, 'unowned')
+
+
+def symlinked_metadata_is_never_read(lab):
+    unsafe_metadata_is_rejected_without_reading(lab, 'symlink')
+
+
+def brief_copy_validates_and_reads_the_same_descriptor(lab):
+    focused = lab.tmp / 'qa-focused'
+    focused.mkdir()
+    brief = focused / 'rung-b0-brief.md'
+    patch = f"""import os
+from pathlib import Path
+original = os.open
+opens = []
+def opened(path, flags, *args, **kwargs):
+    fd = original(path, flags, *args, **kwargs)
+    if Path(path) == Path({str(brief)!r}):
+        assert flags & os.O_NOFOLLOW
+        assert not opens, 'brief opened more than once'
+        opens.append(fd)
+        Path(path).rename(Path(path).with_name('opened-brief'))
+        replacement = Path(path).with_name('replacement')
+        replacement.write_bytes(b'A different pathname.\\n')
+        replacement.replace(path)
+    return fd
+os.open = opened
+"""
+    driven_walk(lab, patch)
+    directory, _ = lab.walk_state()
+    assert (directory / 'brief.md').read_bytes() == b'fixture rung\n'
+    assert brief.read_bytes() == b'A different pathname.\n'
+
+
 def hand_give_cannot_release_a_saved_walk_holder_or_claim(lab):
     directory, state = walk_with_logins(lab, CHATGPT)
     before = lab.calls('logins')
@@ -3163,6 +3312,11 @@ def pass_states_are_left_untouched(lab):
     assert lab.walk_state()[1]['stage'] == 'ended'
 
 CASES = (
+    a_hard_linked_rung_brief_is_never_read_or_copied,
+    hard_linked_metadata_is_never_read,
+    unowned_metadata_is_never_read,
+    symlinked_metadata_is_never_read,
+    brief_copy_validates_and_reads_the_same_descriptor,
     a_loaded_inactive_unit_keeps_a_surviving_launcher,
     queued_and_running_start_jobs_keep_custody,
     a_job_created_during_launcher_scan_keeps_custody,
