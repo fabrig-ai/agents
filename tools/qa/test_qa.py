@@ -3432,7 +3432,344 @@ def pass_states_are_left_untouched(lab):
     assert (state.read_bytes(), state.stat().st_mtime_ns) == original
     assert lab.walk_state()[1]['stage'] == 'ended'
 
+def slot_claims(lab):
+    path = lab.root / 'claims.json'
+    return json.loads(path.read_text()) if path.exists() else {}
+
+
+def hold_slot(lab, number, owner='s/qa', what='another task'):
+    claims = slot_claims(lab)
+    claims[str(number)] = dict(owner=owner, what=what)
+    path = lab.root / 'claims.json'
+    temporary = path.with_suffix('.new')
+    temporary.write_text(json.dumps(claims))
+    temporary.replace(path)
+
+
+def no_walk_resources_taken(lab):
+    assert not any(args[0] == 'take' for args in lab.calls('logins'))
+    assert not lab.calls('codex-run') and not lab.calls('cargo')
+    assert not (lab.tmp / 'qa/repos').exists()
+    assert all(not state['logins'] and state['released'] for _, state in lab.walk_states())
+
+
+def a_held_named_slot_falls_through_in_configured_order(lab):
+    lab.env['QA_WALK_SLOTS'] = 'forgejo=2,1'
+    hold_slot(lab, 2)  # This owner's claim is a refusal too.
+    lab.walk()
+    _, state = lab.walk_state()
+    assert state['slot'] == 1 and state['slot_claim']['what'] == 'qa walk rung-b0-1 attempt 1'
+    assert lab.calls('claim')[:2] == [
+        ['claim', 'hetzner6', '2', 's/qa', 'qa walk rung-b0-1 attempt 1'],
+        ['claim', 'hetzner6', '1', 's/qa', 'qa walk rung-b0-1 attempt 1']]
+    assert slot_claims(lab)['2']['what'] == 'another task'
+    assert lab.calls('codex-run')[0][-2] == str(lab.slots / '1')
+    assert not (lab.tmp / 'qa/repos').exists()
+
+
+def all_named_slots_held_refuses_without_taking_anything(lab):
+    hold_slot(lab, 1, owner='ops')
+    hold_slot(lab, 2)
+    before = slot_claims(lab)
+    result = lab.walk(status=1)
+    assert 'no free walk slot' in result.stderr
+    no_walk_resources_taken(lab)
+    assert slot_claims(lab) == before
+    assert not [call for call in lab.calls('claim') if call[0] == 'release']
+
+
+def dirty_slots_are_preserved_refused_and_released(lab):
+    checkout = lab.slots / '1'
+    tracked = checkout / 'tools/slots/trim'
+    original = tracked.read_bytes()
+    tracked.write_bytes(original + b'# changed\n')
+    result = lab.walk('tracked', status=4)
+    assert 'dirty slot' in result.stderr and tracked.read_bytes() == original + b'# changed\n'
+    tracked.write_bytes(original)
+    untracked = checkout / 'private-work'
+    untracked.write_text('preserve me')
+    result = lab.walk('untracked', status=4)
+    assert 'dirty slot' in result.stderr and untracked.read_text() == 'preserve me'
+    untracked.unlink()
+    # Ignored files outside target must not be silently erased or used either.
+    (checkout / '.git/info/exclude').write_text('private-work\n')
+    untracked.write_text('ignored work')
+    result = lab.walk('ignored', status=4)
+    assert 'dirty slot' in result.stderr and untracked.read_text() == 'ignored work'
+    no_walk_resources_taken(lab)
+    assert not slot_claims(lab)
+    assert len([c for c in lab.calls('claim') if c[0] == 'release']) == 3
+
+
+def a_slot_is_never_created_replaced_or_used_with_the_wrong_origin(lab):
+    checkout = lab.slots / '1'
+    lab.git(checkout, 'remote', 'set-url', 'origin', str(lab.root / 'wrong-origin'))
+    result = lab.walk('wrong', status=4)
+    assert 'unexpected origin' in result.stderr
+    moved = lab.slots / 'kept'
+    checkout.rename(moved)
+    lab.walk('missing', status=4)
+    assert not checkout.exists() and moved.is_dir()
+    checkout.symlink_to(moved)
+    result = lab.walk('linked', status=4)
+    assert 'symlink refused' in result.stderr and checkout.is_symlink()
+    no_walk_resources_taken(lab)
+    assert not slot_claims(lab)
+
+
+def low_disk_refuses_and_releases_before_taking_a_login(lab):
+    lab.configure(disk_available=79999999999)
+    result = lab.walk(status=4)
+    assert '80000000000' in result.stderr
+    no_walk_resources_taken(lab)
+    assert not slot_claims(lab)
+    assert lab.calls('trim') == [[str(lab.slots / '1')]]
+    assert lab.walk_state()[1]['slot_claim']['released']
+
+
+def target_stays_warm_and_trim_failure_is_logged_before_fetch(lab):
+    target = lab.slots / '1/target/debug/keep'
+    target.parent.mkdir(parents=True)
+    target.write_text('warm build')
+    lab.configure(trim_status=7, disk_available=80000000000)
+    lab.walk()
+    directory, _ = lab.walk_state()
+    assert target.read_text() == 'warm build'
+    assert 'fixture trim\ntrim exit 7\n' == (directory / 'prepare-1.log').read_text()
+    calls = list(map(json.loads, (lab.root / 'tools.jsonl').read_text().splitlines()))
+    index = lambda name: next(i for i, row in enumerate(calls) if row['tool'] == name)
+    take = next(i for i, row in enumerate(calls) if row['tool'] == 'logins' and row['args'][0] == 'take')
+    assert index('claim') < index('trim') < index('df') < index('cargo') < take
+    task = (directory / 'task.md').read_text()
+    for text in ('HEAVY_CLASS=background heavy cargo build --locked --offline -p temper',
+                 'Never use --release or --target-dir', 'never clean the target',
+                 'touch nothing else in the checkout', 'df -B1 --output=avail /',
+                 '80000000000', 'wait 5 minutes', 'own binary'):
+        assert text in task, text
+    assert not (lab.tmp / 'qa/repos').exists()
+
+
+def claims_over_ssh_quote_both_shell_levels_and_use_saved_endpoint(lab):
+    import shlex
+    # Make accidental interpolation observable without invoking a real shell or ssh.
+    directory = lab.root / "literal ' $() ; directory"
+    directory.mkdir()
+    shutil.copyfile(lab.root / 'claim', directory / 'claim')
+    (directory / 'claim').chmod(0o700)
+    lab.env['QA_CLAIM'] = str(directory / 'claim')
+    lab.env['QA_CLAIM_SSH'] = 'claims@hel8'
+    lab.walk()
+    _, state = lab.walk_state()
+    call = lab.calls('ssh')[0]
+    assert call[:3] == ['-o', 'BatchMode=yes', 'claims@hel8'] and len(call) == 4
+    outer = shlex.split(call[3])
+    assert outer[:2] == ['bash', '-lc'] and len(outer) == 3
+    assert shlex.split(outer[2]) == [str(directory / 'claim'), 'claim', 'hetzner6', '1', 's/qa',
+                                   'qa walk rung-b0-1 attempt 1']
+    lab.env['QA_CLAIM_SSH'] = 'new-claims@hel8'
+    lab.env['QA_CLAIM_OWNER'] = 'new/owner'
+    lab.configure(inactive=True)
+    lab.watch()
+    assert lab.walk_state()[1]['slot_claim']['released'] and not slot_claims(lab)
+    assert any(call[2] == 'claims@hel8' and 'release' in call[3] for call in lab.calls('ssh'))
+    assert state['slot_claim']['ssh'] == 'claims@hel8'
+
+
+def claim_release_waits_for_session_and_deployment_stop(lab):
+    lab.walk()
+    directory, state = lab.walk_state()
+    unit, pid = deployment(lab, directory)
+    lab.end_run(state)
+    lab.configure(unit_job='77')
+    lab.watch()
+    assert not [c for c in lab.calls('claim') if c[0] == 'release']
+    lab.configure(unit_job='0', inactive=True, unit_states={unit: 'unknown'})
+    lab.watch()
+    assert not [c for c in lab.calls('claim') if c[0] == 'release']
+    assert slot_claims(lab) and lab.walk_state()[1]['given'] == [CHATGPT]
+    lab.configure(unit_states={})
+    lab.watch()
+    assert lab.walk_state()[1]['slot_claim']['released'] and not slot_claims(lab)
+    dead(pid)
+
+
+def claim_release_retries_without_delaying_login_returns(lab):
+    lab.walk()
+    lab.configure(inactive=True, claim_release_refusal=True)
+    lab.watch()
+    _, state = lab.walk_state()
+    assert state['stage'] == 'ended' and state['released'] and state['given'] == [CHATGPT]
+    assert not state['slot_claim']['released'] and slot_claims(lab)
+    releases = lambda: [c for c in lab.calls('claim') if c[0] == 'release']
+    before = len(releases())
+    lab.watch()
+    assert len(releases()) > before and not lab.walk_state()[1]['slot_claim']['released']
+    lab.configure(claim_release_refusal=False)
+    lab.watch()
+    assert lab.walk_state()[1]['slot_claim']['released'] and not slot_claims(lab)
+
+
+def a_claim_lost_between_acceptance_and_save_is_repaired(lab):
+    driven_walk(lab, '''Watch = tool['Watch']
+original = Watch.slot_call
+def slot_call(self, claim, *args):
+    result = original(self, claim, *args)
+    if args[0] == 'claim' and result.returncode == 0:
+        os._exit(77)
+    return result
+Watch.slot_call = slot_call
+''', status=77)
+    _, state = lab.walk_state()
+    assert state['slot'] is None and not state.get('slot_claim') and slot_claims(lab)
+    # Same owner, unrelated WHAT and an out-of-kind slot remain protected.
+    hold_slot(lab, 2, what='manual work')
+    hold_slot(lab, 7, what='qa walk rung-unrelated-1 attempt 1')
+    lab.watch()
+    assert set(slot_claims(lab)) == {'2', '7'}
+    assert lab.walk_state()[1]['released']
+    lab.walk('next')
+    assert lab.walk_states()[1][1]['slot'] == 1
+
+
+def an_orphan_claim_without_any_state_is_retried(lab):
+    hold_slot(lab, 1, what='qa walk rung-crashed-1 attempt 1')
+    hold_slot(lab, 2, owner='ops', what='qa walk rung-other-1 attempt 1')
+    lab.configure(claim_release_refusal=True)
+    lab.watch()
+    assert set(slot_claims(lab)) == {'1', '2'}
+    lab.configure(claim_release_refusal=False)
+    lab.watch()
+    assert set(slot_claims(lab)) == {'2'}
+
+
+def a_saved_claim_precedes_any_checkout_preparation(lab):
+    result = driven_walk(lab, '''Repositories = tool['Repositories']
+def fetch(self, repo, slot):
+    state, = (self.workspace.tmp / 'qa/walks').glob('*.json')
+    import json
+    saved = json.loads(state.read_text())
+    assert saved['slot'] == slot and saved['slot_claim']['what'] == 'qa walk rung-b0-1 attempt 1'
+    os._exit(77)
+Repositories.fetch = fetch
+''', status=77)
+    assert not result.stderr
+    assert lab.walk_state()[1]['slot_claim'] and slot_claims(lab)
+    lab.watch()
+    assert not slot_claims(lab) and lab.walk_state()[1]['slot_claim']['released']
+
+
+def a_release_saved_after_a_crash_never_releases_a_successor(lab):
+    lab.walk()
+    lab.configure(inactive=True)
+    driven_watch(lab, '''import os
+Watch = tool['Watch']
+original = Watch.slot_call
+def slot_call(self, claim, *args):
+    result = original(self, claim, *args)
+    if args[0] == 'release' and result.returncode == 0:
+        os._exit(77)
+    return result
+Watch.slot_call = slot_call
+''', status=77)
+    assert not slot_claims(lab) and not lab.walk_state()[1]['slot_claim']['released']
+    hold_slot(lab, 1, what='qa walk rung-successor-1 attempt 1')
+    before = len([c for c in lab.calls('claim') if c[0] == 'release'])
+    # Exclude this slot from orphan repair to isolate the saved-release retry.
+    lab.env['QA_WALK_SLOTS'] = 'forgejo=2'
+    lab.watch()
+    assert lab.walk_state()[1]['slot_claim']['released']
+    assert slot_claims(lab)['1']['what'] == 'qa walk rung-successor-1 attempt 1'
+    assert len([c for c in lab.calls('claim') if c[0] == 'release']) == before
+
+
+def a_pause_releases_and_resume_reclaims_a_named_slot(lab):
+    directory, state = walk_with_logins(lab, CHATGPT)
+    paused = pause_walk(lab, directory, state)
+    assert paused['slot_claim']['released'] and not slot_claims(lab)
+    hold_slot(lab, 1)
+    lab.run('walk', 'fabrig', 'b0', '--resume', state['walk'], '--build', 'main')
+    resumed = lab.walk_state()[1]
+    assert resumed['attempt'] == 2 and resumed['slot'] == 2
+    assert resumed['slot_claim']['what'] == 'qa walk rung-b0-1 attempt 2'
+    assert resumed['attempts'][0]['slot_claim']['released']
+    assert (directory / 'prepare-2.log').is_file()
+    assert lab.calls('codex-run')[-1][-2] == str(lab.slots / '2')
+    assert not (lab.tmp / 'qa/repos').exists()
+
+
+def a_pause_with_pending_release_keeps_retrying_before_resume(lab):
+    directory, state = walk_with_logins(lab, CHATGPT)
+    lab.configure(claim_release_refusal=True)
+    state = pause_walk(lab, directory, state)
+    assert state['stage'] == 'paused' and state['given'] == [CHATGPT]
+    assert not state['slot_claim']['released']
+    result = lab.run('walk', 'fabrig', 'b0', '--resume', state['walk'], '--build', 'main', status=1)
+    assert 'slot claim release is still pending' in result.stderr
+    lab.configure(claim_release_refusal=False)
+    lab.watch()
+    assert lab.walk_state()[1]['slot_claim']['released']
+    lab.run('walk', 'fabrig', 'b0', '--resume', state['walk'], '--build', 'main')
+    assert lab.walk_state()[1]['attempt'] == 2
+
+
+def local_and_remote_claims_are_bounded_and_unknown_acceptance_is_repaired(lab):
+    for remote, when in (('', 'before'), ('claims@hel8', 'after')):
+        lab.env['QA_CLAIM_SSH'] = remote
+        lab.configure(hang={'claim:claim': when})
+        result = driven_walk(lab, "HUNG = {'claim:claim', 'ssh:-o'}\n" + TIMEOUT_DRIVER,
+                             status=4)
+        assert 'slot claim timed out' in result.stderr
+        assert not lab.calls('cargo') and not lab.calls('codex-run')
+        assert all(state['slot'] is None for _, state in lab.walk_states())
+        lab.configure(hang={})
+        lab.watch()
+        assert not slot_claims(lab)
+
+
+def named_slot_settings_validate_and_override_the_old_counts(lab):
+    for value in ('forgejo=0', 'forgejo=1,1', 'forgejo=1 claude=1', 'forgejo=1 forgejo=2',
+                  'forgejo=../1', 'forgejo=1\nclaude=3', 'forgejo=', 'Forgejo=1'):
+        lab.run('walk', 'fabrig', 'b0', status=2, extra={'QA_WALK_SLOTS': value})
+    for key, value in (('QA_SLOT_HOST', '-host'), ('QA_CLAIM_OWNER', 'bad\nowner'),
+                       ('QA_CLAIM_SSH', '-oProxyCommand=bad')):
+        lab.run('walk', 'fabrig', 'b0', status=2, extra={key: value})
+    assert not lab.calls('claim') and not lab.calls('logins')
+    lab.env.pop('QA_WALK_SLOTS')
+    (lab.tmp / 'machine.env').write_text('QA_WALK_SLOTS=forgejo=2\nQA_SLOT_HOST=hetzner6\nQA_CLAIM_OWNER=s/qa\nQA_CLAIM_SSH=claims@hel8\n')
+    # Two in the old setting, one named slot: the kind now has cap one.
+    lab.env['QA_WALK_KINDS'] = 'forgejo=2:chatgpt claude=9:claude'
+    lab.env.pop('QA_CLAIM_SSH')
+    lab.walk('one')
+    result = lab.walk('two', status=1)
+    assert 'holds 1 of its 1' in result.stderr
+    result = lab.walk('no-slot', '--kind', 'claude', status=1)
+    assert 'no walk slots configured for kind claude' in result.stderr
+    assert lab.walk_state()[1]['slot'] == 2 and lab.calls('ssh')
+    # Environment takes priority over the file, including an empty local target.
+    lab.env['QA_WALK_SLOTS'] = 'forgejo=1 claude=3'
+    lab.env['QA_CLAIM_SSH'] = ''
+    lab.walk('local', '--kind', 'claude')
+    assert lab.walk_states()[0][1]['slot_claim']['ssh'] == ''
+
+
 CASES = (
+    a_held_named_slot_falls_through_in_configured_order,
+    all_named_slots_held_refuses_without_taking_anything,
+    dirty_slots_are_preserved_refused_and_released,
+    a_slot_is_never_created_replaced_or_used_with_the_wrong_origin,
+    low_disk_refuses_and_releases_before_taking_a_login,
+    target_stays_warm_and_trim_failure_is_logged_before_fetch,
+    claims_over_ssh_quote_both_shell_levels_and_use_saved_endpoint,
+    claim_release_waits_for_session_and_deployment_stop,
+    claim_release_retries_without_delaying_login_returns,
+    a_claim_lost_between_acceptance_and_save_is_repaired,
+    an_orphan_claim_without_any_state_is_retried,
+    a_saved_claim_precedes_any_checkout_preparation,
+    a_release_saved_after_a_crash_never_releases_a_successor,
+    a_pause_releases_and_resume_reclaims_a_named_slot,
+    a_pause_with_pending_release_keeps_retrying_before_resume,
+    local_and_remote_claims_are_bounded_and_unknown_acceptance_is_repaired,
+    named_slot_settings_validate_and_override_the_old_counts,
 
     a_hard_linked_rung_brief_is_never_read_or_copied,
     hard_linked_metadata_is_never_read,
