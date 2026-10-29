@@ -339,6 +339,7 @@ def repository(root, origin, branch):
                     shutil.rmtree(temporary)
         no_symlinks(root / '.git')
         need((root / '.git').is_dir(), f'{root}: expected dedicated clone')
+        # Hold through validation, fetch, publication retries and failure reset.
         with file_lock(root / '.git' / 'record.lock'):
             clone_checks(root, origin, branch)
             yield
@@ -679,17 +680,27 @@ def publish(root, branch, args, data):
         # Retries add rejected attempts only: at most one push succeeds per run.
         attempts = 5
         for attempt in range(attempts):
+            previous = out(root, 'rev-parse', remote)
             result = git(root, 'push', '--porcelain', 'origin', f'HEAD:refs/heads/{branch}', check=False)
-            if result.returncode == 0:
+            # A successful exit alone is insufficient, and a failed exit may be
+            # a lost acknowledgement. Fetch and prove containment in either case.
+            fetch(root, branch)
+            base = out(root, 'rev-parse', remote)
+            if git(root, 'merge-base', '--is-ancestor', 'HEAD', remote, check=False).returncode == 0:
+                if automatic:
+                    git(root, 'reset', '--hard', remote)
+                    # Replay the immutable input on the confirmed tree: every id
+                    # must already be present, including after a lost acknowledgement.
+                    if append_files(root, args.source, args.host, data, args.allowed_sources):
+                        raise Failure('origin contains the commit but not the saved batch')
                 print('record: pushed ' + (name if name else ', '.join(files)))
                 if getattr(args, 'print_number', False):
                     print(Path(name).stem)
                 return 0
             # Concurrent receive-pack processes can report either a non-fast-forward
             # or a ref-lock failure. Retry only if the fetched branch advanced.
-            previous = out(root, 'rev-parse', remote)
-            fetch(root, branch)
-            base = out(root, 'rev-parse', remote)
+            if result.returncode == 0:
+                raise Failure('push acknowledgement not confirmed by origin; saved batch retained')
             if base == previous:
                 raise Failure(result.stderr.decode(errors='replace').strip() or 'push failed')
             if attempt == attempts - 1:
@@ -720,11 +731,14 @@ def publish(root, branch, args, data):
         for path in files:
             if git(root, 'ls-files', '--error-unmatch', '--', path, check=False).returncode:
                 safe(root, path).unlink(missing_ok=True)
-        print('record: input not published; original input follows:', file=sys.stderr)
-        sys.stderr.flush()
-        sys.stderr.buffer.write(data)
-        if data and not data.endswith(b'\n'):
-            sys.stderr.buffer.write(b'\n')
+        # Automatic callers already have a durable outbox. Echoing that batch
+        # into its next heartbeat would recursively embed earlier heartbeats.
+        if not automatic:
+            print('record: input not published; original input follows:', file=sys.stderr)
+            sys.stderr.flush()
+            sys.stderr.buffer.write(data)
+            if data and not data.endswith(b'\n'):
+                sys.stderr.buffer.write(b'\n')
         raise
 
 

@@ -3,14 +3,17 @@
 
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+import fcntl
 import json
 import os
 from pathlib import Path
 import runpy
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import tomllib
 import unittest
 from unittest.mock import patch
@@ -266,6 +269,109 @@ class RecordTests(unittest.TestCase):
                 self.assertEqual((self.clone / f'events/{source}/hel8/2026-10-29.jsonl').read_bytes(), data)
                 self.assert_clean()
 
+    @contextmanager
+    def push_transport(self, mode):
+        directory = self.home / 'transport'
+        directory.mkdir(exist_ok=True)
+        tool = directory / 'git'
+        real_git = shutil.which('git')
+        tool.write_text('#!/usr/bin/env -S python3 -I -B\n'
+            'import subprocess, sys\nfrom pathlib import Path\n'
+            'args = sys.argv[1:]\n'
+            f'push = len(args) > 2 and args[2] == "push" and args[1] == {str(self.clone)!r}\n'
+            f'mode = {mode!r}\n'
+            'if push and mode == "false-success": sys.exit(0)\n'
+            f'result = subprocess.run([{real_git!r}, *args])\n'
+            'if push and result.returncode == 0 and mode == "lost-ack":\n'
+            ' print("synthetic acknowledgement lost", file=sys.stderr)\n'
+            ' sys.exit(1)\n'
+            'sys.exit(result.returncode)\n')
+        tool.chmod(0o700)
+        with patch.dict(self.env, PATH=str(directory) + os.pathsep + os.environ['PATH']):
+            yield
+
+    def test_lost_acknowledgement_replays_ids_without_duplicates(self):
+        self.prepare()
+        for writer in ('collect', 'watch'):
+            for rejected in (0, 4):
+                with self.subTest(writer=writer, rejected=rejected):
+                    counter = self.home / f'{writer}-{rejected}-attempts'
+                    self.hook(self.clone,
+                        f'echo attempt >> {shlex.quote(str(counter))}\n'
+                        f'if test "$(wc -l < {shlex.quote(str(counter))})" -le {rejected}; then\n'
+                        f'git -C {shlex.quote(str(self.seed))} pull --ff-only origin main >&2\n'
+                        f'cp {shlex.quote(str(counter))} {shlex.quote(str(self.seed / "AGENTS.md"))}\n'
+                        f'git -C {shlex.quote(str(self.seed))} add AGENTS.md\n'
+                        f'git -C {shlex.quote(str(self.seed))} commit -m "advance origin" >&2\n'
+                        f'git -C {shlex.quote(str(self.seed))} push origin main >&2\nfi\n')
+                    source = 'watch' if writer == 'watch' else 'queue'
+                    identities = [f'{writer}-{rejected}-{n}' for n in range(2)]
+                    data = b''.join(self.event(identity).replace(b'queue', source.encode()) for identity in identities)
+                    with self.push_transport('lost-ack'):
+                        self.run_record('append', '--as', writer, source, 'hel8', data=data + data, wait=False)
+                    self.assertEqual(len(counter.read_text().splitlines()), rejected + 1)
+                    rows = self.git(self.origin, 'show', f'main:events/{source}/hel8/2026-10-29.jsonl').splitlines()
+                    ids = [json.loads(row)['id'] for row in rows]
+                    for identity in identities:
+                        self.assertEqual(ids.count(identity), 1)
+                    self.assert_clean()
+
+    def test_success_exit_without_origin_commit_is_not_confirmation(self):
+        self.prepare()
+        with self.push_transport('false-success'):
+            result = self.run_record('append', '--as', 'collect', '--batch', 'hel8', data=self.event(), code=2)
+        self.assertIn(b'not confirmed by origin', result.stderr)
+        self.assertFalse((self.clone / 'events').exists())
+        self.assert_clean()
+
+    def test_two_concurrent_appends_one_clone_hold_lock_through_retry_and_reset(self):
+        self.prepare()
+        (self.seed / 'AGENTS.md').write_text('# Racing writer\n')
+        self.git(self.seed, 'add', 'AGENTS.md')
+        self.git(self.seed, 'commit', '-m', 'racing writer')
+        ready, release = self.home / 'ready', self.home / 'release'
+        self.hook(self.clone,
+            f'if test ! -e {shlex.quote(str(ready))}; then\n'
+            f'touch {shlex.quote(str(ready))}\n'
+            'i=0\n'
+            f'while test ! -e {shlex.quote(str(release))}; do\n'
+            'i=$((i + 1)); test "$i" -lt 1000 || exit 1; sleep 0.01\ndone\n'
+            f'git -C {shlex.quote(str(self.seed))} push origin main >&2\nfi\n')
+        processes = []
+        def start(identity):
+            process = subprocess.Popen([str(TOOL), 'append', '--as', 'collect', 'queue', 'hel8'],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=self.env)
+            processes.append(process)
+            process.stdin.write(self.event(identity))
+            process.stdin.close()
+            process.stdin = None
+            return process
+        try:
+            start('first')
+            deadline = time.monotonic() + 10
+            while not ready.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(ready.exists(), 'first writer did not reach its push barrier')
+            with (self.clone / '.git/record.lock').open('a') as lock:
+                with self.assertRaises(BlockingIOError):
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            second = start('second')
+            with self.assertRaises(subprocess.TimeoutExpired):
+                second.wait(timeout=0.1)
+            release.touch()
+            for process in processes:
+                stdout, stderr = process.communicate(timeout=30)
+                self.assertEqual(process.returncode, 0, stdout.decode() + stderr.decode())
+        finally:
+            release.touch()
+            for process in processes:
+                if process.poll() is None:
+                    process.kill()
+                    process.communicate()
+        rows = self.git(self.origin, 'show', 'main:events/queue/hel8/2026-10-29.jsonl').splitlines()
+        self.assertCountEqual([json.loads(row)['id'] for row in rows], ['first', 'second'])
+        self.assert_clean()
+
     def test_collector_identity_is_append_only(self):
         data = VALID['events/queue/hel8/2026-10-29.jsonl']
         self.run_record('append', '--as', 'collect', 'queue', 'hel8', data=data)
@@ -485,6 +591,7 @@ class RecordTests(unittest.TestCase):
         result = self.run_record('append', '--as', 'collect', '--batch', 'hel8',
                                  data=self.event(), code=3, wait=False)
         self.assertIn(b'five attempts', result.stderr)
+        self.assertNotIn(b'original input follows', result.stderr)
         self.assertEqual(len(counter.read_text().splitlines()), 5)
         self.assert_clean()
         self.assertFalse((self.clone / 'events').exists())
