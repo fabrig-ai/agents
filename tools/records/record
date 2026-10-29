@@ -280,10 +280,12 @@ def clone_checks(root, origin, branch):
     need((root / '.git').is_dir() and not (root / '.git').is_symlink(),
          f'{root}: expected a dedicated clone with a .git directory')
     need(out(root, 'rev-parse', '--show-toplevel') == str(root), 'expected clone root')
-    need(out(root, 'remote', 'get-url', '--all', 'origin') == origin and
-         out(root, 'remote', 'get-url', '--push', '--all', 'origin') == origin,
-         'foreign origin refused (including push URL)')
-    need(out(root, 'symbolic-ref', '--quiet', '--short', 'HEAD') == branch,
+    for flags in (('--all',), ('--push', '--all')):
+        url = git(root, 'remote', 'get-url', *flags, 'origin', check=False)
+        need(url.returncode == 0 and url.stdout.decode().strip() == origin,
+             'missing or foreign origin refused (including push URL)')
+    head = git(root, 'symbolic-ref', '--quiet', '--short', 'HEAD', check=False)
+    need(head.returncode == 0 and head.stdout.decode().strip() == branch,
          f'clone must be on {branch}')
     need(not any((root / '.git' / p).exists() for p in
                  ('MERGE_HEAD', 'rebase-merge', 'rebase-apply', 'CHERRY_PICK_HEAD', 'REVERT_HEAD')),
