@@ -65,6 +65,76 @@ that number during a push race, the losing writer resets to the new origin and
 allocates again using its original input. Distinct judgements never merge into
 one numbered file. Ordinary concurrent writes use Git's rebase conflict rules.
 
+## Director commands
+
+Every command below requires `--as NAME`, including reads, using the post names
+above. Writes build the files, validate them, and commit and push through the
+same locked writer as `write`. Reads pull first and never commit generated data.
+Text is quoted by the tool; no hand-written TOML is needed.
+
+```
+record draft dynamic-memory --as director --coordinator dm \
+  --mailbox s/dynamic-memory --source skein/docs/design/draft/dynamic-memory.md \
+  --state active --priority 1
+record priority set dynamic-memory upgrades --as director --reason "Green first"
+record priority show --as director
+record ask --as director --question "Which scope?" --option small --option full \
+  --recommendation small --deadline +24
+record answer 0001 --as director --answer small
+record answer 0001 --as director --applied commit:abc123
+record questions --as director --open
+record decide --director --as director --title "Resume QA" --context @context.txt \
+  --options "QA or upgrades" --decision QA --why "Restore the checks first"
+record decide --draft dynamic-memory --as s/dynamic-memory --title "Scope" \
+  --context "First release" --options "small or full" --decision small --why "Time"
+record status --as director
+record status --as director --json
+```
+
+- `draft NAME --coordinator H --mailbox s/NAME --source PATH [--state S]
+  [--priority N]` creates or updates `drafts/NAME/draft.toml` and sets `updated`
+  to now in UTC. Coordinator, mailbox and source are required on updates too.
+  New drafts default to `queued` and priority 1; an omitted state or priority
+  on an existing draft preserves its value. Creation accepts any schema state.
+  Changes allow `queued → active`, `active → paused`, `paused → active`, and
+  `active → done`; the same state is allowed, and `done` is terminal.
+- `priority set NAME... --reason TEXT` replaces `director/priorities.toml` with
+  the supplied order. Names must be unique existing drafts with valid metadata.
+  Each entry receives the reason. Its `since` stays the same at the same
+  position; new or moved entries receive now in UTC. `priority show` prints the
+  validated TOML, or reports that no priorities exist yet.
+- `ask --question TEXT --option TEXT... --recommendation TEXT --deadline ISO|+HOURS`
+  creates the next `director/questions/NNNN.toml`. Repeat `--option` for each
+  option. The writer becomes `by`, and `asked` is now in UTC. Deadlines take an
+  ISO UTC time (`Z` or `+00:00`) or positive hours from now, including fractions
+  such as `+0.5`. The final output line is the allocated four-digit number,
+  including after a concurrent numbering retry.
+- `answer NNNN --answer TEXT [--applied TEXT]` records `answer` and `answered`.
+  `answer NNNN --applied TEXT` requires an already answered question and preserves
+  its answer and timestamp. A new `--answer` replaces the answer and timestamp.
+  Question numbers may omit leading zeroes. `applied` can name a commit, event,
+  or explain what was done.
+- `questions [--open]` prints number, age since asking, UTC deadline, asking post,
+  and the first 80 characters of the question on one line. Unanswered questions
+  past their deadline are marked `OVERDUE`. `--open` hides answered questions.
+- `decide (--draft NAME | --director) --title T --context T --options T
+  --decision T --why T` writes the next decision in that draft or the director's
+  decisions directory. A draft must already exist. Each text argument accepts
+  `@FILE` for UTF-8 input. The title must be one line. The Markdown contains
+  `# title`, writer and UTC date, then Context, Options, Decision and Why sections.
+  The entire generated file, including headings and attribution, is capped at
+  4096 UTF-8 bytes.
+- `status [--json]` computes drafts in priority-list order (unlisted drafts follow
+  by metadata priority, then name), with state, coordinator and age of `updated`;
+  open questions ordered overdue first, then by deadline; the last five director
+  and draft decisions in Git history order; and event counts by source in the
+  last hour. Future events are excluded. The text view omits event counts when
+  there are none. JSON always includes `drafts`, `questions`, `decisions`, and
+  `events_last_hour` (empty arrays/object when absent). Drafts and questions
+  retain their metadata, with `name`/`number` and numeric `age_seconds`; questions
+  also have `overdue`. Decisions have `path`, `title` and Unix commit `timestamp`.
+  UTC datetimes are JSON strings. No status file is written.
+
 ## Verification
 
 Run `python3 -I -B tools/records/test_record.py`. Tests use temporary HOME
