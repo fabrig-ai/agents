@@ -50,6 +50,8 @@ elif pathlib.Path(sys.argv[0]).name == "session-context":
     assert sys.argv[1:] == ["--capabilities"]
     if os.environ.get("FAKE_GATING", "1") == "1":
         print("hook-gating")
+        if os.environ.get("FAKE_DRIFT") == "1":
+            print("role-drift")
     else:
         sys.exit(1)
 else:
@@ -350,6 +352,66 @@ class LaunchTests(Sandbox):
 
 
 class WiringTests(Sandbox):
+    def test_watched_paths_for_both_coordinators_and_roles(self):
+        root = self.home / "src/fabrig/main"
+        for handle, lead in (("dm", "skein"), ("ab", "ab-skein")):
+            self.assertEqual(lib.watched("lead", handle, "skein"), [
+                str(root / "AGENTS.md"), str(root / "agents/lead.md"), str(root / "agents/operations.md"),
+                str(self.home / "src/fabrig/leads" / lead / "brief.md"),
+            ])
+            self.assertEqual(lib.watched("coordinator", handle, None), [
+                str(root / "AGENTS.md"), str(root / "agents/coordinator.md"), str(root / "agents/operations.md"),
+                str(root / "agents/lead.md"),
+            ])
+        for role, area in (("lead", None), ("unknown", None)):
+            with self.assertRaises(ValueError):
+                lib.watched(role, "dm", area)
+
+    def test_role_drift_entries_and_gating_only_downgrade(self):
+        values = lib.names("dm", "jig")
+        Path(values["lead_start_dir"]).mkdir(parents=True)
+        for flag in ("1", "0"):
+            with self.subTest(drift=flag):
+                self.env["FAKE_DRIFT"] = flag
+                result = self.command("start", "wire", "dm")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                for role, value in (("lead", values), ("coordinator", lib.names("dm"))):
+                    directory = value["lead_start_dir" if role == "lead" else "coordinator_start_dir"]
+                    hooks = json.loads((Path(directory) / ".claude/settings.json").read_text())["hooks"]
+                    stop = hooks["Stop"][0]["hooks"][0]
+                    argv = shlex.split(stop["command"])
+                    if flag == "1":
+                        self.assertEqual(set(hooks), {"Stop", "SessionStart", "UserPromptSubmit"})
+                        self.assertEqual(hooks["Stop"], hooks["UserPromptSubmit"])
+                        self.assertEqual(hooks["Stop"], hooks["SessionStart"])
+                        self.assertNotIn("matcher", hooks["SessionStart"][0])
+                        self.assertEqual([argv[i + 1] for i, token in enumerate(argv) if token == "--watch"],
+                                         lib.watched(role, "dm", "jig" if role == "lead" else None))
+                        self.assertEqual(stop["timeout"], 30)
+                    else:
+                        self.assertEqual(set(hooks), {"Stop", "SessionStart"})
+                        self.assertNotIn("--watch", argv)
+                        self.assertEqual(hooks["SessionStart"][0]["matcher"], "compact")
+
+    def test_watched_paths_are_shell_quoted(self):
+        with patch.dict(os.environ, {"HOME": str(self.home / "space's home;$literal")}):
+            values = lib.names("ab", "temper")
+            _, settings, _ = lib.hook_settings(values, "lead", {"hook-gating", "role-drift"})
+            argv = shlex.split(settings["hooks"]["Stop"][0]["hooks"][0]["command"])
+            self.assertEqual([argv[i + 1] for i, token in enumerate(argv) if token == "--watch"],
+                             lib.watched("lead", "ab", "temper"))
+
+    def test_drift_wire_dry_run_prints_hooks_and_creates_nothing(self):
+        self.env["FAKE_DRIFT"] = "1"
+        result = self.command("start", "wire", "dm", "--dry-run")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("UserPromptSubmit", result.stdout)
+        self.assertIn("--watch", result.stdout)
+        self.assertIn("agents/coordinator.md", result.stdout)
+        self.assertNotIn('"matcher"', result.stdout)
+        self.assertEqual(list(self.home.iterdir()), [])
+        self.assertEqual(self.calls(), [])
+
     def test_owned_hooks_replaced_other_settings_preserved(self):
         values = lib.names("dm", "jig")
         path = Path(values["lead_start_dir"]) / ".claude/settings.json"
@@ -382,13 +444,13 @@ class WiringTests(Sandbox):
     def test_shell_quoting_and_coordinator_gates(self):
         values = lib.names("dm")
         values["coordinator_handover"] = str(self.home / "a handover's $file; `literal`.md")
-        _, settings, _ = lib.hook_settings(values, "coordinator", True)
+        _, settings, _ = lib.hook_settings(values, "coordinator", {"hook-gating"})
         command = settings["hooks"]["Stop"][0]["hooks"][0]["command"]
         argv = shlex.split(command)
         self.assertEqual(argv[argv.index("--handover") + 1], values["coordinator_handover"])
         self.assertEqual(argv[argv.index("--name-prefix") + 1], "coordinator/dm/")
         self.assertEqual(argv[argv.index("--name") + 1], "coord-next")
-        _, settings, _ = lib.hook_settings(lib.names("ab"), "coordinator", True)
+        _, settings, _ = lib.hook_settings(lib.names("ab"), "coordinator", {"hook-gating"})
         argv = shlex.split(settings["hooks"]["Stop"][0]["hooks"][0]["command"])
         self.assertNotIn("--name", argv)
         self.assertIn("coordinator/ab/", argv)
@@ -396,7 +458,7 @@ class WiringTests(Sandbox):
     def test_legacy_capabilities_only_plain_lead_stop_and_no_coordinator_hooks(self):
         self.env["FAKE_GATING"] = "0"
         for role, values in (("lead", lib.names("dm", "skein")), ("coordinator", lib.names("dm"))):
-            path, _, _ = lib.hook_settings(values, role, True)
+            path, _, _ = lib.hook_settings(values, role, {"hook-gating"})
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps({"keep": True, "hooks": {"Stop": ["old"], "SessionStart": ["old"], "Notification": ["keep"]}}))
         result = self.command("start", "wire", "dm")
@@ -404,7 +466,7 @@ class WiringTests(Sandbox):
         self.assertIn("lacks hook-gating", result.stdout)
         self.assertIn("coordinator hooks skipped", result.stdout)
         for role, values in (("lead", lib.names("dm", "skein")), ("coordinator", lib.names("dm"))):
-            path, _, _ = lib.hook_settings(values, role, True)
+            path, _, _ = lib.hook_settings(values, role, {"hook-gating"})
             settings = json.loads(path.read_text())
             self.assertTrue(settings["keep"])
             self.assertEqual(settings["hooks"]["Notification"], ["keep"])
@@ -445,11 +507,11 @@ class WiringTests(Sandbox):
 
     def test_unsupported_probe_or_missing_tool_falls_back(self):
         with patch.object(lib.subprocess, "run", side_effect=FileNotFoundError()):
-            self.assertFalse(lib.gating_available())
+            self.assertFalse(lib.session_capabilities())
         with patch.object(lib.subprocess, "run", side_effect=subprocess.TimeoutExpired("session-context", 10)):
-            self.assertFalse(lib.gating_available())
+            self.assertFalse(lib.session_capabilities())
         with patch.object(lib.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, "hook-gating\n", "")):
-            self.assertFalse(lib.gating_available())
+            self.assertFalse(lib.session_capabilities())
 
     def test_invalid_existing_settings_fail_without_launching(self):
         self.brief()
