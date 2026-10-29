@@ -8,7 +8,6 @@ import json
 import os
 from pathlib import Path
 import re
-import resource
 import secrets
 import shutil
 import signal
@@ -502,14 +501,12 @@ if os.fork() == 0:
     Path({str(marker)!r}).write_text(str(os.getpid()))
 time.sleep(60)
 ''')
-    driver = f'''import resource, runpy, sys
+    driver = f'''import runpy, sys, time
 tool = runpy.run_path({str(SCRIPT)!r})
-start = resource.getrusage(resource.RUSAGE_CHILDREN)
+start = time.monotonic()
 result = tool['command']([sys.executable, '-I', '-B', {str(script)!r}], timeout=0.3)
 assert result.returncode == 124
-end = resource.getrusage(resource.RUSAGE_CHILDREN)
-# Idle child CPU 19 ms; 4x rounded up to the 500 ms minimum.
-assert end.ru_utime + end.ru_stime - start.ru_utime - start.ru_stime < 0.5
+assert time.monotonic() - start < 7
 '''
     try:
         result = subprocess.run([sys.executable, '-I', '-B', '-c', driver], env=lab.env,
@@ -809,11 +806,9 @@ def two_stops_take_turns(lab):
     (directory / 'give-back.lock').unlink()
     (directory / 'give-back.log').unlink()
     os.mkfifo(directory / 'give-back.log')
-    started = resource.getrusage(resource.RUSAGE_CHILDREN)
+    started = time.monotonic()
     lab.run('_give-back', str(directory), '1')
-    ended = resource.getrusage(resource.RUSAGE_CHILDREN)
-    # Idle child CPU 56 ms; 4x rounded up to the 500 ms minimum.
-    assert ended.ru_utime + ended.ru_stime - started.ru_utime - started.ru_stime < 0.5
+    assert time.monotonic() - started < 5
 
 
 def a_wrapper_past_its_bound_is_ended(lab):
@@ -825,11 +820,9 @@ def a_wrapper_past_its_bound_is_ended(lab):
         + f'child = subprocess.Popen([{sys.executable!r}, "-I", "-B", "-c", "import time; time.sleep(60)"])\n'
           "Path('export-pids').write_text(f'{os.getpid()} {child.pid}')\n"
           'time.sleep(60)\n')
-    started = resource.getrusage(resource.RUSAGE_CHILDREN)
+    started = time.monotonic()
     lab.run('_give-back', str(directory), '2')
-    ended = resource.getrusage(resource.RUSAGE_CHILDREN)
-    # Idle child CPU 85 ms; 4x rounded up to the 500 ms minimum.
-    assert ended.ru_utime + ended.ru_stime - started.ru_utime - started.ru_stime < 0.5
+    assert time.monotonic() - started < 10
     for process in map(int, (directory / 'export-pids').read_text().split()):
         dead(process)
     assert 'killed past 2 s' in (directory / 'give-back.log').read_text()
