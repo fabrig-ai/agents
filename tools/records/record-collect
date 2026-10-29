@@ -1,0 +1,539 @@
+#!/usr/bin/env -S python3 -I -B
+"""Read local pipeline facts and publish them through the records writer."""
+
+import argparse
+from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import socket
+import subprocess
+import sys
+import tempfile
+import tomllib
+
+UTC = timezone.utc
+SOURCES = ('runs', 'queue', 'heavy', 'sessions', 'claims', 'leases', 'post')
+JOIN = ('task', 'branch', 'coordinator', 'draft', 'area', 'part')
+
+
+class Skip(Exception):
+    pass
+
+
+def timestamp(value):
+    if not isinstance(value, str):
+        raise ValueError('expected an ISO timestamp')
+    result = datetime.fromisoformat(value.replace('Z', '+00:00'))
+    if result.utcoffset() is None:
+        raise ValueError('timestamp needs a UTC offset')
+    return result.astimezone(UTC)
+
+
+def iso(value):
+    return value.astimezone(UTC).isoformat().replace('+00:00', 'Z')
+
+
+def digest(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+
+def names(address):
+    """Extract only identities encoded in pipeline names, without guessing a draft."""
+    name = address.split('@', 1)[0]
+    parts = name.split('/')
+    if parts[0] == 'lead' and len(parts) >= 2:
+        result = {'area': parts[-1]}
+        if len(parts) >= 3:
+            result['coordinator'] = parts[1]
+        return result
+    if parts[0] == 'coordinator' and len(parts) >= 2:
+        return {'coordinator': parts[1]}
+    if parts[0] == 's' and len(parts) == 2:
+        return {'coordinator': name}
+    if name in ('coord-next', 'coordinator-next', 'coordinator'):
+        return {'coordinator': name}
+    return {}
+
+
+def task_keys(path):
+    if not path or not Path(path).is_file():
+        return {}
+    text = Path(path).read_text()
+    lines = text.splitlines()
+    if lines and lines[0].strip() == '+++':
+        try:
+            end = next(i for i in range(1, len(lines)) if lines[i].strip() == '+++')
+        except StopIteration:
+            raise ValueError(f'{path}: unclosed task header') from None
+        header = tomllib.loads('\n'.join(lines[1:end]))
+        result = {k: header[k] for k in JOIN if k in header}
+        if any(not isinstance(v, str) or not v for v in result.values()):
+            raise ValueError(f'{path}: task join keys must be nonempty strings')
+        return result
+    branch = re.search(r'\bbranch\s+`([^`\n]+)`', text, re.IGNORECASE)
+    if branch is None:
+        branch = re.search(r'\b(ready/[a-zA-Z0-9._/-]+)', text)
+        return {'branch': branch[1].rstrip('.')} if branch else {}
+    return {'branch': branch[1]}
+
+
+@contextmanager
+def read_lock(directory):
+    """Use the producer's lock if present; never create or modify source state."""
+    try:
+        lock = (directory / '.lock').open('rb')
+    except FileNotFoundError:
+        yield
+        return
+    with lock:
+        fcntl.flock(lock, fcntl.LOCK_SH)
+        yield
+
+
+def atomic(path, value):
+    fd, sibling = tempfile.mkstemp(prefix='.' + path.name + '.', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'w') as output:
+            os.fchmod(output.fileno(), 0o600)
+            json.dump(value, output, sort_keys=True)
+            output.write('\n')
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(sibling, path)
+    finally:
+        if os.path.exists(sibling):
+            os.unlink(sibling)
+
+
+def inventory(path):
+    hostnames = {socket.gethostname(), socket.getfqdn()}
+    matches, local = [], []
+    for line in path.read_text().splitlines():
+        fields = line.split('#', 1)[0].split()
+        if not fields:
+            continue
+        if len(fields) != 2:
+            raise ValueError('invalid machines inventory')
+        name, address = fields
+        if address == 'local':
+            local.append(name)
+        if name in hostnames or address.split('@')[-1] in hostnames:
+            matches.append(name)
+    candidates = local or matches
+    if len(set(candidates)) != 1:
+        raise ValueError('cannot map hostname through post/machines; use --host')
+    return candidates[0]
+
+
+class Collector:
+    def __init__(self, source, host, state, since, now):
+        self.source, self.host, self.state, self.now = source, host, state, now
+        self.since = timestamp(state.get('since', since))
+        self.home = Path.home()
+        self.tmp = self.home / 'src/rust/tmp'
+        self.fabrig = self.home / 'src/fabrig'
+        self.seen = set(state.get('seen', []))
+        self.events = []
+
+    def emit(self, kind, key, when, **fields):
+        when = timestamp(when) if isinstance(when, str) else when
+        identity = f'{self.source}:{self.host}:{digest([kind, key])}'
+        if identity in self.seen:
+            return
+        self.seen.add(identity)
+        if when < self.since:
+            return
+        self.events.append(dict(fields, id=identity, time=iso(when),
+                                source=self.source, host=self.host, kind=kind))
+
+    def lines(self, path):
+        """Advance only over complete lines; rotation replays safely via event ids."""
+        if not path.exists():
+            return
+        files = self.state.setdefault('files', {})
+        prior = files.get(str(path), {})
+        with path.open('rb') as stream:
+            stat = os.fstat(stream.fileno())
+            identity = [stat.st_dev, stat.st_ino]
+            offset = prior.get('offset', 0) if prior.get('identity') == identity else 0
+            if stat.st_size < offset:
+                offset = 0
+            stream.seek(offset)
+            while True:
+                line = stream.readline()
+                if not line or not line.endswith(b'\n'):
+                    break
+                yield line.decode('utf-8').rstrip('\n')
+                offset = stream.tell()
+        files[str(path)] = dict(identity=identity, offset=offset)
+
+    def finish(self):
+        self.state.update(version=1, host=self.host, since=iso(self.since), seen=sorted(self.seen))
+        return self.events
+
+    def runs(self):
+        root = self.tmp / 'codex-run'
+        if not root.is_dir():
+            raise Skip('no codex-run directory')
+        cache = self.state.setdefault('meta', {})
+        for path in sorted(root.glob('*/meta')):
+            stat = path.stat()
+            signature = [stat.st_mtime_ns, stat.st_size]
+            if cache.get(str(path)) == signature:
+                continue
+            meta = dict(line.split('=', 1) for line in path.read_text().splitlines() if '=' in line)
+            run = path.parent.name
+            keys = names(meta.get('to', '')) | task_keys(meta.get('task'))
+            self.emit('run-start', run, meta['started'], run=run, **keys,
+                      model=meta.get('model'), effort=meta.get('effort'),
+                      cwd=meta.get('dir'), report=meta.get('report'), resumed_from=meta.get('resume_of') or None)
+            cache[str(path)] = signature
+        for line in self.lines(root / 'runs.tsv'):
+            columns = line.split('\t')
+            if len(columns) != 13:
+                raise ValueError('runs.tsv: expected 13 columns')
+            run, to, start, end, code, tries, model, effort, task, report, thread, tokens, post = columns
+            keys = names(to) | task_keys(task)
+            meta_path = root / run / 'meta'
+            meta = dict(line.split('=', 1) for line in meta_path.read_text().splitlines() if '=' in line) if meta_path.exists() else {}
+            common = dict(run=run, **keys, model=model, effort=effort, report=report,
+                          resumed_from=meta.get('resume_of') or None)
+            self.emit('run-start', run, start, **common)
+            usage = [int(v) for v in tokens.split('/')] if tokens != '-' else [None] * 3
+            if len(usage) != 3:
+                raise ValueError('runs.tsv: invalid token counts')
+            self.emit('run-end', run, end, **common, exit=int(code), tries=int(tries),
+                      tokens_in=usage[0], tokens_cached=usage[1], tokens_out=usage[2],
+                      minutes=(timestamp(end) - timestamp(start)).total_seconds() / 60,
+                      post_status=int(post), thread=None if thread == '-' else thread)
+
+    def queue(self):
+        path = self.fabrig / 'notes/queue.jsonl'
+        if not path.is_file():
+            raise Skip('no queue.jsonl')
+        leads_path = self.fabrig / 'main/tools/queue/leads.txt'
+        leads = {}
+        if leads_path.exists():
+            for line in leads_path.read_text().splitlines():
+                values = line.split('#', 1)[0].split()
+                if values:
+                    key, address = values
+                    leads[key] = names(address)
+        for line in self.lines(path):
+            row = json.loads(line)
+            # Recovery reuses a batch's start; it is not a second batch/attempt.
+            if row.get('event'):
+                continue
+            start, end = row['start'], row['end']
+            branches, steps = row.get('branches', []), row.get('steps', [])
+            # Deliberately omit notification payloads and command output.
+            step_keys = ('name', 'green', 'returncode', 'duration', 'sizes', 'size', 'before', 'after', 'cwd')
+            def safe_step(step):
+                value = {k: step[k] for k in step_keys if k in step}
+                if 'suites' in step:
+                    value['suites'] = [safe_step(s) for s in step['suites']]
+                return value
+            fields = {k: row[k] for k in ('selection', 'outcome', 'log', 'dry', 'sizes', 'size', 'parent', 'commit') if k in row}
+            if 'target_cleanup' in row:
+                fields['target_cleanup'] = {k: row['target_cleanup'][k] for k in ('count', 'gb', 'skipped')
+                                            if k in row['target_cleanup']}
+            self.emit('batch', start, end, start=start, end=end,
+                      branches=[{k: b[k] for k in ('name', 'tip') if k in b} for b in branches],
+                      steps=[safe_step(s) for s in steps], **fields)
+            conflicts = {b['name']: b for b in row.get('conflicts', [])}
+            rejected = next((s['name'] for s in steps if not s.get('green', False)), None)
+            for branch in branches:
+                name = branch['name']
+                key = name.split('/')[1] if '/' in name else name
+                conflict = conflicts.get(name)
+                self.emit('attempt', [start, name], end, branch=name, tip=branch['tip'],
+                          **leads.get(key, {}), batch_start=start,
+                          outcome='conflict' if conflict else row['outcome'],
+                          rejected_step=conflict.get('step', 'merge') if conflict else rejected,
+                          log=row.get('log'))
+
+    def heavy(self):
+        path = self.tmp / 'logs/heavy.tsv'
+        if not path.is_file():
+            raise Skip('no heavy completion TSV')
+        # Phase events contain safe identities, not command arguments. Keep only
+        # the completion metadata needed to associate the TSV's terminal row.
+        phases = self.state.setdefault('phases', {})
+        for line in self.lines(self.tmp / 'heavy/events.jsonl'):
+            row = json.loads(line)
+            if row['event'] == 'release_end':
+                key = [row.get('repo'), row.get('lane'), row.get('label'), int(row['time_ns']) // 1_000_000_000]
+                phases[digest(key)] = {k: row[k] for k in ('token', 'outcome', 'code') if k in row}
+        for line in self.lines(path):
+            columns = line.split('\t')
+            if len(columns) != 11:
+                raise ValueError('heavy.tsv: expected 11 columns')
+            number, lane, ended, wait, run, code, memory, cwd, log, command, label = columns
+            phase = phases.get(digest([cwd, lane, label, int(timestamp(ended).timestamp())]), {})
+            keys = {}
+            # Only join a run explicitly named by the slot's claim.
+            slot = re.search(r'/slots/(?:(?P<host>[a-z][a-z0-9-]*)/)?(?P<number>\d+)(?:/|$)', cwd)
+            if slot:
+                claim_host = slot['host'] or self.host
+                claim_path = self.fabrig / 'claims' / f'{claim_host}-{slot["number"]}'
+                if claim_path.is_file():
+                    claim = json.loads(claim_path.read_text())
+                    match = re.search(r'\b(\d{8}T\d{6}Z-[0-9a-f]+)\b', claim['what'])
+                    if match:
+                        keys['run'] = match[1]
+            self.emit('command', [number, log, ended], ended, **keys, lane=lane, label=label,
+                      cwd=cwd, wait_s=int(wait), run_s=int(run), exit=int(code), log=log, **phase)
+
+    def sessions(self):
+        if shutil.which('claude') is None:
+            raise Skip('claude is not installed')
+        result = subprocess.run(['claude', 'agents', '--json'], capture_output=True, text=True, timeout=60)
+        if result.returncode:
+            raise ValueError('claude agents failed')
+        rows = json.loads(result.stdout)
+        if not isinstance(rows, list):
+            raise ValueError('claude agents must return an array')
+        old = self.state.get('snapshot', {})
+        current = {}
+        for row in rows:
+            name = row.get('name', '')
+            keys = names(name)
+            if not keys:
+                continue
+            session = row.get('sessionId') or row['id']
+            started = datetime.fromtimestamp(row['startedAt'] / 1000, UTC)
+            current[session] = dict(name=name, started=iso(started))
+            self.emit('session-start', session, started, session=session, name=name, **keys)
+            prior = old.get(session)
+            if prior and prior['name'] != name:
+                self.emit('session-name', [session, self.state.get('generation', 0), name], self.now,
+                          session=session, name=name, previous_name=prior['name'], **keys)
+            if shutil.which('session-context') is None:
+                raise ValueError('session-context is not installed')
+            reading = subprocess.run(['session-context', '--name', name], capture_output=True, text=True, timeout=30)
+            if reading.returncode not in (0, 3):
+                raise ValueError(f'session-context failed for {name}')
+            match = re.search(r':\s*([\d,]+) of ([\d,]+) tokens \((\d+)%\) at (\S+);\s*([\d,]+) calls;\s*(\d+) compaction', reading.stdout)
+            if not match:
+                raise ValueError(f'unrecognized session-context reading for {name}')
+            used, window, percent, measured, calls, compactions = match.groups()
+            self.emit('context', [session, iso(self.now)], self.now, session=session, name=name, **keys,
+                      tokens=int(used.replace(',', '')), window=int(window.replace(',', '')),
+                      percent=int(percent), measured=measured, calls=int(calls.replace(',', '')),
+                      compactions=int(compactions))
+        for session, prior in old.items():
+            if session not in current:
+                self.emit('session-end', [session, self.state.get('generation', 0)], self.now,
+                          session=session, name=prior['name'], **names(prior['name']), observed=True)
+        self.state['snapshot'] = current
+        self.state['generation'] = self.state.get('generation', 0) + 1
+
+    def claims(self):
+        root = self.fabrig / 'claims'
+        if not root.is_dir():
+            raise Skip('no claims directory')
+        with read_lock(root):
+            current = {p.name: json.loads(p.read_text()) for p in sorted(root.iterdir())
+                       if re.fullmatch(r'[a-z][a-z0-9-]*-\d+', p.name)}
+        old = self.state.get('snapshot', {})
+        for slot in sorted(old.keys() | current.keys()):
+            before, after = old.get(slot), current.get(slot)
+            if before == after:
+                continue
+            if before:
+                self.emit('release', [slot, before['created']], self.now,
+                          slot=slot, **before, **self.owner_area(before['owner']), observed=True)
+            if after:
+                self.emit('claim', [slot, after['created']], after['created'],
+                          slot=slot, **after, **self.owner_area(after['owner']))
+        self.state['snapshot'] = current
+
+    @staticmethod
+    def owner_area(owner):
+        return {'area': names(owner).get('area', owner.split('@')[0].split('/')[-1])}
+
+    def leases(self):
+        root = self.fabrig / 'leases'
+        if not root.is_dir():
+            raise Skip('no leases directory')
+        with read_lock(root):
+            current = {}
+            for path in sorted(root.iterdir()):
+                if path.name.startswith('.'):
+                    continue
+                row = json.loads(path.read_text())
+                current[row['subject']] = row
+        old = self.state.get('snapshot', {})
+        generation = self.state.get('generation', 0)
+        for subject in sorted(old.keys() | current.keys()):
+            before, after = old.get(subject, {}), current.get(subject, {})
+            holder_before = (before.get('owner'), before.get('since'))
+            holder_after = (after.get('owner'), after.get('since'))
+            if holder_before != holder_after:
+                if before.get('owner'):
+                    self.emit('release', [subject, before['since']], self.now, subject=subject,
+                              coordinator=before['owner'], observed=True)
+                if after.get('owner'):
+                    self.emit('take', [subject, after['since']], after['since'], subject=subject,
+                              coordinator=after['owner'], what=after.get('what'))
+            previous_waiters = {w['owner']: w for w in before.get('waiters', [])}
+            for waiter in after.get('waiters', []):
+                if previous_waiters.get(waiter['owner']) != waiter:
+                    self.emit('want', [subject, waiter['owner'], waiter['since']], waiter['since'],
+                              subject=subject, coordinator=waiter['owner'], what=waiter['what'], active=True)
+            # Removals need recording as well, otherwise reports retain stale permissions/waits.
+            waiting = {w['owner'] for w in after.get('waiters', [])}
+            for owner, waiter in previous_waiters.items():
+                if owner not in waiting:
+                    self.emit('want', [subject, generation, owner, 'remove'], self.now,
+                              subject=subject, coordinator=owner, active=False, observed=True)
+            lends_before = set(before.get('lends', []))
+            lends_after = set(after.get('lends', []))
+            for branch in sorted(lends_before ^ lends_after):
+                active = branch in lends_after
+                owner = after.get('owner') if active else before.get('owner')
+                self.emit('lend', [subject, generation, branch, active], self.now,
+                          subject=subject, coordinator=owner, branch=branch, active=active, observed=True)
+        if current != old:
+            self.state['generation'] = generation + 1
+        self.state['snapshot'] = current
+
+    def post(self):
+        root = self.tmp / 'post'
+        if not root.is_dir():
+            raise Skip('no post directory')
+        for box in sorted(root.iterdir()):
+            if not box.is_dir() or not (box / 'new').is_dir():
+                continue
+            with read_lock(box):
+                for location in ('new', 'cur'):
+                    for path in sorted((box / location).glob('*.md')):
+                        key = [box.name, path.stem]
+                        kinds = ('mail', 'read') if location == 'cur' else ('mail',)
+                        if all(f'post:{self.host}:{digest([kind, key])}' in self.seen for kind in kinds):
+                            continue
+                        # Unbuffered reads stop at the header separator, even for
+                        # a binary/very large body. Bodies never enter this process.
+                        header = {}
+                        with path.open('rb', buffering=0) as stream:
+                            size = 0
+                            while True:
+                                line = stream.readline(4097)
+                                size += len(line)
+                                if not line or size > 4096:
+                                    raise ValueError(f'{path.name}: invalid mail header')
+                                if line == b'\n':
+                                    break
+                                key, separator, value = line.decode('utf-8').rstrip('\n').partition(': ')
+                                if not separator or key not in ('Id', 'From', 'To', 'Re', 'Subject') or key in header:
+                                    raise ValueError(f'{path.name}: invalid mail header')
+                                header[key] = value
+                            stat = os.fstat(stream.fileno())
+                        if not all(k in header for k in ('Id', 'From', 'To', 'Subject')):
+                            raise ValueError(f'{path.name}: missing mail headers')
+                        if header['Id'] != path.stem:
+                            raise ValueError(f'{path.name}: mail id differs from filename')
+                        key = [box.name, header['Id']]
+                        # Delivery creates the inode; a new -> cur rename preserves
+                        # mtime and updates ctime. Neither time is in post's header.
+                        delivered = datetime.fromtimestamp(stat.st_mtime, UTC)
+                        fields = dict(message_id=header['Id'], **{'from': header['From'], 'to': header['To']},
+                                      **(names(header['From']) | names(header['To'])))
+                        self.emit('mail', key, delivered, **fields, subject=header['Subject'], delivered=iso(delivered))
+                        if location == 'cur':
+                            self.emit('read', key, datetime.fromtimestamp(stat.st_ctime, UTC), **fields,
+                                      read_time_basis='inode-ctime')
+
+
+def collect(source, args, host, since):
+    directory = Path.home() / '.local/state/record-collect'
+    path = directory / (source + '.json')
+    pending = directory / (source + '.pending.json')
+    if directory.is_symlink() or path.is_symlink() or pending.is_symlink():
+        raise ValueError('cursor must not be a symlink')
+    if not args.dry_run:
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    lock_path = directory / (source + '.lock')
+    lock = None
+    try:
+        if not args.dry_run:
+            if lock_path.is_symlink():
+                raise ValueError('cursor lock must not be a symlink')
+            lock = lock_path.open('a')
+            os.fchmod(lock.fileno(), 0o600)
+            fcntl.flock(lock, fcntl.LOCK_EX)
+        elif lock_path.exists():
+            lock = lock_path.open('rb')
+            fcntl.flock(lock, fcntl.LOCK_SH)
+        state = json.loads(path.read_text()) if path.exists() else {}
+        if state and (state.get('version') != 1 or state.get('host') != host):
+            raise ValueError('cursor version or host differs; use the original host or a fresh cursor')
+        if pending.exists():
+            transaction = json.loads(pending.read_text())
+            state, events = transaction['state'], transaction['events']
+            if state.get('host') != host or state.get('version') != 1:
+                raise ValueError('pending cursor version or host differs')
+        else:
+            reader = Collector(source, host, state, since, datetime.now(UTC))
+            getattr(reader, source)()
+            events = reader.finish()
+        payload = ''.join(json.dumps(e, sort_keys=True) + '\n' for e in events)
+        if args.dry_run:
+            sys.stdout.write(payload)
+        else:
+            if events:
+                # Keep the exact timestamps across publication/cursor failures,
+                # including retries after UTC midnight and context readings.
+                if not pending.exists():
+                    atomic(pending, dict(state=state, events=events))
+                result = subprocess.run([str(Path(__file__).with_name('record')), 'append', '--as', 'collect', source, host],
+                                        input=payload, capture_output=True, text=True)
+                if result.returncode:
+                    # Do not echo rejected event data (particularly mail subjects).
+                    raise ValueError(f'record append failed (exit {result.returncode}); cursor unchanged')
+                if result.stdout:
+                    print(result.stdout, end='')
+            atomic(path, state)
+            pending.unlink(missing_ok=True)
+        print(f'{source}: {len(events)} events', file=sys.stderr)
+    finally:
+        if lock:
+            lock.close()
+
+
+def main():
+    os.umask(0o077)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('sources', nargs='+', choices=SOURCES)
+    parser.add_argument('--host')
+    parser.add_argument('--dry-run', action='store_true')
+    parser.add_argument('--since', help='first cursor lower bound (default: seven days ago)')
+    args = parser.parse_args()
+    try:
+        since = iso(timestamp(args.since)) if args.since else iso(datetime.now(UTC) - timedelta(days=7))
+        host = args.host or inventory(Path.home() / 'src/rust/tmp/post/machines')
+        if not re.fullmatch(r'[a-z][a-z0-9-]*', host):
+            raise ValueError('invalid host name')
+    except (ValueError, OSError) as error:
+        print(f'record-collect: {error}', file=sys.stderr)
+        return 2
+    failed = False
+    for source in dict.fromkeys(args.sources):
+        try:
+            collect(source, args, host, since)
+        except Skip as error:
+            print(f'skip {source}: {error}')
+        except Exception as error:
+            print(f'{source}: error: {error}', file=sys.stderr)
+            failed = True
+    return 2 if failed else 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
