@@ -1,0 +1,11 @@
+[dm]
+mailbox = "s/dynamic-memory"
+default = true
+
+# draft qa: the QA loop and its rungs
+[q]
+mailbox = "s/qa"
+
+# draft upgrades: the upgrades mission
+[u]
+mailbox = "s/upgrades"
