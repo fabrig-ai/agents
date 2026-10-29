@@ -14,6 +14,32 @@ from unittest.mock import patch
 import test_fleet_sync as fixture
 
 
+def exiting(pid):
+    """A pidfd is notified after exit releases memory and inherited pipes.
+
+    PF_EXITING is set at entry to Linux do_exit, before those releases. Check
+    that irreversible state when a lock observation beats pidfd notification.
+    Only inspect the PIDs announced by this test's fake installer.
+    """
+    try:
+        fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+    except FileNotFoundError:
+        return True
+    return bool(int(fields[6]) & 0x4)  # PF_EXITING
+
+
+class ExitObservationTests(unittest.TestCase):
+    def test_running_descendant_is_not_accepted(self):
+        with patch.object(Path, "read_text", return_value="123 (fake child) R 1 2 3 0 -1 4195336"):
+            self.assertFalse(exiting(123))
+
+    def test_exit_before_pidfd_notification_is_accepted(self):
+        with patch.object(Path, "read_text", return_value="123 (fake child) R 1 2 3 0 -1 4195340"):
+            self.assertTrue(exiting(123))
+        with patch.object(Path, "read_text", side_effect=FileNotFoundError):
+            self.assertTrue(exiting(123))
+
+
 class Review2Test(fixture.FleetTest):
     def test_candidate_cannot_exclude_recovery_timer(self):
         self.sync()
@@ -108,14 +134,15 @@ class Review2Test(fixture.FleetTest):
 
     def test_interrupt_waits_for_installer_group_before_unlock(self):
         installer = '''#!/usr/bin/env python3
-import json, os, pathlib, signal, subprocess, sys, time
+import json, os, signal, subprocess, sys
 for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
     signal.signal(sig, signal.SIG_IGN)
-code = "import signal,time; [signal.signal(s,signal.SIG_IGN) for s in (signal.SIGINT,signal.SIGTERM,signal.SIGHUP)]; print('ready',flush=True); time.sleep(120)"
+code = "import signal; [signal.signal(s,signal.SIG_IGN) for s in (signal.SIGINT,signal.SIGTERM,signal.SIGHUP)]; print('ready',flush=True); signal.pause()"
 child = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, text=True)
 assert child.stdout.readline().strip() == "ready"
-pathlib.Path(os.environ["SIGNAL_INFO"]).write_text(json.dumps({"group": os.getpgrp(), "pids": [os.getpid(), child.pid]}))
-time.sleep(120)
+with open(os.environ["SIGNAL_INFO"], "w") as ready:
+    ready.write(json.dumps({"group": os.getpgrp(), "pids": [os.getpid(), child.pid]}) + "\\n")
+signal.pause()
 '''
         fixture.put(self.fabrig / "tools/install", installer, True)
         self.git(self.fabrig, "add", ".")
@@ -125,22 +152,18 @@ time.sleep(120)
             with self.subTest(signal=sig):
                 home = self.directory / f"signal-home-{sig}"
                 home.mkdir()
-                ready = home / "signal-info.json"
+                ready = home / "signal-info"
+                os.mkfifo(ready)
+                ready_fd = os.open(ready, os.O_RDWR | os.O_NONBLOCK)
                 process = subprocess.Popen(["python3", "-I", "-B", str(self.source / "tools/fleet-sync"), "--host", "hel8", "--json"],
                     env={**self.env, "HOME": str(home), "SIGNAL_INFO": str(ready)},
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
                 info, descriptors = None, []
                 try:
-                    deadline = time.monotonic() + 10
-                    while time.monotonic() < deadline and process.poll() is None:
-                        if ready.exists():
-                            try:
-                                info = json.loads(ready.read_text())
-                                break
-                            except ValueError:
-                                pass
-                        time.sleep(0.02)
-                    self.assertIsNotNone(info, "fake installer did not start")
+                    readiness = select.poll()
+                    readiness.register(ready_fd, select.POLLIN)
+                    self.assertTrue(readiness.poll(30_000), "fake installer did not start")
+                    info = json.loads(os.read(ready_fd, 4096))
                     for pid in info["pids"]:
                         descriptors.append(os.pidfd_open(pid))
                     poll = select.poll()
@@ -157,12 +180,23 @@ time.sleep(120)
                             except BlockingIOError:
                                 pass
                             else:
-                                self.assertEqual(len(poll.poll(0)), 2, "install lock became free while descendants survived")
+                                exited = {fd for fd, _ in poll.poll(0)}
+                                for pid, fd in zip(info["pids"], descriptors):
+                                    self.assertTrue(fd in exited or exiting(pid),
+                                                    "install lock became free while descendants survived")
                                 fcntl.flock(lock, fcntl.LOCK_UN)
                             time.sleep(0.01)
                         output, error = process.communicate(timeout=1)
                         self.assertEqual(process.returncode, 130 if sig == signal.SIGINT else 143, output + error)
-                        self.assertEqual(len(poll.poll(100)), 2, "installer group survived fleet-sync exit")
+                        # poll can wake for just one pidfd. Accumulate readiness
+                        # until both have exited, rather than sampling a moment.
+                        pending = set(descriptors)
+                        deadline = time.monotonic() + 5
+                        while pending and time.monotonic() < deadline:
+                            for fd, _ in poll.poll(100):
+                                pending.discard(fd)
+                                poll.unregister(fd)
+                        self.assertFalse(pending, "installer group survived fleet-sync exit")
                         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     deadline = time.monotonic() + 2
                     while time.monotonic() < deadline:
@@ -174,6 +208,7 @@ time.sleep(120)
                     else:
                         self.fail("installer process group remains after fleet-sync exit")
                 finally:
+                    os.close(ready_fd)
                     if info:
                         try:
                             os.killpg(info["group"], signal.SIGKILL)
@@ -187,7 +222,9 @@ time.sleep(120)
 
 
 def load_tests(loader, tests, pattern):
-    return unittest.TestSuite(Review2Test(name) for name in Review2Test.__dict__ if name.startswith("test_"))
+    suite = loader.loadTestsFromTestCase(ExitObservationTests)
+    suite.addTests(Review2Test(name) for name in Review2Test.__dict__ if name.startswith("test_"))
+    return suite
 
 
 if __name__ == "__main__":
