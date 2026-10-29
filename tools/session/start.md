@@ -139,3 +139,12 @@ warm-up on director-next until explicit takeover. Keep installed links unchanged
 
 Tests: `python3 -I -B tools/test_session_start.py` and
 `python3 -I -B tools/session/test_session_context.py`, temporary HOME and fakes.
+
+Coordinators may set `lead_kind = "claude" | "codex"` (default `claude`);
+`u` uses Codex. Lead inventory rows include `kind`; Codex rows have `unit`
+(systemd string escaping) and `owner_state` instead of `start_dir`.
+Codex leads preserve the same brief/scratch/common/state and clone preparation,
+then run `codex-run owner --effort E [--model M] NAME <scratch>/brief.md`
+(default effort `high`). No start directory or Claude hook is created. Missing
+briefs and active user units refuse launch; dry runs print argv and check only
+the unit. `wire` announces and skips every Codex lead.

@@ -55,12 +55,18 @@ elif pathlib.Path(sys.argv[0]).name == "session-context":
             print("role-drift")
     else:
         sys.exit(1)
+elif pathlib.Path(sys.argv[0]).name == "systemctl":
+    assert sys.argv[1:4] == ["--user", "is-active", "--quiet"]
+    sys.exit(int(os.environ.get("FAKE_UNIT_EXIT", "3")))
+elif pathlib.Path(sys.argv[0]).name == "codex-run":
+    print("codex-owner-lead-ab-skein")
+    sys.exit(int(os.environ.get("FAKE_LAUNCH_EXIT", "0")))
 else:
     if os.environ.get("FAKE_GIT_EXIT"):
         sys.exit(int(os.environ["FAKE_GIT_EXIT"]))
     pathlib.Path(sys.argv[-1]).mkdir()
 '''
-        for command in ("claude", "git", "session-context"):
+        for command in ("claude", "git", "session-context", "systemctl", "codex-run"):
             path = self.bin / command
             path.write_text(fake)
             path.chmod(0o755)
@@ -156,6 +162,8 @@ class NamesTests(Sandbox):
             '[dm]\nmailbox="s/a"',
             '[dm]\nmailbox="s/a"\ndefault="yes"',
             '[dm]\nmailbox="s/a"\ndefault=true\nextra=1',
+            '[dm]\nmailbox="s/a"\ndefault=true\nlead_kind="other"',
+            '[dm]\nmailbox="s/a"\ndefault=true\nlead_kind=true',
             '',
         )
         for contents in cases:
@@ -188,6 +196,89 @@ class NamesTests(Sandbox):
         self.assertEqual(lib.state_time(state), "02:48Z")
         state.write_text("(empty)\n")
         self.assertEqual(lib.state_time(state), "unknown")
+
+
+class CodexLeadTests(Sandbox):
+    def setUp(self):
+        super().setUp()
+        self.registry.write_text(self.registry.read_text() + 'lead_kind = "codex"\n')
+
+    def test_registry_kind_defaults_and_owner_paths(self):
+        self.assertEqual(lib.names('dm', 'jig')['lead_kind'], 'claude')
+        values = lib.names('ab', 'jig')
+        self.assertEqual(values['lead_kind'], 'codex')
+        self.assertEqual(values['lead_unit'], 'codex-owner-lead-ab-jig')
+        with patch.dict(os.environ, DEV_ROOT=str(self.base / 'dev')):
+            self.assertEqual(lib.names('ab', 'jig')['lead_owner_state'], str(self.base / 'dev/tmp/owners/jig/codex'))
+
+    def test_systemd_string_escaping(self):
+        for name, escaped in (('lead/u/jig', 'lead-u-jig'), ('a-b/c_d:e.f', r'a\x2db-c_d:e.f'),
+                              ('.hello', r'\x2ehello'), ('a b/é', r'a\x20b-\xc3\xa9'),
+                              (r'a\b', r'a\x5cb')):
+            self.assertEqual(lib.systemd_escape(name), escaped)
+
+    def test_missing_brief_refuses_without_any_commands(self):
+        result = self.command('start', 'lead', 'ab', 'skein')
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn('missing brief', result.stderr)
+        self.assertEqual(self.all_calls(), [])
+        self.assertFalse(list(self.home.iterdir()))
+
+    def test_owner_launch_preserves_state_and_prepares_clones_without_hooks(self):
+        scratch = self.brief('ab')
+        (scratch / 'state.md').write_text('inherited\n')
+        result = self.command('start', 'lead', 'ab', 'skein')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = self.all_calls()
+        self.assertEqual([c['tool'] for c in calls], ['systemctl', 'git', 'git', 'codex-run'])
+        self.assertEqual(calls[0]['argv'], ['--user', 'is-active', '--quiet', 'codex-owner-lead-ab-skein'])
+        self.assertEqual(calls[-1]['argv'], ['owner', '--effort', 'high', 'lead/ab/skein', str(scratch / 'brief.md')])
+        self.assertEqual((scratch / 'state.md').read_text(), 'inherited\n')
+        self.assertEqual((scratch / 'common.md').read_text(), '(empty)\n')
+        self.assertTrue((scratch / 'repo').is_dir())
+        self.assertTrue((scratch / 'survey').is_dir())
+        self.assertFalse(Path(lib.names('ab', 'skein')['lead_start_dir']).exists())
+
+    def test_dry_run_command_and_no_writes(self):
+        scratch = self.brief('ab')
+        result = self.command('start', 'lead', 'ab', 'skein', '--effort', 'xhigh', '--model', 'custom', '--dry-run')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(shlex.split(result.stdout.strip().removeprefix('argv=')),
+                         ['codex-run', 'owner', '--effort', 'xhigh', '--model', 'custom', 'lead/ab/skein', str(scratch / 'brief.md')])
+        self.assertEqual([c['tool'] for c in self.all_calls()], ['systemctl'])
+        self.assertEqual([p.name for p in scratch.iterdir()], ['brief.md'])
+
+    def test_active_unit_refuses_even_dry_run(self):
+        scratch = self.brief('ab')
+        self.env['FAKE_UNIT_EXIT'] = '0'
+        for options in ((), ('--dry-run',)):
+            result = self.command('start', 'lead', 'ab', 'skein', *options)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn('active unit codex-owner-lead-ab-skein', result.stderr)
+        self.assertTrue(all(c['tool'] == 'systemctl' for c in self.all_calls()))
+        self.assertEqual([p.name for p in scratch.iterdir()], ['brief.md'])
+
+    def test_unit_and_launch_errors_are_not_success(self):
+        self.brief('ab')
+        self.env['FAKE_UNIT_EXIT'] = '1'
+        self.assertEqual(self.command('start', 'lead', 'ab', 'skein').returncode, 2)
+        self.env.update(FAKE_UNIT_EXIT='3', FAKE_LAUNCH_EXIT='2')
+        result = self.command('start', 'lead', 'ab', 'skein')
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('codex-run launch failed', result.stderr)
+
+    def test_wire_skips_all_codex_leads_including_existing_directories(self):
+        values = lib.names('ab', 'skein')
+        directory = Path(values['lead_start_dir']) / '.claude'
+        directory.mkdir(parents=True)
+        settings = directory / 'settings.json'
+        settings.write_text('{"keep": true}')
+        for options in ((), ('--dry-run',)):
+            result = self.command('start', 'wire', 'ab', *options)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.count('Codex owner has no Claude hooks'), 4)
+        self.assertEqual(settings.read_text(), '{"keep": true}')
+        self.assertTrue(all(c['tool'] == 'session-context' for c in self.all_calls()))
 
 
 class LaunchTests(Sandbox):
@@ -528,7 +619,15 @@ class InventoryTests(Sandbox):
                 self.assertEqual(lead["supervisor"], mailbox)
                 self.assertEqual(lead["coordinator_mailbox"], mailbox)
                 self.assertEqual(lead["scratch"], str(self.home / "src/fabrig/leads" / key))
-                self.assertEqual(lead["start_dir"], str(self.home / "src/rust/tmp/supervise/leads" / key))
+                self.assertEqual(lead["kind"], "codex" if handle == "u" else "claude")
+                if handle == "u":
+                    self.assertNotIn("start_dir", lead)
+                    self.assertEqual(lead["unit"], "codex-owner-lead-u-" + area)
+                    self.assertEqual(lead["owner_state"], str(self.home / "src/rust/tmp/owners" / area / "codex"))
+                else:
+                    self.assertEqual(lead["start_dir"], str(self.home / "src/rust/tmp/supervise/leads" / key))
+                    self.assertNotIn("unit", lead)
+                    self.assertNotIn("owner_state", lead)
                 self.assertFalse(lead["paused"])
         director = by_mailbox["director"]
         self.assertEqual(director["name_prefix"], "director/")

@@ -12,7 +12,7 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from session_lib import (ROOT, AREAS, clone, create_empty, session_capabilities, list_sessions,
                          inventory, live_session, names, owns, publish_settings, recent_warmup, record_warmup,
-                         render, session_id, state_time, watched)
+                         render, session_id, state_time, watched, unit_active)
 
 
 def main():
@@ -57,6 +57,9 @@ def main():
             publish_settings(values, "coordinator", capabilities, args.dry_run)
             for area in AREAS:
                 lead = names(args.handle, area)
+                if lead["lead_kind"] == "codex":
+                    print(f"wire: skipping {lead['lead_name']}: Codex owner has no Claude hooks")
+                    continue
                 if Path(lead["lead_start_dir"]).is_dir():
                     publish_settings(lead, "lead", capabilities, args.dry_run)
             return 0
@@ -65,6 +68,27 @@ def main():
             if not (scratch / "brief.md").is_file():
                 print(f"start: refused: missing brief: {scratch / 'brief.md'}", file=sys.stderr)
                 return 1
+            if values["lead_kind"] == "codex":
+                argv = ["codex-run", "owner", "--effort", args.effort]
+                if args.model is not None:
+                    argv += ["--model", args.model]
+                argv += [values["lead_name"], str(scratch / "brief.md")]
+                if args.dry_run:
+                    print(f"argv={shlex.join(argv)}", flush=True)
+                if unit_active(values["lead_unit"]):
+                    print(f"start: refused: active unit {values['lead_unit']}", file=sys.stderr)
+                    return 1
+                if args.dry_run:
+                    return 0
+                for filename in ("common.md", "state.md"):
+                    create_empty(scratch / filename)
+                for directory in ("repo", "survey"):
+                    clone(scratch / directory)
+                result = subprocess.run(argv, capture_output=True, text=True)
+                if result.returncode:
+                    raise RuntimeError(f"codex-run launch failed ({result.returncode}):\n{result.stdout}{result.stderr}")
+                print(result.stdout, end="")
+                return 0
             values["state_time"] = state_time(scratch / "state.md")
             name = values["lead_name"]
             cwd = values["lead_start_dir"]

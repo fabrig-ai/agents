@@ -9,3 +9,4 @@ mailbox = "s/qa"
 # draft upgrades: the upgrades mission
 [u]
 mailbox = "s/upgrades"
+lead_kind = "codex"

@@ -26,8 +26,10 @@ def registry(path=None):
     for handle, entry in entries.items():
         if not re.fullmatch(r"[a-z][a-z0-9]{0,7}", handle):
             raise ValueError(f"invalid coordinator handle: {handle!r}")
-        if not isinstance(entry, dict) or set(entry) - {"mailbox", "default"}:
+        if not isinstance(entry, dict) or set(entry) - {"mailbox", "default", "lead_kind"}:
             raise ValueError(f"invalid coordinator entry: {handle}")
+        if entry.get("lead_kind", "claude") not in ("claude", "codex"):
+            raise ValueError(f"invalid lead_kind: {handle}")
         mailbox = entry.get("mailbox")
         if not isinstance(mailbox, str) or not re.fullmatch(r"s/[a-z0-9][a-z0-9-]*", mailbox):
             raise ValueError(f"invalid mailbox for {handle}")
@@ -41,6 +43,26 @@ def registry(path=None):
     if defaults != 1:
         raise ValueError("registry must have exactly one default coordinator")
     return entries
+
+
+def systemd_escape(name):
+    """systemd-escape string mode: UTF-8 bytes, slash separators, literal hyphens escaped."""
+    return "".join(
+        "-" if byte == 47 else chr(byte) if (byte in b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789:_"
+                                           or (byte == 46 and index != 0)) else f"\\x{byte:02x}"
+        for index, byte in enumerate(name.encode("utf-8"))
+    )
+
+
+def unit_active(unit):
+    result = subprocess.run(["systemctl", "--user", "is-active", "--quiet", unit],
+                            capture_output=True, text=True, timeout=30)
+    if result.returncode not in (0, 3, 4):
+        raise ValueError(f"systemctl is-active failed for {unit} (exit {result.returncode})")
+    # A disconnected user bus is an unavailable input, not an inactive unit.
+    if result.returncode and result.stderr.strip():
+        raise ValueError(f"systemctl is-active unavailable for {unit}")
+    return result.returncode == 0
 
 
 def names(handle, area=None):
@@ -87,10 +109,15 @@ def names(handle, area=None):
         scratch = home / "src/fabrig/leads" / key
         result.update(
             area=area, lead_mailbox=mailbox, lead_name=mailbox, branch_key=key,
+            lead_kind=entry.get("lead_kind", "claude"),
             lead_scratch=str(scratch), lead_start_dir=str(supervise / "leads" / key),
             lead_clone=str(scratch / "repo"),
             lead_mail_dir=str(home / "src/rust/tmp/post" / mailbox.replace("/", "+") / "cur"),
         )
+        if result["lead_kind"] == "codex":
+            root = Path(os.environ.get("DEV_ROOT", home / "src/rust"))
+            result.update(lead_unit="codex-owner-" + systemd_escape(mailbox),
+                          lead_owner_state=str(root / "tmp/owners" / mailbox.rsplit("/", 1)[-1] / "codex"))
     return result
 
 
@@ -139,12 +166,15 @@ def inventory():
         for area in AREAS:
             lead = names(handle, area)
             rows.append({
-                "role": "lead", "handle": handle, "area": area, "name": lead["lead_name"],
+                "role": "lead", "kind": lead["lead_kind"], "handle": handle, "area": area, "name": lead["lead_name"],
                 "mailbox": lead["lead_mailbox"], "branch_key": lead["branch_key"],
                 "scratch": lead["lead_scratch"], "start_dir": lead["lead_start_dir"],
                 "coordinator_mailbox": values["coordinator_mailbox"],
                 "supervisor": values["coordinator_mailbox"], "paused": handle in paused,
             })
+            if lead["lead_kind"] == "codex":
+                rows[-1].pop("start_dir")
+                rows[-1].update(unit=lead["lead_unit"], owner_state=lead["lead_owner_state"])
     director = names("director")
     rows.append({
         "role": "director", "mailbox": director["director_mailbox"], "name_prefix": director["director_name_prefix"],
