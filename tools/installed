@@ -1,8 +1,7 @@
 fleet-sync
 lease
-# Nested targets await s/deploy's name/path manifest support:
-# session-start session/start
-# record records/record
-# record-collect records/record-collect
-# watch records/watch
-# status-page records/status-page
+session-start session/start
+record records/record
+record-collect records/record-collect
+watch records/watch
+status-page records/status-page
