@@ -235,27 +235,18 @@ LISTED = re.compile(r'(' + LOGIN + r'): (?:at rest|missing|held by (\S+)(?: \([^
 
 
 def login_inventory(text):
-    """logins list, read strictly (qa-flow.md 10.6): None when a line isn't its form."""
-    pools, holders, names, waiting = {}, {}, set(), False
-    # Physical lines alone: a note's other line breaks must never make a login.
+    """Read the physical logins-list rows strictly; return holders or None."""
+    holders, names = {}, set()
     for line in text.split('\n'):
-        if not line:
-            continue
-        if line.startswith('  '):
-            row = re.match(r'  waiting: (\S+) since ', line)
-            waiting = waiting or bool(row and re.fullmatch(r'qa-watch(?:/\S+)?', row[1]))
+        if not line or line.startswith('  '):
             continue
         match = LISTED.fullmatch(line)
         if not match or match[1] in names:
             return None
         names.add(match[1])
-        counts = pools.setdefault(pool_of(match[1]), [0, 0])
-        counts[0] += 1
         if match[2]:
             holders[match[1]] = match[2]
-            if re.fullmatch(r'qa-watch(?:/\S+)?', match[2]):
-                counts[1] += 1
-    return pools, holders, waiting
+    return holders
 
 
 def log(message):
@@ -529,7 +520,7 @@ class Watch:
                 continue
             if kind and state.get('kinds', {}).get(name, 'moved') != kind:
                 continue
-            result = self.call('logins', 'give', name, '--as', state.get('holder', 'qa-watch'))
+            result = self.call('logins', 'give', name, '--as', state['holder'])
             if result.returncode == 0:
                 self.released_login(name)
                 state.setdefault('given', []).append(name)
@@ -630,7 +621,7 @@ class Watch:
             log('cannot list stray logins: ' + (listing.stderr.strip() if listing.returncode
                                                 else 'the listing is not in its form'))
             return
-        self.holders = inventory[1]
+        self.holders = inventory
         managed = {state['holder'] for _, state in walks}
         if not sweep_walks:
             return
@@ -927,7 +918,7 @@ class Watch:
         listing = self.call('logins', 'list')
         inventory = login_inventory(listing.stdout) if listing.returncode == 0 else None
         need(inventory is not None, 'cannot read login inventory for walk admission', 1)
-        holders = inventory[1]
+        holders = inventory
         slots = self.options['QA_WALK_KINDS'][kind]['slots']
         for pool in pools:
             held = walk_count(holders, pool, kind)
