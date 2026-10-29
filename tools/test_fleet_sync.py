@@ -1,7 +1,10 @@
 """Integration tests: all processes use a disposable HOME and local git origins."""
 
+import argparse
 import datetime as dt
 import fcntl
+import importlib.machinery
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -11,6 +14,7 @@ import subprocess
 import tempfile
 import tomllib
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 FABRIG_TOOLS = Path("/home/free/src/fabrig/main/tools")
@@ -89,7 +93,11 @@ class FleetTest(unittest.TestCase):
             if line.strip() and not line.startswith("#"):
                 tool, directory = line.split()
                 put(self.fabrig / "tools" / directory / tool, "#!/bin/bash\nexit 0\n", True)
-        self.fabrig_origin = self.repository(self.fabrig, "fabrig-origin.git")
+        fabrig_origin = self.repository(self.fabrig, "fabrig-origin.git")
+        self.git(fabrig_origin, "config", "uploadpack.allowFilter", "true")
+        # Transport semantics avoid local-clone object hardlinks changing main's
+        # mtimes when the fixture origin receives unrelated commits.
+        self.fabrig_origin = fabrig_origin.as_uri()
         self.source = self.directory / "agents-source"
         self.source.mkdir()
         shutil.copytree(ROOT / "fleet", self.source / "fleet")
@@ -141,11 +149,24 @@ class FleetTest(unittest.TestCase):
     def calls(self):
         return [json.loads(line) for line in (self.home / "systemctl.log").read_text().splitlines()]
 
-    def snapshot(self):
+    def fabrig_item(self, state):
+        return next(i for i in state["items"] if i["item"] == "fabrig")
+
+    def runner(self, check=False):
+        loader = importlib.machinery.SourceFileLoader("fleet_sync_test", str(self.source / "tools/fleet-sync"))
+        module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        loader.exec_module(module)
+        args = argparse.Namespace(check=check, timer=False, resume_fd=None)
+        return module, module.Runner(args, module.Declarations(self.source, self.home), "hel8")
+
+    def snapshot(self, exclude_mirror=False, root=None):
+        root = root or self.home
         rows = {}
-        for path in [self.home, *self.home.rglob("*")]:
+        for path in [root, *root.rglob("*")]:
+            if exclude_mirror and path.is_relative_to(self.home / "src/fabrig/.fleet-sync/fabrig.git"):
+                continue
             info = path.lstat()
-            rows[str(path.relative_to(self.home))] = (info.st_mode, info.st_size, info.st_mtime_ns,
+            rows[str(path.relative_to(root))] = (info.st_mode, info.st_size, info.st_mtime_ns,
                 os.readlink(path) if path.is_symlink() else path.read_bytes() if path.is_file() else None)
         return rows
 
@@ -156,10 +177,10 @@ class FleetTest(unittest.TestCase):
         self.assertFalse((self.current() / "old").exists())
         self.assertEqual(os.readlink(self.home / ".local/bin/fleet-sync"), str(self.home / "src/fabrig/current/tools/fleet-sync"))
         self.assertEqual(self.git(self.home / "src/fabrig/agents", "branch", "--show-current"), "")
-        self.assertFalse(any(i["result"] != "ok" for i in self.sync()["items"]))
+        self.assertFalse(any(i["result"] not in ("ok", "warn") for i in self.sync()["items"]))
         cargo = tomllib.loads((self.home / ".cargo/config.toml").read_text())
         self.assertEqual(cargo["build"]["jobs"], 4)
-        self.assertEqual((self.home / "src/rust/tmp/post/machines").read_text().splitlines()[0], "hel8 local")
+        self.assertFalse((self.home / "src/rust/tmp/post/machines").exists())
         for path in (".profile", ".bashrc", ".config/fabrig/env.sh"):
             self.process("bash", "-n", self.home / path)
 
@@ -288,14 +309,14 @@ class FleetTest(unittest.TestCase):
         self.assertEqual(next(i["result"] for i in state["items"] if i["item"] == ".claude/settings.json"), "ok")
 
     def test_check_writes_nothing_empty_and_configured(self):
-        before = self.snapshot()
+        before = self.snapshot(exclude_mirror=True)
         self.sync("--check", expected=1)
-        self.assertEqual(before, self.snapshot())
+        self.assertEqual(before, self.snapshot(exclude_mirror=True))
         self.sync()
         put(self.home / ".cargo/config.toml", "# drift\n")
-        before = self.snapshot()
+        before = self.snapshot(exclude_mirror=True)
         self.sync("--check", expected=1)
-        self.assertEqual(before, self.snapshot())
+        self.assertEqual(before, self.snapshot(exclude_mirror=True))
 
     def test_unknown_host_no_writes(self):
         before = self.snapshot()
@@ -366,7 +387,7 @@ class FleetTest(unittest.TestCase):
 
     def test_fabrig_new_head_and_link_repair(self):
         self.sync()
-        put(self.fabrig / "new-file", "new\n")
+        put(self.fabrig / "tools/new-file", "new\n")
         self.git(self.fabrig, "add", ".")
         self.git(self.fabrig, "commit", "-qm", "fabrig update")
         self.git(self.fabrig, "push", "origin", "main")
@@ -377,6 +398,231 @@ class FleetTest(unittest.TestCase):
         state = self.sync()
         self.assertTrue(link.is_symlink())
         self.assertIn("tools/install", (self.home / ".local/state/fleet-sync/run.log").read_text())
+
+    def test_fabrig_non_tools_landing_leaves_main_untouched(self):
+        self.sync()
+        clone = self.home / "src/fabrig/main"
+        installed = self.git(clone, "rev-parse", "HEAD").strip()
+        before = self.snapshot(root=clone)
+        put(self.fabrig / "docs/new", "docs only\n")
+        self.git(self.fabrig, "add", ".")
+        self.git(self.fabrig, "commit", "-qm", "non-tool landing")
+        self.git(self.fabrig, "push", "origin", "main")
+        remote = self.git(self.fabrig, "rev-parse", "HEAD").strip()
+        state = self.sync()
+        self.assertEqual(before, self.snapshot(root=clone))
+        self.assertEqual(state["fabrig_sha"], installed)
+        self.assertEqual(self.fabrig_item(state), {"item": "fabrig", "result": "ok",
+            "reason": f"main ahead, tools unchanged ({installed[:7]} -> {remote[:7]})"})
+        self.assertNotIn("tools/install", (self.home / ".local/state/fleet-sync/run.log").read_text())
+        mirror = self.home / "src/fabrig/.fleet-sync/fabrig.git"
+        self.assertEqual(self.git(mirror, "rev-parse", "origin/main").strip(), remote)
+        self.assertEqual(self.git(mirror, "rev-parse", "--is-bare-repository").strip(), "true")
+        self.assertEqual(self.git(mirror, "config", "--get", "remote.origin.partialclonefilter").strip(), "blob:none")
+        self.assertEqual(stat.S_IMODE(mirror.stat().st_mode), 0o700)
+
+    def test_check_fetches_only_existing_mirror(self):
+        self.sync()
+        put(self.fabrig / "tools/new", "tool change\n")
+        self.git(self.fabrig, "add", ".")
+        self.git(self.fabrig, "commit", "-qm", "tool landing")
+        self.git(self.fabrig, "push", "origin", "main")
+        mirror = self.home / "src/fabrig/.fleet-sync/fabrig.git"
+        old = self.git(mirror, "rev-parse", "origin/main")
+        before = self.snapshot(exclude_mirror=True)
+        state = self.sync("--check", expected=1)
+        self.assertEqual(before, self.snapshot(exclude_mirror=True))
+        self.assertNotEqual(old, self.git(mirror, "rev-parse", "origin/main"))
+        self.assertEqual(self.fabrig_item(state)["result"], "drift")
+
+    def test_check_missing_mirror_and_lock_creates_neither(self):
+        self.sync()
+        mirror = self.home / "src/fabrig/.fleet-sync/fabrig.git"
+        lock = self.home / ".local/state/fabrig/install.lock"
+        shutil.rmtree(mirror)
+        lock.unlink()  # Fixture cleanup only; fleet-sync must never unlink this inode.
+        before = self.snapshot()
+        self.assertEqual(self.fabrig_item(self.sync("--check"))["result"], "ok")
+        self.assertEqual(before, self.snapshot())
+        put(self.fabrig / "docs-only", "ahead\n")
+        self.git(self.fabrig, "add", ".")
+        self.git(self.fabrig, "commit", "-qm", "non-tool landing")
+        self.git(self.fabrig, "push", "origin", "main")
+        state = self.sync("--check", expected=1)
+        self.assertEqual(self.fabrig_item(state)["result"], "drift")
+        self.assertEqual(before, self.snapshot())
+        self.assertFalse(mirror.exists())
+        self.assertFalse(lock.exists())
+
+    def test_installed_head_missing_from_mirror_counts_changed(self):
+        self.sync()
+        clone = self.home / "src/fabrig/main"
+        put(clone / "local-only", "unpublished commit\n")
+        self.git(clone, "add", ".")
+        self.git(clone, "commit", "-qm", "installed local commit")
+        self.assertEqual(self.fabrig_item(self.sync("--check", expected=1))["result"], "drift")
+
+    def test_install_lock_busy_skips_fabrig_and_continues(self):
+        self.sync()
+        path = self.home / ".local/state/fabrig/install.lock"
+        inode = path.stat().st_ino
+        link = self.home / ".local/bin/claim"
+        link.unlink()
+        link.symlink_to("wrong")
+        with path.open("r") as stream:
+            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            before = self.snapshot()
+            self.assertEqual(self.fabrig_item(self.sync("--check")),
+                {"item": "fabrig", "result": "held", "reason": "install lock busy"})
+            self.assertEqual(before, self.snapshot())
+            (self.home / ".cargo/config.toml").unlink()
+            state = self.sync()
+            self.assertEqual(self.fabrig_item(state)["result"], "held")
+            self.assertTrue((self.home / ".cargo/config.toml").exists())
+            self.assertEqual(os.readlink(link), "wrong")
+        self.assertEqual(path.stat().st_ino, inode)
+
+    def test_install_lock_inode_modes_scope_and_installer_exclusion(self):
+        with patch.dict(os.environ, self.env, clear=True):
+            module, runner = self.runner()
+            command = runner.cmd
+            path = self.home / ".local/state/fabrig/install.lock"
+            observed = []
+            def assert_locked(*args, **kwargs):
+                if str(args[-1]).endswith("tools/install"):
+                    with path.open("r") as stream:
+                        with self.assertRaises(BlockingIOError):
+                            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    observed.append("installer")
+                return command(*args, **kwargs)
+            with patch.object(runner, "cmd", side_effect=assert_locked):
+                runner.fabrig()
+            self.assertEqual(observed, ["installer"])
+            inode = path.stat().st_ino
+            real_readlink = os.readlink
+            def readlink_checked(link, *args, **kwargs):
+                if Path(link).parent == self.home / ".local/bin":
+                    with path.open("r") as stream:
+                        with self.assertRaises(BlockingIOError):
+                            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    observed.append("link")
+                return real_readlink(link, *args, **kwargs)
+            with patch.object(module.os, "readlink", side_effect=readlink_checked):
+                runner.fabrig()
+            self.assertIn("link", observed)
+            self.assertEqual(path.stat().st_ino, inode)
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(path.parent.stat().st_mode), 0o700)
+            with path.open("r") as stream:
+                fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)  # Released at step return.
+
+    def test_install_lock_refuses_symlink_fifo_and_directory(self):
+        lock = self.home / ".local/state/fabrig/install.lock"
+        lock.parent.mkdir(parents=True)
+        target = self.home / "untouched"
+        put(target, "never replace or follow\n")
+        lock.symlink_to(target)
+        self.assertEqual(self.fabrig_item(self.sync(expected=1))["result"], "failed")
+        self.assertTrue(lock.is_symlink())
+        self.assertEqual(target.read_text(), "never replace or follow\n")
+        lock.unlink()
+        os.mkfifo(lock, 0o600)
+        self.assertIn("not a regular file", self.fabrig_item(self.sync(expected=1))["reason"])
+        self.assertTrue(stat.S_ISFIFO(lock.lstat().st_mode))
+        lock.unlink()
+        lock.mkdir()
+        self.assertEqual(self.fabrig_item(self.sync(expected=1))["result"], "failed")
+        self.assertTrue(lock.is_dir())
+
+    def test_install_lock_modes_check_read_only_normal_repairs_inode(self):
+        self.sync()
+        lock = self.home / ".local/state/fabrig/install.lock"
+        inode = lock.stat().st_ino
+        lock.chmod(0o644)
+        lock.parent.chmod(0o755)
+        before = self.snapshot()
+        self.assertIn("0600", self.fabrig_item(self.sync("--check", expected=1))["reason"])
+        self.assertEqual(before, self.snapshot())
+        self.sync()
+        self.assertEqual(lock.stat().st_ino, inode)
+        self.assertEqual(stat.S_IMODE(lock.stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(lock.parent.stat().st_mode), 0o700)
+
+    def test_defer_before_lock_keeps_controls_unchanged(self):
+        defer = self.home / ".config/fleet-sync/defer-fabrig"
+        put(defer, "ops upgrading\nsecond line\n")
+        state = self.sync()
+        self.assertEqual(self.fabrig_item(state), {"item": "fabrig", "result": "deferred", "reason": "ops upgrading"})
+        self.assertFalse((self.home / ".local/state/fabrig/install.lock").exists())
+        self.assertFalse((self.home / "src/fabrig/main").exists())
+        self.assertEqual(defer.read_text(), "ops upgrading\nsecond line\n")
+        self.assertFalse((defer.parent / "pin").exists())
+        self.assertFalse((defer.parent / "hold").exists())
+        result = self.process("python3", "-I", "-B", self.source / "tools/fleet-sync", "--host", "hel8")
+        self.assertIn("1 deferred", result.stdout)
+
+    def test_defer_created_during_lock_acquisition(self):
+        with patch.dict(os.environ, self.env, clear=True):
+            module, runner = self.runner()
+            real_flock = fcntl.flock
+            lock = self.home / ".local/state/fabrig/install.lock"
+            def acquire_then_defer(fd, operation):
+                real_flock(fd, operation)
+                with lock.open("r") as other:
+                    with self.assertRaises(BlockingIOError):
+                        real_flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                put(self.home / ".config/fleet-sync/defer-fabrig", "raced with ops\n")
+            with patch.object(module.fcntl, "flock", side_effect=acquire_then_defer):
+                runner.fabrig()
+            self.assertEqual(self.fabrig_item(runner.state)["result"], "deferred")
+            self.assertFalse(runner.log)  # No git calls or link checks before the second defer check.
+
+    def test_defer_created_during_fetch_precedes_link_check(self):
+        self.sync()
+        put(self.home / "src/fabrig/main/tools/installed", "malformed manifest to detect a read\n")
+        with patch.dict(os.environ, self.env, clear=True):
+            _, runner = self.runner()
+            command = runner.cmd
+            def fetch_then_defer(*args, **kwargs):
+                result = command(*args, **kwargs)
+                if args[0] == "git" and "fetch" in args and str(args[2]).endswith("fabrig.git"):
+                    put(self.home / ".config/fleet-sync/defer-fabrig", "deferred during fetch\n")
+                return result
+            with patch.object(runner, "cmd", side_effect=fetch_then_defer):
+                runner.fabrig()
+            self.assertEqual(self.fabrig_item(runner.state)["result"], "deferred")
+
+    def test_defer_created_during_bootstrap_precedes_installer(self):
+        with patch.dict(os.environ, self.env, clear=True):
+            _, runner = self.runner()
+            command = runner.cmd
+            def clone_then_defer(*args, **kwargs):
+                result = command(*args, **kwargs)
+                if args[0] == "git" and "clone" in args and ".fabrig-install-" in str(args[-1]):
+                    put(self.home / ".config/fleet-sync/defer-fabrig", "ops deferred bootstrap\n")
+                return result
+            with patch.object(runner, "cmd", side_effect=clone_then_defer):
+                runner.fabrig()
+            self.assertEqual(self.fabrig_item(runner.state)["result"], "deferred")
+            self.assertFalse((self.home / "src/fabrig/main").exists())
+            self.assertFalse(any("tools/install" in entry for entry in runner.log))
+
+    def test_defer_created_during_links_stops_remaining_checks(self):
+        self.sync()
+        with patch.dict(os.environ, self.env, clear=True):
+            module, runner = self.runner()
+            readlink = os.readlink
+            seen = []
+            def readlink_then_defer(path, *args, **kwargs):
+                result = readlink(path, *args, **kwargs)
+                if Path(path).parent == self.home / ".local/bin":
+                    seen.append(str(path))
+                    put(self.home / ".config/fleet-sync/defer-fabrig", "ops deferred link checks\n")
+                return result
+            with patch.object(module.os, "readlink", side_effect=readlink_then_defer):
+                runner.fabrig()
+            self.assertEqual(len(seen), 1)
+            self.assertEqual(self.fabrig_item(runner.state)["result"], "deferred")
 
     def test_versions_warn_only(self):
         put(self.bin / "codex", "#!/bin/bash\necho codex-cli 0.0.1\n", True)
@@ -393,6 +639,108 @@ class FleetTest(unittest.TestCase):
         self.assertNotIn("HEAVY_BUILD_JOBS", settings["env"])
         self.assertNotIn("PATH", settings["env"])
         self.assertTrue(settings["env"]["SKEIN_TEST_CHROMIUM"].startswith(str(self.home)))
+
+    def test_post_machines_check_only_never_written_or_backed_up(self):
+        path = self.home / "src/rust/tmp/post/machines"
+        put(path, "ops routing\n")
+        before = path.stat().st_mtime_ns
+        for flags in ((), ("--check",)):
+            state = self.sync(*flags)
+            item = next(i for i in state["items"] if i["item"] == "src/rust/tmp/post/machines")
+            self.assertEqual((item["result"], item["reason"]), ("warn", "differs; check-only"))
+            self.assertEqual(path.read_text(), "ops routing\n")
+            self.assertEqual(path.stat().st_mtime_ns, before)
+            self.assertFalse(path.with_name("machines.pre-fleet-sync").exists())
+
+    def test_policy_write_opt_in_and_matching_check_only(self):
+        policy = self.source / "fleet/policy.toml"
+        put(policy, '[files]\n"src/rust/tmp/post/machines" = "write"\n')
+        self.publish()
+        self.sync()
+        path = self.home / "src/rust/tmp/post/machines"
+        self.assertEqual(path.read_text().splitlines()[0], "hel8 local")
+        put(policy, '[files]\n"src/rust/tmp/post/machines" = "check"\n')
+        self.publish()
+        before = path.stat().st_mtime_ns
+        state = self.sync()
+        self.assertEqual(next(i["result"] for i in state["items"] if i["item"] == "src/rust/tmp/post/machines"), "ok")
+        self.assertEqual(path.stat().st_mtime_ns, before)
+
+    def test_invalid_file_policy_no_writes(self):
+        put(self.source / "fleet/policy.toml", '[files]\n"src/rust/tmp/post/machines" = "ignore"\n')
+        before = self.snapshot()
+        self.process("python3", "-I", "-B", self.source / "tools/fleet-sync", "--host", "hel8", expected=2)
+        self.assertEqual(before, self.snapshot())
+
+    def test_environment_d_plain_values(self):
+        self.sync()
+        content = (self.home / ".config/environment.d/90-fabrig.conf").read_text()
+        self.assertIn(f"SKEIN_TEST_CHROMIUM={self.home}/.local/opt/chromium-147.0.7727.101/bin/chromium\n", content)
+        self.assertNotIn('"', content)
+        self.assertNotIn("'", content)
+        self.assertNotIn("$", content)
+
+    def test_invalid_global_host_and_expanded_env_no_writes(self):
+        before = self.snapshot()
+        original = (self.source / "fleet/env").read_text()
+        for value in ("two words", "a\tb", "a\u2003b", "a'b", 'a"b', "a\\b", "$USER", "$HOME/$OTHER"):
+            with self.subTest(value=value):
+                put(self.source / "fleet/env", original + f"INVALID={value}\n")
+                self.process("python3", "-I", "-B", self.source / "tools/fleet-sync", "--host", "hel8", expected=2)
+                self.assertEqual(before, self.snapshot())
+        put(self.source / "fleet/env", original)
+        hosts = self.source / "fleet/hosts.toml"
+        original_hosts = hosts.read_text()
+        put(hosts, original_hosts.replace('HEAVY_BUILD_JOBS = "2"', 'HEAVY_BUILD_JOBS = "two words"'))
+        self.process("python3", "-I", "-B", self.source / "tools/fleet-sync", "--host", "hel8", expected=2)
+        put(hosts, original_hosts)
+        self.assertEqual(before, self.snapshot())
+        # Values safe before expansion can become unsafe through HOME.
+        self.process("python3", "-I", "-B", self.source / "tools/fleet-sync", "--host", "hel8", expected=2,
+                     env={**self.env, "HOME": str(self.home / "with space")})
+        self.assertEqual(before, self.snapshot())
+
+    def test_posix_path_idempotence_in_nested_shells(self):
+        self.sync()
+        path = self.home / ".config/fabrig/env.sh"
+        self.process("sh", "-n", path)
+        local, cargo = f"{self.home}/.local/bin", f"{self.home}/.cargo/bin"
+        script = '. "$1"; . "$1"; exec /bin/sh -c \' . "$1"; printf "%s\\n" "$PATH"\' sh "$1"'
+        for initial, expected in (("/usr/bin:/bin", f"{local}:{cargo}:/usr/bin:/bin"),
+                                  (f"{local}:{cargo}:/bin", f"{local}:{cargo}:/bin"),
+                                  (f"/bin:{cargo}", f"{local}:/bin:{cargo}"),
+                                  (f"/bin:{local}", f"{cargo}:/bin:{local}")):
+            with self.subTest(initial=initial):
+                result = self.process("/bin/sh", "-c", script, "sh", path, env={**self.env, "PATH": initial})
+                self.assertEqual(result.stdout.strip(), expected)
+
+    def test_conflicts_ignore_path_but_warn_other_owned_keys(self):
+        put(self.home / ".profile", 'export PATH="$HOME/extra:$PATH"\nexport DISABLE_AUTOUPDATER=0\n')
+        put(self.home / ".config/plan/environment.sh", 'PATH=/wrong\n')
+        put(self.home / ".config/environment.d/10-older.conf", 'PATH=/also-wrong\nDISABLE_AUTOUPDATER=0\n')
+        state = self.sync()
+        warnings = [i for i in state["items"] if i["item"].startswith("conflict:")]
+        self.assertEqual(len(warnings), 2)
+        self.assertTrue(all("DISABLE_AUTOUPDATER" in i["reason"] for i in warnings))
+
+    def test_never_touches_coordination_heavy_or_spools(self):
+        protected = ["src/fabrig/claims", "src/fabrig/leases", "src/fabrig/queue", "src/fabrig/slots",
+                     ".local/state/heavy", ".local/state/agents-heavy", ".local/state/fabrig/heavy",
+                     "src/rust/tmp/heavy", "src/rust/tmp/codex-run", "src/rust/tmp/owners",
+                     "src/rust/tmp/post/inbox", "src/rust/tmp/post/outbox", "src/rust/tmp/post/sent",
+                     "src/rust/tmp/post/arbitrary-spool"]
+        units = [".config/systemd/user/agents-heavy-reconcile.service",
+                 ".config/systemd/user/agents-heavy-reconcile.timer",
+                 ".config/systemd/user/heavy.service"]
+        for directory in protected:
+            put(self.home / directory / "sentinel", "opaque state\n")
+        for unit in units:
+            put(self.home / unit, "[Unit]\nDescription=Never touch\n")
+        snapshots = {p: self.snapshot(root=self.home / p) for p in protected + units}
+        self.sync()
+        self.sync("--check")
+        self.assertEqual(snapshots, {p: self.snapshot(root=self.home / p) for p in protected + units})
+        self.assertFalse(any(any("heavy" in arg for arg in argv) for argv in self.calls()))
 
     def test_shell_outside_bytes_preserved(self):
         outside = "# keep CRLF\r\n# outside\r\n"
