@@ -1,3 +1,6 @@
+# Native tools seed immutable artifacts from peers; no upstream URL is guessed.
+# Optional file url uses the same sha256. Tree url requires its archive sha256
+# in addition to the complete content/mode/symlink manifest.
 [claude]
 version = "2.1.312"
 command = ["claude", "--version"]
@@ -28,11 +31,13 @@ targets = ["x86_64-unknown-linux-gnu", "wasm32-unknown-unknown", "aarch64-apple-
 extra_toolchains = ["nightly-2026-10-21"]
 
 [cargo-nextest.install]
-kind = "tar"
-url = "TODO-USER: cargo-nextest 0.9.148 x86_64 Linux release tarball URL"
-sha256 = "TODO-USER: SHA256 of that release tarball (not the installed binary)"
-member = "cargo-nextest"
+kind = "binary"
+seed = "peer"
+source = ".cargo/bin/cargo-nextest"
 destination = ".cargo/bin/cargo-nextest"
+sha256 = "53470cfc9b5cbcd96780db2d348700d76af962467503791f1f8a8824d8967e5c"
+mode = "0755"
+
 
 [kache.install]
 kind = "kache-source"
@@ -46,44 +51,55 @@ reference_sha256 = "91fb6aa7d7ddd427e3e2732aa346ce116fbf075df0c871e1148bf309aaad
 destination = ".local/bin/kache"
 
 [claude.install]
-kind = "claude-script"
-url = "TODO-USER: Claude 2.1.312 install.sh URL"
-sha256 = "TODO-USER: SHA256 of the approved install.sh"
-# The script also downloads a versioned binary; approve its payload digest.
-payload_url = "TODO-USER: Claude 2.1.312 linux-x64 payload URL"
-payload_sha256 = "TODO-USER: SHA256 of the versioned Claude payload"
+kind = "binary"
+seed = "peer"
+source = ".local/share/claude/versions/2.1.312"
+destination = ".local/share/claude/versions/2.1.312"
+sha256 = "4f4178ce41d83e23341ebfbaecdbcf8ea6bf7baea0690025abe49eeec3a5d01d"
+mode = "0755"
+
 
 [codex.install]
 kind = "codex-package"
-url = "TODO-USER: Codex 0.162.1 x86_64-unknown-linux-musl standalone package URL"
-sha256 = "TODO-USER: SHA256 of the complete standalone package"
+seed = "peer"
+source = ".codex/packages/standalone/releases/0.162.1-x86_64-unknown-linux-musl"
 release = ".codex/packages/standalone/releases/0.162.1-x86_64-unknown-linux-musl"
+manifest = "seeds/codex.sha256"
 entrypoint = "bin/codex"
+
 
 [chromium]
 version = "147.0.7727.101"
 command = ["chromium", "--version"]
 [chromium.install]
 kind = "opt-tar"
-url = "TODO-USER: Chromium 147.0.7727.101 extracted Debian bundle URL"
-sha256 = "TODO-USER: SHA256 of that bundle including bin/chromium launcher"
+seed = "peer"
+source = ".local/opt/chromium-147.0.7727.101"
 release = ".local/opt/chromium-147.0.7727.101"
 entrypoint = "usr/lib/chromium/chromium"
+# Both observed trees are recorded under fleet/seeds; no canonical pin chosen.
+disagreement = "Chromium 147.0.7727.101: hel8 and h3 differ in bin/chromium and etc/chromium.d/extensions; review before selecting a manifest"
+
 
 [forgejo]
 version = "17.0.0"
 command = ["forgejo", "--version"]
 [forgejo.install]
 kind = "binary"
-url = "TODO-USER: Forgejo 17.0.0 linux-amd64 binary URL"
-sha256 = "TODO-USER: SHA256 of that binary"
+seed = "peer"
+source = ".local/opt/forgejo-17.0.0/forgejo"
 destination = ".local/opt/forgejo-17.0.0/forgejo"
+sha256 = "5a3b07e124ed70b4e46ee3939515f003bd3cc85352257a9a4607a527251042ca"
+mode = "0775"
+
 
 [forgejo-runner]
 version = "13.2.0"
 command = ["forgejo-runner", "--version"]
 [forgejo-runner.install]
 kind = "binary"
-url = "TODO-USER: Forgejo runner 13.2.0 linux-amd64 binary URL"
-sha256 = "TODO-USER: SHA256 of that binary"
+seed = "peer"
+source = ".local/opt/forgejo-runner-13.2.0/forgejo-runner"
 destination = ".local/opt/forgejo-runner-13.2.0/forgejo-runner"
+sha256 = "fadaec897f5e6641c363f87ecaf75f866f99c81b7097ec6b433e4c48123fcad1"
+mode = "0775"

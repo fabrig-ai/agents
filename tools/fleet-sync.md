@@ -5,8 +5,18 @@ then use `~/.local/bin/fleet-sync`. Python 3.13 and git are prerequisites.
 The fresh-machine procedure is fleet/bootstrap/README.md. Explicit manual
 `--provision` installs missing/different pins from fleet/versions.toml; it is
 incompatible with timer/check/preview/status. Normal runs only probe versions.
-Missing provenance reports `warn: manual` for the exact TODO-USER pin. URL
-artifacts require HTTPS plus SHA256 before extraction/execution; Rustup and
+The six native tools use `seed = "peer"`: exact file SHA256/modes or the
+fleet/seeds tree manifests, including every file, symlink and directory mode.
+Only seed=true hosts are eligible; h3 is preferred, never self. Check local
+content before running anything; matching artifacts/links need no writes or
+SSH. Missing links alone are repaired locally. Transfer only allowlisted paths
+through strict SSH/no-follow opens, stream tar into private staging, verify all
+members/hashes/modes/targets, then promote and link. Partial/mismatched trees
+are refused before installation. Peer disagreements report warn: manual and
+transfer nothing until reviewed. See fleet/seeds/README.md for observed drift.
+Optional URL artifacts require HTTPS plus SHA256 before extraction/execution;
+file URL SHA256 is the content pin; trees require archive SHA256 AND their
+complete manifest. No credential/config/state is seeded. Rustup and
 Cargo verify their distribution/locked registry checksums, and kache source is
 fetched at the exact declared git revision with vendored patches. Source builds
 have a 30-minute bound. The full Codex standalone layout is preserved.

@@ -6,43 +6,20 @@ The sequence is USER preparation, **one root script**, **one user script**,
 then fleet-sync and heavy. Commands below are a future operator procedure;
 the bootstrap task does not execute machine changes or the acceptance builds.
 
-**Not wipe-ready until the six TODO-USER tool pins below are resolved.** A
-successful fleet-sync exit with `warn: manual` is not acceptance. Legacy
-post/fleet/QA/landing tools are also not ported here: preserving their frozen
-checkout alone is insufficient to restore their SSH transport automatically.
-If gate2's required role still uses them, ops must migrate/restore those
-workflows separately before admitting it. No script depends on `old/`.
+The six native tool installers use pinned peer artifacts; no upstream URL is
+needed. See [seed provenance](../seeds/README.md) for peer comparisons.
+**Chromium is blocked by a same-version tree disagreement**, recorded there;
+no canonical tree was selected. Ops must review that difference before a
+fresh host can pass acceptance. Legacy post/fleet/QA/landing tools are also not
+ported here; any required workflows need their own migration before readmission.
 
 ## USER preparation (in order)
 
-1. **USER — retain state and resolve pins before wiping.** Confirm the drain
-   with the coordinator, retain unpushed work/private notes and needed runtime
-   evidence off-host, especially `~/src/fabrig/queue-worker` and
-   `~/src/fabrig/ops/worker-smoke-20261029T0223`. Preserve heavy receipts/history,
-   holds, gate and after-landing state, post messages, sessions and any local
-   prover artifacts required by ops; inventory lists the observed directories.
-   Back up credentials only through the user's private process, never into git.
-   Approve and fill these fields in `fleet/versions.toml`, then land through
-   `tools/land` after the gate passes (this task pushes a branch only):
-
-   | Tool | Required approval / provenance missing from the machines |
-   |---|---|
-   | cargo-nextest 0.9.148 | release tarball URL and tarball SHA256; member cargo-nextest |
-   | Claude 2.1.312 | install.sh URL/SHA256 and Linux x64 payload URL/SHA256 |
-   | Codex 0.162.1 | full x86_64-unknown-linux-musl standalone package URL/SHA256 |
-   | Chromium 147.0.7727.101 | extracted Debian bundle URL/SHA256, including bin/chromium launcher |
-   | Forgejo 17.0.0 | linux-amd64 binary URL/SHA256 |
-   | Forgejo runner 13.2.0 | linux-amd64 binary URL/SHA256 |
-
-   Hash the approved **download**, not a different installed/extracted file.
-   Tar installers accept regular files/directories only, without a containing
-   directory; repackage a bundle with links if necessary, approve its URL/hash,
-   and keep its license/resources. Codex must include code-mode-host,
-   codex-resources, codex-path and codex-package.json as on h3, not just codex.
-   Claude's approved installer must pin VERSION and verify its internal payload
-   downloads before execution. Fleet additionally verifies its downloaded script,
-   prefetches the approved payload, runs `install.sh VERSION` in a staging HOME,
-   and checks the resulting versioned binary's SHA256 before promotion.
+1. **USER — retain state before wiping.** Confirm the drain with the
+   coordinator and complete the Wipe losses checklist below. Keep credentials
+   in the user's private custody process, never git. Land reviewed changes
+   through tools/land after the gate passes (this task pushes a branch only).
+   Record any peer disagreement rather than choosing a reachable copy blindly.
 
 2. **USER — rebuild the VM.** Reinstall Debian 13 amd64 using Hetzner's image,
    retaining the intended fleet IP/name and keeping it drained. Do not restore
@@ -125,6 +102,28 @@ workflows separately before admitting it. No script depends on `old/`.
    Legacy post uses a separate post_ed25519 identity and restricted `deliver`
    authorization; these are not recreated or read by bootstrap (see inventory).
 
+   **USER — authorize temporary seed access before user.sh.** The new host's
+   SSH public key must be in free's authorized_keys on at least one eligible
+   seed host: h3 (2.29.124.199) or hel8 (204.168.210.29). h3 is needed for the
+   pinned nextest and Codex versions today; hel8 has nextest 0.9.137 and no
+   pinned standalone Codex tree. Using existing trusted admin access, add the
+   new public key as its own authorized_keys line, with a distinctive comment
+   such as bootstrap-hetzner2. Preserve existing lines, use a sibling file,
+   chmod 600 and rename it over authorized_keys. Never copy private keys.
+   The new host must also trust that seed's console-verified host key. Verify
+   from the new host:
+
+   ```sh
+   ssh -T -o BatchMode=yes -o StrictHostKeyChecking=yes -o UpdateHostKeys=no free@2.29.124.199 true
+   ```
+
+   If this grant is unwanted afterwards, **USER removes exactly that public-key
+   line** through trusted admin access, again staging a sibling and renaming;
+   retain unrelated authorization. Remove it after provisioning and real
+   acceptance, or retain it intentionally for later explicit repair runs.
+   Removing the grant does not change artifact pins; matching hosts need no
+   peer connection, but future missing/different artifacts need renewed access.
+
 ## Run the user script and convergence
 
 From the same reviewed admin checkout, transfer the declarations/helper to free
@@ -143,16 +142,24 @@ agents clone, creates empty working parents, runs
 It never resets state or changes a dirty/foreign clone. Rerun safely after a
 partial failure. Preview: `bash fleet/bootstrap/user.sh --dry-run --host hetzner2`.
 
-`--provision` holds the fleet lock, checks each pin and installs missing/different
-versions, reporting provision:TOOL items. Rust components/targets are checked
-even if rustc's version matches. It fetches exact kache source, applies the
-vendored patches, verifies musl SHA256 and builds with the wrapper disabled;
-its isolated build may take eight minutes. SHA256 failure leaves installed
-artifacts untouched. The regular fleet run renders config/units and installs
-fabrig via its installer. Only explicit provision starts/enables kache; a
-running daemon is not restarted. The timer, --check and --preview never provision.
+`--provision` holds the fleet lock and checks exact bytes/modes for seeded
+items, repairing missing/different artifacts from seed=true hosts over strict
+SSH into private staging. It verifies every pinned file and tree member,
+including symlinks/modes, before promoting a sibling and recreating links.
+It never runs an unverified copy. Matching artifacts and links do nothing;
+missing links alone are repaired without transfer. An incomplete/corrupt peer
+archive leaves the installed artifact intact. URL is still optional with a
+verified SHA256; tree downloads must also match their full manifest.
 
-7. **USER — Claude login.** After its approved installer succeeds, open a new
+Rust components/targets are checked even if rustc's version matches. Kache is
+built from exact source with vendored patches and checked musl SHA256, wrapper
+disabled; its isolated build may take eight minutes. Normal convergence renders
+config/units and installs fabrig via its installer. Only explicit provision
+starts/enables kache; a running daemon is not restarted. Timer/check/preview
+never seed or provision. A disagreement reports warn: manual and blocks
+acceptance, rather than picking one peer's content.
+
+7. **USER — Claude login.** After its pinned binary is seeded, open a new
    free login shell, run `claude` and complete interactive authentication.
 8. **USER — Codex login.** In that shell run `codex login` and complete
    authentication. Neither login is copied by scripts or stored in git.
@@ -191,6 +198,40 @@ No shared cache login is needed on h2 (KACHE_LOCAL_ONLY=1). If ops later restore
 its private, user-owned 0600 ~/.config/kache/store.env, convergence renders only
 non-secret remote selectors/drop-in. On a drained machine, ops then restarts
 kache explicitly. Bootstrap never opens that credential or clears the cache.
+
+## Wipe losses — ops checklist
+
+Tick each item only after preserving it off-host through a trusted private
+backup process, or recording an explicit disposable decision. Verify backups
+can be restored; do not reset live coordination state to make a wipe possible.
+
+- [ ] **queue-worker clone** — preserve by an off-host archive including .git,
+  unpushed objects and any unresolved worker marker; reconcile with ops.
+- [ ] **ops/worker-smoke-* artifacts** — preserve by an off-host archive of the
+  immutable attempts, logs and proof artifacts with the clone/generation.
+- [ ] **heavy ledger and receipts** — preserve by a coherent, drained backup
+  of tmp/heavy (ledger/events/receipts/logs/holds), then ops reconciliation.
+- [ ] **post spool** — preserve by a drained archive of tmp/post, including
+  new/cur/tmp/sent and routing, or disposable (ops decides after delivery review).
+- [ ] **Codex sessions** — preserve by the user's private session/state backup,
+  or disposable (ops decides); seed transfer never reads/copies this state.
+- [ ] **slots and claims/leases** — preserve by a drained backup and ownership
+  reconciliation with their tools, or disposable (ops decides after release).
+- [ ] **private notes/ops/tasks and unpushed checkouts** — preserve by off-host
+  archives or push non-secret work; disposable only by an explicit ops decision.
+- [ ] **post_ed25519 delivery key and restricted authorization** — preserve by
+  the user's encrypted key backup plus a private record of the matching
+  restricted authorized_keys entries; restore/rotate together through ops.
+- [ ] **kache store.env** — preserve by the user's private 0600 credential
+  backup, or disposable (ops decides to remain local-only).
+- [ ] **cache/build artifacts and other local runtime history** — disposable
+  (ops decides); retain anything needed as proof before clearing storage.
+- [ ] **interactive auth, SSH access/trust and global git preferences** —
+  preserve by the user's private process or recreate via the USER steps above.
+
+No unresolved worker marker/running prover was visible in bootstrap-1's survey;
+that observation is not a quiescence proof. Bootstrap does not activate a second
+prover or synthesize its evidence, credentials, messages, sessions or holds.
 
 ## Verification before readmission
 

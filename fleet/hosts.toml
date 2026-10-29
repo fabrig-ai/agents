@@ -1,4 +1,5 @@
 [hosts.hel8]
+seed = true
 hostname = "debian-8gb-hel1-1"
 ssh = "free@204.168.210.29"
 roles = ["session"]
@@ -14,6 +15,7 @@ machine_env = { PLAN_MIN_DISK_GB = 40, KACHE_MAX_GB = 25, KACHE_LOCAL_ONLY = 1, 
 env = {}
 
 [hosts.hetzner3]
+seed = true
 hostname = "debian-16gb-hel1-3"
 ssh = "free@2.29.124.199"
 roles = ["builder"]

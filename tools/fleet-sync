@@ -12,6 +12,7 @@ import hashlib
 import io
 import json
 import os
+import posixpath
 from pathlib import Path
 import re
 import secrets
@@ -105,9 +106,9 @@ def terminate_children():
         terminate_group(process)
 
 
-def run_child(argv, timeout, env=None, pass_fds=()):
+def run_child(argv, timeout, env=None, pass_fds=(), stdout=subprocess.PIPE):
     process = subprocess.Popen([str(v) for v in argv], stdin=subprocess.DEVNULL,
-                               stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               stdout=stdout, stderr=subprocess.PIPE,
                                start_new_session=True, env=env, pass_fds=pass_fds)
     try:
         with CHILDREN_LOCK:
@@ -120,7 +121,7 @@ def run_child(argv, timeout, env=None, pass_fds=()):
     finally:
         with CHILDREN_LOCK:
             ACTIVE_CHILDREN.discard(process)
-    return subprocess.CompletedProcess(argv, process.returncode, out, err)
+    return subprocess.CompletedProcess(argv, process.returncode, out or b"", err)
 
 
 def read_json(path, default):
@@ -323,7 +324,7 @@ def relative_asset(value):
     return value
 
 
-def validate_install(name, install):
+def validate_install(name, install, version=None):
     kind = install.get("kind")
     if kind not in ("rustup", "tar", "binary", "opt-tar", "codex-package", "claude-script", "kache-source"):
         raise ValueError(f"invalid installer for {name}")
@@ -335,6 +336,32 @@ def validate_install(name, install):
     }
     if any(key not in install for key in required[kind]):
         raise ValueError(f"incomplete installer for {name}")
+    if "seed" in install:
+        if install["seed"] != "peer" or kind not in ("binary", "opt-tar", "codex-package"):
+            raise ValueError("invalid peer seed installer")
+        expected = seed_location(name, version)
+        expected_kind = "codex-package" if name == "codex" else "opt-tar" if name == "chromium" else "binary"
+        if kind != expected_kind:
+            raise ValueError("wrong installer kind for peer artifact")
+        if kind != "binary" and install.get("entrypoint") != ("bin/codex" if name == "codex" else "usr/lib/chromium/chromium"):
+            raise ValueError("wrong entrypoint for peer artifact")
+        if install.get("source") != expected or install.get("destination", install.get("release")) != expected:
+            raise ValueError("seed paths must name the allowlisted versioned artifact")
+        if install.get("disagreement"):
+            if name != "chromium" or not isinstance(install["disagreement"], str):
+                raise ValueError("invalid seed disagreement")
+            return
+        if kind == "binary":
+            if not re.fullmatch(r"[0-9a-f]{64}", install.get("sha256", "")):
+                raise ValueError("peer file requires SHA256 pin")
+            if not re.fullmatch(r"0[0-7]{3}", install.get("mode", "")):
+                raise ValueError("peer file requires mode")
+        elif install.get("manifest") != f"seeds/{name}.sha256":
+            raise ValueError("peer tree requires its named manifest")
+        if "url" in install and (not install["url"].startswith("https://")
+                or not re.fullmatch(r"[0-9a-f]{64}", install.get("sha256", ""))):
+            raise ValueError("optional upstream URL requires HTTPS and SHA256 pin")
+        return
     downloads = [("musl_url", "musl_sha256")] if kind == "kache-source" else []
     if kind not in ("rustup", "kache-source"):
         downloads.append(("url", "sha256"))
@@ -371,12 +398,140 @@ def validate_install(name, install):
         raise ValueError("provision release outside tool directories")
 
 
+def seed_location(name, version):
+    if not isinstance(version, str) or not re.fullmatch(r"\d+(?:\.\d+){2,3}", version):
+        raise ValueError("invalid peer seed version")
+    paths = {
+        "cargo-nextest": ".cargo/bin/cargo-nextest",
+        "claude": f".local/share/claude/versions/{version}",
+        "forgejo": f".local/opt/forgejo-{version}/forgejo",
+        "forgejo-runner": f".local/opt/forgejo-runner-{version}/forgejo-runner",
+        "chromium": f".local/opt/chromium-{version}",
+        "codex": f".codex/packages/standalone/releases/{version}-x86_64-unknown-linux-musl",
+    }
+    if name not in paths:
+        raise ValueError("not an allowlisted peer artifact")
+    return paths[name]
+
+
+def parse_seed_manifest(text):
+    entries, modes = {}, {}
+    for line in text.splitlines():
+        if not line or line.startswith("#"):
+            continue
+        header, sep, path = line.partition("  ")
+        if not sep:
+            raise ValueError("invalid seed manifest line")
+        if header.startswith("symlink "):
+            path, target = json.loads(path)
+            row = {"type": "link", "mode": int(header.split()[1], 8), "target": target}
+            if (not isinstance(target, str) or not target or Path(target).is_absolute()
+                    or any(c in target for c in "\r\n\0")):
+                raise ValueError("invalid seed symlink target")
+            resolved = posixpath.normpath(posixpath.join(posixpath.dirname(path), target))
+            if resolved == ".." or resolved.startswith("../"):
+                raise ValueError("seed symlink escapes tree")
+        elif header.startswith("directory "):
+            row = {"type": "dir", "mode": int(header.split()[1], 8)}
+        elif header.startswith("mode "):
+            if path in modes:
+                raise ValueError("duplicate seed mode")
+            modes[path] = int(header.split()[1], 8)
+            continue
+        elif re.fullmatch(r"[0-9a-f]{64}", header):
+            row = {"type": "file", "sha256": header}
+        else:
+            raise ValueError("invalid seed manifest record")
+        if path != ".":
+            relative_asset(path)
+            if posixpath.normpath(path) != path:
+                raise ValueError("seed paths must be canonical")
+        if any(c in path for c in "\r\n\0") or path in entries:
+            raise ValueError("invalid or duplicate seed path")
+        entries[path] = row
+    if entries.get(".", {}).get("type") != "dir":
+        raise ValueError("seed tree needs root directory metadata")
+    if set(modes) != {p for p, row in entries.items() if row["type"] == "file"}:
+        raise ValueError("seed files need exactly one mode")
+    for path, row in entries.items():
+        if row["type"] == "file":
+            row["mode"] = modes[path]
+        if not 0 <= row["mode"] <= 0o777 or (row["type"] == "link" and row["mode"] != 0o777):
+            raise ValueError("unsafe seed mode")
+        for parent in Path(path).parents if path != "." else ():
+            if entries.get(str(parent), {}).get("type") != "dir":
+                raise ValueError("seed path has a missing or symlink parent")
+    return entries
+
+
+def seed_entries(root, install):
+    if install["kind"] == "binary":
+        return {"payload": {"type": "file", "sha256": install["sha256"], "mode": int(install["mode"], 8)}}
+    entries = parse_seed_manifest((root / "fleet" / install["manifest"]).read_text())
+    forbidden = {"auth.json", ".credentials.json", ".claude.json", "store.env", "state.json",
+                 "sessions", "logins", ".ssh", ".claude"}
+    if any(set(Path(path).parts) & forbidden for path in entries):
+        raise ValueError("auth/state path is not a seed artifact")
+    return entries
+
+
+# Peer transfer opens only explicitly pinned artifacts through no-follow directory
+# descriptors. No recursive tar of HOME/config, unknown extra file or credential
+# can enter the stream. Tar headers carry pinned names; receivers verify content.
+SEED_EXPORT = r'''import io,json,os,stat,sys,tarfile
+from pathlib import Path
+source,entries,tree=json.loads(sys.argv[1])
+home=os.open(Path.home(),os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+def open_parent(path):
+    parts=path.split("/")
+    fd=os.dup(home)
+    try:
+        for part in parts[:-1]:
+            child=os.open(part,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=fd)
+            os.close(fd)
+            fd=child
+        return fd,parts[-1]
+    except BaseException:
+        os.close(fd)
+        raise
+with tarfile.open(fileobj=sys.stdout.buffer,mode="w|") as archive:
+    for path,row in entries.items():
+        relative=source if not tree or path=="." else source+"/"+path
+        directory,leaf=open_parent(relative)
+        try:
+            info=os.stat(leaf,dir_fd=directory,follow_symlinks=False)
+            kind="file" if stat.S_ISREG(info.st_mode) else "dir" if stat.S_ISDIR(info.st_mode) else "link" if stat.S_ISLNK(info.st_mode) else "invalid"
+            if kind!=row["type"]: raise ValueError("peer artifact type changed: "+path)
+            item=tarfile.TarInfo(path)
+            item.mode=stat.S_IMODE(info.st_mode)
+            if kind=="file":
+                fd=os.open(leaf,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=directory)
+                with os.fdopen(fd,"rb") as stream:
+                    opened=os.fstat(stream.fileno())
+                    if not stat.S_ISREG(opened.st_mode): raise ValueError("not a regular seed file")
+                    item.size=opened.st_size
+                    item.mode=stat.S_IMODE(opened.st_mode)
+                    archive.addfile(item,stream)
+            elif kind=="dir":
+                item.type=tarfile.DIRTYPE
+                archive.addfile(item)
+            else:
+                item.type=tarfile.SYMTYPE
+                item.linkname=os.readlink(leaf,dir_fd=directory)
+                archive.addfile(item)
+        finally:
+            os.close(directory)
+os.close(home)
+'''
+
+
 FLEET_ASSETS = frozenset((
     "bootstrap/README.md", "bootstrap/inventory.md", "bootstrap/packages.txt",
     "bootstrap/root.sh", "bootstrap/user.sh", "bootstrap/bootstrap.py",
     "kache/README.md", "kache/build", "kache/git-checkout-rev.patch",
     "kache/upload-bound.patch", "kache/config.toml", "kache/remote.toml",
-    "kache/20-shared-store.conf",
+    "kache/20-shared-store.conf", "seeds/README.md", "seeds/codex.sha256",
+    "seeds/chromium.sha256", "seeds/chromium-hetzner3.sha256", "seeds/chromium-hel8.sha256",
 ))
 
 
@@ -416,6 +571,8 @@ class Declarations:
             hostnames.add(host["hostname"])
             if not re.fullmatch(r"[a-zA-Z0-9_.@:-]+", host["ssh"]) or host["ssh"].startswith("-"):
                 raise ValueError(f"invalid ssh address for {name}")
+            if type(host.get("seed", False)) is not bool:
+                raise ValueError(f"seed flag must be boolean for {name}")
             if not isinstance(host["roles"], list) or not all(isinstance(r, str) for r in host["roles"]):
                 raise ValueError(f"invalid roles for {name}")
             for key, value in host["machine_env"].items():
@@ -459,7 +616,9 @@ class Declarations:
                 raise ValueError("Claude and Codex may only run with --version")
             install = pin.get("install")
             if install is not None:
-                validate_install(name, install)
+                validate_install(name, install, pin["version"])
+                if install.get("seed") == "peer" and not install.get("disagreement"):
+                    seed_entries(root, install)  # Fail malformed pins before any writes.
         self.agents_origin = parsed["repositories.toml"]["agents"]
         self.fabrig_origin = parsed["repositories.toml"]["fabrig"]
         for name, origin in (("agents", self.agents_origin), ("fabrig", self.fabrig_origin)):
@@ -601,9 +760,9 @@ class Runner:
         self.state["items"].append({"item": name, "result": result,
                                     "reason": " ".join(str(reason).split())[:600]})
 
-    def cmd(self, *argv, timeout=60, binary=False, extra_env=None, pass_fds=(), allowed=(0,)):
+    def cmd(self, *argv, timeout=60, binary=False, extra_env=None, pass_fds=(), allowed=(0,), stdout=subprocess.PIPE):
         path = f"{self.home}/.local/bin:{self.home}/.cargo/bin:" + os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")
-        result = run_child(argv, timeout, pass_fds=pass_fds,
+        result = run_child(argv, timeout, pass_fds=pass_fds, stdout=stdout,
                                 env={**os.environ, **self.environment(), "PATH": path,
                                                       "GIT_TERMINAL_PROMPT": "0",
                                                       "GIT_SSH_COMMAND": "ssh -T -o BatchMode=yes -o StrictHostKeyChecking=yes -o UpdateHostKeys=no -o ConnectTimeout=5",
@@ -1354,7 +1513,7 @@ class Runner:
             sibling = f".{leaf}.{secrets.token_hex(12)}"
             # Copy into a sibling on the destination filesystem, before any rename.
             parent = Path(f"/proc/self/fd/{directory}")
-            shutil.copytree(source, parent / sibling)
+            shutil.copytree(source, parent / sibling, symlinks=True)
             previous = sibling + ".previous"
             try:
                 if info is not None:
@@ -1482,6 +1641,154 @@ class Runner:
             if kind == "binary" and install["destination"] != f".local/bin/{name}":
                 self.safe.link(f".local/bin/{name}", self.home / install["destination"])
 
+    def seed_matches(self, relative, entries, tree):
+        safe = self.safe
+        try:
+            if not tree:
+                with safe.parent(relative) as (directory, leaf):
+                    fd = safe.open_regular(directory, leaf)
+                    with os.fdopen(fd, "rb") as stream:
+                        info = os.fstat(stream.fileno())
+                        return (stat.S_IMODE(info.st_mode) == entries["payload"]["mode"]
+                                and hashlib.file_digest(stream, "sha256").hexdigest() == entries["payload"]["sha256"])
+            # Validate the shape/types/modes before opening any contents. Unknown
+            # extra files (including misplaced state) are never read.
+            for path, row in entries.items():
+                location = relative if path == "." else f"{relative}/{path}"
+                with safe.parent(location) as (directory, leaf):
+                    info = os.stat(leaf, dir_fd=directory, follow_symlinks=False)
+                    kind = "file" if stat.S_ISREG(info.st_mode) else "dir" if stat.S_ISDIR(info.st_mode) else "link" if stat.S_ISLNK(info.st_mode) else "invalid"
+                    if kind != row["type"] or stat.S_IMODE(info.st_mode) != row["mode"]:
+                        return False
+                    if kind == "link" and os.readlink(leaf, dir_fd=directory) != row["target"]:
+                        return False
+                if kind == "dir":
+                    expected = {Path(p).name for p in entries if p != "." and str(Path(p).parent) == path}
+                    if set(safe.names(location)) != expected:
+                        return False
+            for path, row in entries.items():
+                if row["type"] == "file":
+                    with safe.parent(f"{relative}/{path}") as (directory, leaf):
+                        with os.fdopen(safe.open_regular(directory, leaf), "rb") as stream:
+                            if hashlib.file_digest(stream, "sha256").hexdigest() != row["sha256"]:
+                                return False
+            return True
+        except FileNotFoundError:
+            return False
+
+    def unpack_seed(self, archive, destination, entries):
+        # Reject partial/extra/duplicate paths and links/modes before extraction.
+        with tarfile.open(archive) as tar:
+            members = {}
+            for member in tar.getmembers():
+                path = member.name.rstrip("/")
+                while path.startswith("./"):
+                    path = path[2:]
+                if path in members or path not in entries:
+                    raise ValueError("seed archive has duplicate or unexpected member")
+                row = entries[path]
+                kind = "file" if member.isfile() else "dir" if member.isdir() else "link" if member.issym() else "invalid"
+                if kind != row["type"] or member.mode != row["mode"]:
+                    raise ValueError("seed archive type/mode mismatch")
+                if kind == "link" and member.linkname != row["target"]:
+                    raise ValueError("seed archive symlink target mismatch")
+                members[path] = member
+            if members.keys() != entries.keys():
+                raise ValueError("partial seed tree: manifest members missing")
+            destination.mkdir(mode=0o700)
+            for path, row in entries.items():
+                if row["type"] == "dir" and path != ".":
+                    (destination / path).mkdir(mode=0o700, parents=True, exist_ok=True)
+            for path, member in members.items():
+                row = entries[path]
+                if row["type"] != "file":
+                    continue
+                output = destination / path
+                with tar.extractfile(member) as source, output.open("xb") as target:
+                    shutil.copyfileobj(source, target)
+                with output.open("rb") as stream:
+                    if hashlib.file_digest(stream, "sha256").hexdigest() != row["sha256"]:
+                        raise ValueError(f"seed SHA256 mismatch: {path}")
+                output.chmod(row["mode"])
+            for path, row in entries.items():
+                if row["type"] == "link":
+                    (destination / path).symlink_to(row["target"])
+            for path in sorted(entries, key=lambda p: len(Path(p).parts), reverse=True):
+                if entries[path]["type"] == "dir":
+                    (destination / path).chmod(entries[path]["mode"])
+
+    def seed_links(self, name, install):
+        if name == "cargo-nextest":
+            return False
+        changed = False
+        target = self.home / install.get("destination", install.get("release", ""))
+        if name == "codex":
+            relative = ".codex/packages/standalone/current"
+            if self.safe.readlink(relative) != str(target):
+                self.safe.link(relative, target)
+                changed = True
+            target = self.home / relative / "bin/codex"
+        elif install["kind"] != "binary":
+            target /= install["entrypoint"]
+        relative = f".local/bin/{name}"
+        if self.safe.readlink(relative) != str(target):
+            self.safe.link(relative, target)
+            changed = True
+        return changed
+
+    def provision_seed(self, name, pin):
+        install = pin["install"]
+        item = f"provision:{name}"
+        if install.get("disagreement"):
+            self.item(item, "warn", f"manual: peer disagreement: {install['disagreement']}")
+            return
+        entries = seed_entries(self.d.root, install)
+        tree = install["kind"] != "binary"
+        relative = install["release"] if tree else install["destination"]
+        if self.seed_matches(relative, entries, tree):
+            changed = self.seed_links(name, install)
+            self.item(item, "changed" if changed else "ok", f"content pin matches; {'repaired links' if changed else 'no transfer or writes'}")
+            return
+        self.safe.directory(".local/state/fleet-sync", create=True)
+        peers = sorted((n for n, host in self.d.hosts.items() if host.get("seed", False) and n != self.name),
+                       key=lambda n: (n != "hetzner3", n))
+        candidates = [None] if install.get("url") else peers
+        failures = []
+        for peer in candidates:
+            try:
+                with tempfile.TemporaryDirectory(prefix=".seed-", dir=self.state_dir) as temporary:
+                    work = Path(temporary)
+                    archive = work / "archive"
+                    if peer is None:
+                        self.download(install["url"], install["sha256"], archive)
+                        if tree:
+                            self.unpack_seed(archive, work / "verified", entries)
+                        else:
+                            output = work / "verified/payload"
+                            output.parent.mkdir()
+                            archive.rename(output)
+                            output.chmod(entries["payload"]["mode"])
+                    else:
+                        request = json.dumps([install["source"], entries, tree])
+                        command = shlex.join(["python3", "-B", "-c", SEED_EXPORT, request])
+                        with archive.open("xb") as output:
+                            self.cmd("ssh", "-T", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
+                                     "-o", "UpdateHostKeys=no", "-o", "ConnectTimeout=5",
+                                     self.d.hosts[peer]["ssh"], command, timeout=600, binary=True, stdout=output)
+                        self.unpack_seed(archive, work / "verified", entries)
+                    if tree:
+                        self.install_tree(relative, work / "verified")
+                    else:
+                        self.safe.save(relative, (work / "verified/payload").read_bytes(), entries["payload"]["mode"])
+                    self.seed_links(name, install)
+                if failures:
+                    self.item(f"seed:{name}", "warn", "; ".join(failures))
+                self.item(item, "changed", f"verified content pin; installed from {peer or 'upstream URL'}")
+                return
+            except (OSError, ValueError, subprocess.SubprocessError, tarfile.TarError) as error:
+                failures.append(f"{peer or 'upstream URL'}: {error}")
+        raise ValueError("no verified seed available: " + ("; ".join(failures) or "no other seed hosts declared"))
+
     def provision(self):
         # Called only from an explicit manual run under the ordinary fleet lock.
         # Bootstrap Rust before kache, regardless of declaration order.
@@ -1491,6 +1798,9 @@ class Runner:
             install = pin.get("install")
             item = f"provision:{name}"
             try:
+                if install and install.get("seed") == "peer":
+                    self.provision_seed(name, pin)
+                    continue
                 try:
                     current = self.version_matches(pin)
                 except (OSError, ValueError, subprocess.SubprocessError):

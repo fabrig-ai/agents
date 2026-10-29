@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import subprocess
 import tarfile
+import tomllib
 import unittest
 from unittest.mock import patch
 
@@ -298,7 +299,23 @@ sibling.replace(work / "out/kache")
         self.runner.kache_config()
         self.assertEqual(before, self.f.snapshot())
 
+    def only_toolchain_and_cache_pins(self):
+        # Seed transport has its own full handoff tests in test_peer_seed.py.
+        # These generic integration tests exercise Rust, cache activation and
+        # the two bootstrap invocations without borrowing real artifact pins.
+        path = self.f.source / "fleet/versions.toml"
+        pins = tomllib.loads(path.read_text())
+        rows = []
+        for name in ("rustc", "kache"):
+            pin = pins[name]
+            rows += [f"[{name}]", f"version = {json.dumps(pin['version'])}",
+                     f"command = {json.dumps(pin['command'])}", f"[{name}.install]"]
+            rows += [f"{key} = {json.dumps(value)}" for key, value in pin["install"].items()]
+        fixture.put(path, "\n".join(rows) + "\n")
+        self.f.publish()
+
     def test_explicit_provision_survives_release_handoff_and_is_idempotent(self):
+        self.only_toolchain_and_cache_pins()
         rust = self.module.Declarations(self.f.source, self.f.home).versions["rustc"]["install"]
         outputs = {
             "show active-toolchain": "1.95.0-x86_64-unknown-linux-gnu (default)",
@@ -310,8 +327,8 @@ sibling.replace(work / "out/kache")
                     f"print({outputs!r}[' '.join(sys.argv[1:])])\n", True)
         state = self.f.sync("--provision")
         rows = [row for row in state["items"] if row["item"].startswith("provision:")]
-        self.assertEqual(len(rows), 8)
-        self.assertEqual(sum(row["result"] == "warn" and "manual: TODO-USER" in row["reason"] for row in rows), 6)
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(all(row["result"] == "ok" for row in rows), rows)
         self.assertEqual(next(r for r in rows if r["item"] == "provision:kache")["result"], "ok")
         self.assertTrue((self.f.home / ".config/systemd/user/default.target.wants/kache.service").is_symlink())
         count = len(self.f.calls())
@@ -320,6 +337,7 @@ sibling.replace(work / "out/kache")
         self.assertFalse((self.f.home / "downloads.json").exists())
 
     def test_user_script_repeated_with_temporary_home_and_fake_services(self):
+        self.only_toolchain_and_cache_pins()
         rust = self.module.Declarations(self.f.source, self.f.home).versions["rustc"]["install"]
         outputs = {
             "show active-toolchain": "1.95.0-x86_64-unknown-linux-gnu (default)",
