@@ -853,7 +853,7 @@ class FleetTest(unittest.TestCase):
         self.assertIn("unreachable", next(h for h in state["hosts"] if h["host"] == "hetzner3"))
         self.assertTrue(next(h for h in state["hosts"] if h["host"] == "hel8")["last_timer_end"])
         calls = [json.loads(line) for line in (self.home / "ssh.log").read_text().splitlines()]
-        self.assertEqual(len(calls), 5)
+        self.assertEqual(len(calls), HOST_COUNT - 1)
         self.assertTrue(all("StrictHostKeyChecking=yes" in c and "BatchMode=yes" in c for c in calls))
 
     def test_release_retention(self):
