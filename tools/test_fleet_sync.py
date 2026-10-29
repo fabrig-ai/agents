@@ -107,7 +107,9 @@ class FleetTest(unittest.TestCase):
         self.source = self.directory / "agents-source"
         self.source.mkdir()
         shutil.copytree(ROOT / "fleet", self.source / "fleet")
-        put(self.source / "tools/fleet-sync", (ROOT / "tools/fleet-sync").read_text(), True)
+        for tool in (ROOT / "tools/installed").read_text().splitlines():
+            if tool.strip() and not tool.lstrip().startswith("#"):
+                put(self.source / "tools" / tool, (ROOT / "tools" / tool).read_text(), True)
         put(self.source / "tools/installed", (ROOT / "tools/installed").read_text())
         put(self.source / "fleet/repositories.toml", f"fabrig = {json.dumps(str(self.fabrig_origin))}\n")
         put(self.source / "old/forbidden", "must not be deployed\n")
