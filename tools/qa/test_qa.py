@@ -55,10 +55,16 @@ config = json.loads((root / 'tools.json').read_text())
 runs = root / 'tmp/codex-run'
 units = root / 'units'
 
+def publish_marker(name, value):
+    path = root / name
+    temporary = path.with_name(path.name + '.' + str(os.getpid()) + '.new')
+    temporary.write_text(value)
+    temporary.replace(path)
+
 def hang(when):
     operation = name + ':' + (args[0] if args else '')
     if config.get('hang', {}).get(operation) == when:
-        (root / 'hung-tool').write_text(str(os.getpid()))
+        publish_marker('hung-tool', str(os.getpid()))
         time.sleep(600)
 
 hang('before')
@@ -169,7 +175,7 @@ elif name == 'codex-run':
     (process / 'cmdline').write_bytes(b'\0'.join(os.fsencode(word) for word in sys.argv) + b'\0')
     atexit.register(shutil.rmtree, process)
     if config.get('delay_before_meta'):
-        (root / 'meta-waiting').write_text(str(os.getpid()))
+        publish_marker('meta-waiting', str(os.getpid()))
         while not (root / 'allow-meta').exists():
             time.sleep(0.01)
     runs.mkdir(parents=True, exist_ok=True)
@@ -184,7 +190,7 @@ elif name == 'codex-run':
     if config.get('close_admission'):
         os.closerange(3, 256)  # Deliberately lose kernel exclusion to exercise observation fallback.
     if config.get('delay_before_unit'):
-        (root / 'launch-waiting').write_text(str(os.getpid()))
+        publish_marker('launch-waiting', str(os.getpid()))
         while not (root / 'allow-launch').exists():
             time.sleep(0.01)
     (state / 'unit').touch()
@@ -221,7 +227,7 @@ elif name == 'systemctl':
         if args[1] == operation and (pass_name == owner or fnmatch.fnmatchcase(unit, 'qa-' + owner + '-[a-z]*')):
             import subprocess
             child = subprocess.Popen([sys.executable, '-I', '-B', '-c', 'import time; time.sleep(600)'])
-            (root / ('hung-' + owner)).write_text(f'{os.getpid()} {child.pid}')
+            publish_marker('hung-' + owner, f'{os.getpid()} {child.pid}')
             time.sleep(600)
     if args[1] == 'list-units':
         assert args[:7] == ['--user', 'list-units', '--all', '--plain', '--no-legend', '--full', args[-1]]
@@ -302,7 +308,7 @@ elif name == 'systemctl':
         end(run, 'codex-run: the run wrote no report and no last message; exit 143.\n', 143)
 elif name == 'logins':
     if args[0] == 'take' and config.get('delay_take'):
-        (root / 'take-waiting').write_text(str(os.getpid()))
+        publish_marker('take-waiting', str(os.getpid()))
         while not (root / 'allow-take').exists():
             time.sleep(0.01)
         config = json.loads((root / 'tools.json').read_text())
