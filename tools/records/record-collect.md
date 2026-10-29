@@ -83,3 +83,13 @@ with sender joins, stable ids, and only those metadata fields. Complete-line
 cursors, rotation replay and pending publication recovery work as for other
 logs. Exit 2 is delivery failure; a later row for the same message id can
 record success. This source reads neither subjects nor bodies.
+
+The sessions source also reads `session-start names --json` (PATH, with sibling
+`../session/start` fallback). Codex leads bypass Claude lookup: user-unit active
+transitions emit `session-start`/`session-end`, tagged `session_kind="codex-owner"`
+(`kind` remains the event type). Each owner gets a `session-context --owner NAME`
+reading, without Claude's calls field. Exit 3 emits `handover-needed` once per
+threshold crossing; a below-threshold reading or a new thread permits the next
+crossing. Cursor counters keep crossing ids stable on retries. Owners without
+a measurement print a metadata-only skip while unit transitions still collect.
+Unit query failures are errors; missing/inactive units are valid observations.

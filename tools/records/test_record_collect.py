@@ -59,6 +59,8 @@ class CollectTests(unittest.TestCase):
         self.bin = self.home / 'bin'
         self.bin.mkdir()
         self.env['PATH'] = str(self.bin) + os.pathsep + os.environ['PATH']
+        self.fake('session-start', "import os, pathlib, sys\nassert sys.argv[1:] == ['names', '--json']\nprint((pathlib.Path(os.environ['HOME']) / 'names.json').read_text())\n")
+        self.write(self.home / 'names.json', '[]')
         self.fake('claude', """import json, os
 from pathlib import Path
 assert __import__('sys').argv[1:] == ['agents', '--json']
@@ -307,6 +309,107 @@ print('12345678: 125,000 of 1,000,000 tokens (12%) at 2026-10-29T11:00:00Z; 42 c
                 repeated = API['Collector']('heavy', 'hel8', resumed.state, STAMP, datetime.now(timezone.utc))
                 repeated.heavy()
                 self.assertEqual(repeated.finish(), [])
+
+    def codex_fixture(self):
+        self.json(self.home / 'names.json', [dict(role='lead', kind='codex', name='lead/u/jig',
+                  mailbox='lead/u/jig', unit='codex-owner-lead-u-jig', supervisor='s/upgrades')])
+        self.fake('systemctl', """import os, sys
+from pathlib import Path
+assert sys.argv[1:] == ['--user', 'is-active', '--quiet', 'codex-owner-lead-u-jig']
+sys.exit(int((Path(os.environ['HOME']) / 'unit-exit').read_text()))
+""")
+        self.write(self.home / 'unit-exit', '0')
+        original = (self.bin / 'session-context').read_text().split('\n', 1)[1]
+        self.fake('session-context', """import os, sys
+from pathlib import Path
+if sys.argv[1:2] == ['--owner']:
+ assert sys.argv[1:] == ['--owner', 'lead/u/jig']
+ home = Path(os.environ['HOME'])
+ code = int((home / 'context-exit').read_text())
+ print((home / 'context-line').read_text())
+ sys.exit(code)
+# Looking up this name via Claude would read a different session.
+assert sys.argv[1:] != ['--name', 'lead/u/jig']
+""" + original)
+        self.owner_reading(50, 0)
+
+    def owner_reading(self, percent, code, thread='abcdef12'):
+        self.write(self.home / 'context-exit', str(code))
+        self.write(self.home / 'context-line',
+                   f'{thread}: {percent * 1000:,} of 100,000 tokens ({percent}%) at {STAMP}; '
+                   f'2 compaction(s); threshold 75%' + (' REACHED: hand over now' if code == 3 else ''))
+
+    def test_codex_unit_lifecycle_context_and_threshold_crossings(self):
+        self.codex_fixture()
+        # A stale Claude row with the same name must never be measured.
+        self.session_fixture('lead/u/jig')
+        self.run_collect('sessions')
+        start, context = self.events('sessions')
+        self.assertEqual(start['kind'], 'session-start')
+        self.assertEqual(start['session_kind'], 'codex-owner')
+        self.assertEqual(start['unit'], 'codex-owner-lead-u-jig')
+        self.assertEqual((context['tokens'], context['compactions'], context['area'], context['coordinator']),
+                         (50000, 2, 'jig', 'u'))
+        self.assertNotIn('calls', context)
+        self.assertEqual([e['kind'] for e in self.dry('sessions')], ['context'])
+        self.owner_reading(75, 3)
+        first_preview = self.dry('sessions')
+        second_preview = self.dry('sessions')
+        first_hook = next(e for e in first_preview if e['kind'] == 'handover-needed')
+        self.assertEqual(first_hook['id'], next(e for e in second_preview if e['kind'] == 'handover-needed')['id'])
+        self.run_collect('sessions')
+        hooks = lambda: [e for e in self.events('sessions') if e['kind'] == 'handover-needed']
+        self.assertEqual(len(hooks()), 1)
+        self.assertEqual(hooks()[0]['id'], first_hook['id'])
+        self.assertEqual([e['kind'] for e in self.dry('sessions')], ['context'])
+        # The exit status, rather than rounded output, decides crossing.
+        self.owner_reading(75, 0)
+        self.run_collect('sessions')
+        self.owner_reading(75, 3)
+        self.run_collect('sessions')
+        self.assertEqual(len(hooks()), 2)
+        self.assertNotEqual(hooks()[0]['id'], hooks()[1]['id'])
+        # A fresh owner thread above threshold begins its own crossing.
+        self.owner_reading(80, 3, thread='ffffffff')
+        self.run_collect('sessions')
+        self.assertEqual(len(hooks()), 3)
+        self.write(self.home / 'unit-exit', '3')
+        self.run_collect('sessions')
+        ends = [e for e in self.events('sessions') if e['kind'] == 'session-end']
+        self.assertEqual(len(ends), 1)
+        self.assertEqual(ends[0]['session'], start['session'])
+        self.assertEqual(ends[0]['session_kind'], 'codex-owner')
+        self.run_collect('sessions')
+        self.assertEqual(sum(e['kind'] == 'session-end' for e in self.events('sessions')), 1)
+        self.write(self.home / 'unit-exit', '0')
+        self.run_collect('sessions')
+        starts = [e for e in self.events('sessions') if e['kind'] == 'session-start']
+        self.assertEqual(len(starts), 2)
+        self.assertNotEqual(starts[0]['session'], starts[1]['session'])
+
+    def test_codex_ignores_stale_claude_hook_markers(self):
+        self.codex_fixture()
+        self.json(self.home / 'fired.json', [dict(session_id=SESSION, name='lead/u/jig', role='lead',
+                  reason='old Claude hook', first_fired=STAMP, last_fired=STAMP)])
+        events = self.dry('sessions')
+        self.assertEqual([e['kind'] for e in events], ['session-start', 'context'])
+
+    def test_codex_without_measurement_still_records_unit_transition(self):
+        self.codex_fixture()
+        self.write(self.home / 'context-exit', '1')
+        result = self.run_collect('sessions')
+        self.assertIn('skip sessions/context: lead/u/jig:', result.stderr)
+        self.assertEqual([e['kind'] for e in self.events('sessions')], ['session-start'])
+        self.assertFalse(self.dry('sessions'))
+
+    def test_codex_unknown_unit_is_inactive_and_bus_error_is_unavailable(self):
+        self.codex_fixture()
+        self.write(self.home / 'unit-exit', '4')
+        self.assertEqual([e['kind'] for e in self.dry('sessions')], ['context'])
+        self.write(self.home / 'unit-exit', '1')
+        result = self.run_collect('sessions', options=('--dry-run',), code=2)
+        self.assertIn('systemctl is-active failed', result.stderr)
+        self.assertFalse(self.state.exists())
 
     def test_sessions_lifecycle_names_and_context_each_run(self):
         row = self.session_fixture()

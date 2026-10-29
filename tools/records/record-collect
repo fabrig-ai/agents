@@ -17,6 +17,9 @@ import sys
 import tempfile
 import tomllib
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'session'))
+from session_lib import unit_active
+
 UTC = timezone.utc
 SOURCES = ('runs', 'queue', 'heavy', 'sessions', 'claims', 'leases', 'post', 'post-sent')
 JOIN = ('task', 'branch', 'coordinator', 'draft', 'area', 'part')
@@ -318,7 +321,19 @@ class Collector:
                       cwd=cwd, wait_s=int(wait), run_s=int(run), exit=int(code), log=log, **phase)
 
     def sessions(self):
+        launcher = shutil.which('session-start') or str(Path(__file__).resolve().parents[1] / 'session/start')
+        result = subprocess.run([launcher, 'names', '--json'], capture_output=True, text=True, timeout=30, check=True)
+        identities = json.loads(result.stdout)
+        if not isinstance(identities, list) or any(not isinstance(row, dict) for row in identities):
+            raise ValueError('session-start names must return an array of identities')
+        codex = {row['name']: row for row in identities if row.get('role') == 'lead' and row.get('kind') == 'codex'}
+        self.codex_owners(codex)
         if shutil.which('claude') is None:
+            if codex:
+                print('skip sessions/claude: claude is not installed', file=sys.stderr)
+                if (self.tmp / 'post').is_dir():
+                    self.post(files_current=True)
+                return
             raise Skip('claude is not installed')
         result = subprocess.run(['claude', 'agents', '--json'], capture_output=True, text=True, timeout=60)
         if result.returncode:
@@ -330,6 +345,8 @@ class Collector:
         current = {}
         for row in rows:
             name = row.get('name', '')
+            if name in codex:
+                continue
             keys = names(name)
             if not keys and not (name == 'director' or name.startswith('director/') or name in ('ops', 's/deploy')):
                 continue
@@ -354,17 +371,57 @@ class Collector:
                       tokens=int(used.replace(',', '')), window=int(window.replace(',', '')),
                       percent=int(percent), measured=measured, calls=int(calls.replace(',', '')),
                       compactions=int(compactions))
-        self.fired()
+        self.fired(exclude=codex)
         if (self.tmp / 'post').is_dir():
             self.post(files_current=True)
         for session, prior in old.items():
-            if session not in current:
+            if session not in current and prior['name'] not in codex:
                 self.emit('session-end', [session, self.state.get('generation', 0)], self.now,
                           session=session, name=prior['name'], **names(prior['name']), observed=True)
         self.state['snapshot'] = current
         self.state['generation'] = self.state.get('generation', 0) + 1
 
-    def fired(self):
+    def codex_owners(self, identities):
+        owners = self.state.setdefault('codex_owners', {})
+        for name, identity in identities.items():
+            unit = identity['unit']
+            active = unit_active(unit)
+            prior = owners.setdefault(name, {'active': False, 'generation': 0, 'crossings': 0})
+            if active != prior['active']:
+                if active:
+                    prior['generation'] += 1
+                session = f"{unit}:{prior['generation']}"
+                self.emit('session-start' if active else 'session-end', [session, active], self.now,
+                          session=session, name=name, unit=unit, session_kind='codex-owner',
+                          observed=True, **names(name))
+                prior['active'] = active
+            reading = subprocess.run(['session-context', '--owner', name], capture_output=True, text=True, timeout=30)
+            if reading.returncode not in (0, 3):
+                # Owners without a first model call have no measurement yet.
+                # Do not expose producer output or lose a unit transition.
+                print(f'skip sessions/context: {name}: session-context exited {reading.returncode}', file=sys.stderr)
+                continue
+            match = re.fullmatch(
+                r'(\S+):\s*([\d,]+) of ([\d,]+) tokens \((\d+)%\) at (\S+);\s*'
+                r'(\d+) compaction\(s\);\s*threshold (\d+)%(?: REACHED: hand over now)?\s*', reading.stdout)
+            if not match:
+                raise ValueError(f'unrecognized session-context owner reading for {name}')
+            thread, used, window, percent, measured, compactions, threshold = match.groups()
+            fields = dict(session=f"{unit}:{prior['generation']}", name=name, unit=unit,
+                          session_kind='codex-owner', thread=thread, **names(name))
+            self.emit('context', [name, iso(self.now)], self.now, **fields,
+                      tokens=int(used.replace(',', '')), window=int(window.replace(',', '')),
+                      percent=int(percent), measured=measured, compactions=int(compactions), threshold=int(threshold))
+            # Exit 3 uses the unrounded share; displayed percentages are rounded.
+            reached = reading.returncode == 3
+            if reached and (not prior.get('reached') or prior.get('thread') != thread):
+                prior['crossings'] += 1
+                self.emit('handover-needed', [name, prior['crossings']], self.now, **fields,
+                          role='lead', first_fired=iso(self.now), last_fired=iso(self.now),
+                          reason='Codex owner context threshold reached')
+            prior.update(reached=reached, thread=thread)
+
+    def fired(self, exclude=()):
         try:
             capabilities = subprocess.run(['session-context', '--capabilities'],
                                           capture_output=True, text=True, timeout=30)
@@ -391,7 +448,7 @@ class Collector:
                 raise ValueError('invalid fired marker')
             name = marker['name']
             # Ungated hooks can lack a resolved name; never guess an owner.
-            if name is None:
+            if name is None or name in exclude:
                 continue
             if not isinstance(name, str) or not name:
                 raise ValueError('invalid fired name')
