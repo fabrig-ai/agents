@@ -57,6 +57,74 @@ class Rules(unittest.TestCase):
         self.data['runs/hel8'].append(row)
         return row
 
+    def codex(self, active=False):
+        self.names['lead/tools'].update(kind='codex', unit='codex-owner-lead-tools')
+        self.data['unit/lead/tools'] = active
+
+    def test_codex_gone_active_draft_even_without_unfinished_part(self):
+        self.codex()
+        self.live()  # Stale Claude inventory does not make a Codex unit live.
+        self.data['drafts'] = [dict(mailbox='s/default', state='active', unfinished_parts=[])]
+        gone = next(c for c in self.rule('gone') if c['owner'] == 'lead/tools')
+        self.assertEqual(gone['first_to'], 's/default')
+        self.assertEqual(gone['supervisor'], 's/default')
+        self.assertIn('unit/lead/tools', gone['deps'])
+        self.assertNotIn('agents', gone['deps'])
+        self.data['unit/lead/tools'] = True
+        self.assertFalse([c for c in self.rule('gone') if c['owner'] == 'lead/tools'])
+        self.data['unit/lead/tools'] = False
+        self.names['lead/tools']['paused'] = True
+        self.assertFalse([c for c in self.rule('gone') if c['owner'] == 'lead/tools'])
+        self.names['lead/tools']['paused'] = False
+        self.data['drafts'][0]['state'] = 'paused'
+        self.assertFalse([c for c in self.rule('gone') if c['owner'] == 'lead/tools'])
+        self.data['drafts'][0]['state'] = 'active'
+        del self.data['unit/lead/tools']
+        self.assertFalse([c for c in self.rule('gone') if c['owner'] == 'lead/tools'])
+
+    def test_codex_deaf_skips_wake_and_notifies_coordinator_immediately(self):
+        self.codex()
+        self.mail(10)
+        self.assertFalse(self.rule('deaf'))
+        self.data['waiters']['lead/tools'] = dict(alive=True)
+        self.assertTrue(self.rule('deaf', NOW+1))
+        self.round(NOW+1, errors={'agents': 'unavailable', 'waiters': 'unavailable'})
+        self.assertEqual(self.calls, [('send', 's/default', 'deaf')])
+        self.round(NOW+2)
+        self.assertEqual(len(self.calls), 1)
+        self.data['unit/lead/tools'] = True
+        self.assertFalse(self.rule('deaf', NOW+3))
+        self.data['unit/lead/tools'] = False
+        self.names['lead/tools']['paused'] = True
+        self.assertFalse(self.rule('deaf', NOW+3))
+
+    def test_codex_unit_failure_freezes_open_episode(self):
+        self.codex()
+        self.mail(11)
+        self.round()
+        episode = self.state['episodes']['deaf\tlead/tools']
+        del self.data['unit/lead/tools']
+        for offset in (1, 2, 3):
+            self.round(NOW+offset, errors={'unit/lead/tools': 'unavailable'})
+        self.assertIs(self.state['episodes']['deaf\tlead/tools'], episode)
+        self.assertEqual(episode['clear'], 0)
+
+    def test_codex_handover_uses_threshold_event_and_coordinator_supervisor(self):
+        self.codex(True)
+        self.data['records/sessions'] = [dict(kind='context', name='lead/tools', percent=90, time=ISO(NOW-1300))]
+        self.assertFalse(self.rule('handover late'))
+        self.data['records/sessions'].append(dict(kind='handover-needed', session_kind='codex-owner',
+            name='lead/tools', session='owner:1', time=ISO(NOW-1200), first_fired=ISO(NOW-1200)))
+        self.assertFalse(self.rule('handover late'))
+        late, = self.rule('handover late', NOW+1)
+        self.assertEqual(late['supervisor'], 's/default')
+        self.round(NOW+1)
+        self.assertIn(('send', 'lead/tools', 'handover late'), self.calls)
+        self.round(NOW+1201)
+        self.assertIn(('send', 's/default', 'handover late'), self.calls)
+        self.data['records/sessions'].append(dict(kind='files-current', name='lead/tools', time=ISO(NOW)))
+        self.assertFalse(self.rule('handover late', NOW+1202))
+
     def test_deaf_threshold_live_and_dead_waiter(self):
         self.live()
         self.mail(10)
@@ -438,6 +506,7 @@ class Integration(unittest.TestCase):
         self.write(self.home / 'remote', '{"runs":[],"heavy":[],"errors":[]}')
         self.env = dict(os.environ, PATH=str(self.bin)+os.pathsep+os.environ['PATH'],
                         RECORDS_REPO=str(self.home / 'records'), RECORDS_ORIGIN=str(self.origin))
+        self.fake('systemctl', "import os, sys\nassert sys.argv[1:4] == ['--user', 'is-active', '--quiet']\nsys.exit(int(os.environ.get('UNIT_EXIT', '3')))\n")
         self.fake('post', """from pathlib import Path
 import os,sys
 home=Path(os.environ['HOME'])
@@ -488,6 +557,23 @@ else: sys.exit(1 if sys.argv[2] in os.environ.get('UNOWNED','').split(',') else 
     def events(self):
         self.git('-C', str(self.seed), 'pull', '--ff-only')
         return [json.loads(line) for path in (self.seed/'events/watch/hel8').glob('*.jsonl') for line in path.read_text().splitlines()]
+    def test_codex_cli_reads_unit_and_sends_deaf_directly_to_coordinator(self):
+        path = self.write(self.tmp/'post/lead+u+jig/new/owner-mail.md',
+                          'Id: owner-mail\nFrom: test@hel8\nTo: lead/u/jig@hel8\nSubject: synthetic\n\n')
+        old = datetime.now(timezone.utc).timestamp()-660
+        os.utime(path, (old, old))
+        # Unit liveness is independent of Claude availability.
+        active = self.invoke(dry=True, UNIT_EXIT='0', FAIL_INPUT='claude')
+        self.assertNotIn('deaf lead/u/jig', active.stdout)
+        inactive = self.invoke(dry=True, UNIT_EXIT='3', FAIL_INPUT='claude')
+        self.assertIn("would post send --as watch s/upgrades 'watch: deaf lead/u/jig'", inactive.stdout)
+        self.assertNotIn('post wake lead/u/jig', inactive.stdout)
+        failed = self.invoke(dry=True, UNIT_EXIT='1')
+        self.assertNotIn('watch: deaf lead/u/jig', failed.stdout)
+        heartbeat = next(json.loads(line) for line in failed.stdout.splitlines()
+                         if line.startswith('{') and json.loads(line).get('kind') == 'heartbeat')
+        self.assertIn('unit/lead/u/jig', heartbeat['inputs_failed'])
+
     def test_dry_run_no_state_no_posts_no_append_no_clone(self):
         self.mail()
         before = self.git('--git-dir', str(self.origin), 'rev-parse', 'main')
@@ -686,6 +772,9 @@ else: sys.exit(1 if sys.argv[2] in os.environ.get('UNOWNED','').split(',') else 
         original_tool = TOOL
         self.env['PATH'] = str(self.bin) + os.pathsep + '/usr/bin:/bin'
         release = self.home / 'release/tools'
+        helper = release / 'session/session_lib.py'
+        helper.parent.mkdir(parents=True)
+        shutil.copy2(TOOL.parents[1] / 'session/session_lib.py', helper)
         for name in ('watch', 'record', 'watch.toml'):
             target = release / 'records' / name
             target.parent.mkdir(parents=True, exist_ok=True)

@@ -114,3 +114,11 @@ before state persistence can repeat that send after restart.
 Run `python3 -I -B tools/records/test_watch.py`. Tests use temporary HOME,
 fake producer commands/SSH, and a local bare records origin. The existing
 `test_record.py` and `test_record_collect.py` suites remain required.
+
+For leads with `kind="codex"`, live state comes from their registered user unit,
+independently of Claude and post waiters. `gone` means an inactive unit for a
+lead whose coordinator has an active, unpaused draft. `deaf` means unread mail
+older than the configured threshold while the unit is inactive: skip `post wake`
+and notify the coordinator immediately. Failed unit queries freeze dependent
+episodes. Codex `handover-needed` threshold events drive the same handover clock
+and acknowledgements; the coordinator remains the lead's supervisor.

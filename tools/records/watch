@@ -245,6 +245,11 @@ def identities(text):
             raise ValueError('invalid name prefix')
         if 'paused' in row and type(row['paused']) is not bool:
             raise ValueError('invalid pause state')
+        if row.get('role') == 'lead':
+            if row.get('kind', 'claude') not in ('claude', 'codex'):
+                raise ValueError('invalid lead kind')
+            if row.get('kind') == 'codex' and (not isinstance(row.get('unit'), str) or not row['unit'].startswith('codex-owner-')):
+                raise ValueError('Codex lead lacks unit')
         result[name] = dict(row, name=name, supervisor=supervisor)
     return result
 
@@ -307,6 +312,11 @@ class Inputs:
         self.read('records', lambda: self.records(records))
         self.read('names', lambda: identities(checked([self.executables['session-start'], 'names', '--json'])))
         self.data.setdefault('names', {})
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'session'))
+        from session_lib import unit_active
+        for name, identity in self.data['names'].items():
+            if identity.get('kind') == 'codex' and identity.get('role') == 'lead':
+                self.read('unit/' + name, lambda identity=identity: unit_active(identity['unit']))
         self.read('agents', lambda: agent_rows(checked(['claude', 'agents', '--json'])))
         self.read('waiters', lambda: waiters(checked(['post', 'waiters'])))
         self.read('mail', mailboxes)
@@ -409,6 +419,10 @@ def evaluate(data, state, config, now):
         return now - stamp(when) > minutes * 60
     live = {}
     for name, identity in names.items():
+        if identity.get('kind') == 'codex':
+            if data.get('unit/' + name) is True:
+                live[name] = []
+            continue
         aliases = identity.get('aliases', []) + [name]
         prefix = identity.get('name_prefix')
         holders = data.get('waiters', {}).get(name, {}).get('session')
@@ -419,6 +433,8 @@ def evaluate(data, state, config, now):
             live[name] = matches
     deaf = set()
     for name in live:
+        if names[name].get('kind') == 'codex':
+            continue
         mail = [m for m in data.get('mail', []) if m['owner'] == name and older(m['delivered'], config['deaf']['minutes'])]
         if mail and not data.get('waiters', {}).get(name, {}).get('alive'):
             if config['deaf']['enabled']:
@@ -426,6 +442,19 @@ def evaluate(data, state, config, now):
             oldest = min(m['delivered'] for m in mail)
             add('deaf', name, name, [f'unread={len(mail)}; oldest={iso(oldest)}', 'no live mailbox waiter'],
                 ['agents', 'waiters', 'mail'], session=live[name][0].get('sessionId', live[name][0].get('id', '')))
+    for name, identity in names.items():
+        if identity.get('kind') != 'codex' or data.get('unit/' + name) is not False:
+            continue
+        mail = [m for m in data.get('mail', []) if m['owner'] == name and older(m['delivered'], config['deaf']['minutes'])]
+        if mail:
+            if config['deaf']['enabled']:
+                deaf.add(name)
+            oldest = min(m['delivered'] for m in mail)
+            add('deaf', name, name, [f'unread={len(mail)}; oldest={iso(oldest)}', 'Codex owner unit inactive'],
+                ['unit/' + name, 'mail'])
+            candidate = candidates.get('deaf\t' + name)
+            if candidate is not None:
+                candidate.update(skip_wake=True, first_to=identity['supervisor'])
     active = {d['mailbox']: d for d in data.get('drafts', []) if d.get('state') == 'active'}
     for name, identity in names.items():
         registered = name in active
@@ -434,15 +463,18 @@ def evaluate(data, state, config, now):
             unfinished = identity.get('unfinished', False) or any(
                 part.startswith(identity.get('area', name.rsplit('/', 1)[-1]) + '-')
                 for part in draft.get('unfinished_parts', []))
-            registered = bool(draft) and unfinished
-        if registered and name not in live:
+            registered = bool(draft) and (identity.get('kind') == 'codex' or unfinished)
+        codex = identity.get('kind') == 'codex'
+        absent = data.get('unit/' + name) is False if codex else name not in live
+        if registered and absent:
             supervisor = identity.get('supervisor', '')
             draft = active.get(name) or active.get(identity.get('coordinator_mailbox')) or {}
             joins = {k: v for k, v in identity.items() if k in JOIN}
             if draft:
                 joins.update(draft=draft.get('draft', ''), coordinator=draft['mailbox'])
-            add('gone', name, name, ['registered unfinished role absent from claude agents'],
-                ['agents', 'drafts'], supervisor='director', **joins)
+            evidence = 'registered active role has inactive Codex owner unit' if codex else 'registered unfinished role absent from claude agents'
+            add('gone', name, name, [evidence],
+                ['unit/' + name if codex else 'agents', 'drafts'], supervisor='director', **joins)
             if 'gone\t' + name in candidates:
                 candidates['gone\t' + name]['first_to'] = supervisor
     runs = [(key.split('/', 1)[1], row) for key, rows in data.items() if key.startswith('runs/') for row in rows]
@@ -611,7 +643,7 @@ def reconcile(state, candidates, errors, config, now, action):
         if episode is None:
             state['next_episode'] = state.get('next_episode', 0) + 1
             episode = dict(candidate, episode=state['next_episode'], opened=now, clear=0, escalated=False, notified=False)
-            if candidate['rule'] == 'deaf':
+            if candidate['rule'] == 'deaf' and not candidate.get('skip_wake'):
                 episode['wake'] = action('wake', candidate['owner'], candidate)
                 episode['notified'] = True
             else:
