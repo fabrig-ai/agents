@@ -33,6 +33,10 @@ class Refusal(Exception):
     """Invalid input or a clone that must not be changed (exit 1)."""
 
 
+class Deferred(Refusal):
+    """Automatic publication postponed; caller must retain its outbox (exit 3)."""
+
+
 class Failure(Exception):
     """An operational error (exit 2)."""
 
@@ -650,6 +654,7 @@ def print_status(data):
 
 
 def publish(root, branch, args, data):
+    automatic = args.command == 'append' and args.allowed_sources is not None
     numbered = args.command == 'write' and args.path.endswith(('/next.md', '/next.toml'))
     name = next_path(root, args.path) if numbered else getattr(args, 'path', None)
     if args.command == 'write':
@@ -671,9 +676,8 @@ def publish(root, branch, args, data):
         if not commit(root, files, args.writer, message):
             print('record: unchanged')
             return 0
-        # Automatic publishers retry their durable outboxes on the next poll,
-        # keeping even push races to one push attempt per run.
-        attempts = 1 if args.command == 'append' and args.allowed_sources is not None else 5
+        # Retries add rejected attempts only: at most one push succeeds per run.
+        attempts = 5
         for attempt in range(attempts):
             result = git(root, 'push', '--porcelain', 'origin', f'HEAD:refs/heads/{branch}', check=False)
             if result.returncode == 0:
@@ -689,7 +693,9 @@ def publish(root, branch, args, data):
             if base == previous:
                 raise Failure(result.stderr.decode(errors='replace').strip() or 'push failed')
             if attempt == attempts - 1:
-                raise Refusal('push refused after one attempt' if attempts == 1 else 'push refused after five attempts')
+                reason = result.stderr.decode(errors='replace').strip() or 'push rejected'
+                raise (Deferred if automatic else Refusal)(
+                    f'push refused after five attempts: {reason}')
             if numbered and git(root, 'cat-file', '-e', f'{remote}:{name}', check=False).returncode == 0:
                 # Reallocate a claimed number; never merge two distinct judgements.
                 git(root, 'reset', '--hard', remote)
@@ -701,11 +707,12 @@ def publish(root, branch, args, data):
                 rebased = git(root, '-c', 'rebase.autoStash=false', 'rebase', remote, check=False)
                 if rebased.returncode:
                     git(root, 'rebase', '--abort', check=False)
-                    raise Refusal('rebase conflict; local write undone')
+                    raise (Deferred if automatic else Refusal)('rebase conflict; local write undone')
                 # A clean textual merge may still violate a size cap or schema.
                 for path in files:
                     validate(root, path, safe(root, path).read_bytes())
-            time.sleep(random.uniform(0.02, 0.08) * (2 ** attempt))
+            time.sleep(random.uniform(1, 5) if automatic else
+                       random.uniform(0.02, 0.08) * (2 ** attempt))
     except (Refusal, Failure, OSError):
         git(root, 'rebase', '--abort', check=False)
         git(root, 'reset', '--hard', base)
@@ -830,6 +837,9 @@ def main():
                 return publish(root, branch, args, data)
             data = Path(args.input_file).read_bytes() if args.input_file else sys.stdin.buffer.read()
             return publish(root, branch, args, data)
+    except Deferred as error:
+        print(f'record: {error}', file=sys.stderr)
+        return 3
     except Refusal as error:
         print(f'record: {error}', file=sys.stderr)
         return 1

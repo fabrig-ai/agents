@@ -9,6 +9,7 @@ from pathlib import Path
 import runpy
 import shlex
 import subprocess
+import sys
 import tempfile
 import tomllib
 import unittest
@@ -98,11 +99,19 @@ class RecordTests(unittest.TestCase):
         self.git(self.seed, 'commit', '-m', message)
         self.git(self.seed, 'push', 'origin', 'main')
 
-    def run_record(self, *args, data=b'', code=0, repo=None, **environment):
+    def run_record(self, *args, data=b'', code=0, repo=None, wait=True, **environment):
         env = dict(self.env, **environment)
         if repo is not None:
             env['RECORDS_REPO'] = str(repo)
-        result = subprocess.run([str(TOOL), *args], input=data, capture_output=True, env=env)
+        argv = [str(TOOL), *args]
+        if not wait:
+            program = ("import runpy, sys\nfrom unittest.mock import patch\n"
+                       "with patch('time.sleep') as sleep:\n"
+                       " status = runpy.run_path(sys.argv.pop(1))['main']()\n"
+                       " assert all(1 <= call.args[0] <= 5 for call in sleep.call_args_list)\n"
+                       " sys.exit(status)\n")
+            argv = [sys.executable, '-I', '-B', '-c', program, *argv]
+        result = subprocess.run(argv, input=data, capture_output=True, env=env)
         self.assertEqual(result.returncode, code, result.stdout.decode(errors='replace') + result.stderr.decode(errors='replace'))
         return result
 
@@ -237,25 +246,24 @@ class RecordTests(unittest.TestCase):
                 self.assertEqual(self.git(self.origin, 'rev-parse', 'main'), head)
                 self.assert_clean()
 
-    def test_automatic_append_defers_push_races_to_next_run(self):
+    def test_automatic_append_retries_twice_then_succeeds(self):
         self.prepare()
         for writer in ('collect', 'watch'):
             with self.subTest(writer=writer):
-                self.git(self.seed, 'pull', '--ff-only', 'origin', 'main')
-                (self.seed/'AGENTS.md').write_text('# ' + writer + '\n')
-                self.git(self.seed, 'add', 'AGENTS.md')
-                self.git(self.seed, 'commit', '-m', 'other writer')
-                counter = self.home/(writer + '-attempts')
-                hook = self.hook(self.clone,
+                counter = self.home / (writer + '-attempts')
+                self.hook(self.clone,
                     f'echo attempt >> {shlex.quote(str(counter))}\n'
-                    f'git -C {shlex.quote(str(self.seed))} push origin main >&2\n')
+                    f'if test "$(wc -l < {shlex.quote(str(counter))})" -le 2; then\n'
+                    f'git -C {shlex.quote(str(self.seed))} pull --ff-only origin main >&2\n'
+                    f'cp {shlex.quote(str(counter))} {shlex.quote(str(self.seed / "AGENTS.md"))}\n'
+                    f'git -C {shlex.quote(str(self.seed))} add AGENTS.md\n'
+                    f'git -C {shlex.quote(str(self.seed))} commit -m "advance origin" >&2\n'
+                    f'git -C {shlex.quote(str(self.seed))} push origin main >&2\nfi\n')
                 source = 'watch' if writer == 'watch' else 'queue'
                 data = self.event(writer).replace(b'queue', source.encode())
-                self.run_record('append', '--as', writer, source, 'hel8', data=data, code=1)
-                self.assertEqual(counter.read_text().splitlines(), ['attempt'])
-                self.assert_clean()
-                hook.unlink()
-                self.run_record('append', '--as', writer, source, 'hel8', data=data)
+                self.run_record('append', '--as', writer, source, 'hel8', data=data, wait=False)
+                self.assertEqual(len(counter.read_text().splitlines()), 3)
+                self.assertEqual((self.clone / f'events/{source}/hel8/2026-10-29.jsonl').read_bytes(), data)
                 self.assert_clean()
 
     def test_collector_identity_is_append_only(self):
@@ -463,6 +471,39 @@ class RecordTests(unittest.TestCase):
         self.assertIn(b'five attempts', refused.stderr)
         self.assertEqual(len(counter.read_text().splitlines()), 5)
         self.assert_clean()
+
+    def test_automatic_retry_limit_defers_and_resets_to_origin(self):
+        self.prepare()
+        counter = self.home / 'attempts'
+        self.hook(self.clone,
+                  f'git -C {shlex.quote(str(self.seed))} pull --ff-only origin main >&2\n'
+                  f'echo attempt >> {shlex.quote(str(counter))}\n'
+                  f'cp {shlex.quote(str(counter))} {shlex.quote(str(self.seed / "AGENTS.md"))}\n'
+                  f'git -C {shlex.quote(str(self.seed))} add AGENTS.md\n'
+                  f'git -C {shlex.quote(str(self.seed))} commit -m "advance origin" >&2\n'
+                  f'git -C {shlex.quote(str(self.seed))} push origin main >&2\n')
+        result = self.run_record('append', '--as', 'collect', '--batch', 'hel8',
+                                 data=self.event(), code=3, wait=False)
+        self.assertIn(b'five attempts', result.stderr)
+        self.assertEqual(len(counter.read_text().splitlines()), 5)
+        self.assert_clean()
+        self.assertFalse((self.clone / 'events').exists())
+
+    def test_automatic_conflict_defers_without_unfinished_rebase(self):
+        self.prepare()
+        name = 'events/queue/hel8/2026-10-29.jsonl'
+        path = self.seed / name
+        path.parent.mkdir(parents=True)
+        path.write_bytes(self.event('remote'))
+        self.git(self.seed, 'add', name)
+        self.git(self.seed, 'commit', '-m', 'conflicting event file')
+        self.hook(self.clone, f'git -C {shlex.quote(str(self.seed))} push origin main >&2\n')
+        result = self.run_record('append', '--as', 'collect', 'queue', 'hel8',
+                                 data=self.event('local'), code=3, wait=False)
+        self.assertIn(b'rebase conflict', result.stderr)
+        self.assertEqual((self.clone / name).read_bytes(), self.event('remote'))
+        self.assert_clean()
+        self.assertFalse((self.clone / '.git/rebase-merge').exists())
 
     def test_rebased_content_is_validated(self):
         original = b'# Start\n' + b'a' * 5000 + b'\n# End\n' + b'b' * 5000 + b'\n'
