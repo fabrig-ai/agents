@@ -1,0 +1,8 @@
+[collect]
+sources = ["runs", "queue", "heavy", "sessions", "claims", "leases", "post", "post-sent"]
+
+[watch]
+sources = ["watch"]
+
+[after-landing]
+sources = ["after-landing"]

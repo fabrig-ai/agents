@@ -249,12 +249,13 @@ class RecordTests(unittest.TestCase):
                 hook = self.hook(self.clone,
                     f'echo attempt >> {shlex.quote(str(counter))}\n'
                     f'git -C {shlex.quote(str(self.seed))} push origin main >&2\n')
-                data = self.event(writer)
-                self.run_record('append', '--as', writer, 'queue', 'hel8', data=data, code=1)
+                source = 'watch' if writer == 'watch' else 'queue'
+                data = self.event(writer).replace(b'queue', source.encode())
+                self.run_record('append', '--as', writer, source, 'hel8', data=data, code=1)
                 self.assertEqual(counter.read_text().splitlines(), ['attempt'])
                 self.assert_clean()
                 hook.unlink()
-                self.run_record('append', '--as', writer, 'queue', 'hel8', data=data)
+                self.run_record('append', '--as', writer, source, 'hel8', data=data)
                 self.assert_clean()
 
     def test_collector_identity_is_append_only(self):
@@ -263,8 +264,78 @@ class RecordTests(unittest.TestCase):
         self.run_record('write', '--as', 'collect', 'README.md', data=b'# No\n', code=1)
 
     def test_watch_identity_is_append_only(self):
-        self.run_record('append', '--as', 'watch', 'queue', 'hel8', data=self.event())
+        self.run_record('append', '--as', 'watch', 'watch', 'hel8',
+                        data=self.event().replace(b'queue', b'watch'))
         self.run_record('write', '--as', 'watch', 'README.md', data=b'# No\n', code=1)
+
+    @contextmanager
+    def writer_declaration(self, declaration):
+        # Exercise the adjacent declaration without changing the real tool files.
+        tool = self.home / 'tool' / 'record'
+        API['atomic_write'](tool, TOOL.read_bytes())
+        tool.chmod(0o755)
+        if declaration is not None:
+            API['atomic_write'](tool.with_name('writers.toml'), declaration)
+        with patch(__name__ + '.TOOL', tool):
+            yield
+
+    def test_writer_declaration_parsed(self):
+        self.assertEqual(API['append_writers'](), {
+            'collect': ['runs', 'queue', 'heavy', 'sessions', 'claims', 'leases', 'post', 'post-sent'],
+            'watch': ['watch'], 'after-landing': ['after-landing']})
+
+    def test_after_landing_source_and_atomic_batch_restrictions(self):
+        own = self.event().replace(b'queue', b'after-landing')
+        self.run_record('append', '--as', 'after-landing', 'after-landing', 'hel8', data=own)
+        head = self.git(self.origin, 'rev-parse', 'main')
+        for writer in ('collect', 'watch', 'after-landing'):
+            with self.subTest(writer=writer):
+                other = 'watch' if writer != 'watch' else 'queue'
+                self.run_record('append', '--as', writer, other, 'hel8',
+                                data=self.event().replace(b'queue', other.encode()), code=1)
+        self.run_record('append', '--as', 'after-landing', '--batch', 'hel8',
+                        data=own.replace(b'one', b'two') + self.event(), code=1)
+        self.assertEqual(head, self.git(self.origin, 'rev-parse', 'main'))
+        self.assertEqual((self.clone / 'events/after-landing/hel8/2026-10-29.jsonl').read_bytes(), own)
+        self.assertFalse((self.clone / 'events/queue').exists())
+        self.assert_clean()
+
+    def test_new_declaration_controls_sources_and_overrides_post_permissions(self):
+        with self.writer_declaration(b'[new-producer]\nsources = ["queue"]\n[ops]\nsources = ["watch"]\n'):
+            self.run_record('append', '--as', 'new-producer', 'queue', 'hel8', data=self.event())
+            self.run_record('append', '--as', 'ops', 'queue', 'hel8', data=self.event(), code=1)
+            for writer in ('new-producer', 'ops'):
+                self.run_record('write', '--as', writer, 'README.md', data=b'# No\n', code=1)
+        self.assert_clean()
+
+    def test_declared_writer_cannot_run_judgement_commands(self):
+        commands = [
+            ('write', 'README.md'),
+            ('draft', 'example', '--coordinator', 'multi', '--mailbox', 's/multi', '--source', 'draft.md'),
+            ('priority', 'set', 'example', '--reason', 'no'),
+            ('priority', 'show'),
+            ('ask', '--question', 'Q', '--option', 'a', '--recommendation', 'a', '--deadline', '+1'),
+            ('answer', '1', '--answer', 'a'),
+            ('questions',), ('status',),
+            ('decide', '--director', '--title', 'T', '--context', 'C', '--options', 'O',
+             '--decision', 'D', '--why', 'W'),
+        ]
+        for command in commands:
+            with self.subTest(command=command):
+                result = self.run_record(*command, '--as', 'after-landing', code=1)
+                self.assertIn(b'declared writer may only append', result.stderr)
+        self.assertFalse(self.clone.exists())
+
+    def test_malformed_declaration_refuses_every_append(self):
+        for declaration in (None, b'broken = [', b'\xff', b'', b'writer = "queue"',
+                            b'[writer]\nsources = "queue"', b'[writer]\nsources = []',
+                            b'[writer]\nsources = [1]', b'[writer]\nsources = ["../queue"]',
+                            b'[writer]\nsources = ["queue"]\nextra = true',
+                            b'["bad writer"]\nsources = ["queue"]'):
+            with self.subTest(declaration=declaration), self.writer_declaration(declaration):
+                for writer in ('ops', 'collect', 'watch', 'after-landing'):
+                    self.run_record('append', '--as', writer, 'queue', 'hel8', data=self.event(), code=2)
+        self.assertFalse(self.clone.exists())
 
     def test_write_show_pull_and_numbering(self):
         self.run_record('write', '--as', 's/multi', 'drafts/example/draft.toml', data=DRAFT)

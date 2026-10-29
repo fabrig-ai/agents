@@ -19,7 +19,11 @@ record show director/priorities.toml
 ```
 
 Writers are post names: `s/NAME`, `lead/[HANDLE/]NAME`, `director`, or `ops`;
-`collect` and `watch` are permitted for `append` only.
+append-only producers are declared in [writers.toml](writers.toml), beside the
+script. Add a writer table with its `sources` array and document its source and
+event kinds here. Declared writers can append only those sources (including in
+batches) and cannot use judgement commands. Invalid declarations fail every
+append with exit 2.
 `write` accepts one judgement file and `append` accepts JSON objects, one per
 line. Both read stdin unless `--from FILE` is supplied. `--message TEXT` sets
 the complete commit message; otherwise subjects name the writer and operation.
@@ -77,6 +81,15 @@ part = "collect"
 previews local facts. See [collector usage and limits](record-collect.md) for all
 eight sources, cursors, joins and snapshot/timestamp semantics.
 
+The `after-landing` producer appends source `after-landing` with these kinds:
+
+- `after-landing-run`: commit, suspects, verdict, per-pair counts and log paths.
+- `after-landing-test`: id `<commit>:<profile>:<binary>:<test>`; state `new`,
+  `standing`, `recovered` or `flaky`.
+
+Both join on `branch` and `commit` where known, carry log paths rather than log
+contents, and stay within the 16 KB line cap.
+
 ## Scheduled push rate
 
 With the declared timers, each collector invocation makes at most one push,
@@ -100,7 +113,7 @@ for the next scheduled run instead of adding retries within the same run.
 
 ## Races and recovery
 
-Every publish starts from origin/main. Automated `collect` and `watch` appends
+Every publish starts from origin/main. Declared append-only producer appends
 make at most one push attempt. On rejection they reset safely to origin and leave
 the caller's durable outbox for its next poll, preserving exact ids and timestamps.
 Other writers retain the retry behavior below.

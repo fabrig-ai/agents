@@ -42,6 +42,23 @@ def need(condition, message):
         raise Refusal(message)
 
 
+def append_writers():
+    path = Path(__file__).resolve().with_name('writers.toml')
+    try:
+        writers = tomllib.loads(path.read_text(encoding='utf-8'))
+    except (OSError, ValueError) as error:
+        raise Failure(f'{path}: cannot read writer declaration: {error}') from error
+    if not writers or any(
+            not re.fullmatch(rf'(?:{NAME}|{POST})', writer) or
+            not isinstance(entry, dict) or set(entry) != {'sources'} or
+            not isinstance(entry['sources'], list) or not entry['sources'] or
+            any(not isinstance(source, str) or not re.fullmatch('[a-z][a-z0-9-]*', source)
+                for source in entry['sources'])
+            for writer, entry in writers.items()):
+        raise Failure(f'{path}: invalid writer declaration')
+    return {writer: entry['sources'] for writer, entry in writers.items()}
+
+
 def git(root, *args, check=True, data=None):
     result = subprocess.run(
         ['git', '-C', str(root), *args], input=data, capture_output=True,
@@ -383,9 +400,11 @@ def check_tree(root, names):
     return 1 if failures else 0
 
 
-def append_files(root, source, host, data):
+def append_files(root, source, host, data, allowed_sources=None):
     need((source is None or re.fullmatch('[a-z][a-z0-9-]*', source)) and host_name(host),
          'invalid event source or host')
+    need(allowed_sources is None or source is None or source in allowed_sources,
+         'writer may not append this source')
     text_content(data, 'append input')
     groups = {}
     for number, line in enumerate(data.splitlines(), 1):
@@ -396,6 +415,8 @@ def append_files(root, source, host, data):
         row_source = source if source is not None else row.get('source')
         need(isinstance(row_source, str) and re.fullmatch('[a-z][a-z0-9-]*', row_source),
              f'{label}: invalid or missing source')
+        need(allowed_sources is None or row_source in allowed_sources,
+             f'{label}: writer may not append source {row_source}')
         stamp = event(row, row_source, host, label)
         name = f'events/{row_source}/{host}/{stamp}.jsonl'
         groups.setdefault(name, []).append((row['id'], line))
@@ -636,7 +657,7 @@ def publish(root, branch, args, data):
         files = {name: data}
         message = args.message or f'{args.writer}: write {name}'
     else:
-        files = append_files(root, args.source, args.host, data)
+        files = append_files(root, args.source, args.host, data, args.allowed_sources)
         message = args.message or f'{args.writer}: append {args.source or "batch"}/{args.host}'
     # Validate before any mutation. Keep bytes for exact recovery on every failure.
     for path, content in files.items():
@@ -652,7 +673,7 @@ def publish(root, branch, args, data):
             return 0
         # Automatic publishers retry their durable outboxes on the next poll,
         # keeping even push races to one push attempt per run.
-        attempts = 1 if args.command == 'append' and args.writer in ('collect', 'watch') else 5
+        attempts = 1 if args.command == 'append' and args.allowed_sources is not None else 5
         for attempt in range(attempts):
             result = git(root, 'push', '--porcelain', 'origin', f'HEAD:refs/heads/{branch}', check=False)
             if result.returncode == 0:
@@ -765,9 +786,12 @@ def main():
         branch = branch_override or 'main'
         need(branch_name(branch), 'invalid records branch')
         if hasattr(args, 'writer'):
-            need(re.fullmatch(POST, args.writer) or
-                 (args.command == 'append' and args.writer in ('collect', 'watch')),
-                 'invalid writer post name')
+            writers = append_writers()
+            args.allowed_sources = writers.get(args.writer)
+            if args.allowed_sources is not None:
+                need(args.command == 'append', 'invalid writer: declared writer may only append events')
+            else:
+                need(re.fullmatch(POST, args.writer), 'invalid writer post name')
         root = Path(os.environ.get('RECORDS_REPO', '~/src/fabrig/records')).expanduser().absolute()
         origin = os.environ.get('RECORDS_ORIGIN', ORIGIN)
         with repository(root, origin, branch):
