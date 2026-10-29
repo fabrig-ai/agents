@@ -19,10 +19,15 @@ Hook options: --role lead|coordinator, repeatable --name NAME / --name-prefix PR
 --coordinator MAILBOX, --handover PATH, --handle H. Stop also acts after a compaction;
 SessionStart source=compact adds the role's handover message. Name lookups are cached
 under SESSION_CONTEXT_STATE (default ~/.local/state/session-context), with a 10s timeout.
+Repeatable --watch ABSOLUTE_PATH adds notices when role sections change, with a
+silent first baseline. Notices use UserPromptSubmit, SessionStart resume/compact,
+or inactive Stop. Seen copies expire after seven idle days, checked once a day.
 Options: --window N (Claude; default 1000000), --threshold F (default 0.75).
 Exit 0 below the threshold, 3 at or past it (a hook exits 0 and says so in JSON).
 """
 import glob, json, os, subprocess, sys, tempfile
+import fcntl, hashlib, re, shutil, time
+from contextlib import contextmanager
 
 TAIL = 4 << 20  # the latest call is near the end: find it in the tail first
 
@@ -193,24 +198,157 @@ def has_compaction(path):
                for d in records(path))
 
 
-def hook(threshold, window, role=None, names=(), prefixes=(), coordinator=None, handover=None, handle=None):
+def state_directory():
+    return os.environ.get('SESSION_CONTEXT_STATE', os.path.expanduser('~/.local/state/session-context'))
+
+
+def atomic_write(path, data):
+    temporary = None
     try:
-        event = json.load(sys.stdin)
-    except ValueError:
-        return 0
+        with tempfile.NamedTemporaryFile(dir=os.path.dirname(path), prefix='.' + os.path.basename(path) + '.', delete=False) as stream:
+            temporary = stream.name  # mode 0600
+            stream.write(data)
+        os.replace(temporary, path)
+    finally:
+        if temporary and os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+@contextmanager
+def directory_lock(path):
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(descriptor)
+
+
+def cleanup_seen(state, seen, current):
+    """Serialize the daily sweep; keep active sessions and refreshable baselines."""
+    marker = os.path.join(state, 'seen-cleanup.json')
+    with directory_lock(seen):
+        try:
+            with open(marker) as stream:
+                last = float(json.load(stream))
+        except (OSError, ValueError, TypeError):
+            last = 0
+        now = time.time()
+        if now - last < 86400:
+            return
+        with os.scandir(seen) as entries:
+            for entry in entries:
+                if entry.path == current or not entry.is_dir(follow_symlinks=False):
+                    continue
+                if entry.stat().st_mtime < now - 7 * 86400:
+                    shutil.rmtree(entry.path)
+        atomic_write(marker, json.dumps(now).encode())
+
+
+def markdown_sections(text):
+    """Split level-2/3 ATX sections, ignoring heading-shaped code-fence contents."""
+    sections, occurrences = {}, {}
+    current = fence = None
+    for line in text.splitlines(keepends=True):
+        marker = re.match(r'^ {0,3}(`{3,}|~{3,})', line)
+        if fence:
+            if re.fullmatch(r' {0,3}' + re.escape(fence[0]) + '{' + str(len(fence)) + r',}\s*', line):
+                fence = None
+        elif marker:
+            fence = marker.group(1)
+        else:
+            heading = re.match(r'^ {0,3}(#{2,3})(?:[ \t]+(.*?))?[ \t]*\r?\n?$', line)
+            if heading:
+                title = re.sub(r'[ \t]+#+[ \t]*$', '', heading.group(2) or '')
+                identity = (len(heading.group(1)), title)
+                occurrences[identity] = occurrences.get(identity, 0) + 1
+                current = (*identity, occurrences[identity])
+                sections[current] = []
+                continue
+        if current is not None:
+            sections[current].append(line)
+    return {key: ''.join(body) for key, body in sections.items()}
+
+
+def changed_sections(before, after):
+    old, new = markdown_sections(before), markdown_sections(after)
+    keys = [key for key in old if key not in new or old[key] != new[key]]
+    keys += [key for key in new if key not in old]
+    labels = [key[1] for key in keys]
+    if not labels:
+        return 'none (text before the first heading)'
+    return ', '.join(labels[:8]) + (f' and {len(labels) - 8} more' if len(labels) > 8 else '')
+
+
+def snapshot_path(directory, path, digest):
+    key = hashlib.sha256(path.encode()).hexdigest()
+    return os.path.join(directory, key + '-' + digest + '.md')
+
+
+def role_drift(session, watches, deliver):
+    if not watches or not isinstance(session, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]*', session):
+        return []
+    state = state_directory()
+    seen = os.path.join(state, 'seen')
+    directory = os.path.join(seen, session)
+    for path in (state, seen, directory):
+        os.makedirs(path, mode=0o700, exist_ok=True)
+        os.chmod(path, 0o700)
+    # Retention is based on activity, so an old but still running session is kept.
+    os.utime(directory, None)
+    cleanup_seen(state, seen, directory)
+    with directory_lock(directory):
+        index_path = os.path.join(directory, 'index.json')
+        try:
+            with open(index_path) as stream:
+                index = json.load(stream)
+            if not isinstance(index, dict):
+                index = {}
+        except (OSError, ValueError):
+            index = {}
+        notices, updates, obsolete = [], {}, []
+        for path in dict.fromkeys(watches):
+            try:
+                with open(path, 'rb') as stream:
+                    data = stream.read()
+            except OSError:
+                continue  # Missing files are never a deletion notice.
+            digest = hashlib.sha256(data).hexdigest()
+            previous = index.get(path)
+            if previous == digest:
+                continue
+            known = isinstance(previous, str) and re.fullmatch(r'[0-9a-f]{64}', previous)
+            if known:
+                if not deliver:
+                    continue  # Do not consume a change that this event cannot deliver.
+                old_path = snapshot_path(directory, path, previous)
+                with open(old_path, 'rb') as stream:
+                    old = stream.read()
+                sections = changed_sections(old.decode('utf-8', errors='replace'), data.decode('utf-8', errors='replace'))
+                notices.append(f'{path} changed since you last read it ({previous[:8]} -> {digest[:8]}): '
+                               f'sections {sections}. Re-read those sections before acting.')
+                obsolete.append(old_path)
+            atomic_write(snapshot_path(directory, path, digest), data)
+            updates[path] = digest
+        if updates or not os.path.exists(index_path):
+            index.update(updates)
+            atomic_write(index_path, (json.dumps(index) + '\n').encode())
+            for path in obsolete:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass  # Retiring an old snapshot must not hide a committed notice.
+        return notices
+
+
+def handover_message(event, threshold, window, role, coordinator, handover, handle):
     kind = event.get('hook_event_name')
-    if kind not in ('Stop', 'SessionStart') or (kind == 'SessionStart' and event.get('source') != 'compact'):
-        return 0
-    if kind == 'Stop' and event.get('stop_hook_active'):
-        return 0  # the session is already continuing because of this hook: never loop
-    if names or prefixes:
-        name = hook_name(event.get('session_id'))
-        if name is None or not (name in names or any(name.startswith(prefix) for prefix in prefixes)):
-            return 0
+    if not (kind == 'Stop' or (kind == 'SessionStart' and event.get('source') == 'compact')):
+        return ''
     path = event.get('transcript_path')
     exists = bool(path and os.path.isfile(path))
     if kind == 'Stop' and not exists:
-        return 0
+        return ''
     try:
         reached, line = report(*claude_usage(path, window, counts=False, tail_only=True), threshold)
     except (OSError, SystemExit, TypeError):
@@ -218,25 +356,51 @@ def hook(threshold, window, role=None, names=(), prefixes=(), coordinator=None, 
     # A reached threshold already requires handover; avoid scanning a large transcript twice.
     compacted = kind == 'SessionStart' or (not reached and exists and has_compaction(path))
     if kind == 'Stop' and not (reached or compacted):
-        return 0
+        return ''
     if compacted:
         line += '; compaction detected: hand over now'
     if role == 'lead':
-        message = (f"{line}. End now, as agents/lead.md 4 says: bring state.md and common.md current, "
-                   f"send your coordinator what the design should say, stop your waiter, post `files current` "
-                   f"to {coordinator}, then read no mail and change no file.")
-    elif role == 'coordinator':
-        message = (f"{line}. Hand over now, as agents/operations.md 7 says: bring {handover} current "
-                   f"(its 'For my successor' section), start your successor with "
-                   f"`tools/session/start coordinator {handle} --next`, then warm-up and takeover. "
-                   "If your handover is already under way, carry on with it.")
-    else:
-        message = (f'{line}. Start your handover now, as your role says (agents/operations.md 7; '
-                   'a lead ends as agents/lead.md 4 says).')
+        return (f"{line}. End now, as agents/lead.md 4 says: bring state.md and common.md current, "
+                f"send your coordinator what the design should say, stop your waiter, post `files current` "
+                f"to {coordinator}, then read no mail and change no file.")
+    if role == 'coordinator':
+        return (f"{line}. Hand over now, as agents/operations.md 7 says: bring {handover} current "
+                f"(its 'For my successor' section), start your successor with "
+                f"`tools/session/start coordinator {handle} --next`, then warm-up and takeover. "
+                "If your handover is already under way, carry on with it.")
+    return (f'{line}. Start your handover now, as your role says (agents/operations.md 7; '
+            'a lead ends as agents/lead.md 4 says).')
+
+
+def hook(threshold, window, role=None, names=(), prefixes=(), coordinator=None, handover=None, handle=None, watches=()):
+    try:
+        event = json.load(sys.stdin)
+    except ValueError:
+        return 0
+    kind = event.get('hook_event_name')
+    if not watches and not (kind == 'Stop' or (kind == 'SessionStart' and event.get('source') == 'compact')):
+        return 0
+    active_stop = kind == 'Stop' and event.get('stop_hook_active')
+    if active_stop and not watches:
+        return 0  # the session is already continuing because of this hook: never loop
+    if names or prefixes:
+        name = hook_name(event.get('session_id'))
+        if name is None or not (name in names or any(name.startswith(prefix) for prefix in prefixes)):
+            return 0
+    deliver = not active_stop and (kind in ('UserPromptSubmit', 'Stop') or
+                                  (kind == 'SessionStart' and event.get('source') in ('resume', 'compact')))
+    message = '' if active_stop else handover_message(event, threshold, window, role, coordinator, handover, handle)
+    try:
+        notices = role_drift(event.get('session_id'), watches, deliver)
+    except (OSError, ValueError, TypeError):
+        notices = []  # An unavailable drift store must not suppress a due handover.
+    message = '\n\n'.join(text for text in [message, *notices] if text)
+    if not message:
+        return 0
     if kind == 'Stop':
         print(json.dumps({'decision': 'block', 'reason': message}))
     else:
-        print(json.dumps({'hookSpecificOutput': {'hookEventName': 'SessionStart', 'additionalContext': message}}))
+        print(json.dumps({'hookSpecificOutput': {'hookEventName': kind, 'additionalContext': message}}))
     return 0
 
 
@@ -253,11 +417,12 @@ def main(argv):
 def dispatch(argv):
     if argv == ['--capabilities']:
         print('hook-gating')
+        print('role-drift')
         return 0
     window, threshold, session, cwd, codex, as_hook = 1_000_000, 0.75, None, os.getcwd(), None, False
     as_hook = '--hook' in argv
     role = coordinator = handover = handle = None
-    names, prefixes = [], []
+    names, prefixes, watches = [], [], []
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -274,13 +439,17 @@ def dispatch(argv):
         elif as_hook and a == '--coordinator': coordinator = argv[i + 1]; i += 2
         elif as_hook and a == '--handover': handover = argv[i + 1]; i += 2
         elif as_hook and a == '--handle': handle = argv[i + 1]; i += 2
+        elif as_hook and a == '--watch':
+            path = argv[i + 1]; i += 2
+            if not os.path.isabs(path): raise ValueError('--watch requires an absolute path')
+            watches.append(path)
         elif a == '--codex': codex = argv[i + 1]; i += 2
         elif a == '--owner': codex = owner_thread(argv[i + 1]); i += 2
         elif a == '--hook': as_hook = True; i += 1
         elif a in ('-h', '--help'): print(__doc__); return 0
         else: session = a; i += 1
     if as_hook:
-        return hook(threshold, window, role, names, prefixes, coordinator, handover, handle)
+        return hook(threshold, window, role, names, prefixes, coordinator, handover, handle, watches)
     usage = codex_usage(codex) if codex else claude_usage(claude_transcript(session, cwd), window)
     reached, line = report(*usage, threshold)
     print(line)
