@@ -9,7 +9,7 @@ import time
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from session_lib import (ROOT, AREAS, clone, create_empty, gating_available, list_sessions,
+from session_lib import (ROOT, AREAS, clone, create_empty, session_capabilities, list_sessions,
                          live_session, names, publish_settings, recent_warmup, record_warmup,
                          render, session_id, state_time)
 
@@ -34,12 +34,12 @@ def main():
     try:
         values = names(args.handle, getattr(args, "area", None))
         if args.role == "wire":
-            capable = gating_available()
-            publish_settings(values, "coordinator", capable, args.dry_run)
+            capabilities = session_capabilities()
+            publish_settings(values, "coordinator", capabilities, args.dry_run)
             for area in AREAS:
                 lead = names(args.handle, area)
                 if Path(lead["lead_start_dir"]).is_dir():
-                    publish_settings(lead, "lead", capable, args.dry_run)
+                    publish_settings(lead, "lead", capabilities, args.dry_run)
             return 0
         if args.role == "lead":
             scratch = Path(values["lead_scratch"])
@@ -60,12 +60,12 @@ def main():
         if args.model is not None:
             argv += ["--model", args.model]
         argv += ["--effort", args.effort, prompt]
-        capable = gating_available()
+        capabilities = session_capabilities()
         if args.dry_run:
             print(f"cwd={cwd}")
             print(f"argv={shlex.join(argv)}")
             print(f"prompt:\n{prompt}", flush=True)
-            publish_settings(values, args.role, capable, True)
+            publish_settings(values, args.role, capabilities, True)
         sessions = list_sessions()
         live = live_session(name, sessions)
         if live is not None:
@@ -86,7 +86,7 @@ def main():
                 clone(scratch / directory)
         elif not args.next:
             clone(Path(values["coordinator_clone"]))
-        publish_settings(values, args.role, capable, False)
+        publish_settings(values, args.role, capabilities, False)
         started_at = time.time()
         result = subprocess.run(argv, cwd=cwd, capture_output=True, text=True)
         if result.returncode:

@@ -64,7 +64,7 @@ Exit codes: 0 success, 1 refused, 2 usage/configuration/command error.
 
 `start` writes `<start dir>/.claude/settings.json` before launching. `wire` writes
 the coordinator's file and each existing lead start directory's file, starting
-nothing. Replace the whole `Stop` and `SessionStart` hook entries, preserving all
+nothing. Replace the owned `Stop`, `SessionStart` and `UserPromptSubmit` entries, preserving all
 other settings and hooks. Files are published by sibling rename.
 
 Probe PATH's `session-context --capabilities` once per invocation. With
@@ -76,6 +76,19 @@ uses matcher `compact`. If the probe fails or lacks `hook-gating`, explain why:
 leads get only plain `session-context --hook` as Stop; coordinators get neither
 owned hook. New hook options never reach the legacy copy. Do not change installed
 links until the factory move.
+
+With `role-drift` too, all three events use the same command with repeatable
+`--watch` paths; SessionStart has no matcher. `watched(role, handle, area)` holds
+the paths: main's AGENTS.md, the role and operations files, plus a lead's scratch
+brief or, for a coordinator, the lead role. Ledger and backlog are excluded.
+Without this capability, retain the launch-2 entries and pass no watch arguments.
+
+Watched files get a silent first baseline under `seen/SESSION_ID/` in the state
+directory, with 0700 directories, 0600 copies/index and sibling renames. Notices
+name changed level-2/3 headings (eight maximum) and deliver once on prompt submit,
+resume/compact SessionStart or inactive Stop; a due handover comes first in the
+same output. Non-delivery events leave changes pending. Cleanup runs daily and
+removes sessions idle over seven days.
 
 `session-context` caches resolved session names in a private, atomically replaced
 `names.json` under `SESSION_CONTEXT_STATE` (default

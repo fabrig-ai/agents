@@ -128,25 +128,41 @@ def atomic_json(path, value):
             temporary.unlink(missing_ok=True)
 
 
-def gating_available():
+def session_capabilities():
     try:
         result = subprocess.run(["session-context", "--capabilities"], capture_output=True,
                                 text=True, timeout=10)
-        return result.returncode == 0 and "hook-gating" in result.stdout.splitlines()
+        return set(result.stdout.splitlines()) if result.returncode == 0 else set()
     except (OSError, subprocess.SubprocessError):
-        return False
+        return set()
 
 
-def hook_settings(values, role, capable):
+def watched(role, handle, area=None):
+    """All live role paths live here, ready for the factory's eventual move."""
+    values = names(handle, area)
+    root = Path.home() / "src/fabrig/main"
+    paths = [root / "AGENTS.md", root / "agents" / f"{role}.md", root / "agents/operations.md"]
+    if role == "lead":
+        if area is None:
+            raise ValueError("a lead's watched files require an area")
+        paths.append(Path(values["lead_scratch"]) / "brief.md")
+    elif role == "coordinator":
+        paths.append(root / "agents/lead.md")
+    else:
+        raise ValueError(f"unknown role: {role}")
+    return [str(path) for path in paths]
+
+
+def hook_settings(values, role, capabilities):
     directory = values["lead_start_dir" if role == "lead" else "coordinator_start_dir"]
     path = Path(directory) / ".claude/settings.json"
     settings = json.loads(path.read_text()) if path.exists() else {}
     if not isinstance(settings, dict) or not isinstance(settings.get("hooks", {}), dict):
         raise ValueError(f"invalid settings object: {path}")
     hooks = settings.setdefault("hooks", {})
-    for event in ("Stop", "SessionStart"):
+    for event in ("Stop", "SessionStart", "UserPromptSubmit"):
         hooks.pop(event, None)
-    if capable:
+    if "hook-gating" in capabilities:
         command = ["session-context", "--hook", "--role", role]
         if role == "lead":
             command += ["--name", values["lead_name"]]
@@ -156,10 +172,16 @@ def hook_settings(values, role, capable):
                 command += ["--name", values["coordinator_legacy_name"]]
         command += ["--coordinator", values["coordinator_address"],
                     "--handover", values["coordinator_handover"], "--handle", values["handle"]]
+        drift = "role-drift" in capabilities
+        if drift:
+            for watch_path in watched(role, values["handle"], values.get("area")):
+                command += ["--watch", watch_path]
         hook = {"type": "command", "command": shlex.join(command), "timeout": 30}
         hooks["Stop"] = [{"hooks": [hook]}]
-        hooks["SessionStart"] = [{"matcher": "compact", "hooks": [hook.copy()]}]
-        reason = "hook-gating available"
+        hooks["SessionStart"] = [{"hooks": [hook.copy()]} if drift else {"matcher": "compact", "hooks": [hook.copy()]}]
+        if drift:
+            hooks["UserPromptSubmit"] = [{"hooks": [hook.copy()]}]
+        reason = "hook-gating and role-drift available" if drift else "hook-gating available"
     elif role == "lead":
         hooks["Stop"] = [{"hooks": [{"type": "command", "command": "session-context --hook", "timeout": 30}]}]
         reason = "PATH session-context lacks hook-gating; using the plain legacy Stop hook"
@@ -170,8 +192,8 @@ def hook_settings(values, role, capable):
     return path, settings, reason
 
 
-def publish_settings(values, role, capable, dry_run):
-    path, settings, reason = hook_settings(values, role, capable)
+def publish_settings(values, role, capabilities, dry_run):
+    path, settings, reason = hook_settings(values, role, capabilities)
     print(f"settings={path}: {reason}")
     if dry_run:
         print(json.dumps(settings, indent=2))
