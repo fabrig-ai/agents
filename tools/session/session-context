@@ -209,13 +209,14 @@ def hook(threshold, window, role=None, names=(), prefixes=(), coordinator=None, 
             return 0
     path = event.get('transcript_path')
     exists = bool(path and os.path.isfile(path))
-    compacted = exists and has_compaction(path) if kind == 'Stop' else True
     if kind == 'Stop' and not exists:
         return 0
     try:
         reached, line = report(*claude_usage(path, window, counts=False, tail_only=True), threshold)
     except (OSError, SystemExit, TypeError):
         reached, line = False, 'Session usage unavailable'
+    # A reached threshold already requires handover; avoid scanning a large transcript twice.
+    compacted = kind == 'SessionStart' or (not reached and exists and has_compaction(path))
     if kind == 'Stop' and not (reached or compacted):
         return 0
     if compacted:
