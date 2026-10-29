@@ -1,13 +1,16 @@
 """Registry, naming and launch support; Python standard library only."""
 
 import json
+from datetime import datetime, UTC
 import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
 from string import Template
 import tempfile
 import tomllib
+import time
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -56,7 +59,9 @@ def names(handle, area=None):
         "handle": handle,
         "coordinator_mailbox": entry["mailbox"],
         "coordinator_address": entry["mailbox"] + "@hel8",
-        "coordinator_name": entry["mailbox"],
+        "coordinator_name_prefix": f"coordinator/{handle}/",
+        "coordinator_name": f"coordinator/{handle}/{datetime.now(UTC):%Y%m%dT%H%MZ}",
+        "coordinator_legacy_name": "coord-next" if default else "",
         "coordinator_start_dir": str(start),
         "coordinator_handover": str(supervise / "handover.md" if default else start / "handover.md"),
         "coordinator_branch_prefix": "coord" if default else handle,
@@ -92,17 +97,117 @@ def render(template, values):
     return Template(template.read_text()).substitute(values)
 
 
-def live_session(name):
+def list_sessions():
     result = subprocess.run(["claude", "agents", "--json"], capture_output=True, text=True, check=True)
     sessions = json.loads(result.stdout)
     if not isinstance(sessions, list) or any(not isinstance(item, dict) for item in sessions):
         raise ValueError("claude agents --json must return a list of sessions")
-    for session in sessions:
+    return sessions
+
+
+def live_session(name, sessions=None):
+    for session in list_sessions() if sessions is None else sessions:
         if session.get("name") == name:
             status = session.get("status", session.get("state", "unknown"))
             if status not in ("stopped", "completed"):
                 return session
     return None
+
+
+def atomic_json(path, value):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, prefix=f".{path.name}.", delete=False) as stream:
+            temporary = Path(stream.name)
+            json.dump(value, stream, indent=2)
+            stream.write("\n")
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def gating_available():
+    try:
+        result = subprocess.run(["session-context", "--capabilities"], capture_output=True,
+                                text=True, timeout=10)
+        return result.returncode == 0 and "hook-gating" in result.stdout.splitlines()
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def hook_settings(values, role, capable):
+    directory = values["lead_start_dir" if role == "lead" else "coordinator_start_dir"]
+    path = Path(directory) / ".claude/settings.json"
+    settings = json.loads(path.read_text()) if path.exists() else {}
+    if not isinstance(settings, dict) or not isinstance(settings.get("hooks", {}), dict):
+        raise ValueError(f"invalid settings object: {path}")
+    hooks = settings.setdefault("hooks", {})
+    for event in ("Stop", "SessionStart"):
+        hooks.pop(event, None)
+    if capable:
+        command = ["session-context", "--hook", "--role", role]
+        if role == "lead":
+            command += ["--name", values["lead_name"]]
+        else:
+            command += ["--name-prefix", values["coordinator_name_prefix"]]
+            if values["coordinator_legacy_name"]:
+                command += ["--name", values["coordinator_legacy_name"]]
+        command += ["--coordinator", values["coordinator_address"],
+                    "--handover", values["coordinator_handover"], "--handle", values["handle"]]
+        hook = {"type": "command", "command": shlex.join(command), "timeout": 30}
+        hooks["Stop"] = [{"hooks": [hook]}]
+        hooks["SessionStart"] = [{"matcher": "compact", "hooks": [hook.copy()]}]
+        reason = "hook-gating available"
+    elif role == "lead":
+        hooks["Stop"] = [{"hooks": [{"type": "command", "command": "session-context --hook", "timeout": 30}]}]
+        reason = "PATH session-context lacks hook-gating; using the plain legacy Stop hook"
+    else:
+        reason = "coordinator hooks skipped: PATH session-context lacks hook-gating"
+    if not hooks:
+        settings.pop("hooks")
+    return path, settings, reason
+
+
+def publish_settings(values, role, capable, dry_run):
+    path, settings, reason = hook_settings(values, role, capable)
+    print(f"settings={path}: {reason}")
+    if dry_run:
+        print(json.dumps(settings, indent=2))
+    else:
+        atomic_json(path, settings)
+
+
+def warmup_state_path():
+    return Path.home() / ".local/state/session-start/warmups.json"
+
+
+def warmup_records():
+    path = warmup_state_path()
+    records = json.loads(path.read_text()) if path.exists() else {}
+    if not isinstance(records, dict):
+        raise ValueError(f"invalid warm-up state: {path}")
+    return records
+
+
+def recent_warmup(values, sessions):
+    records = warmup_records()
+    for session in sessions:
+        name = session.get("name", "")
+        record = records.get(name, {})
+        if (name.startswith(values["coordinator_name_prefix"])
+                and record.get("next") is True
+                and time.time() - record.get("started_at", 0) < 7200
+                and live_session(name, [session]) is not None):
+            return name
+    return None
+
+
+def record_warmup(name, identifier, started_at):
+    records = warmup_records()
+    records[name] = {"next": True, "started_at": started_at, "session_id": identifier}
+    atomic_json(warmup_state_path(), records)
 
 
 def create_empty(path):

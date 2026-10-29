@@ -3,12 +3,14 @@
 import importlib.util
 import json
 import os
+import shlex
 from pathlib import Path
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+import time
 from unittest.mock import patch
 
 
@@ -44,12 +46,18 @@ if pathlib.Path(sys.argv[0]).name == "claude":
         sys.exit(int(os.environ.get("FAKE_AGENTS_EXIT", "0")))
     print(os.environ.get("FAKE_LAUNCH", "Started background agent. Session ID: 12345678-abcd-4321-8765-123456789abc"))
     sys.exit(int(os.environ.get("FAKE_LAUNCH_EXIT", "0")))
+elif pathlib.Path(sys.argv[0]).name == "session-context":
+    assert sys.argv[1:] == ["--capabilities"]
+    if os.environ.get("FAKE_GATING", "1") == "1":
+        print("hook-gating")
+    else:
+        sys.exit(1)
 else:
     if os.environ.get("FAKE_GIT_EXIT"):
         sys.exit(int(os.environ["FAKE_GIT_EXIT"]))
     pathlib.Path(sys.argv[-1]).mkdir()
 '''
-        for command in ("claude", "git"):
+        for command in ("claude", "git", "session-context"):
             path = self.bin / command
             path.write_text(fake)
             path.chmod(0o755)
@@ -68,6 +76,10 @@ else:
         )
 
     def calls(self):
+        # Existing launch assertions exclude the separately tested capability probe.
+        return [call for call in self.all_calls() if call["tool"] != "session-context"]
+
+    def all_calls(self):
         return [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
 
     def brief(self, handle="dm", area="skein"):
@@ -97,6 +109,8 @@ class NamesTests(Sandbox):
                 self.assertEqual(value["coordinator_mailbox"], mailbox)
                 self.assertEqual(value["coordinator_address"], mailbox + "@hel8")
                 self.assertEqual(value["warmup_name"], warmup)
+                self.assertEqual(value["coordinator_name_prefix"], f"coordinator/{handle}/")
+                self.assertRegex(value["coordinator_name"], rf"^coordinator/{handle}/\d{{8}}T\d{{4}}Z$")
                 self.assertEqual(value["lead_mail_dir"], str(self.home / "src/rust/tmp/post" / lead.replace("/", "+") / "cur"))
         for area in lib.AREAS:
             self.assertEqual(lib.names("ab", area)["branch_key"], f"ab-{area}")
@@ -178,7 +192,7 @@ class LaunchTests(Sandbox):
 
     def test_live_coordinator_and_warmup_refuse(self):
         for handle in ("dm", "ab"):
-            for extra, key in (((), "coordinator_name"), (("--next",), "warmup_name")):
+            for extra, key in (((), "coordinator_name"), (("--next",), "coordinator_name")):
                 name = lib.names(handle)[key]
                 self.env["FAKE_AGENTS"] = json.dumps([{"name": name, "status": "idle"}])
                 result = self.command("start", "coordinator", handle, *extra)
@@ -233,7 +247,7 @@ class LaunchTests(Sandbox):
         (scratch / "state.md").write_text("Updated 2026-10-29T06:12Z\n")
         result = self.command("start", "lead", "ab", "smith", "--model", "a model", "--effort", "medium")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.strip(), "12345678-abcd-4321-8765-123456789abc")
+        self.assertEqual(result.stdout.splitlines()[-1], "12345678-abcd-4321-8765-123456789abc")
         calls = self.calls()
         self.assertEqual(calls[0]["argv"], ["agents", "--json"])
         launch = calls[-1]
@@ -250,7 +264,7 @@ class LaunchTests(Sandbox):
         self.brief()
         self.assertEqual(self.command("start", "lead", "dm", "skein").returncode, 0)
         launch = self.calls()[-1]
-        self.assertEqual(launch["argv"][:-1], ["--bg", "--name", "lead/skein", "--model", "opus", "--effort", "high"])
+        self.assertEqual(launch["argv"][:-1], ["--bg", "--name", "lead/skein", "--effort", "high"])
         self.assertIn("written (unknown)", launch["argv"][-1])
 
     def test_fresh_coordinator_reads_own_clone_and_brief(self):
@@ -259,7 +273,7 @@ class LaunchTests(Sandbox):
         self.assertEqual(result.returncode, 0, result.stderr)
         launch = self.calls()[-1]
         self.assertEqual(launch["cwd"], value["coordinator_start_dir"])
-        self.assertEqual(launch["argv"][:-1], ["--bg", "--name", "s/another-draft", "--model", "opus", "--effort", "xhigh"])
+        self.assertEqual(launch["argv"][:-1], ["--bg", "--name", value["coordinator_name"], "--effort", "xhigh"])
         for text in (value["coordinator_handover"], value["coordinator_clone"], value["coordinator_brief"], "agents/coordinator.md", "post wait s/another-draft", "plan files it names"):
             self.assertIn(text, launch["argv"][-1])
         self.assertTrue(Path(value["coordinator_clone"]).is_dir())
@@ -270,7 +284,7 @@ class LaunchTests(Sandbox):
             self.assertEqual(result.returncode, 0, result.stderr)
             value = lib.names(handle)
             launch = self.calls()[-1]
-            self.assertEqual(launch["argv"][:-1], ["--bg", "--name", value["warmup_name"], "--model", "custom", "--effort", "high"])
+            self.assertEqual(launch["argv"][:-1], ["--bg", "--name", value["coordinator_name"], "--model", "custom", "--effort", "high"])
             self.assertEqual(launch["cwd"], value["coordinator_start_dir"])
             self.assertIn(value["coordinator_address"], launch["argv"][-1])
             self.assertIn(value["coordinator_handover"], launch["argv"][-1])
@@ -298,7 +312,7 @@ class LaunchTests(Sandbox):
                 self.env["FAKE_LAUNCH"] = output
                 result = self.command("start", "lead", "dm", "skein")
                 self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(result.stdout.strip(), expected)
+                self.assertEqual(result.stdout.splitlines()[-1], expected)
 
     def test_bad_agents_output_or_failure_never_launches(self):
         self.brief()
@@ -333,6 +347,160 @@ class LaunchTests(Sandbox):
         self.assertEqual(self.command("start", "coordinator", "dm").returncode, 2)
         self.assertEqual(self.command("names", "dm").returncode, 2)
         self.assertEqual(self.calls(), [])
+
+
+class WiringTests(Sandbox):
+    def test_owned_hooks_replaced_other_settings_preserved(self):
+        values = lib.names("dm", "jig")
+        path = Path(values["lead_start_dir"]) / ".claude/settings.json"
+        path.parent.mkdir(parents=True)
+        original = {"model": "opus[1m]", "permissions": {"allow": ["Read"]},
+                    "hooks": {"Stop": [{"old": True}], "SessionStart": [{"old": True}],
+                              "PreToolUse": [{"other": True}]}}
+        path.write_text(json.dumps(original))
+        result = self.command("start", "wire", "dm")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        settings = json.loads(path.read_text())
+        self.assertEqual(settings["model"], original["model"])
+        self.assertEqual(settings["permissions"], original["permissions"])
+        self.assertEqual(settings["hooks"]["PreToolUse"], original["hooks"]["PreToolUse"])
+        self.assertEqual(len(settings["hooks"]["Stop"]), 1)
+        self.assertNotIn("old", str(settings))
+        stop = settings["hooks"]["Stop"][0]["hooks"][0]
+        self.assertEqual(stop["timeout"], 30)
+        self.assertEqual(shlex.split(stop["command"]), [
+            "session-context", "--hook", "--role", "lead", "--name", "lead/jig",
+            "--coordinator", "s/dynamic-memory@hel8", "--handover", values["coordinator_handover"], "--handle", "dm",
+        ])
+        self.assertEqual(settings["hooks"]["SessionStart"], [{"matcher": "compact", "hooks": [stop]}])
+        self.assertEqual(self.calls(), [])
+        self.assertEqual(len(self.all_calls()), 1)
+        self.assertEqual(self.all_calls()[0]["argv"], ["--capabilities"])
+        self.assertEqual([p.name for p in path.parent.iterdir()], ["settings.json"])
+        self.assertFalse(Path(lib.names("dm", "skein")["lead_start_dir"]).exists())
+
+    def test_shell_quoting_and_coordinator_gates(self):
+        values = lib.names("dm")
+        values["coordinator_handover"] = str(self.home / "a handover's $file; `literal`.md")
+        _, settings, _ = lib.hook_settings(values, "coordinator", True)
+        command = settings["hooks"]["Stop"][0]["hooks"][0]["command"]
+        argv = shlex.split(command)
+        self.assertEqual(argv[argv.index("--handover") + 1], values["coordinator_handover"])
+        self.assertEqual(argv[argv.index("--name-prefix") + 1], "coordinator/dm/")
+        self.assertEqual(argv[argv.index("--name") + 1], "coord-next")
+        _, settings, _ = lib.hook_settings(lib.names("ab"), "coordinator", True)
+        argv = shlex.split(settings["hooks"]["Stop"][0]["hooks"][0]["command"])
+        self.assertNotIn("--name", argv)
+        self.assertIn("coordinator/ab/", argv)
+
+    def test_legacy_capabilities_only_plain_lead_stop_and_no_coordinator_hooks(self):
+        self.env["FAKE_GATING"] = "0"
+        for role, values in (("lead", lib.names("dm", "skein")), ("coordinator", lib.names("dm"))):
+            path, _, _ = lib.hook_settings(values, role, True)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"keep": True, "hooks": {"Stop": ["old"], "SessionStart": ["old"], "Notification": ["keep"]}}))
+        result = self.command("start", "wire", "dm")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("lacks hook-gating", result.stdout)
+        self.assertIn("coordinator hooks skipped", result.stdout)
+        for role, values in (("lead", lib.names("dm", "skein")), ("coordinator", lib.names("dm"))):
+            path, _, _ = lib.hook_settings(values, role, True)
+            settings = json.loads(path.read_text())
+            self.assertTrue(settings["keep"])
+            self.assertEqual(settings["hooks"]["Notification"], ["keep"])
+            self.assertNotIn("SessionStart", settings["hooks"])
+            if role == "lead":
+                self.assertEqual(settings["hooks"]["Stop"][0]["hooks"][0]["command"], "session-context --hook")
+            else:
+                self.assertNotIn("Stop", settings["hooks"])
+        self.assertEqual([call["argv"] for call in self.all_calls()], [["--capabilities"]])
+
+    def test_start_writes_hooks_with_both_capabilities(self):
+        scratch = self.brief()
+        for gating in ("1", "0"):
+            self.env["FAKE_GATING"] = gating
+            result = self.command("start", "lead", "dm", "skein")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            path = Path(lib.names("dm", "skein")["lead_start_dir"]) / ".claude/settings.json"
+            hooks = json.loads(path.read_text())["hooks"]
+            command = hooks["Stop"][0]["hooks"][0]["command"]
+            self.assertEqual("--name lead/skein" in command, gating == "1")
+            self.assertEqual("SessionStart" in hooks, gating == "1")
+        self.assertEqual((scratch / "brief.md").read_text(), "Work on the named part.\n")
+
+    def test_wire_dry_run_creates_nothing_and_only_visits_existing_leads(self):
+        for area in ("jig", "temper"):
+            Path(lib.names("dm", area)["lead_start_dir"]).mkdir(parents=True)
+        before = sorted(str(path) for path in self.home.rglob("*"))
+        result = self.command("start", "wire", "dm", "--dry-run")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("coordinator/dm/", result.stdout)
+        self.assertIn("coord-next", result.stdout)
+        self.assertIn("lead/jig", result.stdout)
+        self.assertIn("lead/temper", result.stdout)
+        self.assertNotIn("lead/skein", result.stdout)
+        self.assertEqual(before, sorted(str(path) for path in self.home.rglob("*")))
+        self.assertEqual(self.calls(), [])
+        self.assertEqual(len(self.all_calls()), 1)
+
+    def test_unsupported_probe_or_missing_tool_falls_back(self):
+        with patch.object(lib.subprocess, "run", side_effect=FileNotFoundError()):
+            self.assertFalse(lib.gating_available())
+        with patch.object(lib.subprocess, "run", side_effect=subprocess.TimeoutExpired("session-context", 10)):
+            self.assertFalse(lib.gating_available())
+        with patch.object(lib.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, "hook-gating\n", "")):
+            self.assertFalse(lib.gating_available())
+
+    def test_invalid_existing_settings_fail_without_launching(self):
+        self.brief()
+        path = Path(lib.names("dm", "skein")["lead_start_dir"]) / ".claude/settings.json"
+        path.parent.mkdir(parents=True)
+        path.write_text('{"hooks": []}')
+        result = self.command("start", "lead", "dm", "skein")
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertFalse(any(call["argv"][0] == "--bg" for call in self.calls()))
+
+
+class WarmupTests(Sandbox):
+    def test_recent_live_warmup_refuses_but_old_or_finished_ones_allow(self):
+        name = "coordinator/dm/20261028T1200Z"
+        path = self.home / ".local/state/session-start/warmups.json"
+        path.parent.mkdir(parents=True)
+        for age, status, was_next, expected in (
+            (60, "busy", True, 1), (7190, "idle", True, 1), (7300, "busy", True, 0),
+            (60, "completed", True, 0), (60, "stopped", True, 0), (60, "busy", False, 0),
+        ):
+            with self.subTest(age=age, status=status, was_next=was_next):
+                path.write_text(json.dumps({name: {"next": was_next, "started_at": time.time() - age}}))
+                self.env["FAKE_AGENTS"] = json.dumps([{"name": name, "status": status}])
+                result = self.command("start", "coordinator", "dm", "--next", "--dry-run")
+                self.assertEqual(result.returncode, expected, result.stderr)
+                if expected:
+                    self.assertIn("recent live warm-up", result.stderr)
+
+    def test_legacy_incumbent_does_not_prevent_start_and_success_is_recorded(self):
+        self.env["FAKE_AGENTS"] = '[{"name":"coord-next","status":"busy"}]'
+        result = self.command("start", "coordinator", "dm", "--next")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        launch = self.calls()[-1]
+        name = launch["argv"][2]
+        self.assertTrue(name.startswith("coordinator/dm/"))
+        self.assertIn(name, launch["argv"][-1])
+        self.assertIn("warm-up post name is coord-next", launch["argv"][-1])
+        state = json.loads((self.home / ".local/state/session-start/warmups.json").read_text())
+        self.assertTrue(state[name]["next"])
+        self.assertLess(abs(state[name]["started_at"] - time.time()), 30)
+        self.assertEqual(state[name]["session_id"], "12345678-abcd-4321-8765-123456789abc")
+        self.env["FAKE_AGENTS"] = json.dumps([{"name": name, "status": "busy"}])
+        again = self.command("start", "coordinator", "dm", "--next")
+        self.assertEqual(again.returncode, 1)
+        self.assertIn("live session", again.stderr)
+
+    def test_failed_launch_does_not_record_a_warmup(self):
+        self.env["FAKE_LAUNCH_EXIT"] = "1"
+        result = self.command("start", "coordinator", "dm", "--next")
+        self.assertEqual(result.returncode, 2)
+        self.assertFalse((self.home / ".local/state/session-start").exists())
 
 
 if __name__ == "__main__":

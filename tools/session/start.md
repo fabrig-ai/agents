@@ -3,17 +3,15 @@
 `pipeline/coordinators.toml` is the identity registry. Each table is a handle
 matching `[a-z][a-z0-9]{0,7}`, with a unique mailbox matching
 `s/[a-z0-9][a-z0-9-]*`. Exactly one table has `default = true`; other entries
-may omit `default`. Duplicate handles (including duplicate TOML tables), duplicate
-mailboxes, invalid values and unknown fields fail validation. The incumbent is
-`dm`, mailbox `s/dynamic-memory`; addresses append `@hel8`.
+may omit it. Invalid values, unknown fields and duplicate handles/mailboxes fail.
+The incumbent is `dm`, mailbox `s/dynamic-memory`; addresses append `@hel8`.
 
 `names(handle, area)` in `session_lib.py` derives all identities. Its command
-`tools/session/names H [AREA]` prints `key=value` lines with absolute paths under
-the current HOME. Areas are `skein`, `smith`, `jig`, `temper`. Without AREA it
-prints just the coordinator values. Add a registry entry to start a new pipeline;
-never assemble names in callers.
+`tools/session/names H [AREA]` prints `key=value` lines with absolute HOME paths.
+Areas are `skein`, `smith`, `jig`, `temper`; omitting AREA prints coordinator
+values. Add a registry entry for each pipeline; callers never assemble names.
 
-In this table H is the handle, A the area, and `~` is HOME:
+H is the handle, A the area, and T the current UTC minute, `%Y%m%dT%H%MZ`:
 
 | Name | Default coordinator | Other coordinator H |
 |---|---|---|
@@ -24,51 +22,71 @@ In this table H is the handle, A the area, and `~` is HOME:
 | Coordinator start directory | `~/src/rust/tmp/supervise/coordinator` | `~/src/rust/tmp/supervise/coordinators/H` |
 | Coordinator handover | `~/src/rust/tmp/supervise/handover.md` | `~/src/rust/tmp/supervise/coordinators/H/handover.md` |
 | Coordinator branches | `coord/<task>` | `H/<task>` |
-| Successor warm-up name | `coord-next` | `H-next` |
+| Successor warm-up post name | `coord-next` | `H-next` |
+| Coordinator session (fresh or warm-up) | `coordinator/dm/T` | `coordinator/H/T` |
 
-Coordinator session names equal their `s/<draft>` mailbox. The coordinator's own
-clone and brief are `repo/` and `brief.md` inside its start directory. Start
-directories stay under `~/src/rust/` for Claude's directory trust. Lead delivered
-mail lives in `~/src/rust/tmp/post/MAILBOX/cur/`, replacing mailbox slashes with
-`+`.
-
-## Launch behavior
+Coordinator post mailboxes remain `s/<draft>`. Prompts distinguish session names
+from post names. The coordinator's own clone and optional brief are `repo/` and
+`brief.md` inside its start directory. Start directories stay under `~/src/rust/`
+for directory trust. Lead delivered-mail directories replace mailbox `/` with `+`
+under `~/src/rust/tmp/post/`.
 
 ```
 tools/session/start lead H AREA [--model M] [--effort E] [--dry-run]
 tools/session/start coordinator H [--next] [--model M] [--effort E] [--dry-run]
+tools/session/start wire H [--dry-run]
 ```
 
-Defaults are `opus` / `high` for leads and `opus` / `xhigh` for coordinators.
-Write the lead's scratch `brief.md` first: a missing brief refuses the launch.
-Rendering uses strict `string.Template.substitute`: missing or malformed
-placeholders fail. The lead prompt's state timestamp is the first Z timestamp
-found while reading `state.md` in order, or `unknown`.
+Default effort is `high` for leads, `xhigh` for coordinators. Without `--model`,
+omit the model flag so shared Claude settings select the model and context window
+(currently `opus[1m]`). An explicit `--model M` passes that value unchanged.
 
-Before making directories, writing files or cloning, query `claude agents
---json`. A matching session with any status except `stopped` or `completed`
-refuses launch (a missing status falls back to state and otherwise is treated as
-live). Invalid session-list output fails closed. Live-session checking is a
-preflight; concurrent invocations must be serialized by the coordinator.
+Write the lead's scratch `brief.md` first. Missing briefs refuse launch. Strict
+`string.Template.substitute` rejects unknown/malformed placeholders. The first
+Z timestamp in `state.md` supplies the lead's reconciliation time, else `unknown`.
+Query `claude agents --json` before setup; any matching session whose status is
+neither `stopped` nor `completed` refuses launch. Missing status falls back to
+state and otherwise counts as live; malformed listings fail closed.
+`--next` also refuses a live `coordinator/H/` session recorded as a warm-up less
+than two hours ago. Successful warm-ups are recorded with their start time and
+session id in `~/.local/state/session-start/warmups.json` (0600, sibling rename).
+Coordinators must serialize concurrent starts; these checks are preflight checks.
 
-For a lead, create the start directory and any absent `common.md` / `state.md`
-with `(empty)` plus a newline, publishing each through a sibling temporary file
-and rename; preserve existing files. Clone absent `repo/` and `survey/` using
-`git clone --reference ~/src/fabrig/main git@github.com:fabrig-ai/fabrig.git`.
-A fresh coordinator creates its start directory and clones its own absent
-`repo/` the same way; its prompt reads a handover if present, role files from its
-clone and the plans its brief names. A warm-up creates only the start directory,
-reads its incumbent's handover and waits on its own warm-up mailbox.
+Create missing lead `common.md` / `state.md` as `(empty)` plus newline, by sibling
+rename, preserving inherited files. Clone absent lead `repo/` and `survey/`, or a
+fresh coordinator's `repo/`, with `git clone --reference ~/src/fabrig/main
+git@github.com:fabrig-ai/fabrig.git`. Prepare project hooks, then execute
+`claude --bg --name NAME [--model M] --effort E PROMPT` in the derived start
+directory. Print its reported session id, or the whole unrecognized launch report.
+Exit codes: 0 success, 1 refused, 2 usage/configuration/command error.
 
-Launch with argv `claude --bg --name NAME --model M --effort E PROMPT`, using the
-derived start directory as cwd. Print the reported session id (JSON or text);
-unrecognized successful output is printed whole. Nonzero Claude or git results
-are errors. Exit codes: 0 success, 1 refused, 2 usage/configuration/command error.
+## Project hooks and compatibility
 
-`--dry-run` prints cwd, full shell-quoted argv and the rendered prompt before
-the live-session check; it creates nothing, skips clones, and runs only
-`claude agents --json`. Live sessions still cause exit 1 after printing.
+`start` writes `<start dir>/.claude/settings.json` before launching. `wire` writes
+the coordinator's file and each existing lead start directory's file, starting
+nothing. Replace the whole `Stop` and `SessionStart` hook entries, preserving all
+other settings and hooks. Files are published by sibling rename.
 
-Run `python3 -I -B tools/test_session_start.py`. Tests use temporary HOME and
-fake Claude/git commands, checking names, validation, state preservation,
-rendering, refusals, flags, cwd, launch reports and dry-run immutability.
+Probe PATH's `session-context --capabilities` once per invocation. With
+`hook-gating`, install shell-quoted PATH commands using `--hook --role ROLE`,
+`--coordinator ADDRESS --handover PATH --handle H` and a 30-second hook timeout.
+Lead gates use `--name lead/...`; coordinator gates use `--name-prefix
+coordinator/H/`, plus `--name coord-next` for the default incumbent. SessionStart
+uses matcher `compact`. If the probe fails or lacks `hook-gating`, explain why:
+leads get only plain `session-context --hook` as Stop; coordinators get neither
+owned hook. New hook options never reach the legacy copy. Do not change installed
+links until the factory move.
+
+`session-context` caches resolved session names in a private, atomically replaced
+`names.json` under `SESSION_CONTEXT_STATE` (default
+`~/.local/state/session-context`). Stop blocks once usage reaches the threshold
+or any compaction exists; compact SessionStart adds the role's handover message.
+Usage reads only the transcript tail; compaction detection scans records until a
+boundary is found. Lookup failures/timeouts remain silent and uncached. Hook mode
+always exits 0; the existing interactive Claude/Codex modes retain their behavior.
+
+`--dry-run` prints settings instead of writing them. Launch dry runs also print
+cwd, full argv and prompt before live-session refusal; they run only the capability
+probe and session listing. Wire dry runs run only the probe. Neither creates files
+or starts sessions. Tests: `python3 -I -B tools/test_session_start.py` and
+`python3 -I -B tools/session/test_session_context.py`, with temporary HOME and fakes.
