@@ -6,13 +6,6 @@ cargo_jobs = 4
 machine_env = { PLAN_MIN_MEM_GB = 4, PLAN_MIN_DISK_GB = 15, KACHE_MAX_GB = 6 }
 env = { HEAVY_BUILD_JOBS = "2" }
 
-[hosts.hetzner2]
-hostname = "debian-16gb-hel1-2"
-ssh = "free@2.29.101.185"
-roles = ["gate2"]
-machine_env = { PLAN_MIN_DISK_GB = 40, KACHE_MAX_GB = 25, KACHE_LOCAL_ONLY = 1, HEAVY_BUILD_SLOTS = 3 }
-env = {}
-
 [hosts.hetzner3]
 hostname = "debian-16gb-hel1-3"
 ssh = "free@2.29.124.199"

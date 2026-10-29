@@ -18,6 +18,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 FABRIG_TOOLS = Path("/home/free/src/fabrig/main/tools")
+HOST_COUNT = len(tomllib.loads((ROOT / "fleet/hosts.toml").read_text())["hosts"])
 
 
 def put(path, content, executable=False):
@@ -442,9 +443,9 @@ class FleetTest(unittest.TestCase):
         script = self.source / "tools/fleet-sync"
         put(script, script.read_text().replace("import socket\n", "import socket\nsocket.gethostname = lambda: 'outside-fleet'\n"), True)
         result = self.process("python3", "-I", "-B", self.source / "tools/fleet-sync", "status", "--json", expected=1)
-        self.assertEqual(len(json.loads(result.stdout)["hosts"]), 6)
+        self.assertEqual(len(json.loads(result.stdout)["hosts"]), HOST_COUNT)
         calls = [json.loads(line) for line in (self.home / "ssh.log").read_text().splitlines()]
-        self.assertEqual(len(calls), 6)
+        self.assertEqual(len(calls), HOST_COUNT)
 
     def test_fabrig_failure_does_not_skip_files(self):
         self.sync()
@@ -848,7 +849,7 @@ class FleetTest(unittest.TestCase):
     def test_status_unreachable(self):
         self.sync("--timer")
         state = self.sync("status", expected=1)
-        self.assertEqual(len(state["hosts"]), 6)
+        self.assertEqual(len(state["hosts"]), HOST_COUNT)
         self.assertIn("unreachable", next(h for h in state["hosts"] if h["host"] == "hetzner3"))
         self.assertTrue(next(h for h in state["hosts"] if h["host"] == "hel8")["last_timer_end"])
         calls = [json.loads(line) for line in (self.home / "ssh.log").read_text().splitlines()]

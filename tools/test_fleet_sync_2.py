@@ -151,7 +151,6 @@ class FleetSync2Test(fixture.FleetTest):
             "hel8": {"fleet-sync", "record-collect-session", "pipeline-watch", "status-page"},
             "hetzner6": {"fleet-sync", "record-collect-builder"},
             "hetzner8": {"fleet-sync", "record-collect-gate"},
-            "hetzner2": {"fleet-sync"},
         }
         before = self.snapshot()
         for host, names in expected.items():

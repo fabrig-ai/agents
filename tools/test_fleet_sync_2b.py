@@ -120,7 +120,7 @@ class FleetSync2bTest(fixture.FleetTest):
     def test_routing_difference_lists_exact_missing_extra_changed_names(self):
         path = self.home / "src/rust/tmp/post/machines"
         mapping = self.routing()
-        mapping.pop("hetzner2")
+        mapping.pop("hetzner7")
         mapping["hetzner3"] = "someone-else@2.29.124.199"
         mapping["extra"] = "unexpected.example"
         fixture.put(path, self.routing_text(mapping))
@@ -128,7 +128,7 @@ class FleetSync2bTest(fixture.FleetTest):
         for flags in ((), ("--check",)):
             item = self.routing_item(self.sync(*flags, env={**self.env, "USER": "free"}))
             self.assertEqual(item["result"], "warn")
-            self.assertEqual(item["reason"], "names differ: extra, hetzner2, hetzner3; check-only")
+            self.assertEqual(item["reason"], "names differ: extra, hetzner3, hetzner7; check-only")
             self.assertEqual(path.read_bytes(), before)
         self.assertFalse(path.with_name("machines.pre-fleet-sync").exists())
 
@@ -136,7 +136,7 @@ class FleetSync2bTest(fixture.FleetTest):
         path = self.home / "src/rust/tmp/post/machines"
         desired = self.routing_text(self.routing())
         cases = (("hel8 local\n", "hel8"), ("mystery\n", "mystery"),
-                 ("hetzner2 wrong.example\n", "hetzner2"))
+                 ("hetzner7 wrong.example\n", "hetzner7"))
         for extra, name in cases:
             with self.subTest(extra=extra):
                 # Identical duplicate entries are still a single mapping.
@@ -146,10 +146,10 @@ class FleetSync2bTest(fixture.FleetTest):
                 if name != "hel8":
                     self.assertEqual(item["reason"], f"names differ: {name}; check-only")
         mapping = self.routing()
-        mapping["hetzner2"] = mapping["hetzner2"].removeprefix("free@")
+        mapping["hetzner7"] = mapping["hetzner7"].removeprefix("free@")
         fixture.put(path, self.routing_text(mapping))
         item = self.routing_item(self.sync("--check", expected=1, env={**self.env, "USER": "another-user"}))
-        self.assertEqual(item["reason"], "names differ: hetzner2; check-only")
+        self.assertEqual(item["reason"], "names differ: hetzner7; check-only")
 
     def test_preview_reports_routing_meaning_without_writing_it(self):
         path = self.home / "src/rust/tmp/post/machines"
