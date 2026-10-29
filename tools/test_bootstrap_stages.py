@@ -12,8 +12,20 @@ from unittest.mock import patch
 import test_fleet_sync as fixture
 
 
-DEPLOYED = "c960011eb6a3d7a8a818f081e1b8587d2288e44e"
-STAGE_A = "d3712a276aa54bf68737b8537151f29a868abdc1"
+
+
+def before_stage_b():
+    """The tree just before stage B: the runner and declarations every host runs."""
+    marker = subprocess.check_output(
+        ["git", "-C", str(fixture.ROOT), "log", "-1", "--format=%H", "--fixed-strings",
+         "--grep=Enable bootstrap declarations after the compatibility rollout"], text=True).strip()
+    return marker + "^" if marker else "HEAD"
+
+
+# Stage A (d3712a2) and its predecessors are on every host already; what must
+# promote stage B now is the runner deployed fleet-wide, just before it.
+DEPLOYED = before_stage_b()
+STAGE_A = DEPLOYED
 HAS_BOOTSTRAP = (fixture.ROOT / "fleet/bootstrap/bootstrap.py").exists()
 MUTATIONS = {"enable", "disable", "start", "stop", "restart", "daemon-reload"}
 
@@ -30,10 +42,7 @@ class BootstrapStagesTest(unittest.TestCase):
     def legacy_fleet(self):
         # The declarations live before stage B: main's own fleet tree, so units
         # that main already declares (after-landing) are not stage B's changes.
-        marker = subprocess.check_output(
-            ["git", "-C", str(fixture.ROOT), "log", "-1", "--format=%H", "--fixed-strings",
-             "--grep=Enable bootstrap declarations after the compatibility rollout"], env=self.f.env, text=True).strip()
-        base = marker + "^" if marker else "HEAD"
+        base = before_stage_b()
         archive = subprocess.check_output(["git", "-C", str(fixture.ROOT), "archive", base, "fleet"], env=self.f.env)
         stage = self.f.directory / "fleet-stage"
         stage.mkdir()
@@ -105,10 +114,12 @@ class BootstrapStagesTest(unittest.TestCase):
         self.assertNotIn("kache.service", state["managed_units"])
         return state
 
-    def test_c960011_timer_promotes_code_only_stage_a_on_declared_hosts(self):
-        for host in self.hosts:
-            with self.subTest(host=host):
-                self.simulate(host, self.script(DEPLOYED), after_fleet=False)
+    def test_stage_b_changes_no_runner_code(self):
+        # Stage A (code only) is deployed fleet-wide; stage B must bring declarations
+        # alone, so the deployed runner is also the runner that applies them.
+        self.assertEqual(self.f.process("git", "-C", fixture.ROOT, "show",
+                                        DEPLOYED + ":tools/fleet-sync").stdout,
+                         (fixture.ROOT / "tools/fleet-sync").read_text())
 
     @unittest.skipUnless(HAS_BOOTSTRAP, "stage B declarations are not in the code-only stage")
     def test_stage_a_timer_promotes_real_stage_b_on_declared_hosts(self):
