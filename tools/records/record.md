@@ -92,8 +92,8 @@ contents, and stay within the 16 KB line cap.
 
 ## Scheduled push rate
 
-With the declared timers, each collector invocation makes at most one push,
-regardless of its source count. These are upper bounds in a steady scheduled
+With the declared timers, each collector invocation makes at most one successful
+push, regardless of its source count. These are upper bounds in a steady scheduled
 hour, excluding boot catch-up, manual invocations and other records writers:
 
 | Host/role | Collector runs/hour | Quiet watch heartbeats/hour | Worst-case pushes/hour |
@@ -108,23 +108,27 @@ only its heartbeat. Alert transitions or changes in the failed-input set can
 make watch publish on every two-minute poll, giving the 60/hour worst case.
 Builders and the gate push only when their batch contains new facts, so idle
 runs can produce zero pushes. Status-page only pulls records (six times/hour);
-fleet-sync also contributes no records pushes. A rejected automatic push waits
-for the next scheduled run instead of adding retries within the same run.
+fleet-sync also contributes no records pushes. Automatic writers try at most
+five times per run. Retries cost only rejected attempts; the successful push
+rate above is unchanged. Collector and pipeline-watch timers use up to 60 seconds
+of randomized delay to spread hosts' publications.
 
 ## Races and recovery
 
-Every publish starts from origin/main. Declared append-only producer appends
-make at most one push attempt. On rejection they reset safely to origin and leave
-the caller's durable outbox for its next poll, preserving exact ids and timestamps.
-Other writers retain the retry behavior below.
-
-A rejected push triggers a fetch; only
+Every publish starts from origin/main. A rejected push triggers a fetch; only
 an advanced remote branch warrants a retry. The unpublished commit is rebased,
 the resulting files are validated again, and push is attempted at most five
-times, with exponential jittered backoff. A conflict aborts the rebase, resets
-the clone to the fetched origin, reports the original input on stderr, and exits
-1. Other publication failures also undo the local write and report its input;
-operational failures exit 2. Inputs rejected during validation are not echoed.
+times. Declared append-only producers pause a random 1–5 seconds between tries;
+other writers use exponential jittered backoff. At most one push succeeds.
+
+A conflict aborts the rebase and resets the clone to the fetched origin. After
+conflict or retry exhaustion, automatic writers exit 3 (publication deferred),
+leaving the caller's durable outbox for its next poll with exact ids and
+timestamps. Other writers exit 1. Other publication failures also undo the local
+write and report its input; operational failures exit 2. Inputs rejected during
+validation are not echoed. Collect and watch report record's stderr and treat
+five consecutive deferrals as successful runs; the sixth and later exit 2 until
+publication succeeds. Real failures exit 2 immediately.
 
 `next.md` in decision directories and `next.toml` in director questions allocate
 the first free number from 0001 to 9999 while locked. If another clone claims

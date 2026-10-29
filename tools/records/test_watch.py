@@ -739,9 +739,9 @@ else: sys.exit(1 if sys.argv[2] in os.environ.get('UNOWNED','').split(',') else 
         self.assertIn('runs/builder', self.events()[-1]['inputs_failed'])
     def test_publication_failure_keeps_outbox_and_replays_without_repeating_wake(self):
         self.mail()
-        hook = self.write(self.origin/'hooks/pre-receive', '#!/bin/sh\nexit 1\n')
+        hook = self.write(self.origin/'hooks/pre-receive', '#!/bin/sh\necho synthetic-denial >&2\nexit 1\n')
         hook.chmod(0o700)
-        self.invoke(code=2)
+        self.assertIn('synthetic-denial', self.invoke(code=2).stderr)
         self.assertTrue(self.state()['pending'])
         ids = [e['id'] for e in self.state()['pending']]
         hook.unlink()
@@ -751,6 +751,50 @@ else: sys.exit(1 if sys.argv[2] in os.environ.get('UNOWNED','').split(',') else 
         self.assertTrue(set(ids).issubset({e['id'] for e in events}))
         self.assertEqual(len(events), len({e['id'] for e in events}))
         self.assertEqual((self.home/'post.log').read_text().count('wake'), 1)
+
+    def publication_tool(self):
+        tool = self.home / 'publication-tool' / TOOL.name
+        self.write(tool, TOOL.read_text()).chmod(0o700)
+        record = TOOL.with_name('record')
+        program = ("#!/usr/bin/env -S python3 -I -B\n"
+                   "import json, os, sys\nfrom pathlib import Path\n"
+                   "reply = Path(os.environ['HOME']) / 'publication.json'\n"
+                   "if sys.argv[1] == 'append' and reply.exists():\n"
+                   " settings = json.loads(reply.read_text())\n"
+                   " print(settings['reason'], file=sys.stderr)\n"
+                   " sys.exit(settings['code'])\n"
+                   f"os.execv({str(record)!r}, [{str(record)!r}] + sys.argv[1:])\n")
+        self.write(tool.with_name('record'), program).chmod(0o700)
+        self.write(tool.with_suffix('.toml'), TOOL.with_suffix('.toml').read_text())
+        return tool
+
+    def test_publication_defers_until_sixth_run_and_recovers(self):
+        self.mail()
+        reply = self.write(self.home / 'publication.json', json.dumps(dict(code=3, reason='record: origin busy')))
+        tool = self.publication_tool()
+        with patch(__name__ + '.TOOL', tool):
+            ids = None
+            for count in range(1, 8):
+                result = self.invoke(code=2 if count >= 6 else 0)
+                self.assertIn('watch: deferred: record: origin busy', result.stderr)
+                self.assertIn(f'({count} consecutive runs)', result.stderr)
+                self.assertEqual(self.state()['deferrals'], count)
+                current = {event['id'] for event in self.state()['pending']}
+                if ids is None:
+                    ids = current
+                self.assertTrue(ids <= current)
+            self.write(reply, json.dumps(dict(code=2, reason='record: transport broken')))
+            self.assertIn('transport broken', self.invoke(code=2).stderr)
+            self.write(reply, json.dumps(dict(code=3, reason='record: origin busy')))
+            self.assertIn('(1 consecutive runs)', self.invoke().stderr)
+            reply.unlink()
+            self.invoke()
+            self.assertEqual(self.state()['deferrals'], 0)
+            self.assertFalse(self.state()['pending'])
+        events = self.events()
+        self.assertTrue(ids <= {event['id'] for event in events})
+        self.assertEqual(len(events), len({event['id'] for event in events}))
+        self.assertEqual((self.home / 'post.log').read_text().count('wake'), 1)
 
     def test_dry_run_keeps_existing_state_bytes_unchanged(self):
         self.mail()

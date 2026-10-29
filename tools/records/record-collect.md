@@ -8,12 +8,16 @@ from `src/fabrig/main/tools/queue/leads.txt`. Default host resolution uses
 `post/machines` (`local` names this machine, otherwise match its hostname);
 `--host` overrides it. Absent inputs print `skip SOURCE: reason`. Errors
 name the source after trying the others. Exit policy: 0 when every selected
-source succeeds or skips; 2 when any source fails, including publication or
-cursor errors. An optional-part skip is also successful.
+source succeeds, skips or defers publication; 2 when any source fails, including
+publication or cursor errors, or publication defers for six consecutive runs.
+An optional-part skip is also successful. A deferred run prints
+`record-collect: deferred: <record's reason>`; errors also include record's stderr.
 
 All successfully read sources in a run publish together via the sibling
-`record append --as collect --batch HOST`: one commit and at most one push
-attempt for the run. Empty or wholly duplicate batches make no commit or push.
+`record append --as collect --batch HOST`: one commit and at most one successful
+push for the run. Record retries races up to five attempts, with a random 1–5
+second pause between tries; retries cost only rejected attempts. Empty or wholly
+duplicate batches make no commit or push.
 A failed source does not prevent the others from publishing.
 SHA-256 ids include source, host, kind and the producer's natural identity.
 The private `~/.local/state/record-collect/SOURCE.json` cursor stores log
@@ -21,10 +25,14 @@ offsets, seen ids and snapshots. Source locks serialize runs; 0600 files
 are flushed to siblings and renamed. A private pending outbox preserves
 exact events through publication/cursor failures, including UTC midnight.
 All selected source locks are acquired in a fixed order and held through
-publication and cursor updates. A failed batch leaves every staged outbox and
-cursor unchanged. After a successful push, a cursor-write failure leaves the
+publication and cursor updates. A deferred batch preserves every staged event and cursor, updating only its
+deferral counters. A failed batch preserves the events and cursors too. After a successful push, a cursor-write failure leaves the
 remaining outboxes for idempotent replay without another commit for those ids.
-Push races are retried on the next poll rather than within this run.
+After record exhausts its retries or encounters a rebase conflict, publication
+is deferred to the next poll. Each pending transaction stores a `deferrals`
+counter outside its cursor state; the sixth consecutive deferral exits 2.
+A real publication error resets the counter and exits 2 immediately. Successful
+publication removes the outbox and its counter.
 Only successful publication advances the cursor. `--dry-run` prints JSONL
 without creating state or invoking `record`. Source counts go to stderr.
 The first cursor uses `--since` or seven days ago; later runs retain that

@@ -761,10 +761,17 @@ def run(dry, config, post, heartbeat_seconds):
             atomic(path, state)
             if pending:
                 result = command([str(Path(__file__).with_name('record')), 'append', '--as', 'watch', 'watch', 'hel8'],
-                                 data=payload)
+                                 data=payload, timeout=180)
                 if result.returncode:
-                    print('watch: record append failed; events retained', file=sys.stderr)
+                    reason = ' '.join(result.stderr.splitlines()) or f'record append exited {result.returncode}'
+                    state['deferrals'] = state.get('deferrals', 0) + 1 if result.returncode == 3 else 0
+                    atomic(path, state)
+                    if result.returncode == 3:
+                        print(f'watch: deferred: {reason} ({state["deferrals"]} consecutive runs)', file=sys.stderr)
+                        return 2 if state['deferrals'] >= 6 else 0
+                    print(f'watch: record append failed (exit {result.returncode}); events retained: {reason}', file=sys.stderr)
                     return 2
+                state['deferrals'] = 0
                 state['pending'] = []
                 atomic(path, state)
         print(f'watch: {len(candidates)} conditions; {len(state["episodes"])} open; {len(errors)} failed inputs')
