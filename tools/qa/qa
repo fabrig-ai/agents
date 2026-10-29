@@ -15,6 +15,7 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
 import shlex
 import shutil
 import signal
@@ -30,6 +31,7 @@ REPOSITORIES = ('fabrig',)
 NAME = r'[a-z0-9][a-z0-9_-]*'
 LOGIN = r'[a-z][a-z0-9-]*'
 SHA = r'[0-9a-f]{40}'
+CLAIM_WHAT = r'qa walk (rung-[a-z0-9-]+-[1-9][0-9]*) attempt ([1-9][0-9]*)(?: claim [0-9a-f]{32})?'
 UNIT_POLL_SECONDS = 2
 ADDRESS = r'[a-z][a-z0-9-]*(/[a-z0-9][a-z0-9-]*)*@[a-z][a-z0-9-]*'
 ATTEMPT_KEYS = ('attempt holder ref main cap started slot slot_claim checkout launch_complete logins kinds pools requests run stage given released '
@@ -544,7 +546,10 @@ class Watch:
         if not self.director:
             return  # A failed start has no director; the watcher sends this notice.
         claim = state['slot_claim']
-        self.notify_once(f'slot release {state["walk"]} attempt {state.get("attempt", 1)}',
+        # Preserve old alert receipts; tokenized claims each have their own lifetime.
+        key = ('slot release ' + claim['what'] if ' claim ' in claim['what']
+               else f'slot release {state["walk"]} attempt {state.get("attempt", 1)}')
+        self.notify_once(key,
                          f'qa: slot release unconfirmed for {state["walk"]}',
                          f'Walk {state["walk"]}, attempt {state.get("attempt", 1)}: release unconfirmed.\n'
                          f'Claim: {claim["host"]} {claim.get("slot", state["slot"])} {claim["owner"]}; '
@@ -581,7 +586,8 @@ class Watch:
                        + re.escape(claim['owner'] + ': ' + claim['what'])
                        + r' \(since [^()\r\n]+\); held .+')
             need(re.fullmatch(pattern, rows[0]), f'claim list does not match saved owner and WHAT: {rows[0]}', 4)
-            result = self.slot_call(claim, 'release', claim['host'], claim['slot'], claim['owner'])
+            result = self.slot_call(claim, 'release', claim['host'], claim['slot'], claim['owner'],
+                                    '--what', claim['what'])
             claim['release_result'] = f'exit {result.returncode}: {result.stderr.strip() or result.stdout.strip()}'
             expected = f"{claim['host']}-{claim['slot']} released by {claim['owner']}"
             need(result.returncode == 0 and result.stdout.strip() == expected,
@@ -608,7 +614,7 @@ class Watch:
                 log('cannot list slot claims; orphan observation waits for next check')
                 return
             pattern = (re.escape(claim['host']) + r' ([1-9][0-9]*) \[[^]\r\n]+\]: '
-                       + re.escape(claim['owner']) + r': (qa walk (rung-[a-z0-9-]+-[1-9][0-9]*) attempt ([1-9][0-9]*))'
+                       + re.escape(claim['owner']) + ': (' + CLAIM_WHAT + ')'
                        + r' \(since [^()\r\n]+\); held .+')
             for row in listed.stdout.splitlines():
                 match = re.fullmatch(pattern, row)
@@ -619,7 +625,8 @@ class Watch:
                     continue
                 state = next((s for _, s in walks if s['walk'] == name), None)
                 saved = ([state, *state.get('attempts', [])] if state else [])
-                if any(a.get('attempt', 1) == attempt and a.get('slot') is not None for a in saved):
+                if any(a.get('attempt', 1) == attempt and a.get('slot') == number
+                       and a.get('slot_claim', {}).get('what') == what for a in saved):
                     continue
                 self.notify_once(f'orphan slot {claim["host"]} {number} {claim["owner"]} {what}',
                                  f'qa: unsaved slot claim for {name}',
@@ -1323,7 +1330,7 @@ def walk_attempt(state):
              and isinstance(claim['host'], str) and re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9-]*', claim['host'])
              and isinstance(claim['owner'], str) and re.fullmatch(r'[a-z][a-z0-9-]*(/[a-z0-9][a-z0-9-]*)*', claim['owner'])
              and isinstance(claim['ssh'], str) and (not claim['ssh'] or re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_.@-]*', claim['ssh']))
-             and isinstance(claim['what'], str) and re.fullmatch(r'qa walk rung-[a-z0-9-]+-[1-9][0-9]* attempt [1-9][0-9]*', claim['what'])
+             and isinstance(claim['what'], str) and re.fullmatch(CLAIM_WHAT, claim['what'])
              and type(claim['released']) is bool and state['slot'] is not None,
              'invalid saved slot claim', 4)
         need('slot' not in claim or type(claim['slot']) is int and claim['slot'] == state['slot'],
@@ -1515,7 +1522,9 @@ def walk(args, workspace):
         taking = False
         try:
             claim = dict(host=options['QA_SLOT_HOST'], owner=options['QA_CLAIM_OWNER'],
-                         ssh=options['QA_CLAIM_SSH'], what=f'qa walk {name} attempt {state.get("attempt", 1)}', released=False)
+                         ssh=options['QA_CLAIM_SSH'],
+                         what=f'qa walk {name} attempt {state.get("attempt", 1)} claim {secrets.token_hex(16)}',
+                         released=False)
             held_slots = {saved['slot'] for _, saved in walks
                           if not saved.get('released') or saved.get('slot_claim')
                           and not saved['slot_claim']['released']}

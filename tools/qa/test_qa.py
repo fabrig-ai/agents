@@ -126,9 +126,11 @@ elif name == 'claim':
                 sys.exit(1)
             claims[number] = dict(owner=owner, what=what[0])
         else:
-            assert action == 'release' and not what, args
+            assert action == 'release' and (not what or len(what) == 2 and what[0] == '--what'), args
             if config.get('claim_release_refusal') or number not in claims or claims[number]['owner'] != owner:
                 sys.exit(1)
+            if what and claims[number]['what'] != what[1]:
+                sys.exit('fixture release requires matching WHAT')
             del claims[number]
         temporary = path.with_suffix('.new')
         temporary.write_text(json.dumps(claims))
@@ -3565,7 +3567,10 @@ def a_held_named_slot_refuses_without_falling_through(lab):
     assert 'claim claim hetzner6 2: exit 1' in result.stderr
     no_walk_resources_taken(lab)
     assert slot_claims(lab) == before
-    assert lab.calls('claim') == [['claim', 'hetzner6', '2', 's/qa', 'qa walk rung-b0-1 attempt 1']]
+    assert len(lab.calls('claim')) == 1
+    call, = lab.calls('claim')
+    assert call[:4] == ['claim', 'hetzner6', '2', 's/qa']
+    assert re.fullmatch(r'qa walk rung-b0-1 attempt 1 claim [0-9a-f]{32}', call[4])
 
 
 def all_named_slots_held_refuses_without_taking_anything(lab):
@@ -3666,7 +3671,8 @@ def claims_over_ssh_quote_both_shell_levels_and_use_saved_endpoint(lab):
     outer = shlex.split(call[3])
     assert outer[:2] == ['bash', '-lc'] and len(outer) == 3
     assert shlex.split(outer[2]) == [str(directory / 'claim'), 'claim', 'hetzner6', '1', 's/qa',
-                                   'qa walk rung-b0-1 attempt 1']
+                                   state['slot_claim']['what']]
+    assert re.fullmatch(r'qa walk rung-b0-1 attempt 1 claim [0-9a-f]{32}', state['slot_claim']['what'])
     lab.env['QA_CLAIM_SSH'] = 'new-claims@hel8'
     lab.env['QA_CLAIM_OWNER'] = 'new/owner'
     lab.configure(inactive=True)
@@ -3753,7 +3759,7 @@ def fetch(self, repo, slot):
     saved = json.loads(state.read_text())
     assert saved['slot'] == saved['slot_claim']['slot'] == slot
     assert saved['slot_claim']['host'] == 'hetzner6' and saved['slot_claim']['owner'] == 's/qa'
-    assert saved['slot_claim']['what'] == 'qa walk rung-b0-1 attempt 1'
+    assert tool['re'].fullmatch(r'qa walk rung-b0-1 attempt 1 claim [0-9a-f]{32}', saved['slot_claim']['what'])
     os._exit(77)
 Repositories.fetch = fetch
 ''', status=77)
@@ -3799,7 +3805,8 @@ def a_pause_releases_and_resume_reclaims_a_named_slot(lab):
     lab.run('walk', 'fabrig', 'b0', '--resume', state['walk'], '--build', 'main')
     resumed = lab.walk_state()[1]
     assert resumed['attempt'] == 3 and resumed['slot'] == 2
-    assert resumed['slot_claim']['what'] == 'qa walk rung-b0-1 attempt 3'
+    assert re.fullmatch(r'qa walk rung-b0-1 attempt 3 claim [0-9a-f]{32}', resumed['slot_claim']['what'])
+    assert resumed['slot_claim']['what'].rsplit(' ', 1)[-1] != paused['slot_claim']['what'].rsplit(' ', 1)[-1]
     assert resumed['attempts'][0]['slot_claim']['released']
     assert (directory / 'prepare-3.log').is_file()
     assert lab.calls('codex-run')[-1][-2] == str(lab.slots / '2')
@@ -3878,7 +3885,8 @@ def fleet_settings_accept_commas_and_plus_without_whitespace(lab):
     assert set(state['requests']) == {CHATGPT, CLAUDE} and state['slot'] == 1
     lab.walk('other', '--kind', 'claude')
     assert lab.walk_states()[1][1]['slot'] == 3
-    assert state['slot_claim']['slot'] == 1 and state['slot_claim']['what'] == 'qa walk rung-b0-1 attempt 1'
+    assert state['slot_claim']['slot'] == 1
+    assert re.fullmatch(r'qa walk rung-b0-1 attempt 1 claim [0-9a-f]{32}', state['slot_claim']['what'])
     # Legacy whitespace kinds and comma pools still work under the same parser.
     lab.env['QA_WALK_KINDS'] = 'forgejo=2:chatgpt,claude claude=2:claude'
     lab.walk('legacy')
@@ -4136,6 +4144,114 @@ tool['Watch'].call = call
     assert saved['stage'] == 'ended' and saved['given'] == [CHATGPT] and saved['slot_claim']['released']
 
 
+def successor_claim_survives_release(lab, remote):
+    lab.env['QA_CLAIM_SSH'] = remote
+    lab.walk()
+    _, started = lab.walk_state()
+    claim = started['slot_claim']
+    lab.configure(inactive=True)
+    driven_watch(lab, """original = tool['Watch'].slot_call
+def slot_call(self, claim, *args):
+    if args[0] == 'release':
+        assert self.walk_lock is not None
+        # An external owner replaces the claim after the successful list guard.
+        path = self.workspace.fixture / 'claims.json'
+        claims = tool['json'].loads(path.read_text())
+        assert claims[str(claim['slot'])]['what'] == claim['what']
+        claims[str(claim['slot'])] = dict(owner=claim['owner'], what=claim['what'] + ' successor')
+        temporary = path.with_suffix('.new')
+        temporary.write_text(tool['json'].dumps(claims))
+        temporary.replace(path)
+    return original(self, claim, *args)
+tool['Watch'].slot_call = slot_call
+""")
+    assert slot_claims(lab)[str(started['slot'])] == dict(owner=claim['owner'], what=claim['what'] + ' successor')
+    saved = lab.walk_state()[1]['slot_claim']
+    assert saved['release_status'] == 'release unconfirmed' and not saved['released']
+    assert 'matching WHAT' in saved['release_result']
+    release = ['release', claim['host'], str(started['slot']), claim['owner'], '--what', claim['what']]
+    assert [c for c in lab.calls('claim') if c[0] == 'release'] == [release]
+    if remote:
+        import shlex
+        calls = [c for c in lab.calls('ssh') if 'release' in c[-1]]
+        assert len(calls) == 1 and calls[0][2] == remote
+        assert shlex.split(shlex.split(calls[0][-1])[2]) == [str(lab.root / 'claim'), *release]
+    lab.watch()
+    lab.watch()
+    assert slot_claims(lab)[str(started['slot'])]['what'] == claim['what'] + ' successor'
+    assert [c for c in lab.calls('claim') if c[0] == 'release'] == [release]
+    notices = [m for m in lab.sent() if 'slot release unconfirmed' in m['args'][2]]
+    assert len(notices) == 1
+    assert claim['what'] in notices[0]['body'] and 'matching WHAT' in notices[0]['body']
+
+
+def a_local_successor_claim_survives_atomic_release(lab):
+    successor_claim_survives_release(lab, '')
+
+
+def a_remote_successor_claim_survives_atomic_release(lab):
+    successor_claim_survives_release(lab, 'claims@hel8')
+
+
+def repeated_claim_lifetimes(lab, refused=False):
+    stamp = '2026-10-29T17:41:00Z'
+    claims = []
+    for repeat in range(2):
+        lab.walk(now=stamp)
+        directory, state = lab.walk_state()
+        assert state['walk'] == 'rung-b0-1' and state['attempt'] == 1 and state['started'] == stamp
+        claims.append(state['slot_claim']['what'])
+        lab.configure(inactive=True, claim_release_refusal=refused)
+        lab.watch(now=stamp)
+        saved = lab.walk_state()[1]
+        assert saved['released'] and saved['given'] == [CHATGPT]
+        if refused:
+            assert saved['slot_claim']['release_status'] == 'release unconfirmed'
+            lab.watch(now=stamp)  # A refused claim still alerts only once.
+        else:
+            assert not slot_claims(lab) and saved['slot_claim']['released']
+        if repeat == 0:
+            # Simulate reconciled claims and fresh history with the same name/clock.
+            path = lab.root / 'claims.json'
+            temporary = path.with_suffix('.new')
+            temporary.write_text('{}')
+            temporary.replace(path)
+            (lab.tmp / 'qa/walks' / (state['walk'] + '.json')).unlink()
+            shutil.rmtree(directory)
+    assert claims[0] != claims[1], claims
+    assert all(re.fullmatch(r'qa walk rung-b0-1 attempt 1 claim [0-9a-f]{32}', what) for what in claims)
+    if refused:
+        notices = [m for m in lab.sent() if 'slot release unconfirmed' in m['args'][2]]
+        assert len(notices) == 2
+        assert all(sum(what in m['body'] for m in notices) == 1 for what in claims)
+
+
+def claim_lifetimes_remain_unique_when_names_attempts_and_times_repeat(lab):
+    repeated_claim_lifetimes(lab)
+
+
+def new_claim_lifetimes_get_distinct_release_alerts(lab):
+    repeated_claim_lifetimes(lab, refused=True)
+
+
+def legacy_saved_claims_release_with_their_exact_what(lab):
+    lab.walk()
+    _, state = lab.walk_state()
+    old = 'qa walk rung-b0-1 attempt 1'
+    state['slot_claim']['what'] = old
+    state['attempts'][-1]['slot_claim']['what'] = old
+    path = lab.tmp / 'qa/walks' / (state['walk'] + '.json')
+    temporary = path.with_suffix('.new')
+    temporary.write_text(json.dumps(state))
+    temporary.replace(path)
+    hold_slot(lab, state['slot'], what=old)
+    lab.configure(inactive=True)
+    lab.watch()
+    assert not slot_claims(lab) and lab.walk_state()[1]['slot_claim']['released']
+    assert [c for c in lab.calls('claim') if c[0] == 'release'] == [
+        ['release', 'hetzner6', str(state['slot']), 's/qa', '--what', old]]
+
+
 def slot_release_refuses_without_the_walks_lock(lab):
     lab.walk()
     lab.configure(logins_held=[], inactive=True)
@@ -4275,6 +4391,11 @@ assert called
 
 
 CASES = (
+    a_local_successor_claim_survives_atomic_release,
+    a_remote_successor_claim_survives_atomic_release,
+    claim_lifetimes_remain_unique_when_names_attempts_and_times_repeat,
+    new_claim_lifetimes_get_distinct_release_alerts,
+    legacy_saved_claims_release_with_their_exact_what,
     fast_readonly_fixture_results_match_external_services,
     a_launcher_without_metadata_keeps_custody_and_admission,
     a_missing_launch_keeps_grace_and_unknown_custody,

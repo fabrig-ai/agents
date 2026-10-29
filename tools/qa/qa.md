@@ -155,7 +155,12 @@ retain REF/SHA, cap, start, numeric slot and claim, grants, pools,
 moved/in-place kinds, run, cleanup progress, alert receipts and pause decision.
 Admission first saves an attempt without a slot, then selects the first
 configured number not already held by a saved local walk or unconfirmed
-release. It invokes `claim claim HOST N OWNER 'qa walk NAME attempt A'` once.
+release. It invokes
+`claim claim HOST N OWNER 'qa walk NAME attempt A claim TOKEN'` once. TOKEN
+is a fresh random 128-bit value (32 lowercase hex digits) for each claim
+lifetime, so even repeated walk names, attempts and start timestamps do not
+reuse WHAT. The exact value is saved and never regenerated for release.
+Legacy saved WHAT values without a token remain readable.
 Any failure, timeout, unreadable/empty or mismatched success reply refuses
 admission, naming the result; there is no fallback to another slot, a local
 claim or an unclaimed checkout. A resume remains paused without new grants.
@@ -284,21 +289,28 @@ by the release entry point and stays held across `claim list` and the
 immediately following release. Through the saved SSH path, `claim list`
 must show the exact saved owner and WHAT; free, changed, missing, malformed
 or failed observations do not authorize release. Only then may
-`claim release HOST N OWNER` run, once. Exit zero and the exact
-`HOST-N released by OWNER` acknowledgement confirm release.
+`claim release HOST N OWNER --what WHAT` run, once, using the exact saved
+WHAT. The installed claim tool compares both OWNER and WHAT and deletes
+under its claims lock. A same-owner successor installed after the list
+check therefore remains held: the release refuses the mismatch. Exit zero
+and the exact `HOST-N released by OWNER` acknowledgement confirm release.
+The list guard stays to reject free, mismatched or unreadable observations
+early; atomic compare-and-release provides successor protection without
+that preflight, so the list is not needed for atomicity.
 
-Once installed, only this tool claims the `s/qa` share slots: hand claims
-or reconciliation that changes them during this critical section break the
-exclusion guarantee. The native claim tool checks only OWNER at release;
-the walks lock excludes cooperating local qa admissions, but cannot make
-verification/deletion atomic against external claim users. Atomic
-compare-and-release by WHAT or claim token requires claim-tool support.
+Once installed, only this tool claims the `s/qa` share slots. The walks lock
+continues to exclude cooperating local qa admissions through verification
+and release. External reconciliation cannot cause this release to delete
+a different WHAT, but must never copy a previous claim's lifetime token.
+The claim executable must support `--what`; there is no owner-only fallback.
 
 Before the preflight/command, state durably records `release_status` as
 `release unconfirmed`, with a result describing possible interruption.
-Any failure, timeout, ambiguous reply or crash leaves that terminal status:
+Any failure (including an atomic WHAT mismatch), timeout, ambiguous reply
+or crash leaves that terminal status:
 the service never retries the release, even after a free slot or successor
-claim appears. It alerts the director once. Successful confirmation saves
+claim appears. It alerts the director once per claim lifetime. Legacy claims
+retain their existing alert receipts. Successful confirmation saves
 `slot_claim.released=true` and `release_status=released`. This bookkeeping
 does not gate login returns or pause/end notices. Resume stays blocked while
 its old claim is unconfirmed; the director reconciles it before further use.
