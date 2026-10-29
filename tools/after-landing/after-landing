@@ -1,0 +1,836 @@
+#!/usr/bin/env python3
+"""Serial, durable slow-tier checks for published fabrig main tips."""
+
+import argparse
+from contextlib import contextmanager, nullcontext
+from datetime import datetime, timezone
+import fcntl
+import importlib.util
+import json
+import math
+import os
+from pathlib import Path
+import re
+import signal
+import socket
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+import tomllib
+import xml.etree.ElementTree as ET
+
+sys.dont_write_bytecode = True
+
+
+class Fault(Exception):
+    def __init__(self, message, *, logs=None, wall=0):
+        super().__init__(message)
+        self.logs = logs or []
+        self.wall = wall
+
+
+def atomic(path, data):
+    """Every persistent write is a flushed sibling followed by rename."""
+    path = Path(path)
+    fd, temporary = tempfile.mkstemp(prefix='.' + path.name + '-', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'w') as output:
+            output.write(data)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, path)
+        fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def write_json(path, value):
+    atomic(path, json.dumps(value, ensure_ascii=True, sort_keys=True) + '\n')
+
+
+def no_links(path):
+    for part in (path, *path.parents):
+        if part.is_symlink():
+            raise Fault(f'symlink refused: {part}')
+
+
+def private_directory(path):
+    no_links(path)
+    path.mkdir(parents=True, mode=0o700, exist_ok=True)
+    info = path.stat()
+    if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+        raise Fault(f'expected owned directory mode 0700: {path}')
+
+
+@contextmanager
+def lock(path, *, wait=False):
+    no_links(path)
+    fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
+        except BlockingIOError as error:
+            raise Fault(f'busy: {path}') from error
+        yield fd
+    finally:
+        os.close(fd)
+
+
+def command(argv, *, cwd=None, data=None, env=None):
+    try:
+        return subprocess.run([str(x) for x in argv], cwd=cwd, input=data,
+                              text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              stdin=subprocess.DEVNULL if data is None else None,
+                              env=env, timeout=60)
+    except (OSError, subprocess.SubprocessError) as error:
+        raise Fault(f'{argv[0]}: {error}') from error
+
+
+def git(slot, *argv):
+    result = command(['git', '-C', slot, *argv], env=dict(os.environ, GIT_TERMINAL_PROMPT='0'))
+    if result.returncode:
+        raise Fault(f'git {argv[0]}: {result.stderr.strip()}')
+    return result.stdout.strip()
+
+
+def suspects(slot, previous, tip):
+    result = []
+    for commit in git(slot, 'rev-list', '--first-parent', '--reverse', f'{previous}..{tip}').splitlines():
+        parents, subject = git(slot, 'show', '-s', '--format=%P%n%s', commit).split('\n', 1)
+        parents = parents.split()
+        match = re.fullmatch(r'Merge ready/([^/]+)/(.+)', subject) if len(parents) == 2 else None
+        item = dict(commit=commit, subject=subject, kind='other')
+        if match:
+            item.update(kind='branch', key=match[1], task=match[2],
+                        branch=f'ready/{match[1]}/{match[2]}', tip=parents[1])
+        result.append(item)
+    return result
+
+
+def duration(value):
+    if not isinstance(value, str):
+        raise Fault('profile needs a finite global-timeout')
+    pieces = re.findall(r'([0-9]+(?:\.[0-9]+)?)\s*(ms|s|m|h)', value)
+    if not pieces or re.sub(r'([0-9]+(?:\.[0-9]+)?)\s*(ms|s|m|h)\s*', '', value):
+        raise Fault(f'invalid global-timeout: {value}')
+    seconds = sum(float(n) * dict(ms=.001, s=1, m=60, h=3600)[unit] for n, unit in pieces)
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise Fault('global-timeout must be positive')
+    return seconds
+
+
+def toml_value(value):
+    """Encode parsed nextest configuration without losing nested overrides."""
+    if isinstance(value, dict):
+        return '{' + ', '.join(json.dumps(k) + ' = ' + toml_value(v) for k, v in value.items()) + '}'
+    if isinstance(value, list):
+        return '[' + ', '.join(toml_value(v) for v in value) + ']'
+    if isinstance(value, (str, bool, int, float)):
+        return json.dumps(value, ensure_ascii=False, allow_nan=False)
+    raise Fault('unsupported nextest configuration value')
+
+
+def exact_filter(binary, test):
+    # Nextest quoted string matchers escape backslash and double quote.
+    quote = lambda text: '"' + text.replace('\\', '\\\\').replace('"', '\\"') + '"'
+    return f'binary_id(={quote(binary)}) & test(={quote(test)})'
+
+
+def junit(path, profile):
+    """Nextest JUnit: testsuite.name is binary_id, testcase.name is test_name."""
+    try:
+        root = ET.parse(path).getroot()
+        if root.tag != 'testsuites':
+            raise Fault('expected nextest testsuites')
+        results, selected = {}, 0
+        for suite in root.findall('testsuite'):
+            binary = suite.attrib['name']
+            for case in suite.findall('testcase'):
+                selected += 1
+                name = case.attrib['name']
+                identity = json.dumps([profile, binary, name], separators=(',', ':'))
+                if identity in results:
+                    raise Fault('duplicate test identity')
+                failure = case.find('failure')
+                if failure is None:
+                    failure = case.find('error')
+                skipped = case.find('skipped') is not None
+                first = '' if failure is None else (failure.text or failure.get('message', ''))
+                results[identity] = dict(identity=[profile, binary, name],
+                                         result='unobserved' if skipped else 'fail' if failure is not None else 'pass',
+                                         error=next((line[:500] for line in first.splitlines() if line.strip()), ''))
+        declared = root.get('tests')
+        if declared is not None and int(declared) != selected:
+            raise Fault('incomplete JUnit counts')
+        return selected, results
+    except (OSError, ET.ParseError, KeyError, ValueError) as error:
+        raise Fault(f'invalid/missing nextest JUnit: {error}') from error
+
+
+def validate_rerun(key, selected, results):
+    if selected != 1 or list(results) != [key] or results[key]['result'] == 'unobserved':
+        raise Fault('rerun did not execute exactly the same single test')
+    return results[key]['result']
+
+
+def heavy_tokens(log):
+    text = Path(log).read_text(errors='replace') if Path(log).exists() else ''
+    queued = re.findall(r'heavy: queued task [^\n]* token ([0-9a-f]{32})', text)
+    ended = set(re.findall(r'heavy: receipt [^\n]* token ([0-9a-f]{32})', text))
+    return list(dict.fromkeys(queued)), ended
+
+
+def heavy_starting(log):
+    text = Path(log).read_text(errors='replace') if Path(log).exists() else ''
+    starts = list(re.finditer(r'after-landing: heavy begin ([0-9a-f]{32})', text))
+    for index, start in enumerate(starts):
+        section = text[start.end():starts[index + 1].start() if index + 1 < len(starts) else len(text)]
+        if ('heavy: queued task ' not in section and
+                f'after-landing: heavy end {start[1]} ' not in section):
+            return True
+    return False
+
+
+def cancel_heavy(heavy, slot, token):
+    try:
+        result = command([heavy, '--cancel', token], cwd=slot)
+    except Fault:
+        return False
+    text = result.stdout + result.stderr
+    # A cancellation acknowledgement alone does NOT prove release. In heavy's
+    # interface the final ', exit CODE' appears only after release + receipt.
+    return result.returncode in (0, 1) and bool(re.search(
+        r'heavy: (?:cancelled|not cancelled, already ended:) [^\n]*token '
+        + re.escape(token) + r', exit -?\d+', text))
+
+
+def supervise(spec_path, inherited_fd):
+    """Independent waiter: keeps its execution lock and slot lease after parent loss."""
+    spec = json.loads(Path(spec_path).read_text())
+    with os.fdopen(inherited_fd, 'rb'):
+        if Path(spec['result']).exists():
+            return 0
+        with open(spec['log'], 'ab', buffering=0) as output:
+            env = dict(os.environ, HEAVY_CLASS='background', PYTHONUNBUFFERED='1')
+            # The shim also makes --heavy apply to prerequisites inside tiers/run.
+            env['PATH'] = spec['shim'] + os.pathsep + env.get('PATH', '')
+            try:
+                child = subprocess.Popen(spec['command'], cwd=spec['slot'], env=env,
+                                         stdin=subprocess.DEVNULL, stdout=output, stderr=output,
+                                         start_new_session=True,
+                                         pass_fds=(inherited_fd, *spec.get('lease_fds', [])))
+            except OSError as error:
+                output.write(str(error).encode() + b'\n')
+                write_json(spec['result'], dict(code=2, timeout=False, elapsed=0))
+                return 0
+            start = time.monotonic()
+            timed_out = False
+            while child.poll() is None:
+                if not timed_out and time.monotonic() - start >= spec['bound']:
+                    # Stop the tier runner, leaving heavy's client able to report
+                    # its token/end. The shim's gate closes the submission race.
+                    try:
+                        os.kill(child.pid, signal.SIGSTOP)
+                    except ProcessLookupError:
+                        continue
+                    with lock(Path(spec['gate']), wait=True):
+                        atomic(Path(spec['blocked']), '')
+                    timed_out = True
+                    write_json(spec['waiting'], dict(reason='wall bound; heavy end unknown'))
+                if timed_out:
+                    tokens, ended = heavy_tokens(spec['log'])
+                    if (not heavy_starting(spec['log']) and
+                            all(token in ended or cancel_heavy(spec['heavy'], spec['slot'], token) for token in tokens)):
+                        os.killpg(child.pid, signal.SIGKILL)
+                        child.wait()
+                        break
+                    # A shim still starting without a token remains unknown.
+                time.sleep(.05)
+            code = child.wait()
+            tokens, ended = heavy_tokens(spec['log'])
+            while heavy_starting(spec['log']) or any(token not in ended for token in tokens):
+                with lock(Path(spec['gate']), wait=True):
+                    atomic(Path(spec['blocked']), '')
+                write_json(spec['waiting'], dict(reason='child exited; heavy release is unknown'))
+                if not heavy_starting(spec['log']) and all(
+                        token in ended or cancel_heavy(spec['heavy'], spec['slot'], token) for token in tokens):
+                    code = 2
+                    break
+                time.sleep(.05)
+                tokens, ended = heavy_tokens(spec['log'])
+        write_json(spec['result'], dict(code=code, timeout=timed_out,
+                                       elapsed=time.monotonic() - start))
+    return 0
+
+
+def initial():
+    now = time.time()
+    return dict(version=1, slot=None, seen=None, cursor=None, queue=[], tests={}, active=None,
+                outbox=[], stopped=False, fault_episode=None,
+                hour=dict(start=now, seen=0, completed=0, coalesced=0), last_run=None, lease_holds=[])
+
+
+class Runner:
+    def __init__(self, args):
+        self.args = args
+        self.directory = args.state_dir
+        self.path = self.directory / 'state.json'
+        no_links(self.path)
+        self.state = json.loads(self.path.read_text()) if self.path.exists() else initial()
+        if self.state.get('version') != 1:
+            raise Fault('unsupported state version')
+        if self.state['slot'] not in (None, str(args.slot)):
+            raise Fault('state belongs to another slot')
+        self.state['slot'] = str(args.slot)
+        self.lease_fds = []
+        self.delivery_attempted = set()
+        self.lifetime = None
+        self.state.setdefault('lease_holds', [])
+        self.next_poll = time.monotonic() + args.poll_interval
+
+    def save(self):
+        write_json(self.path, self.state)
+
+    def bind_lifetime(self, lifetime):
+        self.lifetime = lifetime
+        if lifetime is not None and lifetime.fd is not None:
+            self.lease_fds = [lifetime.fd]
+            self.state['lease_holds'].append(lifetime.token)
+            self.save()
+
+    def adopt_drained_holds(self):
+        if self.lifetime is None or self.lifetime.fd is None:
+            return
+        # Called only after the interrupted invocation has reported completion.
+        # The new lease protects the slot while the old exact holds are adopted.
+        for token in self.state['lease_holds']:
+            if token == self.lifetime.token:
+                continue
+            path = self.lifetime.directory / (token + '.hold')
+            no_links(path)
+            if path.exists():
+                self.lifetime.adopt(token)
+        self.state['lease_holds'] = [self.lifetime.token]
+        self.save()
+
+    def post(self, identifier, destination, body, *, records=None):
+        if any(item['id'] == identifier for item in self.state['outbox']):
+            return
+        self.state['outbox'].append(dict(id=identifier, records=records or [],
+                                         posts=[dict(to=destination, body=body, delivered=False)],
+                                         recorded=not records))
+        self.save()
+
+    def fault(self, reason, identifier=None, group=None):
+        if self.state['fault_episode'] is not None:
+            return
+        identifier = identifier or f"fault:{self.state['seen']}:{time.time_ns()}"
+        self.state['fault_episode'] = identifier
+        body = f'id: {identifier}\n{reason}\nbuilder: {self.args.host}'
+        if group is not None:
+            group['posts'].append(dict(to=self.args.ops, body=body, delivered=False))
+            self.save()
+        else:
+            self.post(identifier, self.args.ops, body)
+
+    def deliver(self):
+        for item in self.state['outbox'][:]:
+            if item['id'] in self.delivery_attempted:
+                continue
+            self.delivery_attempted.add(item['id'])
+            if not item['recorded']:
+                lines = [json.dumps(event, separators=(',', ':'), ensure_ascii=True, sort_keys=True) for event in item['records']]
+                if any(len(line.encode()) > 16384 for line in lines):
+                    raise Fault('records event exceeds 16 KB; publication retained')
+                try:
+                    result = command([self.args.record, 'append', '--as', 'after-landing',
+                                      '--batch', self.args.host], data='\n'.join(lines) + '\n')
+                except Fault:
+                    continue
+                if result.returncode:
+                    continue
+                item['recorded'] = True
+                self.save()
+            for index, post in enumerate(item['posts']):
+                if post['delivered']:
+                    continue
+                body_path = self.directory / 'post-body.txt'
+                atomic(body_path, post['body'] + '\n')
+                try:
+                    result = command([self.args.post, 'send', '--as', 'after-landing', post['to'],
+                                      'after-landing ' + item['id'][:160], body_path])
+                except Fault:
+                    continue
+                if result.returncode in (0, 3):
+                    item['posts'][index]['delivered'] = True
+                    self.save()
+            if all(post['delivered'] for post in item['posts']):
+                self.state['outbox'].remove(item)
+                self.save()
+
+    def poll(self):
+        self.next_poll = time.monotonic() + self.args.poll_interval
+        self.delivery_attempted.clear()
+        self.deliver()
+        if self.state['stopped']:
+            return
+        git(self.args.slot, 'fetch', '-q', 'origin', 'main')
+        tip = git(self.args.slot, 'rev-parse', 'origin/main')
+        previous = self.state['seen']
+        if previous != tip:
+            if previous is not None:
+                result = command(['git', '-C', self.args.slot, 'merge-base', '--is-ancestor', previous, tip])
+                if result.returncode:
+                    self.state['stopped'] = True
+                    self.save()
+                    self.fault(f'rewritten history: {previous} -> {tip}; polling stopped')
+                    return
+            self.state['queue'].append(dict(tip=tip, suspects=suspects(self.args.slot, previous, tip) if previous else [],
+                                             coalesced=[], seen_at=time.time(), attempt=0, pairs={}))
+            self.state['seen'] = tip
+            self.state['hour']['seen'] += 1
+            self.save()
+        self.hourly()
+
+    def hourly(self):
+        hour = self.state['hour']
+        if time.time() - hour['start'] < 3600:
+            return
+        waiting = self.state['queue'][1:] if self.state['active'] else self.state['queue']
+        lag = max(0, time.time() - waiting[0]['seen_at']) if waiting else 0
+        identifier = f"coverage:{int(hour['start'])}"
+        body = (f'id: {identifier}\npublished tips seen: {hour["seen"]}; runs completed: {hour["completed"]}; '
+                f'tips coalesced: {hour["coalesced"]}; oldest waiting lag seconds: {lag:.0f}')
+        for destination in dict.fromkeys([self.args.ops, self.args.coordinator]):
+            self.post(identifier + ':' + destination, destination, body)
+        self.state['hour'] = dict(start=time.time(), seen=0, completed=0, coalesced=0)
+        self.save()
+
+    def resolve(self, keys):
+        result = command([self.args.registry, 'names', '--json'])
+        if result.returncode:
+            raise Fault('launcher registry unreadable')
+        try:
+            rows = json.loads(result.stdout)
+            if not isinstance(rows, list):
+                raise ValueError('expected list')
+            routes = {row['branch_key']: row['coordinator_mailbox'] for row in rows if row.get('role') == 'lead'}
+            for row in rows:
+                if row.get('role') == 'coordinator':
+                    # Registry inventory provides handle + mailbox. The default
+                    # coordinator's branch prefix is coord, other handles own theirs.
+                    routes['coord' if row['mailbox'].split('@')[0] == 's/dynamic-memory' else row['handle']] = row['mailbox']
+            fallback = {}
+            for line in (self.args.slot / 'tools/queue/leads.txt').read_text().splitlines():
+                if line.strip() and not line.lstrip().startswith('#'):
+                    key, address = line.split()
+                    fallback[key] = address
+            resolved = {}
+            for key in keys:
+                mailbox = routes.get(key, fallback.get(key))
+                if not isinstance(mailbox, str) or not mailbox:
+                    raise ValueError('no route for ' + key)
+                if '@' not in mailbox:
+                    addresses = {address for address in fallback.values() if address.split('@')[0] == mailbox}
+                    if len(addresses) != 1:
+                        raise ValueError('no unique transport address for ' + mailbox)
+                    mailbox = addresses.pop()
+                resolved[key] = mailbox
+            return resolved
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            raise Fault(f'route fault: {error}') from error
+
+    def prepare(self):
+        if self.state['active']:
+            return
+        queue = self.state['queue']
+        if not queue:
+            return
+        # Never discard the front tip after a partial run: its faulted pairs
+        # must be retried before coalescing fresh waiting work behind it.
+        if len(queue) > 2 and not queue[0]['attempt']:
+            skipped, newest = queue[:-1], queue[-1]
+            newest['suspects'] = [suspect for item in queue for suspect in item['suspects']]
+            newest['coalesced'] = [tip for item in skipped for tip in [*item['coalesced'], item['tip']]]
+            self.state['hour']['coalesced'] += len(skipped)
+            self.state['queue'] = [newest]
+        item = self.state['queue'][0]
+        config = tomllib.loads(self.args.tiers.read_text())
+        profiles = config['profiles']
+        if not profiles or len(set(profiles)) != len(profiles) or any(not re.fullmatch(r'[a-z][a-z0-9-]*-[a-z][a-z0-9]*', p) for p in profiles):
+            raise Fault('invalid tier set')
+        pending = [p for p in profiles if item['pairs'].get(p, {}).get('status') != 'ran']
+        self.state['active'] = dict(tip=item['tip'], attempt=item['attempt'] + 1, profiles=pending,
+                                    baseline=self.state['tests'].copy(), pairs={}, updates={}, events={},
+                                    invocation=None, started=time.time())
+        self.save()
+
+    def event(self, kind, identifier, **fields):
+        return dict(id=identifier, kind=kind, source='after-landing', host=self.args.host,
+                    time=datetime.now(timezone.utc).isoformat(timespec='microseconds'), **fields)
+
+    def await_invocation(self, invocation):
+        result = Path(invocation['result'])
+        announced = False
+        while not result.exists():
+            # The guardian writes the result before dropping its lock. On a
+            # restart, a held lock proves the old waiter is still responsible.
+            try:
+                with lock(self.directory / 'execution.lock'):
+                    alive = False
+            except Fault:
+                alive = True
+            # Completion is published before releasing execution.lock; it may
+            # have appeared between the loop condition and this lock probe.
+            if result.exists():
+                break
+            if not alive:
+                tokens, ended = heavy_tokens(invocation['log'])
+                if tokens and not heavy_starting(invocation['log']) and all(token in ended or cancel_heavy(self.args.heavy, self.args.slot, token) for token in tokens):
+                    write_json(result, dict(code=2, timeout=True, elapsed=0))
+                    break
+                # There may have been a submission before its queued line was
+                # flushed. Absence of a token cannot prove an idle slot.
+                self.fault('interrupted supervisor; heavy completion unknown; slot retained')
+                self.save()
+                return None
+            overdue = time.time() - invocation.get('started_at', time.time()) > invocation.get('bound', 0) + 5
+            if (Path(invocation['waiting']).exists() or overdue) and not announced:
+                self.fault('waiting for heavy command to end; slot retained')
+                announced = True
+                self.deliver()
+            if self.args.mode == 'follow' and time.monotonic() >= self.next_poll:
+                self.poll()
+                self.next_poll = time.monotonic() + self.args.poll_interval
+            time.sleep(.05)
+        return json.loads(result.read_text())
+
+    def launch(self, profile, binary=None, test=None):
+        active = self.state['active']
+        existing = active['invocation']
+        if existing:
+            if self.await_invocation(existing) is None:
+                raise Fault('heavy completion unknown; no next pair allowed')
+            active['invocation'] = None
+            self.save()
+        config = tomllib.loads((self.args.slot / '.config/nextest.toml').read_text())
+        table = config['profile'][profile]
+        bound = duration(table.get('global-timeout', config['profile'].get('default', {}).get('global-timeout'))) + 1800
+        # Per invocation artifacts stay private and outside the mutable checkout.
+        directory = Path(tempfile.mkdtemp(prefix='run-', dir=self.directory))
+        xml = directory / 'junit.xml'
+        table['junit'] = dict(path=str(xml), **{'store-success-output': False, 'store-failure-output': True})
+        nextest = directory / 'nextest.toml'
+        atomic(nextest, '\n'.join(json.dumps(k) + ' = ' + toml_value(v) for k, v in config.items()) + '\n')
+        shim = directory / 'bin'
+        shim.mkdir(mode=0o700)
+        gate, blocked = directory / 'heavy.lock', directory / 'heavy.blocked'
+        shim_code = '''#!/usr/bin/env python3
+import fcntl
+import os
+from pathlib import Path
+import subprocess
+import sys
+import uuid
+with open(GATE, 'a') as gate:
+    fcntl.flock(gate, fcntl.LOCK_EX)
+    if Path(BLOCKED).exists():
+        sys.exit(2)
+    identifier = uuid.uuid4().hex
+    print('after-landing: heavy begin ' + identifier, flush=True)
+    try:
+        child = subprocess.Popen([HEAVY, *sys.argv[1:]], stdin=subprocess.DEVNULL)
+    except OSError:
+        print('after-landing: heavy end ' + identifier + ' 2', flush=True)
+        sys.exit(2)
+code = child.wait()
+print('after-landing: heavy end ' + identifier + ' ' + str(code), flush=True)
+sys.exit(code if code >= 0 else 128 - code)
+'''
+        shim_code = shim_code.replace('GATE', repr(str(gate))).replace('BLOCKED', repr(str(blocked))).replace('HEAVY', repr(self.args.heavy))
+        atomic(shim / 'heavy', shim_code)
+        (shim / 'heavy').chmod(0o700)
+        tier, tree = profile.rsplit('-', 1)
+        argv = [str(self.args.tiers_run or self.args.slot / 'tools/tiers/run'), tree, tier,
+                '--', '--config-file', str(nextest)]
+        if binary is not None:
+            argv += ['-E', exact_filter(binary, test)]
+        invocation = dict(directory=str(self.directory), slot=str(self.args.slot), log=str(directory / 'output.log'),
+                          result=str(directory / 'result.json'), waiting=str(directory / 'waiting.json'),
+                          shim=str(shim), heavy=self.args.heavy, command=argv, bound=bound,
+                          lease_fds=self.lease_fds, gate=str(gate), blocked=str(blocked), started_at=time.time())
+        spec = directory / 'spec.json'
+        write_json(spec, invocation)
+        active['invocation'] = invocation
+        self.save()
+        # Take execution.lock before startup so a restart cannot mistake the
+        # guardian's exec/startup gap for a dead waiter. Inherit this descriptor.
+        with lock(self.directory / 'execution.lock') as fd:
+            guardian = subprocess.Popen([sys.executable, '-I', '-B', str(Path(__file__).resolve()),
+                                         '_supervise', str(spec), str(fd)],
+                                        stdin=subprocess.DEVNULL, pass_fds=(fd, *self.lease_fds))
+            # Guardian adopts the inherited lock; it never reacquires it.
+            while not (directory / 'started').exists() and guardian.poll() is None:
+                time.sleep(.01)
+        result = self.await_invocation(invocation)
+        guardian.wait() if result is not None else None
+        if result is None:
+            raise Fault('heavy completion unknown; no next pair allowed')
+        active['invocation'] = None
+        self.save()
+        logs = dict(log=str(directory / 'output.log'), junit=str(xml), elapsed=result['elapsed'])
+        if result['timeout']:
+            raise Fault('pair wall bound passed', logs=[logs['log']], wall=logs['elapsed'])
+        if result['code'] not in (0, 100):
+            raise Fault(f'tiers/run exit {result["code"]}', logs=[logs['log']], wall=logs['elapsed'])
+        try:
+            selected, results = junit(xml, profile)
+        except Fault as error:
+            raise Fault(str(error), logs=[logs['log']], wall=logs['elapsed']) from error
+        failures = [r for r in results.values() if r['result'] == 'fail']
+        if (result['code'] == 100) != bool(failures) or not selected:
+            raise Fault('nextest exit and executed results disagree or select zero tests', logs=[logs['log']], wall=logs['elapsed'])
+        return selected, results, logs
+
+    def pair(self, profile):
+        active = self.state['active']
+        selected, results, first = self.launch(profile)
+        updates, events, red, new = {}, {}, [], []
+        pair_logs, pair_wall = [first['log']], first['elapsed']
+        for key, result in results.items():
+            if result['result'] == 'unobserved':
+                continue
+            old = active['baseline'].get(key)
+            rerun = None
+            state = None
+            if result['result'] == 'fail':
+                _, binary, test = result['identity']
+                count, repeated, rerun = self.launch(profile, binary, test)
+                pair_logs.append(rerun['log'])
+                pair_wall += rerun['elapsed']
+                try:
+                    validate_rerun(key, count, repeated)
+                except Fault as error:
+                    raise Fault(str(error), logs=pair_logs, wall=pair_wall) from error
+                if repeated[key]['result'] == 'pass':
+                    state, last = 'flake', 'pass'
+                else:
+                    state = 'unattributed' if old is None else 'standing' if old['result'] == 'red' else 'new'
+                    last = 'red'
+                    red.append(key)
+            else:
+                last = 'pass'
+                if old and old['result'] == 'red':
+                    state = 'recovered'
+            updates[key] = dict(result=last, commit=active['tip'])
+            if state:
+                identifier = f'{active["tip"]}:{active["attempt"]}:' + ':'.join(result['identity'])
+                event = self.event('after-landing-test', identifier, commit=active['tip'],
+                                   identity=result['identity'], state=state,
+                                   logs=[first['log'], rerun['log'] if rerun else first['log']])
+                previous = active['events'].get(identifier)
+                if previous and previous['state'] != state:
+                    raise Fault('replayed verdict changed; retaining prior evidence', logs=pair_logs, wall=pair_wall)
+                events[identifier] = previous or event
+                if state == 'new':
+                    new.append(dict(identity=result['identity'], error=result['error'],
+                                    logs=events[identifier]['logs'], id=identifier))
+        return dict(status='ran', selected=selected, executed=sum(r['result'] != 'unobserved' for r in results.values()),
+                    failed=sum(r['result'] == 'fail' for r in results.values()), red=red, new=new,
+                    logs=pair_logs, wall=pair_wall), updates, events
+
+    def run(self):
+        self.prepare()
+        active = self.state['active']
+        if active is None:
+            return
+        # Interrupted attempts redo their selected pairs. Global executed history
+        # changes only at finish, so replay cannot turn a new red into standing.
+        if active['invocation']:
+            if self.await_invocation(active['invocation']) is None:
+                return
+            active['invocation'] = None
+        self.adopt_drained_holds()
+        git(self.args.slot, 'checkout', '--detach', '--force', active['tip'])
+        git(self.args.slot, 'clean', '-fd')
+        for profile in active['profiles']:
+            try:
+                outcome, updates, events = self.pair(profile)
+                active['updates'].update(updates)
+                for identifier, event in events.items():
+                    active['events'].setdefault(identifier, event)
+            except (Fault, OSError, ValueError, KeyError) as error:
+                if active['invocation']:
+                    # Unknown completion must never start another pair/tip.
+                    self.fault(str(error))
+                    self.save()
+                    return
+                outcome = dict(status='faulted', error=str(error), logs=getattr(error, 'logs', []), wall=getattr(error, 'wall', 0))
+            active['pairs'][profile] = outcome
+            self.save()
+        self.finish()
+
+    def finish(self):
+        active, item = self.state['active'], self.state['queue'][0]
+        item['pairs'].update(active['pairs'])
+        faulted = [p for p, outcome in item['pairs'].items() if outcome['status'] == 'faulted']
+        red = (any(outcome.get('red') for outcome in item['pairs'].values()) or
+               any(event['state'] in ('new', 'standing', 'unattributed') for event in active['events'].values()))
+        verdict = 'red' if red else 'partial' if faulted else 'green'
+        identifier = f'{active["tip"]}:{active["attempt"]}'
+        new = [test for outcome in active['pairs'].values() for test in outcome.get('new', [])]
+        posts = []
+        routing_error = None
+        if new:
+            try:
+                routes = self.resolve({s['key'] for s in item['suspects'] if s['kind'] == 'branch'})
+                for destination in sorted(set(routes.values())):
+                    branches = [s['branch'] for s in item['suspects'] if s['kind'] == 'branch' and routes[s['key']] == destination]
+                    for event in active['events'].values():
+                        if event['state'] == 'new':
+                            event.setdefault('branch', branches[0])
+                            event['branches'] = sorted(set(event.get('branches', []) + branches))
+                    # Keep every identity and suspect, with bounded line count.
+                    body = [f'id: {identifier}', f'tip: {active["tip"]}; builder: {self.args.host}',
+                            'single suspect' if len(item['suspects']) == 1 else 'several suspects',
+                            'suspects: ' + json.dumps(item['suspects'], separators=(',', ':')),
+                            'new reds: ' + json.dumps(new, separators=(',', ':'))]
+                    posts.append(dict(to=destination, body='\n'.join(body), delivered=False))
+            except Fault as error:
+                routing_error = str(error)
+        event = self.event('after-landing-run', identifier, commit=active['tip'], attempt=active['attempt'],
+                           suspects=item['suspects'], coalesced=item['coalesced'], verdict=verdict,
+                           pairs=item['pairs'], wall=time.time() - active['started'], routing_fault=routing_error)
+        # First-error excerpts belong only in posts, never records log contents.
+        event['pairs'] = {p: {k: v for k, v in result.items() if k != 'new'} for p, result in item['pairs'].items()}
+        group = dict(id=identifier, records=[*active['events'].values(), event], posts=posts, recorded=False)
+        self.state['outbox'].append(group)
+        self.state['tests'].update(active['updates'])
+        self.state['last_run'] = dict(id=identifier, verdict=verdict, faulted=faulted)
+        item['attempt'] = active['attempt']
+        if not faulted:
+            self.state['cursor'] = item['tip']
+            self.state['queue'].pop(0)
+            self.state['hour']['completed'] += 1
+            self.state['fault_episode'] = None
+        self.state['active'] = None
+        self.save()
+        if faulted or routing_error:
+            self.fault('faulted pairs: ' + ', '.join(faulted) + ('; ' + routing_error if routing_error else ''), identifier + ':fault', group=group)
+        self.deliver()
+
+
+def positive(value):
+    value = float(value)
+    if not math.isfinite(value) or value <= 0:
+        raise argparse.ArgumentTypeError('must be finite and positive')
+    return value
+
+
+def arguments(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('mode', choices=['follow', 'once', 'status'])
+    parser.add_argument('--slot', type=Path, default=Path.home() / 'src/fabrig/slots/9')
+    parser.add_argument('--state-dir', type=Path, default=Path.home() / 'src/fabrig/after-landing')
+    parser.add_argument('--tiers', type=Path, default=Path(__file__).with_name('tiers.toml'))
+    parser.add_argument('--poll-interval', type=positive, default=60)
+    installed = Path.home() / 'src/fabrig/current/tools'
+    parser.add_argument('--post', default='post')
+    parser.add_argument('--record', default=str(installed / 'records/record'))
+    parser.add_argument('--registry', default=str(installed / 'session/start'))
+    parser.add_argument('--heavy', default=str(Path.home() / 'src/fabrig/main/tools/heavy/heavy'))
+    parser.add_argument('--tiers-run', type=Path)
+    parser.add_argument('--lifetime', type=Path, default=Path.home() / 'src/fabrig/main/tools/slots/lifetime.py')
+    parser.add_argument('--ops', default='ops@hel8')
+    parser.add_argument('--coordinator', default='s/dynamic-memory@hel8')
+    parser.add_argument('--host', default=socket.gethostname())
+    parser.add_argument('--dry-run', action='store_true')
+    args = parser.parse_args(argv)
+    for name in ('slot', 'state_dir', 'tiers', 'lifetime', 'tiers_run'):
+        if getattr(args, name) is not None:
+            setattr(args, name, getattr(args, name).expanduser().absolute())
+    for name in ('post', 'record', 'registry', 'heavy'):
+        value = getattr(args, name)
+        if '/' not in value:
+            import shutil
+            value = shutil.which(value) or value
+        setattr(args, name, os.path.abspath(os.path.expanduser(value)))
+    if args.dry_run and args.mode != 'once':
+        parser.error('--dry-run requires once')
+    return args
+
+
+def main(argv=None):
+    os.umask(0o077)
+    args = arguments(argv)
+    if args.mode == 'status':
+        no_links(args.state_dir / 'state.json')
+        state = json.loads((args.state_dir / 'state.json').read_text()) if (args.state_dir / 'state.json').exists() else initial()
+        active = state['active']
+        print(json.dumps(dict(cursor=state['cursor'], seen=state['seen'],
+                              waiting=[item['tip'] for item in state['queue']],
+                              active=None if active is None else dict(tip=active['tip'], attempt=active['attempt'],
+                                                                     waiting_for_end=active['invocation'] is not None),
+                              last_run=state['last_run'], stopped=state['stopped'],
+                              undelivered=len(state['outbox'])), sort_keys=True))
+        return 0
+    no_links(args.slot)
+    if args.dry_run:
+        git(args.slot, 'fetch', '-q', 'origin', 'main')
+        tip = git(args.slot, 'rev-parse', 'origin/main')
+        previous = git(args.slot, 'rev-parse', 'HEAD~3')
+        print(json.dumps(dict(tip=tip, previous=previous, suspects=suspects(args.slot, previous, tip),
+                              profiles=tomllib.loads(args.tiers.read_text())['profiles']), indent=2))
+        return 0
+    # Persistent evidence must not be in a checkout cleaned/switched by this tool.
+    if args.state_dir == args.slot or args.slot in args.state_dir.parents:
+        raise Fault('state must be outside the slot')
+    private_directory(args.state_dir)
+    lease = nullcontext(None)
+    slots = Path.home() / 'src/fabrig/slots'
+    if args.slot.parent == slots and args.slot.name.isdecimal():
+        spec = importlib.util.spec_from_file_location('after_landing_lifetime', args.lifetime)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        lease = module.Lease(args.slot)
+    with lock(args.state_dir / 'runner.lock'), lease as lifetime:
+        runner = Runner(args)
+        runner.bind_lifetime(lifetime)
+        while True:
+            try:
+                runner.poll()
+                if runner.state['stopped']:
+                    runner.deliver()
+                    return 2
+                runner.run()
+                runner.deliver()
+            except (Fault, OSError, ValueError, KeyError) as error:
+                runner.fault(str(error))
+                runner.deliver()
+                print(f'after-landing: {error}', file=sys.stderr)
+            if args.mode == 'once':
+                if lifetime is not None:
+                    lifetime.clean = runner.state['active'] is None
+                return 0 if not runner.state['active'] else 1
+            time.sleep(args.poll_interval)
+
+
+if __name__ == '__main__':
+    try:
+        if len(sys.argv) == 4 and sys.argv[1] == '_supervise':
+            # Keep the inherited flock for the guardian's entire lifetime.
+            inherited_fd = int(sys.argv[3])
+            spec_path = Path(sys.argv[2])
+            atomic(spec_path.parent / 'started', '')
+            sys.exit(supervise(spec_path, inherited_fd))
+        sys.exit(main())
+    except (Fault, OSError, ValueError, KeyError, TypeError) as error:
+        print(f'after-landing: {error}', file=sys.stderr)
+        sys.exit(2)

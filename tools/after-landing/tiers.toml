@@ -1,0 +1,11 @@
+profiles = [
+  "exhaustive-skein",
+  "qa-skein",
+  "qa-smith",
+  "qa-jig",
+  "process-jig",
+  "browser-skein",
+  "browser-jig",
+  "browser-temper",
+  "qa-temper",
+]
