@@ -569,10 +569,14 @@ class RecordTests(unittest.TestCase):
         return args
 
     def test_director_draft_states_and_defaults(self):
+        before = datetime.now(timezone.utc).replace(microsecond=0)
         self.draft(priority=3)
+        after = datetime.now(timezone.utc)
         fields = self.fields('drafts/example/draft.toml')
         self.assertEqual((fields['state'], fields['priority']), ('queued', 3))
-        self.assertLess(abs((datetime.now(timezone.utc) - API['utc'](fields['updated'], 'updated')).total_seconds()), 10)
+        updated = API['utc'](fields['updated'], 'updated')
+        self.assertGreaterEqual(updated, before)
+        self.assertLessEqual(updated, after)
         self.draft()
         self.assertEqual(self.fields('drafts/example/draft.toml')['priority'], 3)
         transitions = {'queued': {'queued', 'active'}, 'active': {'active', 'paused', 'done'},
@@ -622,15 +626,17 @@ class RecordTests(unittest.TestCase):
         self.assert_clean()
 
     def test_director_ask_answer_applied_and_questions(self):
-        before = datetime.now(timezone.utc)
+        before = datetime.now(timezone.utc).replace(microsecond=0)
         result = self.ask('What next? "quoted"\nline')
+        after = datetime.now(timezone.utc)
         self.assertEqual(result.stdout.splitlines()[-1], b'0001')
         fields = self.fields('director/questions/0001.toml')
         self.assertEqual(fields['by'], 'director')
         self.assertEqual(fields['options'], ['a', 'b'])
         self.assertEqual(fields['question'], 'What next? "quoted"\nline')
         due = API['utc'](fields['deadline'], 'deadline')
-        self.assertLess(abs((due - before - timedelta(hours=2)).total_seconds()), 5)
+        self.assertGreaterEqual(due, before + timedelta(hours=2))
+        self.assertLessEqual(due, after + timedelta(hours=2))
         self.ask('Past question', '2020-01-01T00:00:00Z')
         questions = self.run_record('questions', '--as', 'ops', '--open').stdout
         self.assertIn(b'0001', questions)
