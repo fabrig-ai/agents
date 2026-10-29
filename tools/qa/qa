@@ -1149,6 +1149,20 @@ class Watch:
             need(state['stage'] != 'starting' or state['run'],
                  f'{state["walk"]}: launch outcome is still unknown; admission waits for the watcher', 1)
 
+    def overdue_launch_notice(self, state, observation):
+        if state['stage'] != 'starting' or state['run']:
+            return
+        seconds = (utc(timestamp()) - utc(state['started'])).total_seconds()
+        if seconds < 600:
+            return
+        attempt = state.get('attempt', 1)
+        self.notify_once(f'overdue launch {state["walk"]} attempt {attempt} started {state["started"]}',
+                         f'qa: overdue launch for {state["walk"]}',
+                         f'Walk {state["walk"]}, attempt {attempt}: overdue launch.\n'
+                         f'Waiting {int(seconds)} seconds since {state["started"]} (grace 600 seconds).\n'
+                         f'Observed: {observation}.\n'
+                         'Launch is not proven complete or cancelled; custody and admission stay held.\n')
+
     def launch_cancelled(self, directory, state):
         # An acknowledged command exit may be checked immediately. Otherwise
         # absence means nothing until the existing ten-minute launch grace ends.
@@ -1156,7 +1170,12 @@ class Watch:
                 and (utc(timestamp()) - utc(state['started'])).total_seconds() < 600):
             log(f'{state["walk"]}: awaiting launch metadata within grace; keeping custody')
             return False
-        if self.task_launcher_alive(directory / 'task.md') is not False:
+        try:
+            launcher = self.task_launcher_alive(directory / 'task.md')
+        except (Problem, OSError, ValueError, UnicodeError):
+            launcher = None
+        if launcher is not False:
+            self.overdue_launch_notice(state, 'launcher live' if launcher is True else 'launcher unknown')
             log(f'{state["walk"]}: launcher live or unknown; keeping custody')
             return False
         # A launcher can publish metadata and exit during the process scan.
@@ -1269,6 +1288,15 @@ class Watch:
         self.alert_attempted = set()
         with self.walks_locked(wait=False) as walking:
             if not walking:
+                # An orphan launcher can hold admission indefinitely. Read atomic
+                # snapshots for alerts only: never save state or change custody.
+                no_links(self.workspace.tmp, self.directory / 'walks')
+                for directory, state in self.local_walks(strict=False):
+                    try:
+                        self.overdue_launch_notice(state, 'admission descriptor held (walks lock busy)')
+                    except (Problem, OSError, ValueError, UnicodeError) as error:
+                        why = str(error) if isinstance(error, Problem) else type(error).__name__
+                        log(f'{state["walk"]}: overdue launch notice failed ({why}); keeping custody')
                 return
             self.states.clear()
             self.classes.clear()

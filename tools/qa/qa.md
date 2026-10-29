@@ -270,7 +270,9 @@ The watcher requires `~/.config/agents-qa/director` to exist and an explicit
 valid director ADDRESS. `--once` makes one check. Otherwise it waits on the
 `qa-watch` mailbox with its PID and kind codex, reads delivered mail and
 checks again; a replaced mailbox holder exits 2. A separate nonblocking
-`tmp/qa/watch.lock` permits one service. A busy walks lock skips that check.
+`tmp/qa/watch.lock` permits one service. A busy walks lock skips custody
+actions for that check, but still reads saved walks to send overdue-launch
+notices without taking admission.
 
 At the cap it stops the session and confirms its unit is inactive, including
 the stop wrapper. `ended` alone is insufficient. Then it gives moved logins,
@@ -323,9 +325,9 @@ saved custody disables these observations. There is no automatic orphan
 claim release.
 
 One-time director notices use durable reservations in `tmp/qa/attention/`,
-one hashed JSON receipt and body per release attempt, orphan claim or unknown
-login holder. The reservation precedes `post`, so a service restart or crash
-cannot repeat the post attempt. An interrupted or failed post is recorded
+one hashed JSON receipt and body per release attempt, orphan claim, unknown
+login holder or overdue launch. The reservation precedes `post`, so a service
+restart or crash cannot repeat the post attempt. An interrupted or failed post is recorded
 without retry; its receipt remains available for reconciliation. Ordinary
 stuck-login and starter-post retry rules below are separate.
 
@@ -380,6 +382,14 @@ keeps the existing ten-minute grace from its saved launch start; afterward,
 cleanup must establish that no `codex-run task` launcher for the exact task
 file survives. The same ownership-checked process scanner works with or
 without meta. Live or unknown observations preserve custody and admission.
+Once a pending launch reaches its ten-minute grace, an inherited admission
+descriptor still held, a live launcher or an unknown launcher observation sends
+the director one "overdue launch" notice naming the walk, attempt, elapsed
+seconds and observation. The busy-lock path only reads saved state and sends
+notices; it never saves walk progress, stops units, returns logins or releases
+claims. A free admission lock permits the other walks' normal checks to continue.
+The notice uses the one-time attention receipts: reservation precedes sending,
+restarts never resend, and failed or interrupted sends remain for reconciliation.
 After a negative scan, recovery checks metadata again before cancelling,
 covering a launcher that publishes meta and exits during the scan. A
 refused foreground command records `launch_complete`; it may be cancelled without the grace only after the same negative launcher

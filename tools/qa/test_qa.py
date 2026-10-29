@@ -4086,7 +4086,25 @@ def a_launcher_without_metadata_keeps_custody_and_admission(lab):
             assert starter.wait(timeout=10) == -signal.SIGKILL and alive(child)
             future = (datetime.fromisoformat(state['started'].replace('Z', '+00:00'))
                       + timedelta(minutes=11)).strftime('%Y-%m-%dT%H:%M:%SZ')
-            lab.watch(now=future)
+            before = (datetime.fromisoformat(state['started'].replace('Z', '+00:00'))
+                      + timedelta(seconds=599)).strftime('%Y-%m-%dT%H:%M:%SZ')
+            lab.watch(now=before)
+            assert not lab.sent()
+            custody = (lab.tmp / 'qa/walks' / (state['walk'] + '.json')).read_bytes()
+            calls = {name: lab.calls(name) for name in ('claim', 'logins', 'systemctl', 'codex-run')}
+            lab.watch(now=future, extra={'QA_POST_STATUS': '2'})
+            notice, = lab.sent()
+            assert notice['args'][1:3] == ['director@fixture', f'qa: overdue launch for {state["walk"]}']
+            assert f'Walk {state["walk"]}, attempt 1' in notice['body']
+            assert '660 seconds' in notice['body'] and 'descriptor held' in notice['body']
+            receipt, = (lab.tmp / 'qa/attention').glob('*.json')
+            saved_receipt = json.loads(receipt.read_text())
+            assert saved_receipt['attempted'] and saved_receipt['result'] == 'exit 2'
+            assert saved_receipt['body'] == notice['body']
+            lab.watch(now=future)  # New service, same reservation, no retry after failure.
+            assert lab.sent() == [notice]
+            assert (lab.tmp / 'qa/walks' / (state['walk'] + '.json')).read_bytes() == custody
+            assert {name: lab.calls(name) for name in calls} == calls
             saved = lab.walk_state()[1]
             assert saved['stage'] == 'starting' and not saved['given'] and not saved['released']
             assert slot_claims(lab) and not [c for c in lab.calls('claim') if c[0] == 'release']
@@ -4128,6 +4146,7 @@ tool['Watch'].call = call
     before = (started + timedelta(seconds=599)).strftime('%Y-%m-%dT%H:%M:%SZ')
     after = (started + timedelta(seconds=601)).strftime('%Y-%m-%dT%H:%M:%SZ')
     lab.watch(now=before)
+    assert not lab.sent()
     assert lab.walk_state()[1]['stage'] == 'starting'
     assert not lab.walk_state()[1]['given'] and slot_claims(lab)
     result = lab.run('take', 'forgejo', '--as', 'walk/forgejo/manual', status=1)
@@ -4138,17 +4157,53 @@ tool['Watch'].call = call
     unknown.parent.mkdir()
     unknown.mkdir()  # Same descriptor reader refuses this observation.
     lab.watch(now=after)
+    notice, = lab.sent()
+    assert notice['args'][1:3] == ['director@fixture', f'qa: overdue launch for {state["walk"]}']
+    assert f'Walk {state["walk"]}, attempt 1' in notice['body']
+    assert '601 seconds' in notice['body'] and 'unknown' in notice['body']
     assert lab.walk_state()[1]['stage'] == 'starting' and not lab.walk_state()[1]['given']
     unknown.rmdir()
     unknown.write_bytes(b'\0'.join(os.fsencode(word) for word in
                         (lab.root / 'codex-run', 'task', directory / 'task.md')) + b'\0')
     lab.watch(now=after)
     assert lab.walk_state()[1]['stage'] == 'starting' and not lab.walk_state()[1]['given']
+    assert lab.sent() == [notice]  # Changing observation cannot resend this launch.
     unknown.unlink()
     unknown.parent.rmdir()
     lab.watch(now=after)
     saved = lab.walk_state()[1]
     assert saved['stage'] == 'ended' and saved['given'] == [CHATGPT] and saved['slot_claim']['released']
+
+
+def an_overdue_live_launcher_does_not_block_other_walks(lab):
+    lab.walk('other', '--kind', 'claude')
+    other_directory, other = lab.walk_state()
+    driven_walk(lab, """original = tool['Watch'].call
+def call(self, name, *args):
+    if name == 'codex-run':
+        os._exit(77)
+    return original(self, name, *args)
+tool['Watch'].call = call
+""", status=77)
+    directory, state = next((d, s) for d, s in lab.walk_states() if s['walk'] != other['walk'])
+    after = (datetime.fromisoformat(state['started'].replace('Z', '+00:00'))
+             + timedelta(seconds=601)).strftime('%Y-%m-%dT%H:%M:%SZ')
+    process = lab.root / 'proc' / str(os.getpid())
+    process.mkdir()
+    (process / 'cmdline').write_bytes(b'\0'.join(os.fsencode(word) for word in
+                                    (lab.root / 'codex-run', 'task', directory / 'task.md')) + b'\0')
+    lab.end_run(other)
+    lab.watch(now=after)
+    states = {s['walk']: s for _, s in lab.walk_states()}
+    assert states[state['walk']] == state
+    assert states[other['walk']]['stage'] == 'ended' and states[other['walk']]['slot_claim']['released']
+    notices = [post for post in lab.sent() if 'overdue launch' in post['args'][2]]
+    notice, = notices
+    assert notice['args'][1] == 'director@fixture'
+    assert f'Walk {state["walk"]}, attempt 1' in notice['body']
+    assert '601 seconds' in notice['body'] and 'launcher live' in notice['body']
+    lab.watch(now=after)
+    assert [post for post in lab.sent() if 'overdue launch' in post['args'][2]] == notices
 
 
 def successor_claim_survives_release(lab, remote):
@@ -4404,6 +4459,7 @@ CASES = (
     new_claim_lifetimes_get_distinct_release_alerts,
     legacy_saved_claims_release_with_their_exact_what,
     fast_readonly_fixture_results_match_external_services,
+    an_overdue_live_launcher_does_not_block_other_walks,
     a_launcher_without_metadata_keeps_custody_and_admission,
     a_missing_launch_keeps_grace_and_unknown_custody,
     slot_release_refuses_without_the_walks_lock,
