@@ -248,6 +248,20 @@ class StartOnceTest(fixture.FleetTest):
         old_script = old_script.replace('SYSTEM_TOOL_DIRS = (Path("/usr/bin"), Path("/bin"))',
                                         f'SYSTEM_TOOL_DIRS = tuple(map(Path, {json.dumps([str(p) for p in self.system_bins])}))')
         fixture.put(self.source / "tools/fleet-sync", old_script, True)
+        # The historical runner cannot parse the new QA string settings. Keep
+        # that rollout limitation explicit, then test marker/journal compatibility
+        # with the numeric-only declaration schema that release understood.
+        result = self.process("python3", "-I", "-B", self.source / "tools/fleet-sync",
+                              "--host", "hel8", "--self-check", expected=2)
+        self.assertIn("invalid machine_env for hetzner6", result.stderr)
+        hosts = self.source / "fleet/hosts.toml"
+        content = hosts.read_text()
+        for entry in (', QA_WALK_KINDS = "forgejo=2:chatgpt,claude=2:claude"',
+                      ', QA_WALK_SLOTS = "forgejo=8,claude=4"', ', QA_SLOT_HOST = "hetzner6"',
+                      ', QA_CLAIM_OWNER = "s/qa"', ', QA_CLAIM_SSH = "free@204.168.210.29"'):
+            self.assertIn(entry, content)
+            content = content.replace(entry, "")
+        fixture.put(hosts, content)
         self.process("python3", "-I", "-B", self.source / "tools/fleet-sync", "--host", "hel8", "--self-check")
         self.reset_calls()
         with patch.dict(os.environ, self.env, clear=True):

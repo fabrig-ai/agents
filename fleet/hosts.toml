@@ -17,7 +17,7 @@ env = {}
 hostname = "debian-16gb-hel1-6"
 ssh = "free@2.29.120.8"
 roles = ["builder", "qa"]
-machine_env = { PLAN_MIN_DISK_GB = 40, KACHE_MAX_GB = 50, KACHE_LOCAL_ONLY = 1, QA_SLOTS = 2, HEAVY_BUILD_SLOTS = 3 }
+machine_env = { PLAN_MIN_DISK_GB = 40, KACHE_MAX_GB = 50, KACHE_LOCAL_ONLY = 1, QA_SLOTS = 2, HEAVY_BUILD_SLOTS = 3, QA_WALK_KINDS = "forgejo=2:chatgpt,claude=2:claude", QA_WALK_SLOTS = "forgejo=8,claude=4", QA_SLOT_HOST = "hetzner6", QA_CLAIM_OWNER = "s/qa", QA_CLAIM_SSH = "free@204.168.210.29" }
 env = {}
 
 [hosts.hetzner7]

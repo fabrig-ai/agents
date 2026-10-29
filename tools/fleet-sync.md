@@ -45,6 +45,12 @@ Declarations: hosts.toml defines names, hostnames, SSH addresses, roles and host
 values. `--host` overrides FLEET_HOST, then hostname discovery. env supplies
 literal KEY=VALUE with only $HOME expansion; host env overrides globals.
 Expanded values may contain no whitespace, quotes, backslashes or remaining $.
+machine_env values are nonnegative integers, except QA_WALK_KINDS,
+QA_WALK_SLOTS, QA_SLOT_HOST, QA_CLAIM_OWNER and QA_CLAIM_SSH: these are literal
+strings without whitespace, controls, quotes, backslashes or $.
+Older runners reject these strings when validating a candidate. To adopt a
+release that introduces them, ops must invoke its updated fleet-sync directly
+from a checkout; an older installed runner cannot promote it automatically.
 environment.d is plain KEY=VALUE. POSIX env.sh adds each local/cargo bin directory
 only when absent; nested shells retain PATH. Other competing env assignments
 warn; PATH assignments never conflict. repositories.toml declares both origins.

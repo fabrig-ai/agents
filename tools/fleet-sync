@@ -579,7 +579,15 @@ class Declarations:
             if not isinstance(host["roles"], list) or not all(isinstance(r, str) for r in host["roles"]):
                 raise ValueError(f"invalid roles for {name}")
             for key, value in host["machine_env"].items():
-                if not KEY.fullmatch(key) or type(value) is not int or value < 0:
+                qa_string = key in {"QA_WALK_KINDS", "QA_WALK_SLOTS", "QA_SLOT_HOST",
+                                    "QA_CLAIM_OWNER", "QA_CLAIM_SSH"}
+                if qa_string:
+                    valid_value = (isinstance(value, str) and
+                                   not any(c.isspace() or ord(c) < 32 or ord(c) == 127 or
+                                           c in "\"'\\$" for c in value))
+                else:
+                    valid_value = type(value) is int and value >= 0
+                if not KEY.fullmatch(key) or not valid_value:
                     raise ValueError(f"invalid machine_env for {name}")
             for key, value in host["env"].items():
                 if not KEY.fullmatch(key) or key == "PATH":
