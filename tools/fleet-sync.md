@@ -61,7 +61,16 @@ Hold and a busy lock leave retry untouched; checks and previews never consume it
    Validate .local/bin and all its parents without following symlinks before
    inspecting links and immediately before either installer invocation; unsafe
    destinations fail the fabrig step. Fabrig's installer itself is unchanged.
-3. Link tools/installed through current, refusing non-symlinks. Render env,
+3. Link tools/installed through current, refusing non-symlinks. Entries are NAME
+   (tools/NAME) or NAME PATH (relative to tools/); names are unique lowercase
+   letters/digits/hyphens starting with a letter. Paths cannot be absolute or
+   contain ..; executable regular targets must resolve inside the candidate.
+   Self-check validates before promotion. Journal created links in links.json;
+   remove obsolete recorded links only while they still target current/releases.
+   Older change history provides ownership evidence during migration; unrelated
+   links and user replacements are retained. Roll out parser support with the
+   one-field manifest first, and wait for hosts to adopt it before enabling nested
+   entries: older runners also parse the candidate manifest before exec. Render env,
    Claude settings, Cargo config, machine.env and policy-controlled routing.
    Prepend bashrc's source block, append profile's, and edit only declared Codex
    top-level keys. Preserve all outside/project bytes, including CRLF/multiline
@@ -75,7 +84,9 @@ Hold and a busy lock leave retry untouched; checks and previews never consume it
    writing/enabling units. It is authoritative on restart, including interrupted
    runs without final state.json. Disable/remove obsolete recorded units only;
    stop timers, never services. Disable uses --no-reload. Reload only for changed
-   files or journaled intent; clear intent after success. Read is-active, then
+   files, journaled intent, or owned units reporting NeedDaemonReload=yes via
+   a read-only manager query on each apply. Combine these into one reload and
+   clear intent after success. Read is-active, then
    enable --now --no-reload only if a timer is inactive or its enablement link
    is absent/wrong. Unchanged runs make no state-changing systemctl calls.
    A conflicting enablement symlink for a journal-owned timer is replaced by
