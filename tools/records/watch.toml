@@ -1,0 +1,53 @@
+# Minutes; conditions use strict 'older than' comparisons. Disable any rule.
+[watch]
+interval_seconds = 120
+
+[rules.deaf]
+enabled = true
+minutes = 10
+escalate_minutes = 20
+
+[rules.gone]
+enabled = true
+escalate_minutes = 30
+
+[rules."report unread"]
+enabled = true
+minutes = 15
+escalate_minutes = 15
+
+[rules."run hung"]
+enabled = true
+minutes = 30
+median_multiplier = 3
+escalate_minutes = 30
+
+[rules."idle claim"]
+enabled = true
+minutes = 45
+escalate_minutes = 45
+
+[rules.unqueued]
+enabled = true
+minutes = 30
+batch_minutes = 20
+escalate_minutes = 30
+
+[rules."lease stall"]
+enabled = true
+minutes = 240
+waiter_minutes = 120
+escalate_minutes = 240
+
+[rules."handover late"]
+enabled = true
+minutes = 20
+escalate_minutes = 20
+
+[rules."question due"]
+enabled = true
+escalate_minutes = 0
+
+[rules."delivery failed"]
+enabled = true
+escalate_minutes = 20
