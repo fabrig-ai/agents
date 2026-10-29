@@ -396,6 +396,11 @@ services, fake local and remote claims, fake disk observations, slot clones
 under the temporary HOME and fixture launcher observations; descendants are
 killed and reaped. Fixture drivers poll fake stop observations every 20 ms
 while retaining real monotonic deadlines and all unit/export completion
-assertions; installed polling remains two seconds. Deliberate manager hangs
+assertions; installed polling remains two seconds. Standard read-only fake
+inventory, claim-list, disk and manager observations execute the identical
+fake program in the fixture interpreter, with parity checks against external
+execution. Mutations, SSH, launchers, stop/export actors, modified executables,
+deliberate hangs and the real-command-line case retain subprocess execution.
+Deliberate manager hangs
 use a ready marker before their shortened timeout starts. The suite runs at
 most eight cases concurrently. It never uses real logins, a real manager or network.

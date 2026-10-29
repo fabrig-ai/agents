@@ -417,6 +417,54 @@ elif name == 'post':
     print('fixture end mail')
 '''
 
+# Only standard, nonblocking fake observations can avoid process startup.
+# Mutations, modified fake programs and deliberate hangs retain real argv,
+# timeout, process-group and inherited-descriptor behavior.
+FAST_READ_DRIVER = '_fixture_program = ' + repr(f'#!/usr/bin/env -S {sys.executable} -I -B\n' + WATCH_TOOLS) + '\n' + r'''
+import contextlib, io, traceback
+from pathlib import Path
+_fixture_original = tool['command']
+_fixture_compiled = compile(_fixture_program, '<qa fake observation>', 'exec')
+def _fixture_command(argv, cwd=None, timeout=None, pass_fds=(), **kwargs):
+    argv = [str(word) for word in argv]
+    name = Path(argv[0]).name
+    quick = (name in ('logins', 'claim') and argv[1:] == ['list']
+             or name == 'df' and argv[1:] == ['-B1', '--output=avail', '/']
+             or name == 'systemctl' and argv[1:3] in (['--user', 'show'], ['--user', 'list-units']))
+    try:
+        root = Path(tool['os'].environ['QA_FIXTURE'])
+        config = tool['json'].loads((root / 'tools.json').read_text())
+        quick = (quick and not cwd and not pass_fds and not kwargs
+                 and Path(argv[0]).parent == root and not config.get('hang')
+                 and not config.get('hung_systemctl')
+                 and Path(argv[0]).read_text() == _fixture_program)
+    except (OSError, KeyError, ValueError):
+        quick = False
+    if not quick:
+        return _fixture_original(argv, cwd=cwd, timeout=timeout, pass_fds=pass_fds, **kwargs)
+    out, err, status = io.StringIO(), io.StringIO(), 0
+    previous = tool['sys'].argv
+    tool['sys'].argv = argv
+    try:
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                exec(_fixture_compiled, {'__name__': '__main__', '__file__': argv[0]})
+            except SystemExit as exit_status:
+                if isinstance(exit_status.code, str):
+                    print(exit_status.code, file=tool['sys'].stderr)
+                    status = 1
+                else:
+                    status = exit_status.code or 0
+            except Exception:
+                traceback.print_exc()
+                status = 1
+    finally:
+        tool['sys'].argv = previous
+    return tool['subprocess'].CompletedProcess(argv, status, out.getvalue(), err.getvalue())
+tool['main'].__globals__['command'] = _fixture_command
+'''
+
+
 class Lab:
     def __init__(self, root, built=None):
         self.root = root
@@ -503,6 +551,8 @@ class Lab:
         if now is not None:
             # Own the clock only in the fixture interpreter, never in qa's CLI.
             driver += f'tool["main"].__globals__["timestamp"] = lambda: {now!r}\n'
+        if args[:1] in (('watch',), ('walk',), ('take',)):
+            driver += FAST_READ_DRIVER + '\n'
         driver += 'sys.exit(tool["main"]())'
         command = [sys.executable, '-I', '-B', '-c', driver, *args]
         result = subprocess.run(command, env=dict(self.env, **(extra or {})), cwd=self.root,
@@ -1103,6 +1153,7 @@ def driven_watch(lab, patch, once=True, status=0):
     driver = f'''import runpy, sys
 tool = runpy.run_path({str(SCRIPT)!r})
 {FAST_POLL}
+{FAST_READ_DRIVER}
 {patch}
 sys.exit(tool['main']())
 '''
@@ -1254,7 +1305,7 @@ def driven_walk(lab, patch, *args, status=0):
     brief = lab.tmp / 'qa-focused/rung-b0-brief.md'
     brief.parent.mkdir(parents=True, exist_ok=True)
     brief.write_text('fixture rung\n')
-    driver = f'import os, runpy, sys\ntool = runpy.run_path({str(SCRIPT)!r})\n' + patch + '\nsys.exit(tool["main"]())\n'
+    driver = f'import os, runpy, sys\ntool = runpy.run_path({str(SCRIPT)!r})\n' + FAST_READ_DRIVER + '\n' + patch + '\nsys.exit(tool["main"]())\n'
     result = subprocess.run([sys.executable, '-I', '-B', '-c', driver, 'walk', 'fabrig', 'b0', *args],
                             env=lab.env, capture_output=True, text=True, timeout=HUNG_TOOL_S)
     assert result.returncode == status, (result.returncode, result.stdout, result.stderr)
@@ -4174,7 +4225,51 @@ def detached_heads_contained_in_origin_history_are_accepted(lab):
     assert lab.walk_state()[1]['main'] == new
 
 
+def fast_readonly_fixture_results_match_external_services(lab):
+    driver = f"import runpy, sys\ntool = runpy.run_path({str(SCRIPT)!r})\n" + FAST_READ_DRIVER + r"""
+workspace = tool['Workspace']()
+for broken in (False, True):
+    root = workspace.fixture
+    config = tool['json'].loads((root / 'tools.json').read_text())
+    config['unit_query_failure'] = broken
+    config['login_list_failure'] = broken
+    config['claim_list_refusal'] = broken
+    (root / 'tools.json').write_text(tool['json'].dumps(config))
+    for argv, bound in (([workspace.tool('logins'), 'list'], 60),
+                        ([workspace.tool('claim'), 'list'], 60),
+                        ([workspace.tool('df'), '-B1', '--output=avail', '/'], 30),
+                        ([workspace.tool('systemctl'), '--user', 'show', '--property=LoadState',
+                          '--property=ActiveState', '--property=Job', '--', 'codex-run-fixture'], 30),
+                        ([workspace.tool('systemctl'), '--user', 'list-units', '--all', '--plain',
+                          '--no-legend', '--full', 'qa-rung-b0-1-*'], 30)):
+        native = _fixture_original(argv, timeout=bound)
+        quick = _fixture_command(argv, timeout=bound)
+        assert (quick.returncode, quick.stdout, quick.stderr) == (native.returncode, native.stdout, native.stderr)
+# A changed executable must go through the external command path too.
+script = root / 'logins'
+text = script.read_text()
+temporary = script.with_name(script.name + '.new')
+temporary.write_text(text + '\nprint("custom fixture footer")\n')
+temporary.chmod(0o700)
+temporary.replace(script)
+config['login_list_failure'] = False
+(root / 'tools.json').write_text(tool['json'].dumps(config))
+called = []
+original = _fixture_original
+def external(*args, **kwargs):
+    called.append(args)
+    return original(*args, **kwargs)
+_fixture_original = external
+_fixture_command([workspace.tool('logins'), 'list'], timeout=60)
+assert called
+"""
+    result = subprocess.run([sys.executable, '-I', '-B', '-c', driver], env=lab.env,
+                            capture_output=True, text=True, timeout=HUNG_TOOL_S)
+    assert result.returncode == 0, (result.stdout, result.stderr)
+
+
 CASES = (
+    fast_readonly_fixture_results_match_external_services,
     a_launcher_without_metadata_keeps_custody_and_admission,
     a_missing_launch_keeps_grace_and_unknown_custody,
     slot_release_refuses_without_the_walks_lock,
