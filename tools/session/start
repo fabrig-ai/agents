@@ -5,10 +5,13 @@ from pathlib import Path
 import shlex
 import subprocess
 import sys
+import time
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from session_lib import ROOT, clone, create_empty, live_session, names, render, session_id, state_time
+from session_lib import (ROOT, AREAS, clone, create_empty, gating_available, list_sessions,
+                         live_session, names, publish_settings, recent_warmup, record_warmup,
+                         render, session_id, state_time)
 
 
 def main():
@@ -21,12 +24,23 @@ def main():
             command.add_argument("area")
         else:
             command.add_argument("--next", action="store_true")
-        command.add_argument("--model", default="opus")
+        command.add_argument("--model")
         command.add_argument("--effort", default="high" if role == "lead" else "xhigh")
         command.add_argument("--dry-run", action="store_true")
+    wire = commands.add_parser("wire", help="refresh project hooks without starting sessions")
+    wire.add_argument("handle")
+    wire.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     try:
         values = names(args.handle, getattr(args, "area", None))
+        if args.role == "wire":
+            capable = gating_available()
+            publish_settings(values, "coordinator", capable, args.dry_run)
+            for area in AREAS:
+                lead = names(args.handle, area)
+                if Path(lead["lead_start_dir"]).is_dir():
+                    publish_settings(lead, "lead", capable, args.dry_run)
+            return 0
         if args.role == "lead":
             scratch = Path(values["lead_scratch"])
             if not (scratch / "brief.md").is_file():
@@ -37,20 +51,31 @@ def main():
             cwd = values["lead_start_dir"]
             template = "lead.md"
         else:
-            name = values["warmup_name"] if args.next else values["coordinator_name"]
+            name = values["coordinator_name"]
             cwd = values["coordinator_start_dir"]
             template = "coordinator-next.md" if args.next else "coordinator.md"
         values["name"] = name
         prompt = render(ROOT / "prompts" / template, values)
-        argv = ["claude", "--bg", "--name", name, "--model", args.model, "--effort", args.effort, prompt]
+        argv = ["claude", "--bg", "--name", name]
+        if args.model is not None:
+            argv += ["--model", args.model]
+        argv += ["--effort", args.effort, prompt]
+        capable = gating_available()
         if args.dry_run:
             print(f"cwd={cwd}")
             print(f"argv={shlex.join(argv)}")
             print(f"prompt:\n{prompt}", flush=True)
-        live = live_session(name)
+            publish_settings(values, args.role, capable, True)
+        sessions = list_sessions()
+        live = live_session(name, sessions)
         if live is not None:
             print(f"start: refused: live session {name} ({live.get('sessionId', live.get('id', 'unknown'))})", file=sys.stderr)
             return 1
+        if args.role == "coordinator" and args.next:
+            warmup = recent_warmup(values, sessions)
+            if warmup:
+                print(f"start: refused: recent live warm-up {warmup}", file=sys.stderr)
+                return 1
         if args.dry_run:
             return 0
         Path(cwd).mkdir(parents=True, exist_ok=True)
@@ -61,11 +86,15 @@ def main():
                 clone(scratch / directory)
         elif not args.next:
             clone(Path(values["coordinator_clone"]))
+        publish_settings(values, args.role, capable, False)
+        started_at = time.time()
         result = subprocess.run(argv, cwd=cwd, capture_output=True, text=True)
         if result.returncode:
             raise RuntimeError(f"claude launch failed ({result.returncode}):\n{result.stdout}{result.stderr}")
         output = result.stdout + result.stderr
         identifier = session_id(output)
+        if args.role == "coordinator" and args.next:
+            record_warmup(name, identifier, started_at)
         print(identifier or output, end="" if output.endswith("\n") and not identifier else "\n")
         return 0
     except (OSError, ValueError, KeyError, subprocess.SubprocessError, RuntimeError) as error:
