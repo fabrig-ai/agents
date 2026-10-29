@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
+import runpy
 import subprocess
 import tempfile
 import unittest
@@ -68,15 +69,20 @@ for line in sys.stdin:
         self.write('director/priorities.toml', '[[draft]]\nname="alpha"\nreason="'+POISON+'"\n[[draft]]\nname="beta"\n')
         self.write('director/questions/0001.toml', 'asked="'+sp.utc(NOW-7200,'%Y-%m-%dT%H:%M:%SZ')+'"\nquestion="'+POISON+'"\n')
         self.write('director/questions/0002.toml', 'asked="2026-10-28T00:00:00Z"\nanswer="'+POISON+'"\n')
-        self.event('queue', 'ready', -900, branch='private-branch')
-        self.event('queue', 'land', -300, branch='private-branch', draft='alpha')
-        self.event('queue', 'batch-start', -600, batch='private-batch')
-        self.event('queue', 'batch-end', -60, batch='private-batch', outcome='rejected', step='clippy')
-        self.event('runs', 'start', -400, run='private-run')
-        self.event('runs', 'start', -600, run='ended-run')
-        self.event('runs', 'end', -500, run='ended-run')
+        self.event('queue', 'batch', -300, start=sp.utc(NOW-600,'%Y-%m-%dT%H:%M:%SZ'),
+                   end=sp.utc(NOW-300,'%Y-%m-%dT%H:%M:%SZ'), outcome='green', steps=[dict(name=POISON,duration=60)])
+        self.event('queue', 'attempt', -300, batch_start=sp.utc(NOW-600,'%Y-%m-%dT%H:%M:%SZ'), outcome='green', draft='alpha')
+        self.event('queue', 'batch', -60, start=sp.utc(NOW-600-1,'%Y-%m-%dT%H:%M:%SZ'),
+                   end=sp.utc(NOW-60,'%Y-%m-%dT%H:%M:%SZ'), outcome='red', steps=[])
+        self.event('queue', 'attempt', -60, batch_start=sp.utc(NOW-601,'%Y-%m-%dT%H:%M:%SZ'), outcome='red', rejected_step='clippy')
+        self.event('runs', 'run-start', -400, run='private-run')
+        self.event('runs', 'run-start', -600, run='ended-run')
+        self.event('runs', 'run-end', -500, run='ended-run', effort='high', draft='alpha',
+                   minutes=2, tokens_in=100, tokens_cached=40, tokens_out=20)
+        self.event('heavy', 'command', -400, lane='build', run_s=60, wait_s=12, label=POISON)
         self.event('claims', 'claim', -400)
-        self.event('sessions', 'snapshot', -400, sessions=[dict(session='lead/private-worker',role='lead',state='idle'),dict(session='s/private-coordinator',role='coordinator',state='running')])
+        self.event('sessions', 'session-start', -400, session='private-lead', name='lead/private-worker')
+        self.event('sessions', 'session-start', -400, session='private-coordinator', name='coord-next')
 
     def fake(self, name, content):
         path = self.bin/name
@@ -106,10 +112,10 @@ for line in sys.stdin:
         proc = subprocess.run([str(SCRIPT),'--no-pull','--machines',str(self.machines),'--out',str(out), '--samples',str(self.base/'samples')], env=self.env, capture_output=True, text=True)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         page = out.read_text()
-        self.assertEqual(re.findall(r'<h2>(.*?)</h2>',page), ['Drafts','Landings and the queue','Work in flight','Waiting on the user','Machines and capacity','Subscriptions','Links'])
+        self.assertEqual(re.findall(r'<h2>(.*?)</h2>',page), ['Drafts','Landings and the queue','Work in flight','Waiting on the user','Costs','Machines and capacity','Subscriptions','Links'])
         for private in PRIVATE: self.assertNotIn(private, page)
         self.assertLess(page.index('Public alpha'),page.index('Public beta'))
-        for wanted in ['1 open questions', '2 h 0 min ago', 'Slots held / total: 1 / 2', 'Runs running: 1', 'Leads live: 1', 'Coordinators live: 1', '9 min', 'clippy', '10 min median', 'href="v0.1.0.html"','100 GB', '25%']:
+        for wanted in ['1 open questions', '2 h 0 min ago', 'Slots held / total: 1 / 2', 'Runs running: 1', 'Leads live: 1', 'Coordinators live: 1', '9 min', 'clippy', 'ready timestamps not collected', 'href="v0.1.0.html"','100 GB', '25%']:
             self.assertIn(wanted,page)
         self.assertEqual(out.stat().st_mode & 0o777,0o644)
         self.assertEqual((self.base/'samples').stat().st_mode & 0o777,0o600)
@@ -177,24 +183,26 @@ for line in sys.stdin:
         self.assertEqual(target.read_text(),'new')
         self.assertEqual(list(self.base.glob('.index.html.*')),[])
 
-    def test_queue_buckets_dedup_wait_and_batch_duration(self):
-        self.event('queue','land',-6*3600-1)
-        self.event('queue','land',-6*3600+1)
-        rows=sp.events(self.root,'queue')
-        queue=sp.queue_data(rows,NOW+123)
-        self.assertEqual(sum(n for _,_,n in queue['hours']),1)
-        self.assertEqual(queue['waits'],[600])
-        self.assertEqual(queue['batches'][0]['duration'],540)
+    def test_queue_real_contract_buckets_rejections_and_duration(self):
+        rows = sp.events(self.root, 'queue')
+        queue = sp.queue_data(rows, NOW+123)
+        self.assertEqual(sum(n for _,_,n in queue['hours']), 1)
+        self.assertEqual(queue['batches'][0]['duration'], 541)
+        self.assertEqual(queue['rejects'], {'clippy':1})
         path=self.root/'events/queue/host/2026-10-29.jsonl'
         with path.open('a') as stream: stream.write(json.dumps(rows[0])+'\n')
         self.assertEqual(len(sp.events(self.root,'queue')),len(rows))
 
-    def test_hour_boundary_and_batch_landing_not_counted_twice(self):
-        rows = [dict(host='h', id='land', time=NOW, kind='land', batch='b'),
-                dict(host='h', id='end', time=NOW, kind='batch-end', batch='b', outcome='landed')]
-        queue = sp.queue_data(rows, NOW)
-        self.assertEqual(len(queue['landings']), 1)
-        self.assertEqual(sum(n for _, _, n in queue['hours']), 1)
+    def test_hour_boundary_dry_run_and_missing_batch(self):
+        rows = [dict(host='h', id='end', time=NOW, kind='batch', start=NOW-60, end=NOW, outcome='green'),
+                dict(host='h', id='land', time=NOW, kind='attempt', batch_start=NOW-60, outcome='green')]
+        self.assertEqual(sum(n for _,_,n in sp.queue_data(rows,NOW)['hours']),1)
+        rows[0]['dry'] = True
+        self.assertEqual(sp.queue_data(rows,NOW)['landings'],[])
+        self.assertEqual(sp.queue_data(rows[1:],NOW)['landings'],[])
+        rows[0]['dry'] = False
+        rows[1]['time'] = NOW-6*3600-1
+        self.assertEqual(sum(n for _,_,n in sp.queue_data(rows,NOW)['hours']),0)
 
     def test_pull_and_ssh_failure_do_not_stop_render(self):
         self.fake('record', 'import sys\nsys.exit(1)')
@@ -207,9 +215,41 @@ for line in sys.stdin:
         self.assertIn('unknown', page)
         for private in PRIVATE: self.assertNotIn(private, page)
 
-    def test_snapshot_transitions(self):
-        rows=[dict(host='h',kind='snapshot',runs=[dict(run='r',state='running')]),dict(host='h',kind='end',run='r')]
+    def test_collector_session_rename_end_and_context(self):
+        rows=[dict(host='h',kind='session-start',session='s',name='lead/private-worker'),
+              dict(host='h',kind='session-name',session='s',name='coordinator/private/next'),
+              dict(host='h',kind='context',session='other',name='s/private')]
+        counts = sp.live_count(rows,'sessions')
+        self.assertEqual((counts['leads'],counts['coordinators']), (0,2))
+        rows.append(dict(host='h',kind='session-end',session='s'))
+        self.assertEqual(sp.live_count(rows,'sessions')['coordinators'],1)
+        rows=[dict(host='h',kind='run-start',run='r'),dict(host='h',kind='run-end',run='r')]
         self.assertEqual(sp.live_count(rows,'runs')['runs'],0)
+
+    def test_cost_windows_missing_values_attribution_and_privacy(self):
+        self.event('runs','run-end',-7200,effort='low',minutes=3,tokens_in=30,tokens_cached=None,tokens_out=10,draft='beta')
+        self.event('runs','run-end',-sp.DAY-1,effort='high',minutes=9999)
+        self.event('runs','run-end',1,effort='high',minutes=9999)
+        self.event('runs','run-end',-100,effort=POISON,minutes=1,tokens_in=0,tokens_cached=0,tokens_out=1,draft=POISON)
+        self.event('heavy','command',-100,lane='test',run_s=120,wait_s=30,draft='beta')
+        self.event('heavy','command',-100,lane=POISON,run_s=30,wait_s=6)
+        data = self.gather()
+        day=sp.cost_data(data['sources'],NOW,sp.DAY)
+        hour=sp.cost_data(data['sources'],NOW,sp.HOUR)
+        self.assertEqual(day['runs'][(None,None)]['minutes'],6)
+        self.assertIsNone(day['runs'][(None,None)]['tokens_cached'])
+        self.assertEqual(hour['runs'][(None,None)]['minutes'],3)
+        self.assertEqual(hour['runs'][('alpha','high')]['tokens_in'],100)
+        self.assertEqual(hour['runs'][('unattributed','other')]['tokens_out'],1)
+        self.assertEqual(hour['heavy'][None]['build'],1)
+        self.assertEqual(hour['heavy']['beta']['test_wait'],0.5)
+        self.assertEqual(hour['heavy']['unattributed']['other'],0.5)
+        self.assertEqual(hour['queue'][None]['gate'],1)
+        page=sp.render(data)
+        for value in PRIVATE: self.assertNotIn(value,page)
+        self.assertIn('Last 24 hours',page)
+        self.assertIn('Last hour',page)
+        self.assertIn('unattributed',page)
 
     def test_samples_keep_identity_private_and_measure_pace(self):
         fleet=sp.SimpleNamespace(now=NOW,usage=[('node','claude',dict(state='subscribed',plan='max',label='1234abcd',limits=[dict(name='session',used=60,resets=NOW+3600)]))])
@@ -222,6 +262,61 @@ for line in sys.stdin:
         read,dropped=sp.read_samples(path)
         self.assertEqual(read,[old])
         self.assertEqual(dropped,1)
+
+
+class CollectorContract(unittest.TestCase):
+    def test_page_reads_actual_collector_output(self):
+        # Reuse the producers' fixture builders, then execute the real collector
+        # and records writer against their local bare origin. No hand-built events.
+        api = runpy.run_path(str(SCRIPT.with_name('test_record_collect.py')))
+        fixture = api['CollectTests']('runTest')
+        self.addCleanup(fixture.doCleanups)
+        fixture.setUp()
+        fixture.runs_fixture()
+        fixture.queue_fixture()
+        fixture.heavy_fixture()
+        fixture.session_fixture()
+        fixture.lease_fixture()
+        fixture.post_fixture()
+        fixture.write(fixture.seed/'drafts/wave/draft.toml',
+                      'coordinator="s/example"\nmailbox="s/example"\nsource="draft.md"\n'
+                      'priority=1\nstate="active"\nupdated="2026-10-29T11:00:00Z"\n')
+        fixture.git(fixture.seed,'add','.')
+        fixture.git(fixture.seed,'commit','-m','public draft')
+        fixture.git(fixture.seed,'push','origin','main')
+        fixture.write(fixture.fabrig/'main/draft.md','# Public wave description\n')
+        fixture.run_collect(*api['API']['SOURCES'])
+        with patch.object(sp,'gather',return_value={}), patch.object(sp,'slots',return_value=(1,2)), patch.dict(os.environ,STATUS_NOW=str(NOW)):
+            data=sp.gather_page(fixture.clone,fixture.fabrig/'main',fixture.tmp/'post/machines',False,b'')
+        page=sp.render(data)
+        for private in ('lead/H/tools','s/example',api['SESSION'],api['RUN'],'Synthetic status','/synthetic','ready/tools/example'):
+            self.assertNotIn(private,page)
+        self.assertIn('Public wave description',page)
+        self.assertIn('Runs running: 0',page)
+        self.assertIn('Leads live: 1',page)
+        self.assertIn('Coordinators live: 0',page)
+        queue=sp.queue_data(data['sources']['queue'],NOW)
+        self.assertEqual(queue['batches'][0]['duration'],120)
+        self.assertEqual(queue['batches'][0]['outcome'],'red')
+        self.assertEqual(queue['rejects'],{'other':1,'merge':1})
+        costs=sp.cost_data(data['sources'],NOW,sp.HOUR)
+        self.assertEqual(costs['runs'][('wave','high')],dict(minutes=2,tokens_in=100,tokens_cached=40,tokens_out=20))
+        self.assertEqual(costs['heavy']['unattributed']['build'],1)
+        self.assertEqual(costs['heavy']['unattributed']['build_wait'],0.2)
+        # 2.5s top gate includes a 2.4s suite: it must not be counted twice.
+        self.assertAlmostEqual(costs['queue']['unattributed']['gate'],2.5/60)
+        # Exercise the collector's green attempts and session lifecycle as well.
+        row=fixture.queue_fixture()
+        row.update(start='2026-10-29T11:10:00Z',end='2026-10-29T11:12:00Z',outcome='green',conflicts=[])
+        fixture.json(fixture.fabrig/'notes/queue.jsonl',row)
+        session=fixture.session_fixture(name='coordinator/H/next')
+        fixture.run_collect('queue','sessions')
+        counts=sp.live_count(sp.events(fixture.clone,'sessions'),'sessions')
+        self.assertEqual((counts['leads'],counts['coordinators']),(0,1))
+        self.assertEqual(len(sp.queue_data(sp.events(fixture.clone,'queue'),NOW)['landings']),2)
+        fixture.json(fixture.home/'agents.json',[])
+        fixture.run_collect('sessions')
+        self.assertEqual(sp.live_count(sp.events(fixture.clone,'sessions'),'sessions')['coordinators'],0)
 
 
 if __name__ == '__main__': unittest.main(verbosity=2)

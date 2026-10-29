@@ -731,7 +731,7 @@ def safe_limit(value):
 STEPS = ('fmt', 'clippy', 'wasm', 'build', 'focused', 'fuzzy', 'bundle', 'browser',
          'precheck', 'rebase', 'test', 'push', 'select', 'merge')
 STATES = ('queued', 'active', 'paused', 'done')
-OUTCOMES = ('landed', 'rejected', 'failed', 'running', 'cancelled', 'skipped')
+OUTCOMES = ('green', 'red', 'conflict', 'failed', 'cancelled', 'skipped')
 PRIVATE = re.compile(r'lead/|\bs/[a-z]|coord-next|sessionId|@|(?:/|~)[\w./-]+|'
                      r'\b(?:token|password|secret|subject|session)\b', re.I)
 
@@ -877,81 +877,165 @@ def slots():
     return held, total
 
 
+def session_role(name):
+    """Classify the collector's pipeline names; never return the name."""
+    name = text(name).split('@', 1)[0]
+    parts = name.split('/')
+    if parts[0] == 'lead' and len(parts) >= 2:
+        return 'leads'
+    if ((parts[0] == 'coordinator' and len(parts) >= 2)
+            or (parts[0] == 's' and len(parts) == 2)
+            or name in ('coord-next', 'coordinator-next', 'coordinator')):
+        return 'coordinators'
+    return None
+
+
 def live_count(rows, source):
-    """Latest snapshots per host, or start/end transitions keyed privately."""
-    hosts = {}
+    """Replay record-collect's lifecycle, rename and current context events."""
+    live = {}
     for row in rows:
-        hosts.setdefault(row.get('host', ''), []).append(row)
-    count = {'runs': 0, 'leads': 0, 'coordinators': 0}
-    for history in hosts.values():
-        live = {}
-        for row in history:
-            kind = row['kind']
-            field = 'runs' if source == 'runs' else 'sessions'
-            items = row.get(field)
-            if kind == 'snapshot':
-                if not isinstance(items, list) or any(not isinstance(item, dict) for item in items):
-                    raise ValueError('invalid snapshot')
-                live = {item.get('run' if source == 'runs' else 'session', item.get('id', str(i))): item for i, item in enumerate(items)}
-                continue
-            key = row.get('run' if source == 'runs' else 'session') or row.get('id')
-            if kind in ('start', 'started', 'running', 'run-start', 'session-start'):
+        kind = row['kind']
+        key = (row.get('host'), row.get('run' if source == 'runs' else 'session'))
+        if source == 'runs':
+            if kind == 'run-start':
                 live[key] = row
-            elif kind in ('end', 'ended', 'completed', 'failed', 'stopped', 'run-end', 'session-stop'):
+            elif kind == 'run-end':
                 live.pop(key, None)
+        elif kind in ('session-start', 'session-name', 'context'):
+            live[key] = row
+        elif kind == 'session-end':
+            live.pop(key, None)
+    count = {'runs': len(live) if source == 'runs' else 0, 'leads': 0, 'coordinators': 0}
+    if source == 'sessions':
         for row in live.values():
-            state = row.get('state', row.get('status', 'running'))
-            if state not in ('running', 'active', 'busy', 'idle', 'waiting'):
-                continue
-            if source == 'runs':
-                count['runs'] += 1
-            else:
-                role = row.get('role')
-                name = text(row.get('name') or row.get('session'))
-                role = role or ('lead' if name.startswith('lead/') else 'coordinator' if name.startswith('s/') else '')
-                if role in ('lead', 'coordinator'):
-                    count[role + 's'] += 1
+            role = session_role(row.get('name'))
+            if role:
+                count[role] += 1
     return count
 
 
 def queue_data(rows, now):
-    landings, batches, rejects, waits = [], {}, {}, []
-    ready = {}
-    explicit_batches = {(row.get('host'), row.get('batch')) for row in rows
-                        if row['kind'] in ('land', 'landed', 'landing') and row.get('batch')}
+    """Queue attempts count branch landings; batch records supply gate timing."""
+    batches = {}
     for row in rows:
-        at, kind = timestamp(row['time']), row['kind']
-        branch = row.get('branch') or row.get('task')
-        if kind == 'ready' and branch:
-            ready[branch] = at
-        outcome = row.get('outcome')
-        if kind in ('land', 'landed', 'landing') or (kind in ('batch', 'batch-end') and outcome == 'landed'
-                and (row.get('host'), row.get('batch', row['id'])) not in explicit_batches):
-            landings.append((at, row.get('draft')))
-            start = timestamp(row.get('ready_at', row.get('ready')))
-            if start is None:
-                start = ready.get(branch)
-            wait = number(row.get('ready_to_landing_s'))
-            wait = wait if wait is not None else at - start if start is not None else None
-            if wait is not None and wait >= 0:
-                waits.append(wait)
-        if kind in ('reject', 'rejected') or outcome == 'rejected':
-            step = row.get('step') if row.get('step') in STEPS else 'other'
+        if row['kind'] == 'batch':
+            start, end = timestamp(row.get('start')), timestamp(row.get('end'))
+            duration = end - start if start is not None and end is not None and end >= start else None
+            batches[(row.get('host'), row.get('start'))] = dict(
+                time=timestamp(row['time']), duration=duration, dry=row.get('dry') is True,
+                outcome=row.get('outcome') if row.get('outcome') in OUTCOMES else 'unknown')
+    landings, rejects = [], {}
+    for row in rows:
+        if row['kind'] != 'attempt':
+            continue
+        batch = batches.get((row.get('host'), row.get('batch_start')))
+        # Without its batch we cannot know whether this attempt was a dry run.
+        if batch is None or batch['dry']:
+            continue
+        if row.get('outcome') == 'green':
+            landings.append((timestamp(row['time']), row.get('draft')))
+        elif row.get('outcome') in ('red', 'conflict'):
+            step = row.get('rejected_step')
+            step = step if step in STEPS else 'other'
             rejects[step] = rejects.get(step, 0) + 1
-        if kind in ('batch', 'batch-start', 'batch-end'):
-            key = (row.get('host'), row.get('batch', row['id']))
-            previous = batches.get(key, {})
-            start = timestamp(row.get('started'))
-            start = start if start is not None else previous.get('start', at if kind == 'batch-start' else None)
-            duration = number(row.get('duration_s'))
-            if duration is None and start is not None:
-                duration = max(0, at - start)
-            batches[key] = dict(time=at, start=start, duration=duration,
-                                outcome=outcome if outcome in OUTCOMES else 'running' if kind == 'batch-start' else 'unknown')
     buckets = [(now - (6-i)*HOUR, now - (5-i)*HOUR) for i in range(6)]
     return dict(landings=landings, batches=sorted(batches.values(), key=lambda r:r['time'], reverse=True),
-                rejects=rejects, waits=waits,
+                rejects=rejects,
                 hours=[(a, b, sum(a <= t < b or (b == now and t == now) for t, _ in landings)) for a,b in buckets])
+
+
+EFFORTS = ('minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra')
+COST_FIELDS = ('minutes', 'tokens_in', 'tokens_cached', 'tokens_out')
+
+
+def draft_group(row):
+    name = public(row.get('draft'), True)
+    return name if name != 'unknown' else 'unattributed'
+
+
+def add_cost(group, key, fields):
+    """A missing measurement makes its aggregate unknown, rather than zero."""
+    total = group.setdefault(key, {field: 0 for field in fields})
+    for field, value in fields.items():
+        if value is None or total[field] is None:
+            total[field] = None
+        else:
+            total[field] += value
+
+
+def nonnegative(value):
+    value = number(value)
+    return value if value is not None and value >= 0 else None
+
+
+def cost_data(sources, now, window):
+    result = {'runs': {}, 'heavy': {}, 'queue': {}}
+    kinds = {'runs': 'run-end', 'heavy': 'command', 'queue': 'batch'}
+    for source, groups in result.items():
+        rows = sources.get(source)
+        if rows is None:
+            result[source] = None
+            continue
+        for row in rows:
+            at = timestamp(row['time'])
+            if row['kind'] != kinds[source] or not now-window <= at <= now:
+                continue
+            draft = draft_group(row)
+            if source == 'runs':
+                effort = row.get('effort') if row.get('effort') in EFFORTS else 'other'
+                fields = {key: nonnegative(row.get(key)) for key in COST_FIELDS}
+                for key in ((None, None), (None, effort), (draft, None), (draft, effort)):
+                    add_cost(groups, key, fields)
+            elif source == 'heavy':
+                lane = row.get('lane') if row.get('lane') in ('build', 'test') else 'other'
+                fields = {key: 0 for key in ('build', 'build_wait', 'test', 'test_wait', 'other', 'other_wait')}
+                run, wait = nonnegative(row.get('run_s')), nonnegative(row.get('wait_s'))
+                fields[lane] = run / 60 if run is not None else None
+                fields[lane + '_wait'] = wait / 60 if wait is not None else None
+                for key in (None, draft):
+                    add_cost(groups, key, fields)
+            else:
+                # Top-level gates already include suites; summing both doubles cost.
+                steps = row.get('steps')
+                gate = 0 if isinstance(steps, list) else None
+                for step in steps if isinstance(steps, list) else []:
+                    duration = nonnegative(shaped(step, {}).get('duration'))
+                    gate = gate + duration / 60 if gate is not None and duration is not None else None
+                for key in (None, draft):
+                    add_cost(groups, key, {'gate': gate})
+    return result
+
+
+def cost_cell(value, tokens=False):
+    return 'unknown' if value is None else f'{value:,.0f}' if tokens else f'{value:,.2f}'
+
+
+def costs(sources, now, errors):
+    out = []
+    for window, title in ((DAY, 'Last 24 hours'), (HOUR, 'Last hour')):
+        out.append('<h3>' + title + '</h3>')
+        data = cost_data(sources, now, window)
+        for source, label_, heads in (
+                ('runs', 'Codex runs', ['Draft', 'Effort', 'Run min', 'Input tokens', 'Cached tokens', 'Output tokens']),
+                ('heavy', 'Heavy commands', ['Draft', 'Build min', 'Build wait min', 'Test min', 'Test wait min', 'Other min', 'Other wait min']),
+                ('queue', 'Queue gates', ['Draft', 'Gate min'])):
+            out.append('<h4>' + label_ + '</h4>')
+            groups = data[source]
+            if groups is None:
+                out.append(unknown(errors.get(source, 'source unavailable')))
+            elif not groups:
+                out.append('<p class="empty">' + ('no events yet' if not sources.get(source) else 'No completed events in this window.') + '</p>')
+            else:
+                rows = []
+                if source == 'runs':
+                    for (draft, effort), fields in sorted(groups.items(), key=lambda item: (item[0][0] is not None, item[0][0] or '', item[0][1] is not None, item[0][1] or '')):
+                        rows.append([E(draft or 'Total'), E(effort or 'all')] + [cost_cell(fields[key], key != 'minutes') for key in COST_FIELDS])
+                else:
+                    keys = ('build', 'build_wait', 'test', 'test_wait', 'other', 'other_wait') if source == 'heavy' else ('gate',)
+                    for draft, fields in sorted(groups.items(), key=lambda item: (item[0] is not None, item[0] or '')):
+                        rows.append([E(draft or 'Total')] + [cost_cell(fields[key]) for key in keys])
+                out.append(table(heads, rows, numeric_from=2 if source == 'runs' else 1))
+    return ''.join(out)
 
 
 def gather_page(root, fabrig, machines_file, pulling, source):
@@ -969,13 +1053,13 @@ def gather_page(root, fabrig, machines_file, pulling, source):
         if data['sources'].get('pull'):
             data['errors']['pull'] = data['sources']['pull']
     if not root.is_dir():
-        for key in ('drafts', 'questions', 'queue', 'runs', 'claims', 'sessions'):
+        for key in ('drafts', 'questions', 'queue', 'runs', 'heavy', 'claims', 'sessions'):
             data['sources'][key] = None
             data['errors'][key] = 'not found'
     else:
         read('drafts', lambda: drafts(root, fabrig))
         read('questions', lambda: questions(root))
-        for key in ('queue', 'runs', 'claims', 'sessions'):
+        for key in ('queue', 'runs', 'heavy', 'claims', 'sessions'):
             read(key, lambda key=key: events(root, key))
     read('slots', slots)
     try:
@@ -1038,7 +1122,14 @@ def render(data, samples=None, site=None):
         result = []
         for row in rows:
             last = max((at for at, draft in queue['landings'] if draft == row['key']), default=None) if queue else None
-            landing = when(last, now) if last else 'no events yet' if queue is not None else 'unknown'
+            if last is not None:
+                landing = when(last, now)
+            elif queue is None:
+                landing = 'unknown'
+            elif any(draft is None for _, draft in queue['landings']):
+                landing = 'unknown · queue draft joins not collected'
+            else:
+                landing = 'no events yet' if not sources.get('queue') else 'no landing recorded'
             desc = E(row['description']) + (f' · {E(row["error"])}' if row['error'] else '')
             result.append([E(row['name']), desc, badge('info' if row['state']=='active' else 'neutral', row['state']), landing])
         return table(['Draft', 'Description', 'State', 'Last landing'], result, numeric_from=3, wrap=(1,), empty='No drafts yet.')
@@ -1053,8 +1144,7 @@ def render(data, samples=None, site=None):
         out += '<h3>Batches</h3>' + table(['Finished', 'Outcome', 'Duration'],
             [[when(r['time'],now), E(r['outcome']), E(length(r['duration'])) if r['duration'] is not None else 'unknown'] for r in queue['batches'][:20]], empty='No batches yet.')
         out += '<h3>Rejections by step</h3>' + table(['Step', 'Rejections'], [[E(k), str(v)] for k,v in sorted(queue['rejects'].items())], empty='No rejections yet.')
-        wait = median(queue['waits'])
-        out += '<p>Ready to landing: ' + (E(length(wait)) + f' median ({len(queue["waits"])} samples)' if wait is not None else 'no timing events yet') + '</p>'
+        out += '<p>Ready to landing: unknown · ready timestamps not collected</p>'
         return out
 
     section('Landings and the queue', 'queue', queue_section)
@@ -1072,6 +1162,8 @@ def render(data, samples=None, site=None):
     claims = sources.get('claims')
     body.append('<p>Claim events: ' + ('unknown · ' + E(errors['claims']) if claims is None else str(len(claims)) if claims else 'no events yet') + '</p></div>')
     section('Waiting on the user', 'questions', lambda q: f'<p>{q[0]} open questions · oldest {when(q[1], now) if q[1] is not None else "–"}</p>')
+
+    body.append('<h2>Costs</h2><div class="panel">' + costs(sources, now, errors) + '</div>')
 
     usage_rows = []
     body.append('<h2>Machines and capacity</h2><div class="cards">')
