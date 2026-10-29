@@ -17,7 +17,8 @@ record check [PATH ...]
 record show director/priorities.toml
 ```
 
-Writers are post names: `s/NAME`, `lead/NAME`, `director`, or `ops`.
+Writers are post names: `s/NAME`, `lead/NAME`, `director`, or `ops`;
+`collect` is permitted for `append` only.
 `write` accepts one judgement file and `append` accepts JSON objects, one per
 line. Both read stdin unless `--from FILE` is supplied. `--message TEXT` sets
 the complete commit message; otherwise subjects name the writer and operation.
@@ -48,6 +49,26 @@ in that file, including duplicates within one input, are skipped. Every new line
 and resulting file is validated; existing bytes remain intact. All changed files
 are written to a temporary sibling, flushed and renamed over their destinations,
 then committed together and pushed once. An idempotent call creates no commit.
+
+Every event has string `id`, UTC `time`, `source`, `host`, and `kind` fields.
+Optional string joins are `coordinator`, `draft`, `area`, `part`, `task`,
+`branch`, `run`, `session`; other fields hold each producer's facts.
+Leads and coordinators should begin task files with this TOML join header:
+
+```toml
++++
+task = "example"
+branch = "mc/example"
+coordinator = "s/example"
+draft = "wave"
+area = "tools"
+part = "collect"
++++
+```
+
+`record-collect runs sessions claims post --dry-run --since 2026-10-29T11:00Z`
+previews local facts. See [collector usage and limits](record-collect.md) for all
+seven sources, cursors, joins and snapshot/timestamp semantics.
 
 ## Races and recovery
 

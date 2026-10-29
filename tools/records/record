@@ -750,7 +750,9 @@ def main():
         branch = branch_override or 'main'
         need(branch_name(branch), 'invalid records branch')
         if hasattr(args, 'writer'):
-            need(re.fullmatch(POST, args.writer), 'invalid writer post name')
+            need(re.fullmatch(POST, args.writer) or
+                 (args.command == 'append' and args.writer == 'collect'),
+                 'invalid writer post name')
         root = Path(os.environ.get('RECORDS_REPO', '~/src/fabrig/records')).expanduser().absolute()
         origin = os.environ.get('RECORDS_ORIGIN', ORIGIN)
         with repository(root, origin, branch):
