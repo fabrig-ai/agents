@@ -16,12 +16,14 @@ H is the handle, A the area, T the current UTC minute (`%Y%m%dT%H%MZ`).
 | Lead start directory | `~/src/rust/tmp/supervise/leads/A` | `~/src/rust/tmp/supervise/leads/H-A` |
 | Coordinator start directory | `~/src/rust/tmp/supervise/coordinator` | `~/src/rust/tmp/supervise/coordinators/H` |
 | Coordinator handover | `~/src/rust/tmp/supervise/handover.md` | `~/src/rust/tmp/supervise/coordinators/H/handover.md` |
+| Coordinator clone | `~/src/fabrig/coord/next2` | `~/src/fabrig/coord/H/repo` |
+| Coordinator brief | `~/src/fabrig/coord/dm/brief.md` | `~/src/fabrig/coord/H/brief.md` |
 | Coordinator branches | `coord/<task>` | `H/<task>` |
 | Warm-up post name | `coord-next` | `H-next` |
 | Coordinator session | `coordinator/dm/T` | `coordinator/H/T` |
 
-Coordinator post mailboxes remain `s/<draft>`; their clone and optional brief
-are `repo/` and `brief.md` inside their start directory. Lead delivered-mail
+Coordinator post mailboxes remain `s/<draft>`. Fresh starts create clone/brief
+parent directories as needed, preserving existing files and clones. Lead delivered-mail
 directories replace mailbox slashes with `+` under `~/src/rust/tmp/post/`.
 
 `names director` prints mailbox `director`, session `director/T`, warm-up post

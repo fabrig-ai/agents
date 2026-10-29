@@ -102,7 +102,10 @@ def main():
             for directory in ("repo", "survey"):
                 clone(scratch / directory)
         elif args.role == "coordinator" and not args.next:
-            clone(Path(values["coordinator_clone"]))
+            checkout = Path(values["coordinator_clone"])
+            checkout.parent.mkdir(parents=True, exist_ok=True)
+            Path(values["coordinator_brief"]).parent.mkdir(parents=True, exist_ok=True)
+            clone(checkout)
         publish_settings(values, args.role, capabilities, False)
         started_at = time.time()
         result = subprocess.run(argv, cwd=cwd, capture_output=True, text=True)
