@@ -13,6 +13,7 @@ import tempfile
 import threading
 import time
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 HERE = Path(__file__).resolve().parent
@@ -169,9 +170,9 @@ class Lease:
 """
 
 
-# Run the production guardian with a file-controlled clock in its own process.
-# Only skein expires, after the test has observed its fake's acknowledgement;
-# jig keeps a frozen clock regardless of CPU scheduling or process startup cost.
+# Run the production entry points with a file-controlled guardian clock.
+# Every invocation starts frozen; only skein expires when explicitly released.
+# The first clock read acknowledges initialization before the test may advance it.
 CLOCK_GUARDIAN = r"""import importlib.machinery
 import importlib.util
 import json
@@ -184,9 +185,18 @@ loader = importlib.machinery.SourceFileLoader('guardian_subject', TOOL_PATH)
 spec = importlib.util.spec_from_loader(loader.name, loader)
 app = importlib.util.module_from_spec(spec)
 loader.exec_module(app)
+app.__file__ = __file__
+if sys.argv[1] != '_supervise':
+    sys.exit(app.main())
 path = Path(sys.argv[2])
 invocation = json.loads(path.read_text())
+initialized = False
 def now():
+    global initialized
+    if not initialized:
+        initialized = True
+        app.atomic(path.parent / 'clock-started', '')
+        return 0
     if invocation['command'][1] == 'skein' and (Path.home() / 'expire-skein').exists():
         return invocation['bound'] + 1
     return 0
@@ -201,6 +211,11 @@ class Sandbox(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(prefix='after-landing-test-')
         self.addCleanup(self.temporary.cleanup)
         self.home = Path(self.temporary.name)
+        self.tool = self.home / 'clocked-after-landing.py'
+        app.atomic(self.tool, CLOCK_GUARDIAN.replace('TOOL_PATH', repr(str(TOOL))))
+        guardian = mock.patch.object(app, '__file__', str(self.tool))
+        guardian.start()
+        self.addCleanup(guardian.stop)
         self.environment = mock.patch.dict(os.environ, dict(
             HOME=str(self.home), GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL='/dev/null',
             GIT_AUTHOR_NAME='test', GIT_AUTHOR_EMAIL='test@example.invalid',
@@ -255,7 +270,7 @@ class Sandbox(unittest.TestCase):
 
     def git(self, cwd, *args):
         result = subprocess.run(['git', '-C', str(cwd), *map(str, args)],
-                                stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=5)
+                                stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120)
         self.assertEqual(result.returncode, 0, result.stderr)
         return result.stdout.strip()
 
@@ -361,8 +376,10 @@ class QueueTests(Sandbox):
         self.assertEqual(self.runner.state['hour']['coalesced'], 2)
         fifth, _ = self.advance()
         self.runner.poll()
-        self.runner.state['hour']['start'] -= 3601
-        self.runner.hourly()
+        hourly_time = self.runner.state['hour']['start'] + 3601
+        clock = SimpleNamespace(time=lambda: hourly_time)
+        with mock.patch.object(app, 'time', clock):
+            self.runner.hourly()
         self.runner.deliver()
         bodies = [p['body'] for p in self.calls('post')]
         self.assertEqual(len(bodies), 2)
@@ -394,12 +411,12 @@ class QueueTests(Sandbox):
         self.git(self.slot, 'fetch', '-q', 'origin', 'main')
         self.git(self.slot, 'checkout', '-q', '--detach', 'origin/main')
         empty = self.home / 'empty-status'
-        status = subprocess.run([sys.executable, '-I', '-B', str(TOOL), 'status', '--state-dir', str(empty)],
-                                text=True, capture_output=True, timeout=5)
+        status = subprocess.run([sys.executable, '-I', '-B', str(self.tool), 'status', '--state-dir', str(empty)],
+                                text=True, capture_output=True, timeout=120)
         self.assertEqual(status.returncode, 0, status.stderr)
         self.assertFalse(empty.exists())
-        dry = subprocess.run([sys.executable, '-I', '-B', str(TOOL), *self.argv, '--dry-run'],
-                             text=True, capture_output=True, timeout=5)
+        dry = subprocess.run([sys.executable, '-I', '-B', str(self.tool), *self.argv, '--dry-run'],
+                             text=True, capture_output=True, timeout=120)
         self.assertEqual(dry.returncode, 0, dry.stderr)
         plan = json.loads(dry.stdout)
         self.assertEqual(plan['previous'], before)
@@ -570,7 +587,7 @@ class SupervisionTests(Sandbox):
         self.scenario['pairs']['qa-skein'] = dict(main=[dict(test='one', result='fail')])
         self.scenario['pairs']['qa-jig']['wait'] = True
         self.save_scenario()
-        parent = subprocess.Popen([sys.executable, '-I', '-B', str(TOOL), *self.argv],
+        parent = subprocess.Popen([sys.executable, '-I', '-B', str(self.tool), *self.argv],
                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         def finish_parent():
             app.atomic(self.home / 'tier-release', '')
@@ -588,7 +605,7 @@ class SupervisionTests(Sandbox):
         app.atomic(self.home / 'tier-release', '')
         self.scenario['pairs']['qa-jig']['wait'] = False
         self.save_scenario()
-        restart = subprocess.run([sys.executable, '-I', '-B', str(TOOL), *self.argv],
+        restart = subprocess.run([sys.executable, '-I', '-B', str(self.tool), *self.argv],
                                  text=True, capture_output=True, timeout=120)
         self.assertEqual(restart.returncode, 0, restart.stderr)
         self.runner = app.Runner(self.args)
@@ -605,13 +622,10 @@ class SupervisionTests(Sandbox):
         self.assertEqual(len(self.calls('tiers')), 6)
 
     def start_clocked_run(self):
-        guardian = self.home / 'clock-guardian.py'
-        app.atomic(guardian, CLOCK_GUARDIAN.replace('TOOL_PATH', repr(str(TOOL))))
         self.failures = []
         def run():
             try:
-                with mock.patch.object(app, '__file__', str(guardian)):
-                    self.runner.run()
+                self.runner.run()
             except BaseException as error:
                 self.failures.append(error)
         thread = threading.Thread(target=run)
@@ -624,12 +638,14 @@ class SupervisionTests(Sandbox):
         return thread
 
     def expire_skein(self, thread):
-        # Both fakes print a queued token. Wait for that acknowledgement before
-        # moving the guardian clock past the real configured bound.
+        # Wait for both clock initialization and the fake's queued token before
+        # advancing time, even if the child runs before the guardian does.
         def queued():
             active = self.runner.state['active']
             invocation = active and active['invocation']
-            return invocation and bool(app.heavy_tokens(invocation['log'])[0])
+            return (invocation and
+                    (Path(invocation['log']).parent / 'clock-started').exists() and
+                    bool(app.heavy_tokens(invocation['log'])[0]))
         self.wait_for(queued, 'skein heavy queued token', thread)
         app.atomic(self.home / 'expire-skein', '')
         self.wait_for(lambda: self.calls('heavy'), 'heavy cancellation acknowledgement', thread)
@@ -693,8 +709,10 @@ class SupervisionTests(Sandbox):
     def test_follow_polls_during_a_long_pair(self):
         self.single()
         self.args.mode = 'follow'
-        self.args.poll_interval = .05
-        self.runner.next_poll = time.monotonic()
+        self.args.poll_interval = 10
+        published = threading.Event()
+        clock = SimpleNamespace(monotonic=lambda: 11 if published.is_set() else 0,
+                                time=time.time, time_ns=time.time_ns, sleep=time.sleep)
         self.scenario['pairs']['qa-skein']['wait'] = True
         self.save_scenario()
         self.runner.poll()
@@ -704,15 +722,19 @@ class SupervisionTests(Sandbox):
                 self.wait_file(self.home / 'tier-entered')
                 self.advance('skein')
                 self.advance('q-jig')
+                published.set()
                 self.wait_for(lambda: self.runner.state['hour']['seen'] >= 2, 'follow poll of new tips')
             except BaseException as error:
                 failures.append(error)
             finally:
                 app.atomic(self.home / 'tier-release', '')
         publisher = threading.Thread(target=publish)
-        publisher.start()
-        self.runner.run()
-        publisher.join(timeout=120)
+        with mock.patch.object(app, 'time', clock):
+            self.runner.next_poll = self.args.poll_interval
+            publisher.start()
+            self.runner.run()
+            publisher.join(timeout=120)
+        self.assertFalse(publisher.is_alive(), 'publisher did not finish after tier release')
         self.assertFalse(failures, failures)
         self.assertEqual(self.runner.state['cursor'], self.base)
         self.assertGreaterEqual(self.runner.state['hour']['seen'], 2)
