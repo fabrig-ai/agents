@@ -1,0 +1,19 @@
+[claude]
+version = "2.1.312"
+command = ["claude", "--version"]
+
+[codex]
+version = "0.162.1"
+command = ["codex", "--version"]
+
+[cargo-nextest]
+version = "0.9.148"
+command = ["cargo", "nextest", "--version"]
+
+[kache]
+version = "1.2.2-gitrev.2"
+command = ["kache", "--version"]
+
+[rustc]
+version = "1.95.0"
+command = ["rustc", "--version"]

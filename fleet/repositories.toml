@@ -1,0 +1,2 @@
+# The agents origin is discovered from the invoking checkout or release metadata.
+fabrig = "git@github.com:fabrig-ai/fabrig.git"

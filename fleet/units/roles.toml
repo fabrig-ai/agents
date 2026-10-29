@@ -1,0 +1,4 @@
+# Every unit must have an entry. "*" means all roles.
+[units]
+"fleet-sync.service" = ["*"]
+"fleet-sync.timer" = ["*"]

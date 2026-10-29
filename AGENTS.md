@@ -1,0 +1,11 @@
+# Repository rules
+
+- Python 3.13 standard library only (`tomllib` for TOML), plus minimal bash.
+- Every tool has tests using a temporary HOME and fake services; never test
+  against live machine state. Run Python with `-B` so tests leave no caches.
+- Write files to a sibling and rename over the destination. Replace running
+  scripts; never edit them in place.
+- Nothing secret belongs in this repository. Never read credentials.
+- `old/` is reference only: never modify it or depend on it.
+- `tools/check.sh` is the gate. Main moves only through `tools/land` after the
+  gate passes. A commit requiring machine action must say what action is needed.
