@@ -472,6 +472,102 @@ class OwnershipTests(Sandbox):
         self.assertEqual(len(result.stderr.splitlines()), 1)
 
 
+class InventoryTests(Sandbox):
+    def setUp(self):
+        super().setUp()
+        self.registry.write_text((ROOT / "pipeline/coordinators.toml").read_text())
+
+    def test_inventory_registry_identities_and_supervisors(self):
+        result = self.command("start", "names", "--json")
+        self.assertEqual((result.returncode, result.stderr), (0, ""))
+        rows = json.loads(result.stdout)
+        self.assertEqual(len(rows), 18)
+        by_mailbox = {row["mailbox"]: row for row in rows}
+        self.assertEqual(len(by_mailbox), len(rows))
+        for handle, mailbox, default in (("dm", "s/dynamic-memory", True), ("q", "s/qa", False), ("u", "s/upgrades", False)):
+            coordinator = by_mailbox[mailbox]
+            self.assertEqual(coordinator["role"], "coordinator")
+            self.assertEqual(coordinator["handle"], handle)
+            self.assertEqual(coordinator["supervisor"], "director")
+            self.assertEqual(coordinator["name_prefix"], f"coordinator/{handle}/")
+            self.assertEqual(coordinator["warmup_name"], "coord-next" if default else f"{handle}-next")
+            self.assertEqual(coordinator["legacy_names"], ["coord-next"] if default else [])
+            self.assertEqual(coordinator["aliases"], [coordinator["warmup_name"]])
+            self.assertFalse(coordinator["paused"])
+            start = "coordinator" if default else f"coordinators/{handle}"
+            self.assertEqual(coordinator["start_dir"], str(self.home / "src/rust/tmp/supervise" / start))
+            for area in lib.AREAS:
+                name = f"lead/{area}" if default else f"lead/{handle}/{area}"
+                lead = by_mailbox[name]
+                key = area if default else f"{handle}-{area}"
+                self.assertEqual(lead["name"], name)
+                self.assertEqual(lead["role"], "lead")
+                self.assertEqual(lead["handle"], handle)
+                self.assertEqual(lead["area"], area)
+                self.assertEqual(lead["branch_key"], key)
+                self.assertEqual(lead["supervisor"], mailbox)
+                self.assertEqual(lead["coordinator_mailbox"], mailbox)
+                self.assertEqual(lead["scratch"], str(self.home / "src/fabrig/leads" / key))
+                self.assertEqual(lead["start_dir"], str(self.home / "src/rust/tmp/supervise/leads" / key))
+                self.assertFalse(lead["paused"])
+        director = by_mailbox["director"]
+        self.assertEqual(director["name_prefix"], "director/")
+        self.assertEqual(director["legacy_names"], ["director"])
+        self.assertIsNone(director["supervisor"])
+        self.assertFalse(director["paused"])
+        for name in ("ops", "s/deploy"):
+            self.assertEqual(by_mailbox[name]["supervisor"], "director")
+            self.assertTrue(by_mailbox[name]["always_watched"])
+            self.assertIn("always watched", by_mailbox[name]["note"])
+        self.assertEqual(self.all_calls(), [])
+        self.assertEqual(list(self.home.iterdir()), [])
+
+    def test_inventory_matches_unflagged_watch_invocation(self):
+        flagged = self.command("start", "names", "--json")
+        unflagged = self.command("start", "names")
+        self.assertEqual(unflagged.returncode, 0, unflagged.stderr)
+        self.assertEqual(json.loads(flagged.stdout), json.loads(unflagged.stdout))
+
+    def test_inventory_pause_state_uses_ownership_records(self):
+        records = self.base / "records"
+        self.env["RECORDS_REPO"] = str(records)
+        for name, handle, state in (("qa", "q", "paused"), ("old-qa", "q", "active"), ("upgrades", "u", "active")):
+            path = records / "drafts" / name / "draft.toml"
+            path.parent.mkdir(parents=True)
+            path.write_text(f'coordinator="{handle}"\nstate="{state}"\n')
+        result = self.command("start", "names", "--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for row in json.loads(result.stdout):
+            if "handle" in row:
+                self.assertEqual(row["paused"], row["handle"] == "q")
+        self.assertEqual(self.command("start", "owns", "lead/q/jig").returncode, 1)
+        self.assertEqual(self.command("start", "owns", "s/upgrades").returncode, 0)
+        # Missing overridden records means unpaused, even if the default has paused data.
+        default = self.home / "src/fabrig/records/drafts/green/draft.toml"
+        default.parent.mkdir(parents=True)
+        default.write_text('coordinator="dm"\nstate="paused"\n')
+        self.env["RECORDS_REPO"] = str(self.base / "missing")
+        rows = json.loads(self.command("start", "names", "--json").stdout)
+        self.assertFalse(any(row.get("paused", False) for row in rows))
+        self.assertEqual(self.all_calls(), [])
+
+    def test_inventory_latency_under_150ms(self):
+        durations = []
+        for _ in range(3):
+            begin = time.perf_counter()
+            result = self.command("start", "names", "--json")
+            durations.append(time.perf_counter() - begin)
+            self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertLess(sorted(durations)[1], 0.15, durations)
+        self.assertEqual(self.all_calls(), [])
+
+    def test_inventory_bad_registry_fails_without_partial_json(self):
+        self.registry.write_text("invalid [ toml")
+        result = self.command("start", "names", "--json")
+        self.assertEqual((result.returncode, result.stdout), (2, ""))
+        self.assertEqual(len(result.stderr.splitlines()), 1)
+
+
 class WiringTests(Sandbox):
     def test_watched_paths_for_both_coordinators_and_roles(self):
         root = self.home / "src/fabrig/main"

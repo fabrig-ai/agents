@@ -109,6 +109,55 @@ def render(template, values):
     return Template(template.read_text()).substitute(values)
 
 
+def paused_coordinators():
+    """Read the local records checkout once, shared by ownership and inventory."""
+    paused = set()
+    records = Path(os.environ.get("RECORDS_REPO", Path.home() / "src/fabrig/records")).expanduser()
+    for path in (records / "drafts").glob("*/draft.toml"):
+        with path.open("rb") as stream:
+            draft = tomllib.load(stream)
+        handle = draft.get("coordinator")
+        if isinstance(handle, str) and draft.get("state") == "paused":
+            paused.add(handle)
+    return paused
+
+
+def inventory():
+    """Watch identities and supervisors; no live session queries or network."""
+    entries = registry()
+    paused = paused_coordinators()
+    rows = []
+    for handle in entries:
+        values = names(handle)
+        legacy = [values["coordinator_legacy_name"]] if values["coordinator_legacy_name"] else []
+        rows.append({
+            "role": "coordinator", "handle": handle, "mailbox": values["coordinator_mailbox"],
+            "warmup_name": values["warmup_name"], "name_prefix": values["coordinator_name_prefix"],
+            "legacy_names": legacy, "aliases": list(dict.fromkeys([values["warmup_name"], *legacy])),
+            "start_dir": values["coordinator_start_dir"], "supervisor": "director", "paused": handle in paused,
+        })
+        for area in AREAS:
+            lead = names(handle, area)
+            rows.append({
+                "role": "lead", "handle": handle, "area": area, "name": lead["lead_name"],
+                "mailbox": lead["lead_mailbox"], "branch_key": lead["branch_key"],
+                "scratch": lead["lead_scratch"], "start_dir": lead["lead_start_dir"],
+                "coordinator_mailbox": values["coordinator_mailbox"],
+                "supervisor": values["coordinator_mailbox"], "paused": handle in paused,
+            })
+    director = names("director")
+    rows.append({
+        "role": "director", "mailbox": director["director_mailbox"], "name_prefix": director["director_name_prefix"],
+        "warmup_name": director["warmup_name"], "legacy_names": [director["director_legacy_name"]],
+        "aliases": [director["director_legacy_name"], director["warmup_name"]],
+        "start_dir": director["director_start_dir"], "supervisor": None, "paused": False,
+    })
+    for mailbox in ("ops", "s/deploy"):
+        rows.append({"role": "fixed", "mailbox": mailbox, "supervisor": "director",
+                     "always_watched": True, "note": "always watched; bypass owns"})
+    return rows
+
+
 def owns(name):
     """Local-only ownership contract for post wake; never fetch records or sessions."""
     entries = registry()
@@ -124,12 +173,8 @@ def owns(name):
             break
     if owner is None:
         return False, f"not ours: {name}"
-    records = Path(os.environ.get("RECORDS_REPO", Path.home() / "src/fabrig/records")).expanduser()
-    for path in (records / "drafts").glob("*/draft.toml"):
-        with path.open("rb") as stream:
-            draft = tomllib.load(stream)
-        if draft.get("coordinator") == owner and draft.get("state") == "paused":
-            return False, f"paused: {name} (coordinator {owner})"
+    if owner in paused_coordinators():
+        return False, f"paused: {name} (coordinator {owner})"
     return True, ""
 
 

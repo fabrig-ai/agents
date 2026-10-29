@@ -37,6 +37,7 @@ tools/session/start coordinator H [--next] [--model M] [--effort E] [--dry-run]
 tools/session/start director [--next] [--effort E] [--dry-run]
 tools/session/start wire H|director [--dry-run]
 tools/session/start owns NAME
+tools/session/start names [--json]
 ```
 
 Default effort: high for leads, xhigh for coordinators/director. Omit `--model`
@@ -107,6 +108,14 @@ pauses that coordinator and its leads. Read RECORDS_REPO or
 never paused. Executable `fixtures/start-owns-stub NAME` supplies this contract
 to post's tests using space-separated exact names in START_OWNS_ALLOW and
 START_OWNS_PAUSED (paused wins); wrong arity exits 2.
+
+`start names --json` supplies watch's JSON array; unflagged `start names` also
+returns JSON. Coordinator rows include handle, mailbox, warmup_name, name_prefix,
+legacy_names, aliases, start_dir, supervisor and paused. Lead rows add name,
+area, branch_key, scratch and coordinator_mailbox. The director has no supervisor;
+ops and s/deploy have always_watched=true and supervisor director. Pause state
+uses the same local records reader as owns, also inherited by leads. No network
+or session query; target latency under 150 ms. `tools/session/names` is unchanged.
 
 Dry runs print settings instead of writing; launch previews also print cwd,
 argv and prompt before refusal. They run only capabilities and session listing;
