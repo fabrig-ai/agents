@@ -687,8 +687,12 @@ assert sys.argv[1:] != ['--name', 'lead/u/jig']
         self.assertFalse(list(self.state.glob('*.pending.json')))
 
     def publication_tool(self, retry_clock=False):
-        tool = self.home / 'publication-tool' / TOOL.name
+        # Preserve the release layout so the collector resolves its session library.
+        tools = self.home / 'publication-tool' / 'tools'
+        tool = tools / 'records' / TOOL.name
         self.write(tool, TOOL.read_text()).chmod(0o700)
+        library = TOOL.parent.parent / 'session' / 'session_lib.py'
+        self.write(tools / 'session' / library.name, library.read_text())
         record = TOOL.with_name('record')
         program = ("#!/usr/bin/env -S python3 -I -B\n"
                    "import json, os, sys\nfrom pathlib import Path\n"

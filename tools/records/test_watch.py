@@ -753,8 +753,12 @@ else: sys.exit(1 if sys.argv[2] in os.environ.get('UNOWNED','').split(',') else 
         self.assertEqual((self.home/'post.log').read_text().count('wake'), 1)
 
     def publication_tool(self):
-        tool = self.home / 'publication-tool' / TOOL.name
+        # Preserve the release layout so watch resolves its session library.
+        tools = self.home / 'publication-tool' / 'tools'
+        tool = tools / 'records' / TOOL.name
         self.write(tool, TOOL.read_text()).chmod(0o700)
+        library = TOOL.parent.parent / 'session' / 'session_lib.py'
+        self.write(tools / 'session' / library.name, library.read_text())
         record = TOOL.with_name('record')
         program = ("#!/usr/bin/env -S python3 -I -B\n"
                    "import json, os, sys\nfrom pathlib import Path\n"
