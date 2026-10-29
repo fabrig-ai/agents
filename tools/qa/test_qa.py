@@ -1137,11 +1137,17 @@ def an_in_place_login_waits_for_every_unit(lab):
     assert state['given'] == [CHATGPT] and 'stopped' not in state and alive(two)
     assert json.loads((lab.root / 'tools.json').read_text())['logins_held'] == [CLAUDE]
     dead(one)
+    wait_for(lambda: not (lab.root / 'units' / (first + '.json')).exists())
     lab.configure(stop_failures=[])
+    lab.watch()
+    # A stop can outlast this check's one-second poll budget under load.
+    # Process death precedes the fake manager removing its stopping record;
+    # wait for both, then let the next check observe completion and give.
+    dead(two)
+    wait_for(lambda: not (lab.root / 'units' / (second + '.json')).exists())
     lab.watch()
     state = lab.watch_state()[1]
     assert state['given'] == [CHATGPT, CLAUDE] and 'stopped' not in state
-    dead(two)
     calls = list(map(json.loads, (lab.root / 'tools.jsonl').read_text().splitlines()))
     give = max(i for i, row in enumerate(calls) if row['tool'] == 'logins' and row['args'][:2] == ['give', CLAUDE])
     stop = max(i for i, row in enumerate(calls) if row['tool'] == 'systemctl' and row['args'] == ['--user', 'stop', '--no-block', '--', second])
