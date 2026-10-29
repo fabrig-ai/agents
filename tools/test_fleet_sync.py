@@ -41,6 +41,9 @@ if args[0] == "enable":
     name = args[-1]
     link = directory / "timers.target.wants" / name
     link.parent.mkdir(parents=True, exist_ok=True)
+    if link.is_symlink() and link.resolve() != directory / name:
+        print("conflicting enablement symlink", file=sys.stderr)
+        sys.exit(1)
     if not link.is_symlink():
         link.symlink_to(directory / name)
 elif args[0] == "disable":
@@ -731,6 +734,7 @@ class FleetTest(unittest.TestCase):
         protected = ["src/fabrig/claims", "src/fabrig/leases", "src/fabrig/queue", "src/fabrig/slots",
                      ".local/state/heavy", ".local/state/agents-heavy", ".local/state/fabrig/heavy",
                      "src/rust/tmp/heavy", "src/rust/tmp/codex-run", "src/rust/tmp/owners",
+                     "src/rust/tmp/logins",
                      "src/rust/tmp/post/inbox", "src/rust/tmp/post/outbox", "src/rust/tmp/post/sent",
                      "src/rust/tmp/post/arbitrary-spool"]
         units = [".config/systemd/user/agents-heavy-reconcile.service",

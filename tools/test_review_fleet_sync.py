@@ -86,6 +86,9 @@ sys.exit(int(any("BROKEN" in pathlib.Path(p).read_text() for p in sys.argv[3:]))
         self.assertIn("recover=ssh", text)
         # A bad release has already been promoted; main is reverted, and the
         # operator invokes the previous immutable runner (SSH is fake in tests).
+        broken = self.current() / "tools/fleet-sync"
+        fixture.put(broken, "raise SystemExit(99)\n", True)
+        self.process("python3", "-I", "-B", broken, "--check", "--host", "hel8", expected=99)
         self.git(self.source, "revert", "--no-edit", bad_commit)
         self.git(self.source, "push", "origin", "main")
         self.sync(script=previous / "tools/fleet-sync")
