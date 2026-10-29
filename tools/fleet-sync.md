@@ -44,7 +44,13 @@ and pushes main without force. Machine-action commits say what must happen.
 Declarations: hosts.toml defines names, hostnames, SSH addresses, roles and host
 values. `--host` overrides FLEET_HOST, then hostname discovery. env supplies
 literal KEY=VALUE with only $HOME expansion; host env overrides globals.
-Expanded values may contain no whitespace, quotes, backslashes or remaining $.
+Expanded env values may contain no whitespace, quotes, backslashes or remaining $.
+Every host's machine_env maps environment keys to nonnegative integers or nonempty
+literal strings with no whitespace, quotes, backslashes or `$`, using the same
+value validation as env. No key names are special. Strings are not expanded;
+`=` and `,` are accepted, including compact QA_WALK_KINDS and QA_WALK_SLOTS values.
+Invalid machine_env values name the host and key and are refused before writes.
+Both types render as `KEY=value` in machine.env.
 environment.d is plain KEY=VALUE. POSIX env.sh adds each local/cargo bin directory
 only when absent; nested shells retain PATH. Other competing env assignments
 warn; PATH assignments never conflict. repositories.toml declares both origins.

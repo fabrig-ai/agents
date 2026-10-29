@@ -310,11 +310,14 @@ def expand(value, home):
     return value.replace("$HOME", str(home))
 
 
-def env_value(value, home):
-    value = expand(value, home)
+def literal_env_value(value):
     if any(c.isspace() or c in "\"'\\$" for c in value):
         raise ValueError("env values cannot contain whitespace, quotes, backslashes or $ after expansion")
     return value
+
+
+def env_value(value, home):
+    return literal_env_value(expand(value, home))
 
 
 def relative_asset(value):
@@ -579,8 +582,17 @@ class Declarations:
             if not isinstance(host["roles"], list) or not all(isinstance(r, str) for r in host["roles"]):
                 raise ValueError(f"invalid roles for {name}")
             for key, value in host["machine_env"].items():
-                if not KEY.fullmatch(key) or type(value) is not int or value < 0:
-                    raise ValueError(f"invalid machine_env for {name}")
+                try:
+                    if not KEY.fullmatch(key):
+                        raise ValueError("invalid key")
+                    if isinstance(value, str):
+                        if not value:
+                            raise ValueError("machine_env strings must be nonempty")
+                        literal_env_value(value)
+                    elif type(value) is not int or value < 0:
+                        raise ValueError("expected a nonnegative integer or literal string")
+                except ValueError as error:
+                    raise ValueError(f"invalid machine_env for {name}: {key}: {error}") from error
             for key, value in host["env"].items():
                 if not KEY.fullmatch(key) or key == "PATH":
                     raise ValueError(f"invalid env key: {key}")

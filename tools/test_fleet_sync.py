@@ -773,6 +773,139 @@ class FleetTest(unittest.TestCase):
                      env={**self.env, "HOME": str(self.home / "with space")})
         self.assertEqual(before, self.snapshot())
 
+    def test_machine_env_strings_render_for_every_host(self):
+        hosts = self.source / "fleet/hosts.toml"
+        original = hosts.read_text()
+        # An arbitrary key and an existing numeric key both accept strings.
+        put(hosts, original.replace('machine_env = { ',
+            'machine_env = { GENERIC_LITERAL = "Az09@._:/+-", ZERO = 0, ').replace(
+                'KACHE_MAX_GB = 50', 'KACHE_MAX_GB = "50"'))
+        with patch.dict(os.environ, self.env, clear=True):
+            module, _ = self.runner()
+            declarations = module.Declarations(self.source, self.home)
+            for name, host in declarations.hosts.items():
+                with self.subTest(host=name):
+                    runner = module.Runner(argparse.Namespace(check=False, timer=False, resume_fd=None),
+                                           declarations, name)
+                    runner.render()
+                    self.assertFalse([i for i in runner.state["items"] if i["result"] == "failed"])
+                    content = (self.home / "src/rust/tmp/machine.env").read_text()
+                    self.assertIn("GENERIC_LITERAL=Az09@._:/+-\nZERO=0\n", content)
+                    self.assertIn(f"KACHE_MAX_GB={host['machine_env']['KACHE_MAX_GB']}\n", content)
+
+    def test_hetzner6_qa_machine_env_strings_render_byte_for_byte(self):
+        hosts = self.source / "fleet/hosts.toml"
+        original = hosts.read_text()
+        values = {
+            "QA_WALK_KINDS": "forgejo=2:chatgpt,claude=2:claude",
+            "QA_WALK_SLOTS": "forgejo=8,claude=4",
+            "QA_SLOT_HOST": "hetzner6",
+            "QA_CLAIM_OWNER": "s/qa",
+            "QA_CLAIM_SSH": "free@204.168.210.29",
+        }
+        prefix, rest = original.split("[hosts.hetzner6]", 1)
+        entries = ", ".join(f"{key} = {json.dumps(value)}" for key, value in values.items())
+        put(hosts, prefix + "[hosts.hetzner6]" + rest.replace(
+            'machine_env = { ', f'machine_env = {{ {entries}, ', 1))
+        existing = tomllib.loads(original)["hosts"]["hetzner6"]["machine_env"]
+        with patch.dict(os.environ, self.env, clear=True):
+            module, _ = self.runner()
+            declarations = module.Declarations(self.source, self.home)
+            runner = module.Runner(argparse.Namespace(check=False, timer=False, resume_fd=None),
+                                   declarations, "hetzner6")
+            runner.render()
+        self.assertFalse([i for i in runner.state["items"] if i["result"] == "failed"])
+        expected = "".join(f"{key}={value}\n" for key, value in {**values, **existing}.items())
+        self.assertEqual((self.home / "src/rust/tmp/machine.env").read_bytes(), expected.encode())
+
+    def test_env_value_behavior_matches_main(self):
+        baseline = "f7334e8aa68c325076c5c0eda16f6ae6c0c217fa"
+        script = self.source / "tools/fleet-sync"
+        current = script.read_text()
+        old = self.process("git", "-C", ROOT, "show", f"{baseline}:tools/fleet-sync").stdout
+        results = []
+        values = ("", "a=b,c;é\x7f", "$HOME/file", "two words", "a\tb", "a\nb", "a\rb",
+                  'a"b', "a'b", "a\\b", "$USER", "$HOME/$OTHER", "a\x00b", 1, True)
+        try:
+            for source in (old, current):
+                put(script, source, True)
+                with patch.dict(os.environ, self.env, clear=True):
+                    module, _ = self.runner()
+                result = []
+                for value in values:
+                    try:
+                        result.append(("ok", module.env_value(value, self.home)))
+                    except ValueError as error:
+                        result.append(("error", str(error)))
+                results.append(result)
+        finally:
+            put(script, current, True)
+        self.assertEqual(results[0], results[1])
+        self.assertEqual(results[1][0], ("ok", ""))
+        self.assertEqual(results[1][1], ("ok", "a=b,c;é\x7f"))
+        self.assertEqual(results[1][2], ("ok", str(self.home / "file")))
+
+    def test_invalid_machine_env_no_writes(self):
+        hosts = self.source / "fleet/hosts.toml"
+        original = hosts.read_text()
+        before = self.snapshot()
+        strings = ("", "two words", "a\tb", "a\u2003b", "a'b", 'a"b', "a\\b",
+                   "a\nb", "a\rb", "$HOME", "$USER")
+        invalid = tuple(map(json.dumps, strings)) + ('true', 'false', '-1', '1.5',
+                                                    '[]', '[1]', '{}', '{ x = 1 }')
+        for name in tomllib.loads(original)["hosts"]:
+            for value in invalid:
+                with self.subTest(host=name, value=value):
+                    section = f"[hosts.{name}]"
+                    prefix, rest = original.split(section, 1)
+                    rest = rest.replace('machine_env = { ',
+                                        f'machine_env = {{ ARBITRARY_KEY = {value}, ', 1)
+                    put(hosts, prefix + section + rest)
+                    # Selecting hel8 still validates every other host first.
+                    result = self.process("python3", "-I", "-B", self.source / "tools/fleet-sync",
+                                          "--host", "hel8", expected=2)
+                    self.assertIn(f"invalid machine_env for {name}: ARBITRARY_KEY", result.stderr)
+                    self.assertEqual(before, self.snapshot())
+        put(hosts, original.replace('KACHE_MAX_GB = 6', 'BAD-KEY = 6', 1))
+        result = self.process("python3", "-I", "-B", self.source / "tools/fleet-sync",
+                              "--host", "hel8", expected=2)
+        self.assertIn("invalid machine_env for hel8: BAD-KEY", result.stderr)
+        self.assertEqual(before, self.snapshot())
+
+    def test_integer_machine_env_matches_main_runner_for_every_host(self):
+        # Pin the main runner used when this schema expansion was branched.
+        baseline = "f7334e8aa68c325076c5c0eda16f6ae6c0c217fa"
+        hosts = (ROOT / "fleet/hosts.toml").read_bytes()
+        self.assertEqual(hosts, (self.source / "fleet/hosts.toml").read_bytes())
+        baseline_hosts = self.process("git", "-C", ROOT, "show", f"{baseline}:fleet/hosts.toml").stdout
+        self.assertEqual(hosts, baseline_hosts.encode())
+        script = self.source / "tools/fleet-sync"
+        current = script.read_text()
+        old = self.process("git", "-C", ROOT, "show", f"{baseline}:tools/fleet-sync").stdout
+        rendered = []
+        try:
+            for index, source in enumerate((old, current)):
+                put(script, source, True)
+                with patch.dict(os.environ, self.env, clear=True):
+                    module, _ = self.runner()
+                    declarations = module.Declarations(self.source, self.home)
+                    result = {}
+                    for name, host in declarations.hosts.items():
+                        self.assertTrue(all(type(v) is int for v in host["machine_env"].values()))
+                        home = self.directory / f"render-{index}-{name}"
+                        home.mkdir()
+                        with patch.dict(os.environ, {"HOME": str(home)}):
+                            runner = module.Runner(argparse.Namespace(check=False, timer=False, resume_fd=None),
+                                                   declarations, name)
+                            runner.render()
+                        self.assertFalse([i for i in runner.state["items"] if i["result"] == "failed"])
+                        result[name] = (home / "src/rust/tmp/machine.env").read_bytes()
+                    rendered.append(result)
+        finally:
+            put(script, current, True)
+        self.assertEqual(len(rendered[0]), HOST_COUNT)
+        self.assertEqual(rendered[0], rendered[1])
+
     def test_posix_path_idempotence_in_nested_shells(self):
         self.sync()
         path = self.home / ".config/fabrig/env.sh"
