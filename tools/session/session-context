@@ -14,10 +14,15 @@ and its latest token count, against the window the rollout records.
   session-context --owner ops      a codex-run owner's thread
   session-context --hook           as a Claude Code Stop hook: reads the hook's JSON on
                                    stdin; at the threshold, asks the session to hand over
+  session-context --capabilities   print supported integration capabilities
+Hook options: --role lead|coordinator, repeatable --name NAME / --name-prefix PREFIX,
+--coordinator MAILBOX, --handover PATH, --handle H. Stop also acts after a compaction;
+SessionStart source=compact adds the role's handover message. Name lookups are cached
+under SESSION_CONTEXT_STATE (default ~/.local/state/session-context), with a 10s timeout.
 Options: --window N (Claude; default 1000000), --threshold F (default 0.75).
 Exit 0 below the threshold, 3 at or past it (a hook exits 0 and says so in JSON).
 """
-import glob, json, os, subprocess, sys
+import glob, json, os, subprocess, sys, tempfile
 
 TAIL = 4 << 20  # the latest call is near the end: find it in the tail first
 
@@ -51,6 +56,14 @@ def claude_transcript(session, cwd):
 
 
 def records(path, tail=False):
+    if not tail:
+        with open(path, 'rb') as f:
+            for line in f:
+                try:
+                    yield json.loads(line)
+                except ValueError:
+                    continue
+        return
     with open(path, 'rb') as f:
         size = f.seek(0, 2)
         start = max(0, size - TAIL) if tail else 0
@@ -70,9 +83,9 @@ def claude_call(d):
     return m.get('usage') if isinstance(m, dict) else None
 
 
-def claude_usage(path, window, counts=True):
+def claude_usage(path, window, counts=True, tail_only=False):
     last = None
-    for tail in (True, False):
+    for tail in ((True,) if tail_only else (True, False)):
         for d in records(path, tail):
             u = claude_call(d)
             if u:
@@ -133,39 +146,140 @@ def report(name, used, window, ts, extra, threshold):
     return share >= threshold, line
 
 
-def hook(threshold, window):
+def hook_name(session):
+    """Resolve once per session; failed lookups never populate the cache."""
+    if not isinstance(session, str) or not session:
+        return None
+    directory = os.environ.get('SESSION_CONTEXT_STATE', os.path.expanduser('~/.local/state/session-context'))
+    path = os.path.join(directory, 'names.json')
+    try:
+        with open(path) as stream:
+            cache = json.load(stream)
+        if not isinstance(cache, dict):
+            cache = {}
+    except (OSError, ValueError):
+        cache = {}
+    if isinstance(cache.get(session), str):
+        return cache[session]
+    try:
+        result = subprocess.run(['claude', 'agents', '--json'], capture_output=True,
+                                text=True, timeout=10, check=True)
+        for agent in json.loads(result.stdout):
+            identity = agent.get('sessionId')
+            name = agent.get('name')
+            if isinstance(identity, str) and identity.startswith(session) and isinstance(name, str):
+                cache[session] = name
+                temporary = None
+                try:
+                    os.makedirs(directory, mode=0o700, exist_ok=True)
+                    with tempfile.NamedTemporaryFile(mode='w', dir=directory, prefix='.names.', delete=False) as stream:
+                        temporary = stream.name  # NamedTemporaryFile creates mode 0600.
+                        json.dump(cache, stream)
+                        stream.write('\n')
+                    os.replace(temporary, path)
+                except OSError:
+                    pass  # A read-only cache must not prevent a resolved hook from acting.
+                finally:
+                    if temporary and os.path.exists(temporary):
+                        os.unlink(temporary)
+                return name
+    except (OSError, ValueError, AttributeError, TypeError, subprocess.SubprocessError):
+        pass
+    return None
+
+
+def has_compaction(path):
+    return any(d.get('type') == 'system' and d.get('subtype') == 'compact_boundary'
+               for d in records(path))
+
+
+def hook(threshold, window, role=None, names=(), prefixes=(), coordinator=None, handover=None, handle=None):
     try:
         event = json.load(sys.stdin)
     except ValueError:
         return 0
-    if event.get('stop_hook_active'):
-        return 0  # the session is already continuing because of this hook: never loop
-    path = event.get('transcript_path')
-    if not path or not os.path.exists(path):
+    kind = event.get('hook_event_name')
+    if kind not in ('Stop', 'SessionStart') or (kind == 'SessionStart' and event.get('source') != 'compact'):
         return 0
-    reached, line = report(*claude_usage(path, window, counts=False), threshold)
-    if reached:
-        print(json.dumps({'decision': 'block', 'reason': (
-            f'{line}. Start your handover now, as your role says (agents/operations.md 7; '
-            'a lead ends as agents/lead.md 4 says).')}))
+    if kind == 'Stop' and event.get('stop_hook_active'):
+        return 0  # the session is already continuing because of this hook: never loop
+    if names or prefixes:
+        name = hook_name(event.get('session_id'))
+        if name is None or not (name in names or any(name.startswith(prefix) for prefix in prefixes)):
+            return 0
+    path = event.get('transcript_path')
+    exists = bool(path and os.path.isfile(path))
+    compacted = exists and has_compaction(path) if kind == 'Stop' else True
+    if kind == 'Stop' and not exists:
+        return 0
+    try:
+        reached, line = report(*claude_usage(path, window, counts=False, tail_only=True), threshold)
+    except (OSError, SystemExit, TypeError):
+        reached, line = False, 'Session usage unavailable'
+    if kind == 'Stop' and not (reached or compacted):
+        return 0
+    if compacted:
+        line += '; compaction detected: hand over now'
+    if role == 'lead':
+        message = (f"{line}. End now, as agents/lead.md 4 says: bring state.md and common.md current, "
+                   f"send your coordinator what the design should say, stop your waiter, post `files current` "
+                   f"to {coordinator}, then read no mail and change no file.")
+    elif role == 'coordinator':
+        message = (f"{line}. Hand over now, as agents/operations.md 7 says: bring {handover} current "
+                   f"(its 'For my successor' section), start your successor with "
+                   f"`tools/session/start coordinator {handle} --next`, then warm-up and takeover. "
+                   "If your handover is already under way, carry on with it.")
+    else:
+        message = (f'{line}. Start your handover now, as your role says (agents/operations.md 7; '
+                   'a lead ends as agents/lead.md 4 says).')
+    if kind == 'Stop':
+        print(json.dumps({'decision': 'block', 'reason': message}))
+    else:
+        print(json.dumps({'hookSpecificOutput': {'hookEventName': 'SessionStart', 'additionalContext': message}}))
     return 0
 
 
 def main(argv):
+    # Hooks never interfere with Claude on malformed input or an unavailable transcript.
+    if '--hook' in argv:
+        try:
+            return dispatch(argv)
+        except (Exception, SystemExit):
+            return 0
+    return dispatch(argv)
+
+
+def dispatch(argv):
+    if argv == ['--capabilities']:
+        print('hook-gating')
+        return 0
     window, threshold, session, cwd, codex, as_hook = 1_000_000, 0.75, None, os.getcwd(), None, False
+    as_hook = '--hook' in argv
+    role = coordinator = handover = handle = None
+    names, prefixes = [], []
     i = 0
     while i < len(argv):
         a = argv[i]
         if a == '--window': window = int(argv[i + 1]); i += 2
         elif a == '--threshold': threshold = float(argv[i + 1]); i += 2
-        elif a == '--name': session, cwd = by_name(argv[i + 1]); i += 2
+        elif a == '--name':
+            if as_hook: names.append(argv[i + 1])
+            else: session, cwd = by_name(argv[i + 1])
+            i += 2
+        elif as_hook and a == '--name-prefix': prefixes.append(argv[i + 1]); i += 2
+        elif as_hook and a == '--role':
+            role = argv[i + 1]; i += 2
+            if role not in ('lead', 'coordinator'): raise ValueError('unknown role')
+        elif as_hook and a == '--coordinator': coordinator = argv[i + 1]; i += 2
+        elif as_hook and a == '--handover': handover = argv[i + 1]; i += 2
+        elif as_hook and a == '--handle': handle = argv[i + 1]; i += 2
         elif a == '--codex': codex = argv[i + 1]; i += 2
         elif a == '--owner': codex = owner_thread(argv[i + 1]); i += 2
         elif a == '--hook': as_hook = True; i += 1
         elif a in ('-h', '--help'): print(__doc__); return 0
         else: session = a; i += 1
     if as_hook:
-        return hook(threshold, window)
+        return hook(threshold, window, role, names, prefixes, coordinator, handover, handle)
     usage = codex_usage(codex) if codex else claude_usage(claude_transcript(session, cwd), window)
     reached, line = report(*usage, threshold)
     print(line)
