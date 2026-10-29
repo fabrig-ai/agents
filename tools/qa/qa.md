@@ -42,8 +42,8 @@ or unreadable settings refuse the command.
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `QA_WALK_KINDS` | `forgejo=2:chatgpt claude=2:claude` | Ordered `KIND=COUNT:POOL[,POOL...]` entries; COUNT is accepted for compatibility, caps come from named slots |
-| `QA_WALK_SLOTS` | empty | `KIND=N[,N...]` entries; each kind tries its named slots in this order |
+| `QA_WALK_KINDS` | `forgejo=2:chatgpt claude=2:claude` | Ordered `KIND=COUNT:POOL[+POOL...]` entries separated by commas; legacy space-separated entries and comma-separated pools still parse; COUNT is compatibility only |
+| `QA_WALK_SLOTS` | empty | Comma-separated `KIND=N[,N...]` mappings; legacy spaces between kinds still parse |
 | `QA_SLOT_HOST` | `hetzner6` | This builder's inventory host name |
 | `QA_CLAIM_OWNER` | `s/qa` | Owner of the walk's claims |
 | `QA_CLAIM_SSH` | `hel8` | Claims host's SSH target; empty runs installed `claim` locally |
@@ -64,14 +64,32 @@ The first kind is the default. Pass settings, including `QA_LOGIN_RESERVE`,
 are unused: no pass is admitted, so there is no pass reserve to validate.
 An undersized login pool remains a broken-cap refusal at take time.
 
-For hetzner6's shares, the data lines in `~/src/rust/tmp/machine.env` are:
+The compact spelling fits fleet `machine_env` values: no whitespace,
+quotes, backslash or `$` occurs inside any value. For example,
+`forgejo=2:chatgpt+claude,claude=2:claude` gives forgejo two pools. A comma
+followed by `KIND=` starts another kind; bare numeric commas continue a slot
+list. Spaces between kinds and commas between pools remain accepted for
+existing QA_WALK_KINDS files.
+
+For hetzner6's shares, the generated `~/src/rust/tmp/machine.env` lines are:
 
 ```
-QA_WALK_KINDS=forgejo=1:chatgpt claude=1:claude
-QA_WALK_SLOTS=forgejo=8 claude=4
+QA_WALK_KINDS=forgejo=2:chatgpt,claude=2:claude
+QA_WALK_SLOTS=forgejo=8,claude=4
 QA_SLOT_HOST=hetzner6
 QA_CLAIM_OWNER=s/qa
 QA_CLAIM_SSH=hel8
+```
+
+In `fleet/hosts.toml`, add these entries to hetzner6's existing inline
+`machine_env` table (the TOML quote delimiters are not part of the values):
+
+```toml
+QA_WALK_KINDS = "forgejo=2:chatgpt,claude=2:claude"
+QA_WALK_SLOTS = "forgejo=8,claude=4"
+QA_SLOT_HOST = "hetzner6"
+QA_CLAIM_OWNER = "s/qa"
+QA_CLAIM_SSH = "hel8"
 ```
 
 The fleet supplies clean fabrig clones in slots 8 and 4, and installed

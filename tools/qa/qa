@@ -287,16 +287,16 @@ def settings(workspace):
     parsed = {}
     need(kinds.strip() and not any(ord(c) < 32 or 0x7f <= ord(c) < 0xa0 for c in kinds),
          'QA_WALK_KINDS needs KIND=SLOTS:POOL[,POOL...]')
-    for position, word in enumerate(filter(None, kinds.split(' ')), 1):
+    for position, word in enumerate(filter(None, re.split(r' +|,(?=[a-z][a-z0-9]*=)', kinds)), 1):
         match = re.fullmatch(r'([a-z][a-z0-9]*)=([0-9]+):(.+)', word)
         need(match, f'invalid QA_WALK_KINDS entry {position}')
-        kind, slots, pools = match[1], int(match[2]), match[3].split(',')
+        kind, slots, pools = match[1], int(match[2]), re.split(r'[,+]', match[3])
         need(kind not in parsed and slots > 0 and len(set(pools)) == len(pools)
              and all(re.fullmatch(LOGIN, pool) and pool_of(pool) == pool for pool in pools),
              f'invalid QA_WALK_KINDS entry {position}')
         parsed[kind] = dict(slots=slots, pools=pools)
     named, used = {}, set()
-    for word in text_values['QA_WALK_SLOTS'].split(' '):
+    for word in re.split(r' +|,(?=[a-z][a-z0-9]*=)', text_values['QA_WALK_SLOTS']):
         if not word:
             continue
         match = re.fullmatch(r'([a-z][a-z0-9]*)=([1-9][0-9]*(?:,[1-9][0-9]*)*)', word)

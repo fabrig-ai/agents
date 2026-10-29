@@ -3752,7 +3752,30 @@ def named_slot_settings_validate_and_override_the_old_counts(lab):
     assert lab.walk_states()[0][1]['slot_claim']['ssh'] == ''
 
 
+def fleet_settings_accept_commas_and_plus_without_whitespace(lab):
+    import tomllib
+    values = dict(QA_WALK_KINDS='forgejo=2:chatgpt+claude,claude=2:claude',
+                  QA_WALK_SLOTS='forgejo=1,2,claude=3,4')
+    # The exact fleet representation parses as data and contains only allowed value characters.
+    literal = 'machine_env = { ' + ', '.join(f'{key} = "{value}"' for key, value in values.items()) + ' }'
+    assert tomllib.loads(literal)['machine_env'] == values
+    assert all(not any(c.isspace() or c in "'\"\\$" for c in value) for value in values.values())
+    for key in values:
+        lab.env.pop(key, None)
+    (lab.tmp / 'machine.env').write_text(''.join(f'{key}={value}\n' for key, value in values.items()))
+    lab.walk()
+    directory, state = lab.walk_state()
+    assert set(state['requests']) == {CHATGPT, CLAUDE} and state['slot'] == 1
+    lab.walk('other', '--kind', 'claude')
+    assert lab.walk_states()[1][1]['slot'] == 3
+    # Legacy whitespace kinds and comma pools still work under the same parser.
+    lab.env['QA_WALK_KINDS'] = 'forgejo=2:chatgpt,claude claude=2:claude'
+    lab.walk('legacy')
+    assert set(lab.walk_states()[1][1]['requests']) == {CHATGPT, CLAUDE}
+
+
 CASES = (
+    fleet_settings_accept_commas_and_plus_without_whitespace,
     a_held_named_slot_falls_through_in_configured_order,
     all_named_slots_held_refuses_without_taking_anything,
     dirty_slots_are_preserved_refused_and_released,
