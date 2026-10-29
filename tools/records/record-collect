@@ -152,8 +152,8 @@ class Collector:
         self.events.append(dict(fields, id=identity, time=iso(when),
                                 source=self.source, host=self.host, kind=kind))
 
-    def lines(self, path):
-        """Advance only over complete lines; rotation replays safely via event ids."""
+    def lines(self, path, *, heavy=False):
+        """Read complete lines (or heavy logical rows), retaining unfinished input."""
         if not path.exists():
             return
         files = self.state.setdefault('files', {})
@@ -165,13 +165,42 @@ class Collector:
             if stat.st_size < offset:
                 offset = 0
             stream.seek(offset)
+            pending = None
+            skipped = 0
             while True:
                 line = stream.readline()
                 if not line or not line.endswith(b'\n'):
+                    if heavy and (pending is not None or line):
+                        skipped += 1
                     break
-                yield line.decode('utf-8').rstrip('\n')
+                text = line.decode('utf-8').rstrip('\n')
+                if heavy:
+                    if re.match(r'^\d+\t[a-z]+\t\d{4}-\d\d-\d\dT', text):
+                        if pending is not None:
+                            skipped += 1
+                        pending = text
+                        # A new row makes a preceding incomplete row skippable.
+                        offset = stream.tell() - len(line)
+                    elif pending is not None:
+                        pending += '\n' + text
+                    else:
+                        skipped += 1
+                        offset = stream.tell()
+                        continue
+                    fields = pending.count('\t') + 1
+                    if fields < 11:
+                        continue
+                    if fields > 11:
+                        skipped += 1
+                        pending = None
+                        offset = stream.tell()
+                        continue
+                    text, pending = pending, None
+                yield text
                 offset = stream.tell()
         files[str(path)] = dict(identity=identity, offset=offset)
+        if heavy:
+            print(f'heavy: skipped {skipped} malformed rows', file=sys.stderr)
 
     def finish(self):
         self.state.update(version=1, host=self.host, since=iso(self.since), seen=sorted(self.seen))
@@ -270,10 +299,8 @@ class Collector:
             if row['event'] == 'release_end':
                 key = [row.get('repo'), row.get('lane'), row.get('label'), int(row['time_ns']) // 1_000_000_000]
                 phases[digest(key)] = {k: row[k] for k in ('token', 'outcome', 'code') if k in row}
-        for line in self.lines(path):
+        for line in self.lines(path, heavy=True):
             columns = line.split('\t')
-            if len(columns) != 11:
-                raise ValueError('heavy.tsv: expected 11 columns')
             number, lane, ended, wait, run, code, memory, cwd, log, command, label = columns
             phase = phases.get(digest([cwd, lane, label, int(timestamp(ended).timestamp())]), {})
             keys = {}

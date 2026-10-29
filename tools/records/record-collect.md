@@ -35,6 +35,9 @@ by a backtick-quoted name, or `ready/...`; recipient names supply area and
 coordinator. Queue batches retain outcomes, selection, safe step durations
 and available sizes/cleanup counts; attempts join branches through leads.txt.
 Heavy's completion TSV is authoritative; release events add token/outcome.
+Multi-line commands are joined into logical rows at task/lane/timestamp row
+starts. Malformed rows are skipped with a count on stderr; unfinished trailing
+rows keep their starting offset so a later append can complete them.
 Slot claims naming a run supply its join. Command arguments are not collected.
 Sessions diff the pipeline names returned by `claude agents --json`; a missing
 session produces an observed end, a rename produces `session-name`. Every

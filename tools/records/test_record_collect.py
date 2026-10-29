@@ -253,6 +253,61 @@ print('12345678: 125,000 of 1,000,000 tokens (12%) at 2026-10-29T11:00:00Z; 42 c
         (self.tmp / 'heavy/events.jsonl').unlink()
         self.assertEqual(self.dry('heavy'), [])
 
+    def test_heavy_multiline_rows_keep_identity_and_replay_after_rotation(self):
+        self.heavy_fixture()
+        path = self.tmp / 'logs/heavy.tsv'
+        normal = path.read_text()
+        expected, = self.dry('heavy')
+        multiline = normal.replace('example-check', 'for item in 1 2 3; do\nstep one\nstep two\ndone')
+        self.write(path, multiline)
+        result = self.run_collect('heavy')
+        self.assertIn('heavy: skipped 0 malformed rows', result.stderr)
+        self.assertEqual(self.events('heavy'), [expected])
+        self.assertEqual(self.cursor('heavy')['files'][str(path)]['offset'], len(multiline.encode()))
+        replacement = self.write(path.with_suffix('.new'), normal)
+        replacement.replace(path)
+        self.assertIn('heavy: 0 events', self.run_collect('heavy').stderr)
+        self.assertEqual(self.events('heavy'), [expected])
+
+    def test_heavy_skips_orphans_oversized_and_interrupted_rows(self):
+        self.heavy_fixture()
+        path = self.tmp / 'logs/heavy.tsv'
+        normal = path.read_text()
+        incomplete = normal.rsplit('\t', 1)[0] + '\n'
+        oversized = normal.rstrip('\n') + '\textra\n'
+        self.write(path, 'orphan continuation\n' + incomplete + oversized + normal)
+        result = self.run_collect('heavy')
+        self.assertIn('heavy: skipped 3 malformed rows', result.stderr)
+        self.assertEqual(len(self.events('heavy')), 1)
+        self.assertEqual(self.cursor('heavy')['files'][str(path)]['offset'], path.stat().st_size)
+        result = self.run_collect('heavy')
+        self.assertIn('heavy: 0 events', result.stderr)
+        self.assertIn('heavy: skipped 0 malformed rows', result.stderr)
+
+    def test_heavy_unfinished_tail_retried_from_row_start(self):
+        self.heavy_fixture()
+        path = self.tmp / 'logs/heavy.tsv'
+        normal = path.read_text()
+        # Both newline-terminated command continuations and a partial physical
+        # line must retain the entire logical row for a later append.
+        for tail in ('unfinished\ncontinuation\n', 'unfinished\ncontinuation'):
+            with self.subTest(tail=tail):
+                second = normal.replace('7\t', '8\t', 1).replace('example-check', tail + 'done')
+                prefix, suffix = second.split('done', 1)
+                self.write(path, normal + prefix)
+                reader = API['Collector']('heavy', 'hel8', {}, STAMP, datetime.now(timezone.utc))
+                reader.heavy()
+                self.assertEqual(len(reader.finish()), 1)
+                self.assertEqual(reader.state['files'][str(path)]['offset'], len(normal.encode()))
+                self.write(path, normal + prefix + 'done' + suffix)
+                resumed = API['Collector']('heavy', 'hel8', reader.state, STAMP, datetime.now(timezone.utc))
+                resumed.heavy()
+                self.assertEqual(len(resumed.finish()), 1)
+                self.assertEqual(resumed.state['files'][str(path)]['offset'], path.stat().st_size)
+                repeated = API['Collector']('heavy', 'hel8', resumed.state, STAMP, datetime.now(timezone.utc))
+                repeated.heavy()
+                self.assertEqual(repeated.finish(), [])
+
     def test_sessions_lifecycle_names_and_context_each_run(self):
         row = self.session_fixture()
         self.run_collect('sessions')
