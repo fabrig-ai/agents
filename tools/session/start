@@ -1,0 +1,77 @@
+#!/usr/bin/env python3
+"""Start a registry-named coordinator or ephemeral lead."""
+import argparse
+from pathlib import Path
+import shlex
+import subprocess
+import sys
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from session_lib import ROOT, clone, create_empty, live_session, names, render, session_id, state_time
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest="role", required=True)
+    for role in ("lead", "coordinator"):
+        command = commands.add_parser(role)
+        command.add_argument("handle")
+        if role == "lead":
+            command.add_argument("area")
+        else:
+            command.add_argument("--next", action="store_true")
+        command.add_argument("--model", default="opus")
+        command.add_argument("--effort", default="high" if role == "lead" else "xhigh")
+        command.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args()
+    try:
+        values = names(args.handle, getattr(args, "area", None))
+        if args.role == "lead":
+            scratch = Path(values["lead_scratch"])
+            if not (scratch / "brief.md").is_file():
+                print(f"start: refused: missing brief: {scratch / 'brief.md'}", file=sys.stderr)
+                return 1
+            values["state_time"] = state_time(scratch / "state.md")
+            name = values["lead_name"]
+            cwd = values["lead_start_dir"]
+            template = "lead.md"
+        else:
+            name = values["warmup_name"] if args.next else values["coordinator_name"]
+            cwd = values["coordinator_start_dir"]
+            template = "coordinator-next.md" if args.next else "coordinator.md"
+        values["name"] = name
+        prompt = render(ROOT / "prompts" / template, values)
+        argv = ["claude", "--bg", "--name", name, "--model", args.model, "--effort", args.effort, prompt]
+        if args.dry_run:
+            print(f"cwd={cwd}")
+            print(f"argv={shlex.join(argv)}")
+            print(f"prompt:\n{prompt}", flush=True)
+        live = live_session(name)
+        if live is not None:
+            print(f"start: refused: live session {name} ({live.get('sessionId', live.get('id', 'unknown'))})", file=sys.stderr)
+            return 1
+        if args.dry_run:
+            return 0
+        Path(cwd).mkdir(parents=True, exist_ok=True)
+        if args.role == "lead":
+            for filename in ("common.md", "state.md"):
+                create_empty(scratch / filename)
+            for directory in ("repo", "survey"):
+                clone(scratch / directory)
+        elif not args.next:
+            clone(Path(values["coordinator_clone"]))
+        result = subprocess.run(argv, cwd=cwd, capture_output=True, text=True)
+        if result.returncode:
+            raise RuntimeError(f"claude launch failed ({result.returncode}):\n{result.stdout}{result.stderr}")
+        output = result.stdout + result.stderr
+        identifier = session_id(output)
+        print(identifier or output, end="" if output.endswith("\n") and not identifier else "\n")
+        return 0
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError, RuntimeError) as error:
+        print(f"start: {error}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

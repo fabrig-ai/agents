@@ -63,7 +63,7 @@ else:
 
     def command(self, tool, *args):
         return subprocess.run(
-            [sys.executable, "-I", "-B", str(self.checkout / "tools/session" / tool), *args],
+            [sys.executable, "-I", str(self.checkout / "tools/session" / tool), *args],
             env=self.env, cwd=self.checkout, input="", text=True, capture_output=True,
         )
 
@@ -151,6 +151,188 @@ class NamesTests(Sandbox):
         self.assertEqual(lib.state_time(state), "02:48Z")
         state.write_text("(empty)\n")
         self.assertEqual(lib.state_time(state), "unknown")
+
+
+class LaunchTests(Sandbox):
+    def test_no_brief_refuses_without_commands_or_writes(self):
+        result = self.command("start", "lead", "dm", "skein")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("missing brief", result.stderr)
+        self.assertEqual(self.calls(), [])
+        self.assertEqual(list(self.home.iterdir()), [])
+
+    def test_live_refuses_before_setup_and_prints_dry_run_first(self):
+        scratch = self.brief()
+        self.env["FAKE_AGENTS"] = json.dumps([{"name": "lead/skein", "status": "busy", "id": "live-id"}])
+        for extra in ((), ("--dry-run",)):
+            with self.subTest(extra=extra):
+                result = self.command("start", "lead", "dm", "skein", *extra)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn("live session lead/skein (live-id)", result.stderr)
+                if extra:
+                    self.assertIn("cwd=", result.stdout)
+                    self.assertIn("argv=", result.stdout)
+                    self.assertIn("prompt:", result.stdout)
+                self.assertEqual(sorted(path.name for path in scratch.iterdir()), ["brief.md"])
+        self.assertTrue(all(call["argv"] == ["agents", "--json"] for call in self.calls()))
+
+    def test_live_coordinator_and_warmup_refuse(self):
+        for handle in ("dm", "ab"):
+            for extra, key in (((), "coordinator_name"), (("--next",), "warmup_name")):
+                name = lib.names(handle)[key]
+                self.env["FAKE_AGENTS"] = json.dumps([{"name": name, "status": "idle"}])
+                result = self.command("start", "coordinator", handle, *extra)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn(name, result.stderr)
+        self.assertEqual(list(self.home.iterdir()), [])
+
+    def test_only_stopped_and_completed_allow_reuse(self):
+        self.brief()
+        for status in ("stopped", "completed", "idle", "busy", "unknown"):
+            self.env["FAKE_AGENTS"] = json.dumps([{"name": "lead/skein", "status": status}])
+            result = self.command("start", "lead", "dm", "skein", "--dry-run")
+            self.assertEqual(result.returncode, 0 if status in ("stopped", "completed") else 1, result.stderr)
+        self.env["FAKE_AGENTS"] = '[{"name":"lead/skein","state":"working"}]'
+        self.assertEqual(self.command("start", "lead", "dm", "skein", "--dry-run").returncode, 1)
+
+    def test_scratch_created_once_and_clones_reused(self):
+        scratch = self.brief()
+        result = self.command("start", "lead", "dm", "skein")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for filename in ("common.md", "state.md"):
+            self.assertEqual((scratch / filename).read_text(), "(empty)\n")
+            (scratch / filename).write_text("Inherited content, keep it.\n")
+        self.assertEqual(sorted(path.name for path in scratch.iterdir()), ["brief.md", "common.md", "repo", "state.md", "survey"])
+        self.assertTrue(Path(lib.names("dm", "skein")["lead_start_dir"]).is_dir())
+        result = self.command("start", "lead", "dm", "skein")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for filename in ("common.md", "state.md"):
+            self.assertEqual((scratch / filename).read_text(), "Inherited content, keep it.\n")
+        clones = [call for call in self.calls() if call["tool"] == "git"]
+        self.assertEqual([call["argv"] for call in clones], [
+            ["clone", "--reference", str(self.home / "src/fabrig/main"), "git@github.com:fabrig-ai/fabrig.git", str(scratch / directory)]
+            for directory in ("repo", "survey")
+        ])
+
+    def test_dry_run_leaves_everything_unchanged(self):
+        scratch = self.brief("ab", "jig")
+        (scratch / "state.md").write_text("Updated 06:12Z\n")
+        before = {str(path.relative_to(self.home)): path.read_bytes() if path.is_file() else None for path in self.home.rglob("*")}
+        for args in (("lead", "ab", "jig"), ("coordinator", "dm"), ("coordinator", "ab", "--next")):
+            result = self.command("start", *args, "--dry-run")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("argv=claude --bg --name", result.stdout)
+            self.assertIn("prompt:", result.stdout)
+        after = {str(path.relative_to(self.home)): path.read_bytes() if path.is_file() else None for path in self.home.rglob("*")}
+        self.assertEqual(before, after)
+        self.assertEqual([call["argv"] for call in self.calls()], [["agents", "--json"]] * 3)
+        self.assertEqual(list(self.checkout.rglob("__pycache__")), [])
+
+    def test_lead_argv_cwd_and_prompt(self):
+        scratch = self.brief("ab", "smith")
+        (scratch / "state.md").write_text("Updated 2026-10-29T06:12Z\n")
+        result = self.command("start", "lead", "ab", "smith", "--model", "a model", "--effort", "medium")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "12345678-abcd-4321-8765-123456789abc")
+        calls = self.calls()
+        self.assertEqual(calls[0]["argv"], ["agents", "--json"])
+        launch = calls[-1]
+        self.assertEqual(launch["tool"], "claude")
+        self.assertEqual(launch["argv"][:-1], ["--bg", "--name", "lead/ab/smith", "--model", "a model", "--effort", "medium"])
+        self.assertEqual(launch["cwd"], lib.names("ab", "smith")["lead_start_dir"])
+        self.assertEqual(launch["stdin"], "")
+        prompt = launch["argv"][-1]
+        for text in ("s/another-draft@hel8", "ready/ab-smith/<task>", "2026-10-29T06:12Z", "post wait lead/ab/smith", "session-context", "at exit 3", str(scratch)):
+            self.assertIn(text, prompt)
+        self.assertNotIn("$", prompt)
+
+    def test_default_flags(self):
+        self.brief()
+        self.assertEqual(self.command("start", "lead", "dm", "skein").returncode, 0)
+        launch = self.calls()[-1]
+        self.assertEqual(launch["argv"][:-1], ["--bg", "--name", "lead/skein", "--model", "opus", "--effort", "high"])
+        self.assertIn("written (unknown)", launch["argv"][-1])
+
+    def test_fresh_coordinator_reads_own_clone_and_brief(self):
+        value = lib.names("ab")
+        result = self.command("start", "coordinator", "ab")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        launch = self.calls()[-1]
+        self.assertEqual(launch["cwd"], value["coordinator_start_dir"])
+        self.assertEqual(launch["argv"][:-1], ["--bg", "--name", "s/another-draft", "--model", "opus", "--effort", "xhigh"])
+        for text in (value["coordinator_handover"], value["coordinator_clone"], value["coordinator_brief"], "agents/coordinator.md", "post wait s/another-draft", "plan files it names"):
+            self.assertIn(text, launch["argv"][-1])
+        self.assertTrue(Path(value["coordinator_clone"]).is_dir())
+
+    def test_warmup_uses_incumbent_handover_and_its_own_name(self):
+        for handle in ("dm", "ab"):
+            result = self.command("start", "coordinator", handle, "--next", "--model", "custom", "--effort", "high")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            value = lib.names(handle)
+            launch = self.calls()[-1]
+            self.assertEqual(launch["argv"][:-1], ["--bg", "--name", value["warmup_name"], "--model", "custom", "--effort", "high"])
+            self.assertEqual(launch["cwd"], value["coordinator_start_dir"])
+            self.assertIn(value["coordinator_address"], launch["argv"][-1])
+            self.assertIn(value["coordinator_handover"], launch["argv"][-1])
+            self.assertIn("post wait " + value["warmup_name"], launch["argv"][-1])
+        self.assertFalse(any(call["tool"] == "git" for call in self.calls()))
+
+    def test_unknown_placeholder_fails_before_commands(self):
+        self.brief()
+        (self.checkout / "prompts/lead.md").write_text("Unexpected $missing")
+        result = self.command("start", "lead", "dm", "skein")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("missing", result.stderr)
+        self.assertEqual(self.calls(), [])
+
+    def test_launch_report_formats_and_unparsed_output(self):
+        self.brief()
+        for output, expected in (
+            ('{"session_id":"json-id"}', "json-id"),
+            ('{"sessionId":"camel-id"}', "camel-id"),
+            ("Agent ID: short-id", "short-id"),
+            ("Started 12345678-abcd-4321-8765-123456789abc in background", "12345678-abcd-4321-8765-123456789abc"),
+            ("An unfamiliar launch report", "An unfamiliar launch report"),
+        ):
+            with self.subTest(output=output):
+                self.env["FAKE_LAUNCH"] = output
+                result = self.command("start", "lead", "dm", "skein")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.strip(), expected)
+
+    def test_bad_agents_output_or_failure_never_launches(self):
+        self.brief()
+        for output in ("invalid json", '{}', '["invalid session"]'):
+            self.env["FAKE_AGENTS"] = output
+            result = self.command("start", "lead", "dm", "skein")
+            self.assertEqual(result.returncode, 2, result.stderr)
+        self.env["FAKE_AGENTS"] = "[]"
+        self.env["FAKE_AGENTS_EXIT"] = "1"
+        result = self.command("start", "lead", "dm", "skein")
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertTrue(all(call["argv"] == ["agents", "--json"] for call in self.calls()))
+
+    def test_clone_and_launch_failures_are_errors(self):
+        self.brief()
+        self.env["FAKE_GIT_EXIT"] = "1"
+        result = self.command("start", "lead", "dm", "skein")
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertFalse(any(call["argv"][0] == "--bg" for call in self.calls()))
+        del self.env["FAKE_GIT_EXIT"]
+        self.env["FAKE_LAUNCH_EXIT"] = "1"
+        self.env["FAKE_LAUNCH"] = "Launch failed"
+        result = self.command("start", "lead", "dm", "skein")
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("Launch failed", result.stderr)
+
+    def test_usage_and_registry_errors(self):
+        for args in ((), ("side",), ("lead", "dm"), ("lead", "dm", "../unsafe"), ("coordinator", "missing")):
+            result = self.command("start", *args)
+            self.assertEqual(result.returncode, 2, result.stderr)
+        self.registry.write_text("not valid toml")
+        self.assertEqual(self.command("start", "coordinator", "dm").returncode, 2)
+        self.assertEqual(self.command("names", "dm").returncode, 2)
+        self.assertEqual(self.calls(), [])
 
 
 if __name__ == "__main__":
