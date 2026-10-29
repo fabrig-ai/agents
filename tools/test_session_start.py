@@ -661,5 +661,127 @@ class WarmupTests(Sandbox):
         self.assertFalse((self.home / ".local/state/session-start").exists())
 
 
+class DirectorTests(Sandbox):
+    def test_director_names_and_watched_paths(self):
+        values = lib.names("director")
+        start = self.home / "src/rust/tmp/supervise/director"
+        self.assertEqual(values["director_mailbox"], "director")
+        self.assertEqual(values["director_address"], "director@hel8")
+        self.assertEqual(values["director_start_dir"], str(start))
+        self.assertEqual(values["director_handover"], str(start / "handover.md"))
+        self.assertEqual(values["director_state"], str(start / "state.md"))
+        self.assertEqual(values["warmup_name"], "director-next")
+        self.assertEqual(values["director_name_prefix"], "director/")
+        self.assertEqual(values["director_legacy_name"], "director")
+        self.assertRegex(values["director_name"], r"^director/\d{8}T\d{4}Z$")
+        result = self.command("names", "director")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(dict(line.split("=", 1) for line in result.stdout.splitlines()), values)
+        root = self.home / "src/rust/tmp/supervise/monorepo"
+        self.assertEqual(lib.watched("director", "director"), [str(root / "director-role.md"), str(root / "director-records.md")])
+        with self.assertRaises(ValueError):
+            lib.names("director", "jig")
+
+    def test_fresh_director_flags_prompt_and_cwd(self):
+        result = self.command("start", "director")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        launch = self.calls()[-1]
+        values = lib.names("director")
+        self.assertEqual(launch["argv"][:-1], ["--bg", "--name", values["director_name"], "--effort", "xhigh"])
+        self.assertEqual(launch["cwd"], values["director_start_dir"])
+        for text in (values["director_name"], "post wait director", "post send --as director", "director-role.md",
+                     "director-records.md sections 1, 3 and 3b", "last two sections", "resume-backlog.md",
+                     "read only, never write there", "agents/{coordinator,operations,ledger,backlog}.md",
+                     "old fleet watch", "s/multi-coord", "session-context", "tools/session/start director --next"):
+            self.assertIn(text, launch["argv"][-1])
+        self.assertEqual(launch["stdin"], "")
+        self.assertNotIn("$", launch["argv"][-1])
+        self.assertFalse(any(call["tool"] == "git" for call in self.calls()))
+
+    def test_director_warmup_can_coexist_with_incumbent_and_is_recorded(self):
+        self.env["FAKE_AGENTS"] = '[{"name":"director","status":"busy","id":"722f3d5e"}]'
+        result = self.command("start", "director", "--next", "--effort", "high")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        launch = self.calls()[-1]
+        name = lib.names("director")["director_name"]
+        self.assertEqual(launch["argv"][:-1], ["--bg", "--name", name, "--effort", "high"])
+        for text in (name, "warm-up post name is director-next", "post wait director-next", "post send --as director-next director@hel8", '"take over"', '"For my successor"', "director-role.md", "director-records.md", "post wait director"):
+            self.assertIn(text, launch["argv"][-1])
+        records = json.loads((self.home / ".local/state/session-start/warmups.json").read_text())
+        self.assertTrue(records[name]["next"])
+        self.assertEqual(records[name]["session_id"], "12345678-abcd-4321-8765-123456789abc")
+        self.assertFalse(any(call["tool"] == "git" for call in self.calls()))
+
+    def test_director_refuses_exact_live_name_and_legacy_incumbent(self):
+        for name, extra in (("director", ()), (lib.names("director")["director_name"], ()),
+                            (lib.names("director")["director_name"], ("--next",))):
+            self.env["FAKE_AGENTS"] = json.dumps([{"name": name, "status": "idle", "id": "live-director"}])
+            result = self.command("start", "director", *extra, "--dry-run")
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn("live session " + name, result.stderr)
+            self.assertIn("prompt:", result.stdout)
+        self.assertEqual(list(self.home.iterdir()), [])
+        for status in ("stopped", "completed"):
+            self.env["FAKE_AGENTS"] = json.dumps([{"name": "director", "status": status}])
+            self.assertEqual(self.command("start", "director", "--dry-run").returncode, 0)
+
+    def test_director_recent_warmup_guard_is_scoped_and_expires(self):
+        name = "director/20261028T1200Z"
+        path = self.home / ".local/state/session-start/warmups.json"
+        path.parent.mkdir(parents=True)
+        for age, status, expected in ((60, "busy", 1), (7300, "busy", 0), (60, "completed", 0)):
+            path.write_text(json.dumps({name: {"next": True, "started_at": time.time() - age}}))
+            self.env["FAKE_AGENTS"] = json.dumps([{"name": name, "status": status}])
+            result = self.command("start", "director", "--next", "--dry-run")
+            self.assertEqual(result.returncode, expected, result.stderr)
+            if expected:
+                self.assertIn("recent live warm-up " + name, result.stderr)
+        other = "coordinator/dm/20261028T1200Z"
+        path.write_text(json.dumps({other: {"next": True, "started_at": time.time()}}))
+        self.env["FAKE_AGENTS"] = json.dumps([{"name": other, "status": "busy"}])
+        self.assertEqual(self.command("start", "director", "--next", "--dry-run").returncode, 0)
+
+    def test_director_wire_and_capability_fallbacks(self):
+        values = lib.names("director")
+        path = Path(values["director_start_dir"]) / ".claude/settings.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({"keep": True, "hooks": {"Notification": ["keep"]}}))
+        for gating, drift in (("1", "1"), ("1", "0"), ("0", "0")):
+            self.env.update(FAKE_GATING=gating, FAKE_DRIFT=drift)
+            result = self.command("start", "wire", "director")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            settings = json.loads(path.read_text())
+            self.assertTrue(settings["keep"])
+            self.assertEqual(settings["hooks"]["Notification"], ["keep"])
+            if gating == "0":
+                self.assertEqual(settings["hooks"], {"Notification": ["keep"]})
+                self.assertIn("director hooks skipped", result.stdout)
+                continue
+            argv = shlex.split(settings["hooks"]["Stop"][0]["hooks"][0]["command"])
+            for option, expected in (("--role", "director"), ("--name", "director"), ("--name-prefix", "director/"), ("--handover", values["director_handover"])):
+                self.assertEqual(argv[argv.index(option) + 1], expected)
+            if drift == "1":
+                self.assertEqual(settings["hooks"]["Stop"], settings["hooks"]["SessionStart"])
+                self.assertEqual(settings["hooks"]["Stop"], settings["hooks"]["UserPromptSubmit"])
+                self.assertEqual([argv[i + 1] for i, token in enumerate(argv) if token == "--watch"], lib.watched("director", "director"))
+            else:
+                self.assertNotIn("--watch", argv)
+                self.assertNotIn("UserPromptSubmit", settings["hooks"])
+                self.assertEqual(settings["hooks"]["SessionStart"][0]["matcher"], "compact")
+        self.assertEqual(self.calls(), [])
+        self.assertFalse(Path(lib.names("dm")["coordinator_start_dir"]).exists())
+
+    def test_director_dry_runs_create_nothing(self):
+        self.env["FAKE_DRIFT"] = "1"
+        for args in (("director",), ("director", "--next"), ("wire", "director")):
+            result = self.command("start", *args, "--dry-run")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("--name-prefix director/ --name director", result.stdout)
+            self.assertIn("director-role.md", result.stdout)
+            self.assertIn("director-records.md", result.stdout)
+            self.assertEqual(list(self.home.iterdir()), [])
+        self.assertTrue(all(call["argv"] == ["agents", "--json"] for call in self.calls()))
+
+
 if __name__ == "__main__":
     unittest.main()

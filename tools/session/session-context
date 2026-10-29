@@ -15,7 +15,7 @@ and its latest token count, against the window the rollout records.
   session-context --hook           as a Claude Code Stop hook: reads the hook's JSON on
                                    stdin; at the threshold, asks the session to hand over
   session-context --capabilities   print supported integration capabilities
-Hook options: --role lead|coordinator, repeatable --name NAME / --name-prefix PREFIX,
+Hook options: --role lead|coordinator|director, repeatable --name NAME / --name-prefix PREFIX,
 --coordinator MAILBOX, --handover PATH, --handle H. Stop also acts after a compaction;
 SessionStart source=compact adds the role's handover message. Name lookups are cached
 under SESSION_CONTEXT_STATE (default ~/.local/state/session-context), with a 10s timeout.
@@ -359,6 +359,10 @@ def handover_message(event, threshold, window, role, coordinator, handover, hand
         return ''
     if compacted:
         line += '; compaction detected: hand over now'
+    if role == 'director':
+        return (f"{line}. Hand over now: bring ~/src/rust/tmp/supervise/director/handover.md and state.md current, "
+                "start your successor with `tools/session/start director --next`, then warm-up and takeover. "
+                "If your handover is already under way, carry on with it.")
     if role == 'lead':
         return (f"{line}. End now, as agents/lead.md 4 says: bring state.md and common.md current, "
                 f"send your coordinator what the design should say, stop your waiter, post `files current` "
@@ -435,7 +439,7 @@ def dispatch(argv):
         elif as_hook and a == '--name-prefix': prefixes.append(argv[i + 1]); i += 2
         elif as_hook and a == '--role':
             role = argv[i + 1]; i += 2
-            if role not in ('lead', 'coordinator'): raise ValueError('unknown role')
+            if role not in ('lead', 'coordinator', 'director'): raise ValueError('unknown role')
         elif as_hook and a == '--coordinator': coordinator = argv[i + 1]; i += 2
         elif as_hook and a == '--handover': handover = argv[i + 1]; i += 2
         elif as_hook and a == '--handle': handle = argv[i + 1]; i += 2
