@@ -175,7 +175,10 @@ directory; failed, duplicate or malformed observations keep custody. Stops
 are nonblocking followed by bounded show polls. Every systemctl call has a
 30-second bound; login and post calls 60 seconds, codex-run 120 seconds.
 The slot stays held until session and deployment units are confirmed stopped.
-Unknown state keeps it held. A strict `logins list` precedes gives; invalid
+A queued or running unit job, including on a loaded inactive unit, keeps
+custody and the slot. A live or uncertain task launcher also prevents stop
+confirmation, even with an ended marker; the unit and job are rechecked after
+the launcher scan. Unknown state keeps it held. A strict `logins list` precedes gives; invalid
 inventory gives nothing. A grant missing from its managed owner's state after
 a crash is returned, while manual and unknown-repository owners are protected.
 

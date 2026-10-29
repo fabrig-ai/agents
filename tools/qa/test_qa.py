@@ -156,6 +156,8 @@ elif name == 'systemctl':
         sys.exit(0)
     if args[1] == 'show':
         properties = ['--property=LoadState', '--property=ActiveState']
+        if '--property=Job' in args:
+            properties.append('--property=Job')
         if deployment:
             properties.append('--property=WorkingDirectory')
         assert args[2:-1] == [*properties, '--'], args
@@ -171,6 +173,8 @@ elif name == 'systemctl':
             print('LoadState=' + ('loaded' if saved else 'not-found'))
             print('ActiveState=' + (override or ('deactivating' if saved and saved.get('stopping') else
                                                 'active' if saved and alive(saved['pid']) else 'inactive')))
+            if '--property=Job' in args:
+                print('Job=' + config.get('unit_jobs', {}).get(unit, '0'))
             print('WorkingDirectory=' + (saved['directory'] if saved else ''))
             sys.exit(0)
         present = (runs / run / 'unit').exists()
@@ -181,6 +185,8 @@ elif name == 'systemctl':
         else:
             print('LoadState=' + config.get('unit_load', 'loaded' if present else 'not-found'))
             print('ActiveState=' + active)
+            if '--property=Job' in args:
+                print('Job=' + config.get('unit_job', '0'))
         sys.exit(0)
     if args[1] == '_finish-stop':
         assert deployment and saved
@@ -2246,7 +2252,7 @@ def hung_manual_inventory_and_takes_are_bounded(lab):
     assert not lab.walk_states() and not lab.watch_states()
 
 
-def a_surviving_launcher_keeps_custody_until_its_unit_exists(lab, past_grace=False):
+def a_surviving_launcher_keeps_custody_until_its_unit_exists(lab, past_grace=False, loaded=False):
     resting(lab, CHATGPT, in_place=True)
     lab.env['QA_WALK_KINDS'] = 'forgejo=1:chatgpt'
     focused = lab.tmp / 'qa-focused'
@@ -2273,6 +2279,8 @@ def a_surviving_launcher_keeps_custody_until_its_unit_exists(lab, past_grace=Fal
                 meta = lab.tmp / 'codex-run/fixture-1/meta'
                 now = (datetime.fromtimestamp(meta.stat().st_mtime, timezone.utc)
                        + timedelta(minutes=11)).strftime('%Y-%m-%dT%H:%M:%SZ')
+            if loaded:
+                lab.configure(unit_load='loaded', unit_state='inactive')
             result = lab.watch(now=now)
             state = lab.walk_state()[1]
             assert 'launch may still start' in result.stdout
@@ -2285,10 +2293,12 @@ def a_surviving_launcher_keeps_custody_until_its_unit_exists(lab, past_grace=Fal
                 os.kill(child, signal.SIGCONT)
             wait_for((lab.tmp / 'codex-run/fixture-1/unit').exists)
             dead(child)
+            lab.configure(unit_load='loaded', unit_state='active')
             lab.watch()
             saved = json.loads((lab.tmp / 'qa/walks' / (state['walk'] + '.json')).read_text())
             assert saved['stage'] == 'running' and not saved['given'] and not saved['released']
             lab.end_run(saved)
+            lab.configure(unit_state='inactive')
             lab.watch()
             saved = json.loads((lab.tmp / 'qa/walks' / (state['walk'] + '.json')).read_text())
             assert saved['stage'] == 'ended' and saved['given'] == [CHATGPT] and saved['released']
@@ -2302,6 +2312,50 @@ def a_surviving_launcher_keeps_custody_until_its_unit_exists(lab, past_grace=Fal
                 if alive(child):
                     os.kill(child, signal.SIGCONT)
                 dead(child)
+
+
+def a_loaded_inactive_unit_keeps_a_surviving_launcher(lab):
+    a_surviving_launcher_keeps_custody_until_its_unit_exists(lab, past_grace=True, loaded=True)
+
+
+def queued_and_running_start_jobs_keep_custody(lab):
+    directory, state = walk_with_logins(lab, CHATGPT)
+    lab.env['QA_WALK_KINDS'] = 'forgejo=1:chatgpt'
+    for job in ('42', '43', ''):
+        lab.configure(unit_load='loaded', unit_state='inactive', unit_job=job)
+        lab.watch()
+        saved = lab.walk_state()[1]
+        assert saved['stage'] == 'running' and not saved['given'] and not saved['released']
+        assert not any(args[0] == 'give' for args in lab.calls('logins'))
+        lab.walk('other', '--login', CHATGPT, status=1)
+    # Even a worker completion marker cannot overrule a pending start.
+    lab.end_run(state)
+    lab.configure(unit_job='44')
+    lab.watch()
+    assert not lab.walk_state()[1]['given'] and not lab.walk_state()[1]['released']
+    lab.configure(unit_job='0')
+    lab.watch()
+    assert lab.walk_state()[1]['given'] == [CHATGPT] and lab.walk_state()[1]['released']
+
+
+def a_job_created_during_launcher_scan_keeps_custody(lab):
+    directory, state = walk_with_logins(lab, CHATGPT)
+    lab.configure(unit_load='loaded', unit_state='inactive')
+    patch = """def launcher_alive(self, meta):
+    path = self.workspace.root / 'tools.json'
+    config = json.loads(path.read_text())
+    config['unit_job'] = '42'
+    temporary = path.with_name(path.name + '.new')
+    temporary.write_text(json.dumps(config))
+    temporary.replace(path)
+    return False
+import json
+tool['Watch'].launcher_alive = launcher_alive
+"""
+    driven_watch(lab, patch)
+    saved = lab.walk_state()[1]
+    assert saved['stage'] == 'running' and not saved['given'] and not saved['released']
+    assert not any(args[0] == 'give' for args in lab.calls('logins'))
 
 
 def a_missing_walk_unit_is_ended_after_the_launch_grace(lab):
@@ -3109,6 +3163,9 @@ def pass_states_are_left_untouched(lab):
     assert lab.walk_state()[1]['stage'] == 'ended'
 
 CASES = (
+    a_loaded_inactive_unit_keeps_a_surviving_launcher,
+    queued_and_running_start_jobs_keep_custody,
+    a_job_created_during_launcher_scan_keeps_custody,
     hand_give_cannot_release_a_saved_walk_holder_or_claim,
     hand_give_protects_foreign_walks_and_saved_attempts,
     hand_give_refuses_unreadable_saved_custody,

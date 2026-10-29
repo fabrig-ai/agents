@@ -637,7 +637,7 @@ class Watch:
 
 
     def unit_status(self, unit, directory=None, launch_checked=False):
-        properties = ['--property=LoadState', '--property=ActiveState']
+        properties = ['--property=LoadState', '--property=ActiveState', '--property=Job']
         if directory is not None:
             properties.append('--property=WorkingDirectory')
         result = self.call('systemctl', '--user', 'show', *properties, '--', unit)
@@ -650,23 +650,30 @@ class Watch:
             if directory is not None and load == 'loaded' and fields['WorkingDirectory'] != str(directory):
                 log(f'{unit}: WorkingDirectory is not the walk directory; keeping logins held')
                 return 'unknown'
-            if (not launch_checked and load == 'not-found' and active == 'inactive'
-                    and unit.startswith('codex-run-')):
-                run = self.runs / unit.removeprefix('codex-run-')
-                if not (run / 'ended').exists():
+            # ActiveState alone cannot exclude a queued or running start job.
+            if not re.fullmatch(r'[0-9]+', fields['Job']):
+                log(f'{unit}: cannot establish pending job; keeping custody')
+                return 'unknown'
+            if int(fields['Job']) != 0:
+                log(f'{unit}: pending job; keeping custody and slot')
+                return 'launching'
+            stopped = (load == 'loaded' and active in ('inactive', 'failed')
+                       or load == 'not-found' and active == 'inactive')
+            if stopped:
+                if not launch_checked and unit.startswith('codex-run-'):
+                    run = self.runs / unit.removeprefix('codex-run-')
                     try:
                         meta = (run / 'meta').stat()
                     except FileNotFoundError:
-                        pass
-                    else:
-                        if (utc(timestamp()).timestamp() - meta.st_mtime < 600
-                                or self.launcher_alive(run / 'meta') is not False):
-                            log(f'{unit}: launch may still start; keeping custody and slot')
-                            return 'launching'
-                        # The launcher may have created the unit and exited during the scan.
-                        return self.unit_status(unit, directory, launch_checked=True)
-            if (load == 'loaded' and active in ('inactive', 'failed')
-                    or load == 'not-found' and active == 'inactive'):
+                        log(f'{unit}: cannot establish launcher task; keeping custody')
+                        return 'unknown'
+                    if (load == 'not-found' and not (run / 'ended').exists()
+                            and utc(timestamp()).timestamp() - meta.st_mtime < 600
+                            or self.launcher_alive(run / 'meta') is not False):
+                        log(f'{unit}: launch may still start; keeping custody and slot')
+                        return 'launching'
+                    # The unit or its job may change while the launcher exits.
+                    return self.unit_status(unit, directory, launch_checked=True)
                 return 'stopped'
             if load == 'loaded' and active in ('activating', 'active', 'reloading', 'deactivating'):
                 return 'busy'
