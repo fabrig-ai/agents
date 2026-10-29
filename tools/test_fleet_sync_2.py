@@ -169,6 +169,8 @@ class FleetSync2Test(fixture.FleetTest):
                     self.assertIn("Persistent=true", timer)
                     self.assertIn("OnBootSec=", timer)
                     self.assertIn("AccuracySec=", timer)
+                    if name != "status-page":
+                        self.assertIn("RandomizedDelaySec=60\n", timer)
                     self.assertIn("WantedBy=timers.target", timer)
         self.assertEqual(before, self.snapshot())
         self.assertFalse((self.home / "systemctl.log").exists())

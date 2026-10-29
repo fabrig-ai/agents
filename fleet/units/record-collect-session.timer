@@ -5,6 +5,7 @@ Description=Run record-collect-session every 2 minutes
 OnBootSec=1min
 OnCalendar=*:0/2
 AccuracySec=10s
+RandomizedDelaySec=60
 Persistent=true
 
 [Install]
