@@ -428,6 +428,8 @@ The detached-pipe, FIFO give-back log and wrapper tests measure reaped
 child user plus system CPU instead of elapsed wall time. Each ceiling is
 four times the supplied idle measurement with a 500 ms minimum (500 ms
 for all three); command deadlines, exit results and descendant/completion
-assertions stay in place. Deliberate manager hangs
-use a ready marker before their shortened timeout starts. The suite runs at
+assertions stay in place. The detached-pipe fixture publishes its PID atomically
+after creating its session; its short command timeout starts only after that
+readiness marker appears. Deliberate manager hangs use a ready marker before
+their shortened timeout starts. The suite runs at
 most eight cases concurrently. It never uses real logins, a real manager or network.

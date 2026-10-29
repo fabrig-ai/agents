@@ -645,11 +645,31 @@ def a_detached_pipe_cannot_hold_a_timed_out_command(lab):
 from pathlib import Path
 if os.fork() == 0:
     os.setsid()
-    Path({str(marker)!r}).write_text(str(os.getpid()))
+    marker = Path({str(marker)!r})
+    temporary = marker.with_name(marker.name + '.new')
+    temporary.write_text(str(os.getpid()))
+    temporary.replace(marker)
 time.sleep(60)
 ''')
-    driver = f'''import resource, runpy, sys
+    driver = f'''import resource, runpy, sys, time
+from pathlib import Path
 tool = runpy.run_path({str(SCRIPT)!r})
+subprocess = tool['subprocess']
+original_popen = subprocess.Popen
+class ReadyPopen(original_popen):
+    def communicate(self, input=None, timeout=None):
+        if timeout == 0.3:
+            # Start the timeout only once a detached child holds the pipes.
+            marker = Path({str(marker)!r})
+            deadline = time.monotonic() + 10
+            while not marker.exists():
+                if self.poll() is not None or time.monotonic() >= deadline:
+                    self.kill()
+                    super().communicate()
+                    raise AssertionError('fixture child never detached')
+                time.sleep(0.01)
+        return super().communicate(input=input, timeout=timeout)
+subprocess.Popen = ReadyPopen
 start = resource.getrusage(resource.RUSAGE_CHILDREN)
 result = tool['command']([sys.executable, '-I', '-B', {str(script)!r}], timeout=0.3)
 assert result.returncode == 124
