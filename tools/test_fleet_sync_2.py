@@ -169,7 +169,7 @@ class FleetSync2Test(fixture.FleetTest):
         self.assertFalse((copied / "src/fabrig/releases").exists())
         self.assertFalse((copied / "src/rust/tmp/post/machines").exists())
 
-    def test_preview_existing_home_uses_checkout_and_real_probes_conflicts(self):
+    def test_preview_existing_home_uses_checkout_and_real_conflicts(self):
         self.sync()
         fixture.put(self.source / "fleet/env", (self.source / "fleet/env").read_text() + "FROM_CHECKOUT=yes\n")
         fixture.put(self.home / ".config/plan/environment.sh", "export DISABLE_AUTOUPDATER=0\n")
@@ -180,7 +180,8 @@ class FleetSync2Test(fixture.FleetTest):
         self.assertEqual(before, self.snapshot())
         self.assertIn("FROM_CHECKOUT=yes", (copied / ".config/fabrig/env.sh").read_text())
         self.assertIn("conflict:.config/plan/environment.sh", result.stdout)
-        self.assertIn("wrong-version-from-real-environment", result.stdout)
+        self.assertNotIn("wrong-version-from-real-environment", result.stdout)
+        self.assertIn("versions: not probed in preview; see --check", result.stdout)
         self.assertEqual((copied / "src/rust/tmp/post/machines").read_text(), "operator routing\n")
         self.assertEqual((copied / ".profile").read_bytes(), (self.home / ".profile").read_bytes())
 
@@ -232,6 +233,7 @@ class FleetSync2Test(fixture.FleetTest):
 
     def test_preview_rejects_nonempty_and_incompatible_options(self):
         directory = self.directory / "preview"
+        directory.mkdir(mode=0o700)
         fixture.put(directory / "keep", "untouched\n")
         self.preview_run(directory, expected=1)
         self.assertEqual((directory / "keep").read_text(), "untouched\n")

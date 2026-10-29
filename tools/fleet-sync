@@ -964,7 +964,7 @@ class Runner:
                 continue
             name = fields[0]
             target = fields[1] if len(fields) == 2 else None
-            if target is not None and "@" not in target and user:
+            if target not in (None, "local") and "@" not in target and user:
                 target = f"{user}@{target}"
             # Ambiguous duplicate names and malformed entries cannot compare equal.
             if name in mapping and mapping[name] != target:
@@ -1231,11 +1231,21 @@ class Runner:
         return True
 
     def preview(self, destination):
-        """Converge only a private HOME copy, retaining real HOME for rendering/probes."""
-        destination = Path(os.path.abspath(destination))
+        """Converge a private HOME copy, retaining real HOME for rendering/conflicts."""
+        destination = Path(destination).absolute()
         copy_home = destination / "home"
         if self.home == copy_home or self.home.is_relative_to(copy_home):
             raise ValueError("preview HOME must not contain the real HOME")
+        # Check each component without following links before creating any output.
+        for component in reversed((destination, *destination.parents)):
+            try:
+                info = component.lstat()
+            except FileNotFoundError:
+                if component != destination:
+                    raise
+                continue
+            if not stat.S_ISDIR(info.st_mode):
+                raise ValueError("preview DIR must be a directory with no symlinked components")
         output = SafeHome(Path(destination.anchor))
         relative = str(destination.relative_to(destination.anchor))
         # Only DIR itself may be created: missing ancestors are outside its scope.
@@ -1244,6 +1254,10 @@ class Runner:
                 os.mkdir(leaf, mode=0o700, dir_fd=directory)
             except FileExistsError:
                 pass
+        info = destination.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
+                or stat.S_IMODE(info.st_mode) != 0o700):
+            raise ValueError("preview DIR must be owned by the user with mode 0700")
         if output.names(relative):
             raise ValueError("preview DIR must be empty")
         output.directory(relative + "/home", create=True)
@@ -1286,7 +1300,7 @@ class Runner:
             self.attempt("links", self.links)
             self.render()
             self.attempt("units", self.units)
-            self.versions()
+            self.item("versions", "deferred", "not probed in preview; see --check")
             new = []
             for path, original in sorted(before.items()):
                 rendered = copy.read(path)

@@ -21,8 +21,9 @@ for every host, and are never eligible for removal. This is enforced in code.
 policy.toml maps managed paths to write (default) or check. post/machines is
 check-only pending ops/coordinator agreement: differences warn, without backups
 or writes. Routing compares name-to-target mappings, ignoring order, blank lines
-and comments; a bare target equals `$USER@target`. Equal mappings are ok;
-otherwise warnings list missing, extra or changed names. Conflicting duplicate
+and comments; a bare SSH target equals `$USER@target`. The `local` sentinel
+never receives a username and differs from the SSH target `free@local`.
+Equal mappings are ok; otherwise warnings list missing, extra or changed names. Conflicting duplicate
 names and malformed entries also warn. Invalid declarations/unknown hosts exit 2
 before changing anything.
 
@@ -116,15 +117,21 @@ Never touch ~/src/rust/tmp/logins/: held QA logins must be kept.
 
 For step 0 on each host, run
 `python3 -I -B tools/fleet-sync --preview DIR [--host NAME]` from the checkout.
-DIR must be new or empty, with existing parents and no symlinks in its path.
+DIR must be new or empty, owned by the caller, mode 0700, and a directory with
+existing parents and no symlinked components; each component is checked with
+lstat. A new DIR is created with mode 0700; other ownership/modes are refused.
+DIR is the caller's private directory. Swapping it mid-run requires the user's
+own process, which is outside fleet-sync's threat model.
 Preview copies existing managed regular files and their existing backups to
 DIR/home using no-follow reads, then converges that copy. It refuses unsafe
 managed files; installed tool symlinks are inspected and reproduced as links.
 Rendered paths and link targets name the real HOME, even inside the copy.
 Preview uses the invoking checkout's declarations without fetching/deploying a
 release, defers fabrig, and runs no systemctl, lock, journal or state writes.
-Version probes and conflict checks use the real HOME and environment. It prints
-unified diffs (including additions, removals and backups), tool-link changes,
+Conflict checks use the real HOME and environment. Version probes are skipped:
+`versions: not probed in preview; see --check`. `--check` still probes versions.
+Preview prints unified diffs (including additions, removals and backups),
+tool-link changes,
 and a list of new files. Check-only files retain their original contents and
 report differences as warnings. Hold suppresses preview too. All preview writes
 stay inside DIR; preview accepts only --host alongside --preview.

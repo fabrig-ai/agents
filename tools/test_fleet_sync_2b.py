@@ -93,7 +93,7 @@ class FleetSync2bTest(fixture.FleetTest):
             self.assertTrue(any(i["item"] == name for i in state["items"]), name)
         self.assertEqual(before, self.snapshot(exclude_mirror=True))
 
-    def test_agents_failure_in_preview_does_not_skip_rendering_or_versions(self):
+    def test_agents_failure_in_preview_does_not_skip_rendering_or_version_notice(self):
         before = self.snapshot()
         with patch.dict(os.environ, self.env):
             module, runner = self.runner()
@@ -102,7 +102,8 @@ class FleetSync2bTest(fixture.FleetTest):
             with redirect_stdout(io.StringIO()):
                 self.assertEqual(runner.run(), 1)
         self.assertTrue((self.directory / "preview/home/.cargo/config.toml").exists())
-        self.assertTrue(any(i["item"] == "version:codex" for i in runner.state["items"]))
+        self.assertTrue(any(i["item"] == "versions" and i["result"] == "deferred" for i in runner.state["items"]))
+        self.assertFalse(any(i["item"].startswith("version:") for i in runner.state["items"]))
         self.assertEqual(before, self.snapshot())
 
     def test_routing_equal_ignores_order_comments_and_current_username(self):
