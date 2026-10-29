@@ -106,15 +106,23 @@ elif name == 'run':
     pair = scenario['pairs'][profile]
     chosen = pair.get('rerun', pair.get('main', [])) if rerun else pair.get('main', [])
     override = {}
-    if rerun and pair.get('reruns'):
-        expression = sys.argv[sys.argv.index('-E') + 1]
-        test = json.loads(expression.partition(' & test(=')[2][:-1])
-        override = pair['reruns'][test]
-        chosen = override['tests']
     log(dict(tool='tiers', profile=profile, rerun=rerun, args=sys.argv[1:],
              head=__import__('subprocess').check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
              heavy_class=os.environ.get('HEAVY_CLASS'),
              lease_held=bool(os.fstat(int(os.environ['TEST_LEASE_FD']))) if 'TEST_LEASE_FD' in os.environ else None))
+    if rerun:
+        expression = sys.argv[sys.argv.index('-E') + 1]
+        binary, separator, test = expression.removeprefix('binary_id(=').partition(') & test(=')
+        test = test.removesuffix(')')
+        # Nextest 0.9.148 treats quotes literally, so quoted binary IDs miss.
+        if binary.startswith('"') or test.startswith('"'):
+            print("operator didn't match any binary IDs", file=sys.stderr)
+            sys.exit(94)
+        if not separator:
+            sys.exit(94)
+        if pair.get('reruns'):
+            override = pair['reruns'][test]
+            chosen = override['tests']
     if pair.get('wait'):
         write(home / 'tier-entered', '')
         while not (home / 'tier-release').exists():
@@ -596,6 +604,48 @@ class TrimTests(Sandbox):
 
 
 class VerdictTests(Sandbox):
+    def test_live_identity_confirmation_uses_unquoted_exact_filter(self):
+        binary = 'temper-client-browser-world::qa_all'
+        test = 'qa_task_pages::typed_agent_address_survives_reload_and_a_lineage_round_trip'
+        self.scenario['pairs']['qa-skein'] = dict(main=[dict(binary=binary, test=test, result='fail')])
+        self.save_scenario()
+        self.poll_run()
+        self.assertEqual(self.runner.state['last_run']['verdict'], 'red')
+        rerun, = [row for row in self.calls('tiers') if row['rerun']]
+        self.assertEqual(rerun['args'][-2:], ['-E', f'binary_id(={binary}) & test(={test})'])
+
+    def test_quoted_matchers_are_rejected_by_fake_nextest(self):
+        self.scenario['pairs']['qa-skein'] = dict(main=[dict(test='one', result='fail')])
+        self.save_scenario()
+        with mock.patch.object(app, 'exact_filter', return_value='binary_id(="pkg::qa") & test(="one")'):
+            self.poll_run()
+        self.assertEqual(self.runner.state['last_run']['verdict'], 'partial')
+        self.assertEqual(self.runner.state['last_run']['faulted'], ['qa-skein'])
+        self.assertEqual(self.events('after-landing-run')[-1]['pairs']['qa-skein']['error'],
+                         'tiers/run exit 94')
+        self.assertFalse(self.states())
+
+    def test_unsafe_identity_faults_without_confirmation(self):
+        self.scenario['pairs']['qa-skein'] = dict(main=[dict(test='unsafe)test', result='fail')])
+        self.save_scenario()
+        self.poll_run()
+        self.assertEqual(self.runner.state['last_run']['verdict'], 'partial')
+        self.assertEqual(self.events('after-landing-run')[-1]['pairs']['qa-skein']['error'],
+                         'identity not expressible as an exact filter')
+        self.assertFalse(any(row['rerun'] for row in self.calls('tiers')))
+        self.assertFalse(self.states())
+
+    def test_confirmation_non_test_exits_stay_faults(self):
+        for code in (94, 2, 101):
+            with self.subTest(code=code):
+                self.scenario['pairs']['qa-skein'] = dict(
+                    main=[dict(test='one', result='fail')], rerun_code=code)
+                self.save_scenario()
+                self.poll_run()
+                self.assertEqual(self.runner.state['last_run']['verdict'], 'partial')
+                self.assertEqual(self.runner.state['last_run']['faulted'], ['qa-skein'])
+                self.assertFalse(self.states())
+
     def test_new_standing_unattributed_flake_recovered_and_unobserved(self):
         self.single()
         pair = self.scenario['pairs']['qa-skein']
@@ -1168,7 +1218,7 @@ class ParserTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.home = Path(temporary.name)
 
-    def test_pinned_nextest_junit_and_exact_filter_escaping(self):
+    def test_pinned_nextest_junit(self):
         fixture = self.home / 'fixture.xml'
         app.atomic(fixture, '''<?xml version="1.0" encoding="UTF-8"?>
 <testsuites name="nextest-run" tests="3" failures="1">
@@ -1185,11 +1235,28 @@ class ParserTests(unittest.TestCase):
         self.assertEqual([r['result'] for r in results.values()], ['pass', 'fail', 'unobserved'])
         self.assertEqual(list(results.values())[1]['identity'], ['qa-skein', 'my-package::integration', 'module::broken'])
         self.assertEqual(list(results.values())[1]['error'], 'assertion failed')
-        self.assertEqual(app.exact_filter('a"b\\c', 'x)y,z'),
-                         'binary_id(="a\\"b\\\\c") & test(="x)y,z")')
         app.atomic(fixture, '<testsuites tests="2"><testsuite name="x"><testcase name="a"/></testsuite></testsuites>')
         with self.assertRaises(app.Fault):
             app.junit(fixture, 'qa-skein')
+
+    def test_exact_filter_unquoted_safe_identities(self):
+        for binary, test in [
+            ('temper-client-browser-world::qa_all',
+             'qa_task_pages::typed_agent_address_survives_reload_and_a_lineage_round_trip'),
+            ('package-123::qa_all_4', 'module_5::test-678'),
+        ]:
+            with self.subTest(binary=binary, test=test):
+                self.assertEqual(app.exact_filter(binary, test),
+                                 f'binary_id(={binary}) & test(={test})')
+
+    def test_exact_filter_refuses_unsafe_identities(self):
+        unsafe = ['', 'a)b', 'a(b', 'a,b', 'a&b', 'a|b', 'a b', 'a\tb',
+                  'a\nb', 'a\u00a0b', 'a\\b', '/a', '#a', '~a', '=a', 'a"b']
+        for identity in unsafe:
+            for binary, test in [(identity, 'safe'), ('safe', identity)]:
+                with self.subTest(binary=binary, test=test):
+                    with self.assertRaisesRegex(app.Fault, 'identity not expressible as an exact filter'):
+                        app.exact_filter(binary, test)
 
     def test_confirmation_selection_requires_one_same_executed_identity(self):
         identity = json.dumps(['qa-skein', 'binary', 'test'])

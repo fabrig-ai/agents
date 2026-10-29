@@ -139,9 +139,11 @@ def toml_value(value):
 
 
 def exact_filter(binary, test):
-    # Nextest quoted string matchers escape backslash and double quote.
-    quote = lambda text: '"' + text.replace('\\', '\\\\').replace('"', '\\"') + '"'
-    return f'binary_id(={quote(binary)}) & test(={quote(test)})'
+    # Keep a conservative alphabet rather than guessing filterset escapes.
+    for identity in (binary, test):
+        if not re.fullmatch(r'[A-Za-z0-9_:.-]+', identity):
+            raise Fault('identity not expressible as an exact filter')
+    return f'binary_id(={binary}) & test(={test})'
 
 
 def junit(path, profile):
