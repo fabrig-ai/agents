@@ -213,6 +213,10 @@ class RecordTests(unittest.TestCase):
         self.run_record('append', '--as', 'collect', 'queue', 'hel8', data=data)
         self.run_record('write', '--as', 'collect', 'README.md', data=b'# No\n', code=1)
 
+    def test_watch_identity_is_append_only(self):
+        self.run_record('append', '--as', 'watch', 'queue', 'hel8', data=self.event())
+        self.run_record('write', '--as', 'watch', 'README.md', data=b'# No\n', code=1)
+
     def test_write_show_pull_and_numbering(self):
         self.run_record('write', '--as', 's/multi', 'drafts/example/draft.toml', data=DRAFT)
         self.run_record('write', '--as', 'director', 'director/priorities.toml', data=PRIORITIES)

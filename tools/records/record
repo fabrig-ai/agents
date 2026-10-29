@@ -505,7 +505,7 @@ def main():
         need(branch_name(branch), 'invalid records branch')
         if args.command in ('write', 'append'):
             need(re.fullmatch(POST, args.writer) or
-                 (args.command == 'append' and args.writer == 'collect'),
+                 (args.command == 'append' and args.writer in ('collect', 'watch')),
                  'invalid writer post name')
         root = Path(os.environ.get('RECORDS_REPO', '~/src/fabrig/records')).expanduser().absolute()
         origin = os.environ.get('RECORDS_ORIGIN', ORIGIN)
