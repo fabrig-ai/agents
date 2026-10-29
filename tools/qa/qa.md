@@ -413,6 +413,10 @@ inventory, claim-list, disk and manager observations execute the identical
 fake program in the fixture interpreter, with parity checks against external
 execution. Mutations, SSH, launchers, stop/export actors, modified executables,
 deliberate hangs and the real-command-line case retain subprocess execution.
-Deliberate manager hangs
+The detached-pipe, FIFO give-back log and wrapper tests measure reaped
+child user plus system CPU instead of elapsed wall time. Each ceiling is
+four times the supplied idle measurement with a 500 ms minimum (500 ms
+for all three); command deadlines, exit results and descendant/completion
+assertions stay in place. Deliberate manager hangs
 use a ready marker before their shortened timeout starts. The suite runs at
 most eight cases concurrently. It never uses real logins, a real manager or network.
