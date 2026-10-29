@@ -11,13 +11,15 @@ class ManifestActivationTest(fixture.FleetTest):
         legacy = self.home / ".local/bin/record"
         legacy.parent.mkdir(parents=True)
         legacy.symlink_to(self.directory / "legacy-record")
+        (self.home / ".local/bin/logins").symlink_to(self.directory / "legacy-logins")
         fixture.put(self.home / ".config/fleet-sync/defer-fabrig", "preserve legacy installer links\n")
         self.sync()
         self.assertEqual(os.readlink(legacy), str(self.directory / "legacy-record"))
         self.assertFalse(os.path.lexists(self.home / ".local/bin/watch"))
         expected = {"fleet-sync": "fleet-sync", "lease": "lease", "session-start": "session/start",
                     "fabrig-record": "records/record", "record-collect": "records/record-collect",
-                    "pipeline-watch": "records/watch", "status-page": "records/status-page"}
+                    "pipeline-watch": "records/watch", "status-page": "records/status-page",
+                    "logins": "qa/logins"}
         for name, path in expected.items():
             self.assertEqual(os.readlink(self.home / ".local/bin" / name),
                              str(self.home / "src/fabrig/current/tools" / path))
