@@ -1,0 +1,133 @@
+#!/usr/bin/env python3
+"""Start a registry-named coordinator or ephemeral lead."""
+import argparse
+import json
+from pathlib import Path
+import shlex
+import subprocess
+import sys
+import time
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from session_lib import (ROOT, AREAS, clone, create_empty, session_capabilities, list_sessions,
+                         inventory, live_session, names, owns, publish_settings, recent_warmup, record_warmup,
+                         render, session_id, state_time, watched)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest="role", required=True)
+    for role in ("lead", "coordinator", "director"):
+        command = commands.add_parser(role)
+        if role != "director":
+            command.add_argument("handle")
+        if role == "lead":
+            command.add_argument("area")
+        else:
+            command.add_argument("--next", action="store_true")
+        if role != "director":
+            command.add_argument("--model")
+        command.add_argument("--effort", default="high" if role == "lead" else "xhigh")
+        command.add_argument("--dry-run", action="store_true")
+    wire = commands.add_parser("wire", help="refresh project hooks without starting sessions")
+    wire.add_argument("handle")
+    wire.add_argument("--dry-run", action="store_true")
+    ownership = commands.add_parser("owns", help="local-only ownership check for post wake")
+    ownership.add_argument("name")
+    identities = commands.add_parser("names", help="JSON identity inventory for watch")
+    identities.add_argument("--json", action="store_true", help="JSON output (the default)")
+    args = parser.parse_args()
+    try:
+        if args.role == "names":
+            print(json.dumps(inventory()))
+            return 0
+        if args.role == "owns":
+            owned, reason = owns(args.name)
+            if not owned:
+                print("start: " + " ".join(reason.split()), file=sys.stderr)
+            return 0 if owned else 1
+        handle = "director" if args.role == "director" else args.handle
+        values = names(handle, getattr(args, "area", None))
+        if args.role == "wire":
+            capabilities = session_capabilities()
+            if handle == "director":
+                publish_settings(values, "director", capabilities, args.dry_run)
+                return 0
+            publish_settings(values, "coordinator", capabilities, args.dry_run)
+            for area in AREAS:
+                lead = names(args.handle, area)
+                if Path(lead["lead_start_dir"]).is_dir():
+                    publish_settings(lead, "lead", capabilities, args.dry_run)
+            return 0
+        if args.role == "lead":
+            scratch = Path(values["lead_scratch"])
+            if not (scratch / "brief.md").is_file():
+                print(f"start: refused: missing brief: {scratch / 'brief.md'}", file=sys.stderr)
+                return 1
+            values["state_time"] = state_time(scratch / "state.md")
+            name = values["lead_name"]
+            cwd = values["lead_start_dir"]
+            template = "lead.md"
+        else:
+            name = values[f"{args.role}_name"]
+            cwd = values[f"{args.role}_start_dir"]
+            template = args.role + ("-next.md" if args.next else ".md")
+            if args.role == "director":
+                values["director_role"], values["director_records"] = watched("director", handle)
+        values["name"] = name
+        prompt = render(ROOT / "prompts" / template, values)
+        argv = ["claude", "--bg", "--name", name]
+        if getattr(args, "model", None) is not None:
+            argv += ["--model", args.model]
+        argv += ["--effort", args.effort, prompt]
+        capabilities = session_capabilities()
+        if args.dry_run:
+            print(f"cwd={cwd}")
+            print(f"argv={shlex.join(argv)}")
+            print(f"prompt:\n{prompt}", flush=True)
+            publish_settings(values, args.role, capabilities, True)
+        sessions = list_sessions()
+        live = live_session(name, sessions)
+        if args.role == "director" and not args.next:
+            live = live or live_session(values["director_legacy_name"], sessions)
+        if live is not None:
+            print(f"start: refused: live session {live.get('name', name)} ({live.get('sessionId', live.get('id', 'unknown'))})", file=sys.stderr)
+            return 1
+        if args.role in ("coordinator", "director") and args.next:
+            warmup = recent_warmup(values, sessions, args.role)
+            if warmup:
+                print(f"start: refused: recent live warm-up {warmup}", file=sys.stderr)
+                return 1
+        if args.dry_run:
+            return 0
+        Path(cwd).mkdir(parents=True, exist_ok=True)
+        if args.role == "lead":
+            for filename in ("common.md", "state.md"):
+                create_empty(scratch / filename)
+            for directory in ("repo", "survey"):
+                clone(scratch / directory)
+        elif args.role == "coordinator" and not args.next:
+            checkout = Path(values["coordinator_clone"])
+            checkout.parent.mkdir(parents=True, exist_ok=True)
+            Path(values["coordinator_brief"]).parent.mkdir(parents=True, exist_ok=True)
+            clone(checkout)
+        publish_settings(values, args.role, capabilities, False)
+        started_at = time.time()
+        result = subprocess.run(argv, cwd=cwd, capture_output=True, text=True)
+        if result.returncode:
+            raise RuntimeError(f"claude launch failed ({result.returncode}):\n{result.stdout}{result.stderr}")
+        output = result.stdout + result.stderr
+        identifier = session_id(output)
+        if args.role in ("coordinator", "director") and args.next:
+            record_warmup(name, identifier, started_at)
+        print(identifier or output, end="" if output.endswith("\n") and not identifier else "\n")
+        return 0
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError, RuntimeError) as error:
+        message = " ".join(str(error).split()) if args.role in ("owns", "names") else str(error)
+        print(f"start: {message}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
