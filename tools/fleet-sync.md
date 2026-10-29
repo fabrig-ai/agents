@@ -2,7 +2,42 @@
 
 Run `python3 -I -B tools/fleet-sync` from a checkout for the first deployment,
 then use `~/.local/bin/fleet-sync`. Python 3.13 and git are prerequisites.
-Provisioning and version installation are deferred; version probes only warn.
+The fresh-machine procedure is fleet/bootstrap/README.md. Explicit manual
+`--provision` installs missing/different pins from fleet/versions.toml; it is
+incompatible with timer/check/preview/status. Normal runs only probe versions.
+The six native tools use `seed = "peer"`: exact file SHA256/modes or the
+fleet/seeds tree manifests, including every file, symlink and directory mode.
+Only seed=true hosts are eligible; h3 is preferred, never self. Check local
+content before running anything; matching artifacts/links need no writes or
+SSH. Missing links alone are repaired locally. Transfer only allowlisted paths
+through strict SSH/no-follow opens, stream tar into private staging, verify all
+members/hashes/modes/targets, then promote and link. Partial/mismatched trees
+are refused before installation. Peer disagreements report warn: manual and
+transfer nothing until reviewed. See fleet/seeds/README.md for observed drift.
+Optional URL artifacts require HTTPS plus SHA256 before extraction/execution;
+file URL SHA256 is the content pin; trees require archive SHA256 AND their
+complete manifest. No credential/config/state is seeded. Rustup and
+Cargo verify their distribution/locked registry checksums, and kache source is
+fetched at the exact declared git revision with vendored patches. Source builds
+have a 30-minute bound. The full Codex standalone layout is preserved.
+Only a successful explicit provision of absent kache may create its local-only
+config/unit and enable/start it. Existing binaries (also on PATH), config,
+service, drop-in or cache footprints prevent takeover even under --provision.
+Its config and unit are check-only in policy.toml: normal runs only compare and
+warn, without ownership adoption, unit verification or lifecycle operations.
+No store.env or drop-in is inspected; existing stores/caches are never changed.
+Ops agrees any takeover host by host and manages shared-store setup/restarts.
+Chromium uses h3's canonical tree with a hetzner3-only seed_hosts allowlist;
+hel8's own copy gets a version-only warning, without normal reinstallation.
+Bootstrap rollout has two separate landings. Stage A is code only and keeps
+main's fleet declarations unchanged, including version-only kache (no config
+rendering or preview copy without its kache-source install declaration).
+Stage B adds the pins, seeds, kache assets/unit/policy and bootstrap procedure.
+Land stage A through tools/land, then wait for all six hosts' timers to report
+its release (or a later descendant) before landing stage B through tools/land.
+Publishing both stages to main together would strand older parsers. No host
+needs a manual runner invocation when this order is followed. Normal stage B
+runs remain check-only for kache; provisioning is a separate operator action.
 `tools/land` gates a clean branch, fetches/rebases, gates again if HEAD moved,
 and pushes main without force. Machine-action commits say what must happen.
 
@@ -20,7 +55,9 @@ The recovery service and timer must both have exactly `["*"]`, always render
 for every host, and are never eligible for removal. This is enforced in code.
 policy.toml maps managed paths to write (default) or check. post/machines is
 check-only pending ops/coordinator agreement: differences warn, without backups
-or writes. Routing compares name-to-target mappings, ignoring order, blank lines
+or writes. Check-only units are also excluded from ownership, verification,
+enablement, removal and manager queries; the first successful absent-kache
+provision is the sole exception for its config/unit. Routing compares name-to-target mappings, ignoring order, blank lines
 and comments; a bare SSH target equals `$USER@target`. The `local` sentinel
 never receives a username and differs from the SSH target `free@local`.
 Equal mappings are ok; otherwise warnings list missing, extra or changed names. Conflicting duplicate
