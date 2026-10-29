@@ -1,0 +1,1061 @@
+From d7b939183b18bbfc30f0d939fd04801a47c214f7 Mon Sep 17 00:00:00 2001
+From: Free Ekanayaka <freee@debian.org>
+Date: Sun, 25 Oct 2026 06:51:48 +0000
+Subject: [PATCH] Bound durable upload pins and skip oversized remote packs
+
+---
+ Cargo.lock                             |   2 +-
+ Cargo.toml                             |   2 +-
+ docs/getting-started/configuration.mdx |   1 +
+ src/cache_remote.rs                    |  13 +-
+ src/cli.rs                             |  11 +-
+ src/cli/tests.rs                       |   1 +
+ src/config.rs                          |  27 +++
+ src/config/tests.rs                    |  34 +++
+ src/config_tui.rs                      |   1 +
+ src/daemon.rs                          | 150 ++++++++++++-
+ src/daemon/tests.rs                    | 281 ++++++++++++++++++++++++-
+ src/fallback_planner.rs                |   1 +
+ src/remote_layout.rs                   |  42 +++-
+ src/remote_plan.rs                     |   1 +
+ src/remote_resilience.rs               |   4 +
+ src/report/tests.rs                    |   8 +
+ src/test_support.rs                    |   1 +
+ src/tui/tests.rs                       |   1 +
+ 18 files changed, 563 insertions(+), 18 deletions(-)
+
+diff --git a/Cargo.lock b/Cargo.lock
+index 1e2a256..1288a9b 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -2251,7 +2251,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "kache"
+-version = "1.2.2-gitrev.1"
++version = "1.2.2-gitrev.2"
+ dependencies = [
+  "anyhow",
+  "assert_cmd",
+diff --git a/Cargo.toml b/Cargo.toml
+index 1368167..7b1169a 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -1,6 +1,6 @@
+ [package]
+ name = "kache"
+-version = "1.2.2-gitrev.1"
++version = "1.2.2-gitrev.2"
+ edition = "2024"
+ description = "Compiler cache for Rust, C/C++ and CUDA, with S3, GCS, shared-filesystem and OCI remotes."
+ license = "Apache-2.0"
+diff --git a/docs/getting-started/configuration.mdx b/docs/getting-started/configuration.mdx
+index bcb9c3b..80d38ce 100644
+--- a/docs/getting-started/configuration.mdx
++++ b/docs/getting-started/configuration.mdx
+@@ -95,6 +95,7 @@ local_max_size = "200GiB"
+ | `KACHE_DISABLED` | none | `false` | Pass all compiler work through when set to `1` or `true` |
+ | `KACHE_LOCAL_ONLY` | `cache.local_only` | `false` | Ignore all remote and planner configuration while keeping local caching |
+ | `KACHE_REMOTE_READONLY` | `cache.remote_readonly` | `false` | Allow remote reads but suppress remote writes. On GitHub Actions and GitLab CI, every job except a push to a protected branch is also forced read-only, and `=0` does not turn that off. A pull request job with `pull_request_prefix` set writes under that prefix instead, unless this setting is on or the remote is OCI. See [Who may write](/docs/remote-cache/ci#who-may-write). |
++| `KACHE_REMOTE_UPLOAD_MAX_BYTES` | `cache.remote_upload_max_bytes` | `0` | Maximum compressed entry pack uploaded; 0 means unlimited. Larger entries stay local. |
+ | `KACHE_SCHEDULER` | `cache.scheduler` | `true` | Pace real compiler processes across concurrent builds after a miss. Hits and passthroughs never wait. `0` or `false` turns it off. With the [test runner](#test-runner), it paces test binaries too. |
+ | `KACHE_SCHEDULER_MEMORY_PRESSURE` | `cache.scheduler_memory_pressure` | `true` | Under memory pressure, run compiles one after another. See [Limits](/docs/how-it-works/limits). |
+ 
+diff --git a/src/cache_remote.rs b/src/cache_remote.rs
+index 0b3b1c6..e1647bb 100644
+--- a/src/cache_remote.rs
++++ b/src/cache_remote.rs
+@@ -101,15 +101,26 @@ pub trait V3Prefetch: Send + Sync {
+ pub struct V3Remote {
+     backend: Arc<dyn RemoteBackend>,
+     remote: RemoteConfig,
++    upload_max_bytes: u64,
+ }
+ 
+ impl V3Remote {
+     pub fn new(backend: Arc<dyn RemoteBackend>, remote: RemoteConfig) -> Self {
+-        Self { backend, remote }
++        Self {
++            backend,
++            remote,
++            upload_max_bytes: 0,
++        }
++    }
++
++    pub fn with_upload_max_bytes(mut self, max_bytes: u64) -> Self {
++        self.upload_max_bytes = max_bytes;
++        self
+     }
+ 
+     fn layout(&self) -> RemoteLayout<'_> {
+         RemoteLayout::new(self.backend.as_ref(), &self.remote)
++            .with_upload_max_bytes(self.upload_max_bytes)
+     }
+ }
+ 
+diff --git a/src/cli.rs b/src/cli.rs
+index 6de86ec..b8f003e 100644
+--- a/src/cli.rs
++++ b/src/cli.rs
+@@ -8624,8 +8624,10 @@ async fn sync_inner(
+     )
+     .await
+     .context("connecting to the remote — check its configuration and access")?;
+-    let remote_cache: Arc<dyn crate::cache_remote::CacheRemote> =
+-        Arc::new(crate::cache_remote::V3Remote::new(backend, remote.clone()));
++    let remote_cache: Arc<dyn crate::cache_remote::CacheRemote> = Arc::new(
++        crate::cache_remote::V3Remote::new(backend, remote.clone())
++            .with_upload_max_bytes(config.remote_upload_max_bytes),
++    );
+     sync_with_client(
+         remote_cache.as_ref(),
+         config,
+@@ -9118,7 +9120,10 @@ fn save_manifest_impl(
+             pool_idle_secs,
+         )
+         .await?;
+-        let remote_cache = Arc::new(crate::cache_remote::V3Remote::new(backend, remote.clone()));
++        let remote_cache = Arc::new(
++            crate::cache_remote::V3Remote::new(backend, remote.clone())
++                .with_upload_max_bytes(config.remote_upload_max_bytes),
++        );
+         for (index, key) in keys.iter().enumerate() {
+             let shard_namespace =
+                 shard_namespace_for_publish_key(index, effective_namespace.as_deref());
+diff --git a/src/cli/tests.rs b/src/cli/tests.rs
+index b65511b..b121a54 100644
+--- a/src/cli/tests.rs
++++ b/src/cli/tests.rs
+@@ -3833,6 +3833,7 @@ fn save_manifest_config(
+         cc_extra_allowlist_flags: Vec::new(),
+         local_only: false,
+         remote_readonly: false,
++        remote_upload_max_bytes: 0,
+         readonly_store: None,
+         pull_request_prefix: None,
+         modified_input_guard: false,
+diff --git a/src/config.rs b/src/config.rs
+index 9a0d304..1ca31b8 100644
+--- a/src/config.rs
++++ b/src/config.rs
+@@ -387,6 +387,9 @@ pub struct Config {
+     /// this on. `KACHE_REMOTE_READONLY=0` does not disable that. See
+     /// [`crate::policy`].
+     pub remote_readonly: bool,
++    /// Maximum compressed entry pack uploaded to the remote; 0 means unlimited.
++    /// `KACHE_REMOTE_UPLOAD_MAX_BYTES` overrides `[cache] remote_upload_max_bytes`.
++    pub remote_upload_max_bytes: u64,
+     /// Another local store this process only reads, after its own: the
+     /// directory that holds that store's `index.db`. For a CI container given
+     /// the host's store through a read-only mount. A hit there is restored by
+@@ -888,6 +891,8 @@ pub(crate) struct CacheFileConfig {
+     pub(crate) volumes: Option<HashMap<String, String>>,
+     /// Read-only remote consumer mode. See [`Config::remote_readonly`].
+     pub(crate) remote_readonly: Option<bool>,
++    /// Upload size admission. See [`Config::remote_upload_max_bytes`].
++    pub(crate) remote_upload_max_bytes: Option<u64>,
+     /// Too-new-input guard. See [`Config::modified_input_guard`].
+     pub(crate) modified_input_guard: Option<bool>,
+     /// Input-set predictions. See [`Config::input_predictions`].
+@@ -1332,6 +1337,7 @@ const IGNORE_ENV_GATED_VARS: &[&str] = &[
+     "KACHE_S3_USER_AGENT",
+     "KACHE_LOCAL_ONLY",
+     "KACHE_REMOTE_READONLY",
++    "KACHE_REMOTE_UPLOAD_MAX_BYTES",
+     "KACHE_MODIFIED_INPUT_GUARD",
+     "KACHE_INPUT_PREDICTIONS",
+     "KACHE_RECORD_SESSIONS",
+@@ -1432,6 +1438,10 @@ const ENV_FILE_KEYS: &[(&str, &str)] = &[
+     ("KACHE_S3_USER_AGENT", "cache.remote.user_agent"),
+     ("KACHE_LOCAL_ONLY", "cache.local_only"),
+     ("KACHE_REMOTE_READONLY", "cache.remote_readonly"),
++    (
++        "KACHE_REMOTE_UPLOAD_MAX_BYTES",
++        "cache.remote_upload_max_bytes",
++    ),
+     ("KACHE_MODIFIED_INPUT_GUARD", "cache.modified_input_guard"),
+     ("KACHE_INPUT_PREDICTIONS", "cache.input_predictions"),
+     ("KACHE_RECORD_SESSIONS", "cache.record_sessions"),
+@@ -2141,6 +2151,7 @@ impl Config {
+             disabled,
+             local_only,
+             remote_readonly,
++            remote_upload_max_bytes: Self::remote_upload_max_bytes(&file_config),
+             readonly_store,
+             pull_request_prefix,
+             modified_input_guard,
+@@ -2635,6 +2646,22 @@ impl Config {
+             .unwrap_or(false)
+     }
+ 
++    fn remote_upload_max_bytes(file_config: &Result<FileConfig>) -> u64 {
++        let ignore_env = Self::ignore_env_enabled(file_config);
++        env_or_ignored("KACHE_REMOTE_UPLOAD_MAX_BYTES", ignore_env)
++            .ok()
++            .and_then(|v| v.parse::<u64>().ok())
++            .or_else(|| {
++                file_config
++                    .as_ref()
++                    .ok()?
++                    .cache
++                    .as_ref()?
++                    .remote_upload_max_bytes
++            })
++            .unwrap_or(0)
++    }
++
+     fn remote_readonly_enabled(file_config: &Result<FileConfig>) -> bool {
+         let ignore_env = Self::ignore_env_enabled(file_config);
+         if let Ok(v) = env_or_ignored("KACHE_REMOTE_READONLY", ignore_env) {
+diff --git a/src/config/tests.rs b/src/config/tests.rs
+index b376dfe..7cdb3ac 100644
+--- a/src/config/tests.rs
++++ b/src/config/tests.rs
+@@ -2434,6 +2434,7 @@ fn test_file_config_roundtrip() {
+             bypass_crates: None,
+             local_only: None,
+             remote_readonly: None,
++            remote_upload_max_bytes: None,
+             volumes: None,
+             modified_input_guard: None,
+             input_predictions: None,
+@@ -2978,6 +2979,7 @@ fn test_config_store_dir() {
+         cc_extra_allowlist_flags: Vec::new(),
+         local_only: false,
+         remote_readonly: false,
++        remote_upload_max_bytes: 0,
+         pull_request_prefix: None,
+         modified_input_guard: false,
+         input_predictions: false,
+@@ -3058,6 +3060,7 @@ fn test_config_index_db_path() {
+         cc_extra_allowlist_flags: Vec::new(),
+         local_only: false,
+         remote_readonly: false,
++        remote_upload_max_bytes: 0,
+         pull_request_prefix: None,
+         modified_input_guard: false,
+         input_predictions: false,
+@@ -3134,6 +3137,7 @@ fn test_config_event_log_path() {
+         cc_extra_allowlist_flags: Vec::new(),
+         local_only: false,
+         remote_readonly: false,
++        remote_upload_max_bytes: 0,
+         pull_request_prefix: None,
+         modified_input_guard: false,
+         input_predictions: false,
+@@ -3229,6 +3233,7 @@ fn test_config_socket_path() {
+         cc_extra_allowlist_flags: Vec::new(),
+         local_only: false,
+         remote_readonly: false,
++        remote_upload_max_bytes: 0,
+         pull_request_prefix: None,
+         modified_input_guard: false,
+         input_predictions: false,
+@@ -3962,6 +3967,7 @@ fn test_save_and_load_file_config() {
+             bypass_crates: None,
+             local_only: None,
+             remote_readonly: None,
++            remote_upload_max_bytes: None,
+             volumes: None,
+             modified_input_guard: None,
+             input_predictions: None,
+@@ -5552,3 +5558,31 @@ fn the_default_floor_is_ten_gib_and_the_user_file_never_a_project_one() {
+     let _unset = set_env_for_test("KACHE_CONFIG", None);
+     assert_eq!(user_config_path(), config_file_path());
+ }
++
++#[test]
++fn remote_upload_max_bytes_defaults_and_respects_env_file_and_ignore_env() {
++    let _lock = config_path_lock();
++    let _env = set_env_for_test("KACHE_REMOTE_UPLOAD_MAX_BYTES", None);
++    let missing: Result<FileConfig> = Ok(toml::from_str("").unwrap());
++    assert_eq!(Config::remote_upload_max_bytes(&missing), 0);
++    let file: Result<FileConfig> =
++        Ok(toml::from_str("[cache]\nremote_upload_max_bytes = 67108864\n").unwrap());
++    assert_eq!(Config::remote_upload_max_bytes(&file), 67108864);
++    {
++        let _override = set_env_for_test("KACHE_REMOTE_UPLOAD_MAX_BYTES", Some("42".as_ref()));
++        assert_eq!(Config::remote_upload_max_bytes(&file), 42);
++        let ignored: Result<FileConfig> = Ok(toml::from_str(
++            "[cache]\nignore_env = true\nremote_upload_max_bytes = 9\n",
++        )
++        .unwrap());
++        assert_eq!(Config::remote_upload_max_bytes(&ignored), 9);
++    }
++    {
++        let _unlimited = set_env_for_test("KACHE_REMOTE_UPLOAD_MAX_BYTES", Some("0".as_ref()));
++        assert_eq!(Config::remote_upload_max_bytes(&file), 0);
++    }
++    {
++        let _invalid = set_env_for_test("KACHE_REMOTE_UPLOAD_MAX_BYTES", Some("invalid".as_ref()));
++        assert_eq!(Config::remote_upload_max_bytes(&file), 67108864);
++    }
++}
+diff --git a/src/config_tui.rs b/src/config_tui.rs
+index 57bef8b..e7ffa39 100644
+--- a/src/config_tui.rs
++++ b/src/config_tui.rs
+@@ -2153,6 +2153,7 @@ mod tests {
+                 bypass_crates: None,
+                 local_only: None,
+                 remote_readonly: None,
++                remote_upload_max_bytes: None,
+                 volumes: Some(
+                     [("D:".to_string(), "D:/kache-store".to_string())]
+                         .into_iter()
+diff --git a/src/daemon.rs b/src/daemon.rs
+index 4cbc62d..1f2d158 100644
+--- a/src/daemon.rs
++++ b/src/daemon.rs
+@@ -584,6 +584,46 @@ fn prediction_identity_is_acceptable(identity: &str) -> bool {
+             || crate::cache_key::is_shared_target_identity(identity))
+ }
+ 
++#[derive(Debug, Serialize, Deserialize)]
++struct UploadIntent {
++    #[serde(flatten)]
++    job: UploadJob,
++    #[serde(default)]
++    attempts: u32,
++    // Legacy intents start their age at replay, and that timestamp is then durable.
++    #[serde(default = "unix_time_ms")]
++    first_written_at_ms: u64,
++}
++
++impl UploadIntent {
++    fn new(job: UploadJob) -> Self {
++        Self {
++            job,
++            attempts: 0,
++            first_written_at_ms: unix_time_ms(),
++        }
++    }
++
++    fn exhausted(&self) -> bool {
++        self.attempts >= crate::remote_resilience::UPLOAD_MAX_ATTEMPTS
++            || unix_time_ms().saturating_sub(self.first_written_at_ms)
++                >= crate::remote_resilience::UPLOAD_MAX_AGE.as_millis() as u64
++    }
++
++    fn save(&self, config: &Config) -> Result<()> {
++        let path = upload_spool_path(config, &self.job.key);
++        crate::atomic::atomic_replace(&path, &serde_json::to_vec(self)?)?;
++        // atomic_replace fsyncs the file but treats directory fsync as best effort.
++        crate::atomic::fsync_dir(config.upload_spool_dir().as_path())
++            .context("flushing upload retry budget")
++    }
++}
++
++fn read_upload_intent(config: &Config, key: &str) -> Result<UploadIntent> {
++    serde_json::from_slice(&std::fs::read(upload_spool_path(config, key))?)
++        .context("reading upload retry budget")
++}
++
+ fn upload_spool_path(config: &Config, key: &str) -> PathBuf {
+     config.upload_spool_dir().join(format!("{key}.json"))
+ }
+@@ -762,7 +802,8 @@ fn persist_upload_job(config: &Config, job: &UploadJob) -> Result<UploadJob> {
+     if !upload_spool_has_capacity(existing_count) {
+         anyhow::bail!("upload spool is full ({UPLOAD_SPOOL_MAX_JOBS} jobs)");
+     }
+-    let bytes = serde_json::to_vec(&normalized).context("serializing upload intent")?;
++    let bytes = serde_json::to_vec(&UploadIntent::new(normalized.clone()))
++        .context("serializing upload intent")?;
+     if !upload_intent_size_is_valid(bytes.len() as u64) {
+         anyhow::bail!("upload intent exceeds {UPLOAD_SPOOL_MAX_BYTES} bytes");
+     }
+@@ -808,6 +849,13 @@ fn remove_upload_job(config: &Config, key: &str) -> Result<()> {
+ }
+ 
+ fn load_upload_jobs(config: &Config) -> Result<Vec<UploadJob>> {
++    load_upload_jobs_with(config, |intent| intent.save(config))
++}
++
++fn load_upload_jobs_with(
++    config: &Config,
++    save_legacy: impl Fn(&UploadIntent) -> Result<()>,
++) -> Result<Vec<UploadJob>> {
+     let dir = config.upload_spool_dir();
+     let entries = match std::fs::read_dir(&dir) {
+         Ok(entries) => entries,
+@@ -849,10 +897,32 @@ fn load_upload_jobs(config: &Config) -> Result<Vec<UploadJob>> {
+             tracing::warn!(path = %entry.path().display(), "ignoring invalid upload intent");
+             continue;
+         }
+-        jobs.push(UploadJob {
+-            entry_dir: config.store_dir().join(key).display().to_string(),
+-            ..job
+-        });
++        let replay = (|| -> Result<UploadJob> {
++            let mut intent: UploadIntent = serde_json::from_slice(&bytes)?;
++            intent.job = normalize_upload_job(config, &job)?;
++            // Stamp legacy intents during startup, before they wait in the queue.
++            if serde_json::from_slice::<serde_json::Value>(&bytes)?
++                .get("first_written_at_ms")
++                .is_none()
++            {
++                save_legacy(&intent)?;
++            }
++            Ok(intent.job)
++        })();
++        match replay {
++            Ok(job) => jobs.push(job),
++            Err(error) => {
++                // A full disk or a corrupt budget must not abort the whole scan
++                // and strand every other pin. Abandon only this validated key.
++                tracing::warn!(key, "retiring unreplayable upload intent: {error:#}");
++                if let Err(error) = remove_upload_job(config, key) {
++                    tracing::warn!(
++                        key,
++                        "failed to remove unreplayable upload intent: {error:#}"
++                    );
++                }
++            }
++        }
+     }
+     Ok(jobs)
+ }
+@@ -3565,9 +3635,10 @@ impl Daemon {
+                     .as_ref()
+                     .ok_or_else(|| anyhow::anyhow!("no remote configured"))?
+                     .clone();
+-                Ok::<_, anyhow::Error>(Arc::new(crate::cache_remote::V3Remote::new(
+-                    backend, remote,
+-                )))
++                Ok::<_, anyhow::Error>(Arc::new(
++                    crate::cache_remote::V3Remote::new(backend, remote)
++                        .with_upload_max_bytes(self.config.remote_upload_max_bytes),
++                ))
+             })
+             .await
+     }
+@@ -4356,6 +4427,17 @@ impl Daemon {
+                 Response::ok()
+             }
+             Err(e) => {
++                if let Some(skip) = e.downcast_ref::<crate::remote_layout::UploadTooLarge>() {
++                    put_breaker.success();
++                    tracing::debug!(
++                        crate_name = job.crate_name,
++                        key = key_short,
++                        pack_bytes = skip.pack_bytes,
++                        max_bytes = skip.max_bytes,
++                        "skipping upload (pack exceeds configured limit)"
++                    );
++                    return Response::err(format!("upload skipped: {e:#}"));
++                }
+                 let elapsed_ms = start.elapsed().as_millis() as u64;
+                 let finished_at_unix_ms = unix_time_ms();
+                 self.transfer_counters
+@@ -7281,12 +7363,53 @@ fn start_manifest_warming(daemon: &Arc<Daemon>) -> Option<tokio::task::JoinHandl
+ /// policy, and nothing retries it until the daemon restarts, where a permanent
+ /// error fails it again. Kept, such intents hold the store above its size
+ /// limit for as long as the remote refuses.
+-async fn run_upload_job(daemon: &Daemon, job: &UploadJob) -> Response {
++async fn run_upload_job(daemon: &Arc<Daemon>, job: &UploadJob) -> Response {
++    let config = daemon.config.clone();
++    let key = job.key.clone();
++    let budget = tokio::task::spawn_blocking(move || read_upload_intent(&config, &key)).await;
++    let mut intent = match budget {
++        Ok(Ok(intent)) => intent,
++        other => {
++            // A missing/unreadable budget cannot safely restart an unbounded retry.
++            let response = Response::err(format!("reading upload retry budget failed: {other:?}"));
++            if let Err(error) = daemon.retire_upload_job(&job.key).await {
++                tracing::warn!(
++                    key = job.key,
++                    "failed to retire unreadable upload intent: {error:#}"
++                );
++            }
++            daemon.handle_gc_hint();
++            return response;
++        }
++    };
+     let resp = loop {
++        if intent.exhausted() {
++            break Response::err("upload retry budget exhausted");
++        }
+         let response = daemon.do_upload(job).await;
+         if upload_result_is_terminal(response.error.as_deref()) {
+             break response;
+         }
++        // Initial breaker suppression made no network request. Suppression
++        // before PUT follows a HEAD and therefore did consume an attempt.
++        if response.error.as_deref() != Some("retryable: write breaker open") {
++            intent.attempts = intent.attempts.saturating_add(1);
++            let config = daemon.config.clone();
++            let saved = tokio::task::spawn_blocking(move || {
++                intent.save(&config)?;
++                Ok::<_, anyhow::Error>(intent)
++            })
++            .await;
++            intent = match saved {
++                Ok(Ok(intent)) => intent,
++                other => {
++                    break Response::err(format!("saving upload retry budget failed: {other:?}"));
++                }
++            };
++        }
++        if intent.exhausted() {
++            break Response::err("upload retry budget exhausted");
++        }
+         tracing::debug!(
+             key = key_prefix(&job.key),
+             retry_after_secs = UPLOAD_RETRY_DELAY.as_secs(),
+@@ -7298,7 +7421,11 @@ async fn run_upload_job(daemon: &Daemon, job: &UploadJob) -> Response {
+     };
+     match daemon.retire_upload_job(&job.key).await {
+         Ok(()) => {
+-            if let Some(error) = resp.error.as_deref() {
++            if let Some(error) = resp
++                .error
++                .as_deref()
++                .filter(|e| !e.starts_with("upload skipped:"))
++            {
+                 tracing::warn!(
+                     "upload worker: {} failed: {error}; upload intent retired, \
+                      automatic reupload abandoned; local entry retained until GC",
+@@ -7314,6 +7441,9 @@ async fn run_upload_job(daemon: &Daemon, job: &UploadJob) -> Response {
+             );
+         }
+     }
++    if !resp.ok {
++        daemon.handle_gc_hint();
++    }
+     resp
+ }
+ 
+diff --git a/src/daemon/tests.rs b/src/daemon/tests.rs
+index efdeafb..5629a62 100644
+--- a/src/daemon/tests.rs
++++ b/src/daemon/tests.rs
+@@ -1301,6 +1301,7 @@ pub(super) fn test_config(dir: &Path) -> Config {
+         cc_extra_allowlist_flags: Vec::new(),
+         local_only: false,
+         remote_readonly: false,
++        remote_upload_max_bytes: 0,
+         pull_request_prefix: None,
+         modified_input_guard: false,
+         input_predictions: false,
+@@ -14093,7 +14094,7 @@ async fn a_permanently_failed_upload_retires_its_intent_so_gc_holds_the_size_lim
+     )
+     .unwrap();
+ 
+-    let daemon = Daemon::new(config.clone());
++    let daemon = Arc::new(Daemon::new(config.clone()));
+     assert!(
+         daemon.remote_backend.set(Arc::new(PutFailBackend)).is_ok(),
+         "inject mock backend"
+@@ -14934,3 +14935,281 @@ async fn gc_retries_when_the_probed_daemon_disappears_before_send() {
+     .unwrap()
+     .unwrap();
+ }
++
++mod upload_bound {
++    use super::*;
++
++    struct Backend {
++        heads: AtomicU64,
++        puts: AtomicU64,
++        fail: bool,
++    }
++
++    #[async_trait::async_trait]
++    impl crate::remote_backend::RemoteBackend for Backend {
++        async fn head(&self, _key: &str) -> Result<bool> {
++            self.heads.fetch_add(1, Ordering::SeqCst);
++            if self.fail {
++                return Err(std::io::Error::new(
++                    std::io::ErrorKind::ConnectionReset,
++                    "upload refused",
++                )
++                .into());
++            }
++            Ok(false)
++        }
++        async fn get(
++            &self,
++            _key: &str,
++            _max_bytes: Option<u64>,
++        ) -> Result<Option<crate::remote_backend::GetObject>> {
++            panic!("upload must not GET")
++        }
++        async fn put(&self, _key: &str, _body: Vec<u8>, _content_type: Option<&str>) -> Result<()> {
++            self.puts.fetch_add(1, Ordering::SeqCst);
++            Ok(())
++        }
++        async fn put_if_absent(
++            &self,
++            key: &str,
++            body: Vec<u8>,
++            content_type: Option<&str>,
++        ) -> Result<crate::remote_backend::PutIfAbsentResult> {
++            self.put(key, body, content_type).await?;
++            Ok(crate::remote_backend::PutIfAbsentResult::Created)
++        }
++        async fn list(&self, _prefix: &str) -> Result<Vec<String>> {
++            Ok(Vec::new())
++        }
++        fn describe(&self, key: &str) -> String {
++            format!("upload-bound://{key}")
++        }
++    }
++
++    fn fixture(dir: &Path, fail: bool, max_bytes: u64) -> (Arc<Daemon>, Arc<Backend>, UploadJob) {
++        let backend = Arc::new(Backend {
++            heads: AtomicU64::new(0),
++            puts: AtomicU64::new(0),
++            fail,
++        });
++        let mut config = test_config(dir);
++        config.remote = Some(test_remote_config());
++        config.remote_upload_max_bytes = max_bytes;
++        let key = test_cache_key("bounded-upload");
++        seed_store_entry(&config, &key, "serde", dir);
++        let job = persist_upload_job(
++            &config,
++            &UploadJob {
++                key,
++                entry_dir: String::new(),
++                crate_name: "serde".into(),
++                client_epoch: 0,
++                client_version: None,
++            },
++        )
++        .unwrap();
++        let daemon = Arc::new(Daemon::new(config));
++        daemon.set_remote_backend_for_test(backend.clone());
++        (daemon, backend, job)
++    }
++
++    async fn retired(daemon: &Arc<Daemon>, job: &UploadJob) -> Response {
++        daemon.pending_uploads.write().await.insert(job.key.clone());
++        let response = tokio::time::timeout(Duration::from_secs(25), run_upload_job(daemon, job))
++            .await
++            .unwrap();
++        assert!(!upload_spool_path(&daemon.config, &job.key).exists());
++        assert!(daemon.pending_uploads.read().await.is_empty());
++        assert!(Store::open(&daemon.config).unwrap().contains(&job.key));
++        response
++    }
++
++    #[tokio::test]
++    async fn three_retryable_attempts_release_the_gc_pin() {
++        let dir = tempfile::tempdir().unwrap();
++        let (daemon, backend, job) = fixture(dir.path(), true, 0);
++        let mut small = daemon.config.clone();
++        small.max_size = 1;
++        let store = Store::open(&small).unwrap();
++        std::fs::remove_dir_all(dir.path().join(format!("{}-src", job.key))).unwrap();
++        store.set_last_accessed_for_test(&job.key, "-1 hour");
++        // Size GC cannot reclaim the entry while its intent pins it.
++        store.evict().unwrap();
++        assert!(store.contains(&job.key));
++        let response = retired(&daemon, &job).await;
++        assert!(response.error.unwrap().contains("budget exhausted"));
++        assert_eq!(backend.heads.load(Ordering::SeqCst), 3);
++        store.evict().unwrap();
++        assert!(!store.contains(&job.key));
++    }
++
++    #[tokio::test]
++    async fn retry_count_and_first_write_survive_restart_and_duplicate_submission() {
++        let dir = tempfile::tempdir().unwrap();
++        let (daemon, backend, job) = fixture(dir.path(), true, 0);
++        let original_time = read_upload_intent(&daemon.config, &job.key)
++            .unwrap()
++            .first_written_at_ms;
++        let worker_daemon = daemon.clone();
++        let worker_job = job.clone();
++        let worker = tokio::spawn(async move { run_upload_job(&worker_daemon, &worker_job).await });
++        tokio::time::timeout(Duration::from_secs(3), async {
++            loop {
++                if read_upload_intent(&daemon.config, &job.key)
++                    .unwrap()
++                    .attempts
++                    == 1
++                {
++                    break;
++                }
++                tokio::time::sleep(Duration::from_millis(10)).await;
++            }
++        })
++        .await
++        .unwrap();
++        worker.abort();
++        assert!(worker.await.unwrap_err().is_cancelled());
++        persist_upload_job(&daemon.config, &job).unwrap();
++        let replayed = load_upload_jobs(&daemon.config).unwrap();
++        assert_eq!(replayed, vec![job.clone()]);
++        let saved = read_upload_intent(&daemon.config, &job.key).unwrap();
++        assert_eq!(saved.attempts, 1);
++        assert_eq!(saved.first_written_at_ms, original_time);
++        let restarted = Arc::new(Daemon::new(daemon.config.clone()));
++        restarted.set_remote_backend_for_test(backend.clone());
++        assert!(!retired(&restarted, &replayed[0]).await.ok);
++        assert_eq!(backend.heads.load(Ordering::SeqCst), 3);
++    }
++
++    #[tokio::test]
++    async fn age_expires_before_network_including_startup_replay() {
++        for replay in [false, true] {
++            let dir = tempfile::tempdir().unwrap();
++            let (daemon, backend, job) = fixture(dir.path(), true, 0);
++            let mut intent = read_upload_intent(&daemon.config, &job.key).unwrap();
++            intent.first_written_at_ms = unix_time_ms() - 31 * 60 * 1000;
++            intent.save(&daemon.config).unwrap();
++            let jobs = if replay {
++                load_upload_jobs(&daemon.config).unwrap()
++            } else {
++                vec![job]
++            };
++            assert!(!retired(&daemon, &jobs[0]).await.ok);
++            assert_eq!(backend.heads.load(Ordering::SeqCst), 0);
++        }
++    }
++
++    #[test]
++    fn legacy_intent_starts_at_replay_and_keeps_that_time_on_next_replay() {
++        let dir = tempfile::tempdir().unwrap();
++        let (daemon, _, job) = fixture(dir.path(), true, 0);
++        fs::write(
++            upload_spool_path(&daemon.config, &job.key),
++            serde_json::to_vec(&job).unwrap(),
++        )
++        .unwrap();
++        let before = unix_time_ms();
++        assert_eq!(load_upload_jobs(&daemon.config).unwrap(), vec![job.clone()]);
++        let intent = read_upload_intent(&daemon.config, &job.key).unwrap();
++        assert_eq!(intent.attempts, 0);
++        assert!(
++            intent.first_written_at_ms >= before && intent.first_written_at_ms <= unix_time_ms()
++        );
++        assert!(!intent.exhausted());
++        let bytes = fs::read(upload_spool_path(&daemon.config, &job.key)).unwrap();
++        assert_eq!(load_upload_jobs(&daemon.config).unwrap(), vec![job.clone()]);
++        assert_eq!(
++            fs::read(upload_spool_path(&daemon.config, &job.key)).unwrap(),
++            bytes
++        );
++    }
++
++    #[tokio::test]
++    async fn breaker_suppression_uses_age_but_no_attempts() {
++        let dir = tempfile::tempdir().unwrap();
++        let (daemon, backend, job) = fixture(dir.path(), true, 0);
++        for _ in 0..3 {
++            daemon.remote_breaker.note_failure("PUT", "degraded");
++        }
++        let mut intent = read_upload_intent(&daemon.config, &job.key).unwrap();
++        // Allow four suppressed attempts, then expire without waiting 30 minutes.
++        intent.first_written_at_ms = unix_time_ms() - 30 * 60 * 1000 + 16_000;
++        intent.save(&daemon.config).unwrap();
++        let worker_daemon = daemon.clone();
++        let worker_job = job.clone();
++        let worker = tokio::spawn(async move { retired(&worker_daemon, &worker_job).await });
++        tokio::time::timeout(Duration::from_secs(18), async {
++            loop {
++                if daemon
++                    .transfer_counters
++                    .uploads_suppressed
++                    .load(Ordering::Relaxed)
++                    >= 4
++                {
++                    break;
++                }
++                tokio::time::sleep(Duration::from_millis(20)).await;
++            }
++        })
++        .await
++        .unwrap();
++        assert!(
++            !worker.is_finished(),
++            "three suppressions must not exhaust the attempt budget"
++        );
++        let saved = read_upload_intent(&daemon.config, &job.key).unwrap();
++        assert_eq!(saved.attempts, 0);
++        assert_eq!(saved.first_written_at_ms, intent.first_written_at_ms);
++        let response = worker.await.unwrap();
++        assert!(response.error.unwrap().contains("budget exhausted"));
++        assert_eq!(backend.heads.load(Ordering::SeqCst), 0);
++    }
++
++    #[test]
++    fn replay_continues_after_bad_budget_or_legacy_stamp_failure() {
++        for bad_budget in [false, true] {
++            let dir = tempfile::tempdir().unwrap();
++            let (daemon, _, job) = fixture(dir.path(), true, 0);
++            let mut bytes = serde_json::to_value(&job).unwrap();
++            if bad_budget {
++                bytes["attempts"] = serde_json::json!("invalid");
++            }
++            fs::write(
++                upload_spool_path(&daemon.config, &job.key),
++                serde_json::to_vec(&bytes).unwrap(),
++            )
++            .unwrap();
++            let next_key = test_cache_key("next-replay-job");
++            seed_store_entry(&daemon.config, &next_key, "serde", dir.path());
++            let next = persist_upload_job(
++                &daemon.config,
++                &UploadJob {
++                    key: next_key,
++                    ..job.clone()
++                },
++            )
++            .unwrap();
++            let jobs = load_upload_jobs_with(&daemon.config, |_| {
++                Err(std::io::Error::from_raw_os_error(28).into())
++            })
++            .unwrap();
++            assert_eq!(jobs, vec![next]);
++            assert!(!upload_spool_path(&daemon.config, &job.key).exists());
++            assert!(Store::open(&daemon.config).unwrap().contains(&job.key));
++        }
++    }
++
++    #[tokio::test]
++    async fn oversized_pack_stays_local_without_put_and_zero_limit_uploads() {
++        for (limit, expected_puts) in [(1, 0), (0, 2)] {
++            let dir = tempfile::tempdir().unwrap();
++            let (daemon, backend, job) = fixture(dir.path(), false, limit);
++            let response = retired(&daemon, &job).await;
++            assert_eq!(response.ok, limit == 0);
++            if limit != 0 {
++                assert!(response.error.unwrap().starts_with("upload skipped:"));
++            }
++            assert_eq!(backend.puts.load(Ordering::SeqCst), expected_puts);
++        }
++    }
++}
+diff --git a/src/fallback_planner.rs b/src/fallback_planner.rs
+index 0c9a100..315163c 100644
+--- a/src/fallback_planner.rs
++++ b/src/fallback_planner.rs
+@@ -507,6 +507,7 @@ mod tests {
+             cc_extra_allowlist_flags: Vec::new(),
+             local_only: false,
+             remote_readonly: false,
++            remote_upload_max_bytes: 0,
+             pull_request_prefix: None,
+             modified_input_guard: false,
+             input_predictions: false,
+diff --git a/src/remote_layout.rs b/src/remote_layout.rs
+index 3b96454..5cbefff 100644
+--- a/src/remote_layout.rs
++++ b/src/remote_layout.rs
+@@ -52,8 +52,28 @@ struct V3Manifest {
+ pub struct RemoteLayout<'a> {
+     backend: &'a dyn RemoteBackend,
+     remote: &'a RemoteConfig,
++    upload_max_bytes: u64,
+ }
+ 
++/// Local admission refusal, never a remote availability failure.
++#[derive(Debug)]
++pub(crate) struct UploadTooLarge {
++    pub pack_bytes: u64,
++    pub max_bytes: u64,
++}
++
++impl std::fmt::Display for UploadTooLarge {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        write!(
++            f,
++            "packed entry exceeds remote_upload_max_bytes ({} > {})",
++            self.pack_bytes, self.max_bytes
++        )
++    }
++}
++
++impl std::error::Error for UploadTooLarge {}
++
+ pub struct RemoteUploadResult {
+     pub format: &'static str,
+     pub transfer: UploadResult,
+@@ -90,7 +110,16 @@ struct ExpectedEntryBinding<'a> {
+ 
+ impl<'a> RemoteLayout<'a> {
+     pub fn new(backend: &'a dyn RemoteBackend, remote: &'a RemoteConfig) -> Self {
+-        Self { backend, remote }
++        Self {
++            backend,
++            remote,
++            upload_max_bytes: 0,
++        }
++    }
++
++    pub fn with_upload_max_bytes(mut self, max_bytes: u64) -> Self {
++        self.upload_max_bytes = max_bytes;
++        self
+     }
+ 
+     /// The input prediction row the remote holds for `identity`
+@@ -255,6 +284,13 @@ impl<'a> RemoteLayout<'a> {
+             create_entry_pack_zstd_until(entry_dir, blobs_dir, &meta, compression_level, deadline)?;
+         let compression_ms = compression_start.elapsed().as_millis() as u64;
+         let pack_bytes = packed.len() as u64;
++        if self.upload_max_bytes != 0 && pack_bytes > self.upload_max_bytes {
++            return Err(UploadTooLarge {
++                pack_bytes,
++                max_bytes: self.upload_max_bytes,
++            }
++            .into());
++        }
+         let original_bytes =
+             meta.files.iter().map(|f| f.size).sum::<u64>() + meta_content.len() as u64;
+ 
+@@ -1017,6 +1053,7 @@ pub(crate) mod tests {
+             cc_extra_allowlist_flags: Vec::new(),
+             local_only: false,
+             remote_readonly: false,
++            remote_upload_max_bytes: 0,
+             pull_request_prefix: None,
+             modified_input_guard: false,
+             input_predictions: false,
+@@ -1130,6 +1167,7 @@ pub(crate) mod tests {
+             cc_extra_allowlist_flags: Vec::new(),
+             local_only: false,
+             remote_readonly: false,
++            remote_upload_max_bytes: 0,
+             pull_request_prefix: None,
+             modified_input_guard: false,
+             input_predictions: false,
+@@ -1305,6 +1343,7 @@ pub(crate) mod tests {
+             cc_extra_allowlist_flags: Vec::new(),
+             local_only: false,
+             remote_readonly: false,
++            remote_upload_max_bytes: 0,
+             pull_request_prefix: None,
+             modified_input_guard: false,
+             input_predictions: false,
+@@ -1475,6 +1514,7 @@ pub(crate) mod tests {
+             cc_extra_allowlist_flags: Vec::new(),
+             local_only: false,
+             remote_readonly: false,
++            remote_upload_max_bytes: 0,
+             pull_request_prefix: None,
+             modified_input_guard: false,
+             input_predictions: false,
+diff --git a/src/remote_plan.rs b/src/remote_plan.rs
+index 0f9bb8c..124cd9c 100644
+--- a/src/remote_plan.rs
++++ b/src/remote_plan.rs
+@@ -72,6 +72,7 @@ mod tests {
+             cc_extra_allowlist_flags: Vec::new(),
+             local_only: false,
+             remote_readonly: false,
++            remote_upload_max_bytes: 0,
+             pull_request_prefix: None,
+             modified_input_guard: false,
+             input_predictions: false,
+diff --git a/src/remote_resilience.rs b/src/remote_resilience.rs
+index 0b47cb9..96df308 100644
+--- a/src/remote_resilience.rs
++++ b/src/remote_resilience.rs
+@@ -360,6 +360,10 @@ where
+ /// Consecutive classified failures before one direction degrades.
+ const REMOTE_FAILURE_THRESHOLD: u32 = 3;
+ 
++/// Durable background uploads stop pinning local data after either budget.
++pub(crate) const UPLOAD_MAX_ATTEMPTS: u32 = 3;
++pub(crate) const UPLOAD_MAX_AGE: Duration = Duration::from_secs(30 * 60);
++
+ /// Monotonic cooldown before exactly one half-open probe is admitted.
+ const REMOTE_DEGRADED_FOR: Duration = Duration::from_secs(45);
+ 
+diff --git a/src/report/tests.rs b/src/report/tests.rs
+index d65a1b9..f9e08f1 100644
+--- a/src/report/tests.rs
++++ b/src/report/tests.rs
+@@ -556,6 +556,7 @@ fn write_test_events(dir: &std::path::Path) -> Config {
+         cc_extra_allowlist_flags: Vec::new(),
+         local_only: false,
+         remote_readonly: false,
++        remote_upload_max_bytes: 0,
+         pull_request_prefix: None,
+         modified_input_guard: false,
+         input_predictions: false,
+@@ -1936,6 +1937,7 @@ fn test_missing_transfer_data() {
+         cc_extra_allowlist_flags: Vec::new(),
+         local_only: false,
+         remote_readonly: false,
++        remote_upload_max_bytes: 0,
+         pull_request_prefix: None,
+         modified_input_guard: false,
+         input_predictions: false,
+@@ -2036,6 +2038,7 @@ fn test_suggestion_high_miss_share() {
+         cc_extra_allowlist_flags: Vec::new(),
+         local_only: false,
+         remote_readonly: false,
++        remote_upload_max_bytes: 0,
+         pull_request_prefix: None,
+         modified_input_guard: false,
+         input_predictions: false,
+@@ -2135,6 +2138,7 @@ fn test_suggestion_high_hit_overhead() {
+         cc_extra_allowlist_flags: Vec::new(),
+         local_only: false,
+         remote_readonly: false,
++        remote_upload_max_bytes: 0,
+         pull_request_prefix: None,
+         modified_input_guard: false,
+         input_predictions: false,
+@@ -2235,6 +2239,7 @@ fn test_suggestion_network_download_failures_and_fanout() {
+         cc_extra_allowlist_flags: Vec::new(),
+         local_only: false,
+         remote_readonly: false,
++        remote_upload_max_bytes: 0,
+         pull_request_prefix: None,
+         modified_input_guard: false,
+         input_predictions: false,
+@@ -2340,6 +2345,7 @@ fn test_suggestion_network_latency_thresholds() {
+         cc_extra_allowlist_flags: Vec::new(),
+         local_only: false,
+         remote_readonly: false,
++        remote_upload_max_bytes: 0,
+         pull_request_prefix: None,
+         modified_input_guard: false,
+         input_predictions: false,
+@@ -2848,6 +2854,7 @@ fn test_empty_report() {
+         cc_extra_allowlist_flags: Vec::new(),
+         local_only: false,
+         remote_readonly: false,
++        remote_upload_max_bytes: 0,
+         pull_request_prefix: None,
+         modified_input_guard: false,
+         input_predictions: false,
+@@ -3329,6 +3336,7 @@ fn report_counts_each_download_transfer_format() {
+         cc_extra_allowlist_flags: Vec::new(),
+         local_only: false,
+         remote_readonly: false,
++        remote_upload_max_bytes: 0,
+         pull_request_prefix: None,
+         modified_input_guard: false,
+         input_predictions: false,
+diff --git a/src/test_support.rs b/src/test_support.rs
+index 9db7e08..1733f75 100644
+--- a/src/test_support.rs
++++ b/src/test_support.rs
+@@ -170,6 +170,7 @@ pub(crate) fn test_config(cache_dir: PathBuf) -> crate::config::Config {
+         cc_extra_allowlist_flags: Vec::new(),
+         local_only: false,
+         remote_readonly: false,
++        remote_upload_max_bytes: 0,
+         readonly_store: None,
+         pull_request_prefix: None,
+         modified_input_guard: false,
+diff --git a/src/tui/tests.rs b/src/tui/tests.rs
+index 7a9ae14..27777a3 100644
+--- a/src/tui/tests.rs
++++ b/src/tui/tests.rs
+@@ -108,6 +108,7 @@ fn test_config() -> Config {
+         cc_extra_allowlist_flags: Vec::new(),
+         local_only: false,
+         remote_readonly: false,
++        remote_upload_max_bytes: 0,
+         pull_request_prefix: None,
+         modified_input_guard: false,
+         input_predictions: false,
+-- 
+2.47.3
+

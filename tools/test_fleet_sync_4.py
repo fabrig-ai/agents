@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 import unittest
 from unittest.mock import patch
 
@@ -249,6 +250,15 @@ class StartOnceTest(fixture.FleetTest):
                                         f'SYSTEM_TOOL_DIRS = tuple(map(Path, {json.dumps([str(p) for p in self.system_bins])}))')
         self.assertGreater(self.prepare_integer_machine_env(), 0)
         fixture.put(self.source / "tools/fleet-sync", old_script, True)
+        # Bootstrap assets need a separate parser rollout. Record that limit,
+        # then isolate marker/journal compatibility to legacy-readable inputs.
+        refused = self.process("python3", "-I", "-B", self.source / "tools/fleet-sync",
+                               "--host", "hel8", "--self-check", expected=2)
+        self.assertIn("unknown fleet declaration: bootstrap/", refused.stderr)
+        for name in ("bootstrap", "kache", "seeds"):
+            shutil.rmtree(self.source / "fleet" / name)
+        (self.source / "fleet/units/kache.service").unlink()
+        fixture.put(self.roles, self.roles.read_text().replace('"kache.service" = ["*"]\n', ""))
         self.process("python3", "-I", "-B", self.source / "tools/fleet-sync", "--host", "hel8", "--self-check")
         self.reset_calls()
         with patch.dict(os.environ, self.env, clear=True):

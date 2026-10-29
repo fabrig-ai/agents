@@ -1,3 +1,6 @@
+# Native tools seed immutable artifacts from peers; no upstream URL is guessed.
+# Optional file url uses the same sha256. Tree url requires its archive sha256
+# in addition to the complete content/mode/symlink manifest.
 [claude]
 version = "2.1.312"
 command = ["claude", "--version"]
@@ -17,3 +20,87 @@ command = ["kache", "--version"]
 [rustc]
 version = "1.95.0"
 command = ["rustc", "--version"]
+
+# Rustup verifies toolchain/component downloads against Rust distribution SHA256s.
+[rustc.install]
+kind = "rustup"
+toolchain = "1.95.0"
+profile = "default"
+components = ["clippy", "rustfmt", "rust-docs"]
+targets = ["x86_64-unknown-linux-gnu", "wasm32-unknown-unknown", "aarch64-apple-darwin", "x86_64-unknown-linux-musl"]
+extra_toolchains = ["nightly-2026-10-21"]
+
+[cargo-nextest.install]
+kind = "binary"
+seed = "peer"
+source = ".cargo/bin/cargo-nextest"
+destination = ".cargo/bin/cargo-nextest"
+sha256 = "53470cfc9b5cbcd96780db2d348700d76af962467503791f1f8a8824d8967e5c"
+mode = "0755"
+
+
+[kache.install]
+kind = "kache-source"
+repository = "https://github.com/kunobi-ninja/kache.git"
+rev = "96052b4842239bb216f6c4812054203c21550788"
+patches = ["git-checkout-rev.patch", "upload-bound.patch"]
+musl_url = "https://musl.libc.org/releases/musl-1.2.5.tar.gz"
+musl_sha256 = "a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4"
+# Historical output only; the source build is not byte-for-byte reproducible.
+reference_sha256 = "91fb6aa7d7ddd427e3e2732aa346ce116fbf075df0c871e1148bf309aaadafaf"
+destination = ".local/bin/kache"
+
+[claude.install]
+kind = "binary"
+seed = "peer"
+source = ".local/share/claude/versions/2.1.312"
+destination = ".local/share/claude/versions/2.1.312"
+sha256 = "4f4178ce41d83e23341ebfbaecdbcf8ea6bf7baea0690025abe49eeec3a5d01d"
+mode = "0755"
+
+
+[codex.install]
+kind = "codex-package"
+seed = "peer"
+source = ".codex/packages/standalone/releases/0.162.1-x86_64-unknown-linux-musl"
+release = ".codex/packages/standalone/releases/0.162.1-x86_64-unknown-linux-musl"
+manifest = "seeds/codex.sha256"
+entrypoint = "bin/codex"
+
+
+[chromium]
+version = "147.0.7727.101"
+version_only_hosts = ["hel8"]
+command = ["chromium", "--version"]
+[chromium.install]
+kind = "opt-tar"
+seed = "peer"
+source = ".local/opt/chromium-147.0.7727.101"
+release = ".local/opt/chromium-147.0.7727.101"
+entrypoint = "usr/lib/chromium/chromium"
+manifest = "seeds/chromium.sha256"
+seed_hosts = ["hetzner3"]
+
+
+[forgejo]
+version = "17.0.0"
+command = ["forgejo", "--version"]
+[forgejo.install]
+kind = "binary"
+seed = "peer"
+source = ".local/opt/forgejo-17.0.0/forgejo"
+destination = ".local/opt/forgejo-17.0.0/forgejo"
+sha256 = "5a3b07e124ed70b4e46ee3939515f003bd3cc85352257a9a4607a527251042ca"
+mode = "0775"
+
+
+[forgejo-runner]
+version = "13.2.0"
+command = ["forgejo-runner", "--version"]
+[forgejo-runner.install]
+kind = "binary"
+seed = "peer"
+source = ".local/opt/forgejo-runner-13.2.0/forgejo-runner"
+destination = ".local/opt/forgejo-runner-13.2.0/forgejo-runner"
+sha256 = "fadaec897f5e6641c363f87ecaf75f866f99c81b7097ec6b433e4c48123fcad1"
+mode = "0775"
