@@ -1,0 +1,1446 @@
+#!/usr/bin/env -S python3 -I -B
+"""qa walk REPO RUNG [--kind KIND] [--build REF] [--login POOL]... [--cap MINUTES]
+qa walk REPO RUNG --resume NAME --build REF [--cap MINUTES]
+qa take KIND [--login POOL] --as walk/<KIND>/<WHAT> [--note TEXT]
+qa give NAME --as HOLDER
+qa watch --director ADDRESS [--once]
+qa deploy DIRECTORY NAME -- COMMAND...
+"""
+import argparse
+from contextlib import contextmanager, nullcontext
+from datetime import datetime, timezone
+import fcntl
+import json
+import os
+from pathlib import Path
+import re
+import shlex
+import shutil
+import signal
+import socket
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+
+os.umask(0o077)
+REPOSITORIES = ('fabrig',)
+NAME = r'[a-z0-9][a-z0-9_-]*'
+LOGIN = r'[a-z][a-z0-9-]*'
+SHA = r'[0-9a-f]{40}'
+ADDRESS = r'[a-z][a-z0-9-]*(/[a-z0-9][a-z0-9-]*)*@[a-z][a-z0-9-]*'
+ATTEMPT_KEYS = ('attempt ref main cap started slot logins kinds pools requests run stage given released '
+                'start_logged end_logged posted capped decision pause_line resume_run report_attempt alerts').split()
+
+
+class Problem(Exception):
+    def __init__(self, why, code=2):
+        super().__init__(why)
+        self.code = code
+
+
+def need(ok, why, code=2):
+    if not ok:
+        raise Problem(why, code)
+
+
+def command(argv, cwd=None, timeout=None, pass_fds=(), data=None, env=None):
+    argv = [str(a) for a in argv]
+    binary = isinstance(data, bytes)
+    with subprocess.Popen(argv, cwd=cwd, stdin=subprocess.PIPE if data is not None else subprocess.DEVNULL,
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=not binary,
+                          env=dict(os.environ, GIT_TERMINAL_PROMPT='0', **(env or {})),
+                          start_new_session=timeout is not None, pass_fds=pass_fds) as child:
+        try:
+            stdout, stderr = child.communicate(input=data, timeout=timeout)
+            if binary:
+                stdout, stderr = stdout.decode(errors='replace'), stderr.decode(errors='replace')
+            return subprocess.CompletedProcess(argv, child.returncode, stdout, stderr)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            try:
+                stdout, stderr = child.communicate(timeout=5)
+            except subprocess.TimeoutExpired as error:
+                stdout, stderr = error.output or b'', error.stderr or b''
+                child.stdout.close()
+                child.stderr.close()
+            if isinstance(stdout, bytes):
+                stdout = stdout.decode(errors='replace')
+            if isinstance(stderr, bytes):
+                stderr = stderr.decode(errors='replace')
+            return subprocess.CompletedProcess(argv, 124, stdout, stderr + 'command timed out\n')
+
+
+def git(root, *args, check=True, timeout=300):
+    result = command(['git', '-C', root, *args], timeout=timeout)
+    if check:
+        need(result.returncode == 0, result.stderr.strip() or 'git failed', 4)
+    return result.stdout.strip() if check else result
+
+
+def timestamp():
+    return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+def utc(value):
+    if value == 'unknown':
+        return datetime.min.replace(tzinfo=timezone.utc)
+    need(re.fullmatch(r'\d{4}-\d\d-\d\dT\d\d:\d\d(?::\d\d)?Z', value),
+         f'invalid UTC time: {value}', 4)
+    return datetime.fromisoformat(value.replace('Z', '+00:00'))
+
+
+class Workspace:
+    def __init__(self):
+        self.root = Path(os.environ.get('DEV_ROOT', Path.home() / 'src/rust')).expanduser().absolute()
+        self.tmp = Path(os.environ.get('DEV_TMP', self.root / 'tmp')).expanduser().absolute()
+        fixture = os.environ.get('QA_FIXTURE')
+        self.fixture = Path(fixture).absolute() if fixture else None
+        need(fixture is None or (fixture and self.fixture.is_dir()), 'QA_FIXTURE must be a directory')
+
+    def machine(self):
+        try:
+            lines = (self.root / 'tmp/post/machines').read_text().splitlines()
+        except OSError:
+            lines = []
+        for line in lines:
+            fields = line.partition('#')[0].split()
+            if len(fields) >= 2 and fields[1] == 'local':
+                return fields[0]
+        return socket.gethostname()
+
+    def tool(self, name):
+        # Dependencies are installed independently; resolve their programs on PATH.
+        default = Path(name)
+        return Path(os.environ.get('QA_' + name.upper().replace('-', '_'), default)) if self.fixture else default
+
+    def origin(self, repo):
+        need(repo in REPOSITORIES, f'unknown repository: {repo}')
+        return str(self.fixture / 'origins' / (repo + '.git')) if self.fixture else f'git@github.com:fabrig-ai/{repo}.git'
+
+
+
+def no_links(anchor, path):
+    parts = path.relative_to(anchor).parts
+    current = anchor
+    for part in ('', *parts):
+        if part:
+            current /= part
+        try:
+            mode = os.lstat(current).st_mode
+        except FileNotFoundError:
+            break
+        need(not stat.S_ISLNK(mode), f'{current}: symlink refused', 4)
+
+
+class Repositories:
+    def __init__(self, workspace):
+        self.workspace = workspace
+
+    @contextmanager
+    def fetched(self, repo):
+        origin = self.workspace.origin(repo)
+        parent = self.workspace.tmp / 'qa/repos'
+        no_links(self.workspace.tmp, parent)
+        parent.mkdir(parents=True, exist_ok=True)
+        root = parent / repo
+        with (parent / (repo + '.lock')).open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            no_links(self.workspace.tmp, root)
+            if not root.exists():
+                # A failed clone leaves no half-built repository at the shared path.
+                with tempfile.TemporaryDirectory(prefix=repo + '-', dir=parent) as directory:
+                    clone = Path(directory) / 'repo'
+                    result = command(['git', 'clone', '--filter=blob:none', '--no-checkout', origin, clone], timeout=300)
+                    need(result.returncode == 0, f'cannot clone {repo}: {result.stderr.strip()}', 4)
+                    clone.rename(root)
+            need(git(root, 'config', '--get', 'remote.origin.url') == origin,
+                 f'{root}: unexpected origin', 4)
+            # Prune: a branch deleted on origin never resolves from a stale tracking ref.
+            result = git(root, 'fetch', '--quiet', '--prune', 'origin', '+refs/heads/*:refs/remotes/origin/*', check=False)
+            need(result.returncode == 0, f'cannot fetch {repo}: {result.stderr.strip()}', 4)
+            yield root
+
+    def checkout(self, root, repo, slot, main):
+        # The caller holds the clone lock throughout validation and add.
+        path = root.with_name(slot)
+        no_links(self.workspace.tmp, path)
+        listed = git(root, 'worktree', 'list', '--porcelain').splitlines()
+        common = git(root, 'rev-parse', '--path-format=absolute', '--git-common-dir')
+        own = (git(path, 'rev-parse', '--path-format=absolute', '--git-common-dir', check=False)
+               if path.is_dir() and not path.is_symlink() else None)
+        valid = (f'worktree {path}' in listed and own is not None
+                 and own.returncode == 0 and own.stdout.strip() == common)
+        if not valid:
+            no_links(self.workspace.tmp, path)
+            if path.exists() and not path.is_dir():
+                path.unlink()
+            elif path.exists():
+                shutil.rmtree(path)
+            git(root, 'worktree', 'prune')
+            git(root, 'worktree', 'add', '--detach', str(path), main)
+        git(path, 'checkout', '--detach', '--force', main)
+        git(path, 'clean', '-fdq')
+        return path
+
+    def build(self, repo, ref):
+        why = f'build {ref}: no branch origin/{ref} and no commit; try origin/<branch> or a commit'
+        with self.fetched(repo) as root:
+            branch = ref[7:] if ref.startswith('origin/') else ref
+            remote = None
+            if git(root, 'check-ref-format', 'refs/heads/' + branch, check=False).returncode == 0:
+                # The exact ref alone: rev-parse would fall back to a tag or a local branch of that spelling.
+                shown = git(root, 'show-ref', '--verify', '--hash', 'refs/remotes/origin/' + branch, check=False)
+                sha = shown.stdout.strip() if shown.returncode == 0 else ''
+                if re.fullmatch(SHA, sha) and git(root, 'cat-file', '-t', sha, check=False).stdout.strip() == 'commit':
+                    remote = sha
+            if ref.startswith('origin/') or ref == 'main':
+                need(remote, why)
+                return remote
+            if re.fullmatch(r'[0-9a-fA-F]{4,40}', ref):
+                resolved = git(root, 'rev-parse', '--disambiguate=' + ref.lower(), check=False)
+                objects = resolved.stdout.splitlines()
+                need(resolved.returncode == 0 and len(objects) == 1 and re.fullmatch(SHA, objects[0])
+                     and git(root, 'cat-file', '-t', objects[0]) == 'commit', why)
+                need(not remote, f'build {ref}: ambiguous branch and commit; try origin/{ref} for the branch '
+                     f'or the full commit {objects[0]}')
+                return objects[0]
+            need(not re.fullmatch(r'[0-9a-fA-F]+', ref) and remote, why)
+            return remote
+
+
+def replace(path, data, mode=0o600):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as target:
+        temporary = Path(target.name)
+        try:
+            target.write(data)
+            target.flush()
+            os.chmod(temporary, mode)
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
+def pool_of(name):
+    stem = re.sub(r'-[0-9]+$', '', name)
+    return None if re.search(r'-[0-9]+$', stem) else stem
+
+
+LISTED = re.compile(r'(' + LOGIN + r'): (?:at rest|missing|held by (\S+)(?: \([^\n]*\))? since \S+, [0-9]+:[0-9]{2}, (?:at rest|not at rest))')
+
+
+def login_inventory(text):
+    """logins list, read strictly (qa-flow.md 10.6): None when a line isn't its form."""
+    pools, holders, names, waiting = {}, {}, set(), False
+    # Physical lines alone: a note's other line breaks must never make a login.
+    for line in text.split('\n'):
+        if not line:
+            continue
+        if line.startswith('  '):
+            row = re.match(r'  waiting: (\S+) since ', line)
+            waiting = waiting or bool(row and re.fullmatch(r'qa-watch(?:/\S+)?', row[1]))
+            continue
+        match = LISTED.fullmatch(line)
+        if not match or match[1] in names:
+            return None
+        names.add(match[1])
+        counts = pools.setdefault(pool_of(match[1]), [0, 0])
+        counts[0] += 1
+        if match[2]:
+            holders[match[1]] = match[2]
+            if re.fullmatch(r'qa-watch(?:/\S+)?', match[2]):
+                counts[1] += 1
+    return pools, holders, waiting
+
+
+def log(message):
+    for line in str(message).splitlines():
+        print('qa watch: ' + line, flush=True)
+
+
+def settings(workspace):
+    # Same precedence and valid machine.env lines as kit.sh's machine_setting.
+    values = dict(QA_INTERVAL_SECONDS='300', QA_GIVE_BACK_SECONDS='90', QA_STOP_SECONDS='50',
+                  QA_WALK_KINDS='forgejo=2:chatgpt claude=2:claude')
+    path = workspace.tmp / 'machine.env'
+    try:
+        text = path.read_text(errors='replace')
+    except OSError:
+        text = ''  # kit.sh ignores an absent or unreadable machine file.
+    for line in text.split('\n'):
+        match = re.fullmatch(r'(QA_INTERVAL_SECONDS|QA_GIVE_BACK_SECONDS|QA_STOP_SECONDS)=([0-9]+)', line)
+        if match:
+            values[match[1]] = match[2]
+        if line.startswith('QA_WALK_KINDS='):
+            values['QA_WALK_KINDS'] = line.partition('=')[2]
+    kinds = os.environ.get('QA_WALK_KINDS', values.pop('QA_WALK_KINDS'))
+    for key in values:
+        value = os.environ.get(key, values[key])
+        need(re.fullmatch(r'[0-9]+', value), f'{key} must be a nonnegative integer')
+        values[key] = int(value)
+    need(0 < values['QA_STOP_SECONDS'] < 60, 'QA_STOP_SECONDS must be positive and below 60')
+    parsed = {}
+    need(kinds.strip() and not any(ord(c) < 32 or 0x7f <= ord(c) < 0xa0 for c in kinds),
+         'QA_WALK_KINDS needs KIND=SLOTS:POOL[,POOL...]')
+    for position, word in enumerate(filter(None, kinds.split(' ')), 1):
+        match = re.fullmatch(r'([a-z][a-z0-9]*)=([0-9]+):(.+)', word)
+        need(match, f'invalid QA_WALK_KINDS entry {position}')
+        kind, slots, pools = match[1], int(match[2]), match[3].split(',')
+        need(kind not in parsed and slots > 0 and len(set(pools)) == len(pools)
+             and all(re.fullmatch(LOGIN, pool) and pool_of(pool) == pool for pool in pools),
+             f'invalid QA_WALK_KINDS entry {position}')
+        parsed[kind] = dict(slots=slots, pools=pools)
+    values['QA_WALK_KINDS'] = parsed
+    return values
+
+
+def walk_count(holders, pool, kind):
+    # Old walk grants stay occupied until the pre-kind runs have drained.
+    return sum(pool_of(name) == pool and (holder.startswith('walk/' + kind + '/')
+               or holder.startswith('walk/rung-')) for name, holder in holders.items())
+
+
+def stop_path(path):
+    need(not any(c in str(path) for c in '$%"\\ \t\n'), f'{path}: unsafe path in a stop command')
+    return path
+
+
+def deploy(args, workspace):
+    directory = Path(args.directory)
+    need(directory.is_absolute() and directory.is_dir() and not directory.is_symlink(),
+         'DIRECTORY must be an absolute directory, not a link')
+    need(re.fullmatch(NAME, directory.name), 'DIRECTORY must have a walk name')
+    stop_path(directory)
+    script = stop_path(Path(__file__).resolve())
+    need(re.fullmatch(r'[a-z][a-z0-9-]*', args.name), 'NAME must be a lowercase slug')
+    need(args.argv, 'deploy needs COMMAND')
+    executable = shutil.which(args.argv[0])
+    need(executable, f'COMMAND not found: {args.argv[0]}')
+    executable = str(Path(executable).absolute())
+    seconds = settings(workspace)['QA_STOP_SECONDS']
+    unit = f'qa-{directory.name}-{args.name}'
+    service = Watch(workspace, '')
+    saved = service.directory / 'walks' / (directory.name + '.json')
+    walking = saved.exists() or saved.is_symlink()
+    with service.walks_locked() if walking else nullcontext():
+        if walking:
+            match = next(((path, state) for path, state in service.local_walks() if state['walk'] == directory.name), None)
+            need(match and match[0] == directory and match[1]['stage'] == 'running', 'walk is not running here')
+            state = match[1]
+            deployments = state.setdefault('deployments', [])
+            previous_deployments = list(deployments)
+            if any(d['name'] == args.name for d in deployments):
+                need(service.unit_status(unit, directory) == 'stopped', 'deployment is still up or unknown', 4)
+            deployments[:] = [deployment for deployment in deployments if deployment['name'] != args.name]
+            deployments.append(dict(name=args.name, unit=unit, argv=[executable, *args.argv[1:]]))
+        try:
+            try:
+                descriptor = os.open(directory / 'deployments', os.O_RDWR | os.O_CREAT | os.O_APPEND
+                                     | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+            except OSError:
+                raise Problem('cannot open deployments safely') from None
+            with os.fdopen(descriptor, 'r') as recorded:
+                info = os.fstat(recorded.fileno())
+                need(stat.S_ISREG(info.st_mode) and info.st_nlink == 1,
+                     'deployments must be a regular file with one link')
+                fcntl.flock(recorded, fcntl.LOCK_EX)
+                text = recorded.read()
+                if unit not in text.splitlines():
+                    line = (('' if not text or text.endswith('\n') else '\n') + unit + '\n').encode()
+                    need(os.write(recorded.fileno(), line) == len(line), 'cannot record deployment', 4)
+            stop = ' '.join('"' + str(word) + '"' for word in (script, '_give-back', directory, seconds))
+            if walking:
+                service.save(directory, state)
+            result = command([workspace.tool('systemd-run'), '--user', '--collect', '--quiet', '--unit', unit,
+                              '--service-type=exec', '--expand-environment=no', f'--working-directory={directory}', '--setenv=PATH',
+                              '--property=KillMode=control-group',
+                              f'--property=StandardOutput=append:{directory}/{args.name}.log',
+                              f'--property=StandardError=append:{directory}/{args.name}.log',
+                              '--property=ExecStop=-' + stop, f'--property=TimeoutStopSec={seconds + 60}',
+                              '--', executable, *args.argv[1:]])
+            need(result.returncode == 0, result.stderr.strip() or 'systemd-run failed', 4)
+        except (Problem, OSError):
+            if walking:
+                state['deployments'] = previous_deployments
+                service.save(directory, state)
+            raise
+        print(unit)
+
+
+def give_back(args):
+    # Stop commands cannot fail their unit, even if their scratch has gone away.
+    output = None
+    started = time.monotonic()
+    try:
+        directory = Path(args[0])
+        try:
+            descriptor = os.open(directory / 'give-back.log', os.O_WRONLY | os.O_APPEND | os.O_CREAT
+                                 | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+            info = os.fstat(descriptor)
+            if stat.S_ISREG(info.st_mode) and info.st_nlink == 1:
+                output = os.fdopen(descriptor, 'a')
+            else:
+                os.close(descriptor)
+        except OSError:
+            pass
+        if output is None:
+            # Returning the login matters even when the walk's log is unsafe.
+            output = open(os.devnull, 'w')
+        need(len(args) == 2, 'expected DIRECTORY SECONDS')
+        seconds = int(args[1])
+        need(seconds > 0, 'SECONDS must be positive')
+        deadline = started + seconds
+        with os.fdopen(os.open(directory / 'give-back.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW
+                               | os.O_NONBLOCK, 0o600), 'r+') as lock:
+            need(stat.S_ISREG(os.fstat(lock.fileno()).st_mode), 'give-back.lock must be a regular file')
+            while True:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        output.write(f'{timestamp()} lock busy past {seconds} s\n')
+                        return 0
+                    time.sleep(min(0.05, remaining))
+            path = directory / 'give-back'
+            try:
+                regular = stat.S_ISREG(path.lstat().st_mode) and os.access(path, os.X_OK)
+            except FileNotFoundError:
+                regular = False
+            status = 'absent'
+            if regular:
+                with subprocess.Popen([str(path)], cwd=directory, stdin=subprocess.DEVNULL,
+                                      stdout=output, stderr=output, start_new_session=True) as child:
+                    try:
+                        code = child.wait(timeout=max(0, deadline - time.monotonic()))
+                        status = f'exit {code}'
+                    except subprocess.TimeoutExpired:
+                        os.killpg(child.pid, signal.SIGKILL)
+                        child.wait()
+                        status = f'killed past {seconds} s'
+                    finally:
+                        # A successful exporter must not leave background work outside the lock.
+                        try:
+                            os.killpg(child.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+            output.write(f'{timestamp()} {status}\n')
+    except BaseException as error:
+        try:
+            if output:
+                output.write(f'{timestamp()} error: {error}\n')
+        except BaseException:
+            pass
+    finally:
+        if output:
+            try:
+                output.close()
+            except BaseException:
+                pass
+    return 0
+
+
+class Watch:
+    def __init__(self, workspace, director):
+        self.workspace, self.director = workspace, director
+        self.directory = workspace.tmp / 'qa'
+        self.runs = workspace.root / 'tmp/codex-run'
+        self.repositories = Repositories(workspace)
+        self.giving = True
+        self.conflicts = set()
+        self.states = {}
+        self.classes = {}
+        self.walk_lock = self.watch_lock = None
+        self.holders = {}
+        self.legacy_claims = set()
+
+
+    def call(self, tool, *args):
+        seconds = dict(systemctl=30, logins=60, post=60, **{'codex-run': 120})
+        options = {}
+        if tool == 'logins' and args[:1] == ('take',):
+            lock = self.watch_lock if self.watch_lock is not None else self.walk_lock
+            need(lock is not None, 'login take needs its admission lock', 4)
+            options['pass_fds'] = (lock,)
+        return command([self.workspace.tool(tool), *args], timeout=seconds[tool], **options)
+
+    def save(self, directory, state):
+        need(state['repo'] in REPOSITORIES, 'cannot save an unmanaged walk', 4)
+        state.setdefault('attempt', 1)
+        attempts = state.setdefault('attempts', [])
+        snapshot = json.loads(json.dumps({key: state[key] for key in ATTEMPT_KEYS if key in state}))
+        if len(attempts) == state['attempt'] - 1:
+            attempts.append(snapshot)
+        else:
+            need(len(attempts) == state['attempt'], 'invalid walk attempt history', 4)
+            attempts[-1] = snapshot
+        path = self.directory / 'walks' / (state['walk'] + '.json')
+        replace(path, (json.dumps(state, indent=2) + '\n').encode())
+        self.states[('walk', state['walk'])] = state
+
+
+    def read_state(self, path):
+        no_links(self.workspace.tmp, path)
+        with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), 'rb') as source:
+            info = os.fstat(source.fileno())
+            need(stat.S_ISREG(info.st_mode) and info.st_nlink == 1, f'{path}: invalid state file', 4)
+            data = source.read(1024 * 1024 + 1)
+        need(len(data) <= 1024 * 1024, f'{path}: state exceeds 1 MiB', 4)
+        return json.loads(data)
+
+    def claims(self, states):
+        for directory, state in states:
+            try:
+                kind = self.classes[directory]
+                name = state[kind]
+                need(isinstance(name, str) and re.fullmatch(NAME, name), 'invalid state identity', 4)
+                self.states[(kind, name)] = state
+            except (Problem, KeyError, TypeError, ValueError, RecursionError):
+                log(f'{directory.name}: invalid state claims; keeping custody')
+        claimed = {}
+        for (_, owner), state in self.states.items():
+            try:
+                names = list(self.outstanding(state))
+                for name in names:
+                    claimed.setdefault(name, []).append(owner)
+            except (KeyError, TypeError, ValueError, RecursionError, AttributeError):
+                log(f'{owner}: invalid state claims; keeping custody')
+        for holder, name in self.legacy_claims:
+            claimed.setdefault(name, []).append(holder)
+        self.conflicts = {name for name, owners in claimed.items() if len(owners) > 1}
+        for name in sorted(self.conflicts):
+            log(f'{name}: conflicting custody claims by {", ".join(claimed[name])}; keeping custody')
+
+    def outstanding(self, state):
+        return {name: path for name, path in state.get('logins', {}).items() if name not in state.get('given', [])}
+
+    def give(self, directory, state, kind=None):
+        self.claims([(directory, state)])
+        if not self.giving:
+            return
+        for name in self.outstanding(state):
+            if name in self.conflicts:
+                continue
+            if kind and state.get('kinds', {}).get(name, 'moved') != kind:
+                continue
+            result = self.call('logins', 'give', name, '--as', state.get('holder', 'qa-watch'))
+            if result.returncode == 0:
+                self.released_login(name)
+                state.setdefault('given', []).append(name)
+                self.save(directory, state)
+                log(f'{state["walk"]}: gave {name} back')
+            else:
+                log(f'{state["walk"]}: cannot give {name} back: {result.stderr.strip()}')
+                if result.returncode == 1 and kind == 'moved':
+                    alerts = state.setdefault('alerts', {})
+                    if name not in alerts:
+                        alerts[name] = dict.fromkeys(self.stuck, False)
+                        self.save(directory, state)
+
+    def stuck_addresses(self):
+        addresses = []
+        path = Path.home() / '.config/agents-qa/stuck'
+        try:
+            with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), 'rb') as source:
+                need(stat.S_ISREG(os.fstat(source.fileno()).st_mode), 'not a regular file', 4)
+                data = source.read(16 * 1024 + 1)
+            need(len(data) <= 16 * 1024, 'exceeds 16 KiB', 4)
+        except FileNotFoundError:
+            return [self.director]
+        except (OSError, Problem) as error:
+            why = str(error) if isinstance(error, Problem) else type(error).__name__
+            log(f'{path}: cannot read stuck addresses ({why}); using director alone')
+            return [self.director]
+        for number, line in enumerate(data.decode(errors='replace').splitlines(), 1):
+            if len(line) > 200:
+                log(f'{path}:{number}: invalid stuck address; skipped')
+                continue
+            address = line.split('#', 1)[0].strip()
+            if not address:
+                continue
+            if len(address) <= 120 and re.fullmatch(ADDRESS, address):
+                if address not in addresses and len(addresses) < 16:
+                    addresses.append(address)
+            else:
+                log(f'{path}:{number}: invalid stuck address; skipped')
+        if self.director not in addresses:
+            addresses.append(self.director)
+        return addresses
+
+    def alert(self, directory, state, units):
+        kind = self.classes[directory]
+        name = state[kind]
+        for login, receipts in state.get('alerts', {}).items():
+            if all(receipts.values()):
+                continue
+            body = (f'Login {login} was stuck in {kind} {name}: not back at {state["logins"][login]}.\n'
+                    f'Its deployment is in {directory}; qa watch gives it back once it is.\n')
+            walk_kind = state.get('kind', next(iter(self.options['QA_WALK_KINDS'])))
+            body += (f'Holder: {state["holder"]}. Pool: {pool_of(login)}.\n'
+                     f'It counts against kind {walk_kind}\'s cap until it is back.\n')
+            body += ''.join(f'Unit {unit} is still up or of unknown state.\n'
+                            for unit, status in (units or {}).items() if status != 'stopped')
+            if units is None:
+                body += 'Deployment units are unknown.\n'
+            body += f'Scratch: {directory}. The service tries again at each check.\n'
+            message = directory / 'alert-body'
+            replace(message, body.encode())
+            for address, sent in receipts.items():
+                key = (name, login, address)
+                if sent or key in self.alert_attempted:
+                    continue
+                self.alert_attempted.add(key)
+                try:
+                    need(len(address) <= 120, 'invalid stuck address', 4)
+                    result = self.call('post', 'send', '--as', 'qa-watch', address,
+                                       f'qa: login {login} stuck in {kind} {name}', message)
+                except (OSError, Problem) as error:
+                    log(f'{name}: alert for {login} failed ({type(error).__name__}); trying next check')
+                    continue
+                if result.returncode in (0, 3):
+                    receipts[address] = True
+                    try:
+                        self.save(directory, state)
+                    except BaseException:
+                        receipts[address] = False
+                        raise
+                else:
+                    log(f'{name}: alert for {login} to {address} failed; trying next check')
+        return all(all(receipts.values()) for receipts in state.get('alerts', {}).values())
+
+    def released_login(self, name):
+        self.holders.pop(name, None)
+
+
+    def give_strays(self, walks, sweep_walks=True):
+        # A take can survive the caller before its grant is saved.
+        held = {(state['holder'], name) for _, state in walks for name in self.outstanding(state)}
+        held |= self.legacy_claims
+        listing = self.call('logins', 'list')
+        inventory = login_inventory(listing.stdout) if listing.returncode == 0 else None
+        self.giving = inventory is not None
+        if inventory is None:
+            self.holders = {}
+            log('cannot list stray logins: ' + (listing.stderr.strip() if listing.returncode
+                                                else 'the listing is not in its form'))
+            return
+        self.holders = inventory[1]
+        managed = {state['holder'] for _, state in walks}
+        if not sweep_walks:
+            return
+        for name, holder in sorted(self.holders.copy().items()):
+            if name in self.conflicts or (holder, name) in held or holder not in managed:
+                continue
+            result = self.call('logins', 'give', name, '--as', holder)
+            if result.returncode == 0:
+                self.released_login(name)
+                log(f'gave back {name}: held without a saved grant')
+            elif result.returncode not in (1, 2):
+                log(f'{name}: cannot give stray login back: {result.stderr.strip()}')
+
+
+    def unit_status(self, unit, directory=None, launch_checked=False):
+        properties = ['--property=LoadState', '--property=ActiveState']
+        if directory is not None:
+            properties.append('--property=WorkingDirectory')
+        result = self.call('systemctl', '--user', 'show', *properties, '--', unit)
+        rows = [line.partition('=') for line in result.stdout.splitlines()]
+        keys = {prop.removeprefix('--property=') for prop in properties}
+        if (result.returncode == 0 and len(rows) == len(keys)
+                and all(sep for _, sep, _ in rows) and {key for key, _, _ in rows} == keys):
+            fields = {key: value for key, _, value in rows}
+            load, active = fields['LoadState'], fields['ActiveState']
+            if directory is not None and load == 'loaded' and fields['WorkingDirectory'] != str(directory):
+                log(f'{unit}: WorkingDirectory is not the walk directory; keeping logins held')
+                return 'unknown'
+            if (not launch_checked and load == 'not-found' and active == 'inactive'
+                    and unit.startswith('codex-run-')):
+                run = self.runs / unit.removeprefix('codex-run-')
+                if not (run / 'ended').exists():
+                    try:
+                        meta = (run / 'meta').stat()
+                    except FileNotFoundError:
+                        pass
+                    else:
+                        if (utc(timestamp()).timestamp() - meta.st_mtime < 600
+                                or self.launcher_alive(run / 'meta') is not False):
+                            log(f'{unit}: launch may still start; keeping custody and slot')
+                            return 'launching'
+                        # The launcher may have created the unit and exited during the scan.
+                        return self.unit_status(unit, directory, launch_checked=True)
+            if (load == 'loaded' and active in ('inactive', 'failed')
+                    or load == 'not-found' and active == 'inactive'):
+                return 'stopped'
+            if load == 'loaded' and active in ('activating', 'active', 'reloading', 'deactivating'):
+                return 'busy'
+        log(f'{unit}: cannot establish unit state; keeping logins held')
+        return 'unknown'
+
+    def launcher_alive(self, meta):
+        fields = dict(line.split('=', 1) for line in meta.read_text().splitlines() if '=' in line)
+        task = fields.get('task', '')
+        need(task and Path(task).is_absolute(), 'cannot establish launcher task; keeping custody', 4)
+        expected = os.fsencode(task)
+        unknown = False
+        for process in Path('/proc').iterdir():
+            if not process.name.isdecimal():
+                continue
+            try:
+                with (process / 'cmdline').open('rb') as source:
+                    data = source.read(1024 * 1024 + 1)
+            except (FileNotFoundError, ProcessLookupError):
+                continue
+            except OSError:
+                unknown = True
+                continue
+            if len(data) > 1024 * 1024:
+                unknown = True
+                continue
+            words = data.rstrip(b'\0').split(b'\0')
+            if any(Path(os.fsdecode(word)).name == 'codex-run' and words[index + 1:index + 2] == [b'task']
+                   and expected in words[index + 2:] for index, word in enumerate(words)):
+                return True
+        return None if unknown else False
+
+    def unit_stopped(self, unit, seconds, directory=None):
+        # ended precedes the session's on-stop; deactivating still runs give-back.
+        deadline = time.monotonic() + seconds
+        while True:
+            status = self.unit_status(unit, directory)
+            if status == 'stopped':
+                return True
+            if status in ('unknown', 'launching'):
+                return False
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                log(f'{unit}: waiting for unit to stop before giving logins back')
+                return False
+            time.sleep(min(2, remaining))
+
+    def deployments(self, directory, state):
+        result = self.call('systemctl', '--user', 'list-units', '--all', '--plain', '--no-legend',
+                           '--full', 'qa-' + state['walk'] + '-*')
+        if result.returncode:
+            log(f'{state["walk"]}: deployment listing failed; units unknown')
+            return None
+        units = {}
+        pattern = re.escape('qa-' + state['walk'] + '-') + r'[a-z][a-z0-9-]*'
+        for line in result.stdout.splitlines():
+            fields = line.split(maxsplit=4)
+            if (len(fields) < 4 or not fields[0].startswith('qa-' + state['walk'] + '-')
+                    or fields[1] != 'loaded'
+                    or fields[2] not in ('active', 'inactive', 'activating', 'deactivating', 'failed', 'reloading')
+                    or not re.fullmatch(r'[a-z][a-z0-9-]*', fields[3])):
+                log(f'{state["walk"]}: malformed deployment listing; units unknown')
+                return None
+            # list-units prints canonical service names, unlike --unit's input.
+            unit = fields[0].removesuffix('.service')
+            if not re.fullmatch(pattern, unit):
+                continue
+            if unit in units:
+                log(f'{state["walk"]}: duplicate deployment listing; units unknown')
+                return None
+            units[unit] = self.unit_status(unit, directory)
+        return units
+
+    def end(self, directory, state):
+        if (state['run'] and not (self.runs / state['run'] / 'ended').exists()
+                and self.unit_status('codex-run-' + state['run']) != 'stopped'):
+            self.alert(directory, state, None)
+            return False
+        self.give(directory, state, 'moved')
+        units = self.deployments(directory, state)
+        alerted = self.alert(directory, state, units)
+        moved = [name for name in self.outstanding(state)
+                 if state.get('kinds', {}).get(name, 'moved') == 'moved']
+        if not moved and units is not None:
+            for unit, status in units.items():
+                if status != 'busy':
+                    continue
+                stopped = self.call('systemctl', '--user', 'stop', '--no-block', '--', unit)
+                if stopped.returncode:
+                    log(f'{state["walk"]}: stop {unit} failed')
+                units[unit] = ('stopped' if self.unit_stopped(unit, self.options['QA_GIVE_BACK_SECONDS'], directory)
+                               else 'unknown')
+        remaining = [unit for unit, status in (units or {}).items() if status != 'stopped']
+        complete = units is not None and not remaining
+        if complete:
+            self.give(directory, state, 'in-place')
+        if (complete and not state.get('released') and (not state['run']
+                or self.unit_status('codex-run-' + state['run']) == 'stopped')):
+            state['released'] = True
+            self.save(directory, state)
+        return complete and alerted
+
+
+    def facts(self, run):
+        exit_code = 'unknown'
+        rows = self.runs / 'runs.tsv'
+        if run and rows.exists():
+            for line in rows.read_text().splitlines():
+                row = line.split('\t')
+                if len(row) >= 13 and row[0] == run:
+                    exit_code = row[4]
+        return {'exit': exit_code}
+
+    def recover_run(self, directory, state):
+        # codex-run writes meta before launching its unit. Recover an acknowledged
+        # launch even if this service died before saving the returned id.
+        matches = []
+        for path in self.runs.glob('*/meta'):
+            fields = dict(line.split('=', 1) for line in path.read_text().splitlines() if '=' in line)
+            earlier = {a.get('run') for a in state.get('attempts', [])[:-1]}
+            if (path.parent.name not in earlier
+                    and fields.get('task') == str(directory / 'task.md')
+                    and fields.get('report') == str(directory / 'report.md')):
+                need(re.fullmatch(r'[a-zA-Z0-9_-]+', path.parent.name), 'invalid recovered run', 4)
+                matches.append(path.parent.name)
+        need(len(matches) <= 1, f'{state["walk"]}: multiple runs for one brief', 4)
+        if matches:
+            state['run'] = matches[0]
+            state['stage'] = 'running'
+            self.save(directory, state)
+            log(f'{state["walk"]}: recovered run {state["run"]}')
+
+    @contextmanager
+    def walks_locked(self, wait=True):
+        no_links(self.workspace.tmp, self.directory)
+        self.directory.mkdir(parents=True, exist_ok=True)
+        path = self.directory / 'walks.lock'
+        no_links(self.workspace.tmp, path)
+        with path.open('a') as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
+            except BlockingIOError:
+                yield False
+                return
+            try:
+                no_links(self.workspace.tmp, self.directory / 'walks')
+                (self.directory / 'walks').mkdir(mode=0o700, exist_ok=True)
+            except (Problem, OSError):
+                if wait:
+                    raise
+                log('cannot read walks directory; keeping walk custody')
+                yield False
+                return
+            previous = self.walk_lock
+            self.walk_lock = lock.fileno()
+            try:
+                yield True
+            finally:
+                self.walk_lock = previous
+
+    def local_walks(self, strict=True):
+        result = []
+        self.walks_valid = True
+        self.legacy_claims = set()
+        self.legacy_walks = []
+        parent = self.directory / 'walks'
+        for path in sorted(parent.glob('*.json')):
+            try:
+                state = self.read_state(path)
+                name = state['walk']
+                if state['repo'] not in REPOSITORIES:
+                    # Opaque foreign state is never managed or rewritten. Preserve
+                    # every claim, including one in an earlier attempt, conservatively.
+                    need(name == path.stem and isinstance(name, str)
+                         and re.fullmatch(r'rung-[a-z0-9][a-z0-9-]*-[1-9][0-9]*', name),
+                         'invalid legacy walk identity', 4)
+                    need(isinstance(state.get('rung'), str) and isinstance(state.get('holder'), str),
+                         'invalid legacy walk metadata', 4)
+                    self.legacy_walks.append(state)
+                    for attempt in [state, *state.get('attempts', [])]:
+                        for login in attempt.get('logins', {}):
+                            self.legacy_claims.add((state['holder'], login))
+                    continue
+                need(name == path.stem and re.fullmatch(r'rung-[a-z0-9][a-z0-9-]*-[1-9][0-9]*', name)
+                     and state['repo'] in REPOSITORIES and name == 'rung-' + state['rung'] + '-' + state.get('clock_walk', name.rsplit('-', 1)[-1])
+                     and (state['holder'] == 'walk/' + name or isinstance(state.get('kind'), str)
+                          and re.fullmatch(r'[a-z][a-z0-9]*', state['kind'])
+                          and state['holder'] == 'walk/' + state['kind'] + '/' + name), f'{path}: invalid walk', 4)
+                need('kind' not in state or isinstance(state['kind'], str)
+                     and re.fullmatch(r'[a-z][a-z0-9]*', state['kind']), 'invalid saved walk kind', 4)
+                walk_attempt(state)
+                if 'attempts' in state or 'attempt' in state:
+                    need(type(state['attempt']) is int and state['attempt'] >= 1
+                         and isinstance(state['attempts'], list) and len(state['attempts']) == state['attempt'],
+                         'invalid walk attempt history', 4)
+                    for number, attempt in enumerate(state['attempts'], 1):
+                        walk_attempt(attempt)
+                        need(attempt['attempt'] == number, 'invalid attempt number', 4)
+                deployments = state.get('deployments', [])
+                need(isinstance(deployments, list), 'invalid saved deployments', 4)
+                for deployment in deployments:
+                    need(isinstance(deployment, dict) and set(deployment) == {'name', 'unit', 'argv'}
+                         and isinstance(deployment['name'], str) and re.fullmatch(r'[a-z][a-z0-9-]*', deployment['name'])
+                         and deployment['unit'] == f'qa-{name}-{deployment["name"]}'
+                         and isinstance(deployment['argv'], list) and deployment['argv']
+                         and all(isinstance(word, str) for word in deployment['argv'])
+                         and Path(deployment['argv'][0]).is_absolute(), 'invalid saved deployment', 4)
+                need(len({d['name'] for d in deployments}) == len(deployments), 'duplicate saved deployment', 4)
+                need(isinstance(state['starter'], str) and state['starter'], f'{path}: invalid starter', 4)
+                directory = self.workspace.tmp / 'qa-focused' / name
+                no_links(self.workspace.tmp, directory)
+                self.classes[directory] = 'walk'
+                result.append((directory, state))
+            except (Problem, OSError, ValueError, RecursionError, KeyError, TypeError, AttributeError):
+                if strict:
+                    raise Problem(f'{path}: invalid walk state; keeping custody', 4) from None
+                self.walks_valid = False
+                log(f'{path.name}: invalid walk state; keeping custody')
+        return result
+
+    def walk_event(self, directory, state, event, note):
+        parent = directory.parent / state['rung']
+        path = parent / 'loop.tsv'
+        no_links(self.workspace.tmp, path)
+        parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        descriptor = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+        with os.fdopen(descriptor, 'r+') as out:
+            info = os.fstat(out.fileno())
+            need(stat.S_ISREG(info.st_mode) and info.st_nlink == 1, f'{path}: expected a regular file with one link', 4)
+            fcntl.flock(out, fcntl.LOCK_EX)
+            text = out.read()
+            # The append can survive a crash before the state's progress save.
+            attempt = state.get('attempt', 1)
+            prefix = f'kind {state["kind"]} attempt {attempt}: ' if 'kind' in state else f'attempt {attempt}: '
+            clock = state.get('clock_walk', state['walk'].rsplit('-', 1)[-1])
+            if not any(row.split('\t')[2:4] in ([clock, event], [state['walk'], event])
+                       and (row.split('\t')[-1].startswith(prefix)
+                            or 'kind' not in state and attempt == 1)
+                       for row in text.splitlines()):
+                if not text:
+                    out.write('time\trung\twalk\tevent\tnote\n')
+                out.write(f'{timestamp()}\t{state["rung"]}\t{clock}\t{event}\t{prefix}{note}\n')
+                out.flush()
+                os.fsync(out.fileno())
+        state['start_logged' if event in ('walk-start', 'walk-resume') else 'end_logged'] = True
+        self.save(directory, state)
+
+    def walk_room(self, pools, kind):
+        listing = self.call('logins', 'list')
+        inventory = login_inventory(listing.stdout) if listing.returncode == 0 else None
+        need(inventory is not None, 'cannot read login inventory for walk admission', 1)
+        holders = inventory[1]
+        slots = self.options['QA_WALK_KINDS'][kind]['slots']
+        for pool in pools:
+            held = walk_count(holders, pool, kind)
+            need(held < slots, f'kind {kind} holds {held} of its {slots} logins of pool {pool}', 1)
+        return holders
+
+    def cancel_walk(self, directory, state, drop=True):
+        state['stage'] = 'cancelled'
+        self.save(directory, state)
+        # A take may have left a waiter or a grant without a reply.
+        for pool in state['requests'] if drop else []:
+            dropped = self.call('logins', 'drop', pool, '--any', '--as', state['holder'])
+            need(dropped.returncode == 0, f'cannot drop walk request for {pool}', 4)
+        self.give(directory, state)
+        if not self.outstanding(state):
+            state.update(stage='ended', released=True)
+            if state.get('attempt', 1) > 1:
+                state.update(stage='paused', decision='walk-pause', end_logged=True, posted=True)
+                replace(directory / 'paused', (state['pause_line'] + '\n').encode())
+            self.save(directory, state)
+
+    def check_walk(self, directory, state):
+        if state.get('stage') == 'cancelled':
+            self.cancel_walk(directory, state)
+            return
+        if not state['run']:
+            self.recover_run(directory, state)
+        if not state['run']:
+            self.cancel_walk(directory, state)
+            return
+        unit = 'codex-run-' + state['run']
+        ended = self.runs / state['run'] / 'ended'
+        if state['stage'] != 'ending':
+            status = self.unit_status(unit)
+            if not ended.exists() and status != 'stopped':
+                if status == 'busy' and (state.get('capped') or
+                        (utc(timestamp()) - utc(state['started'])).total_seconds() >= state['cap'] * 60):
+                    stopped = self.call('systemctl', '--user', 'stop', unit)
+                    if stopped.returncode:
+                        log(f'{state["walk"]}: stop failed: {stopped.stderr.strip()}')
+                        return
+                    state['capped'] = True
+                    self.save(directory, state)
+                else:
+                    return
+            if not self.unit_stopped(unit, self.options['QA_GIVE_BACK_SECONDS']):
+                return
+            state['stage'] = 'ending'
+            self.save(directory, state)
+        # Confirm the session's stop even when recovering an interrupted end.
+        if not self.unit_stopped(unit, self.options['QA_GIVE_BACK_SECONDS']):
+            self.alert(directory, state, None)
+            return
+        if ('decision' not in state and (state.get('end_logged') or state.get('posted')
+                                        or pause_line(directory) is None)):
+            state['decision'] = 'walk-end'
+            self.save(directory, state)
+        self.end(directory, state)
+        missing = self.outstanding(state)
+        units = self.deployments(directory, state)
+        remaining = [unit for unit, status in (units or {}).items() if status != 'stopped']
+        if 'decision' not in state:
+            line = pause_line(directory)
+            state['decision'] = ('walk-pause' if not state.get('end_logged') and not state.get('posted')
+                                 and line is not None and not missing
+                                 and units is not None and not remaining and state.get('released') else 'walk-end')
+            if state['decision'] == 'walk-pause':
+                state['pause_line'] = line
+            self.save(directory, state)
+        paused = state['decision'] == 'walk-pause'
+        facts = self.facts(state['run'])
+        note = f'exit {facts["exit"]}; out: ' + (', '.join(missing) or 'none')
+        if remaining or units is None:
+            note += '; units: ' + (', '.join(remaining) if units is not None else 'unknown')
+        if not state.get('end_logged'):
+            self.walk_event(directory, state, state['decision'], state['pause_line'] if paused else note)
+        if not state.get('posted'):
+            outcome = 'paused' if paused else 'ended'
+            body = (f'Walk {state["walk"]} {outcome}; exit {facts["exit"]}.\n'
+                    f'Report: {directory}/report.md\n')
+            if paused:
+                body += f'Paused at: {state["pause_line"]}\n'
+            body += ''.join(f'Login {name} is not back at {path}.\n' for name, path in missing.items())
+            body += ''.join(f'Unit {unit} is still up or of unknown state.\n' for unit in remaining)
+            if units is None:
+                body += 'Deployment units are unknown.\n'
+            if missing or remaining or units is None:
+                body += 'The service tries again at each check.\n'
+            message = directory / 'post-body'
+            replace(message, body.encode())
+            sent = self.call('post', 'send', '--as', 'qa-watch', state['starter'],
+                             f'qa: walk {state["walk"]} {outcome}', message)
+            if sent.returncode in (0, 3):
+                state['posted'] = True
+                self.save(directory, state)
+        if (state.get('released') and state.get('end_logged') and state.get('posted') and not missing
+                and all(all(receipts.values()) for receipts in state.get('alerts', {}).values())):
+            state['stage'] = 'paused' if paused else 'ended'
+            self.save(directory, state)
+
+    def check(self, options):
+        log('checking')
+        self.options = options
+        self.stuck = self.stuck_addresses()
+        self.alert_attempted = set()
+        with self.walks_locked(wait=False) as walking:
+            if not walking:
+                return
+            self.states.clear()
+            self.classes.clear()
+            walks = self.local_walks(strict=False)
+            self.claims(walks)
+            self.give_strays(walks, sweep_walks=self.walks_valid)
+            for directory, state in walks:
+                try:
+                    # Saved alert receipts retry even if the run becomes unknown.
+                    if state.get('stage') not in ('ended', 'paused'):
+                        self.alert(directory, state, None)
+                        self.check_walk(directory, state)
+                except (Problem, OSError, ValueError, RecursionError, UnicodeError,
+                        KeyError, TypeError, AttributeError) as error:
+                    log(f'{state["walk"]}: cleanup failed ({type(error).__name__}); keeping logins and scratch')
+
+
+
+def check_alerts(state):
+    alerts = state.get('alerts', {})
+    need(isinstance(alerts, dict) and all(login in state.get('logins', {}) and isinstance(receipts, dict)
+         and all(isinstance(address, str) and re.fullmatch(ADDRESS, address)
+                 and type(sent) is bool for address, sent in receipts.items())
+         for login, receipts in alerts.items()), 'invalid alerts', 4)
+
+
+def walk_attempt(state):
+    need(isinstance(state, dict), 'invalid walk attempt', 4)
+    need(not state['run'] or re.fullmatch(r'[a-zA-Z0-9_-]+', state['run']), f'attempt: invalid run', 4)
+    need(state['stage'] in ('reserving', 'starting', 'running', 'ending', 'cancelled', 'ended', 'paused')
+         and type(state['cap']) is int and state['cap'] >= 1
+         and (state['slot'] is None or type(state['slot']) is int and state['slot'] >= 1),
+         f'attempt: invalid progress', 4)
+    need(all(isinstance(state[key], dict) for key in ('logins', 'kinds', 'pools'))
+         and isinstance(state['given'], list) and isinstance(state['requests'], list)
+         and all(isinstance(login, str) and re.fullmatch(LOGIN, login)
+                 and isinstance(path, str) and Path(path).is_absolute()
+                 for login, path in state['logins'].items())
+         and set(state['kinds']) == set(state['logins'])
+         and all(kind in ('moved', 'in-place') for kind in state['kinds'].values())
+         and all(isinstance(login, str) and login in state['logins'] for login in state['given'])
+         and all(isinstance(pool, str) and re.fullmatch(LOGIN, pool) and pool_of(pool) == pool
+                 for pool in state['requests'])
+         and all(pool in state['requests'] and isinstance(login, str) and login in state['logins']
+                 and pool_of(login) == pool for pool, login in state['pools'].items())
+         and set(state['pools'].values()) == set(state['logins']), f'attempt: invalid custody', 4)
+    need(all(type(state[key]) is bool for key in ('released', 'start_logged', 'end_logged', 'posted')),
+         'invalid attempt progress', 4)
+    check_alerts(state)
+    if 'report_attempt' in state:
+        need(type(state['report_attempt']) is int and 1 <= state['report_attempt'] <= state.get('attempt', 1),
+             'invalid report attempt', 4)
+    if 'resume_run' in state:
+        need(isinstance(state['resume_run'], str) and re.fullmatch(r'[a-zA-Z0-9_-]+', state['resume_run']),
+             'invalid earlier run', 4)
+    need(state.get('decision') in (None, 'walk-pause', 'walk-end'), 'invalid end decision', 4)
+    if state.get('decision') == 'walk-pause' or state.get('attempt', 1) > 1:
+        need(isinstance(state['pause_line'], str) and 0 < len(state['pause_line']) <= 200
+             and not any(ord(c) < 32 or 0x7f <= ord(c) < 0xa0 or c in '\u2028\u2029' for c in state['pause_line']),
+             'invalid paused line', 4)
+    utc(state['started'])
+
+
+def pause_line(directory):
+    try:
+        descriptor = os.open(directory / 'paused', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(descriptor, 'r') as source:
+            info = os.fstat(source.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                return None
+            line = source.readline(202).removesuffix('\n')
+            if not line or len(line) > 200 or any(
+                    ord(c) < 32 or 0x7f <= ord(c) < 0xa0 or c in '\u2028\u2029' for c in line):
+                return None
+            return line
+    except (OSError, UnicodeError):
+        return None
+
+
+def take(args, workspace):
+    options = settings(workspace)
+    kinds = options['QA_WALK_KINDS']
+    need(args.kind in kinds, 'unknown walk kind: ' + args.kind)
+    need(re.fullmatch('walk/' + args.kind + r'/[a-z0-9][a-z0-9-]*', args.holder),
+         'holder must be walk/' + args.kind + '/WHAT')
+    pool = args.login if args.login is not None else kinds[args.kind]['pools'][0]
+    need(pool in kinds[args.kind]['pools'], 'login is not a pool of kind ' + args.kind)
+    service = Watch(workspace, '')
+    service.options = options
+    with service.walks_locked():
+        name = args.holder.rsplit('/', 1)[-1]
+        saved = service.directory / 'walks' / (name + '.json')
+        need(not saved.exists() and not saved.is_symlink(), 'holder name already belongs to a saved walk: ' + name, 1)
+        service.walk_room([pool], args.kind)
+        note = ['--note', args.note] if args.note is not None else []
+        result = service.call('logins', 'take', pool, '--any', '--now', '--as', args.holder, *note)
+        need(result.returncode == 0, 'the caps are broken: ' + (result.stderr.strip() or result.stdout.strip()
+             or f'cannot take {pool}'), 1)
+        sys.stdout.write(result.stdout)
+    return 0
+
+
+def give(args, workspace):
+    need(re.fullmatch(LOGIN, args.name), 'invalid login name')
+    need(re.fullmatch(r'walk/[a-z][a-z0-9]*/[a-z0-9][a-z0-9-]*', args.holder),
+         'holder must be walk/KIND/WHAT')
+    result = Watch(workspace, '').call('logins', 'give', args.name, '--as', args.holder)
+    sys.stdout.write(result.stdout)
+    sys.stderr.write(result.stderr)
+    return result.returncode
+
+
+def walk(args, workspace):
+    starter = os.environ.get('POST_NAME', '')
+    need(re.fullmatch(r'[a-z][a-z0-9-]*(/[a-z0-9][a-z0-9-]*)*', starter),
+         'POST_NAME must be set to a valid starter name')
+    need(re.fullmatch(r'[a-z0-9][a-z0-9-]*', args.rung), 'invalid rung name')
+    need(args.cap is None or args.cap >= 1, '--cap must be at least 1')
+    need(args.resume is None or re.fullmatch(r'rung-[a-z0-9][a-z0-9-]*-[1-9][0-9]*', args.resume)
+         and args.build is not None and not args.login and args.kind is None,
+         '--resume needs a walk NAME and --build, without --login or --kind')
+    need(all(re.fullmatch(LOGIN, pool) and pool_of(pool) == pool for pool in args.login), 'invalid login pool')
+    need(len(set(args.login)) == len(args.login), 'repeated login pool')
+    workspace.origin(args.repo)
+    options = settings(workspace)
+    service = Watch(workspace, '')
+    service.options = options
+    ref = args.build if args.build is not None else 'main'
+    main = service.repositories.build(args.repo, ref)
+    with service.walks_locked():
+        focused = workspace.tmp / 'qa-focused'
+        no_links(workspace.tmp, focused)
+        focused.mkdir(mode=0o700, parents=True, exist_ok=True)
+        walks = service.local_walks()
+        service.claims(walks)
+        kinds = options['QA_WALK_KINDS']
+        need(not any('kind' not in state and not state.get('released') for _, state in walks),
+             'pre-kind walks still hold slots; drain them before starting a kind', 1)
+        if args.resume is not None:
+            name = args.resume
+            match = next(((path, state) for path, state in walks if state['walk'] == name), None)
+            need(match and match[1]['repo'] == args.repo and match[1]['rung'] == args.rung,
+                 'resume needs a saved walk of this repository and rung')
+            directory, state = match
+            need(state['stage'] == 'paused' and state.get('released') and state.get('end_logged')
+                 and state.get('posted') and not service.outstanding(state), 'walk pause is not complete')
+            kind = state.get('kind', next(iter(kinds)))
+            need(kind in kinds and set(state['requests']) <= set(kinds[kind]['pools']),
+                 'saved walk kind or pools are no longer configured')
+            state['kind'] = kind
+            service.walk_room(state['requests'], kind)
+            service.save(directory, state)
+            previous_run = next((a['run'] for a in reversed(state['attempts']) if a.get('run')), '')
+            need(previous_run, 'paused walk has no earlier run')
+            state.update(attempt=state['attempt'] + 1, ref=ref, main=main, cap=args.cap or state['cap'],
+                         started=timestamp(), slot=None, logins={}, kinds={}, pools={}, given=[],
+                         requests=state['requests'], run='', holder='walk/' + kind + '/' + name,
+                         stage='reserving', released=False, start_logged=False, end_logged=False,
+                         posted=False, capped=False, resume_run=previous_run, alerts={})
+            state.pop('decision', None)
+        else:
+            kind = args.kind if args.kind is not None else next(iter(kinds))
+            need(kind in kinds, 'unknown walk kind: ' + kind)
+            requests = sorted(args.login or kinds[kind]['pools'])
+            need(set(requests) <= set(kinds[kind]['pools']), 'login is not a pool of kind ' + kind)
+            holders = service.walk_room(requests, kind)
+            prefix = 'rung-' + args.rung + '-' + ('' if kind == next(iter(kinds)) else kind + '-')
+            numbering = [state for _, state in walks] + service.legacy_walks
+            known = {state['walk'] for state in numbering}
+            names = [state['walk'].rsplit('-', 1)[-1] for state in numbering
+                     if state['rung'] == args.rung and state.get('kind', next(iter(kinds))) == kind]
+            prefixes = {prefix, f'rung-{args.rung}-{kind}-', f'rung-{args.rung}-'}
+            names += [path.name[len(candidate):] for path in focused.iterdir()
+                      for candidate in prefixes if path.name not in known and path.name.startswith(candidate)]
+            numbers = [int(number) for number in names if re.fullmatch(r'[1-9][0-9]*', number)]
+            number = max(numbers, default=0) + 1
+            while ((focused / (prefix + str(number))).exists()
+                   or (service.directory / 'walks' / (prefix + str(number) + '.json')).exists()
+                   or 'walk/' + kind + '/' + prefix + str(number) in holders.values()):
+                number += 1
+            name = prefix + str(number)
+            directory = focused / name
+            directory.mkdir(mode=0o700)
+            state = dict(walk=name, repo=args.repo, rung=args.rung, kind=kind,
+                         clock_walk=name[len('rung-' + args.rung + '-'):], ref=ref, main=main,
+                         starter=starter + '@' + workspace.machine(), cap=args.cap or 180, started=timestamp(),
+                         slot=None, holder='walk/' + kind + '/' + name, logins={}, kinds={}, pools={}, run='',
+                         stage='reserving', requests=requests, given=[], released=False,
+                         start_logged=False, end_logged=False, posted=False, report_attempt=1)
+        service.classes[directory] = 'walk'
+        service.save(directory, state)
+        held = {s['slot'] for _, s in walks if s.get('kind', next(iter(kinds))) == kind and not s.get('released')}
+        state['slot'] = next((k for k in range(1, kinds[kind]['slots'] + 1) if k not in held), None)
+        if state['slot'] is None:
+            service.cancel_walk(directory, state, drop=False)
+            raise Problem(f'no free walk slot for kind {kind}', 1)
+        service.save(directory, state)
+        try:
+            slot = f'{args.repo}-walk-{kind}-{state["slot"]}'
+            with service.repositories.fetched(args.repo) as root:
+                checkout = service.repositories.checkout(root, args.repo, slot, state['main'])
+            try:
+                fetched = command(['cargo', 'fetch', '--locked'], cwd=checkout, timeout=300)
+            except OSError as error:
+                raise Problem(f'cannot fetch build {ref}: {error}', 4) from None
+            need(fetched.returncode == 0,
+                 f'cannot fetch build {ref}: ' + (fetched.stderr.strip() or fetched.stdout.strip()
+                                                or f'cargo fetch exited {fetched.returncode}'), 4)
+            for pool in state['requests']:
+                service.walk_room([pool], kind)
+                taken = service.call('logins', 'take', pool, '--any', '--now', '--as', state['holder'],
+                                     '--note', directory)
+                need(taken.returncode == 0, 'the caps are broken: ' + (taken.stderr.strip() or taken.stdout.strip()
+                     or f'cannot take {pool}'), 1)
+                login, sep, path = taken.stdout.strip().partition(' ')
+                need(sep and re.fullmatch(LOGIN, login) and pool_of(login) == pool and Path(path).is_absolute(),
+                     f'{name}: invalid login grant', 4)
+                state['pools'][pool] = login
+                state['logins'][login] = path
+                try:
+                    mode = os.lstat(path).st_mode
+                except FileNotFoundError:
+                    mode = 0
+                state['kinds'][login] = 'in-place' if stat.S_ISDIR(mode) else 'moved'
+                service.save(directory, state)
+            if args.resume is not None:
+                report = directory / 'report.md'
+                no_links(workspace.tmp, report)
+                if report.exists():
+                    need(stat.S_ISREG(report.stat().st_mode) and report.stat().st_nlink == 1, 'invalid earlier report', 1)
+                    earlier = directory / f'report-{state.get("report_attempt", 1)}.md'
+                    need(not earlier.exists() and not earlier.is_symlink(), 'earlier report already exists', 1)
+                    report.rename(earlier)
+                state['report_attempt'] = state['attempt']
+                service.save(directory, state)
+                (directory / 'paused').unlink(missing_ok=True)
+                # The earlier exporter names grants that may now belong to another walk.
+                (directory / 'give-back').unlink(missing_ok=True)
+                no_links(workspace.tmp, directory / 'brief.md')
+                need((directory / 'brief.md').is_file(), 'saved rung brief missing', 1)
+            else:
+                brief = focused / ('rung-' + args.rung + '-' + kind + '-brief.md')
+                no_links(workspace.tmp, brief)
+                if not brief.exists():
+                    brief = focused / ('rung-' + args.rung + '-brief.md')
+                no_links(workspace.tmp, brief)
+                need(brief.is_file(), f'rung brief missing: {brief}', 1)
+                replace(directory / 'brief.md', brief.read_bytes())
+            task = (f'Read {directory}/brief.md first.\n\nWalk {name} on {args.repo}, rung {args.rung}.\n'
+                    f'Directory: {directory}\nCheckout: {checkout}\n'
+                    f'Build: {state["ref"]}, commit {state["main"]}\n'
+                    f'Cap: {state["cap"]} minutes. Report: {directory}/report.md\n\nHeld logins:\n')
+            task += ''.join(f'- {login} (pool {pool}): {state["logins"][login]} ({state["kinds"][login]})\n'
+                            for pool, login in state['pools'].items()) or 'None.\n'
+            task += (f'\nMove file logins into deployments as the binding says; directory logins are used in place.\n'
+                     f'At once after moving a login, write {directory}/give-back: an executable\n'
+                     'that exports each moved login back to its resting path, every program named by\n'
+                     'its absolute path (it runs outside your shell). Run it before the deployment\n'
+                     'stops; check by stat alone (a non-empty regular file, 0600). Your session and\n'
+                     'deployment stops run the same file under one lock. Never run logins, never\n'
+                     'read or copy a login. Stop using directory logins before their units stop.\n'
+                     f'For every deployment use: qa deploy {directory} NAME -- COMMAND...\n')
+            task += (f'\nTo pause at a blocking finding: write the finding in your report and {directory}/notes.md,\n'
+                     f'and the step you stopped at in {directory}/paused (one line, at most 200 characters, no controls).\n'
+                     'Give each moved login back through give-back and check it by stat: give back before you break it.\n'
+                     'Then stop the deployments, keeping their data directories and saved commands, and end your session.\n'
+                     'A branch resume confirms a fix; the walk that counts must finish on main at the landed commit.\n')
+            if args.resume is not None:
+                reports = sorted(path.name for path in directory.glob('report-*.md')
+                                 if re.fullmatch(r'report-[1-9][0-9]*\.md', path.name))
+                task += (f'\nResume from: {state["pause_line"]}\n'
+                         f'Read {directory}/notes.md and the earlier reports: {", ".join(reports)}.\n'
+                         'Carry their findings into the new report. Import each login again from its new resting path,\n'
+                         'and write a new give-back file for these grants before moving them.\n'
+                         'Keep each deployment directory and restart through qa deploy on its own data.\n'
+                         'Use this checkout’s REF binary in place of any earlier slot executable; check the binding’s\n'
+                         'configuration before starting. If a kept store will not open (a fix moved a stored family),\n'
+                         'say so in the report and walk again from the first step on a fresh deployment in this directory.\n'
+                         'Saved deployment commands and directories:\n')
+                task += ''.join(f'- {directory}/{d["name"]}: {shlex.join(d["argv"])}\n'
+                                f'  qa deploy {directory} {d["name"]} -- {shlex.join(d["argv"])}\n'
+                                for d in state.get('deployments', []))
+            replace(directory / 'task.md', task.encode())
+            service.walk_event(directory, state, 'walk-resume' if args.resume is not None else 'walk-start', ', '.join(state['logins']) + ' ' + state['main'][:9])
+            script = stop_path(Path(__file__).resolve())
+            stop_path(directory)
+            on_stop = '#!/bin/sh\nexec ' + ' '.join(shlex.quote(str(word)) for word in
+                       (script, '_give-back', directory, options['QA_STOP_SECONDS'])) + '\n'
+            replace(directory / 'on-stop', on_stop.encode(), 0o700)
+            state.update(stage='starting', started=timestamp())
+            service.save(directory, state)
+            launch = ['task', '--to', 'qa-watch', '--on-stop', directory / 'on-stop',
+                      directory / 'task.md', checkout, directory / 'report.md']
+            if args.resume is not None:
+                launch[1:1] = ['--resume', state['resume_run']]
+            launched = service.call('codex-run', *launch)
+            if args.resume is not None and launched.returncode not in (0, 124) and any(
+                    reason in launched.stderr + launched.stdout
+                    for reason in ('resume run has no thread', 'resume run has no meta')):
+                launched = service.call('codex-run', *[launch[0], *launch[3:]])
+            if launched.returncode == 124:
+                log(f'{name}: launch timed out; keeping custody for run recovery')
+                return 1
+            words = launched.stdout.split()
+            need(launched.returncode == 0 and words and re.fullmatch(r'[a-zA-Z0-9_-]+', words[0]),
+                 launched.stderr.strip() or 'codex-run refused launch', 1)
+            state.update(run=words[0], stage='running')
+            service.save(directory, state)
+        except (Problem, OSError, ValueError, UnicodeError):
+            if state['stage'] == 'starting':
+                service.recover_run(directory, state)
+            if not state['run']:
+                service.cancel_walk(directory, state)
+            raise
+        print('walk ' + name)
+        for login, path in state['logins'].items():
+            print(login, path)
+        print('run ' + state['run'])
+    return 0
+
+
+def watch(director, once, workspace):
+    os.environ['POST_NAME'] = 'qa-watch'
+    # Check assignment before creating state or locks.
+    need(workspace.fixture or (Path.home() / '.config/agents-qa/director').is_file(),
+         "this is not the service's machine (no ~/.config/agents-qa/director)")
+    need(re.fullmatch(r'[a-z][a-z0-9-]*(/[a-z0-9][a-z0-9-]*)*@[a-z][a-z0-9-]*', director),
+         'invalid director address: expected NAME@MACHINE')
+    service = Watch(workspace, director)
+    no_links(workspace.tmp, service.directory)
+    service.directory.mkdir(parents=True, exist_ok=True)
+    with (service.directory / 'watch.lock').open('a') as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise Problem('another service runs') from None
+        service.watch_lock = lock.fileno()
+        while True:
+            options = settings(workspace)
+            service.check(options)
+            if once:
+                return 0
+            interval = options['QA_INTERVAL_SECONDS']
+            waited = service.call('post', 'wait', 'qa-watch', '--timeout', str(interval), '--holder', str(os.getpid()), '--kind', 'codex')
+            if waited.returncode == 0:
+                read = service.call('post', 'read', 'qa-watch')
+                log(read.stdout)
+                if read.returncode:
+                    log('post read failed: ' + read.stderr.strip())
+            elif waited.returncode == 4:
+                log('another waiter took qa-watch')
+                return 2
+            elif waited.returncode != 1:
+                log('post wait failed: ' + (waited.stderr.strip() or waited.stdout.strip()))
+                time.sleep(interval)
+
+
+def main():
+    if sys.argv[1:2] == ['_give-back']:
+        return give_back(sys.argv[2:])
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = parser.add_subparsers(dest='command', required=True)
+    deployment = sub.add_parser('deploy')
+    deployment.add_argument('directory')
+    deployment.add_argument('name')
+    deployment.add_argument('argv', nargs=argparse.REMAINDER)
+    walking = sub.add_parser('walk')
+    walking.add_argument('repo')
+    walking.add_argument('rung')
+    walking.add_argument('--build')
+    walking.add_argument('--resume')
+    walking.add_argument('--kind')
+    walking.add_argument('--login', action='append', default=[])
+    walking.add_argument('--cap', type=int)
+    taking = sub.add_parser('take')
+    taking.add_argument('kind')
+    taking.add_argument('--login')
+    taking.add_argument('--as', dest='holder', required=True)
+    taking.add_argument('--note')
+    giving = sub.add_parser('give')
+    giving.add_argument('name')
+    giving.add_argument('--as', dest='holder', required=True)
+    service = sub.add_parser('watch')
+    service.add_argument('--director', required=True)
+    service.add_argument('--once', action='store_true')
+    args = parser.parse_args()
+    try:
+        workspace = Workspace()
+        if args.command == 'take':
+            return take(args, workspace)
+        if args.command == 'give':
+            return give(args, workspace)
+        if args.command == 'deploy':
+            need('--' in sys.argv[2:] and sys.argv[2:].index('--') == 2, 'deploy needs DIRECTORY NAME -- COMMAND...')
+            return deploy(args, workspace)
+        if args.command == 'walk':
+            return walk(args, workspace)
+        if args.command == 'watch':
+            return watch(args.director, args.once, workspace)
+    except Problem as error:
+        print(f'qa: {error}', file=sys.stderr)
+        return error.code
+    except (OSError, ValueError, UnicodeError) as error:
+        print(f'qa: {error}', file=sys.stderr)
+        return 4
+
+
+if __name__ == '__main__':
+    sys.exit(main())
