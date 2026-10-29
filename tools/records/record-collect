@@ -606,7 +606,8 @@ def stage(source, args, host, since):
     directory = Path.home() / '.local/state/record-collect'
     path = directory / (source + '.json')
     pending = directory / (source + '.pending.json')
-    if directory.is_symlink() or path.is_symlink() or pending.is_symlink():
+    status = directory / (source + '.publication.json')
+    if any(p.is_symlink() for p in (directory, path, pending, status)):
         raise ValueError('cursor must not be a symlink')
     if not args.dry_run:
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -663,17 +664,22 @@ def publish(transactions, host, dry):
                     count = transaction.get('deferrals', 0) + 1 if result.returncode == 3 else 0
                     transaction['deferrals'] = count
                     atomic(pending, transaction)
+                    atomic(pending.with_name(pending.name.replace('.pending.json', '.publication.json')),
+                           dict(deferrals=count, reason=reason, status='deferred' if count else 'failed'))
                     counts.append(count)
                 if result.returncode == 3:
                     count = max(counts)
-                    print(f'record-collect: deferred: {reason} ({count} consecutive runs)', file=sys.stderr)
+                    print(f'record-collect: deferred ({count}/6): {reason}', file=sys.stderr)
                     return 2 if count >= 6 else 0
                 raise ValueError(f'record append failed (exit {result.returncode}); cursors unchanged: {reason}')
             if result.stdout:
                 print(result.stdout, end='')
-        for _, path, pending, state, _ in transactions:
+        for source, path, pending, state, rows in transactions:
+            atomic(path.with_name(source + '.publication.json'),
+                   dict(deferrals=0, status='published', events=len(rows)))
             atomic(path, state)
             pending.unlink(missing_ok=True)
+        print(f'record-collect: published {len(events)} events')
     for source, _, _, _, rows in transactions:
         print(f'{source}: {len(rows)} events', file=sys.stderr)
     return 0

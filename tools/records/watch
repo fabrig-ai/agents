@@ -310,6 +310,22 @@ class Inputs:
 
     def collect(self, records):
         self.read('records', lambda: self.records(records))
+        def collector_publications():
+            directory = Path.home() / '.local/state/record-collect'
+            if directory.is_symlink():
+                raise ValueError('collector state symlink refused')
+            result = {}
+            for path in sorted(directory.glob('*.publication.json')):
+                if path.is_symlink():
+                    raise ValueError('collector publication state symlink refused')
+                row = json.loads(path.read_text())
+                if type(row.get('deferrals')) is not int or row['deferrals'] < 0:
+                    raise ValueError('invalid collector deferrals')
+                result[path.name.removesuffix('.publication.json')] = dict(
+                    deferrals=row['deferrals'], status=str(row.get('status', 'unknown')),
+                    reason=str(row.get('reason', ''))[:1024])
+            return result
+        self.read('record-collect', collector_publications)
         self.read('names', lambda: identities(checked([self.executables['session-start'], 'names', '--json'])))
         self.data.setdefault('names', {})
         sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'session'))
@@ -689,6 +705,7 @@ def state_file(dry):
 def heartbeat_due(state, events, errors, now, seconds):
     previous = state.get('heartbeat', {})
     return (bool(events) or sorted(errors) != previous.get('failed_inputs') or
+            state.get('deferrals', 0) != previous.get('deferrals', 0) or
             now - previous.get('time', now) >= seconds)
 
 
@@ -700,6 +717,9 @@ def run(dry, config, post, heartbeat_seconds):
         records = Path(temp) / 'records' if dry else Path(os.environ.get('RECORDS_REPO', '~/src/fabrig/records')).expanduser()
         inputs = Inputs(dry).collect(records)
         data, errors = inputs.data, inputs.errors
+        deferrals = state.get('deferrals', 0)
+        if deferrals:
+            errors['publication'] = f'deferred ({deferrals}/6): ' + state.get('publication_reason', 'publication unconfirmed')[:1024]
         # Missing dependencies must not be interpreted as a quiet input.
         for source in ('drafts', 'questions', 'records/queue', 'records/heavy', 'records/sessions', 'records/post', 'records/post-sent'):
             if source not in data:
@@ -747,8 +767,11 @@ def run(dry, config, post, heartbeat_seconds):
             events.append(dict(id='watch:heartbeat:' + str(time.time_ns()), time=iso(now), source='watch', host='hel8',
                                kind='heartbeat', rules_evaluated=[r for r in RULES if config[r]['enabled'] and r not in skipped],
                                rules_skipped=skipped,
-                               alerts_open=len(state['episodes']), inputs=inputs.executables, inputs_failed=errors))
-            state['heartbeat'] = dict(time=now, failed_inputs=sorted(errors))
+                               alerts_open=len(state['episodes']),
+                               inputs=dict(inputs.executables, publication=dict(deferrals=deferrals,
+                                           reason=state.get('publication_reason', '')[:1024]),
+                                           **{'record-collect': data.get('record-collect', {})}), inputs_failed=errors))
+            state['heartbeat'] = dict(time=now, failed_inputs=sorted(errors), deferrals=deferrals)
         pending = state.setdefault('pending', [])
         pending.extend(events)
         payload = ''.join(json.dumps(e, sort_keys=True) + '\n' for e in pending)
@@ -765,15 +788,18 @@ def run(dry, config, post, heartbeat_seconds):
                 if result.returncode:
                     reason = ' '.join(result.stderr.splitlines()) or f'record append exited {result.returncode}'
                     state['deferrals'] = state.get('deferrals', 0) + 1 if result.returncode == 3 else 0
+                    state['publication_reason'] = reason
                     atomic(path, state)
                     if result.returncode == 3:
-                        print(f'watch: deferred: {reason} ({state["deferrals"]} consecutive runs)', file=sys.stderr)
+                        print(f'watch: deferred ({state["deferrals"]}/6): {reason}', file=sys.stderr)
                         return 2 if state['deferrals'] >= 6 else 0
                     print(f'watch: record append failed (exit {result.returncode}); events retained: {reason}', file=sys.stderr)
                     return 2
                 state['deferrals'] = 0
+                state.pop('publication_reason', None)
                 state['pending'] = []
                 atomic(path, state)
+            print(f'watch: published {len(pending)} events')
         print(f'watch: {len(candidates)} conditions; {len(state["episodes"])} open; {len(errors)} failed inputs')
     return 0
 
