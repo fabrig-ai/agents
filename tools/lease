@@ -1,0 +1,302 @@
+#!/usr/bin/env python3
+"""Coordinate package and design-document writers; standard library only."""
+
+import argparse
+from contextlib import contextmanager
+from datetime import datetime, timezone
+import fcntl
+import json
+import os
+from pathlib import Path, PurePosixPath
+import re
+import subprocess
+import sys
+import tempfile
+import tomllib
+from urllib.parse import quote
+
+
+DOC = re.compile(r"(?:skein|smith|jig|temper)/docs/(?:design|foundation)/[^ ]+\.md")
+OWNER = re.compile(r"s/[a-z0-9][a-z0-9-]*")
+
+
+def git(repo, *args):
+    result = subprocess.run(["git", "-C", str(repo), *args], capture_output=True)
+    if result.returncode:
+        raise ValueError(result.stderr.decode(errors="replace").strip())
+    return result.stdout
+
+
+class Catalog:
+    def __init__(self, repo, rev):
+        # Resolve once: a moving HEAD must not mix trees and manifests.
+        rev = git(repo, "rev-parse", "--verify", f"{rev}^{{commit}}").decode().strip()
+        self.paths = set(git(repo, "ls-tree", "-r", "--name-only", "-z", rev)
+                         .decode().rstrip("\0").split("\0")) - {""}
+        self.packages = set()
+        self.directories = []
+        for path in sorted(self.paths):
+            if PurePosixPath(path).name != "Cargo.toml":
+                continue
+            manifest = tomllib.loads(git(repo, "show", f"{rev}:{path}").decode())
+            name = manifest.get("package", {}).get("name")
+            if name:
+                self.packages.add(name)
+                directory = str(PurePosixPath(path).parent)
+                self.directories.append(("" if directory == "." else directory + "/", name))
+        self.directories.sort(key=lambda entry: len(entry[0]), reverse=True)
+
+    def valid(self, subject):
+        if subject.startswith("pkg:"):
+            return subject[4:] in self.packages
+        if subject.startswith("doc:"):
+            path = subject[4:]
+            if not DOC.fullmatch(path) or path.endswith(".status.md"):
+                return False
+            parent = str(PurePosixPath(path).parent)
+            return path in self.paths or any(
+                str(PurePosixPath(p).parent) == parent and p.endswith(".md")
+                for p in self.paths)
+        return False
+
+    def subject_for(self, path):
+        if (path in {"Cargo.lock", "Cargo.toml"} or path.startswith(".config/")
+                or path.endswith("/scripts/old-forms.txt")):
+            return None, True
+        if DOC.fullmatch(path):
+            if path.endswith(".status.md"):
+                path = path[:-len(".status.md")] + ".md"
+            return "doc:" + path, False
+        for directory, name in self.directories:
+            if path.startswith(directory):
+                return "pkg:" + name, False
+        return None, False
+
+
+def now():
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def age(since):
+    seconds = max(0, int((datetime.now(timezone.utc) - datetime.fromisoformat(since)).total_seconds()))
+    return f"{seconds}s"
+
+
+def empty_record(subject):
+    return dict(subject=subject, owner=None, what=None, since=None, lends=[], waiters=[])
+
+
+class Registry:
+    def __init__(self):
+        self.directory = Path.home() / "src/fabrig/leases"
+
+    @contextmanager
+    def locked(self, write=False):
+        if write:
+            self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+            self.directory.chmod(0o700)
+            fd = os.open(self.directory / ".lock", os.O_CREAT | os.O_RDWR, 0o600)
+            os.fchmod(fd, 0o600)
+        else:
+            try:
+                fd = os.open(self.directory / ".lock", os.O_RDONLY)
+            except FileNotFoundError:
+                # Writers create the lock before any record; no state exists yet.
+                yield {}
+                return
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX if write else fcntl.LOCK_SH)
+            records = {}
+            for path in sorted(self.directory.iterdir()):
+                if path.name.startswith("."):
+                    continue
+                record = json.loads(path.read_text())
+                subject = record["subject"]
+                if path.name != quote(subject, safe=""):
+                    raise ValueError(f"invalid lease record: {path}")
+                records[subject] = record
+            yield records
+        finally:
+            os.close(fd)
+
+    def save(self, record):
+        target = self.directory / quote(record["subject"], safe="")
+        if record["owner"] is None and not record["waiters"]:
+            target.unlink(missing_ok=True)
+            return
+        fd, temporary = tempfile.mkstemp(prefix=".tmp-", dir=self.directory)
+        try:
+            with os.fdopen(fd, "w") as stream:
+                os.fchmod(stream.fileno(), 0o600)
+                json.dump(record, stream, indent=2)
+                stream.write("\n")
+            os.replace(temporary, target)
+        finally:
+            Path(temporary).unlink(missing_ok=True)
+
+
+def notify(subject, waiter):
+    command = ["post", "send", "--as", "lease", waiter["owner"] + "@hel8",
+               f"lease free: {subject}"]
+    try:
+        result = subprocess.run(command, input=f"{json.dumps(subject)} is free; you are first in line.\n",
+                                text=True, capture_output=True)
+        if result.returncode not in (0, 3):
+            print(f"post failed for {subject} (exit {result.returncode}): "
+                  f"{result.stderr.strip() or result.stdout.strip()}", file=sys.stderr)
+    except OSError as error:
+        print(f"post failed for {subject}: {error}", file=sys.stderr)
+
+
+def mutate(args, registry):
+    notifications = []
+    with registry.locked(write=True) as records:
+        subjects = (sorted(s for s, r in records.items() if r["owner"] == args.owner)
+                    if getattr(args, "all", False) else list(dict.fromkeys(args.subjects)))
+        refusals = []
+        for subject in subjects:
+            record = records.get(subject, empty_record(subject))
+            holder = record["owner"]
+            if args.command in {"take", "release", "lend", "unlend"}:
+                if holder and holder != args.owner:
+                    refusals.append(f"{subject} held by {holder} (age {age(record['since'])})")
+                elif args.command in {"lend", "unlend"} and holder != args.owner:
+                    refusals.append(f"{subject} unleased")
+                elif (args.command == "take" and holder is None and record["waiters"]
+                      and record["waiters"][0]["owner"] != args.owner):
+                    refusals.append(f"{subject} free; first waiter {record['waiters'][0]['owner']}")
+        if refusals:
+            print("\n".join(refusals))
+            return 1
+        for subject in subjects:
+            record = records.get(subject, empty_record(subject))
+            if args.command == "take":
+                if record["owner"] == args.owner:
+                    continue
+                record.update(owner=args.owner, what=args.what, since=now(), lends=[])
+                record["waiters"] = [w for w in record["waiters"] if w["owner"] != args.owner]
+            elif args.command == "release":
+                if record["owner"] is None:
+                    continue
+                record.update(owner=None, what=None, since=None, lends=[])
+                if record["waiters"]:
+                    notifications.append((subject, record["waiters"][0]))
+            elif args.command == "want":
+                if record["owner"] is None and not record["waiters"]:
+                    print(f"{subject} free to take")
+                    continue
+                if record["owner"] == args.owner or any(w["owner"] == args.owner for w in record["waiters"]):
+                    continue
+                record["waiters"].append(dict(owner=args.owner, what=args.what, since=now()))
+            elif args.command == "unwant":
+                record["waiters"] = [w for w in record["waiters"] if w["owner"] != args.owner]
+            elif args.command == "lend":
+                if args.to not in record["lends"]:
+                    record["lends"].append(args.to)
+            elif args.command == "unlend":
+                record["lends"] = [branch for branch in record["lends"] if branch != args.to]
+            registry.save(record)
+    # External delivery cannot hold up other lease operations under the lock.
+    for subject, waiter in notifications:
+        notify(subject, waiter)
+    return 0
+
+
+def check(args, registry):
+    catalog = Catalog(args.repo, args.tip)
+    paths = git(args.repo, "diff", "--name-only", "-z", args.base + "..." + args.tip, "--")
+    subjects = set()
+    for path in paths.decode().rstrip("\0").split("\0"):
+        if not path:
+            continue
+        subject, exempt = catalog.subject_for(path)
+        if subject:
+            subjects.add(subject)
+        elif not exempt:
+            print(f"unowned {path}")
+    outside = False
+    with registry.locked() as records:
+        for subject in sorted(subjects):
+            record = records.get(subject, empty_record(subject))
+            if record["owner"] == args.owner or (args.branch and args.branch in record["lends"]):
+                print(f"inside {subject}")
+            else:
+                holder = f"held by {record['owner']}" if record["owner"] else "unleased"
+                print(f"outside {subject} ({holder})")
+                outside = True
+    return int(outside)
+
+
+def parser():
+    result = argparse.ArgumentParser(description=__doc__)
+    result.add_argument("--fabrig", type=Path, default=Path.home() / "src/fabrig/main")
+    commands = result.add_subparsers(dest="command", required=True)
+    for name in ("take", "release", "want", "unwant", "lend", "unlend"):
+        command = commands.add_parser(name)
+        command.add_argument("owner")
+        if name in {"take", "want"}:
+            command.add_argument("what")
+        command.add_argument("subjects", nargs="*" if name == "release" else "+")
+        if name == "release":
+            command.add_argument("--all", action="store_true")
+        if name in {"lend", "unlend"}:
+            command.add_argument("--to", required=True)
+    listing = commands.add_parser("list")
+    listing.add_argument("--owner")
+    listing.add_argument("--json", action="store_true")
+    checking = commands.add_parser("check")
+    checking.add_argument("owner")
+    checking.add_argument("--repo", type=Path, required=True)
+    checking.add_argument("--base", required=True)
+    checking.add_argument("--tip", required=True)
+    checking.add_argument("--branch")
+    return result
+
+
+def main():
+    arguments = parser()
+    args = arguments.parse_args()
+    if getattr(args, "owner", None) is not None and not OWNER.fullmatch(args.owner):
+        arguments.error(f"invalid owner: {args.owner}")
+    if args.command == "release" and bool(args.subjects) == args.all:
+        arguments.error("release needs subjects or --all")
+    branch = getattr(args, "to", None) if hasattr(args, "to") else getattr(args, "branch", None)
+    if branch:
+        try:
+            valid = subprocess.run(["git", "check-ref-format", "refs/heads/" + branch], capture_output=True)
+        except OSError as error:
+            arguments.error(str(error))
+        if branch.startswith("-") or branch == "HEAD" or valid.returncode:
+            arguments.error(f"invalid branch: {branch}")
+    elif branch is not None:
+        arguments.error("invalid branch: empty name")
+    registry = Registry()
+    try:
+        if args.command == "check":
+            return check(args, registry)
+        if args.command == "list":
+            with registry.locked() as records:
+                rows = [r for _, r in sorted(records.items()) if not args.owner or r["owner"] == args.owner]
+            if args.json:
+                print(json.dumps(rows, indent=2))
+            else:
+                for record in rows:
+                    print(f"{record['subject']} {record['owner'] or 'free'} "
+                          f"what={record['what'] or '-'} since={record['since'] or '-'} "
+                          f"age={age(record['since']) if record['since'] else '-'} "
+                          f"lends={','.join(record['lends']) or '-'} "
+                          f"waiters={','.join(w['owner'] for w in record['waiters']) or '-'}")
+            return 0
+        if args.subjects:
+            catalog = Catalog(args.fabrig, "HEAD")
+            unknown = [subject for subject in args.subjects if not catalog.valid(subject)]
+            if unknown:
+                raise ValueError("unknown subject: " + ", ".join(unknown))
+        return mutate(args, registry)
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        print(f"lease: {error}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
