@@ -189,7 +189,7 @@ class FleetSync2Test(fixture.FleetTest):
         self.assertIn(["--user", "enable", "--now", "--no-reload", "status-page.timer"], self.calls())
         before = self.calls()
         self.sync()
-        self.assertEqual(self.calls()[len(before):], [["--user", "show", "--property=Version"]] + [["--user", "is-active", "--quiet", name]
+        self.assertEqual(self.calls()[len(before):], [["--user", "show", "-p", "NeedDaemonReload", *sorted(self.state()["managed_units"])]] + [["--user", "is-active", "--quiet", name]
                          for name in sorted(("fleet-sync.timer", "record-collect-session.timer", "pipeline-watch.timer", "status-page.timer"))])
 
     def test_preview_first_run_renders_real_home_without_deployment(self):

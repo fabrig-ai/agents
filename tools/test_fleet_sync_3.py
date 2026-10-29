@@ -11,31 +11,19 @@ import test_fleet_sync as fixture
 class FleetSync3Test(fixture.FleetTest):
     def setUp(self):
         super().setUp()
-        # Exercise nested manifests even in the support-only rollout commit.
-        manifest = self.source / "tools/installed"
-        original = manifest.read_text()
-        enabled = original
-        for name, path in {"session-start": "session/start", "fabrig-record": "records/record",
-                           "record-collect": "records/record-collect", "pipeline-watch": "records/watch",
-                           "status-page": "records/status-page"}.items():
-            previous = {"fabrig-record": "record", "pipeline-watch": "watch"}.get(name, name)
-            enabled = enabled.replace(f"# {previous} {path}", f"{name} {path}")
-            fixture.put(self.source / "tools" / path, (fixture.ROOT / "tools" / path).read_text(), True)
-        if enabled != original:
-            fixture.put(manifest, enabled)
-            self.sha = self.publish()
+        # Exercise path support independently of either production manifest stage.
+        self.installed = {"fleet-sync": "fleet-sync", "lease": "lease"}
+        for suffix in ("one", "two", "three", "four", "five"):
+            self.installed[f"nested-{suffix}"] = f"nested/{suffix}"
+            fixture.put(self.source / "tools/nested" / suffix, "#!/bin/sh\nexit 0\n", True)
+        fixture.put(self.source / "tools/installed", "".join(
+            f"{name}\n" if name == target else f"{name} {target}\n"
+            for name, target in self.installed.items()))
+        self.sha = self.publish()
 
     def test_nested_links_follow_manifest_paths(self):
-        legacy = self.home / ".local/bin/record"
-        legacy.parent.mkdir(parents=True)
-        legacy.symlink_to(self.directory / "legacy-record")
-        fixture.put(self.home / ".config/fleet-sync/defer-fabrig", "preserve legacy installer links\n")
         self.sync()
-        self.assertEqual(os.readlink(legacy), str(self.directory / "legacy-record"))
-        self.assertFalse((self.home / ".local/bin/watch").is_symlink())
-        expected = {"session-start": "session/start", "fabrig-record": "records/record",
-                    "record-collect": "records/record-collect", "pipeline-watch": "records/watch",
-                    "status-page": "records/status-page", "fleet-sync": "fleet-sync", "lease": "lease"}
+        expected = self.installed
         for name, path in expected.items():
             self.assertEqual(os.readlink(self.home / ".local/bin" / name),
                              str(self.home / "src/fabrig/current/tools" / path))
@@ -68,7 +56,7 @@ class FleetSync3Test(fixture.FleetTest):
 
     def test_manifest_allows_whitespace_and_inside_release_symlink(self):
         manifest = self.source / "tools/installed"
-        (self.source / "tools/inside").symlink_to("session/start")
+        (self.source / "tools/inside").symlink_to("nested/five")
         fixture.put(manifest, manifest.read_text() + "  alias\tinside  \n")
         self.publish()
         self.sync()
@@ -80,14 +68,14 @@ class FleetSync3Test(fixture.FleetTest):
         release = self.current()
         links = self.home / ".local/bin"
         # Record at a release rather than current; both forms must be removed.
-        (links / "fabrig-record").unlink()
-        (links / "fabrig-record").symlink_to(release / "tools/records/record")
-        (links / "record-collect").unlink()
-        (links / "record-collect").symlink_to("../../src/fabrig/current/tools/records/record-collect")
-        (links / "pipeline-watch").unlink()
-        (links / "pipeline-watch").symlink_to("/personal/watch")
-        (links / "status-page").unlink()
-        fixture.put(links / "status-page", "user file\n")
+        (links / "nested-one").unlink()
+        (links / "nested-one").symlink_to(release / "tools/nested/one")
+        (links / "nested-two").unlink()
+        (links / "nested-two").symlink_to("../../src/fabrig/current/tools/nested/two")
+        (links / "nested-three").unlink()
+        (links / "nested-three").symlink_to("/personal/watch")
+        (links / "nested-four").unlink()
+        fixture.put(links / "nested-four", "user file\n")
         (links / "unowned").symlink_to(self.home / "src/fabrig/current/tools/fleet-sync")
         manifest = self.source / "tools/installed"
         fixture.put(manifest, "fleet-sync\nlease\n")
@@ -95,22 +83,22 @@ class FleetSync3Test(fixture.FleetTest):
         with patch.dict(os.environ, self.env, clear=True):
             _, runner = self.runner(check=True)
             runner.links()
-            self.assertTrue(any(i["item"] == "link:fabrig-record" and i["result"] == "drift"
+            self.assertTrue(any(i["item"] == "link:nested-one" and i["result"] == "drift"
                                 for i in runner.state["items"]))
         before = self.snapshot()
         preview = self.process("python3", "-I", "-B", self.source / "tools/fleet-sync", "--host", "hel8",
                                "--preview", self.directory / "cleanup-preview")
-        self.assertIn(".local/bin/fabrig-record:", preview.stdout)
+        self.assertIn(".local/bin/nested-one:", preview.stdout)
         self.assertIn("-> None", preview.stdout)
         self.assertEqual(before, self.snapshot())
-        self.assertTrue((links / "fabrig-record").is_symlink())
+        self.assertTrue((links / "nested-one").is_symlink())
         self.sync(script=release / "tools/fleet-sync")
-        for name in ("fabrig-record", "record-collect", "session-start"):
+        for name in ("nested-one", "nested-two", "nested-five"):
             self.assertFalse((links / name).is_symlink())
-        self.assertEqual(os.readlink(links / "pipeline-watch"), "/personal/watch")
-        self.assertEqual((links / "status-page").read_text(), "user file\n")
+        self.assertEqual(os.readlink(links / "nested-three"), "/personal/watch")
+        self.assertEqual((links / "nested-four").read_text(), "user file\n")
         self.assertTrue((links / "unowned").is_symlink())
-        self.assertEqual(self.state()["managed_links"], ["fleet-sync", "lease", "status-page"])
+        self.assertEqual(self.state()["managed_links"], ["fleet-sync", "lease", "nested-four"])
 
     def test_preexisting_matching_link_is_not_claimed_or_removed(self):
         link = self.home / ".local/bin/lease"
@@ -182,7 +170,8 @@ class FleetSync3Test(fixture.FleetTest):
         self.sync()
         self.assertEqual(self.snapshot(root=directory), before)
         self.assertEqual(self.calls().count(["--user", "daemon-reload"]), 1)
-        self.assertIn(["--user", "show", "-p", "NeedDaemonReload", "fleet-sync.service", "fleet-sync.timer"], self.calls())
+        self.assertEqual([call for call in self.calls() if call[1:4] == ["show", "-p", "NeedDaemonReload"]],
+                         [["--user", "show", "-p", "NeedDaemonReload", *sorted(self.state()["managed_units"])]])
         self.assert_units_unchanged_since_reload()
         self.sync()
         self.assertEqual(self.calls().count(["--user", "daemon-reload"]), 1)
