@@ -468,6 +468,7 @@ class Pquota:
         checks = self.fence()
         for ok, name, detail in checks:
             print(f'{"PASS" if ok else "FAIL"} fence {name}: {detail}')
+        self.last_fence_checks = [dict(name=name, pass_result=ok, detail=detail) for ok, name, detail in checks]
         if not all(row[0] for row in checks):
             raise ValueError('fence refused; no boot changes/reboot authorized')
         return self.claims()
@@ -741,7 +742,7 @@ class Pquota:
         state = dict(version=1, host=self.host, phase='preparing', prepared_at=now(),
             boot_id=proof['boot_id'], before_cmdline=self.read('/proc/cmdline').strip(),
             before_mount=self.mount(), grub_before=self.digest(), default_before=safety['default'],
-            proof=proof, occupancy=occupancy, policy=self.policy, central=self.central)
+            proof=proof, occupancy=occupancy, policy=self.policy, central=self.central, fence=self.last_fence_checks)
         self.save(state)
         self.write(DROPIN, CONTENT, 0o644)
         self.run('update-grub')
@@ -810,6 +811,8 @@ class Pquota:
         state['proof']['services']['owner_restarts'] = sorted(set(state['proof']['services']['owner_restarts']) | set(latest['services']['owner_restarts']))
         self.save(state)
         self.require_fence_unchanged(state)
+        state.update(reboot_fence=self.last_fence_checks, reboot_requested_at=now())
+        self.save(state)
         self.run('systemctl', 'reboot')
 
     def verify(self):
@@ -844,7 +847,7 @@ class Pquota:
             check('project inheritance and EDQUOT scratch probe', self.probe)
         else:
             check('project inheritance and EDQUOT scratch probe', lambda: False)
-        state['verification'] = dict(at=now(), boot_id=self.read(BOOT).strip(), checks=checks)
+        state['verification'] = dict(at=now(), boot_id=self.read(BOOT).strip(), checks=checks, fence=self.last_fence_checks)
         self.save(state)
         status = 'PASS' if all(row['pass_result'] for row in checks) else 'FAIL'
         print(status + ' owner restart list (starts none; wait for accepted verification): ' + ', '.join(state['proof']['services']['owner_restarts']))

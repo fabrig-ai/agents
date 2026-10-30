@@ -441,7 +441,9 @@ grubenv, with digests/modes/ownership in a manifest. Retries validate and never
 replace this backup. A changed/corrupt original or incomplete transaction
 refuses for investigation. Prepared retries preserve original evidence.
 
-Prepare and reboot recheck the full fence immediately. The stored policy is
+Prepare and reboot recheck the full fence immediately. State.json records the
+named fence outcomes at prepare, reboot request and verification, including
+heavy, scope, submitter and non-claim writer drainage. The stored policy is
 used by reboot/verify; supplied overrides must match it, as must the central
 route. Reboot also proves the same boot/config and claim incarnations as prepare.
 The marker is extra ops evidence: **full central occupancy**, rather than zero
