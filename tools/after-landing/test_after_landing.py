@@ -29,6 +29,7 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import re
 import sys
 import tempfile
 import time
@@ -103,7 +104,8 @@ elif name == 'run':
     tree, tier = sys.argv[1:3]
     profile = tier + '-' + tree
     rerun = '-E' in sys.argv
-    pair = scenario['pairs'][profile]
+    head = __import__('subprocess').check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+    pair = scenario.get('commits', {}).get(head, {}).get(profile, scenario['pairs'][profile])
     chosen = pair.get('rerun', pair.get('main', [])) if rerun else pair.get('main', [])
     override = {}
     log(dict(tool='tiers', profile=profile, rerun=rerun, args=sys.argv[1:],
@@ -112,7 +114,21 @@ elif name == 'run':
              lease_held=bool(os.fstat(int(os.environ['TEST_LEASE_FD']))) if 'TEST_LEASE_FD' in os.environ else None))
     if rerun:
         expression = sys.argv[sys.argv.index('-E') + 1]
-        binary, separator, test = expression.removeprefix('binary_id(=').partition(') & test(=')
+        if expression.startswith('('):
+            identities = re.findall(r'\(binary_id\(=([^()]+)\) & test\(=([^()]+)\)\)', expression)
+            if not identities or expression != ' | '.join(f'(binary_id(={b}) & test(={t}))' for b, t in identities):
+                sys.exit(94)
+            chosen = [row for row in pair.get('main', [])
+                      if (row.get('binary', 'pkg::qa'), row.get('test', 'one')) in identities]
+            if len(identities) == 1 and pair.get('reruns'):
+                override = pair['reruns'][identities[0][1]]
+                chosen = override['tests']
+            if 'selection' in pair:
+                chosen = pair['selection']
+            binary, test = identities[0]
+            separator = True
+        else:
+            binary, separator, test = expression.removeprefix('binary_id(=').partition(') & test(=')
         test = test.removesuffix(')')
         # Nextest 0.9.148 treats quotes literally, so quoted binary IDs miss.
         if binary.startswith('"') or test.startswith('"'):
@@ -120,7 +136,7 @@ elif name == 'run':
             sys.exit(94)
         if not separator:
             sys.exit(94)
-        if pair.get('reruns'):
+        if not expression.startswith('(') and pair.get('reruns'):
             override = pair['reruns'][test]
             chosen = override['tests']
     if pair.get('wait'):
@@ -146,7 +162,8 @@ elif name == 'run':
             elif result == 'skip':
                 ET.SubElement(case, 'skipped')
     write(target, ET.tostring(suites, encoding='unicode'))
-    code = override.get('code', pair.get('rerun_code' if rerun else 'code', 100 if any(row.get('result') == 'fail' for row in chosen) else 0))
+    code_key = 'code' if rerun and expression.startswith('(') else 'rerun_code' if rerun else 'code'
+    code = override.get('code', pair.get(code_key, 100 if any(row.get('result') == 'fail' for row in chosen) else 0))
     sys.exit(code)
 '''
 
@@ -219,7 +236,7 @@ def now():
     if invocation['command'][1] == 'skein' and (Path.home() / 'expire-skein').exists():
         return invocation['bound'] + 1
     return 0
-app.time = SimpleNamespace(monotonic=now, sleep=time.sleep)
+app.time = SimpleNamespace(monotonic=now, sleep=time.sleep, time=time.time)
 app.atomic(path.parent / 'started', '')
 sys.exit(app.supervise(path, int(sys.argv[3])))
 """
@@ -581,9 +598,10 @@ class TrimTests(Sandbox):
     def test_existing_state_loads_without_migration(self):
         self.passing_history()
         old = json.loads(self.runner.path.read_text())
-        for key in ('last_trim', 'trim_pending', 'trim_fault_episode'):
+        for key in ('last_trim', 'trim_pending', 'trim_fault_episode', 'bisect'):
             old.pop(key)
         old['hour'].pop('trim_bytes')
+        old['hour'].pop('bisect_seconds')
         app.write_json(self.runner.path, old)
         before = self.runner.path.read_bytes()
         self.runner = app.Runner(self.args)
@@ -784,6 +802,8 @@ class VerdictTests(Sandbox):
         self.poll_run()
         self.assertEqual({c['args'][3] for c in self.calls('post')}, {'s/qa@hel8', 's/dynamic-memory@hel8'})
         for call in self.calls('post'):
+            if 'bisection' in call['body']:
+                continue
             self.assertIn('several suspects', call['body'])
             self.assertIn('baseline suspect', call['body'])
         self.assertTrue(self.events('after-landing-test')[-1]['branch'].startswith('ready/'))
@@ -1018,6 +1038,9 @@ class ReviewTests(Sandbox):
         logs = [str(self.home / ('log-' + str(n) + '-' + 'x'*100)) for n in range(1000)]
         alerts = [dict(identity=['qa-skein', 'pkg::qa', 'test-' + str(n) + 'x'*500],
                        error='failure ' + 'x'*400, logs=logs[:2], id='test-' + str(n)) for n in range(100)]
+        for alert in alerts:
+            key = json.dumps(alert['identity'], separators=(',', ':'))
+            active['baseline'][key] = dict(result='pass', commit=self.base)
         active['pairs']['qa-skein'] = dict(status='ran', selected=1000, executed=1000, failed=1000,
                                          red=['test-' + str(n) for n in range(1000)], new=alerts, logs=logs, wall=1)
         event = self.runner.event('after-landing-test', 'large-test', commit=active['tip'],
@@ -1210,6 +1233,465 @@ class ReviewTests(Sandbox):
         active['selections']['qa-skein'] = [key, 'missing identity']
         with self.assertRaises(app.Fault):
             self.runner.pair('qa-skein')
+
+
+class BisectionTests(Sandbox):
+    def key(self, name='one', profile='qa-skein'):
+        return json.dumps([profile, 'pkg::qa', name], separators=(',', ':'))
+
+    def setup_interval(self, count=4, names=('one',)):
+        self.passing_history()
+        for name in names:
+            self.runner.state['tests'][self.key(name)] = dict(result='pass', commit=self.base)
+        self.runner.save()
+        commits = [self.advance('skein' if i % 2 == 0 else 'q-jig')[0] for i in range(count)]
+        self.scenario['pairs']['qa-skein'] = dict(
+            main=[dict(test=name, result='fail') for name in names],
+            reruns={name: dict(tests=[dict(test=name, result='fail')]) for name in names})
+        self.scenario['commits'] = {self.base: {'qa-skein': dict(main=[dict(test=name) for name in names])}}
+        self.save_scenario()
+        return commits
+
+    def at(self, commit, rows=None, **values):
+        self.scenario.setdefault('commits', {}).setdefault(commit, {})['qa-skein'] = dict(
+            main=rows if rows is not None else [dict(test='one')], **values)
+        self.save_scenario()
+
+    def pending(self):
+        with mock.patch.object(self.runner, 'bisect'):
+            self.poll_run()
+        self.assertIsNotNone(self.runner.state['bisect'])
+        return self.runner.state['bisect']
+
+    def bisect_events(self):
+        return self.events('after-landing-bisect')
+
+    def probe_commits(self, event):
+        return [probe['commit'] for probe in json.loads(Path(event['details']).read_text())['probes']]
+
+    def test_interval_uses_identity_good_older_than_cursor(self):
+        commits = self.setup_interval(4)
+        self.runner.state['cursor'] = commits[2]
+        self.runner.state['seen'] = commits[2]
+        self.runner.save()
+        phase = self.pending()
+        self.assertEqual(phase['groups'][0]['GOOD'], self.base)
+        self.assertEqual(phase['groups'][0]['candidates'], commits)
+        self.assertEqual(phase['deadline'] - phase['started'], 2700)
+        saved = json.loads(self.runner.path.read_text())
+        self.assertEqual(saved['version'], 2)
+        # The pre-change Runner rejects this before any polling or checkout.
+        self.assertNotEqual(saved['version'], 1)
+        tests, cursor, verdict = saved['tests'], saved['cursor'], saved['last_run']
+        self.runner.run()
+        self.assertEqual(self.runner.state['tests'], tests)
+        self.assertEqual(self.runner.state['cursor'], cursor)
+        self.assertEqual(self.runner.state['last_run'], verdict)
+        self.runner.deliver()
+        self.assertEqual(self.bisect_events()[0]['candidate_count'], 4)
+
+    def test_single_commit_interval_has_no_bisection(self):
+        self.setup_interval(1)
+        self.poll_run()
+        self.assertIsNone(self.runner.state['bisect'])
+        self.assertFalse(self.bisect_events())
+        self.assertEqual(len(self.calls('tiers')), 2)
+        self.assertEqual(self.runner.state['version'], 1)
+
+    def test_branch_merge_culprit_is_proven_with_passing_parent(self):
+        commits = self.setup_interval(4)
+        self.at(commits[0])
+        self.poll_run()
+        event, = self.bisect_events()
+        self.assertEqual(event['result'], 'culprit proven')
+        self.assertEqual(event['culprit_commit'], commits[1])
+        self.assertEqual(event['commit'], commits[1])
+        self.assertTrue(event['branch'].startswith('ready/q-jig/'))
+        self.assertEqual(self.probe_commits(event), [self.base, commits[1], commits[0]])
+        self.assertEqual(event['id'], commits[-1] + ':1:bisect:1')
+        for row in self.calls('tiers')[2:]:
+            self.assertTrue(row['args'][-1].startswith('(binary_id(=pkg::qa)'))
+            self.assertEqual(row['heavy_class'], 'background')
+        self.assertEqual(len(self.calls('trim')), 2)
+        self.assertTrue(all(post['body'].count('\n') < 14 for post in self.calls('post')))
+        records_at = [i for i, row in enumerate(self.calls()) if row['tool'] == 'record' and 'after-landing-bisect' in row['body']]
+        posts_at = [i for i, row in enumerate(self.calls()) if row['tool'] == 'post' and 'bisection results' in row['body']]
+        self.assertLess(max(records_at), min(posts_at))
+
+    def test_tip_culprit_is_probed_and_proven(self):
+        commits = self.setup_interval(2)
+        self.at(commits[0])
+        self.poll_run()
+        event, = self.bisect_events()
+        self.assertEqual(event['culprit_commit'], commits[-1])
+        self.assertEqual(self.probe_commits(event), [self.base, commits[0], commits[1]])
+
+    def test_other_culprit_tells_ops(self):
+        self.passing_history()
+        culprit, _ = self.advance(subject='direct regression')
+        self.advance('skein')
+        self.scenario['pairs']['qa-skein'] = dict(main=[dict(test='one', result='fail')])
+        self.at(self.base)
+        self.poll_run()
+        event, = self.bisect_events()
+        self.assertEqual(event['result'], 'culprit proven')
+        self.assertEqual(event['culprit_commit'], culprit)
+        self.assertEqual(event['culprit']['subject'], 'direct regression')
+        self.assertNotIn('branch', event)
+        posts = [row for row in self.calls('post') if 'bisection results' in row['body']]
+        self.assertEqual({row['args'][3] for row in posts}, {'ops@hel8', 's/dynamic-memory@hel8'})
+
+    def test_older_culprit_adds_missing_coordinator(self):
+        commits = self.setup_interval(3)
+        self.runner.state.update(cursor=commits[1], seen=commits[1])
+        self.runner.save()
+        self.at(commits[0])
+        self.poll_run()
+        self.assertEqual(self.bisect_events()[0]['culprit_commit'], commits[1])
+        posts = [row for row in self.calls('post') if 'bisection results' in row['body']]
+        self.assertEqual({row['args'][3] for row in posts}, {'s/dynamic-memory@hel8', 's/qa@hel8'})
+
+    def test_good_failing_now_is_inconclusive(self):
+        self.setup_interval()
+        self.at(self.base, [dict(test='one', result='fail')])
+        self.poll_run()
+        event, = self.bisect_events()
+        self.assertEqual(event['result'], 'inconclusive')
+        self.assertIsNone(event['culprit_commit'])
+        self.assertEqual(self.probe_commits(event), [self.base])
+
+    def test_unbuildable_middle_alternates_older_then_newer(self):
+        commits = self.setup_interval(6)
+        self.at(commits[2], code=101)
+        self.at(commits[1], code=101)
+        self.at(commits[3], code=101)
+        self.at(commits[0])
+        self.poll_run()
+        event, = self.bisect_events()
+        self.assertEqual(self.probe_commits(event)[:5], [self.base, commits[2], commits[1], commits[3], commits[0]])
+        self.assertEqual(event['result'], 'range')
+        probes = json.loads(Path(event['details']).read_text())['probes']
+        self.assertEqual(probes[1]['outcome'], 'unbuildable')
+
+    def test_nextest_build_failed_101_all_unbuildable_gives_range(self):
+        # Pinned to nextest_metadata::NextestExitCode::BUILD_FAILED:
+        # https://nexte.st/rustdoc/src/nextest_metadata/exit_codes.rs
+        self.assertEqual(app.BUILD_FAILED, 101)
+        commits = self.setup_interval(4)
+        for commit in [self.base, *commits[:-1]]:
+            self.at(commit, code=101)
+        self.poll_run()
+        event, = self.bisect_events()
+        self.assertEqual(event['result'], 'range')
+        self.assertEqual(event['good'], self.base)
+        self.assertEqual(event['bad'], commits[-1])
+        self.assertIsNone(event['culprit_commit'])
+        self.assertFalse([post for post in self.calls('post') if post['args'][3] == 'ops@hel8'])
+
+    def test_flake_and_skipped_confirmation_are_unknown(self):
+        commits = self.setup_interval(3, ('one', 'two'))
+        # Both fail the group probe and are rerun alone. One passes, the other
+        # is selected but skipped; neither is a confirmed bad.
+        rows = [dict(test=name, result='fail') for name in ('one', 'two')]
+        reruns = {'one': dict(tests=[dict(test='one')]),
+                  'two': dict(tests=[dict(test='two', result='skip')])}
+        self.at(commits[0], rows, reruns=reruns)
+        self.at(commits[1], [dict(test=name, result='skip') for name in ('one', 'two')])
+        self.poll_run()
+        event, = self.bisect_events()
+        self.assertEqual(event['result'], 'range')
+        probes = json.loads(Path(event['details']).read_text())['probes']
+        self.assertEqual([probe['outcome'] for probe in probes], ['good', 'unknown', 'unknown'])
+        group_call = self.calls('tiers')[3]
+        self.assertIn(') | (binary_id', group_call['args'][-1])
+        # Each failed group member is confirmed with its own exact filter.
+        expressions = [row['args'][-1] for row in self.calls('tiers') if '-E' in row['args']]
+        self.assertIn('(binary_id(=pkg::qa) & test(=two))', expressions)
+
+    def test_group_splits_good_bad_unknown_with_stable_order(self):
+        commits = self.setup_interval(4, ('one', 'two', 'three'))
+        self.at(commits[1], [dict(test='one', result='fail'), dict(test='two'), dict(test='three', result='skip')])
+        self.at(commits[0], [dict(test=name) for name in ('one', 'two', 'three')])
+        self.at(commits[2], [dict(test='one', result='fail'), dict(test='two', result='fail'), dict(test='three', result='skip')])
+        self.poll_run()
+        events = self.bisect_events()
+        self.assertEqual([event['identities'][0][2] for event in events], ['one', 'two', 'three'])
+        self.assertEqual([event['result'] for event in events], ['culprit proven', 'culprit proven', 'range'])
+        self.assertEqual([event['id'] for event in events], [commits[-1] + f':1:bisect:{n}' for n in (1, 2, 3)])
+        self.assertEqual([event['culprit_commit'] for event in events[:2]], [commits[1], commits[2]])
+
+    def test_selection_fault_ends_all_groups_and_posts_ops_once(self):
+        commits = self.setup_interval(4, ('one', 'two'))
+        self.at(commits[1], selection=[dict(test='unexpected')])
+        phase = self.pending()
+        self.runner.run()
+        self.runner.deliver()
+        self.assertEqual({event['result'] for event in self.bisect_events()}, {'inconclusive'})
+        self.assertEqual(phase['count'], 2)
+        self.assertEqual(len([post for post in self.calls('post') if post['args'][3] == 'ops@hel8']), 1)
+        self.runner = app.Runner(self.args)
+        self.runner.poll()
+        self.assertEqual(len([post for post in self.calls('post') if post['args'][3] == 'ops@hel8']), 1)
+
+    def test_tiers_fault_keeps_completed_group_and_stops_unresolved(self):
+        commits = self.setup_interval(4, ('one', 'two'))
+        self.at(commits[1], [dict(test='one', result='fail'), dict(test='two')])
+        self.at(commits[0], [dict(test='one')])
+        self.at(commits[2], code=2)
+        self.poll_run()
+        self.assertEqual([event['result'] for event in self.bisect_events()], ['culprit proven', 'inconclusive'])
+        self.assertEqual(len([post for post in self.calls('post') if post['args'][3] == 'ops@hel8']), 1)
+
+    def test_invocation_budget_includes_confirmations_across_groups(self):
+        self.setup_interval(4, ('one', 'two'))
+        phase = self.pending()
+        phase['count'] = 14
+        # GOOD group launch is #15; then the first failure's confirmation is
+        # #17 and must never launch after the middle group invocation #16.
+        self.runner.save()
+        before = len(self.calls('tiers'))
+        self.runner.run()
+        self.runner.deliver()
+        self.assertEqual(phase['count'], 16)
+        self.assertEqual(len(self.calls('tiers')) - before, 2)
+        event, = self.bisect_events()
+        self.assertEqual(event['result'], 'range')
+        self.assertEqual(self.probe_commits(event), [self.base])
+        self.assertFalse([post for post in self.calls('post') if post['args'][3] == 'ops@hel8'])
+
+    def test_deadline_preserves_narrowed_range_and_bounds_invocation(self):
+        commits = self.setup_interval(6)
+        self.at(commits[2])
+        phase = self.pending()
+        real_save = self.runner.save_bisect_probe
+        def expire_after_middle(index, commit, outcomes, logs):
+            real_save(index, commit, outcomes, logs)
+            if commit == commits[2]:
+                phase['deadline'] = time.time() - 1
+                self.runner.save()
+        phase['deadline'] = time.time() + 120
+        with mock.patch.object(self.runner, 'save_bisect_probe', side_effect=expire_after_middle):
+            self.runner.run()
+        self.runner.deliver()
+        event, = self.bisect_events()
+        self.assertEqual(event['result'], 'range')
+        self.assertEqual(event['good'], commits[2])
+        self.assertEqual(event['bad'], commits[-1])
+        for path in self.runner.directory.glob('run-*/spec.json'):
+            invocation = json.loads(path.read_text())
+            if invocation['command'][-1].startswith('('):
+                self.assertGreater(invocation['bound'], 0)
+                self.assertLessEqual(invocation['bound'], 120)
+        self.assertFalse([post for post in self.calls('post') if post['args'][3] == 'ops@hel8'])
+
+    def test_restart_unknown_heavy_drains_then_redoes_whole_probe(self):
+        self.setup_interval(4)
+        phase = self.pending()
+        artifact = self.home / 'orphan-bisect'
+        artifact.mkdir()
+        app.atomic(artifact / 'output.log', 'heavy: queued task 1 in build token ' + 'a' * 32 + '\n')
+        phase['invocation'] = dict(result=str(artifact / 'result.json'), log=str(artifact / 'output.log'),
+                                   waiting=str(artifact / 'waiting.json'))
+        phase['probe'] = dict(index=0, commit=self.base)
+        phase['count'] = 1
+        self.runner.save()
+        before = len(self.calls('tiers'))
+        self.runner = app.Runner(self.args)
+        with mock.patch.object(app, 'git', wraps=app.git) as git:
+            self.runner.run()
+            self.assertFalse(git.called)
+        self.assertEqual(len(self.calls('tiers')), before)
+        saved = json.loads(self.runner.path.read_text())['bisect']
+        self.assertEqual(saved['invocation']['heavy_tokens'], ['a' * 32])
+        self.assertEqual(saved['deadline'], phase['deadline'])
+        app.atomic(self.home / 'allow-end', '')
+        self.runner = app.Runner(self.args)
+        self.runner.run()
+        self.runner.deliver()
+        self.assertEqual(self.calls('tiers')[before]['head'], self.base)
+        self.assertTrue(self.calls('heavy'))
+        self.assertEqual(self.bisect_events()[0]['result'], 'culprit proven')
+
+    def test_restart_after_saved_probe_keeps_outcome_and_absolute_deadline(self):
+        class Crash(BaseException):
+            pass
+        self.setup_interval(4)
+        phase = self.pending()
+        deadline = phase['deadline']
+        real_save = self.runner.save_bisect_probe
+        def crash_after_saved(*args):
+            real_save(*args)
+            raise Crash()
+        with mock.patch.object(self.runner, 'save_bisect_probe', side_effect=crash_after_saved):
+            with self.assertRaises(Crash):
+                self.runner.run()
+        self.runner = app.Runner(self.args)
+        self.assertEqual(self.runner.state['bisect']['deadline'], deadline)
+        self.assertEqual(self.runner.state['bisect']['count'], 1)
+        self.assertEqual(self.runner.state['bisect']['groups'][0]['probes'][0]['outcome'], 'good')
+        self.runner.run()
+        self.runner.deliver()
+        probes = self.probe_commits(self.bisect_events()[0])
+        self.assertEqual(probes.count(self.base), 1)
+        self.assertEqual(len([call for call in self.calls('tiers') if call['head'] == self.base]), 1)
+
+    def test_final_events_posts_trim_atomic_and_replay_stable(self):
+        class Crash(BaseException):
+            pass
+        self.setup_interval(4)
+        self.scenario.update(record_code=1, post_code=1)
+        self.save_scenario()
+        self.pending()
+        real_save = self.runner.save
+        def crash_after_completed():
+            real_save()
+            state = self.runner.state
+            if state['bisect'] is None and any(item['id'].endswith(':bisect') for item in state['outbox']):
+                raise Crash()
+        with mock.patch.object(self.runner, 'save', side_effect=crash_after_completed):
+            with self.assertRaises(Crash):
+                self.runner.run()
+        snapshot = json.loads(self.runner.path.read_text())
+        event = snapshot['outbox'][-1]['records'][0]
+        self.assertTrue(snapshot['trim_pending']['id'].endswith(':bisect'))
+        self.assertEqual(len(self.calls('trim')), 1)
+        self.runner = app.Runner(self.args)
+        self.runner.run()
+        self.runner.deliver()
+        self.assertEqual(len(self.calls('trim')), 2)
+        self.assertEqual(self.runner.state['outbox'][-1]['records'][0], event)
+        self.scenario['record_code'] = 0
+        self.save_scenario()
+        self.runner = app.Runner(self.args)
+        self.runner.poll()
+        bodies = [post['body'] for post in self.runner.state['outbox'][-1]['posts']]
+        self.assertTrue(all(record == event for record in self.bisect_events()))
+        self.scenario['post_code'] = 3
+        self.save_scenario()
+        self.runner = app.Runner(self.args)
+        self.runner.poll()
+        self.assertEqual(self.runner.state['outbox'], [])
+        self.assertEqual([row['body'] for row in self.calls('post') if 'bisection results' in row['body']], [body + '\n' for body in bodies])
+
+    def test_bisect_post_waits_for_run_without_holding_slot(self):
+        self.setup_interval(4)
+        self.scenario['post_code'] = 1
+        self.save_scenario()
+        self.poll_run()
+        self.assertIsNone(self.runner.state['bisect'])
+        self.assertIsNone(self.runner.state['active'])
+        self.assertIsNone(self.runner.state['trim_pending'])
+        self.assertFalse([row for row in self.calls('post') if 'bisection results' in row['body']])
+        self.assertTrue(self.bisect_events())  # Records may proceed independently.
+        self.advance('skein')
+        self.poll_run()
+        self.assertEqual(self.runner.state['last_run']['verdict'], 'red')
+        self.scenario['post_code'] = 0
+        self.save_scenario()
+        self.runner = app.Runner(self.args)
+        self.runner.poll()
+        calls = self.calls('post')
+        first_bisect = next(i for i, row in enumerate(calls) if 'bisection results' in row['body'])
+        self.assertTrue(all('bisection results' not in row['body'] for row in calls[:first_bisect]))
+        self.assertEqual(self.runner.state['outbox'], [])
+
+    def test_unresolved_run_routes_follow_bisect_after_registry_recovers(self):
+        self.setup_interval(4)
+        self.scenario['registry_fault'] = True
+        self.save_scenario()
+        self.poll_run()
+        self.assertIsNone(self.runner.state['bisect'])
+        self.assertTrue(self.runner.state['outbox'][-1]['notification']['bisect'])
+        self.scenario['registry_fault'] = False
+        self.save_scenario()
+        self.runner = app.Runner(self.args)
+        self.runner.poll()
+        self.assertFalse(self.runner.state['outbox'])
+        self.assertEqual(len([row for row in self.calls('post') if 'bisection results' in row['body']]), 2)
+
+    def test_hourly_counts_bisection_minutes_and_arriving_tips(self):
+        self.setup_interval(4)
+        phase = self.pending()
+        new, _ = self.advance('skein')
+        self.runner.poll()
+        self.assertEqual(phase['arrived'], [new])
+        phase['started'] -= 120
+        self.runner.save()
+        self.runner.run()
+        self.runner.deliver()
+        self.assertEqual(self.bisect_events()[0]['arrived'], [new])
+        self.runner.state['hour']['start'] -= 3601
+        self.runner.hourly()
+        self.runner.deliver()
+        self.assertTrue(any('bisection minutes: 2.' in row['body'] for row in self.calls('post')))
+
+
+    def test_deadline_cancels_and_drains_before_final_trim(self):
+        self.setup_interval(4)
+        phase = self.pending()
+        phase['deadline'] = time.time() + 60
+        self.runner.save()
+        self.at(self.base, hang=True)
+        before = len(self.calls('tiers'))
+        failures = []
+        def run():
+            try:
+                self.runner.run()
+            except BaseException as error:
+                failures.append(error)
+        worker = threading.Thread(target=run)
+        worker.start()
+        try:
+            def queued():
+                invocation = phase['invocation']
+                return (invocation and (Path(invocation['log']).parent / 'clock-started').exists()
+                        and app.heavy_tokens(invocation['log'])[0])
+            self.wait_for(queued, 'bisection heavy submission', worker)
+            invocation = phase['invocation']
+            self.assertLessEqual(invocation['bound'], 60)
+            self.assertTrue(invocation['deadline_bound'])
+            app.atomic(self.home / 'expire-skein', '')
+            self.wait_for(lambda: self.calls('heavy'), 'bisection cancellation', worker)
+            self.wait_for(lambda: Path(invocation['waiting']).exists(), 'guardian waiting for heavy', worker)
+            self.assertTrue(worker.is_alive())
+            self.assertEqual(len(self.calls('trim')), 1)
+            self.assertEqual(len(self.calls('tiers')) - before, 1)
+            self.assertIsNotNone(self.runner.state['bisect'])
+        finally:
+            app.atomic(self.home / 'allow-end', '')
+            worker.join(timeout=120)
+        self.assertFalse(worker.is_alive())
+        self.assertFalse(failures, failures)
+        self.runner.deliver()
+        self.assertEqual(self.bisect_events()[0]['result'], 'range')
+        self.assertEqual(len(self.calls('trim')), 2)
+        self.assertIsNone(self.runner.state['bisect'])
+
+    def test_distinct_good_commits_and_pairs_form_ordered_groups(self):
+        commits = self.setup_interval(3, ('one', 'two'))
+        self.two()
+        self.runner.state['tests'][self.key('two')] = dict(result='pass', commit=commits[0])
+        self.scenario['pairs']['qa-jig'] = dict(main=[dict(test='one', result='fail')])
+        self.runner.save()
+        self.save_scenario()
+        phase = self.pending()
+        self.assertEqual([group['profile'] for group in phase['groups']], ['qa-skein', 'qa-skein', 'qa-jig'])
+        self.assertEqual({group['GOOD'] for group in phase['groups'][:2]}, {self.base, commits[0]})
+        self.assertTrue(all(len(group['identities']) == 1 for group in phase['groups']))
+
+    def test_large_bisect_event_keeps_result_and_private_probe_details(self):
+        event = self.runner.event('after-landing-bisect', self.base + ':1:bisect:1',
+                                  commit=self.base, tip=self.base, attempt=1, GOOD=self.base,
+                                  candidate_count=4, result='range', culprit_commit=None,
+                                  identities=[['qa-skein', 'binary', 'x' * 20000]],
+                                  probes=[dict(commit=self.base, outcome='unknown')])
+        bounded = self.runner.bounded_event(event)
+        self.assertLess(len(json.dumps(bounded).encode()) + 1, 16384)
+        self.assertEqual(bounded['identities_count'], 1)
+        self.assertEqual(bounded['result'], 'range')
+        detail = Path(bounded['details'])
+        self.assertEqual(detail.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(json.loads(detail.read_text()), event)
 
 
 class ParserTests(unittest.TestCase):

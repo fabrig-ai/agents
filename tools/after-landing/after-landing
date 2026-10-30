@@ -32,6 +32,15 @@ class Fault(Exception):
         self.wall = wall
 
 
+# nextest_metadata::NextestExitCode::BUILD_FAILED, pinned by the offline test.
+# https://nexte.st/rustdoc/src/nextest_metadata/exit_codes.rs
+BUILD_FAILED = 101
+
+
+class BisectBound(Fault):
+    pass
+
+
 def atomic(path, data):
     """Every persistent write is a flushed sibling followed by rename."""
     path = Path(path)
@@ -221,6 +230,9 @@ def supervise(spec_path, inherited_fd):
         if Path(spec['result']).exists():
             return 0
         with open(spec['log'], 'ab', buffering=0) as output:
+            if spec.get('deadline') is not None and time.time() >= spec['deadline']:
+                write_json(spec['result'], dict(code=2, timeout=True, elapsed=0))
+                return 0
             env = dict(os.environ, HEAVY_CLASS='background', PYTHONUNBUFFERED='1')
             # The shim also makes --heavy apply to prerequisites inside tiers/run.
             env['PATH'] = spec['shim'] + os.pathsep + env.get('PATH', '')
@@ -236,7 +248,9 @@ def supervise(spec_path, inherited_fd):
             start = time.monotonic()
             timed_out = False
             while child.poll() is None:
-                if not timed_out and time.monotonic() - start >= spec['bound']:
+                expired = (time.monotonic() - start >= spec['bound'] or
+                           (spec.get('deadline') is not None and time.time() >= spec['deadline']))
+                if not timed_out and expired:
                     # Stop the tier runner, leaving heavy's client able to report
                     # its token/end. The shim's gate closes the submission race.
                     try:
@@ -288,7 +302,7 @@ class Runner:
         self.path = self.directory / 'state.json'
         no_links(self.path)
         self.state = json.loads(self.path.read_text()) if self.path.exists() else initial()
-        if self.state.get('version') != 1:
+        if self.state.get('version') not in (1, 2):
             raise Fault('unsupported state version')
         if self.state['slot'] not in (None, str(args.slot)):
             raise Fault('state belongs to another slot')
@@ -302,6 +316,8 @@ class Runner:
         self.state.setdefault('trim_fault_episode', None)
         self.state.setdefault('last_trim', None)
         self.state['hour'].setdefault('trim_bytes', 0)
+        self.state['hour'].setdefault('bisect_seconds', 0)
+        self.state.setdefault('bisect', None)
         self.next_poll = time.monotonic() + args.poll_interval
 
     def save(self):
@@ -356,7 +372,8 @@ class Runner:
         bounded = {key: event[key] for key in ('id', 'time', 'source', 'host', 'kind')}
         if len(bounded['id'].encode()) > 1024:
             bounded['id'] = 'sha256:' + hashlib.sha256(event['id'].encode()).hexdigest()
-        for key in ('commit', 'attempt', 'verdict', 'state', 'wall'):
+        for key in ('commit', 'attempt', 'verdict', 'state', 'wall', 'tip', 'GOOD',
+                    'candidate_count', 'result', 'culprit_commit', 'good', 'bad'):
             if key in event:
                 bounded[key] = event[key]
         if event.get('branch'):
@@ -368,7 +385,7 @@ class Runner:
             bounded['routing_fault'] = event['routing_fault'][:256]
         if 'identity' in event:
             bounded['identity_preview'] = [part[:256] for part in event['identity']]
-        for key in ('suspects', 'coalesced', 'pairs', 'logs', 'branches'):
+        for key in ('suspects', 'coalesced', 'pairs', 'logs', 'branches', 'identities', 'arrived'):
             if key in event:
                 bounded[key + '_count'] = len(event[key])
         if 'pairs' in event:
@@ -409,6 +426,8 @@ class Runner:
         if not notification or notification['resolved']:
             return None
         self.resolution_attempted.add(group['id'])
+        if notification.get('bisect'):
+            return self.route_bisection(group, notification)
         detail = json.loads(Path(notification['details']).read_text())
         branch_suspects = [suspect for suspect in detail['suspects'] if suspect['kind'] == 'branch']
         try:
@@ -430,7 +449,14 @@ class Runner:
                                                    error=test['error'][:200], logs=test['logs'][:2]))
                          for test in detail['new'][:5]]
             group['posts'].append(dict(to=destination, body='\n'.join(body), delivered=False))
-        notification.update(resolved=True, error=None)
+        notification.update(resolved=True, error=None, destinations=sorted(set(routes.values())))
+        phase = self.state['bisect']
+        if phase and phase['run_id'] == group['id']:
+            phase['run_destinations'] = notification['destinations']
+        for pending in self.state['outbox']:
+            follow = pending.get('notification', {})
+            if follow.get('bisect') and follow['run_id'] == group['id']:
+                follow['run_destinations'] = notification['destinations']
         return None
 
     def deliver(self):
@@ -459,6 +485,8 @@ class Runner:
                     continue
                 item['recorded'] = True
                 self.save()
+            if any(prior['id'] == item.get('after') for prior in self.state['outbox']):
+                continue
             for index, post in enumerate(item['posts']):
                 if post['delivered']:
                     continue
@@ -481,7 +509,8 @@ class Runner:
         self.next_poll = time.monotonic() + self.args.poll_interval
         self.delivery_attempted.clear()
         self.resolution_attempted.clear()
-        self.deliver()
+        if self.state['bisect'] is None:
+            self.deliver()
         if self.state['stopped']:
             return
         git(self.args.slot, 'fetch', '-q', 'origin', 'main')
@@ -497,6 +526,8 @@ class Runner:
                     return
             self.state['queue'].append(dict(tip=tip, suspects=suspects(self.args.slot, previous, tip) if previous else [],
                                              coalesced=[], seen_at=time.time(), attempt=0, pairs={}))
+            if self.state['bisect']:
+                self.state['bisect']['arrived'].append(tip)
             self.state['seen'] = tip
             self.state['hour']['seen'] += 1
             self.save()
@@ -506,15 +537,20 @@ class Runner:
         hour = self.state['hour']
         if time.time() - hour['start'] < 3600:
             return
+        phase = self.state['bisect']
+        if phase:
+            now = time.time()
+            hour['bisect_seconds'] += now - phase.get('accounted_at', phase['started'])
+            phase['accounted_at'] = now
         waiting = self.state['queue'][1:] if self.state['active'] else self.state['queue']
         lag = max(0, time.time() - waiting[0]['seen_at']) if waiting else 0
         identifier = f"coverage:{int(hour['start'])}"
         body = (f'id: {identifier}\npublished tips seen: {hour["seen"]}; runs completed: {hour["completed"]}; '
                 f'tips coalesced: {hour["coalesced"]}; oldest waiting lag seconds: {lag:.0f}; '
-                f'trim bytes freed: {hour["trim_bytes"]}')
+                f'trim bytes freed: {hour["trim_bytes"]}; bisection minutes: {hour["bisect_seconds"] / 60:.1f}')
         for destination in dict.fromkeys([self.args.ops, self.args.coordinator]):
             self.post(identifier + ':' + destination, destination, body)
-        self.state['hour'] = dict(start=time.time(), seen=0, completed=0, coalesced=0, trim_bytes=0)
+        self.state['hour'] = dict(start=time.time(), seen=0, completed=0, coalesced=0, trim_bytes=0, bisect_seconds=0)
         self.save()
 
     def resolve(self, keys):
@@ -562,7 +598,7 @@ class Runner:
             raise Fault(f'route fault: {error}') from error
 
     def prepare(self):
-        if self.state['active']:
+        if self.state['active'] or self.state['bisect']:
             return
         queue = self.state['queue']
         if not queue:
@@ -594,6 +630,10 @@ class Runner:
         result = Path(invocation['result'])
         announced = False
         while not result.exists():
+            tokens, ended = heavy_tokens(invocation['log'])
+            if invocation.get('heavy_tokens') != tokens:
+                invocation['heavy_tokens'] = tokens
+                self.save()
             # The guardian writes the result before dropping its lock. On a
             # restart, a held lock proves the old waiter is still responsible.
             try:
@@ -624,19 +664,25 @@ class Runner:
                 self.poll()
                 self.next_poll = time.monotonic() + self.args.poll_interval
             time.sleep(.05)
+        invocation['heavy_tokens'] = heavy_tokens(invocation['log'])[0]
+        self.save()
         return json.loads(result.read_text())
 
-    def launch(self, profile, binary=None, test=None):
-        active = self.state['active']
+    def launch(self, profile, binary=None, test=None, *, identities=None):
+        phase = self.state['bisect']
+        active = phase if identities is not None else self.state['active']
         existing = active['invocation']
         if existing:
             if self.await_invocation(existing) is None:
                 raise Fault('heavy completion unknown; no next pair allowed')
             active['invocation'] = None
             self.save()
+        if identities is not None and (phase['count'] >= 16 or time.time() >= phase['deadline']):
+            raise BisectBound('bisection invocation budget or deadline reached')
         config = tomllib.loads((self.args.slot / '.config/nextest.toml').read_text())
         table = config['profile'][profile]
         bound = duration(table.get('global-timeout', config['profile'].get('default', {}).get('global-timeout'))) + 1800
+        section_bound = bound
         # Per invocation artifacts stay private and outside the mutable checkout.
         directory = Path(tempfile.mkdtemp(prefix='run-', dir=self.directory))
         xml = directory / 'junit.xml'
@@ -676,13 +722,25 @@ sys.exit(code if code >= 0 else 128 - code)
                 '--', '--config-file', str(nextest)]
         if binary is not None:
             argv += ['-E', exact_filter(binary, test)]
+        if identities is not None:
+            left = phase['deadline'] - time.time()
+            if left <= 0:
+                raise BisectBound('bisection deadline reached during setup')
+            bound = min(section_bound, left)
+            argv += ['-E', ' | '.join('(' + exact_filter(*json.loads(key)[1:]) + ')' for key in identities)]
         invocation = dict(directory=str(self.directory), slot=str(self.args.slot), log=str(directory / 'output.log'),
                           result=str(directory / 'result.json'), waiting=str(directory / 'waiting.json'),
                           shim=str(shim), heavy=self.args.heavy, command=argv, bound=bound,
-                          lease_fds=self.lease_fds, gate=str(gate), blocked=str(blocked), started_at=time.time())
+                          lease_fds=self.lease_fds, gate=str(gate), blocked=str(blocked), started_at=time.time(),
+                          deadline_bound=identities is not None and bound < section_bound,
+                          deadline=phase['deadline'] if identities is not None else None)
         spec = directory / 'spec.json'
         write_json(spec, invocation)
         active['invocation'] = invocation
+        if identities is not None:
+            phase['probe'].setdefault('attempts', []).append(dict(
+                commit=phase['probe']['commit'], identities=identities, log=invocation['log'], junit=str(xml)))
+            phase['count'] += 1
         self.save()
         # Take execution.lock before startup so a restart cannot mistake the
         # guardian's exec/startup gap for a dead waiter. Inherit this descriptor.
@@ -701,7 +759,11 @@ sys.exit(code if code >= 0 else 128 - code)
         self.save()
         logs = dict(log=str(directory / 'output.log'), junit=str(xml), elapsed=result['elapsed'])
         if result['timeout']:
+            if invocation.get('deadline_bound'):
+                raise BisectBound('bisection deadline wall bound passed', logs=[logs['log']], wall=logs['elapsed'])
             raise Fault('pair wall bound passed', logs=[logs['log']], wall=logs['elapsed'])
+        if identities is not None and result['code'] == BUILD_FAILED:
+            return 0, None, logs
         if result['code'] not in (0, 100):
             raise Fault(f'tiers/run exit {result["code"]}', logs=[logs['log']], wall=logs['elapsed'])
         try:
@@ -786,7 +848,8 @@ sys.exit(code if code >= 0 else 128 - code)
     def trim(self):
         pending = self.state['trim_pending']
         active = self.state['active']
-        if pending is None or (active and active['invocation']):
+        phase = self.state['bisect']
+        if pending is None or (active and active['invocation']) or (phase and phase['invocation']):
             return
         # The verdict/outbox and this intent were saved together. Mark the
         # attempt before launch so a restart never repeats an uncertain trim.
@@ -819,6 +882,10 @@ sys.exit(code if code >= 0 else 128 - code)
         self.save()
 
     def run(self):
+        if self.state['bisect']:
+            self.trim()
+            self.bisect()
+            return
         self.trim()
         self.prepare()
         active = self.state['active']
@@ -873,6 +940,11 @@ sys.exit(code if code >= 0 else 128 - code)
                            wall=time.time() - active['started'], routing_fault=routing_error)
         group['records'] = [self.bounded_event(record) for record in [*active['events'].values(), event]]
         self.state['outbox'].append(group)
+        self.state['bisect'] = self.pending_bisection(active, new, group)
+        if self.state['bisect']:
+            # Today's code accepts only version 1, so it stops before polling,
+            # delivery or a checkout rather than ignoring an unfamiliar phase.
+            self.state['version'] = 2
         self.state['tests'].update(active['updates'])
         self.state['last_run'] = dict(id=identifier, verdict=verdict, faulted=faulted)
         item['attempt'] = active['attempt']
@@ -890,7 +962,234 @@ sys.exit(code if code >= 0 else 128 - code)
         # Completion, episode and its undelivered alert are one transaction.
         self.save()
         self.trim()
+        if self.state['bisect']:
+            self.bisect()
         self.deliver()
+
+    def pending_bisection(self, active, new, run_group):
+        groups = []
+        for profile in active['profiles']:
+            by_good = {}
+            for alert in new:
+                if alert['identity'][0] != profile:
+                    continue
+                key = json.dumps(alert['identity'], separators=(',', ':'))
+                good = active['baseline'][key]['commit']
+                by_good.setdefault(good, []).append(key)
+            for good, identities in sorted(by_good.items()):
+                candidates = git(self.args.slot, 'rev-list', '--first-parent', '--reverse',
+                                 f'{good}..{active["tip"]}').splitlines()
+                if len(candidates) <= 1:
+                    continue
+                # The saved pass must be on TIP's first-parent chain.
+                parent = git(self.args.slot, 'rev-parse', candidates[0] + '^1')
+                if parent != good:
+                    raise Fault('bisection GOOD is not a first-parent ancestor')
+                groups.append(dict(profile=profile, identities=sorted(identities), GOOD=good,
+                                   candidates=candidates, chain=[good, *candidates], lo=0, hi=len(candidates),
+                                   probes=[], result=None, culprit=None))
+        if not groups:
+            return None
+        now = time.time()
+        return dict(tip=active['tip'], attempt=active['attempt'], run_id=run_group['id'],
+                    run_destinations=run_group['notification'].get('destinations'),
+                    groups=groups, started=now, deadline=now + 45 * 60, count=0,
+                    invocation=None, probe=None, completed=None, arrived=[])
+
+    def bisect_target(self, group):
+        observed = {probe['commit']: probe['outcome'] for probe in group['probes']}
+        chain, lo, hi = group['chain'], group['lo'], group['hi']
+        if group['GOOD'] not in observed:
+            return group['GOOD']
+        if hi - lo == 1:
+            if observed.get(chain[lo]) == 'good':
+                if chain[hi] not in observed:
+                    # Also observe TIP itself if it is the adjacent bad. The
+                    # run's confirmation seeds the interval, not the proof.
+                    return chain[hi]
+                if observed[chain[hi]] == 'bad':
+                    group.update(result='culprit proven', culprit=chain[hi])
+                    return None
+            group['result'] = 'range'
+            return None
+        middle = (lo + hi) // 2
+        # With an unchanged interval this is middle, older, newer, alternating
+        # outward. A good/bad outcome establishes a new middle.
+        order = sorted(range(lo + 1, hi), key=lambda index: (abs(index - middle), index))
+        for index in order:
+            if chain[index] not in observed:
+                return chain[index]
+        group['result'] = 'range'
+        return None
+
+    def bisect_probe(self, group, commit):
+        git(self.args.slot, 'checkout', '--detach', '--force', commit)
+        git(self.args.slot, 'clean', '-fd')
+        selected, results, first = self.launch(group['profile'], identities=group['identities'])
+        logs = [first]
+        if results is None:  # nextest BUILD_FAILED; no JUnit is expected.
+            return {key: 'unbuildable' for key in group['identities']}, logs
+        if selected != len(group['identities']) or set(results) != set(group['identities']):
+            raise Fault('bisection selection differs from group', logs=[first['log']])
+        outcomes = {}
+        for key in group['identities']:
+            result = results[key]['result']
+            outcome = 'good' if result == 'pass' else 'unknown'
+            if result == 'fail':
+                count, repeated, confirmation = self.launch(group['profile'], identities=[key])
+                logs.append(confirmation)
+                if repeated is None:
+                    outcome = 'unknown'
+                else:
+                    if count != 1 or set(repeated) != {key}:
+                        raise Fault('bisection confirmation selection differs', logs=[confirmation['log']])
+                    outcome = 'bad' if repeated[key]['result'] == 'fail' else 'unknown'
+            outcomes[key] = outcome
+        return outcomes, logs
+
+    def save_bisect_probe(self, index, commit, outcomes, logs):
+        phase = self.state['bisect']
+        group = phase['groups'][index]
+        parts = []
+        # A fixed split order, and a sorted identity order within each part,
+        # keep final event numbering deterministic across restart.
+        for outcome in ('bad', 'good', 'unknown', 'unbuildable'):
+            identities = [key for key in group['identities'] if outcomes[key] == outcome]
+            if not identities:
+                continue
+            part = dict(group, identities=identities,
+                        probes=[*group['probes'], dict(commit=commit, outcome=outcome,
+                                                      outcomes={key: outcomes[key] for key in identities}, logs=logs)])
+            position = group['chain'].index(commit)
+            if commit == group['GOOD'] and outcome == 'bad':
+                part.update(result='inconclusive', reason='GOOD fails now')
+            elif outcome == 'good' and position == group['hi']:
+                part.update(result='inconclusive', reason='bad endpoint passes now')
+            elif outcome == 'good':
+                part['lo'] = max(group['lo'], position)
+            elif outcome == 'bad':
+                part['hi'] = min(group['hi'], position)
+            parts.append(part)
+        phase['groups'][index:index + 1] = parts
+        phase.setdefault('attempts', []).extend(phase['probe'].get('attempts', []))
+        phase['probe'] = None
+        self.save()
+
+    def bisect(self):
+        phase = self.state['bisect']
+        if phase is None:
+            return
+        # No checkout or trim until a previous guardian/heavy command is known
+        # finished. Its unsaved probe is deliberately redone in full.
+        if phase['invocation']:
+            if self.await_invocation(phase['invocation']) is None:
+                return
+            phase['invocation'] = None
+            self.save()
+        self.adopt_drained_holds()
+        while phase['completed'] is None:
+            index = next((i for i, group in enumerate(phase['groups']) if group['result'] is None), None)
+            if index is None:
+                phase['completed'] = time.time()
+                self.save()
+                break
+            group = phase['groups'][index]
+            try:
+                target = phase['probe']['commit'] if phase['probe'] else self.bisect_target(group)
+                if target is None:
+                    self.save()
+                    continue
+                if phase['count'] >= 16 or time.time() >= phase['deadline']:
+                    raise BisectBound('bisection invocation budget or deadline reached')
+                if phase['probe'] is None:
+                    phase['probe'] = dict(index=index, commit=target, attempts=[])
+                    self.save()
+                outcomes, logs = self.bisect_probe(group, target)
+                self.save_bisect_probe(index, target, outcomes, logs)
+            except (Fault, OSError, ValueError, KeyError) as error:
+                if phase['invocation']:
+                    self.fault(str(error))
+                    self.save()
+                    return
+                bounded = isinstance(error, BisectBound) or time.time() >= phase['deadline']
+                for pending in phase['groups']:
+                    if pending['result'] is None:
+                        pending.update(result='range' if bounded else 'inconclusive', reason=str(error))
+                phase['error'] = dict(reason=str(error), logs=getattr(error, 'logs', []))
+                phase.setdefault('attempts', []).extend((phase['probe'] or {}).get('attempts', []))
+                phase['probe'] = None
+                if not bounded:
+                    self.fault('bisection: ' + str(error), phase['run_id'] + ':bisect:fault', save=False)
+                self.save()
+        self.finish_bisection()
+
+    def finish_bisection(self):
+        phase = self.state['bisect']
+        identifier = phase['run_id'] + ':bisect'
+        wall = phase['completed'] - phase['started']
+        records, summaries, culprit_keys = [], [], set()
+        other = False
+        for number, group in enumerate(phase['groups'], 1):
+            culprit = None
+            if group['culprit']:
+                chain, hi = group['chain'], group['hi']
+                culprit = suspects(self.args.slot, chain[hi - 1], chain[hi])[0]
+                if culprit['kind'] == 'branch':
+                    culprit_keys.add(culprit['key'])
+                else:
+                    other = True
+            detail = self.artifact('bisect', dict(group, tip=phase['tip'], attempt=phase['attempt'],
+                                                 error=phase.get('error'), attempts=phase.get('attempts', [])))
+            summary = dict(identities=[json.loads(key) for key in group['identities']],
+                           result=group['result'], good=group['chain'][group['lo']],
+                           bad=group['chain'][group['hi']], culprit=culprit, details=detail)
+            summaries.append(summary)
+            event = self.event('after-landing-bisect', f'{identifier}:{number}',
+                               tip=phase['tip'], attempt=phase['attempt'], GOOD=group['GOOD'],
+                               candidate_count=len(group['candidates']), wall=wall,
+                               arrived=phase['arrived'], commit=group['culprit'] or phase['tip'],
+                               culprit_commit=group['culprit'], **summary)
+            event['time'] = datetime.fromtimestamp(phase['completed'], timezone.utc).isoformat(timespec='microseconds')
+            if culprit and culprit['kind'] == 'branch':
+                event['branch'] = culprit['branch']
+            records.append(self.bounded_event(event))
+        detail = self.artifact('bisection', dict(tip=phase['tip'], groups=summaries,
+                                                events=[record['id'] for record in records]))
+        notification = dict(bisect=True, resolved=False, error=None, run_id=phase['run_id'],
+                            run_destinations=phase['run_destinations'], culprit_keys=sorted(culprit_keys),
+                            other=other, details=detail)
+        outbox = dict(id=identifier, records=records, recorded=False, posts=[],
+                      after=phase['run_id'], notification=notification)
+        self.state['outbox'].append(outbox)
+        self.state['hour']['bisect_seconds'] += phase['completed'] - phase.get('accounted_at', phase['started'])
+        self.state['bisect'] = None
+        self.state['trim_pending'] = dict(id=identifier, started=False)
+        # Events, outbox and final trim intent are one state replacement.
+        self.save()
+        self.trim()
+
+    def route_bisection(self, group, notification):
+        destinations = notification['run_destinations']
+        if destinations is None:
+            return None  # The preceding run still has unresolved routing.
+        try:
+            routes = self.resolve(set(notification['culprit_keys'])) if notification['culprit_keys'] else {}
+        except Fault as error:
+            notification['error'] = str(error)
+            return str(error)
+        destinations = set(destinations) | set(routes.values())
+        if notification['other']:
+            destinations.add(self.args.ops)
+        detail = json.loads(Path(notification['details']).read_text())
+        body = [f'id: {group["id"]}', f'tip: {detail["tip"]}; builder: {self.args.host}',
+                'bisection results: ' + json.dumps(detail['groups'], separators=(',', ':')),
+                'details: ' + notification['details']]
+        if len('\n'.join(body).encode()) > 60000:
+            body[2] = f'bisection groups: {len(detail["groups"])}; see details'
+        group['posts'] = [dict(to=destination, body='\n'.join(body), delivered=False)
+                          for destination in sorted(destinations)]
+        notification.update(resolved=True, error=None)
+        return None
 
 
 def positive(value):
@@ -984,8 +1283,8 @@ def main(argv=None):
                 print(f'after-landing: {error}', file=sys.stderr)
             if args.mode == 'once':
                 if lifetime is not None:
-                    lifetime.clean = runner.state['active'] is None
-                return 0 if not runner.state['active'] else 1
+                    lifetime.clean = runner.state['active'] is None and runner.state['bisect'] is None
+                return 0 if not runner.state['active'] and not runner.state['bisect'] else 1
             time.sleep(args.poll_interval)
 
 

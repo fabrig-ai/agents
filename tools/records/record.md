@@ -83,6 +83,7 @@ eight sources, cursors, joins and snapshot/timestamp semantics.
 
 The `after-landing` producer appends source `after-landing` with these kinds:
 
+- `after-landing-bisect`: id `<tip>:<attempt>:bisect:<n>`; identities, GOOD, candidate count, result, culprit commit and branch, wall, arriving tips and private probe-detail path.
 - `after-landing-run`: commit, suspects, verdict, per-pair counts and log paths.
 - `after-landing-test`: id `<commit>:<profile>:<binary>:<test>`; state `new`,
   `standing`, `recovered` or `flaky`.
