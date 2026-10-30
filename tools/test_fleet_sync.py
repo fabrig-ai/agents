@@ -888,7 +888,7 @@ class FleetTest(unittest.TestCase):
                                           "--host", "hel8", expected=2)
                     self.assertIn(f"invalid machine_env for {name}: ARBITRARY_KEY", result.stderr)
                     self.assertEqual(before, self.snapshot())
-        put(hosts, original.replace('KACHE_MAX_GB = 6', 'BAD-KEY = 6', 1))
+        put(hosts, original.replace('PLAN_MIN_MEM_GB = 4', 'BAD-KEY = 4', 1))
         result = self.process("python3", "-I", "-B", self.source / "tools/fleet-sync",
                               "--host", "hel8", expected=2)
         self.assertIn("invalid machine_env for hel8: BAD-KEY", result.stderr)

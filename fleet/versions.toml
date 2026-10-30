@@ -83,11 +83,13 @@ seed_hosts = ["hetzner3"]
 
 
 [forgejo]
+version_only_hosts = ["hel8"]
 version = "17.0.0"
 command = ["forgejo", "--version"]
 [forgejo.install]
 kind = "binary"
 seed = "peer"
+seed_hosts = ["hetzner3"]
 source = ".local/opt/forgejo-17.0.0/forgejo"
 destination = ".local/opt/forgejo-17.0.0/forgejo"
 sha256 = "5a3b07e124ed70b4e46ee3939515f003bd3cc85352257a9a4607a527251042ca"
@@ -95,11 +97,13 @@ mode = "0775"
 
 
 [forgejo-runner]
+version_only_hosts = ["hel8"]
 version = "13.2.0"
 command = ["forgejo-runner", "--version"]
 [forgejo-runner.install]
 kind = "binary"
 seed = "peer"
+seed_hosts = ["hetzner3"]
 source = ".local/opt/forgejo-runner-13.2.0/forgejo-runner"
 destination = ".local/opt/forgejo-runner-13.2.0/forgejo-runner"
 sha256 = "fadaec897f5e6641c363f87ecaf75f866f99c81b7097ec6b433e4c48123fcad1"

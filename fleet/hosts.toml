@@ -4,7 +4,7 @@ hostname = "debian-8gb-hel1-1"
 ssh = "free@204.168.210.29"
 roles = ["session"]
 cargo_jobs = 4
-machine_env = { PLAN_MIN_MEM_GB = 4, PLAN_MIN_DISK_GB = 15, KACHE_MAX_GB = 6 }
+machine_env = { PLAN_MIN_MEM_GB = 4, PLAN_MIN_DISK_GB = 15, KACHE_MAX_GB = 1 }
 env = { HEAVY_BUILD_JOBS = "2" }
 
 [hosts.hetzner3]

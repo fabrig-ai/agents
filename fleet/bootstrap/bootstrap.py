@@ -115,6 +115,9 @@ class Bootstrap:
         self.write("/etc/security/limits.d/10-coredump-debian.conf",
                    "* soft core 0\nroot soft core 0\n* hard core infinity\nroot hard core infinity\n")
         self.run("systemctl", "enable", "--now", "unattended-upgrades", "apt-daily.timer", "apt-daily-upgrade.timer")
+        # Cap the system journal (hel8 reached 620 MB, 10-30); journald reads drop-ins at restart.
+        self.write("/etc/systemd/journald.conf.d/90-fabrig.conf", "[Journal]\nSystemMaxUse=200M\n")
+        self.run("systemctl", "restart", "systemd-journald")
         print("No swap or custom sysctl settings were found; Debian/image defaults apply.")
 
     def user(self):
