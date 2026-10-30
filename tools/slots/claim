@@ -1,0 +1,191 @@
+#!/usr/bin/env python3
+"""Bookkeep slot ownership on hel8 (tools/slots/design.md, 3)."""
+
+import argparse
+from contextlib import contextmanager
+from datetime import datetime, timezone
+import fcntl
+import json
+import os
+from pathlib import Path
+import socket
+import sys
+
+
+HOSTS = Path(__file__).resolve().with_name("hosts")
+
+
+def require_authority():
+    hostname = socket.gethostname().split(".", 1)[0]
+    if hostname not in ("hel8", "debian-8gb-hel1-1"):
+        raise RuntimeError(f"claim authority is hel8; run claim there via SSH "
+                           f"(this host is {hostname!r}; local claims are not authoritative)")
+
+
+def inventory(path=HOSTS):
+    slots = {}
+    for line in path.read_text().splitlines():
+        fields = line.split("#", 1)[0].split()
+        if not fields:
+            continue
+        host, *shares = fields
+        if not host.replace("-", "").isalnum() or not shares:
+            raise ValueError(f"invalid hosts line: {line}")
+        for entry in shares:
+            number, separator, owner = entry.partition("=")
+            if not separator or not owner or "=" in owner or "\0" in owner:
+                raise ValueError(f"invalid slot share: {entry}")
+            if not number.isdecimal() or int(number) < 1:
+                raise ValueError(f"invalid slot number: {number}")
+            pair = (host, str(int(number)))
+            if pair in slots:
+                raise ValueError(f"duplicate slot: {host} {number}")
+            slots[pair] = owner
+    return slots
+
+
+@contextmanager
+def state_lock(directory):
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if directory.is_symlink():
+        raise RuntimeError("claims directory must not be a symlink")
+    with (directory / ".lock").open("a") as lock:
+        os.chmod(directory / ".lock", 0o600)
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
+def read_record(path):
+    if path.is_symlink():
+        raise RuntimeError(f"claim record must not be a symlink: {path.name}")
+    record = json.loads(path.read_text())
+    if not isinstance(record, dict):
+        raise ValueError(f"invalid claim record: {path.name}")
+    for key in ("owner", "what", "created"):
+        if not isinstance(record.get(key), str) or not record[key].strip():
+            raise ValueError(f"invalid claim record: {path.name}")
+    if "lent_by" in record and (not isinstance(record["lent_by"], str)
+                                or not record["lent_by"].strip()):
+        raise ValueError(f"invalid claim record: {path.name}")
+    return record
+
+
+def holder(record):
+    return f"{record['owner']}: {record['what']} (since {record['created']})"
+
+
+def create_claim(path, owner, what, now, lent_by=None):
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        raise RuntimeError(f"{path.name} held by {holder(read_record(path))}") from None
+    try:
+        with os.fdopen(fd, "w") as output:
+            record = {"owner": owner, "what": what,
+                      "created": now.astimezone(timezone.utc).isoformat()}
+            if lent_by is not None:
+                record["lent_by"] = lent_by
+            json.dump(record, output)
+            output.write("\n")
+    except BaseException:
+        path.unlink()
+        raise
+    print(f"{path.name} claimed by {owner}: {what}")
+
+
+def release_claim(path, owner, what=None):
+    record = read_record(path)
+    if record["owner"] != owner:
+        raise RuntimeError(f"{path.name} held by {holder(record)}; release requires that owner")
+    if what is not None and record["what"] != what:
+        raise RuntimeError(f"{path.name} held by {holder(record)}; release requires matching WHAT {what!r}")
+    path.unlink()
+    print(f"{path.name} released by {owner}")
+
+
+def list_claims(directory, slots, now):
+    for (host, number), share in slots.items():
+        path = directory / f"{host}-{number}"
+        try:
+            record = read_record(path)
+        except FileNotFoundError:
+            print(f"{host} {number} [{share}]: free")
+            continue
+        created = datetime.fromisoformat(record["created"])
+        if created.utcoffset() is None:
+            raise ValueError(f"claim time lacks UTC offset: {path.name}")
+        age = max(0, int((now - created).total_seconds()))
+        days, remainder = divmod(age, 86400)
+        hours, remainder = divmod(remainder, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        lend = f"; lent by {record['lent_by']}" if "lent_by" in record else ""
+        print(f"{host} {number} [{share}]: {holder(record)}; "
+              f"held {days}d {hours:02}:{minutes:02}:{seconds:02}{lend}")
+
+
+def list_free(directory, slots, owner):
+    for group in dict.fromkeys((owner, "pool")):
+        for (host, number), share in slots.items():
+            if share != group:
+                continue
+            try:
+                read_record(directory / f"{host}-{number}")
+            except FileNotFoundError:
+                print(f"{host} {number}")
+
+
+def text(value):
+    if not value.strip() or any(character in value for character in "\r\n\0"):
+        raise argparse.ArgumentTypeError("must be nonempty, single-line text")
+    return value
+
+
+def main():
+    os.umask(0o077)
+    parser = argparse.ArgumentParser(description=__doc__)
+    subparsers = parser.add_subparsers(dest="action", required=True)
+    for name in ("claim", "release"):
+        sub = subparsers.add_parser(name)
+        sub.add_argument("host")
+        sub.add_argument("number")
+        sub.add_argument("owner", type=text)
+        if name == "claim":
+            sub.add_argument("what", type=text)
+            sub.add_argument("--lent-by", type=text)
+        else:
+            sub.add_argument("--what", type=text, help="release only when the recorded work matches exactly")
+    subparsers.add_parser("list").add_argument("--free", metavar="OWNER", type=text)
+    args = parser.parse_args()
+    try:
+        require_authority()
+        slots = inventory()
+        if args.action != "list" and (args.host, args.number) not in slots:
+            raise ValueError(f"unknown slot: {args.host} {args.number}")
+        if args.action == "claim":
+            share = slots[(args.host, args.number)]
+            if ((share not in ("pool", args.owner) and args.lent_by is None)
+                    or (args.lent_by is not None and args.lent_by != share)):
+                raise ValueError(f"{args.host} {args.number} belongs to share {share}; "
+                                 f"a lend requires --lent-by {share}")
+        directory = Path.home() / "src/fabrig/claims"
+        with state_lock(directory):
+            now = datetime.now(timezone.utc)
+            if args.action == "list":
+                if args.free is not None:
+                    list_free(directory, slots, args.free)
+                else:
+                    list_claims(directory, slots, now)
+            else:
+                path = directory / f"{args.host}-{args.number}"
+                if args.action == "claim":
+                    create_claim(path, args.owner, args.what, now, args.lent_by)
+                else:
+                    release_claim(path, args.owner, args.what)
+        return 0
+    except (OSError, ValueError, RuntimeError) as error:
+        print(f"claim: {error}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

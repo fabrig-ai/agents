@@ -1,0 +1,307 @@
+#!/usr/bin/env python3
+"""Trim idle builder slots under disk pressure (tools/slots/design.md, 5)."""
+
+import argparse
+from contextlib import ExitStack
+from datetime import datetime, timezone
+import json
+import os
+from pathlib import Path
+import runpy
+import shutil
+import stat
+import subprocess
+import sys
+import time
+
+sys.dont_write_bytecode = True
+RECOVERY = runpy.run_path(str(Path(__file__).resolve().with_name("recovery.py")))
+LIFETIME = RECOVERY["L"]
+
+GB = 1_000_000_000
+UNIT = "fabrig-slot-guard"
+
+
+def command(*args):
+    result = subprocess.run(args, check=False, text=True, capture_output=True,
+                            stdin=subprocess.DEVNULL)
+    if result.returncode:
+        raise RuntimeError(f"{args[0]} exited {result.returncode}: {result.stderr.strip()}")
+    return result.stdout
+
+
+def busy(slot):
+    try:
+        list(RECOVERY["units"](slot))
+    except RuntimeError as error:
+        if str(error).startswith("live service "):
+            return True
+        raise
+    return False
+
+
+def slot_size(slot):
+    """Rank by allocated bytes, without following directory or file symlinks."""
+    size = 0
+
+    def fail(error):
+        raise error
+
+    for directory, _, files in os.walk(slot, onerror=fail, followlinks=False):
+        for name in files:
+            try:
+                info = (Path(directory) / name).lstat()
+            except FileNotFoundError:
+                continue
+            if stat.S_ISREG(info.st_mode):
+                size += info.st_blocks * 512
+    return size
+
+
+def timer(stop, below):
+    existing = command("systemctl", "--user", "list-units", "--all", "--plain",
+                       "--no-legend", f"{UNIT}.timer", f"{UNIT}.service")
+    names = [row.split()[0] for row in existing.splitlines()
+             if row.split()[0] in (f"{UNIT}.timer", f"{UNIT}.service")]
+    if names:
+        command("systemctl", "--user", "stop", *names)
+    if not stop:
+        command("systemd-run", "--user", "--collect", "--unit", UNIT,
+                "--on-calendar", "*:0/5", "bash", "-lc", 'exec "$0" "$@"',
+                str(Path(__file__).resolve()), "--below", str(below))
+    print(f"{UNIT}: {'stopped' if stop else 'timer started'}")
+
+
+def emit(line, log):
+    line = " ".join(line.splitlines())
+    LIFETIME["no_links"](log)
+    log.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    with os.fdopen(fd, "a") as output:
+        info = os.fstat(output.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1:
+            raise RuntimeError(f"unsafe log: {log}")
+        os.fchmod(output.fileno(), 0o600)
+        output.write(line + "\n")
+        output.flush()
+        os.fsync(output.fileno())
+
+
+def sweep(below, dry_run, home):
+    root = home / "src/fabrig/slots"
+    log = home / "src/fabrig/notes/slot-guard.log"
+    before = after = None
+    details = []
+    code = 0
+    ownership = ExitStack()
+    try:
+        LIFETIME["no_links"](root)
+        state = LIFETIME["state_root"](home)
+        ownership.enter_context(LIFETIME["locked"](state / "sweep.lock"))
+        before = after = shutil.disk_usage(root).free / GB
+        if before < below:
+            # run_path works under Python -I and leaves trim standalone for ssh stdin.
+            trim = runpy.run_path(str(Path(__file__).resolve().with_name("trim")))["trim"]
+            slots = []
+            for slot in root.iterdir():
+                if not slot.name.isascii() or not slot.name.isdecimal():
+                    continue
+                if slot.is_symlink():
+                    raise RuntimeError(f"symlink slot: {slot}")
+                if slot.is_dir():
+                    slots.append(slot.absolute())
+            idle = []
+            for slot in slots:
+                if busy(slot):
+                    details.append(f"slot {slot.name}: skipped (busy)")
+                else:
+                    idle.append((slot_size(slot), slot))
+            for _, slot in sorted(idle, key=lambda item: (-item[0], item[1].name)):
+                if busy(slot):
+                    details.append(f"slot {slot.name}: skipped (busy)")
+                    continue
+                count, size, skipped = trim(slot, time.time_ns(), dry_run=dry_run)
+                action = "would trim" if dry_run else "trimmed"
+                details.append(f"slot {slot.name}: {action} {count} executables, "
+                               f"{size / GB:.3f} GB; {skipped} processes skipped")
+                after = shutil.disk_usage(root).free / GB
+                if after > below + 40:
+                    break
+            after = shutil.disk_usage(root).free / GB
+            if after < below:
+                def record(detail):
+                    details.append(detail)
+                    # Persist each attempt, even if deletion is interrupted.
+                    emit(f"{datetime.now(timezone.utc):%Y-%m-%dT%H:%M:%SZ} {detail}", log)
+                RECOVERY["recover"](slots, home, below, dry_run,
+                                    lambda: shutil.disk_usage(root).free / GB, record)
+                after = shutil.disk_usage(root).free / GB
+            if slots and after < below:
+                code = 2
+    except (OSError, RuntimeError) as error:
+        details.append(f"error: {error}")
+        code = 1
+    finally:
+        ownership.close()
+    status = f"still below {below:g} GB" if after is not None and after < below else "ok"
+
+    def free(value):
+        return "unknown" if value is None else f"{value:.3f}"
+
+    line = (f"{datetime.now(timezone.utc):%Y-%m-%dT%H:%M:%SZ} "
+            f"free GB before={free(before)} after={free(after)}; "
+            + ("dry-run; " if dry_run else "") + "; ".join([*details, status]))
+    line = " ".join(line.splitlines())
+    try:
+        emit(line, log)
+    except (OSError, RuntimeError) as error:
+        line += f"; log error: {error}"
+        code = 1
+    print(" ".join(line.splitlines()))
+    return code
+
+
+def threshold(value):
+    number = float(value)
+    if not 0 <= number < float("inf"):
+        raise argparse.ArgumentTypeError("must be a finite nonnegative number")
+    return number
+
+
+def automatic_observation(home):
+    """Report policy observations without entering either destructive sweep."""
+    root = home / "src/fabrig/slots"
+    log = home / "src/fabrig/notes/slot-guard.log"
+
+    def record(detail):
+        line = " ".join(f"{datetime.now(timezone.utc):%Y-%m-%dT%H:%M:%SZ} {detail}".splitlines())
+        emit(line, log)
+        print(line)
+
+    try:
+        LIFETIME["no_links"](root)
+        available = shutil.disk_usage(root).free
+        record(f"automatic-targets dry-run; free-bytes={available}; claim snapshots grant no deletion exclusion; "
+               "automatic live mode unavailable pending central exclusion and finality protocol")
+        # Include numeric symlinks in the report; builder() refuses their paths.
+        slots = [slot.absolute() for slot in root.iterdir()
+                 if slot.name.isascii() and slot.name.isdecimal()]
+        RECOVERY["observe_targets"](slots, home, available, record)
+        return 2 if slots and available < 80_000_000_000 else 0
+    except (OSError, ValueError, KeyError, RuntimeError) as error:
+        print(f"guard: automatic observation failed: {error}", file=sys.stderr)
+        return 1
+
+
+def automatic_live(home):
+    root = home / "src/fabrig/slots"
+    log = home / "src/fabrig/notes/slot-guard.log"
+    def record(detail):
+        line = " ".join(f"{datetime.now(timezone.utc):%Y-%m-%dT%H:%M:%SZ} {detail}".splitlines())
+        emit(line, log)
+        print(line)
+    try:
+        RECOVERY["require_automatic_activation"]()
+        LIFETIME["no_links"](root)
+        slots = [slot.absolute() for slot in root.iterdir()
+                 if slot.name.isascii() and slot.name.isdecimal()]
+        if not RECOVERY["automatic_recover"](slots, home, lambda: shutil.disk_usage(root).free, record):
+            return 1
+        return 2 if slots and shutil.disk_usage(root).free < 80_000_000_000 else 0
+    except (OSError, ValueError, RuntimeError) as error:
+        print(f"guard: {error}", file=sys.stderr)
+        return 1
+
+
+def main():
+    os.umask(0o077)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--below", type=threshold, default=80)
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--automatic-targets", nargs="?", const="observe", choices=("observe", "live"),
+                        help="observe the idle >24h policy; live is gated by FIRSTDAYDRYRUN and Ops review")
+    parser.add_argument("--timer", action="store_true")
+    parser.add_argument("--stop", action="store_true")
+    parser.add_argument("--ack", metavar="N", help="acknowledge a completed numeric builder slot")
+    parser.add_argument("--release-hold", metavar="N", help="reconcile one uncertain completed lifetime")
+    parser.add_argument("--hold", help="exact hold token to release")
+    parser.add_argument("--notices", action="store_true", help="print durable owner-addressed reclaim notices")
+    parser.add_argument("--by", help="operator/lead identity attesting eligibility")
+    parser.add_argument("--reason", help="review/ownership provenance")
+    parser.add_argument("--report-handled", action="store_true")
+    parser.add_argument("--no-pending-resume", action="store_true")
+    parser.add_argument("--exclusive-lease-use", action="store_true",
+                        help="attest all future direct work uses lifetime.py run")
+    args = parser.parse_args()
+    if args.automatic_targets:
+        if (args.ack or args.release_hold or args.hold or args.by or args.reason or args.notices or
+                args.timer or args.stop or args.report_handled or args.no_pending_resume or
+                args.exclusive_lease_use or args.below != 80):
+            parser.error("--automatic-targets cannot combine with manual actions, timer control or a changed threshold")
+        if args.automatic_targets == "live":
+            try:
+                RECOVERY["require_automatic_activation"]()
+            except RuntimeError as error:
+                print(f"guard: {error}", file=sys.stderr)
+                return 1
+            if not args.dry_run:
+                return automatic_live(Path.home())
+        return automatic_observation(Path.home())
+    if args.notices:
+        if (args.ack or args.release_hold or args.hold or args.by or args.reason or args.timer or
+                args.stop or args.dry_run or args.report_handled or args.no_pending_resume or args.exclusive_lease_use):
+            parser.error("--notices cannot be combined with other actions")
+        try:
+            state = LIFETIME["state_root"](Path.home())
+            with LIFETIME["locked"](state / "sweep.lock"):
+                for directory in sorted(state.iterdir()):
+                    if directory.name.isascii() and directory.name.isdecimal():
+                        LIFETIME["private_directory"](directory)
+                        notice = directory / "owner-notice.json"
+                        LIFETIME["no_links"](notice)
+                        if notice.exists():
+                            print(json.dumps(LIFETIME["read"](notice), sort_keys=True))
+            return 0
+        except (OSError, ValueError, RuntimeError) as error:
+            print(f"guard: {error}", file=sys.stderr)
+            return 1
+    if args.ack or args.release_hold:
+        if (args.timer or args.stop or args.dry_run or not args.by or not args.reason or
+                not args.report_handled or not args.no_pending_resume or not args.exclusive_lease_use):
+            parser.error("--ack requires --by, --reason, --report-handled, --no-pending-resume, --exclusive-lease-use; no timer/dry-run")
+        try:
+            home = Path.home()
+            state = LIFETIME["state_root"](home)
+            with LIFETIME["locked"](state / "sweep.lock"):
+                if args.release_hold:
+                    if args.ack or not args.hold:
+                        parser.error("--release-hold requires --hold and cannot be combined with --ack")
+                    line = RECOVERY["release_hold"](args.release_hold, args.hold, home, args.by, args.reason)
+                else:
+                    if args.hold:
+                        parser.error("--hold requires --release-hold")
+                    line = RECOVERY["acknowledge"](args.ack, home, args.by, args.reason)
+                emit(f"{datetime.now(timezone.utc):%Y-%m-%dT%H:%M:%SZ} {line}", home / "src/fabrig/notes/slot-guard.log")
+                print(line)
+            return 0
+        except (OSError, ValueError, KeyError, RuntimeError) as error:
+            print(f"guard: {error}", file=sys.stderr)
+            return 1
+    if args.hold or args.by or args.reason or args.report_handled or args.no_pending_resume or args.exclusive_lease_use:
+        parser.error("acknowledgement options require --ack")
+    if args.stop and not args.timer:
+        parser.error("--stop requires --timer")
+    if args.timer:
+        if args.dry_run:
+            parser.error("--dry-run cannot start or stop a timer")
+        try:
+            timer(args.stop, args.below)
+        except (OSError, RuntimeError) as error:
+            print(f"guard: {error}", file=sys.stderr)
+            return 1
+        return 0
+    return sweep(args.below, args.dry_run, Path.home())
+
+
+if __name__ == "__main__":
+    sys.exit(main())

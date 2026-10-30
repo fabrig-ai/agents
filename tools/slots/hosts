@@ -1,0 +1,4 @@
+# hetzner2 is retired for this phase and has no builder slots.
+hetzner3 1=pool 2=pool 3=pool 4=pool 5=pool 6=pool
+hetzner6 1=s/qa 2=s/qa 3=s/qa 4=s/qa 5=pool 6=s/qa 7=pool 8=s/qa
+hetzner7 1=lead/jig 2=lead/jig 3=lead/jig 4=pool 5=pool 6=pool 7=pool 8=pool 9=pool
