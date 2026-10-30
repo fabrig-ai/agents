@@ -34,6 +34,7 @@ class Rules(unittest.TestCase):
             's/second': dict(name='s/second', role='coordinator', supervisor='director', aliases=[]),
             'ops': dict(name='ops', supervisor='director', aliases=[]),
             's/deploy': dict(name='s/deploy', supervisor='director', aliases=[]),
+            's/multi-coord': dict(name='s/multi-coord', supervisor='director', aliases=[], always_watched=True),
             'director': dict(name='director', supervisor='', aliases=[]),
         }
         self.data = dict(names=self.names, owned={n: True for n in self.names}, agents=[], waiters={}, mail=[],
@@ -159,7 +160,7 @@ class Rules(unittest.TestCase):
         self.calls.clear()
         self.round(NOW+1799)
         self.assertEqual(self.calls, [])
-        events = self.round(NOW+1800)
+        events = self.round(NOW+1801)
         self.assertEqual(len(events), 2)
         self.assertTrue(all(e['kind'] == 'alert-escalate' for e in events))
         self.assertEqual(set(c[1] for c in self.calls), {'s/second', 'director'})
@@ -261,16 +262,20 @@ class Rules(unittest.TestCase):
         self.assertFalse(self.rule('lease stall', NOW+99999))
 
     def test_handover_edge_successor_and_files_current(self):
+        self.live()
+        self.data['agents'][0]['sessionId'] = 'old'
         hook = dict(kind='context-hook', name='lead/tools', session='old', time=ISO(NOW-1200))
         self.data['spool/sessions'] = [hook]
         self.assertFalse(self.rule('handover late'))
         self.assertTrue(self.rule('handover late', NOW+1))
         for following in ('files-current', 'successor', 'session-start'):
             with self.subTest(following=following):
-                self.data['spool/sessions'] = [hook, dict(kind=following, name='lead/tools', session='new', time=ISO(NOW))]
+                self.data['spool/sessions'] = [hook, dict(kind=following, name='lead/tools', session='old' if following == 'files-current' else 'new', time=ISO(NOW))]
                 self.assertFalse(self.rule('handover late', NOW+1))
 
     def test_handover_repeated_hooks_do_not_reset_clock_and_post_ack_clears(self):
+        self.live()
+        self.data['agents'][0]['sessionId'] = 'old'
         self.data['spool/sessions'] = [dict(kind='context-hook', name='lead/tools', session='old',
                                              time=ISO(NOW-age)) for age in (1201, 1000, 10)]
         self.assertTrue(self.rule('handover late'))
@@ -338,19 +343,19 @@ class Rules(unittest.TestCase):
         self.mail(11)
         self.assertEqual([e['kind'] for e in self.round()], ['alert-open'])
         self.assertEqual(self.round(), [])
-        self.assertEqual(self.calls, [('wake', 'lead/tools', 'deaf')])
-        self.assertEqual(self.round(NOW+1199), [])
-        self.assertEqual([e['kind'] for e in self.round(NOW+1200)], ['alert-escalate'])
+        self.assertEqual(self.calls, [('send', 'lead/tools', 'deaf')])
+        self.assertEqual(self.round(NOW+1799), [])
+        self.assertEqual([e['kind'] for e in self.round(NOW+1801)], ['alert-escalate'])
         self.assertEqual(self.calls[-1], ('send', 's/default', 'deaf'))
         self.data['mail'] = []
         for _ in range(3):
-            self.assertFalse(self.round(NOW+1201, errors={'mail': 'failed'}))
-        self.assertEqual(self.round(NOW+1202), [])
-        self.assertEqual([e['kind'] for e in self.round(NOW+1203)], ['alert-close'])
+            self.assertFalse(self.round(NOW+1802, errors={'mail': 'failed'}))
+        self.assertEqual(self.round(NOW+1803), [])
+        self.assertEqual([e['kind'] for e in self.round(NOW+1804)], ['alert-close'])
         self.mail(11)
-        events = self.round(NOW+1204)
+        events = self.round(NOW+1805)
         self.assertEqual(events[0]['kind'], 'alert-open')
-        self.assertEqual(self.calls[-1], ('wake', 'lead/tools', 'deaf'))
+        self.assertEqual(self.calls[-1], ('send', 'lead/tools', 'deaf'))
 
     def test_recurrence_event_ids_are_distinct_with_a_frozen_clock(self):
         self.live()
@@ -375,34 +380,38 @@ class Rules(unittest.TestCase):
         self.assertTrue(self.state['episodes'])
         self.assertEqual([e['kind'] for e in self.round(NOW+4)], ['alert-close'])
 
-    def test_every_wake_result_still_escalates(self):
+    def test_remedy_failure_retries_at_interval_and_escalates_once(self):
         self.live()
         self.mail(11)
-        for result in ('woken', 'queued', 'waiting', 'unwoken: stopped'):
-            with self.subTest(result=result):
-                state = {}
-                candidates = self.judge()
-                actions = []
-                def act(kind, to, candidate):
-                    actions.append((kind, to))
-                    return result if kind == 'wake' else 0
-                first = API['reconcile'](state, candidates, {}, self.config, NOW, act)
-                self.assertEqual(first[0]['wake'], result)
-                events = API['reconcile'](state, candidates, {}, self.config, NOW+1200, act)
-                self.assertEqual(events[0]['kind'], 'alert-escalate')
-                self.assertEqual(actions, [('wake', 'lead/tools'), ('send', 's/default')])
+        candidates = self.judge()
+        candidates['deaf\tlead/tools']['remedy'] = dict(kind='resume')
+        calls = []
+        def action(kind, to, candidate):
+            calls.append((kind, to))
+            return dict(success=False, result='synthetic failure') if kind == 'remedy' else 0
+        first = API['reconcile'](self.state, candidates, {}, self.config, NOW, action)
+        self.assertEqual([e['kind'] for e in first], ['alert-open', 'remedy'])
+        API['reconcile'](self.state, candidates, {}, self.config, NOW+119, action)
+        self.assertEqual(calls, [('remedy', 'lead/tools')])
+        events = API['reconcile'](self.state, candidates, {}, self.config, NOW+120, action)
+        self.assertEqual([e['kind'] for e in events], ['remedy', 'alert-escalate'])
+        self.assertNotEqual(first[-1]['id'], events[0]['id'])
+        API['reconcile'](self.state, candidates, {}, self.config, NOW+10000, action)
+        self.assertEqual(calls, [('remedy', 'lead/tools')]*2 + [('send', 's/default')])
 
     def test_supervisors_default_second_ops_and_director(self):
         for name, target in [('lead/tools', 's/default'), ('lead/H/tools', 's/second'), ('s/second', 'director'),
-                             ('ops', 'director'), ('s/deploy', 'director'), ('director', None)]:
+                             ('ops', 'director'), ('s/deploy', 'director'), ('s/multi-coord', 'director'), ('director', None)]:
             with self.subTest(name=name):
                 self.state, self.calls = {}, []
                 self.data['agents'], self.data['mail'] = [], []
                 self.live(name)
+                if name == 'ops':
+                    self.data['unit/ops'] = False
                 self.mail(11, owner=name)
                 self.round()
-                self.round(NOW+1200)
-                self.assertEqual(self.calls, [('wake', name, 'deaf')] + ([('send', target, 'deaf')] if target else []))
+                self.round(NOW+1801)
+                self.assertEqual(self.calls, [('send', name, 'deaf')] + ([('send', target, 'deaf')] if target else []))
 
     def test_all_rules_route_open_to_owner_and_escalation_to_supervisor(self):
         self.live()
@@ -421,7 +430,7 @@ class Rules(unittest.TestCase):
         self.data['spool/post-sent'] = [dict(id='failed', kind='send', time=ISO(NOW),
                                               **{'from': 'lead/tools', 'exit': 2})]
         candidates = self.judge()
-        self.assertEqual({c['rule'] for c in candidates.values()}, set(API['RULES']))
+        self.assertEqual({c['rule'] for c in candidates.values()}, set(API['RULES']) - {'waiter orphan', 'waiter dead'})
         for candidate in candidates.values():
             self.assertNotIn('first_to', candidate)
             self.assertEqual(candidate['escalate_to'], self.names[candidate['owner']]['supervisor'])
@@ -455,16 +464,16 @@ class Rules(unittest.TestCase):
         self.live('s/deploy')
         self.mail(11, owner='s/deploy')
         candidates = self.judge()
-        for tick in (NOW, NOW+1200):
+        for tick in (NOW, NOW+1801):
             API['reconcile'](self.state, candidates, {}, self.config, tick, self.action, post=False)
         self.calls.clear()
         notices = []
         def send(kind, to, candidate):
             notices.append((kind, to, candidate))
             return 2 if len(notices) == 1 else 3
-        API['reconcile'](self.state, candidates, {'mail': 'unavailable'}, self.config, NOW+1201, send)
+        API['reconcile'](self.state, candidates, {'mail': 'unavailable'}, self.config, NOW+1802, send)
         self.assertEqual(notices, [])
-        for tick in (NOW+1202, NOW+1203, NOW+1204):
+        for tick in (NOW+1803, NOW+1804, NOW+1805):
             API['reconcile'](self.state, candidates, {}, self.config, tick, send)
         self.assertEqual([(kind, to) for kind, to, _ in notices], [('send', 'director')]*2)
         self.assertTrue(all(c['was_silent_since'] == ISO(NOW) for _, _, c in notices))
@@ -478,7 +487,7 @@ class Rules(unittest.TestCase):
         API['reconcile'](self.state, candidates, {}, self.config, NOW+1, self.action)
         API['reconcile'](self.state, candidates, {}, self.config, NOW+2, self.action)
         self.assertEqual(self.calls, [('send', 'lead/tools', 'deaf')])
-        API['reconcile'](self.state, candidates, {}, self.config, NOW+1200, self.action)
+        API['reconcile'](self.state, candidates, {}, self.config, NOW+1801, self.action)
         self.assertEqual(self.calls[-1], ('send', 's/default', 'deaf'))
 
     def test_paused_not_ours_and_rules_disabled(self):
@@ -505,6 +514,8 @@ class Rules(unittest.TestCase):
         self.assertEqual(len(self.calls), 1)
 
     def test_handover_updates_keep_first_clock_and_do_not_reopen_after_ack(self):
+        self.live()
+        self.data['agents'][0]['sessionId'] = 'old'
         first = ISO(NOW-1300)
         self.data['spool/sessions'] = [
             dict(kind='handover-needed', name='lead/tools', session='old', time=ISO(NOW-10),
@@ -512,6 +523,9 @@ class Rules(unittest.TestCase):
         self.assertTrue(self.rule('handover late'))
         self.data['spool/sessions'].append(dict(kind='files-current', name='lead/tools', time=ISO(NOW-100)))
         self.assertFalse(self.rule('handover late'))
+
+        self.data['spool/sessions'] = [self.data['spool/sessions'][0]]
+        self.assertFalse(self.rule('handover late', NOW+15000))
 
     def test_post_sent_failures_retry_and_missing_stream_freeze(self):
         row = dict(id='send-fail', kind='send', time=ISO(NOW), message_id='mail',
@@ -534,6 +548,8 @@ class Rules(unittest.TestCase):
         self.assertFalse(self.state['episodes'])
 
     def test_handover_and_delivery_survive_event_expiry_and_clear_on_new_evidence(self):
+        self.live()
+        self.data['agents'][0]['sessionId'] = 'old'
         self.data['spool/sessions'] = [dict(kind='handover-needed', name='lead/tools',
                     session='old', time=ISO(NOW-1300), first_fired=ISO(NOW-1300))]
         self.data['spool/post-sent'] = [dict(id='failed', kind='send', message_id='mail',
@@ -588,6 +604,240 @@ class Rules(unittest.TestCase):
         for offset in (1, 2, 3):
             self.round(NOW+offset, errors={'names': 'unavailable'})
         self.assertTrue(self.state['episodes'])
+
+
+class MailHealth(unittest.TestCase):
+    setUp = Rules.setUp
+    live = Rules.live
+    mail = Rules.mail
+    codex = Rules.codex
+    add_run = Rules.add_run
+    judge = Rules.judge
+    rule = Rules.rule
+    round = Rules.round
+    action = Rules.action
+    def test_one_episode_per_reader_many_runs_and_turn_evidence(self):
+        self.codex(True)
+        for i in range(20):
+            self.add_run(run=f'run-{i}', ended=True)
+            self.mail(16+i, subject=f'codex-run run-{i} complete', sender='codex-run@hel8')
+        self.data['turn/lead/tools'] = dict(started=NOW-2200)
+        candidate, = self.rule('report unread')
+        self.assertEqual(candidate['subject'], 'lead/tools')
+        self.assertIn('unread=20;', candidate['evidence'][0])
+        self.assertIn('current_turn_s=2200', candidate['evidence'])
+        for tick in (0, 120, 1800, 1801, 3600):
+            self.round(NOW+tick)
+        episodes = [e for e in self.state['episodes'].values() if e['rule'] == 'report unread']
+        self.assertEqual(len(episodes), 1)
+        self.assertEqual(self.calls, [('send', 'lead/tools', 'report unread'), ('send', 's/default', 'report unread')])
+
+    def test_deaf_requires_idle_and_confirmed_saved_bypass(self):
+        self.live()
+        self.mail(11)
+        agent = self.data['agents'][0]
+        agent.update(cwd='/synthetic/start', state='done')
+        self.data['saved'] = {'synthetic-session': dict(bypass=True, cwd=agent['cwd'])}
+        self.assertIsNone(self.rule('deaf')[0]['remedy'])
+        agent['status'] = 'idle'
+        self.assertEqual(self.rule('deaf')[0]['remedy']['session'], 'synthetic-session')
+        self.data['saved'] = {}
+        self.assertIsNone(self.rule('deaf')[0]['remedy'])
+        agent['status'] = 'waiting'
+        self.assertIsNone(self.rule('deaf')[0]['remedy'])
+
+    def test_gone_launcher_excludes_paused_retired_codex_and_fixed(self):
+        identity = dict(role='lead', handle='q', area='jig')
+        self.assertEqual(API['launch_role'](identity)['argv'], ['lead', 'q', 'jig'])
+        self.assertEqual(API['launch_role'](dict(role='coordinator', handle='q'))['argv'], ['coordinator', 'q'])
+        self.assertEqual(API['launch_role'](dict(role='director'))['argv'], ['director'])
+        for flag in ({'paused':True}, {'retired':True}, {'kind':'codex'}, {'role':'fixed'}):
+            self.assertIsNone(API['launch_role'](dict(identity, **flag)))
+
+    def test_orphan_and_dead_waiter_actions(self):
+        self.live()
+        current = dict(pid=200, session='synthetic-session', alive=True,
+                       process=dict(alive=True, ppid=100, start='1', verified=True))
+        orphan = dict(pid=201, session='old', alive=True,
+                      process=dict(alive=True, ppid=1, start='2', verified=True))
+        dead = dict(pid=202, session='old', alive=False, process=dict(alive=False))
+        box = dict(alive=True, session='synthetic-session', records=[current, orphan, dead])
+        self.data['waiters']['lead/tools'] = box
+        self.assertEqual(self.rule('waiter orphan')[0]['remedy']['pid'], 201)
+        self.assertIsNone(self.rule('waiter dead')[0]['remedy'])
+        box['records'] = [orphan]
+        self.assertIsNone(self.rule('waiter orphan')[0]['remedy'])
+        self.data['agents'] = []
+        self.assertEqual(self.rule('waiter orphan')[0]['remedy']['pid'], 201)
+
+    def test_stale_waiter_does_not_hide_deaf_successor_and_ops_unit_is_live(self):
+        self.live()
+        self.mail(11)
+        self.data['waiters']['lead/tools'] = dict(alive=True, session='old', records=[dict(
+            pid=201,session='old',alive=True,process=dict(alive=True,ppid=1,start='1',verified=True))])
+        self.assertTrue(self.rule('deaf'))
+        self.data['unit/ops'] = True
+        self.data['waiters']['ops'] = dict(alive=True,session='-',records=[dict(
+            pid=202,session='-',alive=True,process=dict(alive=True,ppid=1,start='1',verified=True))])
+        self.assertFalse([c for c in self.rule('waiter orphan') if c['owner'] == 'ops'])
+
+    def test_handover_old_owner_ack_before_fire_and_claude_successor(self):
+        self.codex(True)
+        fired = dict(kind='handover-needed', name='lead/tools', session_kind='codex-owner',
+                     session='old-owner', time=ISO(NOW-1260), first_fired=ISO(NOW-1260))
+        self.data['spool/sessions'] = [fired]
+        self.data['spool/post'] = [dict(kind='mail', time=ISO(NOW-1380), subject='files current',
+                                     **{'from':'lead/tools@hel8'})]
+        self.assertFalse(self.rule('handover late'))
+        self.data['spool/post'] = []
+        self.state = {}
+        self.data['agents'] = [dict(name='lead/tools', sessionId='claude-successor', state='working', status='busy')]
+        self.assertFalse(self.rule('handover late'))
+        self.data['agents'] = []
+        self.data['unit/lead/tools'] = False
+        self.assertFalse(self.rule('handover late'))
+
+    def test_successful_remedy_escalates_only_after_thirty_minutes(self):
+        self.live()
+        self.mail(11)
+        candidates = self.judge()
+        candidates['deaf\tlead/tools']['remedy'] = dict(kind='resume')
+        calls = []
+        def action(kind, to, candidate):
+            calls.append((kind, to))
+            return dict(success=True) if kind == 'remedy' else 0
+        for tick in (0, 120, 1800):
+            API['reconcile'](self.state, candidates, {}, self.config, NOW+tick, action)
+        self.assertEqual(calls, [('remedy', 'lead/tools')])
+        API['reconcile'](self.state, candidates, {}, self.config, NOW+1801, action)
+        self.assertEqual(calls[-1], ('send', 's/default'))
+
+
+class Repairs(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.home = Path(self.temp.name)
+        self.addCleanup(patch.stopall)
+        patch.dict(os.environ, HOME=str(self.home)).start()
+        self.sid = '01234567-1234-1234-1234-123456789abc'
+        self.cwd = str(self.home)
+        self.agent = dict(sessionId=self.sid, cwd=self.cwd, state='done', status='idle')
+        self.saved = self.home/'.claude/jobs/01234567/state.json'
+        self.saved.parent.mkdir(parents=True)
+        self.saved.write_text(json.dumps(dict(self.agent, respawnFlags=['--permission-mode','bypassPermissions'])))
+        self.calls = []
+        self.stopped = False
+        self.resume_id = self.sid
+        self.fail_dry = False
+        self.pending = 1
+        self.timeout = False
+        def fake(argv, **kw):
+            self.calls.append((argv, kw))
+            stdout = ''
+            rc = 0
+            if argv[:2] == ['claude', 'agents']:
+                if '--all' in argv:
+                    self.pending -= 1
+                    state = 'stopped' if self.stopped and self.pending < 0 and not self.timeout else 'blocked'
+                    stdout = json.dumps([dict(self.agent, state=state)])
+                else:
+                    stdout = json.dumps([self.agent])
+            elif argv[:2] == ['claude', 'stop']:
+                self.stopped = True
+            elif '--resume' in argv:
+                self.assertLess(self.pending, 0)
+                stdout = json.dumps(dict(session_id=self.resume_id))
+            elif '--dry-run' in argv and self.fail_dry:
+                rc = 1
+            return subprocess.CompletedProcess(argv, rc, stdout, '')
+        patch.dict(API['repair'].__globals__, command=fake).start()
+        patch('time.sleep').start()
+        self.plan = dict(kind='resume', session=self.sid, cwd=self.cwd, owner='lead/tools')
+
+    def repair(self):
+        return API['repair'](self.plan, dict(stop_timeout_seconds=60, stop_poll_seconds=1), 'session-start')
+
+    def test_stop_waits_then_resumes_exact_id_and_argv(self):
+        self.assertTrue(self.repair()['success'])
+        argv, kw = self.calls[-1]
+        self.assertEqual(argv, ['claude','--bg','--resume',self.sid,
+            'Restart your post wait lead/tools in the background, post read lead/tools, and carry on.'])
+        self.assertEqual(kw['cwd'], self.cwd)
+        stop = next(kw for argv, kw in self.calls if argv[:2] == ['claude','stop'])
+        self.assertEqual(stop['cwd'], self.cwd)
+        self.assertEqual(sum('--all' in argv for argv, _ in self.calls), 2)
+
+    def test_busy_or_unknown_bypass_never_stops(self):
+        self.agent['status'] = 'busy'
+        self.assertFalse(self.repair()['attempted'])
+        self.agent['status'] = 'idle'
+        self.saved.unlink()
+        self.assertFalse(self.repair()['attempted'])
+        self.assertFalse(any(argv[1:2] == ['stop'] for argv, _ in self.calls))
+
+    def test_copy_is_stopped_and_failed_result_records_copy(self):
+        self.resume_id = 'copy-session'
+        result = self.repair()
+        self.assertFalse(result['success'])
+        self.assertEqual(result['copy_session'], 'copy-session')
+        self.assertEqual(self.calls[-1][0], ['claude','stop','copy-session'])
+
+    def test_stop_timeout_never_resumes(self):
+        self.timeout = True
+        with patch('time.monotonic', side_effect=[0, 0, 0, 61]):
+            result = self.repair()
+        self.assertFalse(result['success'])
+        self.assertFalse(any('--resume' in argv for argv, _ in self.calls))
+
+    def test_copy_waiter_cleanup_rechecks_other_reader_before_signal(self):
+        self.agent['name'] = 'lead/tools'
+        original_command = API['repair'].__globals__['command']
+        records = [f'lead/tools 201 alive copy-session', f'lead/tools 202 alive {self.sid}']
+        def command(argv, **kw):
+            if argv == ['post','waiters']:
+                return subprocess.CompletedProcess(argv,0,'\n'.join(records),'')
+            return original_command(argv, **kw)
+        def process(pid):
+            return dict(alive=True,verified=True,start=str(pid),argv=['post','wait','lead/tools'])
+        plan = dict(kind='kill',pid=201,start='201',owner='lead/tools',identity={})
+        with patch.dict(API['repair'].__globals__, command=command, waiter_process=process), patch('os.kill') as kill:
+            self.assertTrue(API['repair'](plan,{},'session-start')['success'])
+            kill.assert_called_once_with(201,15)
+            records.pop()
+            kill.reset_mock()
+            self.assertFalse(API['repair'](plan,{},'session-start')['attempted'])
+            kill.assert_not_called()
+
+    def test_saved_bypass_conflicts_and_identity_mismatch_refuse(self):
+        for fields in (dict(respawnFlags=['--permission-mode','default']),
+                       dict(respawnFlags=['--permission-mode','bypassPermissions','--permission-mode','default']),
+                       dict(respawnFlags=['--model','opus']), dict(sessionId='wrong-id')):
+            row = dict(self.agent,respawnFlags=['--dangerously-skip-permissions'])
+            row.update(fields)
+            self.saved.write_text(json.dumps(row))
+            self.assertFalse(self.repair()['attempted'])
+        self.assertFalse(any(argv[:2] == ['claude','stop'] for argv,_ in self.calls))
+
+    def test_current_turn_metadata_is_correlated_with_completion_ledger(self):
+        directory = self.home/'owner'
+        directory.mkdir()
+        (directory/'events.jsonl').write_text('\n'.join(json.dumps(row) for row in [
+            dict(type='thread.started',thread_id='thread',ts=ISO(NOW-100)),
+            dict(type='turn.started',ts=ISO(NOW-100))])+'\n')
+        ledger = directory/'turns.tsv'
+        ledger.write_text(f'{ISO(NOW-400)}\t{ISO(NOW-200)}\t0\t1\n')
+        row = API['owner_turn'](dict(owner_state=str(directory)), 'ops')
+        self.assertEqual(row['started'], NOW-100)
+        self.assertEqual(row['thread'], 'thread')
+        ledger.write_text(f'{ISO(NOW-100)}\t{ISO(NOW)}\t0\t1\n')
+        self.assertIsNone(API['owner_turn'](dict(owner_state=str(directory)), 'ops')['started'])
+
+    def test_gone_failed_dry_run_never_starts(self):
+        self.fail_dry = True
+        result = API['repair'](dict(kind='launch', argv=['coordinator','q']), {}, 'session-start')
+        self.assertFalse(result['success'])
+        self.assertEqual([argv for argv, _ in self.calls], [['session-start','coordinator','q','--dry-run']])
 
 
 class Heartbeats(unittest.TestCase):
@@ -668,8 +918,12 @@ if sys.argv[1]=='names':
 else: sys.exit(1 if sys.argv[2] in os.environ.get('UNOWNED','').split(',') else 0)
 """)
         for name, file in [('claude','agents.json'), ('claim','claims'), ('lease','leases'), ('ssh','remote')]:
-            self.fake(name, f"import os,sys\nfrom pathlib import Path\nif os.environ.get('FAIL_INPUT')=={name!r}: sys.exit(2)\nprint((Path(os.environ['HOME'])/{file!r}).read_text(),end='')\n")
-        self.fake('git', f"import os,sys\nfrom pathlib import Path\nif sys.argv[1]=='ls-remote': print((Path(os.environ['HOME'])/'refs').read_text(),end='')\nelse: os.execv({self.real_git!r}, [{self.real_git!r}]+sys.argv[1:])\n")
+            suffix = """rows=__import__('json').loads((Path(os.environ['HOME'])/'agents.json').read_text())
+rows.append(dict(name='director',sessionId='fixture-director',state='working',status='busy'))
+print(__import__('json').dumps(rows))
+""" if name == 'claude' else f"print((Path(os.environ['HOME'])/{file!r}).read_text(),end='')\n"
+            self.fake(name, f"import os,sys\nfrom pathlib import Path\nif os.environ.get('FAIL_INPUT')=={name!r}: sys.exit(2)\n" + suffix)
+        self.fake('git', f"import os,sys\nfrom pathlib import Path\nif sys.argv[1]=='ls-remote' and sys.argv[-1]=='refs/heads/ready/*': print((Path(os.environ['HOME'])/'refs').read_text(),end='')\nelse: os.execv({self.real_git!r}, [{self.real_git!r}]+sys.argv[1:])\n")
     def write(self, path, text):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text)
@@ -706,7 +960,7 @@ else: sys.exit(1 if sys.argv[2] in os.environ.get('UNOWNED','').split(',') else 
         self.mail()
         before = self.git('--git-dir', str(self.origin), 'rev-parse', 'main')
         result = self.invoke(dry=True)
-        self.assertIn('would post wake lead/jig', result.stdout)
+        self.assertIn("would post send --as watch lead/jig", result.stdout)
         self.assertIn('"kind": "alert-open"', result.stdout)
         self.assertNotIn('PRIVATE BODY', result.stdout)
         self.assertFalse((self.home/'.local').exists())
@@ -727,7 +981,7 @@ else: sys.exit(1 if sys.argv[2] in os.environ.get('UNOWNED','').split(',') else 
         self.invoke()
         self.assertFalse(self.state()['pending'])
         self.assertTrue(saved <= {e['id'] for e in self.events()})
-        self.assertEqual((self.home/'post.log').read_text().count('wake'), 1)
+        self.assertEqual((self.home/'post.log').read_text().count('send'), 1)
 
 
     def test_probe_real_producer_shapes_and_header_joins(self):
@@ -763,7 +1017,7 @@ else: sys.exit(1 if sys.argv[2] in os.environ.get('UNOWNED','').split(',') else 
     def test_claim_and_waiter_parsers_reject_malformed(self):
         rows = API['claims']('builder 1 [pool]: lead/jig: synthetic (since '+ISO(NOW)+'); held 0d 00:00:00\n')
         self.assertEqual(rows[0]['host'], 'builder')
-        self.assertEqual(API['waiters']('lead/jig 1 dead session')['lead/jig']['alive'], False)
+        self.assertEqual(API['waiters']('lead/jig 123 dead session')['lead/jig']['alive'], False)
         for parser, value in [('claims','nonsense'), ('waiters','lead/jig invalid')]:
             with self.assertRaises(ValueError): API[parser](value)
     def test_names_failure_does_not_invent_fixed_identities(self):
