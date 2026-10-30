@@ -61,3 +61,25 @@ See the task report for real hetzner7 dry-run and full-gate measurements and
 focused validation. This branch is pushed for review, not landed.
 Machine action after landing: fleet-sync installs the new timer on hetzner3;
 no manual enablement or machine changes were performed by this task.
+
+
+## 5. Review fixes, 2026-10-30 (gate-fix-1)
+
+Added regressions before each fix: advancing local HEAD during a paused remote
+gate previously pushed an unchecked descendant; dropped/interrupted uploads
+previously released their claims; archive periodic runs lacked history; wall-only
+notices omitted their owners alone and alongside another file's notice.
+
+Landing now holds a checkout flock, pins the bundle/checkout/receipt/push SHA,
+refuses unexpected HEAD movement and records exact no-overlap rebase SHAs.
+Upload intent is durable before SSH; a remote barrier publishes writer/group
+and wrapper identities before copying. Unknown uploads retain the claim and
+receipt until reconciliation proves both ended. Private release-pinned Git
+snapshots supply periodic history; notices include wall-only budget overruns.
+Coverage adds `tools/test_periodic.py` and extends the landing/race/reconcile
+fixtures. The unit fixture follows the declared flag and exercises re-enablement.
+
+Enforcement and budgets remain unchanged. Periodic remains paused at ed5c048;
+the coordinator will re-enable AGENTS_PERIODIC on h3 after landing. This branch
+requires no machine action before review and is pushed without landing.
+Validation and actual auto-host dry-run timing are in the gate-fix-1 task report.

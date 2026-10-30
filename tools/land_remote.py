@@ -71,13 +71,13 @@ def identity(record):
     return {key: record[key] for key in ('id', 'sha', 'owner', 'what')}
 
 
-def state(record):
+def state(record, name='run'):
     path = directory(record)
     if path is None or not path.exists():
         return None
     if json.loads((path / 'identity.json').read_text()) != identity(record):
         raise ValueError('remote identity mismatch')
-    status = path / 'run.json'
+    status = path / (name + '.json')
     value = json.loads(status.read_text()) if status.exists() else None
     if value is not None and any(value.get(k) != v for k, v in identity(record).items()):
         raise ValueError('remote run identity mismatch')
@@ -120,7 +120,16 @@ def inspect(record):
             raise ValueError('remote allocation unknown; retain claim for ops')
         record['remote_dir'] = str(candidates[0])
     value = state(record)
-    scope = record | (value or {})
+    processes, supervisors = identities(record | (value or {}), record.get('launch_requested'), value)
+    upload = state(record, 'upload') or record.get('upload')
+    up_processes, up_supervisors = identities(upload or {}, record.get('upload_requested'), upload)
+    path = directory(record)
+    return dict(remote_dir=record.get('remote_dir'), exists=bool(path and path.exists()),
+                run=value, upload=upload, processes=processes + up_processes,
+                supervisors=supervisors + up_supervisors, heavy=heavy(record))
+
+
+def identities(scope, requested, value):
     if scope.get('boot') and scope['boot'] != boot():
         raise ValueError('builder rebooted: saved process identity is unavailable')
     pgid = scope.get('pgid')
@@ -136,13 +145,46 @@ def inspect(record):
         supervisors = [supervisor]
     else:
         supervisors = []
-    if record.get('launch_requested') and pgid is None:
+    if requested and pgid is None:
         cancelled_before_launch = value and value.get('phase') == 'finished' and value.get('exit_code') == 125
         if not supervisors and not cancelled_before_launch:
             raise ValueError('remote process identity unavailable; keep claim for ops')
+    return group(pgid), supervisors
+
+
+def upload(record):
+    """Publish the uploader's identity before allowing it to consume any bytes."""
     path = directory(record)
-    return dict(remote_dir=record.get('remote_dir'), exists=bool(path and path.exists()), run=value, processes=group(pgid),
-                supervisors=supervisors, heavy=heavy(record))
+    state(record)  # Validate owned directory before writing.
+    read_fd, write_fd = os.pipe()
+    try:
+        with (path / 'run.lock').open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            if (path / 'cancelled').exists() or (path / 'upload.json').exists():
+                raise ValueError('remote upload cancelled or already launched')
+            # The barrier survives SSH loss: EOF before permission means no copy.
+            worker = ("import os,sys; "
+                      "permission=os.read(int(sys.argv[1]),1); "
+                      "command=['cat']; "
+                      "os.execvp(command[0],command) if permission==b'1' else sys.exit(125)")
+            with (path / 'candidate.bundle').open('wb') as stream:
+                child = subprocess.Popen([sys.executable, '-I', '-B', '-c', worker, str(read_fd)],
+                                         stdin=sys.stdin.buffer, stdout=stream,
+                                         stderr=subprocess.DEVNULL, pass_fds=(read_fd,), start_new_session=True)
+            value = identity(record) | dict(phase='running', boot=boot(), pgid=child.pid,
+                        start_ticks=process(child.pid)['start_ticks'], supervisor_pid=os.getpid(),
+                        supervisor_start_ticks=process(os.getpid())['start_ticks'])
+            atomic(path / 'upload.json', value)
+            os.write(write_fd, b'1')
+        code = child.wait()
+        with (path / 'run.lock').open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            value |= dict(phase='finished', exit_code=code)
+            atomic(path / 'upload.json', value)
+        return value
+    finally:
+        os.close(read_fd)
+        os.close(write_fd)
 
 
 def prepare(record):
@@ -262,10 +304,17 @@ def kill(record):
         fcntl.flock(lock, fcntl.LOCK_EX)
         observation = inspect(record)  # Verify boot/PID identity immediately before killing.
         (path / 'cancelled').touch()
-        pgid = (observation['run'] or record).get('pgid')
-        if pgid and observation['processes']:
-            os.killpg(pgid, signal.SIGKILL)
-    return wait(record, 5)
+        for value in (observation['run'] or record, observation.get('upload') or {}):
+            pgid = value.get('pgid')
+            if pgid and group(pgid):
+                os.killpg(pgid, signal.SIGKILL)
+    end = time.monotonic() + 5
+    while time.monotonic() < end:
+        observation = inspect(record)
+        if not observation['processes'] and not observation['supervisors']:
+            return observation
+        time.sleep(.02)
+    raise TimeoutError('remote processes have not ended')
 
 
 def main():
@@ -281,7 +330,7 @@ def main():
     elif action == 'wait':
         result = wait(record, sys.argv[3])
     else:
-        result = {'prepare': prepare, 'inspect': inspect, 'cleanup': cleanup, 'kill': kill}[action](record)
+        result = {'prepare': prepare, 'upload': upload, 'inspect': inspect, 'cleanup': cleanup, 'kill': kill}[action](record)
     print(json.dumps(result), flush=True)
 
 

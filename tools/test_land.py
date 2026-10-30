@@ -59,6 +59,16 @@ else:
   deadline=time.monotonic()+5
   while not (home/'ready').exists() and time.monotonic()<deadline: time.sleep(.01)
   sys.exit(255)
+ if os.environ.get('WAIT_UPLOAD') and (action=='upload' or args[:2]==['sh','-c'] and 'candidate.bundle' in args[2]):
+  pause="from pathlib import Path; import time; p=Path.home(); (p/'upload-ready').touch(); exec(\"while not (p/'end-upload').exists(): time.sleep(.01)\")"
+  if action!='upload':
+   args[2]='python3 -c '+shlex.quote(pause)+'; '+args[2]
+  output=(home/'upload-output').open('wb')
+  child=subprocess.Popen(args,stdout=output,stderr=output)
+  deadline=time.monotonic()+5
+  while not (home/'upload-ready').exists() and time.monotonic()<deadline: time.sleep(.01)
+  if os.environ.get('DROP_UPLOAD'): sys.exit(255)
+  sys.exit(child.wait())
  if action=='prepare':
   result=subprocess.check_output(args,text=True)
   (home/'remote').write_text(json.loads(result)['remote_dir'])
@@ -199,7 +209,7 @@ class LandTests(LandFixture):
         self.assertIn('shipped HEAD bundle',output)
         self.assertIn('merge wall',output)
         self.assert_released()
-        self.assertTrue(any(a[:2]==['sh','-c'] and 'candidate.bundle' in a[2] for a in self.calls()))
+        self.assertIn(['remote', 'upload'], self.calls())
 
     def test_dry_run_auto_builder(self):
         output=self.land('--dry-run')
@@ -293,8 +303,12 @@ class PeriodicTests(unittest.TestCase):
             declarations=module.Declarations(ROOT,Path(home))
             for host in declarations.hosts:
                 wanted=declarations.host_units(host)
-                self.assertEqual('agents-periodic.timer' in wanted,host=='hetzner3')
-                self.assertEqual('agents-periodic.service' in wanted,host=='hetzner3')
+                enabled = 'builder' in declarations.hosts[host]['roles'] and declarations.hosts[host]['machine_env'].get('AGENTS_PERIODIC') == 1
+                self.assertEqual('agents-periodic.timer' in wanted, enabled)
+                self.assertEqual('agents-periodic.service' in wanted, enabled)
+            declarations.hosts['hetzner3']['machine_env']['AGENTS_PERIODIC'] = 1
+            self.assertIn('agents-periodic.timer', declarations.host_units('hetzner3'))
+            self.assertIn('agents-periodic.service', declarations.host_units('hetzner3'))
             service=(ROOT/'fleet/units/agents-periodic.service').read_text()
             self.assertIn('AGENTS_PERIODIC',service)
             self.assertIn('Nice=19',service)
@@ -317,6 +331,12 @@ sys.exit(1)
             result=subprocess.run(['python3','-I','-B',str(root/'tools/periodic')],env=env,capture_output=True)
             self.assertEqual(result.returncode,0,result.stderr)
             self.assertFalse((root/'tiers').exists())
+            git_env=dict(env, GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1',
+                         GIT_AUTHOR_NAME='Fixture', GIT_AUTHOR_EMAIL='fixture@example.invalid',
+                         GIT_COMMITTER_NAME='Fixture', GIT_COMMITTER_EMAIL='fixture@example.invalid')
+            for args in (['init','-b','main'], ['add','tools'], ['commit','-qm','periodic fixture']):
+                subprocess.run(['git',*args],cwd=root,env=git_env,check=True,capture_output=True)
+            env.update(git_env)
             env['AGENTS_PERIODIC']='1'
             result=subprocess.run(['python3','-I','-B',str(root/'tools/periodic')],env=env,capture_output=True)
             self.assertEqual(result.returncode,1,result.stderr)

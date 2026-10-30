@@ -1,6 +1,8 @@
 """Reconciliation uses only fixture SSH, claims, processes and private HOME."""
 import json
 import os
+import signal
+import subprocess
 from pathlib import Path
 import time
 import unittest
@@ -8,6 +10,56 @@ import test_land as fixture
 
 
 class ReconcileTests(fixture.LandFixture):
+    def uncertain_upload(self, interrupt):
+        fixture.put(self.bin / 'cat', '''#!/usr/bin/env python3
+import os, time
+from pathlib import Path
+home = Path.home()
+(home / 'upload-ready').touch()
+while not (home / 'end-upload').exists(): time.sleep(.01)
+os.execv('/bin/cat', ['cat'])
+''', True)
+        self.env['WAIT_UPLOAD'] = '1'
+        if not interrupt:
+            self.env['DROP_UPLOAD'] = '1'
+        child = subprocess.Popen(['python3', '-I', '-B', 'tools/land', '--host', 'hetzner7',
+                                  '--inventory', str(self.inventory)], cwd=self.source,
+                                 env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            deadline = time.monotonic() + 10
+            while not (self.home / 'upload-ready').exists():
+                self.assertIsNone(child.poll())
+                self.assertLess(time.monotonic(), deadline)
+                time.sleep(.01)
+            if interrupt:
+                child.send_signal(signal.SIGINT)
+            out, err = child.communicate(timeout=10)
+            self.assertNotEqual(child.returncode, 0, out + err)
+            row = self.assert_kept()
+            self.assertTrue(row['upload_requested'])
+            self.assertFalse(row['upload_seen'])
+            self.assertTrue(Path(row['remote_dir']).exists())
+            self.assertEqual(self.tip(), self.original)
+            self.env.pop('DROP_UPLOAD', None)
+            self.env.pop('WAIT_UPLOAD')
+            before = len(self.calls())
+            self.land('--reconcile', row['id'], expected=1)
+            self.assertEqual(self.calls()[before:], [['remote', 'inspect']])
+            self.assert_kept()
+            self.land('--reconcile', row['id'], '--kill')
+            self.assert_released()
+        finally:
+            fixture.put(self.home / 'end-upload', 'finish')
+            if child.poll() is None:
+                child.kill()
+                child.communicate()
+
+    def test_dropped_upload_keeps_claim_until_processes_proven_gone(self):
+        self.uncertain_upload(False)
+
+    def test_interrupted_upload_keeps_claim_until_processes_proven_gone(self):
+        self.uncertain_upload(True)
+
     def drop_run(self):
         self.env.update(WAIT_GATE='1', DROP_WAIT='1')
         self.land('--host', 'hetzner7', expected=1)
