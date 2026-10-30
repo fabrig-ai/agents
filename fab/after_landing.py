@@ -42,7 +42,17 @@ def suspects(repo: Path, previous: str | None, tip: str, *, sh: Runner = run) ->
     --reverse <previous>..<tip>` in repo (oldest first), each with its parents and subject from
     `git show -s --format=%P%n%s`. A commit with two parents whose subject fully matches MERGE
     names that branch; any other commit has branch None. previous None: no suspects."""
-    raise NotImplementedError
+    if previous is None:
+        return []
+    commits = sh(["git", "rev-list", "--first-parent", "--reverse", f"{previous}..{tip}"],
+                 cwd=str(repo), check=True).out.splitlines()
+    result = []
+    for commit in commits:
+        parents, subject = sh(["git", "show", "-s", "--format=%P%n%s", commit],
+                              cwd=str(repo), check=True).out.rstrip("\n").split("\n", 1)
+        match = MERGE.fullmatch(subject) if len(parents.split()) == 2 else None
+        result.append(Suspect(commit, subject, match.group(1) if match else None))
+    return result
 
 
 def state(first: str, rerun: str | None, last: dict | None) -> str:
@@ -53,13 +63,27 @@ def state(first: str, rerun: str | None, last: dict | None) -> str:
     fail then pass: "flake". fail then fail: "unattributed" with no history, "standing" when
     last was red, "new" when it was pass. ValueError for a fail without a rerun or a rerun
     after a pass or a skip."""
-    raise NotImplementedError
+    if first == "fail":
+        if rerun is None:
+            raise ValueError("a failed test needs a rerun")
+        if rerun == "pass":
+            return "flake"
+        if last is None:
+            return "unattributed"
+        return "standing" if last["result"] == "red" else "new"
+    if rerun is not None:
+        raise ValueError("a passing or skipped test cannot have a rerun")
+    if first == "skipped":
+        return "unobserved"
+    return "recovered" if last is not None and last["result"] == "red" else "passing"
 
 
 def verdict(states: Iterable[str], faulted: bool) -> str:
     """A run's verdict: "red" when any state is CONFIRMED (whatever faulted), else "partial"
     when a pair faulted, else "green"."""
-    raise NotImplementedError
+    if any(value in CONFIRMED for value in states):
+        return "red"
+    return "partial" if faulted else "green"
 
 
 class AfterLanding:
