@@ -1,0 +1,20 @@
+[links.after-landing]
+legacy_root = "~/src/rust/agents/"
+reason = "Invokes the frozen old kit heavy directly."
+
+[links.land]
+legacy_root = "~/src/rust/agents/"
+reason = "Submits landing builds to the frozen old kit heavy."
+
+[links.land-set]
+legacy_root = "~/src/rust/agents/"
+reason = "Reaches the frozen old kit land and heavy helpers."
+
+[links.repin]
+legacy_root = "~/src/rust/agents/"
+reason = "Invokes the frozen old kit heavy and land."
+
+[links.setup]
+legacy_root = "~/src/rust/agents/"
+reason = "Can restore legacy PATH links with --fix."
+
