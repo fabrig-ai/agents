@@ -19,6 +19,9 @@ Contract: `docs/design/fleet.md`, sections 1–6.
   leading BOOT_IMAGE metadata, uncached root probes, saved-default refusal and
   shared bound bootstrap recovery transactions. Five fixtures fail on 36872fd;
   real-guard/fake-service recovery covers both drop-in and regeneration interruptions.
+  Third-review fixtures fail on d7d418d: success/failure handlers now include
+  reverse evidence and reject producer routes or unsupported job modes; systemctl
+  operands follow --, with option-parsing fixtures covering the root -.slice.
   Only plan has run on a real host; boot/quota enforcement remains unproved.
   Deploy the compatibility parser fleet-wide before the asset/bootstrap stage.
 

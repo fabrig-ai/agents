@@ -41,8 +41,9 @@ sys.stdout.write((Path.home() / 'src/rust/tmp/heavy/state.json').read_text())
 
 
 ORIGINAL = '/var/lib/fabrig-pquota/original'
-GRAPH_FORWARD = ('Wants', 'Requires', 'BindsTo', 'Upholds', 'ConsistsOf', 'Triggers')
-GRAPH_REVERSE = ('WantedBy', 'RequiredBy', 'BoundBy', 'UpheldBy', 'PartOf', 'TriggeredBy')
+GRAPH_FORWARD = ('Wants', 'Requires', 'BindsTo', 'Upholds', 'ConsistsOf', 'Triggers', 'OnSuccess', 'OnFailure')
+GRAPH_REVERSE = ('WantedBy', 'RequiredBy', 'BoundBy', 'UpheldBy', 'PartOf', 'TriggeredBy', 'OnSuccessOf', 'OnFailureOf')
+HANDLER_MODES = dict(OnSuccess='OnSuccessJobMode', OnFailure='OnFailureJobMode')
 GRAPH_LIMIT = 256
 GRAPH_EDGE_LIMIT = 2048
 MACHINE_KEYS = frozenset(('PLAN_MIN_MEM_GB', 'PLAN_MIN_DISK_GB', 'PLAN_LAND_ROOM_GB',
@@ -359,7 +360,8 @@ class Pquota:
         return dict(path=snapshot['path'], digest=snapshot['digest'], slots=held, admission_closed=snapshot['admission_closed'])
 
     def unit(self, name, allow_absent=False):
-        output = self.user('systemctl', '--user', 'show', name, '--property=' + ','.join(('LoadState', 'ActiveState', 'SubState', 'UnitFileState', *GRAPH_FORWARD, *GRAPH_REVERSE)))
+        output = self.user('systemctl', '--user', 'show', '--property=' + ','.join(
+            ('LoadState', 'ActiveState', 'SubState', 'UnitFileState', *GRAPH_FORWARD, *GRAPH_REVERSE, *HANDLER_MODES.values())), '--', name)
         row = dict(line.split('=', 1) for line in output.splitlines() if '=' in line)
         if allow_absent and row.get('LoadState') == 'not-found' and row.get('ActiveState') == 'inactive':
             return row
@@ -369,7 +371,7 @@ class Pquota:
 
     def nonclaim_writers(self):
         rows = json.loads(self.user('systemctl', '--user', 'list-units', '--all', '--type=service,scope',
-                                   '--output=json', '--no-pager'))
+                                   '--output=json', '--no-pager', '--'))
         if not isinstance(rows, list):
             raise ValueError('unreadable user unit status')
         busy = []
@@ -416,7 +418,7 @@ class Pquota:
         producers = set(services['states'])
         roots = {'default.target'}
         pending = set(producers) | roots
-        rows = json.loads(self.user('systemctl', '--user', 'list-unit-files', '--output=json', '--no-pager'))
+        rows = json.loads(self.user('systemctl', '--user', 'list-unit-files', '--output=json', '--no-pager', '--'))
         if not isinstance(rows, list):
             raise ValueError('unreadable unit installation inventory')
         disabled = {'disabled', 'static', 'indirect', 'masked', 'masked-runtime'}
@@ -431,7 +433,7 @@ class Pquota:
                 pending.add(name)
             if name.endswith(('.timer', '.path', '.socket')):
                 pending.add(name)
-        edges = set()
+        edges, handlers = set(), set()
         while pending:
             if len(evidence) >= GRAPH_LIMIT:
                 raise ValueError('activation graph exceeds supported unit bound')
@@ -448,7 +450,7 @@ class Pquota:
             required = {*GRAPH_FORWARD, *GRAPH_REVERSE, 'UnitFileState'}
             if not required <= status.keys():
                 raise ValueError(f'incomplete activation graph properties: {name}')
-            installed = self.user('systemctl', '--user', 'is-enabled', name, returncodes=(0, 1)).strip()
+            installed = self.user('systemctl', '--user', 'is-enabled', '--', name, returncodes=(0, 1)).strip()
             if installed not in disabled | boot_states or status['UnitFileState'] not in disabled | boot_states:
                 raise ValueError(f'unresolved installation state: {name}')
             if installed in boot_states or status['UnitFileState'] in boot_states:
@@ -462,6 +464,9 @@ class Pquota:
                 for other in status[key].split():
                     source, destination = (name, other) if key in GRAPH_FORWARD else (other, name)
                     edges.add((source, destination))
+                    event = key.removesuffix('Of')
+                    if event in HANDLER_MODES:
+                        handlers.add((source, destination, event))
                     if len(edges) > GRAPH_EDGE_LIMIT:
                         raise ValueError('activation graph exceeds supported edge bound')
                     graph.setdefault(source, set()).add(destination)
@@ -470,22 +475,32 @@ class Pquota:
         missing = {node for edge in edges for node in edge if evidence[node]['status']['LoadState'] != 'loaded'}
         if missing:
             raise ValueError(f'unresolved activation graph dependencies: {sorted(missing)}')
-        reached, paths = set(), {root: [root] for root in roots}
-        todo = sorted(roots)
-        while todo:
-            node = todo.pop(0)
-            if node in reached:
-                continue
-            reached.add(node)
-            if node in producers:
-                raise ValueError('producer reachable at boot/through active trigger: ' + ' -> '.join(paths[node]))
-            for other in sorted(graph.get(node, ())):
-                if other not in paths:
-                    paths[other] = paths[node] + [other]
-                if other not in reached:
-                    todo.append(other)
+        for source, _, event in handlers:
+            if evidence[source]['status'].get(HANDLER_MODES[event]) != 'replace':
+                raise ValueError(f'unsupported {event} handler job mode: {source}')
+        def reachable(seeds, reason):
+            reached, paths = set(), {seed: [seed] for seed in seeds}
+            todo = sorted(seeds)
+            while todo:
+                node = todo.pop(0)
+                if node in reached:
+                    continue
+                reached.add(node)
+                if node in producers:
+                    raise ValueError(f'producer reachable through {reason}: ' + ' -> '.join(paths[node]))
+                for other in sorted(graph.get(node, ())):
+                    if other not in paths:
+                        paths[other] = paths[node] + [other]
+                    if other not in reached:
+                        todo.append(other)
+            return reached
+        # Even an otherwise dormant handler route to a retained producer is
+        # refused: success/failure can be delivered before owner readmission.
+        handler_reached = reachable({destination for _, destination, _ in handlers}, 'success/failure handler')
+        reached = reachable(roots, 'boot/active trigger')
         return dict(units=evidence, roots=sorted(roots), edges=[list(edge) for edge in sorted(edges)],
-                    reached=sorted(reached), unit_bound=GRAPH_LIMIT, edge_bound=GRAPH_EDGE_LIMIT)
+                    reached=sorted(reached), handlers=[list(edge) for edge in sorted(handlers)],
+                    handler_reached=sorted(handler_reached), unit_bound=GRAPH_LIMIT, edge_bound=GRAPH_EDGE_LIMIT)
 
     def preboot(self):
         sources = self.installed()
@@ -977,7 +992,7 @@ class Pquota:
         self.require_fence_unchanged(state)
         state.update(reboot_fence=self.last_fence_checks, reboot_requested_at=now())
         self.save(state)
-        self.run('systemctl', 'reboot')
+        self.run('systemctl', 'reboot', '--')
 
     def expected_options(self, state):
         prepared = shlex.split(state['default_after'])
@@ -1021,7 +1036,7 @@ class Pquota:
         check('project accounting/enforcement ON', quota)
         check('installed sources unchanged', lambda: self.installed() == state['proof']['sources'])
         check('machine.env unchanged', lambda: self.environment() == state['proof']['environment'])
-        check('fleet-sync.timer active', lambda: self.user('systemctl', '--user', 'is-active', 'fleet-sync.timer').strip() == 'active')
+        check('fleet-sync.timer active', lambda: self.user('systemctl', '--user', 'is-active', '--', 'fleet-sync.timer').strip() == 'active')
         check('maintenance and retained claims unchanged; all writers drained', lambda: self.require_fence_unchanged(state))
         # A failed prerequisite never authorizes any live quota operation.
         if all(row['pass_result'] for row in checks):

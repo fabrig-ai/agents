@@ -181,7 +181,11 @@ service proof. Reboot and verify recheck unchanged claims, sources and environme
 Reboot refuses enabled retained/start-once services and transitive activation
 from default.target, enabled boot units or active timer/path/socket triggers.
 Walk Wants/Requires/BindsTo/Upholds and their reverse edges, PartOf/ConsistsOf
-and trigger edges, including intermediate targets. The read-only graph walk
+and trigger edges, including intermediate targets. Include OnSuccess/OnFailure
+and reverse OnSuccessOf/OnFailureOf handler edges; any handler route to a
+protected producer refuses. Only `replace` handler job mode is supported;
+unreadable or unsupported modes refuse. Systemctl options precede `--`; unit
+names follow it, so `-.slice` remains a unit operand. The read-only graph walk
 refuses unknown or incomplete graphs and stops at 256 units or 2048 edges.
 Owners disable without --now; verify
 records unchanged prevention, then owners restore enablement and start once only

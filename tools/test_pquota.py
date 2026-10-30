@@ -86,28 +86,53 @@ elif name == 'python3':
     print(json.dumps(dict(errno=control.get('write_errno', errno.EDQUOT), bytes=control.get('written', 983040))))
 elif name == 'grub-editenv': print(control.get('grubenv', ''))
 elif name == 'systemctl':
-    if args == ['--user', 'is-active', 'fleet-sync.timer']: print(control.get('timer', 'active'))
-    elif 'is-enabled' in args:
-        value = control.get('enablement', {}).get(args[-1], 'disabled')
+    options, operands, terminated = [], [], False
+    for arg in args:
+        if arg == '--' and not terminated:
+            terminated = True
+        elif not terminated and arg.startswith('-'):
+            if arg not in ('--user', '--all', '--no-pager', '--now') and not arg.startswith(('--output=', '--type=', '--property=')):
+                print('systemctl: unrecognized option ' + arg, file=sys.stderr)
+                sys.exit(2)
+            options.append(arg)
+        else:
+            operands.append(arg)
+    action, *units = operands
+    if action == 'is-active':
+        assert units == ['fleet-sync.timer']
+        print(control.get('timer', 'active'))
+    elif action == 'is-enabled':
+        assert len(units) == 1
+        value = control.get('enablement', {}).get(units[0], 'disabled')
         print(value); sys.exit(0 if value == 'enabled' else 1)
-    elif 'list-unit-files' in args: print(json.dumps(control.get('unit_files', [])))
-    elif 'list-units' in args: print(json.dumps(control.get('units', [])))
-    elif 'show' in args:
-        unit = args[args.index('show') + 1]
-        graph_keys = ('WantedBy', 'RequiredBy', 'Requires', 'Wants', 'BindsTo', 'BoundBy', 'PartOf', 'ConsistsOf', 'Upholds', 'UpheldBy', 'Triggers', 'TriggeredBy')
+    elif action == 'list-unit-files':
+        assert not units
+        print(json.dumps(control.get('unit_files', [])))
+    elif action == 'list-units':
+        assert not units
+        print(json.dumps(control.get('units', [])))
+    elif action == 'show':
+        assert len(units) == 1
+        unit = units[0]
+        graph_keys = ('WantedBy', 'RequiredBy', 'Requires', 'Wants', 'BindsTo', 'BoundBy', 'PartOf', 'ConsistsOf', 'Upholds', 'UpheldBy', 'Triggers', 'TriggeredBy', 'OnSuccess', 'OnFailure', 'OnSuccessOf', 'OnFailureOf')
         if unit == control.get('graph_error'): sys.exit(8)
         if unit in control.get('unit_properties', {}):
             output = control['unit_properties'][unit]
-            present = {line.partition('=')[0] for line in output.splitlines()}
-            print(output)
-            for key in graph_keys:
-                if key not in present and unit != control.get('graph_incomplete'): print(key + '=')
-            sys.exit(0)
-        state = control.get('unit_states', {}).get(unit, 'inactive')
-        print('LoadState=loaded\nActiveState=' + state + '\nSubState=' + ('running' if state == 'active' else 'dead') + '\nUnitFileState=' + control.get('enablement', {}).get(unit, 'disabled') + '\nWantedBy=\nTriggeredBy=\nTriggers=')
-        for key in graph_keys:
-            if key not in ('WantedBy', 'TriggeredBy', 'Triggers'): print(key + '=')
-    else: assert args == ['reboot']
+            values = dict(line.split('=', 1) for line in output.splitlines() if '=' in line)
+        else:
+            state = control.get('unit_states', {}).get(unit, 'inactive')
+            values = dict(LoadState='loaded', ActiveState=state, SubState='running' if state == 'active' else 'dead',
+                          UnitFileState=control.get('enablement', {}).get(unit, 'disabled'))
+        if unit != control.get('graph_incomplete'):
+            for key in graph_keys: values.setdefault(key, '')
+            values.setdefault('OnSuccessJobMode', 'replace')
+            values.setdefault('OnFailureJobMode', 'replace')
+        properties = [arg.partition('=')[2] for arg in options if arg.startswith('--property=')]
+        requested = set(','.join(properties).split(',')) if properties else set(values)
+        for key, value in values.items():
+            if key in requested: print(key + '=' + value)
+    else:
+        assert action == 'reboot' and not units
 elif name == 'update-grub':
     enabled = (root / 'etc/default/grub.d/90-fabrig-pquota.cfg').exists()
     flags = ' rootflags=pquota' if enabled and not control.get('bad_generated') else ''
@@ -221,10 +246,10 @@ class PquotaTests(unittest.TestCase):
         self.output(self.tool.prepare)
 
     def assert_refuses(self, function=None):
-        before = len([r for r in self.calls() if r[0] == 'update-grub' or r == ['systemctl', 'reboot']])
+        before = len([r for r in self.calls() if r[0] == 'update-grub' or r == ['systemctl', 'reboot', '--']])
         with self.assertRaises((ValueError, OSError)), contextlib.redirect_stdout(io.StringIO()):
             (function or self.tool.prepare)()
-        self.assertEqual(before, len([r for r in self.calls() if r[0] == 'update-grub' or r == ['systemctl', 'reboot']]))
+        self.assertEqual(before, len([r for r in self.calls() if r[0] == 'update-grub' or r == ['systemctl', 'reboot', '--']]))
 
     def test_review_1_reboot_refuses_enabled_retained_or_triggered_producer(self):
         self.retained()
@@ -525,6 +550,86 @@ class PquotaTests(unittest.TestCase):
         self.output(self.tool.rollback)
         self.assertEqual(original, self.tool.boot_files())
 
+    def handler_reboot_fixture(self, property):
+        self.retained()
+        self.prepare()
+        self.controls(unit_files=[{'unit_file': 'boot-oneshot.service', 'state': 'enabled'}],
+            enablement={'boot-oneshot.service': 'enabled'}, unit_properties={'boot-oneshot.service':
+                'LoadState=loaded\nActiveState=inactive\nSubState=dead\nUnitFileState=enabled\n' + property + '=after-landing.service\n'})
+        self.assert_refuses(self.tool.reboot)
+
+    def test_third_on_failure_boot_handler_refuses_reboot(self):
+        self.handler_reboot_fixture('OnFailure')
+
+    def test_third_on_success_boot_handler_refuses_reboot(self):
+        self.handler_reboot_fixture('OnSuccess')
+
+    def test_third_root_slice_chain_uses_terminated_unit_operands(self):
+        self.retained()
+        self.controls(unit_properties={
+            'default.target': 'LoadState=loaded\nActiveState=active\nUnitFileState=static\nRequires=app.slice\n',
+            'app.slice': 'LoadState=loaded\nActiveState=active\nUnitFileState=static\nRequires=-.slice\n',
+            '-.slice': 'LoadState=loaded\nActiveState=active\nUnitFileState=static\n'})
+        result = self.tool.boot_prevention(self.tool.services())
+        self.assertIn('-.slice', result['units'])
+        self.assertIn('-.slice', result['reached'])
+        for action in ('show', 'is-enabled'):
+            calls = [row for row in self.calls() if row[0] == 'systemctl' and action in row and '-.slice' in row]
+            self.assertTrue(calls)
+            for row in calls:
+                self.assertLess(row.index('--'), row.index('-.slice'))
+                self.assertTrue(all(not token.startswith('--') for token in row[row.index('--') + 1:]))
+
+    def test_third_handler_reverse_evidence_and_intermediate_targets_refuse(self):
+        self.retained()
+        def unit(**fields):
+            status = dict(LoadState='loaded', ActiveState='inactive', SubState='dead', UnitFileState='disabled')
+            status.update(fields)
+            return ''.join(f'{key}={value}\n' for key, value in status.items())
+        for event in ('OnFailure', 'OnSuccess'):
+            with self.subTest(event=event, evidence='reverse-only dormant handler'):
+                self.controls(unit_properties={'after-landing.service': unit(**{event + 'Of': 'handler.service'}),
+                    'handler.service': unit()})
+                with self.assertRaisesRegex(ValueError, 'success/failure handler'):
+                    self.tool.boot_prevention(self.tool.services())
+            with self.subTest(event=event, evidence='intermediate target'):
+                self.controls(unit_properties={'default.target': unit(Requires='handler.service'),
+                    'handler.service': unit(**{event: 'middle.target'}),
+                    'middle.target': unit(Requires='after-landing.service')})
+                with self.assertRaisesRegex(ValueError, 'success/failure handler'):
+                    self.tool.boot_prevention(self.tool.services())
+
+    def test_third_unsupported_handler_modes_and_templates_refuse(self):
+        self.retained()
+        status = 'LoadState=loaded\nActiveState=inactive\nUnitFileState=disabled\n'
+        for event in ('OnSuccess', 'OnFailure'):
+            for mode in ('isolate', 'flush', ''):
+                with self.subTest(event=event, mode=mode):
+                    self.controls(unit_properties={'default.target': status + 'Requires=handler.service\n',
+                        'handler.service': status + event + '=cleanup.service\n' + event + 'JobMode=' + mode + '\n'})
+                    with self.assertRaisesRegex(ValueError, 'unsupported .* handler job mode'):
+                        self.tool.boot_prevention(self.tool.services())
+        self.controls(unit_properties={'default.target': status + 'OnFailure=handler@.service\n'})
+        with self.assertRaisesRegex(ValueError, 'unsupported activation graph unit'):
+            self.tool.boot_prevention(self.tool.services())
+
+    def test_third_benign_handlers_and_realistic_option_parsing(self):
+        self.retained()
+        self.controls(unit_properties={'default.target':
+            'LoadState=loaded\nActiveState=active\nUnitFileState=static\nOnFailure=cleanup.service\n'})
+        result = self.tool.boot_prevention(self.tool.services())
+        self.assertIn(['default.target', 'cleanup.service', 'OnFailure'], result['handlers'])
+        self.assertIn('cleanup.service', result['handler_reached'])
+        self.assertNotIn('after-landing.service', result['handler_reached'])
+        for row in self.calls():
+            if row[0] == 'systemctl':
+                self.assertIn('--', row)
+                self.assertTrue(all(not value.startswith('--') for value in row[row.index('--') + 1:]))
+        for action in ('show', 'is-enabled'):
+            with self.subTest(action=action), self.assertRaisesRegex(ValueError, 'unrecognized option -.slice'):
+                self.tool.user('systemctl', '--user', action, '-.slice')
+        self.assertEqual(self.tool.unit('-.slice')['LoadState'], 'loaded')
+
     def test_plan_is_read_only_shows_occupancy_sources_environment_services(self):
         before = self.snapshot()
         _, output = self.output(self.tool.plan)
@@ -532,7 +637,7 @@ class PquotaTests(unittest.TestCase):
                      'fabrig_head', 'PLAN_MIN_DISK_GB', 'qa-watch.service', 'would run: update-grub'):
             self.assertIn(text, output)
         self.assertEqual(before, self.snapshot())
-        self.assertFalse(any(r[0] == 'update-grub' or r == ['systemctl', 'reboot'] for r in self.calls()))
+        self.assertFalse(any(r[0] == 'update-grub' or r == ['systemctl', 'reboot', '--'] for r in self.calls()))
         self.assertFalse(any(r[0] == 'xfs_quota' and r[-2] != 'state' for r in self.calls()))
 
     def test_plan_without_options_shows_every_missing_occupancy_and_digest(self):
@@ -670,7 +775,7 @@ class PquotaTests(unittest.TestCase):
         self.assertEqual(before, self.snapshot())
         self.assertEqual(self.tool.safe(self.mod.DROPIN).read_text(), self.mod.CONTENT)
         self.assertEqual(self.tool.state()['default_before'] + ' rootflags=pquota', self.tool.state()['default_after'])
-        self.assertNotIn(['systemctl', 'reboot'], self.calls())
+        self.assertNotIn(['systemctl', 'reboot', '--'], self.calls())
         self.assertEqual(list(self.tool.path(self.mod.DROPIN).parent.glob('.90-fabrig*')), [])
 
     def test_corrupt_or_drifted_backup_is_never_overwritten(self):
@@ -700,7 +805,7 @@ class PquotaTests(unittest.TestCase):
         self.output(self.tool.rollback)
         self.assertEqual(self.tool.boot_files(), original)
         self.output(self.tool.reboot)
-        self.assertIn(['systemctl', 'reboot'], self.calls())
+        self.assertIn(['systemctl', 'reboot', '--'], self.calls())
 
     def test_missing_backup_or_foreign_dropin_refuses_rollback(self):
         self.assert_refuses(self.tool.rollback)
@@ -790,7 +895,7 @@ class PquotaTests(unittest.TestCase):
     def test_reboot_checks_fence_as_last_operations_then_boot_changes_refuse(self):
         self.prepare()
         self.output(self.tool.reboot)
-        self.assertEqual(self.calls()[-1], ['systemctl', 'reboot'])
+        self.assertEqual(self.calls()[-1], ['systemctl', 'reboot', '--'])
         self.assertTrue(all(row['pass_result'] for row in self.tool.state()['reboot_fence']))
         self.assertEqual(self.calls()[-2][0], 'ssh')
         self.put('proc/sys/kernel/random/boot_id', 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb')

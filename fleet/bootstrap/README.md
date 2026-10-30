@@ -245,8 +245,8 @@ prover or synthesize its evidence, credentials, messages, sessions or holds.
 
     ```sh
     fleet-sync --check --host hetzner2
-    systemctl --user is-active fleet-sync.timer kache.service
-    systemctl --user list-timers '*reconcile*' --no-pager
+    systemctl --user is-active -- fleet-sync.timer kache.service
+    systemctl --user list-timers --no-pager -- '*reconcile*'
     heavy --check-recovery
     # A real compiler/linker/wrapper build, from fabrig installed by fleet-sync:
     cd "$HOME/src/fabrig/main"
@@ -509,8 +509,8 @@ Before the reboot, owners drain and stop producers, then **disable without
 prior enablement and application state. For example, as the owning user:
 
 ```sh
-systemctl --user stop after-landing.service
-systemctl --user disable after-landing.service
+systemctl --user stop -- after-landing.service
+systemctl --user disable -- after-landing.service
 # Stop and disable each associated timer/path/socket as well, without --now.
 ```
 
@@ -518,11 +518,17 @@ Reboot refuses enabled retained/start-once producers and any route to them from
 `default.target`, an enabled boot unit or an active timer/path/socket. It walks
 Wants/Requires/BindsTo/Upholds, their reverse properties, PartOf/ConsistsOf, and
 Triggers/TriggeredBy transitively, including triggers activating intermediate
-targets. Both UnitFileState and installation enablement are checked. The graph
+targets. OnSuccess/OnFailure and their reverse OnSuccessOf/OnFailureOf evidence
+are also walked. Any handler route to a protected producer refuses, even from a
+dormant source. Only handler job mode `replace` is supported; other or unreadable
+modes, unresolved handler templates and missing graph properties refuse.
+Both UnitFileState and installation enablement are checked. The graph
 is bounded to 256 units and 2048 edges; absent dependencies, missing properties,
 unknown installation states, unresolved templates and unsupported graphs refuse.
-Verify repeats and records units, roots, edges and reachability; an inactive
-service alone is insufficient. Owners must remove boot dependency routes as
+Verify repeats and records units, roots, edges, handler routes and reachability;
+an inactive service alone is insufficient. Every systemctl invocation places
+options before `--` and unit operands after it, including the legitimate root
+slice `-.slice`. Owners must remove boot dependency routes as
 well as disable direct enablement; stop and disable relevant triggers.
 Stopping an enabled WantedBy=default.target unit once does not prevent it from
 autostarting at boot. Coordinate a fleet convergence hold so it cannot re-enable
@@ -532,8 +538,8 @@ enablement or convergence controls. Owners retain the pre-drain plan's active-se
 immediate pre-boot state, then restore the agreed enablement and restart their
 listed start-once services **once**, preserving their existing state, claims and
 recovery evidence, after ops accepts the quota proof. Owners first restore the
-agreed enablement with `systemctl --user enable UNIT` (without `--now`), then
-explicitly `systemctl --user start UNIT` once; restore trigger enablement only
+agreed enablement with `systemctl --user enable -- UNIT` (without `--now`), then
+explicitly `systemctl --user start -- UNIT` once; restore trigger enablement only
 at the agreed readmission point.
 Fleet-sync does not restart an existing start-once service for its owner.
 For **h8**, the current transient queue wrapper is **not durable across boot**:
