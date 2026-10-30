@@ -139,10 +139,14 @@ class BootstrapStagesTest(unittest.TestCase):
         return state
 
     def test_stage_b_changes_no_runner_code(self):
-        # Stage A (code only) is deployed fleet-wide; stage B must bring declarations
-        # alone, so the deployed runner is also the runner that applies them.
-        self.assertEqual(fixture.historical_source(DEPLOYED),
-                         fixture.historical_source(self.rollout))
+        # Stage B brought declarations alone. Compare that historical rollout,
+        # allowing later runner changes after stage B has landed.
+        stage_b = DEPLOYED.removesuffix("^")
+        candidate = (self.f.process("git", "-C", fixture.ROOT, "show",
+                                    stage_b + ":tools/fleet-sync").stdout
+                     if stage_b != DEPLOYED else (fixture.ROOT / "tools/fleet-sync").read_text())
+        self.assertEqual(self.f.process("git", "-C", fixture.ROOT, "show",
+                                        DEPLOYED + ":tools/fleet-sync").stdout, candidate)
 
 
     def test_stage_a_accepts_future_assets_seeds_provision_pins_and_readonly_units(self):

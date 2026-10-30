@@ -166,7 +166,8 @@ class FleetTest(unittest.TestCase):
             self.addCleanup(shutil.rmtree, self.directory)
 
     def build_fixture(self):
-        self.temp = tempfile.TemporaryDirectory(prefix="fleet-test-")
+        # Keep HOME short enough for the real OpenSSH %C socket limit, even inside the gate.
+        self.temp = tempfile.TemporaryDirectory(prefix="fs-", dir="/tmp")
         self.addCleanup(self.temp.cleanup)
         self.directory = Path(self.temp.name)
         self.home = self.directory / "home"

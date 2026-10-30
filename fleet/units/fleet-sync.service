@@ -3,5 +3,7 @@ Description=Converge this machine to the fleet declarations
 
 [Service]
 Type=oneshot
+# OpenSSH ControlPersist masters outlive a run; fleet-sync cleans up its own children.
+KillMode=process
 WorkingDirectory=%h
 ExecStart=/bin/bash -lc 'exec "$$HOME/src/fabrig/current/tools/fleet-sync" --timer'

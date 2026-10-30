@@ -315,6 +315,10 @@ class FleetPolicyTest(FleetTest):
     def test_defer_created_during_fetch_precedes_link_check(self):
         self.deployed()
         put(self.home / "src/fabrig/main/tools/installed", "malformed manifest to detect a read\n")
+        put(self.fabrig / "unrelated", "advance the mirror so this test still exercises a fetch\n")
+        self.git(self.fabrig, "add", ".")
+        self.git(self.fabrig, "commit", "-qm", "advance mirror")
+        self.git(self.fabrig, "push", "origin", "main")
         with patch.dict(os.environ, self.env, clear=True):
             _, runner = self.runner()
             command = runner.cmd

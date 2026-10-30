@@ -783,12 +783,37 @@ class Runner:
         self.state["items"].append({"item": name, "result": result,
                                     "reason": " ".join(str(reason).split())[:600]})
 
+    def git_ssh_command(self):
+        inspecting = self.args.check or self.previewing or getattr(self.args, "preview", None) is not None
+        relative = ".local/state/fleet-sync/ssh"
+        control = str(self.home / relative)
+        # OpenSSH expands %C to a 40-byte hex hash, not the remote's full name.
+        if len(os.fsencode(control)) + 1 + 40 >= 100:
+            raise ValueError("SSH control path must be under 100 bytes after %C expansion")
+        try:
+            with self.safe.parent(relative + "/.probe", create=not inspecting) as (directory, _):
+                if stat.S_IMODE(os.fstat(directory).st_mode) != 0o700:
+                    if inspecting:
+                        raise ValueError("SSH control directory must be 0700")
+                    os.fchmod(directory, 0o700)
+        except FileNotFoundError:
+            if not inspecting:
+                raise
+        # Quote both for the shell and ssh_config's option parser; HOME may contain spaces/%.
+        control = control.replace("%", "%%").replace("\\", "\\\\").replace('"', '\\"') + "/%C"
+        return shlex.join(["ssh", "-T", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
+                           "-o", "UpdateHostKeys=no", "-o", "ConnectTimeout=5",
+                           "-o", "ControlMaster=no" if inspecting else "ControlMaster=auto",
+                           "-o", "ControlPersist=no" if inspecting else "ControlPersist=600",
+                           "-o", f'ControlPath="{control}"'])
+
     def cmd(self, *argv, timeout=60, binary=False, extra_env=None, pass_fds=(), allowed=(0,), stdout=subprocess.PIPE):
         path = f"{self.home}/.local/bin:{self.home}/.cargo/bin:" + os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")
+        ssh = self.git_ssh_command()
         result = run_child(argv, timeout, pass_fds=pass_fds, stdout=stdout,
                                 env={**os.environ, **self.environment(), "PATH": path,
                                                       "GIT_TERMINAL_PROMPT": "0",
-                                                      "GIT_SSH_COMMAND": "ssh -T -o BatchMode=yes -o StrictHostKeyChecking=yes -o UpdateHostKeys=no -o ConnectTimeout=5",
+                                                      "GIT_SSH_COMMAND": ssh,
                                                       "GIT_OPTIONAL_LOCKS": "0", "PYTHONDONTWRITEBYTECODE": "1", **(extra_env or {})})
         err = result.stderr.decode(errors="replace")
         out = result.stdout.decode(errors="replace") if not binary else "[binary output]"
@@ -1001,8 +1026,15 @@ class Runner:
         if not self.args.check:
             directory.chmod(0o700)
             mirror.chmod(0o700)
-        # Bare clones have no default origin/main fetch refspec; name it explicitly.
-        if getattr(self.args, "smoke_fd", None) is None:
+        remote = self.cmd("git", "ls-remote", "--exit-code", self.d.fabrig_origin, "refs/heads/main").split()[0]
+        if not SHA.fullmatch(remote):
+            raise ValueError("invalid fabrig origin/main sha")
+        try:
+            cached = self.git(mirror, "rev-parse", "--verify", "refs/remotes/origin/main")
+        except CommandError:
+            cached = None  # A new bare clone has refs/heads/main, not origin/main.
+        if cached != remote:
+            # Bare clones have no default origin/main fetch refspec; name it explicitly.
             self.git(mirror, "fetch", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main")
         return mirror
 

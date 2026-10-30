@@ -7,6 +7,11 @@ Contract: `docs/design/fleet.md`, sections 1–6.
 
 - Agents periodic units are gated by builder role and AGENTS_PERIODIC=1; only
   hetzner3 declares the flag (`tools/fleet-sync`, `tools/test_land.py`).
+- Git SSH multiplexing and change-only mirror fetching implement section 3:
+  private 0700 control directory, %C path under 100 bytes, detached OpenSSH
+  ControlPersist=600 master and service KillMode=process; inspections never
+  create masters. Fixture coverage: `tools/test_fleet_sync_mux.py` (7 tests),
+  including cleanup and publickey backoff. No live-host deployment was run.
 
 - Release promotion, rendering, links, installer locking, unit journals, controls,
   backoff, inspection and recovery exist (`tools/fleet-sync:831`, `:953`, `:1114`, `:1312`, `:1340`, `:1972`, `:2032`, `:2060`, `:2232`).
@@ -53,5 +58,7 @@ Contract: `docs/design/fleet.md`, sections 1–6.
 ## Verification
 
 Fresh read-only host checks: 2026-10-30 11:21 UTC; hel8 via existing strict trust on h3.
-Tools/fleet are unchanged since the prior full gate (26 files, 0 failures); no rerun.
-The smoke probe used disposable HOME/fake services. No machine action required.
+This branch validates the fleet-sync suite with `tools/check.sh` and disposable
+HOME/local origins/fake services, including multiplexing and process cleanup.
+The service declaration now preserves persistent SSH masters; fleet-sync applies
+it through its normal unit reload. No live-host deployment was performed.

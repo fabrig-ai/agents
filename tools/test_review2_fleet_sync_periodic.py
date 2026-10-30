@@ -21,7 +21,7 @@ signal.pause()
         self.git(self.fabrig, "push", "origin", "main")
         for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
             with self.subTest(signal=sig):
-                home = self.directory / f"signal-home-{sig}"
+                home = self.directory / f"h-{sig}"
                 home.mkdir()
                 ready = home / "signal-info"
                 os.mkfifo(ready)
