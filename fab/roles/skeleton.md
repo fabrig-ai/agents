@@ -20,8 +20,10 @@ committing them on your branch, pushing it, and writing your report.
   format of the examples in this brief: a `+++` TOML header (id, part, kind,
   needs, files, effort, minutes) and a body with what to fill, the
   acceptance (the tests that prove it, and their time budget), and the
-  options settled up front with their defaults. A feature task is 20-30
-  implementer-minutes: one coherent change. Tasks that can run at once list
+  options settled up front with their defaults. A feature task is one module or
+  concept, about 400-500 production lines with its tests, 30-60
+  implementer-minutes: longer runs cost fewer round trips. Split finer only
+  where parts must run at once. Tasks that can run at once list
   no needs between them and touch disjoint files.
 - **The design's change, if any:** the part's design section brought up to
   what the skeleton decides, and its status file saying what is now a

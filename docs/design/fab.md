@@ -302,7 +302,7 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
   its detail files, heavy cancellation and wall bounds beyond the steps'
   timeout, the guardian and replay of a half-run pair, and the tier runner's
   CPU accounting and budgets (still fabrig's `tools/tiers --cpu`). Each
-  attaches to the records above when numbers show it is needed (section 13).
+  attaches to the records above when numbers show it is needed (section 14).
 
 ## 12. Gates and the structure review
 
@@ -356,7 +356,86 @@ and Claude reads the code's structure in batches, never on the landing path.
   that ends with a question starts no further call for that subject until
   `question.answered` names it.
 
-## 13. Later
+## 13. Growing toward the full model
+
+What the user's execution model asks that fab does not do yet, cut into parts
+the loop designs and builds itself (`docs/plan/agents-rebuild/plan.toml`,
+slice 6). Two rules hold throughout: whoever designs a thing never accepts
+it, and the flow grows from a small start rather than to a fixed cap.
+
+### 13.1 Design and acceptance are separate
+
+- **A Claude call's output is reviewed before it lands.** A skeleton or
+  answer call's branch gets a read-only Codex review run (kind `review`,
+  effort medium) with the call's brief and its diff: at most ten lines on
+  contradictions with the design, layering breaches, gaps a task would hit,
+  and duplicates of what the inventory already holds. Its report's first
+  line is `Done: approve` or `Failed: <findings>`. Approved, the branch lands;
+  refused, the findings go back as an answer-style amendment call on the
+  same branch, once; refused twice, the part parks for the user.
+- **Acceptance tests are not the implementer's.** A part's skeleton names,
+  per task, the acceptance tests it needs. A test-writer run (Codex, high,
+  kind `tests`) writes them on the task's branch from the design and the
+  skeleton alone, before the implementer starts; the implementer fills the
+  bodies until they pass and may not change those test files (a gate, as
+  `files` is); a test it believes wrong is a question.
+- **The structure review stays its own call** (section 12), never the
+  skeleton author's.
+
+### 13.2 The flow grows
+
+- **Places are indicative.** A builder's `places` in `fab/hosts.toml` is a
+  hint, not a cap: the dispatcher's own target for runs in flight starts at 2
+  when a plan starts, grows by one with each task landed on its first
+  attempt, and drops by one with each rejection or infra outcome, never below
+  1; it may pass `places` while the builder's load and heavy's waits stay low
+  (heavy and the disk wait still bound what actually builds).
+- **Longer runs are better than more round trips.** A task is one module or
+  concept, about 400-500 production lines with its tests, 30-60
+  implementer-minutes; the skeleton author splits finer only where parts
+  must run at once.
+
+### 13.3 The designer's calls
+
+- **cut:** a draft and the repository's designs in, `docs/plan/<draft>/plan.toml`
+  out (parts with modes and needs, contracts as early parts, slices with
+  their story and whether QA walks them) plus the user's questions; it lands
+  like a skeleton and starts the plan.
+- **decision:** a probe's report in, a design section out.
+- **retire:** when a plan's parts are all done: the status files brought
+  current, a Codex consistency pass over the designs changed since the plan
+  started, and the plan marked retired (`retired = true` in plan.toml), after
+  which the tick skips it.
+
+### 13.4 Several plans, calls in parallel
+
+- **The tick takes every plan** listed in `FAB_HOME/plans` (one checkout path
+  per line), each its own draft; places are shared across plans.
+- **Skeleton calls run in parallel** for independent parts, up to two at a
+  time to start, growing as 13.2's target does.
+
+### 13.5 Accounting
+
+- **run.ended carries Codex's tokens** (input, cached, output) from the run's
+  result; call.ended already carries Claude's. The code report shows the
+  Claude to Codex weight (input 1, cache write 1.25, cache read 0.1, output 5
+  for Claude and 8 for Codex) and each call's peak context.
+- **A call is bounded:** `--max-turns` and a context target of about 120k
+  tokens; a call over it ends `Failed:` and its brief is split.
+
+### 13.6 A channel to the user
+
+- **Questions that are the user's** (budgets, machines, what is hard to
+  reverse) park their task and are listed, with the daily reports, on one
+  page the user reads; nothing else goes to the user.
+
+### 13.7 Probes
+
+- **A probe** is a read-only Codex run with a time box (the part's
+  `minutes`, hard) and a success criterion from its design; its report is
+  the measurement; a decision call (13.3) turns it into design.
+
+## 14. Later
 
 - The self-critique: a read-only Codex run against the skeleton and the taste
   file before ready, its findings fixed by the implementer.

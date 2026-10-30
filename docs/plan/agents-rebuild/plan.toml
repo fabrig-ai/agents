@@ -157,7 +157,7 @@ id = "retire"
 title = "Retire session, watch's session rules, post, lease, record-collect and the old kit"
 mode = "migration"
 needs = ["dispatch", "report"]
-design = "docs/design/fab.md, 13"
+design = "docs/design/fab.md, 14"
 
 [[slice]]
 id = 1
@@ -187,4 +187,68 @@ walk = false
 id = 5
 story = "Every branch passes the gates and a structure review; no resident session is needed"
 parts = ["gates", "retire"]
+walk = false
+
+# Slice 6: the full model, built by the loop itself (docs/design/fab.md, 13).
+
+[[part]]
+id = "call-review"
+title = "A Codex review of every Claude call's output before it lands"
+mode = "feature"
+needs = ["calls", "dispatch"]
+design = "docs/design/fab.md, 13.1"
+
+[[part]]
+id = "acceptance"
+title = "Test-writer runs: acceptance tests written apart from the implementer"
+mode = "feature"
+needs = ["run", "gates"]
+design = "docs/design/fab.md, 13.1"
+
+[[part]]
+id = "flow"
+title = "A target for runs in flight that grows with clean landings; places as hints"
+mode = "feature"
+needs = ["dispatch"]
+design = "docs/design/fab.md, 13.2"
+
+[[part]]
+id = "designer"
+title = "The designer's calls: cut, decision, retire"
+mode = "feature"
+needs = ["calls"]
+design = "docs/design/fab.md, 13.3"
+
+[[part]]
+id = "plans"
+title = "Every plan in one tick; skeleton calls in parallel"
+mode = "feature"
+needs = ["dispatch", "flow"]
+design = "docs/design/fab.md, 13.4"
+
+[[part]]
+id = "accounting"
+title = "Codex tokens in the log; the Claude to Codex weight; bounded calls"
+mode = "feature"
+needs = ["report", "calls"]
+design = "docs/design/fab.md, 13.5"
+
+[[part]]
+id = "probe"
+title = "Probe runs with a time box, and their decision calls"
+mode = "feature"
+needs = ["designer"]
+design = "docs/design/fab.md, 13.7"
+
+[[part]]
+id = "user-channel"
+title = "The user's questions and the daily reports on one page"
+mode = "feature"
+needs = ["report"]
+design = "docs/design/fab.md, 13.6"
+
+[[slice]]
+id = 6
+story = "A draft goes from its cut to landed code with design, acceptance and review by separate sessions, growing from two runs in flight to many"
+parts = ["call-review", "acceptance", "flow", "designer", "plans", "accounting", "probe", "user-channel"]
 walk = false
