@@ -125,3 +125,63 @@ def collect(run_id, events, hosts):
     """Collect an ended run once: copy its report here, log run.ended. Returns the
     outcome; None while the run is still going or when it was already collected."""
 ```
+
+### A private name stays in its module
+
+Why: the underscore tells the next editor that nothing else calls it. Callers
+elsewhere break without warning. Make it public where it belongs, or keep it
+at home.
+
+Bad:
+
+```python
+from fab.run import _write  # in fab.after_landing, fab.calls and fab.report
+```
+
+Good:
+
+```python
+freed = slots.remove(slots.sweep_plan(self.repo / "target", started_ns))  # fab.queue
+```
+
+### A line from another machine may not parse
+
+Why: one torn or stray line must not stop a tick. `fab.log.iterate` skips
+such lines too.
+
+Bad:
+
+```python
+for line in result.out.splitlines() if result.ok else ():
+    entry = json.loads(line)  # fab.dispatch.tick's queue import
+```
+
+Good:
+
+```python
+try:
+    record = json.loads(line)  # fab.report.gather
+except json.JSONDecodeError:
+    continue
+if isinstance(record, dict) and isinstance(record.get("ts"), str):
+    records.append(record)
+```
+
+### A local never takes an imported module's name
+
+Why: once the name is shadowed, `gates.screen(...)` later in the same
+function fails on a list.
+
+Bad:
+
+```python
+from fab import calls, gates, land  # fab.dispatch
+gates = sorted(name for name, host in hosts.items() if "gate" in host.roles)
+```
+
+Good:
+
+```python
+from fab import hosts as machines  # fab.dispatch: the parameter keeps `hosts`
+hosts = machines.load() if hosts is None else hosts
+```
