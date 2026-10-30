@@ -31,7 +31,7 @@ import errno, hashlib, json, os, pathlib, subprocess, sys
 root = pathlib.Path(os.environ['PQUOTA_FIXTURE'])
 control = json.loads((root / 'control.json').read_text())
 name, args = pathlib.Path(sys.argv[0]).name, sys.argv[1:]
-with (root / 'calls.jsonl').open('a') as out: out.write(json.dumps([name, *args]) + '\n')
+with pathlib.Path(os.environ.get('PQUOTA_CALLS_FILE', root / 'calls.jsonl')).open('a') as out: out.write(json.dumps([name, *args]) + '\n')
 if name in control.get('fail', []): sys.exit(9)
 if name == 'runuser':
     assert args[:5] == ['-u', 'free', '--', 'env', '-i']
@@ -61,11 +61,13 @@ elif name == 'heavy':
     sys.exit(control.get('installed', 0))
 elif name == 'uname': print(control.get('kernel', 'fixture'))
 elif name == 'blkid':
+    if control.get('cache_probe') and not ('-c' in args and args[args.index('-c')+1] == '/dev/null' and '-p' in args):
+        (root / 'run/blkid/blkid.tab').write_text('cache write')
     spec = args[-1]
     if '-U' in args:
         if spec != '11111111-1111-1111-1111-111111111111': sys.exit(2)
         print('/dev/sda1'); sys.exit(0)
-    identities = control.get('identities', {'/dev/sda1': '11111111-1111-1111-1111-111111111111', '/dev/sdb1': '22222222-2222-2222-2222-222222222222', 'UUID=11111111-1111-1111-1111-111111111111': '11111111-1111-1111-1111-111111111111'})
+    identities = control.get('identities', {'/dev/sda1': '11111111-1111-1111-1111-111111111111', '/dev/sdb1': '22222222-2222-2222-2222-222222222222', 'UUID=11111111-1111-1111-1111-111111111111': '11111111-1111-1111-1111-111111111111', '/dev/disk/by-uuid/11111111-1111-1111-1111-111111111111': '11111111-1111-1111-1111-111111111111'})
     if spec not in identities: sys.exit(2)
     print(identities[spec])
 elif name == 'findmnt': print(json.dumps({'filesystems': [control['mount']]}))
@@ -92,16 +94,25 @@ elif name == 'systemctl':
     elif 'list-units' in args: print(json.dumps(control.get('units', [])))
     elif 'show' in args:
         unit = args[args.index('show') + 1]
+        graph_keys = ('WantedBy', 'RequiredBy', 'Requires', 'Wants', 'BindsTo', 'BoundBy', 'PartOf', 'ConsistsOf', 'Upholds', 'UpheldBy', 'Triggers', 'TriggeredBy')
+        if unit == control.get('graph_error'): sys.exit(8)
         if unit in control.get('unit_properties', {}):
-            print(control['unit_properties'][unit]); sys.exit(0)
+            output = control['unit_properties'][unit]
+            present = {line.partition('=')[0] for line in output.splitlines()}
+            print(output)
+            for key in graph_keys:
+                if key not in present and unit != control.get('graph_incomplete'): print(key + '=')
+            sys.exit(0)
         state = control.get('unit_states', {}).get(unit, 'inactive')
         print('LoadState=loaded\nActiveState=' + state + '\nSubState=' + ('running' if state == 'active' else 'dead') + '\nUnitFileState=' + control.get('enablement', {}).get(unit, 'disabled') + '\nWantedBy=\nTriggeredBy=\nTriggers=')
+        for key in graph_keys:
+            if key not in ('WantedBy', 'TriggeredBy', 'Triggers'): print(key + '=')
     else: assert args == ['reboot']
 elif name == 'update-grub':
     enabled = (root / 'etc/default/grub.d/90-fabrig-pquota.cfg').exists()
     flags = ' rootflags=pquota' if enabled and not control.get('bad_generated') else ''
     extra = ' bad=changed' if control.get('changed_options') else ''
-    text = 'set default="0"\nmenuentry "Debian" {\n linux /vmlinuz-fixture root=/dev/sda1 ro console=ttyS0' + flags + extra + '\n}\n'
+    text = 'set default="0"\nmenuentry "Debian" {\n linux ' + control.get('generated_kernel', '/vmlinuz-fixture') + ' root=' + control.get('generated_root', '/dev/sda1') + ' ro console=ttyS0' + flags + extra + '\n}\n'
     (root / 'boot/grub/grub.cfg').write_text(text)
 else: raise RuntimeError(name)
 '''
@@ -310,8 +321,8 @@ class PquotaTests(unittest.TestCase):
         self.assertTrue(ok, output)
         checks = self.tool.state()['verification']['checks']
         prevention = next(c['detail'] for c in checks if c['name'] == 'owner boot prevention preserved')
-        self.assertEqual(prevention['after-landing.service']['installation'], 'disabled')
-        self.assertEqual(prevention['producer.timer']['installation'], 'disabled')
+        self.assertEqual(prevention['units']['after-landing.service']['installation'], 'disabled')
+        self.assertEqual(prevention['units']['producer.timer']['installation'], 'disabled')
         self.assertFalse(any('start' in row or 'enable' in row or 'disable' in row for row in self.calls()))
 
     def test_review_uuid_root_and_literal_configuration_are_supported(self):
@@ -340,6 +351,179 @@ class PquotaTests(unittest.TestCase):
         self.tool.path(self.mod.STATE).unlink()
         with self.assertRaises(ValueError):
             self.tool.verify_originals(json.loads(manifest))
+
+    def test_repair_1_transitive_boot_dependencies_and_triggers_refuse(self):
+        self.retained()
+        self.prepare()
+        def unit(**fields):
+            base = dict(LoadState='loaded', ActiveState='inactive', SubState='dead', UnitFileState='disabled', WantedBy='', TriggeredBy='', Triggers='')
+            base.update(fields)
+            return ''.join(f'{key}={value}\n' for key, value in base.items())
+        for relation in ('RequiredBy', 'PartOf'):
+            with self.subTest(relation=relation):
+                self.controls(unit_properties={'after-landing.service': unit(**{relation: 'middle.target'}),
+                    'middle.target': unit(RequiredBy='default.target')})
+                self.assert_refuses(self.tool.reboot)
+        for relation in ('Requires', 'BindsTo', 'Upholds'):
+            with self.subTest(relation=relation):
+                self.controls(unit_properties={'default.target': unit(**{relation: 'middle.target'}),
+                    'middle.target': unit(**{relation: 'after-landing.service'})})
+                self.assert_refuses(self.tool.reboot)
+        for suffix in ('timer', 'path', 'socket'):
+            with self.subTest(trigger=suffix):
+                name = 'producer.' + suffix
+                self.controls(unit_files=[{'unit_file': name, 'state': 'enabled'}],
+                    enablement={name: 'enabled'}, unit_properties={
+                        name: unit(UnitFileState='enabled', Triggers='middle.target'),
+                        'middle.target': unit(Requires='after-landing.service')})
+                self.assert_refuses(self.tool.reboot)
+        self.controls(unit_files=[], enablement={}, unit_properties={'default.target': unit(Requires='unresolved.target')},
+                      graph_error='unresolved.target')
+        self.assert_refuses(self.tool.reboot)
+
+    def test_repair_2_real_grub_boot_image_metadata_is_accepted(self):
+        kernel = '/boot/vmlinuz-fixture'
+        root = 'UUID=11111111-1111-1111-1111-111111111111'
+        self.controls(generated_kernel=kernel, generated_root=root)
+        self.put('etc/fstab', root + ' / xfs defaults 0 1\n')
+        self.put('boot/grub/grub.cfg', 'set default="0"\nmenuentry "Debian" {\n linux ' + kernel + ' root=' + root + ' ro console=ttyS0\n}\n')
+        self.prepare()
+        self.put('proc/sys/kernel/random/boot_id', 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb\n')
+        self.put('proc/cmdline', 'BOOT_IMAGE=' + kernel + ' root=' + root + ' ro console=ttyS0 rootflags=pquota\n')
+        self.controls(mount=dict(self.control['mount'], options='rw,prjquota'),
+                      quota='Project quota state on / (/dev/sda1)\n Accounting: ON\n Enforcement: ON\n')
+        probe = self.patch(self.tool, 'probe', return_value={'inherited': True})
+        ok, output = self.output(self.tool.verify)
+        self.assertTrue(ok, output)
+        probe.assert_called_once()
+
+    def test_repair_3_plan_under_read_only_root_never_writes_blkid_cache(self):
+        self.controls(cache_probe=True)
+        (self.root / 'run/blkid').mkdir(parents=True)
+        with tempfile.TemporaryDirectory(prefix='pquota-plan-observer-') as directory:
+            log = Path(directory) / 'calls.jsonl'
+            self.tool.env = dict(self.env, PQUOTA_CALLS_FILE=str(log))
+            modes = {path: path.stat().st_mode & 0o777 for path in [self.root, *self.root.rglob('*')]}
+            try:
+                for path, mode in modes.items(): path.chmod(mode & ~0o222)
+                before = self.snapshot()
+                _, output = self.output(self.tool.plan)
+                self.assertEqual(before, self.snapshot())
+                self.assertIn('boot safety: {', output)
+                calls = [json.loads(line) for line in log.read_text().splitlines()]
+                probes = [row for row in calls if row[0] == 'blkid']
+                self.assertTrue(probes)
+                for row in probes:
+                    self.assertIn('-p', row)
+                    self.assertEqual(row[row.index('-c') + 1], '/dev/null')
+            finally:
+                for path, mode in modes.items(): path.chmod(mode)
+
+    def test_repair_4_save_default_refuses_before_writes(self):
+        self.put('etc/default/grub', self.tool.read('/etc/default/grub') + 'GRUB_SAVEDEFAULT=true\n')
+        self.assert_refuses()
+        self.assertFalse(self.tool.path(self.mod.ORIGINAL).exists())
+        self.assertFalse(self.tool.path(self.mod.STATE).exists())
+
+    def test_repair_5_real_bootstrap_guard_has_bound_interruption_recovery(self):
+        module = load('bootstrap_recovery_fixture', ROOT / 'fleet/bootstrap/bootstrap.py')
+        bootstrap = module.Bootstrap(argparse.Namespace(dry_run=False, host='hetzner7'))
+        original = self.tool.boot_files()
+        for phase in ('after-dropin', 'after-update-grub'):
+            with self.subTest(phase=phase):
+                self.controls(fail=['update-grub'] if phase == 'after-dropin' else [])
+                def command(*args):
+                    self.tool.run(*args)
+                    raise ValueError('interrupted after regeneration')
+                with patch.object(module.runpy, 'run_path', return_value={'Pquota': lambda host: self.tool}), \
+                        patch.object(bootstrap, 'write', side_effect=self.tool.write), \
+                        patch.object(bootstrap, 'run', side_effect=command), \
+                        contextlib.redirect_stdout(io.StringIO()), self.assertRaises(ValueError):
+                    bootstrap.pquota({'pquota': True})
+                self.controls(fail=[])
+                self.output(self.tool.rollback)
+                self.assertEqual(original, self.tool.boot_files())
+                self.assertTrue(self.tool.verify_originals(self.tool.originals()))
+                self.tool.path(self.mod.STATE).unlink()
+                shutil.rmtree(self.tool.path(self.mod.ORIGINAL))
+
+    def test_repair_graph_direction_cycles_incomplete_properties_and_bound(self):
+        self.retained()
+        def unit(**fields):
+            base = dict(LoadState='loaded', ActiveState='inactive', SubState='dead', UnitFileState='disabled')
+            base.update(fields)
+            return ''.join(f'{key}={value}\n' for key, value in base.items())
+        self.controls(unit_properties={'default.target': unit(Requires='basic.target'),
+            'basic.target': unit(Requires='default.target'),
+            'after-landing.service': unit(Requires='basic.target')})
+        result = self.tool.boot_prevention(self.tool.services())
+        self.assertNotIn('after-landing.service', result['reached'])
+        self.controls(graph_incomplete='basic.target')
+        with self.assertRaisesRegex(ValueError, 'incomplete activation graph'):
+            self.tool.boot_prevention(self.tool.services())
+        self.controls(graph_incomplete=None, unit_properties={
+            'default.target': unit(Requires='a.target'), 'a.target': unit(Requires='b.target'),
+            'b.target': unit(Requires='c.target'), 'c.target': unit()})
+        with patch.object(self.mod, 'GRAPH_LIMIT', 4), self.assertRaisesRegex(ValueError, 'unit bound'):
+            self.tool.boot_prevention(self.tool.services())
+
+    def test_repair_boot_image_mismatch_duplicates_and_option_changes_skip_probe(self):
+        self.healthy_boot()
+        options = self.tool.read('/proc/cmdline').strip()
+        metadata = 'BOOT_IMAGE=/vmlinuz-fixture'
+        probe = self.patch(self.tool, 'probe', return_value=True)
+        for line in ('BOOT_IMAGE=/vmlinuz-other ' + options,
+                     metadata + ' ' + metadata + ' ' + options,
+                     options + ' ' + metadata,
+                     metadata + ' ' + options.replace('root=/dev/sda1 ro', 'ro root=/dev/sda1'),
+                     metadata + ' ' + options + ' rootflags=pquota'):
+            with self.subTest(cmdline=line):
+                self.put('proc/cmdline', line + '\n')
+                probe.reset_mock()
+                ok, output = self.output(self.tool.verify)
+                self.assertFalse(ok, output)
+                probe.assert_not_called()
+
+    def test_repair_save_default_dropin_saved_default_and_saved_entry_refuse(self):
+        original = self.tool.read('/etc/default/grub')
+        self.put('etc/default/grub.d/local.cfg', 'GRUB_SAVEDEFAULT="true"\n')
+        self.assert_refuses()
+        (self.root / 'etc/default/grub.d/local.cfg').unlink()
+        self.put('etc/default/grub', original.replace('GRUB_DEFAULT=0', 'GRUB_DEFAULT=saved'))
+        self.assert_refuses()
+        self.put('etc/default/grub', original)
+        self.controls(grubenv='saved_entry=0\n')
+        self.assert_refuses()
+        self.assertFalse(self.tool.path(self.mod.ORIGINAL).exists())
+        self.assertFalse(self.tool.path(self.mod.STATE).exists())
+
+    def test_repair_real_bootstrap_saves_binding_before_dropin_and_remains_recovery_only(self):
+        module = load('bootstrap_complete_fixture', ROOT / 'fleet/bootstrap/bootstrap.py')
+        bootstrap = module.Bootstrap(argparse.Namespace(dry_run=False, host='hetzner7'))
+        original = self.tool.boot_files()
+        witnessed = []
+        def write(name, content):
+            state = self.tool.state()
+            self.assertIn(state['phase'], ('preparing', 'prepared'))
+            self.assertEqual(state['transaction_origin'], 'bootstrap')
+            manifest = self.tool.originals(require_binding=True)
+            self.assertEqual(sorted(original), state['original_binding']['files'])
+            self.assertEqual(set(manifest['files']), set(original))
+            witnessed.append(state['original_binding'])
+            self.tool.write(name, content)
+        with patch.object(module.runpy, 'run_path', return_value={'Pquota': lambda host: self.tool}), \
+                patch.object(bootstrap, 'write', side_effect=write), \
+                patch.object(bootstrap, 'run', side_effect=self.tool.run):
+            self.output(lambda: bootstrap.pquota({'pquota': True}))
+            first = self.tool.state()
+            self.output(lambda: bootstrap.pquota({'pquota': True}))
+            self.assertEqual(first, self.tool.state())
+        self.assertEqual(len(witnessed), 2)
+        self.assertEqual(self.tool.state()['phase'], 'prepared')
+        self.assert_refuses(self.tool.reboot)
+        self.assert_refuses(self.tool.verify)
+        self.output(self.tool.rollback)
+        self.assertEqual(original, self.tool.boot_files())
 
     def test_plan_is_read_only_shows_occupancy_sources_environment_services(self):
         before = self.snapshot()
@@ -750,7 +934,7 @@ class PquotaTests(unittest.TestCase):
         tool = module.Bootstrap(argparse.Namespace(dry_run=False, host='hetzner7'))
         writes, commands = [], []
         guard = unittest.mock.Mock()
-        guard.boot_safety.return_value = {'default': '/vmlinuz root=/dev/sda1 ro'}
+        guard.bootstrap_begin.return_value = {'default_before': '/vmlinuz root=/dev/sda1 ro'}
         guard.check_entry.return_value = '/vmlinuz root=/dev/sda1 ro rootflags=pquota'
         with patch.object(module.runpy, 'run_path', return_value={'Pquota': lambda host: guard}), \
                 patch.object(tool, 'write', side_effect=lambda *a: writes.append(a)), \
@@ -765,7 +949,7 @@ class PquotaTests(unittest.TestCase):
             with self.assertRaises(ValueError): tool.pquota({'pquota': 'true'})
             writes.clear()
             commands.clear()
-            guard.boot_safety.side_effect = ValueError('rootflags conflict')
+            guard.bootstrap_begin.side_effect = ValueError('rootflags conflict')
             with self.assertRaises(ValueError): tool.pquota({'pquota': True})
             self.assertEqual((writes, commands), ([], []))
         wrapper = (ROOT / 'fleet/bootstrap/root.sh').read_text()

@@ -66,16 +66,12 @@ class Bootstrap:
             guard = None
             if not self.args.dry_run:
                 guard = runpy.run_path(str(ROOT / "fleet/bootstrap/pquota"))["Pquota"](self.args.host)
-                guard.mount()
-                before = guard.boot_safety()
-                guard.backup()
+                state = guard.bootstrap_begin()
             self.write("/etc/default/grub.d/90-fabrig-pquota.cfg",
                        'GRUB_CMDLINE_LINUX="$GRUB_CMDLINE_LINUX rootflags=pquota"\n')
             self.run("update-grub")
             if guard:
-                line = guard.check_entry(True)
-                if [item for item in shlex.split(line) if item != "rootflags=pquota"] != shlex.split(before["default"]):
-                    raise ValueError("update-grub changed existing default Linux options")
+                guard.finish_prepare(state)
             print("USER: pquota requires one drained reboot after root bootstrap; fleet-scale automation is pending.")
 
     def root(self):
@@ -100,8 +96,9 @@ class Bootstrap:
             user = pwd.getpwnam("free")
             if user.pw_dir != "/home/free":
                 raise ValueError("free must have HOME /home/free")
-        self.pquota(host)
+        # Bind quota recovery to the final host identity before any boot write.
         self.run("hostnamectl", "set-hostname", hosts[self.args.host]["hostname"])
+        self.pquota(host)
         self.run("usermod", "--append", "--groups", "sudo", "free")
         sudoers = "free ALL=(ALL) NOPASSWD: ALL\n"
         if not self.args.dry_run:
