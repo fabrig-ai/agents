@@ -32,7 +32,18 @@ def banned_names(taste: str) -> frozenset[str]:
     """The banned names of a taste file's text (fab/taste.md), lowercased: the first
     backquoted word of each line starting with "- `" between the `## Banned names` heading
     and the next `## ` heading. No such heading: none."""
-    raise NotImplementedError
+    active = False
+    names = set()
+    for line in taste.splitlines():
+        if active and line.startswith("## "):
+            break
+        if line == "## Banned names":
+            active = True
+        elif active and line.startswith("- `"):
+            word, closing, _ = line[3:].partition("`")
+            if closing:
+                names.add(word.lower())
+    return frozenset(names)
 
 
 def words(name: str) -> list[str]:
@@ -40,7 +51,22 @@ def words(name: str) -> list[str]:
     that starts a word and between letters and digits. `fetch_all` -> fetch, all;
     `TaskView` -> task, view; `HTTPError` -> http, error; `sha256` -> sha, 256;
     `_private_x` -> private, x."""
-    raise NotImplementedError
+    result = []
+    for part in name.split("_"):
+        start = 0
+        for i in range(1, len(part)):
+            previous, current = part[i - 1], part[i]
+            digit_edge = (previous.isalpha() and current.isdigit()
+                          or previous.isdigit() and current.isalpha())
+            capital_edge = current.isupper() and (
+                previous.islower() or previous.isupper()
+                and i + 1 < len(part) and part[i + 1].islower())
+            if digit_edge or capital_edge:
+                result.append(part[start:i].lower())
+                start = i
+        if part:
+            result.append(part[start:].lower())
+    return result
 
 
 def check(digest: Digest, banned: Iterable[str]) -> list[Finding]:
@@ -57,14 +83,44 @@ def check(digest: Digest, banned: Iterable[str]) -> list[Finding]:
       "`<module>`: `<name>` uses the banned word `<word>`" for an item.
     - docs: per added item whose doc is empty: "`<module>`: `<text>` has no docstring".
     - clones: per clone: "`<path>:<start>-<end>` repeats `<other>:<other_start>`"."""
-    raise NotImplementedError
+    findings = [Finding("files", f"`{path}` is outside the task's files")
+                for path in digest.outside]
+    if digest.kind not in EXEMPT:
+        findings.extend(Finding("shape", f"`{item.module}`: `{item.text}` removed")
+                        for item in digest.removed)
+        findings.extend(Finding("shape", f"`{base.module}`: `{base.text}` changed to `{tip.text}`")
+                        for base, tip in digest.changed)
+    findings.extend(Finding("size", f"`{item.module}:{item.start}` {item.name} is "
+                            f"{item.lines} lines (cap {SIZE_CAP})")
+                    for item in digest.long)
+    banned = frozenset(word.lower() for word in banned)
+    for path in digest.modules:
+        word = next((word for word in words(Path(path).stem) if word in banned), None)
+        if word is not None:
+            findings.append(Finding("names", f"`{path}` uses the banned word `{word}`"))
+    for item in digest.added:
+        word = next((word for word in words(item.name.rsplit(".", 1)[-1])
+                     if word in banned), None)
+        if word is not None:
+            findings.append(Finding("names", f"`{item.module}`: `{item.name}` "
+                                    f"uses the banned word `{word}`"))
+    findings.extend(Finding("docs", f"`{item.module}`: `{item.text}` has no docstring")
+                    for item in digest.added if not item.doc)
+    findings.extend(Finding("clones", f"`{item.path}:{item.start}-{item.end}` repeats "
+                            f"`{item.other}:{item.other_start}`")
+                    for item in digest.clones)
+    return findings
 
 
 def findings_text(findings: Sequence[Finding]) -> str:
     """The findings for a rejection and the repair brief: per gate in order of its first
     finding, a line `[gate:<gate>]`, then one `- <text>` line per finding; ends with a newline.
     fab.run.brief quotes it from the first header on (it finds `[<step>]`)."""
-    raise NotImplementedError
+    grouped = {}
+    for finding in findings:
+        grouped.setdefault(finding.gate, []).append(finding.text)
+    return "".join(f"[gate:{gate}]\n" + "".join(f"- {text}\n" for text in texts)
+                   for gate, texts in grouped.items())
 
 
 def screen(task: Task, events: Iterable[dict], *, sh: Runner = run,
