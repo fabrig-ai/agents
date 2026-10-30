@@ -19,6 +19,7 @@ class ManifestActivationTest(fixture.FleetTest):
         self.assertEqual(os.readlink(legacy), str(self.directory / "legacy-record"))
         self.assertFalse(os.path.lexists(self.home / ".local/bin/watch"))
         expected = {"fleet-sync": "fleet-sync", "lease": "lease", "session-start": "session/start",
+                    "session-context": "session/session-context",
                     "fabrig-record": "records/record", "record-collect": "records/record-collect",
                     "pipeline-watch": "records/watch", "status-page": "records/status-page",
                     "logins": "qa/logins", "qa": "qa/qa"}

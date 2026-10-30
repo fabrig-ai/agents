@@ -1,6 +1,7 @@
 fleet-sync
 lease
 session-start session/start
+session-context session/session-context
 fabrig-record records/record
 record-collect records/record-collect
 pipeline-watch records/watch
