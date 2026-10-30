@@ -56,8 +56,20 @@ elif pathlib.Path(sys.argv[0]).name == "session-context":
     else:
         sys.exit(1)
 elif pathlib.Path(sys.argv[0]).name == "systemctl":
+    if sys.argv[1:] == ["--user", "start", "--no-block", "reap.service"]:
+        sys.exit(0)
     assert sys.argv[1:4] == ["--user", "is-active", "--quiet"]
     sys.exit(int(os.environ.get("FAKE_UNIT_EXIT", "3")))
+elif pathlib.Path(sys.argv[0]).name == "claim":
+    assert sys.argv[1:] == ["list"]
+    print(os.environ.get("FAKE_CLAIMS", ""))
+    sys.exit(int(os.environ.get("FAKE_CLAIMS_EXIT", "0")))
+elif pathlib.Path(sys.argv[0]).name == "lease":
+    assert sys.argv[1:] == ["list", "--json"]
+    print(os.environ.get("FAKE_LEASES", "[]"))
+    sys.exit(int(os.environ.get("FAKE_LEASES_EXIT", "0")))
+elif pathlib.Path(sys.argv[0]).name == "reap":
+    sys.exit(int(os.environ.get("FAKE_REAP_EXIT", "0")))
 elif pathlib.Path(sys.argv[0]).name == "codex-run":
     print("codex-owner-lead-ab-skein")
     sys.exit(int(os.environ.get("FAKE_LAUNCH_EXIT", "0")))
@@ -66,7 +78,7 @@ else:
         sys.exit(int(os.environ["FAKE_GIT_EXIT"]))
     pathlib.Path(sys.argv[-1]).mkdir()
 '''
-        for command in ("claude", "git", "session-context", "systemctl", "codex-run"):
+        for command in ("claude", "git", "session-context", "systemctl", "codex-run", "claim", "lease", "reap"):
             path = self.bin / command
             path.write_text(fake)
             path.chmod(0o755)
@@ -102,6 +114,8 @@ class Clock(datetime):
     def now(cls, tz=None):
         return now.astimezone(tz) if tz is not None else now.replace(tzinfo=None)
 session_lib.datetime = Clock
+import session_retire
+session_retire.datetime = Clock
 """
         if tool == "start" and args[:1] in (("owns",), ("names",)):
             # Enforce locality inside the child, including calls outside fake PATH.
@@ -1070,6 +1084,138 @@ class ReapSettingsTests(Sandbox):
                             self.assertEqual(shlex.split(reapers[0]["hooks"][0]["command"])[1:], [values[f"{role}_name"]])
                     lib.atomic_json(path, settings)
                     self.assertEqual(lib.hook_settings(values, role, capabilities)[1], settings)
+
+
+class RetireTests(Sandbox):
+    def retire(self, role="lead", handle="ab", area="jig", yes=False):
+        args = ["retire", role, handle]
+        if role == "lead":
+            args.append(area)
+        if yes:
+            args.append("--yes")
+        return self.command("start", *args)
+
+    def test_lead_dry_run_and_yes_keep_paths_and_drop_only_role_warmups(self):
+        values = lib.names("ab", "jig")
+        scratch = self.brief("ab", "jig")
+        Path(values["lead_start_dir"]).mkdir(parents=True)
+        lib.record_warmup(values["lead_name"], "id", 123)
+        lib.record_warmup("coordinator/ab/old", "other", 124)
+        before = sorted(str(path) for path in self.home.rglob("*"))
+        result = self.retire()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for key in ("lead_scratch", "lead_start_dir"):
+            self.assertIn("path=" + values[key], result.stdout)
+        self.assertNotIn("refused:", result.stdout)
+        self.assertFalse(any(call["tool"] in ("reap", "systemctl") for call in self.calls()))
+        self.assertEqual(before, sorted(str(path) for path in self.home.rglob("*")))
+        result = self.retire(yes=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = [call for call in self.calls() if call["tool"] in ("reap", "systemctl")]
+        identifier = f"retire-lead+ab+jig-{self.now:%Y%m%dT%H%M%S%fZ}"
+        self.assertEqual(calls[0]["argv"], ["record", "start", "--kind", "retired-scratch", "--owner", "lead/ab/jig",
+            "--id", identifier, "--path", values["lead_scratch"], "--path", values["lead_start_dir"]])
+        self.assertEqual(calls[1]["argv"], ["record", "end", "--kind", "retired-scratch", "--id", identifier])
+        self.assertEqual(calls[2]["argv"], ["--user", "start", "--no-block", "reap.service"])
+        self.assertEqual(set(lib.warmup_records()), {"coordinator/ab/old"})
+        self.assertTrue((scratch / "brief.md").exists())
+        self.assertTrue(Path(values["lead_start_dir"]).exists())
+
+    def test_coordinator_paths_and_warmup_cleanup(self):
+        values = lib.names("ab")
+        lib.record_warmup("coordinator/ab/old", "id", 123)
+        lib.record_warmup("ab-next", "id", 123)
+        lib.record_warmup("coordinator/dm/old", "id", 123)
+        result = self.retire("coordinator", yes=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("refused:", result.stdout)
+        for key in ("coordinator_clone", "coordinator_brief", "coordinator_start_dir"):
+            self.assertIn("path=" + values[key], result.stdout)
+        self.assertEqual(set(lib.warmup_records()), {"coordinator/dm/old"})
+        self.assertEqual([c["argv"] for c in self.calls() if c["tool"] == "lease"], [["list", "--json"]])
+
+    def test_live_names_and_prefixes_refuse_but_completed_does_not(self):
+        for role, name in (("lead", "lead/ab/jig"), ("lead", "lead/ab/jig/next"),
+                           ("coordinator", "coordinator/ab/old"), ("coordinator", "ab-next"),
+                           ("coordinator", "s/another-draft")):
+            for status in (None, "busy", "stopped", "completed"):
+                with self.subTest(role=role, name=name, status=status):
+                    session = {"name": name, "id": "deadbeef"}
+                    if status is not None:
+                        session["state"] = status
+                    self.env["FAKE_AGENTS"] = json.dumps([session])
+                    result = self.retire(role)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual("live session " + name in result.stdout, status not in ("stopped", "completed"))
+                    if status not in ("stopped", "completed"):
+                        self.assertEqual(self.retire(role, yes=True).returncode, 1)
+        self.assertFalse(any(call["tool"] == "reap" for call in self.calls()))
+
+    def test_claim_owner_and_successor_refusals(self):
+        for role, owner in (("lead", "lead/ab/jig"), ("coordinator", "s/another-draft")):
+            self.env["FAKE_CLAIMS"] = f"hel8 1 [s/reserved]: {owner}: build (since now); held 1d"
+            result = self.retire(role, yes=True)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn("claimed slot: hel8 1", result.stdout)
+        self.env["FAKE_CLAIMS"] = "hel8 1 [lead/ab/jig]: other/owner: lead/ab/jig (since now); held 1d"
+        for name in ("lead/jig", "lead/unknown/jig"):
+            self.env["FAKE_AGENTS"] = json.dumps([{"name": name, "status": "busy"}])
+            result = self.retire(yes=True)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn("live successor for area jig: " + name, result.stdout)
+            self.assertNotIn("claimed slot:", result.stdout)
+        self.assertFalse(any(call["tool"] == "reap" for call in self.calls()))
+
+    def test_lease_default_shared_and_symlink_shared_refusals(self):
+        self.env["FAKE_LEASES"] = json.dumps([{"owner": "s/another-draft", "subject": "crates/compiler"}])
+        result = self.retire("coordinator", yes=True)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("lease held by s/another-draft: crates/compiler", result.stdout)
+        result = self.retire("coordinator", "dm", yes=True)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("default coordinator has a shared start directory", result.stdout)
+        scratch = Path(lib.names("ab", "jig")["lead_scratch"])
+        scratch.parent.mkdir(parents=True)
+        scratch.symlink_to(lib.names("dm", "jig")["lead_scratch"], target_is_directory=True)
+        result = self.retire(yes=True)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("path shared with another role", result.stdout)
+        self.assertFalse(any(call["tool"] == "reap" for call in self.calls()))
+
+    def test_missing_reap_and_unavailable_inputs_refuse(self):
+        for key, value, expected in (("FAKE_CLAIMS", "malformed", "claim list unavailable"),
+                                     ("FAKE_CLAIMS_EXIT", "1", "claim list unavailable"),
+                                     ("FAKE_AGENTS_EXIT", "1", "session observation unavailable"),
+                                     ("FAKE_LEASES", "{}", "lease list unavailable")):
+            self.env[key] = value
+            result = self.retire("coordinator", yes=True)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn(expected, result.stdout)
+            del self.env[key]
+        (self.bin / "reap").unlink()
+        self.assertEqual(self.retire().returncode, 0)
+        result = self.retire(yes=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("reap absent", result.stdout)
+
+    def test_record_failure_preserves_warmups_and_does_not_wake(self):
+        lib.record_warmup("coordinator/ab/old", "id", 123)
+        self.env["FAKE_REAP_EXIT"] = "1"
+        result = self.retire("coordinator", yes=True)
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("coordinator/ab/old", lib.warmup_records())
+        self.assertFalse(any(call["tool"] == "systemctl" for call in self.calls()))
+
+    def test_codex_active_owner_refuses(self):
+        self.registry.write_text(self.registry.read_text() + 'lead_kind = "codex"\n')
+        self.env["FAKE_UNIT_EXIT"] = "0"
+        result = self.retire(yes=True)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("active unit codex-owner-lead-ab-jig", result.stdout)
+
+    def test_arity_refuses(self):
+        for args in (("lead", "ab"), ("coordinator", "ab", "jig")):
+            self.assertEqual(self.command("start", "retire", *args).returncode, 2)
 
 
 if __name__ == "__main__":

@@ -30,6 +30,11 @@ def main():
             command.add_argument("--model")
         command.add_argument("--effort", default="high" if role == "lead" else "xhigh")
         command.add_argument("--dry-run", action="store_true")
+    retirement = commands.add_parser("retire", help="hand a stopped role's paths to reap")
+    retirement.add_argument("retired_role", choices=("lead", "coordinator"))
+    retirement.add_argument("handle")
+    retirement.add_argument("area", nargs="?")
+    retirement.add_argument("--yes", action="store_true")
     wire = commands.add_parser("wire", help="refresh project hooks without starting sessions")
     wire.add_argument("handle")
     wire.add_argument("--dry-run", action="store_true")
@@ -39,6 +44,11 @@ def main():
     identities.add_argument("--json", action="store_true", help="JSON output (the default)")
     args = parser.parse_args()
     try:
+        if args.role == "retire":
+            if (args.retired_role == "lead") != (args.area is not None):
+                parser.error("retire lead requires AREA; retire coordinator takes no AREA")
+            from session_retire import retire
+            return retire(args.retired_role, args.handle, args.area, args.yes)
         if args.role == "names":
             print(json.dumps(inventory()))
             return 0

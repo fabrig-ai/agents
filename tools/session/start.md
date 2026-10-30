@@ -36,6 +36,8 @@ tools/session/start lead H AREA [--model M] [--effort E] [--dry-run]
 tools/session/start coordinator H [--next] [--model M] [--effort E] [--dry-run]
 tools/session/start director [--next] [--effort E] [--dry-run]
 tools/session/start wire H|director [--dry-run]
+tools/session/start retire lead H AREA [--yes]
+tools/session/start retire coordinator H [--yes]
 tools/session/start owns NAME
 tools/session/start names [--json]
 ```
@@ -113,6 +115,34 @@ budget and 0.4 s command timeouts. Resumed starts safely repeat the start record
 `wire H` / `wire director` refresh these hooks too. Codex leads use codex-run's
 lifecycle instead of Claude hooks.
 
+## Retiring dropped roles
+
+`start retire lead H AREA` and `start retire coordinator H` print the derived
+paths and every observed refusal, then exit 0 without writing anything. Keep H
+in `pipeline/coordinators.toml` until retirement has been handed over. Lead paths
+are scratch (including clones) and start directory. Coordinator paths are clone,
+brief, start directory (including handover), plus handover's directory if separate.
+A default coordinator's shared start directory always refuses retirement; any
+path overlapping another role's paths, including through symlinks, also refuses.
+
+Retirement refuses live role names/prefixes and aliases, slots claimed by the
+role's mailbox, and (for coordinators) held leases. Leads also refuse any live
+same-area successor under another coordinator, or an active Codex owner unit.
+Unavailable or malformed observations fail closed. Retire queries `claude agents
+--json`, `claim list`, and for coordinators `lease list --json`; it does not query
+or change the records repository.
+
+Add `--yes` to hand the paths to reap: start and end records of kind
+`retired-scratch`, followed by a nonblocking start of reap.service. The record
+owner is `lead/H/AREA` (incumbent: `lead/AREA`) or the stable coordinator role
+`coordinator/H`; the id is `retire-<owner with / replaced by +>-<UTC timestamp>`.
+Only after successful handover are matching launcher warm-up records removed.
+No scratch, clone or start directory is deleted by the launcher. Missing reap
+refuses `--yes`, as do all blockers (exit 1; command/configuration failures exit 2).
+Serialize retirement with launches and role reassignment: observations are preflights.
+Removing a dropped coordinator from `pipeline/coordinators.toml` remains a
+**separate manual commit**, after handover; retirement never edits the registry.
+
 ## Ownership for post wake
 
 `owns NAME` is local: no session query, network or pull; target latency under
@@ -148,7 +178,8 @@ sessions-stream events; a collector must adapt them for watch's event input.
 
 Dry runs print settings instead of writing; launch previews also print cwd,
 argv and prompt before refusal. They run only capabilities and session listing;
-wire previews run only capabilities. They create nothing and start nothing.
+wire previews run only capabilities. Retire previews perform their read-only
+session/claim/lease checks instead. They create nothing and start nothing.
 Director prompts follow monorepo/director-role.md sections 4–6, with read-only
 warm-up on director-next until explicit takeover. Keep installed links unchanged.
 
