@@ -10,3 +10,9 @@
 - `tools/check.sh` is the gate. Main moves only through `tools/land` after the
   gate passes. A commit requiring machine action must say what action is needed.
 - Every machine gives passwordless sudo; use it where a task truly needs root, never to get round a rule (heavy's units and state, another's checkout, credentials and keys).
+- The design is the contract: `docs/design/`, cited by repository-root path and
+  section. Code must be rebuildable from it at a high level. Every design has a
+  Later section and an adjacent `.status.md` file; its designer keeps both.
+- `docs/design/draft/` is the user's input. Agents read it and never edit it.
+- A change that alters a design changes its document and status file in the
+  same branch.
