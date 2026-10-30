@@ -113,13 +113,16 @@ class DecideTest(unittest.TestCase):
             with self.subTest(step=step):
                 events = [event("branch.rejected", step="rebase"),
                           event("branch.rejected", step=step)]
-                self.assertEqual(self.decide([task("a")], events)[0].run_kind, expected)
+                action = self.decide([task("a")], events)[0]
+                self.assertEqual(action.run_kind, expected)
+                self.assertEqual(action.rejection, events[-1])
 
     def test_infra_repairs_and_new_tasks_implement(self):
         events = [started(), ended(outcome="infra")]
         actions = self.decide([task("a"), task("b")], events)
         self.assertEqual([(a.task, a.run_kind) for a in actions],
                          [("draft/a", "repair"), ("draft/b", "implement")])
+        self.assertTrue(all(action.rejection is None for action in actions))
 
     def test_waiting_running_parked_ready_landed_do_not_start(self):
         tasks = [task("a", needs=("draft/b",)), task("b"), task("c"), task("d"), task("e")]
@@ -340,6 +343,7 @@ walk = false
         self.assertEqual(first[1]["branch"], "draft/b-r2")
         self.assertEqual(self.calls[0][:3], ("start", "draft/b", "builder"))
         self.assertEqual(self.calls[0][3]["kind"], "rebase")
+        self.assertEqual(self.calls[0][3]["rejection"], first[1])
         self.tick()
         self.assertEqual(log.read(), first)
         commands = [shlex.split(c.argv[-1].removeprefix("bash -lc "))[0]
@@ -385,6 +389,50 @@ walk = false
         self.tick()
         self.assertEqual(len([e for e in log.read() if e["ev"] == "branch.ready"]), 1)
         self.assertEqual(len([e for e in log.read() if e["ev"] == "question.asked"]), 1)
+
+    def repaired_ready(self, rejected_tip):
+        self.add_task("a", repo="fabrig")
+        branch = "draft/a-r1"
+        self.append(started(branch=branch), ended(),
+                    event("branch.rejected", branch=branch, tip="tip", step="default", log="old"),
+                    event("branch.rejected", branch=branch, tip=rejected_tip, step="default", log="red"),
+                    started(n=2, branch=branch), ended(n=2))
+        self.fake.on(["git", "rev-parse", "--verify"], Result(0, "tip\n"))
+        return branch
+
+    def test_same_tip_ready_untries_on_gate_before_push_and_notes_retry_once(self):
+        branch = self.repaired_ready("tip")
+        self.tick()
+        untry = ssh("fake@gate", ["fab", "queue", "untry", branch])
+        commands = self.fake.argvs()
+        self.assertIn(untry, commands)
+        push = ["git", "push", "origin", f"tip:refs/heads/ready/{branch}"]
+        self.assertLess(commands.index(untry), commands.index(push))
+        note, ready = log.read()[-2:]
+        self.assertEqual((note["ev"], note["text"]),
+                         ("note", "retry draft/a: same tip after repair"))
+        self.assertEqual((ready["ev"], ready["branch"], ready["tip"]),
+                         ("branch.ready", branch, "tip"))
+        self.tick()
+        self.assertEqual(self.fake.argvs().count(untry), 1)
+
+    def test_new_tip_ready_uses_last_rejection_and_pushes_without_untry(self):
+        branch = self.repaired_ready("older-tip")
+        self.tick()
+        self.assertNotIn(ssh("fake@gate", ["fab", "queue", "untry", branch]), self.fake.argvs())
+        self.assertIn(["git", "push", "origin", f"tip:refs/heads/ready/{branch}"], self.fake.argvs())
+        self.assertEqual(log.read()[-1]["ev"], "branch.ready")
+        self.assertFalse(any(e["ev"] == "note" for e in log.read()))
+
+    def test_failed_untry_prevents_ready_push_and_is_noted(self):
+        branch = self.repaired_ready("tip")
+        self.fake.on(ssh("fake@gate", ["fab", "queue", "untry", branch]),
+                     Result(1, err="gate unavailable"))
+        self.tick()
+        self.assertFalse(any(argv[:2] == ["git", "push"] for argv in self.fake.argvs()))
+        self.assertEqual(log.read()[-1]["ev"], "note")
+        self.assertIn("gate unavailable", log.read()[-1]["text"])
+        self.assertNotIn("branch.ready", [e["ev"] for e in log.read()])
 
     def test_design_starts_first_skeleton_in_user_unit(self):
         write(self.directory / "plan.toml", (self.directory / "plan.toml").read_text() +
@@ -630,6 +678,7 @@ walk = false
         self.assertEqual(self.calls[0][-1]["log_path"], path)
         self.assertEqual(self.calls[1][-1]["log_path"], path)
         self.assertEqual(self.calls[1][-1]["events"][-1]["ev"], "branch.rejected")
+        self.assertEqual(self.calls[1][-1]["rejection"], log.read(path)[-1])
         self.assertEqual(log.read(), [])
         self.assertEqual(log.read(path)[-1]["queue_ts"], "001")
 

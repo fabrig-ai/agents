@@ -77,6 +77,7 @@ class Action:
     run_kind: str | None = None  # for start: implement, repair or rebase
     branch: str | None = None
     detail: str = ""
+    rejection: dict | None = None
 
 
 def in_flight(events: Iterable[dict]) -> list[dict]:
@@ -135,6 +136,7 @@ def decide(plan: Plan, tasks: Mapping[str, Task], events: list[dict], hosts: Map
         host = min(available, key=lambda name: (-free[name], name))
         history = [event for event in reversed(events) if event.get("task") == identifier]
         kind = "implement"
+        rejection = None
         if view.status == "rejected":
             rejection = next(event for event in history if event.get("ev") == "branch.rejected")
             kind = "rebase" if rejection.get("step") in ("rebase", "merge") else "repair"
@@ -143,7 +145,7 @@ def decide(plan: Plan, tasks: Mapping[str, Task], events: list[dict], hosts: Map
             if ended.get("outcome") == "infra":
                 kind = "repair"
         actions.append(Action("start", task=identifier, host=host, run_kind=kind,
-                              detail=f"{kind} {host}"))
+                              detail=f"{kind} {host}", rejection=rejection))
         free[host] -= 1
 
     capacity = sum(host.places for host in hosts.values() if "builder" in host.roles)
@@ -253,13 +255,24 @@ def tick(plan_dir: Path, *, sh: Runner = run, hosts: Mapping[str, Host] | None =
                                  cwd=str(repo), check=True).out.strip()
                         if not tip:
                             raise ValueError("branch has no tip")
+                        rejection = next((event for event in reversed(log.read(log_path))
+                                          if event.get("ev") == "branch.rejected"
+                                          and event.get("task") == action.task), None)
+                        if rejection is not None and tip == rejection.get("tip"):
+                            if not gates:
+                                raise ValueError("no gate host configured for queue untry")
+                            sh(ssh(hosts[gates[0]].ssh,
+                                   ["fab", "queue", "untry", action.branch]), check=True)
+                            log.append("note", path=log_path,
+                                       text=f"retry {action.task}: same tip after repair")
                         sh(["git", "push", "origin", f"{tip}:refs/heads/ready/{action.branch}"],
                            cwd=str(repo), check=True)
                         log.append("branch.ready", path=log_path, task=action.task,
                                    branch=action.branch, tip=tip)
                     case "start":
                         runs.start(tasks[action.task], hosts[action.host], kind=action.run_kind,
-                                   events=log.read(log_path), sh=sh, log_path=log_path)
+                                   events=log.read(log_path), sh=sh, log_path=log_path,
+                                   rejection=action.rejection)
                     case "call":
                         events = log.read(log_path)
                         number = 1 + sum(event.get("ev") == "call.started" and

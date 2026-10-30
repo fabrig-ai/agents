@@ -234,6 +234,76 @@ class ShellTest(unittest.TestCase):
         self.home = context.__enter__()
         self.addCleanup(context.__exit__, None, None, None)
 
+    def test_untry_only_writes_request_and_cycle_consumes_each_once_before_fetch(self):
+        fake = FakeRunner()
+        q = queue.Queue(self.home / 'clone', sh=fake)
+        q.state['tried'] = {'draft/a': 'a', 'draft/b': 'b', 'draft/keep': 'keep'}
+        q._save()
+        before = q.state_path.read_text()
+        # The CLI must leave the running queue's state alone, even if its clone is unavailable.
+        with patch('fab.queue.Queue', side_effect=AssertionError('queue constructed')):
+            for name in ('draft/a', 'draft/b', 'draft/unknown'):
+                self.assertEqual(queue.main(['untry', name]), 0)
+        requests = q.home / 'queue-untry'
+        self.assertEqual({p.name for p in requests.iterdir()},
+                         {'draft%2Fa', 'draft%2Fb', 'draft%2Funknown'})
+        self.assertEqual(q.state_path.read_text(), before)
+        write(requests / '.untry-in-progress', '')
+
+        def fetch(call):
+            self.assertEqual(json.loads(q.state_path.read_text())['tried'], {'draft/keep': 'keep'})
+            self.assertEqual({p.name for p in requests.iterdir()}, {'.untry-in-progress'})
+            return Result(0)
+
+        fake.on(['git', 'fetch'], fetch)
+        self.assertFalse(q.cycle())
+        self.assertEqual(q.state['tried'], {'draft/keep': 'keep'})
+        entries = log.read(q.log_path)
+        self.assertEqual([(e['ev'], e['branch'], e['tip']) for e in entries],
+                         [('untried', 'draft/a', 'a'), ('untried', 'draft/b', 'b'),
+                          ('untried', 'draft/unknown', None)])
+        q.state['tried']['draft/a'] = 'a'
+        q._save()
+        q.sh = FakeRunner()
+        self.assertFalse(q.cycle())
+        self.assertEqual(q.state['tried']['draft/a'], 'a')
+        self.assertEqual(log.read(q.log_path), entries)
+        restored = queue.Queue(q.repo, sh=FakeRunner())
+        self.assertEqual(restored.state['tried'], q.state['tried'])
+
+    def test_untry_makes_the_same_tip_a_candidate_in_this_cycle(self):
+        branch = queue.Branch('draft/a', 'same', 1)
+        fake = FakeRunner().on(['git', 'for-each-ref'],
+                              Result(0, 'refs/remotes/origin/ready/draft/a same 1\n'))
+        q = queue.Queue(self.home / 'clone', sh=fake)
+        q.state['tried'][branch.name] = branch.tip
+        q._save()
+        self.assertFalse(q.cycle())
+        self.assertEqual(queue.main(['untry', branch.name]), 0)
+        with patch.object(q, 'attempt', return_value=True) as attempt:
+            self.assertTrue(q.cycle())
+        attempt.assert_called_once_with([branch])
+        self.assertEqual(json.loads(q.state_path.read_text())['tried'], {})
+
+    def test_untry_remains_consumed_when_fetch_fails(self):
+        fake = FakeRunner().on(['git', 'fetch'], Result(1, err='offline'))
+        q = queue.Queue(self.home / 'clone', sh=fake)
+        q.state['tried']['draft/a'] = 'a'
+        q._save()
+        self.assertEqual(queue.main(['untry', 'draft/a']), 0)
+        with self.assertRaises(Failed):
+            q.cycle()
+        self.assertEqual(json.loads(q.state_path.read_text())['tried'], {})
+        self.assertEqual(log.read(q.log_path)[0]['ev'], 'untried')
+        self.assertEqual(list((q.home / 'queue-untry').iterdir()), [])
+
+    def test_untry_requires_a_branch_and_other_commands_reject_one(self):
+        for argv in (['untry'], ['untry', '..'], ['untry', ''], ['once', 'draft/a']):
+            with self.subTest(argv=argv), contextlib.redirect_stderr(io.StringIO()), \
+                    self.assertRaises(SystemExit) as error:
+                queue.main(argv)
+            self.assertEqual(error.exception.code, 2)
+
     def test_selected_metadata_periodic_full_and_ratchet_commit(self):
         repo = self.home / 'clone'
         branch = queue.Branch('draft/a', 'tip', 0)

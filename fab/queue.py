@@ -285,10 +285,20 @@ class Queue:
                 log.append("batch", path=self.log_path, ts=started, **record)
 
     def cycle(self) -> bool:
-        """fetch --prune, then take up to `batch` candidates and attempt them, bisecting when red;
+        """Consume queue-untry requests (forget, save, remove, record), then fetch --prune.
+        Take up to `batch` candidates and attempt them, bisecting when red;
         return whether there was anything to do."""
         self._error_recorded = False
         self._force_full = False
+        requests = self.home / "queue-untry"
+        for request in sorted(requests.iterdir()) if requests.exists() else ():
+            if request.name.startswith(".") or not request.is_file():
+                continue
+            branch = request.name.replace("%2F", "/")
+            tip = self.state["tried"].pop(branch, None)
+            self._save()
+            request.unlink()
+            log.append("untried", path=self.log_path, branch=branch, tip=tip)
         self._git("fetch", "--prune", "origin")
         branches = candidates(self.repo, self.state["tried"], sh=self.sh)[:self.batch]
         if not branches:
@@ -327,13 +337,19 @@ class Queue:
 def main(argv: list[str]) -> int:
     """`fab queue run|once [--repo PATH] [--batch N]` (repo default FAB_HOME/repos/fabrig; run stops
     at FAB_HOME/queue.stop), `fab queue plan` (the next batch's names, no checks),
-    `fab queue log [--since TS]` (queue.jsonl records at or after TS, one per line)."""
+    `fab queue log [--since TS]` (queue.jsonl records at or after TS, one per line),
+    `fab queue untry BRANCH` (ask the running queue to forget its tried tip next cycle)."""
     parser = argparse.ArgumentParser(prog="fab queue")
-    parser.add_argument("command", choices=("run", "once", "plan", "log"))
+    parser.add_argument("command", choices=("run", "once", "plan", "log", "untry"))
+    parser.add_argument("branch", nargs="?")
     parser.add_argument("--repo", type=Path, default=log.home() / "repos/fabrig")
     parser.add_argument("--batch", type=int, default=8)
     parser.add_argument("--since")
     args = parser.parse_args(argv)
+    if (args.command == "untry") != (args.branch is not None):
+        parser.error("untry requires BRANCH; other commands take no branch")
+    if args.command == "untry" and (not args.branch or args.branch.startswith(".")):
+        parser.error("untry requires a branch name")
     if args.batch < 1:
         parser.error("--batch must be positive")
     if args.command == "log":
@@ -342,6 +358,14 @@ def main(argv: list[str]) -> int:
                 print(json.dumps(entry, ensure_ascii=False))
         return 0
     try:
+        if args.command == "untry":
+            path = log.home() / "queue-untry" / args.branch.replace("/", "%2F")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, prefix=".untry-",
+                                             delete=False) as sibling:
+                sibling.write("")
+            Path(sibling.name).replace(path)
+            return 0
         queue = Queue(args.repo, batch=args.batch)
         if args.command == "plan":
             queue._git("fetch", "--prune", "origin")
