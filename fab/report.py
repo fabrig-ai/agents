@@ -8,13 +8,18 @@ figures' formatting, and the command that writes the reports under FAB_HOME/repo
 
 from __future__ import annotations
 
+import json
+import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from fab import log
+from fab.heavy import EX_TEMPFAIL
 from fab.hosts import Host
-from fab.sh import Runner, run
+from fab.run import remote_home
+from fab.sh import Runner, run, ssh
 
 LOOKBACK_DAYS = 7  # the queue's and heavy's records read before the window's start
 LANDING = "landing"  # the landing report's directory under FAB_HOME/reports
@@ -29,15 +34,16 @@ class Window:
 
     def holds(self, ts: str) -> bool:
         """start <= ts < end, comparing the strings (every ts has the same fixed format)."""
-        raise NotImplementedError
+        return self.start <= ts < self.end
 
     def hours(self) -> float:
         """The window's length in hours."""
-        raise NotImplementedError
+        return (moment(self.end) - moment(self.start)).total_seconds() / 3600
 
     def previous(self) -> Window:
         """The window of the same length that ends where this one starts."""
-        raise NotImplementedError
+        start, end = moment(self.start), moment(self.end)
+        return Window(stamp(start - (end - start)), self.start)
 
 
 @dataclass
@@ -57,60 +63,77 @@ class Signal:
 
 def stamp(moment: datetime) -> str:
     """A datetime (aware, UTC) as a record ts: `YYYY-MM-DDTHH:MM:SS.mmmZ`, as fab.log.now."""
-    raise NotImplementedError
+    return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
 
 def moment(ts: str) -> datetime:
     """A record ts as an aware UTC datetime; ValueError when it is not one."""
-    raise NotImplementedError
+    parsed = datetime.strptime(ts, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc)
+    if stamp(parsed) != ts:
+        raise ValueError(f"not a record timestamp: {ts!r}")
+    return parsed
 
 
 def minutes(start: str, end: str) -> float:
     """Minutes from ts start to ts end (negative when end is earlier)."""
-    raise NotImplementedError
+    return (moment(end) - moment(start)).total_seconds() / 60
 
 
 def day_window(day: str | None, now: str) -> Window:
     """The window a report covers. day "YYYY-MM-DD": that UTC day, [00:00:00.000Z, the next
     day's 00:00:00.000Z). None: today so far, [today's 00:00:00.000Z, now). ValueError for a
     day that does not parse or is after now's day."""
-    raise NotImplementedError
+    today = moment(now).replace(hour=0, minute=0, second=0, microsecond=0)
+    if day is None:
+        return Window(stamp(today), now)
+    start = datetime.strptime(day, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    if start.strftime("%Y-%m-%d") != day or start > today:
+        raise ValueError(f"invalid report day: {day!r}")
+    return Window(stamp(start), stamp(start + timedelta(days=1)))
 
 
 def within(records: Iterable[dict], window: Window) -> list[dict]:
     """The records whose ts the window holds, in their order; records without a ts are skipped."""
-    raise NotImplementedError
+    return [record for record in records if "ts" in record and window.holds(record["ts"])]
 
 
 def quantile(values: Iterable[float], q: float) -> float | None:
     """Nearest rank: the value at index ceil(q * n) - 1 (at least 0) of the sorted values; None
     when there are none. quantile(v, 0.5) is the report's median, 0.9 its 90th percentile."""
-    raise NotImplementedError
+    ordered = sorted(values)
+    return ordered[max(0, math.ceil(q * len(ordered)) - 1)] if ordered else None
 
 
 def show(value: Figure) -> str:
     """A figure as text: None "-", an int (or a bool) as is, a float to one decimal."""
-    raise NotImplementedError
+    if value is None:
+        return "-"
+    return f"{value:.1f}" if isinstance(value, float) else str(value)
 
 
 def trend(current: Figure, previous: Figure) -> str:
     """`show(current)`, then ` (prev <show(previous)>)`: every figure carries the previous
     window's beside it until the user sets targets."""
-    raise NotImplementedError
+    return f"{show(current)} (prev {show(previous)})"
 
 
 def table(header: Sequence[str], rows: Iterable[Sequence[object]]) -> list[str]:
     """A Markdown table: the header row, a `| --- |` row, then one row per entry, each cell
     str() of the value with `|` escaped as `\\|` and newlines as spaces. No rows: the header and
     its rule only."""
-    raise NotImplementedError
+    def row(cells):
+        return "| " + " | ".join(str(cell).replace("|", "\\|").replace("\n", " ")
+                                 for cell in cells) + " |"
+
+    return [row(header), row(["---"] * len(header)), *(row(cells) for cells in rows)]
 
 
 def figure_table(labels: Sequence[tuple[str, str]], current: Mapping[str, Figure],
                  previous: Mapping[str, Figure]) -> list[str]:
     """table(("Figure", "Value"), ...) with one row per (key, label) in labels' order:
     (label, trend(current[key], previous[key])); a key missing from a mapping counts as None."""
-    raise NotImplementedError
+    return table(("Figure", "Value"),
+                 ((label, trend(current.get(key), previous.get(key))) for key, label in labels))
 
 
 def heavy_waits(heavy: Mapping[str, list[dict]], hosts: Iterable[str], window: Window) -> dict[str, Figure]:
@@ -118,12 +141,19 @@ def heavy_waits(heavy: Mapping[str, list[dict]], hosts: Iterable[str], window: W
     host absent from heavy adds nothing): commands (their count), lane_wait and disk_wait (the
     records' seconds summed, in minutes), disk_refused (records with code
     fab.heavy.EX_TEMPFAIL)."""
-    raise NotImplementedError
+    records = [record for host in hosts for record in within(heavy.get(host, []), window)
+               if record.get("ev") == "heavy"]
+    return {
+        "commands": len(records),
+        "lane_wait": sum((record.get("lane_wait", 0.0) for record in records), 0.0) / 60,
+        "disk_wait": sum((record.get("disk_wait", 0.0) for record in records), 0.0) / 60,
+        "disk_refused": sum(record.get("code") == EX_TEMPFAIL for record in records),
+    }
 
 
 def signal_lines(signals: Sequence[Signal]) -> list[str]:
     """`- **<text>:** <action> (<owner>)` per signal; `- none` when there are none."""
-    raise NotImplementedError
+    return [f"- **{signal.text}:** {signal.action} ({signal.owner})" for signal in signals] or ["- none"]
 
 
 def gather(hosts: Mapping[str, Host], since: str, *, sh: Runner = run,
@@ -139,12 +169,42 @@ def gather(hosts: Mapping[str, Host], since: str, *, sh: Runner = run,
     adds `queue <host>: <last line of its stderr or stdout>` or `heavy <host>: ...` to unread
     and leaves that source empty; no host with role gate adds `queue: no gate host`. Never
     raises for a remote failure."""
-    raise NotImplementedError
+    sources = Sources(log.read(log_path), [], {})
+
+    def read_remote(host, command, source):
+        result = sh(ssh(host.ssh, command))
+        if not result.ok:
+            detail = (result.err.strip() or result.out.strip()).splitlines()
+            sources.unread.append(f"{source} {host.name}: " +
+                                  (detail[-1] if detail else f"exit {result.code}"))
+            return []
+        records = []
+        for line in result.out.splitlines():
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(record, dict) and isinstance(record.get("ts"), str):
+                records.append(record)
+        return records
+
+    ordered = sorted(hosts.values(), key=lambda host: host.name)
+    gate = next((host for host in ordered if "gate" in host.roles), None)
+    if gate is None:
+        sources.unread.append("queue: no gate host")
+    else:
+        sources.queue = read_remote(gate, ["fab", "queue", "log", "--since", since], "queue")
+    for host in ordered:
+        if "builder" in host.roles or "gate" in host.roles:
+            records = read_remote(host, ["sh", "-c", 'test ! -e "$1" || cat "$1"', "sh",
+                                         remote_home(host) + "/heavy.jsonl"], "heavy")
+            sources.heavy[host.name] = [record for record in records if record["ts"] >= since]
+    return sources
 
 
 def report_path(name: str, day: str) -> Path:
     """FAB_HOME/reports/<name>/<day>.md: name is a plan's draft, or LANDING."""
-    raise NotImplementedError
+    return log.home() / "reports" / name / f"{day}.md"
 
 
 def main(argv: list[str]) -> int:
