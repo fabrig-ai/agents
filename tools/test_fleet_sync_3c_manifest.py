@@ -15,7 +15,7 @@ class ManifestActivationTest(fixture.FleetTest):
         legacy_qa = self.home / ".local/bin/qa"
         legacy_qa.symlink_to(self.home / "src/rust/agents/scripts/devel/qa")
         fixture.put(self.home / ".config/fleet-sync/defer-fabrig", "preserve legacy installer links\n")
-        self.sync()
+        self.component_sync("links")
         self.assertEqual(os.readlink(legacy), str(self.directory / "legacy-record"))
         self.assertFalse(os.path.lexists(self.home / ".local/bin/watch"))
         expected = {"fleet-sync": "fleet-sync", "lease": "lease", "session-start": "session/start",

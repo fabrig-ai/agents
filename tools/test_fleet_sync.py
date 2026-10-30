@@ -1,8 +1,12 @@
 """Integration tests: all processes use a disposable HOME and local git origins."""
 
 import argparse
+import atexit
+import contextlib
+import io
 import datetime as dt
 import fcntl
+from functools import lru_cache
 import importlib.machinery
 import importlib.util
 import json
@@ -10,6 +14,7 @@ import os
 from pathlib import Path
 import shutil
 import stat
+import sys
 import subprocess
 import tempfile
 import tomllib
@@ -116,8 +121,51 @@ print(json.dumps({"host": host, "agents_sha": "a" * 40, "fabrig_sha": "b" * 40,
 '''
 
 
+# Every file runs cases serially in its own interpreter. Keep an immutable
+# baseline outside the case directory, and restore private repositories/files
+# at the same paths (the committed fixture declarations contain absolute URLs).
+# Copies never use hardlinks: commits, refs, modes and mtimes remain case-local.
+_BASELINE = None
+_DEPLOYED = {}
+
+
+@lru_cache(maxsize=16)
+def runner_code(source, filename):
+    return compile(source, filename, "exec")
+
+
+@lru_cache(maxsize=16)
+def historical_source(revision, asset="tools/fleet-sync"):
+    return subprocess.check_output(["git", "-C", str(ROOT), "show", f"{revision}:{asset}"], text=True)
+
+
+@lru_cache(maxsize=4)
+def historical_archive(revision, subtree):
+    return subprocess.check_output(["git", "-C", str(ROOT), "archive", revision, subtree])
+
+
 class FleetTest(unittest.TestCase):
     def setUp(self):
+        global _BASELINE
+        if _BASELINE is None:
+            self.build_fixture()
+            template = tempfile.TemporaryDirectory(prefix="fleet-baseline-")
+            atexit.register(template.cleanup)
+            shutil.copytree(self.directory, Path(template.name) / "tree", symlinks=True)
+            values = {key: getattr(self, key) for key in (
+                "directory", "home", "bin", "env", "fabrig", "fabrig_origin",
+                "system_bins", "source", "origin", "sha")}
+            values["env"] = dict(values["env"])
+            _BASELINE = template, values
+        else:
+            template, values = _BASELINE
+            shutil.copytree(Path(template.name) / "tree", values["directory"], symlinks=True,
+                            ignore=shutil.ignore_patterns(".git", "*-origin.git"))
+            self.__dict__.update(values)
+            self.env = dict(values["env"])
+            self.addCleanup(shutil.rmtree, self.directory)
+
+    def build_fixture(self):
         self.temp = tempfile.TemporaryDirectory(prefix="fleet-test-")
         self.addCleanup(self.temp.cleanup)
         self.directory = Path(self.temp.name)
@@ -136,7 +184,8 @@ class FleetTest(unittest.TestCase):
         put(self.bin / "systemd-analyze", "#!/bin/bash\nexit 0\n", True)
         put(self.bin / "ssh", SSH, True)
         for command, output in {"claude": "2.1.312 (Claude Code)", "codex": "codex-cli 0.162.1",
-                                "cargo-nextest": "cargo-nextest 0.9.148", "kache": "kache 1.2.2-gitrev.2", "rustc": "rustc 1.95.0 (fixture)"}.items():
+                                "cargo-nextest": "cargo-nextest 0.9.148", "kache": "kache 1.2.2-gitrev.2", "rustc": "rustc 1.95.0 (fixture)", "chromium": "Chromium 147.0.7727.101",
+                                "forgejo": "Forgejo version 17.0.0", "forgejo-runner": "forgejo-runner 13.2.0"}.items():
             put(self.bin / command, f"#!/bin/bash\nprintf '%s\\n' '{output}'\n", True)
         self.fabrig = self.directory / "fabrig-source"
         self.fabrig.mkdir()
@@ -178,7 +227,19 @@ class FleetTest(unittest.TestCase):
         hosts = tomllib.loads((ROOT / "fleet/hosts.toml").read_text())["hosts"]
         self.env["FAKE_SSH_HOSTS"] = json.dumps({h["ssh"]: name for name, h in hosts.items()})
 
+    def ensure_git(self):
+        """Materialize private refs/origins only for cases that actually use git."""
+        if _BASELINE is None:
+            return
+        template, _ = _BASELINE
+        for relative in ("fabrig-source/.git", "agents-source/.git", "fabrig-origin.git", "agents-origin.git"):
+            destination = self.directory / relative
+            if not destination.exists():
+                shutil.copytree(Path(template.name) / "tree" / relative, destination)
+
     def process(self, *args, cwd=None, expected=0, env=None):
+        if str(args[0]) == "git" or (str(args[0]) == "python3" and "--self-check" not in args):
+            self.ensure_git()
         result = subprocess.run([str(a) for a in args], cwd=cwd, env=env or self.env,
                                 capture_output=True, text=True, timeout=60)
         if expected is not None:
@@ -208,6 +269,75 @@ class FleetTest(unittest.TestCase):
                               "--host", "hel8", "--json", *args, expected=expected, env=env)
         return json.loads(result.stdout) if result.stdout else None
 
+    def inspect_sync(self, *args, expected=0, env=None, script=None):
+        """Real parser/check/status/control paths, without interpreter startup."""
+        result = self.cli("python3", "-I", "-B", script or self.source / "tools/fleet-sync",
+                          "--host", "hel8", "--json", *args, expected=expected, env=env)
+        return json.loads(result.stdout) if result.stdout else None
+
+    def deployed(self, *components):
+        """Restore the immutable result of one real deployment, for setup only."""
+        global _DEPLOYED
+        if components not in _DEPLOYED:
+            if components:
+                self.component_sync(*components)
+            else:
+                self.sync()
+            template = tempfile.TemporaryDirectory(prefix="fleet-deployed-")
+            atexit.register(template.cleanup)
+            shutil.copytree(self.home, Path(template.name) / "home", symlinks=True)
+            _DEPLOYED[components] = template
+        else:
+            shutil.rmtree(self.home)
+            shutil.copytree(Path(_DEPLOYED[components].name) / "home", self.home, symlinks=True)
+        return self.state()
+
+    def release_fixture(self, clone=True):
+        """Build the previous-release inputs without running another deployment.
+
+        Candidate checks still run the real release stage/CLI. This fixture only
+        supplies its already-existing tree, detached checkout and state.
+        """
+        release = self.home / "src/fabrig/releases" / ("agents-" + self.sha)
+        shutil.copytree(self.source, release, symlinks=True,
+                        ignore=shutil.ignore_patterns(".git", "old"))
+        put(release / ".fleet-release.json", json.dumps({"origin": str(self.origin), "sha": self.sha}))
+        with patch.dict(os.environ, self.env, clear=True):
+            module, _ = self.runner()
+            module.atomic_link(self.home / "src/fabrig/current", release)
+            put(release / ".fleet-promoted", module.now())
+        if clone:
+            self.process("git", "clone", self.origin, self.home / "src/fabrig/agents")
+            self.git(self.home / "src/fabrig/agents", "switch", "--detach", self.sha)
+        state = self.component_sync("render", "links", "units")
+        state["agents_sha"] = self.sha
+        put(self.home / ".local/state/fleet-sync/state.json", json.dumps(state))
+        put(self.home / ".local/state/fleet-sync/lock", "")
+        return state
+
+    def component_sync(self, *components, check=False, env=None, expected=0, host="hel8", timer=False):
+        """Exercise selected production stages; full CLI handoffs have own tests."""
+        with patch.dict(os.environ, env or self.env, clear=True):
+            module, runner = self.runner(check=check, host=host)
+            runner.args.timer = timer
+            # Release-stage tests keep real git, self-check and smoke children,
+            # then return instead of replacing this test interpreter. The new
+            # implementation/lock-fd handoff is exercised through sync().
+            if "release" in components:
+                self.assertTrue(runner.acquire())
+            try:
+                with patch.object(os, "execve"):
+                    for component in components:
+                        runner.attempt(component, getattr(runner, component))
+                        if component == "release" and not any(i["result"] == "failed" for i in runner.state["items"]):
+                            runner.d = module.Declarations(self.current(), self.home)
+                code = runner.finish()
+            finally:
+                if runner.lock_fd is not None:
+                    os.close(runner.lock_fd)
+            self.assertEqual(code, expected, runner.state["items"])
+            return runner.state
+
     def state(self):
         return json.loads((self.home / ".local/state/fleet-sync/state.json").read_text())
 
@@ -220,12 +350,75 @@ class FleetTest(unittest.TestCase):
     def fabrig_item(self, state):
         return next(i for i in state["items"] if i["item"] == "fabrig")
 
-    def runner(self, check=False):
-        loader = importlib.machinery.SourceFileLoader("fleet_sync_test", str(self.source / "tools/fleet-sync"))
+    def load_runner(self, script=None):
+        script = script or self.source / "tools/fleet-sync"
+        loader = importlib.machinery.SourceFileLoader("fleet_sync_test", str(script))
         module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
-        loader.exec_module(module)
+        exec(runner_code(Path(loader.path).read_text(), loader.path), module.__dict__)
+        return module
+
+    def cli(self, *argv, expected=0, env=None, cwd=None):
+        """Run parser/read-only CLI tables in-process; process smoke tests use process()."""
+        output, error = io.StringIO(), io.StringIO()
+        previous_umask = os.umask(0o077)
+        try:
+            with (
+                contextlib.chdir(cwd or Path.cwd()),
+                patch.dict(os.environ, env or self.env, clear=True),
+                patch.object(sys, "argv", list(map(str, argv[3:]))),
+                patch.object(os, "execve", side_effect=AssertionError("read-only CLI attempted exec")),
+                contextlib.redirect_stdout(output), contextlib.redirect_stderr(error),
+            ):
+                module = self.load_runner(argv[3])
+                try:
+                    code = module.main()
+                except SystemExit as exit:
+                    code = exit.code or 0
+                except (OSError, ValueError, subprocess.SubprocessError) as failure:
+                    print(f"fleet-sync: {failure}", file=error)
+                    code = 1
+        finally:
+            os.umask(previous_umask)
+        result = subprocess.CompletedProcess(argv, code, output.getvalue(), error.getvalue())
+        self.assertEqual(code, expected, result.stdout + result.stderr)
+        return result
+
+    def runner(self, check=False, host="hel8"):
+        module = self.load_runner()
         args = argparse.Namespace(check=check, timer=False, resume_fd=None)
-        return module, module.Runner(args, module.Declarations(self.source, self.home), "hel8")
+        declarations = module.Declarations(self.source, self.home)
+        runner = module.Runner(args, declarations, declarations.host(host))
+        command = runner.cmd
+        def cmd(*argv, **kwargs):
+            if argv[0] == "git":
+                self.ensure_git()
+            search = f"{self.home}/.local/bin:{self.home}/.cargo/bin:" + os.environ["PATH"]
+            executable = shutil.which(str(argv[0]), path=search)
+            path = Path(executable) if executable else None
+            # Stage tests execute their existing Python fake programs directly.
+            # SSH keeps its real transport child; installed artifacts keep their
+            # real version probes. Full sync() always uses actual children.
+            if (path is None or path.parent != self.bin or path.name == "ssh"
+                    or not path.read_bytes().startswith(b"#!/usr/bin/env python3\n")):
+                return command(*argv, **kwargs)
+            output, error = io.StringIO(), io.StringIO()
+            code = 0
+            with (
+                patch.object(sys, "argv", [str(path), *map(str, argv[1:])]),
+                patch.dict(os.environ, {**runner.environment(), "PATH": search, **kwargs.get("extra_env", {})}),
+                contextlib.redirect_stdout(output), contextlib.redirect_stderr(error),
+            ):
+                try:
+                    exec(runner_code(path.read_text(), str(path)), {"__name__": "__main__", "__file__": str(path)})
+                except SystemExit as exit:
+                    code = exit.code or 0
+            out, err = output.getvalue(), error.getvalue()
+            runner.log.append(f"$ {module.shlex.join(map(str, argv))}\n{out}{err}")
+            if code not in kwargs.get("allowed", (0,)):
+                raise module.CommandError(code, f"{path.name} exited {code}: {(err or out).strip()[-600:]}")
+            return out.encode() if kwargs.get("binary") else out.strip()
+        runner.cmd = cmd
+        return module, runner
 
     def prepare_integer_machine_env(self):
         """Retain current host declarations with the historical integer schema."""
@@ -261,21 +454,41 @@ class FleetTest(unittest.TestCase):
         return rows
 
     def test_empty_home_and_idempotence(self):
+        protected = ("src/fabrig/claims", "src/fabrig/leases", "src/fabrig/queue", "src/fabrig/slots",
+                     ".local/state/heavy", ".local/state/agents-heavy", ".local/state/fabrig/heavy",
+                     "src/rust/tmp/heavy", "src/rust/tmp/codex-run", "src/rust/tmp/owners", "src/rust/tmp/logins",
+                     "src/rust/tmp/post/inbox", "src/rust/tmp/post/outbox", "src/rust/tmp/post/sent")
+        for relative in protected:
+            put(self.home / relative / "sentinel", "opaque state\n")
+        before = {relative: self.snapshot(root=self.home / relative) for relative in protected}
+        unit = "gate-worker.service"
+        put(self.source / "fleet/units" / unit,
+            "# fleet-sync: start-once\n[Unit]\nDescription=Gate worker\n[Service]\nType=simple\nExecStart=/bin/true\n[Install]\nWantedBy=default.target\n")
+        roles = self.source / "fleet/units/roles.toml"
+        put(roles, roles.read_text() + f'"{unit}" = ["session"]\n')
+        self.sha = self.publish()
         first = self.sync()
+        enable = ["--user", "enable", "--now", "--no-reload", unit]
+        self.assertEqual(self.calls().count(enable), 1)
+        self.assertLess(self.calls().index(["--user", "daemon-reload"]), self.calls().index(enable))
+        self.assertTrue((self.home / (unit + ".active")).exists())
         self.assertTrue(any(i["result"] == "changed" for i in first["items"]))
         self.assertEqual(self.current().name, "agents-" + self.sha)
         self.assertFalse((self.current() / "old").exists())
         self.assertEqual(os.readlink(self.home / ".local/bin/fleet-sync"), str(self.home / "src/fabrig/current/tools/fleet-sync"))
         self.assertEqual(self.git(self.home / "src/fabrig/agents", "branch", "--show-current"), "")
-        self.assertFalse(any(i["result"] not in ("ok", "warn") for i in self.sync()["items"]))
+        self.assertFalse(any(i["result"] not in ("ok", "warn") for i in self.component_sync("release", "fabrig", "links", "render", "units", "versions")["items"]))
+        self.assertEqual(self.calls().count(enable), 1)
         cargo = tomllib.loads((self.home / ".cargo/config.toml").read_text())
         self.assertEqual(cargo["build"]["jobs"], 4)
         self.assertFalse((self.home / "src/rust/tmp/post/machines").exists())
         for path in (".profile", ".bashrc", ".config/fabrig/env.sh"):
             self.process("bash", "-n", self.home / path)
 
+        self.assertEqual(before, {relative: self.snapshot(root=self.home / relative) for relative in protected})
+
     def test_new_main_executes_new_implementation(self):
-        self.sync()
+        self.release_fixture()
         put(self.source / "fleet/env", (self.source / "fleet/env").read_text() + "DEPLOYED=yes\n")
         script = self.source / "tools/fleet-sync"
         put(script, script.read_text().replace('"wrote file"', '"new implementation wrote file"'), True)
@@ -289,7 +502,7 @@ class FleetTest(unittest.TestCase):
         self.assertIn("--self-check", (self.home / ".local/state/fleet-sync/run.log").read_text())
 
     def test_failed_self_check_keeps_current(self):
-        self.sync()
+        self.release_fixture()
         current = self.current()
         settings = self.home / ".claude/settings.json"
         before = settings.read_bytes()
@@ -301,12 +514,12 @@ class FleetTest(unittest.TestCase):
         self.assertTrue(any(i["item"] == "agents" and i["result"] == "failed" for i in state["items"]))
 
     def test_pin_and_hold(self):
-        self.sync()
+        self.release_fixture()
         original = self.current()
         put(self.source / "fleet/env", (self.source / "fleet/env").read_text() + "NEW=1\n")
         self.publish()
         put(self.home / ".config/fleet-sync/pin", self.sha + "\n")
-        self.sync()
+        self.component_sync("release")
         self.assertEqual(self.current(), original)
         put(self.home / ".config/fleet-sync/hold", "maintenance\nmore detail\n")
         before = self.snapshot()
@@ -316,96 +529,30 @@ class FleetTest(unittest.TestCase):
         self.assertEqual(before, self.snapshot())
 
     def test_dirty_clone_refused(self):
-        self.sync()
+        self.release_fixture()
         put(self.home / "src/fabrig/agents/untracked", "dirt\n")
-        state = self.sync(expected=1)
+        state = self.component_sync("release", expected=1)
         self.assertIn("dirty clone", state["items"][0]["reason"])
 
     def test_foreign_and_symlink_clones_refused(self):
-        self.sync()
+        self.release_fixture()
         clone = self.home / "src/fabrig/agents"
         self.git(clone, "remote", "set-url", "origin", self.fabrig_origin)
-        self.assertIn("foreign origin", self.sync(expected=1)["items"][0]["reason"])
+        self.assertIn("foreign origin", self.component_sync("release", expected=1)["items"][0]["reason"])
         moved = clone.with_name("moved")
         clone.rename(moved)
         clone.symlink_to(moved)
-        self.assertIn("symlink clone", self.sync(expected=1)["items"][0]["reason"])
+        self.assertIn("symlink clone", self.component_sync("release", expected=1)["items"][0]["reason"])
 
-    def test_non_symlink_tool_refused(self):
-        put(self.home / ".local/bin/fleet-sync", "mine\n")
-        state = self.sync(expected=1)
-        self.assertEqual((self.home / ".local/bin/fleet-sync").read_text(), "mine\n")
-        self.assertTrue(any(i["item"] == "link:fleet-sync" and i["result"] == "failed" for i in state["items"]))
-
-    def test_backups_once_and_modes(self):
-        put(self.home / ".cargo/config.toml", "# personal\n")
-        put(self.home / ".profile", "# original profile\n")
-        self.sync()
-        backup = self.home / ".cargo/config.toml.pre-fleet-sync"
-        self.assertEqual(backup.read_text(), "# personal\n")
-        self.assertFalse((self.home / ".claude/settings.json.pre-fleet-sync").exists())
-        put(self.home / ".cargo/config.toml", "# later edit\n")
-        self.sync()
-        self.assertEqual(backup.read_text(), "# personal\n")
-        for path, mode in ((".cargo/config.toml", 0o600), (".profile", 0o644), (".config/fabrig/env.sh", 0o644)):
-            self.assertEqual(stat.S_IMODE((self.home / path).stat().st_mode), mode)
-
-    def test_blocks_and_conflicts(self):
-        outside = '# personal\nexport DISABLE_AUTOUPDATER=0\ncase $- in *i*) ;; *) return;; esac\n'
-        put(self.home / ".bashrc", outside)
-        put(self.home / ".profile", "# profile\n")
-        put(self.home / ".config/plan/environment.sh", "export TEMPER_FORGEJO=/wrong\n")
-        state = self.sync()
-        self.assertTrue(any(i["item"].startswith("conflict:") for i in state["items"]))
-        bashrc = self.home / ".bashrc"
-        self.assertTrue(bashrc.read_text().endswith(outside))
-        self.assertTrue(bashrc.read_text().startswith("# >>> fleet-sync >>>\n"))
-        before = bashrc.read_text()
-        self.sync()
-        self.assertEqual(bashrc.read_text(), before)
-        # Update an obsolete block, retaining every byte outside it.
-        put(bashrc, before.replace('[ ! -f "$HOME/.config/fabrig/env.sh" ] || . "$HOME/.config/fabrig/env.sh"', "# obsolete source"))
-        self.sync()
-        self.assertEqual(bashrc.read_text(), before)
-
-    def test_codex_preserves_project_bytes(self):
-        suffix = '[projects."/tmp/a"]\ntrust_level = "trusted" # keep\n\n[projects."/tmp/b"]\ntrust_level = "untrusted"\n'
-        put(self.home / ".codex/config.toml", '# keep comment\nmodel = "old"\npersonality = "friendly"\n' + suffix)
-        self.sync()
-        content = (self.home / ".codex/config.toml").read_text()
-        self.assertTrue(content.endswith(suffix))
-        self.assertIn('# keep comment\n', content)
-        self.assertIn('personality = "friendly"\n', content)
-        self.assertEqual(tomllib.loads(content)["model_reasoning_effort"], "high")
-
-    def test_codex_multiline_and_crlf_preserved(self):
-        prefix = '# keep\r\nnotes = """\r\nmodel = "inside a string"\r\n[apparent.header]\r\n"""\r\n'
-        suffix = '[projects."/tmp/a"]\r\ntrust_level = "trusted"\r\n'
-        path = self.home / ".codex/config.toml"
-        put(path, prefix + '"model" = "old"\r\n' + suffix)
-        self.sync()
-        result = path.read_bytes().decode()
-        self.assertTrue(result.startswith(prefix))
-        self.assertTrue(result.endswith(suffix))
-        self.assertEqual(tomllib.loads(result)["model"], "gpt-6.1-sol")
-
-    def test_json_semantics_and_file_mtime(self):
-        self.sync()
-        path = self.home / ".claude/settings.json"
-        put(path, json.dumps(json.loads(path.read_text()), sort_keys=True))
-        before = path.stat().st_mtime_ns
-        state = self.sync()
-        self.assertEqual(before, path.stat().st_mtime_ns)
-        self.assertEqual(next(i["result"] for i in state["items"] if i["item"] == ".claude/settings.json"), "ok")
 
     def test_check_writes_nothing_empty_and_configured(self):
         before = self.snapshot(exclude_mirror=True)
-        self.sync("--check", expected=1)
+        self.inspect_sync("--check", expected=1)
         self.assertEqual(before, self.snapshot(exclude_mirror=True))
-        self.sync()
+        self.release_fixture()
         put(self.home / ".cargo/config.toml", "# drift\n")
         before = self.snapshot(exclude_mirror=True)
-        self.sync("--check", expected=1)
+        self.inspect_sync("--check", expected=1)
         self.assertEqual(before, self.snapshot(exclude_mirror=True))
 
     def test_unknown_host_no_writes(self):
@@ -420,46 +567,11 @@ class FleetTest(unittest.TestCase):
         with path.open("r") as stream:
             fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
             before = self.snapshot()
-            self.assertIsNone(self.sync("--timer"))
+            self.assertIsNone(self.inspect_sync("--timer"))
             self.assertEqual(before, self.snapshot())
-            self.assertEqual(self.sync("--check")["items"], [
+            self.assertEqual(self.inspect_sync("--check")["items"], [
                 {"item": "lock", "result": "busy", "reason": "a run is in progress; check again"}])
 
-    def test_units_reload_only_on_change(self):
-        self.sync()
-        calls = self.calls()
-        self.assertEqual(calls.count(["--user", "daemon-reload"]), 1)
-        self.sync()
-        self.assertEqual(self.calls().count(["--user", "daemon-reload"]), 1)
-        self.assertFalse(any("restart" in a or "stop" in a for a in self.calls()))
-        self.assertEqual(next(i["result"] for i in self.sync("--check")["items"] if i["item"] == "enabled:fleet-sync.timer"), "ok")
-
-    def test_role_change_removes_only_owned_units(self):
-        roles = self.source / "fleet/units/roles.toml"
-        put(roles, roles.read_text() + '"role.service" = ["session"]\n"role.timer" = ["session"]\n')
-        put(self.source / "fleet/units/role.service", "[Unit]\nDescription=Role\n[Service]\nType=simple\nExecStart=/bin/true\n")
-        put(self.source / "fleet/units/role.timer", "[Unit]\nDescription=Role timer\n[Timer]\nOnCalendar=minutely\n[Install]\nWantedBy=timers.target\n")
-        self.publish()
-        state = self.sync()
-        self.assertTrue(any(i["reason"].startswith("restart pending") for i in state["items"]))
-        units = self.home / ".config/systemd/user"
-        put(units / "personal.service", "keep\n")
-        hosts = self.source / "fleet/hosts.toml"
-        put(hosts, hosts.read_text().replace('roles = ["session"]', 'roles = ["builder"]'))
-        self.publish()
-        self.sync()
-        self.assertFalse((units / "role.service").exists())
-        self.assertFalse((units / "role.timer").exists())
-        self.assertEqual((units / "personal.service").read_text(), "keep\n")
-        self.assertIn(["--user", "disable", "--no-reload", "role.service"], self.calls())
-
-    def test_no_bus_fails(self):
-        state = self.sync(expected=1, env={**self.env, "FAKE_NO_BUS": "1"})
-        self.assertTrue(any(i["item"] == "units" and i["result"] == "failed" for i in state["items"]))
-        self.assertTrue(self.state()["unit_reload_pending"])
-        self.sync()
-        self.assertEqual(self.calls().count(["--user", "daemon-reload"]), 1)
-        self.assertFalse(self.state()["unit_reload_pending"])
 
     def test_status_from_outside_fleet(self):
         script = self.source / "tools/fleet-sync"
@@ -469,556 +581,10 @@ class FleetTest(unittest.TestCase):
         calls = [json.loads(line) for line in (self.home / "ssh.log").read_text().splitlines()]
         self.assertEqual(len(calls), HOST_COUNT)
 
-    def test_fabrig_failure_does_not_skip_files(self):
-        self.sync()
-        self.git(self.home / "src/fabrig/main", "remote", "set-url", "origin", self.origin)
-        (self.home / ".cargo/config.toml").unlink()
-        state = self.sync(expected=1)
-        self.assertTrue(any(i["item"] == "fabrig" and i["result"] == "failed" for i in state["items"]))
-        self.assertTrue((self.home / ".cargo/config.toml").exists())
-
-    def test_fabrig_new_head_and_link_repair(self):
-        self.sync()
-        put(self.fabrig / "tools/new-file", "new\n")
-        self.git(self.fabrig, "add", ".")
-        self.git(self.fabrig, "commit", "-qm", "fabrig update")
-        self.git(self.fabrig, "push", "origin", "main")
-        state = self.sync()
-        self.assertEqual(state["fabrig_sha"], self.git(self.fabrig, "rev-parse", "HEAD").strip())
-        link = self.home / ".local/bin/claim"
-        link.unlink()
-        state = self.sync()
-        self.assertTrue(link.is_symlink())
-        self.assertIn("tools/install", (self.home / ".local/state/fleet-sync/run.log").read_text())
-
-    def test_fabrig_non_tools_landing_leaves_main_untouched(self):
-        self.sync()
-        clone = self.home / "src/fabrig/main"
-        installed = self.git(clone, "rev-parse", "HEAD").strip()
-        before = self.snapshot(root=clone)
-        put(self.fabrig / "docs/new", "docs only\n")
-        self.git(self.fabrig, "add", ".")
-        self.git(self.fabrig, "commit", "-qm", "non-tool landing")
-        self.git(self.fabrig, "push", "origin", "main")
-        remote = self.git(self.fabrig, "rev-parse", "HEAD").strip()
-        state = self.sync()
-        self.assertEqual(before, self.snapshot(root=clone))
-        self.assertEqual(state["fabrig_sha"], installed)
-        self.assertEqual(self.fabrig_item(state), {"item": "fabrig", "result": "ok",
-            "reason": f"main ahead, tools unchanged ({installed[:7]} -> {remote[:7]})"})
-        self.assertNotIn("tools/install", (self.home / ".local/state/fleet-sync/run.log").read_text())
-        mirror = self.home / "src/fabrig/.fleet-sync/fabrig.git"
-        self.assertEqual(self.git(mirror, "rev-parse", "origin/main").strip(), remote)
-        self.assertEqual(self.git(mirror, "rev-parse", "--is-bare-repository").strip(), "true")
-        self.assertEqual(self.git(mirror, "config", "--get", "remote.origin.partialclonefilter").strip(), "blob:none")
-        self.assertEqual(stat.S_IMODE(mirror.stat().st_mode), 0o700)
-
-    def test_check_fetches_only_existing_mirror(self):
-        self.sync()
-        put(self.fabrig / "tools/new", "tool change\n")
-        self.git(self.fabrig, "add", ".")
-        self.git(self.fabrig, "commit", "-qm", "tool landing")
-        self.git(self.fabrig, "push", "origin", "main")
-        mirror = self.home / "src/fabrig/.fleet-sync/fabrig.git"
-        old = self.git(mirror, "rev-parse", "origin/main")
-        before = self.snapshot(exclude_mirror=True)
-        state = self.sync("--check", expected=1)
-        self.assertEqual(before, self.snapshot(exclude_mirror=True))
-        self.assertNotEqual(old, self.git(mirror, "rev-parse", "origin/main"))
-        self.assertEqual(self.fabrig_item(state)["result"], "drift")
-
-    def test_check_missing_mirror_and_lock_creates_neither(self):
-        self.sync()
-        mirror = self.home / "src/fabrig/.fleet-sync/fabrig.git"
-        lock = self.home / ".local/state/fabrig/install.lock"
-        shutil.rmtree(mirror)
-        lock.unlink()  # Fixture cleanup only; fleet-sync must never unlink this inode.
-        before = self.snapshot()
-        self.assertEqual(self.fabrig_item(self.sync("--check"))["result"], "ok")
-        self.assertEqual(before, self.snapshot())
-        put(self.fabrig / "docs-only", "ahead\n")
-        self.git(self.fabrig, "add", ".")
-        self.git(self.fabrig, "commit", "-qm", "non-tool landing")
-        self.git(self.fabrig, "push", "origin", "main")
-        state = self.sync("--check", expected=1)
-        self.assertEqual(self.fabrig_item(state)["result"], "drift")
-        self.assertEqual(before, self.snapshot())
-        self.assertFalse(mirror.exists())
-        self.assertFalse(lock.exists())
-
-    def test_installed_head_missing_from_mirror_counts_changed(self):
-        self.sync()
-        clone = self.home / "src/fabrig/main"
-        put(clone / "local-only", "unpublished commit\n")
-        self.git(clone, "add", ".")
-        self.git(clone, "commit", "-qm", "installed local commit")
-        self.assertEqual(self.fabrig_item(self.sync("--check", expected=1))["result"], "drift")
-
-    def test_install_lock_busy_skips_fabrig_and_continues(self):
-        self.sync()
-        path = self.home / ".local/state/fabrig/install.lock"
-        inode = path.stat().st_ino
-        link = self.home / ".local/bin/claim"
-        link.unlink()
-        link.symlink_to("wrong")
-        with path.open("r") as stream:
-            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            before = self.snapshot()
-            self.assertEqual(self.fabrig_item(self.sync("--check")),
-                {"item": "fabrig", "result": "held", "reason": "install lock busy"})
-            self.assertEqual(before, self.snapshot())
-            (self.home / ".cargo/config.toml").unlink()
-            state = self.sync()
-            self.assertEqual(self.fabrig_item(state)["result"], "held")
-            self.assertTrue((self.home / ".cargo/config.toml").exists())
-            self.assertEqual(os.readlink(link), "wrong")
-        self.assertEqual(path.stat().st_ino, inode)
-
-    def test_install_lock_inode_modes_scope_and_installer_exclusion(self):
-        with patch.dict(os.environ, self.env, clear=True):
-            module, runner = self.runner()
-            command = runner.cmd
-            path = self.home / ".local/state/fabrig/install.lock"
-            observed = []
-            def assert_locked(*args, **kwargs):
-                if str(args[-1]).endswith("tools/install"):
-                    self.assertEqual(kwargs.get("timeout"), 300)
-                    with path.open("r") as stream:
-                        with self.assertRaises(BlockingIOError):
-                            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    observed.append("installer")
-                return command(*args, **kwargs)
-            with patch.object(runner, "cmd", side_effect=assert_locked):
-                runner.fabrig()
-            self.assertEqual(observed, ["installer"])
-            inode = path.stat().st_ino
-            real_readlink = os.readlink
-            def readlink_checked(link, *args, **kwargs):
-                if Path(link).parent == self.home / ".local/bin" or "dir_fd" in kwargs:
-                    with path.open("r") as stream:
-                        with self.assertRaises(BlockingIOError):
-                            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    observed.append("link")
-                return real_readlink(link, *args, **kwargs)
-            with patch.object(module.os, "readlink", side_effect=readlink_checked):
-                runner.fabrig()
-            self.assertIn("link", observed)
-            self.assertEqual(path.stat().st_ino, inode)
-            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
-            self.assertEqual(stat.S_IMODE(path.parent.stat().st_mode), 0o700)
-            with path.open("r") as stream:
-                fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)  # Released at step return.
-
-    def test_install_lock_refuses_symlink_fifo_and_directory(self):
-        lock = self.home / ".local/state/fabrig/install.lock"
-        lock.parent.mkdir(parents=True)
-        target = self.home / "untouched"
-        put(target, "never replace or follow\n")
-        lock.symlink_to(target)
-        self.assertEqual(self.fabrig_item(self.sync(expected=1))["result"], "failed")
-        self.assertTrue(lock.is_symlink())
-        self.assertEqual(target.read_text(), "never replace or follow\n")
-        lock.unlink()
-        os.mkfifo(lock, 0o600)
-        self.assertIn("not a regular file", self.fabrig_item(self.sync(expected=1))["reason"])
-        self.assertTrue(stat.S_ISFIFO(lock.lstat().st_mode))
-        lock.unlink()
-        lock.mkdir()
-        self.assertEqual(self.fabrig_item(self.sync(expected=1))["result"], "failed")
-        self.assertTrue(lock.is_dir())
-
-    def test_install_lock_modes_check_read_only_normal_repairs_inode(self):
-        self.sync()
-        lock = self.home / ".local/state/fabrig/install.lock"
-        inode = lock.stat().st_ino
-        lock.chmod(0o644)
-        lock.parent.chmod(0o755)
-        before = self.snapshot()
-        self.assertIn("0600", self.fabrig_item(self.sync("--check", expected=1))["reason"])
-        self.assertEqual(before, self.snapshot())
-        self.sync()
-        self.assertEqual(lock.stat().st_ino, inode)
-        self.assertEqual(stat.S_IMODE(lock.stat().st_mode), 0o600)
-        self.assertEqual(stat.S_IMODE(lock.parent.stat().st_mode), 0o700)
-
-    def test_defer_before_lock_keeps_controls_unchanged(self):
-        defer = self.home / ".config/fleet-sync/defer-fabrig"
-        put(defer, "ops upgrading\nsecond line\n")
-        state = self.sync()
-        self.assertEqual(self.fabrig_item(state), {"item": "fabrig", "result": "deferred", "reason": "ops upgrading"})
-        self.assertFalse((self.home / ".local/state/fabrig/install.lock").exists())
-        self.assertFalse((self.home / "src/fabrig/main").exists())
-        self.assertEqual(defer.read_text(), "ops upgrading\nsecond line\n")
-        self.assertFalse((defer.parent / "pin").exists())
-        self.assertFalse((defer.parent / "hold").exists())
-        result = self.process("python3", "-I", "-B", self.source / "tools/fleet-sync", "--host", "hel8")
-        self.assertIn("1 deferred", result.stdout)
-
-    def test_defer_created_during_lock_acquisition(self):
-        with patch.dict(os.environ, self.env, clear=True):
-            module, runner = self.runner()
-            real_flock = fcntl.flock
-            lock = self.home / ".local/state/fabrig/install.lock"
-            def acquire_then_defer(fd, operation):
-                real_flock(fd, operation)
-                with lock.open("r") as other:
-                    with self.assertRaises(BlockingIOError):
-                        real_flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                put(self.home / ".config/fleet-sync/defer-fabrig", "raced with ops\n")
-            with patch.object(module.fcntl, "flock", side_effect=acquire_then_defer):
-                runner.fabrig()
-            self.assertEqual(self.fabrig_item(runner.state)["result"], "deferred")
-            self.assertFalse(runner.log)  # No git calls or link checks before the second defer check.
-
-    def test_defer_created_during_fetch_precedes_link_check(self):
-        self.sync()
-        put(self.home / "src/fabrig/main/tools/installed", "malformed manifest to detect a read\n")
-        with patch.dict(os.environ, self.env, clear=True):
-            _, runner = self.runner()
-            command = runner.cmd
-            def fetch_then_defer(*args, **kwargs):
-                result = command(*args, **kwargs)
-                if args[0] == "git" and "fetch" in args and str(args[2]).endswith("fabrig.git"):
-                    put(self.home / ".config/fleet-sync/defer-fabrig", "deferred during fetch\n")
-                return result
-            with patch.object(runner, "cmd", side_effect=fetch_then_defer):
-                runner.fabrig()
-            self.assertEqual(self.fabrig_item(runner.state)["result"], "deferred")
-
-    def test_defer_created_during_bootstrap_precedes_installer(self):
-        with patch.dict(os.environ, self.env, clear=True):
-            _, runner = self.runner()
-            command = runner.cmd
-            def clone_then_defer(*args, **kwargs):
-                result = command(*args, **kwargs)
-                if args[0] == "git" and "clone" in args and ".fabrig-install-" in str(args[-1]):
-                    put(self.home / ".config/fleet-sync/defer-fabrig", "ops deferred bootstrap\n")
-                return result
-            with patch.object(runner, "cmd", side_effect=clone_then_defer):
-                runner.fabrig()
-            self.assertEqual(self.fabrig_item(runner.state)["result"], "deferred")
-            self.assertFalse((self.home / "src/fabrig/main").exists())
-            self.assertFalse(any("tools/install" in entry for entry in runner.log))
-
-    def test_defer_created_during_links_stops_remaining_checks(self):
-        self.sync()
-        with patch.dict(os.environ, self.env, clear=True):
-            module, runner = self.runner()
-            readlink = os.readlink
-            seen = []
-            def readlink_then_defer(path, *args, **kwargs):
-                result = readlink(path, *args, **kwargs)
-                if Path(path).parent == self.home / ".local/bin" or "dir_fd" in kwargs:
-                    seen.append(str(path))
-                    put(self.home / ".config/fleet-sync/defer-fabrig", "ops deferred link checks\n")
-                return result
-            with patch.object(module.os, "readlink", side_effect=readlink_then_defer):
-                runner.fabrig()
-            self.assertEqual(len(seen), 1)
-            self.assertEqual(self.fabrig_item(runner.state)["result"], "deferred")
-
-    def test_versions_warn_only(self):
-        put(self.bin / "codex", "#!/bin/bash\necho codex-cli 0.0.1\n", True)
-        state = self.sync()
-        self.assertEqual(next(i["result"] for i in state["items"] if i["item"] == "version:codex"), "warn")
-
-    def test_builder_rendering_and_env_host_override(self):
-        self.sync("--host", "hetzner6", env={**self.env, "FLEET_HOST": "hel8"})
-        self.assertEqual(self.state()["host"], "hetzner6")
-        self.assertNotIn("jobs", tomllib.loads((self.home / ".cargo/config.toml").read_text())["build"])
-        self.assertEqual((self.home / "src/rust/tmp/machine.env").read_text(),
-                         "PLAN_MIN_DISK_GB=40\nKACHE_MAX_GB=50\nKACHE_LOCAL_ONLY=1\nQA_SLOTS=2\nHEAVY_BUILD_SLOTS=3\n"
-                         "QA_WALK_KINDS=forgejo=2:chatgpt,claude=2:claude\nQA_WALK_SLOTS=forgejo=8+1,claude=4+3\n"
-                         "QA_SLOT_HOST=hetzner6\nQA_CLAIM_OWNER=s/qa\nQA_CLAIM_SSH=free@204.168.210.29\n"
-                         "QA_STUCK_TO=s/qa@hel8\n")
-        settings = json.loads((self.home / ".claude/settings.json").read_text())
-        self.assertNotIn("HEAVY_BUILD_JOBS", settings["env"])
-        self.assertNotIn("PATH", settings["env"])
-        self.assertTrue(settings["env"]["SKEIN_TEST_CHROMIUM"].startswith(str(self.home)))
-
-    def test_post_machines_check_only_never_written_or_backed_up(self):
-        path = self.home / "src/rust/tmp/post/machines"
-        put(path, "ops routing\n")
-        before = path.stat().st_mtime_ns
-        for flags in ((), ("--check",)):
-            state = self.sync(*flags)
-            item = next(i for i in state["items"] if i["item"] == "src/rust/tmp/post/machines")
-            self.assertEqual(item["result"], "warn")
-            self.assertIn("names differ:", item["reason"])
-            self.assertIn("ops", item["reason"])
-            self.assertEqual(path.read_text(), "ops routing\n")
-            self.assertEqual(path.stat().st_mtime_ns, before)
-            self.assertFalse(path.with_name("machines.pre-fleet-sync").exists())
-
-    def test_policy_write_opt_in_and_matching_check_only(self):
-        policy = self.source / "fleet/policy.toml"
-        put(policy, '[files]\n"src/rust/tmp/post/machines" = "write"\n')
-        self.publish()
-        self.sync()
-        path = self.home / "src/rust/tmp/post/machines"
-        self.assertEqual(path.read_text().splitlines()[0], "hel8 local")
-        put(policy, '[files]\n"src/rust/tmp/post/machines" = "check"\n')
-        self.publish()
-        before = path.stat().st_mtime_ns
-        state = self.sync()
-        self.assertEqual(next(i["result"] for i in state["items"] if i["item"] == "src/rust/tmp/post/machines"), "ok")
-        self.assertEqual(path.stat().st_mtime_ns, before)
-
-    def test_invalid_file_policy_no_writes(self):
-        put(self.source / "fleet/policy.toml", '[files]\n"src/rust/tmp/post/machines" = "ignore"\n')
-        before = self.snapshot()
-        self.process("python3", "-I", "-B", self.source / "tools/fleet-sync", "--host", "hel8", expected=2)
-        self.assertEqual(before, self.snapshot())
-
-    def test_environment_d_plain_values(self):
-        self.sync()
-        content = (self.home / ".config/environment.d/90-fabrig.conf").read_text()
-        self.assertIn(f"SKEIN_TEST_CHROMIUM={self.home}/.local/opt/chromium-147.0.7727.101/bin/chromium\n", content)
-        self.assertNotIn('"', content)
-        self.assertNotIn("'", content)
-        self.assertNotIn("$", content)
-
-    def test_invalid_global_host_and_expanded_env_no_writes(self):
-        before = self.snapshot()
-        original = (self.source / "fleet/env").read_text()
-        for value in ("two words", "a\tb", "a\u2003b", "a'b", 'a"b', "a\\b", "$USER", "$HOME/$OTHER"):
-            with self.subTest(value=value):
-                put(self.source / "fleet/env", original + f"INVALID={value}\n")
-                self.process("python3", "-I", "-B", self.source / "tools/fleet-sync", "--host", "hel8", expected=2)
-                self.assertEqual(before, self.snapshot())
-        put(self.source / "fleet/env", original)
-        hosts = self.source / "fleet/hosts.toml"
-        original_hosts = hosts.read_text()
-        put(hosts, original_hosts.replace('HEAVY_BUILD_JOBS = "2"', 'HEAVY_BUILD_JOBS = "two words"'))
-        self.process("python3", "-I", "-B", self.source / "tools/fleet-sync", "--host", "hel8", expected=2)
-        put(hosts, original_hosts)
-        self.assertEqual(before, self.snapshot())
-        # Values safe before expansion can become unsafe through HOME.
-        self.process("python3", "-I", "-B", self.source / "tools/fleet-sync", "--host", "hel8", expected=2,
-                     env={**self.env, "HOME": str(self.home / "with space")})
-        self.assertEqual(before, self.snapshot())
-
-    def test_machine_env_strings_render_for_every_host(self):
-        hosts = self.source / "fleet/hosts.toml"
-        original = hosts.read_text()
-        # An arbitrary key and an existing numeric key both accept strings.
-        put(hosts, original.replace('machine_env = { ',
-            'machine_env = { GENERIC_LITERAL = "Az09@._:/+-", ZERO = 0, ').replace(
-                'KACHE_MAX_GB = 50', 'KACHE_MAX_GB = "50"'))
-        with patch.dict(os.environ, self.env, clear=True):
-            module, _ = self.runner()
-            declarations = module.Declarations(self.source, self.home)
-            for name, host in declarations.hosts.items():
-                with self.subTest(host=name):
-                    runner = module.Runner(argparse.Namespace(check=False, timer=False, resume_fd=None),
-                                           declarations, name)
-                    runner.render()
-                    self.assertFalse([i for i in runner.state["items"] if i["result"] == "failed"])
-                    content = (self.home / "src/rust/tmp/machine.env").read_text()
-                    self.assertIn("GENERIC_LITERAL=Az09@._:/+-\nZERO=0\n", content)
-                    self.assertIn(f"KACHE_MAX_GB={host['machine_env']['KACHE_MAX_GB']}\n", content)
-
-    def test_hetzner6_qa_machine_env_strings_render_byte_for_byte(self):
-        hosts = self.source / "fleet/hosts.toml"
-        original = hosts.read_text()
-        values = {
-            "QA_WALK_KINDS": "forgejo=2:chatgpt,claude=2:claude",
-            "QA_WALK_SLOTS": "forgejo=8+1,claude=4+3",
-            "QA_SLOT_HOST": "hetzner6",
-            "QA_CLAIM_OWNER": "s/qa",
-            "QA_CLAIM_SSH": "free@204.168.210.29",
-            "QA_STUCK_TO": "s/qa@hel8",
-        }
-        existing = tomllib.loads(original)["hosts"]["hetzner6"]["machine_env"]
-        self.assertEqual({key: existing[key] for key in values}, values)
-        with patch.dict(os.environ, self.env, clear=True):
-            module, _ = self.runner()
-            declarations = module.Declarations(self.source, self.home)
-            runner = module.Runner(argparse.Namespace(check=False, timer=False, resume_fd=None),
-                                   declarations, "hetzner6")
-            runner.render()
-        self.assertFalse([i for i in runner.state["items"] if i["result"] == "failed"])
-        expected = "".join(f"{key}={value}\n" for key, value in existing.items())
-        self.assertEqual((self.home / "src/rust/tmp/machine.env").read_bytes(), expected.encode())
-
-    def test_env_value_behavior_matches_main(self):
-        self.assertGreater(self.prepare_integer_machine_env(), 0)
-        baseline = "f7334e8aa68c325076c5c0eda16f6ae6c0c217fa"
-        script = self.source / "tools/fleet-sync"
-        current = script.read_text()
-        old = self.process("git", "-C", ROOT, "show", f"{baseline}:tools/fleet-sync").stdout
-        results = []
-        values = ("", "a=b,c;é\x7f", "$HOME/file", "two words", "a\tb", "a\nb", "a\rb",
-                  'a"b', "a'b", "a\\b", "$USER", "$HOME/$OTHER", "a\x00b", 1, True)
-        try:
-            for source in (old, current):
-                put(script, source, True)
-                with patch.dict(os.environ, self.env, clear=True):
-                    module, _ = self.runner()
-                result = []
-                for value in values:
-                    try:
-                        result.append(("ok", module.env_value(value, self.home)))
-                    except ValueError as error:
-                        result.append(("error", str(error)))
-                results.append(result)
-        finally:
-            put(script, current, True)
-        self.assertEqual(results[0], results[1])
-        self.assertEqual(results[1][0], ("ok", ""))
-        self.assertEqual(results[1][1], ("ok", "a=b,c;é\x7f"))
-        self.assertEqual(results[1][2], ("ok", str(self.home / "file")))
-
-    def test_invalid_machine_env_no_writes(self):
-        hosts = self.source / "fleet/hosts.toml"
-        original = hosts.read_text()
-        before = self.snapshot()
-        strings = ("", "two words", "a\tb", "a\u2003b", "a'b", 'a"b', "a\\b",
-                   "a\nb", "a\rb", "$HOME", "$USER")
-        invalid = tuple(map(json.dumps, strings)) + ('true', 'false', '-1', '1.5',
-                                                    '[]', '[1]', '{}', '{ x = 1 }')
-        for name in tomllib.loads(original)["hosts"]:
-            for value in invalid:
-                with self.subTest(host=name, value=value):
-                    section = f"[hosts.{name}]"
-                    prefix, rest = original.split(section, 1)
-                    rest = rest.replace('machine_env = { ',
-                                        f'machine_env = {{ ARBITRARY_KEY = {value}, ', 1)
-                    put(hosts, prefix + section + rest)
-                    # Selecting hel8 still validates every other host first.
-                    result = self.process("python3", "-I", "-B", self.source / "tools/fleet-sync",
-                                          "--host", "hel8", expected=2)
-                    self.assertIn(f"invalid machine_env for {name}: ARBITRARY_KEY", result.stderr)
-                    self.assertEqual(before, self.snapshot())
-        put(hosts, original.replace('PLAN_MIN_MEM_GB = 4', 'BAD-KEY = 4', 1))
-        result = self.process("python3", "-I", "-B", self.source / "tools/fleet-sync",
-                              "--host", "hel8", expected=2)
-        self.assertIn("invalid machine_env for hel8: BAD-KEY", result.stderr)
-        self.assertEqual(before, self.snapshot())
-
-    def test_integer_machine_env_matches_main_runner_for_every_host(self):
-        # Pin the main runner used when this schema expansion was branched.
-        baseline = "f7334e8aa68c325076c5c0eda16f6ae6c0c217fa"
-        hosts = tomllib.loads((ROOT / "fleet/hosts.toml").read_text())["hosts"]
-        # Use today's declarations, including roles, while keeping the old
-        # runner's integer-only schema. Future string settings are excluded
-        # from both candidates rather than pinning the declaration bytes.
-        lines = []
-        for name, host in hosts.items():
-            lines.append(f"[hosts.{name}]\n")
-            for key, value in host.items():
-                if key == "machine_env":
-                    value = {k: v for k, v in value.items() if not isinstance(v, str)}
-                if isinstance(value, dict):
-                    literal = "{ " + ", ".join(f"{json.dumps(k)} = {json.dumps(v)}"
-                                               for k, v in value.items()) + " }"
-                else:
-                    literal = json.dumps(value)
-                lines.append(f"{key} = {literal}\n")
-        put(self.source / "fleet/hosts.toml", "".join(lines))
-        script = self.source / "tools/fleet-sync"
-        current = script.read_text()
-        old = self.process("git", "-C", ROOT, "show", f"{baseline}:tools/fleet-sync").stdout
-        rendered = []
-        try:
-            for index, source in enumerate((old, current)):
-                put(script, source, True)
-                with patch.dict(os.environ, self.env, clear=True):
-                    module, _ = self.runner()
-                    declarations = module.Declarations(self.source, self.home)
-                    result = {}
-                    for name, host in declarations.hosts.items():
-                        self.assertTrue(all(type(v) is int for v in host["machine_env"].values()))
-                        home = self.directory / f"render-{index}-{name}"
-                        home.mkdir()
-                        with patch.dict(os.environ, {"HOME": str(home)}):
-                            runner = module.Runner(argparse.Namespace(check=False, timer=False, resume_fd=None),
-                                                   declarations, name)
-                            runner.render()
-                        self.assertFalse([i for i in runner.state["items"] if i["result"] == "failed"])
-                        result[name] = (home / "src/rust/tmp/machine.env").read_bytes()
-                    rendered.append(result)
-        finally:
-            put(script, current, True)
-        self.assertEqual(set(rendered[0]), set(hosts))
-        self.assertEqual(set(rendered[1]), set(hosts))
-        self.assertEqual(rendered[0], rendered[1])
-
-    def test_posix_path_idempotence_in_nested_shells(self):
-        self.sync()
-        path = self.home / ".config/fabrig/env.sh"
-        self.process("sh", "-n", path)
-        local, cargo = f"{self.home}/.local/bin", f"{self.home}/.cargo/bin"
-        script = '. "$1"; . "$1"; exec /bin/sh -c \' . "$1"; printf "%s\\n" "$PATH"\' sh "$1"'
-        for initial, expected in (("/usr/bin:/bin", f"{local}:{cargo}:/usr/bin:/bin"),
-                                  (f"{local}:{cargo}:/bin", f"{local}:{cargo}:/bin"),
-                                  (f"/bin:{cargo}", f"{local}:/bin:{cargo}"),
-                                  (f"/bin:{local}", f"{cargo}:/bin:{local}")):
-            with self.subTest(initial=initial):
-                result = self.process("/bin/sh", "-c", script, "sh", path, env={**self.env, "PATH": initial})
-                self.assertEqual(result.stdout.strip(), expected)
-
-    def test_conflicts_ignore_path_but_warn_other_owned_keys(self):
-        put(self.home / ".profile", 'export PATH="$HOME/extra:$PATH"\nexport DISABLE_AUTOUPDATER=0\n')
-        put(self.home / ".config/plan/environment.sh", 'PATH=/wrong\n')
-        put(self.home / ".config/environment.d/10-older.conf", 'PATH=/also-wrong\nDISABLE_AUTOUPDATER=0\n')
-        state = self.sync()
-        warnings = [i for i in state["items"] if i["item"].startswith("conflict:")]
-        self.assertEqual(len(warnings), 2)
-        self.assertTrue(all("DISABLE_AUTOUPDATER" in i["reason"] for i in warnings))
-
-    def test_never_touches_coordination_heavy_or_spools(self):
-        protected = ["src/fabrig/claims", "src/fabrig/leases", "src/fabrig/queue", "src/fabrig/slots",
-                     ".local/state/heavy", ".local/state/agents-heavy", ".local/state/fabrig/heavy",
-                     "src/rust/tmp/heavy", "src/rust/tmp/codex-run", "src/rust/tmp/owners",
-                     "src/rust/tmp/logins",
-                     "src/rust/tmp/post/inbox", "src/rust/tmp/post/outbox", "src/rust/tmp/post/sent",
-                     "src/rust/tmp/post/arbitrary-spool"]
-        units = [".config/systemd/user/agents-heavy-reconcile.service",
-                 ".config/systemd/user/agents-heavy-reconcile.timer",
-                 ".config/systemd/user/heavy.service"]
-        for directory in protected:
-            put(self.home / directory / "sentinel", "opaque state\n")
-        for unit in units:
-            put(self.home / unit, "[Unit]\nDescription=Never touch\n")
-        snapshots = {p: self.snapshot(root=self.home / p) for p in protected + units}
-        self.sync()
-        self.sync("--check")
-        self.assertEqual(snapshots, {p: self.snapshot(root=self.home / p) for p in protected + units})
-        self.assertFalse(any(any("heavy" in arg for arg in argv) for argv in self.calls()))
-
-    def test_shell_outside_bytes_preserved(self):
-        outside = "# keep CRLF\r\n# outside\r\n"
-        put(self.home / ".profile", outside)
-        put(self.home / ".bashrc", outside)
-        self.sync()
-        self.assertTrue((self.home / ".profile").read_bytes().decode().startswith(outside))
-        self.assertTrue((self.home / ".bashrc").read_bytes().decode().endswith(outside))
-
-    def test_full_sha_pin_rolls_back_current(self):
-        self.sync()
-        put(self.source / "fleet/env", (self.source / "fleet/env").read_text() + "NEW_VALUE=1\n")
-        self.publish()
-        self.sync()
-        put(self.home / ".config/fleet-sync/pin", self.sha + "\n")
-        state = self.sync(script=self.current() / "tools/fleet-sync")
-        self.assertEqual(self.current().name, "agents-" + self.sha)
-        self.assertEqual(state["agents_sha"], self.sha)
-        self.assertNotIn("NEW_VALUE", (self.home / ".config/fabrig/env.sh").read_text())
-
-    def test_timer_age_and_history_pruning(self):
-        self.sync("--timer")
-        stamp = self.state()["last_timer_end"]
-        history = self.home / ".local/state/fleet-sync/runs.jsonl"
-        stale = {"end": (dt.datetime.now(dt.UTC) - dt.timedelta(days=8)).isoformat()}
-        put(history, json.dumps(stale) + "\n" + history.read_text())
-        self.sync()
-        self.assertEqual(self.state()["last_timer_end"], stamp)
-        self.assertEqual(len(history.read_text().splitlines()), 1)
-        self.assertEqual(self.sync("--check")["last_timer_end"], stamp)
 
     def test_status_unreachable(self):
-        self.sync("--timer")
+        self.release_fixture()
+        self.component_sync("versions", timer=True)
         state = self.sync("status", expected=1)
         self.assertEqual(len(state["hosts"]), HOST_COUNT)
         self.assertIn("unreachable", next(h for h in state["hosts"] if h["host"] == "hetzner3"))
@@ -1028,13 +594,13 @@ class FleetTest(unittest.TestCase):
         self.assertTrue(all("StrictHostKeyChecking=yes" in c and "BatchMode=yes" in c for c in calls))
 
     def test_release_retention(self):
-        self.sync()
+        self.release_fixture()
         directory = self.home / "src/fabrig/releases"
         for n in range(12):
             path = directory / f"agents-{n:040x}"
             path.mkdir()
             os.utime(path, (n + 1, n + 1))
-        self.sync()
+        self.component_sync("release")
         self.assertEqual(len(list(directory.glob("agents-*"))), 10)
         self.assertTrue(self.current().is_dir())
 

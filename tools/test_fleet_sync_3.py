@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 import unittest
 from unittest.mock import patch
 
@@ -19,10 +20,22 @@ class FleetSync3Test(fixture.FleetTest):
         fixture.put(self.source / "tools/installed", "".join(
             f"{name}\n" if name == target else f"{name} {target}\n"
             for name, target in self.installed.items()))
-        self.sha = self.publish()
+
+    def link_release(self, revision="a" * 40):
+        """Two private immutable trees suffice to prove stable current links.
+
+        Real git promotion/exec and timer handoff are tested separately.
+        """
+        release = self.home / "src/fabrig/releases" / ("agents-" + revision)
+        shutil.copytree(self.source, release, symlinks=True,
+                        ignore=shutil.ignore_patterns(".git"))
+        with patch.dict(os.environ, self.env, clear=True):
+            module, _ = self.runner()
+            module.atomic_link(self.home / "src/fabrig/current", release)
+        return self.component_sync("links")
 
     def test_nested_links_follow_manifest_paths(self):
-        self.sync()
+        self.component_sync("links")
         expected = self.installed
         for name, path in expected.items():
             self.assertEqual(os.readlink(self.home / ".local/bin" / name),
@@ -37,22 +50,19 @@ class FleetSync3Test(fixture.FleetTest):
         self.assertEqual(target, "session/reap-hook")
         path = self.source / "tools/installed"
         fixture.put(path, path.read_text() + f"session-reap-hook {target}\n")
-        self.publish()
-        self.sync()
+        self.link_release()
         link = self.home / ".local/bin/session-reap-hook"
         expected = str(self.home / "src/fabrig/current/tools" / target)
         self.assertEqual(os.readlink(link), expected)
         previous = link.resolve()
         fixture.put(self.source / "tools" / target, "#!/bin/sh\nexit 0\n", True)
-        self.publish()
-        self.sync()
+        self.link_release("b" * 40)
         self.assertEqual(os.readlink(link), expected)
         self.assertNotEqual(link.resolve(), previous)
         self.assertTrue(link.is_file())
 
-    def test_bad_candidate_manifests_block_promotion(self):
-        self.sync()
-        current = self.current()
+
+    def test_manifest_validation_table(self):
         manifest = self.source / "tools/installed"
         original = manifest.read_text()
         outside = self.directory / "outside"
@@ -65,27 +75,26 @@ class FleetSync3Test(fixture.FleetTest):
                  "bad ../tools/fleet-sync", "bad /bin/sh", "bad escape", "bad missing",
                  "bad not-executable", "bad directory", "bad loop", "bad a b",
                  "fleet-sync fleet-sync", "one fleet-sync\none lease")
-        for entry in cases:
-            with self.subTest(entry=entry):
-                fixture.put(manifest, original + entry + "\n")
-                self.process("python3", "-I", "-B", self.source / "tools/fleet-sync",
-                             "--self-check", "--host", "hel8", expected=2)
-                self.publish()
-                state = self.sync(script=current / "tools/fleet-sync", expected=1)
-                self.assertEqual(self.current(), current)
-                self.assertTrue(any(i["item"] == "agents" and i["result"] == "failed" for i in state["items"]))
+        before = self.snapshot()
+        with patch.dict(os.environ, self.env, clear=True):
+            module = self.load_runner()
+            for entry in cases:
+                with self.subTest(entry=entry):
+                    fixture.put(manifest, original + entry + "\n")
+                    with self.assertRaises(ValueError):
+                        module.Declarations(self.source, self.home)
+                    self.assertEqual(self.snapshot(), before)
 
     def test_manifest_allows_whitespace_and_inside_release_symlink(self):
         manifest = self.source / "tools/installed"
         (self.source / "tools/inside").symlink_to("nested/five")
         fixture.put(manifest, manifest.read_text() + "  alias\tinside  \n")
-        self.publish()
-        self.sync()
+        self.component_sync("links")
         self.assertEqual(os.readlink(self.home / ".local/bin/alias"),
                          str(self.home / "src/fabrig/current/tools/inside"))
 
     def test_removed_tools_cleanup_only_recorded_fleet_links(self):
-        self.sync()
+        self.link_release()
         release = self.current()
         links = self.home / ".local/bin"
         # Record at a release rather than current; both forms must be removed.
@@ -100,7 +109,6 @@ class FleetSync3Test(fixture.FleetTest):
         (links / "unowned").symlink_to(self.home / "src/fabrig/current/tools/fleet-sync")
         manifest = self.source / "tools/installed"
         fixture.put(manifest, "fleet-sync\nlease\n")
-        self.publish()
         with patch.dict(os.environ, self.env, clear=True):
             _, runner = self.runner(check=True)
             runner.links()
@@ -113,7 +121,7 @@ class FleetSync3Test(fixture.FleetTest):
         self.assertIn("-> None", preview.stdout)
         self.assertEqual(before, self.snapshot())
         self.assertTrue((links / "nested-one").is_symlink())
-        self.sync(script=release / "tools/fleet-sync")
+        self.component_sync("links")
         for name in ("nested-one", "nested-two", "nested-five"):
             self.assertFalse((links / name).is_symlink())
         self.assertEqual(os.readlink(links / "nested-three"), "/personal/watch")
@@ -125,12 +133,11 @@ class FleetSync3Test(fixture.FleetTest):
         link = self.home / ".local/bin/lease"
         link.parent.mkdir(parents=True)
         link.symlink_to(self.home / "src/fabrig/current/tools/lease")
-        self.sync()
+        self.component_sync("links")
         self.assertNotIn("lease", self.state()["managed_links"])
         manifest = self.source / "tools/installed"
         fixture.put(manifest, manifest.read_text().replace("lease\n", ""))
-        self.publish()
-        self.sync(script=self.current() / "tools/fleet-sync")
+        self.component_sync("links")
         self.assertTrue(link.is_symlink())
 
     def test_link_journal_survives_failure_before_final_state(self):
@@ -170,36 +177,37 @@ class FleetSync3Test(fixture.FleetTest):
                                       for p in directory.iterdir() if p.is_file()})
         return reloads
 
-    def test_unit_mtimes_after_reload_first_exec_upgrade_and_timer_race(self):
-        self.sync(env={**self.env, "FAKE_ENABLE_TIMER_RUN": "1"})
+
+    def test_first_exec_timer_race_preserves_unit_mtimes(self):
+        with patch.dict(os.environ, {**self.env, "FAKE_ENABLE_TIMER_RUN": "1"}, clear=True):
+            module, runner = self.runner()
+            module.atomic_link(self.home / "src/fabrig/current", self.source)
+            self.assertTrue(runner.acquire())
+            try:
+                runner.units()
+            finally:
+                os.close(runner.lock_fd)
         self.assertEqual(json.loads((self.home / "timer-race.json").read_text()), [0, "", ""])
         self.assertEqual(len(self.assert_units_unchanged_since_reload()), 1)
-        unit = self.source / "fleet/units/fleet-sync.timer"
-        fixture.put(unit, unit.read_text().replace("[Unit]", "[Unit]\n# upgraded"))
-        self.publish()
-        self.sync(script=self.current() / "tools/fleet-sync")
-        self.assertEqual(len(self.assert_units_unchanged_since_reload()), 2)
-        self.sync()
-        self.assertEqual(len(self.assert_units_unchanged_since_reload()), 2)
 
     def test_manager_pending_reload_heals_once_without_file_changes(self):
-        self.sync()
+        self.component_sync("units")
         directory = self.home / ".config/systemd/user"
         before = self.snapshot(root=directory)
         fixture.put(self.home / "systemctl.log", "")
         fixture.put(self.home / "manager-needs-reload", "fleet-sync.timer\n")
-        self.sync()
+        self.component_sync("units")
         self.assertEqual(self.snapshot(root=directory), before)
         self.assertEqual(self.calls().count(["--user", "daemon-reload"]), 1)
         self.assertEqual([call for call in self.calls() if call[1:4] == ["show", "-p", "NeedDaemonReload"]],
                          [["--user", "show", "-p", "NeedDaemonReload", *sorted(self.state()["managed_units"])]])
         self.assert_units_unchanged_since_reload()
-        self.sync()
+        self.component_sync("units")
         self.assertEqual(self.calls().count(["--user", "daemon-reload"]), 1)
         self.assertFalse(self.state()["unit_reload_pending"])
 
     def test_manager_reload_failure_keeps_intent_until_success(self):
-        self.sync()
+        self.component_sync("units")
         fixture.put(self.home / "manager-needs-reload", "fleet-sync.timer\n")
         with patch.dict(os.environ, self.env, clear=True):
             _, runner = self.runner()
@@ -213,15 +221,15 @@ class FleetSync3Test(fixture.FleetTest):
         journal = self.home / ".local/state/fleet-sync/units.json"
         self.assertTrue(json.loads(journal.read_text())["reload_pending"])
         (self.home / "manager-needs-reload").unlink()
-        self.sync()
+        self.component_sync("units")
         self.assertFalse(json.loads(journal.read_text())["reload_pending"])
         self.assert_units_unchanged_since_reload()
 
     def test_check_and_preview_never_probe_manager_or_mutate_links(self):
-        self.sync()
+        self.component_sync("links", "render", "units")
         fixture.put(self.home / "manager-needs-reload", "fleet-sync.timer\n")
         before = self.snapshot(exclude_mirror=True)
-        self.sync("--check")
+        self.component_sync("links", "render", "units", check=True)
         self.process("python3", "-I", "-B", self.source / "tools/fleet-sync", "--host", "hel8",
                      "--preview", self.directory / "preview")
         self.assertEqual(before, self.snapshot(exclude_mirror=True))

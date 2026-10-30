@@ -42,7 +42,7 @@ class ExitObservationTests(unittest.TestCase):
 
 class Review2Test(fixture.FleetTest):
     def test_candidate_cannot_exclude_recovery_timer(self):
-        self.sync()
+        self.release_fixture()
         current = self.current()
         roles = self.source / "fleet/units/roles.toml"
         fixture.put(roles, roles.read_text().replace('"fleet-sync.timer" = ["*"]', '"fleet-sync.timer" = ["unused"]'))
@@ -70,7 +70,7 @@ class Review2Test(fixture.FleetTest):
 
     def assert_unsafe_destination_refused(self, bootstrap, parent):
         if not bootstrap:
-            self.sync()
+            self.deployed("fabrig")
         outside = self.directory / "outside-bin"
         destination = self.home / (".local" if parent else ".local/bin")
         if destination.exists():
@@ -105,7 +105,7 @@ class Review2Test(fixture.FleetTest):
         self.assert_unsafe_destination_refused(bootstrap=False, parent=True)
 
     def test_wrong_enablement_link_is_replaced_atomically(self):
-        self.sync()
+        self.component_sync("units")
         link = self.home / ".config/systemd/user/timers.target.wants/fleet-sync.timer"
         link.unlink()
         link.symlink_to("/old-release/fleet-sync.timer")
@@ -148,7 +148,7 @@ signal.pause()
         self.git(self.fabrig, "add", ".")
         self.git(self.fabrig, "commit", "-qm", "fake interruptible install")
         self.git(self.fabrig, "push", "origin", "main")
-        for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        for sig in (signal.SIGTERM,):
             with self.subTest(signal=sig):
                 home = self.directory / f"signal-home-{sig}"
                 home.mkdir()

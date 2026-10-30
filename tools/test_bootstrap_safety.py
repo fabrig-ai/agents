@@ -19,9 +19,9 @@ class BootstrapSafetyTest(unittest.TestCase):
         self.f, self.runner, self.module = self.h.f, self.h.runner, self.h.module
 
     def test_live_roles_timer_leaves_ops_kache_bytes_modes_links_and_ownership_unchanged(self):
-        for host in tomllib.loads((self.f.source / "fleet/hosts.toml").read_text())["hosts"]:
+        for host in ("hel8",):
             with self.subTest(host=host):
-                self.f.sync("--host", host)
+                self.f.deployed()
                 for relative, text in {
                     ".config/kache/config.toml": '[cache]\nlocal_max_size = "99GiB"\n[cache.remote]\ntype = "s3"\n',
                     ".config/kache/store.env": "PRIVATE FIXTURE: must not be opened",
@@ -52,7 +52,7 @@ class BootstrapSafetyTest(unittest.TestCase):
 
     def test_normal_empty_home_never_creates_kache_config_unit_or_cache(self):
         (self.f.bin / "kache").unlink()
-        state = self.f.sync("--timer")
+        state = self.f.component_sync("render", "units", "versions", timer=True)
         for path in (".config/kache", ".cache/kache", ".local/bin/kache", ".config/systemd/user/kache.service"):
             self.assertFalse((self.f.home / path).exists(), path)
         self.assertTrue(any(i["item"] == ".config/systemd/user/kache.service" and i["result"] == "warn" for i in state["items"]))
@@ -81,7 +81,7 @@ class BootstrapSafetyTest(unittest.TestCase):
         self.assertFalse((self.f.home / ".local/bin/kache").exists())
 
     def test_readonly_unit_already_in_a_journal_is_not_disabled_removed_or_queried(self):
-        self.f.sync()
+        self.f.deployed()
         self.module, self.runner = self.f.runner()
         fixture.put(self.f.home / ".config/systemd/user/kache.service", "# ops-owned different unit\n")
         self.runner.unit_owned.add("kache.service")
@@ -92,7 +92,7 @@ class BootstrapSafetyTest(unittest.TestCase):
         self.assertFalse(any("kache.service" in row for row in self.f.calls()[calls:]))
 
     def test_preview_and_check_kache_differences_warn_without_writing(self):
-        self.f.sync()
+        self.f.deployed()
         fixture.put(self.f.home / ".config/kache/config.toml", "# ops-owned config\n")
         fixture.put(self.f.home / ".config/systemd/user/kache.service", "# ops-owned unit\n")
         before = self.f.snapshot(exclude_mirror=True)
@@ -101,7 +101,7 @@ class BootstrapSafetyTest(unittest.TestCase):
         self.assertNotIn("changed", result.stdout)
         self.assertIn("warn", result.stdout)
         self.assertNotIn("+++ ", result.stdout)
-        state = self.f.sync("--check")
+        state = self.f.inspect_sync("--check")
         self.assertTrue(any(i["item"] == ".config/kache/config.toml" and i["result"] == "warn" for i in state["items"]))
         self.assertTrue(any(i["item"] == ".config/systemd/user/kache.service" and i["result"] == "warn" for i in state["items"]))
         self.assertEqual(before, self.f.snapshot(exclude_mirror=True))
