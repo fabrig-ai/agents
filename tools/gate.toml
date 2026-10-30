@@ -25,6 +25,10 @@ owner = "s/qa"
 file_cpu_s = 10
 file_wall_s = 15
 
+# 16b97da Read pipeline events from local and probed host spools
+[files."tools/records/test_event_spool.py"]
+owner = "s/multi-coord"
+
 # 4101e72 Confirm origin before acknowledging saved record batches
 [files."tools/records/test_record.py"]
 owner = "s/multi-coord"
