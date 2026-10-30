@@ -512,6 +512,12 @@ class Watch:
             options['pass_fds'] = (lock,)
         return command([self.workspace.tool(tool), *args], timeout=seconds[tool], **options)
 
+    def take_login(self, pool, holder, note=None, run=None):
+        options = ['--note', note] if note is not None else []
+        if run:
+            options += ['--run', run]
+        return self.call('logins', 'take', pool, '--any', '--now', '--as', holder, *options)
+
     def slot_call(self, claim, *args):
         words = [str(self.workspace.tool('claim')), *map(str, args)]
         if claim['ssh']:
@@ -1457,8 +1463,7 @@ def take(args, workspace):
         saved = service.directory / 'walks' / (name + '.json')
         need(not saved.exists() and not saved.is_symlink(), 'holder name already belongs to a saved walk: ' + name, 1)
         service.walk_room([pool], args.kind)
-        note = ['--note', args.note] if args.note is not None else []
-        result = service.call('logins', 'take', pool, '--any', '--now', '--as', args.holder, *note)
+        result = service.take_login(pool, args.holder, args.note)
         need(result.returncode == 0, 'the caps are broken: ' + (result.stderr.strip() or result.stdout.strip()
              or f'cannot take {pool}'), 1)
         sys.stdout.write(result.stdout)
@@ -1630,8 +1635,7 @@ def walk(args, workspace):
             taking = True
             for pool in state['requests']:
                 service.walk_room([pool], kind)
-                taken = service.call('logins', 'take', pool, '--any', '--now', '--as', state['holder'],
-                                     '--note', directory)
+                taken = service.take_login(pool, state['holder'], directory, state.get('run'))
                 need(taken.returncode == 0, 'the caps are broken: ' + (taken.stderr.strip() or taken.stdout.strip()
                      or f'cannot take {pool}'), 1)
                 login, sep, path = taken.stdout.strip().partition(' ')

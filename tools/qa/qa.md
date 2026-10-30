@@ -105,7 +105,9 @@ takes. A kind holds at most its slots' number of logins of each pool,
 counting every holder `walk/KIND/...`, including stuck or manual holdings.
 Pre-kind holders `walk/rung-...` count too; managed pre-kind walks must drain
 before a new kind starts. Takes are `logins take POOL --any --now --as HOLDER`
-and never wait in the login queue. Login takes and `codex-run task` launchers inherit the walks admission lock,
+and never wait in the login queue. Takes pass `--run ID` when the current
+walk's run ID is known; starts and resumes normally take before the new run
+exists, so their custody run remains unknown at take time. Login takes and `codex-run task` launchers inherit the walks admission lock,
 so an orphan take or launcher still excludes another admission. A starting
 walk without recovered run metadata also blocks starts, resumes and hand
 takes through its saved state, even if the descriptor has been lost. A refused take names the

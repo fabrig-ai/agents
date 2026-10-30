@@ -4,6 +4,8 @@ from datetime import datetime, timedelta, timezone
 import fcntl
 import json
 import os
+import re
+import runpy
 from pathlib import Path
 import stat
 import subprocess
@@ -580,7 +582,8 @@ def give_by_another_holder_is_refused(lab):
 def take_waits_until_the_login_is_given(lab):
     path = lab.login()
     lab.run('take', CHATGPT, '--as', QA)
-    proc = subprocess.Popen([*lab.argv, 'take', CHATGPT, '--as', RUNG, '--wait', str(HUNG_TOOL_S)],
+    proc = subprocess.Popen([*lab.argv, 'take', CHATGPT, '--as', RUNG, '--run', 'run-after-wait',
+                             '--wait', str(HUNG_TOOL_S)],
                             env=lab.env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
         deadline = time.monotonic() + HUNG_TOOL_S
@@ -590,6 +593,7 @@ def take_waits_until_the_login_is_given(lab):
         out, err = proc.communicate(timeout=HUNG_TOOL_S)
         assert (proc.returncode, out, err) == (0, f'{path}\n', '')
         assert lab.read('holder.json')['holder'] == RUNG
+        assert lab.read('holder.json')['run'] == 'run-after-wait'
     finally:
         if proc.poll() is None:
             proc.kill()
@@ -605,7 +609,8 @@ def take_without_a_login_at_rest_says_so(lab):
 def lists_holder_waiters_and_the_last_day(lab):
     lab.clock('2026-10-26T19:12:00Z')
     lab.login().rename(lab.root / 'imported')
-    lab.write('holder.json', dict(holder=QA, note='20261026-1830-temper', since='2026-10-26T18:30:00Z'))
+    lab.write('holder.json', dict(holder=QA, note='20261026-1830-temper', since='2026-10-26T18:30:00Z',
+                                  run='run-plain-unchanged'))
     lab.write('waiting.json', [dict(holder=RUNG, request=CHATGPT, pool=False, note='', since='2026-10-26T18:45:00Z',
                                     seen='2026-10-26T18:45:00Z')])
     write_text(lab.directory() / 'log.tsv',
@@ -1129,6 +1134,224 @@ sys.exit(module.main())
 
 CASES += (legacy_state_is_listed_taken_given_and_dropped,
           default_root_uses_temporary_home, admission_lock_is_kept_by_a_child)
+
+
+def json_listing(lab, *names):
+    code, out, err = lab.run('list', *names, '--json')
+    assert code == 0 and not err, (code, out, err)
+    rows = json.loads(out)  # Also refuses a second document or trailing plain output.
+    assert_json_schema(rows)
+    return rows
+
+
+def assert_json_schema(rows):
+    assert isinstance(rows, list)
+    fields = {'name', 'pool', 'holder', 'since', 'note', 'use', 'run', 'waiters'}
+
+    def stamp(value):
+        assert isinstance(value, str) and re.fullmatch(r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ', value)
+        datetime.fromisoformat(value.replace('Z', '+00:00'))
+
+    for row in rows:
+        assert isinstance(row, dict) and fields <= row.keys(), row
+        assert all(isinstance(row[key], str) and re.fullmatch(r'[a-z][a-z0-9-]*', row[key])
+                   for key in ('name', 'pool'))
+        assert row['use'] in ('walk', 'pass', 'other')
+        for key in ('holder', 'note', 'run'):
+            assert row[key] is None or isinstance(row[key], str) and row[key], row
+        if row['holder'] is None:
+            assert all(row[key] is None for key in ('since', 'note', 'run'))
+            assert row['use'] == 'other'
+        else:
+            stamp(row['since'])
+        assert isinstance(row['waiters'], list)
+        for waiter in row['waiters']:
+            assert isinstance(waiter, dict) and {'holder', 'since', 'use'} <= waiter.keys()
+            assert isinstance(waiter['holder'], str) and waiter['holder']
+            assert waiter['use'] in ('walk', 'pass', 'other')
+            stamp(waiter['since'])
+
+
+def json_lists_empty_resting_and_missing_logins(lab):
+    assert lab.run('list', '--json') == (0, '[]\n', '')
+    for name in ('chatgpt-2-3', 'chatgpt-2', 'chatgpt-10', 'chatgpt'):
+        lab.login(name)
+    lab.directory('chatgpt-2').joinpath('login').rename(lab.root / 'away')
+    names = ['chatgpt', 'chatgpt-10', 'chatgpt-2', 'chatgpt-2-3']
+    rows = json_listing(lab)
+    assert rows == [dict(name=name, pool='chatgpt' if name != 'chatgpt-2-3' else name,
+                         holder=None, since=None, note=None, use='other', run=None, waiters=[])
+                    for name in names]
+    assert json_listing(lab, 'chatgpt-2') == [rows[2]]
+    code, plain, err = lab.run('list')
+    assert code == 0 and not err
+    assert [line.split(':', 1)[0] for line in plain.splitlines() if not line.startswith(' ')] == names
+    assert 'chatgpt-2: missing\n' in plain
+
+
+def json_lists_a_walk_run_even_away_from_rest(lab):
+    lab.clock('2026-10-30T10:00:00Z')
+    path = lab.login()
+    holder = 'walk/forgejo/rung-a-1'
+    assert lab.run('take', CHATGPT, '--as', holder, '--note', 'rung a', '--run', 'run-W_1')[0] == 0
+    path.rename(lab.root / 'away')
+    assert json_listing(lab) == [dict(name=CHATGPT, pool=CHATGPT, holder=holder,
+        since='2026-10-30T10:00:00Z', note='rung a', use='walk', run='run-W_1', waiters=[])]
+    assert lab.read('holder.json')['run'] == 'run-W_1'
+
+
+def json_lists_legacy_holders_and_pass_forms(lab):
+    lab.clock('2026-10-30T10:00:00Z')
+    lab.login()
+    for holder, use in (('walk/rung-a-1', 'walk'), ('qa-watch', 'pass'),
+                        ('qa-watch/pass-a', 'pass'), ('pass/a', 'pass'),
+                        ('manual/a', 'other'), ('walker/a', 'other')):
+        current = dict(holder=holder, note='', since='2026-10-30T09:00:00Z')
+        lab.write('holder.json', current)
+        row = json_listing(lab)[0]
+        assert row['holder'] == holder and row['use'] == use
+        assert row['run'] is None and row['note'] is None
+        assert lab.read('holder.json') == current
+    lab.write('holder.json', dict(current, run=None))
+    assert json_listing(lab)[0]['run'] is None
+
+
+def json_waiters_include_stale_legacy_and_pool_rows_in_order(lab):
+    lab.clock('2026-10-30T10:00:00Z')
+    for name in ('chatgpt', 'chatgpt-2', 'chatgpt-tools'):
+        lab.login(name)
+    early, late = '2026-10-30T08:00:00Z', '2026-10-30T09:00:00Z'
+    rows = [dict(holder=holder, request=request, pool=pool, note='', since=since, seen=since)
+            for holder, request, pool, since in (
+                ('walk/forgejo/z', CHATGPT, True, late),
+                ('pass/a', CHATGPT, False, late),
+                ('manual/a', CHATGPT, True, early))]
+    lab.write('waiting.json', rows)
+    legacy = lab.directory() / 'waiting.json'
+    write_text(legacy, json.dumps([dict(holder='qa-watch/old', note='', since=early, seen=early)]))
+    before = (lab.tmp / 'logins/waiting.json').read_bytes(), legacy.read_bytes()
+    result = json_listing(lab)
+    early_pool = dict(holder='manual/a', since=early, use='other')
+    late_pool = dict(holder='walk/forgejo/z', since=late, use='walk')
+    assert result[0]['waiters'] == [early_pool, dict(holder='qa-watch/old', since=early, use='pass'),
+                                  dict(holder='pass/a', since=late, use='pass'), late_pool]
+    assert result[1]['waiters'] == [early_pool, late_pool]
+    assert result[2]['waiters'] == []
+    assert ((lab.tmp / 'logins/waiting.json').read_bytes(), legacy.read_bytes()) == before
+
+
+def run_is_saved_for_named_pooled_now_and_wait_takes(lab):
+    lab.clock('2026-10-30T10:00:00Z')
+    lab.login()
+    for options, run in (((), 'run-A_1'), (('--any',), 'session-123'),
+                         (('--any', '--now'), 'codex-run@abc.service'),
+                         (('--now',), 'session:9'), (('--wait', '1'), 'run-wait')):
+        assert lab.run('take', CHATGPT, *options, '--as', 'manual/a', '--run', run)[0] == 0
+        assert lab.read('holder.json')['run'] == run
+        assert json_listing(lab)[0]['run'] == run
+        assert lab.run('give', CHATGPT, '--as', 'manual/a')[0] == 0
+    assert json_listing(lab)[0]['run'] is None
+
+
+def retaking_preserves_original_run_note_and_since(lab):
+    lab.clock('2026-10-30T10:00:00Z')
+    lab.login()
+    lab.run('take', CHATGPT, '--as', 'manual/a', '--run', 'original', '--note', 'first')
+    original = lab.read('holder.json')
+    lab.clock('2026-10-30T10:01:00Z')
+    assert lab.run('take', CHATGPT, '--as', 'manual/a', '--run', 'replacement', '--note', 'second')[0] == 0
+    assert lab.read('holder.json') == original
+    assert len([row for row in lab.log() if row[1] == 'take']) == 1
+
+
+def invalid_runs_are_refused_before_state_changes(lab):
+    lab.login()
+    for run in ('', '/tmp/a', 'has space', 'has\nnewline', 'a' * 257):
+        code, out, err = lab.run('take', CHATGPT, '--as', 'manual/a', '--run', run)
+        assert code == 2 and not out and '--run' in err
+        assert not (lab.directory() / 'holder.json').exists()
+        assert not (lab.tmp / 'logins/waiting.json').exists()
+    for run in (42, [], '', '/tmp/a'):
+        lab.write('holder.json', dict(holder='manual/a', note='', since='2026-10-30T10:00:00Z', run=run))
+        for options in ((), ('--json',)):
+            code, out, err = lab.run('list', *options)
+            assert code == 4 and not out and 'invalid run' in err
+
+
+def json_list_uses_plain_exit_codes_and_emits_no_partial_document(lab):
+    for options in ((), ('--json',)):
+        assert lab.run('list', 'unknown', *options) == (2, '', 'logins: unknown login: unknown\n')
+        assert lab.run('list', 'INVALID', *options) == (2, '', 'logins: invalid login name\n')
+    lab.login('chatgpt')
+    lab.login('claude')
+    write_text(lab.directory('claude') / 'log.tsv', 'invalid event\n')
+    plain = lab.run('list')
+    structured = lab.run('list', '--json')
+    assert structured[0] == plain[0] == 4 and structured[2] == plain[2]
+    assert structured[1] == ''
+    lab.directory('claude').joinpath('log.tsv').unlink()
+    queue = lab.tmp / 'logins/waiting.json'
+    queue.symlink_to(lab.root / 'unused')
+    assert lab.run('list', '--json')[0:2] == (4, '')
+
+
+def json_listing_never_opens_a_login_or_reads_directory_entries(lab):
+    path = lab.directory_login()
+    trace = lab.observe_login(path)
+    assert json_listing(lab)[0]['holder'] is None
+    evidence = json.loads(trace.read_text())
+    assert evidence['entries'] == [1]
+    assert not any(isinstance(target, str) and target.startswith(str(path) + '/')
+                   for _, target in evidence['calls'])
+    lab.argv = [sys.executable, '-I', '-B', str(SCRIPT)]
+    path.rename(lab.root / 'away')
+    lab.login()
+    lab.driver(f"""
+def audit(event, args):
+    if event == 'open' and args[0] == {str(path)!r}:
+        raise AssertionError('opened a login')
+sys.addaudithook(audit)
+sys.exit(module.main())
+""")
+    assert json_listing(lab)[0]['holder'] is None
+
+
+def consumer_fixture_matches_real_json_output(lab):
+    fixture = json.loads(SCRIPT.with_name('fixtures').joinpath('logins-list.json').read_text())
+    assert_json_schema(fixture)
+    lab.clock('2026-10-30T10:00:00Z')
+    for row in fixture:
+        lab.login(row['name'])
+        if row['holder'] is not None:
+            options = ['--note', row['note']] if row['note'] is not None else []
+            if row['run'] is not None:
+                options += ['--run', row['run']]
+            assert lab.run('take', row['name'], '--as', row['holder'], *options)[0] == 0
+    lab.clock('2026-10-30T10:01:00Z')
+    assert lab.run('take', 'claude', '--as', 'walk/claude/rung-b-1')[0] == 1
+    assert json_listing(lab) == fixture
+
+
+def qa_takes_forward_known_runs_to_custody(lab):
+    namespace = runpy.run_path(str(SCRIPT.with_name('qa')), run_name='qa_fixture')
+    watch = object.__new__(namespace['Watch'])
+    calls = []
+    watch.call = lambda *args: calls.append(args) or 'grant'
+    base = ('logins', 'take', CHATGPT, '--any', '--now', '--as', 'walk/forgejo/a')
+    for run in (None, '', 'run-known'):
+        assert watch.take_login(CHATGPT, 'walk/forgejo/a', 'rung a', run) == 'grant'
+        assert calls[-1] == (*base, '--note', 'rung a', *(['--run', run] if run else []))
+    watch.take_login(CHATGPT, 'walk/forgejo/a')
+    assert calls[-1] == base
+
+
+CASES += (json_lists_empty_resting_and_missing_logins, json_lists_a_walk_run_even_away_from_rest,
+          json_lists_legacy_holders_and_pass_forms, json_waiters_include_stale_legacy_and_pool_rows_in_order,
+          run_is_saved_for_named_pooled_now_and_wait_takes, retaking_preserves_original_run_note_and_since,
+          invalid_runs_are_refused_before_state_changes,
+          json_list_uses_plain_exit_codes_and_emits_no_partial_document,
+          json_listing_never_opens_a_login_or_reads_directory_entries,
+          consumer_fixture_matches_real_json_output, qa_takes_forward_known_runs_to_custody)
 
 
 def run_one(name, root):

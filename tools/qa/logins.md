@@ -10,12 +10,12 @@ configuration directory in place. Custody alone never moves a login.
 ```
 logins add NAME PATH
 logins replace NAME PATH
-logins take NAME --as HOLDER [--note TEXT] [--wait SECONDS | --now]
-logins take POOL --any --as HOLDER [--note TEXT] [--wait SECONDS | --now]
+logins take NAME --as HOLDER [--note TEXT] [--run ID] [--wait SECONDS | --now]
+logins take POOL --any --as HOLDER [--note TEXT] [--run ID] [--wait SECONDS | --now]
 logins drop NAME --as HOLDER
 logins drop POOL --any --as HOLDER
 logins give NAME --as HOLDER
-logins list [NAME]
+logins list [NAME] [--json]
 ```
 
 Names match `[a-z][a-z0-9-]*`; `lock` and `waiting.json` belong to the tool.
@@ -24,6 +24,8 @@ Holders match `[a-z][a-z0-9-]*(/[a-z0-9][a-z0-9-]*)*`. Notes contain at most
 are finite nonnegative seconds. `--wait` and `--now` are mutually exclusive.
 
 ## State and privacy
+
+Custody state is kept on hetzner6, where the logins rest, in `~/src/rust/tmp/logins/`.
 
 `DEV_ROOT` defaults to `~/src/rust`; `DEV_TMP` defaults to `$DEV_ROOT/tmp`.
 Both expand `~` and become absolute paths. State lives in
@@ -44,7 +46,14 @@ paths, and incorrect state-directory or metadata modes. Global lock and queue
 files must also have exactly one hard link. It checks the entire discovered
 registry even for an operation on one name. It does not repair unsafe state.
 
-`holder.json` has exactly `holder`, `note`, `since`.
+`holder.json` has `holder`, `note`, `since`, and an optional `run` (an ID
+string or null). Older state without `run` remains readable and reports null.
+A granted take with `--run ID` records that ID; without it the field is omitted.
+IDs have 1–256 ASCII characters, start with a letter, digit or underscore,
+and contain only letters, digits, underscores, dots, colons, @ or hyphens.
+Retaking by the current holder preserves the original run, note and timestamp.
+A queued request does not store a run: supply `--run` on the invocation that
+obtains the grant, including retries. `--wait` retains the option while polling.
 The global queue is a JSON array of rows with exactly `holder`, `request`,
 `pool` (boolean), `note`, `since`, `seen`. Times are UTC
 `YYYY-MM-DDTHH:MM:SSZ`. Requests are unique by holder, request and pool flag.
@@ -121,6 +130,46 @@ truncated. It does not prune queue rows, so stale waiters remain visible.
 It leaves existing metadata untouched, but can create the state directory and
 missing locks; listing is not a filesystem-read-only operation.
 
+## JSON contract
+
+`logins list --json` writes one JSON document followed by a newline: an array
+with one object per registered login, in the same lexicographic name order as
+plain `list`. `list NAME --json` returns an array containing that login only;
+an empty registry produces `[]`. Exit codes and state validation are the same
+as plain `list`. On failure, JSON mode writes diagnostics to stderr and no
+partial document to stdout. Plain output is unchanged.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `name` | string | Login's registered name |
+| `pool` | string | Its pool name; an unpooled nested numeric name such as `chatgpt-2-3` uses its own name |
+| `holder` | string or null | Current custody holder, or null when unheld |
+| `since` | string or null | Current take's UTC RFC 3339 timestamp, exactly `YYYY-MM-DDTHH:MM:SSZ`; null when unheld |
+| `note` | string or null | Current take's note; null when absent or empty |
+| `use` | string | `walk`, `pass` or `other`, derived from the holder as below |
+| `run` | string or null | Recorded codex-run, unit or session ID; null if unknown or unheld |
+| `waiters` | array of objects | Matching waiters, each with string `holder`, UTC RFC 3339 string `since`, and string `use` |
+
+`walk/...` holders have use `walk`. `pass/...`, legacy `qa-watch/...` and
+`qa-watch` holders have use `pass`. All other holders, including null, have
+use `other`. Custody remains held when its login is away from the resting
+path; it still reports its holder, since, note and run. An unheld missing
+login has null holder, since, note and run just like an unheld resting login.
+This contract does not report file location or rest status.
+
+Waiters are ordered by their first request time, then holder name, exactly
+as in plain output. Named waiters appear under that login; pool waiters
+appear under every member. Legacy per-login queues are merged in memory.
+Stale and already-served rows remain visible, as with plain `list`; listing
+does not prune or migrate queues. There are no waiters when the array is `[]`.
+
+The contract is additive: fields are only added, never renamed or removed,
+and existing field types and meanings remain stable. Consumers must ignore
+unknown fields, including in waiter objects. JSON contains custody metadata
+only, never login contents or paths inside a login. The offline consumer
+fixture is `tools/qa/fixtures/logins-list.json`; the custody tests check its
+schema and reproduce it through real commands against fake state.
+
 ## Locks, compatibility and callers
 
 Every operation takes the global flock first, then every login's exclusive
@@ -134,11 +183,19 @@ Per-login `waiting.json` arrays with `holder`, `note`, `since`, `seen` are
 merged into named global requests. A duplicate retains the earliest `since`
 and latest `seen`. Mutations save the merged queue before unlinking the old
 queues; listing merges only in memory, and `--now` leaves both forms intact.
-State remains readable and writable by either tool without moving any login,
-changing its contents or signing in again.
+The new tool reads older holder and queue state without moving any login,
+changing its contents or signing in again. Older executables with strict
+holder schemas cannot read holder state containing `run`; upgrade all custody
+callers before using `--run`. For rollback, stop custody mutators and remove
+only the optional `run` field through a private sibling metadata replacement
+before restoring an older executable. No login contents need to be accessed.
 
 Live passes and walks use the QA caller's admission controls. QA's takes use
-`--any --now`, so they hold no queue reservation ahead of walks. Manual live
+`--any --now`, so they hold no queue reservation ahead of walks. A managed
+walk take passes its current run ID with `--run` when known. Current starts
+and resumes acquire logins before launching the new run, so their take-time
+run is normally unknown and JSON reports null; it is not inferred from the
+holder, note or an earlier attempt's run. Manual live
 runs use `qa take` and `qa give`. Custody alone gives no permission to exceed
 those caps. The operator checks saturation and stuck holders through `list`.
 Before switching the installed tool, stop outstanding old `logins take --wait`
@@ -165,7 +222,12 @@ modes, messages, status codes and lock order are preserved.
 Run `python3 -I -B tools/qa/test_logins.py`. All 57 original cases are separate
 unittest cases in temporary HOME/DEV_ROOT directories, using dummy files and
 instrumented offline drivers. Three additional cases exercise inline compatible
-state, the default HOME-based root, and an inherited admission lock. Each case
+state, the default HOME-based root, and an inherited admission lock. Eleven
+JSON/run cases cover empty/resting/missing logins, moved holdings, legacy
+holders, use classification, waiter ordering and preservation, take modes,
+idempotency, invalid IDs/state, exit codes, privacy, the consumer fixture,
+and QA forwarding known run IDs. The existing exact plain-output assertion
+also exercises a holder with run metadata. Each case
 has its own Linux subreaper process and session with signal cleanup, tracked
 child reaping, a 300-second tool hang bound and a 900-second case hang bound.
 The unittest wrapper runs cases sequentially; these bounds detect hangs rather
