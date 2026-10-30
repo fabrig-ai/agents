@@ -57,7 +57,20 @@ Large event lists are kept in referenced private JSON detail files; the wire eve
 
 ## 8. Later
 
-- Bisection over a red run's suspects (each first-parent merge is a buildable commit), to prove a culprit.
 - Parts across two slots, or a slower cadence, from the coalescing numbers.
 - `process-temper` and the live tiers, when their owners agree.
 - Verdicts read by the queue (holding a batch on a standing red) and by the status page.
+
+## 9. Bisection
+
+Added 2026-10-30 (green): a confirmed new red with several suspects names its culprit.
+- **When:** after a red run's verdict, events and posts are durable (section 5's posts go out first, saying `several suspects`), and only when its new reds have more than one first-parent commit between the last checked tip (`PREV`) and the tip. Standing and unattributed reds are not bisected.
+- **Candidates:** the first-parent commits of `PREV..TIP`, oldest first; `PREV` passed those identities (that is what made them new). Binary search for the first commit where an identity fails.
+- **A probe:** switch the slot to the candidate (detached, clean), then for each pair with unresolved identities, one `tools/tiers/run TREE TIER -- -E '<exact filters joined with |>'` (prerequisites as usual, only that pair's packages); an identity that fails is rerun once alone at the same commit (the confirmation rule), and only a confirmed failure counts as bad; a pass is good. A candidate that does not build, or whose run faults, is **skipped** and its neighbour probed instead.
+- **Grouping:** identities of one pair are probed together; they split into groups when their results differ, and each group continues alone.
+- **Result per group:** `culprit proven` when a commit is bad and its first parent good: the commit names a branch suspect (`Merge ready/<key>/<task>`) or an other suspect; `range` when skipped candidates leave several commits; `inconclusive` when the results are not monotonic (good after bad) or the bound is reached.
+- **Bound:** at most 2 + ceil(log2(candidates)) probes per group, and 45 minutes of wall per bisection; past it, the result is what is narrowed so far. The heavy-drain rule of section 2 applies to every probe.
+- **Told:** one post per bisection to the coordinator of a proven culprit (`culprit proven: <branch>`, the identities, the good and bad commits, the probe logs), and one line to each other suspect's coordinator that its branch is cleared for those identities; `range` and `inconclusive` go to every suspect's coordinator.
+- **Recorded:** an event `after-landing-bisect` per group (tip, attempt, identities, candidates, probes with commit/result/log, result, culprit), id `<tip>:<attempt>:bisect:<group>`; written before its posts.
+- **Then:** the slot returns to the tip, is trimmed (section 7), and the loop takes the next tip; tips that waited meanwhile coalesce as usual. State keeps the bisection in progress: a restart resumes it from its last probe.
+
