@@ -80,6 +80,37 @@ The sole removable control is retry: after acquiring the lock, a timer reads
 and removes ~/.config/fleet-sync/retry, bypassing its current backoff once.
 Hold and a busy lock leave retry untouched; checks and previews never consume it.
 
+All Git SSH operations, including installer subprocesses and backoff probes,
+share `GIT_SSH_COMMAND` with `-o ControlMaster=auto -o ControlPersist=600`
+and `-o ControlPath=<HOME>/.local/state/fleet-sync/ssh/%C`. The no-follow safe
+HOME directory helper creates the control directory with 0700; normal runs
+repair its mode in place, and checks refuse an existing insecure directory.
+The expanded path (HOME bytes plus slash and the 40-byte %C hash) must be under
+100 bytes, or the step fails before SSH. HOME is quoted for both shell and SSH
+option parsing, and literal percent signs are escaped.
+
+OpenSSH itself backgrounds a ControlPersist master, redirects its standard
+streams to /dev/null, and calls daemon()/setsid(); it is outside each Git
+command's process group. See [OpenSSH control_persist_detach](https://github.com/openssh/openssh-portable/blob/V_10_0_P1/ssh.c)
+and [ControlPersist](https://man.openbsd.org/ssh_config#ControlPersist).
+There is no separate master-start authentication or retry loop. A command
+timeout or interrupt cleans up the Git/client group without waiting on or
+killing the detached master. The fleet-sync service uses `KillMode=process`
+so systemd also preserves it at oneshot completion; ordinary INT/TERM/HUP
+still invoke fleet-sync's own tracked-child cleanup. A forced SIGKILL of the
+runner bypasses that cleanup. The master expires after 600 idle seconds;
+minute polling can keep it alive longer. Healthy runs therefore need at most
+one GitHub authentication per host per 10 min for the same SSH host/user/port,
+unless GitHub disconnects it. Other tools do not inherit this multiplexing
+outside fleet-sync's subprocesses.
+
+`--check` (including local/remote `status` checks and candidate smoke checks)
+and `--preview` use `ControlMaster=no` and `ControlPersist=no`: they may attach
+to an existing master at the same path, but create neither a control directory
+nor a master. Without one, a network check uses a normal single connection.
+Preview performs no GitHub requests. Status's SSH connections to fleet hosts
+keep their existing behavior.
+
 1. Validate the dedicated agents clone, fetch, and detach at origin/main or the
    full lowercase SHA in pin. Archive into a sibling, excluding old/, and rename.
    Before promotion, run the candidate's isolated self-check, enforce the fixed
@@ -98,7 +129,11 @@ Hold and a busy lock leave retry untouched; checks and previews never consume it
    steps continue. Recheck defer under the lock, before every link check and
    install, and release at step return. Ops uses the same inode:
    `flock ~/.local/state/fabrig/install.lock python3 -I ~/src/fabrig/main/tools/install`.
-   Fetch a private bare partial mirror at src/fabrig/.fleet-sync/fabrig.git.
+   Maintain a private bare partial mirror at src/fabrig/.fleet-sync/fabrig.git.
+   First ls-remote fabrig refs/heads/main through the shared SSH master; fetch
+   only if that SHA differs from the mirror's origin/main (or that ref is absent
+   after bootstrap). Unchanged runs do no mirror fetch. An existing mirror in
+   --check follows the same rule; smoke checks skip it completely.
    Compare installed HEAD with origin/main under tools/ there; missing commits
    count as changed. Install only for changed tools or wrong links. Non-tool
    landings are ok, reporting both short SHAs. Only the installer writes main;
@@ -174,6 +209,10 @@ Hold and a busy lock leave retry untouched; checks and previews never consume it
    wait immediately, as does retry. A failed remote probe keeps the wait and is
    included in that log line. Completed runs without failed items reset the
    counter; manual runs never wait. Manual failures preserve the timer counter.
+   Permission denied (publickey) is a failed Git command and hence a failed
+   timer run subject to this same backoff; it is never retried in a tight loop.
+   The waiting timer's single remote probe also uses the shared master. A denied
+   probe logs the failure and preserves the wait; it does not immediately retry.
    Checks and status show `backoff until HH:MMZ (n failures)` while it is active.
    Child commands have private process groups; a timeout
    sends TERM, allows five seconds, KILLs survivors and waits before unlocking.

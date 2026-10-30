@@ -78,6 +78,12 @@ and warn; installing a pin is the explicit `--provision`.
 5. **Record.** Write state, items and run log. Repeated failures back off
    (1 minute up to 60), but a new main commit skips the wait.
 
+**GitHub transport:** one GitHub authentication per host per 10 min on a healthy
+shared connection: a detached OpenSSH master persists for 600 idle seconds;
+`KillMode=process` preserves it between timer runs. Checks/status only reuse
+masters, preview makes no GitHub requests, and the fabrig mirror fetches only
+when ls-remote differs from its origin/main (`tools/fleet-sync.md`).
+
 **Effect timing.** A rendered file is in place after the next successful
 convergence. That convergence can be delayed by a hold, a pin, backoff, a busy
 lock or a failed release. Claude

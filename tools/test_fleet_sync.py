@@ -118,7 +118,8 @@ print(json.dumps({"host": host, "agents_sha": "a" * 40, "fabrig_sha": "b" * 40,
 
 class FleetTest(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix="fleet-test-")
+        # Keep HOME short enough for the real OpenSSH %C socket limit, even inside the gate.
+        self.temp = tempfile.TemporaryDirectory(prefix="fs-", dir="/tmp")
         self.addCleanup(self.temp.cleanup)
         self.directory = Path(self.temp.name)
         self.home = self.directory / "home"
@@ -673,6 +674,10 @@ class FleetTest(unittest.TestCase):
     def test_defer_created_during_fetch_precedes_link_check(self):
         self.sync()
         put(self.home / "src/fabrig/main/tools/installed", "malformed manifest to detect a read\n")
+        put(self.fabrig / "unrelated", "advance the mirror so this test still exercises a fetch\n")
+        self.git(self.fabrig, "add", ".")
+        self.git(self.fabrig, "commit", "-qm", "advance mirror")
+        self.git(self.fabrig, "push", "origin", "main")
         with patch.dict(os.environ, self.env, clear=True):
             _, runner = self.runner()
             command = runner.cmd
