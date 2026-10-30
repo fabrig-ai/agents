@@ -1,0 +1,391 @@
+#!/usr/bin/env -S python3 -I -B
+"""Private Claude and Codex login shelf; see agent-logins.md."""
+import argparse
+from contextlib import contextmanager
+from datetime import datetime, timezone
+import fcntl
+import json
+import os
+from pathlib import Path
+import re
+import shlex
+import stat
+import subprocess
+import sys
+import tempfile
+import tomllib
+
+os.umask(0o077)
+FILES = {'claude': '.credentials.json', 'codex': 'auth.json'}
+ID = r'[a-z0-9-]+'
+HASH = r'[0-9a-f]{64}'
+
+# Runs locally and over ssh. O_PATH pins an inode without opening it for
+# reading. Only cat/sha256sum read credentials, through that inherited inode.
+# Never forward a child's diagnostic: even a failed service is not a log sink.
+SOURCE = r'''
+import os, stat, sys
+operation, path = sys.argv[1:]
+path = os.path.abspath(os.path.expanduser(path))
+fds = []
+try:
+    fd = os.open('/', os.O_PATH | os.O_DIRECTORY | os.O_CLOEXEC)
+    fds.append(fd)
+    parts = path.split('/')[1:]
+    for part in parts[:-1]:
+        fd = os.open(part, os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+        fds.append(fd)
+    info = os.fstat(fd)
+    if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700:
+        sys.exit(4)
+    fd = os.open(parts[-1], os.O_PATH | os.O_NOFOLLOW, dir_fd=fd)
+    fds.append(fd)
+    info = os.fstat(fd)
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+            or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1 or info.st_size == 0):
+        sys.exit(4)
+    os.set_inheritable(fd, True)
+    for parent in fds[:-1]:
+        os.close(parent)
+except FileNotFoundError:
+    sys.exit(3)
+except OSError:
+    sys.exit(4)
+try:
+    os.execvp(operation, [operation, '--', '/proc/self/fd/' + str(fd)])
+except OSError:
+    sys.exit(4)
+'''
+
+
+class Problem(Exception):
+    pass
+
+
+def need(condition, message):
+    if not condition:
+        raise Problem(message)
+
+
+def now():
+    return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+def check(info, directory, path):
+    kind = stat.S_ISDIR if directory else stat.S_ISREG
+    mode = 0o700 if directory else 0o600
+    need(kind(info.st_mode) and info.st_uid == os.geteuid()
+         and stat.S_IMODE(info.st_mode) == mode
+         and (directory or info.st_nlink == 1),
+         f'{path}: expected owned {mode:04o} {"directory" if directory else "single-link regular file"}')
+
+
+@contextmanager
+def directory(path, create=False, private=False):
+    """Walk each component without following links; pin the final directory."""
+    fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        for part in path.parts[1:]:
+            if create:
+                try:
+                    os.mkdir(part, mode=0o700, dir_fd=fd)
+                except FileExistsError:
+                    pass
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                            dir_fd=fd)
+            os.close(fd)
+            fd = child
+        if private:
+            check(os.fstat(fd), True, path)
+        yield fd
+    finally:
+        os.close(fd)
+
+
+def private_file(parent, name, flags):
+    # lstat before open avoids opening FIFOs/devices. O_NOFOLLOW and fstat
+    # cover replacement between the two; O_NONBLOCK prevents a FIFO race hang.
+    try:
+        check(os.stat(name, dir_fd=parent, follow_symlinks=False), False, name)
+    except FileNotFoundError:
+        need(flags & os.O_CREAT, f'{name}: absent')
+    fd = os.open(name, flags | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, 0o600, dir_fd=parent)
+    try:
+        check(os.fstat(fd), False, name)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def transfer(operation, path, target=None, output=None):
+    need(operation in ('cat', 'sha256sum') and (operation != 'cat' or output is not None),
+         'cat requires a file descriptor sink')
+    command = ['python3', '-I', '-B', '-c', SOURCE, operation, str(path)]
+    if target is not None:
+        command = ['ssh', '-T', '-o', 'BatchMode=yes', '--', target, shlex.join(command)]
+    result = subprocess.run(command, stdin=subprocess.DEVNULL,
+                            stdout=output if output is not None else subprocess.PIPE,
+                            stderr=subprocess.DEVNULL, timeout=120)
+    if result.returncode == 3:
+        return None
+    need(result.returncode == 0, f'{path}: unsafe source or {operation} failed')
+    if output is not None:
+        return True
+    # Only the hash helper may produce captured output. Never capture cat.
+    match = re.fullmatch(rb'([0-9a-f]{64})  /proc/self/fd/[0-9]+\n', result.stdout)
+    need(match is not None, f'{path}: invalid sha256sum response')
+    return match[1].decode('ascii')
+
+
+class Shelf:
+    def __init__(self):
+        self.home = Path.home()
+        self.root = self.home / 'src/fabrig/logins/pool'
+
+    @contextmanager
+    def locked(self):
+        # Intermediate shared source directories need not be 0700, but none
+        # may be a link; the shelf parent and everything within it are private.
+        with directory(self.root.parent, create=True, private=True):
+            with directory(self.root, create=True, private=True) as root:
+                self.fd = root
+                lock = private_file(root, 'lock', os.O_RDWR | os.O_CREAT)
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX)
+                    info = os.stat('lock', dir_fd=root, follow_symlinks=False)
+                    need((info.st_dev, info.st_ino) == (os.fstat(lock).st_dev, os.fstat(lock).st_ino),
+                         'lock: replaced while waiting')
+                    self.validate_layout()
+                    self.load()
+                    yield
+                finally:
+                    os.close(lock)
+
+    def validate_layout(self):
+        # Prepared and orphaned entries are not custody records, but their
+        # directories and any expected credential still obey shelf safety.
+        for provider, filename in FILES.items():
+            try:
+                os.stat(provider, dir_fd=self.fd, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            with directory(self.root / provider, private=True) as parent:
+                for name in os.listdir(parent):
+                    if name.startswith('.capture-'):
+                        check(os.stat(name, dir_fd=parent, follow_symlinks=False), False, name)
+                        continue
+                    need(re.fullmatch(ID, name), 'shelf: invalid entry name')
+                    path = self.root / provider / name
+                    with directory(path, private=True) as entry:
+                        try:
+                            info = os.stat(filename, dir_fd=entry, follow_symlinks=False)
+                        except FileNotFoundError:
+                            continue
+                        check(info, False, path / filename)
+
+    def load(self):
+        try:
+            os.stat('state.json', dir_fd=self.fd, follow_symlinks=False)
+        except FileNotFoundError:
+            self.entries = []
+            return
+        fd = private_file(self.fd, 'state.json', os.O_RDONLY)
+        try:
+            with os.fdopen(fd) as stream:
+                data = json.load(stream)
+        except (ValueError, UnicodeError):
+            raise Problem('state.json: invalid metadata') from None
+        need(isinstance(data, dict) and set(data) == {'version', 'entries'} and data['version'] == 1
+             and isinstance(data['entries'], list), 'state.json: invalid schema')
+        self.entries = data['entries']
+        seen = set()
+        for row in self.entries:
+            need(isinstance(row, dict) and set(row) == {
+                'provider', 'id', 'status', 'origin', 'sha256', 'kind', 'created_at', 'updated_at', 'moves'
+            }, 'state.json: invalid entry')
+            provider, identity = row['provider'], row['id']
+            need(isinstance(provider, str) and provider in FILES and isinstance(identity, str)
+                 and re.fullmatch(ID, identity), 'state.json: invalid entry name')
+            key = provider, identity
+            need(key not in seen, 'state.json: duplicate entry')
+            seen.add(key)
+            need(isinstance(row['sha256'], str) and re.fullmatch(HASH, row['sha256']),
+                 'state.json: invalid hash')
+            need(row['kind'] in ('snapshot', 'own') and isinstance(row['status'], str),
+                 'state.json: invalid custody')
+            if row['kind'] == 'own':
+                need(row['origin'] == 'signed-in' and row['status'] == 'free', 'state.json: invalid own login')
+            else:
+                origin = row['origin']
+                need(isinstance(origin, dict) and set(origin) == {'host', 'path'}
+                     and isinstance(origin['host'], str) and re.fullmatch(ID, origin['host'])
+                     and origin['path'] == '~/' + ('.claude/.credentials.json' if provider == 'claude' else '.codex/auth.json')
+                     and row['status'] == 'bound:' + origin['host'], 'state.json: invalid snapshot')
+            for field in ('created_at', 'updated_at'):
+                need(isinstance(row[field], str) and re.fullmatch(r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ', row[field]),
+                     'state.json: invalid time')
+            need(isinstance(row['moves'], list) and len(row['moves']) == 1
+                 and row['moves'][0] == {'at': row['created_at'], 'event': 'capture' if row['kind'] == 'snapshot' else 'register',
+                                         'to': row['status']}, 'state.json: invalid moves')
+            self.check_entry(provider, identity)
+
+    def check_entry(self, provider, identity):
+        path = self.root / provider / identity
+        with directory(self.root / provider, private=True):
+            with directory(path, private=True) as fd:
+                info = os.stat(FILES[provider], dir_fd=fd, follow_symlinks=False)
+                check(info, False, path / FILES[provider])
+                need(info.st_size > 0, f'{path / FILES[provider]}: empty credential')
+
+    def save(self):
+        fd, name = tempfile.mkstemp(prefix='.state-', dir=self.root)
+        try:
+            with os.fdopen(fd, 'w') as stream:
+                json.dump({'version': 1, 'entries': self.entries}, stream, indent=2)
+                stream.write('\n')
+                stream.flush()
+                os.fsync(stream.fileno())
+            # Refuse a state path replaced by an unsafe object since load.
+            try:
+                check(os.stat('state.json', dir_fd=self.fd, follow_symlinks=False), False, 'state.json')
+            except FileNotFoundError:
+                pass
+            os.replace(name, self.root / 'state.json')
+            os.fsync(self.fd)
+        finally:
+            Path(name).unlink(missing_ok=True)
+
+    def add(self, provider, identity, digest, host=None):
+        time = now()
+        status = 'bound:' + host if host else 'free'
+        self.entries.append(dict(provider=provider, id=identity, status=status,
+                                 origin={'host': host, 'path': '~/' + ('.claude/.credentials.json' if provider == 'claude'
+                                                                   else '.codex/auth.json')} if host else 'signed-in',
+                                 sha256=digest, kind='snapshot' if host else 'own', created_at=time, updated_at=time,
+                                 moves=[{'at': time, 'event': 'capture' if host else 'register', 'to': status}]))
+        self.save()
+
+    def prepare(self, provider, identity):
+        path = self.root / provider / identity
+        with directory(path.parent, create=True, private=True) as parent:
+            os.mkdir(identity, mode=0o700, dir_fd=parent)
+        variable, command = ('CODEX_HOME', 'codex login --device-auth') if provider == 'codex' else (
+            'CLAUDE_CONFIG_DIR', 'claude auth login')
+        print(f'{variable}={shlex.quote(str(path))} {command}')
+
+    def register(self, provider, identity):
+        self.check_entry(provider, identity)
+        path = self.root / provider / identity / FILES[provider]
+        existing = next((row for row in self.entries if (row['provider'], row['id']) == (provider, identity)), None)
+        need(existing is None or existing['kind'] == 'own', f'{path}: snapshot cannot become free')
+        digest = transfer('sha256sum', path)
+        need(digest is not None, f'{path}: absent')
+        if existing is not None:
+            need(existing['sha256'] == digest, f'{path}: registered login changed')
+        else:
+            self.add(provider, identity, digest)
+        print(f'{path}: {digest}')
+
+    def capture(self, host, dry_run):
+        need(re.fullmatch(ID, host), 'invalid host')
+        # The current release is intentionally a symlink. No checkout fallback.
+        hosts = self.home / 'src/fabrig/current/fleet/hosts.toml'
+        try:
+            with hosts.open('rb') as stream:
+                fleet = tomllib.load(stream)['hosts']
+            target = fleet[host]['ssh']
+        except (KeyError, ValueError):
+            raise Problem('fleet/hosts.toml: unknown host or invalid roster') from None
+        need(isinstance(target, str) and re.fullmatch(r'[A-Za-z0-9_.@:-]+', target)
+             and not target.startswith('-'), 'fleet/hosts.toml: invalid ssh target')
+        for provider, filename in FILES.items():
+            relative = Path('.claude' if provider == 'claude' else '.codex') / filename
+            source = self.home / relative if host == 'hel8' else Path('~') / relative
+            remote = None if host == 'hel8' else target
+            if dry_run:
+                print(f'{host}:{source} -> {self.root / provider} (dry-run)')
+                continue
+            with directory(self.root / provider, create=True, private=True):
+                fd, name = tempfile.mkstemp(prefix='.capture-', dir=self.root / provider)
+                temporary = Path(name)
+                destination = None
+                try:
+                    with os.fdopen(fd, 'wb') as stream:
+                        present = transfer('cat', source, remote, stream)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    if present is None:
+                        print(f'{host}:{source}: absent')
+                        continue
+                    digest = transfer('sha256sum', temporary)
+                    expected = transfer('sha256sum', source, remote)
+                    need(expected is not None and digest == expected, f'{host}:{source}: sha256 mismatch')
+                    if any(row['provider'] == provider and row['kind'] == 'snapshot'
+                           and row['origin']['host'] == host and row['sha256'] == digest for row in self.entries):
+                        print(f'{host}:{source}: {digest} unchanged')
+                        continue
+                    # Full hashes avoid collisions; suffixes protect prepared/unregistered entries.
+                    base = f'{host}-{digest}'
+                    identity = base
+                    suffix = 0
+                    while (self.root / provider / identity).exists() or (self.root / provider / identity).is_symlink():
+                        suffix += 1
+                        identity = f'{base}-{suffix}'
+                    destination = self.root / provider / identity
+                    destination.mkdir(mode=0o700)
+                    os.replace(temporary, destination / filename)
+                    # The credential rename precedes the atomic metadata commit.
+                    # A crash can leave a private unregistered entry, never a free snapshot.
+                    self.add(provider, identity, digest, host)
+                    print(f'{destination / filename}: {digest}')
+                    destination = None
+                finally:
+                    temporary.unlink(missing_ok=True)
+                    if destination is not None:
+                        # Retain an orphan after a metadata failure for operator recovery.
+                        if not (destination / filename).exists():
+                            destination.rmdir()
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest='command', required=True)
+    capture = commands.add_parser('capture')
+    capture.add_argument('host')
+    capture.add_argument('--dry-run', action='store_true')
+    for name in ('prepare', 'register'):
+        command = commands.add_parser(name)
+        command.add_argument('provider', choices=FILES)
+        command.add_argument('id')
+    listing = commands.add_parser('list')
+    listing.add_argument('--json', action='store_true')
+    args = parser.parse_args()
+    try:
+        if hasattr(args, 'id'):
+            need(re.fullmatch(ID, args.id), 'invalid login id')
+        shelf = Shelf()
+        with shelf.locked():
+            if args.command == 'list':
+                entries = sorted(shelf.entries, key=lambda row: (row['provider'], row['id']))
+                if args.json:
+                    print(json.dumps(entries))
+                else:
+                    for row in entries:
+                        print(f'{shelf.root / row["provider"] / row["id"]}: {row["status"]} {row["sha256"]}')
+            elif args.command == 'capture':
+                shelf.capture(args.host, args.dry_run)
+            else:
+                getattr(shelf, args.command)(args.provider, args.id)
+        return 0
+    except Problem as error:
+        print(f'agent-logins: {error}', file=sys.stderr)
+        return 4
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError):
+        # Never include arbitrary metadata or child diagnostics in errors.
+        print('agent-logins: operation refused (unsafe, absent, invalid or unavailable path/state/source)', file=sys.stderr)
+        return 4
+
+
+if __name__ == '__main__':
+    sys.exit(main())
