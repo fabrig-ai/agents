@@ -48,6 +48,17 @@ class BootstrapStagesTest(unittest.TestCase):
         stage.mkdir()
         with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
             tar.extractall(stage, filter="data")
+        # Declarations stage B did not touch come from main, so later changes to
+        # them (Claude settings, say) are on both sides and are not promotions.
+        marker = base.removesuffix("^")
+        touched = set(subprocess.check_output(
+            ["git", "-C", str(fixture.ROOT), "diff", "--name-only", base, marker, "--", "fleet"],
+            text=True).split()) if marker != base else set()
+        for path in (self.f.source / "fleet").rglob("*"):
+            name = path.relative_to(self.f.source).as_posix()
+            if path.is_file() and name not in touched:
+                (stage / name).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(path, stage / name)
         retired = self.f.directory / "retired-fleet"
         (self.f.source / "fleet").rename(retired)
         (stage / "fleet").rename(self.f.source / "fleet")
