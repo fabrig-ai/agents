@@ -1,7 +1,8 @@
 # QA passes after landing
 
-Provisional, 2026-10-30. Proposed contract for unattended fabrig passes;
-not implemented or activated. Walks remain described by [qa.md](qa.md).
+Provisional, 2026-10-30; revised after the round-2 review the same day.
+Proposed contract for unattended fabrig passes; not implemented or activated.
+Walks remain described by [qa.md](qa.md).
 
 ## 1. In one page
 
@@ -14,8 +15,9 @@ not implemented or activated. Walks remain described by [qa.md](qa.md).
 - **The watcher starts passes.** It selects the newest main with a published
   after-landing **green** run containing the chosen merges, batches up to five
   marked merges per pass, and caps each session at 120 minutes (section 4).
-- **A pass has one existing numeric slot.** Two pass slots on hetzner6 are
-  separate from walks' slots 4 and 8. Claims, preparation, launch recovery,
+- **A pass has one existing numeric slot.** Pass slots 11 and 12 on hetzner6 are
+  dedicated s/qa shares, separate from the walk shares (section 13). Claims,
+  preparation, launch recovery,
   deployment supervision and cleanup reuse today's walk contracts. ChatGPT
   passes leave two logins for walks; stuck holdings count (sections 5 and 6).
 - **Results outlive scratch.** Reports are records files and per-merge verdicts
@@ -26,8 +28,8 @@ not implemented or activated. Walks remain described by [qa.md](qa.md).
   `fabrig-ai/qa` repository's `evidence` branch. Prune ended walk and pass scratch
   after seven days only when preservation and custody allow it (section 9).
 - **No deployment comes with this document.** Section 12 divides implementation
-  at the queue, records, scheduler and cleanup boundaries. Section 13 names the
-  activation questions the sources cannot answer.
+  at the queue, records, scheduler and cleanup boundaries. Section 13
+  records the coordinator's answered activation questions.
 
 ## 2. The mark and the landing feed
 
@@ -70,33 +72,75 @@ the coordinator column required here. Today's records collector projects
 branches/tips and batch parent/commit, not per-merge landing routes. These
 are required producer changes, not interfaces the QA reader can assume exist.
 
-Extend the successful publication row with ordered `merges` entries:
-`{name, tip, commit, parent, coordinator}`. Here name is the ready branch,
-tip is B, commit is M, parent is P, and coordinator is a fully qualified
-mailbox. Also retain the published batch `commit` and `parent`. A row describes
-only merges in the confirmed published batch; conflicts, rejected halves,
-dry runs, preparations and unknown push outcomes supply no landing. Recovery
-must reconcile publication and append the same merge identities if the push
-succeeded but its journal acknowledgement was lost.
+Before the queue's **first push**, durably commit a publication intent outside
+its checkout, under its existing authority lock. The version-1 intent has a
+stable `publication_id`, origin/ref, original batch parent, exact candidate
+SHA, ordered merge entries, roster snapshot digest, created UTC time and the
+exact prospective journal metadata. Each merge has `name` (ready branch),
+`tip` (B), `commit` (M), `parent` (P), and the route fields below. Stage safe
+immutable data, fsync it and its containing directories, then replace the
+intent through a sibling, fsyncing the file and parent directory; only that committed intent authorizes push.
+No roster reread may change it after the first push attempt. A pre-intent
+crash cannot have published anything; unreferenced staging is not authority.
+
+Extend the successful publication row with `publication_id` and the saved
+ordered `merges` list, plus published batch `commit` and `parent`. Only a
+confirmed published candidate supplies landings; rejected halves, conflicts,
+dry runs, preparations and unknown push outcomes do not. On restart, drain
+or reconcile any original push child before another push; fetch the saved
+origin/ref and test whether it contains the **saved candidate**, including
+when main has advanced. If it does, append the journal row from the intent,
+using its saved routes and identities, then save journal confirmation. If it
+does not, retain the intent and reconcile/retry that same candidate under the
+queue's publication guards; never rebuild its metadata from today's roster.
+An unavailable/divergent remote preserves uncertainty and blocks replacement.
+A crash after journal append replays `publication_id` without a second logical
+row. Retire the intent only after journal confirmation; branch cleanup is
+later. A collector outbox cannot substitute for this pre-push checkpoint.
 
 Extend `leads.txt` to `KEY LEAD_ADDRESS COORDINATOR_ADDRESS`, preserving the
-lead destination for queue notifications. A landing snapshots the third
-column from the queue's loaded configuration when it publishes. Validate
-unique keys and hosted addresses. A missing route is an explicit unresolved
-coordinator, never a guessed lead-to-coordinator substitution; QA sends that
-finding to the director. Updating the roster later must not reroute old
-findings. Update every two-column reader, including record-collect, in that
-producer change. Do not derive a coordinator from a prefix or mission README.
+lead destination for queue notifications. Unique keys and hosted lead
+addresses are required. The coordinator cell is either a hosted mailbox or
+exactly `-` for unassigned. Two-column rows or malformed addresses refuse new
+configuration; a missing key is a supported unresolved route. Snapshot the
+loaded third-column route into the publication intent, not after push.
+Update every roster reader, including record-collect, in this producer part.
+Do not derive a coordinator from a prefix or mission README.
 
-Have record-collect publish a source `queue`, kind `merge` event per entry,
-with id `merge:<full M>`, the batch tip, P, B, branch and coordinator. Events
-also name their source journal path. Preserve the existing batch/attempt
-events. A producer outbox retains exact rows and timestamps across retries;
-after a lost acknowledgement, a confirmed publication is replayed by id.
-QA pulls these events through records, validates their graph claims against
-its own fabrig fetch, and saves the route and event reference. It needs no SSH
-reader on the queue host. This is a new feed contract and needs queue and
-collector fixtures before activation.
+Use one canonical route object in intents, journal entries and merge events:
+
+| State | Exact fields |
+|---|---|
+| Resolved | `route_status="resolved"`, `coordinator=HOSTED_ADDRESS`; omit `route_reason` |
+| Unresolved | `route_status="unresolved"`, `route_reason=REASON`; omit `coordinator` |
+
+REASON is `unassigned` for roster `-`, `missing_key` for no roster row, or
+`historical_unknown` for reviewed old-data backfill. The text roster's `-`
+is converted to that object at its parser boundary; it never becomes a
+coordinator join value. Null, empty-string, sentinel-valued coordinator, or
+an absent coordinator without unresolved status/reason is invalid on the
+wire. The optional records `coordinator` join therefore remains a string
+only when resolved. QA preserves this same object in its brief/authority
+and routes unresolved findings to the director. Changing the roster later
+must not reroute an old landing.
+
+Have record-collect publish a source `queue`, kind `merge` event per saved
+entry with id `merge:<full M>`, publication_id, batch tip, P, B, branch and
+the canonical route fields. Events name their journal path; preserve existing
+batch/attempt events. The intent fixes the event's source timestamp so a
+crash across UTC midnight cannot change its deduplication file. Its `time`
+reflects the intent observation, not a claim about the exact remote push
+instant. A producer outbox retains exact event rows/timestamps across retries.
+QA reads them through records and validates graph claims against its own
+fabrig fetch; it needs no queue-host SSH reader.
+
+Name producer/collector fixtures `route_resolved`, `route_unassigned`,
+`route_missing_key`, `route_historical_unknown`, `route_invalid_wire`, and
+`publication_lost_ack_roster_changed`. The last kills the queue after a
+successful push and before journal append, changes the roster, and proves
+that reconciliation/collection retain the intent's original route and ids.
+Also kill before intent commit, after journal append and before retirement;
+none may invent or duplicate a landing.
 
 Historical rows without routes/merge entries cannot invent them. An explicit
 default start avoids importing the old backlog automatically; older marked
@@ -133,20 +177,34 @@ print the resolved merge and every affected mark. The exception applies to
 the whole merge. `backlog` keeps it for later; `run` requests its next pass.
 There is no exception that makes an unmarked landing eligible.
 
+Every run request has a two-part identity `[event_id, M]`: default work is
+`[default-event-id, M]` (one default can cover many merges), explicit run is
+`[decision-event-id, M]`. A backlog decision suppresses that merge's earlier
+request without consuming another merge covered by the same default.
+
 The latest selection event wins: a default supplies an implicit run at its
 on event, an explicit decision overrides it, and a pass's durable take consumes
-that request. Order control events by the QA authority's increasing selection
-sequence, not timestamps; at a tie an explicit decision beats the default,
-and a take beats the decision it consumed. The sequence and consumed request
-id are saved under admission before publication. Records replay reconstructs
-the same ordering. A decision after a take requests a follow-up; it cannot
-cancel a session or overlap another pass on the same merge. A prelaunch
-reservation cancelled with proven no launcher restores its consumed request;
-a possibly launched pass keeps it taken. Publish a cancellation event with
-the restored request ids so records replay reaches the same choice; never
-restore over a later explicit decision. A capped, failed or blocked pass
-does not automatically loop on the same request: it remains visible as
-uncleared and needs `qa decide ... run`. New marked merges still run unattended.
+that **request pair**. Order by the QA authority's increasing selection
+sequence, not timestamps; explicit decisions beat a default at a tie, and
+a take beats the request it consumed. Default intervals remain graph-based;
+the sequence orders control, take and cancellation operations only.
+
+Consumption, pass identity, every batch share/reservation and its initial
+publication intents commit together through the single authority snapshot
+in section 10.1. Separate selection/pass/outbox files are never independent
+sources of truth. No claim, login take or launch precedes this commit. A
+follow-up decision after a take cannot cancel a session or overlap a pass
+on the same merge; it waits for prior ownership to drain.
+
+Proven-unlaunched cancellation atomically records its synthetic final,
+publication intents and the restoration of the same request pair, conditional
+on there being no newer explicit decision. Keep a cancellation barrier on M
+until all custody/claim uncertainty is resolved and the final/cancel events
+are confirmed. Only then can the restored request be reserved again. A
+possibly launched pass keeps its request consumed. Capped, failed or blocked
+passes remain visible as uncleared and need a new explicit run decision;
+new marked merges still run unattended. Section 10.1 covers every interrupted
+transition, including cancellations whose publications are still pending.
 
 `qa candidates` lists, in carrying-merge order, marked merges with no default,
 decision or take covering them; each row includes M, marked SHAs, subjects
@@ -190,12 +248,16 @@ most n (slots plus every required login pool). Partition oldest first with
 share `min(QA_BATCH, ceil(n/k))`, each time leaving one for each later pass.
 Thus five merges over two slots become three and two; eleven over two become
 five and five with one waiting. Failed reservations restore their work for
-the next check. Save every disjoint share and take event before launching
-the first session; restart cannot give two passes the same request.
+the next check once their cancellation barriers clear. Commit every disjoint
+share, request pair, pass identity and publication intent in one authority
+snapshot (section 10.1) before resource acquisition, then confirm the initial
+reports/start events before launch. Restart cannot allocate a request twice.
 
-Each brief names G, M/P/B, every marked SHA and exact trailer, branch,
-coordinator, green event, numeric slot, scratch, rung, login names/resting
-paths, cap and report path. It directs the session to read fabrig's rules and
+The immutable brief root names G, M/P/B, every marked SHA and exact trailer,
+branch/route object, green event, slot, scratch, rung, cap and report path.
+It contains no not-yet-observed run or grants. The delivered task combines
+that root with an authority-saved runtime annex of actual login names/resting
+paths; save the exact task bytes/digest before the launch intent. It directs the session to read fabrig's rules and
 the product's QA binding at G, read the marked diffs and touched designs,
 write expected outcomes before testing, and exercise each marked story's
 happy path plus two to four tricky cases. Several trees in one monorepo do
@@ -217,9 +279,9 @@ a retry is a new pass and request, preserving the previous report.
 ## 5. Slots, logins and safe admission
 
 `QA_PASS_SLOTS` lists existing numeric fabrig slots on `QA_SLOT_HOST`. Its
-length is the pass cap. Configure two on hetzner6 after allocation (section
-13); there is no inferred pair of free numbers, fallback clone or use of a
-walk slot. Reject duplicate pass numbers and overlap with any configured
+length is the pass cap. Configure `11,12` on hetzner6 as dedicated s/qa
+shares (section 13); no inferred free pair, fallback clone or walk slot is
+a pass slot. Clone readiness and disk admission still gate activation. Reject duplicate pass numbers and overlap with any configured
 walk kind. Each concurrent pass claims and prepares exactly one slot with
 its warm target. Retain today's origin/dirty/unpublished-HEAD checks, fetch,
 detached exact-SHA checkout, trim, decimal 80,000,000,000-byte disk admission,
@@ -308,7 +370,7 @@ Then advance these durable, independently retryable steps:
    findings after their publication is confirmed. Retry unconfirmed records
    and ordinary post deliveries independently of freed resources.
 
-Each step saves progress by sibling-and-rename before the next. An unavailable
+Each step commits progress in an authority generation before the next. An unavailable
 writer never prevents a login return; an unavailable login never prevents
 record publication or a stuck alert. Cleanup continues on every check after
 the outcome is recorded. Preserve the current exceptional one-attempt
@@ -320,85 +382,251 @@ to retain a pass box indefinitely.
 
 ## 7. Reports and verdicts in records
 
-Reports are `qa/passes/NAME.md` in the private records repository. Add this
-path class, an 8 KiB UTF-8 cap, and front-matter validation to `record`.
-Use a leading `+++`-delimited TOML header, parsed with tomllib.
-Required fields are repository (`fabrig`), pass, main G, green event,
-merge/marked-commit lists, rung, host, slot, model/effort, run, started/ended,
-wall, tokens (unknown allowed), outcome, login **names**, and evidence
-(`unknown`, `refused`, or commit plus directory). Never credential contents.
-Write a running report before launch and a completed safe report at end;
-later evidence linkage replaces metadata without creating new findings.
-Keep findings before cases when abbreviating to 8 KiB; the whole safe report
-is available in evidence. Oversize findings require a safe evidence reference
-and an explicit truncation note rather than silently losing a finding.
+### 7.1 Bounded summaries and durable complete details
 
-Register `[qa] sources = ["qa"]` in writers.toml. Extend records' producer
-permissions explicitly: `qa` may append source qa and write only
-`qa/passes/NAME.md`. Today declared producers are append-only and cannot use
-`write`; merely adding the writer declaration is insufficient. No generic
-judgement or director-file permission is granted. Use proposed
-`record write --as qa qa/passes/NAME.md --from SAFE_REPORT` and existing
-`record append --as qa --batch HOST` for events.
+`qa/passes/NAME.md` is an at-most-8-KiB UTF-8 **summary** in the private
+records repository, with a leading `+++`-delimited TOML header and short safe
+human body. It never has to contain every mark, case or finding. Complete
+briefs and results live in immutable records files
+`qa/details/sha256/DIGEST.json`, where DIGEST is the SHA-256 of the exact file
+bytes. This is required records data, independent of optional evidence
+preservation: refused evidence cannot remove the complete validated result.
 
-All events have record's id/time/source/host envelope; source is `qa`, ids
-and original UTC timestamps persist in the outbox. Carry `commit` (M for a
-merge result), `branch`, `coordinator`, `run` when known, report and evidence
-references. Keep each line under 16 KiB; details go in safe report/evidence,
-not command outputs in an event.
+Encode each detail file as canonical JSON (UTF-8, ensure_ascii=False, sorted
+keys, compact separators, no NaN, newline at end), at most 32 KiB.
+A version-1 leaf has
+`schema_version=1`, `kind` (`brief`, `result`, `summary`, `grants` or `control`),
+`type="leaf"`, `entries` (an ordered array). A branch has the same version/kind, `type="branch"`
+and `children` (ordered child digests). No other fields; recursive ordered
+concatenation gives the full entries. A single leaf can be the root. Leaves
+hold complete brief entries, result tables, exact archived summary text,
+runtime grant entries, or control/request/route details respectively. Logical entries carry
+a `type` discriminator; their schemas belong to the corresponding contract.
+Oversize logical entries (long reproduction/output text) become ordered
+fragment entries with exactly `type="fragment"`, `entry_id`, `fragment`,
+`fragments`, `text`, containing pieces of the canonical logical-entry JSON, each text fragment at most 8 KiB UTF-8;
+fragment metadata must agree and reassembly must validate the logical entry.
+Shrink a fragment further whenever JSON escaping would exceed 32 KiB; the
+serialized byte bound takes precedence over its 8 KiB text bound.
+Tree depth/fanout are validated, cycles/repeated fragments refuse, and readers
+stream the tree rather than loading an unbounded report into a state file.
+Use the same fragmentation for an unusually long identity. A fixed-size root
+digest is sufficient in summaries/events regardless of the number of marks.
 
-| Kind | Natural identity and facts |
+Scan logical entries before canonicalization/fragmentation and scan each
+serialized file too; splitting cannot hide a secret across fragments. Publish
+children before parents, verify every child digest and validate the complete
+logical schema before confirming a root. New files are create-only; an
+occupied digest path with different bytes is corruption. A missing file,
+invalid digest or incomplete tree authorizes no verdict. The brief and current grants roots are
+confirmed before the running summary; the result root before its final.
+
+The human summary uses counts and at most three bounded finding-title
+previews (160 characters each), plus immutable roots for full details.
+Header identifiers are at most 256 UTF-8 bytes; oversized external text is
+represented by `sha256:DIGEST` with its exact value in the referenced detail.
+Host, SHA, numeric and fixed-enum fields retain their stated formats; locally
+chosen names/rungs must fit their validated grammar and this bound. Header
+revision/counter integers fit signed 64-bit positive/nonnegative ranges.
+The header/body renderer has a byte-budget fixture proving every supported
+variant fits 8 KiB; it abbreviates previews, never required fields or roots.
+If an identifier alone would exceed the budget, store it in the detail root
+and use its digest identity in the summary/event; exact identity remains in
+that immutable detail. No admission limit on marked-commit count is needed.
+The session's full report may be larger than 8 KiB and is parsed/streamed
+separately from this generated summary.
+
+Register `[qa] sources = ["qa"]` in writers.toml. Extend records' permissions
+explicitly: qa may append source qa, replace only `qa/passes/NAME.md`, and
+create only correctly addressed `qa/details/sha256/DIGEST.json` files. Today
+declared producers are append-only; adding the declaration alone is
+insufficient. No general judgement/director-file permission is granted.
+Use proposed `record write --as qa PATH --from SAFE_FILE` with the new
+validators, plus existing `record append --as qa --batch HOST` for events.
+
+### 7.2 Version-1 running and final summary schemas
+
+Reject unknown header fields. A SHA is a full Git commit SHA; a digest is
+64 lowercase hex characters. UTC fields use record's UTC format. No TOML
+nulls, empty stand-ins or fabricated run/case results are allowed.
+All variants require these exact common fields:
+
+| Field | Type and meaning |
 |---|---|
-| `qa-default` | `default:UUID`; selection sequence, on/off, boundary SHA, reason |
-| `qa-decision` | `decision:UUID`; sequence, M, marked SHAs, run/backlog, reason |
-| `qa-pass-start` | `NAME:start`; selection sequence, consumed request ids, G, green event, merges, slot, rung, report |
-| `qa-pass-end` | `NAME:end`; done/capped/failed, wall/tokens, blocked counts and report |
-| `qa-pass-cancel` | `NAME:cancel`; proven unlaunched, restored request ids, sequence and reason |
-| `qa-merge` | `NAME:merge:M`; verdict cleared/found/incomplete, marked SHAs, case/finding numbers |
-| `qa-finding` | `NAME:finding:N`; likely marked SHA/M or unknown, concerns, report anchor, evidence reference |
-| `qa-route` | `NAME:route:N:REV`; recipient or backlog/drop, finding id, reason and delivery acceptance |
-| `qa-evidence` | `KIND:NAME:evidence:REV`; kept/refused, commit/directory or safe refusal digest |
+| `schema_version` | Integer 1 |
+| `variant` | String `running` or `final` |
+| `revision` | Positive per-pass publication revision (section 7.4) |
+| `repository`, `pass`, `host` | Strings: `fabrig`, pass name, inventory host |
+| `main`, `green_event` | SHA G and nonempty after-landing event identity |
+| `brief_digest` | Digest of the immutable complete brief root |
+| `created` | UTC reservation-transaction time, unchanged on retries |
+| `rung`, `slot` | Rung string, positive numeric slot from reservation |
+| `model`, `effort` | Nonempty strings, `unknown` until observed if not selected explicitly |
+| `logins`, `login_count` | Array of at most eight grant-name strings and nonnegative integer total grant count |
+| `grants_digest` | Complete runtime-grants root digest; reservation root has an empty entry set |
+| `evidence_status` | `unknown`, `refused` or `kept` |
 
-`cleared` means every mark in that merge received its planned happy/tricky
-cases with observed expected results, no blocked case and no attributed
-finding, in a normally completed pass. `found` means at least one finding
-attributed to that merge; it does not prove causation. Otherwise the merge
-is `incomplete`, including an absent/unparseable/unsafe report, cap or setup
-failure. An unknown-attribution finding prevents clearance of the whole
-pass's selected merges until reviewed; never infer clearance from the
-absence of a Findings heading. Verdicts describe that pass, not all future
-main. A subsequent run adds events; it does not erase findings or history.
+`evidence_commit` (SHA) and `evidence_directory` (safe relative path) are
+required only for kept and forbidden otherwise. They are the only optional
+common fields. All later revisions retain the immutable brief identity.
+Grant names/count/root reflect that revision's observed grants; revision 1 precedes resource
+effects and has `logins=[]`, login_count 0 and a confirmed empty grants root.
+Later revisions may add observations. Final grants detail lists every grant
+from authority; preview names are bounded and never a custody authority.
 
-Require exactly one TOML result block between whole-line
-`<!-- qa-results -->` and `<!-- /qa-results -->` sentinels, without a Markdown
-fence inside. Its version is `version = 1`; its arrays of tables are:
+A **running** summary additionally requires `outcome="running"` and
+`launch_state="reserved"|"launching"|"running"`. `started` is absent for
+reserved and required as a UTC time for launching/running: it is the durable
+launch-intent time from which the cap runs. `run` is a nonempty string only
+once metadata/acknowledgement establishes it; it is required for running,
+optional for launching and forbidden for reserved. Running forbids `ended`,
+`wall_seconds`, token fields, result fields and final `reason`; no completed
+case set or result block is required. The mandatory prelaunch publication
+is the reserved variant with no started/run/results. Launch-state updates
+are optional serialized later revisions; the authority still records them.
 
-- `[[merges]]`: `commit` (M), `marked` (the exact SHA array from the brief).
-- `[[cases]]`: unique string `id`, `merge` (M), `commit` (a mark in M),
+A **final** summary additionally requires:
+
+| Field | Type and permitted values |
+|---|---|
+| `outcome` | `done`, `capped`, `failed` or `cancelled` |
+| `reason` | `completed`, `cap`, `run_failed`, `cancelled_before_launch`, `failed_launch`, `missing_output`, `invalid_output` or `unsafe_output` |
+| `ended` | UTC final observation after stop/negative launch proof |
+| `wall_seconds` | Nonnegative integer from started to ended; 0 when never launched |
+| `result_status` | `complete`, `partial` or `synthetic` |
+| `result_digest` | Immutable complete result-tree digest |
+| `result_revision` | Revision that first published this final result |
+
+Final `started` is present iff a launch intent was committed; final `run` is
+present iff recovered/acknowledged, even for a failed launch. No launch intent
+means both absent and wall_seconds 0. `tokens_in`, `tokens_cached` and
+`tokens_out` are an all-or-none set of nonnegative integers when measured;
+all three are absent when unknown or never launched. `launch_state` is
+forbidden in finals.
+Outcome/reason pairs are done/completed, capped/cap, cancelled/
+cancelled_before_launch, or failed with any other reason. No header field
+beyond these lists is allowed. A done report may still have blocked cases
+and incomplete merge verdicts. Later evidence revisions preserve final
+result_revision/result_digest exactly.
+
+Create a **synthetic final** even without session output: cancellation is
+cancelled/cancelled_before_launch; proven failed launch is failed/failed_launch;
+a completed run with absent output is failed/missing_output. Invalid or unsafe
+output similarly gets failed/invalid_output or failed/unsafe_output. Synthetic
+results name every selected merge and mark through the brief root, contain
+empty case/finding arrays, a safe service-written blocked explanation, and
+incomplete for every selected merge. They never invent happy/tricky cases.
+A launched nonzero exit or cap with valid partial output uses result_status
+partial and records actual cases/findings; complete is reserved for normally
+completed, fully validated output. Cancellation finals are required even if
+a running summary never reached records. Cleanup and cancellation barriers
+do not depend on the session having produced a report.
+
+### 7.3 Complete result schema, verdicts and events
+
+The session writes exactly one TOML block between whole-line
+`<!-- qa-results -->` and `<!-- /qa-results -->` sentinels without an inner
+Markdown fence. Parse with tomllib. `version=1`, arrays `merges`, `cases`,
+`findings`, and optional `blocked` array of explanation strings are the only
+root keys; absent findings/cases in partial output are normalized to empty
+arrays and missing planned coverage is explicitly blocked. For complete
+output all three arrays are required, including empty `findings=[]`.
+
+- `[[merges]]`: `commit` (M), `marked` (exact ordered SHA array from brief).
+- `[[cases]]`: unique nonempty `id`, `merge` (M), `commit` (a mark in M),
   `kind` (`happy` or `tricky`), `outcome` (`ok`, `finding` or `blocked`),
-  nonempty `expected` and `observed` strings; `finding` is a positive finding
-  number and is required only for a finding outcome.
-- `[[findings]]`: unique positive integer `number`, `commit` (marked SHA,
-  M or `unknown`), `concerns` (`ordinary`, `security` or `lost data`), nonempty
+  nonempty `expected` and `observed`; positive `finding` number only when
+  outcome is finding, required then and forbidden otherwise.
+- `[[findings]]`: unique positive `number`, `commit` (marked SHA, M or
+  `unknown`), `concerns` (`ordinary`, `security` or `lost data`), nonempty
   `title`, `reproduce`, `expected`, `observed`, and `evidence` (safe relative
-  capture path or `none`). No findings uses an empty array, not a missing key.
+  capture path or `none`). No unknown table fields are allowed.
 
-Every selected M appears once; every marked SHA has exactly one happy case
-and two to four tricky cases. A blocked case still has an observed explanation.
-Every finding reference resolves and every finding appears in the human body
-under the same number. The service validates against the brief; duplicate or
-missing marks/cases, conflicting fields and unknown status yield incomplete,
-not cleared. The human Cases/Findings/Automation/Blocked body explains these
-results. Fixture both header and result schemas in the records-contract part
-before the scheduler relies on them.
+Complete output has every selected M once, each marked SHA exactly once in
+its merge table, one happy and two to four tricky cases per mark. Findings
+and case references agree with the human body. Partial output retains only
+validated actual observations and makes missing coverage explicit; ambiguous
+identities or invalid syntax produce a synthetic final. Normalize validated
+output into the durable result-tree logical entries: version/pass/brief
+identity, result status, all merge/mark/case/finding/blocked tables and the
+computed per-merge verdicts. Synthetic root metadata points to brief_digest
+for the complete selected identity set. This root is the canonical result,
+not the mutable summary or optional evidence copy.
 
-Report confirmation precedes dependent end/verdict/finding events, and those
-events precede routing posts. Every successful record call must confirm the
-remote publication as record.md specifies. Preserve exact pending bytes
-after exit 3, a conflict, timeout or lost reply; retries with the same ids
-and dates are idempotent. A failed publication does not release a consumed
-request for another pass. Late evidence updates append qa-evidence and
-update the report link; they never reroute old findings.
+`cleared` requires complete, normally completed output, every planned case
+ok, no blocked case and no attributed finding for that merge. `found` means
+at least one validated finding attributed to it; causation is not proven.
+Otherwise it is incomplete. An unknown-attribution finding prevents clearance
+of the pass's other merges. Synthetic/cancelled/absent output never clears.
+A later pass adds results without deleting findings/history.
+
+Events use record's id/time/source/host envelope, source qa. Exact ids and
+UTC times persist in the authority outbox. `coordinator` is present only for
+resolved route objects (section 2.1); `run` is omitted when unknown. Each
+line is at most 16 KiB: bounded counts/previews and fixed digest references
+replace unbounded merge/marked/case/finding arrays. Oversize identity text
+is stored in detail and represented by its SHA-256 plus detail reference.
+Brief/result roots hold all exact values; an oversized preview is omitted.
+
+| Kind | Identity and bounded facts |
+|---|---|
+| `qa-default` | `default:UUID`; sequence, on/off, boundary SHA, reason or reason digest |
+| `qa-decision` | `decision:UUID`; sequence, M, run/backlog, request pair, brief/selection detail digest |
+| `qa-pass-start` | `NAME:start`; sequence, request count, brief_digest, G, green event, slot/rung, running report revision/digest |
+| `qa-pass-end` | `NAME:end`; outcome, wall/tokens/counts, final report revision/digest, result_revision/result_digest |
+| `qa-pass-cancel` | `NAME:cancel`; restored-request count/digest, sequence/reason, synthetic final revision/digest |
+| `qa-merge` | `NAME:merge:M`; M, cleared/found/incomplete, counts, final report revision/digest and result_digest |
+| `qa-finding` | `NAME:finding:N`; safe title preview, likely SHA/M or unknown, concerns, final report revision/digest and result_digest |
+| `qa-route` | `NAME:route:N:REV`; desired revision and owner/backlog/drop, address for owner, reason/digest, finding id |
+| `qa-delivery` | `NAME:delivery:N:REV:ATTEMPT`; route revision, accepted/failed/uncertain/superseded, recipient, stable finding id |
+| `qa-evidence` | `KIND:NAME:evidence:REV`; kept/refused/digest, report revision/digest for passes, unchanged result_digest when final |
+
+### 7.4 Serialized report publication and exact references
+
+All report publications for one pass share a single serialized authority
+lane and `publish/NAME.lock`. Hold that lock across the writer call and
+confirmation; inherit its descriptor into the bounded writer child so an
+orphan still excludes another publisher. Under this lock take walks.lock
+briefly for authority mutations, never the reverse; hold neither routes.lock
+nor walks.lock across record calls. Queuing a later revision under admission
+does not authorize publishing it while this lane is busy. Before any call,
+commit its immutable bytes, SHA-256, monotonically increasing revision, variant
+and dependent event intents in the authority.
+Only the next unconfirmed revision may be sent; no concurrent report writers
+or independently replayable old report outboxes exist. Calls and their child
+processes are tracked until completion. A timeout is uncertain, not permission
+to start a newer revision while an old writer might still publish.
+
+Resolve an uncertain write by fetching records and inspecting the exact
+path's bytes/header revision and digest. Matching bytes confirm it; an absent
+path or lower revision permits retry of the exact saved next revision only after the old
+writer is proven finished. A higher revision absent from the local authority
+or equal revision with another digest is corruption: freeze the lane and
+alert; never overwrite it. A higher *known* confirmed revision means the
+older receipt was superseded locally and must never be replayed. After
+confirmation, durably advance the cursor before the next revision; crash
+recovery repeats this inspection, not an unconditional stale `record write`.
+
+Publish all detail children/roots, then the corresponding summary, then its
+dependent events. Every event referencing a pass report names
+`report_revision` and `report_sha256`; verdict/finding/end events also name
+`result_revision` and `result_digest`.
+Retain immutable summary bytes as a `summary` logical entry in a separate
+detail tree and put its `report_archive_digest` in events, allowing exact
+verification after the path advances. That archive tree is published before
+the mutable summary; it contains no self-reference. Later evidence metadata
+gets the next report revision but preserves the original final result digest
+and result_revision. Its event names the updated summary revision/digest.
+Evidence update requests arriving before final confirmation wait behind that
+final in the lane. No metadata retry may restore a running report over a
+final or remove a later evidence link. Final verdict events may publish after
+a later metadata revision only by their exact archived final reference.
+
+Publication confirmation follows record.md: fetch and prove remote
+containment/exact bytes, not exit status alone. Preserve exact pending bytes
+and original ids/dates after deferred/conflict/lost replies. Report/evidence
+publication failure never releases a consumed request or blocks login returns.
+No finding post precedes confirmed final details, summary and finding event.
 
 ## 8. Findings and the coordinator
 
@@ -411,23 +639,61 @@ lost-data concerns go to the director. Stuck logins and infrastructure/input
 exceptions also go there. The queue's lead address is not a fallback, and
 the director is not copied on ordinary attributed findings.
 
-After confirmed report and finding-event publication, persist an outbox item
-per finding and recipient. Send as qa-watch, subject bounded to 200 characters,
-body under 15 lines: stable finding event id, G, M, marked SHA, title,
-records report path/anchor, evidence repository/commit/directory (or refused/
-pending status), and machine. If evidence is pending, also name the retained
-scratch path, explicitly local to that host. Never put raw captures or
-secret-match text in a post. Post exits 0 and 3 are accepted; save the receipt
-before appending qa-route. A crash between delivery and receipt can repeat a
-post; the stable event id lets the recipient recognize it. A records retry
-after a saved receipt sends no post again.
+Create the initial automatic **desired route** at revision 1 in the authority
+with its finding and publication intents. `qa-route` records intent, not
+acceptance; `qa-delivery` records attempts/receipts separately. After confirmed
+final report/details and finding/route events, a delivery can become eligible.
+Every outbox item is bound to `(pass, finding number, route revision)`, desired
+owner address, immutable body digest, finding/result references and attempt
+state. Backlog/drop have a route revision but no new send item.
 
-`qa findings` lists finding events without a route or with a failed delivery.
-`qa triage PASS N owner ADDRESS|backlog|drop [--why TEXT]` records a manual
-override and revision; owner sends through the same outbox. Backlog/drop stay
-as route events, not invented director/backlog.md writes. Finding numbers
-stay stable across report metadata updates. An unreadable route does not
-disappear from the queue; the director's exception and its retry are durable.
+Use one routing lock `routes.lock` for triage and send, with fixed order
+routes.lock then walks.lock when both are needed; release both before report
+publication. Under that lock, `qa triage PASS N owner ADDRESS|backlog|drop
+[--why TEXT]` atomically commits the next desired revision and marks older
+**unsent or known-failed** items superseded in the same authority generation.
+Owner creates a replacement item; backlog/drop does not. Old accepted
+receipts remain historical facts, never reclassified as cancelled. The
+new desired route is durably pending publication even if records is down;
+older eligible items cannot slip through during that interval.
+
+Immediately before sending, acquire routes.lock, reload the authority and
+compare the item's revision/address to the current desired route. A mismatch
+supersedes it without post. Persist an attempt intent, retain routes.lock
+across the bounded post call and persist its result before unlocking. Pass
+the routing-lock descriptor to that child, so a surviving send after watcher
+death still excludes triage/send until reconciliation. Triage either
+supersedes an unsent item before send or follows an already
+attempted delivery; it cannot race between the check and post. All authority
+updates take walks.lock briefly in that order, so concurrent cleanup updates
+merge against the latest generation without losing triage. No other code
+acquires routes.lock while holding walks.lock.
+
+Send as qa-watch, subject at most 200 characters, body under 15 lines:
+stable finding id, route revision/attempt id, G/M/marked SHA or digest,
+bounded title, immutable result/report revision/digests, records paths,
+evidence commit/directory or refused/pending status, and host. Pending
+evidence can name retained host-local scratch. Never send raw captures or
+secret-match text. Post exits 0/3 are accepted; persist that receipt before
+publishing qa-delivery. Known failures retry only if their route revision
+remains current, with a new saved attempt id.
+
+Timeout, lost reply, or a crash with an unfinished attempt is **uncertain**.
+On restart acquire routes.lock and reconcile/drain the exact send child
+before another send for that finding. Preserve the uncertain receipt across
+triage; do not claim that supersession withdrew a possibly delivered post.
+After the child ends, a superseded uncertain attempt is recorded as uncertain
+and is never retried; a current uncertain revision may be retried at least
+once with its stable finding id, acknowledging possible duplicate delivery.
+Accepted older deliveries may coexist with a newer backlog/drop or owner;
+the route history makes that order explicit. A saved accepted receipt causes
+no resend merely because its delivery event publication failed.
+
+`qa findings` lists findings without a current desired route or with a current
+owner delivery not accepted, including failed/uncertain states. Backlog/drop
+remain as route events rather than invented director/backlog.md writes.
+Finding numbers stay stable across report metadata revisions. Unreadable
+route state freezes delivery and preserves an explicit director exception.
 
 ## 9. Evidence, scanning and seven-day pruning
 
@@ -487,9 +753,11 @@ forbidden regardless of masking.
 The 2048 KiB cap omits evidence/ whole first, then scripts/ whole, with file/
 byte counts and unreadable entries in the index. Documents alone over cap
 refuse; other scan failures never cause selective copying of a snapshot.
-For the records report only, unsafe body lines become `(withheld: RULE)`;
-unsafe findings keep a safe numbered heading and route an exception without
-their text. Scan all report metadata, routes, event fields and generated
+For records summaries/details, unsafe text becomes a safe `(withheld: RULE)`
+placeholder before publication; unsafe findings retain their number and route
+an exception without their text. Any withheld required result produces a
+synthetic unsafe_output final rather than a cleared result. The original
+unsafe bytes never enter a detail tree or summary archive. Scan all report metadata, routes, event fields and generated
 post bodies too. An unsafe marker/subject must not bypass the scan via
 front matter. A withheld required result cannot yield cleared.
 
@@ -535,14 +803,14 @@ records and evidence origins are fixed/validated in production.
 
 | Setting | Default / activation value | Validation and use |
 |---|---|---|
-| `QA_PASS_SLOTS` | empty / two allocated hetzner6 numbers | Same compact number-list grammar as walk slots; empty disables starts |
+| `QA_PASS_SLOTS` | empty / `11,12` on hetzner6 | Same compact number-list grammar as walk slots; empty disables starts |
 | `QA_BATCH` | 5 | Positive marked merges per pass |
 | `QA_CAP_MINUTES` | 120 | Positive; persisted at launch |
 | `QA_LOGIN_RESERVE` | 2 | Nonnegative; at least each pool's summed walk slot caps |
-| `QA_PASS_RUNG` | unset until binding reviewed | Lowercase rung slug; must exist in binding |
-| `QA_PASS_BINDING` | unset until binding reviewed | Safe repo-relative Markdown path at G |
+| `QA_PASS_RUNG` | reviewed live ChatGPT rung, explicit at activation | Lowercase rung slug; must exist in binding |
+| `QA_PASS_BINDING` | reviewed live ChatGPT binding path, explicit at activation | Safe repo-relative Markdown path at G |
 | `QA_PASS_POOLS` | `chatgpt` | Unique base pools in compact + separated form; explicit none for fakes |
-| `QA_AFTER_LANDING_HOST` | unset until activation | One authoritative hosted records producer; required for starts |
+| `QA_AFTER_LANDING_HOST` | deployed after-landing host, explicit at activation | One authoritative hosted records producer; required for starts |
 | `QA_EVIDENCE_KIB` | 2048 | Positive snapshot cap |
 | `QA_EVIDENCE_SECONDS` | 120 | Positive total bound per keep attempt |
 | `QA_RETENTION_DAYS` | 7 | Fixed policy for this design; no deletion before it |
@@ -553,21 +821,71 @@ and bounds from qa.md. Validate pass-only settings for pass admission without
 preventing already held walks or passes from cleaning up after a settings
 error. Settings lowering capacity never invalidates saved ownership.
 
-Local state under DEV_TMP/qa (0700 directories, 0600 metadata) consists of
-`passes/NAME.json`, existing `walks/NAME.json`, `selection.json` (sequence,
-defaults/decisions, consumed requests and feed/snapshot cursors), publication
-and post outboxes, evidence snapshots, attention receipts and tombstones.
-Pass scratch is `DEV_TMP/qa-passes/NAME/`, walk scratch remains qa-focused.
-Names contain host, UTC start and a random suffix, avoiding same-minute
-collisions. Saved pass state includes the complete mark/route mapping, G and
-green event, request ids, slot/claim/checkout sequence, grants and kinds,
-task/report/run/launch observations, immutable cap, cleanup steps, report
-digest, verdict/finding ids, evidence tree/status, delivery receipts and
-end/prune times. State files are bounded, descriptor-validated and atomically
-replaced as today's walks. Corrupt state blocks affected admission and stray
-custody reconciliation without stopping other valid cleanup. State may be
-rebuilt from confirmed records only under an explicit recovery procedure;
-records alone cannot prove that a live deployment no longer owns resources.
+Local state under DEV_TMP/qa uses 0700 directories and 0600 metadata.
+`authority.json` is the sole authority for pass selection, reservation,
+lifetime, report publications and routing. `passes/NAME.json`, selection
+listings and standalone outbox files, if retained for inspection, are
+read-only projections stamped with authority generation/digest; recovery
+never trusts them over the authority. Existing `walks/NAME.json` remains
+walk authority; no second authority for pass claims is introduced. Pass
+scratch is `DEV_TMP/qa-passes/NAME/`; walks remain in qa-focused. Pass names
+contain host, UTC reservation time and a random suffix allocated in the
+reservation transaction and never regenerated on restart.
+
+### 10.1 One authoritative write-ahead state and partial transitions
+
+The version-1 `authority.json` contains `schema_version`, monotonically
+increasing `generation`, and digest roots for selection, pass transactions,
+publication lanes, routes/deliveries and attention/cleanup state. Use local
+immutable canonical-JSON pages (at most 32 KiB, paged like section 7.1) so the
+root/state reader bound does not limit marks or request count. Before a root
+replacement, stage/fsync every referenced page and payload **and their
+containing directory entries**, then fsync a sibling root, rename it and
+fsync its parent directory. That single root
+commit is the transaction boundary. Retain prior generations and referenced
+payloads; reference-aware local page GC is Later. Unreferenced staging after
+a crash supplies no authority and permits no external action.
+
+Under walks.lock, a reservation transaction changes all of these together:
+request-pair owners/consumption, stable pass ids and disjoint shares for the
+whole batch, G/green snapshot, complete brief roots/route snapshots, selected
+slots and unique claim WHAT values, stage `reserved`, report revision-1
+bytes/digests and all initial detail/report/event publication intents. Publish
+intent here means a durable plan, not a claim of remote success. All later
+mutators reload the current root under walks.lock and commit a new generation;
+no callback edits a projection or overwrites a stale root.
+
+Every external effect has an intent committed before the call and an
+observation committed afterward, keyed to the same pass/operation identity.
+Retain task/report/run observations, pool/name/kind grants, unit/job proofs,
+claim/release state, cap, cleanup progress, exact pending publication bytes,
+report revisions/digests, route receipts, end/prune times and tombstones.
+The recovery rules for interrupted boundaries are:
+
+| Last durable boundary | Recovery |
+|---|---|
+| Pages staged, root not committed | Ignore staging; previous request ownership remains. No external effect was permitted. |
+| Reservation/consumption committed, no effect intent | Resume that same pass/reservation or cancel it; never allocate its request elsewhere. |
+| Claim or login-take intent, no saved reply | Reconcile the exact WHAT or saved holder through strict inventory/central claims; uncertainty retains ownership and forbids a replacement take/claim. |
+| Brief/running report/start-event publication incomplete | Resume exact saved bytes/revision in dependency order; resources may be cleaned and cancellation queued, but do not launch before confirmation. |
+| Running/start publications confirmed, no launch intent | Revalidate and either launch the same pass or commit cancellation. A remote running report does not itself mean a launcher exists. |
+| Launch intent committed, reply/meta missing | Recover the exact task/report/launcher with qa.md's grace and negative proofs; never call launch twice. Proven failure gets a synthetic failed_launch final; unknown keeps custody. |
+| End/cap observation or cleanup step interrupted | Reconcile that step's external outcome and continue from authority; retain the consumed request. |
+| Cancellation committed, publication or release unfinished | Keep the restored request behind M's cancellation barrier; finish synthetic final/cancel publication and custody cleanup, then atomically clear the barrier. |
+| Publication accepted, receipt/root update lost | Inspect saved revision/digest or event id on records; confirm or replay exact bytes without reallocating ids. |
+| Send intent without receipt | Preserve uncertain delivery and reconcile under routes.lock (section 8); never silently cancel possible acceptance. |
+| Projection/outbox export interrupted | Regenerate from the committed root; neither consumption nor ownership changes. |
+
+Cancellation commits its terminal observation, synthetic-final/result intents,
+conditional request restoration and barrier **in one root replacement**.
+Barrier clearance is another single replacement after all required proofs;
+a crash on either side exposes one consistent state. A newer explicit
+backlog/run decision is preserved and never overwritten by restoration.
+No records reconstruction can bypass local pending ownership. Corrupt/missing
+referenced pages or roots disable pass admission/delivery and alert; safe
+independent walk cleanup can continue. Records-based repair is explicit and
+must account for active claims/units first. Ordinary bounded file/descriptor
+safety rules still apply to every page and snapshot.
 
 Commands added to the existing qa CLI:
 
@@ -597,25 +915,27 @@ names the pending operation id. `keep` uses its explicit statuses above.
 Under the existing nonblocking watch lock, at startup, every mailbox wake
 and each 300-second timeout:
 
-1. Load safe saved states and current settings; recover possible launches
-   before considering starts. A busy admission lock still permits current
+1. Load the committed authority root and safe walk states/settings; recover
+   partial transitions by section 10.1 and possible launches before starts. A busy admission lock still permits current
    read-only overdue-launch attention, never custody mutations.
 2. Under admission, obtain strict inventory and reconcile each owned walk
    and pass: cap stops, wrapper completion, grants, deployments, claims and
    saved attention. Isolate failures per state and preserve foreign custody.
 3. Outside admission, retry safe evidence/report/event outboxes and accepted
-   receipt bookkeeping, then finding/exception posts whose publications are
-   confirmed. A publication deferral never prolongs an unlaunched reservation:
-   cancel it through cleanup; uncertain launches retain custody.
+   receipt bookkeeping in the per-pass serialized lanes, then revision-checked
+   finding/exception posts whose publications are confirmed. A publication
+   deferral never prolongs an unlaunched reservation: cancel it through cleanup; uncertain launches retain custody.
 4. Pull records once and fetch metadata with bounded calls. Validate feed
    completeness, main ancestry, defaults/decisions and authoritative green
    runs. If any admission input is unavailable, keep reservations unchanged
    and skip starts. Other cleanup, outbox and prune work continues.
 5. Under admission, recheck counts/claims and plan disjoint shares; pending
-   control publications disable new starts until resolved. Claim and prepare
-   slots before taking logins. Persist all reservations/takes, publish
-   running reports/start events, then launch complete admissions only. If
-   publication waits, cancel proven unlaunched reservations through cleanup
+   control publications disable new starts until resolved. First commit the
+   complete reservation/consumption transaction, then claim/prepare slots
+   before taking logins, committing each effect intent/observation. Release
+   admission before publishing running details/summaries/start events in the
+   report lane; reacquire it and revalidate before launch. If publication
+   waits, cancel proven unlaunched reservations through cleanup
    so they do not tie up logins until the next network recovery. Keep unknown
    launch ownership held. Revalidate saved selection if decisions advanced.
 6. Retry eligible preservation and pruning (section 9), save progress, then
@@ -673,10 +993,37 @@ Required acceptance worlds:
   seven-day boundaries, kept/refused/waiting copies, stuck custody, pending
   notices/routes and retained tombstones. Pruning touches only owned scratch.
 
+Round-2 regression worlds are named as implementation acceptance tests:
+
+- `authority_two_merges_one_default` consumes `[default_id, M1]` without
+  consuming `[default_id, M2]`. `authority_crash_each_boundary` kills before/
+  after root commit, every external intent/observation, cancellation commit
+  and barrier clearance; projections can be stale without changing ownership.
+- `report_reserved_without_results` accepts a running prelaunch header;
+  `report_running_forbidden_fields` rejects invented final fields.
+  `report_final_cancel`, `report_final_missing_output` and
+  `report_final_failed_launch` validate synthetic finals and required absences.
+- `details_many_marks_one_merge` exceeds 8 KiB with complete results;
+  `details_evidence_refused` still reads them from confirmed records.
+  `details_fragmented_entry` checks escaping/size/reassembly, missing children
+  and a secret shape split across fragments before any publication.
+- `report_lost_write_child_alive`, `report_old_retry_after_final` and
+  `report_evidence_revision` prove serialized publication, exact archived
+  references and stable result digests. `report_revision_digest_conflict`
+  freezes publication rather than rolling back a final.
+- `route_failed_then_backlog`, `route_failed_then_drop` and
+  `route_failed_then_new_owner` never retry superseded sends. Include triage
+  racing the pre-send revision check, an orphan holding routes.lock, and
+  `route_uncertain_then_override` retaining possible prior delivery alongside
+  the new desired revision. Accepted receipts survive event-publication retry.
+- The six named route/publication producer fixtures in section 2.1 exercise
+  resolved/unassigned/missing/historical data and reject every other wire
+  spelling, including a null optional coordinator join.
+
 Producer changes additionally extend records/test_record_collect.py and
 test_record.py with the queue merge projection, narrowly scoped QA report
-writes, invalid schemas and publication replay. Queue's own fake-origin
-tests cover route snapshot, merge journal/recovery and all roster readers.
+writes/details, both report variants and synthetic finals, invalid schemas
+and publication replay. Queue's own fake-origin tests cover route snapshot, merge journal/recovery and all roster readers.
 Run focused suites with Python 3.13 `-I -B`, then tools/check.sh in agents;
 fabrig's producer change uses its queue tools gate. No cargo/heavy or live
 machine test is required to review this design.
@@ -689,14 +1036,15 @@ Implement as reviewable parts with explicit dependencies:
    recovery; agents record-collect merge events. Publish fixtures/contracts
    together. This supplies stable landing identity and historical coordinator.
 2. **Records contract:** scoped qa writer, report path/schema, event validation
-   and replay; define the TOML result block and a pure selection/feed/green
-   reader using local origins. No scheduler before these two parts pass.
+   and replay; immutable detail trees, versioned report/result schemas and
+   a pure selection/feed/green reader using local origins. No scheduler
+   before these two parts pass.
 3. **Preservation:** common snapshot scanner and evidence writer, keep CLI,
    walk final-end integration and guarded pruning. Preserve walk safety and
    earlier attempt reports before adding pass scheduling.
 4. **Pass lifetime:** common slot/admission/claim/launch/deploy/cleanup code
-   for pass states with regression tests for walks; no watcher scheduling
-   until faked crash/custody worlds pass.
+   and the atomic authority snapshot for pass states, with walk regressions;
+   no watcher scheduling until faked crash/custody worlds pass.
 5. **Scheduler and routing:** control CLI, defaults, batch shares, brief/report
    interpretation, records outboxes, coordinator delivery and pass listings,
    followed by the watcher loop acceptance worlds.
@@ -723,7 +1071,7 @@ evidence, secret rules and guarded seven-day retention. Depart deliberately:
 - Published after-landing-run green events replace landings cleared. QA
   verdicts/decisions/routes are records events and reports use today's locked
   writer, replacing free-form records/qa Markdown ledgers.
-- Two pass slots are proposed, not legacy four, with actual numeric walk
+- Two dedicated pass slots are selected, not legacy four, with numeric walk
   slots determining reserve validation. Current configured walk numbers do
   not justify restoring legacy COUNT caps.
 - Evidence stays in the legacy durable location but uses a separate metadata
@@ -734,25 +1082,25 @@ evidence, secret rules and guarded seven-day retention. Depart deliberately:
   findings go straight to the saved coordinator. Exceptions still receive
   attention. Structured results prevent absent prose from looking cleared.
 
-## 13. Questions
+## 13. Questions — answered by coordinator q, 2026-10-30
 
-- **Which two hetzner6 numeric slots?** Options: allocate two additional s/qa
-  shares, or obtain two explicitly lent pool slots. Recommend two dedicated
-  shares with fleet-created fabrig clones. The sources assign only walks'
-  4 and 8; no other slot is authorized here. Pass starts stay disabled until
-  ops/director allocates the pair; walks keep their slots.
-- **Which fabrig binding/rung and after-landing producer host at activation?**
-  Options: review the current live-model binding and ChatGPT pool, or start
-  with its no-login fake rung. Recommend the reviewed live-model binding,
-  ChatGPT reserve 2, and ops's actual after-landing host. The sources propose
-  a host but do not establish its activation, and do not identify an approved
-  monorepo binding/rung. Set the explicit settings only after that review.
-- **Where does the default begin, and do old marks need backfill?** Options:
-  activation main S with no backfill, or an older reviewed S plus reconstructed
-  merge/route events. Recommend activation main with `qa default on --at S`;
-  select important older work through explicit decisions after a reviewed
-  backfill. New third-column roster entries require coordinator review,
-  rather than guessing historic ownership from today's leads.
+- **Slots — answered:** dedicated s/qa pass shares on hetzner6 are **11 and
+  12**. The selected walk allocation is forgejo **8 and 9**, claude **4 and
+  10**, once disk allows. Apply those settings only with ready clones and
+  successful disk checks; this document does not claim the extra slots are
+  already provisioned. Reserve 2 covers forgejo's two ChatGPT slots and
+  claude's two Claude slots separately; the common admission validation
+  still checks the actually configured mappings during rollout.
+- **Binding/rung and host — answered:** use the **reviewed live ChatGPT
+  binding on the deployed after-landing host**, not the fake rung or a
+  proposed undeployed host. Activation records the concrete approved binding
+  path/rung and actual inventory host in the settings; no new design choice
+  is delegated to the implementer and this doc does not guess those strings.
+- **Default boundary — answered:** start at **activation main S**, with
+  `qa default on --at S` and **no automatic backfill**. Important earlier
+  work requires a separately reviewed backfill and explicit run decisions.
+  Coordinator roster assignments still need their owners' concrete addresses;
+  missing/historical routes use section 2.1's unresolved representation.
 
 ## 14. Later
 
@@ -760,8 +1108,8 @@ evidence, secret rules and guarded seven-day retention. Depart deliberately:
   blockage causes; for now repeat work needs an explicit run decision.
 - Multi-host pass scheduling and distributed admission authority, additional
   provider pools/rungs, adaptive batching and resource-based slot reductions.
-- Reference-aware records/evidence GC, transcript preservation and a web
-  findings view. Seven-day scratch pruning is not evidence retention expiry.
+- Reference-aware local authority-page and records/evidence GC, transcript
+  preservation and a web findings view. Seven-day scratch pruning is not evidence retention expiry.
 - Automated repair tasks, causality bisection of QA findings, or feeding QA
   verdicts back into merge-queue admission. A pass's found verdict proves
   neither the culprit nor that another merge is safe.
