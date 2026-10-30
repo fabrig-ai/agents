@@ -12,7 +12,7 @@ seed = true
 hostname = "debian-16gb-hel1-3"
 ssh = "free@2.29.124.199"
 roles = ["builder"]
-machine_env = { PLAN_MIN_DISK_GB = 40, KACHE_MAX_GB = 40, KACHE_LOCAL_ONLY = 1, HEAVY_BUILD_SLOTS = 3, AGENTS_PERIODIC = 1, SESSION_SLOTS = 3 }
+machine_env = { PLAN_MIN_DISK_GB = 40, KACHE_MAX_GB = 40, KACHE_LOCAL_ONLY = 1, HEAVY_BUILD_SLOTS = 3, SESSION_SLOTS = 3 }
 env = {}
 
 [hosts.hetzner6]
