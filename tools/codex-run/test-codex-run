@@ -1,0 +1,1771 @@
+#!/usr/bin/env bash
+# Test codex-run in an isolated workspace with fake Codex, post and units.
+set -Eeuo pipefail
+umask 077
+trap 'echo "test-codex-run: failed at line $LINENO" >&2' ERR
+started=$(date +%s.%N)
+# Like case_runner.py: five minutes of tool hang patience; a unit runs
+# several tools (and sometimes retries or an ExecStop), so allow a whole
+# case. The supplied standalone baseline is 179 checks in 19 seconds.
+HUNG_TOOL_S=300
+HUNG_CASE_S=$((3 * HUNG_TOOL_S))
+# This deadline is the subject of the TERM-ignoring callback case.
+ON_STOP_TIMEOUT_S=1
+kit=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
+scratch_parent=$(cd "$kit/../.." && pwd -P)
+t=$(mktemp -d "$scratch_parent/.test-codex-run.XXXXXX")
+cleanup() {
+    local file pid
+    for file in "$DEV_ROOT"/fake/*.pid; do
+        [[ -f $file && ! -f ${file%.pid}.ended ]] || continue
+        read -r pid <"$file"
+        kill "$pid" 2>/dev/null || true
+    done
+    rm -rf "$t"
+}
+export HOME=$t/home DEV_ROOT=$t/workspace POST_NAME=o/caller
+export CODEX_RUN_RETRY_DELAYS='0 0 0'
+mkdir -p "$HOME" "$DEV_ROOT/fake" "$t/bin" "$t/reports" "$t/work dir" "$t/fabrig/tools/codex-run" "$t/fabrig/tools/slots"
+trap cleanup EXIT
+cp "$kit/codex-run" "$t/fabrig/tools/codex-run/codex-run"
+cp "$kit/final.py" "$t/fabrig/tools/codex-run/final.py"
+cp "$kit/../slots/lifetime.py" "$t/fabrig/tools/slots/lifetime.py"
+kit=$t/fabrig/tools/codex-run
+# No host directory is searchable, including when a service fake is removed.
+for tool in awk bash cat chmod cmp cp cut date dirname env flock grep head jq ln mkdir mkfifo \
+    mv od perl python3 readlink realpath rm rmdir sed setsid sleep stat systemd-escape tail timeout touch tr true wc; do
+    [[ -x /usr/bin/$tool ]]
+    ln -s "/usr/bin/$tool" "$t/bin/$tool"
+done
+export PATH=$t/bin
+export BASH_ENV=$t/service-env
+printf 'fixture_path=%q\nfixture_audit=%q\n' "$PATH" "$t/isolation-audit" >"$BASH_ENV"
+cat >>"$BASH_ENV" <<'AUDIT'
+# Independent of producer calls: abort before shell code can use a host PATH.
+if [[ $PATH != "$fixture_path" ]]; then
+    printf 'UNSAFE PATH %s\n' "$PATH" >>"$fixture_audit"
+    exit 99
+fi
+fixture_reap=missing fixture_systemctl=missing
+[[ ! -x $fixture_path/reap ]] || fixture_reap=stub
+[[ ! -x $fixture_path/systemctl ]] || fixture_systemctl=stub
+printf '%s\t%s\t%s\t%s\t%s\n' "$BASHPID" "$PATH" "$fixture_reap" "$fixture_systemctl" "$0" >>"$fixture_audit"
+AUDIT
+fake=$DEV_ROOT/fake
+export CODEX_RUN_FIXTURE_ROOT=$DEV_ROOT
+# A monitor notifies only after publishing its ended marker. Keep a reader
+# open so a fast unit can finish before wait_unit starts reading.
+mkfifo "$fake/unit-events" "$fake/pause-release"
+exec {unit_events}<>"$fake/unit-events"
+# Pause until the signal case ends this child, regardless of host scheduling.
+# A reader held open also lets the child open its end without a handshake.
+exec {pause_release}<>"$fake/pause-release"
+printf 'Implement the fixture task.\n' >"$t/task file.md"
+printf 'Own the fixture tasks.\n' >"$t/brief.md"
+
+# The fixture's login profile supplies PATH; the launcher must not forward it.
+printf 'export PATH=%q\n' "$t/bin" >"$HOME/.bash_profile"
+cat >"$t/bin/systemd-run.python" <<'FAKE'
+#!/usr/bin/python3 -IS
+import os, pathlib, shlex, signal, subprocess, sys
+args = sys.argv[1:]
+fixture = pathlib.Path(os.environ.get('DEV_ROOT') or os.environ['CODEX_RUN_FIXTURE_ROOT']).resolve() / 'fake'
+(fixture / 'launch.args').write_bytes(b'\0'.join(os.fsencode(a) for a in args) + b'\0')
+if (fixture / 'launch-fail').exists():
+    sys.exit('fixture launch failed')
+env = {key: os.environ[key] for key in ('HOME', 'PATH', 'BASH_ENV')}
+unit = ''
+stop = None
+assert '--service-type=exec' in args
+while args:
+    arg = args.pop(0)
+    if arg in ('--user', '--collect', '--quiet', '--service-type=exec'):
+        continue
+    if arg == '--unit':
+        unit = args.pop(0)
+    elif arg.startswith('--property='):
+        assert stop is None and arg.startswith('--property=ExecStop=-'), arg
+        stop = arg[len('--property=ExecStop=-'):]
+        (fixture / 'stop.property').write_text(stop)
+    elif arg.startswith('--setenv='):
+        key, value = arg[len('--setenv='):].split('=', 1)
+        assert key in ('DEV_ROOT', 'CODEX_RUN_RETRY_DELAYS'), key
+        env[key] = value
+    else:
+        args.insert(0, arg)
+        break
+assert args[:3] == ['bash', '-lc', 'exec "$0" "$@"']
+stop_args = None
+if stop is not None:
+    # Only the quoted tokens our launcher emits: check syntax AND decoded argv.
+    expected = [args[3], '_stop', args[5]]
+    assert stop == ' '.join('"' + token + '"' for token in expected), stop
+    stop_args = shlex.split(stop)
+    assert stop_args == expected, stop_args
+    (fixture / 'stop.argv').write_text(repr(stop_args))
+# Emulate exec's launch-time refusal, including a removed worker executable.
+if (fixture / 'missing-executable').exists():
+    args[3] = str(fixture / 'missing-worker')
+if not os.access(args[3], os.X_OK):
+    sys.exit('worker executable missing')
+if (fixture / 'hold-launch').exists():
+    sys.exit(0)
+# A private profile emulates the login environment without using real tools/state.
+command = ['/bin/bash', '--noprofile', '--norc', '-c',
+           'source "$HOME/.bash_profile"; exec "$0" "$@"', *args[3:]]
+# A unit starts with default signal dispositions, also when this fixture runs
+# as a background job, which ignores SIGINT and SIGQUIT.
+signal.signal(signal.SIGINT, signal.SIG_DFL)
+signal.signal(signal.SIGQUIT, signal.SIG_DFL)
+with (fixture / (unit + '.log')).open('wb') as log:
+    pid = os.fork()
+    if pid == 0:
+        orphan_story = ((fixture / 'scenario').exists() and
+                        (fixture / 'scenario').read_text().strip() == 'orphan')
+        if orphan_story:
+            import ctypes
+            assert ctypes.CDLL(None).prctl(36, 1, 0, 0, 0) == 0
+            signal.signal(signal.SIGTERM, lambda sig, frame:
+                          (fixture / (unit + '.manager-signal')).write_text(str(sig)))
+        os.dup2(log.fileno(), 1)
+        os.dup2(log.fileno(), 2)
+        proc = subprocess.Popen(command, env=env, stdin=subprocess.DEVNULL,
+                                stdout=log, stderr=log, start_new_session=True)
+        (fixture / (unit + '.pid')).write_text(str(proc.pid) + '\n')
+        status = proc.wait()
+        if orphan_story:
+            while True:
+                try:
+                    os.waitpid(-1, 0)
+                except ChildProcessError:
+                    break
+        if stop_args is not None:
+            subprocess.run(stop_args, env=env, stdin=subprocess.DEVNULL,
+                           stdout=log, stderr=log, check=True)
+        (fixture / (unit + '.ended')).write_text(str(status) + '\n')
+        fd = os.open(fixture / 'unit-events', os.O_WRONLY | os.O_NONBLOCK)
+        os.write(fd, (unit + '\n').encode())
+        os.close(fd)
+        os._exit(0)
+FAKE
+cat >"$t/bin/systemctl" <<'FAKE'
+#!/usr/bin/env bash
+fixture=${DEV_ROOT:-$CODEX_RUN_FIXTURE_ROOT}/fake
+printf '%s\n' "$*" >>"$fixture/systemctl.calls"
+if [[ $1 == --user && $2 == list-units ]]; then
+    mode=inactive
+    [[ ! -f $fixture/final-liveness ]] || mode=$(<"$fixture/final-liveness")
+    case $mode in
+        inactive) printf '%s loaded inactive dead fixture\n' "${!#}" ;;
+        gone) ;;
+        active) printf '%s loaded active running fixture\n' "${!#}" ;;
+        unknown) exit 4 ;;
+        malformed) printf 'unknown unit state\n' ;;
+        hang) exec /bin/sleep 300 ;;
+        disappear)
+            printf '%s loaded inactive dead fixture\n' "${!#}"
+            mv "${BASH_SOURCE[0]}" "${BASH_SOURCE[0]}.saved" ;;
+        *) exit 2 ;;
+    esac
+    exit 0
+fi
+if [[ $* == '--user start --no-block reap.service' ]]; then
+    source "${BASH_SOURCE[0]%/*}/fixture-json"
+    json_call args systemctl "$@" >>"$fixture/reap.calls"
+    behavior=success
+    [[ ! -f $fixture/unit-mode ]] || behavior=$(<"$fixture/unit-mode")
+    case $behavior in
+        broken) exit 7 ;;
+        hang) exec /bin/sleep 300 ;;
+    esac
+    exit 0
+fi
+[[ $* == '--user is-active --quiet '* && -f $fixture/active ]]
+FAKE
+cat >"$t/bin/reap" <<'FAKE'
+#!/usr/bin/env bash
+set -euo pipefail
+fixture=$HOME/../workspace/fake
+source "${BASH_SOURCE[0]%/*}/fixture-json"
+behavior=success
+[[ ! -f $fixture/reap-mode ]] || behavior=$(<"$fixture/reap-mode")
+state=${DEV_ROOT:-$HOME/src/rust}/tmp/codex-run
+if [[ $1 == record && $2 == start && $# == 10 && $3 == --kind && $4 == codex-run &&
+      $5 == --owner && $7 == --id && $9 == --path ]]; then
+    state=${10}
+    [[ $state == /*/tmp/codex-run/"$8" && -f $state/meta && ! -e $state/ended ]] ||
+        echo 'start before durable metadata or wrong owned path' >>"$fixture/reap-violations"
+elif [[ $1 == record && $2 == end && $# == 8 && $3 == --kind && $4 == codex-run &&
+        $5 == --owner && $7 == --id ]]; then
+    state=$state/$8
+    [[ -f $state/final.json ]] || echo 'end before durable finality' >>"$fixture/reap-violations"
+else
+    echo 'unexpected argv or premature task end' >>"$fixture/reap-violations"
+fi
+callback=''
+[[ ! -f $state/on-stop ]] || callback=$(<"$state/on-stop")
+{
+    entry=$(json_call args "$@")
+    printf '%s,"callback":' "${entry%\}}"; json_string "$callback"
+    printf '}\n'
+} >>"$fixture/reap.calls"
+case $behavior in
+    broken) exit 7 ;;
+    hang) exec /bin/sleep 300 ;;
+esac
+FAKE
+cat >"$t/bin/codex.python" <<'FAKE'
+#!/usr/bin/python3 -IS
+import json, os, pathlib, sys
+args = sys.argv[1:]
+fake = pathlib.Path(os.environ['DEV_ROOT']) / 'fake'
+assert args[-1] == '-'
+last = pathlib.Path(args[args.index('-o') + 1])
+state = last.parent
+count_file = state / 'fake-count'
+count = int(count_file.read_text()) + 1 if count_file.exists() else 1
+count_file.write_text(str(count))
+if (fake / 'expect-trim').exists():
+    assert (state / 'trim.log').exists(), 'Codex started before slot trimming'
+with (fake / 'codex.calls').open('a') as out:
+    out.write(json.dumps({'args': args, 'cwd': os.getcwd(), 'stdin': sys.stdin.read(),
+                          'home': os.environ.get('HOME'), 'post_name': os.environ.get('POST_NAME'),
+                          'unwanted': os.environ.get('CODEX_RUN_FIXTURE_UNWANTED')}) + '\n')
+scenario = (fake / 'scenario').read_text().strip()
+if pathlib.Path.cwd().is_relative_to(pathlib.Path(os.environ['HOME']) / 'src/fabrig/slots/1'):
+    lease = pathlib.Path(os.environ['HOME']) / 'src/fabrig/slot-maintenance/1/lease'
+    inherited = os.fstat(int(os.environ['FABRIG_SLOT_LEASE_FD']))
+    assert (inherited.st_dev, inherited.st_ino) == (lease.stat().st_dev, lease.stat().st_ino)
+if scenario == 'orphan':
+    import signal, time
+    parent = os.getpid()
+    if os.fork() == 0:
+        while os.getppid() == parent:
+            time.sleep(.01)
+        parent = os.getppid()
+        (state / 'orphan-parent').write_text(str(parent))
+        os.kill(parent, signal.SIGTERM)
+        os._exit(0)
+    sys.exit(0)
+if scenario in ('on-stop', 'on-stop-failure', 'on-stop-timeout', 'failure-with-stop'):
+    meta = dict(line.split('=', 1) for line in (state / 'meta').read_text().splitlines())
+    hook = pathlib.Path(meta['on_stop'])
+    hook.write_text('#!/bin/bash\npwd >"$DEV_ROOT/fake/stop.cwd"\n'
+                    'echo returned >>"$DEV_ROOT/fake/returned"\n'
+                    'echo hook-out\necho hook-err >&2\n'
+                    + ('exit 3\n' if scenario == 'on-stop-failure' else
+                       'trap \"\" TERM\nwhile :; do sleep 1; done\n' if scenario == 'on-stop-timeout' else ''))
+    hook.chmod(0o700)
+if scenario == 'pause':
+    import time
+    (state / 'worker.pid').write_text(str(os.getppid()))
+    (state / 'codex.pid').write_text(str(os.getpid()))
+    print(json.dumps({'type': 'thread.started', 'thread_id': 'thread-fixture'}), flush=True)
+    with (fake / 'pause-release').open('rb', buffering=0) as release:
+        release.read(1)
+if scenario == 'remove-parent':
+    report = pathlib.Path((fake / 'report').read_text().strip())
+    report.unlink()
+    report.parent.rmdir()
+if scenario == 'report-directory':
+    report = pathlib.Path((fake / 'report').read_text().strip())
+    report.unlink()
+    report.mkdir()
+if scenario == 'fallback-directory':
+    (state / 'report.md').mkdir()
+if scenario == 'ended-directory':
+    (state / 'ended').mkdir()
+if scenario == 'owner-fail-once' and count == 2:
+    sys.exit(9)
+capacity = scenario in ('capacity-always', 'capacity-no-thread') or (scenario in ('capacity-once', 'capacity-other', 'stderr-capacity', 'owner-capacity') and count == 1)
+if scenario != 'capacity-no-thread':
+    print(json.dumps({'type': 'thread.started', 'thread_id': 'thread-fixture'}))
+message = 'Selected model is at capacity. Please try a different model.'
+if capacity:
+    if scenario == 'stderr-capacity':
+        print(message, file=sys.stderr)
+    else:
+        print(json.dumps({'type': 'error', 'message': message}))
+        print(json.dumps({'type': 'turn.failed', 'error': {'message': message}}))
+    sys.exit(17)
+if scenario in ('failure', 'no-last', 'empty-last', 'capacity-other', 'failure-with-stop'):
+    print(json.dumps({'type': 'item.completed', 'item': {'text': message}}))
+    print(json.dumps({'type': 'turn.failed', 'error': {'message': 'another failure'}}))
+    if scenario != 'no-last':
+        last.write_text('' if scenario == 'empty-last' else 'The task failed.\n')
+    sys.exit(9)
+last.write_text('Read-only fixture findings.\n\nFirst finding.\nSecond finding.\n\nValidation complete.\n'
+                if scenario == 'read-only-report' else 'Last message from the fixture.\n')
+report = (fake / 'report').read_text().strip()
+if report and '--sandbox' not in args and scenario not in ('no-report', 'remove-parent', 'report-directory', 'fallback-directory'):
+    pathlib.Path(report).write_text('\tFixture task completed.\r\nReport body.\n' if scenario == 'controls' else 'Fixture task completed.\nReport body.\n')
+for usage in ({'input_tokens': 10, 'cached_input_tokens': 2, 'output_tokens': 3},
+              {'input_tokens': 20, 'cached_input_tokens': 4, 'output_tokens': 5}):
+    print(json.dumps({'type': 'turn.completed', 'usage': usage}))
+FAKE
+cat >"$t/bin/fixture-json" <<'FAKE'
+json_string() {
+    local value=$1 control escaped octal number
+    # Bash substitutions copy the whole string for each control byte. Keep
+    # ordinary argv in the shell and escape large fixture bodies in one pass.
+    # Perl is independent of the jq/Python parsers checking these recordings.
+    if ((${#value} > 8192)); then
+        printf '%s' "$value" | perl -0777 -pe '
+            BEGIN { print "\"" }
+            s/(["\\\x00-\x1f])/sprintf("\\u%04x", ord($1))/ge;
+            END { print "\"" }
+        '
+        return
+    fi
+    if [[ $value == *[[:cntrl:]]* || $value == *\\* || $value == *\"* ]]; then
+        value=${value//\\/\\\\}; value=${value//\"/\\\"}
+        value=${value//$'\n'/\\n}; value=${value//$'\r'/\\r}; value=${value//$'\t'/\\t}
+        if [[ $value == *[$'\001'-$'\037']* ]]; then
+            for ((number=1; number<32; number++)); do
+                printf -v octal '%03o' "$number"
+                printf -v control '%b' "\\$octal"
+                printf -v escaped '\\u%04x' "$number"
+                value=${value//"$control"/"$escaped"}
+            done
+        fi
+    fi
+    printf '"%s"' "$value"
+}
+json_call() {
+    local body=$1 argument separator=''
+    shift
+    printf '{"args":['
+    for argument in "$@"; do
+        printf '%s' "$separator"; json_string "$argument"; separator=,
+    done
+    printf ']'
+    if [[ $body == body ]]; then
+        [[ -f ${!#} && -r ${!#} ]] || return 1
+        # A sentinel preserves trailing newlines across command substitution.
+        # Bulk reads avoid Bash read's byte-at-a-time handling of long input.
+        body=$(cat -- "${!#}" && printf .) || return
+        body=${body%.}
+        printf ',"body":'; json_string "$body"
+    fi
+    printf '}\n'
+}
+FAKE
+cat >"$t/bin/post" <<'FAKE'
+#!/usr/bin/env bash
+set -euo pipefail
+fake=$DEV_ROOT/fake
+source "${BASH_SOURCE[0]%/*}/fixture-json"
+case $1 in
+    send)
+        [[ ${#5} -le 200 && ! $5 =~ [[:cntrl:]] ]]
+        json_call body "$@" >>"$fake/post.calls"
+        status=0
+        [[ ! -f $fake/post-exit ]] || status=$(<"$fake/post-exit")
+        if ((status == 0)); then echo 'message-fixture waiting'
+        elif ((status == 3)); then echo 'message-fixture queued, nobody will wake it: fixture'
+        else echo 'message-fixture refused'; fi
+        exit "$status" ;;
+    wait)
+        json_call args "$@" >>"$fake/post.calls"
+        mapfile -t codes <"$fake/wait-codes"
+        status=${codes[0]:-4}
+        : >"$fake/wait-codes"
+        if ((${#codes[@]} > 1)); then printf '%s\n' "${codes[@]:1}" >"$fake/wait-codes"; fi
+        if ((status == 0)); then echo 'message-fixture director fixture subject'; fi
+        exit "$status" ;;
+    read)
+        json_call args "$@" >>"$fake/post.calls"
+        n=0
+        [[ ! -f $fake/read-count ]] || n=$(<"$fake/read-count")
+        n=$((n + 1))
+        printf '%s\n' "$n" >"$fake/read-count"
+        cat "$fake/read-text"
+        if ((n > 1)); then printf '\nNew second post.\n'; fi ;;
+    *) exit 2 ;;
+esac
+FAKE
+cat >"$fake/jq" <<'FAKE'
+#!/usr/bin/env bash
+if [[ -f $DEV_ROOT/fake/tokens-fail && $* == *turn.completed* ]]; then exit 1; fi
+exec /usr/bin/jq "$@"
+FAKE
+cat >"$fake/flock" <<'FAKE'
+#!/usr/bin/env bash
+[[ ! -f $DEV_ROOT/fake/row-fail || $* != 9 ]] || exit 1
+exec /usr/bin/flock "$@"
+FAKE
+# Ordinary fake units need shell process supervision, not Python imports.
+# Orphan and signal stories retain the Python monitor and its wait statuses.
+cat >"$t/bin/systemd-run" <<'FAKE'
+#!/bin/bash
+set -euo pipefail
+fixture=${DEV_ROOT:-$CODEX_RUN_FIXTURE_ROOT}/fake
+if [[ -f $fixture/scenario && $(<"$fixture/scenario") == orphan ||
+      -f $fixture/scenario && $(<"$fixture/scenario") == pause ]]; then
+    exec /usr/bin/python3 -I -S "${BASH_SOURCE[0]}.python" "$@"
+fi
+printf '%s\0' "$@" >"$fixture/launch.args"
+[[ ! -f $fixture/launch-fail ]] || { echo 'fixture launch failed' >&2; exit 1; }
+envs=("HOME=$HOME" "PATH=$PATH" "BASH_ENV=$BASH_ENV")
+unit='' stop='' stop_set=0 service=0
+while (($#)); do
+    case $1 in
+        --user|--collect|--quiet) shift ;;
+        --service-type=exec) service=1; shift ;;
+        --unit) unit=$2; shift 2 ;;
+        --property=*)
+            [[ $stop_set == 0 && $1 == --property=ExecStop=-* ]]
+            stop_set=1
+            stop=${1#--property=ExecStop=-}
+            printf '%s' "$stop" >"$fixture/stop.property"
+            shift ;;
+        --setenv=*)
+            value=${1#--setenv=}; [[ $value == *=* ]]; key=${value%%=*}
+            [[ $key == DEV_ROOT || $key == CODEX_RUN_RETRY_DELAYS ]]
+            envs+=("$value"); shift ;;
+        *) break ;;
+    esac
+done
+[[ $service == 1 && $1 == bash && $2 == -lc && $3 == 'exec "$0" "$@"' ]]
+shift 3
+stop_args=()
+if ((stop_set)); then
+    stop_args=("$1" _stop "$3")
+    printf -v expected '"%s" "%s" "%s"' "${stop_args[@]}"
+    [[ $stop == "$expected" ]]
+    # The exact quoted property is checked above; these tokens are its argv.
+    printf "['%s', '%s', '%s']" "${stop_args[@]}" >"$fixture/stop.argv"
+fi
+worker=$1; shift
+[[ ! -f $fixture/missing-executable ]] || worker=$fixture/missing-worker
+[[ -x $worker ]] || { echo 'worker executable missing' >&2; exit 1; }
+[[ ! -f $fixture/hold-launch ]] || exit 0
+(
+    # env restores default dispositions even when the fixture is a background
+    # job. setsid execs the worker in its own process group, preserving its PID.
+    env -i --default-signal=INT --default-signal=QUIT "${envs[@]}" \
+        setsid /bin/bash --noprofile --norc -c \
+        'source "$HOME/.bash_profile"; exec "$0" "$@"' "$worker" "$@" </dev/null &
+    pid=$!
+    printf '%s\n' "$pid" >"$fixture/$unit.pid"
+    status=0
+    wait "$pid" || status=$?
+    if ((${#stop_args[@]})); then
+        env -i "${envs[@]}" "${stop_args[@]}" </dev/null
+    fi
+    printf '%s\n' "$status" >"$fixture/$unit.ended"
+    printf '%s\n' "$unit" >"$fixture/unit-events"
+) >"$fixture/$unit.log" 2>&1 &
+FAKE
+cat >"$t/bin/codex" <<'FAKE'
+#!/bin/bash
+set -euo pipefail
+fake=$DEV_ROOT/fake
+scenario=$(<"$fake/scenario")
+if [[ $scenario == orphan ]]; then
+    exec /usr/bin/python3 -I -S "${BASH_SOURCE[0]}.python" "$@"
+fi
+# JSON quoting is independent of the assertions' jq parser. Bash strings hold
+# every non-NUL byte used by the fixture; prompts are read to EOF, not one line.
+source "${BASH_SOURCE[0]%/*}/fixture-json"
+args=("$@")
+[[ ${args[-1]} == - ]]
+last='' read_only=0 output_seen=0
+for ((i=0; i<${#args[@]}; i++)); do
+    if [[ ${args[i]} == -o && $output_seen == 0 ]]; then
+        last=${args[i+1]}; output_seen=1
+    fi
+    [[ ${args[i]} != --sandbox ]] || read_only=1
+done
+[[ -n $last ]]
+state=${last%/*}
+count=0
+[[ ! -f $state/fake-count ]] || count=$(<"$state/fake-count")
+count=$((count + 1))
+printf '%s' "$count" >"$state/fake-count"
+[[ ! -f $fake/expect-trim || -f $state/trim.log ]]
+prompt=$(cat && printf .)
+prompt=${prompt%.}
+{
+    printf '{"args":['
+    separator=''
+    for arg in "${args[@]}"; do printf '%s' "$separator"; json_string "$arg"; separator=,; done
+    printf '],"cwd":'; json_string "$PWD"
+    printf ',"stdin":'; json_string "$prompt"
+    for key in HOME POST_NAME CODEX_RUN_FIXTURE_UNWANTED; do
+        case $key in HOME) label=home ;; POST_NAME) label=post_name ;; *) label=unwanted ;; esac
+        printf ',"%s":' "$label"
+        if [[ -v $key ]]; then json_string "${!key}"; else printf null; fi
+    done
+    printf '}\n'
+} >>"$fake/codex.calls"
+if [[ $PWD == "$HOME/src/fabrig/slots/1" || $PWD == "$HOME/src/fabrig/slots/1/"* ]]; then
+    [[ /dev/fd/$FABRIG_SLOT_LEASE_FD -ef $HOME/src/fabrig/slot-maintenance/1/lease ]]
+fi
+case $scenario in
+    on-stop|on-stop-failure|on-stop-timeout|failure-with-stop)
+        hook=''
+        while IFS= read -r line; do [[ $line != on_stop=* ]] || hook=${line#on_stop=}; done <"$state/meta"
+        {
+            printf '%s\n' '#!/bin/bash' 'pwd >"$DEV_ROOT/fake/stop.cwd"' \
+                'echo returned >>"$DEV_ROOT/fake/returned"' 'echo hook-out' 'echo hook-err >&2'
+            case $scenario in
+                on-stop-failure) printf 'exit 3\n' ;;
+                on-stop-timeout) printf '%s\n' 'trap "" TERM' 'while :; do sleep 1; done' ;;
+            esac
+        } >"$hook"
+        chmod 700 "$hook" ;;
+    pause)
+        printf '%s' "$PPID" >"$state/worker.pid"
+        printf '%s' "$$" >"$state/codex.pid"
+        printf '%s\n' '{"type": "thread.started", "thread_id": "thread-fixture"}'
+        IFS= read -r -n 1 release <"$fake/pause-release" || true ;;
+    remove-parent)
+        report=$(<"$fake/report"); rm "$report"; rmdir "${report%/*}" ;;
+    report-directory)
+        report=$(<"$fake/report"); rm "$report"; mkdir "$report" ;;
+    fallback-directory) mkdir "$state/report.md" ;;
+    ended-directory) mkdir "$state/ended" ;;
+    owner-fail-once) ((count != 2)) || exit 9 ;;
+esac
+capacity=0
+case $scenario in
+    capacity-always|capacity-no-thread) capacity=1 ;;
+    capacity-once|capacity-other|stderr-capacity|owner-capacity) ((count != 1)) || capacity=1 ;;
+esac
+if [[ $scenario != capacity-no-thread ]]; then
+    printf '%s\n' '{"type": "thread.started", "thread_id": "thread-fixture"}'
+fi
+message='Selected model is at capacity. Please try a different model.'
+if ((capacity)); then
+    if [[ $scenario == stderr-capacity ]]; then printf '%s\n' "$message" >&2
+    else
+        printf '{"type":"error","message":"%s"}\n' "$message"
+        printf '{"type":"turn.failed","error":{"message":"%s"}}\n' "$message"
+    fi
+    exit 17
+fi
+case $scenario in
+    failure|no-last|empty-last|capacity-other|failure-with-stop)
+        printf '{"type":"item.completed","item":{"text":"%s"}}\n' "$message"
+        printf '%s\n' '{"type":"turn.failed","error":{"message":"another failure"}}'
+        if [[ $scenario == empty-last ]]; then : >"$last"
+        elif [[ $scenario != no-last ]]; then printf 'The task failed.\n' >"$last"; fi
+        exit 9 ;;
+esac
+if [[ $scenario == read-only-report ]]; then
+    printf 'Read-only fixture findings.\n\nFirst finding.\nSecond finding.\n\nValidation complete.\n' >"$last"
+else printf 'Last message from the fixture.\n' >"$last"; fi
+report=$(<"$fake/report")
+if [[ -n $report && $read_only == 0 && $scenario != no-report &&
+      $scenario != remove-parent && $scenario != report-directory && $scenario != fallback-directory ]]; then
+    if [[ $scenario == controls ]]; then printf '\tFixture task completed.\r\nReport body.\n' >"$report"
+    else printf 'Fixture task completed.\nReport body.\n' >"$report"; fi
+fi
+printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}' \
+    '{"type":"turn.completed","usage":{"input_tokens":20,"cached_input_tokens":4,"output_tokens":5}}'
+FAKE
+
+chmod +x "$t/bin/codex" "$t/bin/codex.python" "$t/bin/post" \
+    "$t/bin/systemd-run" "$t/bin/systemd-run.python" "$t/bin/systemctl" "$t/bin/reap" \
+    "$fake/jq" "$fake/flock"
+for tool in codex post systemd-run systemctl reap; do
+    [[ $(command -v "$tool") == "$t/bin/$tool" ]]
+done
+export CODEX_RUN_FIXTURE_UNWANTED=must-not-survive
+checks=0
+expect() {
+    local what=$1 output=$2 want
+    shift 2
+    for want in "$@"; do
+        if [[ $output != *"$want"* ]]; then
+            printf 'FAIL %s: no "%s" in:\n%s\n' "$what" "$want" "$output" >&2
+            exit 1
+        fi
+    done
+    checks=$((checks + 1))
+}
+json_expect() {
+    local what=$1 filter=$2 file=$3
+    if ! jq -se "$filter" "$file" >/dev/null; then
+        printf 'FAIL %s\n' "$what" >&2
+        cat "$file" >&2
+        exit 1
+    fi
+    checks=$((checks + 1))
+}
+# Subscribe before inspecting publications, so a write between the check and
+# the wait cannot be lost. Readiness includes the Codex PID contents and the stamped
+# thread event, not just creation of their files. No scheduling sleeps.
+wait_task_ready() {
+    python3 -I -S -B - "$state" "$HUNG_CASE_S" <<'PYWAIT'
+import ctypes
+import os
+from pathlib import Path
+import select
+import sys
+import time
+
+state = Path(sys.argv[1])
+deadline = time.monotonic() + int(sys.argv[2])
+libc = ctypes.CDLL(None, use_errno=True)
+fd = libc.inotify_init1(os.O_CLOEXEC | os.O_NONBLOCK)
+if fd < 0:
+    raise OSError(ctypes.get_errno(), 'inotify_init1')
+try:
+    # IN_MODIFY | IN_CLOSE_WRITE | IN_MOVED_TO | IN_CREATE
+    if libc.inotify_add_watch(fd, os.fsencode(state), 0x2 | 0x8 | 0x80 | 0x100) < 0:
+        raise OSError(ctypes.get_errno(), 'inotify_add_watch', str(state))
+
+    def ready():
+        try:
+            return ((state / 'codex.pid').read_text().strip().isdigit() and
+                    b'"thread_id": "thread-fixture"}\n' in
+                    (state / 'events.jsonl').read_bytes())
+        except FileNotFoundError:
+            return False
+
+    while not ready():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not select.select([fd], [], [], remaining)[0]:
+            sys.exit(f'FAIL deadline: task publications in {state}')
+        os.read(fd, 65536)
+finally:
+    os.close(fd)
+PYWAIT
+}
+wait_unit() {
+    local unit=$1 finished
+    IFS= read -r -t "$HUNG_CASE_S" finished <&"$unit_events" || {
+        echo "FAIL deadline: unit $unit" >&2
+        return 1
+    }
+    [[ $finished == "$unit" && -f $fake/$unit.ended ]]
+}
+directories() {
+    local path
+    for path in "$DEV_ROOT/tmp/codex-run/"*/; do
+        [[ ! -d $path ]] || printf '%s\n' "$path"
+    done
+}
+refusal() {
+    local what=$1 before output status=0
+    shift
+    before=$(directories)
+    output=$("$kit/codex-run" "$@" 2>&1) || status=$?
+    [[ $status == 2 && $output != *$'\n'* && $before == "$(directories)" ]]
+    expect "$what" "$output" 'codex-run:'
+}
+mkdir -p "$t/unsafe kit/tools/codex-run" "$t/unsafe kit/tools/slots"
+cp "$kit/codex-run" "$t/unsafe kit/tools/codex-run/codex-run"
+cp "$kit/../slots/lifetime.py" "$t/unsafe kit/tools/slots/lifetime.py"
+output=$("$t/unsafe kit/tools/codex-run/codex-run" task --on-stop "$t/return-login" \
+    "$t/task file.md" "$t/work dir" "$t/reports/refused.md" 2>&1) && status=0 || status=$?
+[[ $status == 2 && ! -e $fake/launch.args && ! -e $DEV_ROOT/tmp/codex-run && ! -e $t/reports/refused.md ]]
+expect 'on-stop refused for an unsafe kit path' "$output" "codex-run: the kit's path is unsafe in a stop command"
+refusal 'relative on-stop refused' task --on-stop relative/file "$t/task file.md" "$t/work dir" "$t/reports/refused.md"
+refusal 'relative TASK' task relative "$t/work dir" "$t/reports/refused.md"
+refusal 'relative DIR' task "$t/task file.md" relative "$t/reports/refused.md"
+refusal 'relative REPORT' task "$t/task file.md" "$t/work dir" relative
+refusal 'missing TASK' task "$t/missing" "$t/work dir" "$t/reports/refused.md"
+refusal 'TASK is a directory' task "$t" "$t/work dir" "$t/reports/refused.md"
+refusal 'missing DIR' task "$t/task file.md" "$t/missing" "$t/reports/refused.md"
+refusal 'missing REPORT parent' task "$t/task file.md" "$t/work dir" "$t/missing/refused.md"
+touch "$t/reports/exists.md"
+refusal 'existing REPORT' task "$t/task file.md" "$t/work dir" "$t/reports/exists.md"
+ln -s "$t/missing" "$t/reports/dangling.md"
+refusal 'existing REPORT symlink' task "$t/task file.md" "$t/work dir" "$t/reports/dangling.md"
+POST_NAME='' refusal 'no recipient' task "$t/task file.md" "$t/work dir" "$t/reports/refused.md"
+refusal 'invalid recipient' task --to bad@@ "$t/task file.md" "$t/work dir" "$t/reports/refused.md"
+for delimiter in $'\t' $'\n'; do
+    refusal 'TASK delimiter' task "$t/task${delimiter}file" "$t/work dir" "$t/reports/refused.md"
+    refusal 'DIR delimiter' task "$t/task file.md" "$t/work${delimiter}dir" "$t/reports/refused.md"
+    refusal 'REPORT delimiter' task "$t/task file.md" "$t/work dir" "$t/reports/report${delimiter}file"
+    refusal 'model delimiter' task --model "bad${delimiter}model" "$t/task file.md" "$t/work dir" "$t/reports/refused.md"
+    refusal 'BRIEF delimiter' owner o/fixture "$t/brief${delimiter}file"
+done
+refusal 'bad effort' task --effort max "$t/task file.md" "$t/work dir" "$t/reports/refused.md"
+refusal 'resume without thread' task --resume absent "$t/task file.md" "$t/work dir" "$t/reports/refused.md"
+[[ ! -e $DEV_ROOT/tmp/codex-run ]]
+# The subreaper bootstrap must still validate history before reading metadata.
+mkdir -p "$HOME/src/fabrig/slots/1/target"
+output=$(DEV_ROOT="$HOME/src/fabrig/slots/1/target" "$kit/codex-run" _run absent 2>&1) && status=0 || status=$?
+[[ $status == 2 && ! -e $fake/launch.args && ! -e $DEV_ROOT/tmp/codex-run ]]
+expect 'bootstrapped worker refuses target history before metadata' "$output" 'protected evidence overlaps target'
+ln -s "$DEV_ROOT" "$t/history-link"
+output=$(DEV_ROOT="$t/history-link/../workspace" "$kit/codex-run" _run absent 2>&1) && status=0 || status=$?
+[[ $status == 2 && ! -e $fake/launch.args && ! -e $DEV_ROOT/tmp/codex-run ]]
+expect 'bootstrapped worker refuses a cancelled history symlink' "$output" 'symlink path'
+
+# A framed result must preserve paths, and success requires both all fields and
+# a successful helper exit before report reservation or detached startup.
+python3 -I -S -B - "$kit/../slots/lifetime.py" "$t" <<'PYPATHS'
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+helper, fixture = sys.argv[1:]
+root = os.path.join(fixture, 'history\nwith a line')
+report = os.path.join(fixture, 'reports', 'framed.md')
+directory = os.path.join(fixture, 'work dir')
+result = subprocess.run([sys.executable, '-I', '-S', '-B', helper, 'task-paths',
+                         root, report, directory], stdin=subprocess.DEVNULL,
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+assert result.stdout.split(b'\0') == [os.fsencode(root), os.fsencode(report),
+                                      os.fsencode(directory), b'other', b'']
+PYPATHS
+checks=$((checks + 1))
+cp "$kit/../slots/lifetime.py" "$t/lifetime.saved"
+cat >"$kit/../slots/lifetime.py" <<'PYFAULT'
+import os
+import sys
+values = [*sys.argv[2:], 'other']
+short = os.path.exists(os.path.join(os.path.dirname(__file__), 'short-result'))
+sys.stdout.write('\0'.join(values[:3] if short else values) + '\0')
+sys.exit(0 if short else 7)
+PYFAULT
+refusal 'complete path result with failed status refuses launch' task "$t/task file.md" "$t/work dir" "$t/reports/framed.md"
+[[ ! -e $t/reports/framed.md && ! -e $fake/launch.args ]]
+touch "$kit/../slots/short-result"
+refusal 'successful incomplete path result refuses launch' task "$t/task file.md" "$t/work dir" "$t/reports/framed.md"
+[[ ! -e $t/reports/framed.md && ! -e $fake/launch.args ]]
+rm "$kit/../slots/short-result"
+mv "$t/lifetime.saved" "$kit/../slots/lifetime.py"
+ln -s "$kit/codex-run" "$t/bin/aliased-run"
+output=$("$t/bin/aliased-run" stale)
+[[ -z $output && ! -e $DEV_ROOT/tmp/codex-run && ! -e $fake/launch.args ]]
+checks=$((checks + 1))
+# A worker must check both framing and helper status before parsing metadata.
+python3 -I -S -B - "$kit/../slots/lifetime.py" "$t" <<'PYWORKERPATHS'
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+helper, fixture = sys.argv[1:]
+root = Path(fixture) / 'worker-history'
+meta = root / 'tmp/codex-run/fixture/meta'
+meta.parent.mkdir(parents=True)
+directory = os.fsencode(Path(fixture) / 'work dir')
+metadata = (b'dir=' + directory + b'=\nunknown=retained\n' +
+            b'dir=' + directory + b'\xff\0==\n' + b'dir=unterminated')
+meta.write_bytes(metadata)
+result = subprocess.run([sys.executable, '-I', '-S', '-B', helper, 'worker-paths',
+                         str(root), 'fixture'], stdin=subprocess.DEVNULL,
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+assert result.stdout.split(b'\0') == [os.fsencode(root), metadata.replace(b'\0', b''),
+                                      directory + b'\xff==', b'other', b'']
+assert meta.read_bytes() == metadata
+PYWORKERPATHS
+checks=$((checks + 1))
+cp "$kit/../slots/lifetime.py" "$t/worker-lifetime.saved"
+cat >"$kit/../slots/lifetime.py" <<'PYWORKERFAULT'
+import os
+import sys
+short = os.path.exists(os.path.join(os.path.dirname(__file__), 'short-worker-result'))
+values = [sys.argv[2], '', sys.argv[2], 'other']
+sys.stdout.write('\0'.join(values[:3] if short else values) + '\0')
+sys.exit(0 if short else 7)
+PYWORKERFAULT
+refusal 'failed worker path helper refuses complete output' _run absent
+[[ ! -e $fake/codex.calls && ! -e $DEV_ROOT/tmp/codex-run ]]
+touch "$kit/../slots/short-worker-result"
+refusal 'incomplete worker path output refuses successful helper' _run absent
+[[ ! -e $fake/codex.calls && ! -e $DEV_ROOT/tmp/codex-run ]]
+rm "$kit/../slots/short-worker-result"
+mv "$t/worker-lifetime.saved" "$kit/../slots/lifetime.py"
+refusal 'owner invalid name' owner ../oops "$t/brief.md"
+refusal 'owner relative brief' owner o/fixture relative
+refusal 'owner unreadable brief' owner o/fixture "$t/missing"
+refusal 'owner bad effort' owner --effort low o/fixture "$t/brief.md"
+touch "$fake/active"
+refusal 'owner active unit' owner o/fixture "$t/brief.md"
+rm "$fake/active"
+[[ ! -e $fake/launch.args ]]
+
+touch "$fake/launch-fail"
+refusal 'systemd launch failure' task "$t/task file.md" "$t/work dir" "$t/reports/refused.md"
+rm "$fake/launch-fail"
+touch "$fake/missing-executable"
+refusal 'missing worker executable' task "$t/task file.md" "$t/work dir" "$t/reports/refused.md"
+rm "$fake/missing-executable"
+
+# Run state keeps the rust workspace default independently of installation.
+touch "$fake/hold-launch"
+output=$(env -u DEV_ROOT "$kit/codex-run" task "$t/task file.md" "$t/work dir" "$t/reports/default-root.md")
+read -r default_id default_state <<<"$output"
+[[ $default_state == "$HOME/src/rust/tmp/codex-run/$default_id" ]]
+expect 'default run root forwarded to unit' "$(tr '\0' '\n' <"$fake/launch.args")" "--setenv=DEV_ROOT=$HOME/src/rust"
+rm -r "$HOME/src/rust/tmp" "$t/reports/default-root.md"
+rm "$fake/hold-launch"
+
+# Seed a prior run in the old default location, without a DEV_ROOT override.
+legacy_runs=$HOME/src/rust/tmp/codex-run
+mkdir -p "$legacy_runs/legacy-default"
+ln -s "$fake" "$HOME/src/rust/fake"
+printf 'legacy-thread\n' >"$legacy_runs/legacy-default/thread"
+printf 'model=legacy-model\neffort=medium\nread_only=0\ndir=%s\n' "$t/work dir" \
+    >"$legacy_runs/legacy-default/meta"
+printf 'legacy accounting row\n' >"$legacy_runs/runs.tsv"
+printf 'success\n' >"$fake/scenario"
+printf '%s\n' "$t/reports/legacy-resume.md" >"$fake/report"
+: >"$fake/codex.calls"
+output=$(env -u DEV_ROOT "$kit/codex-run" task --resume legacy-default \
+    "$t/task file.md" "$t/reports/legacy-resume.md")
+read -r legacy_id legacy_state <<<"$output"
+wait_unit "codex-run-$legacy_id"
+[[ $legacy_state == "$legacy_runs/$legacy_id" && -f $legacy_state/ended ]]
+json_expect 'resume finds the old default thread and inherits its settings and directory' \
+    'length == 1 and .[0].args[0:2] == ["exec", "resume"] and
+     .[0].args[-2] == "legacy-thread" and
+     (.[0].args | index("legacy-model")) != null and
+     (.[0].args | index("model_reasoning_effort=medium")) != null and
+     (.[0].cwd | endswith("/work dir"))' "$fake/codex.calls"
+expect 'resume metadata records the old default run' "$(<"$legacy_state/meta")" 'resume_of=legacy-default'
+[[ $(head -n1 "$legacy_runs/runs.tsv") == 'legacy accounting row' &&
+   $(wc -l <"$legacy_runs/runs.tsv") == 2 &&
+   $(<"$legacy_runs/legacy-default/thread") == legacy-thread ]]
+checks=$((checks + 1))
+printf '4\n' >"$fake/wait-codes"
+unit=$(env -u DEV_ROOT "$kit/codex-run" owner o/default-root "$t/brief.md")
+wait_unit "$unit"
+expect 'owner state keeps the old default root' "$(<"$HOME/src/rust/tmp/owners/default-root/codex/name")" 'o/default-root'
+
+# A worker held before execution still reserves the report against another launch.
+touch "$fake/hold-launch"
+output=$("$kit/codex-run" task "$t/task file.md" "$t/work dir" "$t/reports/reserved.md")
+read -r reserved_id reserved_state <<<"$output"
+expect 'report reserved at launch' "$(<"$t/reports/reserved.md")" "codex-run: run $reserved_id is writing this report."
+refusal 'second report launch refused' task "$t/task file.md" "$t/work dir" "$t/reports/reserved.md"
+expect 'fresh run not stale' "[$("$kit/codex-run" stale)]" '[]'
+touch -d '3 minutes ago' "$reserved_state/meta"
+expect 'inactive unfinished run is stale' "$("$kit/codex-run" stale)" "$reserved_id" 'unit inactive without end' "$reserved_state" 'o/caller'
+touch "$fake/active"
+expect 'active unfinished run omitted' "[$("$kit/codex-run" stale)]" '[]'
+rm "$fake/active" "$fake/hold-launch"
+
+touch -d '23 hours ago' "$reserved_state/meta"
+expect '23-hour unfinished run is stale' "$("$kit/codex-run" stale)" "$reserved_id" 'unit inactive without end'
+touch -d '25 hours ago' "$reserved_state/meta"
+expect '25-hour unfinished run omitted' "[$("$kit/codex-run" stale)]" '[]'
+: >"$fake/post.calls"
+expect '25-hour unfinished run not posted' "[$("$kit/codex-run" stale --post)]" '[]'
+expect '25-hour unfinished run leaves no post or told' \
+    "$(test ! -s "$fake/post.calls" && test ! -e "$reserved_state/told" && echo untouched)" untouched
+touch -d '3 minutes ago' "$reserved_state/meta"
+
+# An old exit-3 marker predates the distinction between queued and refused.
+touch "$reserved_state/ended"
+printf 'queued, nobody will wake it: stopped\n' >"$reserved_state/post-failed"
+expect 'legacy queued post-failed counts as told' "[$("$kit/codex-run" stale)]" '[]'
+refusal 'stale usage rejects unknown option' stale --bogus
+refusal 'stale usage rejects extra argument' stale --post extra
+expect 'stale --post with no runs to tell' "[$("$kit/codex-run" stale --post)]" '[]'
+
+n=0
+has_row() { [[ -f $DEV_ROOT/tmp/codex-run/runs.tsv ]] && grep -q "^$id"$'\t' "$DEV_ROOT/tmp/codex-run/runs.tsv"; }
+start_task() {
+    local scenario=$1 output
+    shift
+    n=$((n + 1))
+    report=$t/reports/report-$n.md
+    printf '%s\n' "$scenario" >"$fake/scenario"
+    printf '%s\n' "$report" >"$fake/report"
+    : >"$fake/codex.calls"
+    : >"$fake/post.calls"
+    output=$("$kit/codex-run" task "$@" "$t/task file.md" "$t/work dir" "$report")
+    read -r id state <<<"$output"
+    [[ $id =~ ^[0-9]{8}T[0-9]{6}Z-[a-f0-9]{4}$ && $state == "$DEV_ROOT/tmp/codex-run/$id" ]]
+    wait_unit "codex-run-$id"
+    has_row
+}
+row() { awk -F'\t' -v id="$id" '$1 == id { print }' "$DEV_ROOT/tmp/codex-run/runs.tsv"; }
+reap_run_expect() {
+    local owner=${1:-o/caller}
+    jq -se --arg id "$id" --arg state "$state" --arg owner "$owner" '
+        [.[] | select((.args | index($id)) != null)] ==
+        [{args: ["record", "start", "--kind", "codex-run", "--owner", $owner,
+                 "--id", $id, "--path", $state], callback: ""}]' "$fake/reap.calls" >/dev/null || {
+        printf 'FAIL reap start or premature end: %s owner=%s\n' "$id" "$owner" >&2
+        cat "$fake/reap.calls" >&2
+        return 1
+    }
+    checks=$((checks + 1))
+}
+finish_checks() {
+    jq -se 'all(.[]; .args[0:2] == ["record", "start"] or
+        .args[0:2] == ["record", "end"] or
+        .args == ["systemctl", "--user", "start", "--no-block", "reap.service"])' \
+        "$fake/reap.calls" >/dev/null
+    python3 -I -S -B - "$t" <<'PYISOLATION'
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+rows = [line.split('\t') for line in (root / 'isolation-audit').read_text().splitlines()]
+assert rows.count(['UNSAFE PATH /usr/bin']) == 1, 'guard rejection was not exercised'
+rows.remove(['UNSAFE PATH /usr/bin'])
+assert rows and all(len(row) == 5 and row[1] == str(root / 'bin') for row in rows), rows
+assert not (root / 'workspace/fake/guard-body').exists(), 'unsafe shell body executed'
+assert any(row[2] == 'missing' for row in rows), 'missing reap path not exercised'
+assert any(row[3] == 'missing' for row in rows), 'missing systemctl path not exercised'
+for service in ('reap', 'systemctl', 'systemd-run', 'post', 'codex'):
+    path = root / 'bin' / service
+    assert path.is_file() and not path.is_symlink(), path
+print(f'isolation: {len(rows)} shell entries audited; private PATH only; missing reap/systemctl exercised; unsafe PATH rejected before body')
+PYISOLATION
+    if [[ -n ${CODEX_RUN_ISOLATION_LOG:-} ]]; then cp "$t/isolation-audit" "$CODEX_RUN_ISOLATION_LOG"; fi
+    elapsed=$(awk -v start="$started" -v end="$(date +%s.%N)" 'BEGIN { printf "%.3f", end-start }')
+    # Account for this shell and all children it waited for.
+    LC_ALL=C times >"$t/times"
+    cpu=$(awk '{ for (i = 1; i <= NF; i++) { split($i, p, "m"); s += p[1] * 60 + p[2] } }
+               END { printf "%.3f", s }' "$t/times")
+    printf 'test-codex-run: %s checks passed in %ss (%ss CPU)\n' "$checks" "$elapsed" "$cpu"
+    if [[ -s $fake/reap-violations ]]; then cat "$fake/reap-violations" >&2; return 1; fi
+    awk -v cpu="$cpu" -v wall="$elapsed" 'BEGIN { exit !(cpu < 15 && wall < 60) }'
+}
+
+# Optional adoption has the same report, row, post and exit for each unavailable
+# neighbour. Only this private copy shortens the deadline under test.
+status=0
+env PATH=/usr/bin /bin/bash -c 'printf body >"$1"' guard-canary "$fake/guard-body" || status=$?
+[[ $status == 99 && ! -e $fake/guard-body ]]
+checks=$((checks + 1))
+cp "$kit/codex-run" "$t/launcher.saved"
+sed "s/^ON_STOP_SECONDS=60$/ON_STOP_SECONDS=$ON_STOP_TIMEOUT_S/" "$t/launcher.saved" >"$kit/codex-run"
+for fault in missing-reap broken-reap hanging-reap missing-unit broken-unit hanging-unit; do
+    case $fault in
+        missing-reap)
+            mv "$t/bin/reap" "$t/reap.saved" ;;
+        broken-reap) printf 'broken\n' >"$fake/reap-mode" ;;
+        hanging-reap) printf 'hang\n' >"$fake/reap-mode" ;;
+        missing-unit)
+            mv "$t/bin/systemctl" "$t/systemctl.saved" ;;
+        broken-unit) printf 'broken\n' >"$fake/unit-mode" ;;
+        hanging-unit) printf 'hang\n' >"$fake/unit-mode" ;;
+    esac
+    start_task failure-with-stop --read-only --on-stop "$t/optional-neighbour-hook"
+    [[ -f $state/ended && $(<"$fake/codex-run-$id.ended") == 9 &&
+       $(<"$report") == 'The task failed.' && $(<"$state/on-stop") == 'exit 0' &&
+       ! -e $state/finish-errors ]]
+    expect "$fault preserves failure accounting" "$(row)" $'\t9\t1\t' $'\tthread-fixture\t-\t0'
+    json_expect "$fault preserves completion delivery" \
+        'length == 1 and (.[0].args[4] | contains("failed 9:"))' "$fake/post.calls"
+    [[ ! -f $t/reap.saved ]] || mv "$t/reap.saved" "$t/bin/reap"
+    [[ ! -f $t/systemctl.saved ]] || mv "$t/systemctl.saved" "$t/bin/systemctl"
+    rm -f "$fake/reap-mode" "$fake/unit-mode"
+done
+mv "$t/launcher.saved" "$kit/codex-run"
+
+# The whole run directory is the sole registered path, including when its root
+# contains spaces. Caller task, report and checkout paths stay out of argv.
+saved_root=$DEV_ROOT
+export DEV_ROOT="$t/history with spaces"
+mkdir -p "$DEV_ROOT"
+ln -s "$fake" "$DEV_ROOT/fake"
+start_task success
+reap_run_expect
+export DEV_ROOT=$saved_root
+
+# A launch refusal triggers discovery without inferring task finality.
+: >"$fake/reap.calls"
+touch "$fake/launch-fail"
+refusal 'reap adoption preserves launch refusal' task "$t/task file.md" "$t/work dir" "$t/reports/reap-refused.md"
+rm "$fake/launch-fail"
+json_expect 'launch failure records start then wakes reaper without end' \
+    'length == 2 and .[0].args[0:6] == ["record", "start", "--kind", "codex-run", "--owner", "o/caller"] and
+     .[1].args == ["systemctl", "--user", "start", "--no-block", "reap.service"]' "$fake/reap.calls"
+
+# Successful, failed, resumed and stopped runs all remain unfinalized tasks.
+start_task success
+lifecycle_id=$id lifecycle_state=$state
+reap_run_expect
+start_task failure --read-only
+reap_run_expect
+start_task success --resume "$lifecycle_id"
+reap_run_expect
+[[ -f $lifecycle_state/meta && -f $lifecycle_state/ended ]]
+for lifecycle in on-stop on-stop-failure; do
+    start_task "$lifecycle" --on-stop "$t/lifecycle-hook"
+    reap_run_expect
+done
+POST_NAME=o/launching start_task success --to o/recipient
+reap_run_expect o/recipient
+POST_NAME='' start_task success --to o/recipient
+reap_run_expect o/recipient
+# These cases must not affect the later callback return-count assertion.
+rm "$fake/returned"
+if [[ ${1:-} != --reap-only ]]; then
+    cp "$kit/codex-run" "$t/final-launcher.saved"
+    sed "s/^ON_STOP_SECONDS=60$/ON_STOP_SECONDS=$ON_STOP_TIMEOUT_S/" "$t/final-launcher.saved" >"$kit/codex-run"
+    final_checks=$(python3 -I -S -B "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/test-final.py" "$t" "$kit" "$id")
+    mv "$t/final-launcher.saved" "$kit/codex-run"
+    printf 'finality: %s checks passed\n' "$final_checks"
+    checks=$((checks + final_checks))
+fi
+if [[ ${1:-} == --final-only ]]; then finish_checks; exit; fi
+if [[ ${1:-} == --reap-only ]]; then finish_checks; exit; fi
+
+start_task success
+success_id=$id
+reap_run_expect
+expect 'no on-stop, no stop property' "[$(tr '\0' '\n' <"$fake/launch.args" | sed -n '/^--property/p')]" '[]'
+[[ ! -f $state/on-stop ]]
+expect 'success report' "$(<"$report")" 'Fixture task completed.'
+json_expect 'each event is stamped when it arrived, first' \
+    'length > 0 and all(.[]; (keys_unsorted[0] == "ts") and
+     (.ts | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$")))' "$state/events.jsonl"
+expect 'success row has settings, tokens and post' "$(row)" $'\t0\t1\tgpt-6.1-sol\thigh\t' $'\tthread-fixture\t30/6/8\t0'
+expect 'meta records caller and recipient' "$(<"$state/meta")" 'caller=o/caller' 'to=o/caller' 'resume_of='
+json_expect 'success posts to POST_NAME and includes the report' \
+    'length == 1 and .[0].args[0:4] == ["send", "--as", "codex-run", "o/caller"] and
+     (.[0].args[4] | test("^run .* ok: Fixture task completed\\.$")) and
+     (.[0].body | contains("Report: ") and contains("Thread: thread-fixture") and contains("Minutes: 0") and contains("Tries: 1"))' "$fake/post.calls"
+json_expect 'task defaults, stdin prompt and clean unit environment' \
+    'length == 1 and .[0].args[-1] == "-" and .[0].unwanted == null and
+     (.[0].args | .[index("-m") + 1] == "gpt-6.1-sol") and
+     (.[0].stdin | startswith("Before any command, read the rules in the text below."))' "$fake/codex.calls"
+expect 'task cwd' "$(jq -r .cwd "$fake/codex.calls")" "$t/work dir"
+[[ $(stat -c %a "$state") == 700 && $(stat -c %a "$state/meta") == 600 && $(stat -c %a "$report") == 600 ]]
+checks=$((checks + 1))
+
+start_task ended-directory
+reap_run_expect
+expect 'failed completion marker preserves diagnostic and status' "$(<"$state/finish-errors"),$(row)" \
+    'ended marker failed' $'\t0\t1\t'
+
+start_task on-stop --on-stop "$t/return-login"
+stop_id=$id
+reap_run_expect
+expect 'on-stop runs after the session ends' "$(<"$fake/returned"),$(<"$state/on-stop"),$(<"$fake/stop.cwd")" "returned,exit 0,$t"
+expect 'on-stop appends stdout and stderr' "$(<"$state/on-stop.log")" hook-out hook-err
+expect 'meta records on_stop' "$(<"$state/meta")" "on_stop=$t/return-login"
+start_task success --resume "$stop_id"
+expect 'resume does not inherit on-stop' "$(sed -n '/^on_stop=/p' "$state/meta"),$(test ! -f "$state/on-stop" && echo none)" 'on_stop=,none'
+start_task success --on-stop "$t/not-written"
+reap_run_expect
+expect 'absent on-stop runs nothing' "$(<"$state/on-stop"),$(wc -l <"$fake/returned")" 'absent,1'
+saved_row=$(row)
+"$kit/codex-run" _stop "$id"
+[[ $(row) == "$saved_row" && $(<"$state/on-stop") == absent && -f $state/ended ]]
+jq -se --arg id "$id" \
+    '[.[] | select(.args[0:2] == ["record", "end"] and .args[-1] == $id)] | length == 0' \
+    "$fake/reap.calls" >/dev/null
+checks=$((checks + 1))
+start_task on-stop-failure --on-stop "$t/failing-hook"
+reap_run_expect
+expect 'failing on-stop records its exit' "$(<"$state/on-stop")" 'exit 3'
+expect 'failing on-stop keeps normal row' "$(row)" $'\t0\t1\t' $'\t30/6/8\t0'
+json_expect 'failing on-stop keeps normal post' 'length == 1 and (.[0].args[4] | contains(" ok: "))' "$fake/post.calls"
+start_task on-stop --on-stop "$t/work dir/return login"
+expect 'on-stop with a space in its path' "$(<"$state/on-stop"),$(<"$fake/stop.cwd")" "exit 0,$t/work dir"
+
+# Exercise a TERM-ignoring callback with a one-second private bound.
+sed "s/^ON_STOP_SECONDS=60$/ON_STOP_SECONDS=$ON_STOP_TIMEOUT_S/" "$kit/codex-run" >"$kit/codex-run.new"
+chmod +x "$kit/codex-run.new"
+mv "$kit/codex-run.new" "$kit/codex-run"
+start_task on-stop-timeout --on-stop "$t/ignores-term"
+reap_run_expect
+expect 'on-stop cannot ignore its deadline' "$(<"$state/on-stop")" 'exit 137'
+expect 'timed-out on-stop keeps normal row' "$(row)" $'\t0\t1\t'
+cp "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/codex-run" "$kit/codex-run.new"
+mv "$kit/codex-run.new" "$kit/codex-run"
+
+start_task no-report --to director@hel8
+recipient_id=$id
+expect 'fallback also saved in run directory' "$(cmp -s "$report" "$state/report.md" && echo same)" same
+expect 'missing report gets last message' "$(<"$report")" \
+    'codex-run: the run wrote no report; its last message follows.' 'Last message from the fixture.'
+json_expect '--to overrides POST_NAME' '.[0].args[3] == "director@hel8"' "$fake/post.calls"
+
+# The sandbox prevents report writes; the final message is the whole report.
+start_task read-only-report --read-only
+expect 'read-only publishes the final message unchanged' \
+    "$(cmp -s "$report" "$state/last.md" && cmp -s "$report" "$state/report.md" && echo whole)" whole
+expect 'read-only publication keeps successful status' "$(row)" $'\t0\t1\t'
+json_expect 'read-only posts the report title without a fallback warning' \
+    'length == 1 and (.[0].args[4] | test("^run .* ok: Read-only fixture findings\\.$"))' "$fake/post.calls"
+json_expect 'read-only prompt overrides task file-write instructions' \
+    'length == 1 and (.[0].stdin | contains("entire report as your final message") and
+     contains("even if the task asks") and contains("codex-run will write it to ") and
+     (contains("Write your report to ") | not))' "$fake/codex.calls"
+
+start_task failure --read-only
+expect 'failed read-only report keeps its exit status' "$(row)" $'\t9\t1\t'
+expect 'failed read-only publishes its final message unchanged' \
+    "$(cmp -s "$report" "$state/last.md" && echo whole)" whole
+json_expect 'failed read-only post keeps failure status' \
+    '.[0].args[4] | test("^run .* failed 9: The task failed\\.$")' "$fake/post.calls"
+start_task no-last --read-only
+expect 'read-only without a final message keeps diagnostics' "$(<"$report")" 'no report and no last message; exit 9'
+
+start_task empty-last --read-only
+[[ -f $state/last.md && ! -s $state/last.md ]]
+expect 'read-only with an empty final message keeps diagnostics' "$(<"$report")" 'no report and no last message; exit 9'
+expect 'empty read-only final message keeps failure status' "$(row)" $'\t9\t1\t'
+
+start_task capacity-once --model fixture-model --effort xhigh
+expect 'capacity once succeeds on second try' "$(row)" $'\t0\t2\tfixture-model\txhigh\t'
+json_expect 'capacity resume retains every flag and uses the retry prompt' \
+    'length == 2 and .[0].args[0:2] == ["exec", "-m"] and .[1].args[0:2] == ["exec", "resume"] and
+     .[0].args[1:-1] == .[1].args[2:-2] and .[1].args[-2] == "thread-fixture" and
+     .[1].stdin == "Go on with the task: the model was at capacity.\n" and
+     all(.[]; .args[-1] == "-" and (.args | index("--json")) != null and (.args | index("-o")) != null)' "$fake/codex.calls"
+[[ $(wc -l <"$state/events.jsonl") == 6 ]]
+
+start_task capacity-always
+expect 'capacity exhausts exactly three retries' "$(row)" $'\t17\t4\t' $'\tthread-fixture\t-\t0'
+json_expect 'four capacity attempts' 'length == 4' "$fake/codex.calls"
+json_expect 'failed post subject' '.[0].args[4] | test("^run .* failed 17:")' "$fake/post.calls"
+expect 'no last message fallback' "$(<"$report")" 'codex-run: the run wrote no report and no last message; exit 17; see '
+
+start_task failure
+expect 'other failures stop after one attempt' "$(row)" $'\t9\t1\t' $'\tthread-fixture\t-\t0'
+json_expect 'quoting capacity in a task event does not retry' 'length == 1' "$fake/codex.calls"
+start_task no-last
+expect 'other failure without last message' "$(<"$report")" 'no report and no last message; exit 9'
+start_task capacity-other
+expect 'a later different error does not reuse old capacity events' "$(row)" $'\t9\t2\t'
+json_expect 'a different error stops after the capacity retry' 'length == 2' "$fake/codex.calls"
+start_task stderr-capacity
+expect 'stderr capacity retries' "$(row)" $'\t0\t2\t'
+start_task capacity-no-thread
+expect 'capacity without a thread cannot resume' "$(row)" $'\t17\t1\t' $'\t-\t-\t0'
+
+start_task capacity-once --read-only --model read-model --effort medium
+readonly_id=$id
+expect 'read-only retry publishes its final message unchanged' \
+    "$(cmp -s "$report" "$state/last.md" && echo whole)" whole
+json_expect 'read-only sandbox survives retry before the resume subcommand' \
+    'length == 2 and all(.[]; .args[0:3] == ["exec", "--sandbox", "read-only"] and
+     (.args | index("--dangerously-bypass-approvals-and-sandbox")) == null) and
+     .[1].args[3] == "resume" and .[0].args[3:-1] == .[1].args[4:-2]' "$fake/codex.calls"
+
+start_task success --resume "$readonly_id"
+expect 'read-only resume publishes its final message unchanged' \
+    "$(cmp -s "$report" "$state/last.md" && echo whole)" whole
+expect 'resume inherits settings' "$(<"$state/meta")" 'model=read-model' 'effort=medium' 'read_only=1' "resume_of=$readonly_id"
+json_expect 'explicit resume starts on the saved thread with the new task' \
+    'length == 1 and .[0].args[0:4] == ["exec", "--sandbox", "read-only", "resume"] and
+     .[0].args[-2] == "thread-fixture" and (.[0].stdin | contains("Read ") and contains("entire report as your final message"))' "$fake/codex.calls"
+
+# A resumed run can leave DIR out; explicit settings still override the old run.
+n=$((n + 1))
+report=$t/reports/report-$n.md
+printf '%s\n' "$report" >"$fake/report"
+: >"$fake/codex.calls"
+output=$("$kit/codex-run" task --resume "$success_id" --model override --effort medium "$t/task file.md" "$report")
+read -r id state <<<"$output"
+wait_unit "codex-run-$id"
+has_row
+expect 'resume inherits omitted DIR and overrides settings' "$(<"$state/meta")" "dir=$t/work dir" 'model=override' 'effort=medium'
+json_expect 'resumed writable invocation keeps bypass' \
+    '.[0].args[0:2] == ["exec", "resume"] and (.[0].args | index("--dangerously-bypass-approvals-and-sandbox")) != null' "$fake/codex.calls"
+
+# Recipient resolution keeps explicit and environment settings ahead of inheritance.
+unset POST_NAME
+start_task success --resume "$recipient_id"
+json_expect 'resume without --to or POST_NAME posts to the saved recipient' \
+    'length == 1 and .[0].args[0:4] == ["send", "--as", "codex-run", "director@hel8"]' "$fake/post.calls"
+start_task success --resume "$recipient_id" --to o/override
+json_expect '--to overrides the resumed recipient' \
+    'length == 1 and .[0].args[3] == "o/override"' "$fake/post.calls"
+export POST_NAME=o/caller
+start_task success --resume "$recipient_id"
+json_expect 'POST_NAME overrides the resumed recipient' \
+    'length == 1 and .[0].args[3] == "o/caller"' "$fake/post.calls"
+
+# Resume assertions are complete. Preserve their evidence outside the stale
+# cases' history so each stale check scans only its own fixture runs.
+mv "$DEV_ROOT/tmp/codex-run" "$DEV_ROOT/tmp/checked-task-runs"
+
+printf '3\n' >"$fake/post-exit"
+start_task success
+touch -d '3 minutes ago' "$state/meta"
+expect 'exit 3 is told at the end' "$(test ! -e "$state/post-failed" && echo told),[$("$kit/codex-run" stale)]" 'told,[]'
+expect 'queued post failure still diagnosed' "$(<"$state/finish-errors")" 'post failed: 3'
+expect 'journal includes post failure' "$(<"$fake/codex-run-$id.log")" 'nobody will wake it'
+expect 'row includes post exit' "$(row)" $'\t30/6/8\t3'
+rm "$fake/post-exit"
+
+printf '2\n' >"$fake/post-exit"
+start_task success
+touch -d '3 minutes ago' "$state/meta"
+expect 'refused post surfaced by stale' "$("$kit/codex-run" stale)" "$id" 'post failed' "$state" 'o/caller'
+expect 'completion marker written even after post failure' "$(test -f "$state/ended" && echo ended)" ended
+expect 'post failure noted in finish-errors' "$(<"$state/finish-errors")" 'post failed: 2'
+rm "$fake/post-exit"
+touch -d '25 hours ago' "$state/meta"
+expect '25-hour refused end omitted' "[$("$kit/codex-run" stale)]" '[]'
+expect '25-hour refused end not posted' "[$("$kit/codex-run" stale --post)]" '[]'
+json_expect '25-hour refused end makes no additional post' 'length == 1' "$fake/post.calls"
+expect '25-hour refused end writes no told' "$(test ! -e "$state/told" && echo untold)" untold
+touch -d '3 minutes ago' "$state/meta"
+output=$("$kit/codex-run" stale --post)
+json_expect 'stale --post resends a refused end' \
+    'length == 2 and .[1].args == .[0].args and .[1].body == .[0].body and
+     .[1].args[0:4] == ["send", "--as", "codex-run", "o/caller"]' "$fake/post.calls"
+expect 'resent end is told once' "$output,$(<"$state/told"),[$("$kit/codex-run" stale)],[$("$kit/codex-run" stale --post)]" \
+    "$id told: message-fixture waiting,message-fixture waiting,[],[]"
+
+# Unexpected post exits also leave an end retryable, with its original run exit.
+printf '7\n' >"$fake/post-exit"
+start_task failure
+touch -d '3 minutes ago' "$state/meta"
+expect 'unexpected post exit remains untold' "$(<"$state/post-failed"),$(<"$state/finish-errors")" \
+    'message-fixture refused,post failed: 7'
+rm "$fake/post-exit"
+"$kit/codex-run" stale --post >/dev/null
+json_expect 'resent failed subject uses run exit rather than post exit' \
+    'length == 2 and .[1].args == .[0].args and (.[1].args[4] | contains("failed 9:")) and
+     .[1].body == .[0].body' "$fake/post.calls"
+
+
+# Row loss cannot prevent an otherwise retryable end from reaching its caller.
+for missing in row file malformed unreadable; do
+    printf '2\n' >"$fake/post-exit"
+    start_task success
+    touch -d '3 minutes ago' "$state/meta"
+    rm "$fake/post-exit"
+    cp "$DEV_ROOT/tmp/codex-run/runs.tsv" "$fake/saved-runs.tsv"
+    case $missing in
+        row)
+            awk -F'\t' -v id="$id" '$1 != id' "$fake/saved-runs.tsv" >"$DEV_ROOT/tmp/codex-run/runs.tsv" ;;
+        file) rm "$DEV_ROOT/tmp/codex-run/runs.tsv" ;;
+        malformed)
+            awk -F'\t' -v OFS='\t' -v id="$id" '$1 == id { $5 = "unknown" } { print }' \
+                "$fake/saved-runs.tsv" >"$DEV_ROOT/tmp/codex-run/runs.tsv" ;;
+        unreadable)
+            rm "$DEV_ROOT/tmp/codex-run/runs.tsv"
+            mkdir "$DEV_ROOT/tmp/codex-run/runs.tsv" ;;
+    esac
+    output=$("$kit/codex-run" stale --post)
+    expect "stale --post without a row ($missing)" "$output,$(<"$state/told")" \
+        "$id told: message-fixture waiting,message-fixture waiting"
+    json_expect "missing $missing keeps the end's body and uses a stale subject" \
+        'length == 2 and .[1].body == .[0].body and .[1].args[0:4] == .[0].args[0:4] and
+         (.[1].args[4] | test("^run .* failed stale: post failed$"))' "$fake/post.calls"
+    if [[ $missing == unreadable ]]; then rmdir "$DEV_ROOT/tmp/codex-run/runs.tsv"; fi
+    mv "$fake/saved-runs.tsv" "$DEV_ROOT/tmp/codex-run/runs.tsv"
+done
+
+printf '2\n' >"$fake/post-exit"
+start_task success
+touch -d '3 minutes ago' "$state/meta"
+rm "$fake/post-exit" "$state/post-body"
+mv "$DEV_ROOT/tmp/codex-run/runs.tsv" "$fake/saved-runs.tsv"
+output=$("$kit/codex-run" stale --post)
+[[ ! -e $DEV_ROOT/tmp/codex-run/runs.tsv && -f $state/ended ]]
+expect 'missing row and body rebuild only the body' "$output,$(<"$state/post-body")" \
+    "$id told: message-fixture waiting" "Report: $report" "Run: $state" 'Thread: thread-fixture' 'Tries: -'
+json_expect 'rebuilt refused end uses stale subject' \
+    'length == 2 and (.[1].args[4] | test("^run .* failed stale: post failed$"))' "$fake/post.calls"
+mv "$fake/saved-runs.tsv" "$DEV_ROOT/tmp/codex-run/runs.tsv"
+
+# Synthetic dead units keep local failure cases independent of worker timing.
+make_stale_run() {
+    id=$1 state=$DEV_ROOT/tmp/codex-run/$1 report=$t/reports/$1.md
+    mkdir "$state"
+    printf 'fixture report\n' >"$report"
+    printf 'to=o/caller\nreport=%s\nstarted=%s\n' "$report" "$(date -u -d '3 minutes ago' +%FT%TZ)" >"$state/meta"
+    touch -d '3 minutes ago' "$state/meta"
+}
+make_stale_run stale-local-a
+first_id=$id first_state=$state
+mkdir "$state/post-body"
+make_stale_run stale-local-b
+second_id=$id second_state=$state
+printf 'saved-thread\n' >"$state/thread"
+: >"$fake/post.calls"
+status=0
+output=$("$kit/codex-run" stale --post 2>"$fake/local-errors") || status=$?
+[[ $output == "$first_id not told: post body failed"$'\n'"$second_id told: message-fixture waiting" &&
+   ! -e $first_state/told && -f $second_state/told ]]
+expect "stale --post goes on after one run's failure" "$status,$output" \
+    '1,' "$first_id not told: post body failed" "$second_id told: message-fixture waiting"
+json_expect 'only the second caller is posted with its saved thread and elapsed minutes' \
+    'length == 1 and (.[0].body | contains("Thread: saved-thread\n") and contains("Minutes: 3\n"))' "$fake/post.calls"
+rm -r "$first_state" "$second_state"
+
+# A refused end's existing body is never regenerated merely because it is unreadable.
+printf '2\n' >"$fake/post-exit"
+start_task success
+touch -d '3 minutes ago' "$state/meta"
+rm "$fake/post-exit" "$state/post-body"
+mkdir "$state/post-body"
+status=0
+output=$("$kit/codex-run" stale --post) || status=$?
+expect 'unreadable post-body is not told' "$status,$output,$(wc -l <"$fake/post.calls")" \
+    "1,$id not told: post body unreadable,1"
+[[ ! -e $state/told ]]
+rmdir "$state/post-body"
+printf 'original body restored\n' >"$state/post-body"
+"$kit/codex-run" stale --post >/dev/null
+
+make_stale_run stale-marker
+mkdir "$state/told"
+status=0
+output=$("$kit/codex-run" stale --post 2>"$fake/told-errors") || status=$?
+[[ -s $fake/told-errors && ! -f $state/told ]]
+expect 'delivered post with an unwritable told marker still reports told' "$status,$output" \
+    "1,$id told: message-fixture waiting"
+rmdir "$state/told"
+"$kit/codex-run" stale --post >/dev/null
+
+# Missing metadata is a local failure, rather than an invented timestamp or path.
+for missing in started report to; do
+    make_stale_run "stale-meta-$missing"
+    sed "/^$missing=/d" "$state/meta" >"$state/meta.new"
+    mv "$state/meta.new" "$state/meta"
+    touch -d '3 minutes ago' "$state/meta"
+    : >"$fake/post.calls"
+    status=0
+    output=$("$kit/codex-run" stale --post) || status=$?
+    [[ ! -e $state/told && ! -s $fake/post.calls ]]
+    expect "missing metadata $missing leaves run untold" "$status,$output" "1,$id not told: "
+    rm -r "$state"
+done
+
+start_task controls
+json_expect 'tab and CRLF removed only from subject' '.[0].args[4] | test("ok: Fixture task completed\\.$")' "$fake/post.calls"
+expect 'original report retains tab' "$(head -c1 "$report" | od -An -tu1)" 9
+
+# Removing the report directory must leave the fallback, row and post available.
+mkdir "$t/reports/vanishing"
+printf 'remove-parent\n' >"$fake/scenario"
+report=$t/reports/vanishing/report.md
+printf '%s\n' "$report" >"$fake/report"
+: >"$fake/post.calls"
+output=$("$kit/codex-run" task "$t/task file.md" "$t/work dir" "$report")
+read -r id state <<<"$output"
+wait_unit "codex-run-$id"
+[[ -f $state/ended ]]
+expect 'missing report directory still writes row' "$(row)" "$id" $'\t0\t1\t'
+expect 'fallback retained after publication failure' "$(<"$state/report.md")" 'Last message from the fixture.'
+expect 'publication failure diagnosed' "$(<"$state/finish-errors")" 'report publication failed'
+json_expect 'publication failure still posts' 'length == 1 and (.[0].body | contains("Report: "))' "$fake/post.calls"
+start_task report-directory
+expect 'directory report summary failure diagnosed' "$(<"$state/finish-errors")" 'report summary failed'
+json_expect 'directory report still posts' 'length == 1' "$fake/post.calls"
+
+start_task fallback-directory
+expect 'fallback write failure diagnosed' "$(<"$state/finish-errors")" 'report fallback failed'
+json_expect 'fallback write failure still posts' 'length == 1' "$fake/post.calls"
+touch "$fake/tokens-fail"
+ln -sfn "$fake/jq" "$t/bin/jq"
+start_task success
+expect 'tokens failure diagnosed' "$(<"$state/finish-errors")" 'tokens failed'
+expect 'tokens failure leaves row with unknown tokens' "$(row)" $'\tthread-fixture\t-\t0'
+json_expect 'tokens failure still posts' 'length == 1' "$fake/post.calls"
+rm "$fake/tokens-fail"
+ln -sfn /usr/bin/jq "$t/bin/jq"
+touch "$fake/row-fail"
+ln -sfn "$fake/flock" "$t/bin/flock"
+n=$((n + 1))
+report=$t/reports/row-fail-$n.md
+printf 'success\n' >"$fake/scenario"
+printf '%s\n' "$report" >"$fake/report"
+: >"$fake/post.calls"
+output=$("$kit/codex-run" task "$t/task file.md" "$t/work dir" "$report")
+read -r id state <<<"$output"
+wait_unit "codex-run-$id"
+[[ -f $state/ended ]]
+expect 'row failure diagnosed' "$(<"$state/finish-errors")" 'row failed'
+json_expect 'row failure still posts' 'length == 1' "$fake/post.calls"
+rm "$fake/row-fail"
+ln -sfn /usr/bin/flock "$t/bin/flock"
+
+# An orphan signals the worker, never its subreaper stand-in user manager.
+start_task orphan
+expect 'worker adopts an orphan' "$(<"$state/orphan-parent")" "$(<"$fake/codex-run-$id.pid")"
+expect 'orphan signal ends the worker' "$(<"$fake/codex-run-$id.ended")" 143
+expect 'stand-in manager receives no orphan signal' "$(test ! -e "$fake/codex-run-$id.manager-signal" && echo clear)" clear
+
+# Termination of the worker alone and of its whole unit both finish with failure.
+printf '#!/bin/bash\nexit 3\n' >"$t/signal-stop"
+chmod +x "$t/signal-stop"
+for signal_case in TERM INT KILL TERM-stop KILL-stop; do
+    signal=${signal_case%-stop}
+    options=()
+    if [[ $signal_case == *-stop ]]; then options=(--on-stop "$t/signal-stop"); fi
+    n=$((n + 1))
+    report=$t/reports/signal-$n.md
+    printf 'pause\n' >"$fake/scenario"
+    printf '%s\n' "$report" >"$fake/report"
+    : >"$fake/post.calls"
+    output=$("$kit/codex-run" task "${options[@]}" "$t/task file.md" "$t/work dir" "$report")
+    read -r id state <<<"$output"
+    # Wait for the Codex PID write and stamped thread before reading or
+    # signaling: KILL must leave a thread that stale can recover.
+    wait_task_ready
+    if [[ $signal_case == TERM ]]; then
+        status=0
+        output=$("$kit/codex-run" final "$id" --owner o/caller --withdrawn report-read 2>&1) || status=$?
+        [[ $status == 2 && ! -e $state/final.json ]]
+        expect 'running worker metadata lock blocks finality' "$output" 'Resource temporarily unavailable'
+    fi
+    worker=$(<"$state/worker.pid")
+    if [[ $signal == TERM ]]; then kill -TERM "$worker"
+    else kill -"$signal" -- "-$worker"; fi
+    wait_unit "codex-run-$id"
+    case $signal in
+        TERM|INT)
+            reap_run_expect
+            if [[ $signal == TERM ]]; then code=143; else code=130; fi
+            expect 'signal exit preserved in row' "$(row)" $'\t'"$code"$'\t1\t'
+            json_expect 'signal post says failed' '.[0].args[4] | contains("failed ")' "$fake/post.calls"
+            expect 'signal unit exit preserved' "$(<"$fake/codex-run-$id.ended")" "$code" ;;
+        KILL)
+            reap_run_expect
+            touch -d '3 minutes ago' "$state/meta"
+            expect 'killed worker is stale' "$("$kit/codex-run" stale)" "$id" 'unit inactive without end' "$state"
+            [[ ! -f $state/ended && ! -s $state/thread ]]
+            # The later stale retry case addresses only the last killed run.
+            if [[ $signal_case == KILL ]]; then touch -d '25 hours ago' "$state/meta"; fi
+            killed_id=$id ;;
+    esac
+done
+# Every paused unit has ended; no child still needs this writer held open.
+exec {pause_release}>&-
+
+rows_before=$(<"$DEV_ROOT/tmp/codex-run/runs.tsv")
+report_before=$(<"$report")
+printf '2\n' >"$fake/post-exit"
+status=0
+output=$("$kit/codex-run" stale --post) || status=$?
+expect 'stale --post keeps an untold run' \
+    "$status,$output,$(test ! -e "$state/told" && echo untold),$("$kit/codex-run" stale)" \
+    "1,$id not told: message-fixture refused,untold,$id" 'unit inactive without end'
+json_expect "stale --post tells a dead unit's caller" \
+    'length == 1 and .[0].args[0:4] == ["send", "--as", "codex-run", "o/caller"] and
+     (.[0].args[4] | test("^run .* failed stale: unit inactive without end$")) and
+     (.[0].body | contains("Report: ") and contains("Run: ") and contains("Thread: -\n") and
+      contains("Minutes: 0\n") and contains("Tries: -\n"))' "$fake/post.calls"
+[[ $(<"$DEV_ROOT/tmp/codex-run/runs.tsv") == "$rows_before" && ! -e $state/ended &&
+   $(<"$report") == "$report_before" ]]
+expect 'dead unit post replays no other end step' "$(test ! -e "$state/report.md" && echo unchanged)" unchanged
+printf '3\n' >"$fake/post-exit"
+output=$("$kit/codex-run" stale --post)
+expect 'stale --post exit 3 marks told' \
+    "$output,$(<"$state/told"),[$("$kit/codex-run" stale)]" \
+    "$id told: message-fixture queued, nobody will wake it: fixture,message-fixture queued, nobody will wake it: fixture,[]"
+rm "$fake/post-exit"
+start_task success --resume "$killed_id"
+json_expect 'killed thread recovered from events' '.[0].args[0:2] == ["exec", "resume"] and .[0].args[-2] == "thread-fixture"' "$fake/codex.calls"
+
+# DEV_ROOT is normalized before the login shell starts in a different directory.
+printf 'success\n' >"$fake/scenario"
+n=$((n + 1))
+report=$t/reports/relative-root-$n.md
+printf '%s\n' "$report" >"$fake/report"
+output=$(cd "$t" && DEV_ROOT=workspace "$kit/codex-run" task "$t/task file.md" "$t/work dir" "$report")
+read -r id state <<<"$output"
+wait_unit "codex-run-$id"
+[[ -f $state/ended ]]
+expect 'relative DEV_ROOT normalized' "$state" "$DEV_ROOT/tmp/codex-run/$id"
+
+owner_reap_before=$(<"$fake/reap.calls")
+printf 'owner-capacity\n' >"$fake/scenario"
+printf '\n' >"$fake/report"
+printf '1\n0\n1\n4\n' >"$fake/wait-codes"
+printf 'From: director\nSubject: next task\n\nRead this fixture message.\n' >"$fake/read-text"
+: >"$fake/post.calls"
+: >"$fake/codex.calls"
+output=$(on_stop="$t/return-login" "$kit/codex-run" owner --model owner-model --effort xhigh o/fixture "$t/brief.md")
+expect 'owner prints unit name' "$output" 'codex-owner-o-fixture'
+wait_unit codex-owner-o-fixture
+expect 'owner loop ends normally' "$(<"$fake/codex-owner-o-fixture.ended")" 0
+json_expect 'owner registers its holder before the first turn and waits between turns' \
+    '.[0].args[0:5] == ["wait", "o/fixture", "--timeout", "0", "--holder"] and
+     (.[0].args[5] | test("^[0-9]+$")) and .[0].args[6:8] == ["--kind", "codex"] and
+     ([.[] | select(.args[0] == "wait")] | length == 4 and ([.[].args[5]] | unique | length) == 1 and
+      all(.[1:][]; .args[3] == "3600"))' "$fake/post.calls"
+json_expect 'owner prompt, post text, hourly prompt, settings and stdin prompt' \
+    'length == 4 and all(.[]; .post_name == "o/fixture" and .args[-1] == "-" and .unwanted == null and
+      (.args | index("owner-model")) != null and (.args | index("model_reasoning_effort=xhigh")) != null and
+      (.args | index("--dangerously-bypass-approvals-and-sandbox")) != null) and
+     (.[0].stdin | startswith("You are o/fixture: read ")) and
+     .[1].stdin == "Go on with the task: the model was at capacity.\n" and
+     (.[2].stdin | startswith("Post for o/fixture:\n") and contains("Read this fixture message.")) and
+     .[3].stdin == "An hour without post: check your running tasks, act on what has ended, and keep your notes current.\n" and
+     all(.[1:][]; .args[0:2] == ["exec", "resume"])' "$fake/codex.calls"
+owner_state=$DEV_ROOT/tmp/owners/fixture/codex
+[[ $(wc -l <"$owner_state/turns.tsv") == 3 ]]
+expect 'owner turn row includes retry count' "$(head -n1 "$owner_state/turns.tsv")" $'\t0\t2'
+[[ $(<"$owner_state/thread") == thread-fixture && -f $owner_state/last.md && -f $owner_state/stderr.log ]]
+checks=$((checks + 1))
+
+printf '4\n' >"$fake/wait-codes"
+: >"$fake/codex.calls"
+"$kit/codex-run" owner o/replaced "$t/brief.md" >/dev/null
+wait_unit codex-owner-o-replaced
+[[ ! -s $fake/codex.calls ]]
+expect 'replacement at registration ends without a turn' "$(<"$fake/codex-owner-o-replaced.ended")" 0
+
+# Equal final components refuse; systemd-escape keeps slash/dash units distinct.
+printf '1\n4\n' >"$fake/wait-codes"
+"$kit/codex-run" owner o/shared "$t/brief.md" >/dev/null
+wait_unit codex-owner-o-shared
+refusal 'owner state collision' owner p/shared "$t/brief.md"
+expect 'full owner identity persisted' "$(<"$DEV_ROOT/tmp/owners/shared/codex/name")" 'o/shared'
+for name in o/a-b o-a/b; do
+    printf '1\n4\n' >"$fake/wait-codes"
+    unit=$("$kit/codex-run" owner "$name" "$t/brief.md")
+    expect 'escaped owner unit' "$unit" "codex-owner-$(systemd-escape "$name")"
+    wait_unit "$unit"
+done
+
+# Oversized mail is on stdin, and a failed turn replays before newly read mail.
+printf 'owner-fail-once\n' >"$fake/scenario"
+printf '1\n0\n0\n4\n' >"$fake/wait-codes"
+head -c 204800 /dev/zero | tr '\0' x >"$fake/read-text"
+rm -f "$fake/read-count"
+: >"$fake/codex.calls"
+: >"$fake/post.calls"
+"$kit/codex-run" owner o/replay "$t/brief.md" >/dev/null
+wait_unit codex-owner-o-replay
+json_expect '200 KiB prompt reaches stdin and failed mail precedes new post' \
+    'length == 3 and (.[1].stdin | length) > 204800 and (.[2].stdin | contains("Post for o/replay:"))' "$fake/codex.calls"
+# $old is bound by jq.
+# shellcheck disable=SC2016
+json_expect 'failed mail retained before new post' \
+    '.[1].stdin as $old | .[2].stdin | startswith($old) and endswith("New second post.\n")' "$fake/codex.calls"
+json_expect 'failed owner turn waits five minutes' \
+    '[.[] | select(.args[0] == "wait") | .args[3]] == ["0", "3600", "300", "3600"]' "$fake/post.calls"
+expect 'successful replay removes pending batch' "$(test ! -e "$DEV_ROOT/tmp/owners/replay/codex/pending.md" && echo removed)" removed
+
+# Restart after an unsuccessful mail turn replays the pending prompt after the brief.
+printf '1\n0\n4\n' >"$fake/wait-codes"
+printf 'Restart this pending post.\n' >"$fake/read-text"
+: >"$fake/codex.calls"
+"$kit/codex-run" owner o/restart "$t/brief.md" >/dev/null
+wait_unit codex-owner-o-restart
+restart_state=$DEV_ROOT/tmp/owners/restart/codex
+expect 'unsuccessful turn keeps pending mail' "$(<"$restart_state/pending.md")" 'Restart this pending post.'
+printf 'success\n' >"$fake/scenario"
+printf '1\n4\n' >"$fake/wait-codes"
+: >"$fake/codex.calls"
+rm "$fake/codex-owner-o-restart.ended"
+"$kit/codex-run" owner o/restart "$t/brief.md" >/dev/null
+wait_unit codex-owner-o-restart
+json_expect 'restart brief followed by saved post' \
+    'length == 1 and (.[0].stdin | startswith("You are o/restart: read ") and contains("Restart this pending post."))' "$fake/codex.calls"
+expect 'restart clears successful pending batch' "$(test ! -e "$restart_state/pending.md" && echo removed)" removed
+[[ $(<"$fake/reap.calls") == "$owner_reap_before" ]]
+checks=$((checks + 1))
+
+# The fake trim runs only for writable numeric slots, before Codex starts.
+cat >"$t/fabrig/tools/slots/trim" <<'PYTRIM'
+import os, pathlib, sys
+assert sys.flags.isolated == 1
+fake = pathlib.Path(os.environ['DEV_ROOT']) / 'fake'
+with (fake / 'trim.calls').open('a') as out:
+    out.write(sys.argv[1] + '\n')
+print('fixture slot: removed 1 executable, 0.001 GB; free 50.000 GB', flush=True)
+sys.exit(7 if (fake / 'trim-fail').exists() else 0)
+PYTRIM
+slot=$HOME/src/fabrig/slots/1
+mkdir -p "$slot" "$HOME/src/fabrig/slots/named" "$slot/nested"
+slot_task() {
+    local dir=$1
+    shift
+    n=$((n + 1))
+    report=$t/reports/slot-$n.md
+    printf 'success\n' >"$fake/scenario"
+    printf '%s\n' "$report" >"$fake/report"
+    output=$("$kit/codex-run" task "$@" "$t/task file.md" "$dir" "$report")
+    read -r id state <<<"$output"
+    wait_unit "codex-run-$id"
+    has_row
+}
+touch "$fake/expect-trim"
+slot_task "$slot"
+expect 'trim receives the writable slot' "$(<"$fake/trim.calls")" "$slot"
+expect 'trim result logged before Codex' "$(<"$state/trim.log")" 'removed 1 executable'
+[[ $(stat -c %a "$state/trim.log") == 600 ]]
+checks=$((checks + 1))
+touch "$fake/trim-fail"
+slot_task "$slot"
+expect 'trim failure logged without failing task' "$(<"$state/trim.log"),$(row)" 'trim failed: exit 7' $'\t0\t1\t'
+rm "$fake/trim-fail"
+mv "$t/fabrig/tools/slots/trim" "$t/fabrig/tools/slots/trim.saved"
+slot_task "$slot"
+expect 'missing trim is nonfatal and diagnosed' "$(<"$state/trim.log"),$(row)" 'trim failed: exit 2' $'\t0\t1\t'
+mv "$t/fabrig/tools/slots/trim.saved" "$t/fabrig/tools/slots/trim"
+rm "$fake/expect-trim"
+for excluded in "$slot" "$slot/nested" "$HOME/src/fabrig/slots/named" "$t/work dir"; do
+    options=()
+    [[ $excluded != "$slot" ]] || options+=(--read-only)
+    slot_task "$excluded" "${options[@]}"
+    [[ ! -e $state/trim.log && $(wc -l <"$fake/trim.calls") == 2 ]]
+    checks=$((checks + 1))
+done
+
+# A FIFO replaces retry sleep only in this case: observe the lease while Codex
+# is between attempts, then release it without relying on scheduling delays.
+mkfifo "$fake/retry-ready" "$fake/retry-release"
+exec {retry_ready}<>"$fake/retry-ready"
+exec {retry_release}<>"$fake/retry-release"
+rm "$t/bin/sleep"
+cat >"$t/bin/sleep" <<'PYSLEEP'
+#!/usr/bin/python3 -IS
+import os
+from pathlib import Path
+fake = Path(os.environ['DEV_ROOT']) / 'fake'
+with (fake / 'retry-ready').open('wb', buffering=0) as ready:
+    ready.write(b'ready\n')
+with (fake / 'retry-release').open('rb', buffering=0) as release:
+    release.read(1)
+PYSLEEP
+chmod +x "$t/bin/sleep"
+printf 'capacity-once\n' >"$fake/scenario"
+report=$t/reports/slot-retry.md
+printf '%s\n' "$report" >"$fake/report"
+output=$("$kit/codex-run" task "$t/task file.md" "$HOME/src/fabrig/slots/../slots/1" "$report")
+read -r id state <<<"$output"
+IFS= read -r -t "$HUNG_CASE_S" ready <&"$retry_ready"
+[[ $ready == ready ]]
+checks=$((checks + 1))
+expect 'alias retry metadata names canonical slot' "$(sed -n 's/^dir=//p' "$state/meta")" "$slot"
+if flock -n "$HOME/src/fabrig/slot-maintenance/1/lease" true; then
+    echo 'FAIL reclaim entered during capacity retry' >&2
+    exit 1
+fi
+checks=$((checks + 1))
+printf x >&"$retry_release"
+wait_unit "codex-run-$id"
+expect 'slot capacity retry completes under lease' "$(row)" $'\t0\t2\t'
+shopt -s nullglob
+holds=("$HOME/src/fabrig/slot-maintenance/1/"*.hold)
+[[ ${#holds[@]} == 0 ]]
+checks=$((checks + 1))
+exec {retry_ready}>&- {retry_release}>&-
+
+printf 'on-stop\n' >"$fake/scenario"
+report=$t/reports/slot-on-stop.md
+printf '%s\n' "$report" >"$fake/report"
+output=$("$kit/codex-run" task --on-stop "$t/slot-return" "$t/task file.md" "$slot" "$report")
+read -r id state <<<"$output"
+wait_unit "codex-run-$id"
+holds=("$HOME/src/fabrig/slot-maintenance/1/"*.hold)
+[[ ${#holds[@]} == 0 ]]
+expect 'slot callback ends its bridged lease' "$(<"$state/on-stop")" 'exit 0'
+reap_run_expect
+printf 'on-stop-failure\n' >"$fake/scenario"
+report=$t/reports/slot-on-stop-failure.md
+printf '%s\n' "$report" >"$fake/report"
+output=$("$kit/codex-run" task --on-stop "$t/slot-return-failure" "$t/task file.md" "$slot" "$report")
+read -r id state <<<"$output"
+wait_unit "codex-run-$id"
+holds=("$HOME/src/fabrig/slot-maintenance/1/"*.hold)
+[[ ${#holds[@]} == 1 && $(jq -r .uncertain "${holds[0]}") == true ]]
+checks=$((checks + 1))
+expect 'failed slot callback retains uncertain ownership' "$(<"$state/on-stop")" 'exit 3'
+reap_run_expect
+printf 'broken\n' >"$fake/reap-mode"
+printf 'broken\n' >"$fake/unit-mode"
+slot_task "$slot"
+holds=("$HOME/src/fabrig/slot-maintenance/1/"*.hold)
+[[ ${#holds[@]} == 1 && $(jq -r .uncertain "${holds[0]}") == true && -f $state/ended ]]
+expect 'broken reaper preserves lease cleanup and prior protected hold' "$(row)" $'\t0\t1\t'
+rm "$fake/reap-mode" "$fake/unit-mode"
+shopt -u nullglob
+
+# Fixture helpers use only the standard library and start without site imports.
+# Fixture conformance keeps the faster neighbours faithful to their process and
+# byte contracts; production workers, callbacks and validators still execute.
+python3 -I -S -B - "$t" "$HUNG_CASE_S" <<'PYFIXTURES'
+import json
+import os
+from pathlib import Path
+import select
+import subprocess
+import sys
+
+fixture = Path(sys.argv[1]) / 'fixture-conformance'
+fake = fixture / 'fake'
+fake.mkdir(parents=True)
+state = fixture / 'state'
+state.mkdir()
+directory = fixture / 'working directory'
+directory.mkdir()
+report = fixture / 'report.md'
+last = state / 'last.md'
+kit = Path(sys.argv[1]) / 'bin'
+env = {'HOME': str(Path(sys.argv[1]) / 'home'), 'DEV_ROOT': str(fixture),
+       'PATH': str(kit), 'BASH_ENV': os.environ['BASH_ENV']}
+(fake / 'scenario').write_text('success\n')
+(fake / 'report').write_text(str(report) + '\n')
+prompt = ('quotes " and \\, Unicode λ\n' + ''.join(map(chr, range(1, 32))) +
+          'x' * 204800 + '\n\n')
+arguments = ['exec', '-m', 'a value with --sandbox inside', '', '-o', str(last), '-']
+result = subprocess.run([str(kit / 'codex'), *arguments], input=prompt.encode(),
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                        cwd=directory, env=env, check=True)
+call = json.loads((fake / 'codex.calls').read_text())
+assert call == {'args': arguments, 'cwd': str(directory), 'stdin': prompt,
+                'home': env['HOME'], 'post_name': None, 'unwanted': None}
+assert report.read_text() == 'Fixture task completed.\nReport body.\n'
+assert len([json.loads(line) for line in result.stdout.splitlines()]) == 3
+# An exact sandbox token suppresses report writes; a model substring does not.
+report.unlink()
+(fake / 'codex.calls').unlink()
+arguments[1:1] = ['--sandbox', 'read-only']
+env['POST_NAME'] = 'o/fixture'
+subprocess.run([str(kit / 'codex'), *arguments], input=b'',
+               stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+               cwd=directory, env=env, check=True)
+call = json.loads((fake / 'codex.calls').read_text())
+assert call['args'] == arguments and call['stdin'] == ''
+assert call['post_name'] == 'o/fixture' and not report.exists()
+assert (state / 'fake-count').read_text() == '2'
+# Post serializes the same control bytes and trailing newlines without jq.
+body = fixture / 'body'
+body.write_text(prompt)
+arguments = ['send', '--as', 'codex-run', 'o/fixture', 'fixture subject', str(body)]
+subprocess.run([str(kit / 'post'), *arguments], stdin=subprocess.DEVNULL,
+               stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, env=env, check=True)
+assert json.loads((fake / 'post.calls').read_text()) == {'args': arguments, 'body': prompt}
+# A unit retains its PID across login exec, owns a fresh session, starts with
+# default signals and closed stdin, and completes its callback before notifying.
+unit = 'fixture-conformance'
+os.mkfifo(fake / 'unit-events')
+fd = os.open(fake / 'unit-events', os.O_RDWR | os.O_NONBLOCK)
+worker = fixture / 'worker'
+worker.write_text('''#!/usr/bin/python3 -IS
+import json, os, pathlib, signal, sys
+fake = pathlib.Path(os.environ['DEV_ROOT']) / 'fake'
+assert os.read(0, 1) == b''
+assert 'POST_NAME' not in os.environ and 'CODEX_RUN_FIXTURE_UNWANTED' not in os.environ
+if sys.argv[1] == '_run':
+    assert os.getsid(0) == os.getpid() == os.getpgrp()
+    assert signal.getsignal(signal.SIGINT) != signal.SIG_IGN
+    assert signal.getsignal(signal.SIGQUIT) == signal.SIG_DFL
+    (fake / 'worker-result').write_text(str(os.getpid()))
+else:
+    assert sys.argv[1:] == ['_stop', 'fixture'] and (fake / 'worker-result').is_file()
+    (fake / 'callback-result').write_text('complete')
+''')
+worker.chmod(0o700)
+stop = ' '.join('"' + token + '"' for token in (str(worker), '_stop', 'fixture'))
+parent_env = dict(env, CODEX_RUN_FIXTURE_UNWANTED='must-not-survive')
+subprocess.run([str(kit / 'systemd-run'), '--user', '--collect', '--quiet',
+                '--service-type=exec', '--unit', unit, '--setenv=DEV_ROOT=' + str(fixture),
+                '--property=ExecStop=-' + stop, 'bash', '-lc', 'exec "$0" "$@"',
+                str(worker), '_run', 'fixture'], stdin=subprocess.DEVNULL,
+               stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, env=parent_env, check=True)
+assert select.select([fd], [], [], int(sys.argv[2]))[0], 'unit deadline'
+assert os.read(fd, 65536) == (unit + '\n').encode()
+os.close(fd)
+assert (fake / (unit + '.ended')).read_text() == '0\n'
+assert (fake / (unit + '.pid')).read_text().strip() == (fake / 'worker-result').read_text()
+assert (fake / 'callback-result').read_text() == 'complete'
+PYFIXTURES
+checks=$((checks + 4))
+
+stale_checks=$(python3 -I -S -B "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/test-stale.py" "$t" "$kit")
+printf 'stale candidates: %s checks passed\n' "$stale_checks"
+checks=$((checks + stale_checks))
+
+finish_checks
