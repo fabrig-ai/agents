@@ -11,7 +11,8 @@ enforcement is enabled. Report-only runs complete past budget targets, with
 `OVER (report-only)` labels and a separate 900 s safety cap. Enforced runs
 retain file and merge-wall hard limits. Killed/starved files always fail and
 stay unobserved. Slow-completion, enforced-kill and hang-guard fixtures cover
-these behaviors.
+these behaviors. Workers reap adopted zombies during execution as well as
+at teardown, preserving process-group exit observations and CPU accounting.
 
 ## 2. Claimed landing
 

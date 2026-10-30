@@ -153,11 +153,16 @@ def run_file(root, path, limits, enforce):
                                      stderr=subprocess.STDOUT, start_new_session=True,
                                      preexec_fn=lambda: priority(limits['file_cpu_s'] if enforce else None))
             starved = False
+            reaped_cpu = 0.0
             try:
                 while True:
-                    pid, status, usage = os.wait4(child.pid, os.WNOHANG)
-                    if pid:
+                    pid, status, usage = os.wait4(-1, os.WNOHANG)
+                    if pid == child.pid:
                         break
+                    if pid:
+                        # Adopted zombies must disappear while the file is
+                        # running too: fixtures may assert that groups ended.
+                        reaped_cpu += usage.ru_utime + usage.ru_stime
                     if time.monotonic() >= min(started + (limits['file_wall_s'] if enforce else limits['report_hard_wall_s']), DEADLINE):
                         starved = True
                         os.killpg(child.pid, signal.SIGKILL)
@@ -170,7 +175,7 @@ def run_file(root, path, limits, enforce):
                     os.killpg(child.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
-                descendant_cpu = drain_children()
+                descendant_cpu = reaped_cpu + drain_children()
             child.returncode = os.waitstatus_to_exitcode(status)
             output.seek(0)
             text = output.read().decode(errors='replace')

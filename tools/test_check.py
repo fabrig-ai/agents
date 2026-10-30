@@ -175,6 +175,25 @@ print('descendant_pid',child.pid,flush=True)
         with self.assertRaises(ProcessLookupError):
             os.kill(int(line.split()[1]), 0)
 
+    def test_adopted_children_are_reaped_while_test_file_is_running(self):
+        source = """import os,subprocess,sys,time
+busy = 'import time; end=time.process_time()+0.15\\nwhile time.process_time()<end: pass'
+launcher = 'import subprocess,sys; p=subprocess.Popen([sys.executable,"-c",sys.argv[1]],stdout=subprocess.DEVNULL,start_new_session=True); print(p.pid)'
+pid = int(subprocess.check_output([sys.executable,'-c',launcher,busy]))
+deadline = time.monotonic()+5
+while True:
+ try: os.kill(pid,0)
+ except ProcessLookupError: break
+ assert time.monotonic()<deadline, 'adopted zombie still exists during test'
+ time.sleep(.01)
+print('adopted child reaped')
+"""
+        result = GateTests.run_gate(self, {'test_adopted.py': source})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('adopted child reaped', result.stderr)
+        row = next(line for line in result.stderr.splitlines() if line.startswith('tools/test_adopted.py '))
+        self.assertGreaterEqual(float(row.split()[2]), 0.15)
+
     def test_priority_and_tier_wall_backstop(self):
         source = """import os,subprocess
 assert os.getpriority(os.PRIO_PROCESS, 0) == 19

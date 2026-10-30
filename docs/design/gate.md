@@ -28,7 +28,8 @@ files (all files if empty); other unknown paths select every gate file.
 
 Up to eight workers share a per-host lock. They use nice 19 and idle IO when
 ionice is available. `wait4` reports each child's user+system CPU, including its
-waited and adopted descendants, and wall time. The table names file, owner, CPU, wall,
+waited and adopted descendants, and wall time. Workers reap adopted zombies
+throughout the run so fixture process groups can disappear before file exit. The table names file, owner, CPU, wall,
 budget and status. Every tier/check/landing summary says `budget: REPORT-ONLY
 (not enforced)` or `budget: ENFORCED`; report-mode merge-wall overruns say
 `OVER (report-only)`. `--json PATH` saves the same observations atomically.
