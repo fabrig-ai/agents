@@ -36,6 +36,16 @@
 - **Git history is the archive.** Nothing is deleted to save space, so what enters must be worth keeping. Raw events never enter through the writer. After the spool tools are deployed
   on every host, a separate history rewrite removes historical raw events while
   keeping `events/after-landing/`; see `docs/design/records.status.md`.
+- **A rewritten upstream must not be replayed.** Before pulling or rebasing,
+  `record` refuses more than 20 local-only commits or any local-only commit
+  touching raw `events/` paths; `events/after-landing/` is exempt. The refusal
+  directs the caller to `record reset`. Reset locks the clone, fetches, saves
+  every local-only commit as a binary/full-index patch with a commit manifest
+  in permanent `~/src/fabrig/archive/records-local-<UTC stamp>/`, and resets to
+  `origin/main`. It prints the archive path/count and old/new HEAD. Untracked
+  files remain; tracked edits and untracked paths that would be overwritten
+  refuse. Repeating reset leaves HEAD unchanged. Review saved patches before
+  restoring judgements; never replay raw-event history.
 
 ## 3. A role's state, journal and incidents
 

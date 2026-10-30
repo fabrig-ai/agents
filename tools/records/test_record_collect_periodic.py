@@ -6,6 +6,75 @@ class PeriodicCollectTests(CollectTests):
     def run_collect(self, *sources, **kwargs):
         return self.run_collect_cli(*sources, **kwargs)
 
+    def test_retry_uses_saved_batch_when_producer_changes_mid_spool_write(self):
+        row = self.queue_fixture()
+        self.run_collect('queue')
+        origin_before = self.git(self.origin, 'rev-parse', 'main')
+        cursor = self.state / 'queue.json'
+        cursor_before = cursor.read_bytes()
+        before = {event['id'] for event in self.events('queue')}
+        row.update(start='2026-10-29T11:00:30Z', end='2026-10-29T11:01:00Z')
+        path = self.fabrig / 'notes/queue.jsonl'
+        self.write(path, path.read_text() + json.dumps(row) + '\n')
+        pending = self.state / 'queue.pending.json'
+        saved = []
+        spool = API['publish'].__globals__['event_spool']
+
+        def change_producer_then_fail(*args):
+            saved.extend(json.loads(pending.read_text())['events'])
+            row.update(start='2026-10-29T11:01:20Z', end='2026-10-29T11:01:30Z')
+            self.write(path, path.read_text() + json.dumps(row) + '\n')
+            raise OSError('simulated spool write failure')
+
+        with patch.object(spool, 'append', side_effect=change_producer_then_fail):
+            result = CollectTests.run_collect(self, 'queue', code=2)
+        self.assertIn('simulated spool write failure', result.stderr)
+        self.assertEqual(cursor.read_bytes(), cursor_before)
+        self.assertEqual(json.loads(pending.read_text())['events'], saved)
+        self.run_collect('queue')
+        ids = {event['id'] for event in saved}
+        self.assertEqual({event['id'] for event in self.events('queue')} - before, ids)
+        self.assertLess(self.cursor('queue')['files'][str(path)]['offset'], path.stat().st_size)
+        self.run_collect('queue')
+        self.assertGreater(len(self.events('queue')), len(before | ids))
+        for event_id in ids:
+            self.assertEqual(sum(e['id'] == event_id for e in self.events('queue')), 1)
+        self.assertFalse(pending.exists())
+        self.assertFalse(self.clone.exists())
+        self.assertEqual(self.git(self.origin, 'rev-parse', 'main'), origin_before)
+
+    def test_repeated_spool_failures_preserve_batch_until_recovery(self):
+        row = self.queue_fixture()
+        self.run_collect('queue')
+        origin_before = self.git(self.origin, 'rev-parse', 'main')
+        path = self.fabrig / 'notes/queue.jsonl'
+        cursor = self.state / 'queue.json'
+        pending = self.state / 'queue.pending.json'
+        spool = API['publish'].__globals__['event_spool']
+        for failures in (2, 5):
+            with self.subTest(failures=failures):
+                before = cursor.read_bytes()
+                row.update(start=f'2026-10-29T11:01:0{failures}Z',
+                           end=f'2026-10-29T11:01:1{failures}Z')
+                self.write(path, path.read_text() + json.dumps(row) + '\n')
+                saved = None
+                with patch.object(spool, 'append', side_effect=OSError('disk full')) as append:
+                    for _ in range(failures):
+                        CollectTests.run_collect(self, 'queue', code=2)
+                        self.assertEqual(cursor.read_bytes(), before)
+                        current = json.loads(pending.read_text())
+                        if saved is None:
+                            saved = current
+                        self.assertEqual(current, saved)
+                    self.assertEqual(append.call_count, failures)
+                self.run_collect('queue')
+                self.assertNotEqual(cursor.read_bytes(), before)
+                self.assertFalse(pending.exists())
+                for event in saved['events']:
+                    self.assertEqual(sum(e['id'] == event['id'] for e in self.events('queue')), 1)
+        self.assertFalse(self.clone.exists())
+        self.assertEqual(self.git(self.origin, 'rev-parse', 'main'), origin_before)
+
     def test_heavy_multiline_rows_keep_identity_and_replay_after_rotation(self):
         self.heavy_fixture()
         path = self.tmp / 'logs/heavy.tsv'

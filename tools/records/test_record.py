@@ -142,6 +142,59 @@ class RecordTests(RecordsSeed, unittest.TestCase):
         self.assertFalse((clone / '.git/rebase-merge').exists())
         self.assertFalse((clone / '.git/rebase-apply').exists())
 
+    def rewrite_origin(self):
+        self.git(self.seed, 'checkout', '--orphan', 'rewritten')
+        self.git(self.seed, 'rm', '-rf', '.')
+        (self.seed / 'README.md').write_bytes(b'# Rewritten records\n')
+        self.git(self.seed, 'add', '.')
+        self.git(self.seed, 'commit', '-m', 'rewritten root')
+        self.git(self.seed, 'push', '--force', 'origin', 'HEAD:main')
+        return self.git(self.origin, 'rev-parse', 'main')
+
+
+    def test_reset_refuses_tracked_edits_and_untracked_collisions(self):
+        self.prepare()
+        (self.clone / 'README.md').write_text('uncommitted')
+        self.assertIn(b'tracked changes refused', self.run_record('reset', code=1).stderr)
+        self.git(self.clone, 'checkout', '--', 'README.md')
+        (self.clone / 'new.md').write_text('untracked')
+        (self.seed / 'new.md').write_text('upstream')
+        self.seed_commit('new upstream path')
+        self.assertIn(b'untracked path would be overwritten', self.run_record('reset', code=1).stderr)
+        self.assertEqual((self.clone / 'new.md').read_text(), 'untracked')
+
+
+    def test_rewritten_history_guard_refuses_without_mutation(self):
+        path = self.seed / 'events/queue/hel8/2026-10-29.jsonl'
+        path.parent.mkdir(parents=True)
+        path.write_bytes(self.event().replace(b'after-landing', b'queue'))
+        self.seed_commit('old collector')
+        self.prepare()
+        old = self.git(self.clone, 'rev-parse', 'HEAD')
+        self.rewrite_origin()
+        refused = self.run_record('pull', code=1)
+        self.assertIn(b'records history was rewritten upstream; run `record reset`', refused.stderr)
+        self.assertEqual(self.git(self.clone, 'rev-parse', 'HEAD'), old)
+
+    def test_reset_saves_patch_keeps_untracked_and_is_idempotent(self):
+        self.prepare()
+        upstream = self.git(self.origin, 'rev-parse', 'main')
+        (self.clone / 'README.md').write_bytes(b'# Local judgement\n')
+        self.git(self.clone, 'add', 'README.md')
+        self.git(self.clone, 'commit', '-m', 'local judgement')
+        old = self.git(self.clone, 'rev-parse', 'HEAD')
+        (self.clone / 'scratch').write_bytes(b'keep me')
+        saved = self.run_record('reset')
+        self.assertIn(b'saved 1 local-only commits', saved.stdout)
+        self.assertIn(old.encode() + b' -> ' + upstream.encode(), saved.stdout)
+        archive, = (self.home / 'src/fabrig/archive').iterdir()
+        patch_file, = archive.glob('*.patch')
+        self.assertTrue(patch_file.read_bytes().startswith(f'From {old} '.encode()))
+        self.assertEqual((archive / 'commits.txt').read_text(), old + '\n')
+        self.assertEqual((self.clone / 'scratch').read_bytes(), b'keep me')
+        self.assertIn(b'saved 0 local-only commits', self.run_record('reset').stdout)
+        self.assertEqual(self.git(self.clone, 'rev-parse', 'HEAD'), upstream)
+
     def test_every_path_class(self):
         (self.seed / 'drafts/example').mkdir(parents=True)
         for name, data in VALID.items():
