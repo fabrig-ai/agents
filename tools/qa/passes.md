@@ -6,6 +6,10 @@ Walks remain described by [qa.md](qa.md).
 
 ## 1. In one page
 
+For the first implementation, section 13a overrides the records destinations
+and feed transport summarized here. Its queue-only producer prerequisite and
+QA-owned publication path require no records changes.
+
 - **Owners mark stories in git.** A landed branch's commits carry one-line
   `QA:` trailers describing the stories or surfaces to exercise. The queue's
   published merges identify which commits arrived together (section 2).
@@ -63,6 +67,11 @@ between sessions. The batch of five is consequently five marked merges, a
 departure from the legacy's five individual marked commits.
 
 ### 2.1 Queue producer prerequisite
+
+First-version amendment: section 13a replaces the proposed third column with
+`tools/queue/coordinators.txt` and the records merge projection with QA's own
+read-only journal reader. The pre-push intent, saved-candidate recovery,
+canonical route objects and graph validation below still apply.
 
 The supplied fabrig main's `tools/queue/design.md` describes the external
 `~/src/fabrig/notes/queue.jsonl` journal. Its `mq` computes each merged branch's
@@ -154,6 +163,10 @@ non-fast-forward main cursor.
 
 ## 3. Defaults, decisions and candidates
 
+For the first version, save and confirm defaults, decisions and their stable
+event identities through QA's authority and private evidence branch as section
+13a specifies; references here to records publication use that destination.
+
 Fabrig is the sole repository. All commands run on the designated QA host;
 no REPO positional argument or multi-repository fairness is needed. First
 activation runs `qa default on --at S`, where S is the exact then-current
@@ -215,6 +228,10 @@ acknowledged only after records confirms publication; an exact pending event
 survives a timeout and is retried rather than allocated again.
 
 ## 4. Selecting the build, batching and the brief
+
+Section 13a specifies the first-version journal transport and the exact
+already-published after-landing fields. Records remains read-only for green
+selection; running reports/start publications use QA's private branch.
 
 At a check, pull a consistent records main snapshot and fetch fabrig in a
 dedicated metadata clone at `DEV_TMP/qa/fabrig.git`. It is bare, owns no build
@@ -329,6 +346,10 @@ the new admission and returns its other grants through normal cleanup.
 
 ## 6. Ending a pass without an operator
 
+For the first version, the report/event writer and confirmation destination
+in these steps is QA's own publisher (section 13a). Publication failures still
+cannot hold up independent custody cleanup.
+
 Reuse qa.md's **Deployment and cleanup** and **codex-run and installation**
 contracts for managed passes as well as walks. Extend `qa deploy`'s saved
 directory ownership check to passes; do not introduce a second unit discovery
@@ -381,6 +402,11 @@ unreadable-report and metadata exceptions do. Do not use a walk's pause marker
 to retain a pass box indefinitely.
 
 ## 7. Reports and verdicts in records
+
+First-version storage amendment: apply all schemas, identities, byte bounds,
+revisions and dependency ordering in this section to QA-owned state and the
+private evidence branch (section 13a). Records writer declarations, new record
+permissions/commands and QA records events are deferred to section 14.
 
 ### 7.1 Bounded summaries and durable complete details
 
@@ -630,6 +656,10 @@ No finding post precedes confirmed final details, summary and finding event.
 
 ## 8. Findings and the coordinator
 
+For the first version, section 13a supplies QA-owned report/event paths and
+publication confirmation wherever this section says records. The same post
+routing, revision checks, receipts and uncertainty rules apply.
+
 Resolve a finding's marked Commit to its carrying merge from section 2 and
 route to that landing's saved coordinator mailbox. A finding naming M
 directly uses M. A commit outside the pass's marks is unresolved unless an
@@ -696,6 +726,11 @@ Finding numbers stay stable across report metadata revisions. Unreadable
 route state freezes delivery and preserves an explicit director exception.
 
 ## 9. Evidence, scanning and seven-day pruning
+
+Section 13a adds required service-generated QA reports, detail trees and
+control/event history to this same private branch. Its publication and pruning
+rules distinguish those permanent results from optional scratch captures;
+records report/link updates in this section use QA's publisher in version 1.
 
 Today's port keeps walk scratch/reports on the host, opens no evidence
 repository and prunes nothing (qa.md). The legacy kept evidence on the private
@@ -795,6 +830,10 @@ enabling passes does not adopt old pass directories or erase them.
 
 ## 10. Settings, state and CLI
 
+Section 13a adds the first-version queue host/path settings and publication
+layout. QA commands read controls/results from their committed authority and
+confirmed private branch; records is read only for after-landing facts.
+
 Use today's environment > safe DEV_TMP/machine.env > defaults precedence,
 with no sourcing of shell. Preserve DEV_ROOT/DEV_TMP meanings and existing
 director/stuck-address configuration. No additional credential configuration.
@@ -833,6 +872,11 @@ contain host, UTC reservation time and a random suffix allocated in the
 reservation transaction and never regenerated on restart.
 
 ### 10.1 One authoritative write-ahead state and partial transitions
+
+In the first version, every records publication/inspection/repair reference
+below uses the QA branch and exact revision/id checks in section 13a. Records
+cannot reconstruct QA-owned pending state; repair remains explicit and must
+account for local custody before changing authority.
 
 The version-1 `authority.json` contains `schema_version`, monotonically
 increasing `generation`, and digest roots for selection, pass transactions,
@@ -911,6 +955,13 @@ refused input/configuration is 2; operational/publication failure is 1 and
 names the pending operation id. `keep` uses its explicit statuses above.
 
 ## 11. Every watcher check and the test worlds
+
+First-version substitutions are in section 13a: bounded journal SSH in step
+4, the existing records green reader, and QA branch publication in steps 3
+and 5. Use fake SSH and a private local QA origin for these worlds. The records
+producer/writer/schema tests below belong to Later, not the first-version gate;
+replace three-column migration coverage with separate coordinator-roster
+coverage while preserving the six named route/publication fixtures.
 
 Under the existing nonblocking watch lock, at startup, every mailbox wake
 and each 300-second timeout:
@@ -1032,27 +1083,39 @@ machine test is required to review this design.
 
 Implement as reviewable parts with explicit dependencies:
 
-1. **Queue feed:** fabrig tools/queue roster, confirmed merge journal and
-   recovery; agents record-collect merge events. Publish fixtures/contracts
-   together. This supplies stable landing identity and historical coordinator.
-2. **Records contract:** scoped qa writer, report path/schema, event validation
-   and replay; immutable detail trees, versioned report/result schemas and
-   a pure selection/feed/green reader using local origins. No scheduler
-   before these two parts pass.
+1. **Queue feed (fabrig producer only):** tools/queue adds the separate
+   coordinator roster, confirmed merge journal and durable publication
+   recovery in sections 2.1 and 13a. Publish the pinned contract/fixtures with
+   that producer. No agents collector or after-landing parser change is needed.
+2. **Records contract (Later):** merge projection, scoped qa writer,
+   report/detail paths, schemas, event validation and replay move to section
+   14. This part is not a prerequisite for the first version.
 3. **Preservation:** common snapshot scanner and evidence writer, keep CLI,
-   walk final-end integration and guarded pruning. Preserve walk safety and
-   earlier attempt reports before adding pass scheduling.
+   walk final-end integration and guarded pruning. Include section 13a's
+   required QA-owned report/detail/control publication, with section 7's
+   schemas and serialized revisions. Preserve walk safety and earlier attempt
+   reports before adding pass scheduling.
 4. **Pass lifetime:** common slot/admission/claim/launch/deploy/cleanup code
    and the atomic authority snapshot for pass states, with walk regressions;
    no watcher scheduling until faked crash/custody worlds pass.
-5. **Scheduler and routing:** control CLI, defaults, batch shares, brief/report
-   interpretation, records outboxes, coordinator delivery and pass listings,
-   followed by the watcher loop acceptance worlds.
-6. **Activation:** reviewed slots, binding, records schema/producer deployment,
-   old-state reconciliation, fleet settings and one explicit default start.
-   A machine-action commit must name these actions. Installation alone starts
-   no pass; no change to main except through each repository's normal gate
-   and landing tool/queue. This design commit requires no machine action.
+5. **Scheduler and routing:** pure journal/feed/green reader, control CLI,
+   defaults, batch shares, brief/report interpretation, QA-owned outboxes,
+   coordinator delivery and pass listings, followed by watcher acceptance
+   worlds. Scheduling depends on parts 1, 3 and 4 and this part's offline
+   tests, with existing after-landing records read only (section 13a).
+6. **Activation:** reviewed slots/binding, queue producer deployment and
+   validated queue host/path, existing after-landing producer host, private
+   QA publication, old-state reconciliation, fleet settings and one explicit
+   default start. A machine-action commit must name these actions.
+   Installation alone starts no pass; no change to main except through each
+   repository's normal gate and landing tool/queue. This design commit
+   requires no machine action.
+
+Parts 1, 3, 4 and 5 can proceed now, including their independent fake-service
+work in parallel; the producer and required publication/lifetime tests must
+pass before scheduling. Part 6 follows their reviewed deployment and activation
+checks. Part 2 waits for the records scope review. The legacy comparisons below
+use section 13a's first-version destinations wherever they mention QA records.
 
 Compared with old/docs/design/qa-flow.md 2–4, 6, 10.6 and 11 and
 old/roles/qa-operations.md 7–8, retain ancestry defaults, explicit exceptions,
@@ -1084,6 +1147,9 @@ evidence, secret rules and guarded seven-day retention. Depart deliberately:
 
 ## 13. Questions — answered by coordinator q, 2026-10-30
 
+Section 13a changes the coordinator roster's file and first-version storage,
+without changing these slot, binding/rung or explicit-start answers.
+
 - **Slots — answered:** dedicated s/qa pass shares on hetzner6 are **2 and
   6**. The selected walk allocation is forgejo **8 and 1**, claude **4 and
   3**: existing slots with warm targets, so no new target is made (5 and 7
@@ -1102,8 +1168,228 @@ evidence, secret rules and guarded seven-day retention. Depart deliberately:
   Coordinator roster assignments still need their owners' concrete addresses;
   missing/historical routes use section 2.1's unresolved representation.
 
+## 13a. First version, without records changes
+
+This section is the first-version amendment to sections 1–13. Records
+implementation is paused while its scope is reviewed. Implement the queue
+producer and QA consumer without changing records files, events, schemas,
+writer permissions, collector or after-landing writer. Sections 2.1 and 7
+remain the safety/schema contracts subject to the substitutions here; their
+records integration is a section-14 Later item. This document activates nothing.
+
+### Routes and the unchanged publication boundary
+
+Add fabrig `tools/queue/coordinators.txt`, with comment/blank-line handling
+and exactly two cells per row: `KEY COORDINATOR_ADDRESS`. An address is a
+hosted mailbox or exactly `-` for unassigned. Apply section 2.1's strict key,
+duplicate-key, control and hosted-address validation; malformed configuration
+refuses publication, while an absent key becomes `missing_key`. Snapshot `-`
+as `route_status="unresolved", route_reason="unassigned"`, an absent key as
+unresolved/missing_key, and an address as resolved/coordinator, with exactly
+section 2.1's omissions. Historical backfill alone uses `historical_unknown`.
+No prefix or mission-file inference supplies a coordinator.
+
+`tools/queue/leads.txt` stays `KEY LEAD_ADDRESS`, two columns, for existing
+notifications and readers. In particular, record-collect unpacks exactly two
+cells today (`tools/records/record-collect`, queue parser); after-landing does
+too. Extra journal row fields are compatible with the existing readers, but
+a third lead column would require the records changes excluded here.
+
+The queue loads and validates the coordinator roster as a frozen runtime
+input, includes it in worker/restart manifests and coherent-runtime checks,
+and snapshots its exact bytes/digest with the publication intent. In the
+pinned contract's `<authority-root>/publications/PUBLICATION_ID/` layout,
+`roster.txt` and `roster_sha256` now mean that coordinator snapshot. Keep the
+intent path, fields, exact candidate, ordered M/P/B entries, publication time,
+journal row, fsync/rename boundary and journal-confirmation protocol unchanged.
+Each merge's canonical route is fixed before the first push and copied into
+its confirmed journal entry. A lost acknowledgement followed by a roster
+change still reconciles the original candidate, routes and ids. Changing
+coordinators later cannot reroute a published merge. Lead destinations keep
+their existing separate frozen mapping and notification policy.
+
+### Feed transport owned by QA
+
+QA reads `merges` directly from the queue host's external journal, through
+read-only SSH. It does not consume records `queue`/`merge` events. Add these
+settings with section 10's precedence and safe parsing:
+
+| Setting | Default / activation value | Validation and use |
+|---|---|---|
+| `QA_QUEUE_HOST` | unset; explicit deployed queue inventory host at activation | Required for starts; validated inventory host, never a shell fragment |
+| `QA_QUEUE_JOURNAL` | unset; explicit absolute queue-host path, conventionally its HOME plus `/src/fabrig/notes/queue.jsonl` | Required for starts; safe absolute regular-file path, no shell expansion or traversal |
+
+This is a bounded read protocol, not an unbounded `cat` or remote tailer.
+Use noninteractive SSH, a fixed Python 3.13 standard-library read helper,
+structured arguments and a 60-second total deadline per read, killing/reaping
+its transport child on timeout. Each response contains at most 1 MiB of
+journal bytes plus bounded identity/offset metadata; a complete line is at
+most 1 MiB. A larger row is a visible feed fault, not a skipped landing.
+Read from an opened regular nonsymlinked journal descriptor and return its
+`st_dev`, `st_ino`, size, start/end byte offsets and bytes from that same
+file. Never install a service, mutate the journal, or read roster/login/key
+contents through this channel. Existing machine transport supplies access.
+
+Keep the source host/path, device/inode identity, committed byte offset and
+replay identities in QA's authority. Consume only complete newline-terminated
+UTF-8 JSON objects; an unfinished tail stays at its starting offset for the
+next bounded read. A line crossing a response boundary is re-read/assembled
+within the line bound. Commit validated merge facts and their cursor together
+before using them. A crash before that commit replays the same bytes. Key
+landings by `merge:<full M>` and retain `publication_id`, exact saved metadata
+and canonical route: identical replay is a no-op; conflicting identity/data
+is corruption, never a route update or another request.
+
+Accept only ordinary confirmed publication rows with `outcome="green"`,
+`dry=false`, saved `publication_id`/`publication_time`, batch `parent`/`commit`
+and ordered `merges`, as in the pinned producer contract. Ignore diagnostic
+`event` rows and known red/dry/idle attempts, not malformed publication rows.
+Validate M's exact parents P/B, candidate containment, first-parent order and
+all route fields against the saved journal and QA's own fabrig fetch. Queue
+baseline commits are not merge entries; enumeration/mark ownership stays as
+section 2 says. At activation retain the explicit S boundary, without importing
+old backlog. Legacy rows wholly at/before S may be ignored after graph
+verification; a publication crossing/following S without the required merge
+facts blocks starts. Journal/graph coverage must account for every carrying
+merge following S through the admitted green build.
+
+Replacement/rotation (changed device/inode) or truncation below the offset
+starts a bounded replay from zero, deduplicating by M. Also retain/check a
+digest of consumed byte ranges so an in-place rewrite is detected, not
+mistaken for append-only growth. Verify those ranges by bounded read-back
+chunks against a saved verification boundary; no helper hashes an unbounded
+prefix. Until continuity/replay proves unchanged saved facts and complete
+post-S coverage, admit nothing. Missing prior coverage requires reviewed
+backfill; a replacement file is not permission to forget a merge. Missing or
+unreadable journal, SSH failure/timeout, malformed JSON/schema, oversize row,
+changed saved facts, lost cursor or a graph/feed gap preserves existing
+reservations and consumption, reports the reason, and blocks new admission
+and unlaunched starts. Cleanup, publication retries and custody returns
+continue. Never silently reset a divergent main cursor or reconstruct routes
+from today's roster.
+
+### After-landing green is an existing read-only records input
+
+Read a consistent, confirmed records main snapshot using the existing records
+pull path. Its events are `events/after-landing/HOST/DATE.jsonl` for
+`QA_AFTER_LANDING_HOST`. No new writer, permission or records event is needed.
+The published contract is `tools/after-landing/design.md` sections 4 and 6,
+`tools/records/record.md`, and the existing after-landing event serializer.
+
+Use the envelope `source="after-landing"`, `host`, `kind`, `id`, `time`, and
+kind `after-landing-run` with `commit`, positive numeric `attempt`, `verdict`
+and `pairs`. The normal run id is `<tip>:<attempt>`. `pairs` is a mapping from
+configured profile name to result; require every enrolled profile, each with
+`status="ran"`, and empty per-pair `red` arrays (confirmed identities), with
+`verdict="green"`. Counts `selected`, `executed`, `failed` describe tests;
+`failed` alone does not mean confirmed red, since reruns may establish flakes.
+Use the reviewed tier set from after-landing design section 3, not every
+profile appearing in fabrig's tier configuration.
+
+Today's serializer can publish a compacted event with `pairs_count`, bounded
+`pairs` previews, `confirmed_red_count`, `details` and `payload_bytes`. Accept
+that form only if the published pairs cover the entire enrolled set,
+`pairs_count` agrees with that complete set, every status is ran, and
+`confirmed_red_count=0`; previews alone never imply missing pairs ran. A
+`details` path points at a producer-private file, not necessarily a records
+blob: do not invent a records detail layout or require a new detail writer.
+If the published event lacks enough data to prove coverage, visibly wait.
+
+`after-landing-test` records identity transitions and `after-landing-bisect`
+records probe results; neither authorizes a build. There is no extra green
+kind or QA-written copy of a runner verdict. Keep section 4's latest-numeric-
+attempt rule, conflicting-duplicate rejection, newest green by first-parent
+ancestry, coalescing treatment, prelaunch revalidation and saved records SHA,
+green event id and G. Event time/file order and the runner's private cursor
+never substitute for those published facts.
+
+### QA-owned reports, verdicts and controls
+
+Use `DEV_TMP/qa/authority.json` and its immutable payload/pages as section
+10.1 defines them. Stage publication payloads below `DEV_TMP/qa/publish/`;
+confirmed reader projections below `DEV_TMP/qa/published/` are derived data,
+never a second authority. Keep section 10's 0700 directories/0600 files and
+sibling/fsync/rename commits. Defaults, decisions, request pairs, per-merge
+verdicts, findings, routes and delivery receipts belong to this authority and
+its permanent published history, not to records files or events.
+
+Publish service-generated data on the private `fabrig-ai/qa` repository's
+`evidence` branch through the evidence-only clone/lock in section 9. Use
+these branch-relative paths (also mirrored under the local published root):
+
+| Path | Contents |
+|---|---|
+| `qa/passes/NAME.md` | Current bounded summary, exactly section 7's header/body schema |
+| `qa/details/sha256/DIGEST.json` | Create-only canonical detail trees, including archived summary bytes, briefs, grants, controls and complete results |
+| `qa/events/HOST/DATE.jsonl` | QA-owned history using section 7.3's kinds, exact stable ids/times, sequences and bounded digest references |
+| `passes/NAME/`, `walks/FIRST-START-DATE-NAME/` | Optional scanned scratch snapshots, as in section 9 |
+
+This is a QA data layout, not a new records path or source registration.
+Keep section 7's pass/finding identities, selection sequence/request pairs,
+synthetic finals, revision/result_revision semantics, fragmentation, digest
+validation, archive references and byte bounds unchanged. Event paths in posts
+point here; the host-local state path is useful during publication outages.
+No `record write --as qa`, `record append --as qa`, writers.toml change,
+collector merge projection or records schema extension is part of version 1.
+
+All required logical entries and publication bytes pass the section-9 scan.
+The service-generated `qa/` paths above are an explicit addition to the branch
+publication allowlist, not permission to copy arbitrary scratch files. Required
+safe details/results survive refusal of optional captures. Preserve permanent
+reports, control history, detail trees and tombstones beyond scratch pruning;
+the seven-day rule deletes only eligible owned scratch. Refused unsafe output
+still produces the safe synthetic final required by section 7.
+
+Apply section 7.4's serialized per-pass lane and exact revision/digest recovery
+to this branch, with the common evidence Git lock serializing all branch
+updates, including controls and raw snapshots. Lock order is the per-pass
+publication lane then the evidence Git lock; release admission/routes locks
+before either, retaining section 7.4's brief authority updates under walks.lock.
+Commit immutable detail children/roots and summary archives before referencing summaries/events;
+confirm a push by fetching the validated origin and proving containment and
+exact saved bytes, not its exit status. Append history with stable id/date
+replay checks; matching ids require matching bytes. Preserve exact pending
+payloads on races, deferred/lost replies and crashes across UTC midnight.
+Never replay a lower summary revision over a confirmed final. Branch updates
+are fast-forward only; raw snapshot names stay immutable, while the current
+summary path advances only through section 7's serialized revisions.
+
+Initial defaults/decisions are acknowledged only after this confirmation;
+initial brief/grants/running summary/start history must confirm before launch.
+Final detail/summary/finding/route history must confirm before section 8's
+post delivery. Findings still go by post to the saved coordinator, with
+unresolved/security/lost-data exceptions to the director. Retain routing
+revisions, accepted/uncertain receipts and independently retryable deliveries.
+A QA publication outage disables new starts without preventing custody
+cleanup. No normal completion mail to the director is added.
+
+### First-version acceptance and rollout
+
+Use section 11's temporary HOME, fake SSH/services, real local merge graph,
+read-only existing records fixtures and private local QA origin. Add bounded
+partial-tail/cross-chunk reads, device/inode replacement, truncation, same-inode
+rewrite, replay conflict/gaps and cursor crashes; prove each M schedules once.
+Exercise complete and compacted green events without private detail access.
+Prove records remains unchanged while defaults/decisions, synthetic finals,
+full results and revision/delivery recovery publish through the QA branch;
+refused captures and unavailable publication must preserve results/custody.
+Retain all section-2.1 named fixtures, now using coordinators.txt; a lost push
+ack followed by changed coordinator bytes preserves the saved routes. Verify
+existing lead-roster parsers and queue batch/attempt readers stay compatible.
+
+Section 12 gives the parts that can proceed now. Before activation, deploy
+the coherent queue producer, validate read-only transport and complete feed
+coverage, confirm existing green records and QA publication, pass the lifetime
+and scheduler worlds, and record the approved slots/binding/host and exact S.
+Do not deploy or activate any service as part of this documentation change.
+
 ## 14. Later
 
+- Records integration (section 12, part 2): collector merge projection from
+  saved journal routes; scoped QA writer/permissions, report/detail schemas
+  and QA events, with an explicit migration/replay plan for existing QA-owned
+  identities and revisions. This waits for the records scope review and is
+  not required to ship or activate section 13a's first version.
 - Automatic retry policy for incomplete passes, learned from costs and
   blockage causes; for now repeat work needs an explicit run decision.
 - Multi-host pass scheduling and distributed admission authority, additional
