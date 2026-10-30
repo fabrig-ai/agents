@@ -6,9 +6,11 @@ Contract: `docs/design/fleet.md`, sections 1–6.
 ## Present
 
 - Git SSH multiplexing and change-only mirror fetching implement section 3:
-  private 0700 control directory, %C path under 100 bytes, detached OpenSSH
-  ControlPersist=600 master and service KillMode=process; inspections never
-  create masters. Fixture coverage: `tools/test_fleet_sync_mux.py` (7 tests),
+  shared `~/.local/state/github-ssh/%C` path in a safe 0700 directory,
+  detached OpenSSH ControlPersist=600 master and service KillMode=process.
+  Fleet renders GIT_SSH=fleet-git-ssh to env.sh/environment.d and installs its
+  wrapper; other unit owners retain responsibility for master survival at exit.
+  Inspections never create masters. Fixture coverage: `tools/test_fleet_sync_mux.py` (9 tests),
   including cleanup and publickey backoff. No live-host deployment was run.
 
 - Release promotion, rendering, links, installer locking, unit journals, controls,

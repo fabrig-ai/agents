@@ -1,4 +1,5 @@
 fleet-sync
+fleet-git-ssh
 lease
 session-start session/start
 session-context session/session-context

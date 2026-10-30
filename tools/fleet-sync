@@ -783,7 +783,7 @@ class Runner:
 
     def git_ssh_command(self):
         inspecting = self.args.check or self.previewing or getattr(self.args, "preview", None) is not None
-        relative = ".local/state/fleet-sync/ssh"
+        relative = ".local/state/github-ssh"
         control = str(self.home / relative)
         # OpenSSH expands %C to a 40-byte hex hash, not the remote's full name.
         if len(os.fsencode(control)) + 1 + 40 >= 100:

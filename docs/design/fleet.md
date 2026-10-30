@@ -78,11 +78,27 @@ and warn; installing a pin is the explicit `--provision`.
 5. **Record.** Write state, items and run log. Repeated failures back off
    (1 minute up to 60), but a new main commit skips the wait.
 
-**GitHub transport:** one GitHub authentication per host per 10 min on a healthy
-shared connection: a detached OpenSSH master persists for 600 idle seconds;
-`KillMode=process` preserves it between timer runs. Checks/status only reuse
-masters, preview makes no GitHub requests, and the fabrig mirror fetches only
-when ls-remote differs from its origin/main (`tools/fleet-sync.md`).
+**GitHub connection.** One shared master per host: the pinned ControlPath is
+`~/.local/state/github-ssh/%C`, with `ControlMaster=auto` and
+`ControlPersist=600`. A normal fleet-sync run creates/repairs its directory
+through SafeHome at 0700 on every host. Healthy shared connections need at most
+one GitHub authentication per host per 10 min (600 idle seconds before expiry).
+`KillMode=process` preserves fleet-sync's detached master between timer runs.
+
+`fleet/env` declares `GIT_SSH=fleet-git-ssh`. Fleet installs the two-line
+`tools/fleet-git-ssh` wrapper at `~/.local/bin/fleet-git-ssh` through current,
+and renders that setting into both env.sh and environment.d. Login shells
+(`bash -lc` units and sessions) source env.sh. The user manager reads
+environment.d only at its start; daemon-reload does not refresh its environment.
+Tools must inherit `GIT_SSH`/`GIT_SSH_COMMAND` or call `fleet-git-ssh`; they must
+not invent another master path. A service owner must also preserve a master
+created in its unit at unit exit; inheriting this environment does not change
+that unit's cleanup policy.
+
+Fleet-sync uses the same path/options plus BatchMode=yes,
+StrictHostKeyChecking=yes and UpdateHostKeys=no. Checks/status only reuse
+masters with ControlMaster=no; preview makes no GitHub requests. The fabrig
+mirror fetches only when ls-remote differs from origin/main (`tools/fleet-sync.md`).
 
 **Effect timing.** A rendered file is in place after the next successful
 convergence. That convergence can be delayed by a hold, a pin, backoff, a busy
