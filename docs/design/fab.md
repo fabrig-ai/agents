@@ -43,6 +43,7 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
 | `~/src/fabrig/fab/` on every machine (`FAB_HOME`) | runtime data, never in git |
 | `FAB_HOME/log.jsonl` on the dispatcher's machine (hel8) | the event log (section 3) |
 | `FAB_HOME/runs/<run>/` on hel8 | each run's brief, its collected report and metadata |
+| `FAB_HOME/reports/` on hel8 | the standing reports, one file per draft and day (section 10) |
 | `FAB_HOME/repos/<repo>` on each machine | fab's own clones; `FAB_HOME/wt/<run>` worktrees for runs that build nothing |
 | `~/src/fabrig/slots/<n>` on a builder | warm fabrig checkouts (unchanged); `slots/<n>.claim` the slot's claim (section 7) |
 
@@ -210,13 +211,56 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
 - **Leases:** one writer per crate becomes the dispatcher's choice of
   runnable tasks (their `files`), not a lock.
 
-## 10. Later
+## 10. Reports
+
+- **Two standing reports, from records alone:** the code report of a plan
+  (the metrics of `docs/design/draft/code-producing-pipeline.md`, 3, that the
+  log records) and the landing report (those of
+  `docs/design/draft/landing-pipeline.md`, 3, that the queue's record holds).
+  Nothing is counted by hand and nothing new is recorded for them.
+- **`fab report` runs on hel8.** It reads the whole log there, the queue's
+  record from the gate machine (`fab queue log --since`, as the tick does) and
+  each builder's and the gate's `heavy.jsonl`, over ssh, seven days back. A
+  source it cannot read is named in the report, never a failure.
+- **A report covers one UTC day,** or today so far on demand, and every figure
+  stands beside the previous day's: the trend the drafts ask for until the
+  user sets targets.
+- **The code report** (`fab/code_report.py`): runs started and their outcomes,
+  branches ready, landed and rejected; runs in flight per hour against the
+  builders' places; idle gaps (no run in flight while a task is not landed,
+  10 minutes or more) with the tasks' statuses at their start; runs and Codex
+  minutes per landed task; questions, their rate per report and time to
+  answer; Infra minutes and heavy's lane and disk waits on the builders;
+  Claude calls, minutes and tokens; the stops (questions, failed and Infra
+  runs, rejections) ranked by time lost; the same per part.
+- **The landing report** (`fab/landing_report.py`): batches, their outcomes
+  and branches; the share of the day in gate steps; rejections by step (the
+  red classes) and collateral ones (a rejected tip that later lands); ready to
+  landed latency (from the log's `branch.ready`), branches waiting and the
+  oldest wait; bisection runs and minutes; repair rounds; each step's
+  durations, failures and timeouts; batches in error; heavy's waits on the
+  gate.
+- **Signals without targets:** a report raises only the drafts' signals that
+  need no number of the user's: idle gaps, rising rejections, Infra runs,
+  collateral rejections, queue errors, a ready branch waiting over an hour and
+  longer than the day before, disk waits and unread sources, each with the
+  draft's first action and owner. Thresholds come with targets.
+- **Where they go:** `FAB_HOME/reports/<draft>/<day>.md` and
+  `FAB_HOME/reports/landing/<day>.md` on hel8, written to a sibling and
+  renamed. `fab report daily PLAN_DIR...` writes yesterday's that do not
+  exist yet; the director reads them there.
+
+## 11. Later
 
 - The dispatcher's loop on a timer, the ready-task buffer and the answer
   queue (slice 3 of `docs/plan/agents-rebuild/plan.toml`).
 - Claude calls compiled by code: skeleton author, answerer, structure
   reviewer; gates and the structure digest.
-- Standing reports for both drafts from the log and the queue's record.
+- `fab report daily` on a timer on hel8, with the dispatcher's; reports
+  posted to the director rather than read from FAB_HOME.
+- Report metrics the records do not hold yet: lines changed per landed
+  branch, questions by kind, continuity, CPU per step against its budget,
+  after-landing verdicts; targets and their signals once the user sets them.
 - after-landing and tiers moved here; QA walks as a run kind.
 - Elastic builders from `fab hosts check`'s numbers.
 - Retiring the session launcher, watch's session rules, mail, leases and the

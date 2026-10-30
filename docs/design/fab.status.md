@@ -33,6 +33,11 @@
 - **The tick is run by hand,** not on a timer.
 - **Claude calls** (`fab/calls.py`) are being filled; skeletons and task
   specs are still written by hand.
+- **Reports are a skeleton:** `fab/report.py`, `fab/code_report.py` and
+  `fab/landing_report.py` hold section 10's signatures and contracts, filled
+  by the tasks `report-base`, `report-code`, `report-landing` and
+  `report-command`; `fab report` is not a command until the last lands. No
+  timer runs `fab report daily` yet.
 - **Parts done by hand have no task specs** (package, slot-probe), so the
   tick's design line lists them.
 - **The slot bound of 25 GB is one measurement** (10-30 20:18Z): a

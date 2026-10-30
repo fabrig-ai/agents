@@ -115,14 +115,14 @@ id = "dispatch"
 title = "The dispatcher: decide's actions and the tick that takes them; questions park tasks"
 mode = "feature"
 needs = ["files", "run", "land"]
-design = "docs/design/fab.md, 10"
+design = "docs/design/fab.md, 11"
 
 [[part]]
 id = "calls"
 title = "Claude calls from compiled briefs: skeleton author, answerer"
 mode = "feature"
 needs = ["files"]
-design = "docs/design/fab.md, 10"
+design = "docs/design/fab.md, 11"
 
 # Slice 4: both pipelines report themselves.
 
@@ -138,7 +138,7 @@ id = "after-landing"
 title = "after-landing and tiers, ported"
 mode = "migration"
 needs = ["heavy", "slots"]
-design = "docs/design/fab.md, 10"
+design = "docs/design/fab.md, 11"
 
 # Slice 5: quality on every branch, and nothing resident left.
 
@@ -147,14 +147,14 @@ id = "gates"
 title = "Gates and the structure digest; the structure review call"
 mode = "feature"
 needs = ["calls"]
-design = "docs/design/fab.md, 10"
+design = "docs/design/fab.md, 11"
 
 [[part]]
 id = "retire"
 title = "Retire session, watch's session rules, post, lease, record-collect and the old kit"
 mode = "migration"
 needs = ["dispatch", "report"]
-design = "docs/design/fab.md, 10"
+design = "docs/design/fab.md, 11"
 
 [[slice]]
 id = 1

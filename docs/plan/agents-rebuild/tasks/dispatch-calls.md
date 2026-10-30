@@ -13,7 +13,7 @@ Today a skeleton or answer call is started by hand, and the first one failed
 with no trace of why (claude exited in a second; nothing kept its stderr).
 Make the tick start calls in their own user units and finish them, as the
 amended docstrings of `fab.dispatch.call_actions`, `fab.dispatch.tick` and
-`fab.calls.start` say. Design: `docs/design/fab.md`, section 10.
+`fab.calls.start` say. Design: `docs/design/fab.md`, section 11.
 
 ## Acceptance
 
