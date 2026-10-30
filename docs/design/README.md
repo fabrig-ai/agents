@@ -40,6 +40,7 @@ paths and records-repository data paths are labelled where they are introduced.
 | `docs/design/gate.md` | s/deploy | `tools/check.sh`, `tools/land`; host gate lock |
 | `docs/design/qa.md` | s/qa | `tools/qa/`; custody, rung walks and planned passes, evidence and live tiers |
 | `docs/design/after-landing.md` | s/dynamic-memory | `tools/after-landing/`; published-tip checks, verdicts, routing and bisection |
+| `docs/design/fab.md` | the user's pipeline session | `fab/`, `bin/fab`; the pipelines' new code, replacing the tools above part by part (`docs/plan/agents-rebuild/plan.toml`) |
 
 **Migration is owned work.** The remaining migration rows list current text and coverage
 responsibility. They do not assert that every tool already has a full design.

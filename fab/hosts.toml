@@ -1,0 +1,22 @@
+# The machines fab uses (docs/design/fab.md, 2 and 7).
+# places: Codex runs at once; builds: builds heavy admits at once.
+# Disk figures in GB: the builder's budget is kache_gb + slots x slot_bound_gb + headroom_gb.
+
+[hel8]
+ssh = "free@204.168.210.29"
+roles = ["dispatcher"]
+
+[hetzner6]
+ssh = "free@2.29.120.8"
+roles = ["builder"]
+disk_gb = 305
+places = 6
+slots = 8
+slot_bound_gb = 20
+kache_gb = 50
+headroom_gb = 10
+builds = 3
+
+[hetzner8]
+ssh = "free@2.29.110.236"
+roles = ["gate"]

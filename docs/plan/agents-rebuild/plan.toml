@@ -1,0 +1,180 @@
+# The thin cut for rebuilding the pipelines' code as fab (docs/design/fab.md).
+draft = "agents-rebuild"
+repo = "agents"
+sources = [
+  "docs/design/draft/code-producing-pipeline.md",
+  "docs/design/draft/landing-pipeline.md",
+  "Execution modes for the code-producing pipeline (Claude Docs, 2026-10-30)",
+]
+
+[buffer]
+low = 1.0
+high = 2.0
+
+# Contracts: what more than one part reads. Each lands alone as a skeleton.
+
+[[part]]
+id = "package"
+title = "Package, command, runner seam and the 30 s test runner"
+mode = "feature"
+needs = []
+design = "docs/design/fab.md, 2 and 8"
+
+[[part]]
+id = "files"
+title = "Event log, plan and task specs, the status fold"
+mode = "feature"
+needs = ["package"]
+design = "docs/design/fab.md, 3 and 4"
+
+[[part]]
+id = "slot-contract"
+title = "hosts.toml, slot claims, sweep and reclaim signatures, heavy's exit codes"
+mode = "feature"
+needs = ["package"]
+design = "docs/design/fab.md, 7"
+
+# Slice 1: an agents task runs and lands with fab.
+
+[[part]]
+id = "land"
+title = "bin/fab land for this repository"
+mode = "feature"
+needs = ["files"]
+design = "docs/design/fab.md, 6"
+
+[[part]]
+id = "run"
+title = "Runs: prepare a worktree, compile the brief, start codex-run, read the outcome"
+mode = "feature"
+needs = ["files"]
+design = "docs/design/fab.md, 5"
+
+# Slice 2: fabrig lands through fab, and builds never stop for disk.
+
+[[part]]
+id = "slot-probe"
+title = "Measure a slot's peak during a broad build, to set the slot bound"
+mode = "probe"
+needs = []
+design = "docs/design/fab.md, 7"
+
+[[part]]
+id = "slots"
+title = "Slot claim, release, sweep and reclaim on a builder"
+mode = "feature"
+needs = ["slot-contract", "slot-probe"]
+design = "docs/design/fab.md, 7"
+
+[[part]]
+id = "heavy"
+title = "Build admission: concurrency, the gate lane, the disk wait with reclaim"
+mode = "migration"
+needs = ["slots"]
+design = "docs/design/fab.md, 7"
+
+[[part]]
+id = "queue"
+title = "fabrig's merge queue, ported from tools/queue/mq's core"
+mode = "migration"
+needs = ["files", "heavy"]
+design = "docs/design/fab.md, 6"
+
+[[part]]
+id = "precheck"
+title = "Precheck in the implementer's slot, with the queue's selection"
+mode = "migration"
+needs = ["queue"]
+design = "docs/design/fab.md, 6"
+
+[[part]]
+id = "cutover-landing"
+title = "Install fab's heavy, queue and precheck; delete fabrig's tools/"
+mode = "migration"
+needs = ["heavy", "queue", "precheck"]
+design = "docs/design/fab.md, 1"
+
+# Slice 3: the dispatcher keeps the pipeline full unattended.
+
+[[part]]
+id = "decide"
+title = "The dispatcher's decisions: buffer, needs, places, requeues"
+mode = "feature"
+needs = ["files", "run"]
+design = "docs/design/fab.md, 10"
+
+[[part]]
+id = "tick"
+title = "The dispatcher's loop on a timer; questions and their answers"
+mode = "feature"
+needs = ["decide", "land", "slots"]
+design = "docs/design/fab.md, 10"
+
+[[part]]
+id = "calls"
+title = "Claude calls from compiled briefs: skeleton author, answerer"
+mode = "feature"
+needs = ["files"]
+design = "docs/design/fab.md, 10"
+
+# Slice 4: both pipelines report themselves.
+
+[[part]]
+id = "report"
+title = "Standing reports for both drafts from the log and the queue's record"
+mode = "feature"
+needs = ["files", "queue"]
+design = "docs/design/fab.md, 10"
+
+[[part]]
+id = "after-landing"
+title = "after-landing and tiers, ported"
+mode = "migration"
+needs = ["heavy", "slots"]
+design = "docs/design/fab.md, 10"
+
+# Slice 5: quality on every branch, and nothing resident left.
+
+[[part]]
+id = "gates"
+title = "Gates and the structure digest; the structure review call"
+mode = "feature"
+needs = ["calls"]
+design = "docs/design/fab.md, 10"
+
+[[part]]
+id = "retire"
+title = "Retire session, watch's session rules, post, lease, record-collect and the old kit"
+mode = "migration"
+needs = ["tick", "report"]
+design = "docs/design/fab.md, 10"
+
+[[slice]]
+id = 1
+story = "A task spec in this repository becomes a Codex run on hetzner6 and lands on main through bin/fab land with its tests"
+parts = ["package", "files", "land", "run"]
+walk = true
+
+[[slice]]
+id = 2
+story = "A fabrig branch lands through fab's queue; a build short of disk waits and resumes while idle slots are reclaimed"
+parts = ["slot-contract", "slot-probe", "slots", "heavy", "queue", "precheck", "cutover-landing"]
+walk = true
+
+[[slice]]
+id = 3
+story = "Tasks of a plan run, park on questions and land with nobody dispatching by hand"
+parts = ["decide", "tick", "calls"]
+walk = true
+
+[[slice]]
+id = 4
+story = "Both drafts' metrics are reported daily from records alone; slow tiers run after landing"
+parts = ["report", "after-landing"]
+walk = false
+
+[[slice]]
+id = 5
+story = "Every branch passes the gates and a structure review; no resident session is needed"
+parts = ["gates", "retire"]
+walk = false
