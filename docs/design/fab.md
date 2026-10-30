@@ -395,12 +395,36 @@ it, and the flow grows from a small start rather than to a fixed cap.
   - While a subject's chain is open, no call starts for that subject; no
     answer call starts while an answer chain is open, and no review call
     while a review chain is open.
-- **Acceptance tests are not the implementer's.** A part's skeleton names,
-  per task, the acceptance tests it needs. A test-writer run (Codex, high,
-  kind `tests`) writes them on the task's branch from the design and the
-  skeleton alone, before the implementer starts; the implementer fills the
-  bodies until they pass and may not change those test files (a gate, as
-  `files` is); a test it believes wrong is a question.
+- **Acceptance is the test-writer's, at the level of the design.** When a
+  part's skeleton lands, one test-writer run (Codex, high, kind `tests`)
+  writes the part's acceptance tests from its design section and its
+  skeleton's test vocabulary alone, never from bodies: the behaviours the
+  design promises, through the part's public items. It runs beside the
+  part's implementers, not before each one. Its tests land at once, marked
+  pending (skipped with the reason `pending: <draft>/<part>`), so main stays
+  green. Implementers write their own unit tests, as today, and never edit a
+  pending test; one they believe wrong is a question.
+- **A part is accepted when its acceptance tests pass.** When all a part's
+  tasks have landed, an accept run (Codex, medium, kind `accept`) removes
+  the part's pending markers and runs the suite. Green, the part is done and
+  the branch lands; red, its findings become repair tasks of the part, and
+  the part is not done.
+- **A slice's story test** is the test-writer's too: written when the last
+  part of the slice is designed, pending on the slice (`pending: slice <n>`),
+  un-pended by the accept run of its last part. A slice is complete when its
+  story test passes on main (`slice.done` in the log).
+- **Every branch gets a self-critique before ready.** After the gates pass,
+  a read-only Codex run (kind `critique`, effort high, `fab/roles/critic.md`)
+  reviews the branch against its skeleton, the taste file and the gates'
+  output; the implementer's next run on the same branch fixes what it finds,
+  once, before the branch lands or is readied. A critique with no findings
+  lets it through at once.
+- **The foreman settles what the options settle.** A run ending with a
+  question first goes to a foreman run (Codex, medium, read-only, kind
+  `foreman`) with the task spec and the report: when the spec's pre-approved
+  options answer it, the foreman records the answer in the spec's Answers
+  section and the task runs again; otherwise the question queues for the
+  answerer, every 2 hours or at 4 queued, as the user's model says.
 - **The structure review stays its own call** (section 12), never the
   skeleton author's.
 
@@ -456,6 +480,17 @@ it, and the flow grows from a small start rather than to a fixed cap.
 - **A probe** is a read-only Codex run with a time box (the part's
   `minutes`, hard) and a success criterion from its design; its report is
   the measurement; a decision call (13.3) turns it into design.
+
+### 13.8 The landing side
+
+- **Precheck receipts are reused:** a batch of one branch whose precheck
+  receipt names the same main and passed lands on the receipt's checks
+  alone, after fmt; the queue's own full checks still run on every fifth
+  batch and on every batch of more than one.
+- **Reds are classed before anyone hears them:** a failing test that passed
+  in the branch's precheck is retried once alone; passing, the red is
+  collateral, recorded as such, and the branch is retried without counting
+  against it; failing twice, it is the branch's.
 
 ## 14. Later
 

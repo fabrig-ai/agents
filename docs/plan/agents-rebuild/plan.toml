@@ -200,10 +200,31 @@ design = "docs/design/fab.md, 13.1"
 
 [[part]]
 id = "acceptance"
-title = "Test-writer runs: acceptance tests written apart from the implementer"
+title = "Test-writer and accept runs: acceptance per part and per slice, apart from the implementers"
 mode = "feature"
 needs = ["run", "gates"]
 design = "docs/design/fab.md, 13.1"
+
+[[part]]
+id = "critique"
+title = "A self-critique run on every branch before it lands or is readied"
+mode = "feature"
+needs = ["gates", "run"]
+design = "docs/design/fab.md, 13.1"
+
+[[part]]
+id = "foreman"
+title = "A foreman run settles questions the task's options answer; the rest queue for the answerer"
+mode = "feature"
+needs = ["dispatch", "calls"]
+design = "docs/design/fab.md, 13.1"
+
+[[part]]
+id = "landing-checks"
+title = "The queue reuses precheck receipts and classes reds before anyone hears them"
+mode = "feature"
+needs = ["queue", "precheck"]
+design = "docs/design/fab.md, 13.8"
 
 [[part]]
 id = "flow"
@@ -250,5 +271,5 @@ design = "docs/design/fab.md, 13.6"
 [[slice]]
 id = 6
 story = "A draft goes from its cut to landed code with design, acceptance and review by separate sessions, growing from two runs in flight to many"
-parts = ["call-review", "acceptance", "flow", "designer", "plans", "accounting", "probe", "user-channel"]
+parts = ["call-review", "acceptance", "critique", "foreman", "flow", "designer", "plans", "accounting", "probe", "user-channel", "landing-checks"]
 walk = false

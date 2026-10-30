@@ -192,7 +192,7 @@ class CallActionsTest(unittest.TestCase):
     def setUp(self):
         self.plan = make_plan(part("core"), part("next"))
         self.tasks = {t.id: t for t in (task(str(n)) for n in range(dispatch.ANSWER_AT))}
-        self.now = "2026-10-30T12:30:00.000Z"
+        self.now = "2026-10-30T14:00:00.000Z"
 
     def actions(self, events=(), design=()):
         return dispatch.call_actions(self.plan, self.tasks, list(events), list(design), self.now)

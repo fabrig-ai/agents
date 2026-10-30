@@ -25,7 +25,7 @@ from fab.plan import Plan, Task
 from fab.sh import Failed, Runner, run, ssh
 
 MAX_RUNS = 4  # a task with this many runs and still not landed parks for judgement
-ANSWER_AFTER = 30  # minutes the oldest open question waits before an answer call
+ANSWER_AFTER = 120  # minutes the oldest open question waits before an answer call
 ANSWER_AT = 4  # open questions that start an answer call at once
 REVIEW_AT = 10  # tasks landed since the last review call that start one at once
 REVIEW_AFTER = 4 * 60  # minutes since the last review call that start one with any landed
