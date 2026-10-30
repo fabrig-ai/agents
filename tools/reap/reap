@@ -154,9 +154,14 @@ def append(path, row):
 
 
 def command(args, timeout=30, input=None):
+    env = dict(os.environ)
+    if str(args[0]) == 'git':
+        env = {key: value for key, value in env.items() if not key.startswith('GIT_')}
+        env.update(GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1')
+    env.update(GIT_OPTIONAL_LOCKS='0', GIT_TERMINAL_PROMPT='0')
     result = subprocess.run([str(a) for a in args], input=input, capture_output=True,
                             text=True, timeout=timeout, stdin=None if input is not None else subprocess.DEVNULL,
-                            env=dict(os.environ, GIT_OPTIONAL_LOCKS='0', GIT_TERMINAL_PROMPT='0'))
+                            env=env)
     if result.returncode:
         raise ValueError(f'{args[0]} failed ({result.returncode})')
     return result.stdout
@@ -502,6 +507,8 @@ class Reaper:
             with regular(path) as fd:
                 os.fsync(fd)
             path.replace(folder / path.name)
+        with directory(folder) as fd:
+            os.fsync(fd)
         staging.rmdir()
         return str(folder / target.name)
 
@@ -619,8 +626,12 @@ class Reaper:
         full = self.state / f'run-{time.time_ns()}.json'
         result['list_path'] = str(full)
         atomic(full, result)
+        self.daily_summary(result, full)
+        atomic(full, result)
         atomic(self.state / 'last.json', result)
         append(self.state / 'runs.jsonl', {k: v for k, v in result.items() if k != 'candidates'})
+
+    def daily_summary(self, result, full):
         if not self.timer_run():
             return
         day = datetime.fromtimestamp(self.now, timezone.utc).strftime('%Y-%m-%d')
@@ -640,7 +651,6 @@ class Reaper:
             command(['post', 'send', '--as', 'reap', self.config['summary_to'], f'reap {os.uname().nodename} {day}'], input=body)
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             result['errors'].append(f'daily summary: {exc}')
-            atomic(self.state / 'last.json', result)
 
 
 class Parser(argparse.ArgumentParser):
