@@ -10,8 +10,16 @@ This describes repository code, not verified fleet deployment.
 - **The locked writer exists.** `tools/records/record` validates paths, formats,
   sizes and secrets, commits, and retries publication against confirmed origin.
   Its commands are `pull`, `write`, `append`, `check`, `show`, `draft`, `priority`,
-  `ask`, `answer`, `questions`, `decide` and `status`. Director writes and reads
+  `ask`, `answer`, `questions`, `decide`, `status` and `reset`. Director writes and reads
   require `--as`; see `tools/records/record.md`, "Director commands".
+- **History rewrite recovery is implemented.** The pull and push-retry guards
+  refuse more than 20 local-only commits or any touching historical raw events.
+  `record reset` permanently archives patches before resetting, preserving
+  untracked files and refusing collisions. Contract: `docs/design/records.md`,
+  section 2. Fast smoke/safety cases run in `tools/records/test_record.py`;
+  threshold, patch round-trip, merge/binary and publication-race matrices run
+  in `tools/records/test_record_periodic.py`. Periodic collector recovery cases
+  exercise spool failures and producer changes; collectors never publish to git.
 - **Collectors exist** for runs, queue, heavy, sessions, claims, leases, post and
   post-sent. They write `~/src/fabrig/events/<source>/<UTC-day>.jsonl` on each
   host, never records git. Stable ids, source locks and pending outboxes protect

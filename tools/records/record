@@ -298,7 +298,7 @@ def file_lock(path):
         yield
 
 
-def clone_checks(root, origin, branch):
+def clone_checks(root, origin, branch, resetting=False):
     no_symlinks(root)
     need((root / '.git').is_dir() and not (root / '.git').is_symlink(),
          f'{root}: expected a dedicated clone with a .git directory')
@@ -313,8 +313,10 @@ def clone_checks(root, origin, branch):
     need(not any((root / '.git' / p).exists() for p in
                  ('MERGE_HEAD', 'rebase-merge', 'rebase-apply', 'CHERRY_PICK_HEAD', 'REVERT_HEAD')),
          'unfinished git operation refused')
-    need(not git(root, 'status', '--porcelain', '--untracked-files=all', '--ignored').stdout,
-         'dirty clone refused (including untracked or ignored files)')
+    status = ('--untracked-files=no',) if resetting else ('--untracked-files=all', '--ignored')
+    need(not git(root, 'status', '--porcelain', *status).stdout,
+         'dirty clone refused (including untracked or ignored files)' if not resetting else
+         'tracked changes refused; commit or save them before record reset')
     # Includes tracked directory links and archive links; never follow them.
     for entry in git(root, 'ls-files', '--stage', '-z').stdout.split(b'\0'):
         if entry:
@@ -325,7 +327,7 @@ def clone_checks(root, origin, branch):
 
 
 @contextmanager
-def repository(root, origin, branch):
+def repository(root, origin, branch, resetting=False):
     no_symlinks(root)
     root.parent.mkdir(parents=True, exist_ok=True)
     # Creation must also serialize: the per-clone lock does not exist yet.
@@ -343,7 +345,7 @@ def repository(root, origin, branch):
         need((root / '.git').is_dir(), f'{root}: expected dedicated clone')
         # Hold through validation, fetch, publication retries and failure reset.
         with file_lock(root / '.git' / 'record.lock'):
-            clone_checks(root, origin, branch)
+            clone_checks(root, origin, branch, resetting)
             yield
 
 
@@ -352,9 +354,51 @@ def fetch(root, branch):
         f'+refs/heads/{branch}:refs/remotes/origin/{branch}')
 
 
+def history_guard(root, remote):
+    local = out(root, 'rev-list', '--count', f'{remote}..HEAD')
+    message = 'records history was rewritten upstream; run `record reset`'
+    need(int(local) <= 20, message)
+    # Inspect every commit, including deletions, renames and merge parents.
+    changed = git(root, 'log', '--format=', '--name-only', '-z', '--no-renames',
+                  '-m', '--full-history', f'{remote}..HEAD', '--', 'events/',
+                  ':(exclude)events/after-landing/').stdout
+    need(not changed.strip(b'\0\n'), message)
+
+
+def reset(root, branch):
+    old = out(root, 'rev-parse', 'HEAD')
+    # Refresh first so a force-push is included in the local-only archive.
+    fetch(root, branch)
+    remote = f'refs/remotes/origin/{branch}'
+    commits = out(root, 'rev-list', '--reverse', f'{remote}..HEAD').splitlines()
+    archive = Path.home() / 'src/fabrig/archive'
+    no_symlinks(archive)
+    archive.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')
+    archive = archive / ('records-local-' + stamp)
+    archive.mkdir()
+    for number, commit_id in enumerate(commits, 1):
+        patch = git(root, 'format-patch', '--root', '-1', '--always', '--binary',
+                    '--full-index', '--no-max-parents', '--diff-merges=first-parent', '--stdout', commit_id).stdout
+        need(patch.startswith(f'From {commit_id} '.encode()), f'cannot archive commit {commit_id}')
+        atomic_write(archive / f'{number:06d}-{commit_id}.patch', patch)
+    atomic_write(archive / 'commits.txt', (''.join(c + '\n' for c in commits)).encode())
+    print(f'record: saved {len(commits)} local-only commits as patches in {archive}', flush=True)
+    # reset --hard otherwise silently removes untracked files in its way.
+    tracked = git(root, 'ls-tree', '-r', '--name-only', '-z', remote).stdout.split(b'\0')
+    for name in git(root, 'ls-files', '--others', '-z').stdout.split(b'\0'):
+        if name:
+            need(not any(path and (name == path or name.startswith(path + b'/') or
+                                   path.startswith(name + b'/')) for path in tracked),
+                 'untracked path would be overwritten; move it before record reset')
+    git(root, 'reset', '--hard', remote)
+    print(f'record: HEAD {old} -> {out(root, "rev-parse", "HEAD")}')
+
+
 def pull(root, branch):
     fetch(root, branch)
     remote = f'refs/remotes/origin/{branch}'
+    history_guard(root, remote)
     need(git(root, 'merge-base', '--is-ancestor', 'HEAD', remote, check=False).returncode == 0,
          'clone has unpublished/divergent commits; fast-forward refused')
     git(root, 'merge', '--quiet', '--ff-only', remote)
@@ -703,6 +747,13 @@ def publish(root, branch, args, data):
                 return 0
             # Concurrent receive-pack processes can report either a non-fast-forward
             # or a ref-lock failure. Retry only if the fetched branch advanced.
+            if base != previous:
+                try:
+                    history_guard(root, remote)
+                except Refusal:
+                    # Preserve all pending history for record reset's patch archive.
+                    base = out(root, 'rev-parse', 'HEAD')
+                    raise
             if result.returncode == 0:
                 raise Failure('push acknowledgement not confirmed by origin; saved batch retained')
             if base == previous:
@@ -750,6 +801,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='command', required=True)
     sub.add_parser('pull')
+    sub.add_parser('reset')
     write = sub.add_parser('write')
     write.add_argument('path')
     append = sub.add_parser('append')
@@ -819,7 +871,10 @@ def main():
                 need(re.fullmatch(POST, args.writer), 'invalid writer post name')
         root = Path(os.environ.get('RECORDS_REPO', '~/src/fabrig/records')).expanduser().absolute()
         origin = os.environ.get('RECORDS_ORIGIN', ORIGIN)
-        with repository(root, origin, branch):
+        with repository(root, origin, branch, resetting=args.command == 'reset'):
+            if args.command == 'reset':
+                reset(root, branch)
+                return 0
             pull(root, branch)
             if args.command == 'pull':
                 print('record: pulled origin/' + branch)

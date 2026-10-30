@@ -6,6 +6,114 @@ class PeriodicRecordTests(RecordTests):
     def run_record(self, *args, **kwargs):
         return super().run_record(*args, cli=True, **kwargs)
 
+    def test_rewritten_history_guard_reset_archives_and_keeps_untracked(self):
+        path = self.seed / 'events/queue/hel8/2026-10-29.jsonl'
+        path.parent.mkdir(parents=True)
+        path.write_bytes(self.event().replace(b'after-landing', b'queue'))
+        self.seed_commit('old collector')
+        self.prepare()
+        (self.clone / 'AGENTS.md').write_text('# Unpublished local judgement\n')
+        self.git(self.clone, 'add', '.')
+        self.git(self.clone, 'commit', '-m', 'local judgement')
+        old = self.git(self.clone, 'rev-parse', 'HEAD')
+        new = self.rewrite_origin()
+        refused = self.run_record('pull', code=1)
+        self.assertIn(b'records history was rewritten upstream; run `record reset`', refused.stderr)
+        self.assertEqual(self.git(self.clone, 'rev-parse', 'HEAD'), old)
+        (self.clone / 'scratch.txt').write_bytes(b'keep this untracked file')
+        reset = self.run_record('reset')
+        self.assertIn(old.encode() + b' -> ' + new.encode(), reset.stdout)
+        self.assertIn(b'saved 3 local-only commits', reset.stdout)
+        archive_root = self.home / 'src/fabrig/archive'
+        archive, = archive_root.iterdir()
+        patches = sorted(archive.glob('*.patch'))
+        self.assertEqual(len(patches), 3)
+        self.assertEqual((archive / 'commits.txt').read_text().splitlines()[-1], old)
+        # The patches restore all original bytes, including the unpublished judgement.
+        restored = self.home / 'restored'
+        self.git(self.home, 'init', str(restored))
+        self.git(restored, 'am', *(str(p) for p in patches))
+        self.assertEqual(self.git(restored, 'rev-parse', 'HEAD^{tree}'),
+                         self.git(self.clone, 'rev-parse', old + '^{tree}'))
+        self.assertEqual((self.clone / 'scratch.txt').read_bytes(), b'keep this untracked file')
+        self.assertFalse((self.clone / 'events').exists())
+        self.assertEqual(self.git(self.clone, 'rev-parse', 'HEAD'), new)
+        again = self.run_record('reset')
+        self.assertIn(b'saved 0 local-only commits', again.stdout)
+        self.assertIn(new.encode() + b' -> ' + new.encode(), again.stdout)
+        self.assertEqual(len(list(archive_root.iterdir())), 2)
+        (self.clone / 'scratch.txt').unlink()
+        self.run_record('write', '--as', 'ops', 'README.md', data=b'# Normal push after reset\n')
+        self.assert_clean()
+
+
+    def test_history_guard_threshold_and_durable_events_exception(self):
+        self.prepare()
+        for _ in range(20):
+            self.git(self.clone, 'commit', '--allow-empty', '-m', 'local')
+        refused = self.run_record('pull', code=1)
+        self.assertIn(b'unpublished/divergent', refused.stderr)
+        self.git(self.clone, 'commit', '--allow-empty', '-m', 'one too many')
+        refused = self.run_record('pull', code=1)
+        self.assertIn(b'history was rewritten upstream', refused.stderr)
+        self.run_record('reset')
+        path = self.clone / 'events/after-landing/hel8/2026-10-29.jsonl'
+        path.parent.mkdir(parents=True)
+        path.write_bytes(self.event())
+        self.git(self.clone, 'add', '.')
+        self.git(self.clone, 'commit', '-m', 'durable verdict')
+        refused = self.run_record('pull', code=1)
+        self.assertIn(b'unpublished/divergent', refused.stderr)
+        self.git(self.clone, 'mv', 'events/after-landing', 'events/raw')
+        self.git(self.clone, 'commit', '-m', 'rename to raw')
+        self.assertIn(b'history was rewritten upstream', self.run_record('pull', code=1).stderr)
+
+
+    def test_reset_archives_merge_empty_and_binary_commits(self):
+        self.prepare()
+        self.git(self.clone, 'checkout', '-b', 'side')
+        (self.clone / 'binary.dat').write_bytes(b'\x00\xff\x01')
+        self.git(self.clone, 'add', '.')
+        self.git(self.clone, 'commit', '-m', 'binary')
+        self.git(self.clone, 'checkout', 'main')
+        self.git(self.clone, 'commit', '--allow-empty', '-m', 'empty local commit')
+        self.git(self.clone, 'merge', '--no-ff', 'side', '-m', 'local merge')
+        saved = self.run_record('reset')
+        self.assertIn(b'saved 3 local-only commits', saved.stdout)
+        archive, = (self.home / 'src/fabrig/archive').iterdir()
+        patches = list(archive.glob('*.patch'))
+        self.assertEqual(len(patches), 3)
+        self.assertTrue(all(p.stat().st_size > 0 for p in patches))
+        self.assertTrue(any(b'GIT binary patch' in p.read_bytes() for p in patches))
+        self.assertTrue(any(b'local merge' in p.read_bytes() for p in patches))
+        for patch_file in patches:
+            sha = patch_file.stem.split('-', 1)[1]
+            self.assertTrue(patch_file.read_bytes().startswith(f'From {sha} '.encode()))
+
+
+    def test_push_guard_never_replays_old_events_after_force_push(self):
+        path = self.seed / 'events/queue/hel8/2026-10-29.jsonl'
+        path.parent.mkdir(parents=True)
+        path.write_bytes(self.event().replace(b'after-landing', b'queue'))
+        self.seed_commit('old collector')
+        self.prepare()
+        # Prepare a new root but postpone the force-push until record's pre-push hook.
+        self.git(self.seed, 'checkout', '--orphan', 'rewritten')
+        self.git(self.seed, 'rm', '-rf', '.')
+        (self.seed / 'README.md').write_text('# New root\n')
+        self.git(self.seed, 'add', '.')
+        self.git(self.seed, 'commit', '-m', 'rewritten')
+        self.hook(self.clone,
+                  f'git -C {shlex.quote(str(self.seed))} push --force origin HEAD:main >&2\n')
+        refused = self.run_record('write', '--as', 'ops', 'README.md', data=b'# Pending input\n', code=1)
+        self.assertIn(b'history was rewritten upstream', refused.stderr)
+        self.assertEqual(self.git(self.origin, 'rev-list', '--count', 'main'), '1')
+        self.assertTrue((self.clone / 'events').is_dir())
+        self.assertEqual((self.clone / 'README.md').read_bytes(), b'# Pending input\n')
+        self.run_record('reset')
+        self.assert_clean()
+
+
     def test_automatic_append_retries_twice_then_succeeds(self):
         self.prepare()
         for writer in ('after-landing',):
