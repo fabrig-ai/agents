@@ -270,7 +270,7 @@ design = "docs/design/fab.md, 13.10"
 
 [[part]]
 id = "events"
-title = "Events start the tick, coalesced; the timer only a 30-minute backstop"
+title = "Events start the tick, coalesced; the timer only a 10-minute backstop"
 mode = "feature"
 needs = ["dispatch", "codex"]
 design = "docs/design/fab.md, 13.9"

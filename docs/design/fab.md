@@ -643,9 +643,12 @@ only the backstop.
   nothing: systemd keeps at most one start pending, so a burst of events
   makes one tick after the running one, never a queue of them. A tick reads
   every new record anyway.
-- **The timer is the backstop,** never the driver: it ticks at most every 30
-  minutes, for a lost event or a host that could not reach hel8. Until the
-  events are in place the timer stays at 2 minutes.
+- **The timer is the backstop,** never the driver: it ticks every 10 minutes
+  (the user, 10-30), for a lost event or a host that could not reach hel8.
+  In normal operation every change of state arrives as an event, so the
+  backstop tick finds nothing to do; a backstop tick that does act is a lost
+  event, and it logs a note saying so. Until the events are in place the
+  timer stays at 2 minutes.
 - **A tick that wants another starts one:** when a tick's own actions end
   work the next decision depends on (a landing that makes tasks runnable,
   a finished call), it starts the next tick at its end.
