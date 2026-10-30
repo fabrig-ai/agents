@@ -165,9 +165,19 @@ submitters and codex-run/after-landing units must be drained. Non-claim producer
 remain frozen independently. The inventory SHA256 covers all pool/share bytes.
 
 Prepare refuses conflicting/unknown root flags, quota fstab options and ambiguous
-root/default entries; it keeps write-once original boot files and their digests.
+root/default entries. Mounted, fstab and selected GRUB roots must resolve to the
+same block-device UUID before writes. Main GRUB defaults and every drop-in use a
+literal assignment/comment grammar; unsupported shell input refuses. It keeps
+write-once originals; state binds the manifest digest and exact complete file
+set, required before restore or original verification.
 It records boot, installed-source/digest, non-secret machine.env and start-once
 service proof. Reboot and verify recheck unchanged claims, sources and environment.
+Reboot refuses enabled retained/start-once services, WantedBy installation links
+and enabled or active timer/path triggers. Owners disable without --now; verify
+records unchanged prevention, then owners restore enablement and start once only
+after acceptance. Before any probe, verify requires a valid changed boot UUID,
+the prepared kernel release, unchanged root UUID and post-prepare boot digests,
+intact bound originals and exactly the prepared command-line options.
 Verify explicitly mutates only a bounded private scratch project: project/inherit
 flags must propagate and a >1MiB unprivileged write must fail with EDQUOT; project,
 limit and directory cleanup are mandatory. Failed prerequisites skip the probe.

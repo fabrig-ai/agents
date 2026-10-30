@@ -59,6 +59,15 @@ elif name == 'ssh':
 elif name == 'heavy':
     assert args == ['--installed']
     sys.exit(control.get('installed', 0))
+elif name == 'uname': print(control.get('kernel', 'fixture'))
+elif name == 'blkid':
+    spec = args[-1]
+    if '-U' in args:
+        if spec != '11111111-1111-1111-1111-111111111111': sys.exit(2)
+        print('/dev/sda1'); sys.exit(0)
+    identities = control.get('identities', {'/dev/sda1': '11111111-1111-1111-1111-111111111111', '/dev/sdb1': '22222222-2222-2222-2222-222222222222', 'UUID=11111111-1111-1111-1111-111111111111': '11111111-1111-1111-1111-111111111111'})
+    if spec not in identities: sys.exit(2)
+    print(identities[spec])
 elif name == 'findmnt': print(json.dumps({'filesystems': [control['mount']]}))
 elif name == 'xfs_quota':
     command = args[args.index('-c') + 1]
@@ -76,17 +85,23 @@ elif name == 'python3':
 elif name == 'grub-editenv': print(control.get('grubenv', ''))
 elif name == 'systemctl':
     if args == ['--user', 'is-active', 'fleet-sync.timer']: print(control.get('timer', 'active'))
+    elif 'is-enabled' in args:
+        value = control.get('enablement', {}).get(args[-1], 'disabled')
+        print(value); sys.exit(0 if value == 'enabled' else 1)
+    elif 'list-unit-files' in args: print(json.dumps(control.get('unit_files', [])))
     elif 'list-units' in args: print(json.dumps(control.get('units', [])))
     elif 'show' in args:
         unit = args[args.index('show') + 1]
+        if unit in control.get('unit_properties', {}):
+            print(control['unit_properties'][unit]); sys.exit(0)
         state = control.get('unit_states', {}).get(unit, 'inactive')
-        print('LoadState=loaded\nActiveState=' + state + '\nSubState=' + ('running' if state == 'active' else 'dead') + '\nUnitFileState=enabled')
+        print('LoadState=loaded\nActiveState=' + state + '\nSubState=' + ('running' if state == 'active' else 'dead') + '\nUnitFileState=' + control.get('enablement', {}).get(unit, 'disabled') + '\nWantedBy=\nTriggeredBy=\nTriggers=')
     else: assert args == ['reboot']
 elif name == 'update-grub':
     enabled = (root / 'etc/default/grub.d/90-fabrig-pquota.cfg').exists()
     flags = ' rootflags=pquota' if enabled and not control.get('bad_generated') else ''
     extra = ' bad=changed' if control.get('changed_options') else ''
-    text = 'set default="0"\nmenuentry "Debian" {\n linux /vmlinuz root=/dev/sda1 ro console=ttyS0' + flags + extra + '\n}\n'
+    text = 'set default="0"\nmenuentry "Debian" {\n linux /vmlinuz-fixture root=/dev/sda1 ro console=ttyS0' + flags + extra + '\n}\n'
     (root / 'boot/grub/grub.cfg').write_text(text)
 else: raise RuntimeError(name)
 '''
@@ -114,7 +129,7 @@ class PquotaTests(unittest.TestCase):
         self.patch(self.mod.pwd, 'getpwnam', return_value=argparse.Namespace(pw_uid=os.getuid(), pw_gid=os.getgid()))
         self.bin = self.root / 'bin'
         self.bin.mkdir()
-        for name in ('runuser', 'ssh', 'heavy', 'findmnt', 'xfs_quota', 'python3', 'systemctl', 'update-grub', 'grub-editenv'):
+        for name in ('runuser', 'ssh', 'heavy', 'findmnt', 'xfs_quota', 'python3', 'systemctl', 'update-grub', 'grub-editenv', 'blkid', 'uname'):
             self.put('bin/' + name, FAKE, 0o755)
         self.env = dict(os.environ, PATH=f'{self.bin}:/usr/bin:/bin', HOME=str(self.home),
                         PQUOTA_FIXTURE=str(self.root), PYTHONDONTWRITEBYTECODE='1')
@@ -127,15 +142,15 @@ class PquotaTests(unittest.TestCase):
             unit_states={'after-landing.service': 'inactive', 'qa-watch.service': 'active'})
         self.controls()
         self.put('proc/cmdline', 'root=/dev/sda1 ro console=ttyS0\n')
-        self.put('proc/sys/kernel/random/boot_id', 'boot-before\n')
+        self.put('proc/sys/kernel/random/boot_id', 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\n')
         self.put('etc/default/grub', 'GRUB_DEFAULT=0\nGRUB_CMDLINE_LINUX=""\nGRUB_CMDLINE_LINUX_DEFAULT="console=ttyS0"\n')
         self.put('etc/fstab', '/dev/sda1 / xfs defaults,noatime 0 1\n')
         self.put('boot/grub/grubenv', 'original environment\n')
         self.put('var/lib/fabrig-pquota/fence', 'hetzner7 ops: all producers stopped; drained REF\n', 0o600)
         self.put('inventory.txt', 'hetzner7 1=pool 4=pool\nhetzner3 1=pool\n')
         self.put('claims.txt', self.held('1') + self.held('4') + 'hetzner3 1 [pool]: free\n')
-        self.put('heavy.json', json.dumps(dict(version=1, installation=dict(boot='boot-before'), tasks={})))
-        self.put('boot/grub/grub.cfg', 'set default="0"\nmenuentry "Debian" {\n linux /vmlinuz root=/dev/sda1 ro console=ttyS0\n}\n')
+        self.put('heavy.json', json.dumps(dict(version=1, installation=dict(boot='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'), tasks={})))
+        self.put('boot/grub/grub.cfg', 'set default="0"\nmenuentry "Debian" {\n linux /vmlinuz-fixture root=/dev/sda1 ro console=ttyS0\n}\n')
         self.policy = dict(inventory_digest=self.digest_inventory(), maintenance_owner='ops',
             maintenance_what='pquota maintenance REF', retained_claims=[], approval_files={}, retained_services={})
         self.tool = self.mod.Pquota('hetzner7', root=self.root, env=self.env, policy=self.policy)
@@ -199,6 +214,132 @@ class PquotaTests(unittest.TestCase):
         with self.assertRaises((ValueError, OSError)), contextlib.redirect_stdout(io.StringIO()):
             (function or self.tool.prepare)()
         self.assertEqual(before, len([r for r in self.calls() if r[0] == 'update-grub' or r == ['systemctl', 'reboot']]))
+
+    def test_review_1_reboot_refuses_enabled_retained_or_triggered_producer(self):
+        self.retained()
+        self.prepare()
+        scenarios = [
+            dict(enablement={'after-landing.service': 'enabled'}),
+            dict(unit_properties={'after-landing.service': 'LoadState=loaded\nActiveState=inactive\nSubState=dead\nUnitFileState=disabled\nWantedBy=default.target\nTriggeredBy=\n'}),
+            dict(unit_files=[{'unit_file': 'producer.timer', 'state': 'enabled'}],
+                 unit_properties={'producer.timer': 'LoadState=loaded\nActiveState=inactive\nUnitFileState=enabled\nTriggers=after-landing.service\nWantedBy=timers.target\n'}),
+            dict(unit_files=[{'unit_file': 'producer.path', 'state': 'enabled'}],
+                 unit_properties={'producer.path': 'LoadState=loaded\nActiveState=active\nUnitFileState=enabled\nTriggers=after-landing.service\nWantedBy=default.target\n'}),
+        ]
+        for scenario in scenarios:
+            with self.subTest(scenario=scenario):
+                self.controls(enablement={}, unit_properties={}, unit_files=[])
+                self.controls(**scenario)
+                self.assert_refuses(self.tool.reboot)
+
+    def test_review_2_conflicting_or_unresolved_boot_root_refuses_before_write(self):
+        config = self.tool.read('/boot/grub/grub.cfg')
+        for root in ('/dev/sdb1', 'UUID=unknown'):
+            with self.subTest(root=root):
+                self.put('boot/grub/grub.cfg', config.replace('/dev/sda1', root))
+                self.assert_refuses()
+                self.assertFalse(self.tool.path(self.mod.ORIGINAL).exists())
+                self.assertFalse(self.tool.path(self.mod.STATE).exists())
+        self.put('boot/grub/grub.cfg', config)
+        self.put('etc/fstab', '/dev/sdb1 / xfs defaults 0 1\n')
+        self.assert_refuses()
+
+    def test_review_3_incomplete_new_boot_proof_never_reaches_probe(self):
+        self.healthy_boot()
+        before = {name: self.tool.read(name) for name in
+                  (self.mod.BOOT, '/proc/cmdline', '/etc/default/grub')}
+        probe = self.patch(self.tool, 'probe', return_value={'inherited': True})
+        changes = [(self.mod.BOOT, ''), (self.mod.BOOT, 'not-a-uuid'),
+                   ('/proc/cmdline', 'root=/dev/sda1 ro rootflags=pquota'),
+                   ('/proc/cmdline', before['/proc/cmdline'] + ' unexpected=1'),
+                   ('/etc/default/grub', before['/etc/default/grub'] + 'GRUB_TIMEOUT=8\n')]
+        for name, value in changes:
+            with self.subTest(name=name, value=value):
+                self.put(name.lstrip('/'), value)
+                probe.reset_mock()
+                ok, output = self.output(self.tool.verify)
+                self.assertFalse(ok, output)
+                probe.assert_not_called()
+                self.put(name.lstrip('/'), before[name])
+        for change in (dict(kernel='alternate'), dict(mount=dict(self.control['mount'], source='/dev/sdb1'))):
+            with self.subTest(change=change):
+                self.controls(**change)
+                probe.reset_mock()
+                ok, output = self.output(self.tool.verify)
+                self.assertFalse(ok, output)
+                probe.assert_not_called()
+                self.controls(kernel='fixture', mount=dict(target='/', source='/dev/sda1', fstype='xfs', options='rw,prjquota'))
+
+    def test_review_4_shell_input_refuses_before_any_boot_write(self):
+        original = self.tool.read('/etc/default/grub')
+        for filename in ('etc/default/grub', 'etc/default/grub.d/custom.cfg'):
+            for line in ('GRUB_TIMEOUT=$(some-command)', 'GRUB_TIMEOUT=`some-command`',
+                         'GRUB_TIMEOUT=${OTHER}', 'export GRUB_CMDLINE_LINUX="x"',
+                         'source /other', '. /other', 'f() { true; }', 'if true; then true; fi'):
+                with self.subTest(filename=filename, line=line):
+                    self.put(filename, (original if filename.endswith('/grub') else '') + line + '\n')
+                    self.assert_refuses()
+                    self.assertFalse(self.tool.path(self.mod.ORIGINAL).exists())
+                    self.assertFalse(self.tool.path(self.mod.STATE).exists())
+            if filename.endswith('/grub'):
+                self.put(filename, original)
+            else:
+                (self.root / filename).unlink()
+
+    def test_review_5_manifest_omission_refuses_restore_and_original_verification(self):
+        self.put('etc/default/grub.d/local.cfg', 'GRUB_TIMEOUT=5\n')
+        self.prepare()
+        path = self.tool.path(self.mod.ORIGINAL + '/manifest.json')
+        original = path.read_text()
+        for name in ('/etc/fstab', '/etc/default/grub', '/boot/grub/grub.cfg', '/etc/default/grub.d/local.cfg'):
+            with self.subTest(name=name):
+                manifest = json.loads(original)
+                del manifest['files'][name]
+                self.put(str(path.relative_to(self.root)), json.dumps(manifest))
+                self.assert_refuses(self.tool.rollback)
+                with self.assertRaises(ValueError):
+                    self.tool.verify_originals(manifest)
+                self.put(str(path.relative_to(self.root)), original)
+
+    def test_review_disabled_service_and_triggers_remain_recorded_through_acceptance(self):
+        self.retained()
+        self.controls(unit_files=[{'unit_file': 'producer.timer', 'state': 'disabled'}],
+            unit_properties={'producer.timer': 'LoadState=loaded\nActiveState=inactive\nSubState=dead\nUnitFileState=disabled\nWantedBy=\nTriggers=after-landing.service\n'})
+        self.healthy_boot()
+        ok, output = self.output(self.tool.verify)
+        self.assertTrue(ok, output)
+        checks = self.tool.state()['verification']['checks']
+        prevention = next(c['detail'] for c in checks if c['name'] == 'owner boot prevention preserved')
+        self.assertEqual(prevention['after-landing.service']['installation'], 'disabled')
+        self.assertEqual(prevention['producer.timer']['installation'], 'disabled')
+        self.assertFalse(any('start' in row or 'enable' in row or 'disable' in row for row in self.calls()))
+
+    def test_review_uuid_root_and_literal_configuration_are_supported(self):
+        root = 'UUID=11111111-1111-1111-1111-111111111111'
+        self.put('etc/fstab', root + ' / xfs defaults 0 1\n')
+        config = self.tool.read('/boot/grub/grub.cfg')
+        self.put('boot/grub/grub.cfg', config.replace('/dev/sda1', root))
+        self.put('etc/default/grub.d/local.cfg', '# comment\n\nGRUB_TIMEOUT=5 # literal\nGRUB_DISTRIBUTOR="Debian GNU/Linux"\n')
+        self.assertEqual(self.tool.boot_safety()['root_uuid'], root[5:])
+
+    def test_review_changed_backup_or_missing_binding_skips_probe_and_restore(self):
+        self.healthy_boot()
+        manifest_path = self.mod.ORIGINAL + '/manifest.json'
+        manifest = self.tool.read(manifest_path)
+        self.put(manifest_path.lstrip('/'), manifest + ' ')
+        probe = self.patch(self.tool, 'probe', return_value=True)
+        ok, output = self.output(self.tool.verify)
+        self.assertFalse(ok, output)
+        probe.assert_not_called()
+        self.assert_refuses(self.tool.rollback)
+        self.put(manifest_path.lstrip('/'), manifest)
+        state = self.tool.state()
+        del state['original_binding']
+        self.tool.save(state)
+        self.assert_refuses(self.tool.rollback)
+        self.tool.path(self.mod.STATE).unlink()
+        with self.assertRaises(ValueError):
+            self.tool.verify_originals(json.loads(manifest))
 
     def test_plan_is_read_only_shows_occupancy_sources_environment_services(self):
         before = self.snapshot()
@@ -468,12 +609,12 @@ class PquotaTests(unittest.TestCase):
         self.assertEqual(self.calls()[-1], ['systemctl', 'reboot'])
         self.assertTrue(all(row['pass_result'] for row in self.tool.state()['reboot_fence']))
         self.assertEqual(self.calls()[-2][0], 'ssh')
-        self.put('proc/sys/kernel/random/boot_id', 'boot-after')
+        self.put('proc/sys/kernel/random/boot_id', 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb')
         self.assert_refuses(self.tool.reboot)
 
     def healthy_boot(self):
         self.prepare()
-        self.put('proc/sys/kernel/random/boot_id', 'boot-after\n')
+        self.put('proc/sys/kernel/random/boot_id', 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb\n')
         self.put('proc/cmdline', 'root=/dev/sda1 ro console=ttyS0 rootflags=pquota\n')
         self.control['mount']['options'] = 'rw,prjquota'
         self.controls(quota='Project quota state on / (/dev/sda1)\n Accounting: ON\n Enforcement: ON\n')
@@ -492,7 +633,7 @@ class PquotaTests(unittest.TestCase):
 
     def test_verify_failed_boot_accounting_or_environment_skips_all_quota_mutation(self):
         self.healthy_boot()
-        self.put('proc/sys/kernel/random/boot_id', 'boot-before')
+        self.put('proc/sys/kernel/random/boot_id', 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa')
         self.controls(machine={'PLAN_MIN_DISK_GB': '99'}, quota='Project quota state on / (/dev/sda1)\n Accounting: OFF\n Enforcement: ON\n')
         before = len(self.calls())
         ok, output = self.output(self.tool.verify)

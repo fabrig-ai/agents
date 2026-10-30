@@ -428,7 +428,16 @@ unknown drop-in shell code, another fstab quota option, an unidentified default,
 multiple fstab root rows or multiple `root=` arguments on the default Linux line.
 Ordinary recovery/kernel menu entries remain valid when the numeric top-level
 default is unambiguous. Saved/one-shot/submenu defaults refuse. Existing kernel
-options must survive `update-grub` unchanged. The only added input is exactly:
+options must survive `update-grub` unchanged. Mounted root, fstab root (device
+or UUID) and the selected entry's `root=` must resolve through blkid to the same
+non-empty UUID before any backup or boot-intent write. Unresolved identities
+refuse. The selected kernel must have a literal versioned vmlinuz path.
+
+Both `/etc/default/grub` and every grub.d file accept only literal `KEY=value`
+or `KEY="value"` assignments, comments and blank lines. Expansion, command
+substitution, export, source, functions and conditionals refuse before any write.
+The sole expansion exception is the exact owned drop-in below. The only added
+input is exactly:
 
 ```sh
 GRUB_CMDLINE_LINUX="$GRUB_CMDLINE_LINUX rootflags=pquota"
@@ -437,7 +446,10 @@ GRUB_CMDLINE_LINUX="$GRUB_CMDLINE_LINUX rootflags=pquota"
 at `/etc/default/grub.d/90-fabrig-pquota.cfg`. Before this change, a private,
 atomic, **write-once** `/var/lib/fabrig-pquota/original/` stores the original
 `/etc/default/grub`, all GRUB drop-ins, fstab, generated grub.cfg and binary
-grubenv, with digests/modes/ownership in a manifest. Retries validate and never
+grubenv, with digests/modes/ownership in a manifest. Prepared state independently
+pins the manifest's sha256 and exact file set, including every original grub.d
+file. Missing entries, changed membership or missing state binding refuse before
+restore or original-file verification. Retries validate and never
 replace this backup. A changed/corrupt original or incomplete transaction
 refuses for investigation. Prepared retries preserve original evidence.
 
@@ -457,7 +469,13 @@ writers still require the independent producer freeze and drainage proof.
 sudo python3 -I fleet/bootstrap/pquota verify --host hetzner6
 ```
 
-**Verify is no longer read-only.** It first checks new boot ID, cmdline pquota,
+**Verify is no longer read-only.** Before the scratch probe it requires a valid,
+non-empty new boot UUID; the running kernel release equal to the prepared
+entry's version; the unchanged root UUID; all post-prepare boot-file digests;
+the bound original manifest and payloads; and `/proc/cmdline` containing exactly
+the prepared entry's options, including the one added `rootflags=pquota`.
+An alternate kernel, missing or extra option, empty boot ID or changed boot
+input fails verification and skips the probe. It also checks
 XFS prjquota, project accounting AND enforcement, unchanged installed sources
 and environment, fleet-sync.timer, and the complete unchanged maintenance and
 retained occupancy/drainage proof. Failure skips all quota mutation. Unlike the
@@ -477,16 +495,32 @@ fails verification and preserves the path for explicit ops reconciliation.
 Verification checks and the probe receipt are recorded in state.json. No probe
 runs under plan, prepare or reboot, and no service is started by the helper.
 
-Before the reboot, owners stop and **disable** the relevant enabled services and
-their triggers, preserving and recording prior enablement and application state.
+Before the reboot, owners drain and stop producers, then **disable without
+`--now`** the relevant services and timer/path triggers, preserving and recording
+prior enablement and application state. For example, as the owning user:
+
+```sh
+systemctl --user stop after-landing.service
+systemctl --user disable after-landing.service
+# Stop and disable each associated timer/path as well, without --now.
+```
+
+Reboot refuses enabled retained/start-once producers, WantedBy links and enabled
+or active timer/path triggers pointing to them. It checks both UnitFileState and
+installation enablement, inventories timer/path units and follows TriggeredBy.
+Verify repeats and records this prevention proof; an inactive service alone is
+insufficient.
 Stopping an enabled WantedBy=default.target unit once does not prevent it from
 autostarting at boot. Coordinate a fleet convergence hold so it cannot re-enable
 those services; keep fleet-sync.timer itself active for the post-boot check.
-The helper records UnitFileState but never changes enablement or convergence
-controls. Owners retain the pre-drain plan's active-service list as well as the
+The helper records unit, installation and trigger state but never changes
+enablement or convergence controls. Owners retain the pre-drain plan's active-service list as well as the
 immediate pre-boot state, then restore the agreed enablement and restart their
 listed start-once services **once**, preserving their existing state, claims and
-recovery evidence, after ops accepts the quota proof.
+recovery evidence, after ops accepts the quota proof. Owners first restore the
+agreed enablement with `systemctl --user enable UNIT` (without `--now`), then
+explicitly `systemctl --user start UNIT` once; restore trigger enablement only
+at the agreed readmission point.
 Fleet-sync does not restart an existing start-once service for its owner.
 For **h8**, the current transient queue wrapper is **not durable across boot**:
 ops owns the normal16 official queue restart, the **authority lock and checkout

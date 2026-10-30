@@ -12,6 +12,9 @@ Contract: `docs/design/fleet.md`, sections 1–6.
   fencing with pinned full central occupancy and bound retained-owner approvals.
   Pre-boot source/environment/writer proof, write-once backups, owner restart
   recording and bounded post-boot EDQUOT/inheritance verification have fixtures.
+  Accepted ops review fixes now cover boot-time producer/trigger prevention,
+  root UUID agreement, exact new-boot proof, literal GRUB input grammar and
+  state-bound complete original manifests. Regression fixtures fail on 9e656e9.
   Only plan has run on a real host; boot/quota enforcement remains unproved.
   Deploy the compatibility parser fleet-wide before the asset/bootstrap stage.
 
