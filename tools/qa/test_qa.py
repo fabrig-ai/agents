@@ -5196,7 +5196,154 @@ def the_queue_json_fixture_matches_real_output(lab):
     assert lab.run('queue', '--json').stdout == '[]\n'
 
 
+def evidence_scan_rules_and_placeholders(lab):
+    module = runpy.run_path(str(KIT / 'evidence.py'))
+    scan = module['scan']
+    unsafe = {
+        'key/jwt': ['ghp_' + 'x' * 30, 'sk-ant-example', 'eyJabc.def.ghi',
+                    '-----BEGIN RSA PRIVATE KEY-----'],
+        'header/cookie-jar': ['Authorization: Bearer literal', 'Proxy-Authorization: Basic literal',
+                              'Cookie: session=literal', '{"Authorization": "Bearer literal"}',
+                              '{"Cookie": "session=literal"}', '# Netscape HTTP Cookie File',
+                              '.example.test\tTRUE\t/\tFALSE\t0\tsession\tvalue'],
+        'link': ['https://user:literal@example.test', 'https://example.test?code=literal',
+                 'https://example.test#access_token=literal'],
+        'assigned/user': ['password=literal', '{"api_key": "literal"}', "secret: 'literal'",
+                          'curl -u user:literal https://example.test', 'token=$TOKEN-literal',
+                          r'password=some\ value'],
+    }
+    for rule, samples in unsafe.items():
+        for value in samples:
+            assert scan(value) == rule, (value, scan(value))
+    for value in ('password=""', 'token=null', 'secret=true', 'password=false', 'token=TOKEN',
+                  'token=<token>', 'token=...', 'token=***', 'token=@FILE', 'token=$token',
+                  'token=${token}', 'token=${{ secrets.TOKEN }}', 'token="${{ secrets.TOKEN }}"',
+                  'password=$PASSWORD # comment', 'token="[masked]"',
+                  'Authorization: Bearer <TOKEN>', 'Cookie: session=[masked]',
+                  '{"Authorization": "Bearer <TOKEN>"}', '{"Cookie": "session=[masked]"}',
+                  'Set-Cookie: session=[masked]; Path=/; SameSite=Lax; HttpOnly',
+                  'https://example.test?code=$code', 'curl --user user:$PASSWORD'):
+        assert scan(value) is None, (value, scan(value))
+
+
+def evidence_snapshot_checks_names_types_and_limits(lab):
+    module = runpy.run_path(str(KIT / 'evidence.py'))
+    snapshot, refused = module['snapshot'], module['Refusal']
+    root = lab.scratch({'report.md': 'report\n', 'notes.md': 'notes\n', 'store/data': b'\x00'})
+    files, index = snapshot(root, {'kind': 'walk', 'name': 'fixture'}, 1024)
+    assert set(files) == {'report.md', 'notes.md', 'index.json'}
+    for name in ('cookies.txt', 'auth.json', 'id_rsa', 'login.txt', 'nested/password.log', 'x.env'):
+        target = root / 'evidence' / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b'never opened')
+        try:
+            snapshot(root, {}, 1024)
+            assert False, name
+        except refused as error:
+            assert 'name' in str(error) and 'never opened' not in str(error)
+        target.unlink()
+    for name in ('tokens.txt', 'session-status.txt'):
+        (root / 'evidence' / name).write_text('safe\n')
+    snapshot(root, {}, 1024)
+    target = root / 'evidence/linked.txt'
+    target.symlink_to(root / 'report.md')
+    try:
+        snapshot(root, {}, 1024)
+        assert False
+    except refused as error:
+        assert 'kind/binary' in str(error)
+    target.unlink()
+    os.link(root / 'report.md', target)
+    try:
+        snapshot(root, {}, 1024)
+        assert False
+    except refused:
+        pass
+    target.unlink()
+    (root / 'evidence/large.txt').write_bytes(b'x' * 2000)
+    (root / 'scripts').mkdir()
+    (root / 'scripts/run.sh').write_text('echo safe\n')
+    files, index = snapshot(root, {}, 1024)
+    assert not any(name.startswith('evidence/') for name in files)
+    assert 'scripts/run.sh' in files and index['omissions']
+    (root / 'report.md').write_bytes(b'x' * 2000)
+    try:
+        snapshot(root, {}, 1024)
+        assert False
+    except refused as error:
+        assert 'size' in str(error)
+
+
+def evidence_snapshot_never_opens_credentials_or_unsafe_entries(lab):
+    from unittest.mock import patch
+    module = runpy.run_path(str(KIT / 'evidence.py'))
+    root = lab.scratch({'report.md': 'safe\n', 'evidence/auth.json': 'fixture do not open\n'})
+    opened = os.open
+    def guard(path, *args, **kwargs):
+        assert str(path) != 'auth.json', 'credential name was opened'
+        return opened(path, *args, **kwargs)
+    with patch.object(os, 'open', guard):
+        try:
+            module['snapshot'](root, {})
+            assert False
+        except module['Refusal'] as error:
+            assert error.rule == 'name'
+    (root / 'evidence/auth.json').unlink()
+    for content in (b'\x00', b'\xff'):
+        (root / 'report.md').write_bytes(content)
+        try:
+            module['snapshot'](root, {})
+            assert False
+        except module['Refusal'] as error:
+            assert error.rule == 'kind/binary'
+    (root / 'report.md').write_text('safe\n')
+    fifo = root / 'evidence/wait.txt'
+    os.mkfifo(fifo)
+    try:
+        module['snapshot'](root, {})
+        assert False
+    except module['Refusal'] as error:
+        assert error.rule == 'kind/binary'
+    fifo.unlink()
+    (root / 'evidence/token=literal.txt').write_text('safe\n')
+    try:
+        module['snapshot'](root, {})
+        assert False
+    except module['Refusal'] as error:
+        assert 'literal' not in str(error) and 'entry' in str(error)
+
+
+def evidence_snapshot_detects_replacement_before_read(lab):
+    from unittest.mock import patch
+    module = runpy.run_path(str(KIT / 'evidence.py'))
+    root = lab.scratch({'report.md': 'original\n'})
+    opened = os.open
+    def replace_before_open(path, *args, **kwargs):
+        if path == 'report.md':
+            target = root / 'report.md'
+            sibling = root / 'changed.md'
+            sibling.write_text('changed\n')
+            sibling.replace(target)
+        return opened(path, *args, **kwargs)
+    with patch.object(os, 'open', replace_before_open):
+        try:
+            module['snapshot'](root, {})
+            assert False
+        except module['Refusal'] as error:
+            assert error.rule == 'changed during snapshot'
+    (root / 'report.md').write_text('x' * 1000)
+    try:
+        module['snapshot'](root, {}, 1024)
+        assert False, 'index must count against the cap'
+    except module['Refusal'] as error:
+        assert error.rule == 'size'
+
+
 CASES = (
+    evidence_scan_rules_and_placeholders,
+    evidence_snapshot_checks_names_types_and_limits,
+    evidence_snapshot_never_opens_credentials_or_unsafe_entries,
+    evidence_snapshot_detects_replacement_before_read,
     a_queued_walk_uses_the_first_free_inventory_slot,
     plus_slot_lists_validate_and_keep_legacy_forms,
     unknown_slot_inventory_refuses_without_claiming,
