@@ -9,6 +9,7 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from copy import deepcopy
 from dataclasses import replace
+from datetime import datetime, timedelta
 from unittest.mock import patch
 
 from fab import cli, dispatch, log, plan, state
@@ -270,6 +271,80 @@ class CallActionsTest(unittest.TestCase):
                           Action("finish", run="s", run_kind="skeleton", branch="calls/s")])
         events.append(dict(ev="call.finished", call="a", outcome="done"))
         self.assertEqual([a.run for a in self.actions(events)], ["s"])
+
+    def landings(self, count, ts="2026-10-30T12:29:00.000Z"):
+        tasks = [task(str(n)) for n in range(count)]
+        self.tasks.update((item.id, item) for item in tasks)
+        return [dict(ev="branch.landed", task=item.id, ts=ts) for item in tasks]
+
+    def test_review_count_threshold_and_plan_landings_only(self):
+        landed = self.landings(dispatch.REVIEW_AT)
+        expected = [Action("call", task="draft/review", run_kind="review")]
+        self.assertEqual(self.actions(landed[:-1]), [])
+        self.assertEqual(self.actions(landed), expected)
+        foreign = dict(landed[-1], task="other/task")
+        self.assertEqual(self.actions(landed[:-1] + [foreign]), [])
+
+    def test_review_age_threshold_since_first_landing_with_no_review(self):
+        threshold = datetime.fromisoformat(self.now) - timedelta(minutes=dispatch.REVIEW_AFTER)
+        for delta, due in ((1, False), (0, True), (-1, True)):
+            with self.subTest(delta=delta):
+                ts = (threshold + timedelta(milliseconds=delta)).isoformat()
+                landed = self.landings(1, ts)
+                expected = [Action("call", task="draft/review", run_kind="review")] if due else []
+                self.assertEqual(self.actions(landed), expected)
+        self.assertEqual(self.actions(), [])
+
+    def test_review_count_resets_at_latest_start_including_failed_review(self):
+        old = self.landings(dispatch.REVIEW_AT, "2026-10-29T00:00:00.000Z")
+        for outcome in ("done", "failed"):
+            with self.subTest(outcome=outcome):
+                review = dict(self.call("review", "r1"), ts="2026-10-30T12:00:00.000Z",
+                              subject="draft/review")
+                history = old + [review,
+                                 dict(ev="call.ended", call="r1", outcome=outcome, ts="2026-10-30T12:15:00.000Z"),
+                                 dict(ev="call.finished", call="r1", outcome=outcome)]
+                recent = self.landings(dispatch.REVIEW_AT)
+                self.assertEqual(self.actions(history + recent[:-1]), [])
+                self.assertEqual(self.actions(history + recent),
+                                 [Action("call", task="draft/review", run_kind="review")])
+
+    def test_review_age_uses_start_instead_of_end_and_requires_a_landing(self):
+        threshold = datetime.fromisoformat(self.now) - timedelta(minutes=dispatch.REVIEW_AFTER)
+        for outcome in ("done", "failed"):
+            with self.subTest(outcome=outcome):
+                review = dict(self.call("review", "r1"), ts=threshold.isoformat(), subject="draft/review")
+                ended = [dict(ev="call.ended", call="r1", outcome=outcome, ts=self.now),
+                         dict(ev="call.finished", call="r1", outcome=outcome)]
+                history = [review, *self.landings(1), *ended]
+                self.assertEqual(self.actions(history),
+                                 [Action("call", task="draft/review", run_kind="review")])
+                self.assertEqual(self.actions([review, *ended]), [])
+                later_start = dict(review, ts=(threshold + timedelta(milliseconds=1)).isoformat())
+                self.assertEqual(self.actions([later_start, *history[1:]]), [])
+
+    def test_review_in_flight_blocks_review_and_other_roles_do_not(self):
+        review = dict(self.call("review"), ts="2026-10-29T00:00:00.000Z", subject="draft/review")
+        landed = self.landings(dispatch.REVIEW_AT)
+        self.assertEqual(self.actions([review, *landed]), [])
+        self.assertEqual(self.actions([self.call("skeleton"), *landed]),
+                         [Action("call", task="draft/review", run_kind="review")])
+
+    def test_review_question_parks_subject_until_matching_answer(self):
+        asked = [dict(self.call("review", "r1"), ts="2026-10-30T12:00:00.000Z", subject="draft/review"),
+                 dict(ev="call.ended", call="r1", role="review", outcome="question"),
+                 *self.landings(dispatch.REVIEW_AT)]
+        self.assertEqual(self.actions(asked), [])
+        self.assertEqual(self.actions(asked + [event("question.answered", "core")]), [])
+        self.assertEqual(self.actions(asked + [event("question.answered", "review")]),
+                         [Action("call", task="draft/review", run_kind="review")])
+
+    def test_review_start_follows_answer_and_skeleton(self):
+        history = [self.question(ts="2026-10-30T12:00:00.000Z"), *self.landings(dispatch.REVIEW_AT)]
+        self.assertEqual(self.actions(history, ["core"]),
+                         [Action("call", task="draft", run_kind="answer"),
+                          Action("call", task="core", run_kind="skeleton"),
+                          Action("call", task="draft/review", run_kind="review")])
 
     def test_pure_repeatable_and_inputs_unchanged(self):
         events = [self.call(), self.question()]

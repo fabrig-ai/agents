@@ -77,6 +77,17 @@ def call_actions(plan: Plan, tasks: Mapping[str, Task], events: list[dict], desi
     designed = {started[identifier].get("subject") for identifier in started
                 if any(event.get("ev") == "call.ended" and event.get("call") == identifier
                        and event.get("outcome") == "done" for event in events)}
+    parked = _parked_subjects(events, started)
+    fresh = [part for part in design if f"{plan.draft}/{part}" not in designed | parked]
+    if "skeleton" not in roles and fresh:
+        actions.append(Action("call", task=fresh[0], run_kind="skeleton"))
+    subject = f"{plan.draft}/review"
+    if "review" not in roles and subject not in parked and _review_due(tasks, events, now):
+        actions.append(Action("call", task=subject, run_kind="review"))
+    return actions
+
+
+def _parked_subjects(events: list[dict], started: Mapping[str, dict]) -> set[str | None]:
     # A call that asked a question parks its subject until question.answered names it.
     parked = set()
     for event in events:
@@ -84,10 +95,15 @@ def call_actions(plan: Plan, tasks: Mapping[str, Task], events: list[dict], desi
             parked.add(started.get(event.get("call"), {}).get("subject"))
         elif event.get("ev") == "question.answered":
             parked.discard(event.get("task"))
-    fresh = [part for part in design if f"{plan.draft}/{part}" not in designed | parked]
-    if "skeleton" not in roles and fresh:
-        actions.append(Action("call", task=fresh[0], run_kind="skeleton"))
-    return actions
+    return parked
+
+
+def _review_due(tasks: Mapping[str, Task], events: list[dict], now: str) -> bool:
+    previous = calls.last_review(events)
+    landed = calls.landed_after(events, tasks, previous)
+    return bool(landed) and (len(landed) >= REVIEW_AT or
+                            datetime.fromisoformat(now) - datetime.fromisoformat(previous or landed[0]["ts"])
+                            >= timedelta(minutes=REVIEW_AFTER))
 
 
 @dataclass(frozen=True)
