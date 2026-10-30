@@ -23,6 +23,11 @@ Contract: `docs/design/qa.md`, sections 2–7.
   service. Durable pin/unpin and scratch-byte reservation/measurement protect
   retained work and queue starts over budget. Remote publication defaults off.
   Temporary-HOME tests cover scans, publication recovery and deletion guards.
+  Review repairs add componentwise path scans, bounded enumeration after all
+  custody cleanup, saved device/inode identities with verified quarantine,
+  concrete retention times, stable resume accounting and explicit two-setting
+  publication activation. Older walks without saved identities are retained.
+  Added repair probes run in process with fresh HOME and fake services.
 - **JSON contracts are built.** Both tools expose the metadata interfaces in
   design section 2. `tools/qa/fixtures/logins-list.json` and
   `tools/qa/fixtures/qa-queue.json` are checked against real CLI output in the
@@ -51,7 +56,10 @@ Contract: `docs/design/qa.md`, sections 2–7.
 `bash tools/check.sh` runs `tools/qa/test_logins.py` and
 `tools/qa/test_qa.py` along with the repository gate, with isolated temporary
 HOME and fake services. This branch runs only
-`python3 -I -B tools/qa/test_qa.py`, as assigned: 208 tests passed in 92.778
-seconds, including 17 new cases. No full gate or live service tests were run. Deployment requires the matching `qa` and
+`python3 -I -B tools/qa/test_qa.py`, as assigned. The original feature run
+passed 208 tests. The repair run passed 220 tests in 134.695 seconds, adding
+12 in-process probes. Those probes passed separately in 2.032 seconds with
+0.772 seconds of CPU; they launch no child interpreters.
+No full gate or live service tests were run. Deployment requires matching `qa` and
 `evidence.py` plus a watcher restart. Remote publication requires explicit
-private repository/branch configuration; no service is deployed here.
+configuration of both private repository and branch; no service is deployed here.

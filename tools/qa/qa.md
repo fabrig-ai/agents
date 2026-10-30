@@ -60,7 +60,7 @@ or unreadable settings refuse the command.
 | `QA_WALK_SCRATCH_BYTES` | 2000000000 | Bytes reserved per active walk at admission, saved for that lifetime |
 | `QA_SCRATCH_BUDGET_BYTES` | 48000000000 | Budget for active reservations plus measured retained and paused/pinned scratch |
 | `QA_EVIDENCE_REMOTE` | empty | Empty keeps locally; production publication accepts `git@github.com:fabrig-ai/qa.git` |
-| `QA_EVIDENCE_BRANCH` | `evidence` | Safe branch name in that private repository |
+| `QA_EVIDENCE_BRANCH` | empty | Explicit safe branch name, normally `evidence`; remote publication needs both settings |
 | `QA_EVIDENCE_KIB` | 2048 | Positive snapshot cap, at most 2048 KiB including the index |
 | `QA_EVIDENCE_SECONDS` | 120 | Positive total time bound per remote keep attempt, at most five push races |
 | `QA_STUCK_TO` | empty | One stuck-login recipient; empty falls back to `~/.config/agents-qa/stuck`; director always included |
@@ -450,13 +450,17 @@ only scanned walk evidence, with no records writer.
 
 ### Walk preservation and scratch retention
 
-At final end, after custody cleanup has been attempted, the watcher snapshots
-`brief.md`, `plan.md`, `notes.md`, `report.md`, earlier `report-N.md` files,
+At final end, after custody cleanup has been attempted for every walk, the
+watcher snapshots outside the admission lock: `brief.md`, `plan.md`, `notes.md`, `report.md`, earlier `report-N.md` files,
 `scripts/` and `evidence/`. No store, deployment, binary, exporter, login or
 transcript is copied. `tools/qa/evidence.py` implements the section-9 scanner
 in `tools/qa/passes.md`: checked descriptors, owned singly linked regular
 UTF-8 files, no directory/file links, forbidden names checked before reads,
-and secret-shape checks on paths, contents and generated `index.json`.
+and secret-shape checks on each path component, the whole relative path,
+contents and generated `index.json`. Recovery validates indexed paths before
+opening a capture. Snapshot/archive traversal and scratch measurement are
+bounded to 4096 entries, depth 32 and five seconds; reaching a bound refuses
+and retains the source. Enumeration is bounded before sorting.
 Diagnostics give a safe path, line and rule, never matched values. Mask capture
 values with `[masked]` while retaining diagnostic lines. HTTP folding, JSON
 escaped keys and unknown token shapes remain scanner limits.
@@ -476,9 +480,12 @@ using the network. Pauses preserve their existing scratch without a final copy.
 
 A clean snapshot is installed through a sibling directory and rename at
 `DEV_TMP/qa/evidence/NAME/` (normally `~/src/rust/tmp/qa/evidence/NAME/`).
-Its bytes and identity are frozen for retries. Empty `QA_EVIDENCE_REMOTE`
-confirms `kept-locally` without opening an evidence Git repository. A configured
-remote uses the separate evidence lock and bare `DEV_TMP/qa/evidence.git` to
+Its bytes and identity are frozen for retries. Unless both
+`QA_EVIDENCE_REMOTE` and `QA_EVIDENCE_BRANCH` are explicitly nonempty, a new
+snapshot confirms `kept-locally` without opening an evidence Git repository.
+Once reserved, a pending remote snapshot keeps its target and remains pending
+while either activation setting is unset. An enabled remote uses the separate
+evidence lock and bare `DEV_TMP/qa/evidence.git` to
 append `walks/FIRST-START-DATE-NAME/` to `QA_EVIDENCE_BRANCH`. Origin and push
 target are checked; URL rewriting and alternate push URLs refuse. Same path
 and tree returns the original commit; different bytes refuse the occupied
@@ -494,17 +501,26 @@ snapshot identity, publication, status delivery and prune tombstone. Completion
 mail names the current evidence status; a later confirmed copy sends the starter
 one retried update. No evidence error blocks login returns or claim release.
 
-Seven days from the first saved final-end observation, the watcher makes a
-final keep/confirmation attempt and may delete only that walk's owned directory
+The saved end must be a concrete UTC timestamp at or after the current
+attempt's start and no later than the observation time; unknown, missing or
+inconsistent retention times retain scratch. Seven days from that end, the
+watcher makes a final keep/confirmation attempt and may delete only that walk's owned directory
 under `DEV_TMP/qa-focused/`. `qa pin NAME` and `qa unpin NAME` durably change its
 pin under the admission lock. Paused/pinned walks, held logins (including older
 attempt holders), pending/live claims, live or unknown units/jobs/launchers,
 pending publication or status delivery, and unaccepted refusal notices all
 retain scratch. An unchanged refusal can expire after its notice and status
 are accepted; a changed refusal needs its own accepted notice. Fresh inventory,
-claim and process observations precede deletion. Descriptor-anchored removal
-rejects links and paths outside focused scratch. A tombstone and one retried
-prune notice survive removal. Foreign legacy states remain opaque. Small
+claim and process observations precede deletion. New walks durably record
+the scratch directory's device/inode before claiming. Pruning saves a random
+quarantine name under the same anchored parent, atomically moves the candidate
+there, verifies its identity against the walk and removes recursively through
+the verified directory descriptor. A mismatch is retained and restored if the
+original name is free; an occupied name is preserved too. Interrupted quarantine
+work resumes from its saved name. Older walks with no saved identity retain
+scratch and get one retried notice; no current pathname supplies an inferred
+identity. Descriptor anchoring rejects links and paths outside focused scratch.
+A tombstone and one retried prune notice survive removal. Foreign legacy states remain opaque. Small
 states/outboxes, evidence, clocks, slots, warm targets and run transcripts
 remain.
 
@@ -514,8 +530,10 @@ across configuration changes. Retained ended and paused scratch is measured
 from metadata without reading file contents or following links; pinned scratch
 is measured too, including alongside an active reservation. Resume replaces
 its own paused measurement with a fresh reservation, retaining the measurement
-if pinned. A start over budget joins the existing queue with the byte reason
-and retries after cleanup/pruning; it takes no login or claim while waiting.
+if pinned. The resumed unpinned walk is skipped in the initial measurement;
+no second observation is subtracted from the total. Pending quarantine bytes
+are counted until removed. A start over budget joins the existing queue with
+the byte reason and retries after cleanup/pruning; it takes no login or claim while waiting.
 
 ### Run metadata on login holds
 

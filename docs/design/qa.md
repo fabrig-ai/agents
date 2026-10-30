@@ -125,7 +125,9 @@ Return moved logins before stopping deployments, confirm their stops, then
 return in-place logins. Give only verified matching holds. Release a claim
 only after all grants are returned and stop checks succeed, using the exact
 saved owner and lifetime token. Retry unconfirmed returns, releases, clock
-entries and posts on subsequent checks.
+entries and posts on subsequent checks. Only after every walk has received its
+custody cleanup attempt, scan evidence outside admission; enumeration is
+bounded by entry count, depth and elapsed time.
 
 **Uncertainty retains resources.** Invalid inventory or state cannot authorize
 a give. Unknown holders are left held and reported. Foreign legacy states
@@ -165,16 +167,17 @@ contract, with section 13a controlling first-version destinations and rollout.
 
 **Scan exactly the bytes to be published.** Walk preservation snapshots
 only allowed documents, scripts and captures, with ownership, link, type,
-size and secret-shape checks. Never inspect a login or a suspected credential
-to diagnose a refusal. Publish append-only private evidence; retry uncertain
+size and secret-shape checks on every path component and the whole path.
+Never inspect a login or a suspected credential to diagnose a refusal. Publish append-only private evidence; retry uncertain
 publication without replacing its saved identity. Required results and optional
 scratch captures have separate preservation obligations.
 
 **Admission accounts for scratch bytes.** Active walks reserve 2 GB each
 against a default 48 GB budget. Retained ended and paused/pinned directories
 contribute measured bytes; pinned active scratch also contributes its size.
-Resumes replace their own paused measurement with a new reservation. Scarcity
-queues through the existing admission queue before claiming or taking a login.
+Resumes exclude their own unpinned paused contribution from the initial total
+and add a new reservation; changing measurements cannot subtract other work.
+Scarcity queues through the existing admission queue before claiming or taking a login.
 
 **Seven days is conditional scratch expiry.** Final keep, durable status and
 notices, returned logins, stopped units/jobs/launchers and confirmed claim
@@ -182,10 +185,15 @@ release precede deletion of owned ended scratch. Pending publication or custody
 retains it; paused walks are never age-pruned. Preserve small state and
 outboxes, evidence history, login registry, slots, warm targets and transcripts.
 `tools/qa/passes.md`, sections 9 and 13a, specifies scans and pruning. Walk
-preservation is built: remote publication is off by default, safe local copies
-and receipts survive scratch, pins and pauses prevent age-pruning, and an
+preservation is built: remote publication requires both an explicitly set
+repository and branch. Safe local copies and receipts survive scratch, pins and pauses prevent age-pruning, and an
 accepted unchanged scan refusal can expire after seven days. Remote retries
 follow custody cleanup outside admission; they never delay returns/releases.
+Scratch identity (device/inode) is saved at creation. Pruning atomically
+quarantines the candidate under its anchored parent, verifies that identity
+and removes through its descriptor. A mismatch is retained and restored when
+the original name is free; missing identities retain scratch with one retried
+notice. Retention requires a concrete end time consistent with the walk start.
 Pass preservation and required result publication remain planned.
 
 ## 8. Later
