@@ -68,25 +68,37 @@ def names(address):
 
 
 def task_keys(path):
-    if not path or not Path(path).is_file():
+    if not path:
         return {}
-    text = Path(path).read_text()
+    try:
+        text = Path(path).read_text()
+    except (OSError, UnicodeError, ValueError):
+        return {'header_error': 'unreadable task file'}
     lines = text.splitlines()
     if lines and lines[0].strip() == '+++':
         try:
             end = next(i for i in range(1, len(lines)) if lines[i].strip() == '+++')
         except StopIteration:
-            raise ValueError(f'{path}: unclosed task header') from None
-        header = tomllib.loads('\n'.join(lines[1:end]))
+            return {'header_error': 'unclosed task header'}
+        try:
+            header = tomllib.loads('\n'.join(lines[1:end]))
+        except tomllib.TOMLDecodeError:
+            return {'header_error': 'invalid TOML task header'}
         result = {k: header[k] for k in JOIN if k in header}
-        if any(not isinstance(v, str) or not v for v in result.values()):
-            raise ValueError(f'{path}: task join keys must be nonempty strings')
+        if any(not isinstance(v, str) or not v.strip() for v in result.values()):
+            return {'header_error': 'task join keys must be nonempty strings'}
         return result
     branch = re.search(r'\bbranch\s+`([^`\n]+)`', text, re.IGNORECASE)
     if branch is None:
         branch = re.search(r'\b(ready/[a-zA-Z0-9._/-]+)', text)
         return {'branch': branch[1].rstrip('.')} if branch else {}
     return {'branch': branch[1]}
+
+
+def run_keys(address, path):
+    keys = task_keys(path)
+    # A broken header must not leave a partially inferred task/role join.
+    return keys if 'header_error' in keys else names(address) | keys
 
 
 @contextmanager
@@ -224,7 +236,7 @@ class Collector:
                 continue
             meta = dict(line.split('=', 1) for line in path.read_text().splitlines() if '=' in line)
             run = path.parent.name
-            keys = names(meta.get('to', '')) | task_keys(meta.get('task'))
+            keys = run_keys(meta.get('to', ''), meta.get('task'))
             self.emit('run-start', run, meta['started'], run=run, **keys,
                       model=meta.get('model'), effort=meta.get('effort'),
                       cwd=meta.get('dir'), report=meta.get('report'), resumed_from=meta.get('resume_of') or None)
@@ -234,7 +246,7 @@ class Collector:
             if len(columns) != 13:
                 raise ValueError('runs.tsv: expected 13 columns')
             run, to, start, end, code, tries, model, effort, task, report, thread, tokens, post = columns
-            keys = names(to) | task_keys(task)
+            keys = run_keys(to, task)
             meta_path = root / run / 'meta'
             meta = dict(line.split('=', 1) for line in meta_path.read_text().splitlines() if '=' in line) if meta_path.exists() else {}
             common = dict(run=run, **keys, model=model, effort=effort, report=report,
@@ -658,7 +670,8 @@ def publish(transactions, host, dry):
             raise failures[0]
         print(f'record-collect: spooled {len(events)} events')
     for source, _, _, _, rows in transactions:
-        print(f'{source}: {len(rows)} events', file=sys.stderr)
+        errors = f", {sum('header_error' in row for row in rows)} header errors" if source == 'runs' else ''
+        print(f'{source}: {len(rows)} events{errors}', file=sys.stderr)
     return 0
 
 
