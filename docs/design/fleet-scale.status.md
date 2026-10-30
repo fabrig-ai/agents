@@ -24,3 +24,11 @@ lock and requires every task released, without changing heavy state. A missing
 or unsupported snapshot fails closed; --force requires an independent drain.
 Open: real rebuild/teardown acceptance by the user. The login pool (section 6),
 consumer adoption and automatic decisions remain Later.
+
+Scale-1b separates the exact hel8 kache source from the member destination.
+Missing/insecure sources fail before allocation/API; --local-only-kache skips
+source access, records the choice and persists its machine_env override in the
+member's non-secret 0600 settings. Shared templates omit KACHE_LOCAL_ONLY and
+new-member bootstrap installs remote selectors/drop-in after credential
+streaming, then restarts that fresh cache. Existing fixed-host policy is unchanged.
+Tests use synthetic credentials only; no live source is read by this task.

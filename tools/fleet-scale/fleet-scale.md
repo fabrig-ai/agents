@@ -15,6 +15,7 @@ by its tests. The first real rebuild remains operator acceptance evidence.
 fleet-scale key
 fleet-scale up --dry-run
 fleet-scale up
+fleet-scale up --local-only-kache
 fleet-scale list
 fleet-scale list --json
 fleet-scale hosts --json
@@ -47,12 +48,28 @@ through hel8 with existing admin SSH access to the eligible seeds: the exact
 allowlisted content is checked against fleet pins before transfer and again
 before installation. No general SSH grant on a seed is needed by the member.
 Rustup and pinned kache source provisioning retain the existing bootstrap rules.
-The kache store.env is streamed from/to its declared 0600 path and its two SHA256s
-must match; its contents are never stored in a Python variable or command log.
-Transfer follows user bootstrap: creating .config/kache before provisioning
-would correctly trigger fleet-sync's existing-installation protection.
-The template retains hetzner3's local-only selector; copying the store credential
-does not activate a shared store or restart an existing cache.
+The shared-store default reads only `kache_source` from pool.toml:
+`~/.config/fleet-scale/kache-store.env` on hel8 (owned regular 0600 file).
+The separate `kache_destination` is `~/.config/kache/store.env` on the member;
+its parent is set to 0700 and file to 0600. Missing/unsafe sources refuse `up`
+before name allocation or any API call, with no fallback search. The source is
+streamed through its file descriptor and bounded SHA256 reads, never loaded
+into a Python variable or command log; both SHA256s must match. Dry runs check
+source metadata without reading credential contents.
+
+The template keeps hetzner3's 40 GiB cache cap, 40 GiB disk floor and three
+heavy build slots, but omits its `KACHE_LOCAL_ONLY=1`. After fresh provisioning
+and credential delivery, bootstrap writes the declared remote selectors and
+EnvironmentFile drop-in, reloads the manager and restarts this new member's
+kache to enable shared storage. The recovery threshold is 80 GiB. Delivery
+follows provisioning so its .config/kache footprint cannot block installation.
+Fixed hosts and their existing caches retain the existing fleet-sync policy.
+
+`up --local-only-kache` explicitly skips all credential access and delivery,
+remote setup and that restart. It records the choice centrally and writes a
+non-secret 0600 `~/src/fabrig/fleet/member.json` on the member before user
+bootstrap. Pool declarations read that exact file for the matching member and
+set `KACHE_LOCAL_ONLY=1`, including after release promotion and timer runs.
 
 `down` marks draining, checks central claims and waits up to five minutes for
 heavy's version-1 ledger (`~/src/rust/tmp/heavy/state.json`) to contain only
@@ -70,7 +87,7 @@ adoption of the ready-only `hosts --json` feed is later work.
 `list --json` emits `{members: {NAME: RECORD}, retired: [...], next: N}`;
 `hosts --json` emits `{hosts: {NAME: {hostname, ssh, roles, ...}}}`, merging
 fixed declarations and ready pool members. Dry runs read configuration and the
-registry only: no API, SSH, secrets, locks or writes. `max_members` counts all
+registry, plus shared-source metadata: no API, SSH, credential contents, locks or writes. `max_members` counts all
 unretired entries, including incomplete ones. Other limits are reserved.
 
 Configuration is `fleet/pool.toml`; tests inject a loopback API URL there.

@@ -210,7 +210,7 @@ class Fleet:
         self.api = API(self.config["api_base"], self.expand(self.config["token_file"]))
 
     def expand(self, path):
-        if not path.startswith("~/"):
+        if not path.startswith("~/") or ".." in Path(path[2:]).parts:
             raise Error("credential paths must start with ~/")
         return self.home / path[2:]
 
@@ -389,13 +389,14 @@ class Fleet:
                     self.ssh(member, f"python3 -I -B ~/bootstrap/fleet/bootstrap/bootstrap.py seed --host {member['name']} --seed {name}", stdin=stream)
 
     def credential(self, member):
-        path = self.expand(self.config["kache_credential"])
-        relative = str(path.relative_to(self.home))
+        path = self.expand(self.config["kache_source"])
+        relative = str(self.expand(self.config["kache_destination"]).relative_to(self.home))
         script = '''import hashlib, os, pathlib, sys, tempfile
 p = pathlib.Path.home() / sys.argv[1]
 for x in (p, *p.parents):
     if x.is_symlink(): raise ValueError("unsafe credential destination")
 p.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+p.parent.chmod(0o700)
 fd, name = tempfile.mkstemp(dir=p.parent, prefix=".store.")
 try:
     with os.fdopen(fd, "wb") as out:
@@ -430,11 +431,20 @@ finally:
         if self.ssh(member, "systemctl --user is-active fleet-sync.timer").strip() != b"active":
             raise Error("fleet-sync timer is not active")
 
-    def up(self, dry=False):
+    def up(self, dry=False, local_only_kache=False):
+        if not local_only_kache:
+            try:
+                # Metadata-only preflight, before reserving a name or creating a VM.
+                with opened(self.expand(self.config["kache_source"]), private=True):
+                    pass
+            except (OSError, Error):
+                raise Error("shared kache source unavailable or not 0600: " + self.config["kache_source"]
+                            + "; explicitly use --local-only-kache to skip delivery") from None
         if dry:
             data = self.registry.read()
             self.capacity(data)
-            print(f"would create {self.config['prefix']}-{data['next']} ({self.config['template']['server_type']}); bootstrap, credential, verify")
+            cache = "local-only kache; no credential" if local_only_kache else "shared kache credential"
+            print(f"would create {self.config['prefix']}-{data['next']} ({self.config['template']['server_type']}); bootstrap, {cache}, verify")
             return
         with self.registry.locked():
             data = self.registry.read()
@@ -449,7 +459,7 @@ finally:
             if not re.fullmatch(r"[0-9a-f]{40}", revision):
                 raise Error("cannot identify deployed template revision")
             member = {"name": name, "state": "creating", "created_at": time.time(), "template_revision": revision,
-                      "roles": self.config["template"]["roles"]}
+                      "roles": self.config["template"]["roles"], "local_only_kache": local_only_kache}
             data["members"][name] = member
             data["next"] += 1
             self.stamp(data, member, step="create")
@@ -468,13 +478,19 @@ finally:
             for step, operation in (("member-key", self.member_key), ("seeds", self.seeds)):
                 self.stamp(data, member, step=step)
                 operation(member)
+            self.stamp(data, member, step="member-settings")
+            options = " --local-only-kache" if local_only_kache else ""
+            self.ssh(member, f"python3 -I -B ~/bootstrap/fleet/bootstrap/bootstrap.py member --host {name}{options}")
             self.stamp(data, member, step="user")
             self.ssh(member, f"bash -lc 'bash ~/bootstrap/fleet/bootstrap/user.sh --host {name}'", timeout=3600)
             self.ssh(member, "bash -lc 'env -u DEV_ROOT -u DEV_TMP heavy --install-reconciler'")
             # A pre-existing .config/kache footprint correctly prevents fresh
             # provisioning. Stream the credential only AFTER user bootstrap.
-            self.stamp(data, member, step="credential")
-            self.credential(member)
+            if not local_only_kache:
+                self.stamp(data, member, step="credential")
+                self.credential(member)
+                self.stamp(data, member, step="kache")
+                self.ssh(member, f"python3 -I -B ~/bootstrap/fleet/bootstrap/bootstrap.py kache --host {name}")
             self.stamp(data, member, step="verify")
             self.verify(member)
             self.stamp(data, member, state="ready", step="complete", ready_at=time.time())
@@ -578,6 +594,7 @@ def main():
     commands = parser.add_subparsers(dest="command", required=True)
     up = commands.add_parser("up")
     up.add_argument("--dry-run", action="store_true")
+    up.add_argument("--local-only-kache", action="store_true")
     down = commands.add_parser("down")
     down.add_argument("name")
     down.add_argument("--force", action="store_true")
@@ -591,7 +608,7 @@ def main():
     try:
         fleet = Fleet()
         if args.command == "up":
-            fleet.up(args.dry_run)
+            fleet.up(args.dry_run, args.local_only_kache)
         elif args.command == "down":
             fleet.down(args.name, args.force, args.dry_run)
         elif args.command == "list":

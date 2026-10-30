@@ -36,6 +36,8 @@ the mirror units: the previous runner parses candidate fleet assets before exec.
 - the template: server type (cpx42), image (debian-13), location (hel1), roles
   (builder), machine_env and env, exactly like a hosts.toml entry;
 - the name prefix (`pool`), the Hetzner SSH key name, and the API base;
+- separate `kache_source = "~/.config/fleet-scale/kache-store.env"` on hel8
+  and `kache_destination = "~/.config/kache/store.env"` on the member;
 - `[limits]`, empty until the user sets them: `max_members`,
   `min_members`, `idle_minutes`, and a monthly cap. `up` refuses beyond
   `max_members` once it is set.
@@ -52,7 +54,9 @@ ssh but receives no work (section 5).
 
 ## 3. `up`
 
-1. **Name and lock.** Take the registry lock, pick the next `pool-N`, record
+1. **Name and lock.** Unless `--local-only-kache` is explicit, require the
+   exact declared owned 0600 source before creating anything; never search for
+   or derive another source. Take the registry lock, pick the next `pool-N`, record
    `creating`.
 2. **Create.** POST the server with the template, the fleet SSH key, and
    labels `fleet=pool`, `member=pool-N`. Record the id and IPv4.
@@ -69,8 +73,15 @@ ssh but receives no work (section 5).
    fleet pins both before transfer and on the member. Members need no general
    SSH authorization on a seed. Pool host/origin resolution is also used by
    fleet-sync after release promotion.
-5. **Credentials.** Copy the kache store credential file from hel8's 0600 path
-   to the member's 0600 path. Assign agent logins from the pool (section 6).
+5. **Credentials.** Stream the kache source to the separate member destination
+   (parent 0700, file 0600), after provisioning, and compare both SHA256s without
+   loading the source into memory. The shared-store template omits hetzner3's
+   `KACHE_LOCAL_ONLY=1`; retain its 40 GiB cap, 40 GiB floor and three build slots.
+   Initialize remote selectors and the EnvironmentFile drop-in, then restart
+   only this newly provisioned member's cache. `--local-only-kache` skips this
+   delivery/setup and sets `KACHE_LOCAL_ONLY=1` through a non-secret per-member
+   `~/src/fabrig/fleet/member.json`, read by pool declaration resolution after
+   promotion. Agent logins remain section 6, outside the scaling implementation.
 6. **Verify.** On the member: `fleet-sync --check` exits 0 (warnings only),
    the pinned tool versions answer, heavy reports installed, the fleet-sync
    timer is active. Record `ready`.

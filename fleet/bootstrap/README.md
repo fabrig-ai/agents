@@ -4,7 +4,10 @@ Elastic `pool-N` builders use [fleet-scale](../../tools/fleet-scale/fleet-scale.
 and `fleet/pool.toml` instead of the fixed-host manual steps below. The scaler
 stages the reviewed release, supplies only the fleet public key to root/free,
 creates the member's git-only key, relays verified pinned peer artifacts, and
-streams the declared kache credential. Pool repository origins are hel8's
+streams the separate declared kache source to its member destination after
+provisioning. Shared members then receive remote selectors and the credential
+drop-in before a fresh-cache restart. `up --local-only-kache` skips delivery
+and persists `KACHE_LOCAL_ONLY=1` in the member's runtime declaration. Pool repository origins are hel8's
 mirrors; no GitHub key or interactive agent login is copied. Pool host and
 repository resolution continues after fleet-sync promotes a release. Normal
 readmission/build acceptance remains the operator's after the scaler reports

@@ -2,6 +2,7 @@
 """Minimal root/user bootstrap; --dry-run works without root or a live HOME."""
 
 import argparse
+import json
 import os
 from pathlib import Path
 import pwd
@@ -202,6 +203,43 @@ class Bootstrap:
         self.run(sys.executable, "-I", "-B", home / "src/fabrig/current/tools/fleet-sync", "--host", self.args.host)
         print("USER: complete Claude/Codex logins and verification; keep the host drained until acceptance.")
 
+    def member(self):
+        if not POOL["declaration"](ROOT, self.args.host):
+            raise ValueError("member settings require a pool host")
+        self.write(Path.home() / "src/fabrig/fleet/member.json", json.dumps({
+            "name": self.args.host, "local_only_kache": self.args.local_only_kache}) + "\n", 0o600)
+
+    def kache(self):
+        host = POOL["declaration"](ROOT, self.args.host, None if self.args.dry_run else Path.home())
+        if not host or host["machine_env"].get("KACHE_LOCAL_ONLY"):
+            raise ValueError("shared kache setup requires a shared-store pool member")
+        # fleet-scale calls this only on its newly provisioned, drained member.
+        # Credentials are inspected by metadata only, never read here.
+        pool = tomllib.loads((ROOT / "fleet/pool.toml").read_text())
+        destination = pool["kache_destination"]
+        if not destination.startswith("~/") or ".." in Path(destination[2:]).parts:
+            raise ValueError("unsafe kache destination")
+        if not self.args.dry_run:
+            path = Path.home() / destination[2:]
+            for component in (path, *path.parents):
+                if component.is_symlink():
+                    raise ValueError("unsafe kache credential path")
+            metadata = path.stat()
+            if not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o600:
+                raise ValueError("kache credential must be a regular 0600 file")
+        values = host["machine_env"]
+        cap, floor = values["KACHE_MAX_GB"], values["PLAN_MIN_DISK_GB"]
+        config = (ROOT / "fleet/kache/config.toml").read_text()
+        config = config.replace("@CAP@", str(cap)).replace("@LOCAL_ONLY@", "false")
+        config = config.replace("@RECOVERY@", str((floor + max(cap, 1)) * 1024**3))
+        config += (ROOT / "fleet/kache/remote.toml").read_text()
+        self.write(Path.home() / ".config/kache/config.toml", config, 0o600)
+        dropin = (ROOT / "fleet/kache/20-shared-store.conf").read_text()
+        dropin = dropin.replace("%h/.config/kache/store.env", "%h/" + destination[2:])
+        self.write(Path.home() / ".config/systemd/user/kache.service.d/20-shared-store.conf", dropin, 0o600)
+        self.run("systemctl", "--user", "daemon-reload")
+        self.run("systemctl", "--user", "restart", "kache.service")
+
     def seed(self):
         if not POOL["declaration"](ROOT, self.args.host) or not self.args.seed:
             raise ValueError("seed mode requires a pool host and --seed")
@@ -233,8 +271,9 @@ class Bootstrap:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("root", "user", "seed"))
+    parser.add_argument("mode", choices=("root", "user", "seed", "member", "kache"))
     parser.add_argument("--seed")
+    parser.add_argument("--local-only-kache", action="store_true")
     parser.add_argument("--dry-run", action="store_true", help="print only; no reads from machine configuration, no writes or subprocesses")
     parser.add_argument("--host", default="hetzner2")
     args = parser.parse_args()

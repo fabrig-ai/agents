@@ -45,6 +45,14 @@ elif 'hashlib.file_digest' in command:
     data=sys.stdin.buffer.read()
     (home/'remote-credential').write_bytes(data)
     print('wrong' if os.environ.get('BAD_HASH') else hashlib.sha256(data).hexdigest())
+elif 'bootstrap.py member' in command:
+    import shlex
+    arguments=shlex.split(command)
+    name=arguments[arguments.index('--host')+1]
+    path=home/'src/fabrig/fleet/member.json'
+    path.parent.mkdir(parents=True,exist_ok=True)
+    path.write_text(json.dumps({'name':name,'local_only_kache':'--local-only-kache' in arguments}))
+    path.chmod(0o600)
 elif 'fleet-sync --check' in command:
     print(json.dumps({'items':[{'item':'fixture','result':os.environ.get('CHECK_RESULT','ok')}]}))
 elif 'fleet-scale-idle' in command:
@@ -155,7 +163,7 @@ class ScaleTest(unittest.TestCase):
         put(self.home / '.ssh/authorized_keys', '# retained comment\nssh-ed25519 AAAA other-user\n')
         self.original_auth = (self.home / '.ssh/authorized_keys').read_bytes()
         put(self.home / 'src/rust/tmp/hetzner/api-token', TOKEN)
-        put(self.home / '.config/kache/store.env', 'PRIVATE-KACHE-FIXTURE\n')
+        put(self.home / '.config/fleet-scale/kache-store.env', 'PRIVATE-KACHE-FIXTURE\n')
         self.requests, self.keys, self.servers = [], [], {}
         self.api_failure, self.lost_create = None, False
         self.action_status, self.next_id = 'success', 1
@@ -194,10 +202,12 @@ class ScaleTest(unittest.TestCase):
         states={value for row in rows for value in row['states'].values()}
         self.assertEqual(states, {'creating','bootstrapping'})
         steps={value for row in rows for value in row['steps'].values()}
-        self.assertTrue({'root','member-key','seeds','credential','user','verify'} <= steps)
+        self.assertTrue({'root','member-key','seeds','member-settings','credential','user','kache','verify'} <= steps)
         ordered=[next(iter(row['steps'].values())) for row in rows]
+        self.assertLess(ordered.index('member-settings'),ordered.index('user'))
         self.assertLess(ordered.index('user'),ordered.index('credential'))
-        self.assertLess(ordered.index('credential'),ordered.index('verify'))
+        self.assertLess(ordered.index('credential'),ordered.index('kache'))
+        self.assertLess(ordered.index('kache'),ordered.index('verify'))
         self.assertEqual((self.home/'remote-credential').read_bytes(), b'PRIVATE-KACHE-FIXTURE\n')
         self.assertNotIn(TOKEN, (self.home/'ssh.log').read_text())
         create = next(row[2] for row in self.requests if row[:2] == ('POST','/v1/servers'))
@@ -342,7 +352,8 @@ for _ in range(15):
         helper=runpy.run_path(str(SOURCE/'fleet/bootstrap/bootstrap.py'))
         declaration=helper['host_declaration']('pool-1')
         fixed=tomllib.loads((SOURCE/'fleet/hosts.toml').read_text())['hosts']['hetzner3']
-        self.assertEqual(declaration['machine_env'],fixed['machine_env'])
+        self.assertEqual(declaration['machine_env'],{key:value for key,value in fixed['machine_env'].items() if key != 'KACHE_LOCAL_ONLY'})
+        self.assertNotIn('KACHE_LOCAL_ONLY',declaration['machine_env'])
         self.assertNotIn('seed',declaration)
         for mode in ('root','user'):
             result=subprocess.run(['bash',str(SOURCE/f'fleet/bootstrap/{mode}.sh'),'--dry-run','--host','pool-1'],env=self.env,text=True,capture_output=True)
@@ -374,7 +385,7 @@ for _ in range(15):
 
     def test_credential_mode_and_hash(self):
         member=self.up()
-        path=self.home/'.config/kache/store.env'
+        path=self.home/'.config/fleet-scale/kache-store.env'
         path.chmod(0o644)
         with self.assertRaises(Error):self.fleet.credential(member)
         path.chmod(0o600)
@@ -528,6 +539,110 @@ for _ in range(15):
         self.assertNotEqual(probe().returncode,0)
 
 
+    def test_missing_shared_source_refuses_without_fallback_or_allocation(self):
+        source=self.home/'.config/fleet-scale/kache-store.env'
+        source.unlink()
+        # The old destination must never be used as a source fallback.
+        put(self.home/'.config/kache/store.env','UNRELATED-PRIVATE-FIXTURE')
+        result=self.invoke('up')
+        self.assertEqual(result.returncode,1)
+        self.assertIn('~/.config/fleet-scale/kache-store.env',result.stderr)
+        self.assertIn('--local-only-kache',result.stderr)
+        self.assertEqual(self.requests,[])
+        self.assertEqual(self.fleet.registry.read()['members'],{})
+        self.assertFalse(self.fleet.registry.path.exists())
+
+    def test_local_only_skips_delivery_and_persists_machine_env(self):
+        (self.home/'.config/fleet-scale/kache-store.env').unlink()
+        result=self.invoke('up','--local-only-kache')
+        self.assertEqual(result.returncode,0,result.stderr)
+        member=self.fleet.registry.read()['members']['pool-1']
+        self.assertTrue(member['local_only_kache'])
+        self.assertFalse((self.home/'remote-credential').exists())
+        log=(self.home/'ssh.log').read_text()
+        self.assertNotIn('hashlib.file_digest',log)
+        self.assertNotIn('bootstrap.py kache',log)
+        self.assertNotIn('PRIVATE-KACHE',result.stdout+result.stderr+log)
+        module=runpy.run_path(str(SOURCE/'tools/fleet-sync'),run_name='local_only_sync')
+        declarations=module['Declarations'](SOURCE,self.home,'pool-1')
+        self.assertEqual(declarations.hosts['pool-1']['machine_env']['KACHE_LOCAL_ONLY'],1)
+        self.assertNotIn('KACHE_LOCAL_ONLY',tomllib.loads((SOURCE/'fleet/pool.toml').read_text())['template']['machine_env'])
+        # A fresh process/release still reads the member's non-secret choice.
+        script='import pathlib,runpy; d=runpy.run_path('+repr(str(SOURCE/'tools/fleet-sync'))+')["Declarations"](pathlib.Path('+repr(str(SOURCE))+'),pathlib.Path.home(),"pool-1"); print(d.hosts["pool-1"]["machine_env"]["KACHE_LOCAL_ONLY"])'
+        self.assertEqual(subprocess.check_output(['python3','-I','-B','-c',script],env=self.env,text=True).strip(),'1')
+
+    def test_exact_distinct_paths_streaming_and_destination_permissions(self):
+        import shlex
+        source=self.home/'.config/fleet-scale/kache-store.env'
+        destination_home=self.directory/'member-home'
+        destination=destination_home/'.config/kache/store.env'
+        destination.parent.mkdir(parents=True,mode=0o755)
+        destination.parent.chmod(0o755)
+        payload=b'PRIVATE-STREAMED-FIXTURE-'*50000
+        put(source,payload)
+        self.assertEqual(self.fleet.config['kache_source'],'~/.config/fleet-scale/kache-store.env')
+        self.assertEqual(self.fleet.config['kache_destination'],'~/.config/kache/store.env')
+        globals_=Fleet.credential.__globals__
+        original=globals_['opened']
+        requested=[]
+        case=self
+        class StreamingOnly:
+            def __init__(self, stream):self.stream=stream
+            def __enter__(self):return self
+            def __exit__(self,*args):return self.stream.__exit__(*args)
+            def __getattr__(self,name):return getattr(self.stream,name)
+            def read(self,*args):raise AssertionError('source must not be read into a variable')
+            def readinto(self,buffer):
+                case.assertLessEqual(len(buffer),262144)
+                requested.append(len(buffer))
+                return self.stream.readinto(buffer)
+        def guarded(path,*args,**kwargs):
+            stream=original(path,*args,**kwargs)
+            return StreamingOnly(stream) if Path(path)==source else stream
+        def remote(member,command,stdin=None,**kwargs):
+            arguments=shlex.split(command)
+            self.assertEqual(arguments[-1],'.config/kache/store.env')
+            result=subprocess.run(arguments,stdin=stdin,env=dict(self.env,HOME=str(destination_home)),capture_output=True,check=True)
+            return result.stdout
+        with patch.dict(globals_,opened=guarded),patch.object(self.fleet,'ssh',side_effect=remote):
+            self.fleet.credential({})
+        self.assertTrue(requested)
+        self.assertEqual(destination.read_bytes(),payload)
+        self.assertEqual(destination.stat().st_mode & 0o777,0o600)
+        self.assertEqual(destination.parent.stat().st_mode & 0o777,0o700)
+        self.assertFalse((destination_home/'.config/fleet-scale/kache-store.env').exists())
+
+    def test_shared_bootstrap_selectors_and_dropin_match_renderer(self):
+        import types
+        module=runpy.run_path(str(self.root/'fleet/bootstrap/bootstrap.py'))
+        bootstrap=module['Bootstrap'](types.SimpleNamespace(host='pool-1',local_only_kache=False,dry_run=False))
+        bootstrap.member()
+        destination=self.home/'.config/kache/store.env'
+        put(destination,'PRIVATE-FIXTURE-DO-NOT-READ')
+        original=Path.read_text
+        def forbid_credential(path,*args,**kwargs):
+            self.assertNotEqual(path,destination)
+            return original(path,*args,**kwargs)
+        calls=[]
+        with patch.object(Path,'read_text',forbid_credential),patch.object(bootstrap,'run',side_effect=lambda *args,**kwargs:calls.append(args)):
+            bootstrap.kache()
+        config=tomllib.loads((self.home/'.config/kache/config.toml').read_text())
+        self.assertFalse(config['cache']['local_only'])
+        self.assertEqual(config['cache']['local_max_size'],'40GiB')
+        self.assertEqual(config['cache']['auto_recover_min_free_bytes'],80*1024**3)
+        self.assertEqual(config['cache']['remote']['endpoint'],'http://10.80.0.13:3900')
+        dropin=self.home/'.config/systemd/user/kache.service.d/20-shared-store.conf'
+        self.assertIn('EnvironmentFile=%h/.config/kache/store.env',dropin.read_text())
+        self.assertEqual(calls,[('systemctl','--user','daemon-reload'),('systemctl','--user','restart','kache.service')])
+        sync=runpy.run_path(str(SOURCE/'tools/fleet-sync'),run_name='shared_sync')
+        declarations=sync['Declarations'](SOURCE,self.home,'pool-1')
+        self.assertNotIn('KACHE_LOCAL_ONLY',declarations.hosts['pool-1']['machine_env'])
+        runner=sync['Runner'](types.SimpleNamespace(check=True,timer=False,resume_fd=None),declarations,'pool-1')
+        with patch.object(Path,'read_text',forbid_credential):
+            runner.kache_config()
+        self.assertFalse(any(row['result'] in ('failed','drift') for row in runner.state['items']),runner.state['items'])
+
+
 def shlex_quote(value):
     import shlex
     return shlex.quote(value)
@@ -570,6 +685,7 @@ for _label,_fragment,_step in (
         ('archive','tar -xf','root'),('root','root.sh','root'),('copy','cp -a','root'),
         ('member_key','fleet-member.pub','member-key'),('central_trust','mv "$tmp" ~/.ssh/known_hosts','member-key'),
         ('seed','bootstrap.py seed','seeds'),('credential','hashlib.file_digest','credential'),
+        ('member_settings','bootstrap.py member','member-settings'),('kache','bootstrap.py kache','kache'),
         ('user','user.sh','user'),('heavy_install','--install-reconciler','user'),
         ('check','fleet-sync --check','verify'),('versions','--version','verify'),
         ('heavy','heavy --installed','verify'),('timer','is-active','verify')):
