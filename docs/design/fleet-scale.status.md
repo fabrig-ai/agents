@@ -1,0 +1,26 @@
+# Fleet scale status
+
+2026-10-30. Implements `docs/design/fleet-scale.md` sections 2–5 in
+`tools/fleet-scale/`, `fleet/pool.toml`, `fleet/pool.py`, bootstrap and
+fleet-sync pool resolution, and session-role mirror units.
+
+The implementation relays pinned peer artifacts through hel8, with verification
+at both ends, because git-only member authorization cannot run seed exports.
+Deletion precedes final deregistration so interrupted API deletion remains
+tracked and cleanable. Authorization and known_hosts changes retain backups.
+Mirrors reject receive-pack updates; git-shell alone is not read-only.
+
+Validation uses disposable HOMEs, a loopback fake API, fake SSH/scp and local
+key utilities. No real Hetzner call, key registration, hel8 SSH edit, or server
+creation/deletion is part of this implementation task. No rebuild is proven.
+Land the fleet-sync parser commit alone, wait for all fixed-host timers to
+adopt it, then land the declarations/helpers commit. Older runners parse the
+candidate fleet tree before exec and would reject pool.py in one landing.
+Real acceptance follows both reviewed landings and mirror adoption.
+
+Heavy's current upstream source (fabrig main 059851a6bd8c) has no status
+subcommand. Drain reads its version-1 snapshot under the existing shared host
+lock and requires every task released, without changing heavy state. A missing
+or unsupported snapshot fails closed; --force requires an independent drain.
+Open: real rebuild/teardown acceptance by the user. The login pool (section 6),
+consumer adoption and automatic decisions remain Later.

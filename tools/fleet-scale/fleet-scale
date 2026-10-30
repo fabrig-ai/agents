@@ -1,0 +1,614 @@
+#!/usr/bin/env python3
+"""Create and retire fleet builders (docs/design/fleet-scale.md §§2–5)."""
+import argparse
+import contextlib
+import fcntl
+import hashlib
+import ipaddress
+import json
+import os
+from pathlib import Path
+import re
+import runpy
+import shlex
+import shutil
+import stat
+import subprocess
+import sys
+import tarfile
+import tempfile
+import time
+import tomllib
+import urllib.error
+import urllib.parse
+import urllib.request
+
+ROOT = Path(__file__).resolve().parents[2]
+STATES = ("creating", "bootstrapping", "ready", "draining", "deleting")
+
+
+# Read-only heavy v1 snapshot contract, fabrig tools/heavy/design.md §§2–3.
+# Do not invoke recovery commands: they can reconcile or rewrite the ledger.
+IDLE_PROBE = r'''# fleet-scale-idle
+import fcntl, hashlib, json, os, pathlib, stat, sys
+base = pathlib.Path.home() / "src/rust/tmp/heavy"
+for path in (base, *base.parents):
+    if path.is_symlink(): raise ValueError("unsafe heavy state path")
+def read_only(path):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        os.close(fd); raise ValueError("heavy state is not a regular file")
+    return fd
+lock = read_only(base / "host.lock")
+try:
+    try:
+        fcntl.flock(lock, fcntl.LOCK_SH | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print(json.dumps({"idle": False})); sys.exit(0)
+    with os.fdopen(read_only(base / "state.json")) as stream:
+        data = json.load(stream)
+    if (data.get("version") != 1 or data.get("queue") != hashlib.sha256(str(base).encode()).hexdigest()
+            or not isinstance(data.get("tasks"), dict) or data.get("installation") is None):
+        raise ValueError("unsupported heavy snapshot")
+    idle = all(isinstance(task, dict) and task.get("state") == "released"
+               for task in data["tasks"].values())
+    print(json.dumps({"idle": idle}))
+finally:
+    os.close(lock)
+'''
+
+
+class Error(Exception):
+    pass
+
+
+def safe(path):
+    path = Path(path)
+    for part in (path, *path.parents):
+        if part.is_symlink():
+            raise Error("refusing a symlink in a managed path")
+    return path
+
+
+def opened(path, mode="rb", private=False):
+    safe(path)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    metadata = os.fstat(fd)
+    if not stat.S_ISREG(metadata.st_mode) or (private and (
+            stat.S_IMODE(metadata.st_mode) != 0o600 or metadata.st_uid != os.getuid())):
+        os.close(fd)
+        raise Error("expected an owned regular 0600 file")
+    return os.fdopen(fd, mode)
+
+
+def atomic(path, data, backup=False, mode=0o600):
+    path = safe(path)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if path.exists() and not path.is_file():
+        raise Error("managed destination is not a regular file")
+    if backup and path.exists():
+        with opened(path) as stream:
+            atomic(path.with_name(path.name + ".fleet-scale.bak"), stream.read())
+    fd, temporary = tempfile.mkstemp(dir=path.parent, prefix="." + path.name + ".")
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            os.fchmod(stream.fileno(), mode)
+            stream.write(data.encode() if isinstance(data, str) else data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        safe(path)
+        os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+@contextlib.contextmanager
+def lock(path):
+    safe(path).parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise Error("lock is not a regular file")
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+class Registry:
+    def __init__(self, home):
+        self.path = home / "src/fabrig/fleet/members.json"
+
+    def read(self):
+        if not safe(self.path).exists():
+            return {"members": {}, "retired": [], "next": 1}
+        with opened(self.path) as stream:
+            value = json.load(stream)
+        if not isinstance(value.get("members"), dict) or not isinstance(value.get("retired"), list):
+            raise Error("invalid registry")
+        return value
+
+    def write(self, data):
+        atomic(self.path, json.dumps(data, indent=2) + "\n")
+
+    def locked(self):
+        return lock(self.path.with_suffix(".lock"))
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+class API:
+    def __init__(self, base, token_file):
+        url = urllib.parse.urlsplit(base)
+        local = url.hostname in ("127.0.0.1", "localhost", "::1")
+        if (url.scheme != "https" and not (url.scheme == "http" and local)) or url.username or url.password or url.query or url.fragment:
+            raise Error("API base must be HTTPS (HTTP is allowed only on loopback)")
+        self.base = base.rstrip("/")
+        self.token_file = token_file
+        # Do not use proxy environment variables for the credential-bearing client.
+        self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+
+    def request(self, method, path, body=None, missing=False):
+        request = urllib.request.Request(self.base + path, method=method,
+                                         data=None if body is None else json.dumps(body).encode())
+        with opened(self.token_file, "r", private=True) as stream:
+            request.add_header("Authorization", "Bearer " + stream.read().strip())
+        request.add_header("Content-Type", "application/json")
+        try:
+            with self.opener.open(request, timeout=30) as response:
+                payload = response.read()
+            return json.loads(payload) if payload else {}
+        except urllib.error.HTTPError as error:
+            if error.code == 404 and missing:
+                return None
+            # Never emit response bodies, headers, request objects or exception text.
+            raise Error(f"API {method} failed (HTTP {error.code})") from None
+        except (OSError, ValueError):
+            raise Error(f"API {method} failed") from None
+
+    def servers(self, name=None):
+        selector = "fleet=pool" + (",member=" + name if name else "")
+        rows, page = [], 1
+        while True:
+            result = self.request("GET", "/servers?" + urllib.parse.urlencode({"label_selector": selector, "page": page, "per_page": 50}))
+            rows.extend(result["servers"])
+            page = result.get("meta", {}).get("pagination", {}).get("next_page")
+            if not page:
+                return rows
+
+    def poll(self, action):
+        deadline = time.monotonic() + 600
+        while True:
+            row = self.request("GET", f"/actions/{int(action)}")["action"]
+            if row["status"] == "success":
+                return
+            if row["status"] == "error" or time.monotonic() >= deadline:
+                raise Error("server action failed or timed out")
+            time.sleep(2)
+
+
+class Fleet:
+    def __init__(self, root=ROOT, home=None):
+        self.root, self.home = root, home or Path.home()
+        self.config = tomllib.loads((root / "fleet/pool.toml").read_text())
+        if not re.fullmatch(r"[a-z][a-z0-9-]*", self.config["prefix"]):
+            raise Error("invalid pool prefix")
+        maximum = self.config["limits"].get("max_members")
+        if maximum is not None and (type(maximum) is not int or maximum < 0):
+            raise Error("max_members must be a nonnegative integer")
+        self.registry = Registry(self.home)
+        self.keypath = self.home / ".ssh/fleet-scale"
+        self.known = self.home / ".ssh/known_hosts"
+        self.api = API(self.config["api_base"], self.expand(self.config["token_file"]))
+
+    def expand(self, path):
+        if not path.startswith("~/"):
+            raise Error("credential paths must start with ~/")
+        return self.home / path[2:]
+
+    def run(self, *argv, stdin=None, stdout=None, timeout=600):
+        try:
+            result = subprocess.run([str(a) for a in argv], stdin=stdin if stdin is not None else subprocess.DEVNULL, stdout=stdout or subprocess.PIPE,
+                                    stderr=subprocess.PIPE, timeout=timeout, check=False)
+        except (OSError, subprocess.SubprocessError):
+            raise Error(f"{Path(str(argv[0])).name} could not complete") from None
+        if result.returncode:
+            raise Error(f"{Path(str(argv[0])).name} failed (exit {result.returncode})")
+        return result.stdout or b""
+
+    def ssh(self, member, command, user="free", stdin=None, stdout=None, timeout=600):
+        return self.run("ssh", "-T", "-i", self.keypath, "-o", "IdentitiesOnly=yes", "-o", "ForwardAgent=no",
+                        "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
+                        "-o", "UpdateHostKeys=no", "-o", "ConnectTimeout=5",
+                        "-o", f"UserKnownHostsFile={self.known}", f"{user}@{member['ipv4']}",
+                        command, stdin=stdin, stdout=stdout, timeout=timeout)
+
+    def feed(self, member, command, data, user="free"):
+        with tempfile.TemporaryFile() as stream:
+            stream.write(data.encode() if isinstance(data, str) else data)
+            stream.seek(0)
+            return self.ssh(member, command, user=user, stdin=stream)
+
+    def stamp(self, data, member, state=None, step=None, **fields):
+        if state:
+            member["state"] = state
+        if step:
+            member["step"] = step
+        member.update(fields, updated_at=time.time())
+        self.registry.write(data)
+
+    def key(self):
+        with lock(self.home / ".ssh/.fleet-scale.lock"):
+            if not safe(self.keypath).exists():
+                self.run("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "fleet-scale", "-f", self.keypath)
+            with opened(self.keypath, private=True):
+                pass
+            publicpath = self.keypath.with_suffix(".pub")
+            public = self.run("ssh-keygen", "-y", "-P", "", "-f", self.keypath).decode().strip()
+            if not public.startswith("ssh-ed25519 ") or "\n" in public:
+                raise Error("invalid public key")
+            atomic(publicpath, public + " fleet-scale\n")
+            existing = self.api.request("GET", "/ssh_keys?" + urllib.parse.urlencode({"name": self.config["ssh_key"]}))["ssh_keys"]
+            matching = [row for row in existing if row["name"] == self.config["ssh_key"]]
+            if matching and any(row["public_key"].split()[:2] != public.split()[:2] for row in matching):
+                raise Error("Hetzner key name exists with a different public key")
+            if not matching:
+                self.api.request("POST", "/ssh_keys", {"name": self.config["ssh_key"], "public_key": public})
+        print("fleet-scale key ready")
+
+    def authorization(self, name, public=None):
+        marker = f"fleet-scale:{name}"
+        path = self.home / ".ssh/authorized_keys"
+        with lock(self.home / ".ssh/.fleet-scale.lock"):
+            before = b""
+            if safe(path).exists():
+                with opened(path) as stream:
+                    before = stream.read()
+            rows = before.splitlines(keepends=True)
+            retained = [row for row in rows if row.rstrip().split()[-1:] != [marker.encode()]]
+            if public is not None:
+                fields = public.split()
+                if len(fields) < 2 or fields[0] != "ssh-ed25519" or not re.fullmatch(r"[A-Za-z0-9+/=]+", fields[1]):
+                    raise Error("invalid member public key")
+                line = ('restrict,command="git-shell -c \\"$SSH_ORIGINAL_COMMAND\\"" '
+                        + " ".join(fields[:2]) + " " + marker + "\n").encode()
+                # Prepend so an unrelated final line without a newline is
+                # preserved byte-for-byte through add/remove.
+                retained.insert(0, line)
+            after = b"".join(retained)
+            if after != before:
+                atomic(path, after, backup=True)
+
+    def trust(self, data, member):
+        deadline = time.monotonic() + 300
+        while True:
+            try:
+                public = self.run("ssh-keyscan", "-T", "5", "-t", "ed25519", member["ipv4"], timeout=15)
+                if public.strip():
+                    break
+            except Error:
+                pass
+            if time.monotonic() >= deadline:
+                raise Error("first SSH contact timed out")
+            time.sleep(2)
+        # Fingerprint only the newly scanned host, never unrelated known_hosts.
+        with tempfile.TemporaryDirectory() as directory:
+            scan = Path(directory) / "scan"
+            scan.write_bytes(public)
+            fingerprint = self.run("ssh-keygen", "-lf", scan).decode().split()[1]
+        with lock(self.home / ".ssh/.fleet-scale.lock"):
+            old = b""
+            if safe(self.known).exists():
+                with opened(self.known) as stream:
+                    old = stream.read()
+            atomic(self.known, old + (b"\n" if old and not old.endswith(b"\n") else b"") + public, backup=True)
+        self.stamp(data, member, fingerprint=fingerprint)
+        while True:
+            try:
+                self.ssh(member, "true", user="root", timeout=15)
+                return
+            except Error:
+                if time.monotonic() >= deadline:
+                    raise Error("root SSH readiness timed out")
+                time.sleep(2)
+
+    def untrust(self, member):
+        if not member.get("ipv4") or not safe(self.known).exists():
+            return
+        with lock(self.home / ".ssh/.fleet-scale.lock"):
+            with opened(self.known) as stream:
+                before = stream.read()
+            with tempfile.TemporaryDirectory(dir=self.known.parent) as directory:
+                temporary = Path(directory) / "known_hosts"
+                temporary.write_bytes(before)
+                self.run("ssh-keygen", "-R", member["ipv4"], "-f", temporary)
+                atomic(self.known, temporary.read_bytes(), backup=True)
+
+    def archive(self, member):
+        with tempfile.TemporaryFile() as archive:
+            # Installed commands live in immutable release archives, without .git.
+            with tarfile.open(fileobj=archive, mode="w") as tar:
+                for directory in ("fleet", "tools"):
+                    tar.add(self.root / directory, arcname=directory,
+                            filter=lambda info: None if "__pycache__" in Path(info.name).parts else info)
+            archive.seek(0)
+            self.ssh(member, "umask 077; mkdir -p /root/bootstrap; tar -xf - -C /root/bootstrap", user="root", stdin=archive)
+        with opened(self.keypath.with_suffix(".pub")) as public:
+            self.ssh(member, "set -eu; umask 077; cat > /root/bootstrap/fleet/bootstrap/fleet-scale.pub.new; mv /root/bootstrap/fleet/bootstrap/fleet-scale.pub.new /root/bootstrap/fleet/bootstrap/fleet-scale.pub", user="root", stdin=public)
+        self.ssh(member, f"bash /root/bootstrap/fleet/bootstrap/root.sh --host {member['name']}", user="root", timeout=1800)
+        self.ssh(member, "install -d -m 700 /home/free/bootstrap; cp -a /root/bootstrap/. /home/free/bootstrap/; chown -R free:free /home/free/bootstrap", user="root")
+
+    def member_key(self, member):
+        public = self.ssh(member, 'umask 077; mkdir -p ~/.ssh; test -f ~/.ssh/fleet-member || ssh-keygen -q -t ed25519 -N "" -f ~/.ssh/fleet-member; cat ~/.ssh/fleet-member.pub').decode().strip()
+        self.authorization(member["name"], public)
+        central = self.config["central"]
+        if not re.fullmatch(r"[a-z][a-z0-9_-]*@[A-Za-z0-9.-]+", central):
+            raise Error("invalid central SSH target")
+        user, address = central.split("@")
+        trusted = self.run("ssh-keygen", "-F", address, "-f", self.known)
+        if not trusted.strip():
+            raise Error("hel8 must already be trusted in known_hosts")
+        self.feed(member, 'set -eu; umask 077; tmp=$(mktemp ~/.ssh/.known_hosts.XXXXXX); cat > "$tmp"; mv "$tmp" ~/.ssh/known_hosts', trusted)
+        config = f"Host FABRIG_CENTRAL\n HostName {address}\n User {user}\n HostKeyAlias {address}\n IdentityFile ~/.ssh/fleet-member\n IdentitiesOnly yes\n StrictHostKeyChecking yes\n UpdateHostKeys no\n"
+        self.feed(member, 'set -eu; umask 077; tmp=$(mktemp ~/.ssh/.config.XXXXXX); cat > "$tmp"; mv "$tmp" ~/.ssh/config', config)
+
+    def seeds(self, member):
+        # Members have only git-only mirror access. Relay exact allowlisted
+        # artifacts through the controller; verify again on the member.
+        module = runpy.run_path(str(self.root / "tools/fleet-sync"), run_name="fleet_seed")
+        hosts = tomllib.loads((self.root / "fleet/hosts.toml").read_text())["hosts"]
+        versions = tomllib.loads((self.root / "fleet/versions.toml").read_text())
+        for name, pin in versions.items():
+            install = pin.get("install", {})
+            if install.get("seed") != "peer":
+                continue
+            entries = module["seed_entries"](self.root, install)
+            peers = sorted((n for n, host in hosts.items() if host.get("seed") and n in install.get("seed_hosts", hosts)), key=lambda n: (n != "hetzner3", n))
+            with tempfile.TemporaryDirectory() as directory:
+                work = Path(directory)
+                for peer in peers:
+                    try:
+                        with (work / "archive").open("wb") as output:
+                            command = shlex.join(["python3", "-B", "-c", module["SEED_EXPORT"], json.dumps([install["source"], entries, install["kind"] != "binary"])])
+                            self.run("ssh", "-T", "-o", "ForwardAgent=no", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "UpdateHostKeys=no", hosts[peer]["ssh"], command, stdout=output)
+                        module["Runner"].unpack_seed(None, work / "archive", work / "verified", entries)
+                        break
+                    except (Error, OSError, ValueError, tarfile.TarError):
+                        shutil.rmtree(work / "verified", ignore_errors=True)
+                else:
+                    raise Error("no verified peer artifact for " + name)
+                with (work / "archive").open("rb") as stream:
+                    self.ssh(member, f"python3 -I -B ~/bootstrap/fleet/bootstrap/bootstrap.py seed --host {member['name']} --seed {name}", stdin=stream)
+
+    def credential(self, member):
+        path = self.expand(self.config["kache_credential"])
+        relative = str(path.relative_to(self.home))
+        script = '''import hashlib, os, pathlib, sys, tempfile
+p = pathlib.Path.home() / sys.argv[1]
+for x in (p, *p.parents):
+    if x.is_symlink(): raise ValueError("unsafe credential destination")
+p.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+fd, name = tempfile.mkstemp(dir=p.parent, prefix=".store.")
+try:
+    with os.fdopen(fd, "wb") as out:
+        import shutil
+        os.fchmod(out.fileno(), 0o600)
+        shutil.copyfileobj(sys.stdin.buffer, out)
+        out.flush(); os.fsync(out.fileno())
+    os.replace(name, p)
+    with p.open("rb") as stream: print(hashlib.file_digest(stream, "sha256").hexdigest())
+finally:
+    pathlib.Path(name).unlink(missing_ok=True)
+'''
+        with opened(path, private=True) as stream:
+            digest = hashlib.file_digest(stream, "sha256").hexdigest()
+            stream.seek(0)
+            remote = self.ssh(member, shlex.join(["python3", "-c", script, relative]), stdin=stream).decode().strip()
+        if remote != digest:
+            raise Error("kache credential SHA256 mismatch")
+
+    def verify(self, member):
+        check = json.loads(self.ssh(member, "bash -lc 'fleet-sync --check --json'"))
+        if any(row.get("result") not in ("ok", "warn", "held", "deferred", "skipped") for row in check["items"]):
+            raise Error("fleet-sync verification reported drift or failure")
+        if not check["items"] or check.get("busy") or any(row.get("result") in ("held", "deferred", "skipped") or row.get("item") == "busy" for row in check["items"]):
+            raise Error("fleet-sync verification did not complete")
+        versions = tomllib.loads((self.root / "fleet/versions.toml").read_text())
+        for pin in versions.values():
+            output = self.ssh(member, "bash -lc " + shlex.quote(shlex.join(pin["command"]))).decode()
+            if pin["version"] not in output:
+                raise Error("tool version verification failed")
+        self.ssh(member, "bash -lc 'heavy --installed'")
+        if self.ssh(member, "systemctl --user is-active fleet-sync.timer").strip() != b"active":
+            raise Error("fleet-sync timer is not active")
+
+    def up(self, dry=False):
+        if dry:
+            data = self.registry.read()
+            self.capacity(data)
+            print(f"would create {self.config['prefix']}-{data['next']} ({self.config['template']['server_type']}); bootstrap, credential, verify")
+            return
+        with self.registry.locked():
+            data = self.registry.read()
+            self.capacity(data)
+            name = f"{self.config['prefix']}-{data['next']}"
+            metadata = self.root / ".fleet-release.json"
+            if metadata.exists():
+                with opened(metadata) as stream:
+                    revision = json.load(stream)["sha"]
+            else:
+                revision = self.run("git", "-C", self.root, "rev-parse", "HEAD").decode().strip()
+            if not re.fullmatch(r"[0-9a-f]{40}", revision):
+                raise Error("cannot identify deployed template revision")
+            member = {"name": name, "state": "creating", "created_at": time.time(), "template_revision": revision,
+                      "roles": self.config["template"]["roles"]}
+            data["members"][name] = member
+            data["next"] += 1
+            self.stamp(data, member, step="create")
+            template = self.config["template"]
+            result = self.api.request("POST", "/servers", {key: template[key] for key in ("server_type", "image", "location")} | {
+                "name": name, "ssh_keys": [self.config["ssh_key"]], "labels": {"fleet": "pool", "member": name}, "start_after_create": True})
+            server = result["server"]
+            self.stamp(data, member, id=int(server["id"]))
+            self.api.poll(result["action"]["id"])
+            server = self.api.request("GET", f"/servers/{member['id']}")["server"]
+            address = str(ipaddress.IPv4Address(server["public_net"]["ipv4"]["ip"]))
+            self.stamp(data, member, ipv4=address, ssh="free@" + address, step="trust")
+            self.trust(data, member)
+            self.stamp(data, member, state="bootstrapping", step="root")
+            self.archive(member)
+            for step, operation in (("member-key", self.member_key), ("seeds", self.seeds)):
+                self.stamp(data, member, step=step)
+                operation(member)
+            self.stamp(data, member, step="user")
+            self.ssh(member, f"bash -lc 'bash ~/bootstrap/fleet/bootstrap/user.sh --host {name}'", timeout=3600)
+            self.ssh(member, "bash -lc 'env -u DEV_ROOT -u DEV_TMP heavy --install-reconciler'")
+            # A pre-existing .config/kache footprint correctly prevents fresh
+            # provisioning. Stream the credential only AFTER user bootstrap.
+            self.stamp(data, member, step="credential")
+            self.credential(member)
+            self.stamp(data, member, step="verify")
+            self.verify(member)
+            self.stamp(data, member, state="ready", step="complete", ready_at=time.time())
+        print(f"{name} ready {member['ssh']}")
+
+    def capacity(self, data):
+        maximum = self.config["limits"].get("max_members")
+        if maximum is not None and len(data["members"]) >= maximum:
+            raise Error("max_members reached")
+
+    def drain(self, member):
+        # Consumers have not adopted the pool yet. Fail closed on any claim
+        # naming this member; heavy's durable snapshot must prove all jobs released.
+        claims = safe(self.home / "src/fabrig/claims")
+        if claims.exists() and any(p.name == member["name"] or p.name.startswith(member["name"] + "-") for p in claims.iterdir()):
+            return False
+        if not member.get("ipv4"):
+            return True
+        status = json.loads(self.ssh(member, shlex.join(["python3", "-I", "-B", "-c", IDLE_PROBE]), timeout=15))
+        if not isinstance(status, dict) or type(status.get("idle")) is not bool:
+            raise Error("cannot prove heavy idle; use --force only after operator drain")
+        return status["idle"]
+
+    def down(self, name, force=False, dry=False):
+        if not re.fullmatch(re.escape(self.config["prefix"]) + r"-[1-9][0-9]*", name):
+            raise Error("invalid member name")
+        if dry:
+            if name not in self.registry.read()["members"]:
+                raise Error("unknown member")
+            print(f"would drain and delete {name}; remove its authorization and host trust")
+            return
+        with self.registry.locked():
+            data = self.registry.read()
+            if name not in data["members"]:
+                if any(row["name"] == name for row in data["retired"]):
+                    print(f"{name} already retired")
+                    return
+                raise Error("unknown member")
+            member = data["members"][name]
+            previous = member["state"]
+            self.stamp(data, member, state="draining", step="drain")
+            if not force and member.get("ready_at") and previous != "deleting":
+                deadline = time.monotonic() + 300
+                while not self.drain(member):
+                    if time.monotonic() >= deadline:
+                        raise Error("drain timed out; member remains draining")
+                    time.sleep(2)
+            self.stamp(data, member, state="deleting", step="recover-server")
+            # A POST can succeed before the client records its id. Labels recover it.
+            servers = self.api.servers(name)
+            ids = {int(row["id"]) for row in servers}
+            if member.get("id"):
+                ids.add(int(member["id"]))
+            self.stamp(data, member, step="delete")
+            for server_id in ids:
+                server = self.api.request("GET", f"/servers/{server_id}", missing=True)
+                if server is None:
+                    continue
+                labels = server["server"].get("labels", {})
+                if labels.get("fleet") != "pool" or labels.get("member") != name:
+                    raise Error("refusing to delete a server without matching pool labels")
+                result = self.api.request("DELETE", f"/servers/{server_id}", missing=True)
+                if result and result.get("action"):
+                    self.api.poll(result["action"]["id"])
+                deadline = time.monotonic() + 300
+                while self.api.request("GET", f"/servers/{server_id}", missing=True) is not None:
+                    if time.monotonic() >= deadline:
+                        raise Error("server deletion not yet confirmed")
+                    time.sleep(2)
+            self.stamp(data, member, step="deregister")
+            self.authorization(name)
+            self.untrust(member)
+            member.update(retired_at=time.time())
+            data["retired"].append(member)
+            del data["members"][name]
+            self.registry.write(data)
+        print(f"{name} retired; server deletion confirmed")
+
+    def listing(self, json_output=False):
+        data = self.registry.read()
+        if json_output:
+            print(json.dumps(data, sort_keys=True))
+        elif not data["members"]:
+            print("no active pool members")
+        else:
+            for name, row in sorted(data["members"].items()):
+                print(name, row["state"], row.get("ssh", "-"), row.get("step", "-"))
+
+    def hosts(self):
+        fixed = tomllib.loads((self.root / "fleet/hosts.toml").read_text())["hosts"]
+        for name, member in self.registry.read()["members"].items():
+            if member["state"] == "ready":
+                if name in fixed:
+                    raise Error("pool member collides with a fixed host")
+                fixed[name] = {"hostname": name, "ssh": member["ssh"], "roles": member["roles"]}
+        print(json.dumps({"hosts": fixed}, sort_keys=True))
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest="command", required=True)
+    up = commands.add_parser("up")
+    up.add_argument("--dry-run", action="store_true")
+    down = commands.add_parser("down")
+    down.add_argument("name")
+    down.add_argument("--force", action="store_true")
+    down.add_argument("--dry-run", action="store_true")
+    listing = commands.add_parser("list")
+    listing.add_argument("--json", action="store_true")
+    hosts = commands.add_parser("hosts")
+    hosts.add_argument("--json", action="store_true", required=True)
+    commands.add_parser("key")
+    args = parser.parse_args()
+    try:
+        fleet = Fleet()
+        if args.command == "up":
+            fleet.up(args.dry_run)
+        elif args.command == "down":
+            fleet.down(args.name, args.force, args.dry_run)
+        elif args.command == "list":
+            fleet.listing(args.json)
+        elif args.command == "hosts":
+            fleet.hosts()
+        else:
+            fleet.key()
+    except Error as error:
+        print(f"fleet-scale: {error}", file=sys.stderr)
+        return 1
+    except (OSError, ValueError, KeyError, TypeError, IndexError, tarfile.TarError):
+        # Malformed remote/API/config data is never echoed, including secrets.
+        print("fleet-scale: invalid data or inaccessible file; inspect list before retrying", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

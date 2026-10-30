@@ -1,0 +1,6 @@
+[Unit]
+Description=Refresh read-only fleet Git mirrors
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -lc 'exec "$$HOME/src/fabrig/current/tools/fleet-scale/mirror"'

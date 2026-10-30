@@ -5,6 +5,8 @@ import argparse
 import os
 from pathlib import Path
 import pwd
+import runpy
+import shutil
 import shlex
 import stat
 import subprocess
@@ -13,6 +15,12 @@ import tempfile
 import tomllib
 
 ROOT = Path(__file__).resolve().parents[2]
+POOL = runpy.run_path(str(ROOT / "fleet/pool.py"))
+
+
+def host_declaration(name):
+    return (POOL["declaration"](ROOT, name) or
+            tomllib.loads((ROOT / "fleet/hosts.toml").read_text())["hosts"].get(name))
 
 
 class Bootstrap:
@@ -75,8 +83,7 @@ class Bootstrap:
             user = pwd.getpwnam("free")
             if user.pw_dir != "/home/free":
                 raise ValueError("free must have HOME /home/free")
-        hosts = tomllib.loads((ROOT / "fleet/hosts.toml").read_text())["hosts"]
-        self.run("hostnamectl", "set-hostname", hosts[self.args.host]["hostname"])
+        self.run("hostnamectl", "set-hostname", host_declaration(self.args.host)["hostname"])
         self.run("usermod", "--append", "--groups", "sudo", "free")
         sudoers = "free ALL=(ALL) NOPASSWD: ALL\n"
         if not self.args.dry_run:
@@ -108,6 +115,7 @@ class Bootstrap:
                 self.write(destination, source.read_bytes(), 0o600, (user.pw_uid, user.pw_gid))
             elif destination.is_symlink() or not stat.S_ISREG(destination.stat().st_mode):
                 raise ValueError("refusing unsafe authorized_keys")
+        self.pool_public_keys(user)
         self.run("loginctl", "enable-linger", "free")
         self.write("/etc/apt/apt.conf.d/20auto-upgrades", 'APT::Periodic::Update-Package-Lists "1";\nAPT::Periodic::Unattended-Upgrade "1";\n')
         self.write("/etc/apt/apt.conf.d/99-fleet-no-reboot", 'Unattended-Upgrade::Automatic-Reboot "false";\n')
@@ -119,6 +127,28 @@ class Bootstrap:
         self.write("/etc/systemd/journald.conf.d/90-fabrig.conf", "[Journal]\nSystemMaxUse=200M\n")
         self.run("systemctl", "restart", "systemd-journald")
         print("No swap or custom sysctl settings were found; Debian/image defaults apply.")
+
+    def pool_public_keys(self, user):
+        if POOL["declaration"](ROOT, self.args.host):
+            if self.args.dry_run:
+                print("install fleet-scale PUBLIC key for root and free")
+            else:
+                public = (ROOT / "fleet/bootstrap/fleet-scale.pub").read_text().strip()
+                if not public.startswith("ssh-ed25519 ") or "\n" in public:
+                    raise ValueError("invalid fleet-scale public key")
+                for account, owner in (("/root", (0, 0)), ("/home/free", (user.pw_uid, user.pw_gid))):
+                    directory = Path(account) / ".ssh"
+                    if directory.is_symlink():
+                        raise ValueError("unsafe .ssh directory")
+                    directory.mkdir(mode=0o700, exist_ok=True)
+                    directory.chmod(0o700)
+                    os.chown(directory, *owner)
+                    destination = directory / "authorized_keys"
+                    if destination.is_symlink():
+                        raise ValueError("unsafe authorized_keys")
+                    previous = destination.read_text() if destination.exists() else ""
+                    if public not in previous.splitlines():
+                        self.write(destination, previous + ("\n" if previous and not previous.endswith("\n") else "") + public + "\n", 0o600, owner)
 
     def user(self):
         if not self.args.dry_run and (os.geteuid() == 0 or pwd.getpwuid(os.geteuid()).pw_name != "free"):
@@ -136,7 +166,8 @@ class Bootstrap:
         for extra in rust["extra_toolchains"]:
             self.run("rustup", "toolchain", "install", extra, "--profile", rust["profile"], "--no-self-update")
         agents = home / "src/fabrig/agents"
-        origin = tomllib.loads((ROOT / "fleet/repositories.toml").read_text())["agents"]
+        origin = (POOL["repositories"](ROOT) if POOL["declaration"](ROOT, self.args.host) else
+                  tomllib.loads((ROOT / "fleet/repositories.toml").read_text()))["agents"]
         if self.args.dry_run:
             print(f"clone {origin} to {agents} if missing; validate existing origin and clean checkout")
         else:
@@ -171,15 +202,43 @@ class Bootstrap:
         self.run(sys.executable, "-I", "-B", home / "src/fabrig/current/tools/fleet-sync", "--host", self.args.host)
         print("USER: complete Claude/Codex logins and verification; keep the host drained until acceptance.")
 
+    def seed(self):
+        if not POOL["declaration"](ROOT, self.args.host) or not self.args.seed:
+            raise ValueError("seed mode requires a pool host and --seed")
+        if self.args.dry_run:
+            print(f"verify and install pinned seed {self.args.seed} for {self.args.host}")
+            return
+        module = runpy.run_path(str(ROOT / "tools/fleet-sync"), run_name="fleet_seed")
+        pin = tomllib.loads((ROOT / "fleet/versions.toml").read_text())[self.args.seed]
+        install = pin["install"]
+        if install.get("seed") != "peer":
+            raise ValueError("seed mode accepts only pinned peer artifacts")
+        module["validate_install"](self.args.seed, install, pin["version"])
+        entries = module["seed_entries"](ROOT, install)
+        destination = Path.home() / install.get("release", install.get("destination", ""))
+        for parent in (destination, *destination.parents):
+            if parent.is_symlink():
+                raise ValueError("unsafe seed destination")
+        if destination.exists():
+            raise ValueError("pool preseed requires an absent destination")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=destination.parent, prefix=".pool-seed-") as temporary:
+            work = Path(temporary)
+            with (work / "archive").open("xb") as stream:
+                shutil.copyfileobj(sys.stdin.buffer, stream)
+            module["Runner"].unpack_seed(None, work / "archive", work / "verified", entries)
+            source = work / "verified" if install["kind"] != "binary" else work / "verified/payload"
+            source.rename(destination)
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("root", "user"))
+    parser.add_argument("mode", choices=("root", "user", "seed"))
+    parser.add_argument("--seed")
     parser.add_argument("--dry-run", action="store_true", help="print only; no reads from machine configuration, no writes or subprocesses")
     parser.add_argument("--host", default="hetzner2")
     args = parser.parse_args()
-    hosts = tomllib.loads((ROOT / "fleet/hosts.toml").read_text())["hosts"]
-    if args.host not in hosts:
+    if not host_declaration(args.host):
         parser.error("unknown fleet host")
     bootstrap = Bootstrap(args)
     getattr(bootstrap, args.mode)()

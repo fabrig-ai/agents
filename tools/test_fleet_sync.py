@@ -21,6 +21,12 @@ FABRIG_TOOLS = Path("/home/free/src/fabrig/main/tools")
 HOST_COUNT = len(tomllib.loads((ROOT / "fleet/hosts.toml").read_text())["hosts"])
 
 
+def legacy_pool_inputs(source):
+    """Pool assets follow their parser rollout; legacy schema tests omit them."""
+    for name in ("pool.py", "pool.toml"):
+        (source / "fleet" / name).unlink(missing_ok=True)
+
+
 def put(path, content, executable=False):
     path.parent.mkdir(parents=True, exist_ok=True)
     sibling = path.with_name(path.name + ".test-new")
@@ -847,6 +853,7 @@ class FleetTest(unittest.TestCase):
         script = self.source / "tools/fleet-sync"
         current = script.read_text()
         old = self.process("git", "-C", ROOT, "show", f"{baseline}:tools/fleet-sync").stdout
+        legacy_pool_inputs(self.source)
         results = []
         values = ("", "a=b,c;é\x7f", "$HOME/file", "two words", "a\tb", "a\nb", "a\rb",
                   'a"b', "a'b", "a\\b", "$USER", "$HOME/$OTHER", "a\x00b", 1, True)
@@ -919,6 +926,7 @@ class FleetTest(unittest.TestCase):
         script = self.source / "tools/fleet-sync"
         current = script.read_text()
         old = self.process("git", "-C", ROOT, "show", f"{baseline}:tools/fleet-sync").stdout
+        legacy_pool_inputs(self.source)
         rendered = []
         try:
             for index, source in enumerate((old, current)):

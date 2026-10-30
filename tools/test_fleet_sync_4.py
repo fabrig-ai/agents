@@ -255,6 +255,7 @@ class StartOnceTest(fixture.FleetTest):
         refused = self.process("python3", "-I", "-B", self.source / "tools/fleet-sync",
                                "--host", "hel8", "--self-check", expected=2)
         self.assertIn("unknown fleet declaration: bootstrap/", refused.stderr)
+        fixture.legacy_pool_inputs(self.source)
         for name in ("bootstrap", "kache", "seeds"):
             shutil.rmtree(self.source / "fleet" / name)
         (self.source / "fleet/units/kache.service").unlink()

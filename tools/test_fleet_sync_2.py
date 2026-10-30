@@ -148,7 +148,7 @@ class FleetSync2Test(fixture.FleetTest):
 
     def test_records_units_render_by_role_without_activation(self):
         expected = {
-            "hel8": {"fleet-sync", "record-collect-session", "pipeline-watch", "status-page"},
+            "hel8": {"fleet-sync", "record-collect-session", "pipeline-watch", "status-page", "mirror"},
             "hetzner6": {"fleet-sync", "record-collect-builder"},
             "hetzner8": {"fleet-sync", "record-collect-gate"},
         }
@@ -165,7 +165,10 @@ class FleetSync2Test(fixture.FleetTest):
                 self.assertEqual({p.name for p in units.iterdir()},
                                  {name + suffix for name in names for suffix in (".service", ".timer")}
                                  | services.get(host, set()))
-                for name in names - {"fleet-sync"}:
+                if "mirror" in names:
+                    self.assertIn("tools/fleet-scale/mirror", (units / "mirror.service").read_text())
+                    self.assertIn("OnUnitActiveSec=60s", (units / "mirror.timer").read_text())
+                for name in names - {"fleet-sync", "mirror"}:
                     service = (units / (name + ".service")).read_text()
                     timer = (units / (name + ".timer")).read_text()
                     self.assertIn("Type=oneshot\nWorkingDirectory=%h\n", service)
@@ -195,7 +198,7 @@ class FleetSync2Test(fixture.FleetTest):
         before = self.calls()
         self.sync()
         self.assertEqual(self.calls()[len(before):], [["--user", "show", "-p", "NeedDaemonReload", *sorted(self.state()["managed_units"])]] + [["--user", "is-active", "--quiet", name]
-                         for name in sorted(("fleet-sync.timer", "record-collect-session.timer", "pipeline-watch.timer", "status-page.timer"))])
+                         for name in sorted(("fleet-sync.timer", "record-collect-session.timer", "pipeline-watch.timer", "status-page.timer", "mirror.timer"))])
 
     def test_preview_first_run_renders_real_home_without_deployment(self):
         fixture.put(self.home / ".bashrc", "# personal\n")

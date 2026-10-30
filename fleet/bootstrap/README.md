@@ -1,5 +1,15 @@
 # Rebuild a fleet member (Debian 13 amd64)
 
+Elastic `pool-N` builders use [fleet-scale](../../tools/fleet-scale/fleet-scale.md)
+and `fleet/pool.toml` instead of the fixed-host manual steps below. The scaler
+stages the reviewed release, supplies only the fleet public key to root/free,
+creates the member's git-only key, relays verified pinned peer artifacts, and
+streams the declared kache credential. Pool repository origins are hel8's
+mirrors; no GitHub key or interactive agent login is copied. Pool host and
+repository resolution continues after fleet-sync promotes a release. Normal
+readmission/build acceptance remains the operator's after the scaler reports
+ready. The scaler's fake-service tests do not prove a real rebuild.
+
 Target: hetzner2 / debian-16gb-hel1-2, drained gate2. See [inventory](inventory.md)
 for the read-only 2026-10-29 survey and the state that a wipe would destroy.
 The sequence is USER preparation, **one root script**, **one user script**,

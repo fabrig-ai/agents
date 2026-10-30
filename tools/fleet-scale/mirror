@@ -1,0 +1,28 @@
+#!/usr/bin/env python3
+"""Maintain the session host's read-only fleet mirrors."""
+from pathlib import Path
+import runpy
+import subprocess
+import tempfile
+import tomllib
+
+ROOT = Path(__file__).resolve().parents[2]
+helpers = runpy.run_path(str(ROOT / "tools/fleet-scale/fleet-scale"))
+base = helpers['safe'](Path.home() / "src/fabrig/mirror")
+base.mkdir(mode=0o700, parents=True, exist_ok=True)
+origins = tomllib.loads((ROOT / "fleet/repositories.toml").read_text())
+with helpers['lock'](base / ".lock"):
+    for name in ("agents", "fabrig"):
+        path = helpers['safe'](base / (name + ".git"))
+        if not path.exists():
+            with tempfile.TemporaryDirectory(prefix="." + name + ".", dir=base) as directory:
+                stage = Path(directory) / "mirror.git"
+                subprocess.run(["git", "clone", "--mirror", "--", origins[name], str(stage)], check=True)
+                # Forced git-shell keys may invoke receive-pack: refuse updates.
+                helpers['atomic'](stage / "hooks/pre-receive", "#!/bin/sh\nexit 1\n", mode=0o700)
+                stage.rename(path)
+        actual = subprocess.check_output(["git", "-C", str(path), "remote", "get-url", "origin"], text=True).strip()
+        if actual != origins[name]:
+            raise SystemExit("mirror: foreign origin")
+        helpers['atomic'](path / "hooks/pre-receive", "#!/bin/sh\nexit 1\n", mode=0o700)
+        subprocess.run(["git", "-C", str(path), "fetch", "--prune", "origin"], check=True)

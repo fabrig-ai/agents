@@ -1,6 +1,6 @@
 # Fleet scale
 
-2026-10-30. Owner: s/deploy. Code (planned): `tools/fleet-scale/`,
+2026-10-30. Owner: s/deploy. Code: `tools/fleet-scale/`,
 `fleet/pool.toml`, `fleet/units/mirror.*`. Decisions: director 0012 (elastic
 builders), 0015 (agent login pool). Code departures:
 `docs/design/fleet-scale.status.md`.
@@ -27,6 +27,10 @@ builders), 0015 (agent login pool). Code departures:
   follows (section 7).
 
 ## 2. Declarations
+
+Roll out parser support first, without pool declarations/helper assets. Wait
+until every fixed host reports that release before landing those inputs and
+the mirror units: the previous runner parses candidate fleet assets before exec.
 
 **`fleet/pool.toml`** holds:
 - the template: server type (cpx42), image (debian-13), location (hel1), roles
@@ -60,6 +64,11 @@ ssh but receives no work (section 5).
    The member's declaration comes from the template; repository origins point
    at hel8's mirrors (`~/src/fabrig/mirror/{agents,fabrig}.git`) through a
    per-member git-only SSH key on hel8 (`restrict,command="git-shell -c ..."`).
+   Peer-seeded tools are relayed by the controller using its existing trusted
+   seed access; only allowlisted artifacts are transferred and verified against
+   fleet pins both before transfer and on the member. Members need no general
+   SSH authorization on a seed. Pool host/origin resolution is also used by
+   fleet-sync after release promotion.
 5. **Credentials.** Copy the kache store credential file from hel8's 0600 path
    to the member's 0600 path. Assign agent logins from the pool (section 6).
 6. **Verify.** On the member: `fleet-sync --check` exits 0 (warnings only),
@@ -73,7 +82,10 @@ Any failure stops at the failing step with the member left in its state;
 
 1. **Drain.** Record `draining`. No new claims (the slots tool skips draining
    members once adopted). Wait for its claims and heavy jobs to end, with a
-   bound; `--force` is the user's or ops' explicit call.
+   five-minute bound; `--force` is the user's or ops' explicit call. Heavy's
+   version-1 atomic snapshot, under a shared read-only host lock, must show
+   every task released. Missing/unknown snapshots fail closed; no heavy state
+   is created or reconciled by the drain probe.
 2. **Return logins** to the pool (section 6).
 3. **Deregister.** Remove its git-only key from hel8, its known_hosts line, and
    its registry entry (kept in a `retired` list with times).
@@ -82,7 +94,8 @@ Any failure stops at the failing step with the member left in its state;
 ## 5. Mirrors and access
 
 **hel8 serves two bare mirrors,** refreshed every minute by `mirror.timer`
-(session role): agents and fabrig from GitHub. Members fetch only; they have
+(session role): agents and fabrig from GitHub. Members fetch only; mirrors
+reject receive-pack ref updates through a pre-receive hook, since git-shell alone also permits receive-pack. They have
 no GitHub credential. A member's key on hel8 runs git-shell only.
 
 **Pushing from members** is out of scope in this pass: members run builds,

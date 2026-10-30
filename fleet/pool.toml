@@ -1,0 +1,16 @@
+prefix = "pool"
+ssh_key = "fleet-scale"
+api_base = "https://api.hetzner.cloud/v1"
+token_file = "~/src/rust/tmp/hetzner/api-token"
+central = "free@204.168.210.29"
+kache_credential = "~/.config/kache/store.env"
+
+[template]
+server_type = "cpx42"
+image = "debian-13"
+location = "hel1"
+roles = ["builder"]
+machine_env = { PLAN_MIN_DISK_GB = 40, KACHE_MAX_GB = 40, KACHE_LOCAL_ONLY = 1, HEAVY_BUILD_SLOTS = 3 }
+env = {}
+
+[limits]
