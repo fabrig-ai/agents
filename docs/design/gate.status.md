@@ -70,7 +70,8 @@ gate previously pushed an unchecked descendant; dropped/interrupted uploads
 previously released their claims; archive periodic runs lacked history; wall-only
 notices omitted their owners alone and alongside another file's notice.
 
-Landing now holds a checkout flock, pins the bundle/checkout/receipt/push SHA,
+Landing now holds a checkout flock continuously, including local host-lock
+waiting without re-exec, pins the bundle/checkout/receipt/push SHA,
 refuses unexpected HEAD movement and records exact no-overlap rebase SHAs.
 Upload intent is durable before SSH; a remote barrier publishes writer/group
 and wrapper identities before copying. Unknown uploads retain the claim and

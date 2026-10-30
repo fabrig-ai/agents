@@ -450,10 +450,15 @@ def main():
     if args.local and not os.environ.get('AGENTS_GATE_HELD'):
         lock = os.environ.get('AGENTS_GATE_LOCK', str(Path.home() / '.local/state/agents-gate.lock'))
         Path(lock).parent.mkdir(parents=True, exist_ok=True)
-        if subprocess.run(['flock', '-n', '-o', lock, 'true']).returncode:
+        host_lock = Path(lock).open('a')
+        try:
+            fcntl.flock(host_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
             print(f'land: waiting for another agents gate on this host ({lock})', flush=True)
+            fcntl.flock(host_lock, fcntl.LOCK_EX)
+        # Keep both file descriptors in this process through push. Re-execing
+        # under flock would drop the checkout lock while waiting for this one.
         os.environ['AGENTS_GATE_HELD'] = '1'
-        os.execvp('flock', ['flock', '-o', lock, sys.executable, '-I', '-B', *sys.argv])
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, interrupted)
     before_rebase = run('git', 'rev-parse', 'HEAD')

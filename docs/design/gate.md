@@ -122,7 +122,9 @@ with budget mode and report-only wall overruns.
 ## 4. Lock and periodic checks
 
 `~/.local/state/agents-gate.lock` (`AGENTS_GATE_LOCK` override) serializes
-checks on each host. Local landing holds it through fetch/rebase/check/push.
+checks on each host. Local landing takes this flock in the same process as
+the checkout lock and holds both through fetch/rebase/check/push, including
+while waiting for the host gate.
 `AGENTS_GATE_HELD` is a trusted nesting marker; fixture children strip it and
 the lock override. This is cooperation, not verified exclusion.
 
