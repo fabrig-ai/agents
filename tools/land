@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
-"""Usage: tools/land [--host NAME] [--local] [--dry-run] [--inventory PATH]
+"""Usage: tools/land [--host NAME] [--local] [--dry-run] [--keep-branch]
+       tools/land --reconcile [CLAIM] [--kill]
 
 Rebase, test a bundle on a claimed builder, then fast-forward main. --dry-run
 executes the real claim/bundle/check/release flow and stops before pushing.
 --local is an explicit fallback with the same budgets and selection.
+Unseen completion keeps the claim; --reconcile inspects before acting.
+--kill explicitly permits reconciliation to terminate this run. --keep-branch
+retains the local branch after main is pushed; remote cleanup still applies.
 """
 import argparse
+import fcntl
 import importlib.util
 import json
 import os
@@ -29,6 +34,8 @@ def run(*args, **kwargs):
 
 
 def ssh(target, *command, **kwargs):
+    if not isinstance(target, str) or not re.fullmatch('[A-Za-z0-9_.@:-]+', target) or target.startswith('-'):
+        raise ValueError('invalid SSH target')
     return run('ssh', '-oBatchMode=yes', '-oConnectTimeout=5', target,
                shlex.join(str(a) for a in command), **kwargs)
 
@@ -62,155 +69,303 @@ def interrupted(signum, frame):
     raise KeyboardInterrupt(f'signal {signum}')
 
 
+def record_root():
+    return Path.home() / '.local/state/agents-gate/unreconciled'
+
+
+def save_record(path, value):
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(mode='w', dir=path.parent, prefix='.' + path.name,
+                                     delete=False) as stream:
+        json.dump(value, stream, indent=2)
+        stream.flush()
+        os.fsync(stream.fileno())
+        sibling = Path(stream.name)
+    sibling.replace(path)
+    directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
 class Builder:
-    def __init__(self, hosts, inventory, requested, sha):
+    def __init__(self, hosts, inventory, requested, sha, saved=None):
         self.hosts = hosts
-        self.hel8 = hosts['hel8']['ssh']
         self.inventory = inventory
         self.requested = ALIASES.get(requested, requested)
-        self.what = f'agents-gate {sha} {uuid.uuid4().hex}'
-        self.slot = None
-        self.target = None
+        token = uuid.uuid4().hex
+        if saved is not None and (not isinstance(saved, dict) or saved.get('version') != 1 or
+                                  not {'id','owner','what','sha','host','slot','target','hel8','phase',
+                                       'prepare_uncertain','launch_requested','exit_seen','restored'} <= saved.keys()):
+            raise ValueError('invalid saved claim record')
+        self.data = saved or dict(version=1, id=token, owner=OWNER, what=f'agents-gate {sha} {token}',
+                    sha=sha, host=None, slot=None, target=None, hel8=hosts['hel8']['ssh'],
+                    remote_dir=None, pgid=None, remote_pgid=None, phase='claiming',
+                    prepare_uncertain=False, launch_requested=False, exit_seen=False, restored=False)
+        if not re.fullmatch('[0-9a-f]{32}', self.data['id']) or self.data['owner'] != OWNER:
+            raise ValueError('invalid saved claim')
+        self.path = record_root() / (self.data['id'] + '.json')
+        self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self.lock = self.path.with_suffix('.lock').open('a')
+        fcntl.flock(self.lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        self.source = Path(__file__).with_name('land_remote.py').read_text()
+
+    @property
+    def slot(self):
+        return (self.data['host'], self.data['slot']) if self.data['slot'] is not None else None
+
+    @property
+    def what(self):
+        return self.data['what']
+
+    def save(self):
+        save_record(self.path, self.data)
+
+    def remote(self, action, *args):
+        target = self.data['target']
+        if not isinstance(target, str) or not re.fullmatch('[A-Za-z0-9_.@:-]+', target) or target.startswith('-'):
+            raise ValueError('invalid saved SSH target')
+        reply = ssh(target, 'python3', '-I', '-B', '-c', self.source, action,
+                    json.dumps(self.data), *args, timeout=80 if action == 'wait' else 10)
+        return json.loads(reply)
+
+    def observe(self, value):
+        # Retain the observed process identity locally before further SSH calls.
+        run = value.get('run') or value
+        for key in ('pgid', 'boot', 'start_ticks', 'supervisor_pid', 'supervisor_start_ticks'):
+            if run.get(key) is not None:
+                self.data[key] = run[key]
+        self.data['remote_pgid'] = self.data.get('pgid')
+        if value.get('remote_dir'):
+            self.data['remote_dir'] = value['remote_dir']
+        self.save()
+
+    def keep(self, reason):
+        self.data['reason'] = reason
+        self.save()
+        print(f'land: KEEP CLAIM {self.slot}: {self.what}; {reason}', file=sys.stderr, flush=True)
+        print(f'land: record {self.path}; reconcile: tools/land --reconcile {self.data["id"]}',
+              file=sys.stderr, flush=True)
 
     def claim(self):
         available = pools(self.inventory)
         free = {tuple(line.split()) for line in
-                ssh(self.hel8, 'claim', 'list', '--free', OWNER, timeout=10).splitlines()}
+                ssh(self.data['hel8'], 'claim', 'list', '--free', OWNER, timeout=10).splitlines()}
         choices = [self.requested] if self.requested else ['hetzner3', 'hetzner7', 'hetzner6']
         for host in choices:
             if host not in self.hosts or 'builder' not in self.hosts[host]['roles']:
                 raise ValueError(f'not a builder: {host}')
-            for h, n in sorted(available & free, key=lambda p: (p[0], int(p[1]))):
+            for h, n in sorted(available & free, key=lambda pair: (pair[0], int(pair[1]))):
                 if h != host:
                     continue
-                # Record the intent while signals are blocked. A lost SSH reply
-                # still gets an exact-WHAT release; it cannot release a successor.
-                blocked = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM, signal.SIGHUP})
-                self.slot = (h, n)
-                self.target = self.hosts[h]['ssh']
+                self.data.update(host=h, slot=n, target=self.hosts[h]['ssh'], phase='claiming')
+                self.save()  # Durable intent precedes an operation whose reply may be lost.
                 try:
-                    reply = ssh(self.hel8, 'claim', 'claim', h, n, OWNER, self.what, timeout=10)
+                    reply = ssh(self.data['hel8'], 'claim', 'claim', h, n, OWNER, self.what, timeout=10)
                 except subprocess.CalledProcessError as error:
                     if error.returncode == 1:
-                        self.slot = None
+                        self.data['slot'] = None
+                        self.path.unlink()
                         continue
-                    self.release()
+                    self.data['phase'] = 'claim_unknown'
+                    self.save()
                     raise
                 except BaseException:
-                    self.release()
+                    self.data['phase'] = 'claim_unknown'
+                    self.save()
                     raise
-                finally:
-                    signal.pthread_sigmask(signal.SIG_SETMASK, blocked)
+                self.data['phase'] = 'claimed'
+                self.save()
                 print(f'land: claimed {h} slot {n}: {reply}', flush=True)
                 return
         raise ValueError('no free builder pool slot; use --local explicitly if necessary')
 
+    def restore(self):
+        self.data['restoration_pending'] = True
+        self.save()
+        observation = self.remote('inspect')
+        self.observe(observation)
+        if observation['processes'] or observation['supervisors']:
+            raise ValueError(f'remote processes still alive: {observation["processes"] + observation["supervisors"]}')
+        if observation['heavy']:
+            raise ValueError('BUG: gate submitted heavy work; claim retained for ops')
+        proof = self.remote('cleanup')
+        if proof['exists'] or proof['processes'] or proof['supervisors'] or proof['heavy']:
+            raise ValueError('remote restoration is unknown')
+        self.data.update(restored=True, restoration_pending=False, phase='restored')
+        self.save()
+
     def release(self):
         if self.slot is None:
             return
-        host, number = self.slot
         blocked = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM, signal.SIGHUP})
         try:
-            # Retry transient transport failures. Never release by owner alone.
-            for attempt in range(3):
-                try:
-                    reply = ssh(self.hel8, 'claim', 'release', host, number, OWNER,
-                                '--what', self.what, timeout=10)
-                    print(f'land: released {host} slot {number}: {reply}', flush=True)
-                    self.slot = None
+            if not self.data['restored']:
+                # Never turn unseen remote completion into permission to clean up.
+                if self.data.get('restoration_pending') or self.data['phase'] == 'claim_unknown' or self.data['prepare_uncertain'] or self.data['launch_requested'] and not self.data['exit_seen']:
+                    self.keep('remote end is unknown')
                     return
-                except (OSError, subprocess.SubprocessError):
-                    if attempt == 2:
-                        raise RuntimeError(f'RELEASE FAILED: {host} {number}; exact claim {self.what!r}')
+                try:
+                    self.restore()
+                except (ValueError, OSError, subprocess.SubprocessError) as error:
+                    self.keep('restoration unproved: ' + type(error).__name__)
+                    return
+            host, number = self.slot
+            try:
+                reply = ssh(self.data['hel8'], 'claim', 'release', host, number, OWNER,
+                            '--what', self.what, timeout=10)
+            except (OSError, subprocess.SubprocessError):
+                self.keep('central release reply unknown')
+                raise
+            print(f'land: released {host} slot {number}: {reply}', flush=True)
+            self.path.unlink()
+            self.data['slot'] = None
         finally:
             signal.pthread_sigmask(signal.SIG_SETMASK, blocked)
 
     def check(self, root, base, limit, gate, require_green=True):
-        remote = None
+        for key in ('boot', 'supervisor_pid', 'supervisor_start_ticks', 'start_ticks'):
+            self.data.pop(key, None)
+        self.data.update(sha=run('git', 'rev-parse', 'HEAD'), remote_dir=None, pgid=None, remote_pgid=None, phase='allocating',
+                         prepare_uncertain=True, launch_requested=False, exit_seen=False, restored=False, restoration_pending=False)
+        self.save()
+        prepared = self.remote('prepare')
+        candidate = prepared['remote_dir']
+        if not re.fullmatch(r'/tmp/agents-gate\.' + self.data['id'] + r'\.[A-Za-z0-9_]+', candidate):
+            raise ValueError('invalid builder temporary path')
+        self.data.update(remote_dir=candidate, prepare_uncertain=False, phase='prepared')
+        self.save()
         with tempfile.TemporaryDirectory(prefix='agents-land-') as directory:
             bundle = Path(directory) / 'candidate.bundle'
             subprocess.run(['git', 'bundle', 'create', str(bundle), 'HEAD'], cwd=root, check=True)
+            with bundle.open('rb') as stream:
+                ssh(self.data['target'], 'sh', '-c', 'cat > ' + shlex.quote(candidate + '/candidate.bundle'),
+                    stdin=stream, timeout=15)
+            print(f'land: shipped HEAD bundle to {self.slot[0]}:{candidate}', flush=True)
+            script = (f'git clone -q {shlex.quote(candidate)}/candidate.bundle {shlex.quote(candidate)}/repo && '
+                      f'cd {shlex.quote(candidate)}/repo && mkdir {shlex.quote(candidate)}/tmp && '
+                      f'TMPDIR={shlex.quote(candidate)}/tmp HEAVY_LABEL={shlex.quote(self.what)} '
+                      f'nice -n 19 ionice -c3 tools/check.sh --tier gate '
+                      f'{("--changed " + shlex.quote(base) + " ") if base else ""}'
+                      f'--json {shlex.quote(candidate)}/result.json > {shlex.quote(candidate)}/table 2>&1')
+            self.data.update(launch_requested=True, phase='launching')
+            self.save()
+            self.observe(self.remote('start', script, str(limit + 5), self.source))
+            self.data['phase'] = 'running'
+            self.save()
+            observation = self.remote('wait', str(limit + 5))
+            value = observation.get('run') or {}
+            if value.get('phase') != 'finished' or type(value.get('exit_code')) is not int:
+                raise ValueError('remote exit status unavailable')
+            self.observe(observation)
+            self.data.update(exit_seen=True, exit_code=value['exit_code'], phase='exited')
+            self.save()
             try:
-                candidate = ssh(self.target, 'mktemp', '-d', '/tmp/agents-gate.XXXXXXXX', timeout=10)
-                if not re.fullmatch(r'/tmp/agents-gate\.[A-Za-z0-9]+', candidate):
-                    raise ValueError('invalid builder temporary path')
-                remote = candidate
-                with bundle.open('rb') as stream:
-                    ssh(self.target, 'sh', '-c', 'cat > ' + shlex.quote(remote + '/candidate.bundle'),
-                        stdin=stream, timeout=15)
-                print(f'land: shipped HEAD bundle to {self.slot[0]}:{remote}', flush=True)
-                script = (f'git clone -q {shlex.quote(remote)}/candidate.bundle {shlex.quote(remote)}/repo && '
-                          f'cd {shlex.quote(remote)}/repo && '
-                          f'nice -n 19 ionice -c3 tools/check.sh --tier gate {('--changed ' + shlex.quote(base) + ' ') if base else ''}'
-                          f'--json {shlex.quote(remote)}/result.json > {shlex.quote(remote)}/table 2>&1')
-                code = 0
-                try:
-                    supervisor = """import ctypes,fcntl,os,signal,subprocess,sys,time
-from pathlib import Path
-root=Path(sys.argv[1])
-libc=ctypes.CDLL(None,use_errno=True)
-if libc.prctl(36,1,0,0,0): raise OSError(ctypes.get_errno(),'subreaper')
-with (root/'run.lock').open('a') as lock:
- fcntl.flock(lock,fcntl.LOCK_EX)
- if (root/'cancelled').exists(): sys.exit(125)
- child=subprocess.Popen(['sh','-c',sys.argv[2]],start_new_session=True)
- sibling=root/'run.pid.new'
- sibling.write_text(str(child.pid))
- sibling.replace(root/'run.pid')
- fcntl.flock(lock,fcntl.LOCK_UN)
- try:
-  code=child.wait(timeout=float(sys.argv[3]))
- except subprocess.TimeoutExpired:
-  os.killpg(child.pid,signal.SIGKILL)
-  child.wait()
-  code=124
- while True:
-  for pid in Path(f'/proc/{os.getpid()}/task/{os.getpid()}/children').read_text().split():
-   try: os.kill(int(pid),signal.SIGKILL)
-   except ProcessLookupError: pass
-  try: pid,status,usage=os.wait4(-1,os.WNOHANG)
-  except ChildProcessError: break
-  if not pid: time.sleep(.005)
- fcntl.flock(lock,fcntl.LOCK_EX)
- (root/'run.pid').unlink(missing_ok=True)
- sys.exit(code)
-"""
-                    ssh(self.target, 'python3', '-I', '-B', '-c', supervisor, remote, script, str(limit+5),
-                        timeout=limit + 10)
-                except subprocess.CalledProcessError as error:
-                    code = error.returncode
-                finally:
-                    print(ssh(self.target, 'cat', remote + '/table', timeout=10), flush=True)
-                result = json.loads(ssh(self.target, 'cat', remote + '/result.json', timeout=10))
-                if require_green and (code or result['code'] or result['starved']):
-                    raise ValueError(f'builder gate incomplete or red (exit {code}, starved {result["starved"]})')
-                return result
+                print(ssh(self.data['target'], 'cat', candidate + '/table', timeout=10), flush=True)
+                result = json.loads(ssh(self.data['target'], 'cat', candidate + '/result.json', timeout=10))
             finally:
-                if remote:
-                    blocked = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM, signal.SIGHUP})
-                    try:
-                        # Cancel under the launch lock, then kill this run's whole
-                        # group before removing its temporary directory.
-                        cleanup = """import fcntl,os,signal,sys,time
-from pathlib import Path
-root=Path(sys.argv[1])
-with (root/'run.lock').open('a') as lock:
- fcntl.flock(lock,fcntl.LOCK_EX)
- (root/'cancelled').touch()
- p=root/'run.pid'
- if p.exists():
-  try: os.killpg(int(p.read_text()),signal.SIGKILL)
-  except ProcessLookupError: pass
-# The supervisor removes run.pid only after draining escaped descendants.
-end=time.monotonic()+8
-while p.exists():
- if time.monotonic()>end: raise RuntimeError('remote workers did not drain')
- time.sleep(.01)
-"""
-                        ssh(self.target, 'python3', '-I', '-B', '-c', cleanup, remote, timeout=10)
-                        ssh(self.target, 'rm', '-rf', '--', remote, timeout=10)
-                    finally:
-                        signal.pthread_sigmask(signal.SIG_SETMASK, blocked)
+                # Only a received exit can authorize normal restoration. Drops,
+                # timeouts and interrupts before it go directly to a kept claim.
+                self.restore()
+            if require_green and (value['exit_code'] or result['code'] or result['starved']):
+                raise ValueError(f'builder gate incomplete or red (exit {value["exit_code"]}, starved {result["starved"]})')
+            return result
+
+
+def reconcile(root, claim, kill):
+    directory = record_root()
+    if claim != '*':
+        token = claim.removesuffix('.json')
+        if not re.fullmatch('[0-9a-f]{32}', token):
+            raise ValueError('CLAIM must be an unreconciled claim id')
+        paths = [directory / (token + '.json')]
+    else:
+        paths = sorted(directory.glob('*.json'))
+    failed = False
+    for path in paths:
+        builder = None
+        try:
+            saved = json.loads(path.read_text())
+            if not isinstance(saved, dict) or path.stem != saved.get('id') or 'sha' not in saved:
+                raise ValueError('claim record identity mismatch')
+            builder = Builder({}, None, None, saved['sha'], saved=saved)
+            observation = builder.remote('inspect')  # Always read-only first.
+            builder.observe(observation)
+            if observation['heavy']:
+                raise ValueError('BUG: gate submitted heavy work; resolve with ops')
+            alive = observation['processes'] + observation['supervisors']
+            if alive and not kill:
+                raise ValueError(f'remote processes alive: {alive}; --kill is required to terminate them')
+            if alive:
+                builder.observe(builder.remote('kill'))
+            builder.restore()
+            try:
+                builder.release()
+            except subprocess.CalledProcessError as error:
+                if error.returncode != 1:
+                    raise
+                free = {tuple(line.split()) for line in ssh(builder.data['hel8'], 'claim', 'list',
+                        '--free', OWNER, timeout=10).splitlines()}
+                if builder.slot not in free:
+                    raise
+                print(f'land: old claim {builder.data["id"]} is already free; clearing its record')
+                builder.path.unlink()
+                builder.data['slot'] = None
+        except KeyboardInterrupt:
+            if builder:
+                builder.keep('reconciliation interrupted')
+            raise
+        except (ValueError, OSError, subprocess.SubprocessError) as error:
+            failed = True
+            if builder:
+                builder.keep(str(error) if isinstance(error, ValueError) else type(error).__name__)
+            else:
+                print(f'land: cannot reconcile {path.name}: {type(error).__name__}; '
+                      f'retry {shlex.join(["tools/land", "--reconcile", path.stem])}', file=sys.stderr)
+        finally:
+            if builder:
+                builder.lock.close()
+    if not paths:
+        print('land: no unreconciled claims')
+    return int(failed)
+
+
+def delete_landed_branch(branch, before, landed, keep_local):
+    refs = run('git', 'ls-remote', '--heads', 'origin', 'refs/heads/' + branch)
+    tip = refs.split()[0] if refs else None
+    if tip in (before, landed):
+        # Validate the server-advertised deletion OID as well as ls-remote's
+        # observation. Git's ordinary old-OID check then closes the final race.
+        original = Path(run('git', 'rev-parse', '--git-path', 'hooks/pre-push')).resolve()
+        with tempfile.TemporaryDirectory(prefix='agents-delete-hook-') as directory:
+            hook = Path(directory) / 'pre-push'
+            source = ("#!/usr/bin/env python3\nimport os,subprocess,sys\n" +
+                      "data=sys.stdin.buffer.read()\n" +
+                      "allowed=" + repr((before, landed)) + "\n" +
+                      "expected=" + repr('refs/heads/' + branch) + "\n" +
+                      "for line in data.decode().splitlines():\n" +
+                      " local_ref,local_oid,remote_ref,remote_oid=line.split()\n" +
+                      " if remote_ref!=expected or set(local_oid)!={'0'} or remote_oid not in allowed:\n" +
+                      "  sys.exit('land: remote branch moved; refusing deletion')\n" +
+                      "original=" + repr(str(original)) + "\n" +
+                      "if os.path.isfile(original) and os.access(original,os.X_OK):\n" +
+                      " sys.exit(subprocess.run([original,*sys.argv[1:]],input=data).returncode)\n")
+            sibling = hook.with_suffix('.new')
+            sibling.write_text(source)
+            sibling.chmod(0o700)
+            sibling.replace(hook)
+            deleted = subprocess.run(['git', '-c', 'core.hooksPath=' + directory,
+                                      'push', 'origin', '--delete', branch], timeout=15)
+            if deleted.returncode:
+                print(f'land: WARNING could not safely delete origin/{branch}; keeping it', file=sys.stderr)
+    elif tip is not None:
+        print(f'land: WARNING origin/{branch} moved; keeping remote branch', file=sys.stderr)
+    if not keep_local:
+        subprocess.run(['git', 'switch', '--detach', landed], check=True)
+        if run('git', 'for-each-ref', '--format=%(upstream)', 'refs/heads/' + branch):
+            subprocess.run(['git', 'branch', '--unset-upstream', branch], check=True)
+        subprocess.run(['git', 'branch', '-d', branch], check=True)
 
 
 def main():
@@ -218,17 +373,34 @@ def main():
     parser.add_argument('--host')
     parser.add_argument('--local', action='store_true')
     parser.add_argument('--dry-run', action='store_true')
+    parser.add_argument('--keep-branch', action='store_true')
+    parser.add_argument('--reconcile', nargs='?', const='*')
+    parser.add_argument('--kill', action='store_true')
     parser.add_argument('--inventory', type=Path,
                         default=Path('/home/free/src/fabrig/main/tools/slots/hosts'))
     args = parser.parse_args()
+    if args.kill and args.reconcile is None:
+        parser.error('--kill requires --reconcile')
+    if args.reconcile is not None and (args.local or args.host or args.dry_run or args.keep_branch):
+        parser.error('--reconcile cannot be combined with landing options')
     if args.local and args.host:
         parser.error('--host and --local are mutually exclusive')
     started = time.monotonic()
     root = Path(run('git', 'rev-parse', '--show-toplevel'))
     os.chdir(root)
+    gate = load_gate(root)
+    budget = gate.configuration(root)['budget']
+    print(gate.budget_mode(budget), flush=True)
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, interrupted)
+    if args.reconcile is not None:
+        code = reconcile(root, args.reconcile, args.kill)
+        print(f'land: reconcile exit {code}; {gate.budget_mode(budget)}', flush=True)
+        return code
     if run('git', 'status', '--porcelain', '--untracked-files=all'):
         raise ValueError('refusing a dirty tree')
-    if run('git', 'branch', '--show-current') in ('', 'main'):
+    branch = run('git', 'branch', '--show-current')
+    if branch in ('', 'main'):
         raise ValueError('use a named branch other than main')
     # Local mode retains the host lock across rebase, checks and push. A
     # remote check acquires its builder's check.sh lock instead.
@@ -241,6 +413,7 @@ def main():
         os.execvp('flock', ['flock', '-o', lock, sys.executable, *sys.argv])
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, interrupted)
+    before_rebase = run('git', 'rev-parse', 'HEAD')
     subprocess.run(['git', 'fetch', 'origin'], check=True, timeout=15)
     subprocess.run(['git', 'rebase', 'origin/main'], check=True, timeout=15)
     gate = load_gate(root)
@@ -292,19 +465,26 @@ def main():
         else:
             subprocess.run(['git', 'push', 'origin', 'HEAD:main'], check=True, timeout=15)
         completed_at = time.monotonic()
+        if not args.dry_run:
+            try:
+                delete_landed_branch(branch, before_rebase, run('git', 'rev-parse', 'HEAD'), args.keep_branch)
+            except (OSError, subprocess.SubprocessError) as error:
+                print(f'land: main pushed; WARNING branch cleanup failed: {type(error).__name__}', file=sys.stderr)
     finally:
         try:
             if builder:
                 builder.release()
         finally:
-            print(f'land: merge wall {(completed_at or time.monotonic()) - started:.3f}s / '
-                  f'{budget["merge_wall_s"]}s', flush=True)
+            elapsed = (completed_at or time.monotonic()) - started
+            print(f'land: merge wall {elapsed:.3f}s / {budget["merge_wall_s"]}s; '
+                  f'{gate.budget_mode(budget)}{gate.wall_status(elapsed, budget)}', flush=True)
 
 
 if __name__ == '__main__':
     try:
-        main()
+        sys.exit(main())
     except KeyboardInterrupt:
         sys.exit('land: interrupted; rerun')
     except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as error:
-        sys.exit(f'land: {error}')
+        detail = f'{error.cmd[0]} exited {error.returncode}' if isinstance(error, subprocess.CalledProcessError) else str(error)
+        sys.exit(f'land: {detail}')

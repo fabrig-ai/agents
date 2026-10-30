@@ -1,7 +1,7 @@
 # Gate
 
 2026-10-30. Owner: s/deploy. Code: `tools/check.sh`, `tools/gate.py`,
-`tools/land`, `tools/periodic`. Status: `docs/design/gate.status.md`.
+`tools/land`, `tools/land_remote.py`, `tools/periodic`. Status: `docs/design/gate.status.md`.
 
 ## 1. In one page
 
@@ -29,7 +29,9 @@ files (all files if empty); other unknown paths select every gate file.
 Up to eight workers share a per-host lock. They use nice 19 and idle IO when
 ionice is available. `wait4` reports each child's user+system CPU, including its
 waited and adopted descendants, and wall time. The table names file, owner, CPU, wall,
-budget and status. `--json PATH` saves the same observations atomically.
+budget and status. Every tier/check/landing summary says `budget: REPORT-ONLY
+(not enforced)` or `budget: ENFORCED`; report-mode merge-wall overruns say
+`OVER (report-only)`. `--json PATH` saves the same observations atomically.
 Defaults: file CPU 8 s, file wall 15 s, tier CPU 100 s, merge wall 60 s.
 With enforcement enabled, CPU overruns fail by name and workers also receive
 an OS CPU ceiling. Wall expiry kills the file's process group and warns
@@ -40,28 +42,56 @@ before asking the user about budgets (fabrig testing-strategy, section 8.1).
 
 ## 3. Land and races
 
-`tools/land [--host NAME] [--local] [--dry-run]` refuses dirty trees, main and
+`tools/land [--host NAME] [--local] [--dry-run] [--keep-branch]` refuses dirty trees, main and
 detached HEAD, then fetches and performs a plain rebase on origin/main.
 Auto selection tries hetzner3, hetzner7, hetzner6 (h3/h7/h6 aliases), matching
 pool slots from fabrig's slots inventory against hel8's central free list.
 Hel8's SSH target comes from `fleet/hosts.toml`. Atomic claim admission is
 still authoritative if that list races. Claims use owner `s/deploy-gate` and
-a unique `agents-gate <sha> <token>` description. Finally releases with that
-exact description, including failed runs and interrupts; release errors fail
-loudly. There is no owner-only release or stale-claim stealing.
+a unique `agents-gate <sha> <token>` description. There is no owner-only
+release or stale-claim stealing.
 
 A builder receives a full HEAD bundle in a private temporary directory and
 runs `nice -n 19 ionice -c3 tools/check.sh --tier gate --changed BASE` with a
-65 s hard wall backstop, including lock waiting. Results return before cleanup.
-On interruption cleanup cancels launch and kills this run's process group
-and drains escaped fixture sessions before releasing. SSH errors fail closed. `--local` loudly announces its
-unclaimed in-place fallback; selection, budgets and lock still apply.
+65 s hard wall backstop, including lock waiting. A detached supervisor records
+its process group, boot/start identity and exit status. It drains its fixture
+descendants on completion; losing SSH does not terminate the remote run.
+
+**Release requires a known end.** Normal landing must receive the remote exit
+status, prove the process group and supervisor ended, remove the working
+directory and assert that heavy's read-only snapshot has no task submitted
+from it. Gate scratch stays below that directory and submissions would carry
+the unique claim label, so either cwd or label identifies a violation. A heavy submission is a bug; land never submits or cancels heavy work.
+Unknown completion or restoration keeps the exact claim. This includes an SSH
+drop, timeout, or interrupt before the exit status was received. Durable 0600
+records in `~/.local/state/agents-gate/unreconciled/<token>.json` hold host,
+slot, owner, WHAT, SHA, remote directory and process identity. Intent is saved
+before dispatch, so an unseen launch/claim reply is also recoverable.
+
+`tools/land --reconcile [CLAIM]` inspects those builders read-only first,
+including the group, directory and heavy snapshot. Live processes are reported
+and keep the claim. Only `--reconcile ... --kill` may terminate a live run;
+it verifies the saved process identity and kills no heavy task. Once ended,
+reconciliation blocks delayed launches, removes any remaining owned directory,
+rechecks restoration and releases the exact WHAT. Missing/corrupt observation
+keeps the record and prints the reconcile command. A local record lock prevents
+a live lander and reconciliation from acting together. `--local` explicitly
+announces its unclaimed fallback; selection, budgets and host lock still apply.
 
 After green, fetch again. A moved main is rebased; disjoint test selections
 permit push, overlapping selections require one further check. A second
 upstream race refuses and asks for a rerun. A plain `HEAD:main` push also
 refuses a final race. `--dry-run` follows the real flow but stops before push.
-Report the elapsed time from entry through push (or dry-run completion).
+After a successful main push, delete origin's landed branch only if its tip
+matches the local pre-rebase tip or landed HEAD. The ordinary deletion push
+checks the server-advertised OID through a temporary pre-push guard, chaining
+any existing hook, then relies on Git's normal old-OID check. A moved branch
+is kept with a warning. Detach at landed HEAD and delete the local branch;
+`--keep-branch` retains the local branch, while remote cleanup still applies.
+Dry-runs, refusals and failed gates never delete branches. Cleanup failures
+are reported separately from an already successful main push.
+Report elapsed time from entry through push (or dry-run completion), labelled
+with budget mode and report-only wall overruns.
 
 ## 4. Lock and periodic checks
 

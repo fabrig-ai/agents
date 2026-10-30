@@ -129,6 +129,7 @@ subprocess.run([sys.executable, '-c', 'import time; end=time.process_time()+0.15
         sources = {'test_cpu.py': source, 'gate.toml': config}
         result = GateTests.run_gate(self, sources)
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('budget: REPORT-ONLY (not enforced)', result.stderr)
         self.assertIn('REPORT ONLY: file CPU budget: tools/test_cpu.py (lead/test)', result.stderr)
         self.assertIn('REPORT ONLY: tier CPU budget: gate', result.stderr)
         row = next(line for line in result.stderr.splitlines() if line.startswith('tools/test_cpu.py lead/test '))
@@ -137,6 +138,7 @@ subprocess.run([sys.executable, '-c', 'import time; end=time.process_time()+0.15
         result = GateTests.run_gate(self, sources)
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn('FAIL: file CPU budget', result.stderr)
+        self.assertIn('budget: ENFORCED', result.stderr)
 
     def test_wall_limit_reports_unobserved(self):
         result = GateTests.run_gate(self, {'test_hang.py': 'import time; time.sleep(10)',
@@ -165,6 +167,7 @@ assert 'idle' in subprocess.check_output(['ionice', '-p', str(os.getpid())], tex
                                          'gate.toml': '[budget]\nmerge_wall_s = 0.15\n'})
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('1 starved/unobserved', result.stderr)
+        self.assertIn('OVER (report-only)', result.stderr)
 
     def test_selection_mapping_smoke_unknown_and_changed_git_diff(self):
         import importlib.util

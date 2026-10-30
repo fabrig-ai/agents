@@ -148,6 +148,19 @@ owner = "s/deploy"
 [files."tools/test_session_start.py"]
 owner = "s/multi-coord"
 
+# a768a35 after-landing process matrix moved to periodic on main.
+[files."tools/after-landing/test_after_landing_periodic.py"]
+owner = "s/dynamic-memory"
+
+[files."tools/test_land_reconcile.py"]
+owner = "s/deploy"
+
+[files."tools/test_land_races.py"]
+owner = "s/deploy"
+
+[files."tools/test_land_branches.py"]
+owner = "s/deploy"
+
 [select]
 "tools/fleet-sync" = ["tools/test_bootstrap.py", "tools/test_bootstrap_safety.py", "tools/test_bootstrap_stages.py", "tools/test_fleet_sync.py", "tools/test_fleet_sync_2.py", "tools/test_fleet_sync_2b.py", "tools/test_fleet_sync_2c.py", "tools/test_fleet_sync_3.py", "tools/test_fleet_sync_3b.py", "tools/test_fleet_sync_3c_manifest.py", "tools/test_fleet_sync_4.py", "tools/test_fleet_sync_cases_1.py", "tools/test_fleet_sync_cases_2.py", "tools/test_fleet_sync_cases_3.py", "tools/test_fleet_sync_cases_4.py", "tools/test_fleet_sync_cases_5.py", "tools/test_fleet_sync_cases_6.py", "tools/test_peer_seed.py", "tools/test_review2_fleet_sync.py", "tools/test_review_fleet_sync.py"]
 "fleet/**" = ["tools/test_bootstrap.py", "tools/test_bootstrap_safety.py", "tools/test_bootstrap_stages.py", "tools/test_fleet_sync.py", "tools/test_fleet_sync_2.py", "tools/test_fleet_sync_2b.py", "tools/test_fleet_sync_2c.py", "tools/test_fleet_sync_3.py", "tools/test_fleet_sync_3b.py", "tools/test_fleet_sync_3c_manifest.py", "tools/test_fleet_sync_4.py", "tools/test_fleet_sync_cases_1.py", "tools/test_fleet_sync_cases_2.py", "tools/test_fleet_sync_cases_3.py", "tools/test_fleet_sync_cases_4.py", "tools/test_fleet_sync_cases_5.py", "tools/test_fleet_sync_cases_6.py", "tools/test_peer_seed.py", "tools/test_review2_fleet_sync.py", "tools/test_review_fleet_sync.py"]
@@ -155,12 +168,13 @@ owner = "s/multi-coord"
 "tools/qa/**" = ["tools/qa/test_qa.py", "tools/qa/test_logins.py"]
 "tools/session/**" = ["tools/session/test_reap_hook.py", "tools/session/test_session_context.py", "tools/test_session_start.py"]
 "tools/records/**" = ["tools/records/test_record.py", "tools/records/test_record_collect.py", "tools/records/test_status_page.py", "tools/records/test_watch.py", "tools/records/test_watch_replay.py"]
-"tools/after-landing/**" = ["tools/after-landing/test_after_landing.py"]
+"tools/after-landing/**" = ["tools/after-landing/test_after_landing.py", "tools/after-landing/test_after_landing_periodic.py"]
 "tools/reap/**" = ["tools/session/test_reap_hook.py"]
 "tools/check.sh" = ["*"]
 "tools/land" = ["*"]
 "tools/gate.toml" = ["*"]
 "tools/gate.py" = ["*"]
+"tools/land_remote.py" = ["tools/test_land.py", "tools/test_land_reconcile.py", "tools/test_land_races.py"]
 "tools/periodic" = ["*"]
 "docs/**" = ["tools/test_gate_smoke.py"]
 "*.md" = ["tools/test_gate_smoke.py"]

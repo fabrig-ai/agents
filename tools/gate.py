@@ -193,6 +193,16 @@ def atomic_json(path, result):
     temporary.replace(path)
 
 
+def budget_mode(budget):
+    return 'budget: ENFORCED' if budget['enforce'] else 'budget: REPORT-ONLY (not enforced)'
+
+
+def wall_status(elapsed, budget):
+    if elapsed > budget['merge_wall_s']:
+        return '; OVER (enforced)' if budget['enforce'] else '; OVER (report-only)'
+    return ''
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--tier', choices=('gate', 'periodic'), default='gate')
@@ -247,12 +257,13 @@ def main():
             status += ',failed'
         print(f"{r['file']} {r['owner']} {r['cpu_s']:.3f} {r['wall_s']:.3f} {r['budget_s']:g} {status}", file=sys.stderr)
     print(f"Tier {args.tier}: CPU {cpu:.3f}s / {budget['tier_cpu_s']:g}s; wall {wall:.3f}s; "
-          f"merge wall {wall:.3f}s / {budget['merge_wall_s']:g}s", file=sys.stderr)
+          f"merge wall {wall:.3f}s / {budget['merge_wall_s']:g}s; "
+          f"{budget_mode(budget)}{wall_status(wall, budget)}", file=sys.stderr)
     for reason in reasons:
         print(('FAIL: ' if budget['enforce'] else 'REPORT ONLY: ') + reason, file=sys.stderr)
     starved = sum(r['starved'] for r in results)
     print(f'Checked {len(paths)} files in {wall:.3f}s ({workers} workers; {failed} failed; '
-          f'{starved} starved/unobserved)', file=sys.stderr)
+          f'{starved} starved/unobserved); {budget_mode(budget)}{wall_status(wall, budget)}', file=sys.stderr)
     code = int(bool(failed or budget['enforce'] and reasons))
     if args.json:
         atomic_json(args.json, dict(tier=args.tier, files=[{k: v for k, v in r.items() if k != 'output'}

@@ -12,11 +12,19 @@ unobserved and cannot authorize a landing.
 
 ## 2. Claimed landing
 
-`tools/land` claims centrally, ships a full-history bundle, checks at low
-priority, handles one upstream race and releases its exact claim in finally.
-Dry-run exercises this flow without push. Local fallback is explicit.
-Disposable SSH/claim/git fixtures cover shipping, release on red/interruption,
-lost claim replies, race overlap, refusals and plain pushes (`tools/test_land.py`).
+`tools/land` and `tools/land_remote.py` require a received exit, empty process
+group, removed directory and clear read-only heavy observation before normal
+release. Unknown ends/restoration retain the claim and durable private record;
+`--reconcile [CLAIM]` inspects first, and requires `--kill` to terminate a live
+run. SSH-drop, unseen-interrupt, live/ended reconciliation, restoration-drop
+and heavy-submission fixtures use only private HOME, fake services and remotes.
+
+Successful main pushes clean up only matching remote branch tips and, unless
+`--keep-branch`, the local branch. The pre-push guard also covers movement
+between the first observation and deletion's handshake; it chains existing
+hooks without forcing updates. Both budget modes and report-only wall overruns
+are printed and tested. Coverage: `tools/test_land{,_races,_reconcile,_branches}.py`,
+`tools/test_check.py`. This follow-up made no production landing or builder run.
 
 ## 3. Periodic and cost
 
