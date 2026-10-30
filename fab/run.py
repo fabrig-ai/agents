@@ -65,7 +65,10 @@ def role_text(repo: str) -> str:
     """The implementer's role text, then the taste file (TASTE), then the repository's notes
     (fab/roles/<repo>.md) when it has any, each separated by one blank line."""
     notes = ROLE.with_name(f"{repo}.md")
-    return ROLE.read_text() + (f"\n{notes.read_text()}" if notes.exists() else "")
+    texts = [ROLE.read_text(), TASTE.read_text()]
+    if notes.exists():
+        texts.append(notes.read_text())
+    return "\n\n".join(text.rstrip("\n") for text in texts) + "\n"
 
 
 def brief(task: Task, role: str, *, run_id: str, branch: str, base: str, report: str,
@@ -79,14 +82,15 @@ def brief(task: Task, role: str, *, run_id: str, branch: str, base: str, report:
     if rejection is not None:
         step = rejection.get("step", "unknown")
         lines = rejection.get("text", "(log unreadable: no log text)").splitlines()
-        starts = [i for i, line in enumerate(lines) if line.startswith(f"[{step}]")]
-        if starts:
-            lines = lines[starts[-1]:]
-            end = next((i for i, line in enumerate(lines[1:], 1)
-                        if line.startswith("[") and " (cwd " in line), len(lines))
-            lines = lines[:end]
-        elif not lines or not lines[0].startswith("(log unreadable:"):
-            lines = [f"(log unreadable: step [{step}] not found)"]
+        if "findings" not in rejection:
+            starts = [i for i, line in enumerate(lines) if line.startswith(f"[{step}]")]
+            if starts:
+                lines = lines[starts[-1]:]
+                end = next((i for i, line in enumerate(lines[1:], 1)
+                            if line.startswith("[") and " (cwd " in line), len(lines))
+                lines = lines[:end]
+            elif not lines or not lines[0].startswith("(log unreadable:"):
+                lines = [f"(log unreadable: step [{step}] not found)"]
         excerpt = "\n".join(lines[:120])
         refusal = ("## The landing refused this branch\n\n"
                    "The landing's checks failed; reproduce this first, in the lowest tier "
@@ -157,14 +161,17 @@ def start(task: Task, host: Host, *, kind: str = "implement", events: Iterable[d
     brief_path, report_path = directory / "brief.md", directory / "report.md"
     base = "origin/main"
     if rejection is not None:
-        try:
-            gates = sorted((host for host in hosts.load().values() if "gate" in host.roles),
-                           key=lambda host: host.name)
-            if not gates:
-                raise ValueError("no gate host configured")
-            red = rejection_text(rejection, gates[0], sh=sh)
-        except (OSError, ValueError) as error:
-            red = "(log unreadable: " + " ".join(str(error).splitlines()) + ")"
+        if "findings" in rejection:
+            red = rejection["findings"]
+        else:
+            try:
+                gates = sorted((host for host in hosts.load().values() if "gate" in host.roles),
+                               key=lambda host: host.name)
+                if not gates:
+                    raise ValueError("no gate host configured")
+                red = rejection_text(rejection, gates[0], sh=sh)
+            except (OSError, ValueError) as error:
+                red = "(log unreadable: " + " ".join(str(error).splitlines()) + ")"
         rejection = {**rejection, "text": red}
     text = brief(task, role_text(task.repo), run_id=run_id, branch=branch, base=base,
                  report=str(report_path), rejection=rejection)

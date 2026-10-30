@@ -173,9 +173,32 @@ class RunStartTest(unittest.TestCase):
                 run_id = run.start(TASK, HOST, kind="repair", sh=fake, rejection=record)
             text = (home / "fab/runs" / run_id / "brief.md").read_text()
             self.assertEqual(fake.calls[-2].input, text)
+            self.assertEqual(command(fake.calls[0]),
+                             ["tail", "-n", "+1", "--", record["log"]])
+            self.assertEqual(fake.calls[0].argv[5], gate.ssh)
             self.assertIn("red umask", text)
             self.assertNotIn("[build]", text)
             self.assertEqual(record, {"step": "default", "log": "/queue/red.log", "tip": "same"})
+
+    def test_start_uses_gate_findings_without_reading_a_gate(self):
+        findings = "files: changed path outside task: fab/other.py\nshape: signature changed\n"
+        for text in (findings, ""):
+            with self.subTest(findings=text), tmp_home() as home:
+                record = {"step": "gate:files", "log": "/digests/task.md", "findings": text}
+                fake = starter()
+                with patch.object(run.hosts, "load") as load:
+                    run_id = run.start(TASK, HOST, kind="repair", sh=fake, rejection=record)
+                load.assert_not_called()
+                self.assertTrue(all(call.argv[5] == HOST.ssh for call in fake.calls))
+                self.assertFalse(any(command(call)[0] == "tail" for call in fake.calls))
+                brief = (home / "fab/runs" / run_id / "brief.md").read_text()
+                self.assertEqual(fake.calls[-2].input, brief)
+                refusal = brief.split("## The landing refused this branch\n", 1)[1]
+                self.assertIn("- Step: `gate:files`", refusal)
+                self.assertEqual(refusal.split("```text\n", 1)[1].split("\n```", 1)[0],
+                                 text.rstrip("\n"))
+                self.assertEqual(record, {"step": "gate:files", "log": "/digests/task.md",
+                                          "findings": text})
 
     def test_start_still_launches_when_gate_log_cannot_be_read(self):
         with tmp_home() as home:
@@ -668,10 +691,12 @@ class RunMainTest(unittest.TestCase):
 
 
 class RoleTextTest(unittest.TestCase):
-    def test_repository_notes_follow_the_role(self):
-        self.assertTrue(run.role_text("fabrig").startswith(run.ROLE.read_text()))
-        self.assertIn("# Working in fabrig", run.role_text("fabrig"))
-        self.assertEqual(run.role_text("agents"), run.ROLE.read_text())
+    def test_repository_notes_follow_the_role_and_taste(self):
+        role = run.ROLE.read_text().rstrip("\n")
+        taste = run.TASTE.read_text().rstrip("\n")
+        notes = run.ROLE.with_name("fabrig.md").read_text().rstrip("\n")
+        self.assertEqual(run.role_text("agents"), role + "\n\n" + taste + "\n")
+        self.assertEqual(run.role_text("fabrig"), role + "\n\n" + taste + "\n\n" + notes + "\n")
 
 
 class StartUndoTest(unittest.TestCase):
