@@ -39,18 +39,13 @@ Contract: `docs/design/fleet.md`, sections 1–6.
   Read-only `/etc/systemd/journald.conf.d/` checks on all five hosts at 11:21 UTC
   found hel8's 90-fabrig.conf/SystemMaxUse=200M; the directory was absent on h3/6/7/8.
 - **The bypass decision remains pending.** `fleet/claude/settings.json:1` sets
-  permissions.defaultMode=auto; the task establishes no decision to deploy bypass.
-- **Factory tooling remains in fabrig.** `tools/fleet-sync:1086` uses its installer;
-  read-only `git -C /home/free/src/fabrig/main ls-tree HEAD agents tools` confirms both trees. Role text remains external (`tools/session/session_lib.py:257`).
+  permissions.defaultMode=auto; the user's decision on bypass is pending.
+- **Factory tooling remains in fabrig.** `tools/fleet-sync:1086` uses its
+  installer; read-only `git -C ~/src/fabrig/main ls-tree HEAD agents tools`
+  confirms both trees. Role text remains external
+  (`tools/session/session_lib.py:257`).
 - **The reaper is unlanded.** Fetched origin/main `5c9e665` and this baseline lack
   tools/reap and reap units; origin/deploy/reap-1 `f71889c` contains them (`git ls-tree`).
-- **Timing remains conditional.** `docs/design/fleet.md:80` still promises the next run;
-  hold, contention, backoff or release failure can skip rendering (`tools/fleet-sync:2169`, `:2180`, `:2195`, `:2203`). See `gate.status.md` for landing/lock gaps.
-- **Smoke success is weaker than configuration-read success** (`docs/design/fleet.md:67`).
-  `tools/fleet-sync:891` accepts exit 1 and `:894` checks JSON structure, including
-  failed items. A disposable fixture confirmed promotion with malformed Codex TOML.
-- **Status checks the local host in-process**, rather than over SSH as `docs/design/fleet.md:98`
-  implies (`tools/fleet-sync:2253`); only other hosts use parallel SSH checks.
 
 ## Verification
 

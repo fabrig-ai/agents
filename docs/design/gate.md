@@ -9,9 +9,9 @@ Code departures: `docs/design/gate.status.md`.
   required workflow, not an enforced one. It checks,
   rebases onto origin/main, checks again if anything moved, and fast-forwards
   main. It never force-pushes.
-- **Main deploys itself.** Every landing reaches all hosts within a minute
-  (`docs/design/fleet.md`), so the gate is the only review the fleet gets
-  before running new code.
+- **Main deploys itself.** Every host polls main each minute and deploys a
+  landing at its next healthy run (`docs/design/fleet.md`, section 3). The
+  gate is therefore the only review the fleet gets before running new code.
 - **One gate per host at a time.** Concurrent full gates starve each other and
   the sessions on the host, so both commands serialize on one host lock
   (by convention: see section 4).

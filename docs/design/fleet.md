@@ -64,9 +64,10 @@ and warn; installing a pin is the explicit `--provision`.
 
 1. **Agents release.** Fetch main, build an immutable release directory, run
    its self-check and a smoke check, then switch the `current` symlink
-   atomically and continue with the new runner. The smoke check proves that the
-   new runner can read the host's configuration; drift (exit 1) is allowed. A
-   candidate that cannot run never becomes current.
+   atomically and continue with the new runner. The smoke check proves the new
+   runner executes on this host and emits valid state. It accepts drift and
+   failed items (exit 1), which the new runner then reports. A candidate that
+   cannot run never becomes current.
 2. **Fabrig tools.** Run fabrig's own installer only when fabrig's `tools/`
    changed, when its links are wrong, or when its clone is missing. It runs under
    the install lock that ops also uses. Ops can defer this step.
@@ -77,7 +78,9 @@ and warn; installing a pin is the explicit `--provision`.
 5. **Record.** Write state, items and run log. Repeated failures back off
    (1 minute up to 60), but a new main commit skips the wait.
 
-**Effect timing.** A rendered file is in place at the next run. Claude
+**Effect timing.** A rendered file is in place after the next successful
+convergence. That convergence can be delayed by a hold, a pin, backoff, a busy
+lock or a failed release. Claude
 documents that it reloads its settings live, except model and effort, which
 apply at the next start. That is Claude's behaviour, which fleet-sync's tests
 do not establish. Changed long-running and start-once services report
@@ -95,8 +98,8 @@ do not establish. Changed long-running and start-once services report
   fabrig mirror.
 - `--preview DIR` converges a copy of the managed files inside DIR and prints
   diffs, for a first deployment.
-- `status` runs the check on every host over SSH and prints a recovery command
-  for a bad release.
+- `status` runs the check locally in-process and on the other hosts over SSH,
+  and prints a recovery command for a bad release.
 
 ## 4. Safety boundaries
 

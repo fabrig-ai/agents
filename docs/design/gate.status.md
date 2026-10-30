@@ -24,10 +24,6 @@ Contract: `docs/design/gate.md`, sections 1–4.
   (`tools/check.sh:7`, `tools/land:17`); neither verifies lock ownership.
   AGENTS_GATE_LOCK may select another lock. Host exclusion relies on cooperation,
   as the corrected section 4 now states.
-- **The rollout deadline remains overstated** (`docs/design/gate.md:12`).
-  `fleet/units/fleet-sync.timer:6` schedules polls, not completion. Hold/pin,
-  contention, backoff and deployment failure can delay convergence
-  (`tools/fleet-sync:840`, `:2011`, `:2169`). Fix: describe conditional minutely polling.
 - **Timing is printed but not retained with a landing.** `tools/check.sh:80` prints
   elapsed time; `tools/land:31` does not persist it, matching the remaining Later item.
 
