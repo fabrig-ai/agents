@@ -5,6 +5,7 @@ import argparse
 import os
 from pathlib import Path
 import pwd
+import runpy
 import shlex
 import stat
 import subprocess
@@ -62,9 +63,19 @@ class Bootstrap:
         if type(enabled) is not bool:
             raise ValueError("pquota flag must be boolean")
         if enabled:
+            guard = None
+            if not self.args.dry_run:
+                guard = runpy.run_path(str(ROOT / "fleet/bootstrap/pquota"))["Pquota"](self.args.host)
+                guard.mount()
+                before = guard.boot_safety()
+                guard.backup()
             self.write("/etc/default/grub.d/90-fabrig-pquota.cfg",
                        'GRUB_CMDLINE_LINUX="$GRUB_CMDLINE_LINUX rootflags=pquota"\n')
             self.run("update-grub")
+            if guard:
+                line = guard.check_entry(True)
+                if [item for item in shlex.split(line) if item != "rootflags=pquota"] != shlex.split(before["default"]):
+                    raise ValueError("update-grub changed existing default Linux options")
             print("USER: pquota requires one drained reboot after root bootstrap; fleet-scale automation is pending.")
 
     def root(self):
