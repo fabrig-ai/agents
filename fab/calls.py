@@ -169,11 +169,13 @@ def open_questions(events: Iterable[dict]) -> list[dict]:
 
 
 def claude_argv(brief_path: Path, workdir: Path, *, model: str = MODEL) -> list[str]:
-    """`claude -p --model <model> --output-format json --dangerously-skip-permissions
-    --add-dir <workdir>`, the prompt being a one-line instruction to read and follow brief_path."""
-    return ["claude", "-p", "--model", model, "--output-format", "json",
-            "--dangerously-skip-permissions", "--add-dir", str(workdir),
-            f"Read and follow the brief at {shlex.quote(str(brief_path))}."]
+    """`claude -p <prompt> --model <model> --output-format json --dangerously-skip-permissions
+    --add-dir=<workdir>`, the prompt being a one-line instruction to read and follow brief_path.
+    The prompt comes first and --add-dir takes `=`: --add-dir accepts several directories and
+    would otherwise take the prompt for one."""
+    return ["claude", "-p", f"Read and follow the brief at {shlex.quote(str(brief_path))}.",
+            "--model", model, "--output-format", "json", "--dangerously-skip-permissions",
+            f"--add-dir={workdir}"]
 
 
 def start(role: str, subject: str, repo: Path, brief: str, *, sh: Runner = run,

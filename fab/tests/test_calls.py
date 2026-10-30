@@ -195,12 +195,13 @@ class BriefTest(unittest.TestCase):
     def test_claude_argv(self):
         brief, worktree = Path("/a b's/brief.md"), Path("/work tree")
         argv = calls.claude_argv(brief, worktree)
-        self.assertEqual(argv[:-1], ["claude", "-p", "--model", calls.MODEL, "--output-format", "json",
-                                    "--dangerously-skip-permissions", "--add-dir", str(worktree)])
-        self.assertEqual(len(argv[-1].splitlines()), 1)
-        self.assertIn("Read and follow", argv[-1])
-        self.assertIn("brief.md", argv[-1])
-        self.assertEqual(calls.claude_argv(brief, worktree, model="another")[3], "another")
+        self.assertEqual(argv[:2], ["claude", "-p"])
+        self.assertEqual(argv[3:], ["--model", calls.MODEL, "--output-format", "json",
+                                    "--dangerously-skip-permissions", f"--add-dir={worktree}"])
+        self.assertEqual(len(argv[2].splitlines()), 1)
+        self.assertIn("Read and follow", argv[2])
+        self.assertIn("brief.md", argv[2])
+        self.assertEqual(calls.claude_argv(brief, worktree, model="another")[4], "another")
 
 
 class StartTest(unittest.TestCase):
