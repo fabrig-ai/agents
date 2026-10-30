@@ -30,3 +30,5 @@ file
 xz-utils
 zstd
 unzip
+xfsprogs
+grub2-common

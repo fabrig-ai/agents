@@ -273,3 +273,151 @@ Normal runs do not provision new tools or take over kache. Fresh-host
 provisioning is a separate explicit operator action; existing kache takeover
 requires host-by-host agreement. Reverts also go through tools/land; preserve
 parser compatibility and keep private logins and operational evidence intact.
+
+## XFS project quota proposal: ops review, dry-run first
+
+`pquota` is a Python 3.13 stdlib root tool, separate from convergence. No
+existing host is opted in. Commands below are an operator procedure, **not
+permission to edit GRUB or reboot a live builder**. It enables accounting and
+enforcement only; it assigns no project IDs, roots or limits and establishes
+no build containment. See `docs/design/fleet.md`, sections 4–5, and ops'
+`bounded-slots-design-reviewed-20261030T1215.md` for the separate containment work.
+
+Read-only proof (the command defaults to `plan`):
+
+```sh
+sudo python3 -I fleet/bootstrap/pquota --host hetzner7
+sudo python3 -I fleet/bootstrap/pquota plan --host hetzner7
+```
+
+The plan prints cmdline, XFS root options, `xfs_quota -x -c state /`, the
+selected Linux boot line, exact proposed drop-in and `update-grub`, plus each
+fence observation. It writes no file, takes no lock and invokes no update,
+reconcile or reboot command. Unavailable observations are displayed, not
+interpreted as an empty queue. The default central address is hel8,
+`free@204.168.210.29`; `--central` can supply its trusted SSH destination.
+Root drops to `free` for SSH, heavy and user-systemd reads. No root SSH keys,
+credentials or root heavy ledger access are used. SSH keeps strict host checking.
+
+**Claim and queue fence contract.** The deployed `tools/slots/claim` has no
+`--json` or unavailable-host command. Its documented interface is
+`ssh free@204.168.210.29 'claim list'` (slots design section 3), parsed strictly
+and filtered by exact host. It runs at the hel8 authority and records survive
+a builder reboot; never delete, copy, release or recreate claims to reboot.
+There is no expiry. A host absent from the nonempty inventory (currently h8)
+has no claimable slots. The slots design describes assigning draining slots
+to ops and removing the drained host from inventory; that is an inventory
+change requiring owner coordination, not a CLI host-disable operation.
+The marker plus zero claims is the available fence. Ops must first stop all
+claim producers and heavy submitters, including QA/after-landing/queue paths,
+and keep them stopped throughout reboot and review. This is an operational
+fence, not an atomic authority-side admission barrier.
+
+Heavy has no status CLI. The tool calls its documented read-only
+`heavy --installed`, then reads the atomic version-1
+`/home/free/src/rust/tmp/heavy/state.json` snapshot **as free**, without
+constructing Ledger or running reconciliation (heavy design sections 2, 12).
+Every task must be `released`; queued, waiting, disk-retry, launching, active,
+finishing, closing and unknown states all refuse. Missing/unreadable/unsupported
+state or command failure refuses. This proposal covers that default queue;
+ops must inventory and drain any queues using DEV_ROOT/DEV_TMP overrides too.
+A snapshot cannot block a concurrent submitter. End all producer lifetimes
+before creating the marker. Do not stop recovery before it drains its children.
+
+After stopping new claims/submissions and draining existing lifetimes, ops
+creates a root-owned, non-group/world-writable marker. The script never makes
+it. Example (replace the reason with the actual drain evidence):
+
+```sh
+sudo install -d -m 700 /var/lib/fabrig-pquota
+printf '%s\n' 'hetzner7 ops: producers stopped; claims empty; heavy drained; review REF' |
+  sudo tee /var/lib/fabrig-pquota/fence >/dev/null
+sudo chmod 600 /var/lib/fabrig-pquota/fence
+sudo python3 -I fleet/bootstrap/pquota prepare --yes --host hetzner7
+# Review state.json, generated default and pre-boot proof before choosing time:
+sudo python3 -I fleet/bootstrap/pquota reboot --yes --host hetzner7
+# Once SSH returns, still fenced:
+sudo python3 -I fleet/bootstrap/pquota verify --host hetzner7
+```
+
+Prepare atomically installs exactly:
+
+```sh
+GRUB_CMDLINE_LINUX="$GRUB_CMDLINE_LINUX rootflags=pquota"
+```
+
+at `/etc/default/grub.d/90-fabrig-pquota.cfg`, runs `update-grub`, and verifies
+the default entry, not a stray occurrence elsewhere. Only numeric top-level
+GRUB_DEFAULT entries are supported. Saved/one-shot/submenu defaults and defaults
+overridden in other drop-ins refuse for ops investigation. Its durable
+`/var/lib/fabrig-pquota/state.json` includes original cmdline/mount, boot ID,
+pre/post grub.cfg hashes and fence proof; a same-boot prepared retry preserves
+these originals. An interrupted/failed update retains intent; do not reboot
+until a successful prepare or rollback. Root writes reject symlink paths.
+Mutating commands require `--yes` and serialize locally. Prepare and reboot
+recheck the fence; reboot additionally checks successful preparation, unchanged boot/config and
+selected entry. Reboot is never implicit.
+
+Each verify line is PASS or FAIL: rootflags, XFS prjquota, project accounting
+and enforcement, changed boot ID, free's fleet-sync timer, heavy installation
+and idle state, and the new authoritative claim list. Any current claims are
+reported, including work created during downtime. **The central list has no
+history**: a claim created and released while the host was down is unobservable.
+Consequently the separate downtime-history check always prints FAIL/UNPROVEN
+and verify exits 1 on the current protocol. Do not claim an automated green
+readmission from this proposal: ops must review independent authority-side
+producer/audit evidence. A future claim-history interface is required for that
+check to pass automatically. This deliberate gap blocks unattended rollout.
+
+For rollback, keep the host drained and marker intact:
+
+```sh
+sudo python3 -I fleet/bootstrap/pquota rollback --yes --host hetzner7
+sudo python3 -I fleet/bootstrap/pquota reboot --yes --host hetzner7
+```
+
+Rollback works even without a prepare record (fresh-bootstrap rescue), and
+does not depend on claim/heavy availability. It removes only the exact owned
+drop-in, regenerates GRUB, verifies the
+default no longer has pquota and records hashes/result. It does not reboot or
+disable quota on the running mount. After the separate reboot, ops proves the
+boot ID changed, pquota absent from cmdline/default and quota accounting off,
+then checks fleet-sync, heavy and claims before considering readmission.
+Pre-existing pquota from another source will prevent successful rollback;
+resolve that source with ops. Never reset claims/heavy to make checks pass.
+
+**Out-of-band rescue:** use the Hetzner console, select the boot entry, press
+GRUB `e`, delete `rootflags=pquota` from its Linux line, and boot with Ctrl-X
+or F10. This edits one boot only. Once up, keep producers stopped, restore the
+marker/fence proof, then run `rollback --yes`; investigate before another boot.
+The initial quota-enabled mount may scan about 1.4 million inodes; allow console
+access and a maintenance window. Remount cannot enable XFS accounting.
+
+**Staggered rollout:** one host at a time: **h7, h6, h3, h8** (full names
+hetzner7, hetzner6, hetzner3, hetzner8). H8 runs the queue and goes last.
+Before each host, retain pre-boot plan, central claim/producer evidence and
+heavy drainage. After boot retain verify plus ops' heavy recovery and slot
+checks. Require all proof green, including resolving the history gap above,
+then soak for **at least two hours** before touching the next host. Any failure
+triggers rollback of that host and stops the rollout; never roll back or
+reboot multiple hosts at once. Keep console access and the previous known-good
+boot available. Re-enable producers and remove the marker only after ops accepts
+the proof; a rollback does not silently readmit the host.
+
+**Landing order:** this branch is a two-stage proposal. Land the compatibility
+commit (fleet-sync's pquota boolean and asset allowlist) first, and wait until
+all hosts report that release. Only then land the script/bootstrap/docs/tests
+commit. An older runner validates a candidate with its own asset allowlist,
+so shipping the new fleet asset before that barrier can strand promotion.
+Do not squash the stages into one main landing.
+
+**New hosts:** add `pquota = true` to the host's table in `fleet/hosts.toml`
+only after the parser code is deployed (fleet design section 6). Omission is
+false; no host is enabled by this branch. `root.sh` delegates to `bootstrap.py
+root`, and both install the same drop-in atomically and run `update-grub` only
+when enabled. False leaves existing boot configuration alone. The new host
+requires **one drained reboot after root bootstrap** and manual mount/quota,
+service and claim proof before readmission. Fresh bootstrap has no pquota
+prepare record; the prepare/verify transaction above is for existing hosts.
+Fleet-sync validates the flag but never changes boot configuration. Fleet-scale
+will add new-host reboot orchestration later.
