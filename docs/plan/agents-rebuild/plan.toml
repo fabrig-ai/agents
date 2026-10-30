@@ -104,17 +104,10 @@ design = "docs/design/fab.md, 1"
 # Slice 3: the dispatcher keeps the pipeline full unattended.
 
 [[part]]
-id = "decide"
-title = "The dispatcher's decisions: buffer, needs, places, requeues"
+id = "dispatch"
+title = "The dispatcher: decide's actions and the tick that takes them; questions park tasks"
 mode = "feature"
-needs = ["files", "run"]
-design = "docs/design/fab.md, 10"
-
-[[part]]
-id = "tick"
-title = "The dispatcher's loop on a timer; questions and their answers"
-mode = "feature"
-needs = ["decide", "land", "slots"]
+needs = ["files", "run", "land"]
 design = "docs/design/fab.md, 10"
 
 [[part]]
@@ -153,7 +146,7 @@ design = "docs/design/fab.md, 10"
 id = "retire"
 title = "Retire session, watch's session rules, post, lease, record-collect and the old kit"
 mode = "migration"
-needs = ["tick", "report"]
+needs = ["dispatch", "report"]
 design = "docs/design/fab.md, 10"
 
 [[slice]]
@@ -171,7 +164,7 @@ walk = true
 [[slice]]
 id = 3
 story = "Tasks of a plan run, park on questions and land with nobody dispatching by hand"
-parts = ["decide", "tick", "calls"]
+parts = ["dispatch", "calls"]
 walk = true
 
 [[slice]]
