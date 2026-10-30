@@ -6,12 +6,12 @@ Contract: `docs/design/fleet.md`, sections 1–6.
 ## Present
 
 - Project-quota boot proposal: `fleet/bootstrap/pquota` and opt-in root bootstrap;
-  default off, no live GRUB change/reboot. Offline fixture proof only. The
-  central claim CLI has no host-disable or history API; verify deliberately
-  reports downtime history UNPROVEN and refuses automated readmission. Ops
-  must stop producers and supply independent audit proof before rollout.
-  Land the fleet-sync compatibility commit and deploy it everywhere before
-  the new fleet asset/bootstrap commit; do not squash these stages.
+  all flags off, no live boot/quota changes. Follow-up replaces zero-claim/history
+  fencing with pinned full central occupancy and bound retained-owner approvals.
+  Pre-boot source/environment/writer proof, write-once backups, owner restart
+  recording and bounded post-boot EDQUOT/inheritance verification have fixtures.
+  Only plan has run on a real host; boot/quota enforcement remains unproved.
+  Deploy the compatibility parser fleet-wide before the asset/bootstrap stage.
 
 - Release promotion, rendering, links, installer locking, unit journals, controls,
   backoff, inspection and recovery exist (`tools/fleet-sync:831`, `:953`, `:1114`, `:1312`, `:1340`, `:1972`, `:2032`, `:2060`, `:2232`).
