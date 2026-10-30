@@ -179,6 +179,84 @@ class DecideTest(unittest.TestCase):
         self.assertEqual((self.plan, tasks, events, self.hosts), before)
 
 
+class CallActionsTest(unittest.TestCase):
+    def setUp(self):
+        self.plan = make_plan(part("core"), part("next"))
+        self.tasks = {t.id: t for t in (task(str(n)) for n in range(dispatch.ANSWER_AT))}
+        self.now = "2026-10-30T12:30:00.000Z"
+
+    def actions(self, events=(), design=()):
+        return dispatch.call_actions(self.plan, self.tasks, list(events), list(design), self.now)
+
+    def question(self, name="0", ts="2026-10-30T12:29:00.000Z"):
+        return event("question.asked", name, ts=ts, text="Which type?")
+
+    def call(self, role="answer", identifier="a"):
+        return dict(ev="call.started", call=identifier, role=role, subject="draft",
+                    branch=f"calls/{identifier}")
+
+    def test_answer_count_threshold_and_plan_questions_only(self):
+        questions = [self.question(str(n)) for n in range(dispatch.ANSWER_AT)]
+        expected = [Action("call", task="draft", run_kind="answer")]
+        self.assertEqual(self.actions(questions[:-1]), [])
+        self.assertEqual(self.actions(questions), expected)
+        self.assertEqual(self.actions(questions + [self.question("0")]), expected)
+        self.assertEqual(self.actions(questions[:-1] + [self.question("other")]), [])
+        questions.append(event("question.answered", "0"))
+        self.assertEqual(self.actions(questions), [])
+
+    def test_answer_age_threshold_uses_oldest_timestamp(self):
+        for ts, expected in (("2026-10-30T12:00:00.001Z", False),
+                             ("2026-10-30T12:00:00.000Z", True),
+                             ("2026-10-30T11:59:59.999Z", True)):
+            with self.subTest(ts=ts):
+                actions = self.actions([self.question(), self.question("1", ts)])
+                self.assertEqual(actions, [Action("call", task="draft", run_kind="answer")]
+                                 if expected else [])
+        self.assertEqual(self.actions(), [])
+
+    def test_only_first_design_part_and_role_exclusion(self):
+        questions = [self.question(ts="2026-10-30T12:00:00.000Z")]
+        answer = Action("call", task="draft", run_kind="answer")
+        skeleton = Action("call", task="core", run_kind="skeleton")
+        self.assertEqual(self.actions(questions, ["core", "next"]), [answer, skeleton])
+        self.assertEqual(self.actions(questions + [self.call()], ["core", "next"]), [skeleton])
+        self.assertEqual(self.actions(questions + [self.call("skeleton")], ["core"]), [answer])
+        self.assertEqual(self.actions(questions + [self.call(), self.call("skeleton", "s")], ["core"]), [])
+
+    def test_ended_releases_role_and_only_done_finishes_once(self):
+        for outcome in ("done", "failed", "question", "infra"):
+            with self.subTest(outcome=outcome):
+                events = [self.call("skeleton"), dict(ev="call.ended", call="a", outcome=outcome)]
+                finish = Action("finish", run="a", run_kind="skeleton", branch="calls/a")
+                skeleton = Action("call", task="next", run_kind="skeleton")
+                self.assertEqual(self.actions(events, ["next"]),
+                                 [finish, skeleton] if outcome == "done" else [skeleton])
+                events.append(dict(ev="call.finished", call="a", outcome="failed"))
+                self.assertEqual(self.actions(events, ["next"]), [skeleton])
+
+    def test_finish_uses_matching_start_and_later_finished_record(self):
+        events = [self.call("skeleton", "s"), self.call(),
+                  dict(ev="call.finished", call="a", outcome="done"),
+                  dict(ev="call.ended", call="a", outcome="done"),
+                  dict(ev="call.ended", call="s", outcome="done")]
+        self.assertEqual(self.actions(events),
+                         [Action("finish", run="a", run_kind="answer", branch="calls/a"),
+                          Action("finish", run="s", run_kind="skeleton", branch="calls/s")])
+        events.append(dict(ev="call.finished", call="a", outcome="done"))
+        self.assertEqual([a.run for a in self.actions(events)], ["s"])
+
+    def test_pure_repeatable_and_inputs_unchanged(self):
+        events = [self.call(), self.question()]
+        design = ["core", "next"]
+        before = deepcopy((self.plan, self.tasks, events, design))
+        with patch("fab.log.read", side_effect=AssertionError("read log")), \
+             patch("fab.log.home", side_effect=AssertionError("read home")):
+            first = self.actions(events, design)
+            self.assertEqual(self.actions(events, design), first)
+        self.assertEqual((self.plan, self.tasks, events, design), before)
+
+
 class TickTest(unittest.TestCase):
     def setUp(self):
         self.home = self.enterContext(tmp_home())
@@ -231,7 +309,7 @@ walk = false
             log.append(ev, path=path, **fields)
 
     def tick(self, **kwargs):
-        return dispatch.tick(self.directory, sh=self.fake, hosts=self.hosts, **kwargs)
+        return dispatch.tick(self.directory, sh=self.fake, hosts=kwargs.pop("hosts", self.hosts), **kwargs)
 
     def queue(self, records):
         self.fake.on(ssh("fake@gate", ["fab", "queue", "log"])[:-1],
@@ -303,7 +381,7 @@ walk = false
         self.assertEqual(len([e for e in log.read() if e["ev"] == "branch.ready"]), 1)
         self.assertEqual(len([e for e in log.read() if e["ev"] == "question.asked"]), 1)
 
-    def test_design_only_prints(self):
+    def test_design_starts_first_skeleton_in_user_unit(self):
         write(self.directory / "plan.toml", (self.directory / "plan.toml").read_text() +
               '\n[[part]]\nid="next"\ntitle="Next"\nmode="feature"\nneeds=[]\ndesign="next.md"\n')
         # Extend the slice to include the new part.
@@ -311,10 +389,105 @@ walk = false
         write(path, path.read_text().replace('parts = ["core"]', 'parts = ["core", "next"]'))
         self.append(event("question.asked", text="Which?"))
         actions = self.tick()
-        self.assertEqual(actions, [Action("design", detail="next")])
+        self.assertEqual(actions, [Action("design", detail="next"),
+                                   Action("call", task="next", run_kind="skeleton")])
+        self.assertEqual(self.fake.argvs()[-1],
+                         ["systemd-run", "--user", "--collect", "--unit", "fab-call-skeleton-1",
+                          "fab", "call", "skeleton", "next", "--plan", str(self.directory)])
         self.assertEqual(self.calls, [])
-        self.assertEqual(self.out.getvalue(), "design - next\n")
+        self.assertEqual(self.out.getvalue(), "design - next\ncall next \n")
         self.assertEqual(len(log.read()), 1)
+
+    def completed_call(self, role="answer", identifier="answer-1", path=None):
+        self.append(dict(ev="call.started", call=identifier, role=role, subject="draft",
+                         branch=f"calls/{identifier}"),
+                    dict(ev="call.ended", call=identifier, role=role, outcome="done"), path=path)
+        return log.home() / "calls" / identifier / "report.md"
+
+    def test_answer_unit_uses_role_start_count_and_no_part_argument(self):
+        self.completed_call("answer", "old")
+        self.append(dict(ev="call.finished", call="old", outcome="done"))
+        self.completed_call("skeleton", "s1")
+        self.append(dict(ev="call.finished", call="s1", outcome="done"))
+        self.append(event("question.asked", ts="2000-01-01T00:00:00Z", text="Which?"))
+        self.assertEqual(self.tick(), [Action("call", task="draft", run_kind="answer")])
+        self.assertEqual(self.fake.argvs()[-1],
+                         ["systemd-run", "--user", "--collect", "--unit", "fab-call-answer-2",
+                          "fab", "call", "answer", "--plan", str(self.directory)])
+        self.assertEqual(len([e for e in log.read() if e["ev"] == "call.started"]), 2)
+
+    def test_call_decisions_see_questions_written_by_collect(self):
+        self.append(started())
+        self.collect.side_effect = lambda *a, **kw: self.append(
+            event("question.asked", ts="2000-01-01T00:00:00Z", text="Which?"))
+        actions = self.tick()
+        self.assertEqual([a.kind for a in actions], ["collect", "call"])
+        self.assertEqual(self.fake.argvs()[-1][-5:],
+                         ["fab", "call", "answer", "--plan", str(self.directory)])
+
+    def test_finish_lands_then_parses_answered_line_and_logs_once(self):
+        self.add_task("b")
+        self.append(event("question.asked", text="Which?"), event("question.asked", "b", text="Why?"))
+        report = self.completed_call()
+        write(report, "Done: answered\nOther: draft/ignored\nAnswered: draft/a  draft/b draft/a\nDetails.\n")
+
+        def landing(argv):
+            self.assertEqual(argv, ["calls/answer-1"])
+            self.assertNotIn("question.answered", [e["ev"] for e in log.read()])
+            print("Landed")
+            return 0
+
+        self.land.side_effect = landing
+        actions = self.tick(hosts={})
+        self.assertEqual(actions, [Action("finish", run="answer-1", run_kind="answer", branch="calls/answer-1")])
+        answered = [e for e in log.read() if e["ev"] == "question.answered"]
+        self.assertEqual([(e["task"], e["call"]) for e in answered],
+                         [("draft/a", "answer-1"), ("draft/b", "answer-1")])
+        self.assertEqual({k: v for k, v in log.read()[-1].items() if k != "ts"},
+                         dict(ev="call.finished", call="answer-1", role="answer", outcome="done"))
+        self.assertEqual(self.tick(hosts={}), [])
+        self.land.assert_called_once()
+        self.assertEqual(self.out.getvalue().splitlines(), ["finish - "])
+
+    def test_finish_skeleton_needs_no_report_and_respects_explicit_log(self):
+        path = self.home / "custom.jsonl"
+        self.completed_call("skeleton", "s1", path=path)
+        self.tick(hosts={}, log_path=path)
+        self.land.assert_called_once_with(["calls/s1"])
+        self.assertEqual(log.read(), [])
+        self.assertEqual(log.read(path)[-1]["outcome"], "done")
+        self.assertEqual(log.read(path)[-1]["ev"], "call.finished")
+
+    def test_failed_finish_is_noted_and_finished_without_answering(self):
+        for failure in (1, OSError("offline\nretry later")):
+            with self.subTest(failure=failure):
+                identifier = f"answer-{self.land.call_count}"
+                write(self.completed_call(identifier=identifier), "Done: answered\nAnswered: draft/a\n")
+                if isinstance(failure, Exception):
+                    self.land.side_effect = failure
+                else:
+                    self.land.side_effect = lambda argv: print("conflict") or 1
+                self.tick(hosts={})
+                note, finished = log.read()[-2:]
+                self.assertEqual(note["ev"], "note")
+                self.assertIn("finish - failed:", note["text"])
+                self.assertEqual((finished["ev"], finished["call"], finished["role"], finished["outcome"]),
+                                 ("call.finished", identifier, "answer", "failed"))
+                count = self.land.call_count
+                self.tick(hosts={})
+                self.assertEqual(self.land.call_count, count)
+                self.assertNotIn("question.answered", [e["ev"] for e in log.read()])
+
+    def test_failed_call_launch_is_noted_and_other_role_still_starts(self):
+        self.append(event("question.asked", ts="2000-01-01T00:00:00Z", text="Which?"))
+        self.fake.on(["systemd-run", "--user", "--collect", "--unit", "fab-call-answer-1"],
+                     Result(1, err="no unit"))
+        design = Action("design", detail="core, next")
+        with patch("fab.dispatch.decide", return_value=[design]):
+            self.tick()
+        self.assertEqual([argv[4] for argv in self.fake.argvs() if argv[0] == "systemd-run"],
+                         ["fab-call-answer-1", "fab-call-skeleton-1"])
+        self.assertIn("call draft failed:", log.read()[-1]["text"])
 
     def test_action_failure_logs_note_and_next_action_runs(self):
         self.add_task("b")

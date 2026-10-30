@@ -16,9 +16,10 @@ from collections import Counter
 from collections.abc import Iterable, Mapping
 from contextlib import redirect_stdout
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 
-from fab import hosts as machines, land, log, plan as specs, run as runs, state
+from fab import calls, hosts as machines, land, log, plan as specs, run as runs, state
 from fab.hosts import Host
 from fab.plan import Plan, Task
 from fab.sh import Failed, Runner, run, ssh
@@ -41,7 +42,30 @@ def call_actions(plan: Plan, tasks: Mapping[str, Task], events: list[dict], desi
     minutes old at `now`; a skeleton call for design[0] (decide's design list) when no
     skeleton call is in flight. Actions: Action("call", task=<subject>, run_kind=<role>) and
     Action("finish", run=<call id>, run_kind=<role>, branch=<branch>)."""
-    raise NotImplementedError
+    started = {event["call"]: event for event in events if event.get("ev") == "call.started"}
+    flight = dict(started)
+    pending = {}
+    for event in events:
+        identifier = event.get("call")
+        if event.get("ev") == "call.ended":
+            flight.pop(identifier, None)
+            if event.get("outcome") == "done" and identifier in started:
+                pending[identifier] = started[identifier]
+        elif event.get("ev") == "call.finished":
+            pending.pop(identifier, None)
+    actions = [Action("finish", run=identifier, run_kind=event["role"], branch=event["branch"])
+               for identifier, event in pending.items()]
+    roles = {event["role"] for event in flight.values()}
+    questions = [event for event in calls.open_questions(events) if event["task"] in tasks]
+    if "answer" not in roles and questions:
+        old_enough = (datetime.fromisoformat(now) -
+                      min(datetime.fromisoformat(event["ts"]) for event in questions)
+                      >= timedelta(minutes=ANSWER_AFTER))
+        if len(questions) >= ANSWER_AT or old_enough:
+            actions.append(Action("call", task=plan.draft, run_kind="answer"))
+    if "skeleton" not in roles and design:
+        actions.append(Action("call", task=design[0], run_kind="skeleton"))
+    return actions
 
 
 @dataclass(frozen=True)
@@ -200,8 +224,10 @@ def tick(plan_dir: Path, *, sh: Runner = run, hosts: Mapping[str, Host] | None =
                 imported.add(key)
 
         actions = decide(plan, tasks, events, hosts)
-        for action in actions:
+
+        def take(action):
             detail = action.detail
+            outcome = "failed"
             try:
                 match action.kind:
                     case "collect":
@@ -231,6 +257,31 @@ def tick(plan_dir: Path, *, sh: Runner = run, hosts: Mapping[str, Host] | None =
                     case "start":
                         runs.start(tasks[action.task], hosts[action.host], kind=action.run_kind,
                                    events=log.read(log_path), sh=sh, log_path=log_path)
+                    case "call":
+                        events = log.read(log_path)
+                        number = 1 + sum(event.get("ev") == "call.started" and
+                                         event.get("role") == action.run_kind for event in events)
+                        argv = ["fab", "call", action.run_kind]
+                        if action.run_kind == "skeleton":
+                            argv.append(action.task)
+                        argv.extend(["--plan", str(plan_dir.resolve())])
+                        sh(["systemd-run", "--user", "--collect", "--unit",
+                            f"fab-call-{action.run_kind}-{number}", *argv], check=True)
+                    case "finish":
+                        output = io.StringIO()
+                        with redirect_stdout(output):
+                            refused = land.main([action.branch])
+                        if refused:
+                            raise RuntimeError(output.getvalue().strip() or "landing refused")
+                        if action.run_kind == "answer":
+                            report = (home / "calls" / action.run / "report.md").read_text(encoding="utf-8")
+                            answered = next((line.removeprefix("Answered:").split()
+                                             for line in report.splitlines()
+                                             if line.startswith("Answered:")), [])
+                            for identifier in dict.fromkeys(answered):
+                                log.append("question.answered", path=log_path, task=identifier,
+                                           call=action.run)
+                        outcome = "done"
                     case "park":
                         log.append("question.asked", path=log_path, task=action.task,
                                    run=action.run, text=action.detail)
@@ -238,7 +289,20 @@ def tick(plan_dir: Path, *, sh: Runner = run, hosts: Mapping[str, Host] | None =
                 detail = "failed: " + " ".join(str(error).splitlines())
                 log.append("note", path=log_path,
                            text=f"{action.kind} {action.task or '-'} {detail}")
+            finally:
+                if action.kind == "finish":
+                    log.append("call.finished", path=log_path, call=action.run,
+                               role=action.run_kind, outcome=outcome)
             print(f"{action.kind} {action.task or '-'} {detail}")
+
+        for action in actions:
+            take(action)
+        design = [part for action in actions if action.kind == "design"
+                  for part in action.detail.split(", ")]
+        followups = call_actions(plan, tasks, log.read(log_path), design, log.now())
+        actions.extend(followups)
+        for action in followups:
+            take(action)
         return actions
 
 
