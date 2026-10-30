@@ -6,8 +6,12 @@ import os
 from pathlib import Path
 import re
 import stat
+import time
 
 CAP = 2048 * 1024
+MAX_ENTRIES = 4096
+MAX_DEPTH = 32
+MAX_SECONDS = 5
 SECRET = re.compile(
     r'-----BEGIN [^\n-]*PRIVATE KEY-----|'
     r'(?<![\w-])(?:gh[pousr]_[A-Za-z0-9_-]{20,}|github_pat_[A-Za-z0-9_-]{20,}|'
@@ -78,6 +82,38 @@ def scan(text):
     return None
 
 
+def path_rule(path):
+    """A prefix must not hide a shape recognized at the start of a component."""
+    return next((rule for part in (path, *path.split('/')) if (rule := scan(part))), None)
+
+
+class Traversal:
+    def __init__(self):
+        self.deadline = time.monotonic() + MAX_SECONDS
+        self.entries = 0
+
+    def check(self, depth=0):
+        if depth > MAX_DEPTH or time.monotonic() >= self.deadline:
+            raise Refusal('source', 'enumeration bound')
+
+    def take(self, depth=0):
+        self.check(depth)
+        self.entries += 1
+        if self.entries > MAX_ENTRIES:
+            raise Refusal('source', 'enumeration bound')
+
+    def names(self, parent, depth):
+        self.check(depth)
+        names = []
+        # Bound memory and time before sorting; listdir would materialize everything.
+        with os.scandir(parent) as entries:
+            for entry in entries:
+                self.take(depth)
+                names.append(entry.name)
+        self.check(depth)
+        return sorted(names)
+
+
 def forbidden(path):
     return any(FORBIDDEN.search(part) or part.lower() in ('auth.json', 'id_rsa', 'id_ed25519')
                or re.fullmatch(r'(?i)login(?:\..*)?', part)
@@ -115,16 +151,17 @@ def signature(info):
 def snapshot(directory, metadata, cap=CAP):
     """Snapshot the allowlist once, then scan and return those exact bytes."""
     digest = hashlib.sha256()
+    traversal = Traversal()
     entries, omissions, files = [], [], {}
     try:
         with opened_directory(directory) as root:
-            def collect(parent, prefix='', group='documents'):
-                for number, name in enumerate(sorted(os.listdir(parent)), 1):
+            def collect(parent, prefix='', group='documents', depth=0):
+                for number, name in enumerate(traversal.names(parent, depth), 1):
                     path = prefix + name
                     # Unsafe names never appear in diagnostics or an index.
                     if any(ord(c) < 32 or 127 <= ord(c) < 160 or c in '\u2028\u2029' for c in name):
                         raise Refusal(f'{prefix or "source/"}entry {number}', 'kind/binary')
-                    if scan(path):
+                    if path_rule(path):
                         raise Refusal(f'{prefix or "source/"}entry {number}', 'path secret-shape')
                     info = os.stat(name, dir_fd=parent, follow_symlinks=False)
                     if not prefix and name not in ('brief.md', 'plan.md', 'notes.md', 'report.md', 'scripts', 'evidence') \
@@ -143,7 +180,7 @@ def snapshot(directory, metadata, cap=CAP):
                         child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
                         try:
                             checked(os.fstat(child), path, directory=True)
-                            collect(child, path + '/', group if prefix else name)
+                            collect(child, path + '/', group if prefix else name, depth + 1)
                         finally:
                             os.close(child)
                     else:
@@ -162,6 +199,7 @@ def snapshot(directory, metadata, cap=CAP):
             if sum(info.st_size for _, _, info in kept) > cap:
                 raise Refusal('documents', 'size')
             for path, group, info in kept:
+                traversal.check()
                 parent = os.dup(root)
                 try:
                     parts = path.split('/')
@@ -205,7 +243,12 @@ def snapshot(directory, metadata, cap=CAP):
                 omissions.append(dict(group=group, files=len(removed), bytes=sum(len(files[n]) for n in removed), reason='size'))
                 for name in removed:
                     del files[name]
+        traversal.check()
+        for number, name in enumerate(index['entries'], 1):
+            if path_rule(name):
+                raise Refusal(f'index entry {number}', 'path secret-shape')
         rule = scan(data.decode())
+        traversal.check()
         if rule:
             raise Refusal('index.json', rule)
         files['index.json'] = data
@@ -219,11 +262,15 @@ def snapshot(directory, metadata, cap=CAP):
 
 def read_snapshot(directory):
     """Recheck a frozen archive without following any path component."""
+    traversal = Traversal()
     try:
         with opened_directory(directory) as root:
-            def read(path):
-                if forbidden(path) or scan(path):
-                    raise Refusal('snapshot entry', 'name')
+            def read(path, number=0):
+                traversal.take(len(path.split('/')) - 1)
+                if path_rule(path):
+                    raise Refusal(f'snapshot entry {number}', 'path secret-shape')
+                if forbidden(path):
+                    raise Refusal(f'snapshot entry {number}', 'name')
                 parent = os.dup(root)
                 try:
                     parts = path.split('/')
@@ -253,17 +300,24 @@ def read_snapshot(directory):
             index_bytes = read('index.json')
             index = json.loads(index_bytes)
             names = index['entries']
+            if isinstance(names, list) and len(names) + 1 > MAX_ENTRIES:
+                raise Refusal('index.json', 'enumeration bound')
             if (not isinstance(names, list) or not all(isinstance(n, str) and re.fullmatch(
                     r'(?:brief|plan|notes|report)\.md|report-[1-9][0-9]*\.md|(?:scripts|evidence)/[^\x00-\x1f]+', n)
                     and all(p not in ('', '.', '..') for p in n.split('/')) for n in names)
                     or len(set(names)) != len(names)):
                 raise Refusal('index.json', 'invalid snapshot index')
-            files = {name: read(name) for name in names}
+            for number, name in enumerate(names, 1):
+                traversal.check()
+                if path_rule(name):
+                    raise Refusal(f'index entry {number}', 'path secret-shape')
+            files = {name: read(name, number) for number, name in enumerate(names, 1)}
             if index['files'] != len(files) or index['bytes'] != sum(map(len, files.values())):
                 raise Refusal('index.json', 'invalid snapshot index')
             files['index.json'] = index_bytes
             if sum(map(len, files.values())) > CAP:
                 raise Refusal('snapshot', 'size')
+            traversal.check()
             return files
     except Refusal:
         raise
@@ -280,15 +334,16 @@ def tree_digest(files):
 
 def directory_bytes(directory):
     """Metadata only, never follow links or open file contents for admission."""
-    def size(parent):
+    traversal = Traversal()
+    def size(parent, depth=0):
         total = 0
-        for name in os.listdir(parent):
+        for name in traversal.names(parent, depth):
             info = os.stat(name, dir_fd=parent, follow_symlinks=False)
             total += info.st_size
             if stat.S_ISDIR(info.st_mode):
                 fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
                 try:
-                    total += size(fd)
+                    total += size(fd, depth + 1)
                 finally:
                     os.close(fd)
         return total

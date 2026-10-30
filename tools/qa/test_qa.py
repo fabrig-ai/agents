@@ -5888,6 +5888,125 @@ for case in CASES:
     setattr(WalkTests, 'test_' + case.__name__, test_method(case.__name__))
 
 
+class EvidenceRepairTests(unittest.TestCase):
+    """Small production-code probes: fresh HOME/state, no child interpreters."""
+    def setUp(self):
+        from unittest.mock import patch
+        self.patch = patch
+        temporary = self.enterContext(tempfile.TemporaryDirectory(prefix='qa-repair-'))
+        self.root = Path(temporary)
+        self.enterContext(patch.dict(os.environ, dict(HOME=str(self.root / 'home'), DEV_ROOT=str(self.root),
+                         DEV_TMP=str(self.root / 'tmp'), QA_FIXTURE=str(self.root)), clear=True))
+        (self.root / 'home').mkdir()
+        (self.root / 'tmp').mkdir()
+        previous = os.umask(0o077)
+        self.addCleanup(os.umask, previous)
+        self.tool = runpy.run_path(str(SCRIPT))
+        self.ev = self.tool['evidence']
+        self.tool['Watch'].check.__globals__['timestamp'] = lambda: '2026-10-08T00:00:00Z'
+        self.watch = self.tool['Watch'](self.tool['Workspace'](), 'director@fixture')
+        self.watch.workspace.machine = lambda: 'fixture'
+        self.watch.options = self.tool['settings'](self.watch.workspace)
+        self.walks, self.posts = [], []
+        def local_walks(strict=True):
+            self.watch.walks_valid = True
+            return self.walks
+        self.watch.local_walks = local_walks
+        self.watch.outstanding = lambda state: {}
+        self.watch.unit_status = lambda *a, **kw: 'stopped'
+        self.watch.deployments = lambda *a: {}
+        def call(tool, *args):
+            if tool == 'logins' and args == ('list',):
+                return subprocess.CompletedProcess([], 0, 'chatgpt: at rest\n', '')
+            if tool == 'post':
+                self.posts.append(args)
+                return subprocess.CompletedProcess([], 0, '', '')
+            raise AssertionError((tool, args))
+        self.watch.call = call
+
+    def walk(self, number=1, **updates):
+        name = f'rung-repair-{number}'
+        directory = self.root / 'tmp/qa-focused' / name
+        directory.mkdir(parents=True)
+        (directory / 'report.md').write_text('safe fixture report\n')
+        info = directory.stat()
+        state = dict(walk=name, repo='fabrig', rung='repair', holder='walk/forgejo/' + name,
+                     stage='ended', released=True, posted=True, end_logged=True, run='',
+                     started='2026-10-01T00:00:00Z', starter='owner@fixture', decision='walk-end',
+                     logins={}, given=[], kinds={}, pools={}, requests=[], alerts={}, slot=None,
+                     scratch_identity=dict(device=info.st_dev, inode=info.st_ino))
+        state.update(updates)
+        self.walks.append((directory, state))
+        return directory, state
+
+    def kept(self, state, **updates):
+        saved = dict(walk=state['walk'], status='kept-locally', digest='a' * 64,
+                     ended='2026-10-01T00:00:00Z', local='fixture', remote='', branch='evidence',
+                     destination='walks/2026-10-01-' + state['walk'])
+        saved['announced'] = self.watch.evidence_identity(saved)
+        saved.update(updates)
+        return saved
+
+    def test_components_and_whole_paths_are_scanned_before_indexing(self):
+        for number, name in enumerate(('--user=user:literal', 'nested/--user=user:literal'), 1):
+            directory, _ = self.walk(number)
+            target = directory / 'scripts' / name
+            target.parent.mkdir(parents=True)
+            target.write_text('safe\n')
+            with self.subTest(name=name), self.assertRaises(self.ev['Refusal']) as failure:
+                self.ev['snapshot'](directory, {})
+            self.assertNotIn('literal', str(failure.exception))
+            self.assertIn('entry', str(failure.exception))
+        directory, _ = self.walk(3)
+        (directory / 'scripts/--user=user:literal').mkdir(parents=True)
+        with self.assertRaises(self.ev['Refusal']):
+            self.ev['snapshot'](directory, {})
+
+    def test_archive_index_components_refuse_before_opening_capture(self):
+        directory, _ = self.walk()
+        index = dict(entries=['scripts/--user=user:literal'], files=1, bytes=5, omissions=[])
+        (directory / 'index.json').write_text(json.dumps(index))
+        target = directory / index['entries'][0]
+        target.parent.mkdir()
+        target.write_text('safe\n')
+        opened = os.open
+        def guard(path, *args, **kwargs):
+            self.assertNotEqual(path, '--user=user:literal', 'unsafe indexed capture was opened')
+            return opened(path, *args, **kwargs)
+        with self.patch.object(os, 'open', guard), self.assertRaises(self.ev['Refusal']) as failure:
+            self.ev['read_snapshot'](directory)
+        self.assertNotIn('literal', str(failure.exception))
+        self.assertIn('entry', str(failure.exception))
+
+    def test_archive_entry_bound_precedes_capture_opens(self):
+        directory, _ = self.walk()
+        names = ['scripts/a.txt', 'scripts/b.txt', 'scripts/c.txt']
+        (directory / 'index.json').write_text(json.dumps(dict(entries=names, files=3, bytes=15)))
+        (directory / 'scripts').mkdir()
+        for name in names:
+            (directory / name).write_text('safe\n')
+        opened = os.open
+        def guard(path, *args, **kwargs):
+            self.assertNotIn(path, ('a.txt', 'b.txt', 'c.txt'), 'capture opened beyond known index bound')
+            return opened(path, *args, **kwargs)
+        with self.patch.dict(self.ev['read_snapshot'].__globals__, MAX_ENTRIES=2):
+            with self.patch.object(os, 'open', guard), self.assertRaises(self.ev['Refusal']) as failure:
+                self.ev['read_snapshot'](directory)
+        self.assertIn('bound', str(failure.exception))
+
+    def test_snapshot_entry_depth_and_time_bounds(self):
+        for number, limit in enumerate(('entries', 'depth', 'time'), 1):
+            directory, _ = self.walk(number)
+            (directory / 'scripts/a/b').mkdir(parents=True)
+            (directory / 'scripts/a/b/safe.txt').write_text('safe\n')
+            limits = dict(MAX_ENTRIES=1 if limit == 'entries' else 100,
+                          MAX_DEPTH=1 if limit == 'depth' else 20,
+                          MAX_SECONDS=0 if limit == 'time' else 5)
+            with self.subTest(limit=limit), self.patch.dict(self.ev['snapshot'].__globals__, limits):
+                with self.assertRaises(self.ev['Refusal']) as failure:
+                    self.ev['snapshot'](directory, {})
+                self.assertIn('bound', str(failure.exception))
+
 if __name__ == '__main__':
     if sys.argv[1:2] == ['--one']:
         run_case(sys.argv[2], Path(sys.argv[3]))
