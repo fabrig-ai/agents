@@ -8,8 +8,10 @@ The full recovery suite is `test_recovery_periodic.py`; `test_recovery.py`
 selects four fast authority/lifetime contracts from it. The recovery test for
 completion ordering now runs the real lifetime helper across a Git checkout
 and restoration; full queue/precheck integration remains with the queue move.
-Owner `ops` and intended gate/periodic tiers are recorded in `tools/gate.toml`;
-the current gate discovers periodic files too until tier selection lands.
+Owner `ops` uses the repaired gate's `[files."path"]` rows in
+`tools/gate.toml`; selectors cover launcher/slot cross-dependencies, and
+filename suffixes determine tiers. The old base still discovers periodic
+files too; landing requires the coordinator-supplied repaired gate on main.
 
 Automatic idle-target policy (`tools/slots/design.md`, 5.5–5.6): FIRSTDAYDRYRUN.
 `--automatic-targets` defaults to observation; live refuses before claims or local

@@ -1,48 +1,36 @@
-# Test ownership and intended tiers for the pipeline-tools move.
-# The current check.sh discovers all test_*.py files; it does not consume this
-# registry yet. Each tests row has a repository-relative path, tier and owner.
+# Pipeline-tool owners use the repaired gate schema.
+# Filename suffix _periodic.py determines the periodic tier.
+# Merge these rows/selectors with the repaired main gate before landing.
 
-[[tests]]
-path = "tools/codex-run/test_codex_run.py"
-tier = "gate"
+[files."tools/codex-run/test_codex_run.py"]
 owner = "ops"
 
-[[tests]]
-path = "tools/codex-run/test_final.py"
-tier = "gate"
+[files."tools/codex-run/test_final.py"]
 owner = "ops"
 
-[[tests]]
-path = "tools/codex-run/test_stale.py"
-tier = "gate"
+[files."tools/codex-run/test_stale.py"]
 owner = "ops"
 
-[[tests]]
-path = "tools/codex-run/test_codex_run_periodic.py"
-tier = "periodic"
+[files."tools/codex-run/test_codex_run_periodic.py"]
 owner = "ops"
 
-[[tests]]
-path = "tools/slots/test_claim.py"
-tier = "gate"
+[files."tools/slots/test_claim.py"]
 owner = "ops"
 
-[[tests]]
-path = "tools/slots/test_guard.py"
-tier = "gate"
+[files."tools/slots/test_guard.py"]
 owner = "ops"
 
-[[tests]]
-path = "tools/slots/test_trim.py"
-tier = "gate"
+[files."tools/slots/test_trim.py"]
 owner = "ops"
 
-[[tests]]
-path = "tools/slots/test_recovery.py"
-tier = "gate"
+[files."tools/slots/test_recovery.py"]
 owner = "ops"
 
-[[tests]]
-path = "tools/slots/test_recovery_periodic.py"
-tier = "periodic"
+[files."tools/slots/test_recovery_periodic.py"]
 owner = "ops"
+
+[select]
+# Launcher changes also exercise slot recovery against the launcher.
+"tools/codex-run/**" = ["tools/codex-run/test_codex_run.py", "tools/codex-run/test_final.py", "tools/codex-run/test_stale.py", "tools/codex-run/test_codex_run_periodic.py", "tools/slots/test_recovery.py", "tools/slots/test_recovery_periodic.py"]
+# Slot helpers are runtime dependencies of every launcher entrance.
+"tools/slots/**" = ["tools/codex-run/test_codex_run.py", "tools/codex-run/test_final.py", "tools/codex-run/test_stale.py", "tools/codex-run/test_codex_run_periodic.py", "tools/slots/test_claim.py", "tools/slots/test_guard.py", "tools/slots/test_trim.py", "tools/slots/test_recovery.py", "tools/slots/test_recovery_periodic.py"]

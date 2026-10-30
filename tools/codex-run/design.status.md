@@ -15,9 +15,11 @@ Agents' focused gate files are `test_codex_run.py`, `test_final.py` and
 `test_codex_run_periodic.py` wraps the complete bash suite in a temporary
 workspace. Its original guard requires CPU below 15 seconds and wall below
 60 seconds; periodic classification does not relax either assertion.
-Owner `ops` and intended tiers are recorded
-in `tools/gate.toml`. Until the tier-aware gate lands, default `check.sh`
-discovery also includes periodic files.
+Owner `ops` is recorded using `[files."path"]` rows in `tools/gate.toml`,
+with selectors covering both launcher and slot-helper dependencies. The old
+base still discovers periodic files by default. Landing is deferred until
+rebasing onto the coordinator-supplied repaired gate SHA on main; verification
+uses the repaired gate from `origin/deploy/gate-fix-1` in a private worktree.
 The installation description below records fabrig's existing installation;
 this copy adds no `tools/installed` row and performs no link handover.
 
