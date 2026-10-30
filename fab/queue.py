@@ -11,14 +11,13 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-import tempfile
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from fab import gate, log, slots
+from fab import atomic, gate, log, slots
 from fab.sh import Runner, run
 
 
@@ -145,7 +144,7 @@ class Queue:
         return self.sh(["git", *args], cwd=str(self.repo), check=check)
 
     def _save(self) -> None:
-        _write(self.state_path, json.dumps(self.state) + "\n")
+        atomic.write(self.state_path, json.dumps(self.state) + "\n")
 
     def _reject(self, branch: Branch, step: str, detail: Path) -> None:
         self.state["tried"][branch.name] = branch.tip
@@ -189,7 +188,7 @@ class Queue:
         detail = self.home / "queue" / (batch_id + ".log")
         # Bisection can start several attempts in one second; retain all their output.
         if not detail.exists():
-            _write(detail, "")
+            atomic.write(detail, "")
         record = {"branches": [branch.name for branch in branches], "parent": "",
                   "selection": None, "steps": [], "outcome": "error", "log": str(detail)}
         tried_before = dict(self.state["tried"])
@@ -205,7 +204,7 @@ class Queue:
             merged, conflicts = build_batch(self.repo, branches, parent, sh=self.sh)
             self.last_merged = merged
             if conflicts:
-                _write(detail, detail.read_text() + "\n".join(output for _, output in conflicts) + "\n")
+                atomic.extend(detail, "\n".join(output for _, output in conflicts) + "\n")
             conflicted = {branch for branch, _ in conflicts}
             reachable = [branch for branch in branches if branch not in conflicted and branch not in merged]
             green = True
@@ -262,14 +261,14 @@ class Queue:
             record["outcome"] = ("conflict" if conflicts else "green") if green else "red"
             if cleanup_error:
                 record.update(outcome="error", error=cleanup_error)
-                _write(detail, detail.read_text() + f"\n{cleanup_error}\n")
+                atomic.extend(detail, f"\n{cleanup_error}\n")
             self._save()
             clean = green
             return green
         except Exception as error:
             self.state["tried"] = tried_before
             record.update(outcome="error", error=str(error))
-            _write(detail, detail.read_text() + f"\n{error}\n")
+            atomic.extend(detail, f"\n{error}\n")
             self._error_recorded = True
             raise
         finally:
@@ -360,11 +359,7 @@ def main(argv: list[str]) -> int:
     try:
         if args.command == "untry":
             path = log.home() / "queue-untry" / args.branch.replace("/", "%2F")
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, prefix=".untry-",
-                                             delete=False) as sibling:
-                sibling.write("")
-            Path(sibling.name).replace(path)
+            atomic.write(path, "")
             return 0
         queue = Queue(args.repo, batch=args.batch)
         if args.command == "plan":
@@ -379,11 +374,3 @@ def main(argv: list[str]) -> int:
         print(f"fab queue: {error}", file=sys.stderr)
         return 1
     return 0
-
-
-def _write(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, prefix=path.name + ".",
-                                     delete=False) as sibling:
-        sibling.write(content)
-    Path(sibling.name).replace(path)

@@ -5,12 +5,11 @@ from __future__ import annotations
 import argparse
 import json
 import shlex
-import tempfile
 from collections.abc import Iterable
 from datetime import datetime
 from pathlib import Path
 
-from fab import hosts, log, plan
+from fab import atomic, hosts, log, plan
 from fab.hosts import Host
 from fab.plan import Task
 from fab.sh import Failed, Runner, run, ssh
@@ -235,7 +234,7 @@ def _prepare_and_launch(task: Task, host: Host, kind: str, remote, *, run_id: st
     temporary = brief_path.with_name("brief.md.tmp")
     remote(["bash", "-c", f"cat > {shlex.quote(str(temporary))} && "
             + shlex.join(["mv", "--", str(temporary), str(brief_path)])], input=text)
-    _write(log.home() / "runs" / run_id / "brief.md", text)
+    atomic.write(log.home() / "runs" / run_id / "brief.md", text)
     if LAUNCHER == "fab":
         command = ["fab", "codex", "start", "--effort", task.effort]
     else:
@@ -271,7 +270,7 @@ def launch(host: Host, run_id: str, *, task: str, kind: str, workdir: str, branc
 
     Over ssh, check=True: write brief to `<remote_home(host)>/runs/<run>/brief.md` (mkdir -p
     its directory, `cat` to brief.md.tmp, then `mv`, in one bash -c with the brief on stdin);
-    keep a copy at this machine's FAB_HOME/runs/<run>/brief.md (_write); then LAUNCHER's
+    keep a copy at this machine's FAB_HOME/runs/<run>/brief.md (fab.atomic.write); then LAUNCHER's
     command, `fab codex start --effort <effort>` or `codex-run task --effort <effort> --to
     NOTIFY`, with `--read-only` when read_only, then BRIEF, workdir and REPORT, REPORT being
     `<remote_home(host)>/runs/<run>/report.md`. Its output must be `<id> <absolute state
@@ -323,7 +322,7 @@ def collect(run_id: str, events: Iterable[dict], hosts: dict[str, Host], *, sh: 
     if not current["ended"]:
         return None
     report_path = log.home() / "runs" / run_id / "report.md"
-    _write(report_path, current["report"])
+    atomic.write(report_path, current["report"])
     stamp = log.now()
     minutes = max(0.0, (datetime.fromisoformat(stamp)
                        - datetime.fromisoformat(started["ts"])).total_seconds() / 60)
@@ -401,16 +400,3 @@ def _load_spec(path: Path) -> Task:
     plan_path = path.parent.parent / "plan.toml"
     loaded = plan.load_plan(plan_path)
     return plan.parse_task(path.read_text(), str(path), loaded.draft, loaded.repo)
-
-
-def _write(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
-                                     prefix=path.name + ".", delete=False) as sibling:
-        temporary = Path(sibling.name)
-        try:
-            sibling.write(text)
-            sibling.close()
-            temporary.replace(path)
-        finally:
-            temporary.unlink(missing_ok=True)

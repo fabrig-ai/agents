@@ -9,13 +9,13 @@ from __future__ import annotations
 import fnmatch
 import json
 import shlex
-import tempfile
 import time
 import tomllib
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
+from fab import atomic
 from fab.sh import Runner, run
 
 TREES = ("skein", "smith", "jig", "temper")
@@ -260,10 +260,7 @@ def run_steps(steps: Sequence[Step], log: Path, *, sh: Runner = run, timeout: fl
             code, output = result.code, result.out + result.err
         seconds = clock() - started
         content += output
-        with tempfile.NamedTemporaryFile(mode="w", dir=log.parent, prefix=log.name + ".",
-                                         delete=False) as sibling:
-            sibling.write(content)
-        Path(sibling.name).replace(log)
+        atomic.write(log, content)
         green = code == 0 or (step.name in ("build", "default", "fuzzy") and code == NO_TESTS)
         outcomes.append(StepResult(step.name, step.argv, code, green, seconds))
         if not green:

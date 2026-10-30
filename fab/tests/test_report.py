@@ -5,9 +5,8 @@ from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timezone
 from unittest.mock import patch
 
-from fab import hosts, log, report
+from fab import atomic, hosts, log, report
 from fab.heavy import EX_TEMPFAIL
-from fab.run import _write
 from fab.sh import Result, ssh
 from fab.tests.support import FakeRunner, tmp_home
 
@@ -177,7 +176,7 @@ class ReportCommandTest(unittest.TestCase):
 
     def plan(self, draft="sample"):
         directory = self.home / draft
-        _write(directory / "plan.toml", f'''draft = "{draft}"
+        atomic.write(directory / "plan.toml", f'''draft = "{draft}"
 repo = "agents"
 [[part]]
 id = "core"
@@ -191,7 +190,7 @@ story = "Report"
 parts = ["core"]
 walk = false
 ''')
-        _write(directory / "tasks" / "task.md", '''+++
+        atomic.write(directory / "tasks" / "task.md", '''+++
 id = "task"
 part = "core"
 kind = "feature"
@@ -243,7 +242,7 @@ Implement the task.
         contents = [path.read_bytes() for path in paths]
         stats = [path.stat() for path in paths]
         self.assertTrue(contents[0].startswith(b"# Code report: sample, 2026-10-29\n"))
-        with patch("fab.run._write") as write:
+        with patch("fab.atomic.write") as write:
             code, text, err = self.command(argv)
         write.assert_not_called()
         self.assertEqual((code, err), (0, ""))
@@ -255,7 +254,7 @@ Implement the task.
         valid = self.plan()
         broken = self.plan("broken")
         task = broken / "tasks" / "task.md"
-        _write(task, task.read_text().replace('part = "core"', 'part = "missing"'))
+        atomic.write(task, task.read_text().replace('part = "core"', 'part = "missing"'))
         missing = self.home / "missing"
         code, text, err = self.command(["daily", str(missing), str(broken), str(valid)])
         self.assertEqual(code, 1)

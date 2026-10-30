@@ -20,8 +20,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fab import log, nextest, slots, tiers
-from fab.run import _write
+from fab import atomic, log, nextest, slots, tiers
 from fab.sh import Runner, run
 
 # The pairs every tip gets, in order. A profile is enrolled only by adding it here: not the
@@ -145,7 +144,7 @@ class AfterLanding:
             config = directory / f"{name}.toml"
             # A replay in the same second must not accept a report from the interrupted run.
             report.unlink(missing_ok=True)
-            _write(config, nextest.overlay(config_text, profile, report))
+            atomic.write(config, nextest.overlay(config_text, profile, report))
             started = time.monotonic()
             try:
                 code = tiers.run_pair(self.repo, target, ["--config-file", str(config), *extra],
@@ -216,7 +215,7 @@ class AfterLanding:
         of fab.slots.remove(fab.slots.sweep_plan(<slot>/target, <the run's start in ns>)), as
         the queue bounds its target.
 
-        Then update the state and save it (fab.run._write, sibling and rename): every case of
+        Then update the state and save it (fab.atomic.write, sibling and rename): every case of
         a ran pair that executed sets its key's history to "pass" (passing, recovered, flake)
         or "red" (confirmed) with the tip; unobserved ones keep theirs. "last" becomes this
         tip and verdict; the cursor becomes tip only when no pair faulted. A crash before the
@@ -264,7 +263,7 @@ class AfterLanding:
                     if pair["status"] == "faulted"], log=str(directory), freed=freed)
         saved = {"cursor": previous if faulted else tip,
                  "last": {"tip": tip, "verdict": outcome}, "tests": tests}
-        _write(self.state_path, json.dumps(saved, sort_keys=True) + "\n")
+        atomic.write(self.state_path, json.dumps(saved, sort_keys=True) + "\n")
         self.state = saved
         return record
 
