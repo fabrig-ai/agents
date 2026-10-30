@@ -139,8 +139,8 @@ class BootstrapStagesTest(unittest.TestCase):
         return state
 
     def test_stage_b_changes_no_runner_code(self):
-        # Stage A (code only) is deployed fleet-wide; stage B must bring declarations
-        # alone, so the deployed runner is also the runner that applies them.
+        # Stage B brought declarations alone. Keep this comparison pinned to
+        # its historical landing; later runner changes cannot alter that proof.
         self.assertEqual(fixture.historical_source(DEPLOYED),
                          fixture.historical_source(self.rollout))
 
