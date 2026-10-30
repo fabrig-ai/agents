@@ -57,9 +57,23 @@ class Bootstrap:
         finally:
             Path(temporary).unlink(missing_ok=True)
 
+    def pquota(self, host):
+        enabled = host.get("pquota", False)
+        if type(enabled) is not bool:
+            raise ValueError("pquota flag must be boolean")
+        if enabled:
+            self.write("/etc/default/grub.d/90-fabrig-pquota.cfg",
+                       'GRUB_CMDLINE_LINUX="$GRUB_CMDLINE_LINUX rootflags=pquota"\n')
+            self.run("update-grub")
+            print("USER: pquota requires one drained reboot after root bootstrap; fleet-scale automation is pending.")
+
     def root(self):
         if not self.args.dry_run and os.geteuid() != 0:
             raise ValueError("root.sh must run as root")
+        hosts = tomllib.loads((ROOT / "fleet/hosts.toml").read_text())["hosts"]
+        host = hosts[self.args.host]
+        if type(host.get("pquota", False)) is not bool:
+            raise ValueError("pquota flag must be boolean")
         packages = [line.partition("#")[0].strip() for line in
                     (ROOT / "fleet/bootstrap/packages.txt").read_text().splitlines()]
         packages = [p for p in packages if p]
@@ -75,7 +89,7 @@ class Bootstrap:
             user = pwd.getpwnam("free")
             if user.pw_dir != "/home/free":
                 raise ValueError("free must have HOME /home/free")
-        hosts = tomllib.loads((ROOT / "fleet/hosts.toml").read_text())["hosts"]
+        self.pquota(host)
         self.run("hostnamectl", "set-hostname", hosts[self.args.host]["hostname"])
         self.run("usermod", "--append", "--groups", "sudo", "free")
         sudoers = "free ALL=(ALL) NOPASSWD: ALL\n"
