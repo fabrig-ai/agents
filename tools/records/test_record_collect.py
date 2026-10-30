@@ -218,17 +218,79 @@ print('12345678: 125,000 of 1,000,000 tokens (12%) at 2026-10-29T11:00:00Z; 42 c
         self.assertEqual((self.state / 'runs.json').stat().st_mode & 0o777, 0o600)
         self.assertFalse(self.clone.exists())
 
-    def test_task_fallback_and_invalid_header(self):
+    def test_task_fallback_without_header(self):
         task = self.runs_fixture(header=False)
         events = self.dry('runs')
         self.assertTrue(all(e['branch'] == 'mc/fallback' and e['coordinator'] == 'H' and e['area'] == 'tools' for e in events))
         self.write(task, 'Push ready/tools/fallback before finishing.\n')
         self.assertEqual(API['task_keys'](task), {'branch': 'ready/tools/fallback'})
-        self.write(task, '+++\narea = 42\n+++\n')
-        self.run_collect('runs', options=('--dry-run',), code=2)
         self.assertFalse(self.state.exists())
-        self.write(task, '+++\nbranch = "mc/x"\n')
-        self.assertRaises(ValueError, API['task_keys'], task)
+
+    def test_malformed_task_headers_keep_runs_and_other_events(self):
+        task = self.runs_fixture()
+        healthy_task = self.write(self.fabrig/'tasks/healthy.md',
+                    '+++\ntask="healthy"\nbranch="mc/healthy"\n'
+                    'coordinator="s/healthy"\ndraft="healthy"\narea="healthy"\npart="runs"\n+++\n')
+        healthy_run = '20261029T110000Z-bbbb'
+        meta = self.tmp/f'codex-run/{RUN}/meta'
+        self.write(self.tmp/f'codex-run/{healthy_run}/meta',
+                   meta.read_text().replace(str(task), str(healthy_task)))
+        healthy_row = self.run_row.replace(RUN, healthy_run).replace(str(task), str(healthy_task))
+        self.write(self.tmp/'codex-run/runs.tsv', self.run_row + healthy_row)
+        self.claim_fixture()
+        cases = (
+            ('unclosed', '+++\nbranch="PRIVATE CONTENT"\n', 'unclosed task header'),
+            ('toml', '+++\nbranch: PRIVATE CONTENT\n+++\n', 'invalid TOML task header'),
+            ('non-string', '+++\nbranch="mc/partial"\narea=42\n+++\n', 'task join keys must be nonempty strings'),
+            ('empty', '+++\nbranch="mc/partial"\narea=""\n+++\n', 'task join keys must be nonempty strings'),
+            ('blank', '+++\narea="  "\n+++\n', 'task join keys must be nonempty strings'),
+            ('unreadable', None, 'unreadable task file'),
+            ('encoding', b'\xffPRIVATE CONTENT', 'unreadable task file'),
+        )
+        for kind, text, reason in cases:
+            with self.subTest(kind=kind):
+                if task.is_dir():
+                    task.rmdir()
+                else:
+                    task.unlink(missing_ok=True)
+                if text is None:
+                    task.mkdir()  # EISDIR is unreadable even when tests run as root.
+                elif isinstance(text, bytes):
+                    task.write_bytes(text)
+                else:
+                    task.write_text(text)
+                result = self.run_collect('runs', 'claims', options=('--dry-run',))
+                rows = [json.loads(line) for line in result.stdout.splitlines() if line.startswith('{')]
+                broken = [row for row in rows if row.get('run') == RUN]
+                healthy = [row for row in rows if row.get('run') == healthy_run]
+                self.assertEqual([row['kind'] for row in broken], ['run-start', 'run-end'])
+                self.assertEqual([row['kind'] for row in healthy], ['run-start', 'run-end'])
+                for row in broken:
+                    self.assertEqual(row['header_error'], reason)
+                    self.assertTrue(set(API['JOIN']).isdisjoint(row))
+                for row in healthy:
+                    self.assertNotIn('header_error', row)
+                    self.assertEqual({key:row[key] for key in API['JOIN']},
+                        dict(task='healthy', branch='mc/healthy', coordinator='s/healthy',
+                             draft='healthy', area='healthy', part='runs'))
+                self.assertTrue(any(row['source'] == 'claims' for row in rows))
+                self.assertIn('runs: 4 events, 2 header errors', result.stderr)
+                self.assertNotIn('PRIVATE CONTENT', result.stdout + result.stderr)
+                self.assertFalse(self.state.exists())
+                normal = self.run_collect('runs', 'claims')
+                self.assertIn('runs: 4 events, 2 header errors', normal.stderr)
+                self.assertEqual(self.events('runs'), [row for row in rows if row['source'] == 'runs'])
+                if kind != 'encoding':
+                    shutil.rmtree(self.state)
+                    shutil.rmtree(self.fabrig/'events')
+        # The final case also advances the cursor without repeating annotated facts.
+        self.assertEqual(len(self.events('runs')), 4)
+        self.assertIn('runs: 0 events, 0 header errors', self.run_collect('runs').stderr)
+
+    def test_task_permission_error_is_content_free(self):
+        with patch.object(Path, 'read_text', side_effect=PermissionError('PRIVATE CONTENT')):
+            self.assertEqual(API['task_keys']('/synthetic/task.md'),
+                             {'header_error': 'unreadable task file'})
 
     def test_active_run_without_completion_and_missing_task(self):
         task = self.runs_fixture()
@@ -237,7 +299,8 @@ print('12345678: 125,000 of 1,000,000 tokens (12%) at 2026-10-29T11:00:00Z; 42 c
         events = self.dry('runs')
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]['kind'], 'run-start')
-        self.assertEqual(events[0]['area'], 'tools')
+        self.assertEqual(events[0]['header_error'], 'unreadable task file')
+        self.assertTrue(set(API['JOIN']).isdisjoint(events[0]))
 
     def test_queue_batch_attempts_and_recovery_not_duplicated(self):
         row = self.queue_fixture()

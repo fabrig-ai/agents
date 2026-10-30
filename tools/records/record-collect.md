@@ -37,7 +37,12 @@ rotation safely replays ids. Retention applies independently of that lower bound
 
 Runs join through the task header, falling back to a prose `branch` followed
 by a backtick-quoted name, or `ready/...`; recipient names supply area and
-coordinator. Queue batches retain outcomes, selection, safe step durations
+coordinator. Unclosed or invalid TOML headers, invalid join values, and unreadable
+or undecodable task files never fail the runs source. Their events retain their
+run identity and facts, omit every task/recipient join key, and carry a fixed,
+content-free `header_error`. The summary is `runs: N events, M header errors`;
+M counts emitted events carrying that annotation (a start and end count twice).
+Other runs and sources still collect normally. Queue batches retain outcomes, selection, safe step durations
 and available sizes/cleanup counts; attempts join branches through leads.txt.
 Heavy's completion TSV is authoritative; release events add token/outcome.
 Multi-line commands are joined into logical rows at task/lane/timestamp row
