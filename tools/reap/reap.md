@@ -26,6 +26,8 @@ An unfinished record protects its paths even against generic discovery. A
 resumed `start` merges paths and clears the previous end. Duplicate start/end
 calls do not extend retention: the earliest end since the most recent start
 sets the clock. A resumed start stays live until a new end starts a new clock.
+Kind retention also protects ended paths from earlier generic discovery; an
+old directory mtime cannot skip this wait.
 Unknown/malformed JSONL lines are ignored.
 Overlapping candidates are counted and removed once; a parent owns its bytes.
 Codex finality is never inferred from `ended` or mtimes. Missing, unreadable or
