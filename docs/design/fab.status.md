@@ -38,6 +38,13 @@
   by the tasks `report-base`, `report-code`, `report-landing` and
   `report-command`; `fab report` is not a command until the last lands. No
   timer runs `fab report daily` yet.
+- **After landing is a skeleton:** `fab/nextest.py`, `fab/tiers.py` and
+  `fab/after_landing.py` hold section 11's signatures and contracts, filled
+  by the tasks `nextest`, `tiers`, `after-landing-verdicts` and
+  `after-landing-runner`; `fab tiers` and `fab after-landing` are listed
+  commands that do nothing until those land. The old
+  `tools/after-landing` (hetzner7, slot 4) keeps running and posting; no
+  unit runs fab's yet, and its builder and slot are the user's to choose.
 - **Parts done by hand have no task specs** (package, slot-probe), so the
   tick's design line lists them.
 - **The slot bound of 25 GB is one measurement** (10-30 20:18Z): a

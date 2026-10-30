@@ -46,6 +46,7 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
 | `FAB_HOME/reports/` on hel8 | the standing reports, one file per draft and day (section 10) |
 | `FAB_HOME/repos/<repo>` on each machine | fab's own clones; `FAB_HOME/wt/<run>` worktrees for runs that build nothing |
 | `~/src/fabrig/slots/<n>` on a builder | warm fabrig checkouts (unchanged); `slots/<n>.claim` the slot's claim (section 7) |
+| `FAB_HOME/after-landing.jsonl` on the after-landing builder | its verdicts; `FAB_HOME/after-landing/` its state and each run's logs (section 11) |
 
 - **hel8** runs the dispatcher, Claude calls and `fab land` for this
   repository. **Builders** (hetzner6 today) run Codex and builds. **hetzner8**
@@ -250,7 +251,59 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
   renamed. `fab report daily PLAN_DIR...` writes yesterday's that do not
   exist yet; the director reads them there.
 
-## 11. Later
+## 11. After landing
+
+- **fabrig's slow tiers run on each new main,** ported from the agents
+  repository's `tools/after-landing` (`docs/design/after-landing.md`) and
+  fabrig's `tools/tiers/run`. `fab after-landing run --slot N` loops on one
+  builder in one slot claimed for it (`fab slot claim N after-landing
+  after-landing`); it refuses any other slot. Every cargo command goes
+  through `heavy` in the build lane, which waits for disk by itself.
+- **A tier is a pair:** a nextest profile `<tier>-<tree>` of fabrig's
+  `.config/nextest.toml`, its packages and the native binaries its tests run
+  from the package map (`.config/tiers/packages.toml`, or
+  `tools/tiers/packages.toml` until fabrig moves it). `fab tiers run TREE
+  TIER` builds the pair's browser bundle and binaries, then runs its packages'
+  tests; `fab tiers verify` checks the map against the workspace's listing.
+- **The tier set** is a list in the code: `exhaustive-skein`, `qa-skein`,
+  `qa-smith`, `qa-jig`, `process-jig`, `browser-skein`, `browser-jig`,
+  `browser-temper`, `qa-temper`, in that order. Not the live pairs (real
+  providers, the user's sign-ins) nor `process-temper` (its owner's).
+- **One tip at a time, the newest:** each cycle fetches main. A tip that is
+  not the cursor (the last tip run without a fault) gets one run of the tier
+  set. Its **suspects** are the first-parent commits since the cursor; a queue
+  merge `Merge <draft>/<task>` names its task's branch. Tips published
+  meanwhile are covered by the next run: their commits are its suspects.
+- **A red is confirmed first:** each failed test (profile, binary id, test
+  name, read from nextest's JUnit) runs once more alone. Failing again is a
+  confirmed red; passing is a **flake**. Against the test's own history, a
+  confirmed red is **new** (it last passed), **standing** (it was last red)
+  or **unattributed** (never executed before); a pass after a red is
+  **recovered**. A new red names the branches merged since its last pass.
+- **A pair that cannot run faults:** an exit other than pass or test failure
+  (heavy's 75 for disk among them), a missing or inconsistent JUnit, a rerun
+  that does not select exactly its test. A faulted pair says nothing about
+  its tests. A run is **red** with any confirmed red, else **partial** with a
+  fault, else **green**. The cursor moves only past a run without a fault; a
+  partial tip is not run again, the next tip's run takes its suspects.
+- **Records, not posts:** each run appends to
+  `FAB_HOME/after-landing.jsonl` on its builder one `test` record per test
+  that is not plainly passing, then one `run` record (tip, suspects'
+  branches, verdict, counts, pairs, faults, logs). `fab after-landing log
+  --since` serves them over ssh, as `fab queue log` does. The state (cursor,
+  last run, each test's last executed result) is
+  `FAB_HOME/after-landing/state.json`, saved after the records; a run cut
+  short is redone whole.
+- **The slot stays bounded:** a run ends by sweeping the slot's target as the
+  queue sweeps its own (section 7).
+- **Left out from the old tool:** posts to coordinators and its resolver,
+  bisection to a culprit commit, hourly coverage posts, the records writer and
+  its detail files, heavy cancellation and wall bounds beyond the steps'
+  timeout, the guardian and replay of a half-run pair, and the tier runner's
+  CPU accounting and budgets (still fabrig's `tools/tiers --cpu`). Each
+  attaches to the records above when numbers show it is needed (section 12).
+
+## 12. Later
 
 - The dispatcher's loop on a timer, the ready-task buffer and the answer
   queue (slice 3 of `docs/plan/agents-rebuild/plan.toml`).
@@ -261,7 +314,11 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
 - Report metrics the records do not hold yet: lines changed per landed
   branch, questions by kind, continuity, CPU per step against its budget,
   after-landing verdicts; targets and their signals once the user sets them.
-- after-landing and tiers moved here; QA walks as a run kind.
+- after-landing live: its unit on a builder and its slot, the old tool
+  stopped, fabrig's package map moved to `.config/tiers/`; then new reds
+  reaching their tasks through the dispatcher, bisection when several
+  branches are suspects, CPU accounting against the tiers' budgets, and the
+  landing report's after-landing figures. QA walks as a run kind.
 - Elastic builders from `fab hosts check`'s numbers.
 - Retiring the session launcher, watch's session rules, mail, leases and the
   event collector once nothing resident remains.

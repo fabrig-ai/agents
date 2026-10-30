@@ -10,7 +10,7 @@ minutes = 30
 # fab call: Claude calls from compiled briefs
 
 Fill the bodies of `fab/calls.py` as their docstrings say. Design:
-`docs/design/fab.md`, section 11, and the user's execution model (each call
+`docs/design/fab.md`, section 12, and the user's execution model (each call
 a fresh session on a brief compiled by code, ending by writing files). The
 role texts are `fab/roles/skeleton.md` and `fab/roles/answerer.md`.
 

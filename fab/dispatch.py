@@ -1,4 +1,4 @@
-"""The dispatcher: one idempotent tick keeps a plan's tasks moving (docs/design/fab.md, 11).
+"""The dispatcher: one idempotent tick keeps a plan's tasks moving (docs/design/fab.md, 12).
 
 `decide` is pure: from the plan, its tasks, the log and the machines it returns the actions
 to take now. `tick` gathers those inputs, carries the actions out through `fab.run`,
@@ -31,7 +31,7 @@ ANSWER_AT = 4  # open questions that start an answer call at once
 
 def call_actions(plan: Plan, tasks: Mapping[str, Task], events: list[dict], design: list[str],
                  now: str) -> list[Action]:
-    """The Claude calls to start or finish now (docs/design/fab.md, 11), after decide's actions.
+    """The Claude calls to start or finish now (docs/design/fab.md, 12), after decide's actions.
 
     A call is in flight from its call.started to its call.ended; at most one call of each role
     is in flight. finish: every call.ended with outcome done and no later call.finished for

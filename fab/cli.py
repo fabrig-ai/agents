@@ -18,6 +18,8 @@ COMMANDS = {
     "slot": ("fab.slots", "a builder's slots: claim, release, reclaim"),
     "queue": ("fab.queue", "fabrig's merge queue"),
     "precheck": ("fab.precheck", "the queue's checks on a branch, in its slot"),
+    "tiers": ("fab.tiers", "run or verify one of fabrig's slow tiers"),
+    "after-landing": ("fab.after_landing", "fabrig's slow tiers on each new main"),
 }
 
 
