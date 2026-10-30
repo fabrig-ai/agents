@@ -1,6 +1,6 @@
 # Status-page status
 
-2026-10-30. Owner: s/multi-coord. Baseline: origin/main `95d8351`.
+2026-10-30. Owner: s/multi-coord. Baseline: origin/main `1335337`.
 Contract: `docs/design/status-page.md`, sections 2–4.
 
 ## Present and limits

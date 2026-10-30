@@ -1,7 +1,7 @@
 # Records status
 
 2026-10-30. Owner: s/multi-coord. Contract: `docs/design/records.md`, sections 2–5.
-Baseline: agents origin/main `95d8351`. This is the new contract, ahead of code.
+Baseline: agents origin/main `1335337`. This is the new contract, ahead of code.
 
 ## Present
 

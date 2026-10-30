@@ -14,7 +14,7 @@
   current files back to its coordinator.
 - **Context asks for handover at 85%.** Below that, ordinary Stop turns are
   silent. At or above it, every turn asks again. Compaction also asks; this is
-  the user's 10-30 decision. The current threshold gap is in the status file.
+  the user's 10-30 decision.
 - **Changed role text is delivered separately.** Notices identify changed
   sections. Fired markers let the collector distinguish actual handover
   requests from context measurements.
@@ -76,6 +76,9 @@ turn until it acts. Below 85%, there is no context reminder unless compaction
 has occurred. Compact SessionStart supplies the same instructions as additional
 context. Compaction remains a handover cause even below threshold. A recursive
 Stop already active because of the hook is exempt to avoid a hook loop.
+Without role watches, a quiet Stop returns before name lookup and creates no
+context state. Watched hooks retain independent drift baselines and delivery;
+those can update state below the context threshold.
 
 **Manual readings return a signal.** `session-context` uses the explicit session
 id or `CLAUDE_CODE_SESSION_ID`. Without either, it requires one recent transcript

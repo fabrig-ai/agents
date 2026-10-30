@@ -1,6 +1,6 @@
 # Pipeline status
 
-2026-10-30. Owner: s/multi-coord. Baseline: origin/main `95d8351`.
+2026-10-30. Owner: s/multi-coord. Baseline: origin/main `1335337`.
 Contract: `docs/design/pipeline.md`, sections 2–5.
 
 ## Present

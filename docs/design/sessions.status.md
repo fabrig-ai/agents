@@ -1,23 +1,22 @@
 # Sessions status
 
-2026-10-30. Owner: s/multi-coord. Baseline: origin/main `95d8351`.
+2026-10-30. Owner: s/multi-coord. Baseline: origin/main `1335337`.
 Contract: `docs/design/sessions.md`, sections 2–4.
 
 ## Present
 
 - Launcher roles, warm-ups, names, owns, wire and Codex-owner leads exist.
+- **Context defaults to 85%.** Ordinary turns at or above the threshold ask
+  for handover repeatedly; compaction also asks. Active recursive Stop hooks
+  are suppressed. Without role watches, a quiet Stop below threshold returns
+  before name lookup and creates no context state. Watched hooks retain their
+  independent role-drift baseline and delivery behavior.
 - Capability-gated hooks, role drift and locked fired markers exist. The sessions
   collector already turns markers into durable handover-needed events and
   records owner unit transitions and threshold crossings.
 
 ## Gaps and departures
 
-- **85% has not landed on this baseline.** `tools/session/session-context`
-  defaults to 0.75, and `tools/session/session_lib.py` wires no threshold
-  override. `mc/context-85` is in flight. The contract states the user's 85%
-  decision; ordinary current hooks still fire at 75%. Compaction already asks
-  for handover, repeated ordinary turns already ask again, and active recursive
-  Stop hooks are suppressed. Do not read the 85% body as a claim about this tip.
 - **Cleanup hooks and retire have not landed.** `mc/reap-hooks` is in flight;
   there is no `retire` launcher command or `tools/session/reap-hook` on this
   baseline. Existing daily pruning of role-drift snapshots older than seven
