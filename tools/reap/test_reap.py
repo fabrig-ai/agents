@@ -403,6 +403,34 @@ class ReapTests(unittest.TestCase):
                 reaper.now += 2
                 self.assertIn(path, {Path(row['path']) for row in reaper.discover({'recorded'})})
 
+    def test_resumed_record_retention_also_protects_generic_discovery(self):
+        for kind, retention in self.config['kinds'].items():
+            with self.subTest(kind=kind):
+                identity = kind
+                path = self.old(f'.claude/jobs/{identity}' if kind == 'claude-session'
+                                else f'src/rust/tmp/logs/{kind}', directory=True)
+                args = argparse.Namespace(event='start', kind=kind, owner='lead/q/temper', id=identity, path=[str(path)])
+                writer = self.reaper()
+                writer.now = NOW-3*retention
+                writer.record(args)
+                args.event = 'end'
+                writer.record(args)
+                args.event = 'start'
+                writer.now = NOW
+                writer.record(args)
+                args.event = 'end'
+                writer.now = NOW+10
+                writer.record(args)
+                cls = 'claude-jobs' if kind == 'claude-session' else 'heavy-logs'
+                probe = self.reaper()
+                probe.now = NOW+11
+                result = probe.execute({cls}, 'dry-run')
+                item = next(row for row in result['candidates'] if Path(row['path']) == path)
+                self.assertEqual(item['reason'], 'record retention')
+                self.assertNotIn(path, self.selected(result))
+                probe.now = NOW+10+retention+1
+                self.assertIn(path, self.selected(probe.execute({cls}, 'dry-run')))
+
     def test_active_records_protect_discovery(self):
         path = self.old('src/rust/tmp/logs/old', 8)
         self.record('start', path)

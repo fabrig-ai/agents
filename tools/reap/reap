@@ -233,9 +233,13 @@ class Reaper:
         except FileNotFoundError:
             pass
         self.active = []
-        for record in self.records.values():
+        self.retained = []
+        for (kind, _), record in self.records.items():
             if record['ended'] is None:
                 self.active.extend(self.path(p) for p in record['paths'])
+            elif kind in self.config['kinds']:
+                self.retained.extend((self.path(p), record['ended'], self.config['kinds'][kind])
+                                     for p in record['paths'])
 
     def path(self, value):
         if value.startswith('~/'):
@@ -588,6 +592,9 @@ class Reaper:
                 return reason
         if any(intersects(path, active) for active in self.active):
             return 'record active'
+        if any(intersects(path, recorded) and self.now - ended < retention
+               for recorded, ended, retention in self.retained):
+            return 'record retention'
         jobs = self.home / '.claude/jobs'
         if inside(path, jobs):
             if self.claude_error:
