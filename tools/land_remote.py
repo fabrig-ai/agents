@@ -115,7 +115,8 @@ def heavy(record):
 def inspect(record):
     record = dict(record)
     if record.get('remote_dir') is None and record.get('prepare_uncertain'):
-        candidates = list(Path('/tmp').glob('agents-gate.' + record['id'] + '.*'))
+        candidates = [p for p in Path('/tmp').glob('agents-gate.' + record['id'] + '.*')
+                      if re.fullmatch(r'agents-gate\.' + record['id'] + r'\.[A-Za-z0-9_]+', p.name)]
         if len(candidates) != 1:
             raise ValueError('remote allocation unknown; retain claim for ops')
         record['remote_dir'] = str(candidates[0])

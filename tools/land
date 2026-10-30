@@ -17,6 +17,7 @@ import os
 import re
 from pathlib import Path
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -201,6 +202,44 @@ class Builder:
                 return
         raise ValueError('no free builder pool slot; use --local explicitly if necessary')
 
+    def prepare_local(self):
+        self.data.update(local_dir=None, local_prepare_uncertain=True)
+        self.save()
+        blocked = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM, signal.SIGHUP})
+        try:
+            path = Path(tempfile.mkdtemp(prefix='agents-gate.' + self.data['id'] + '.local.', dir='/tmp'))
+            self.data['local_dir'] = str(path)
+            save_record(path / 'identity.json', {key: self.data[key] for key in ('id', 'sha', 'owner', 'what')})
+            self.data['local_prepare_uncertain'] = False
+            self.save()
+            return path
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, blocked)
+
+    def cleanup_local(self):
+        value = self.data.get('local_dir')
+        if value is None and self.data.get('local_prepare_uncertain'):
+            candidates = list(Path('/tmp').glob('agents-gate.' + self.data['id'] + '.local.*'))
+            if len(candidates) > 1:
+                raise ValueError('local scratch allocation is ambiguous')
+            value = str(candidates[0]) if candidates else None
+        if value is not None:
+            if not re.fullmatch(r'/tmp/agents-gate\.' + self.data['id'] + r'\.local\.[A-Za-z0-9_]+', value):
+                raise ValueError('invalid owned local scratch directory')
+            path = Path(value)
+            if path.is_symlink():
+                raise ValueError('refusing symlink local scratch directory')
+            if path.exists():
+                identity = {key: self.data[key] for key in ('id', 'sha', 'owner', 'what')}
+                if json.loads((path / 'identity.json').read_text()) != identity:
+                    raise ValueError('local scratch identity mismatch')
+                shutil.rmtree(path)
+            if path.exists():
+                raise ValueError('local scratch removal unproved')
+            print(f'land: removed local scratch {path}', flush=True)
+        self.data.update(local_dir=None, local_prepare_uncertain=False)
+        self.save()
+
     def restore(self):
         self.data['restoration_pending'] = True
         self.save()
@@ -214,6 +253,7 @@ class Builder:
         if proof['exists'] or proof['processes'] or proof['supervisors'] or proof['heavy']:
             raise ValueError('remote restoration is unknown')
         print(f'land: restored {self.data["host"]}: removed {self.data["remote_dir"]}; no processes or heavy tasks', flush=True)
+        self.cleanup_local()
         self.data.update(restored=True, restoration_pending=False, phase='restored')
         self.save()
 
@@ -252,7 +292,10 @@ class Builder:
         for key in ('boot', 'supervisor_pid', 'supervisor_start_ticks', 'start_ticks', 'upload'):
             self.data.pop(key, None)
         self.data.update(sha=sha or run('git', 'rev-parse', 'HEAD'), remote_dir=None, pgid=None, remote_pgid=None, phase='allocating',
-                         prepare_uncertain=True, upload_requested=False, upload_seen=False, launch_requested=False, exit_seen=False, restored=False, restoration_pending=False)
+                         prepare_uncertain=False, upload_requested=False, upload_seen=False, launch_requested=False, exit_seen=False, restored=False, restoration_pending=False)
+        self.save()
+        directory = self.prepare_local()
+        self.data['prepare_uncertain'] = True
         self.save()
         prepared = self.remote('prepare')
         candidate = prepared['remote_dir']
@@ -260,55 +303,54 @@ class Builder:
             raise ValueError('invalid builder temporary path')
         self.data.update(remote_dir=candidate, prepare_uncertain=False, phase='prepared')
         self.save()
-        with tempfile.TemporaryDirectory(prefix='agents-land-') as directory:
-            bundle = Path(directory) / 'candidate.bundle'
-            bundle_ref = 'refs/heads/agents-land-' + self.data['id']
-            subprocess.run(['git', 'update-ref', bundle_ref, self.data['sha']], cwd=root, check=True)
-            try:
-                subprocess.run(['git', 'bundle', 'create', str(bundle), bundle_ref], cwd=root, check=True)
-            finally:
-                subprocess.run(['git', 'update-ref', '-d', bundle_ref], cwd=root, check=True)
-            self.data.update(upload_requested=True, upload_seen=False, phase='uploading')
-            self.save()  # Durable unknown-end intent precedes upload dispatch.
-            with bundle.open('rb') as stream:
-                receipt = json.loads(ssh(self.data['target'], 'python3', '-I', '-B', '-c',
-                                         self.source, 'upload', json.dumps(self.data),
-                                         stdin=stream, timeout=15))
-            if receipt.get('sha') != self.data['sha'] or receipt.get('phase') != 'finished' or receipt.get('exit_code') != 0:
-                raise ValueError('upload receipt unavailable or mismatched')
-            self.data.update(upload_seen=True, upload=receipt, phase='uploaded')
-            self.save()
-            print(f'land: shipped HEAD bundle ({self.data["sha"]}) to {self.slot[0]}:{candidate}', flush=True)
-            script = (f'git clone -q {shlex.quote(candidate)}/candidate.bundle {shlex.quote(candidate)}/repo && '
-                      f'cd {shlex.quote(candidate)}/repo && git checkout -q --detach {self.data["sha"]} && mkdir {shlex.quote(candidate)}/tmp && '
-                      f'TMPDIR={shlex.quote(candidate)}/tmp HEAVY_LABEL={shlex.quote(self.what)} '
-                      f'nice -n 19 ionice -c3 tools/check.sh --tier gate '
-                      f'{("--changed " + shlex.quote(base) + " ") if base else ""}'
-                      f'--json {shlex.quote(candidate)}/result.json > {shlex.quote(candidate)}/table 2>&1')
-            self.data.update(launch_requested=True, phase='launching')
-            self.save()
-            self.observe(self.remote('start', script, str(limit + 5), self.source))
-            self.data['phase'] = 'running'
-            self.save()
-            observation = self.remote('wait', str(limit + 5))
-            value = observation.get('run') or {}
-            if value.get('sha') != self.data['sha']:
-                raise ValueError('remote receipt SHA mismatch')
-            if value.get('phase') != 'finished' or type(value.get('exit_code')) is not int:
-                raise ValueError('remote exit status unavailable')
-            self.observe(observation)
-            self.data.update(exit_seen=True, exit_code=value['exit_code'], phase='exited')
-            self.save()
-            try:
-                print(ssh(self.data['target'], 'cat', candidate + '/table', timeout=10), flush=True)
-                result = json.loads(ssh(self.data['target'], 'cat', candidate + '/result.json', timeout=10))
-            finally:
-                # Only a received exit can authorize normal restoration. Drops,
-                # timeouts and interrupts before it go directly to a kept claim.
-                self.restore()
-            if require_green and (value['exit_code'] or result['code'] or result['starved']):
-                raise ValueError(f'builder gate incomplete or red (exit {value["exit_code"]}, starved {result["starved"]})')
-            return result
+        bundle = Path(directory) / 'candidate.bundle'
+        bundle_ref = 'refs/heads/agents-land-' + self.data['id']
+        subprocess.run(['git', 'update-ref', bundle_ref, self.data['sha']], cwd=root, check=True)
+        try:
+            subprocess.run(['git', 'bundle', 'create', str(bundle), bundle_ref], cwd=root, check=True)
+        finally:
+            subprocess.run(['git', 'update-ref', '-d', bundle_ref], cwd=root, check=True)
+        self.data.update(upload_requested=True, upload_seen=False, phase='uploading')
+        self.save()  # Durable unknown-end intent precedes upload dispatch.
+        with bundle.open('rb') as stream:
+            receipt = json.loads(ssh(self.data['target'], 'python3', '-I', '-B', '-c',
+                                     self.source, 'upload', json.dumps(self.data),
+                                     stdin=stream, timeout=15))
+        if receipt.get('sha') != self.data['sha'] or receipt.get('phase') != 'finished' or receipt.get('exit_code') != 0:
+            raise ValueError('upload receipt unavailable or mismatched')
+        self.data.update(upload_seen=True, upload=receipt, phase='uploaded')
+        self.save()
+        print(f'land: shipped HEAD bundle ({self.data["sha"]}) to {self.slot[0]}:{candidate}', flush=True)
+        script = (f'git clone -q {shlex.quote(candidate)}/candidate.bundle {shlex.quote(candidate)}/repo && '
+                  f'cd {shlex.quote(candidate)}/repo && git checkout -q --detach {self.data["sha"]} && mkdir {shlex.quote(candidate)}/tmp && '
+                  f'TMPDIR={shlex.quote(candidate)}/tmp HEAVY_LABEL={shlex.quote(self.what)} '
+                  f'nice -n 19 ionice -c3 tools/check.sh --tier gate '
+                  f'{("--changed " + shlex.quote(base) + " ") if base else ""}'
+                  f'--json {shlex.quote(candidate)}/result.json > {shlex.quote(candidate)}/table 2>&1')
+        self.data.update(launch_requested=True, phase='launching')
+        self.save()
+        self.observe(self.remote('start', script, str(limit + 5), self.source))
+        self.data['phase'] = 'running'
+        self.save()
+        observation = self.remote('wait', str(limit + 5))
+        value = observation.get('run') or {}
+        if value.get('sha') != self.data['sha']:
+            raise ValueError('remote receipt SHA mismatch')
+        if value.get('phase') != 'finished' or type(value.get('exit_code')) is not int:
+            raise ValueError('remote exit status unavailable')
+        self.observe(observation)
+        self.data.update(exit_seen=True, exit_code=value['exit_code'], phase='exited')
+        self.save()
+        try:
+            print(ssh(self.data['target'], 'cat', candidate + '/table', timeout=10), flush=True)
+            result = json.loads(ssh(self.data['target'], 'cat', candidate + '/result.json', timeout=10))
+        finally:
+            # Only a received exit can authorize normal restoration. Drops,
+            # timeouts and interrupts before it go directly to a kept claim.
+            self.restore()
+        if require_green and (value['exit_code'] or result['code'] or result['starved']):
+            raise ValueError(f'builder gate incomplete or red (exit {value["exit_code"]}, starved {result["starved"]})')
+        return result
 
 
 def reconcile(root, claim, kill):

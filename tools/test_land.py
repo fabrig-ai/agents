@@ -52,6 +52,8 @@ else:
   print('Avail\n'+str(spaces.get(target,100*1024**3)))
   sys.exit(0)
  if action=='prepare' and os.environ.get('BAD_TEMP'):
+  prepared=json.loads(subprocess.check_output(args,text=True))
+  (home/'remote').write_text(prepared['remote_dir'])
   print(json.dumps(dict(remote_dir='/tmp/agents-gate.x/../outside')))
   sys.exit(0)
  if action=='cleanup' and os.environ.get('DROP_CLEANUP'): sys.exit(255)
@@ -70,6 +72,7 @@ else:
   if os.environ.get('DROP_UPLOAD'): sys.exit(255)
   sys.exit(child.wait())
  if action=='prepare':
+  (home/'local-dir').write_text(json.loads(args[6]).get('local_dir') or '')
   result=subprocess.check_output(args,text=True)
   (home/'remote').write_text(json.loads(result)['remote_dir'])
   print(result)
@@ -164,6 +167,9 @@ class LandFixture(unittest.TestCase):
         row=json.loads(self.records()[0].read_text())
         self.assertEqual(row['owner'],'s/deploy-gate')
         self.assertEqual(row['what'],json.loads((self.home/'claim.json').read_text())[3])
+        if row.get('remote_dir') or row.get('prepare_uncertain'):
+            self.assertTrue(Path(row['local_dir']).is_dir())
+            self.assertEqual(json.loads((Path(row['local_dir']) / 'identity.json').read_text())['id'], row['id'])
         return row
 
     def command(self, *args, expected=0):
@@ -194,6 +200,10 @@ class LandFixture(unittest.TestCase):
         self.assertEqual(len(releases),1)
         self.assertEqual(claims[0][2:5], releases[0][2:5])
         self.assertEqual(claims[0][5],releases[0][6])
+        if (self.home / 'local-dir').exists():
+            local_dir = (self.home / 'local-dir').read_text()
+            self.assertTrue(local_dir)
+            self.assertFalse(Path(local_dir).exists(), local_dir)
         if (self.home/'remote').exists():
             self.assertFalse(Path((self.home/'remote').read_text()).exists())
 
@@ -222,6 +232,9 @@ class LandTests(LandFixture):
         self.env['FAIL_GATE']='1'
         self.land('--host','hetzner7',expected=1)
         self.assertEqual(self.tip(),self.original)
+        local_dir = (self.home / 'local-dir').read_text()
+        self.assertTrue(local_dir, 'local scratch must be named before remote dispatch')
+        self.assertFalse(Path(local_dir).exists(), local_dir)
         self.assert_released()
 
     def test_lost_claim_reply_keeps_exact_intent(self):
@@ -301,14 +314,16 @@ class PeriodicTests(unittest.TestCase):
         loader.exec_module(module)
         with tempfile.TemporaryDirectory() as home:
             declarations=module.Declarations(ROOT,Path(home))
-            for host in declarations.hosts:
-                wanted=declarations.host_units(host)
-                enabled = 'builder' in declarations.hosts[host]['roles'] and declarations.hosts[host]['machine_env'].get('AGENTS_PERIODIC') == 1
-                self.assertEqual('agents-periodic.timer' in wanted, enabled)
-                self.assertEqual('agents-periodic.service' in wanted, enabled)
-            declarations.hosts['hetzner3']['machine_env']['AGENTS_PERIODIC'] = 1
-            self.assertIn('agents-periodic.timer', declarations.host_units('hetzner3'))
-            self.assertIn('agents-periodic.service', declarations.host_units('hetzner3'))
+            expected = {name for name, row in declarations.hosts.items()
+                        if 'builder' in row['roles'] and row['machine_env'].get('AGENTS_PERIODIC') == 1}
+            for unit in ('agents-periodic.timer', 'agents-periodic.service'):
+                actual = {host for host in declarations.hosts if unit in declarations.host_units(host)}
+                self.assertEqual(actual, expected)
+            # Exercise enabled rendering even while main has every host paused.
+            flagged = next(name for name, row in declarations.hosts.items() if 'builder' in row['roles'])
+            declarations.hosts[flagged]['machine_env']['AGENTS_PERIODIC'] = 1
+            self.assertIn('agents-periodic.timer', declarations.host_units(flagged))
+            self.assertIn('agents-periodic.service', declarations.host_units(flagged))
             service=(ROOT/'fleet/units/agents-periodic.service').read_text()
             self.assertIn('AGENTS_PERIODIC',service)
             self.assertIn('Nice=19',service)
