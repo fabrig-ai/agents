@@ -12,7 +12,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta
 from unittest.mock import patch
 
-from fab import cli, dispatch, log, plan, state
+from fab import cli, dispatch, gates, log, plan, state
 from fab.dispatch import Action, MAX_RUNS
 from fab.hosts import Host
 from fab.sh import Result, ssh
@@ -110,7 +110,8 @@ class DecideTest(unittest.TestCase):
 
     def test_rejections_use_last_step(self):
         for step, expected in (("merge", "rebase"), ("rebase", "rebase"),
-                               ("test", "repair"), ("push", "repair"), ("paths", "repair")):
+                               ("test", "repair"), ("push", "repair"), ("paths", "repair"),
+                               ("gate:files", "repair"), ("gate:parse", "repair")):
             with self.subTest(step=step):
                 events = [event("branch.rejected", step="rebase"),
                           event("branch.rejected", step=step)]
@@ -383,6 +384,7 @@ walk = false
         self.start = self.enterContext(patch("fab.run.start", side_effect=self.record_start))
         self.collect = self.enterContext(patch("fab.run.collect", side_effect=self.record_collect))
         self.land = self.enterContext(patch("fab.land.main", side_effect=self.record_land))
+        self.screen = self.enterContext(patch("fab.gates.screen", return_value=[]))
         self.out = io.StringIO()
         self.enterContext(redirect_stdout(self.out))
 
@@ -646,6 +648,52 @@ walk = false
         self.assertEqual(note["text"], "land draft/a failed: offline retry later")
         self.assertEqual(self.out.getvalue().splitlines(),
                          ["land draft/a failed: offline retry later", "land draft/b draft/b"])
+
+    def test_gate_findings_reject_without_landing_and_print_unique_gates(self):
+        self.append(started(), ended())
+        self.screen.return_value = [gates.Finding("files", "outside"),
+                                    gates.Finding("files", "also outside"),
+                                    gates.Finding("docs", "no docstring")]
+        self.tick()
+        self.land.assert_not_called()
+        self.assertEqual(self.out.getvalue(), "land draft/a rejected gate:files,docs\n")
+        self.assertFalse(any(entry["ev"] == "note" for entry in log.read()))
+
+    def test_clean_screen_precedes_landing_with_current_events_and_runner(self):
+        path = self.home / "events.jsonl"
+        self.append(started(branch="draft/a-r1"), ended(), path=path)
+        history = log.read(path)
+
+        def landing(argv):
+            self.screen.assert_called_once_with(
+                plan.load_tasks(self.directory / "tasks", "draft", "agents")["draft/a"],
+                history, sh=self.fake, log_path=path)
+            self.assertEqual(argv, ["draft/a-r1", "--task", "draft/a"])
+            return 0
+
+        self.land.side_effect = landing
+        self.tick(log_path=path)
+        self.land.assert_called_once()
+        self.assertEqual(self.out.getvalue(), "land draft/a draft/a-r1\n")
+        self.assertEqual(log.read(path), history)
+
+    def test_failed_screen_never_lands_and_next_action_runs(self):
+        self.add_task("b")
+        self.append(started(), ended())
+        self.screen.side_effect = RuntimeError("screen unavailable")
+        self.tick()
+        self.land.assert_not_called()
+        self.assertEqual(log.read()[-1]["text"], "land draft/a failed: screen unavailable")
+        self.assertIn("land draft/a failed: screen unavailable\n", self.out.getvalue())
+        self.start.assert_called_once()
+
+    def test_other_repository_ready_is_not_screened(self):
+        self.add_task("a", repo="fabrig")
+        self.append(started(), ended())
+        self.fake.on(["git", "rev-parse", "--verify"], Result(0, "tip\n"))
+        self.tick()
+        self.screen.assert_not_called()
+        self.assertEqual(log.read()[-1]["ev"], "branch.ready")
 
     def test_land_output_is_captured_to_keep_one_line_per_action(self):
         self.append(started(), ended())

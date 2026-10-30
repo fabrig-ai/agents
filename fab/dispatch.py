@@ -240,12 +240,12 @@ def tick(plan_dir: Path, *, sh: Runner = run, hosts: Mapping[str, Host] | None =
             raise specs.PlanError("\n".join(issues))
         hosts = machines.load() if hosts is None else hosts
         events = log.read(log_path)
-        gates = sorted(name for name, host in hosts.items() if "gate" in host.roles)
-        if gates:
+        gate_hosts = sorted(name for name, host in hosts.items() if "gate" in host.roles)
+        if gate_hosts:
             imported = {(event.get("queue_ts"), event.get("ev"), event.get("branch"),
                          event.get("tip")) for event in events if "queue_ts" in event}
             since = max((event["queue_ts"] for event in events if "queue_ts" in event), default="")
-            result = sh(ssh(hosts[gates[0]].ssh, ["fab", "queue", "log", "--since", since]))
+            result = sh(ssh(hosts[gate_hosts[0]].ssh, ["fab", "queue", "log", "--since", since]))
             if not result.ok:
                 # The queue's record is read again next tick; the other actions still run.
                 failure = " ".join((result.err or result.out).strip().splitlines()[-3:])
@@ -279,11 +279,18 @@ def tick(plan_dir: Path, *, sh: Runner = run, hosts: Mapping[str, Host] | None =
                     case "collect":
                         runs.collect(action.run, log.read(log_path), hosts, sh=sh, log_path=log_path)
                     case "land":
-                        output = io.StringIO()
-                        with redirect_stdout(output):
-                            refused = land.main([action.branch, "--task", action.task])
-                        if refused:
-                            raise RuntimeError(output.getvalue().strip() or "landing refused")
+                        findings = (gates.screen(tasks[action.task], log.read(log_path),
+                                                sh=sh, log_path=log_path)
+                                    if tasks[action.task].repo in gates.REPOS else [])
+                        if findings:
+                            detail = "rejected gate:" + ",".join(dict.fromkeys(
+                                finding.gate for finding in findings))
+                        else:
+                            output = io.StringIO()
+                            with redirect_stdout(output):
+                                refused = land.main([action.branch, "--task", action.task])
+                            if refused:
+                                raise RuntimeError(output.getvalue().strip() or "landing refused")
                     case "ready":
                         repo = home / "repos" / tasks[action.task].repo
                         if not (repo / ".git").exists():
@@ -300,9 +307,9 @@ def tick(plan_dir: Path, *, sh: Runner = run, hosts: Mapping[str, Host] | None =
                                           if event.get("ev") == "branch.rejected"
                                           and event.get("task") == action.task), None)
                         if rejection is not None and tip == rejection.get("tip"):
-                            if not gates:
+                            if not gate_hosts:
                                 raise ValueError("no gate host configured for queue untry")
-                            sh(ssh(hosts[gates[0]].ssh,
+                            sh(ssh(hosts[gate_hosts[0]].ssh,
                                    ["fab", "queue", "untry", action.branch]), check=True)
                             log.append("note", path=log_path,
                                        text=f"retry {action.task}: same tip after repair")
