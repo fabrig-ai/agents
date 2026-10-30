@@ -9,6 +9,7 @@ from pathlib import Path
 MODES = ("feature", "migration", "fix", "probe")
 KINDS = ("feature", "interface", "migration", "repair", "rebase", "docs")
 EFFORTS = ("medium", "high")
+RESERVED = ("cut", "retire", "review")  # call subjects `<draft>/<name>` (fab.designer); not part ids
 
 
 class PlanError(ValueError):
@@ -23,6 +24,17 @@ class Part:
     needs: tuple[str, ...]
     design: str
     done: bool = False  # built without task specs (by hand); counts as landed for its readers
+    contract: bool = False  # a shared contract: the designer's contract call designs it (13.3)
+
+
+@dataclass(frozen=True)
+class Question:
+    """A question of the user's from the cut (budgets, machines, what is hard to reverse)."""
+
+    id: str  # unique in the plan
+    text: str
+    parts: tuple[str, ...]  # parts not designed until it is answered
+    answer: str = ""  # the user's answer, written into plan.toml; empty while open
 
 
 @dataclass(frozen=True)
@@ -42,6 +54,8 @@ class Plan:
     high: float
     parts: dict[str, Part]
     slices: tuple[Slice, ...]
+    retired: bool = False  # set by the retire call; the tick skips a retired plan
+    questions: tuple[Question, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -69,7 +83,9 @@ class Task:
 
 
 def load_plan(path: Path) -> Plan:
-    """Read plan.toml: required keys draft, repo, parts; defaults sources=(), buffer low=1.0 high=2.0.
+    """Read plan.toml: required keys draft, repo, parts; defaults sources=(), buffer low=1.0 high=2.0,
+    retired=false. A part's contract defaults to false. Each `[[question]]` table requires id,
+    text and parts (strings) and defaults answer="".
 
     Raises PlanError for a missing key, a wrong type, an unknown mode, or a part id used twice.
     """
@@ -199,7 +215,8 @@ def problems(plan: Plan, tasks: dict[str, Task]) -> list[str]:
     """What does not hold together, one line each, in a stable order (empty when sound):
 
     a part's need or a slice's part naming no part; a task naming no part or needing no task;
-    a cycle among part needs or among task needs; a part in no slice.
+    a cycle among part needs or among task needs; a part in no slice; a part whose id is in
+    RESERVED; a question id used twice; a question naming no part.
     """
     issues = []
     included = {part for item in plan.slices for part in item.parts}

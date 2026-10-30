@@ -9,9 +9,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from fab import log
-from fab.plan import PlanError, Task, load_plan, load_tasks, problems
+from fab.plan import Plan, PlanError, Task, load_plan, load_tasks, problems
 
 STATUSES = ("waiting", "runnable", "running", "parked", "done", "ready", "landed", "rejected")
+PART_STATUSES = ("not designed", "designed", "done")
 
 
 @dataclass
@@ -85,6 +86,15 @@ def fold(tasks: Mapping[str, Task], events: Iterable[dict]) -> dict[str, TaskVie
 def runnable(views: Mapping[str, TaskView]) -> list[str]:
     """Ids whose status is runnable, in the views' order."""
     return [identifier for identifier, view in views.items() if view.status == "runnable"]
+
+
+def part_statuses(plan: Plan, tasks: Mapping[str, Task], statuses: Mapping[str, str]) -> dict[str, str]:
+    """Each part's status (PART_STATUSES), keyed by id in the plan's order (docs/design/fab.md, 4):
+    done when the plan marks the part done or it has task specs that all have status landed;
+    designed when it has task specs; else not designed. statuses maps task ids to fold's
+    statuses; a task missing from it is not landed. fab.calls' parts table, fab.dispatch.decide's
+    design step and fab.designer.retire_due read it."""
+    raise NotImplementedError
 
 
 def main(argv: list[str]) -> int:

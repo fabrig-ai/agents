@@ -242,7 +242,7 @@ design = "docs/design/fab.md, 13.2"
 
 [[part]]
 id = "designer"
-title = "The designer's calls: cut, decision, retire"
+title = "The designer's calls: cut, contracts, decision, retire"
 mode = "feature"
 needs = ["calls"]
 design = "docs/design/fab.md, 13.3"

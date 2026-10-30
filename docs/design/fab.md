@@ -90,8 +90,13 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
   default repository), `sources` (the drafts it serves), and `[buffer]` `low`
   and `high` (the ready-task band as multiples of implementer places). Each
   `[[part]]` has `id`, `title`, `mode` (feature, migration, fix or probe),
-  `needs` (other parts) and `design` (where its design is). Each `[[slice]]`
-  has `id`, `story`, `parts` and `walk` (whether QA walks it).
+  `needs` (other parts), `design` (where its design is) and `contract` (a
+  shared contract, designed by the designer's contract call, 13.3; default
+  false). Each `[[slice]]` has `id`, `story`, `parts` and `walk` (whether QA
+  walks it). Each `[[question]]` is one of the user's, from the cut: `id`,
+  `text`, `parts` (designed only once it is answered) and `answer`, written
+  into plan.toml when the user gives it. `retired = true` ends the plan. No
+  part is called `cut`, `retire` or `review`: those name calls' subjects.
 - **A task spec** is Markdown with a TOML header between `+++` lines: `id`,
   `part`, `kind` (feature, interface, migration, repair, rebase or docs),
   `repo`, `needs` (tasks that land first), `files` (globs it may change),
@@ -104,7 +109,7 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
   `rejected` (waiting for its repair or rebase run). An `Infra:` outcome makes
   it runnable again. `fab.state.fold` derives it from the specs and the log.
 - **A part is designed** once its skeleton and task specs have landed, and
-  **done** once all its tasks have landed.
+  **done** once all its tasks have landed (`fab.state.part_statuses`).
 
 ## 5. Runs
 
@@ -369,8 +374,9 @@ it, and the flow grows from a small start rather than to a fixed cap.
 ### 13.1 Design and acceptance are separate
 
 - **A Claude call's output is reviewed before it lands.** A skeleton,
-  answer or structure review call's branch gets a read-only Codex review run
-  (kind `review`, effort medium, `fab/roles/call-reviewer.md`). Its brief
+  answer, structure review or designer's call's branch (13.3) gets a
+  read-only Codex review run (kind `review`, effort medium,
+  `fab/roles/call-reviewer.md`). Its brief
   holds the call's brief and its diff from the merge base with main. It
   reports at most ten lines on contradictions with the design, layering
   breaches, gaps a task would hit, and duplicates of what the inventory
@@ -482,15 +488,52 @@ it, and the flow grows from a small start rather than to a fixed cap.
 
 ### 13.3 The designer's calls
 
+The designer of the user's model is four Claude calls (`fab/designer.py`),
+each with its role text in `fab/roles/`. Like every call, each is reviewed
+before it lands (13.1).
+
 - **cut:** a draft and the repository's designs in, `docs/plan/<draft>/plan.toml`
-  out (parts with modes and needs, contracts as early parts, slices with
-  their story and whether QA walks them) plus the user's questions; it lands
-  like a skeleton and starts the plan.
-- **decision:** a probe's report in, a design section out.
-- **retire:** when a plan's parts are all done: the status files brought
-  current, a Codex consistency pass over the designs changed since the plan
-  started, and the plan marked retired (`retired = true` in plan.toml), after
-  which the tick skips it.
+  out: parts with modes and needs, shared contracts as early parts marked
+  `contract`, slices with their story and whether QA walks them, and the
+  user's questions as `[[question]]`s naming the parts that wait for them.
+  No signatures and no task specs. Its brief holds the drafts, a one-line
+  index of the designs (path, title, size, status file) and the existing
+  plans as examples; the call reads the designs it needs itself.
+  - It is started by hand when a draft lands: `fab call cut --plan
+    PLAN_DIR --source PATH...`, PLAN_DIR being `docs/plan/<draft>` in a
+    checkout (it need not exist). The call lists PLAN_DIR in
+    `FAB_HOME/plans` (13.4) and runs; its subject is `<draft>/cut`.
+  - Its chain is the tick's of PLAN_DIR: a plan directory with no
+    plan.toml but a cut call in the log ticks as a plan with no parts, so
+    only the cut's chain moves. Once its branch lands, the plan is there and
+    the next tick runs it: that is how the cut starts the plan.
+- **contract:** a part marked `contract` is designed by the designer, not
+  the skeleton author (the user's model: "the designer writes it"). The call
+  is a skeleton call with the role `contract` (`fab call contract PART`),
+  its brief the skeleton author's with the contract's readers named. Its
+  subject is the part's, `<draft>/<part>`, so a part is designed by one or
+  the other. One contract call and one skeleton call may run at once.
+- **The user's questions park parts, not the plan:** a part named by a
+  question without an answer is not designed; its readers wait as for any
+  need. A skeleton or contract brief shows the part's questions and their
+  answers. The user's channel (13.6) lists the open ones.
+- **decision:** a probe's report in, a design section out. `fab call
+  decision PART --run RUN` for a probe part, its brief the probe's report
+  (`FAB_HOME/runs/<run>/report.md`), its readers and their designs; its
+  subject is `<draft>/<part>/decision`. It writes the section the readers
+  cite and its status file, and changes the plan only where the measurement
+  does. What starts it is the probe's (13.7).
+- **retire:** when a plan's parts are all done, the tick starts one retire
+  call (subject `<draft>/retire`). Its brief holds every design changed
+  since the plan started, with its status file: those a commit since the
+  one that added plan.toml changed, or whose status file it changed. It
+  brings the status files current and sets `retired = true` in plan.toml.
+  The Codex consistency pass is its chain's review run, with its own role
+  text (`fab/roles/consistency.md`) and the list of changed designs; a
+  refusal goes back once as an amend call. Once it lands, the tick skips the
+  plan.
+- **Where they land:** as every call, through `fab land` for this
+  repository, so they may change only what it allows (section 6).
 
 ### 13.4 Several plans, calls in parallel
 
@@ -555,3 +598,8 @@ it, and the flow grows from a small start rather than to a fixed cap.
   landing through that repository's landing, not `fab land`.
 - Retiring the session launcher, watch's session rules, mail, leases and the
   event collector once nothing resident remains.
+- The cut started by the tick when a draft lands that no plan serves, once
+  a draft can say where its plan goes.
+- The designer's calls for repositories other than this one, and changes to
+  designs outside `docs/design/fab*`, once calls land through tools/land or
+  fabrig's queue.

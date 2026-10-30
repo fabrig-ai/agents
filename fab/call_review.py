@@ -23,6 +23,7 @@ KIND = "review"  # the review run's kind in run.started (fab.run.KINDS)
 EFFORT = "medium"  # the review run's Codex effort
 ROLE = Path(__file__).resolve().parent / "roles" / "call-reviewer.md"  # the review run's role text
 AMENDER = Path(__file__).resolve().parent / "roles" / "amender.md"  # the amend call's role text
+CONSISTENCY = Path(__file__).resolve().parent / "roles" / "consistency.md"  # a retire chain's review
 DIFF_LIMIT = 120_000  # characters of the diff a review brief quotes; the run reads the rest itself
 FINDINGS_LINES = 40  # lines of a refusing report quoted in later briefs
 INFRA_LIMIT = 3  # review runs of a chain ending infra since its reset that park it

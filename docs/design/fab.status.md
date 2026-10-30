@@ -86,6 +86,16 @@
   measure, and `fab.dispatch.places` and `decide` take a `calm` argument they
   do not use yet. The task `flow` fills them after `gates-tick`; until then
   the tick fills every builder's `places` and never passes them.
+- **The designer's calls are a skeleton:** `fab/designer.py` holds 13.3's
+  briefs, the changed-designs and retire checks and `fab call cut|contract|
+  decision|retire`; `fab.state.part_statuses` and the plan's `contract`,
+  `retired` and `[[question]]` fields are declared but not read yet. The
+  role texts `cut.md`, `contract.md`, `decision.md`, `retire.md` and
+  `consistency.md` are written. The task `designer` fills the module, the
+  plan's fields and the commands; `designer-tick` makes the tick start
+  contract and retire calls, tick a plan being cut, skip a retired plan and
+  review a retire call with the consistency pass. Until then every part is
+  designed by a skeleton call, and plans are cut by hand.
 - **Parts done by hand have no task specs** (package, slot-probe), so the
   tick's design line lists them.
 - **The slot bound of 25 GB is one measurement** (10-30 20:18Z): a
