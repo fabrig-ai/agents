@@ -29,6 +29,27 @@ class FleetSync3Test(fixture.FleetTest):
                              str(self.home / "src/fabrig/current/tools" / path))
         self.assertEqual(set(self.state()["managed_links"]), expected.keys())
 
+    def test_session_reap_hook_production_mapping_survives_release_switch(self):
+        manifest = dict((line.split()[0], line.split()[-1])
+                        for line in (fixture.ROOT / "tools/installed").read_text().splitlines()
+                        if line.strip() and not line.lstrip().startswith("#"))
+        target = manifest["session-reap-hook"]
+        self.assertEqual(target, "session/reap-hook")
+        path = self.source / "tools/installed"
+        fixture.put(path, path.read_text() + f"session-reap-hook {target}\n")
+        self.publish()
+        self.sync()
+        link = self.home / ".local/bin/session-reap-hook"
+        expected = str(self.home / "src/fabrig/current/tools" / target)
+        self.assertEqual(os.readlink(link), expected)
+        previous = link.resolve()
+        fixture.put(self.source / "tools" / target, "#!/bin/sh\nexit 0\n", True)
+        self.publish()
+        self.sync()
+        self.assertEqual(os.readlink(link), expected)
+        self.assertNotEqual(link.resolve(), previous)
+        self.assertTrue(link.is_file())
+
     def test_bad_candidate_manifests_block_promotion(self):
         self.sync()
         current = self.current()

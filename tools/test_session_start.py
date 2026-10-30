@@ -78,7 +78,7 @@ else:
         sys.exit(int(os.environ["FAKE_GIT_EXIT"]))
     pathlib.Path(sys.argv[-1]).mkdir()
 '''
-        for command in ("claude", "git", "session-context", "systemctl", "codex-run", "claim", "lease", "reap"):
+        for command in ("claude", "git", "session-context", "systemctl", "codex-run", "claim", "lease", "reap", "session-reap-hook"):
             path = self.bin / command
             path.write_text(fake)
             path.chmod(0o755)
@@ -87,7 +87,7 @@ else:
             "PYTHONDONTWRITEBYTECODE": "1",
         }
         self.addCleanup(patch.stopall)
-        patch.dict(os.environ, {"HOME": str(self.home)}).start()
+        patch.dict(os.environ, {"HOME": str(self.home), "PATH": str(self.bin)}).start()
         patch.object(lib, "REGISTRY", self.registry).start()
         # Parent expectations and child launches must share a minute even when
         # scheduling crosses a real clock boundary.
@@ -1081,9 +1081,57 @@ class ReapSettingsTests(Sandbox):
                         self.assertEqual(len(reapers), int(event in ("SessionStart", "SessionEnd")))
                         if reapers:
                             self.assertNotIn("matcher", reapers[0])
-                            self.assertEqual(shlex.split(reapers[0]["hooks"][0]["command"])[1:], [values[f"{role}_name"]])
+                            self.assertEqual(shlex.split(reapers[0]["hooks"][0]["command"]), ["session-reap-hook", values[f"{role}_name"]])
                     lib.atomic_json(path, settings)
                     self.assertEqual(lib.hook_settings(values, role, capabilities)[1], settings)
+
+    def test_missing_or_nonexecutable_hook_omits_both_and_migrates_owned_entries(self):
+        executable = self.bin / "session-reap-hook"
+        foreign = {"type": "command", "command": "foreign-hook"}
+        for available in (False, True):
+            executable.chmod(0o755 if available else 0o644)
+            for role, values in (("lead", lib.names("dm", "jig")),
+                                 ("coordinator", lib.names("ab")), ("director", lib.names("director"))):
+                for capabilities in (set(), {"hook-gating"}, {"hook-gating", "role-drift"}):
+                    with self.subTest(available=available, role=role, capabilities=capabilities):
+                        path = Path(values[f"{role}_start_dir"]) / ".claude/settings.json"
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        old = [{"hooks": [foreign,
+                            {"type": "command", "command": "/obsolete/release/tools/session/reap-hook old"},
+                            {"type": "command", "command": "session-reap-hook old"}]}]
+                        path.write_text(json.dumps({"hooks": {event: old for event in ("SessionStart", "SessionEnd")}}))
+                        _, settings, reason = lib.hook_settings(values, role, capabilities)
+                        for event in ("SessionStart", "SessionEnd"):
+                            groups = settings["hooks"][event]
+                            self.assertEqual(groups[0], {"hooks": [foreign]})
+                            commands = [hook["command"] for group in groups for hook in group["hooks"]]
+                            self.assertNotIn("/obsolete/release/tools/session/reap-hook old", commands)
+                            self.assertNotIn("session-reap-hook old", commands)
+                            self.assertEqual(sum(command.startswith("session-reap-hook ") for command in commands), int(available))
+                        self.assertEqual("session-reap-hook absent from PATH" in reason, not available)
+        executable.unlink()
+        for role, values in (("lead", lib.names("dm", "jig")),
+                             ("coordinator", lib.names("ab")), ("director", lib.names("director"))):
+            path = Path(values[f"{role}_start_dir"]) / ".claude/settings.json"
+            path.unlink()
+            _, settings, _ = lib.hook_settings(values, role, set())
+            self.assertNotIn("SessionStart", settings.get("hooks", {}))
+            self.assertNotIn("SessionEnd", settings.get("hooks", {}))
+
+    def test_wire_omits_missing_hook_until_installed_and_shows_path_name(self):
+        executable = self.bin / "session-reap-hook"
+        executable.unlink()
+        result = self.command("start", "wire", "director", "--dry-run")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("session-reap-hook absent from PATH", result.stdout)
+        self.assertNotIn('"SessionEnd"', result.stdout)
+        executable.symlink_to(self.checkout / "tools/session/reap-hook")
+        result = self.command("start", "wire", "director", "--dry-run")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('"command": "session-reap-hook director/', result.stdout)
+        self.assertIn('"SessionEnd"', result.stdout)
+        self.assertNotIn(str(self.checkout / "tools/session/reap-hook"), result.stdout)
+
 
 
 class RetireTests(Sandbox):

@@ -73,7 +73,7 @@ if several have, pass a session id explicitly (exit 2 lists their ids and mtimes
 
 `start` writes `<start dir>/.claude/settings.json`; `wire` refreshes the
 coordinator plus existing lead directories, or just the director. Replace owned
-session-context and reap-hook commands in Stop/SessionStart/UserPromptSubmit/SessionEnd;
+session-context and session-reap-hook commands (including legacy reap-hook paths) in Stop/SessionStart/UserPromptSubmit/SessionEnd;
 preserve foreign commands and their order, even inside mixed hook groups.
 Files are written to siblings and renamed.
 
@@ -103,8 +103,20 @@ A due handover comes first in the same output. Changes on other events remain
 pending. Cleanup runs daily for sessions idle over seven days. Hooks always exit 0.
 
 
-Every Claude role also gets `reap-hook ROLE_NAME` on every SessionStart source
-and on SessionEnd, regardless of context capabilities. The hook reads Claude's
+When `session-reap-hook` resolves on PATH, every Claude role also gets
+`session-reap-hook ROLE_NAME` on every SessionStart source and on SessionEnd,
+regardless of context capabilities. `tools/installed` maps that stable PATH name
+to `session/reap-hook`; fleet-sync manages its link through the current release.
+Published commands never embed a release or checkout path.
+
+If the executable is absent, launch/wire omits both reap hooks, removes obsolete
+owned reap hooks, and prints why. A missing command is not silent in Claude Code:
+its [hooks reference](https://code.claude.com/docs/en/hooks#other-exit-codes)
+describes a non-blocking hook-error notice, including shell exit 127 for missing
+executables. Deploy with fleet-sync first, then `session-start wire H` for each
+coordinator and `session-start wire director` to enable or migrate live settings.
+Both the old absolute `reap-hook` command and `session-reap-hook` are owned;
+foreign hook commands keep their order. The hook reads Claude's
 JSON from stdin. Start records `claude-session`, the full session id and
 `~/.claude/jobs/<first eight id characters>`. Owner comes from session-context's
 `names.json` cache (including short/full id matches), with the launcher's role

@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import subprocess
 from string import Template
 import tempfile
@@ -274,7 +275,7 @@ def owned_hook(hook):
         argv = shlex.split(hook.get("command", ""))
     except ValueError:
         return False
-    return bool(argv) and (Path(argv[0]).name == "reap-hook" or
+    return bool(argv) and (Path(argv[0]).name in ("reap-hook", "session-reap-hook") or
                            (Path(argv[0]).name == "session-context" and "--hook" in argv))
 
 
@@ -329,10 +330,15 @@ def hook_settings(values, role, capabilities):
         reason = f"{role} hooks skipped: PATH session-context lacks hook-gating"
     for event, groups in owned.items():
         hooks.setdefault(event, []).extend(groups)
-    reap = {"type": "command", "command": shlex.join([
-        str(ROOT / "tools/session/reap-hook"), values[f"{role}_name"]]), "timeout": 2}
-    for event in ("SessionStart", "SessionEnd"):
-        hooks.setdefault(event, []).append({"hooks": [reap.copy()]})
+    if shutil.which("session-reap-hook") is not None:
+        reap = {"type": "command", "command": shlex.join([
+            "session-reap-hook", values[f"{role}_name"]]), "timeout": 2}
+        for event in ("SessionStart", "SessionEnd"):
+            hooks.setdefault(event, []).append({"hooks": [reap.copy()]})
+    else:
+        reason += "; reap hooks skipped: session-reap-hook absent from PATH"
+    if not hooks:
+        settings.pop("hooks")
     return path, settings, reason
 
 
