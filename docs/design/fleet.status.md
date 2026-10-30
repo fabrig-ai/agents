@@ -15,6 +15,10 @@ Contract: `docs/design/fleet.md`, sections 1–6.
 
 ## Gaps and departures
 
+- **Retired links are not yet enforced on hosts.** `fleet/retired-links.toml`
+  and its fleet-sync step land with ops' go; until then the five old-kit links
+  remain on all five hosts (`docs/design/fleet.md`, section 2).
+
 - **Bootstrap is unproven and targets retired hetzner2** (`fleet/bootstrap/README.md:3`).
   Its default is rejected by the roster (`fleet/bootstrap/bootstrap.py:179`); fixture tests are not rebuilt-host acceptance.
 - **Routing and existing kache remain check-only.** `fleet/policy.toml:3` covers
