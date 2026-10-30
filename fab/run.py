@@ -124,6 +124,36 @@ def start(task: Task, host: Host, *, kind: str = "implement", events: Iterable[d
     clone = shlex.join(["git", "clone", "--", REMOTES[task.repo], str(repo)])
     remote(["bash", "-c", f"if ! test -d {shlex.quote(str(repo / '.git'))}; then {clone}; fi"])
     remote(["git", "-C", str(repo), "fetch", "origin"])
+    try:
+        return _prepare_and_launch(task, host, kind, remote, run_id=run_id, branch=branch,
+                                   base=base, root=root, repo=repo, worktree=worktree,
+                                   brief_path=brief_path, report_path=report_path, text=text,
+                                   log_path=log_path)
+    except BaseException:
+        # A start that fails part way gives back what it took, so the next start finds it free.
+        _undo_start(task, remote, run_id=run_id, branch=branch, repo=repo, worktree=worktree)
+        raise
+
+
+def _undo_start(task: Task, remote, *, run_id: str, branch: str, repo: Path, worktree: Path) -> None:
+    try:
+        if task.repo in SLOTTED:
+            listed = remote(["fab", "slot", "list"])
+            for line in listed.out.splitlines():
+                entry = json.loads(line) if line.strip() else {}
+                if (entry.get("claim") or {}).get("run") == run_id:
+                    remote(["fab", "slot", "release", str(entry["slot"]), run_id])
+        else:
+            remote(["bash", "-c", shlex.join(["git", "-C", str(repo), "worktree", "remove", "--force",
+                                              str(worktree)]) + " 2>/dev/null; "
+                    + shlex.join(["git", "-C", str(repo), "branch", "-D", branch]) + " 2>/dev/null; true"])
+    except Exception:
+        pass
+
+
+def _prepare_and_launch(task: Task, host: Host, kind: str, remote, *, run_id: str, branch: str,
+                        base: str, root: Path, repo: Path, worktree: Path, brief_path: Path,
+                        report_path: Path, text: str, log_path: Path | None) -> str:
     slot = None
     if task.repo in SLOTTED:
         listed = remote(["fab", "slot", "list"])
@@ -147,8 +177,10 @@ def start(task: Task, host: Host, *, kind: str = "implement", events: Iterable[d
     remote(["bash", "-c", f"cat > {shlex.quote(str(temporary))} && "
             + shlex.join(["mv", "--", str(temporary), str(brief_path)])], input=text)
     _write(log.home() / "runs" / run_id / "brief.md", text)
-    command = ["fab", "codex", "start"] if LAUNCHER == "fab" else ["codex-run", "task"]
-    command.extend(["--effort", task.effort, "--to", NOTIFY])
+    if LAUNCHER == "fab":
+        command = ["fab", "codex", "start", "--effort", task.effort]
+    else:
+        command = ["codex-run", "task", "--effort", task.effort, "--to", NOTIFY]
     if kind == "review":
         command.append("--read-only")
     result = remote([*command, str(brief_path), str(worktree), str(report_path)])

@@ -126,7 +126,7 @@ class RunStartTest(unittest.TestCase):
                                                    branch, str(worktree), "origin/main"])
                 self.assertEqual(commands[-2], ["bash", "-c",
                     f"cat > {directory}/brief.md.tmp && mv -- {directory}/brief.md.tmp {directory}/brief.md"])
-                expected = ["fab", "codex", "start", "--effort", "high", "--to", run.NOTIFY]
+                expected = ["fab", "codex", "start", "--effort", "high"]
                 if kind == "review":
                     expected.append("--read-only")
                 self.assertEqual(commands[-1], [*expected, str(directory / "brief.md"), str(worktree),
@@ -171,7 +171,7 @@ class RunStartTest(unittest.TestCase):
                     ["fab", "slot", "claim", "2", run_id, TASK.id],
                     ["git", "-C", str(slot), "fetch", "origin"],
                     ["git", "-C", str(slot), "switch", "-C", branch, source]])
-                expected = ["fab", "codex", "start", "--effort", task.effort, "--to", run.NOTIFY]
+                expected = ["fab", "codex", "start", "--effort", task.effort]
                 if kind == "review":
                     expected.append("--read-only")
                 self.assertEqual(commands[-1], [*expected, str(directory / "brief.md"), str(slot),
@@ -213,7 +213,8 @@ class RunStartTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, HOST.name + ": no idle slot"):
                     run.start(replace(TASK, repo="fabrig"), HOST, sh=fake)
                 self.assertEqual(command(fake.calls[-1]), ["fab", "slot", "list"])
-                self.assertEqual(len(fake.calls), 4)
+                # The fifth call is the failed start's undo, looking for its own claim.
+                self.assertEqual(len(fake.calls), 5)
                 self.assertEqual(log.read(), [])
                 self.assertFalse((home / "fab/runs").exists())
 
@@ -228,7 +229,9 @@ class RunStartTest(unittest.TestCase):
             fake = FakeRunner().on(["ssh"], answer)
             with self.assertRaises(Failed):
                 run.start(replace(TASK, repo="fabrig"), HOST, sh=fake)
-            self.assertEqual(command(fake.calls[-1])[:3], ["fab", "slot", "claim"])
+            commands = [command(call)[:3] for call in fake.calls]
+            self.assertIn(["fab", "slot", "claim"], commands)
+            self.assertNotIn(["fab", "codex", "start"], commands)
             self.assertEqual(log.read(), [])
 
     def test_start_with_fab_launcher_preserves_arguments_and_events(self):
@@ -240,7 +243,7 @@ class RunStartTest(unittest.TestCase):
                     run_id = run.start(task, HOST, kind=kind, sh=fake)
                     worktree = ROOT.parent / "slots/2" if repo == "fabrig" else ROOT / "wt" / run_id
                     directory = ROOT / "runs" / run_id
-                    expected = ["fab", "codex", "start", "--effort", "medium", "--to", run.NOTIFY]
+                    expected = ["fab", "codex", "start", "--effort", "medium"]
                     if kind == "review":
                         expected.append("--read-only")
                     self.assertEqual(command(fake.calls[-1]), [*expected, str(directory / "brief.md"),
@@ -562,3 +565,21 @@ class RoleTextTest(unittest.TestCase):
         self.assertTrue(run.role_text("fabrig").startswith(run.ROLE.read_text()))
         self.assertIn("# Working in fabrig", run.role_text("fabrig"))
         self.assertEqual(run.role_text("agents"), run.ROLE.read_text())
+
+
+class StartUndoTest(unittest.TestCase):
+    def test_a_failed_launch_gives_back_its_worktree_and_branch(self):
+        def answer(call):
+            if command(call)[:3] == ["fab", "codex", "start"]:
+                return Result(2, err="refused")
+            return Result(0)
+
+        with tmp_home():
+            fake = FakeRunner().on(["ssh"], answer)
+            with self.assertRaises(Failed):
+                run.start(TASK, HOST, sh=fake)
+            undo = command(fake.calls[-1])
+            self.assertEqual(undo[:2], ["bash", "-c"])
+            self.assertIn("worktree remove --force", undo[2])
+            self.assertIn("branch -D", undo[2])
+            self.assertEqual(log.read(), [])
