@@ -328,13 +328,12 @@ else: os.execv({self.real_git!r}, [{self.real_git!r}]+sys.argv[1:])
             for option in ('ControlMaster=auto','ControlPersist=600',str(self.home/'.local/state/watch/ssh-%C')):
                 self.assertIn(option,row['ssh'])
 
-    def test_cli_deaf_stop_then_resume_uses_saved_bypass_and_same_cwd(self):
+    def test_cli_deaf_stop_then_resume_without_permission_flags_and_same_cwd(self):
         self.mail()
         sid = '01234567-1234-1234-1234-123456789abc'
         agent = dict(name='lead/jig',sessionId=sid,cwd=str(self.home),state='done',status='idle')
         self.write(self.home/'agents.json', json.dumps([agent]))
-        self.write(self.home/'.claude/jobs/01234567/state.json',json.dumps(dict(agent,
-            respawnFlags=['--permission-mode','bypassPermissions'])))
+        self.write(self.home/'.claude/jobs/01234567/state.json',json.dumps(agent))
         self.fake('claude', """import json,os,sys
 from pathlib import Path
 home=Path(os.environ['HOME'])

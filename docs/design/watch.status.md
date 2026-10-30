@@ -6,9 +6,13 @@ Contract: `docs/design/watch.md`, sections 2–4.
 ## Present
 
 - Decision 0025 mail health repairs are implemented: fixed s/multi-coord
-  inventory, idle/saved-bypass gated stop-confirm-resume, exact id/copy checks,
+  inventory, idle/saved-id-and-cwd gated stop-confirm-resume, exact id/copy checks,
   launcher dry-run-before-start, one retry, remedy result events, safe orphan
   cleanup, and report-only dead waiter records.
+- Decision 0025 correction: deaf restart eligibility is independent of saved
+  permission mode. The watch never adds, removes or changes a permission flag;
+  it passes none, and resume uses the session’s own saved options. Unknown or
+  mismatched full id/cwd still refuse action.
 - Mail reports open one episode per reader, with unread count/oldest age and
   current turn length. Escalation waits for two remedy failures or more than
   30 minutes after remedy; readers without a remedy escalate once after 30

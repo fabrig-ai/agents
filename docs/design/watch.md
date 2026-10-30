@@ -66,7 +66,7 @@ reader (including a Codex owner in a long turn) gets one escalation after
 
 | Rule | Opens when | First action / owner | Escalate after |
 |---|---|---|---|
-| deaf | Live Claude session has no live waiter and unread mail older than 10 min; or inactive Codex owner has such mail | Restart idle Claude with confirmed saved bypass; Codex belongs to ops | 2 failures or >30 min after remedy |
+| deaf | Live Claude session has no live waiter and unread mail older than 10 min; or inactive Codex owner has such mail | Restart idle Claude with confirmed saved full id and cwd; Codex belongs to ops | 2 failures or >30 min after remedy |
 | gone | Active coordinator, director or unfinished lead is absent/inactive | Launcher dry run, then restart from role files; never Codex, paused or retired roles | 2 failures or >30 min after remedy |
 | report unread | Completed run's report post is unread for 15 min and deaf does not cover it | One episode per reader, all unread count/oldest age/current turn length | >30 min, once |
 | run hung | Output unchanged for 60 min AND elapsed exceeds 3× effort median (at least 5 completions), or 90 min without enough samples | Run owner | 30 min |
@@ -97,14 +97,16 @@ and explicit successor/start evidence acknowledge handover. Send failures use se
 **Repair deaf Claude sessions in place.** Only explicit `status=idle` with
 lifecycle `done` (or legacy idle activity without a lifecycle field) is eligible.
 `working` and `blocked` are not proof of idleness; `waiting` requires input.
-Read the full matching session id, cwd and `respawnFlags` from
+Read the job state only to confirm the full matching session id and cwd from
 `~/.claude/jobs/<first-eight-id-characters>/state.json` (under
-`CLAUDE_CONFIG_DIR` when set). Refuse missing, conflicting or unknown bypass
-options. Recheck activity and saved options immediately before action. From
-that cwd, `claude stop FULLID`, poll `claude agents --json --all` for `stopped`
+`CLAUDE_CONFIG_DIR` when set). Refuse missing, unknown or mismatched id or cwd.
+Saved permission mode does not affect eligibility. Recheck activity and saved
+id/cwd immediately before action. From that cwd, `claude stop FULLID`, poll `claude agents --json --all` for `stopped`
 for at most 60 seconds, then and only then
 `claude --bg --resume FULLID "Restart your post wait MAILBOX in the background, post read MAILBOX, and carry on."`.
-No additional flags are passed. A mismatching returned id is a copy: stop it,
+The watch never adds, removes or changes a permission flag; it passes none.
+Resume uses the session’s own saved options. No additional flags are passed.
+A mismatching returned id is a copy: stop it,
 record the failed result and leave the episode open. Orphan reconciliation
 handles any waiter it leaves behind, with fresh process/session checks before
 SIGTERM. Missing stop confirmation never permits resume.

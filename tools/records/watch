@@ -289,19 +289,12 @@ def saved_options(agent):
         return {}
     try:
         row = json.loads((Path(os.environ.get('CLAUDE_CONFIG_DIR', Path.home() / '.claude')) / 'jobs' / sid[:8] / 'state.json').read_text())
-        flags = row.get('respawnFlags', [])
-        if row.get('sessionId') != sid or not isinstance(flags, list) or any(not isinstance(f, str) for f in flags):
+        if not isinstance(row, dict) or row.get('sessionId') != sid:
             return {}
-        if any(flag == '--permission-mode' and (i+1 == len(flags) or flags[i+1].startswith('--')) for i, flag in enumerate(flags)):
+        cwd = row.get('cwd')
+        if not isinstance(cwd, str) or not Path(cwd).is_absolute() or cwd != agent.get('cwd'):
             return {}
-        bypass = '--dangerously-skip-permissions' in flags or any(
-            flag == '--permission-mode=bypassPermissions' or
-            (flag == '--permission-mode' and flags[i+1:i+2] == ['bypassPermissions'])
-            for i, flag in enumerate(flags))
-        modes = [flags[i+1] for i, flag in enumerate(flags[:-1]) if flag == '--permission-mode']
-        modes += [flag.split('=', 1)[1] for flag in flags if isinstance(flag, str) and flag.startswith('--permission-mode=')]
-        bypass = bypass and all(mode == 'bypassPermissions' for mode in modes) and '--restricted' not in flags
-        return dict(bypass=bypass, cwd=row.get('cwd'))
+        return dict(sessionId=sid, cwd=cwd)
     except (OSError, ValueError, TypeError):
         return {}
 
@@ -393,15 +386,15 @@ def repair(plan, settings, launcher):
             checked(argv)
             return dict(success=True, result='launched from files')
         sid, cwd = plan['session'], plan['cwd']
-        # Recheck activity/options immediately before stopping a process.
+        # Recheck activity and saved identity immediately before stopping a process.
         rows = agent_rows(checked(['claude', 'agents', '--json']))
         agent = next((r for r in rows if r.get('sessionId') == sid), None)
         if agent is None:
             rows = agent_rows(checked(['claude', 'agents', '--json', '--all']))
             agent = next((r for r in rows if r.get('sessionId') == sid and r.get('state') == 'stopped'), None)
         if (not agent or (not idle(agent) and agent.get('state') != 'stopped')
-                or saved_options(agent) != dict(bypass=True, cwd=cwd)):
-            return dict(attempted=False, result='activity or saved bypass changed; refused')
+                or saved_options(agent) != dict(sessionId=sid, cwd=cwd)):
+            return dict(attempted=False, result='activity or saved id/cwd changed; refused')
         if agent.get('state') != 'stopped':
             checked(['claude', 'stop', sid], cwd=cwd)
         deadline = time.monotonic() + min(60, settings.get('stop_timeout_seconds', 60))
@@ -668,16 +661,16 @@ def evaluate(data, state, config, now):
             agent = live[name][0]
             sid = agent.get('sessionId', '')
             saved = data.get('saved', {}).get(sid, {})
-            safe = (len(live[name]) == 1 and idle(agent) and saved.get('bypass')
+            safe = (len(live[name]) == 1 and idle(agent) and saved.get('sessionId') == sid
                     and isinstance(agent.get('cwd'), str) and Path(agent['cwd']).is_absolute()
                     and saved.get('cwd') == agent['cwd'])
             add('deaf', name, name, [f'unread={len(all_mail)}; oldest={iso(oldest)}; oldest_age_s={now-oldest:.0f}',
-                'no live mailbox waiter', f'state={agent.get("state")}; status={agent.get("status")}; bypass={bool(saved.get("bypass"))}'],
+                'no live mailbox waiter', f'state={agent.get("state")}; status={agent.get("status")}; saved_id_cwd={saved.get("sessionId") == sid and saved.get("cwd") == agent.get("cwd")}'],
                 ['agents', 'waiters', 'mail'], session=sid)
             candidate = candidates.get('deaf\t' + name)
             if candidate is not None:
                 candidate.update(remedy=dict(kind='resume', session=sid, cwd=agent['cwd'], owner=name) if safe else None,
-                                 remedy_reason='idle with saved bypass' if safe else 'busy, ambiguous session, or saved bypass/cwd unknown')
+                                 remedy_reason='idle with confirmed saved id/cwd' if safe else 'busy, ambiguous session, or saved id/cwd unknown')
     for name, identity in names.items():
         if (identity.get('kind') != 'codex' and name != 'ops') or data.get('unit/' + name) is not False:
             continue

@@ -634,17 +634,20 @@ class MailHealth(unittest.TestCase):
         self.assertEqual(len(episodes), 1)
         self.assertEqual(self.calls, [('send', 'lead/tools', 'report unread'), ('send', 's/default', 'report unread')])
 
-    def test_deaf_requires_idle_and_confirmed_saved_bypass(self):
+    def test_deaf_requires_idle_and_confirmed_saved_identity(self):
         self.live()
         self.mail(11)
         agent = self.data['agents'][0]
         agent.update(cwd='/synthetic/start', state='done')
-        self.data['saved'] = {'synthetic-session': dict(bypass=True, cwd=agent['cwd'])}
+        self.data['saved'] = {'synthetic-session': dict(sessionId='synthetic-session', cwd=agent['cwd'])}
         self.assertIsNone(self.rule('deaf')[0]['remedy'])
         agent['status'] = 'idle'
         self.assertEqual(self.rule('deaf')[0]['remedy']['session'], 'synthetic-session')
-        self.data['saved'] = {}
-        self.assertIsNone(self.rule('deaf')[0]['remedy'])
+        for saved in ({}, dict(sessionId='other', cwd=agent['cwd']),
+                      dict(sessionId='synthetic-session', cwd='/other')):
+            self.data['saved'] = {'synthetic-session': saved}
+            self.assertIsNone(self.rule('deaf')[0]['remedy'])
+        self.data['saved'] = {'synthetic-session': dict(sessionId='synthetic-session', cwd=agent['cwd'])}
         agent['status'] = 'waiting'
         self.assertIsNone(self.rule('deaf')[0]['remedy'])
 
@@ -727,7 +730,7 @@ class Repairs(unittest.TestCase):
         self.agent = dict(sessionId=self.sid, cwd=self.cwd, state='done', status='idle')
         self.saved = self.home/'.claude/jobs/01234567/state.json'
         self.saved.parent.mkdir(parents=True)
-        self.saved.write_text(json.dumps(dict(self.agent, respawnFlags=['--permission-mode','bypassPermissions'])))
+        self.saved.write_text(json.dumps(self.agent))
         self.calls = []
         self.stopped = False
         self.resume_id = self.sid
@@ -770,7 +773,7 @@ class Repairs(unittest.TestCase):
         self.assertEqual(stop['cwd'], self.cwd)
         self.assertEqual(sum('--all' in argv for argv, _ in self.calls), 2)
 
-    def test_busy_or_unknown_bypass_never_stops(self):
+    def test_busy_or_unknown_saved_identity_never_stops(self):
         self.agent['status'] = 'busy'
         self.assertFalse(self.repair()['attempted'])
         self.agent['status'] = 'idle'
@@ -811,15 +814,40 @@ class Repairs(unittest.TestCase):
             self.assertFalse(API['repair'](plan,{},'session-start')['attempted'])
             kill.assert_not_called()
 
-    def test_saved_bypass_conflicts_and_identity_mismatch_refuse(self):
-        for fields in (dict(respawnFlags=['--permission-mode','default']),
-                       dict(respawnFlags=['--permission-mode','bypassPermissions','--permission-mode','default']),
-                       dict(respawnFlags=['--model','opus']), dict(sessionId='wrong-id')):
-            row = dict(self.agent,respawnFlags=['--dangerously-skip-permissions'])
-            row.update(fields)
+    def test_saved_permission_modes_do_not_change_restart(self):
+        for flags in (None, [], ['--model', 'opus'], ['--dangerously-skip-permissions'],
+                      *(['--permission-mode', mode] for mode in
+                        ('auto', 'default', 'acceptEdits', 'plan', 'dontAsk', 'bypassPermissions', 'future-mode')),
+                      ['--permission-mode=auto'], ['--restricted'],
+                      ['--permission-mode', 'bypassPermissions', '--permission-mode', 'default']):
+            with self.subTest(flags=flags):
+                row = dict(self.agent)
+                if flags is not None:
+                    row['respawnFlags'] = flags
+                self.saved.write_text(json.dumps(row))
+                self.calls.clear()
+                self.stopped, self.pending = False, 1
+                self.assertTrue(self.repair()['success'])
+                self.assertEqual(self.calls[-1][0], ['claude', '--bg', '--resume', self.sid,
+                    'Restart your post wait lead/tools in the background, post read lead/tools, and carry on.'])
+                self.assertEqual(self.calls[-1][1]['cwd'], self.cwd)
+                self.assertEqual(json.loads(self.saved.read_text()), row)
+
+    def test_unknown_or_mismatched_identity_never_stops(self):
+        for fields in (dict(sessionId='wrong-id'), dict(sessionId=None),
+                       dict(cwd=None), dict(cwd='relative'), dict(cwd=self.cwd + '/other')):
+            with self.subTest(fields=fields):
+                self.saved.write_text(json.dumps(dict(self.agent, **fields)))
+                self.assertFalse(self.repair()['attempted'])
+        for key in ('sessionId', 'cwd'):
+            row = dict(self.agent)
+            del row[key]
             self.saved.write_text(json.dumps(row))
             self.assertFalse(self.repair()['attempted'])
-        self.assertFalse(any(argv[:2] == ['claude','stop'] for argv,_ in self.calls))
+        for content in ('null', '[]', '{'):
+            self.saved.write_text(content)
+            self.assertFalse(self.repair()['attempted'])
+        self.assertFalse(any(argv[:2] == ['claude', 'stop'] for argv, _ in self.calls))
 
     def test_current_turn_metadata_is_correlated_with_completion_ledger(self):
         directory = self.home/'owner'

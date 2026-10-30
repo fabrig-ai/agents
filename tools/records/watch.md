@@ -37,7 +37,7 @@ to director; the director batches the question to the user.
 
 | Rule | Evidence / first destination | Escalation |
 |---|---|---|
-| deaf | live session, missing live waiter, mail mtime >10m; restart idle Claude with saved bypass | supervisor after two failures or >30m after remedy |
+| deaf | live session, missing live waiter, mail mtime >10m; restart idle Claude with confirmed saved full id/cwd | supervisor after two failures or >30m after remedy |
 | gone | registered active draft, director or unfinished lead part, absent session; launcher dry run then restart | supervisor after two failures or >30m after remedy |
 | report unread | completed run id in codex-run post header, mtime >15m; one episode per reader, unless deaf covers it | supervisor after >30m, once |
 | run hung | output `events.jsonl` mtime >60m AND elapsed >3× median of at least 5 completed runs at that effort (else >90m); owner | supervisor |
@@ -180,10 +180,13 @@ and a temporary HOME to check boundaries and prevent future median leakage.
 
 `[rules.deaf] remedy = true` enables the in-place Claude restart. Eligibility
 requires one live session, explicit `status=idle`, lifecycle `done` (or legacy
-idle activity without lifecycle), and matching saved cwd/full id/bypass options
-in `~/.claude/jobs/<short-id>/state.json`'s `respawnFlags`. `working`, `blocked`
-and `status=waiting` are not idle. This file is an unstable CLI detail, so unknown
-or conflicting options refuse action; no transcript or credential is needed.
+idle activity without lifecycle), and matching saved cwd/full id. Read
+`~/.claude/jobs/<short-id>/state.json` only to confirm the full id and cwd.
+`working`, `blocked` and `status=waiting` are not idle. This file is an unstable CLI detail, so unknown
+or mismatched id or cwd refuse action; no transcript or credential is needed.
+Saved permission mode does not affect eligibility. The watch never adds,
+removes or changes a permission flag; it passes none. Resume uses the
+session’s own saved options.
 The [CLI state reference](https://code.claude.com/docs/en/agent-view#read-session-state-from-a-script)
 distinguishes lifecycle state from process activity.
 
