@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import signal
 import shutil
 import statistics
 import subprocess
@@ -26,8 +27,8 @@ EVENT_SOURCES = ('queue', 'heavy', 'sessions', 'post', 'post-sent')
 
 JOIN = 'coordinator draft area part task branch run session'.split()
 RULES = ('deaf', 'gone', 'report unread', 'run hung', 'idle claim', 'unqueued',
-         'lease stall', 'handover late', 'question due', 'delivery failed')
-DEAD = {'stopped', 'completed', 'ended', 'dead'}
+         'lease stall', 'handover late', 'question due', 'delivery failed', 'waiter orphan', 'waiter dead')
+DEAD = {'stopped', 'completed', 'ended', 'dead', 'done', 'failed'}
 
 
 def stamp(value):
@@ -46,9 +47,9 @@ def iso(now):
     return datetime.fromtimestamp(now, timezone.utc).isoformat().replace('+00:00', 'Z')
 
 
-def command(argv, data=None, env=None, timeout=30):
+def command(argv, data=None, env=None, timeout=30, cwd=None):
     return subprocess.run(argv, input=data, text=True, capture_output=True,
-                          timeout=timeout, env=env)
+                          timeout=timeout, env=env, cwd=cwd)
 
 
 def checked(argv, **kwargs):
@@ -216,7 +217,14 @@ def waiters(text):
         fields = line.split()
         if len(fields) != 4 or fields[2] not in ('alive', 'dead'):
             raise ValueError('invalid waiter row')
-        result[fields[0]] = dict(alive=fields[2] == 'alive', session=fields[3])
+        pid = int(fields[1])
+        if pid <= 1:
+            raise ValueError('invalid waiter pid')
+        row = dict(alive=fields[2] == 'alive', session=fields[3], pid=pid)
+        box = result.setdefault(fields[0], dict(alive=False, session=fields[3], records=[]))
+        box['records'].append(row)
+        if row['alive']:
+            box.update(alive=True, session=fields[3])
     return result
 
 
@@ -265,9 +273,170 @@ def identities(text):
     return result
 
 
+def idle(agent):
+    # Lifecycle state is distinct from process activity. blocked alone is NOT idle.
+    return agent.get('status', agent.get('state')) == 'idle' and agent.get('state') in (None, 'idle', 'done')
+
+
+def live_agent(agent):
+    status, state = agent.get('status'), agent.get('state')
+    return (state not in DEAD and status not in DEAD) or (state == 'done' and status in ('busy', 'waiting', 'idle'))
+
+
+def saved_options(agent):
+    sid = agent.get('sessionId', '')
+    if not re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', sid):
+        return {}
+    try:
+        row = json.loads((Path(os.environ.get('CLAUDE_CONFIG_DIR', Path.home() / '.claude')) / 'jobs' / sid[:8] / 'state.json').read_text())
+        flags = row.get('respawnFlags', [])
+        if row.get('sessionId') != sid or not isinstance(flags, list) or any(not isinstance(f, str) for f in flags):
+            return {}
+        if any(flag == '--permission-mode' and (i+1 == len(flags) or flags[i+1].startswith('--')) for i, flag in enumerate(flags)):
+            return {}
+        bypass = '--dangerously-skip-permissions' in flags or any(
+            flag == '--permission-mode=bypassPermissions' or
+            (flag == '--permission-mode' and flags[i+1:i+2] == ['bypassPermissions'])
+            for i, flag in enumerate(flags))
+        modes = [flags[i+1] for i, flag in enumerate(flags[:-1]) if flag == '--permission-mode']
+        modes += [flag.split('=', 1)[1] for flag in flags if isinstance(flag, str) and flag.startswith('--permission-mode=')]
+        bypass = bypass and all(mode == 'bypassPermissions' for mode in modes) and '--restricted' not in flags
+        return dict(bypass=bypass, cwd=row.get('cwd'))
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def owner_turn(identity, name):
+    directory = Path(identity.get('owner_state', Path.home() / 'src/rust/tmp/owners' / name.split('/')[-1] / 'codex'))
+    # Read event types/times only, never prompts or model output.
+    started, session = None, None
+    path = directory / 'events.jsonl'
+    if path.exists():
+        with path.open() as stream:
+            for line in stream:
+                row = json.loads(line)
+                if row.get('type') == 'thread.started':
+                    session = row.get('thread_id')
+                if row.get('type') == 'turn.started':
+                    started = stamp(row.get('ts', row.get('timestamp'))) if row.get('ts', row.get('timestamp')) else None
+                if row.get('type') in ('turn.completed', 'turn.failed'):
+                    started = None
+    ledger = directory / 'turns.tsv'
+    if started is not None and ledger.exists():
+        lines = ledger.read_text().splitlines()
+        if lines:
+            fields = lines[-1].split('\t')
+            if len(fields) != 4:
+                raise ValueError('invalid owner turns.tsv')
+            # A completed row at/after this start proves it is no longer running.
+            if stamp(fields[1]) >= started:
+                started = None
+    return dict(started=started, thread=session)
+
+
+def waiter_process(pid):
+    try:
+        stat = (Path('/proc') / str(pid) / 'stat').read_text().rsplit(')', 1)[1].split()
+        argv = (Path('/proc') / str(pid) / 'cmdline').read_bytes().split(b'\0')
+        return dict(alive=stat[0] != 'Z', ppid=int(stat[1]), start=stat[19], argv=[os.fsdecode(a) for a in argv if a],
+                    verified=any(Path(os.fsdecode(a)).name == 'post' for a in argv[:3]) and b'wait' in argv)
+    except FileNotFoundError:
+        return dict(alive=False)
+    except (OSError, ValueError, IndexError):
+        return {}
+
+
+def launch_role(identity):
+    if identity.get('kind') == 'codex' or identity.get('paused') or identity.get('retired'):
+        return None
+    role = identity.get('role')
+    if role == 'director':
+        return dict(kind='launch', argv=['director'])
+    if role in ('coordinator', 'lead') and identity.get('handle'):
+        argv = [role, identity['handle']]
+        if role == 'lead':
+            argv.append(identity['area'])
+        return dict(kind='launch', argv=argv)
+    return None
+
+
+def repair(plan, settings, launcher):
+    """Only called with actions enabled. Return bounded, non-private result facts."""
+    try:
+        if plan['kind'] == 'kill':
+            current = waiter_process(plan['pid'])
+            if not current.get('verified') or current.get('start') != plan['start'] or plan['owner'] not in current.get('argv', []):
+                return dict(success=False, result='waiter changed; refused')
+            agents = agent_rows(checked(['claude', 'agents', '--json']))
+            boxes = waiters(checked(['post', 'waiters']))
+            records = boxes.get(plan['owner'], {}).get('records', [])
+            identity = plan['identity']
+            aliases = [plan['owner'], *identity.get('aliases', [])]
+            prefix = identity.get('name_prefix')
+            live_ids = {r.get('sessionId') for r in agents if live_agent(r)}
+            mailbox_live = any(live_agent(r) and (r.get('name') in aliases or
+                (prefix and (r.get('name') or '').startswith(prefix)) or
+                any(w['session'] in (r.get('sessionId'), r.get('id')) for w in records)) for r in agents)
+            if plan.get('unit'):
+                sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'session'))
+                from session_lib import unit_active
+                mailbox_live |= unit_active(plan['unit'])
+            another = any(w['pid'] != plan['pid'] and w['alive'] and w['session'] in live_ids
+                          and waiter_process(w['pid']).get('alive') for w in records)
+            if mailbox_live and not another:
+                return dict(attempted=False, result='waiter now sole live reader; refused')
+            os.kill(plan['pid'], signal.SIGTERM)
+            return dict(success=True, result='orphan signalled')
+        if plan['kind'] == 'launch':
+            argv = [launcher, *plan['argv']]
+            checked([*argv, '--dry-run'])
+            checked(argv)
+            return dict(success=True, result='launched from files')
+        sid, cwd = plan['session'], plan['cwd']
+        # Recheck activity/options immediately before stopping a process.
+        rows = agent_rows(checked(['claude', 'agents', '--json']))
+        agent = next((r for r in rows if r.get('sessionId') == sid), None)
+        if agent is None:
+            rows = agent_rows(checked(['claude', 'agents', '--json', '--all']))
+            agent = next((r for r in rows if r.get('sessionId') == sid and r.get('state') == 'stopped'), None)
+        if (not agent or (not idle(agent) and agent.get('state') != 'stopped')
+                or saved_options(agent) != dict(bypass=True, cwd=cwd)):
+            return dict(attempted=False, result='activity or saved bypass changed; refused')
+        if agent.get('state') != 'stopped':
+            checked(['claude', 'stop', sid], cwd=cwd)
+        deadline = time.monotonic() + min(60, settings.get('stop_timeout_seconds', 60))
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return dict(success=False, result='stop timed out; resume withheld')
+            rows = agent_rows(checked(['claude', 'agents', '--json', '--all'], timeout=remaining))
+            stopped = any(r.get('sessionId') == sid and r.get('state', r.get('status')) == 'stopped' for r in rows)
+            if stopped:
+                break
+            time.sleep(min(settings.get('stop_poll_seconds', 1), max(0, deadline-time.monotonic())))
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'session'))
+        from session_lib import session_id
+        prompt = f'Restart your post wait {plan["owner"]} in the background, post read {plan["owner"]}, and carry on.'
+        output = checked(['claude', '--bg', '--resume', sid, prompt], cwd=cwd)
+        resumed = session_id(output)
+        if resumed != sid:
+            if resumed:
+                checked(['claude', 'stop', resumed], cwd=cwd)
+            return dict(success=False, result='resume id mismatch; copy stopped' if resumed else 'resume id missing',
+                        copy_session=resumed)
+        return dict(success=True, result='resumed same session', session=sid)
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
+        return dict(success=False, result='remedy failed: ' + type(error).__name__)
+
+
 class Inputs:
-    def __init__(self, dry):
+    def __init__(self, dry, settings=None, state_dir=None):
         self.dry, self.data, self.errors = dry, {}, {}
+        self.settings = settings or tomllib.loads(Path(__file__).with_suffix('.toml').read_text())['watch']
+        self.state_dir = state_dir or Path.home() / '.local/state/watch'
+        self.git_env = dict(os.environ, GIT_SSH_COMMAND='ssh -o ControlMaster=auto -o ControlPersist=600 -o ControlPath=' +
+                            shlex.quote(str(self.state_dir / 'ssh-%C')))
+
         directory = Path(__file__).resolve().parent.parent
         self.executables = {
             name: shutil.which(name) or str(directory / sibling)
@@ -281,8 +450,16 @@ class Inputs:
             self.errors[name] = type(error).__name__ + ': ' + str(error)[:160]
 
     def records(self, root):
-        checked([str(Path(__file__).with_name('record')), 'pull'],
-                env=dict(os.environ, RECORDS_REPO=str(root)))
+        remote = os.environ.get('RECORDS_ORIGIN') or self.settings.get('records_remote')
+        if not remote:
+            remote = checked(['git', '-C', str(root), 'remote', 'get-url', 'origin']).strip()
+        tip = checked(['git', 'ls-remote', remote, 'refs/heads/main'], env=self.git_env).split()
+        if len(tip) != 2 or not re.fullmatch('[0-9a-f]{40,64}', tip[0]) or tip[1] != 'refs/heads/main':
+            raise ValueError('invalid records main ref')
+        local = command(['git', '-C', str(root), 'rev-parse', 'refs/remotes/origin/main'])
+        if local.returncode or local.stdout.strip() != tip[0]:
+            checked([str(Path(__file__).with_name('record')), 'pull'],
+                    env=dict(self.git_env, RECORDS_REPO=str(root), RECORDS_ORIGIN=remote))
         def questions():
             rows = [dict(tomllib.loads(p.read_text()), subject=p.stem)
                     for p in sorted((root / 'director/questions').glob('*.toml'))]
@@ -315,15 +492,26 @@ class Inputs:
         for name, identity in self.data['names'].items():
             if identity.get('kind') == 'codex' and identity.get('role') == 'lead':
                 self.read('unit/' + name, lambda identity=identity: unit_active(identity['unit']))
+        if 'ops' in self.data['names']:
+            self.read('unit/ops', lambda: unit_active('codex-owner-ops'))
         self.read('agents', lambda: agent_rows(checked(['claude', 'agents', '--json'])))
         self.read('waiters', lambda: waiters(checked(['post', 'waiters'])))
+        for box in self.data.get('waiters', {}).values():
+            for row in box.get('records', []):
+                row.update(process=waiter_process(row['pid']))
+                if not row['process']:
+                    self.errors['waiters'] = 'waiter process unavailable'
+        self.data['saved'] = {r.get('sessionId'): saved_options(r) for r in self.data.get('agents', [])}
+        for name, identity in self.data['names'].items():
+            if identity.get('kind') == 'codex' or name == 'ops':
+                self.read('turn/' + name, lambda identity=identity, name=name: owner_turn(identity, name))
         self.read('mail', mailboxes)
         self.read('claims', lambda: claims(checked(['claim', 'list'])))
         self.read('leases', lambda: lease_rows(checked([self.executables['lease'], 'list', '--json'])))
         def refs():
             rows = {}
-            for line in checked(['git', 'ls-remote', 'git@github.com:fabrig-ai/fabrig.git',
-                                 'refs/heads/ready/*']).splitlines():
+            for line in checked(['git', 'ls-remote', self.settings['fabrig_remote'],
+                                 'refs/heads/ready/*'], env=self.git_env).splitlines():
                 tip, ref = line.split()
                 if not re.fullmatch('[0-9a-f]{40,64}', tip) or not ref.startswith('refs/heads/ready/'):
                     raise ValueError('invalid ready ref')
@@ -430,9 +618,10 @@ def evaluate(data, state, config, now):
         identity = names.get(owner, {})
         return not identity.get('paused', False) and (identity.get('always_watched', False) or owned.get(owner, False))
     def add(rule, subject, owner, evidence, deps, **joins):
-        if not config[rule]['enabled'] or not allowed(owner):
+        waiter_rule = rule.startswith('waiter ')
+        if not config[rule]['enabled'] or (not waiter_rule and not allowed(owner)):
             return
-        identity = names.get(owner, {})
+        identity = names.get(owner, dict(always_watched=True))
         # Joins are carried from the launcher's identity and the actual producer.
         keys = {k: identity[k] for k in JOIN if isinstance(identity.get(k), str)}
         keys.update({k: v for k, v in joins.items() if k in JOIN and isinstance(v, str)})
@@ -442,59 +631,86 @@ def evaluate(data, state, config, now):
         candidates[rule + '\t' + subject] = dict(rule=rule, subject=subject, owner=owner,
             supervisor=identity.get('supervisor', ''),
             escalate_to=identity.get('supervisor', ''),
-            evidence=evidence[:6], deps=dependencies, **keys)
+            evidence=evidence[:6], deps=dependencies, director_escalation=(identity.get('role') == 'coordinator' or owner in ('ops', 's/deploy', 's/multi-coord')), **keys)
     def older(when, minutes):
         return now - stamp(when) > minutes * 60
     live = {}
     for name, identity in names.items():
-        if identity.get('kind') == 'codex':
+        if identity.get('kind') == 'codex' or name == 'ops':
             if data.get('unit/' + name) is True:
                 live[name] = []
             continue
         aliases = identity.get('aliases', []) + [name]
         prefix = identity.get('name_prefix')
         holders = data.get('waiters', {}).get(name, {}).get('session')
-        matches = [r for r in data.get('agents', []) if r.get('status', r.get('state')) not in DEAD and
+        matches = [r for r in data.get('agents', []) if live_agent(r) and
                    (r.get('name') in aliases or (prefix and (r.get('name') or '').startswith(prefix)) or
                     (holders and holders != '-' and holders in (r.get('sessionId'), r.get('id'))))]
         if matches:
             live[name] = matches
+    # An orphan from a stopped session does not make its successor hear mail.
+    if 'agents' in data:
+        ids = {r.get('sessionId') for r in data['agents'] if live_agent(r)}
+        for box in data.get('waiters', {}).values():
+            if 'records' in box:
+                box['alive'] = any(r['alive'] and r.get('process', {}).get('alive')
+                                   and (r['session'] == '-' or r['session'] in ids) for r in box['records'])
     deaf = set()
     for name in live:
-        if names[name].get('kind') == 'codex':
+        if names[name].get('kind') == 'codex' or name == 'ops':
             continue
         mail = [m for m in data.get('mail', []) if m['owner'] == name and older(m['delivered'], config['deaf']['minutes'])]
         if mail and not data.get('waiters', {}).get(name, {}).get('alive'):
             if config['deaf']['enabled']:
                 deaf.add(name)
-            oldest = min(m['delivered'] for m in mail)
-            add('deaf', name, name, [f'unread={len(mail)}; oldest={iso(oldest)}', 'no live mailbox waiter'],
-                ['agents', 'waiters', 'mail'], session=live[name][0].get('sessionId', live[name][0].get('id', '')))
+            all_mail = [m for m in data.get('mail', []) if m['owner'] == name]
+            oldest = min(m['delivered'] for m in all_mail)
+            agent = live[name][0]
+            sid = agent.get('sessionId', '')
+            saved = data.get('saved', {}).get(sid, {})
+            safe = (len(live[name]) == 1 and idle(agent) and saved.get('bypass')
+                    and isinstance(agent.get('cwd'), str) and Path(agent['cwd']).is_absolute()
+                    and saved.get('cwd') == agent['cwd'])
+            add('deaf', name, name, [f'unread={len(all_mail)}; oldest={iso(oldest)}; oldest_age_s={now-oldest:.0f}',
+                'no live mailbox waiter', f'state={agent.get("state")}; status={agent.get("status")}; bypass={bool(saved.get("bypass"))}'],
+                ['agents', 'waiters', 'mail'], session=sid)
+            candidate = candidates.get('deaf\t' + name)
+            if candidate is not None:
+                candidate.update(remedy=dict(kind='resume', session=sid, cwd=agent['cwd'], owner=name) if safe else None,
+                                 remedy_reason='idle with saved bypass' if safe else 'busy, ambiguous session, or saved bypass/cwd unknown')
     for name, identity in names.items():
-        if identity.get('kind') != 'codex' or data.get('unit/' + name) is not False:
+        if (identity.get('kind') != 'codex' and name != 'ops') or data.get('unit/' + name) is not False:
             continue
         mail = [m for m in data.get('mail', []) if m['owner'] == name and older(m['delivered'], config['deaf']['minutes'])]
         if mail:
             if config['deaf']['enabled']:
                 deaf.add(name)
             oldest = min(m['delivered'] for m in mail)
-            add('deaf', name, name, [f'unread={len(mail)}; oldest={iso(oldest)}', 'Codex owner unit inactive'],
+            add('deaf', name, name, [f'unread={len(mail)}; oldest={iso(oldest)}', 'Codex owner unit inactive', 'current_turn_s=' + (str(round(now-data['turn/' + name]['started'])) if data.get('turn/' + name, {}).get('started') else 'unknown')],
                 ['unit/' + name, 'mail'])
             candidate = candidates.get('deaf\t' + name)
             if candidate is not None:
-                candidate.update(skip_wake=True)
+                candidate.update(remedy=None, remedy_reason='Codex owner belongs to ops')
+    for previous in state.get('episodes', {}).values():
+        name = previous['owner']
+        if (previous['rule'] == 'deaf' and previous.get('remedy_attempts', 0) >= 1
+                and not previous.get('remedy_success') and name not in live
+                and previous.get('remedy') and allowed(name)
+                and any(m['owner'] == name and older(m['delivered'], config['deaf']['minutes']) for m in data.get('mail', []))):
+            candidates.setdefault('deaf\t' + name, dict(previous, clear=0))
+            deaf.add(name)
     active = {d['mailbox']: d for d in data.get('drafts', []) if d.get('state') == 'active'}
     for name, identity in names.items():
-        registered = name in active
+        registered = name in active or identity.get('role') == 'director'
         if identity.get('role') == 'lead':
             draft = active.get(identity.get('coordinator_mailbox'), {})
             unfinished = identity.get('unfinished', False) or any(
                 part.startswith(identity.get('area', name.rsplit('/', 1)[-1]) + '-')
                 for part in draft.get('unfinished_parts', []))
             registered = bool(draft) and unfinished
-        codex = identity.get('kind') == 'codex'
+        codex = identity.get('kind') == 'codex' or name == 'ops'
         absent = data.get('unit/' + name) is False if codex else name not in live
-        if registered and absent:
+        if registered and absent and name not in deaf and not identity.get('retired'):
             draft = active.get(name) or active.get(identity.get('coordinator_mailbox')) or {}
             joins = {k: v for k, v in identity.items() if k in JOIN}
             if draft:
@@ -502,6 +718,10 @@ def evaluate(data, state, config, now):
             evidence = 'registered unfinished role has inactive Codex owner unit' if codex else 'registered unfinished role absent from claude agents'
             add('gone', name, name, [evidence],
                 ['unit/' + name if codex else 'agents', 'drafts'], **joins)
+            candidate = candidates.get('gone\t' + name)
+            if candidate is not None:
+                launch = launch_role(identity)
+                candidate.update(remedy=launch, remedy_reason='launcher from role files' if launch else 'no safe launcher for role')
     runs = [(key.split('/', 1)[1], row) for key, rows in data.items() if key.startswith('runs/') for row in rows]
     medians = {}
     for _, row in runs:
@@ -523,15 +743,48 @@ def evaluate(data, state, config, now):
                 add('run hung', subject, owner, [f'output unchanged since {iso(row["changed"])}',
                     f'elapsed_s={elapsed:.0f}; effort={row["effort"]}; median_s={median}; samples={len(samples)}; limit_s={limit}'], deps, **joins)
         if row['ended']:
-            mail = [m for m in data.get('mail', []) if m['owner'] == owner and
-                    m['sender'].split('@')[0] == 'codex-run' and run in m['subject'] and
-                    older(m['delivered'], config['report unread']['minutes'])]
-            if mail and owner not in deaf:
-                add('report unread', subject, owner, [f'completion unread; message_id={mail[0]["message_id"]}',
-                    f'delivered={iso(mail[0]["delivered"])}'], deps + ['mail', 'agents', 'waiters'], **joins)
             if row.get('post_status') == 2 and not row.get('told'):
                 add('delivery failed', subject, owner, ['sender=codex-run; post send exited 2; no told marker'],
                     deps, **joins)
+    for owner in names:
+        completed = {r['run'] for _, r in runs if r['owner'] == owner and r['ended']}
+        mail = [m for m in data.get('mail', []) if m['owner'] == owner]
+        reports = [m for m in mail if m['sender'].split('@')[0] == 'codex-run'
+                   and any(run in m['subject'] for run in completed)
+                   and older(m['delivered'], config['report unread']['minutes'])]
+        if reports and owner not in deaf:
+            oldest = min(m['delivered'] for m in mail)
+            turn = data.get('turn/' + owner, {})
+            evidence = [f'unread={len(mail)}; oldest={iso(oldest)}; oldest_age_s={now-oldest:.0f}',
+                        f'unread completion reports={len(reports)}',
+                        'current_turn_s=' + (str(round(now-turn['started'])) if turn.get('started') else 'unknown')]
+            add('report unread', owner, owner, evidence, ['mail', 'agents', 'waiters'] +
+                [key for key in data if key.startswith('runs/')])
+            candidate = candidates.get('report unread\t' + owner)
+            if candidate is not None:
+                candidate.update(remedy=None, remedy_reason='reader must finish its current turn')
+    live_ids = {r.get('sessionId') for r in data.get('agents', []) if live_agent(r)}
+    for owner, box in data.get('waiters', {}).items():
+        for row in box.get('records', []):
+            process = row.get('process', {})
+            dead = process.get('alive') is False or not row['alive']
+            ended = row['session'] != '-' and row['session'] not in live_ids
+            mailbox_live = owner in live or (row['session'] != '-' and row['session'] in live_ids)
+            orphan = not dead and (ended or (process.get('ppid') == 1 and not mailbox_live))
+            if not dead and not orphan:
+                continue
+            rule = 'waiter dead' if dead else 'waiter orphan'
+            add(rule, owner + '/' + str(row['pid']), owner,
+                [f'waiter pid={row["pid"]}; session={row["session"]}; ppid={process.get("ppid")}',
+                 'dead record; post state is never edited' if dead else 'orphan waiter process'], ['agents', 'waiters'])
+            candidate = candidates.get(rule + '\t' + owner + '/' + str(row['pid']))
+            if candidate is not None:
+                other = any(r['pid'] != row['pid'] and r['alive'] and r.get('process', {}).get('alive')
+                            and r['session'] in live_ids for r in box.get('records', []))
+                safe = orphan and process.get('verified') and (other or not mailbox_live)
+                candidate.update(remedy=dict(kind='kill', pid=row['pid'], owner=owner,
+                    start=process['start'], identity=names.get(owner, {}),
+                    unit=names.get(owner, {}).get('unit', 'codex-owner-ops' if owner == 'ops' else None)) if safe else None, remedy_reason='safe orphan cleanup' if safe else 'report only')
     for claim in data.get('claims', []):
         host, number = claim['host'], claim['number']
         deps = ['claims', 'runs/' + host, 'heavy/' + host, 'spool/heavy', 'spool/queue']
@@ -636,31 +889,61 @@ def evaluate(data, state, config, now):
                    and identity.get('role') == 'lead'
                    and e.get('subject', '').strip().casefold().startswith('files current')]
         facts = state.setdefault('handovers', {}).setdefault(name, {})
-        events.extend(list(facts.values()))
-        hook = None
+        hooks = facts.setdefault('hooks', {})
+        if 'hook' in facts:  # Previous single-mailbox handover schema.
+            old = facts.pop('hook')
+            hooks.setdefault(old.get('session', name), old)
+        events.extend(facts.get('acks', []))
+        events.extend(facts.pop(key) for key in ('ack', 'start') if key in facts)
+        acks = []
         for event in sorted(events, key=lambda e: stamp(e['time'])):
-            projection = {key: event[key] for key in ['kind', 'time', *JOIN] if key in event}
-            if event.get('kind') in ('files-current', 'successor', 'handover'):
-                facts['ack'] = projection
-            elif event.get('kind') == 'session-start':
-                facts['start'] = projection
+            projection = {key: event[key] for key in ['kind', 'time', 'session_kind', *JOIN] if key in event}
             kind = event.get('kind')
-            followed = (kind in ('files-current', 'successor', 'handover') or
-                        (kind == 'session-start' and hook and event.get('session') != hook.get('session')))
-            if followed:
-                hook = None
-            fired = kind in ('context-hook', 'handover-needed')
-            # A high sampled context percentage does not prove a hook fired.
-            # Repeated hook notifications must not restart the existing clock.
-            if fired and hook is None:
-                hook = event
-        if hook:
-            facts['hook'] = {key: hook[key] for key in ['kind', 'time', *JOIN] if key in hook}
-        else:
-            facts.pop('hook', None)
-        if hook and older(hook['time'], config['handover late']['minutes']):
-            add('handover late', name, name, [f'context hook={hook["time"]}; no successor or files current'],
-                ['spool/sessions'], **{k: hook[k] for k in JOIN if k in hook})
+            if kind in ('context-hook', 'handover-needed'):
+                sid = event.get('session', name)
+                if sid not in hooks or stamp(event['time']) < stamp(hooks[sid]['time']):
+                    hooks[sid] = projection
+            elif kind in ('files-current', 'successor', 'handover', 'session-start'):
+                if projection not in acks:
+                    acks.append(projection)
+        facts['acks'] = [ack for ack in acks if stamp(ack['time']) >= now-7200]
+        for sid, hook in list(hooks.items()):
+            fired = stamp(hook['time'])
+            def acknowledges(ack):
+                kind, when = ack['kind'], stamp(ack['time'])
+                if kind in ('successor', 'handover', 'session-start'):
+                    return when >= fired and (kind != 'session-start' or ack.get('session') != sid)
+                if ack.get('session') and ack['session'] != sid:
+                    return False
+                # Mail headers have no session id: exclude a predecessor's ack
+                # when a known session start separates it from this firing.
+                starts = [stamp(e['time']) for e in acks if e['kind'] == 'session-start' and e.get('session') == sid]
+                return when >= fired-1800 and (not starts or when >= max(starts))
+            cleared = any(acknowledges(ack) for ack in acks)
+            ended = False
+            if hook.get('session'):
+                if identity.get('kind') == 'codex' or hook.get('session_kind') == 'codex-owner':
+                    current = data.get('turn/' + name, {}).get('owner_session')
+                    successors = [r for r in data.get('agents', []) if r.get('name') in aliases
+                                  and live_agent(r) and r.get('sessionId') != sid]
+                    ended = bool(successors) or data.get('unit/' + name) is False or (current is not None and current != sid)
+                    cleared |= ended
+                else:
+                    current_ids = {r.get('sessionId', r.get('id')) for r in live.get(name, [])}
+                    ended = 'agents' in data and sid not in current_ids
+                    cleared |= ended
+            if cleared:
+                # A tombstone prevents retained/repeated fired events reopening.
+                hook['acknowledged'] = True
+            if hook.get('acknowledged'):
+                if ended and fired < now-7200:
+                    del hooks[sid]
+                continue
+            if older(hook['time'], config['handover late']['minutes']):
+                subject = name + '/' + sid if hook.get('session') else name
+                add('handover late', subject, name, [f'context hook={hook["time"]}; no successor or files current'],
+                    ['spool/sessions', 'spool/post', 'unit/' + name if identity.get('kind') == 'codex' else 'agents'],
+                    **{k: hook[k] for k in JOIN if k in hook})
     for row in data.get('questions', []):
         if not row.get('answer') and now > stamp(row['deadline']):
             add('question due', row['subject'], 'director', [f'question={row["subject"]}; deadline={iso(stamp(row["deadline"]))}'],
@@ -692,6 +975,23 @@ def evaluate(data, state, config, now):
 def reconcile(state, candidates, errors, config, now, action, post=True):
     """Episodes survive missing inputs. Only two successful clear runs close one."""
     episodes = state.setdefault('episodes', {})
+    for key, episode in list(episodes.items()):
+        if episode['rule'] == 'handover late' and episode.get('session') and episode['subject'] == episode['owner']:
+            subject = episode['owner'] + '/' + episode['session']
+            episode['subject'] = subject
+            episodes.setdefault('handover late\t' + subject, episode)
+            del episodes[key]
+        if episode['rule'] == 'report unread' and episode['subject'] != episode['owner']:
+            new_key = 'report unread\t' + episode['owner']
+            episode['subject'] = episode['owner']
+            previous = episodes.get(new_key)
+            if previous:
+                previous['opened'] = min(previous['opened'], episode['opened'])
+                previous['escalated'] = previous['escalated'] or episode['escalated']
+                previous['notified'] = previous['notified'] or episode['notified']
+            else:
+                episodes[new_key] = episode
+            del episodes[key]
     events = []
     # Older state treated suppressed sends as delivered and has no mode marker.
     if 'posts_enabled' not in state:
@@ -699,8 +999,8 @@ def reconcile(state, candidates, errors, config, now, action, post=True):
             episode.setdefault('silent_since', episode['opened'])
     state['posts_enabled'] = post
     def emit(kind, episode):
-        fields = {k: v for k, v in episode.items() if k in JOIN + ['rule', 'subject', 'owner', 'supervisor', 'wake', 'episode']}
-        identity = [kind, episode['rule'], episode['subject'], episode['opened'], episode.get('episode', 0)]
+        fields = {k: v for k, v in episode.items() if k in JOIN + ['rule', 'subject', 'owner', 'supervisor', 'wake', 'episode', 'evidence', 'remedy_result', 'remedy_attempts', 'remedy_reason']}
+        identity = [kind, episode['rule'], episode['subject'], episode['opened'], episode.get('episode', 0), episode.get('remedy_attempts', 0) if kind == 'remedy' else 0]
         events.append(dict(fields, id='watch:' + hashlib.sha256(json.dumps(identity).encode()).hexdigest(),
                            time=iso(now), source='watch', host='hel8', kind=kind))
     for key, candidate in sorted(candidates.items()):
@@ -715,9 +1015,8 @@ def reconcile(state, candidates, errors, config, now, action, post=True):
             episode = dict(candidate, episode=state['next_episode'], opened=now, clear=0, escalated=False, notified=False)
             if not post:
                 episode['silent_since'] = now
-            if candidate['rule'] == 'deaf' and not candidate.get('skip_wake'):
-                episode['wake'] = action('wake', candidate['owner'], candidate)
-                episode['notified'] = True
+            if candidate['rule'] in ('deaf', 'gone', 'report unread', 'waiter orphan', 'waiter dead'):
+                pass
             else:
                 episode['notified'] = action('send', candidate['owner'], candidate) in (0, 3)
             episodes[key] = episode
@@ -725,6 +1024,57 @@ def reconcile(state, candidates, errors, config, now, action, post=True):
         else:
             episode['clear'] = 0
             episode.update(candidate)
+        if candidate['rule'] in ('deaf', 'gone', 'report unread', 'waiter orphan', 'waiter dead'):
+            rule = config[candidate['rule']]
+            plan = candidate.get('remedy') if rule.get('remedy', False) else None
+            attempts = episode.get('remedy_attempts', 0)
+            retry_due = now - episode.get('remedy_at', 0) >= rule.get('retry_seconds', 120)
+            if plan and attempts < min(2, rule.get('max_attempts', 2)) and (attempts == 0 or (not episode.get('remedy_success') and retry_due)):
+                result = action('remedy', candidate['owner'], candidate)
+                if result.get('attempted', True):
+                    episode['remedy_attempts'] = attempts + 1
+                    episode['remedy_at'] = now
+                    episode['remedy_success'] = result.get('success', False)
+                    episode['remedy_result'] = result
+                    emit('remedy', episode)
+                episode['notified'] = True
+            elif not plan and not candidate['rule'].startswith('waiter ') and ('silent_since' in episode and post or not episode['notified']):
+                notice = dict(candidate)
+                target = candidate['owner']
+                if 'silent_since' in episode and post:
+                    notice['was_silent_since'] = iso(episode['silent_since'])
+                    if (now - episode['opened'] > rule['escalate_minutes'] * 60 and episode['escalate_to']
+                            and (episode['escalate_to'] != 'director' or candidate.get('director_escalation'))):
+                        target = episode['escalate_to']
+                delivered = action('send', target, notice) in (0, 3)
+                episode['notified'] = delivered and post
+                if not delivered and post and 'silent_since' in episode:
+                    continue
+                if delivered and post:
+                    episode.pop('silent_since', None)
+                    if target != candidate['owner'] and not episode['escalated']:
+                        episode['escalated'] = True
+                        emit('alert-escalate', episode)
+            # Suppressed actions never consume attempts or deliver escalations.
+            if not post:
+                continue
+            if 'silent_since' in episode and episode['notified']:
+                episode.pop('silent_since')
+            attempted = episode.get('remedy_attempts', 0)
+            failed_twice = attempted >= 2 and not episode.get('remedy_success')
+            elapsed = now - episode.get('remedy_at', episode['opened'])
+            due = failed_twice or elapsed > rule['escalate_minutes'] * 60
+            if candidate['rule'].startswith('waiter '):
+                due = False
+            if due and episode['escalate_to'] and not episode['escalated']:
+                # Fixed infrastructure roles and coordinators may reach director.
+                target = episode['escalate_to']
+                director_ok = candidate.get('director_escalation', False)
+                if target != 'director' or director_ok:
+                    if action('send', target, candidate) in (0, 3):
+                        episode['escalated'] = True
+                        emit('alert-escalate', episode)
+            continue
         interval = config[candidate['rule']]['escalate_minutes'] * 60
         due = bool(episode['escalate_to']) and now - episode['opened'] >= interval
         if post and 'silent_since' in episode:
@@ -777,7 +1127,7 @@ def heartbeat_due(state, events, errors, now, seconds):
             now - previous.get('time', now) >= seconds)
 
 
-def run(dry, config, post, heartbeat_seconds):
+def run(dry, config, post, heartbeat_seconds, settings=None, remedies=True):
     now = time.time()
     with state_file(dry) as (path, state), tempfile.TemporaryDirectory(prefix='watch-records-') as temp:
         # Even record pull creates locks and may fast-forward. In a preview its
@@ -786,7 +1136,7 @@ def run(dry, config, post, heartbeat_seconds):
         for episode in state.get('episodes', {}).values():
             episode['deps'] = [dep.replace('records/', 'spool/', 1) if dep.startswith('records/') else dep
                                for dep in episode['deps']]
-        inputs = Inputs(dry).collect(records)
+        inputs = Inputs(dry, settings, Path(temp) if dry else path.parent).collect(records)
         data, errors = inputs.data, inputs.errors
         # Missing dependencies must not be interpreted as a quiet input.
         for source in ('drafts', 'questions', 'spool/queue', 'spool/heavy', 'spool/sessions', 'spool/post', 'spool/post-sent'):
@@ -797,7 +1147,13 @@ def run(dry, config, post, heartbeat_seconds):
                 if not dependency.startswith('owns/') and dependency not in data:
                     errors.setdefault(dependency, 'unavailable')
         def action(kind, to, candidate):
-            argv = ['post', 'wake', to] if kind == 'wake' else [
+            if kind == 'remedy':
+                plan = candidate['remedy']
+                if dry or not post or not remedies:
+                    print('would remedy ' + json.dumps(plan, sort_keys=True))
+                    return dict(attempted=False, result='dry-run' if dry else 'suppressed')
+                return repair(plan, config[candidate['rule']], inputs.executables['session-start'])
+            argv = [
                 'post', 'send', '--as', 'watch', to, 'watch: ' + candidate['rule'] + ' ' + candidate['subject']]
             lines = candidate['evidence'][:6]
             if 'was_silent_since' in candidate:
@@ -805,21 +1161,21 @@ def run(dry, config, post, heartbeat_seconds):
             body = '\n'.join(lines) + '\n'
             if dry or not post:
                 print('would ' + shlex.join(argv))
-                if kind == 'send':
-                    print(body, end='')
-                return ('dry-run' if dry else 'suppressed') if kind == 'wake' else 0
+                print(body, end='')
+                return 0
             try:
-                result = command(argv, data=body if kind == 'send' else None)
-                if kind == 'wake':
-                    # post wake's output is a protocol status; keep its reason.
-                    return ' '.join((result.stdout + result.stderr).split())[:1024]
+                result = command(argv, data=body)
                 if result.returncode not in (0, 3):
                     errors['post/send'] = 'exit ' + str(result.returncode)
                 return result.returncode
             except (OSError, subprocess.SubprocessError) as error:
                 errors['post/' + kind] = type(error).__name__
-                return 'unwoken: command failed' if kind == 'wake' else 2
+                return 2
         candidates = evaluate(data, state, config, now)
+        if dry:
+            for candidate in candidates.values():
+                if candidate['rule'] in ('deaf', 'gone', 'report unread'):
+                    print('condition ' + json.dumps(candidate, sort_keys=True))
         events = reconcile(state, candidates, errors, config, now, action, post=post)
         # A failed ownership lookup freezes the corresponding episodes as well.
         dependencies = {
@@ -828,7 +1184,8 @@ def run(dry, config, post, heartbeat_seconds):
             'idle claim': ['claims', 'spool/heavy', 'spool/queue'],
             'unqueued': ['refs', 'spool/queue'],
             'lease stall': ['names', 'leases'],
-            'handover late': ['names', 'spool/sessions'],
+            'handover late': ['names', 'agents', 'spool/sessions', 'spool/post'],
+            'waiter orphan': ['names', 'agents', 'waiters'], 'waiter dead': ['names', 'agents', 'waiters'],
             'question due': ['names', 'questions'], 'delivery failed': [],
         }
         skipped = {rule: [dep for dep in dependencies[rule] if dep in errors]
@@ -869,6 +1226,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--dry-run', action='store_true')
     parser.add_argument('--once', action='store_true')
+    parser.add_argument('--no-post', action='store_true')
+    parser.add_argument('--no-remedy', action='store_true')
     parser.add_argument('--config', type=Path, default=Path(__file__).with_name('watch.toml'))
     parser.add_argument('--probe', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args()
@@ -886,10 +1245,16 @@ def main():
             raise ValueError('watch.heartbeat_seconds must be a positive integer')
         for rule in RULES:
             row = config['rules'][rule]
-            if type(row['enabled']) is not bool or any(type(v) not in (int, float) or v < 0 for k, v in row.items() if k != 'enabled'):
+            if 'remedy' in row and type(row['remedy']) is not bool:
+                raise ValueError('remedy must be boolean')
+            if type(row['enabled']) is not bool or any(type(v) not in (int, float) or v < 0 for k, v in row.items() if k not in ('enabled', 'remedy')):
                 raise ValueError('invalid rule configuration')
+            if 'stop_timeout_seconds' in row and not 0 < row['stop_timeout_seconds'] <= 60:
+                raise ValueError('stop timeout must be in (0, 60]')
+            if 'stop_poll_seconds' in row and row['stop_poll_seconds'] <= 0:
+                raise ValueError('stop poll must be positive')
         while True:
-            status = run(args.dry_run, config['rules'], post, heartbeat_seconds)
+            status = run(args.dry_run, config['rules'], post and not args.no_post, heartbeat_seconds, config['watch'], not args.no_remedy)
             if args.once or args.dry_run or status:
                 return status
             time.sleep(config['watch']['interval_seconds'])
