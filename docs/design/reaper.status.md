@@ -80,6 +80,12 @@ explicit owner mismatches leave the ledger unchanged. Full Claude session IDs
 protect the matching short jobs directory through both records and live inventory.
 The fixed never-paths now also include the complete mailbox-home registry at
 runtime `~/src/fabrig/homes`, with a live-mode temporary-HOME regression.
+Reap-1f adds `~/src/fabrig/logins` (agent login pool) and
+`~/.config/fleet-scale` (fleet-scale credential source) to the fixed keeps in
+`docs/design/reaper.md`, section 3. Each has a temporary-HOME live-mode
+regression: even an ended record keeps the directory and its contents, and
+the guard protects the root, ancestors and descendants. No credential source
+on a live host is read.
 
 - **Borrower coverage is bounded.** Repository discovery covers six levels per
   named root and skips generated trees. A new deeper clone layout requires

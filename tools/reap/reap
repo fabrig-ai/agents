@@ -584,7 +584,8 @@ class Reaper:
                  'archive', '.local/state/reap', 'src/rust/tmp/logs/heavy.tsv',
                  'src/fabrig/events', 'src/fabrig/records', 'src/rust/records',
                  'src/fabrig/archive', 'src/rust/tmp/owners', 'src/fabrig/homes',
-                 'src/fabrig/notes', 'src/fabrig/tasks']
+                 'src/fabrig/notes', 'src/fabrig/tasks',
+                 'src/fabrig/logins', '.config/fleet-scale']
         fixed += [f'src/fabrig/{name}' for name in ('claims', 'leases', 'queue', 'main', 'agents', 'current', 'releases')]
         fixed += [f'.local/state/{name}' for name in ('fleet-sync', 'fabrig', 'heavy')]
         if not inside(path, self.home) or any(intersects(path, self.home / p) for p in fixed):

@@ -76,8 +76,10 @@ unbounded search. New clone layouts require review of the depth limit.
 **Never paths are code rules.** Protect credentials and SSH/Codex private state,
 primary/current/release clones, claims, leases, queue, heavy/post/login state,
 QA scratch, reaper/fleet state, durable bookkeeping and archives. In particular
-protect all of `~/src/fabrig/{archive,events,records,homes,notes,tasks}`, `~/src/rust/records` and
-`~/src/rust/tmp/owners`. Protect their ancestors and descendants too. The command
+protect all of `~/src/fabrig/{archive,events,records,homes,notes,tasks,logins}`,
+`~/src/rust/records`, `~/src/rust/tmp/owners` and `~/.config/fleet-scale`.
+`~/src/fabrig/logins` is the agent login pool; `~/.config/fleet-scale` is the
+fleet-scale credential source. Protect their ancestors and descendants too. The command
 reference lists the other exact paths. TOML cannot disable any keep rule.
 
 **Never execute repository-defined programs.** Stop detecting dirtiness.

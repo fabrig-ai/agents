@@ -572,6 +572,24 @@ class ReapTests(unittest.TestCase):
         self.reason(self.run_class('recorded', True), 'never path')
         self.assertTrue((path / 'payload').exists())
 
+    def test_agent_login_pool_is_never_reaped(self):
+        path = self.old('src/fabrig/logins', directory=True)
+        reaper = self.reaper()
+        for protected in (path, path.parent, path / 'payload'):
+            self.assertTrue(reaper.never(protected), protected)
+        self.ended(path)
+        self.reason(self.run_class('recorded', True), 'never path')
+        self.assertTrue((path / 'payload').exists())
+
+    def test_fleet_scale_credential_source_is_never_reaped(self):
+        path = self.old('.config/fleet-scale', directory=True)
+        reaper = self.reaper()
+        for protected in (path, path.parent, path / 'payload'):
+            self.assertTrue(reaper.never(protected), protected)
+        self.ended(path)
+        self.reason(self.run_class('recorded', True), 'never path')
+        self.assertTrue((path / 'payload').exists())
+
     def test_record_errors_never_fail_caller(self):
         result = subprocess.run([sys.executable, '-I', '-B', str(ROOT / 'tools/reap/reap'), 'record', 'start'], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0)

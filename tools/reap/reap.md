@@ -87,8 +87,8 @@ newlines in paths. Unknown Claude inventory keeps jobs. Symlink candidates, syml
 Nested symlinks are never followed; removal only unlinks them.
 
 Never paths include `src/rust/tmp/{logins,qa*,heavy,post,owners}`,
-`src/fabrig/{claims,leases,queue,main,agents,current,releases,archive,events,records,homes,notes,tasks}`,
-`src/rust/records`,
+`src/fabrig/{claims,leases,queue,main,agents,current,releases,archive,events,records,homes,notes,tasks,logins}`,
+`src/rust/records`, `.config/fleet-scale` (fleet-scale credential source),
 `.local/state/{fleet-sync,fabrig,heavy,reap}`, `.ssh`, `.claude/.credentials.json`,
 `.claude.json`, Codex state outside `.codex/sessions`, and `archive`.
 Claude jobs bookkeeping (`pins.json`) is also protected. Their ancestors are protected
