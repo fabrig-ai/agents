@@ -4,7 +4,7 @@ part = "cutover-landing"
 kind = "migration"
 repo = "fabrig"
 needs = ["queue", "precheck", "codex", "run-slots"]
-files = ["tools/**", ".config/gate/**", "AGENTS.md"]
+files = ["tools/**", ".config/gate/**", ".config/fixture-readers.toml", "AGENTS.md"]
 effort = "medium"
 minutes = 20
 +++
@@ -39,6 +39,16 @@ to land through fab's queue.
 
 - The moves and deletions above, and `AGENTS.md` as described, in one or two
   commits.
-- No remaining reference to a deleted path outside `agents/`.
+- No remaining reference to a deleted path outside `agents/` and the user's
+  drafts (`*/docs/design/draft/`).
 - `fab precheck` on your tip in your slot is green (a full selection: the
   change touches `.config`), with its receipt path in your report.
+
+## Answers
+
+- 2026-10-30, run cutover-fabrig-1: may the task edit
+  `.config/fixture-readers.toml` and `temper/docs/design/draft/landing-model.md`?
+  `.config/fixture-readers.toml`: yes, remove the entries for the deleted heavy
+  fixtures and suite (it is now in `files`). The draft: no. It is the user's
+  input and agents never edit drafts; its mentions of the old tools stay, and
+  the acceptance exempts drafts.
