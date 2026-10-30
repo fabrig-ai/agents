@@ -47,9 +47,13 @@ without creating state or invoking `record`. Source counts go to stderr.
 The first cursor uses `--since` or seven days ago; later runs retain that
 bound. Complete log lines alone advance offsets; rotation safely replays ids.
 
-Runs join through the task header, falling back to a prose `branch` followed
-by a backtick-quoted name, or `ready/...`; recipient names supply area and
-coordinator. Queue batches retain outcomes, selection, safe step durations
+Runs join first through their own meta `header.*` keys when `header` is `ok`
+or `inherited`, without reading the task file. Otherwise they use the task's
+`+++` TOML header, falling back to a prose `branch` followed by a backtick-quoted
+name, or `ready/...`; recipient names supply area and coordinator when absent
+from the selected keys. Unknown meta keys are ignored. Every runs event carries
+`header`: the meta value, or `absent` for older meta (including missing meta).
+Producer files are read only; task changes cannot override a checked run header. Queue batches retain outcomes, selection, safe step durations
 and available sizes/cleanup counts; attempts join branches through leads.txt.
 Heavy's completion TSV is authoritative; release events add token/outcome.
 Multi-line commands are joined into logical rows at task/lane/timestamp row

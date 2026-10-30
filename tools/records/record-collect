@@ -86,6 +86,15 @@ def task_keys(path):
     return {'branch': branch[1]}
 
 
+def run_keys(meta, task, recipient):
+    """A checked run header survives task edits, removal, and resume inheritance."""
+    if meta.get('header') in ('ok', 'inherited'):
+        keys = {key: meta['header.' + key] for key in JOIN if 'header.' + key in meta}
+    else:
+        keys = task_keys(task)
+    return names(recipient) | keys
+
+
 @contextmanager
 def read_lock(directory):
     """Use the producer's lock if present; never create or modify source state."""
@@ -221,9 +230,9 @@ class Collector:
                 continue
             meta = dict(line.split('=', 1) for line in path.read_text().splitlines() if '=' in line)
             run = path.parent.name
-            keys = names(meta.get('to', '')) | task_keys(meta.get('task'))
+            keys = run_keys(meta, meta.get('task'), meta.get('to', ''))
             self.emit('run-start', run, meta['started'], run=run, **keys,
-                      model=meta.get('model'), effort=meta.get('effort'),
+                      header=meta.get('header', 'absent'), model=meta.get('model'), effort=meta.get('effort'),
                       cwd=meta.get('dir'), report=meta.get('report'), resumed_from=meta.get('resume_of') or None)
             cache[str(path)] = signature
         for line in self.lines(root / 'runs.tsv'):
@@ -231,10 +240,11 @@ class Collector:
             if len(columns) != 13:
                 raise ValueError('runs.tsv: expected 13 columns')
             run, to, start, end, code, tries, model, effort, task, report, thread, tokens, post = columns
-            keys = names(to) | task_keys(task)
             meta_path = root / run / 'meta'
             meta = dict(line.split('=', 1) for line in meta_path.read_text().splitlines() if '=' in line) if meta_path.exists() else {}
-            common = dict(run=run, **keys, model=model, effort=effort, report=report,
+            keys = run_keys(meta, task, to)
+            common = dict(run=run, **keys, header=meta.get('header', 'absent'),
+                          model=model, effort=effort, report=report,
                           resumed_from=meta.get('resume_of') or None)
             self.emit('run-start', run, start, **common)
             usage = [int(v) for v in tokens.split('/')] if tokens != '-' else [None] * 3

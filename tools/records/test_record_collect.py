@@ -196,6 +196,7 @@ print('12345678: 125,000 of 1,000,000 tokens (12%) at 2026-10-29T11:00:00Z; 42 c
                                tokens_in=100, tokens_cached=40, tokens_out=20, minutes=2,
                                exit=0, tries=2, post_status=0).items():
             self.assertEqual(end[key], value)
+        self.assertTrue(all(e['header'] == 'absent' for e in events))
         self.assertEqual(end['resumed_from'], '20261029T100000Z-bbbb')
         head = self.git(self.clone, 'rev-parse', 'HEAD')
         r = self.run_collect('runs', options=('--since', '2099-01-01T00:00Z'))
@@ -204,6 +205,65 @@ print('12345678: 125,000 of 1,000,000 tokens (12%) at 2026-10-29T11:00:00Z; 42 c
         self.assertEqual(self.cursor('runs')['files'][str(self.tmp / 'codex-run/runs.tsv')]['offset'], len(self.run_row.encode()))
         self.assertEqual((self.state / 'runs.json').stat().st_mode & 0o777, 0o600)
         self.assertEqual(self.git(self.clone, 'log', '-1', '--format=%s'), 'collect: append batch/hel8')
+
+    def test_checked_meta_precedes_changed_missing_or_invalid_task(self):
+        for status in ('ok', 'inherited'):
+            task = self.runs_fixture()
+            meta = self.tmp / f'codex-run/{RUN}/meta'
+            joins = dict(task='saved', branch='mc/saved', coordinator='s/saved',
+                         draft='saved-wave', area='saved-area', part='saved-part')
+            self.write(meta, meta.read_text() + f'header={status}\n' +
+                       ''.join(f'header.{key}={value}\n' for key, value in joins.items()) +
+                       'header.future=ignored\nfuture_meta=ignored\n')
+            for contents in (task.read_text(), '+++\ninvalid TOML [\n+++\n', None):
+                with self.subTest(status=status, task=contents):
+                    if contents is None:
+                        task.unlink()
+                    else:
+                        self.write(task, contents)
+                    before = {p: p.read_bytes() for p in (meta, meta.parent.parent / 'runs.tsv', task) if p.exists()}
+                    events = self.dry('runs')
+                    self.assertEqual([e['kind'] for e in events], ['run-start', 'run-end'])
+                    for event in events:
+                        self.assertEqual(event['header'], status)
+                        self.assertEqual({key: event[key] for key in joins}, joins)
+                        self.assertNotIn('future', event)
+                        self.assertNotIn('future_meta', event)
+                    self.assertEqual(before, {p: p.read_bytes() for p in before})
+                    self.assertFalse(self.state.exists())
+
+    def test_unchecked_or_absent_meta_uses_file_header_then_prose(self):
+        for status in ('missing', 'invalid', 'future', None):
+            for header in (True, False):
+                with self.subTest(status=status, file_header=header):
+                    self.runs_fixture(header=header)
+                    meta = self.tmp / f'codex-run/{RUN}/meta'
+                    self.write(meta, meta.read_text() + ('header=' + status + '\n' if status else '') +
+                               'header.task=ignored\nheader.branch=mc/ignored\n')
+                    events = self.dry('runs')
+                    for event in events:
+                        self.assertEqual(event['header'], status or 'absent')
+                        self.assertEqual(event['branch'], 'mc/example' if header else 'mc/fallback')
+                        self.assertEqual(event['coordinator'], 's/example' if header else 'H')
+                        self.assertEqual(event.get('task'), 'example' if header else None)
+
+    def test_completed_run_without_meta_has_absent_header(self):
+        self.runs_fixture()
+        (self.tmp / f'codex-run/{RUN}/meta').unlink()
+        events = self.dry('runs')
+        self.assertEqual([e['kind'] for e in events], ['run-start', 'run-end'])
+        self.assertTrue(all(e['header'] == 'absent' and e['draft'] == 'wave' for e in events))
+
+    def test_checked_read_only_meta_does_not_borrow_file_branch(self):
+        self.runs_fixture()
+        meta = self.tmp / f'codex-run/{RUN}/meta'
+        self.write(meta, meta.read_text() + 'header=ok\nheader.task=survey\nheader.draft=survey-wave\n'
+                   'header.coordinator=s/survey\n')
+        for event in self.dry('runs'):
+            self.assertNotIn('branch', event)
+            self.assertEqual(event['task'], 'survey')
+            self.assertEqual(event['draft'], 'survey-wave')
+            self.assertEqual(event['header'], 'ok')
 
     def test_task_fallback_and_invalid_header(self):
         task = self.runs_fixture(header=False)
