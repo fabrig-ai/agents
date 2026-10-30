@@ -12,9 +12,11 @@ commands: the numstat and an archive of each tree.
 
 from __future__ import annotations
 
+import ast
+import difflib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from fab.calls import Signature, inventory
 from fab.plan import Task
@@ -76,14 +78,20 @@ def classify(path: str) -> str:
     """"tests" for a path under `<PACKAGE>/tests/` or whose file name starts with `test_`;
     "docs" for a path ending in `.md` or under `docs/`; "production" otherwise (bin/fab,
     fab/hosts.toml and every other module among them). Tests win over docs."""
-    raise NotImplementedError
+    name = PurePosixPath(path).name
+    if path.startswith(f"{PACKAGE}/tests/") or name.startswith("test_"):
+        return "tests"
+    if path.endswith(".md") or path.startswith("docs/"):
+        return "docs"
+    return "production"
 
 
 def outside(paths: Sequence[str], files: Sequence[str]) -> list[str]:
     """The paths no glob of files matches, sorted. A glob matches as
     `PurePosixPath(path).full_match(glob)` (Python 3.13: `*` stays within one component,
     `**` spans any). No files at all: every path is outside."""
-    raise NotImplementedError
+    return sorted(path for path in paths
+                  if not any(PurePosixPath(path).full_match(glob) for glob in files))
 
 
 def items(base: Path, tip: Path) -> tuple[list[Signature], list[Signature],
@@ -93,28 +101,56 @@ def items(base: Path, tip: Path) -> tuple[list[Signature], list[Signature],
     twice. added: keys only at tip, in tip order; removed: keys only at base, in base order;
     changed: keys in both whose text differs, as (base entry, tip entry) in tip order. A
     docstring that changes alone is not a change. A tree without PACKAGE/ has no items."""
-    raise NotImplementedError
+    entries = []
+    for root in (base, tip):
+        keyed = {}
+        for entry in inventory(root, PACKAGE):
+            keyed.setdefault((entry.module, entry.name), entry)
+        entries.append(keyed)
+    before, after = entries
+    added = [entry for key, entry in after.items() if key not in before]
+    removed = [entry for key, entry in before.items() if key not in after]
+    changed = [(before[key], entry) for key, entry in after.items()
+               if key in before and before[key].text != entry.text]
+    return added, removed, changed
 
 
 def added_lines(before: str, after: str) -> set[int]:
     """The 1-based line numbers of after that are not carried over from before:
     difflib.SequenceMatcher(None, before lines, after lines, autojunk=False), the after side of
     every replace and insert opcode. before "" (a new file): every line of after."""
-    raise NotImplementedError
+    matcher = difflib.SequenceMatcher(None, before.splitlines(), after.splitlines(), autojunk=False)
+    return {line for tag, _, _, start, end in matcher.get_opcodes()
+            if tag in ("replace", "insert") for line in range(start + 1, end + 1)}
 
 
 def functions(module: str, text: str) -> list[Function]:
     """Every function and method in text, at any depth (nested ones too), from ast, in source
     order: name qualified by its enclosing classes and functions joined with ".", start the
     node's lineno (the `def` line), lines end_lineno - lineno + 1. A SyntaxError propagates."""
-    raise NotImplementedError
+    found = []
+
+    def visit(node, parents=()):
+        scoped = isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            found.append(Function(module, ".".join((*parents, node.name)), node.lineno,
+                                  node.end_lineno - node.lineno + 1))
+        scope = (*parents, node.name) if scoped else parents
+        for child in ast.iter_child_nodes(node):
+            visit(child, scope)
+
+    visit(ast.parse(text, filename=module))
+    return sorted(found, key=lambda function: function.start)
 
 
 def long_functions(module: str, before: str, after: str, cap: int = SIZE_CAP) -> list[Function]:
     """functions(module, after) longer than cap lines whose span [start, start + lines) holds
     at least one of added_lines(before, after): new or changed. A long function the branch did
     not touch, or only shortened, is not listed."""
-    raise NotImplementedError
+    added = added_lines(before, after)
+    return [function for function in functions(module, after)
+            if function.lines > cap
+            and any(function.start <= line < function.start + function.lines for line in added)]
 
 
 def clones(texts: Mapping[str, str], changed: Mapping[str, set[int]],
@@ -131,7 +167,37 @@ def clones(texts: Mapping[str, str], changed: Mapping[str, set[int]],
     path at consecutive kept indexes whose matches are in the same other file at consecutive
     kept indexes merge into one Clone: start the first window's first line, end the last
     window's last line, other_start the first match's first line."""
-    raise NotImplementedError
+    kept = {}
+    index = {}
+    for path in sorted(texts):
+        lines = [(number, line.strip()) for number, line in enumerate(texts[path].splitlines(), 1)
+                 if line.strip() and not line.strip().startswith(("#", "import ", "from "))]
+        kept[path] = lines
+        for start in range(len(lines) - size + 1):
+            key = tuple(text for _, text in lines[start:start + size])
+            index.setdefault(key, []).append((path, start))
+
+    found = []
+    for path in sorted(changed):
+        lines = kept.get(path, [])
+        previous = None
+        for start in range(len(lines) - size + 1):
+            window = lines[start:start + size]
+            if not any(number in changed[path] for number, _ in window):
+                continue
+            key = tuple(text for _, text in window)
+            match = next(((other, offset) for other, offset in index[key]
+                          if other != path or abs(offset - start) >= size), None)
+            if match is None:
+                continue
+            other, offset = match
+            if previous == (start - 1, other, offset - 1):
+                last = found[-1]
+                found[-1] = Clone(path, last.start, window[-1][0], other, last.other_start)
+            else:
+                found.append(Clone(path, window[0][0], window[-1][0], other, kept[other][offset][0]))
+            previous = (start, other, offset)
+    return sorted(found, key=lambda clone: (clone.path, clone.start, clone.other, clone.other_start))
 
 
 def build(task: Task, run_id: str, branch: str, base_sha: str, tip_sha: str,
@@ -144,7 +210,33 @@ def build(task: Task, run_id: str, branch: str, base_sha: str, tip_sha: str,
     tip, with its text under base ("" when absent) and under tip; clones: clones over the texts
     of every module inventory reads at tip (`<PACKAGE>/*.py`, not tests), with the added lines
     of those same production changes. Files are read as UTF-8. A SyntaxError propagates."""
-    raise NotImplementedError
+    ordered = tuple(sorted(changes, key=lambda change: change.path))
+    extra = tuple(outside([change.path for change in ordered], task.files))
+    added, removed, changed = items(base, tip)
+    modules = []
+    long = []
+    touched = {}
+    for change in ordered:
+        path = PurePosixPath(change.path)
+        if change.kind != "production" or path.parent != PurePosixPath(PACKAGE) or path.suffix != ".py":
+            continue
+        before_path, after_path = base / path, tip / path
+        if not before_path.is_file():
+            modules.append(change.path)
+        if not after_path.is_file():
+            continue
+        before = before_path.read_text(encoding="utf-8") if before_path.is_file() else ""
+        after = after_path.read_text(encoding="utf-8")
+        long.extend(long_functions(change.path, before, after))
+        touched[change.path] = added_lines(before, after)
+    texts = {path.relative_to(tip).as_posix(): path.read_text(encoding="utf-8")
+             for path in sorted((tip / PACKAGE).glob("*.py"))
+             if not path.name.startswith("test_") and not path.name.endswith("_test.py")}
+    repeated = clones(texts, {path: lines for path, lines in touched.items() if path in texts})
+    return Digest(run_id, task.id, task.kind, branch, base_sha, tip_sha, ordered,
+                  tuple(added), tuple(removed), tuple(changed), tuple(modules), extra,
+                  tuple(sorted(long, key=lambda function: (function.module, function.start))),
+                  tuple(repeated))
 
 
 def render(digest: Digest) -> str:
