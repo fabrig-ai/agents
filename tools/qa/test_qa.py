@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline QA cases with temporary HOME and fakes; cheap repair probes run in process."""
+"""Offline QA gate: fresh state and scoped calls; process matrices are periodic."""
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import fcntl
@@ -20,6 +20,9 @@ import tempfile
 import time
 import unittest
 import runpy
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import qa_test_support as support
 
 KIT = Path(__file__).resolve().parent
 SCRIPT = KIT / 'qa'
@@ -495,8 +498,14 @@ tool['main'].__globals__['command'] = _fixture_command
 '''
 
 
+FIXTURE_PROGRAM = f'#!/usr/bin/env -S {sys.executable} -I -B\n' + WATCH_TOOLS
+FIXTURE_CODE = compile(FIXTURE_PROGRAM, '<qa fake service>', 'exec')
+
+
 class Lab:
-    def __init__(self, root, built=None):
+    def __init__(self, root, built=None, lightweight=False, slot_numbers=range(1, 5)):
+        self.lightweight = lightweight
+        self.built = built
         self.root = root
         self.home, self.tmp = root / 'home', root / 'tmp'
         self.origins = root / 'origins'
@@ -525,7 +534,10 @@ class Lab:
         self.products = {'fabrig': root / 'fabrig'}
         self.serial = 0
         checkout = self.products['fabrig']
-        if built is not None:
+        if lightweight:
+            checkout.mkdir()
+            self.template_head = (built / 'fabrig/.git/refs/heads/main').read_text().strip()
+        elif built is not None:
             shutil.copytree(built / 'fabrig', checkout)
             shutil.copytree(built / 'origins/fabrig.git', self.origins / 'fabrig.git')
             self.git(checkout, 'remote', 'set-url', 'origin', str(self.origins / 'fabrig.git'))
@@ -540,8 +552,9 @@ class Lab:
             self.git(checkout, 'remote', 'add', 'origin', str(self.origins / 'fabrig.git'))
         self.slots = self.home / 'src/fabrig/slots'
         self.slots.mkdir(parents=True)
-        for number in range(1, 5):
-            shutil.copytree(checkout, self.slots / str(number))
+        if not lightweight:
+            for number in slot_numbers:
+                shutil.copytree(checkout, self.slots / str(number))
 
 
 
@@ -585,6 +598,8 @@ class Lab:
         if args[:1] in (('watch',), ('walk',), ('take',)):
             driver += FAST_READ_DRIVER + '\n'
         driver += 'sys.exit(tool["main"]())'
+        if getattr(self, 'in_process', False):
+            return self.invoke(driver, args, status=status, extra=extra)
         command = [sys.executable, '-I', '-B', '-c', driver, *args]
         result = subprocess.run(command, env=dict(self.env, **(extra or {})), cwd=self.root,
                                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -592,7 +607,106 @@ class Lab:
         assert result.returncode == status, (args, result.returncode, result.stdout, result.stderr)
         return result
 
+    def invoke(self, driver, args, status=0, extra=None):
+        env = dict(self.env, **(extra or {}))
+        inline_driver = driver.replace(FAST_READ_DRIVER, '')
+        if '._exit(' in inline_driver or 'os.kill(' in inline_driver or 'addaudithook' in inline_driver:
+            result = support.child_execute(support.load(SCRIPT), inline_driver,
+                [str(SCRIPT), *args], env, self.root, self.setup_inline, HUNG_TOOL_S)
+        else:
+            # The in-process dispatcher handles both observations and mutations.
+            result = support.execute(support.load(SCRIPT), inline_driver, [str(SCRIPT), *args],
+                                     env, self.root, self.setup_inline)
+        assert result.returncode == status, (args, result.returncode, result.stdout, result.stderr)
+        return result
+
+    def setup_inline(self, tool):
+        if self.lightweight:
+            lab = self
+            def fetch(repositories, repo, slot):
+                checkout = lab.slots / str(slot)
+                trim = checkout / 'tools/slots/trim'
+                trim.parent.mkdir(parents=True, exist_ok=True)
+                if not trim.exists():
+                    shutil.copyfile(lab.built / 'fabrig/tools/slots/trim', trim)
+                return checkout
+            tool['Repositories'].fetch = fetch
+            tool['Repositories'].protect_head = lambda *a: None
+            tool['Repositories'].build = lambda repositories, root, ref: lab.template_head
+            tool['Repositories'].checkout = lambda *a: None
+        original = tool['command']
+        def command(argv, cwd=None, timeout=None, pass_fds=(), **kwargs):
+            import atexit
+            import contextlib
+            import io
+            import traceback
+            from unittest.mock import patch
+            words = list(map(str, argv))
+            if self.lightweight and words[0] == 'git':
+                # Q-state dependency fixtures contain only this absent object;
+                # real Git graph/resolution contracts have full repositories.
+                assert words[1] == '-C' and Path(words[2]).parent == self.slots
+                assert words[3:] == ['rev-parse', '--disambiguate=' + 'a' * 40], words
+                return subprocess.CompletedProcess(argv, 0, '', '')
+            resolved = shutil.which(words[0])
+            program = Path(resolved) if resolved else Path(words[0])
+            is_trim = len(words) > 3 and words[:3] == ['python3', '-I', '-B'] and words[3].endswith('/tools/slots/trim')
+            if is_trim:
+                program = Path(words[3])
+                words = words[3:]
+            config = json.loads((self.root / 'tools.json').read_text())
+            quick = (program.is_relative_to(self.root) and program.name in
+                     ('logins', 'claim', 'ssh', 'df', 'cargo', 'post', 'codex-run', 'systemctl')
+                     and program.read_text() == FIXTURE_PROGRAM or is_trim)
+            if (not quick or kwargs or config.get('hang') or config.get('hung_systemctl')
+                    or program.name == 'codex-run' and any(config.get(k) for k in
+                        ('delay_before_meta', 'delay_before_unit', 'interrupt_launch', 'close_admission'))
+                    or program.name == 'systemctl' and words[2:3] not in (['show'], ['list-units'])):
+                return original(argv, cwd=cwd, timeout=timeout, pass_fds=pass_fds, **kwargs)
+            output, error = io.StringIO(), io.StringIO()
+            previous_argv, previous_cwd = sys.argv, Path.cwd()
+            callbacks = []
+            code = compile(program.read_text(), str(program), 'exec') if is_trim else FIXTURE_CODE
+            def exec_fixture(path, argv):
+                # Run the fake ssh's exact parsed argv through the same fixture,
+                # preserving its output/status without replacing this interpreter.
+                nested = command(argv)
+                sys.stdout.write(nested.stdout)
+                sys.stderr.write(nested.stderr)
+                raise SystemExit(nested.returncode)
+            status = 0
+            try:
+                sys.argv = words
+                if cwd is not None:
+                    os.chdir(cwd)
+                with contextlib.redirect_stdout(output), contextlib.redirect_stderr(error), \
+                        patch.object(atexit, 'register', lambda fn, *a, **kw: callbacks.append((fn, a, kw))), \
+                        patch.object(os, 'execv', exec_fixture):
+                    try:
+                        exec(code, {'__name__': '__main__', '__file__': str(program)})
+                    except SystemExit as exit_status:
+                        if isinstance(exit_status.code, str):
+                            print(exit_status.code, file=sys.stderr)
+                            status = 1
+                        else:
+                            status = exit_status.code or 0
+                    except Exception:
+                        traceback.print_exc()
+                        status = 1
+            finally:
+                for fn, a, kw in reversed(callbacks):
+                    fn(*a, **kw)
+                sys.argv = previous_argv
+                os.chdir(previous_cwd)
+            return subprocess.CompletedProcess(argv, status, output.getvalue(), error.getvalue())
+        tool['command'] = command
+
+    def probe(self, driver):
+        return support.execute(support.load(SCRIPT), driver, [str(SCRIPT)], self.env, self.root)
+
     def head(self):
+        if self.lightweight:
+            return self.template_head
         return self.git(self.products['fabrig'], 'rev-parse', 'HEAD')
 
 
@@ -788,7 +902,7 @@ def deploy_runs_the_real_systemd_run(lab):
               f'workspace = tool["Workspace"](); service = tool["Watch"](workspace, "director@fixture"); '
               f'service.deployments(tool["Path"]({str(directory)!r}), '
               f'{{"walk": {directory.name!r}, "kinds": {{}}}})')
-    result = subprocess.run([sys.executable, '-I', '-B', '-c', driver], env=lab.env, capture_output=True, text=True)
+    result = lab.probe(driver)
     assert result.returncode == 0, result.stderr
     assert list(map(json.loads, log.read_text().splitlines())) == [['systemctl', [
         '--user', 'list-units', '--all', '--plain', '--no-legend', '--full', f'qa-{directory.name}-*']]]
@@ -827,6 +941,9 @@ sys.exit(tool['main']())
 '''
     if now is not None:
         driver = driver.replace("sys.exit(tool['main']())", f'tool["main"].__globals__["timestamp"] = lambda: {now!r}\nsys.exit(tool["main"]())')
+    if getattr(lab, 'in_process', False):
+        return lab.invoke(driver, ['watch', '--director', 'director@fixture', *(['--once'] if once else [])],
+                          status=status, extra=extra)
     result = subprocess.run([sys.executable, '-I', '-B', '-c', driver, 'watch', '--director',
                              'director@fixture', *(['--once'] if once else [])], env=dict(lab.env, **(extra or {})), capture_output=True,
                             text=True, timeout=HUNG_TOOL_S)
@@ -971,6 +1088,8 @@ def driven_walk(lab, patch, *args, status=0):
     brief.parent.mkdir(parents=True, exist_ok=True)
     brief.write_text('fixture rung\n')
     driver = f'import os, runpy, sys\ntool = runpy.run_path({str(SCRIPT)!r})\n' + FAST_READ_DRIVER + '\n' + patch + '\nsys.exit(tool["main"]())\n'
+    if getattr(lab, 'in_process', False):
+        return lab.invoke(driver, ['walk', 'fabrig', 'b0', *args], status=status)
     result = subprocess.run([sys.executable, '-I', '-B', '-c', driver, 'walk', 'fabrig', 'b0', *args],
                             env=lab.env, capture_output=True, text=True, timeout=HUNG_TOOL_S)
     assert result.returncode == status, (result.returncode, result.stdout, result.stderr)
@@ -2535,8 +2654,9 @@ def unsafe_metadata_is_rejected_without_reading(lab, shape):
     import io
     from types import SimpleNamespace
     from unittest.mock import patch
-    tool = runpy.run_path(str(SCRIPT))
+    tool = support.load(SCRIPT).__dict__
     with patch.dict(os.environ, lab.env, clear=True):
+        lab.setup_inline(tool)
         workspace = tool['Workspace']()
         watch = tool['Watch'](workspace, 'director@fixture')
         directory = lab.tmp / 'qa-focused/rung-a-1'
@@ -2750,7 +2870,7 @@ assert workspace.tool('systemd-run') == Path('systemd-run')
 assert workspace.origin('fabrig') == 'git@github.com:fabrig-ai/fabrig.git'
 assert not hasattr(workspace, 'records')
 """
-    result = subprocess.run([sys.executable, '-I', '-B', '-c', driver], env=lab.env, capture_output=True, text=True)
+    result = lab.probe(driver)
     assert result.returncode == 0, result.stderr
 
 
@@ -3465,8 +3585,7 @@ except tool['Problem'] as error:
 else:
     raise AssertionError('unlocked claim verification/release was allowed')
 '''
-    result = subprocess.run([sys.executable, '-I', '-B', '-c', driver], env=lab.env,
-                            capture_output=True, text=True, timeout=HUNG_TOOL_S)
+    result = lab.probe(driver)
     assert result.returncode == 0, (result.stdout, result.stderr)
     assert slot_claims(lab) and not [c for c in lab.calls('claim') if c[0] == 'release']
 
@@ -3545,8 +3664,7 @@ _fixture_original = external
 _fixture_command([workspace.tool('logins'), 'list'], timeout=60)
 assert called
 """
-    result = subprocess.run([sys.executable, '-I', '-B', '-c', driver], env=lab.env,
-                            capture_output=True, text=True, timeout=HUNG_TOOL_S)
+    result = lab.probe(driver)
     assert result.returncode == 0, (result.stdout, result.stderr)
 
 
@@ -3959,7 +4077,7 @@ def the_queue_json_fixture_matches_real_output(lab):
 
 
 def evidence_scan_rules_and_placeholders(lab):
-    module = runpy.run_path(str(KIT / 'evidence.py'))
+    module = support.load(SCRIPT).evidence
     scan = module['scan']
     unsafe = {
         'key/jwt': ['ghp_' + 'x' * 30, 'sk-ant-example', 'eyJabc.def.ghi',
@@ -3989,7 +4107,7 @@ def evidence_scan_rules_and_placeholders(lab):
 
 
 def evidence_snapshot_checks_names_types_and_limits(lab):
-    module = runpy.run_path(str(KIT / 'evidence.py'))
+    module = support.load(SCRIPT).evidence
     snapshot, refused = module['snapshot'], module['Refusal']
     root = lab.scratch({'report.md': 'report\n', 'notes.md': 'notes\n', 'store/data': b'\x00'})
     files, index = snapshot(root, {'kind': 'walk', 'name': 'fixture'}, 1024)
@@ -4144,7 +4262,7 @@ def scratch_bytes_queue_counts_reservations_and_retained_data(lab):
 
 def evidence_snapshot_never_opens_credentials_or_unsafe_entries(lab):
     from unittest.mock import patch
-    module = runpy.run_path(str(KIT / 'evidence.py'))
+    module = support.load(SCRIPT).evidence
     root = lab.scratch({'report.md': 'safe\n', 'evidence/auth.json': 'fixture do not open\n'})
     opened = os.open
     def guard(path, *args, **kwargs):
@@ -4183,7 +4301,7 @@ def evidence_snapshot_never_opens_credentials_or_unsafe_entries(lab):
 
 def evidence_snapshot_detects_replacement_before_read(lab):
     from unittest.mock import patch
-    module = runpy.run_path(str(KIT / 'evidence.py'))
+    module = support.load(SCRIPT).evidence
     root = lab.scratch({'report.md': 'original\n'})
     opened = os.open
     def replace_before_open(path, *args, **kwargs):
@@ -4497,6 +4615,7 @@ def run_case(name, built):
 
 
 class WalkTests(unittest.TestCase):
+    isolated = False
     cases = CASES
     script = Path(__file__).resolve()
     @classmethod
@@ -4504,8 +4623,9 @@ class WalkTests(unittest.TestCase):
         cls.baseline = tempfile.TemporaryDirectory(prefix='qa-baseline-')
         baseline = Path(cls.baseline.name)
         Lab(baseline)
-        cls.pool = ThreadPoolExecutor(max_workers=8)
-        cls.futures = {case.__name__: cls.pool.submit(cls.child, case.__name__, baseline) for case in cls.cases}
+        if cls.isolated:
+            cls.pool = ThreadPoolExecutor(max_workers=8)
+            cls.futures = {case.__name__: cls.pool.submit(cls.child, case.__name__, baseline) for case in cls.cases}
 
     @classmethod
     def child(cls, name, baseline):
@@ -4527,14 +4647,45 @@ class WalkTests(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        cls.pool.shutdown(wait=True)
+        if hasattr(cls, 'pool'):
+            cls.pool.shutdown(wait=True)
         cls.baseline.cleanup()
+
+
+# Only Git contracts retain writable real repositories.
+REAL_REPOSITORIES = (
+    'a_bare_branch_resolves_to_origins',
+    'a_build_never_resolves_through_a_tag_or_a_stale_ref',
+    'a_failed_walk_fetch_takes_no_login',
+    'a_resumed_walk_fetches_before_taking_a_login',
+    'a_slot_is_never_created_replaced_or_used_with_the_wrong_origin',
+    'a_walk_fetches_its_build_before_taking_a_login',
+    'a_walk_resolves_origin_branches_and_commit_prefixes',
+    'a_walk_resolves_remote_branches_despite_colliding_tags',
+    'a_walk_takes_a_login_and_a_slot_and_starts',
+    'detached_heads_contained_in_origin_history_are_accepted',
+    'dirty_slots_are_preserved_refused_and_released',
+    'failed_remote_or_unreadable_claim_never_prepares_or_falls_back',
+    'target_stays_warm_and_trim_failure_is_logged_before_fetch',
+)
 
 
 def test_method(name):
     def test(self):
-        code, output = self.futures[name].result()
-        self.assertEqual(code, 0, output)
+        if hasattr(self, 'futures'):
+            code, output = self.futures[name].result()
+            self.assertEqual(code, 0, output)
+            return
+        with tempfile.TemporaryDirectory(prefix='qa-fast-') as directory:
+            previous = os.umask(0o077)
+            try:
+                lab = Lab(Path(directory), Path(self.baseline.name), lightweight=name not in REAL_REPOSITORIES,
+                          slot_numbers=(1, 2))
+                lab.in_process = name != 'a_walk_takes_a_login_and_a_slot_and_starts'
+                with support.case_deadline(90), support.scope(support.load(SCRIPT)):
+                    globals()[name](lab)
+            finally:
+                os.umask(previous)
     return test
 
 
@@ -4555,7 +4706,9 @@ class EvidenceRepairTests(unittest.TestCase):
         (self.root / 'tmp').mkdir()
         previous = os.umask(0o077)
         self.addCleanup(os.umask, previous)
-        self.tool = runpy.run_path(str(SCRIPT))
+        module = support.load(SCRIPT)
+        self.enterContext(support.scope(module))
+        self.tool = module.__dict__
         self.ev = self.tool['evidence']
         self.tool['Watch'].check.__globals__['timestamp'] = lambda: '2026-10-08T00:00:00Z'
         self.watch = self.tool['Watch'](self.tool['Workspace'](), 'director@fixture')

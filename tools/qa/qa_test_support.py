@@ -11,6 +11,7 @@ import sys
 import time
 import fcntl
 import traceback
+from types import ModuleType
 
 _MODULES = {}
 
@@ -40,7 +41,9 @@ def scope(module):
         # runpy's returned mapping differs from function.__globals__.
         actual = evidence['snapshot'].__globals__
         dictionaries.extend((d, d.copy()) for d in (evidence, actual))
-    for standard in (os, sys, time, fcntl, subprocess, runpy, io):
+    standards = {value for value in namespace.values() if isinstance(value, ModuleType)}
+    standards.update((os, sys, time, fcntl, subprocess, runpy, io))
+    for standard in standards:
         dictionaries.append((standard.__dict__, standard.__dict__.copy()))
     classes = [(value, dict(vars(value))) for value in namespace.values()
                if isinstance(value, type) and value.__module__ == module.__name__]
@@ -96,3 +99,56 @@ def execute(module, body, argv, env, cwd=None, setup=None):
         os.chdir(previous_cwd)
         os.umask(previous_umask)
     return subprocess.CompletedProcess(argv, status, out.getvalue(), err.getvalue())
+
+
+def child_execute(module, body, argv, env, cwd, setup=None, timeout=60):
+    """A bounded real child for irreversible hooks/exit, inheriting loaded code."""
+    import multiprocessing
+    import signal
+    import tempfile
+    with tempfile.TemporaryFile(mode='w+') as out, tempfile.TemporaryFile(mode='w+') as err:
+        def run():
+            os.setsid()
+            result = execute(module, body, argv, env, cwd, setup)
+            out.write(result.stdout)
+            err.write(result.stderr)
+            out.flush()
+            err.flush()
+            os._exit(result.returncode)
+        child = multiprocessing.get_context('fork').Process(target=run)
+        child.start()
+        try:
+            child.join(timeout)
+            if child.is_alive():
+                try:
+                    os.killpg(child.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                child.join()
+                raise subprocess.TimeoutExpired(argv, timeout)
+            out.seek(0)
+            err.seek(0)
+            return subprocess.CompletedProcess(argv, child.exitcode, out.read(), err.read())
+        finally:
+            if child.is_alive():
+                try:
+                    os.killpg(child.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                child.join()
+            child.close()
+
+
+@contextmanager
+def case_deadline(seconds):
+    """Keep the original case bound after removing its interpreter wrapper."""
+    import signal
+    def expired(signum, frame):
+        raise TimeoutError(f'fixture case exceeded {seconds} seconds')
+    previous = signal.signal(signal.SIGALRM, expired)
+    timer = signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, *timer)
+        signal.signal(signal.SIGALRM, previous)

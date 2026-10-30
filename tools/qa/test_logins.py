@@ -1,5 +1,5 @@
 #!/usr/bin/env -S python3 -I -B
-"""Offline custody tests: one temporary HOME and bounded worker per case."""
+"""Offline custody gate: fresh HOME/state, scoped CLI calls and bounded IPC."""
 from datetime import datetime, timedelta, timezone
 import fcntl
 import json
@@ -1472,7 +1472,8 @@ def isolated_case(case):
         with tempfile.TemporaryDirectory(prefix='logins-test-') as directory:
             previous = os.umask(0o077)
             try:
-                case(Lab(Path(directory)))
+                with support.case_deadline(HUNG_CASE_S):
+                    case(Lab(Path(directory)))
             finally:
                 os.umask(previous)
     test.__name__ = 'test_' + case.__name__
@@ -1481,6 +1482,56 @@ def isolated_case(case):
 
 for case in CASES:
     setattr(LoginsTests, 'test_' + case.__name__, isolated_case(case))
+
+
+class FixtureScopeTests(unittest.TestCase):
+    def module(self):
+        from types import ModuleType
+        module = ModuleType('fixture_context')
+        exec('import os, sys, secrets\nvalue = "original"\n'
+             'class Example:\n    def value(self): return "original"\n', module.__dict__)
+        return module
+
+    def test_driver_failure_restores_process_context_and_module_patches(self):
+        module = self.module()
+        previous_cwd, previous_argv = Path.cwd(), sys.argv
+        previous_env = dict(os.environ)
+        token_hex = module.secrets.token_hex
+        previous_umask = os.umask(0o077)
+        os.umask(previous_umask)
+        with tempfile.TemporaryDirectory(prefix='fixture-context-') as directory:
+            result = support.execute(module, """module.value = 'changed'
+module.Example.value = lambda self: 'changed'
+module.secrets.token_hex = lambda count: 'changed'
+module.os.environ['FIXTURE_LEAK'] = 'changed'
+module.os.umask(0)
+module.sys.argv = ['changed']
+print('captured')
+raise ValueError('fixture failure')
+""", ['fixture', 'argument'], dict(HOME=directory), directory)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, 'captured\n')
+        self.assertIn('ValueError: fixture failure', result.stderr)
+        self.assertEqual(module.value, 'original')
+        self.assertEqual(module.Example().value(), 'original')
+        self.assertIs(module.secrets.token_hex, token_hex)
+        self.assertEqual(Path.cwd(), previous_cwd)
+        self.assertIs(sys.argv, previous_argv)
+        self.assertEqual(dict(os.environ), previous_env)
+        observed = os.umask(previous_umask)
+        self.assertEqual(observed, previous_umask)
+
+    def test_crash_child_keeps_durable_effects_and_isolates_memory(self):
+        module = self.module()
+        with tempfile.TemporaryDirectory(prefix='fixture-crash-') as directory:
+            target = Path(directory) / 'saved'
+            body = (f"from pathlib import Path\np = Path({str(target)!r})\n"
+                    "sibling = p.with_suffix('.new')\nsibling.write_text('saved before exit')\n"
+                    "sibling.replace(p)\nmodule.value = 'changed'\nmodule.os._exit(77)\n")
+            result = support.child_execute(module, body, ['fixture'], dict(HOME=directory), directory)
+            self.assertEqual(result.returncode, 77)
+            self.assertEqual(target.read_text(), 'saved before exit')
+            self.assertEqual(module.value, 'original')
 
 
 if __name__ == '__main__':

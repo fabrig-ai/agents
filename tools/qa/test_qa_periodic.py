@@ -1568,6 +1568,7 @@ CASES = (
 
 
 class PeriodicWalkTests(unittest.TestCase):
+    isolated = True
     setUpClass = classmethod(fixtures.WalkTests.setUpClass.__func__)
     tearDownClass = classmethod(fixtures.WalkTests.tearDownClass.__func__)
     child = classmethod(fixtures.WalkTests.child.__func__)
