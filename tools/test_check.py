@@ -123,7 +123,7 @@ class BudgetSelectionTests(unittest.TestCase):
 
     def test_wait4_counts_waited_descendant_cpu_and_enforces_named_budget(self):
         source = """import subprocess,sys
-subprocess.run([sys.executable, '-c', 'import time; end=time.process_time()+0.08\\nwhile time.process_time()<end: pass'],check=True)
+subprocess.run([sys.executable, '-c', 'import time; end=time.process_time()+0.15\\nwhile time.process_time()<end: pass'],check=True)
 """
         config = '[budget]\nfile_cpu_s = 0.01\ntier_cpu_s = 0.01\nenforce = false\n[files."tools/test_cpu.py"]\nowner = "lead/test"\n'
         sources = {'test_cpu.py': source, 'gate.toml': config}
@@ -131,6 +131,8 @@ subprocess.run([sys.executable, '-c', 'import time; end=time.process_time()+0.08
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('REPORT ONLY: file CPU budget: tools/test_cpu.py (lead/test)', result.stderr)
         self.assertIn('REPORT ONLY: tier CPU budget: gate', result.stderr)
+        row = next(line for line in result.stderr.splitlines() if line.startswith('tools/test_cpu.py lead/test '))
+        self.assertGreaterEqual(float(row.split()[2]), 0.15)
         sources['gate.toml'] = config.replace('false', 'true')
         result = GateTests.run_gate(self, sources)
         self.assertEqual(result.returncode, 1, result.stderr)
@@ -141,6 +143,16 @@ subprocess.run([sys.executable, '-c', 'import time; end=time.process_time()+0.08
                                          'gate.toml': '[budget]\nfile_wall_s = 0.1\n'})
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('1 starved/unobserved', result.stderr)
+
+    def test_detached_descendants_are_drained_and_counted(self):
+        result = GateTests.run_gate(self, {'test_detached.py': """import subprocess,sys
+child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)'],start_new_session=True)
+print('descendant_pid',child.pid,flush=True)
+"""})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        line = next(line for line in result.stderr.splitlines() if line.startswith('descendant_pid '))
+        with self.assertRaises(ProcessLookupError):
+            os.kill(int(line.split()[1]), 0)
 
     def test_selection_mapping_smoke_unknown_and_changed_git_diff(self):
         import importlib.util
@@ -156,7 +168,7 @@ subprocess.run([sys.executable, '-c', 'import time; end=time.process_time()+0.08
                 path.write_text('')
             config = dict(smoke=[names[0]], select={'tools/a/**': [names[1]]})
             cases = [(['tools/a/code'], names[:2]), (['docs/a.txt'], names[:1]),
-                     (['README.md'], names[:1]), (['tools/b/new'], [names[0], names[2]]),
+                     (['README.md'], names[:1]), (['tools/a/help.md'], names[:1]), (['tools/b/new'], [names[0], names[2]]),
                      (['other'], names), (['tools/empty/new'], names)]
             for changes, expected in cases:
                 self.assertEqual(gate.select(root, config, changes), sorted(expected))
@@ -173,10 +185,6 @@ subprocess.run([sys.executable, '-c', 'import time; end=time.process_time()+0.08
             git('add', '.')
             git('commit', '-qm', 'doc')
             self.assertEqual(gate.changed_paths(root, base), ['README.md'])
-
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 class GateLockTests(unittest.TestCase):
@@ -236,3 +244,7 @@ class GateLockTests(unittest.TestCase):
                                     capture_output=True, text=True, timeout=120)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Checked 1 files", result.stderr)
+
+
+if __name__ == "__main__":
+    unittest.main()

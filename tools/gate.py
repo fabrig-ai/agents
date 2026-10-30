@@ -1,5 +1,6 @@
 """Gate selection, isolated execution and wait4 resource accounting (gate.md §2)."""
 import argparse
+import ctypes
 from concurrent.futures import ProcessPoolExecutor
 import fnmatch
 import json
@@ -66,13 +67,14 @@ def select(root, config, changed, tier='gate', include_smoke=True):
     available = set(discover(root, tier))
     selected = set(config.get('smoke', [])) & available if include_smoke else set()
     for path in changed:
+        if path.endswith('.md') or path.startswith('docs/'):
+            selected.update(set(config.get('smoke', [])) & available)
+            continue
         matches = [tests for pattern, tests in config.get('select', {}).items()
                    if fnmatch.fnmatchcase(path, pattern)]
         if matches:
             for tests in matches:
                 selected.update(available if tests == ['*'] else set(tests) & available)
-        elif path.endswith('.md') or path.startswith('docs/'):
-            selected.update(set(config.get('smoke', [])) & available)
         elif path.startswith('tools/'):
             parent = Path(path).parent.as_posix()
             nearby = {p for p in available if Path(p).parent.as_posix() == parent}
@@ -94,10 +96,49 @@ def priority(cpu_limit):
         resource.setrlimit(resource.RLIMIT_CPU, (cap, cap + 1))
 
 
+# Workers are Linux subreapers: fixtures may deliberately start new sessions.
+# Adopted children are measured and drained before removing their HOME/TMPDIR.
+DEADLINE = float('inf')
+
+
+def subreaper():
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(36, 1, 0, 0, 0):  # PR_SET_CHILD_SUBREAPER
+        raise OSError(ctypes.get_errno(), 'cannot become a test subreaper')
+
+
+def drain_children():
+    cpu = 0.0
+    children = Path(f'/proc/{os.getpid()}/task/{os.getpid()}/children')
+    while True:
+        for child in children.read_text().split():
+            try:
+                os.kill(int(child), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        try:
+            pid, status, usage = os.wait4(-1, os.WNOHANG)
+        except ChildProcessError:
+            return cpu
+        if pid:
+            cpu += usage.ru_utime + usage.ru_stime
+        else:
+            time.sleep(0.005)
+
+
 def run_file(root, path, limits, enforce):
     # Each worker waits for exactly its own child. Popen.wait/poll must not
     # reap it first: wait4 is the source of user+system (including waited children).
+    subreaper()
+    if time.monotonic() >= DEADLINE:
+        return dict(file=path, owner=limits.get('owner', 'ops'), cpu_s=0.0, wall_s=0.0,
+                    budget_s=limits['file_cpu_s'], wall_limit_s=limits['file_wall_s'],
+                    over=False, starved=True, failed=False, code=None,
+                    output='unobserved: tier wall limit expired before this file started\n')
     priority(None)
+    if not shutil.which('ionice'):
+        raise OSError('ionice is required for idle IO priority')
+    subprocess.run(['ionice', '-c3', '-p', str(os.getpid())], check=True)
     started = time.monotonic()
     with tempfile.TemporaryDirectory(prefix='gate-file-') as directory:
         home = Path(directory) / 'home'
@@ -117,7 +158,7 @@ def run_file(root, path, limits, enforce):
                     pid, status, usage = os.wait4(child.pid, os.WNOHANG)
                     if pid:
                         break
-                    if time.monotonic() - started >= limits['file_wall_s']:
+                    if time.monotonic() >= min(started + limits['file_wall_s'], DEADLINE):
                         starved = True
                         os.killpg(child.pid, signal.SIGKILL)
                         _, status, usage = os.wait4(child.pid, 0)
@@ -129,15 +170,17 @@ def run_file(root, path, limits, enforce):
                     os.killpg(child.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
+                descendant_cpu = drain_children()
             child.returncode = os.waitstatus_to_exitcode(status)
             output.seek(0)
             text = output.read().decode(errors='replace')
-    cpu = usage.ru_utime + usage.ru_stime
+    cpu = usage.ru_utime + usage.ru_stime + descendant_cpu
     over = cpu > limits['file_cpu_s'] or child.returncode in (-signal.SIGXCPU, -signal.SIGKILL) and not starved
     return dict(file=path, owner=limits.get('owner', 'ops'), cpu_s=cpu,
                 wall_s=time.monotonic() - started, budget_s=limits['file_cpu_s'],
                 wall_limit_s=limits['file_wall_s'], over=over, starved=starved,
-                failed=child.returncode != 0 and not starved, code=child.returncode, output=text)
+                failed=(child.returncode != 0 and not starved) or (starved and any(
+                    marker in text for marker in (' ... FAIL', ' ... ERROR', 'Traceback (most recent call last)'))), code=child.returncode, output=text)
 
 
 def atomic_json(path, result):
@@ -174,6 +217,8 @@ def main():
     else:
         paths = discover(root, args.tier)
     started = time.monotonic()
+    global DEADLINE
+    DEADLINE = started + budget['merge_wall_s']
     results = []
     workers = min(8, os.cpu_count() or 1)
     print('Selected: ' + ', '.join(paths), file=sys.stderr, flush=True)

@@ -41,6 +41,7 @@ def load_gate(root):
 
 def pools(path):
     result = set()
+    seen = set()
     for line in path.read_text().splitlines():
         fields = line.split('#', 1)[0].split()
         if not fields:
@@ -48,8 +49,9 @@ def pools(path):
         for field in fields[1:]:
             number, separator, share = field.partition('=')
             pair = (fields[0], number)
-            if not separator or not number.isdecimal() or not share or pair in result:
+            if not separator or not number.isdecimal() or not share or pair in seen:
                 raise ValueError(f'invalid slot inventory: {line}')
+            seen.add(pair)
             if share == 'pool':
                 result.add(pair)
     return result
@@ -137,14 +139,15 @@ class Builder:
                 print(f'land: shipped HEAD bundle to {self.slot[0]}:{remote}', flush=True)
                 script = (f'git clone -q {shlex.quote(remote)}/candidate.bundle {shlex.quote(remote)}/repo && '
                           f'cd {shlex.quote(remote)}/repo && '
-                          f'timeout --foreground --signal=TERM --kill-after=2s {limit + 5:g}s '
-                          f'nice -n 19 ionice -c3 tools/check.sh --tier gate --changed {shlex.quote(base)} '
+                          f'nice -n 19 ionice -c3 tools/check.sh --tier gate {('--changed ' + shlex.quote(base) + ' ') if base else ''}'
                           f'--json {shlex.quote(remote)}/result.json > {shlex.quote(remote)}/table 2>&1')
                 code = 0
                 try:
-                    supervisor = """import fcntl,os,subprocess,sys
+                    supervisor = """import ctypes,fcntl,os,signal,subprocess,sys,time
 from pathlib import Path
 root=Path(sys.argv[1])
+libc=ctypes.CDLL(None,use_errno=True)
+if libc.prctl(36,1,0,0,0): raise OSError(ctypes.get_errno(),'subreaper')
 with (root/'run.lock').open('a') as lock:
  fcntl.flock(lock,fcntl.LOCK_EX)
  if (root/'cancelled').exists(): sys.exit(125)
@@ -153,12 +156,24 @@ with (root/'run.lock').open('a') as lock:
  sibling.write_text(str(child.pid))
  sibling.replace(root/'run.pid')
  fcntl.flock(lock,fcntl.LOCK_UN)
- code=child.wait()
+ try:
+  code=child.wait(timeout=float(sys.argv[3]))
+ except subprocess.TimeoutExpired:
+  os.killpg(child.pid,signal.SIGKILL)
+  child.wait()
+  code=124
+ while True:
+  for pid in Path(f'/proc/{os.getpid()}/task/{os.getpid()}/children').read_text().split():
+   try: os.kill(int(pid),signal.SIGKILL)
+   except ProcessLookupError: pass
+  try: pid,status,usage=os.wait4(-1,os.WNOHANG)
+  except ChildProcessError: break
+  if not pid: time.sleep(.005)
  fcntl.flock(lock,fcntl.LOCK_EX)
  (root/'run.pid').unlink(missing_ok=True)
  sys.exit(code)
 """
-                    ssh(self.target, 'python3', '-I', '-B', '-c', supervisor, remote, script,
+                    ssh(self.target, 'python3', '-I', '-B', '-c', supervisor, remote, script, str(limit+5),
                         timeout=limit + 10)
                 except subprocess.CalledProcessError as error:
                     code = error.returncode
@@ -174,7 +189,7 @@ with (root/'run.lock').open('a') as lock:
                     try:
                         # Cancel under the launch lock, then kill this run's whole
                         # group before removing its temporary directory.
-                        cleanup = """import fcntl,os,signal,sys
+                        cleanup = """import fcntl,os,signal,sys,time
 from pathlib import Path
 root=Path(sys.argv[1])
 with (root/'run.lock').open('a') as lock:
@@ -184,6 +199,11 @@ with (root/'run.lock').open('a') as lock:
  if p.exists():
   try: os.killpg(int(p.read_text()),signal.SIGKILL)
   except ProcessLookupError: pass
+# The supervisor removes run.pid only after draining escaped descendants.
+end=time.monotonic()+8
+while p.exists():
+ if time.monotonic()>end: raise RuntimeError('remote workers did not drain')
+ time.sleep(.01)
 """
                         ssh(self.target, 'python3', '-I', '-B', '-c', cleanup, remote, timeout=10)
                         ssh(self.target, 'rm', '-rf', '--', remote, timeout=10)
