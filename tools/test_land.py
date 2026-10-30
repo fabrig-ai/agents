@@ -56,6 +56,7 @@ else:
   (home/'remote').write_text(prepared['remote_dir'])
   print(json.dumps(dict(remote_dir='/tmp/agents-gate.x/../outside')))
   sys.exit(0)
+ if action=='wait': (home/'wait-ready').touch()
  if action=='cleanup' and os.environ.get('DROP_CLEANUP'): sys.exit(255)
  if action=='wait' and os.environ.get('DROP_WAIT'):
   deadline=time.monotonic()+5
@@ -93,6 +94,11 @@ count.write_text(str(n))
 if os.environ.get('WAIT_GATE'):
  (home/'ready').write_text(str(os.getpid()))
  while not (home/'end-gate').exists(): time.sleep(0.01)
+if os.environ.get('SNAPSHOT_PROBE'):
+ value=Path('a/change').read_text()
+ sha=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()
+ (home/'tested-snapshot.json').write_text(json.dumps(dict(sha=sha,root=str(Path.cwd()),value=value)))
+ assert value=='feature', 'gate read uncommitted live-worktree contents'
 if os.environ.get('RACE_PATH') and (n==1 or os.environ.get('SECOND_RACE')):
  other=home/'upstream'
  path=other/os.environ['RACE_PATH']
@@ -250,7 +256,7 @@ class LandTests(LandFixture):
                                stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
         try:
             deadline=time.monotonic()+10
-            while not ((self.home/'ready').exists() and self.records() and
+            while not ((self.home/'ready').exists() and (self.home/'wait-ready').exists() and self.records() and
                        json.loads(self.records()[0].read_text()).get('remote_pgid')):
                 self.assertIsNone(child.poll())
                 self.assertLess(time.monotonic(),deadline)

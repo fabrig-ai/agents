@@ -1,6 +1,8 @@
 """Upstream race policy with disposable remotes and fake claimed builders."""
 import unittest
 import fcntl
+import json
+from pathlib import Path
 import signal
 import subprocess
 import time
@@ -8,6 +10,34 @@ import test_land as fixture
 
 
 class LandRaceTests(fixture.LandFixture):
+    def test_local_gate_uses_pinned_snapshot_despite_uncommitted_live_edit(self):
+        self.env.update(WAIT_GATE='1', SNAPSHOT_PROBE='1')
+        candidate = self.git('rev-parse', 'HEAD')
+        child = subprocess.Popen(['python3', '-I', '-B', 'tools/land', '--local', '--keep-branch'],
+                                 cwd=self.source, env=self.env, stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE, text=True)
+        try:
+            deadline = time.monotonic() + 10
+            while not (self.home / 'ready').exists():
+                self.assertIsNone(child.poll())
+                self.assertLess(time.monotonic(), deadline)
+                time.sleep(.01)
+            fixture.put(self.source / 'a/change', 'uncommitted live edit')
+            fixture.put(self.home / 'end-gate', 'finish')
+            out, err = child.communicate(timeout=10)
+            self.assertEqual(child.returncode, 0, out + err)
+            tested = json.loads((self.home / 'tested-snapshot.json').read_text())
+            self.assertEqual(tested['sha'], candidate)
+            self.assertEqual(tested['value'], 'feature')
+            self.assertNotEqual(Path(tested['root']), self.source)
+            self.assertFalse(Path(tested['root']).exists())
+            self.assertEqual(self.tip(), tested['sha'])
+            self.assertEqual((self.source / 'a/change').read_text(), 'uncommitted live edit')
+        finally:
+            if child.poll() is None:
+                child.send_signal(signal.SIGINT)
+                child.communicate(timeout=10)
+
     def test_local_checkout_lock_stays_held_while_waiting_for_host_gate(self):
         host_lock = self.home / '.local/state/agents-gate.lock'
         host_lock.parent.mkdir(parents=True, exist_ok=True)

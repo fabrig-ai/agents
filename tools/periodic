@@ -28,6 +28,16 @@ def snapshot(release, directory):
     return root
 
 
+def notify(directory, tier, index, owner, text):
+    body = Path(directory) / f'{tier}-{index}.txt'
+    sibling = body.with_suffix('.new')
+    sibling.write_text(text + '\n')
+    sibling.replace(body)
+    return subprocess.run(['post', 'send', '--as', 'agents-periodic',
+                           owner + '@hel8', 'agents ' + tier + ' failure', str(body)],
+                          timeout=30).returncode
+
+
 def main():
     if os.environ.get('AGENTS_PERIODIC') != '1':
         print('agents-periodic: disabled (AGENTS_PERIODIC != 1)')
@@ -35,7 +45,15 @@ def main():
     release = Path(__file__).resolve().parent.parent
     failed = False
     with tempfile.TemporaryDirectory(prefix='agents-periodic-') as directory:
-        root = snapshot(release, directory)
+        try:
+            root = snapshot(release, directory)
+        except Exception as error:
+            # All setup failures, including malformed metadata and failed Git
+            # operations, use the same ops notice path as runner failures.
+            text = f'periodic snapshot setup failed ({type(error).__name__}): {error}'
+            print(text, file=sys.stderr)
+            notify(directory, 'setup', 0, 'ops', text)
+            return 1
         for tier in ('periodic', 'gate'):
             report = Path(directory) / (tier + '.json')
             code = subprocess.run([str(root / 'tools/check.sh'), '--tier', tier,
@@ -51,13 +69,7 @@ def main():
             else:
                 notices.append(('ops', f'{tier} produced no result table (exit {code})'))
             for index, (owner, text) in enumerate(notices):
-                body = Path(directory) / f'{tier}-{index}.txt'
-                sibling = body.with_suffix('.new')
-                sibling.write_text(text + '\n')
-                sibling.replace(body)
-                mailed = subprocess.run(['post', 'send', '--as', 'agents-periodic',
-                                         owner + '@hel8', 'agents ' + tier + ' failure', str(body)],
-                                        timeout=30).returncode
+                mailed = notify(directory, tier, index, owner, text)
                 failed |= bool(mailed)
             failed |= bool(code or notices)
     return int(failed)
