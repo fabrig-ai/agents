@@ -23,7 +23,7 @@ class ManifestActivationTest(fixture.FleetTest):
                     "session-reap-hook": "session/reap-hook",
                     "fabrig-record": "records/record", "record-collect": "records/record-collect",
                     "pipeline-watch": "records/watch", "status-page": "records/status-page",
-                    "logins": "qa/logins", "qa": "qa/qa"}
+                    "logins": "qa/logins", "agent-logins": "logins/agent-logins", "qa": "qa/qa"}
         for name, path in expected.items():
             self.assertEqual(os.readlink(self.home / ".local/bin" / name),
                              str(self.home / "src/fabrig/current/tools" / path))
