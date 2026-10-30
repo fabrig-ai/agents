@@ -623,7 +623,7 @@ class Lab:
         path = self.tmp / 'qa-focused' / ('rung-' + rung + '-brief.md')
         path.parent.mkdir(parents=True, exist_ok=True)
         if not path.exists():
-            path.write_bytes(b'Rung fixture brief.\n\x00Preserve these bytes.\n')
+            path.write_bytes(b'Rung fixture brief.\r\nPreserve these bytes.\n')
         return self.run('walk', 'fabrig', rung, *args, status=status, now=now)
 
     def walk_states(self):
@@ -903,6 +903,7 @@ def deploy_records_then_starts_its_unit(lab):
     copied.mkdir()
     qa = copied / 'qa'
     shutil.copy2(SCRIPT, qa)
+    shutil.copy2(KIT / 'evidence.py', copied / 'evidence.py')
     result = subprocess.run([str(qa), 'deploy', str(directory), 'box', '--', 'true'],
                             env=lab.env, capture_output=True, text=True)
     assert result.returncode == 2 and len(lab.calls('systemd-run')) == before
@@ -3424,7 +3425,7 @@ tool['time'].sleep = lambda seconds: sleep(seconds * 0.01 if seconds == 120 else
 
 
 def unsupported_commands_are_refused_without_state(lab):
-    for name in ('candidates', 'decide', 'default', 'backlog', 'passes', 'findings', 'rung', 'triage', 'keep'):
+    for name in ('candidates', 'decide', 'default', 'backlog', 'passes', 'findings', 'rung', 'triage'):
         lab.run(name, status=2)
     assert not (lab.tmp / 'qa').exists() and not lab.calls('logins')
 
@@ -5196,6 +5197,7 @@ def the_queue_json_fixture_matches_real_output(lab):
     assert lab.run('queue', '--json').stdout == '[]\n'
 
 
+
 def evidence_scan_rules_and_placeholders(lab):
     module = runpy.run_path(str(KIT / 'evidence.py'))
     scan = module['scan']
@@ -5274,6 +5276,109 @@ def evidence_snapshot_checks_names_types_and_limits(lab):
         assert 'size' in str(error)
 
 
+def evidence_keep_is_local_and_immutable_by_default(lab):
+    lab.walk()
+    directory, state = lab.walk_state()
+    lab.end_run()
+    lab.watch()
+    kept = lab.tmp / 'qa/evidence' / state['walk']
+    assert (kept / 'report.md').read_bytes() == (directory / 'report.md').read_bytes()
+    assert not (lab.tmp / 'qa/evidence.git').exists()
+    first = lab.run('keep', state['walk']).stdout
+    (directory / 'report.md').write_text('changed after preservation\n')
+    assert lab.run('keep', state['walk']).stdout == first
+    assert (kept / 'report.md').read_text() == '## Findings\nNone.\n'
+    assert not list(kept.glob('give-back*'))
+
+
+def evidence_refusals_retry_notice_without_holding_custody(lab):
+    lab.walk()
+    directory, state = lab.walk_state()
+    lab.end_run(report='Authorization: Bearer literal-fixture\n')
+    lab.env['QA_POST_STATUS'] = '1'
+    lab.watch()
+    assert directory.exists() and lab.walk_state()[1]['slot_claim']['released']
+    assert not lab.calls('logins')[-1:] == [['give']]
+    assert not (lab.tmp / 'qa/evidence' / state['walk']).exists()
+    lab.env['QA_POST_STATUS'] = '0'
+    lab.watch()
+    notices = [m for m in lab.sent() if m['args'][2] == 'qa: evidence refused']
+    assert len(notices) == 2 and 'report.md' in notices[-1]['body'] and 'header/cookie-jar' in notices[-1]['body']
+    assert 'literal-fixture' not in str(notices)
+    lab.watch()
+    assert len([m for m in lab.sent() if m['args'][2] == 'qa: evidence refused']) == 2
+    (directory / 'report.md').write_text('safe repaired report\n')
+    lab.watch()
+    assert (lab.tmp / 'qa/evidence' / state['walk'] / 'report.md').read_text() == 'safe repaired report\n'
+
+
+def evidence_remote_is_append_only_and_retryable(lab):
+    origin = lab.origins / 'qa.git'
+    lab.git(lab.root, 'init', '--bare', str(origin))
+    lab.env['QA_EVIDENCE_REMOTE'] = str(origin)
+    lab.walk()
+    directory, state = lab.walk_state()
+    lab.end_run()
+    lab.watch()
+    branch = lab.git(origin, 'rev-parse', 'evidence')
+    path = 'walks/' + state['started'][:10] + '-' + state['walk']
+    assert lab.git(origin, 'show', f'evidence:{path}/report.md') == '## Findings\nNone.'
+    assert branch in lab.run('keep', state['walk']).stdout
+    assert lab.git(origin, 'rev-parse', 'evidence') == branch
+    lab.walk('b1')
+    other_dir, other = lab.walk_states()[1]
+    lab.end_run(other)
+    # Receive refuses the push; the same scanned snapshot survives repair/retry.
+    unavailable = origin.with_name('qa-offline.git')
+    origin.rename(unavailable)
+    lab.watch()
+    assert lab.walk_states()[1][1]['slot_claim']['released']
+    (other_dir / 'report.md').write_text('edited after waiting snapshot\n')
+    unavailable.rename(origin)
+    lab.watch()
+    lab.git(origin, 'merge-base', '--is-ancestor', branch, 'evidence')
+    path = 'walks/' + other['started'][:10] + '-' + other['walk']
+    assert lab.git(origin, 'show', f'evidence:{path}/report.md') == '## Findings\nNone.'
+
+
+def evidence_prune_requires_seven_days_and_pin_guards(lab):
+    lab.walk(now='2026-10-01T00:00:00Z')
+    directory, state = lab.walk_state()
+    lab.end_run()
+    lab.watch(now='2026-10-01T00:00:00Z')
+    lab.watch(now='2026-10-07T23:59:59Z')
+    assert directory.exists()
+    lab.run('pin', state['walk'])
+    lab.watch(now='2026-10-08T00:00:00Z')
+    assert directory.exists()
+    lab.run('unpin', state['walk'])
+    lab.watch(now='2026-10-08T00:00:00Z')
+    assert not directory.exists()
+    assert (lab.tmp / 'qa/evidence' / state['walk'] / 'report.md').exists()
+    lab.watch(now='2026-10-09T00:00:00Z')
+    assert len([m for m in lab.sent() if m['args'][2] == 'qa: walk scratch pruned']) == 1
+
+
+def evidence_prune_preserves_pauses_and_pending_publication(lab):
+    lab.walk(now='2026-10-01T00:00:00Z')
+    directory, state = lab.walk_state()
+    (directory / 'paused').write_text('waiting for fix\n')
+    lab.end_run()
+    lab.watch(now='2026-10-01T00:00:00Z')
+    lab.watch(now='2026-11-01T00:00:00Z')
+    assert directory.exists() and lab.walk_state()[1]['stage'] == 'paused'
+    assert not (lab.tmp / 'qa/evidence' / state['walk']).exists()
+    lab.run('keep', state['walk'], status=2)
+    # A valid but unavailable fixture remote must leave scratch after expiry.
+    lab.env['QA_EVIDENCE_REMOTE'] = str(lab.origins / 'unavailable.git')
+    lab.walk('b1', now='2026-10-01T00:00:00Z')
+    other_dir, other = lab.walk_states()[1]
+    lab.end_run(other)
+    lab.watch(now='2026-10-01T00:00:00Z')
+    lab.watch(now='2026-11-01T00:00:00Z')
+    assert other_dir.exists() and lab.walk_states()[1][1]['slot_claim']['released']
+
+
 def evidence_snapshot_never_opens_credentials_or_unsafe_entries(lab):
     from unittest.mock import patch
     module = runpy.run_path(str(KIT / 'evidence.py'))
@@ -5339,11 +5444,159 @@ def evidence_snapshot_detects_replacement_before_read(lab):
         assert error.rule == 'size'
 
 
+def evidence_check_is_network_free_and_does_not_adopt_scratch(lab):
+    root = lab.scratch({'report.md': 'safe\n'})
+    lab.env['QA_EVIDENCE_REMOTE'] = str(lab.origins / 'unavailable.git')
+    lab.run('keep', '--check', str(root))
+    assert not (lab.tmp / 'qa').exists()
+    (root / 'report.md').write_text('token=literal-fixture\n')
+    result = lab.run('keep', '--check', str(root), status=2)
+    assert 'report.md' in result.stderr and 'assigned/user' in result.stderr
+    assert 'literal-fixture' not in result.stderr and not (lab.tmp / 'qa').exists()
+
+
+def evidence_lost_push_ack_and_collision_preserve_saved_identity(lab):
+    origin = lab.origins / 'qa.git'
+    lab.git(lab.root, 'init', '--bare', str(origin))
+    lab.env['QA_EVIDENCE_REMOTE'] = str(origin)
+    real_git = shutil.which('git')
+    wrapper = lab.root / 'git'
+    executable(wrapper, f'''import os, subprocess, sys
+from pathlib import Path
+result = subprocess.run([{real_git!r}, *sys.argv[1:]])
+marker = Path({str(lab.root / 'interrupted-evidence-init')!r})
+if 'remote' in sys.argv and 'add' in sys.argv and not marker.exists():
+    marker.write_text('ready')
+    os.kill(os.getppid(), 9)
+sys.exit(1 if 'push' in sys.argv else result.returncode)
+''')
+    lab.walk()
+    directory, state = lab.walk_state()
+    lab.end_run()
+    lab.watch(status=-9)
+    assert not (lab.tmp / 'qa/evidence.git').exists()
+    assert lab.walk_state()[1]['slot_claim']['released']
+    lab.watch()
+    preservation = lab.tmp / 'qa/preservation' / (state['walk'] + '.json')
+    kept = json.loads(preservation.read_text())
+    assert kept['status'] == 'kept' and kept['candidate'] == kept['commit']
+    head = lab.git(origin, 'rev-parse', 'evidence')
+    assert head == kept['commit']
+    # The publication lane confirms exact saved trees, never a foreign occupied path.
+    checkout = lab.root / 'evidence-edit'
+    lab.git(lab.root, 'clone', '--branch', 'evidence', str(origin), str(checkout))
+    (checkout / kept['destination'] / 'report.md').write_text('foreign bytes\n')
+    lab.git(checkout, 'add', '.')
+    lab.git(checkout, 'commit', '-m', 'fixture collision')
+    wrapper.unlink()
+    lab.git(checkout, 'push', 'origin', 'evidence')
+    conflicting = lab.git(origin, 'rev-parse', 'evidence')
+    kept.update(status='waiting')
+    preservation.write_text(json.dumps(kept))
+    result = lab.run('keep', state['walk'], status=1)
+    assert 'occupied' in result.stderr
+    assert lab.git(origin, 'rev-parse', 'evidence') == conflicting and directory.exists()
+
+
+def evidence_prune_rechecks_custody_claims_processes_and_paths(lab):
+    lab.walk(now='2026-10-01T00:00:00Z')
+    directory, state = lab.walk_state()
+    lab.end_run()
+    lab.watch(now='2026-10-01T00:00:00Z')
+    expiry = '2026-10-08T00:00:00Z'
+    # Saved releases cannot override fresh malformed or live observations.
+    for config in (dict(login_list_failure=True), dict(claim_list_lines=['malformed']),
+                   dict(unit_job='9'), dict(unit_query_failure=True)):
+        before = json.loads((lab.root / 'tools.json').read_text())
+        lab.configure(**config)
+        lab.watch(now=expiry)
+        assert directory.exists(), config
+        (lab.root / 'tools.json').write_text(json.dumps(before))
+    # Inventory holds for old attempts also keep scratch, without returning an unowned grant.
+    lab.configure(logins_held=[CHATGPT], login_holders={CHATGPT: state['holder']},
+                  logins_out=[CHATGPT], logins_refused=[CHATGPT])
+    lab.watch(now=expiry)
+    assert directory.exists()
+    lab.configure(logins_held=[], logins_out=[], logins_refused=[])
+    protected = directory.with_name('protected-fixture')
+    directory.rename(protected)
+    directory.symlink_to(protected, target_is_directory=True)
+    lab.watch(now=expiry)
+    assert directory.is_symlink() and (protected / 'report.md').exists()
+    directory.unlink()
+    protected.rename(directory)
+    lab.watch(now=expiry)
+    assert not directory.exists()
+
+
+def evidence_refused_prune_waits_for_current_accepted_notice(lab):
+    lab.walk(now='2026-10-01T00:00:00Z')
+    directory, _ = lab.walk_state()
+    lab.end_run(report='token=first-literal\n')
+    lab.watch(now='2026-10-01T00:00:00Z')
+    (directory / 'report.md').write_text('token=second-literal\n')
+    lab.watch(now='2026-10-08T00:00:00Z', extra={'QA_POST_STATUS': '1'})
+    assert directory.exists()
+    lab.watch(now='2026-10-08T00:00:00Z')
+    assert not directory.exists()
+    assert len([p for p in lab.sent() if p['args'][2] == 'qa: walk scratch pruned']) == 1
+
+
+def evidence_invalid_settings_cannot_block_login_return(lab):
+    lab.walk()
+    directory, state = lab.walk_state()
+    lab.end_run()
+    lab.env.update(QA_EVIDENCE_REMOTE='invalid-remote', QA_EVIDENCE_KIB='bad')
+    lab.watch()
+    assert directory.exists() and lab.walk_state()[1]['slot_claim']['released']
+    assert ['give', CHATGPT, '--as', state['holder']] in lab.calls('logins')
+    assert not (lab.tmp / 'qa/evidence' / state['walk']).exists()
+    lab.env.update(QA_EVIDENCE_REMOTE='', QA_EVIDENCE_KIB='2048')
+    lab.watch()
+    assert (lab.tmp / 'qa/evidence' / state['walk'] / 'report.md').exists()
+
+
+def evidence_archive_damage_cannot_authorize_pruning(lab):
+    lab.walk(now='2026-10-01T00:00:00Z')
+    directory, state = lab.walk_state()
+    lab.end_run()
+    lab.watch(now='2026-10-01T00:00:00Z')
+    archive = lab.tmp / 'qa/evidence' / state['walk']
+    original = (archive / 'report.md').read_bytes()
+    (archive / 'report.md').write_text('changed archive\n')
+    lab.watch(now='2026-10-08T00:00:00Z')
+    assert directory.exists()
+    lab.run('keep', state['walk'], status=1)
+    (archive / 'report.md').write_bytes(original)
+    (archive / 'notes').symlink_to(directory)
+    # A corrupt recovery manifest cannot redirect a content read through a directory link.
+    index = json.loads((archive / 'index.json').read_text())
+    index['entries'] = ['evidence/report.md']
+    index['files'] = 1
+    index['bytes'] = len(original)
+    (archive / 'index.json').write_text(json.dumps(index))
+    (archive / 'evidence').symlink_to(directory, target_is_directory=True)
+    lab.watch(now='2026-10-08T00:00:00Z')
+    assert directory.exists()
+    lab.run('keep', state['walk'], status=1)
+
+
 CASES = (
-    evidence_scan_rules_and_placeholders,
-    evidence_snapshot_checks_names_types_and_limits,
+    evidence_archive_damage_cannot_authorize_pruning,
     evidence_snapshot_never_opens_credentials_or_unsafe_entries,
     evidence_snapshot_detects_replacement_before_read,
+    evidence_check_is_network_free_and_does_not_adopt_scratch,
+    evidence_lost_push_ack_and_collision_preserve_saved_identity,
+    evidence_prune_rechecks_custody_claims_processes_and_paths,
+    evidence_refused_prune_waits_for_current_accepted_notice,
+    evidence_invalid_settings_cannot_block_login_return,
+    evidence_scan_rules_and_placeholders,
+    evidence_snapshot_checks_names_types_and_limits,
+    evidence_keep_is_local_and_immutable_by_default,
+    evidence_refusals_retry_notice_without_holding_custody,
+    evidence_remote_is_append_only_and_retryable,
+    evidence_prune_requires_seven_days_and_pin_guards,
+    evidence_prune_preserves_pauses_and_pending_publication,
     a_queued_walk_uses_the_first_free_inventory_slot,
     plus_slot_lists_validate_and_keep_legacy_forms,
     unknown_slot_inventory_refuses_without_claiming,
