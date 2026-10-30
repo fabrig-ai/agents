@@ -495,12 +495,13 @@ class Lab:
         self.origins = root / 'origins'
         self.post_log = root / 'post.jsonl'
         self.post = root / 'post'
-        for path in (self.home, self.tmp, self.origins, root / 'proc'):
+        for path in (self.home, self.tmp, self.origins, root / 'proc', root / 'git-template', root / 'git-template/info'):
             path.mkdir(exist_ok=True)
         self.env = dict(PATH=str(root) + os.pathsep + os.environ['PATH'], HOME=str(self.home), DEV_ROOT=str(root),
                         DEV_TMP=str(self.tmp), QA_FIXTURE=str(root), QA_POST_LOG=str(self.post_log), QA_POST_STATUS='0',
                         QA_WALK_SLOTS='forgejo=1,2 claude=3,4 github=5 both=6,7',
-                        QA_CLAIM_SSH='', USER='fixture', POST_NAME='o/fixture', GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1',
+                        QA_CLAIM_SSH='', USER='fixture', POST_NAME='o/fixture', GIT_CONFIG_GLOBAL='/dev/null',
+                        GIT_TEMPLATE_DIR=str(root / 'git-template'), GIT_CONFIG_NOSYSTEM='1',
                         GIT_AUTHOR_NAME='Fixture', GIT_AUTHOR_EMAIL='fixture@invalid',
                         GIT_COMMITTER_NAME='Fixture', GIT_COMMITTER_EMAIL='fixture@invalid',
                         GIT_ALLOW_PROTOCOL='file', LC_ALL='C.UTF-8', PYTHONDONTWRITEBYTECODE='1')
@@ -1393,21 +1394,22 @@ def a_walk_takes_a_login_and_a_slot_and_starts(lab):
 def a_refused_login_starts_nothing(lab):
     lab.env['QA_WALK_KINDS'] = 'forgejo=2:chatgpt,claude'
     lab.configure(logins_busy=[CLAUDE])
-    lab.walk('b0', '--login', CLAUDE, '--login', CHATGPT, status=1)
+    lab.walk('b0', '--login', CLAUDE, '--login', CHATGPT, status=0)
     directory, state = lab.walk_state()
     assert state['stage'] == 'ended' and state['released'] and state['given'] == [CHATGPT]
     assert ['give', CHATGPT, '--as', state['holder']] in lab.calls('logins')
+    assert len(queued_entries(lab)) == 1
     assert not lab.calls('codex-run') and not (directory.parent / 'b0/loop.tsv').exists()
     config = json.loads((lab.root / 'tools.json').read_text())
     assert not config['logins_held'] and not config['login_queue']
 
 
-def a_third_walk_is_refused_at_once(lab):
+def a_third_walk_is_queued_at_once(lab):
     lab.walk('b0')
     lab.walk('b0')
     before = lab.calls('logins')
-    result = lab.walk('b0', '--login', CHATGPT, status=1)
-    assert result.stderr == 'qa: kind forgejo holds 2 of its 2 logins of pool chatgpt\n'
+    result = lab.walk('b0', '--login', CHATGPT, status=0)
+    assert 'queued ' in result.stdout and 'kind forgejo holds 2' in queued_entries(lab)[0]['reason']
     states = [state for _, state in lab.walk_states()]
     assert [state['slot'] for state in states] == [1, 2]
     assert lab.calls('logins') == before + [['list']] and len(lab.calls('codex-run')) == 2
@@ -2176,12 +2178,12 @@ def walks_of_two_kinds_take_their_own_slots_and_pools(lab):
     assert all('--now' in call and '--wait' not in call for call in lab.calls('logins') if call[0] == 'take')
 
 
-def a_kind_at_its_cap_refuses_at_once(lab):
+def a_kind_at_its_cap_queues_at_once(lab):
     lab.walk('b0')
     lab.walk('b0')
     before = [call for call in lab.calls('logins') if call[0] == 'take']
-    result = lab.walk('another', status=1)
-    assert 'kind forgejo holds 2 of its 2 logins of pool chatgpt' in result.stderr
+    result = lab.walk('another', status=0)
+    assert 'queued ' in result.stdout and all('kind forgejo holds 2' in e['reason'] for e in queued_entries(lab))
     assert [call for call in lab.calls('logins') if call[0] == 'take'] == before
     directory, state = lab.walk_states()[0]
     lab.end_run(state)
@@ -2189,8 +2191,8 @@ def a_kind_at_its_cap_refuses_at_once(lab):
     lab.watch()
     current = lab.walk_states()[0][1]
     assert current['released'] and current['decision'] == 'walk-end' and not current['given']
-    result = lab.walk('another', status=1)
-    assert 'kind forgejo holds 2 of its 2 logins of pool chatgpt' in result.stderr
+    result = lab.walk('another', status=0)
+    assert 'queued ' in result.stdout and all('kind forgejo holds 2' in e['reason'] for e in queued_entries(lab))
     assert [call for call in lab.calls('logins') if call[0] == 'take'] == before
 
 
@@ -2210,12 +2212,12 @@ def a_resume_by_name_keeps_its_kind(lab):
     lab.walk('b1', '--kind', 'claude')
     lab.walk('b2', '--kind', 'claude')
     before = [call for call in lab.calls('logins') if call[0] == 'take']
-    result = lab.run('walk', 'fabrig', 'b0', '--resume', state['walk'], '--build', 'main', status=1)
-    assert 'kind claude holds 2 of its 2 logins of pool claude' in result.stderr
+    result = lab.run('walk', 'fabrig', 'b0', '--resume', state['walk'], '--build', 'main', status=0)
+    assert 'queued ' + state['walk'] in result.stdout
     assert [call for call in lab.calls('logins') if call[0] == 'take'] == before
     lab.end_run(lab.walk_states()[1][1])
     lab.watch()
-    lab.run('walk', 'fabrig', 'b0', '--resume', state['walk'], '--build', 'main')
+    assert not queued_entries(lab)
     current = lab.walk_states()[0][1]
     assert current['kind'] == 'claude' and current['pools'] == {CLAUDE: CLAUDE}
     assert current['slot'] == 3 and current['holder'] == state['holder'] and current['attempt'] == 2
@@ -2230,8 +2232,9 @@ def manual_kind_holders_stay_held_when_watcher_checks(lab):
     lab.walk('b0')
     directory, state = lab.walk_state()
     assert state['pools'] == {CHATGPT: 'chatgpt-2'}
-    result = lab.walk('b1', status=1)
-    assert 'kind forgejo holds 2 of its 2 logins' in result.stderr
+    result = lab.walk('b1', status=0)
+    assert 'queued ' in result.stdout
+    lab.run('queue', 'cancel', queued_entries(lab)[0]['id'])
     lab.end_run(state)
     lab.watch()
     config = json.loads((lab.root / 'tools.json').read_text())
@@ -2239,10 +2242,10 @@ def manual_kind_holders_stay_held_when_watcher_checks(lab):
     assert [row['args'][1] for row in lab.sent()] == ['director@fixture', state['starter']]
 
 
-def a_refused_now_take_reports_the_broken_caps(lab):
+def a_busy_now_take_queues_and_undoes_the_attempt(lab):
     lab.configure(logins_busy=[CHATGPT])
-    result = lab.walk('b0', status=1)
-    assert 'the caps are broken: fixture login busy' in result.stderr
+    result = lab.walk('b0', status=0)
+    assert 'queued ' in result.stdout and 'login pool chatgpt is busy' in queued_entries(lab)[0]['reason']
     state = lab.walk_state()[1]
     assert state['released'] and state['stage'] == 'ended' and not state['run']
     takes = [call for call in lab.calls('logins') if call[0] == 'take']
@@ -2598,7 +2601,8 @@ def a_surviving_launcher_keeps_custody_until_its_unit_exists(lab, past_grace=Fal
             assert 'launch may still start' in result.stdout
             assert state['run'] == 'fixture-1' and state['stage'] == 'running'
             assert not state['given'] and not state['released']
-            lab.walk('b0', '--login', CHATGPT, status=1)
+            lab.walk('b0', '--login', CHATGPT)
+            lab.run('queue', 'cancel', queued_entries(lab)[0]['id'])
             assert not any(args[0] == 'give' for args in lab.calls('logins'))
             (lab.root / 'allow-launch').touch()
             if past_grace:
@@ -2640,7 +2644,8 @@ def queued_and_running_start_jobs_keep_custody(lab):
         saved = lab.walk_state()[1]
         assert saved['stage'] == 'running' and not saved['given'] and not saved['released']
         assert not any(args[0] == 'give' for args in lab.calls('logins'))
-        lab.walk('other', '--login', CHATGPT, status=1)
+        lab.walk('other', '--login', CHATGPT)
+        lab.run('queue', 'cancel', queued_entries(lab)[0]['id'])
     # Even a worker completion marker cannot overrule a pending start.
     lab.end_run(state)
     lab.configure(unit_job='44')
@@ -3268,7 +3273,7 @@ def an_unknown_login_holder_preserves_legacy_claims(lab):
     lab.walk()
     _, state = lab.walk_state()
     originals = legacy_login_claims(lab)
-    lab.configure(logins_held=[], login_holders={})
+    lab.configure(logins_held=[], login_holders={}, pools={})
     lab.end_run(state)
     result = lab.watch()
     assert f'{CHATGPT}: conflicting custody claims' in result.stdout
@@ -3857,26 +3862,26 @@ def no_walk_resources_taken(lab):
     assert all(not state['logins'] and state['released'] for _, state in lab.walk_states())
 
 
-def a_held_named_slot_refuses_without_falling_through(lab):
+def a_held_named_slot_queues_without_falling_through(lab):
     lab.env['QA_WALK_SLOTS'] = 'forgejo=2,1'
     hold_slot(lab, 2)
     before = slot_claims(lab)
-    result = lab.walk(status=1)
-    assert 'claim claim hetzner6 2: exit 1' in result.stderr
+    result = lab.walk(status=0)
+    assert 'queued ' in result.stdout
     no_walk_resources_taken(lab)
     assert slot_claims(lab) == before
-    assert len(lab.calls('claim')) == 1
-    call, = lab.calls('claim')
+    assert len(lab.calls('claim')) == 2
+    call, = [c for c in lab.calls('claim') if c[0] == 'claim']
     assert call[:4] == ['claim', 'hetzner6', '2', 's/qa']
     assert re.fullmatch(r'qa walk rung-b0-1 attempt 1 claim [0-9a-f]{32}', call[4])
 
 
-def all_named_slots_held_refuses_without_taking_anything(lab):
+def all_named_slots_held_queues_without_taking_anything(lab):
     hold_slot(lab, 1, owner='ops')
     hold_slot(lab, 2)
     before = slot_claims(lab)
-    result = lab.walk(status=1)
-    assert 'claim claim hetzner6 1: exit 1' in result.stderr
+    result = lab.walk(status=0)
+    assert 'queued ' in result.stdout
     no_walk_resources_taken(lab)
     assert slot_claims(lab) == before
     assert not [call for call in lab.calls('claim') if call[0] == 'release']
@@ -4083,7 +4088,7 @@ Watch.slot_call = slot_call
     assert not slot_claims(lab) and not lab.walk_state()[1]['slot_claim']['released']
     hold_slot(lab, 1, what='qa walk rung-successor-1 attempt 1')
     before = len([c for c in lab.calls('claim') if c[0] == 'release'])
-    # The durable release reservation stays terminal, even after the old claim vanished.
+    # Retries observe the successor but never release its different WHAT.
     lab.env['QA_WALK_SLOTS'] = 'forgejo=2'
     lab.watch()
     assert lab.walk_state()[1]['slot_claim']['release_status'] == 'release unconfirmed'
@@ -4096,11 +4101,12 @@ def a_pause_releases_and_resume_reclaims_a_named_slot(lab):
     paused = pause_walk(lab, directory, state)
     assert paused['slot_claim']['released'] and not slot_claims(lab)
     hold_slot(lab, 1)
-    lab.run('walk', 'fabrig', 'b0', '--resume', state['walk'], '--build', 'main', status=1)
+    lab.run('walk', 'fabrig', 'b0', '--resume', state['walk'], '--build', 'main', status=0)
     assert lab.walk_state()[1]['stage'] == 'paused'
     assert len(lab.calls('codex-run')) == 1
     lab.env['QA_WALK_SLOTS'] = 'forgejo=2,1'
-    lab.run('walk', 'fabrig', 'b0', '--resume', state['walk'], '--build', 'main')
+    lab.watch()
+    assert not queued_entries(lab)
     resumed = lab.walk_state()[1]
     assert resumed['attempt'] == 3 and resumed['slot'] == 2
     assert re.fullmatch(r'qa walk rung-b0-1 attempt 3 claim [0-9a-f]{32}', resumed['slot_claim']['what'])
@@ -4111,19 +4117,20 @@ def a_pause_releases_and_resume_reclaims_a_named_slot(lab):
     assert not (lab.tmp / 'qa/repos').exists()
 
 
-def a_pause_with_unconfirmed_release_waits_for_retry(lab):
+def a_pause_with_unconfirmed_release_queues_resume_until_retry(lab):
     directory, state = walk_with_logins(lab, CHATGPT)
     lab.configure(claim_release_refusal=True)
     state = pause_walk(lab, directory, state)
     assert state['stage'] == 'paused' and state['given'] == [CHATGPT]
     assert state['slot_claim']['release_status'] == 'release unconfirmed'
-    result = lab.run('walk', 'fabrig', 'b0', '--resume', state['walk'], '--build', 'main', status=1)
-    assert 'slot claim release is still pending' in result.stderr
+    result = lab.run('walk', 'fabrig', 'b0', '--resume', state['walk'], '--build', 'main', status=0)
+    assert 'queued ' + state['walk'] in result.stdout
     lab.configure(claim_release_refusal=False)
     lab.watch()
-    assert lab.walk_state()[1]['slot_claim']['released']
+    assert lab.walk_state()[1]['attempts'][0]['slot_claim']['released']
+    assert lab.walk_state()[1]['stage'] == 'running' and not queued_entries(lab)
     assert len([c for c in lab.calls('claim') if c[0] == 'release']) == 2
-    assert len(lab.calls('codex-run')) == 1
+    assert len(lab.calls('codex-run')) == 2
 
 
 def local_and_remote_claims_are_bounded_and_unknown_acceptance_is_alerted(lab):
@@ -4155,8 +4162,8 @@ def named_slot_settings_validate_and_override_the_old_counts(lab):
     lab.env['QA_WALK_KINDS'] = 'forgejo=2:chatgpt claude=9:claude'
     lab.env.pop('QA_CLAIM_SSH')
     lab.walk('one')
-    result = lab.walk('two', status=1)
-    assert 'holds 1 of its 1' in result.stderr
+    result = lab.walk('two', status=0)
+    assert 'holds 1 of its 1' in queued_entries(lab)[0]['reason']
     result = lab.walk('no-slot', '--kind', 'claude', status=1)
     assert 'no walk slots configured for kind claude' in result.stderr
     assert lab.walk_state()[1]['slot'] == 2 and lab.calls('ssh')
@@ -4197,7 +4204,7 @@ def failed_remote_or_unreadable_claim_never_prepares_or_falls_back(lab):
     before = [lab.git(lab.slots / str(n), 'rev-parse', 'HEAD') for n in (1, 2)]
     result = lab.walk(status=1)
     assert 'fixture ssh unavailable' in result.stderr
-    assert len(lab.calls('ssh')) == 1 and not lab.calls('claim')
+    assert len(lab.calls('ssh')) == 2 and not lab.calls('claim')
     no_walk_resources_taken(lab)
     lab.configure(ssh_refusal=False)
     result = driven_walk(lab, '''def slot_call(self, claim, *args):
@@ -4746,6 +4753,105 @@ assert called
     assert result.returncode == 0, (result.stdout, result.stderr)
 
 
+def queued_entries(lab):
+    return [json.loads(p.read_text()) for p in (lab.tmp / 'qa/queue').glob('*.json')]
+
+
+def a_busy_slot_start_is_queued_then_started(lab):
+    lab.env['QA_WALK_SLOTS'] = 'forgejo=1'
+    lab.walk()
+    _, first = lab.walk_state()
+    result = lab.walk()
+    assert re.search(r'queued [0-9a-f]{32}\n', result.stdout)
+    entry, = queued_entries(lab)
+    assert entry['kind'] == 'forgejo' and entry['rung'] == 'b0'
+    assert len(lab.calls('codex-run')) == 1
+    lab.watch()
+    assert len(lab.calls('codex-run')) == 1
+    lab.end_run(first)
+    lab.watch()
+    assert not queued_entries(lab) and len(lab.calls('codex-run')) == 2
+    second = lab.walk_states()[-1][1]
+    assert second['stage'] == 'running' and second['slot'] == 1
+    assert second['starter'] == first['starter'] and second['queue_id'] == entry['id']
+    lab.watch()
+    assert len(lab.calls('codex-run')) == 2
+
+
+def an_after_resume_builds_main_only_after_every_commit_lands(lab):
+    directory, state = walk_with_logins(lab, CHATGPT)
+    state = pause_walk(lab, directory, state)
+    first = lab.commit('first fix', branch='fix')
+    second = lab.commit('second fix', branch='fix')
+    result = lab.run('walk', 'fabrig', 'b0', '--resume', state['walk'], '--after', first, '--after', second)
+    assert 'queued ' + state['walk'] in result.stdout
+    assert lab.walk_state()[1]['attempt'] == 1
+    lab.watch()
+    assert len(lab.calls('codex-run')) == 1
+    checkout = lab.products['fabrig']
+    lab.git(checkout, 'switch', 'main')
+    lab.git(checkout, 'merge', '--ff-only', first)
+    lab.git(checkout, 'push', 'origin', 'main')
+    lab.watch()
+    assert len(lab.calls('codex-run')) == 1
+    lab.git(checkout, 'merge', '--ff-only', second)
+    tip = lab.commit('main advanced after fixes', branch='main')
+    lab.watch()
+    resumed = lab.walk_state()[1]
+    assert resumed['main'] == tip and resumed['ref'] == 'main' and resumed['attempt'] == 2
+    assert not queued_entries(lab) and len(lab.calls('codex-run')) == 2
+    lab.watch()
+    assert len(lab.calls('codex-run')) == 2
+
+
+def a_watcher_refusal_keeps_the_queue_and_posts_each_reason_once(lab):
+    lab.env['QA_WALK_SLOTS'] = 'forgejo=1'
+    lab.walk()
+    _, state = lab.walk_state()
+    lab.walk()
+    lab.end_run(state)
+    lab.configure(cargo_refusal=2)
+    lab.watch()
+    entry, = queued_entries(lab)
+    assert 'cannot fetch build main' in entry['reason']
+    notices = lambda: [m for m in lab.sent() if m['args'][2] == 'qa: queued walk refused']
+    assert len(notices()) == 1
+    lab.watch()
+    assert len(notices()) == 1 and len(queued_entries(lab)) == 1
+    lab.configure(cargo_refusal=3)
+    lab.watch()
+    assert len(notices()) == 2
+    lab.configure(cargo_refusal=0)
+    lab.watch()
+    assert not queued_entries(lab) and len(lab.calls('codex-run')) == 2
+
+
+def the_queue_lists_and_cancels_without_taking_resources(lab):
+    missing = 'a' * 40
+    lab.walk('b0', '--after', missing)
+    entry, = queued_entries(lab)
+    listed = lab.run('queue').stdout
+    assert all(value in listed for value in (entry['id'], 'forgejo', 'b0', missing, entry['since'], entry['reason']))
+    assert not lab.calls('codex-run') and not lab.calls('cargo')
+    assert not [c for c in lab.calls('claim') if c[0] == 'claim']
+    lab.run('queue', 'cancel', entry['id'])
+    assert not queued_entries(lab)
+    lab.run('queue', 'cancel', entry['id'], status=2)
+    lab.watch()
+    assert not lab.calls('codex-run')
+
+
+def a_queued_resume_no_longer_paused_is_dropped_with_notice(lab):
+    directory, state = walk_with_logins(lab, CHATGPT)
+    state = pause_walk(lab, directory, state)
+    lab.run('walk', 'fabrig', 'b0', '--resume', state['walk'], '--after', 'a' * 40)
+    lab.run('walk', 'fabrig', 'b0', '--resume', state['walk'], '--build', 'main')
+    lab.watch()
+    lab.watch()
+    assert not queued_entries(lab) and len(lab.calls('codex-run')) == 2
+    assert len([m for m in lab.sent() if m['args'][2] == 'qa: queued resume dropped']) == 1
+
+
 def pending_attention_notices_retry_until_post_accepts(lab):
     lab.walk()
     lab.configure(inactive=True, claim_release_refusal=True)
@@ -4781,7 +4887,8 @@ def orphan_claims_keep_live_or_uncertain_runs_and_reset_grace(lab):
     lab.walk()
     directory, state = lab.walk_state()
     (lab.tmp / 'qa/walks' / (state['walk'] + '.json')).unlink()
-    # The walk state is gone, but its codex-run unit is live.
+    # The login was returned separately; the missing state's run is still live.
+    lab.configure(logins_held=[], login_holders={})
     lab.watch(now='2026-10-30T00:00:00Z')
     lab.watch(now='2026-10-30T00:20:00Z')
     assert slot_claims(lab) and not [c for c in lab.calls('claim') if c[0] == 'release']
@@ -4797,12 +4904,50 @@ def orphan_claims_keep_live_or_uncertain_runs_and_reset_grace(lab):
     assert not slot_claims(lab)
 
 
+def stale_legacy_holders_are_silent_at_a_start(lab):
+    (lab.tmp / 'qa/walks').mkdir(parents=True)
+    originals = legacy_login_claims(lab)
+    result = lab.walk()
+    assert 'conflicting custody claims' not in result.stdout
+    assert_legacy_unchanged(originals)
+    result = lab.walk('b1')
+    assert 'conflicting custody claims' not in result.stdout
+    assert_legacy_unchanged(originals)
+
+
+def a_queue_admission_survives_a_crash_after_launch(lab):
+    lab.env['QA_WALK_SLOTS'] = 'forgejo=1'
+    lab.walk()
+    _, state = lab.walk_state()
+    lab.walk()
+    lab.end_run(state)
+    driven_watch(lab, '''import os
+original = tool['Watch'].call
+def call(self, name, *args):
+    result = original(self, name, *args)
+    if name == 'codex-run':
+        os._exit(77)
+    return result
+tool['Watch'].call = call
+''', status=77)
+    assert queued_entries(lab) and len(lab.calls('codex-run')) == 2
+    lab.watch()
+    lab.watch()
+    assert not queued_entries(lab) and len(lab.calls('codex-run')) == 2
+    assert lab.walk_states()[-1][1]['stage'] == 'running'
+
 
 CASES = (
+    a_busy_slot_start_is_queued_then_started,
+    an_after_resume_builds_main_only_after_every_commit_lands,
+    a_watcher_refusal_keeps_the_queue_and_posts_each_reason_once,
+    the_queue_lists_and_cancels_without_taking_resources,
+    a_queued_resume_no_longer_paused_is_dropped_with_notice,
     pending_attention_notices_retry_until_post_accepts,
     orphan_claims_release_after_ten_minutes_with_exact_what,
     orphan_claims_keep_live_or_uncertain_runs_and_reset_grace,
-
+    stale_legacy_holders_are_silent_at_a_start,
+    a_queue_admission_survives_a_crash_after_launch,
     a_local_successor_claim_survives_atomic_release,
     a_remote_successor_claim_survives_atomic_release,
     claim_lifetimes_remain_unique_when_names_attempts_and_times_repeat,
@@ -4829,8 +4974,8 @@ CASES = (
     unknown_walk_holders_alert_once_and_hand_holders_are_untouched,
     a_saved_attempt_holder_authorizes_only_its_exact_stray,
 
-    a_held_named_slot_refuses_without_falling_through,
-    all_named_slots_held_refuses_without_taking_anything,
+    a_held_named_slot_queues_without_falling_through,
+    all_named_slots_held_queues_without_taking_anything,
     dirty_slots_are_preserved_refused_and_released,
     a_slot_is_never_created_replaced_or_used_with_the_wrong_origin,
     low_disk_refuses_and_releases_before_taking_a_login,
@@ -4843,7 +4988,7 @@ CASES = (
     a_saved_claim_precedes_any_checkout_preparation,
     a_release_saved_after_a_crash_never_releases_a_successor,
     a_pause_releases_and_resume_reclaims_a_named_slot,
-    a_pause_with_unconfirmed_release_waits_for_retry,
+    a_pause_with_unconfirmed_release_queues_resume_until_retry,
     local_and_remote_claims_are_bounded_and_unknown_acceptance_is_alerted,
     named_slot_settings_validate_and_override_the_old_counts,
 
@@ -4899,7 +5044,7 @@ CASES = (
     a_failed_resume_launch_gives_back_and_stays_paused,
     a_failed_stop_is_tried_again,
     a_failed_walk_fetch_takes_no_login,
-    a_kind_at_its_cap_refuses_at_once,
+    a_kind_at_its_cap_queues_at_once,
     a_linked_log_or_registry_writes_nowhere_else,
     a_linked_pause_marker_is_not_read,
     a_linked_walk_state_keeps_its_grant_held,
@@ -4912,7 +5057,7 @@ CASES = (
     a_paused_walk_frees_its_slot_and_logins,
     a_paused_walk_resumes_at_a_branch_with_another_login,
     a_refused_login_starts_nothing,
-    a_refused_now_take_reports_the_broken_caps,
+    a_busy_now_take_queues_and_undoes_the_attempt,
     a_refused_walk_deployment_preserves_its_saved_command,
     a_restarted_service_goes_on,
     a_resume_before_the_pause_is_complete_is_refused,
@@ -4930,7 +5075,7 @@ CASES = (
     a_surviving_launcher_keeps_custody_past_the_grace,
     a_surviving_launcher_keeps_custody_until_its_unit_exists,
     a_take_by_hand_is_refused_past_its_kinds_cap,
-    a_third_walk_is_refused_at_once,
+    a_third_walk_is_queued_at_once,
     a_timed_out_walk_launch_keeps_custody_for_recovery,
     a_unit_created_during_launcher_scan_keeps_its_custody,
     a_unit_of_another_directory_is_not_stopped,

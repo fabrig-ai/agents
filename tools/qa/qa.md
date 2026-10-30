@@ -206,7 +206,7 @@ directory. Trim failure is advisory. Then `df -B1 --output=avail /` (30-second
 bound) must show at least 80000000000 available bytes, and
 `cargo fetch --locked` (300-second bound) must succeed before any login take.
 A preparation refusal cancels the attempt and attempts verified claim
-release once. An unconfirmed release is retained for reconciliation. REF refusals therefore retain a
+release. An unconfirmed release is retained for retry at every check. REF refusals therefore retain a
 cancelled start or a failed resume attempt, with no login taken.
 
 Pools are taken in name order, each grant saved before the next. Resting
@@ -261,7 +261,7 @@ release, or an `--after` dependency saves a queue entry and prints
 `queued ID` (a resume prints its walk name), exit zero. Other invalid input
 or preparation errors still refuse. Queue entries in `tmp/qa/queue/` retain
 a random ID, repository, rung, kind, requested pools, REF, cap, dependencies,
-starter address, enqueue time and last reason. Queue writes and cancellation
+starter address, enqueue time, monotonic queue order and last reason. Queue writes and cancellation
 share the walks lock and use durable sibling writes and rename.
 `qa queue` lists ID, kind, rung, resume name, after, since and last reason;
 `qa queue cancel ID` removes an entry without touching any walk.
@@ -334,7 +334,7 @@ by the release entry point and stays held across `claim list` and the
 immediately following release. Through the saved SSH path, `claim list`
 must show the exact saved owner and WHAT; free, changed, missing, malformed
 or failed observations do not authorize release. Only then may
-`claim release HOST N OWNER --what WHAT` run, once, using the exact saved
+`claim release HOST N OWNER --what WHAT` run using the exact saved
 WHAT. The installed claim tool compares both OWNER and WHAT and deletes
 under its claims lock. A same-owner successor installed after the list
 check therefore remains held: the release refuses the mismatch. Exit zero

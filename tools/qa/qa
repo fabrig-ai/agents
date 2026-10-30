@@ -1,6 +1,7 @@
 #!/usr/bin/env -S python3 -I -B
 """qa walk REPO RUNG [--kind KIND] [--build REF] [--login POOL]... [--cap MINUTES]
-qa walk REPO RUNG --resume NAME --build REF [--cap MINUTES]
+qa walk REPO RUNG --resume NAME [--build REF] [--after COMMIT]... [--cap MINUTES]
+qa queue [cancel ID]
 qa take KIND [--login POOL] --as walk/<KIND>/<WHAT> [--note TEXT]
 qa give NAME --as HOLDER
 qa watch --director ADDRESS [--once]
@@ -36,13 +37,22 @@ UNIT_POLL_SECONDS = 2
 POST_WAIT_MARGIN_SECONDS = 5
 ADDRESS = r'[a-z][a-z0-9-]*(/[a-z0-9][a-z0-9-]*)*@[a-z][a-z0-9-]*'
 ATTEMPT_KEYS = ('attempt holder ref main cap started slot slot_claim checkout launch_complete logins kinds pools requests run stage given released '
-                'start_logged end_logged posted capped decision pause_line resume_run report_attempt alerts').split()
+                'start_logged end_logged posted capped decision pause_line resume_run report_attempt alerts queue_id').split()
 
 
 class Problem(Exception):
     def __init__(self, why, code=2):
         super().__init__(why)
         self.code = code
+
+
+class Deferred(Problem):
+    """Valid admission waiting for a resource or dependency."""
+
+
+def defer(ok, why):
+    if not ok:
+        raise Deferred(why, 1)
 
 
 def need(ok, why, code=2):
@@ -495,6 +505,7 @@ class Watch:
         self.classes = {}
         self.walk_lock = self.watch_lock = None
         self.holders = {}
+        self.inventory_names = set()
         self.legacy_claims = set()
         self.attention_attempted = set()
         self.release_attempted = set()
@@ -833,7 +844,8 @@ class Watch:
     def current_legacy_claims(self):
         # Missing inventory or an unknown holder cannot retire a legacy claim.
         return {(holder, name) for holder, name in self.legacy_claims
-                if self.holders.get(name, holder) == holder}
+                if (name not in self.inventory_names and name not in self.holders
+                    or self.holders.get(name) == holder)}
 
     def legacy_holders(self):
         return {attempt.get('holder', state['holder']) for state in self.legacy_walks
@@ -948,6 +960,8 @@ class Watch:
         inventory = login_inventory(listing.stdout) if listing.returncode == 0 else None
         self.giving = inventory is not None
         self.holders = inventory if inventory is not None else {}
+        self.inventory_names = {m[1] for line in listing.stdout.splitlines()
+                                if (m := LISTED.fullmatch(line))} if inventory is not None else set()
         self.claims(walks)
         if inventory is None:
             log('cannot list stray logins: ' + (listing.stderr.strip() if listing.returncode
@@ -1319,11 +1333,126 @@ class Watch:
         inventory = login_inventory(listing.stdout) if listing.returncode == 0 else None
         need(inventory is not None, 'cannot read login inventory for walk admission', 1)
         holders = inventory
+        self.holders = holders
+        self.inventory_names = {m[1] for line in listing.stdout.splitlines() if (m := LISTED.fullmatch(line))}
         slots = self.options['QA_WALK_KINDS'][kind]['slots']
         for pool in pools:
             held = walk_count(holders, pool, kind)
-            need(held < slots, f'kind {kind} holds {held} of its {slots} logins of pool {pool}', 1)
+            defer(held < slots, f'kind {kind} holds {held} of its {slots} logins of pool {pool}')
         return holders
+
+    def free_slot(self, walks, kind):
+        held = {s['slot'] for _, s in walks if not s.get('released')
+                or s.get('slot_claim') and not s['slot_claim']['released']}
+        number = next((n for n in self.options['QA_WALK_KINDS'][kind]['numbers'] if n not in held), None)
+        defer(number is not None, f'no free walk slot for kind {kind}')
+        return number
+
+    def dependencies(self, root, commits):
+        for commit in commits:
+            objects = git(root, 'rev-parse', '--disambiguate=' + commit.lower()).splitlines()
+            ready = (len(objects) == 1 and re.fullmatch(SHA, objects[0])
+                     and git(root, 'cat-file', '-t', objects[0], check=False).stdout.strip() == 'commit'
+                     and git(root, 'merge-base', '--is-ancestor', objects[0],
+                             'refs/remotes/origin/main', check=False).returncode == 0)
+            defer(ready, f'after {commit} is not on origin/main')
+
+    def queue_entries(self):
+        parent = self.directory / 'queue'
+        no_links(self.workspace.tmp, parent)
+        result = []
+        for path in sorted(parent.glob('*.json')):
+            entry = self.read_state(path)
+            need(isinstance(entry, dict) and entry.get('id') == path.stem
+                 and re.fullmatch(r'[0-9a-f]{32}', path.stem)
+                 and {'repo', 'rung', 'kind', 'starter', 'after', 'login', 'cap', 'resume', 'build', 'reason', 'since', 'order'} <= set(entry)
+                 and entry.get('repo') in REPOSITORIES
+                 and isinstance(entry.get('rung'), str) and re.fullmatch(r'[a-z0-9][a-z0-9-]*', entry['rung'])
+                 and isinstance(entry.get('kind'), str) and re.fullmatch(r'[a-z][a-z0-9]*', entry['kind'])
+                 and isinstance(entry.get('starter'), str) and re.fullmatch(ADDRESS, entry['starter'])
+                 and isinstance(entry.get('after'), list)
+                 and all(isinstance(c, str) and re.fullmatch(r'[0-9a-fA-F]{4,40}', c) for c in entry['after'])
+                 and isinstance(entry.get('login'), list)
+                 and all(isinstance(pool, str) and re.fullmatch(LOGIN, pool) and pool_of(pool) == pool
+                         for pool in entry['login'])
+                 and (entry.get('cap') is None or type(entry['cap']) is int and entry['cap'] >= 1)
+                 and (entry.get('resume') is None or isinstance(entry['resume'], str)
+                      and re.fullmatch(r'rung-[a-z0-9][a-z0-9-]*-[1-9][0-9]*', entry['resume']))
+                 and (entry.get('build') is None or isinstance(entry['build'], str))
+                 and isinstance(entry.get('reason'), str) and isinstance(entry.get('since'), str)
+                 and type(entry.get('order')) is int and entry['order'] > 0, f'{path}: invalid queued walk', 4)
+            utc(entry['since'])
+            result.append(entry)
+        return sorted(result, key=lambda e: (e['order'], e['id']))
+
+    def save_queue(self, entry):
+        path = self.directory / 'queue' / (entry['id'] + '.json')
+        no_links(self.workspace.tmp, path)
+        replace(path, (json.dumps(entry, indent=2) + '\n').encode(), durable=True)
+
+    def enqueue(self, args, reason):
+        # A repeated resume request updates neither its place nor its inputs.
+        entries = self.queue_entries()
+        entry = next((e for e in entries if args.resume and e['resume'] == args.resume), None)
+        if entry is None:
+            entry = dict(id=secrets.token_hex(16), repo=args.repo, rung=args.rung,
+                         kind=args.queue_kind, login=args.queue_login, cap=args.cap,
+                         build=args.build, resume=args.resume, after=args.after,
+                         starter=args.queue_starter, since=timestamp(), reason=str(reason),
+                         order=max((e['order'] for e in entries), default=0) + 1)
+            self.save_queue(entry)
+        print('queued ' + (entry['resume'] or entry['id']))
+        return 0
+
+    def check_queue(self):
+        if not self.walks_valid:
+            return
+        try:
+            entries = self.queue_entries()
+        except (OSError, Problem, ValueError, KeyError, TypeError, RecursionError) as error:
+            log(f'cannot read walk queue: {error}; cleanup continues')
+            return
+        attempted = set()
+        for entry in entries:
+            path = self.directory / 'queue' / (entry['id'] + '.json')
+            try:
+                walks = self.local_walks()
+                saved = [a for _, s in walks for a in [s, *s.get('attempts', [])]
+                         if a.get('queue_id') == entry['id']]
+                if any(a.get('run') for a in saved):
+                    path.unlink()
+                    continue
+                if entry['resume']:
+                    state = next((s for _, s in walks if s['walk'] == entry['resume']), None)
+                    if state is None or (state['stage'] != 'paused'
+                                         and not any(a['stage'] == 'starting' for a in saved)):
+                        self.notify_once('queue dropped ' + entry['id'], 'qa: queued resume dropped',
+                                         f'Queue {entry["id"]}: {entry["resume"]} is no longer paused.\n')
+                        path.unlink()
+                        continue
+                if entry['kind'] in attempted:
+                    continue
+                args = argparse.Namespace(**{key: entry[key] for key in
+                                          ('repo', 'rung', 'cap', 'build', 'resume', 'after')},
+                                          kind=None if entry['resume'] else entry['kind'],
+                                          login=[] if entry['resume'] else entry['login'])
+                status = start_walk(args, self.workspace, self, entry)
+                attempted.add(entry['kind'])
+                if status == 0:
+                    path.unlink()
+                else:
+                    entry['reason'] = 'launch outcome is still unknown; admission waits for the watcher'
+                    self.save_queue(entry)
+            except Deferred as error:
+                if entry['reason'] != str(error):
+                    entry['reason'] = str(error)
+                    self.save_queue(entry)
+            except (OSError, Problem, ValueError, KeyError, TypeError, UnicodeError) as error:
+                attempted.add(entry['kind'])
+                entry['reason'] = str(error)
+                self.save_queue(entry)
+                self.notify_once('queue ' + entry['id'] + ' reason ' + str(error),
+                                 'qa: queued walk refused', f'Queue {entry["id"]}: {error}. Kept queued.\n')
 
     def admission_ready(self, walks):
         for _, state in walks:
@@ -1499,6 +1628,7 @@ class Watch:
                     why = str(error) if isinstance(error, Problem) else type(error).__name__
                     log(f'{state["walk"]}: cleanup failed ({why}); keeping logins and scratch')
             self.repair_slot_claims(walks)
+            self.check_queue()
 
 
 
@@ -1561,6 +1691,8 @@ def walk_attempt(state):
     need('launch_complete' not in state or type(state['launch_complete']) is bool,
          'invalid saved launch completion', 4)
     check_alerts(state)
+    need('queue_id' not in state or isinstance(state['queue_id'], str)
+         and re.fullmatch(r'[0-9a-f]{32}', state['queue_id']), 'invalid admission ID', 4)
     if 'report_attempt' in state:
         need(type(state['report_attempt']) is int and 1 <= state['report_attempt'] <= state.get('attempt', 1),
              'invalid report attempt', 4)
@@ -1643,29 +1775,56 @@ def give(args, workspace):
     return result.returncode
 
 
+def queue(args, workspace):
+    service = Watch(workspace, '')
+    with service.walks_locked():
+        entries = service.queue_entries()
+        if args.queue_action == 'cancel':
+            need(any(e['id'] == args.id for e in entries), 'unknown queue ID: ' + args.id)
+            (service.directory / 'queue' / (args.id + '.json')).unlink()
+            print('cancelled ' + args.id)
+        else:
+            print('id\tkind\trung\tresume\tafter\tsince\tlast reason')
+            for entry in entries:
+                print('\t'.join(str(entry[key] or '-') if key != 'after' else ','.join(entry[key]) or '-'
+                                for key in ('id', 'kind', 'rung', 'resume', 'after', 'since', 'reason')))
+    return 0
+
+
 def walk(args, workspace):
-    starter = os.environ.get('POST_NAME', '')
+    args.after = getattr(args, 'after', [])
+    service = Watch(workspace, '')
+    try:
+        return start_walk(args, workspace, service)
+    except Deferred as error:
+        with service.walks_locked():
+            return service.enqueue(args, error)
+
+
+def start_walk(args, workspace, service=None, entry=None):
+    starter = entry['starter'].rsplit('@', 1)[0] if entry else os.environ.get('POST_NAME', '')
     need(re.fullmatch(r'[a-z][a-z0-9-]*(/[a-z0-9][a-z0-9-]*)*', starter),
          'POST_NAME must be set to a valid starter name')
     need(re.fullmatch(r'[a-z0-9][a-z0-9-]*', args.rung), 'invalid rung name')
     need(args.cap is None or args.cap >= 1, '--cap must be at least 1')
     need(args.resume is None or re.fullmatch(r'rung-[a-z0-9][a-z0-9-]*-[1-9][0-9]*', args.resume)
-         and args.build is not None and not args.login and args.kind is None,
-         '--resume needs a walk NAME and --build, without --login or --kind')
+         and (args.build is not None or args.after) and not args.login and args.kind is None,
+         '--resume needs a walk NAME and --build or --after, without --login or --kind')
     need(all(re.fullmatch(LOGIN, pool) and pool_of(pool) == pool for pool in args.login), 'invalid login pool')
     need(len(set(args.login)) == len(args.login), 'repeated login pool')
+    need(all(re.fullmatch(r'[0-9a-fA-F]{4,40}', c) for c in args.after), 'invalid --after commit')
     workspace.origin(args.repo)
     options = settings(workspace)
-    service = Watch(workspace, '')
+    service = service or Watch(workspace, '')
     service.options = options
     ref = args.build if args.build is not None else 'main'
     main = ''
-    with service.walks_locked():
+    with nullcontext() if service.walk_lock is not None else service.walks_locked():
         focused = workspace.tmp / 'qa-focused'
         no_links(workspace.tmp, focused)
         focused.mkdir(mode=0o700, parents=True, exist_ok=True)
         walks = service.local_walks()
-        service.claims(walks)
+        service.queue_entries()
         service.admission_ready(walks)
         kinds = options['QA_WALK_KINDS']
         need(not any('kind' not in state and not state.get('released') for _, state in walks),
@@ -1678,13 +1837,19 @@ def walk(args, workspace):
             directory, state = match
             need(state['stage'] == 'paused' and state.get('released') and state.get('end_logged')
                  and state.get('posted') and not service.outstanding(state), 'walk pause is not complete')
-            need(not state.get('slot_claim') or state['slot_claim']['released'], 'slot claim release is still pending', 1)
             kind = state.get('kind', next(iter(kinds)))
             need(kind in kinds and set(state['requests']) <= set(kinds[kind]['pools']),
                  'saved walk kind or pools are no longer configured')
+            args.queue_kind, args.queue_login = kind, state['requests']
+            args.queue_starter = entry['starter'] if entry else starter + '@' + workspace.machine()
+            defer(not state.get('slot_claim') or state['slot_claim']['released'], 'slot claim release is still pending')
             state['kind'] = kind
             need(kinds[kind]['numbers'], f'no walk slots configured for kind {kind}', 1)
             service.walk_room(state['requests'], kind)
+            service.claims(walks)
+            number = service.free_slot(walks, kind)
+            if args.after:
+                service.dependencies(service.repositories.fetch(args.repo, number), args.after)
             service.save(directory, state)
             previous_run = next((a['run'] for a in reversed(state['attempts']) if a.get('run')), '')
             need(previous_run, 'paused walk has no earlier run')
@@ -1703,7 +1868,13 @@ def walk(args, workspace):
             requests = sorted(args.login or kinds[kind]['pools'])
             need(set(requests) <= set(kinds[kind]['pools']), 'login is not a pool of kind ' + kind)
             need(kinds[kind]['numbers'], f'no walk slots configured for kind {kind}', 1)
+            args.queue_kind, args.queue_login = kind, requests
+            args.queue_starter = entry['starter'] if entry else starter + '@' + workspace.machine()
             holders = service.walk_room(requests, kind)
+            service.claims(walks)
+            slot_number = service.free_slot(walks, kind)
+            if args.after:
+                service.dependencies(service.repositories.fetch(args.repo, slot_number), args.after)
             prefix = 'rung-' + args.rung + '-' + ('' if kind == next(iter(kinds)) else kind + '-')
             numbering = [state for _, state in walks] + service.legacy_walks
             known = {state['walk'] for state in numbering}
@@ -1723,10 +1894,14 @@ def walk(args, workspace):
             directory.mkdir(mode=0o700)
             state = dict(walk=name, repo=args.repo, rung=args.rung, kind=kind,
                          clock_walk=name[len('rung-' + args.rung + '-'):], ref=ref, main=main,
-                         starter=starter + '@' + workspace.machine(), cap=args.cap or 180, started=timestamp(),
+                         starter=args.queue_starter, cap=args.cap or 180, started=timestamp(),
                          slot=None, holder='walk/' + kind + '/' + name, logins={}, kinds={}, pools={}, run='',
                          stage='reserving', requests=requests, given=[], released=False,
                          start_logged=False, end_logged=False, posted=False, report_attempt=1)
+        if entry:
+            state['queue_id'] = entry['id']
+        else:
+            state.pop('queue_id', None)
         service.classes[directory] = 'walk'
         service.save(directory, state)
         taking = False
@@ -1735,14 +1910,19 @@ def walk(args, workspace):
                          ssh=options['QA_CLAIM_SSH'],
                          what=f'qa walk {name} attempt {state.get("attempt", 1)} claim {secrets.token_hex(16)}',
                          released=False)
-            held_slots = {saved['slot'] for _, saved in walks
-                          if not saved.get('released') or saved.get('slot_claim')
-                          and not saved['slot_claim']['released']}
-            number = next((n for n in kinds[kind]['numbers'] if n not in held_slots), None)
-            need(number is not None, f'no free walk slot for kind {kind}', 1)
+            number = number if args.resume else slot_number
             try:
                 claimed = service.slot_call(claim, 'claim', claim['host'], number, claim['owner'], claim['what'])
                 expected = f"{claim['host']}-{number} claimed by {claim['owner']}: {claim['what']}"
+                if claimed.returncode == 1:
+                    listing = service.slot_call(claim, 'list')
+                    rows = [r for r in listing.stdout.splitlines()
+                            if r.startswith(f'{claim["host"]} {number} [')]
+                    if (listing.returncode == 0 and len(rows) == 1
+                            and not any(claim['what'] in row for row in rows)
+                            and re.fullmatch(re.escape(f'{claim["host"]} {number} [')
+                                             + r'[^]\r\n]+\]: [^\r\n]+ \(since [^()]+\); held .+', rows[0])):
+                        raise Deferred(f'walk slot {claim["host"]} {number} is busy', 1)
                 need(claimed.returncode == 0 and claimed.stdout.strip() == expected,
                      f'claim claim {claim["host"]} {number}: exit {claimed.returncode}: '
                      + (claimed.stderr.strip() or claimed.stdout.strip() or 'unreadable or empty result'), 1)
@@ -1754,6 +1934,7 @@ def walk(args, workspace):
             checkout = service.repositories.fetch(args.repo, state['slot'])
             previous, sequence = service.last_checkout(state)
             service.repositories.protect_head(checkout, previous)
+            service.dependencies(checkout, args.after)
             state['main'] = service.repositories.build(checkout, ref)
             service.save(directory, state)
             service.repositories.checkout(checkout, state['main'])
@@ -1780,6 +1961,8 @@ def walk(args, workspace):
             for pool in state['requests']:
                 service.walk_room([pool], kind)
                 taken = service.take_login(pool, state['holder'], directory, state.get('run'))
+                if taken.returncode == 1:
+                    raise Deferred(f'login pool {pool} is busy: ' + taken.stderr.strip(), 1)
                 need(taken.returncode == 0, 'the caps are broken: ' + (taken.stderr.strip() or taken.stdout.strip()
                      or f'cannot take {pool}'), 1)
                 login, sep, path = taken.stdout.strip().partition(' ')
@@ -1946,10 +2129,15 @@ def main():
     walking.add_argument('repo')
     walking.add_argument('rung')
     walking.add_argument('--build')
+    walking.add_argument('--after', action='append', default=[])
     walking.add_argument('--resume')
     walking.add_argument('--kind')
     walking.add_argument('--login', action='append', default=[])
     walking.add_argument('--cap', type=int)
+    queued = sub.add_parser('queue')
+    queue_actions = queued.add_subparsers(dest='queue_action')
+    cancelling = queue_actions.add_parser('cancel')
+    cancelling.add_argument('id')
     taking = sub.add_parser('take')
     taking.add_argument('kind')
     taking.add_argument('--login')
@@ -1971,6 +2159,8 @@ def main():
         if args.command == 'deploy':
             need('--' in sys.argv[2:] and sys.argv[2:].index('--') == 2, 'deploy needs DIRECTORY NAME -- COMMAND...')
             return deploy(args, workspace)
+        if args.command == 'queue':
+            return queue(args, workspace)
         if args.command == 'walk':
             return walk(args, workspace)
         if args.command == 'watch':
