@@ -1,21 +1,25 @@
 # Status-page status
 
-2026-10-30. Owner: s/multi-coord. Baseline: origin/main `1335337`.
+2026-10-30. Owner: s/multi-coord. Baseline: origin/main `580a456` plus `mc/events-1-r`.
 Contract: `docs/design/status-page.md`, sections 2–4.
 
 ## Present and limits
 
 - The index renderer, fixture-backed sources, public projection, cost tables,
   samples and atomic publication exist. Service/timer declarations are present;
-  this docs task neither deploys nor checks the live website.
+  this rebase/docs task neither deploys nor checks the live website.
 - Queue ready timestamps and queue/heavy draft joins are not collected. Costs
   remain unattributed and waits unknown rather than inferred. Run/session
   liveness is the collected history, with the collector's snapshot limits.
-- The index consumes raw git events, not the new host spool or task summaries.
-  See `docs/design/records.status.md`.
-- `tools/installed` installs the writer as `fabrig-record`, while status-page's
-  pull still invokes PATH's `record`. That integration mismatch remains; the
-  direct writer is `tools/records/record`.
+- The index consumes the last two hours of local and SSH-probed queue, runs,
+  heavy, claims and sessions spools. Event sections state that window; queue
+  charts have two hourly buckets, and costs show the last two hours and last
+  hour. Events deduplicate by host/id, failed probes name unavailable hosts,
+  and other sections still render. See `docs/design/records.md`, section 4.
+- Durable drafts/questions still come from records, pulled through the sibling
+  `tools/records/record`. The installed writer name `fabrig-record` does not
+  affect this explicit reader path.
+- Task summaries remain unimplemented; the index does not consume them.
 
 ## Release page: agreed design, not built
 
@@ -79,5 +83,5 @@ and `docs/design/status-page.md` together.
 ## Verification
 
 `tools/records/test_status_page.py` uses temporary HOME, fake probes and a local
-records origin, including actual collector-to-renderer contract fixtures. The
-gate is `bash tools/check.sh`; no live probes were used for this backfill.
+records origin, including actual collector-to-spool-to-renderer contract fixtures. The
+gate is `bash tools/check.sh`; no live probes were used for this rebase/docs update.
