@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from fab import calls, gates, hosts as machines, land, log, plan as specs, run as runs, state
+from fab import calls, flow, gates, hosts as machines, land, log, plan as specs, run as runs, state
 from fab.hosts import Host
 from fab.plan import Plan, Task
 from fab.sh import Failed, Runner, run, ssh
@@ -134,8 +134,13 @@ def places(hosts: Mapping[str, Host], flight: Iterable[dict],
     True (fab.flow.measure) gets 1, while its runs in flight are fewer than its `slots` (any
     number when slots is 0). calm None is no builder calm."""
     occupied = Counter(event["host"] for event in flight)
-    return {name: max(0, host.places - occupied[name]) for name, host in hosts.items()
+    free = {name: max(0, host.places - occupied[name]) for name, host in hosts.items()
             if "builder" in host.roles}
+    for name in free:
+        host = hosts[name]
+        if not free[name] and (calm or {}).get(name) and (not host.slots or occupied[name] < host.slots):
+            free[name] = 1
+    return free
 
 
 def decide(plan: Plan, tasks: Mapping[str, Task], events: list[dict], hosts: Mapping[str, Host],
@@ -161,10 +166,13 @@ def decide(plan: Plan, tasks: Mapping[str, Task], events: list[dict], hosts: Map
     Statuses come from fab.state.fold.
     """
     flight = in_flight(events)
-    free = places(hosts, flight)
+    free = places(hosts, flight, calm)
+    limit = flow.target(plan.draft, events)
+    occupied = sum(event["task"].startswith(plan.draft + "/") for event in flight)
     views = state.fold(tasks, events)
-    actions = [Action("collect", task=event["task"], run=event["run"], host=event["host"],
-                      detail=event["run"]) for event in flight]
+    actions = [Action("flow", task=plan.draft, detail=f"target {limit}, {occupied} in flight")]
+    actions.extend(Action("collect", task=event["task"], run=event["run"], host=event["host"],
+                          detail=event["run"]) for event in flight)
     for identifier, view in views.items():
         if view.status == "done":
             actions.append(Action("land" if tasks[identifier].repo == "agents" else "ready",
@@ -172,12 +180,36 @@ def decide(plan: Plan, tasks: Mapping[str, Task], events: list[dict], hosts: Map
 
     candidates = [identifier for status in ("rejected", "runnable")
                   for identifier, view in views.items() if view.status == status]
+    actions.extend(_starts(candidates, views, events, free, limit - occupied))
+
+    capacity = sum(host.places for host in hosts.values() if "builder" in host.roles)
+    if len(candidates) < plan.low * capacity:
+        by_part = {part: [identifier for identifier, task in tasks.items() if task.part == part]
+                   for part in plan.parts}
+        def landed(part_id):
+            part = plan.parts.get(part_id)
+            return part is not None and (part.done or bool(by_part[part_id]) and all(
+                views[identifier].status == "landed" for identifier in by_part[part_id]))
+
+        eligible = [part.id for part in plan.parts.values() if not part.done and not by_part[part.id]
+                    and all(landed(need) for need in part.needs)]
+        if eligible:
+            actions.append(Action("design", detail=", ".join(eligible)))
+    return actions
+
+
+def _starts(candidates: Iterable[str], views: Mapping[str, state.TaskView], events: list[dict],
+            free: dict[str, int], budget: int) -> list[Action]:
+    """Reserve places up to the draft's remaining target, parking exhausted tasks for free."""
+    actions = []
     for identifier in candidates:
         view = views[identifier]
         if len(view.runs) >= MAX_RUNS:
             actions.append(Action("park", task=identifier,
                                   run=view.runs[-1],
                                   detail=f"{MAX_RUNS} runs without landing; needs judgement"))
+            continue
+        if budget <= 0:
             continue
         available = [name for name in free if free[name] > 0]
         if not available:
@@ -196,21 +228,164 @@ def decide(plan: Plan, tasks: Mapping[str, Task], events: list[dict], hosts: Map
         actions.append(Action("start", task=identifier, host=host, run_kind=kind,
                               detail=f"{kind} {host}", rejection=rejection))
         free[host] -= 1
+        budget -= 1
 
-    capacity = sum(host.places for host in hosts.values() if "builder" in host.roles)
-    if len(candidates) < plan.low * capacity:
-        by_part = {part: [identifier for identifier, task in tasks.items() if task.part == part]
-                   for part in plan.parts}
-        def landed(part_id):
-            part = plan.parts.get(part_id)
-            return part is not None and (part.done or bool(by_part[part_id]) and all(
-                views[identifier].status == "landed" for identifier in by_part[part_id]))
-
-        eligible = [part.id for part in plan.parts.values() if not part.done and not by_part[part.id]
-                    and all(landed(need) for need in part.needs)]
-        if eligible:
-            actions.append(Action("design", detail=", ".join(eligible)))
     return actions
+
+
+def _import_queue(tasks: Mapping[str, Task], events: list[dict], hosts: Mapping[str, Host], *,
+                  sh: Runner, log_path: Path | None) -> None:
+    """Append new merge queue records for this plan, skipping torn remote lines."""
+    gate_hosts = sorted(name for name, host in hosts.items() if "gate" in host.roles)
+    if gate_hosts:
+        imported = {(event.get("queue_ts"), event.get("ev"), event.get("branch"),
+                     event.get("tip")) for event in events if "queue_ts" in event}
+        since = max((event["queue_ts"] for event in events if "queue_ts" in event), default="")
+        result = sh(ssh(hosts[gate_hosts[0]].ssh, ["fab", "queue", "log", "--since", since]))
+        if not result.ok:
+            # The queue's record is read again next tick; the other actions still run.
+            failure = " ".join((result.err or result.out).strip().splitlines()[-3:])
+            log.append("note", path=log_path, text=f"queue import failed: {failure}")
+            print(f"import - failed: {failure}")
+        for line in result.out.splitlines() if result.ok else ():
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(entry, dict) or not isinstance(entry.get("ts"), str):
+                continue
+            if entry.get("ev") not in ("landed", "rejected"):
+                continue
+            branch = entry.get("branch")
+            if not isinstance(branch, str):
+                continue
+            identifier = land.task_of(branch)
+            if identifier not in tasks:
+                continue
+            ev = "branch." + entry["ev"]
+            key = (entry["ts"], ev, branch, entry.get("tip"))
+            if key in imported:
+                continue
+            fields = {field: entry[field] for field in ("tip", "main", "step", "log")
+                      if field in entry}
+            events.append(log.append(ev, path=log_path, task=identifier, branch=branch,
+                                     queue_ts=entry["ts"], **fields))
+            imported.add(key)
+
+
+def _land_branch(branch: str, task: str | None = None) -> None:
+    """Land with captured output so a refusal becomes one action failure line."""
+    output = io.StringIO()
+    with redirect_stdout(output):
+        refused = land.main([branch] + (["--task", task] if task is not None else []))
+    if refused:
+        raise RuntimeError(output.getvalue().strip() or "landing refused")
+
+
+def _land_task(action: Action, tasks: Mapping[str, Task], *, sh: Runner,
+               log_path: Path | None) -> str:
+    """Screen a task branch before landing, returning the action's printed detail."""
+    findings = (gates.screen(tasks[action.task], log.read(log_path),
+                            sh=sh, log_path=log_path)
+                if tasks[action.task].repo in gates.REPOS else [])
+    if findings:
+        return "rejected gate:" + ",".join(dict.fromkeys(
+            finding.gate for finding in findings))
+    _land_branch(action.branch, action.task)
+    return action.detail
+
+
+def _ready(action: Action, task: Task, hosts: Mapping[str, Host], *, sh: Runner,
+           log_path: Path | None) -> None:
+    """Push a repository branch to ready, clearing a same-tip rejection on the gate first."""
+    gate_hosts = sorted(name for name, host in hosts.items() if "gate" in host.roles)
+    repo = log.home() / "repos" / task.repo
+    if not (repo / ".git").exists():
+        repo.parent.mkdir(parents=True, exist_ok=True)
+        sh(["git", "clone", "-q", runs.REMOTES[task.repo], str(repo)],
+           check=True)
+    sh(["git", "fetch", "origin"], cwd=str(repo), check=True)
+    tip = sh(["git", "rev-parse", "--verify",
+              f"refs/remotes/origin/{action.branch}^{{commit}}"],
+             cwd=str(repo), check=True).out.strip()
+    if not tip:
+        raise ValueError("branch has no tip")
+    rejection = next((event for event in reversed(log.read(log_path))
+                      if event.get("ev") == "branch.rejected"
+                      and event.get("task") == action.task), None)
+    if rejection is not None and tip == rejection.get("tip"):
+        if not gate_hosts:
+            raise ValueError("no gate host configured for queue untry")
+        sh(ssh(hosts[gate_hosts[0]].ssh,
+               ["fab", "queue", "untry", action.branch]), check=True)
+        log.append("note", path=log_path,
+                   text=f"retry {action.task}: same tip after repair")
+    sh(["git", "push", "origin", f"{tip}:refs/heads/ready/{action.branch}"],
+       cwd=str(repo), check=True)
+    log.append("branch.ready", path=log_path, task=action.task,
+               branch=action.branch, tip=tip)
+
+
+def _call(action: Action, plan_dir: Path, *, sh: Runner, log_path: Path | None) -> None:
+    """Launch a designer call in its numbered user unit."""
+    events = log.read(log_path)
+    number = 1 + sum(event.get("ev") == "call.started" and
+                     event.get("role") == action.run_kind for event in events)
+    argv = ["fab", "call", action.run_kind]
+    if action.run_kind == "skeleton":
+        argv.append(action.task)
+    argv.extend(["--plan", str(plan_dir.resolve())])
+    sh(["systemd-run", "--user", "--collect", "--unit",
+        f"fab-call-{action.run_kind}-{number}", *argv], check=True)
+
+
+def _finish(action: Action, *, log_path: Path | None) -> None:
+    """Land a finished call and log the subjects its answer report names."""
+    _land_branch(action.branch)
+    if action.run_kind == "answer":
+        report = (log.home() / "calls" / action.run / "report.md").read_text(encoding="utf-8")
+        answered = next((line.removeprefix("Answered:").split()
+                         for line in report.splitlines()
+                         if line.startswith("Answered:")), [])
+        for identifier in dict.fromkeys(answered):
+            log.append("question.answered", path=log_path, task=identifier,
+                       call=action.run)
+
+
+def _take(action: Action, tasks: Mapping[str, Task], hosts: Mapping[str, Host], plan_dir: Path, *,
+          sh: Runner, log_path: Path | None) -> None:
+    """Carry out one action, recording failures without stopping subsequent actions."""
+    detail = action.detail
+    outcome = "failed"
+    try:
+        match action.kind:
+            case "collect":
+                runs.collect(action.run, log.read(log_path), hosts, sh=sh, log_path=log_path)
+            case "land":
+                detail = _land_task(action, tasks, sh=sh, log_path=log_path)
+            case "ready":
+                _ready(action, tasks[action.task], hosts, sh=sh, log_path=log_path)
+            case "start":
+                runs.start(tasks[action.task], hosts[action.host], kind=action.run_kind,
+                           events=log.read(log_path), sh=sh, log_path=log_path,
+                           rejection=action.rejection)
+            case "call":
+                _call(action, plan_dir, sh=sh, log_path=log_path)
+            case "finish":
+                _finish(action, log_path=log_path)
+                outcome = "done"
+            case "park":
+                log.append("question.asked", path=log_path, task=action.task,
+                           run=action.run, text=action.detail)
+    except Exception as error:
+        detail = "failed: " + " ".join(str(error).splitlines())
+        log.append("note", path=log_path,
+                   text=f"{action.kind} {action.task or '-'} {detail}")
+    finally:
+        if action.kind == "finish":
+            log.append("call.finished", path=log_path, call=action.run,
+                       role=action.run_kind, outcome=outcome)
+    print(f"{action.kind} {action.task or '-'} {detail}")
 
 
 def tick(plan_dir: Path, *, sh: Runner = run, hosts: Mapping[str, Host] | None = None,
@@ -252,133 +427,19 @@ def tick(plan_dir: Path, *, sh: Runner = run, hosts: Mapping[str, Host] | None =
             raise specs.PlanError("\n".join(issues))
         hosts = machines.load() if hosts is None else hosts
         events = log.read(log_path)
-        gate_hosts = sorted(name for name, host in hosts.items() if "gate" in host.roles)
-        if gate_hosts:
-            imported = {(event.get("queue_ts"), event.get("ev"), event.get("branch"),
-                         event.get("tip")) for event in events if "queue_ts" in event}
-            since = max((event["queue_ts"] for event in events if "queue_ts" in event), default="")
-            result = sh(ssh(hosts[gate_hosts[0]].ssh, ["fab", "queue", "log", "--since", since]))
-            if not result.ok:
-                # The queue's record is read again next tick; the other actions still run.
-                failure = " ".join((result.err or result.out).strip().splitlines()[-3:])
-                log.append("note", path=log_path, text=f"queue import failed: {failure}")
-                print(f"import - failed: {failure}")
-            for line in result.out.splitlines() if result.ok else ():
-                entry = json.loads(line)
-                if entry.get("ev") not in ("landed", "rejected"):
-                    continue
-                branch = entry["branch"]
-                identifier = land.task_of(branch)
-                if identifier not in tasks:
-                    continue
-                ev = "branch." + entry["ev"]
-                key = (entry["ts"], ev, branch, entry.get("tip"))
-                if key in imported:
-                    continue
-                fields = {field: entry[field] for field in ("tip", "main", "step", "log")
-                          if field in entry}
-                events.append(log.append(ev, path=log_path, task=identifier, branch=branch,
-                                         queue_ts=entry["ts"], **fields))
-                imported.add(key)
+        _import_queue(tasks, events, hosts, sh=sh, log_path=log_path)
 
-        actions = decide(plan, tasks, events, hosts)
-
-        def take(action):
-            detail = action.detail
-            outcome = "failed"
-            try:
-                match action.kind:
-                    case "collect":
-                        runs.collect(action.run, log.read(log_path), hosts, sh=sh, log_path=log_path)
-                    case "land":
-                        findings = (gates.screen(tasks[action.task], log.read(log_path),
-                                                sh=sh, log_path=log_path)
-                                    if tasks[action.task].repo in gates.REPOS else [])
-                        if findings:
-                            detail = "rejected gate:" + ",".join(dict.fromkeys(
-                                finding.gate for finding in findings))
-                        else:
-                            output = io.StringIO()
-                            with redirect_stdout(output):
-                                refused = land.main([action.branch, "--task", action.task])
-                            if refused:
-                                raise RuntimeError(output.getvalue().strip() or "landing refused")
-                    case "ready":
-                        repo = home / "repos" / tasks[action.task].repo
-                        if not (repo / ".git").exists():
-                            repo.parent.mkdir(parents=True, exist_ok=True)
-                            sh(["git", "clone", "-q", runs.REMOTES[tasks[action.task].repo], str(repo)],
-                               check=True)
-                        sh(["git", "fetch", "origin"], cwd=str(repo), check=True)
-                        tip = sh(["git", "rev-parse", "--verify",
-                                  f"refs/remotes/origin/{action.branch}^{{commit}}"],
-                                 cwd=str(repo), check=True).out.strip()
-                        if not tip:
-                            raise ValueError("branch has no tip")
-                        rejection = next((event for event in reversed(log.read(log_path))
-                                          if event.get("ev") == "branch.rejected"
-                                          and event.get("task") == action.task), None)
-                        if rejection is not None and tip == rejection.get("tip"):
-                            if not gate_hosts:
-                                raise ValueError("no gate host configured for queue untry")
-                            sh(ssh(hosts[gate_hosts[0]].ssh,
-                                   ["fab", "queue", "untry", action.branch]), check=True)
-                            log.append("note", path=log_path,
-                                       text=f"retry {action.task}: same tip after repair")
-                        sh(["git", "push", "origin", f"{tip}:refs/heads/ready/{action.branch}"],
-                           cwd=str(repo), check=True)
-                        log.append("branch.ready", path=log_path, task=action.task,
-                                   branch=action.branch, tip=tip)
-                    case "start":
-                        runs.start(tasks[action.task], hosts[action.host], kind=action.run_kind,
-                                   events=log.read(log_path), sh=sh, log_path=log_path,
-                                   rejection=action.rejection)
-                    case "call":
-                        events = log.read(log_path)
-                        number = 1 + sum(event.get("ev") == "call.started" and
-                                         event.get("role") == action.run_kind for event in events)
-                        argv = ["fab", "call", action.run_kind]
-                        if action.run_kind == "skeleton":
-                            argv.append(action.task)
-                        argv.extend(["--plan", str(plan_dir.resolve())])
-                        sh(["systemd-run", "--user", "--collect", "--unit",
-                            f"fab-call-{action.run_kind}-{number}", *argv], check=True)
-                    case "finish":
-                        output = io.StringIO()
-                        with redirect_stdout(output):
-                            refused = land.main([action.branch])
-                        if refused:
-                            raise RuntimeError(output.getvalue().strip() or "landing refused")
-                        if action.run_kind == "answer":
-                            report = (home / "calls" / action.run / "report.md").read_text(encoding="utf-8")
-                            answered = next((line.removeprefix("Answered:").split()
-                                             for line in report.splitlines()
-                                             if line.startswith("Answered:")), [])
-                            for identifier in dict.fromkeys(answered):
-                                log.append("question.answered", path=log_path, task=identifier,
-                                           call=action.run)
-                        outcome = "done"
-                    case "park":
-                        log.append("question.asked", path=log_path, task=action.task,
-                                   run=action.run, text=action.detail)
-            except Exception as error:
-                detail = "failed: " + " ".join(str(error).splitlines())
-                log.append("note", path=log_path,
-                           text=f"{action.kind} {action.task or '-'} {detail}")
-            finally:
-                if action.kind == "finish":
-                    log.append("call.finished", path=log_path, call=action.run,
-                               role=action.run_kind, outcome=outcome)
-            print(f"{action.kind} {action.task or '-'} {detail}")
+        calm = flow.measure(hosts, log.now(), sh=sh)
+        actions = decide(plan, tasks, events, hosts, calm)
 
         for action in actions:
-            take(action)
+            _take(action, tasks, hosts, plan_dir, sh=sh, log_path=log_path)
         design = [part for action in actions if action.kind == "design"
                   for part in action.detail.split(", ")]
         followups = call_actions(plan, tasks, log.read(log_path), design, log.now())
         actions.extend(followups)
         for action in followups:
-            take(action)
+            _take(action, tasks, hosts, plan_dir, sh=sh, log_path=log_path)
         return actions
 
 

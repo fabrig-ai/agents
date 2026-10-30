@@ -12,7 +12,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta
 from unittest.mock import patch
 
-from fab import cli, dispatch, gates, log, plan, state
+from fab import cli, dispatch, flow, gates, log, plan, state
 from fab.dispatch import Action, MAX_RUNS
 from fab.hosts import Host
 from fab.sh import Result, ssh
@@ -44,6 +44,13 @@ def ended(name="a", n=1, outcome="done"):
     return event("run.ended", name, run=f"draft/{name}-{n}", outcome=outcome, report="report.md")
 
 
+def growth():
+    """Two clean landings with full windows earn a target of four from START."""
+    return [started("seed-a"), started("seed-b"), ended("seed-a"),
+            event("branch.landed", "seed-a"), started("seed-c"), started("seed-d"),
+            ended("seed-b"), event("branch.landed", "seed-b"), ended("seed-c"), ended("seed-d")]
+
+
 def write(path, text):
     path.parent.mkdir(parents=True, exist_ok=True)
     sibling = path.with_name(path.name + ".tmp")
@@ -57,8 +64,9 @@ class DecideTest(unittest.TestCase):
         self.hosts = {"builder": Host("builder", "fake@builder", ("builder",), places=2)}
 
     def decide(self, tasks, events=(), hosts=None, spec=None):
+        """Return work actions; the flow diagnostic is checked directly in its own test."""
         return dispatch.decide(spec or self.plan, {t.id: t for t in tasks}, list(events),
-                               self.hosts if hosts is None else hosts)
+                               self.hosts if hosts is None else hosts)[1:]
 
     def test_in_flight_matches_run_not_task_and_keeps_log_order(self):
         events = [started(n=1), started("b"), ended(n=1), started(n=2),
@@ -74,13 +82,70 @@ class DecideTest(unittest.TestCase):
         self.assertEqual(dispatch.places(hosts, iter(flight)), {"builder": 1, "full": 0})
         self.assertEqual(dispatch.places({}, flight), {})
 
+    def test_places_full_calm_builder_gets_one_until_slots_full(self):
+        host = Host("builder", "fake@builder", ("builder",), places=1, slots=2)
+        hosts = {"builder": host}
+        flight = [started()]
+        self.assertEqual(dispatch.places(hosts, flight, {"builder": True}), {"builder": 1})
+        self.assertEqual(dispatch.places(hosts, flight, {"builder": False}), {"builder": 0})
+        self.assertEqual(dispatch.places(hosts, flight, {}), {"builder": 0})
+        self.assertEqual(dispatch.places(hosts, flight), {"builder": 0})
+        self.assertEqual(dispatch.places(hosts, flight + [started("b")], {"builder": True}),
+                         {"builder": 0})
+        hosts["builder"] = replace(host, slots=0)
+        self.assertEqual(dispatch.places(hosts, flight * 3, {"builder": True}), {"builder": 1})
+        self.assertEqual(dispatch.places(hosts, [], {"builder": True}), {"builder": 1})
+
+    def test_flow_is_first_and_target_caps_starts_with_rejections_first(self):
+        hosts = {"builder": replace(self.hosts["builder"], places=10)}
+        tasks = {t.id: t for t in (task("a"), task("b"), task("c"))}
+        actions = dispatch.decide(self.plan, tasks, [], hosts)
+        self.assertEqual(actions[0], Action("flow", task="draft", detail="target 2, 0 in flight"))
+        self.assertEqual([a.task for a in actions[1:]], ["draft/a", "draft/b"])
+        events = [event("branch.rejected", "c", step="test")]
+        actions = dispatch.decide(self.plan, tasks, events, hosts)
+        self.assertEqual(actions[0], Action("flow", task="draft", detail="target 1, 0 in flight"))
+        self.assertEqual([(a.task, a.run_kind) for a in actions[1:]], [("draft/c", "repair")])
+
+    def test_only_drafts_runs_count_toward_target_including_unspecified_tasks(self):
+        hosts = {"builder": replace(self.hosts["builder"], places=10)}
+        tasks = {t.id: t for t in (task("a"), task("b"), task("c"))}
+        foreign = [dict(started("foreign"), task="other/foreign"),
+                   dict(started("outside"), task="drafted/outside")]
+        events = foreign + [started("not-in-specs")]
+        actions = dispatch.decide(self.plan, tasks, events, hosts)
+        self.assertEqual(actions[0], Action("flow", task="draft", detail="target 2, 1 in flight"))
+        self.assertEqual([a.task for a in actions if a.kind == "start"], ["draft/a"])
+        actions = dispatch.decide(self.plan, tasks, foreign, hosts)
+        self.assertEqual(actions[0], Action("flow", task="draft", detail="target 2, 0 in flight"))
+        self.assertEqual([a.task for a in actions if a.kind == "start"], ["draft/a", "draft/b"])
+
+    def test_calm_extra_place_used_once_per_decide_and_inputs_unchanged(self):
+        hosts = {"builder": replace(self.hosts["builder"], places=1, slots=4)}
+        tasks = {t.id: t for t in (task("a"), task("b"), task("c"))}
+        events = [dict(started("foreign"), task="other/foreign")]
+        calm = {"builder": True}
+        before = deepcopy((hosts, tasks, events, calm))
+        actions = dispatch.decide(self.plan, tasks, events, hosts, calm)
+        self.assertEqual([a.task for a in actions if a.kind == "start"], ["draft/a"])
+        self.assertEqual(dispatch.decide(self.plan, tasks, events, hosts, calm), actions)
+        self.assertEqual((hosts, tasks, events, calm), before)
+
+    def test_parks_do_not_use_target_and_still_happen_when_target_full(self):
+        events = [e for n in range(1, MAX_RUNS + 1) for e in (started(n=n), ended(n=n))]
+        events.append(event("branch.rejected", step="test"))
+        actions = self.decide([task("a"), task("b"), task("c")], events)
+        self.assertEqual([a.kind for a in actions], ["park", "start"])
+        actions = self.decide([task("a"), task("b")], events + [started("c")])
+        self.assertEqual([a.kind for a in actions], ["collect", "park"])
+
     def test_four_steps_order_and_last_run_branch(self):
         tasks = [task("a"), task("b"), task("c"), task("d", repo="fabrig"), task("e")]
         events = [started("a"), started("b"), ended("b", outcome="infra"),
                   started("b", 2, branch="draft/b-r1"), ended("b", 2),
                   started("d"), ended("d"), started("c"), ended("c"),
                   event("branch.rejected", "c", step="merge")]
-        actions = self.decide(tasks, events, spec=make_plan(part("core"), part("next"), low=2))
+        actions = self.decide(tasks, growth() + events, spec=make_plan(part("core"), part("next"), low=2))
         self.assertEqual([a.kind for a in actions], ["collect", "land", "ready", "start", "design"])
         self.assertEqual(actions[0].run, "draft/a-1")
         self.assertEqual(actions[1].branch, "draft/b-r1")
@@ -90,7 +155,7 @@ class DecideTest(unittest.TestCase):
 
     def test_rejected_before_runnable_and_task_order_within_each(self):
         tasks = [task(name) for name in ("a", "b", "c", "d")]
-        events = [event("branch.rejected", name, step="test") for name in ("d", "b")]
+        events = growth() + [event("branch.rejected", name, step="test") for name in ("d", "b")]
         actions = self.decide(tasks, events)
         self.assertEqual([a.task for a in actions], ["draft/b", "draft/d"])
         self.assertEqual([a.run_kind for a in actions], ["repair", "repair"])
@@ -98,7 +163,7 @@ class DecideTest(unittest.TestCase):
     def test_builder_most_free_first_recomputed_and_ties_by_name(self):
         hosts = {"z": Host("z", "fake@z", ("builder",), places=3),
                  "a": Host("a", "fake@a", ("builder",), places=1)}
-        actions = self.decide([task(str(i)) for i in range(6)], hosts=hosts)
+        actions = self.decide([task(str(i)) for i in range(6)], growth(), hosts=hosts)
         self.assertEqual([a.host for a in actions], ["z", "z", "a", "z"])
 
     def test_other_plans_occupy_places_and_collect_in_log_order(self):
@@ -120,7 +185,7 @@ class DecideTest(unittest.TestCase):
                 self.assertEqual(action.rejection, events[-1])
 
     def test_infra_repairs_and_new_tasks_implement(self):
-        events = [started(), ended(outcome="infra")]
+        events = growth() + [started(), ended(outcome="infra")]
         actions = self.decide([task("a"), task("b")], events)
         self.assertEqual([(a.task, a.run_kind) for a in actions],
                          [("draft/a", "repair"), ("draft/b", "implement")])
@@ -411,11 +476,45 @@ walk = false
             log.append(ev, path=path, **fields)
 
     def tick(self, **kwargs):
-        return dispatch.tick(self.directory, sh=self.fake, hosts=kwargs.pop("hosts", self.hosts), **kwargs)
+        """Return work actions, leaving the printed flow diagnostic in captured output."""
+        return [action for action in dispatch.tick(
+            self.directory, sh=self.fake, hosts=kwargs.pop("hosts", self.hosts), **kwargs)
+                if action.kind != "flow"]
 
     def queue(self, records):
         self.fake.on(ssh("fake@gate", ["fab", "queue", "log"])[:-1],
                      Result(0, "\n".join(json.dumps(r) for r in records)))
+
+    def test_tick_measures_before_deciding_and_prints_flow_without_logging_it(self):
+        self.hosts["builder"] = replace(self.hosts["builder"], places=1, slots=2)
+        self.append(dict(started("foreign"), task="other/foreign"))
+        probe = ssh("fake@builder", flow.PROBE + ["/home/fake/src/fabrig/fab/heavy.jsonl"])
+        self.fake.on(probe, Result(0, "0.1 0.2 0.3\n2\n"))
+        with patch("fab.dispatch.decide", wraps=dispatch.decide) as decide:
+            actions = dispatch.tick(self.directory, sh=self.fake, hosts=self.hosts)
+        self.assertEqual(decide.call_args.args[-1], {"builder": True})
+        self.assertEqual([a.kind for a in actions], ["flow", "collect", "start"])
+        self.assertEqual(actions[0], Action("flow", task="draft", detail="target 2, 0 in flight"))
+        self.assertEqual(self.out.getvalue().splitlines()[0], "flow draft target 2, 0 in flight")
+        self.assertEqual(self.fake.argvs().count(probe), 1)
+        self.assertEqual([e["ev"] for e in log.read()], ["run.started"])
+        self.start.assert_called_once()
+
+    def test_tick_measures_even_with_free_places_and_failed_probe_is_not_calm(self):
+        probe = ssh("fake@builder", flow.PROBE + ["/home/fake/src/fabrig/fab/heavy.jsonl"])
+        self.fake.on(probe, Result(255, err="offline"))
+        with patch("fab.dispatch.decide", wraps=dispatch.decide) as decide:
+            self.tick()
+        self.assertEqual(decide.call_args.args[-1], {"builder": False})
+        self.assertEqual(self.fake.argvs().count(probe), 1)
+        self.start.assert_called_once()
+
+    def test_torn_queue_lines_skipped_while_valid_records_are_imported(self):
+        prefix = ssh("fake@gate", ["fab", "queue", "log"])[:-1]
+        self.fake.on(prefix, Result(0, '{"ev":\n[]\n{"ev":"landed","branch":"draft/a"}\n'
+                                   '{"ev":"landed","ts":"001","branch":"draft/a","tip":"a","main":"main"}\n'))
+        self.tick()
+        self.assertEqual([(e["ev"], e["task"]) for e in log.read()], [("branch.landed", "draft/a")])
 
     def test_import_queue_records_once_including_shared_timestamps_and_rebases(self):
         self.add_task("b")
@@ -441,7 +540,7 @@ walk = false
         self.tick()
         self.assertEqual(log.read(), first)
         commands = [shlex.split(c.argv[-1].removeprefix("bash -lc "))[0]
-                    for c in self.fake.calls if c.argv[0] == "ssh"]
+                    for c in self.fake.calls if c.argv[0] == "ssh" and c.argv[5] == "fake@gate"]
         self.assertEqual(commands, ["fab queue log --since ''", "fab queue log --since 002"])
 
     def test_a_failed_queue_import_is_noted_and_the_tick_goes_on(self):
@@ -459,6 +558,7 @@ walk = false
         self.append(started("a"), started("b"), ended("b"), started("c"), ended("c"))
         self.append(*(e for n in range(1, MAX_RUNS + 1)
                       for e in (started("d", n), ended("d", n, "infra"))))
+        self.append(*growth())
         self.fake.on(["git", "rev-parse", "--verify"], Result(0, "tip-c\n"))
         actions = self.tick()
         self.assertEqual([a.kind for a in actions], ["collect", "land", "ready", "park", "start"])
@@ -478,7 +578,8 @@ walk = false
         self.assertEqual(push.argv, ["git", "push", "origin", "tip-c:refs/heads/ready/draft/c"])
         self.assertEqual(push.cwd, str(log.home() / "repos" / "fabrig"))
         self.assertEqual(self.out.getvalue().splitlines(),
-                         [f"{a.kind} {a.task or '-'} {a.detail}" for a in actions])
+                         ["flow draft target 3, 1 in flight",
+                          *[f"{a.kind} {a.task or '-'} {a.detail}" for a in actions]])
         # Ready and parked tasks are not handed off or parked twice.
         self.tick()
         self.assertEqual(len([e for e in log.read() if e["ev"] == "branch.ready"]), 1)
@@ -542,7 +643,7 @@ walk = false
                          ["systemd-run", "--user", "--collect", "--unit", "fab-call-skeleton-1",
                           "fab", "call", "skeleton", "next", "--plan", str(self.directory)])
         self.assertEqual(self.calls, [])
-        self.assertEqual(self.out.getvalue(), "design - next\ncall next \n")
+        self.assertEqual(self.out.getvalue(), "flow draft target 2, 0 in flight\ndesign - next\ncall next \n")
         self.assertEqual(len(log.read()), 1)
 
     def completed_call(self, role="answer", identifier="answer-1", path=None):
@@ -594,7 +695,8 @@ walk = false
                          dict(ev="call.finished", call="answer-1", role="answer", outcome="done"))
         self.assertEqual(self.tick(hosts={}), [])
         self.land.assert_called_once()
-        self.assertEqual(self.out.getvalue().splitlines(), ["finish - "])
+        self.assertEqual(self.out.getvalue().splitlines(),
+                         ["flow draft target 2, 0 in flight", "finish - ", "flow draft target 2, 0 in flight"])
 
     def test_finish_skeleton_needs_no_report_and_respects_explicit_log(self):
         path = self.home / "custom.jsonl"
@@ -647,7 +749,8 @@ walk = false
         self.assertEqual(note["ev"], "note")
         self.assertEqual(note["text"], "land draft/a failed: offline retry later")
         self.assertEqual(self.out.getvalue().splitlines(),
-                         ["land draft/a failed: offline retry later", "land draft/b draft/b"])
+                         ["flow draft target 2, 0 in flight",
+                          "land draft/a failed: offline retry later", "land draft/b draft/b"])
 
     def test_gate_findings_reject_without_landing_and_print_unique_gates(self):
         self.append(started(), ended())
@@ -656,7 +759,7 @@ walk = false
                                     gates.Finding("docs", "no docstring")]
         self.tick()
         self.land.assert_not_called()
-        self.assertEqual(self.out.getvalue(), "land draft/a rejected gate:files,docs\n")
+        self.assertEqual(self.out.getvalue(), "flow draft target 2, 0 in flight\nland draft/a rejected gate:files,docs\n")
         self.assertFalse(any(entry["ev"] == "note" for entry in log.read()))
 
     def test_clean_screen_precedes_landing_with_current_events_and_runner(self):
@@ -674,7 +777,7 @@ walk = false
         self.land.side_effect = landing
         self.tick(log_path=path)
         self.land.assert_called_once()
-        self.assertEqual(self.out.getvalue(), "land draft/a draft/a-r1\n")
+        self.assertEqual(self.out.getvalue(), "flow draft target 2, 0 in flight\nland draft/a draft/a-r1\n")
         self.assertEqual(log.read(path), history)
 
     def test_failed_screen_never_lands_and_next_action_runs(self):
@@ -704,7 +807,7 @@ walk = false
 
         self.land.side_effect = landing
         self.tick()
-        self.assertEqual(self.out.getvalue(), "land draft/a draft/a\n")
+        self.assertEqual(self.out.getvalue(), "flow draft target 2, 0 in flight\nland draft/a draft/a\n")
 
     def test_failed_land_output_is_printed_and_noted_on_one_line(self):
         self.append(started(), ended())
@@ -715,13 +818,13 @@ walk = false
 
         self.land.side_effect = landing
         self.tick()
-        self.assertEqual(self.out.getvalue(), "land draft/a failed: draft/a: rebase: conflict file.py\n")
-        self.assertEqual(log.read()[-1]["text"], self.out.getvalue().strip())
+        self.assertEqual(self.out.getvalue(), "flow draft target 2, 0 in flight\nland draft/a failed: draft/a: rebase: conflict file.py\n")
+        self.assertEqual(log.read()[-1]["text"], self.out.getvalue().splitlines()[-1])
 
     def test_run_failures_do_not_stop_following_actions(self):
         self.add_task("b")
         self.add_task("c")
-        self.append(started())
+        self.append(*growth(), started())
         self.collect.side_effect = RuntimeError("lost builder")
         self.start.side_effect = [RuntimeError("cannot start"), "draft/c-1"]
         # Capacity is reserved from the snapshot even when a start fails.
@@ -786,7 +889,7 @@ walk = false
         self.tick()
         self.assertEqual((result, errors), ([[]], []))
         self.assertEqual(self.start.call_count, 1)
-        self.assertEqual(len(self.fake.calls), 2)
+        self.assertEqual(len(self.fake.calls), 3)
 
     def test_lock_released_after_input_failure(self):
         write(self.directory / "plan.toml", "invalid")
@@ -805,13 +908,14 @@ walk = false
 
     def test_explicit_empty_hosts_does_not_load_config_or_import_queue(self):
         with patch("fab.hosts.load", side_effect=AssertionError("unexpected load")):
-            self.assertEqual(dispatch.tick(self.directory, sh=self.fake, hosts={}), [])
+            self.assertEqual(dispatch.tick(self.directory, sh=self.fake, hosts={}),
+                             [Action("flow", task="draft", detail="target 2, 0 in flight")])
         self.assertEqual(len(self.fake.calls), 1)
 
     def test_explicit_log_path_used_for_import_run_calls_and_park(self):
         path = self.home / "custom.jsonl"
         self.add_task("b")
-        self.append(started(), path=path)
+        self.append(*growth(), started(), path=path)
         self.queue([dict(ev="rejected", ts="001", branch="draft/b", tip="b", step="test", log="red")])
         self.tick(log_path=path)
         self.assertEqual([c[0] for c in self.calls], ["collect", "start"])
@@ -833,9 +937,10 @@ walk = false
         before = log.default_path().read_bytes()
         with patch("fab.hosts.load", return_value=self.hosts), \
              patch("fab.dispatch.tick", side_effect=AssertionError("tick called")), \
-             patch("fab.dispatch.run", side_effect=AssertionError("command ran")):
+             patch("fab.dispatch.run", side_effect=AssertionError("command ran")), \
+             patch("fab.flow.measure", side_effect=AssertionError("builder measured")):
             self.assertEqual(dispatch.main([str(self.directory), "--dry-run"]), 0)
-        self.assertEqual(self.out.getvalue(), "land draft/a draft/a\n")
+        self.assertEqual(self.out.getvalue(), "flow draft target 2, 0 in flight\nland draft/a draft/a\n")
         self.assertEqual(log.default_path().read_bytes(), before)
         self.assertFalse((log.home() / "tick.lock").exists())
         self.assertEqual(self.calls, [])
