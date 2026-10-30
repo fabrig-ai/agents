@@ -240,9 +240,13 @@ idempotency, invalid IDs/state, exit codes, privacy, the consumer fixture,
 and QA forwarding known run IDs. Three set-run cases cover own-holder updates,
 idempotency and preserved metadata/queues, refusal of other holders and invalid
 IDs, and updating a moved login without opening it. The existing exact plain-output assertion
-also exercises a holder with run metadata. Each case
-has its own Linux subreaper process and session with signal cleanup, tracked
-child reaping, a 300-second tool hang bound and a 900-second case hang bound.
-The unittest wrapper runs cases sequentially; these bounds detect hangs rather
-than assert individual command speed. Tests never read login contents, including
+also exercises a holder with run metadata. Two fixture regressions verify
+restoration after an exception and a real crash's durable effect/memory isolation.
+Ordinary calls now use one cached production module in process, restoring argv,
+environment, cwd, umask and patches; each case still has fresh state. Irreversible
+audit hooks and queue-write exits keep real interpreter children. Real lock/taker
+handshakes and the four-taker case keep their bounded children. Expiry uses an
+injected clock and retains its queue-removal assertion. The unittest wrapper is
+serial, with a 900-second case deadline and 300-second external tool bounds;
+these detect hangs rather than assert individual command speed. Tests never read login contents, including
 the dummy directory move test, which compares entry names, inodes and sizes.

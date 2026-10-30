@@ -624,31 +624,34 @@ The existing director and stuck-address paths remain the service's settings.
 without it `QA_*` executable overrides are ignored. The real-command-line
 test keeps systemd programs on PATH with no executable override.
 
-Run `python3 -I -B tools/qa/test_qa.py`. Every unittest case runs in its own
-process, session and temporary HOME/DEV_ROOT with local git origins, fake
-services, fake local and remote claims, fake disk observations, slot clones
-under the temporary HOME, an empty Git template independent of host hooks,
-and fixture launcher observations; descendants are
-killed and reaped. Fixture drivers cap sleeps during fake stop confirmation
-at 10 ms while retaining real monotonic deadlines and all unit/export completion
-assertions; installed polling remains two seconds. Successful-stop cases wait
-for the fake manager's unit record to disappear before retrying an inconclusive
-observation or asserting custody. Cases that check one notification attempt retry
-the stop observation within that check; unknown/refused-stop cases retain their
-original bounded observations. Exporter contention uses
-readiness FIFOs to establish ordering. Standard read-only fake
-inventory, claim-list, disk and manager observations execute the identical
-fake program in the fixture interpreter, with parity checks against external
-execution. Mutations, SSH, launchers, stop/export actors, modified executables,
-deliberate hangs and the real-command-line case retain subprocess execution.
-The detached-pipe, FIFO give-back log and wrapper tests measure reaped
-child user plus system CPU instead of elapsed wall time. Each ceiling is
-four times the supplied idle measurement with a 500 ms minimum (500 ms
-for all three); command deadlines, exit results and descendant/completion
-assertions stay in place. The detached-pipe fixture publishes its PID atomically
-after creating its session; its short command timeout starts only after that
-readiness marker appears. The hanging exporter publishes both PIDs atomically;
-its wrapper wait starts after a marker matching that invocation's PID, including
-the fake manager's invocation. The bounded cargo fetch and deliberate manager
-hangs use a ready marker before their shortened timeout starts. The suite runs at
-most eight cases concurrently. It never uses real logins, a real manager or network.
+Run `bash tools/check.sh tools/qa/test_qa.py tools/qa/test_logins.py` for the
+fast offline contracts. Each case has fresh temporary HOME/DEV_ROOT/state.
+Production modules load once per file; serial CLI calls capture output and
+restore argv, environment, cwd, umask, injected globals and class/library
+patches. State, parser and guarded-reader cases use metadata fixtures, with
+traced fake command responses instead of unrelated Git preparation. Git
+contracts use real disposable origins/checkouts copied from one immutable
+class template. The gate retains one full external start, real literal-argv
+capture programs, external-versus-inline observation parity, real lock probes,
+and real custody taker handshakes. Crash failpoints run in bounded forked
+children inheriting loaded code; irreversible login audit hooks retain fresh
+interpreters. The login expiry uses an injected clock, and the four-taker
+contention case remains fast enough for the gate. Original case bounds remain
+90 seconds for walks and 900 seconds for custody.
+
+Slow deployment/export, timeout, orphan-process and Git/publication matrices
+live in `tools/qa/test_qa_periodic.py`, importing the gate fixtures. They keep
+their original assertions, independent process/session/state per case, real
+monotonic deadlines, readiness FIFOs and bounded cleanup. Their fake manager
+polls at 10 ms; installed polling remains two seconds. At most eight periodic
+cases run concurrently. Detached-pipe and wrapper CPU ceilings, real deadline,
+exit, descendant and completion assertions remain intact. All services, disk
+observations and remote endpoints are fakes or local Git origins; no real login,
+manager or network is used.
+
+The periodic filename follows the gate-tier convention. On the current gate
+runner (which has no `--tier` option), run it explicitly with
+`bash tools/check.sh tools/qa/test_qa_periodic.py`. Default discovery currently
+includes it too. Skipping periodic files in the merge gate and selecting them
+with `tools/check.sh --tier periodic` belongs to the gate-runner rollout;
+this test rewrite changes neither `tools/check.sh` nor budget rows.

@@ -1,7 +1,7 @@
 # QA status
 
-2026-10-30. Keeper: s/qa. Baseline for walk preservation: origin/main `e98c22d`.
-Contract: `docs/design/qa.md`, sections 2–7.
+2026-10-30. Keeper: s/qa. Baseline for this test rewrite: origin/main `580a456`.
+Contract: `docs/design/qa.md`, sections 2–8.
 
 ## Present
 
@@ -41,6 +41,17 @@ Contract: `docs/design/qa.md`, sections 2–7.
   `tools/qa/fixtures/qa-queue.json` are checked against real CLI output in the
   respective test suites. This establishes producers, not deployed consumers.
 
+- **Offline tests have fast and periodic files.** `tools/qa/test_qa.py` keeps
+  182 cases (159 walk cases plus 23 evidence repair probes);
+  `tools/qa/test_qa_periodic.py` keeps 49 unchanged integration cases, including
+  two evidence publication matrices. All 74 custody cases remain in
+  `tools/qa/test_logins.py`, with two added fixture-isolation regressions.
+  Fresh state, cached production code, scoped injections, lazy metadata
+  fixtures and bounded real crash/IPC children replace ordinary CLI startups.
+  Production code is unchanged. The current `tools/check.sh` has no tier
+  selection and still discovers periodic files by default; explicit file runs
+  verify the split until the gate owner's runner rollout.
+
 ## Plan differences and remaining gaps
 
 - **Passes are not built or activated.** `tools/qa/passes.md` is provisional;
@@ -61,19 +72,17 @@ Contract: `docs/design/qa.md`, sections 2–7.
 
 ## Verification
 
-`bash tools/check.sh` runs `tools/qa/test_logins.py` and
-`tools/qa/test_qa.py` along with the repository gate, with isolated temporary
-HOME and fake services. This branch runs only
-`python3 -I -B tools/qa/test_qa.py`, as assigned. The original feature run
-passed 208 tests; the first repair run passed 220 and repair 2 passed 230.
-Repair 3 passed 231 tests in 86.691 seconds (86.902 seconds shell wall time;
-274.626 seconds CPU). One new in-process regression test covers 100 changing
-queue failures plus claim/orphan release, evidence refusal, measurement and
-overdue-launch notices. All 23 in-process probes passed separately in 1.220
-seconds (1.395 seconds CPU), with no child interpreters.
-The 208 existing child-isolated cases are unchanged in count. The full suite
-still exceeds the ten-second per-file CPU budget; the suite framework rewrite
-is separate work.
-No full gate or live service tests were run. Deployment requires matching `qa` and
-`evidence.py` plus a watcher restart. Remote publication requires explicit
-configuration of both private repository and branch; no service is deployed here.
+The framework rewrite preserves all 305 original case names: QA 231 becomes
+182 gate + 49 periodic; custody keeps 74 and adds two context/crash regressions.
+The periodic assertions are unchanged. Focused whole-file CPU/wall samples
+are QA 8.538/8.494 and 8.712/8.663 seconds; custody 1.841/1.642 and
+1.918/1.710 seconds. The periodic file passes twice at about 67.5 CPU / 12.8
+wall seconds. The full gate passes 29 files in 84.539 seconds, so the overall
+minute target remains unmet by other suites (fleet-sync, after-landing periodic
+and records watch each exceed a minute). Both focused gate files and the
+periodic file pass; all measurements use temporary HOME/TMPDIR, fake services
+and local Git origins. See the assigned measurement report
+`/home/free/src/fabrig/notes/q/qa-gate-budget-report.md` for two before/after
+CPU and wall samples, the evidence-case classifications, full-gate result,
+case-name accounting and commit IDs. Neither production code nor budget rows
+change, and this branch requires no machine action or watcher restart.

@@ -214,7 +214,26 @@ the original name is free; missing identities retain scratch with one retried
 notice. Retention requires a concrete end time consistent with the walk start.
 Pass preservation and required result publication remain planned.
 
-## 8. Later
+## 8. Offline verification tiers
+
+**Gate contracts use fresh state and scoped calls.** `tools/qa/test_qa.py`
+and `tools/qa/test_logins.py` load production once per file and call ordinary
+CLI paths serially, restoring process context and injected patches after each
+call. Metadata fixtures avoid unrelated Git work; Git-specific contracts keep
+real disposable repositories from an immutable class template. Keep real
+children for crash/audit boundaries, lock and custody handshakes, literal argv
+captures, external fixture parity and one full start smoke. Fake clocks cover
+logical expiry; case deadlines and every existing behavioral assertion remain.
+
+**Periodic cases retain process and integration coverage.** Deployment/export,
+real deadlines, orphan-process races and Git/publication matrices live in
+`tools/qa/test_qa_periodic.py` and import fixtures from the gate file. Each
+periodic case owns its temporary state and process tree. The periodic filename
+is the gate-tier contract; gate-runner selection and budget enforcement remain
+owned by the gate design (`docs/design/gate.md`, section 2). The adjacent QA
+status records whether that runner supports tier selection yet.
+
+## 9. Later
 
 - Build and activate passes only after queue producer, feed coverage,
   publication, lifetime and scheduler acceptance checks in `tools/qa/passes.md`.
