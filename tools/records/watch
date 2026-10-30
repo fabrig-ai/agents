@@ -417,7 +417,7 @@ def evaluate(data, state, config, now):
     def allowed(owner):
         identity = names.get(owner, {})
         return not identity.get('paused', False) and (identity.get('always_watched', False) or owned.get(owner, False))
-    def add(rule, subject, owner, evidence, deps, supervisor=None, **joins):
+    def add(rule, subject, owner, evidence, deps, **joins):
         if not config[rule]['enabled'] or not allowed(owner):
             return
         identity = names.get(owner, {})
@@ -429,7 +429,7 @@ def evaluate(data, state, config, now):
             dependencies.append('owns/' + owner)
         candidates[rule + '\t' + subject] = dict(rule=rule, subject=subject, owner=owner,
             supervisor=identity.get('supervisor', ''),
-            escalate_to=identity.get('supervisor', '') if supervisor is None else supervisor,
+            escalate_to=identity.get('supervisor', ''),
             evidence=evidence[:6], deps=dependencies, **keys)
     def older(when, minutes):
         return now - stamp(when) > minutes * 60
@@ -470,7 +470,7 @@ def evaluate(data, state, config, now):
                 ['unit/' + name, 'mail'])
             candidate = candidates.get('deaf\t' + name)
             if candidate is not None:
-                candidate.update(skip_wake=True, first_to=identity['supervisor'])
+                candidate.update(skip_wake=True)
     active = {d['mailbox']: d for d in data.get('drafts', []) if d.get('state') == 'active'}
     for name, identity in names.items():
         registered = name in active
@@ -483,16 +483,13 @@ def evaluate(data, state, config, now):
         codex = identity.get('kind') == 'codex'
         absent = data.get('unit/' + name) is False if codex else name not in live
         if registered and absent:
-            supervisor = identity.get('supervisor', '')
             draft = active.get(name) or active.get(identity.get('coordinator_mailbox')) or {}
             joins = {k: v for k, v in identity.items() if k in JOIN}
             if draft:
                 joins.update(draft=draft.get('draft', ''), coordinator=draft['mailbox'])
             evidence = 'registered unfinished role has inactive Codex owner unit' if codex else 'registered unfinished role absent from claude agents'
             add('gone', name, name, [evidence],
-                ['unit/' + name if codex else 'agents', 'drafts'], supervisor='director', **joins)
-            if 'gone\t' + name in candidates:
-                candidates['gone\t' + name]['first_to'] = supervisor
+                ['unit/' + name if codex else 'agents', 'drafts'], **joins)
     runs = [(key.split('/', 1)[1], row) for key, rows in data.items() if key.startswith('runs/') for row in rows]
     medians = {}
     for _, row in runs:
@@ -506,12 +503,13 @@ def evaluate(data, state, config, now):
         if not row['ended']:
             elapsed = now - row['started']
             samples = medians.get(row['effort'], [])
-            median = statistics.median(samples) if samples else None
+            rule = config['run hung']
+            median = statistics.median(samples) if len(samples) >= rule['median_min_samples'] else None
             quiet = older(row['changed'], config['run hung']['minutes'])
-            over = median is not None and elapsed > median * config['run hung']['median_multiplier']
-            if quiet or over:
+            limit = median * rule['median_multiplier'] if median is not None else rule['fallback_minutes'] * 60
+            if quiet and elapsed > limit:
                 add('run hung', subject, owner, [f'output unchanged since {iso(row["changed"])}',
-                    f'elapsed_s={elapsed:.0f}; effort={row["effort"]}; median_s={median}'], deps, **joins)
+                    f'elapsed_s={elapsed:.0f}; effort={row["effort"]}; median_s={median}; samples={len(samples)}; limit_s={limit}'], deps, **joins)
         if row['ended']:
             mail = [m for m in data.get('mail', []) if m['owner'] == owner and
                     m['sender'].split('@')[0] == 'codex-run' and run in m['subject'] and
@@ -521,7 +519,7 @@ def evaluate(data, state, config, now):
                     f'delivered={iso(mail[0]["delivered"])}'], deps + ['mail', 'agents', 'waiters'], **joins)
             if row.get('post_status') == 2 and not row.get('told'):
                 add('delivery failed', subject, owner, ['sender=codex-run; post send exited 2; no told marker'],
-                    deps, supervisor='ops', **joins)
+                    deps, **joins)
     for claim in data.get('claims', []):
         host, number = claim['host'], claim['number']
         deps = ['claims', 'runs/' + host, 'heavy/' + host, 'records/heavy', 'records/queue']
@@ -553,7 +551,7 @@ def evaluate(data, state, config, now):
         if not busy and older(max(activity), config['idle claim']['minutes']):
             add('idle claim', claim['subject'], claim['owner'],
                 [f'claim since={iso(claim["created"])}; last activity={iso(max(activity))}', 'no live run, heavy command or recent precheck'],
-                deps, supervisor='ops')
+                deps)
     refs = data.get('refs', {})
     seen = state.setdefault('refs', {})
     if 'refs' in data:
@@ -567,13 +565,13 @@ def evaluate(data, state, config, now):
                         for r in data.get('records/queue', []))
         if not attempted and older(seen[branch]['since'], config['unqueued']['minutes']):
             add('unqueued', branch, 'ops', [f'tip={tip}', f'ready tip first observed={iso(seen[branch]["since"])}; no attempt'],
-                ['refs', 'records/queue'], supervisor='director', branch=branch)
+                ['refs', 'records/queue'], branch=branch)
     if refs:
         batches = [stamp(r['time']) for r in data.get('records/queue', []) if r.get('kind') == 'batch' and not r.get('dry')]
         last = max(batches) if batches else min(r['since'] for r in seen.values())
         if older(last, config['unqueued']['batch_minutes']):
             add('unqueued', 'queue', 'ops', [f'ready refs={len(refs)}; last batch/first observation={iso(last)}'],
-                ['refs', 'records/queue'], supervisor='director')
+                ['refs', 'records/queue'])
     for row in data.get('leases', []):
         waiting = row.get('waiters', [])
         if not waiting or not row.get('owner'):
@@ -592,7 +590,7 @@ def evaluate(data, state, config, now):
         if wait_past or stalled:
             add('lease stall', subject, owner, [f'waiters={len(waiting)}; oldest waiter={iso(oldest)}',
                 f'last package event/lease start={iso(max(activity))}'],
-                ['leases'] + ([] if wait_past else activity_deps), supervisor='director')
+                ['leases'] + ([] if wait_past else activity_deps))
     session_events = [dict(e, time=e['first_fired']) if e.get('kind') == 'handover-needed' and e.get('first_fired') else e
                       for e in data.get('records/sessions', [])]
     for name, identity in names.items():
@@ -626,7 +624,7 @@ def evaluate(data, state, config, now):
     for row in data.get('questions', []):
         if not row.get('answer') and now > stamp(row['deadline']):
             add('question due', row['subject'], 'director', [f'question={row["subject"]}; deadline={iso(stamp(row["deadline"]))}'],
-                ['questions'], supervisor='')
+                ['questions'])
     deliveries = {}
     for source in ('records/post', 'records/post-sent'):
         for row in data.get(source, []):
@@ -637,14 +635,19 @@ def evaluate(data, state, config, now):
     for message, (row, source) in deliveries.items():
         if row.get('exit') == 2:
             add('delivery failed', message, row['from'].split('@')[0], ['post send exited 2; message_id=' + message],
-                [source], supervisor='ops', **{k: row[k] for k in JOIN if k in row})
+                [source], **{k: row[k] for k in JOIN if k in row})
     return candidates
 
 
-def reconcile(state, candidates, errors, config, now, action):
+def reconcile(state, candidates, errors, config, now, action, post=True):
     """Episodes survive missing inputs. Only two successful clear runs close one."""
     episodes = state.setdefault('episodes', {})
     events = []
+    # Older state treated suppressed sends as delivered and has no mode marker.
+    if 'posts_enabled' not in state:
+        for episode in episodes.values():
+            episode.setdefault('silent_since', episode['opened'])
+    state['posts_enabled'] = post
     def emit(kind, episode):
         fields = {k: v for k, v in episode.items() if k in JOIN + ['rule', 'subject', 'owner', 'supervisor', 'wake', 'episode']}
         identity = [kind, episode['rule'], episode['subject'], episode['opened'], episode.get('episode', 0)]
@@ -656,22 +659,38 @@ def reconcile(state, candidates, errors, config, now, action):
                 episodes[key]['clear'] = 0
             continue
         episode = episodes.get(key)
-        if episode is None:
+        created = episode is None
+        if created:
             state['next_episode'] = state.get('next_episode', 0) + 1
             episode = dict(candidate, episode=state['next_episode'], opened=now, clear=0, escalated=False, notified=False)
+            if not post:
+                episode['silent_since'] = now
             if candidate['rule'] == 'deaf' and not candidate.get('skip_wake'):
                 episode['wake'] = action('wake', candidate['owner'], candidate)
                 episode['notified'] = True
             else:
-                episode['notified'] = action('send', candidate.get('first_to', candidate['owner']), candidate) in (0, 3)
+                episode['notified'] = action('send', candidate['owner'], candidate) in (0, 3)
             episodes[key] = episode
             emit('alert-open', episode)
         else:
             episode['clear'] = 0
             episode.update(candidate)
-            if not episode['notified']:
-                episode['notified'] = action('send', candidate.get('first_to', candidate['owner']), candidate) in (0, 3)
         interval = config[candidate['rule']]['escalate_minutes'] * 60
+        due = bool(episode['escalate_to']) and now - episode['opened'] >= interval
+        if post and 'silent_since' in episode:
+            # Re-evaluation above proves it is still active. Send one catch-up,
+            # directly to the supervisor if escalation is already due.
+            notice = dict(candidate, was_silent_since=iso(episode['silent_since']))
+            to = episode['escalate_to'] if due else candidate['owner']
+            if action('send', to, notice) in (0, 3):
+                episode.pop('silent_since')
+                episode['notified'] = True
+                if due and not episode['escalated']:
+                    episode['escalated'] = True
+                    emit('alert-escalate', episode)
+            continue
+        if not created and not episode['notified']:
+            episode['notified'] = action('send', candidate['owner'], candidate) in (0, 3)
         if episode['escalate_to'] and not episode['escalated'] and now - episode['opened'] >= interval:
             if action('send', episode['escalate_to'], candidate) in (0, 3):
                 episode['escalated'] = True
@@ -731,7 +750,10 @@ def run(dry, config, post, heartbeat_seconds):
         def action(kind, to, candidate):
             argv = ['post', 'wake', to] if kind == 'wake' else [
                 'post', 'send', '--as', 'watch', to, 'watch: ' + candidate['rule'] + ' ' + candidate['subject']]
-            body = '\n'.join(candidate['evidence']) + '\n'
+            lines = candidate['evidence'][:6]
+            if 'was_silent_since' in candidate:
+                lines = ['(was silent since ' + candidate['was_silent_since'] + ')'] + lines
+            body = '\n'.join(lines) + '\n'
             if dry or not post:
                 print('would ' + shlex.join(argv))
                 if kind == 'send':
@@ -749,7 +771,7 @@ def run(dry, config, post, heartbeat_seconds):
                 errors['post/' + kind] = type(error).__name__
                 return 'unwoken: command failed' if kind == 'wake' else 2
         candidates = evaluate(data, state, config, now)
-        events = reconcile(state, candidates, errors, config, now, action)
+        events = reconcile(state, candidates, errors, config, now, action, post=post)
         # A failed ownership lookup freezes the corresponding episodes as well.
         dependencies = {
             'deaf': ['agents', 'waiters', 'mail'], 'gone': ['names', 'agents', 'drafts'],

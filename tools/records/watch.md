@@ -11,13 +11,18 @@ changes the watch state, or advances the live records clone. Its one `record
 pull` uses a disposable clone, deleted on exit. All publications use the
 sibling `record` executable from this checkout. No legacy code is imported.
 
-`watch.toml` starts with `[alerts] post = false`. In this mode watch evaluates
-conditions, persists episodes, and appends alert events and heartbeats as usual.
-It logs the proposed post commands and evidence, but never sends or wakes.
-Suppressed actions count as handled for episode deduplication; enabling posts
-does not replay earlier actions. After reviewing a day of alert events, the
-designer changes `post = true` in a commit to enable future sends and wakes.
-Unlike `--dry-run`, silent mode still updates state and publishes records.
+`watch.toml` enables `[alerts] post = true`. Setting it to false still evaluates
+conditions, persists episodes, and publishes alert events and heartbeats, while
+logging proposed commands without sending or waking. Silent episodes carry
+their opening time. On enabling posts, only episodes confirmed active by fresh,
+successful inputs receive a catch-up, once each, marked
+`(was silent since <time>)`. Cleared conditions do not post while awaiting their
+second clear poll. An overdue catch-up goes directly to the supervisor and
+satisfies escalation; otherwise it goes to the owner and the normal escalation
+clock continues. Failed sends retry. Legacy silent state migrates using each
+episode's original opening time, even if its suppressed actions were already
+marked handled. Suppressed historical events in the publication outbox never
+replay mailbox actions. Unlike `--dry-run`, silent mode updates state and records.
 
 `watch.toml` enables each of the ten rules and holds every timing threshold.
 Conditions use strict "older than" comparisons; escalation is due at its
@@ -30,15 +35,21 @@ to director; the director batches the question to the user.
 | Rule | Evidence / first destination | Escalation |
 |---|---|---|
 | deaf | live session, dead/missing waiter, mail mtime >10m; wake once | supervisor, 20m |
-| gone | registered active draft or unfinished lead part, absent session; supervisor | director, 30m |
+| gone | registered active draft or unfinished lead part, absent session; owner | supervisor, 30m |
 | report unread | completed run id in codex-run post header, mtime >15m; owner, unless deaf covers it | supervisor |
-| run hung | output `events.jsonl` mtime >30m, or elapsed >3× median of completed runs at that effort; owner | supervisor |
-| idle claim | >45m since claim or latest run/heavy/precheck activity, with no live run/heavy; holder | ops |
-| unqueued | unchanged ready tip observed >30m with no attempt for that tip, or >20m without a batch while refs exist; ops | director |
-| lease stall | waiters and >4h without package events, or waiter >2h; holder | director |
+| run hung | output `events.jsonl` mtime >60m AND elapsed >3× median of at least 5 completed runs at that effort (else >90m); owner | supervisor |
+| idle claim | >45m since claim or latest run/heavy/precheck activity, with no live run/heavy; holder | supervisor |
+| unqueued | unchanged ready tip observed >30m with no attempt for that tip, or >20m without a batch while refs exist; ops | supervisor |
+| lease stall | waiters and >4h without package events, or waiter >2h; holder | supervisor |
 | handover late | >20m after recorded context hook without successor or files-current metadata; session | supervisor |
 | question due | unanswered question past its deadline; director | director handles the user |
-| delivery failed | send exit 2 without successful retry/told marker; sender (run's session owner for codex-run) | ops |
+| delivery failed | send exit 2 without successful retry/told marker; sender (run's session owner for codex-run) | supervisor |
+
+Open sends go to the subject's mailbox or its owner. Every escalation uses the
+owner's supervisor from the launcher, including director for coordinators, ops
+and s/deploy. The post subject contains the rule and watched subject; its body
+contains up to six lines of evidence, plus the silent marker for a catch-up.
+The director has no escalation destination.
 
 The launcher supplies identities and supervisors through
 `session-start names --json`, an array of rows with `mailbox` and
@@ -74,7 +85,9 @@ that inference. All SSH reads have timeouts and run concurrently.
 Ready refs have no creation timestamp in `ls-remote`, so age means continuous
 observation of the same tip. A new tip starts its clock again; historical
 attempts for another tip do not hide it. Run medians use completed runs in the
-available producer ledgers. Lease activity requires explicit package/subject
+available producer ledgers, grouped by effort. `minutes`, `median_multiplier`,
+`median_min_samples` and `fallback_minutes` configure both run-hung conditions.
+Lease activity requires explicit package/subject
 keys or an event for a branch lent by that lease; unrelated coordinator activity
 does not prove package activity. The sessions collector supplies durable `handover-needed` events from
 `session-context --fired --json`, including updates with the same
@@ -85,7 +98,7 @@ proves firing. Sessions' `files-current` projection and lead post subjects
 starting with `files current` acknowledge handover using header metadata;
 mail bodies are never read. An explicit successor/session-start also clears it.
 The `post-sent` stream supplies send exits from the port's `sent.jsonl`
-metadata; exit 2 alerts the sender and escalates to ops, and a later successful
+metadata; exit 2 alerts the sender and escalates to its supervisor; a later successful
 row for the same message clears the condition. Existing run completion/told
 evidence and post delivery events remain supported.
 
@@ -145,6 +158,21 @@ expectation, including after a `files current` post. Scratch `brief.md` and
 handover, not completion of remaining work. Codex liveness uses its user unit.
 `deaf` means unread mail
 older than the configured threshold while the unit is inactive: skip `post wake`
-and notify the coordinator immediately. Failed unit queries freeze dependent
+and send to the owner; an unresolved episode escalates to the coordinator. Failed unit queries freeze dependent
 episodes. Codex `handover-needed` threshold events drive the same handover clock
 and acknowledgements; the coordinator remains the lead's supervisor.
+
+Replay retained lifecycle records without invoking any producers or post:
+
+```sh
+python3 -I -B tools/records/replay_watch.py /path/to/records --day 2026-10-29 --day 2026-10-30
+```
+
+This uses historical completions as they become available, seeds medians from
+older retained days, and rebuilds two-minute polls within each day's observed
+watch window. Lifecycle events lack output modification times, inventory and
+probe availability. The replay gives runs a synthetic watched owner and assumes
+output never changed after start, so its count is an upper bound for that input
+reconstruction, not confirmed true hangs. It cannot establish the exact number
+of real episodes or their truth. `test_watch_replay.py` uses synthetic records
+and a temporary HOME to check boundaries and prevent future median leakage.

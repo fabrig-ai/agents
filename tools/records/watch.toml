@@ -1,6 +1,6 @@
 # Minutes; conditions use strict 'older than' comparisons. Disable any rule.
 [alerts]
-post = false
+post = true
 
 [watch]
 interval_seconds = 120
@@ -22,8 +22,10 @@ escalate_minutes = 15
 
 [rules."run hung"]
 enabled = true
-minutes = 30
+minutes = 60
 median_multiplier = 3
+median_min_samples = 5
+fallback_minutes = 90
 escalate_minutes = 30
 
 [rules."idle claim"]

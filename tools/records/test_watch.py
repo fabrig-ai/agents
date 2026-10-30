@@ -68,7 +68,7 @@ class Rules(unittest.TestCase):
         self.assertFalse([c for c in self.rule('gone') if c['owner'] == 'lead/tools'])
         self.data['drafts'][0]['unfinished_parts'] = ['tools-parser']
         gone = next(c for c in self.rule('gone') if c['owner'] == 'lead/tools')
-        self.assertEqual(gone['first_to'], 's/default')
+        self.assertNotIn('first_to', gone)
         self.assertEqual(gone['supervisor'], 's/default')
         self.assertIn('unit/lead/tools', gone['deps'])
         self.assertNotIn('agents', gone['deps'])
@@ -84,14 +84,14 @@ class Rules(unittest.TestCase):
         del self.data['unit/lead/tools']
         self.assertFalse([c for c in self.rule('gone') if c['owner'] == 'lead/tools'])
 
-    def test_codex_deaf_skips_wake_and_notifies_coordinator_immediately(self):
+    def test_codex_deaf_skips_wake_and_posts_to_owner(self):
         self.codex()
         self.mail(10)
         self.assertFalse(self.rule('deaf'))
         self.data['waiters']['lead/tools'] = dict(alive=True)
         self.assertTrue(self.rule('deaf', NOW+1))
         self.round(NOW+1, errors={'agents': 'unavailable', 'waiters': 'unavailable'})
-        self.assertEqual(self.calls, [('send', 's/default', 'deaf')])
+        self.assertEqual(self.calls, [('send', 'lead/tools', 'deaf')])
         self.round(NOW+2)
         self.assertEqual(len(self.calls), 1)
         self.data['unit/lead/tools'] = True
@@ -151,14 +151,14 @@ class Rules(unittest.TestCase):
         events = self.round()
         self.assertEqual(len(events), 2)
         self.assertIn(('send', 's/second', 'gone'), self.calls)
-        self.assertIn(('send', 'director', 'gone'), self.calls)
+        self.assertIn(('send', 'lead/H/tools', 'gone'), self.calls)
         self.calls.clear()
         self.round(NOW+1799)
         self.assertEqual(self.calls, [])
         events = self.round(NOW+1800)
         self.assertEqual(len(events), 2)
         self.assertTrue(all(e['kind'] == 'alert-escalate' for e in events))
-        self.assertTrue(all(c[1] == 'director' for c in self.calls))
+        self.assertEqual(set(c[1] for c in self.calls), {'s/second', 'director'})
         lead = next(e for e in events if e['owner'] == 'lead/H/tools')
         self.assertEqual(lead['supervisor'], 's/second')
 
@@ -172,16 +172,42 @@ class Rules(unittest.TestCase):
         self.data['waiters']['lead/tools']['alive'] = False
         self.assertFalse(self.rule('report unread', NOW+1))
 
-    def test_hung_quiet_threshold_and_effort_median(self):
-        row = self.add_run(changed=NOW-1800)
+    def test_hung_requires_quiet_and_elapsed_with_fallback(self):
+        row = self.add_run(changed=NOW-3600, started=NOW-5400)
         self.assertFalse(self.rule('run hung'))
         self.assertTrue(self.rule('run hung', NOW+1))
-        row.update(changed=NOW, started=NOW-600)
-        self.add_run(run='finished', ended=True, started=NOW-200, end=NOW, effort='high')
-        self.add_run(run='other-effort', ended=True, started=NOW-10, end=NOW, effort='low')
+        row['changed'] = NOW
+        self.assertFalse(self.rule('run hung', NOW+1))
+        row.update(changed=NOW-5401, started=NOW-5400)
         self.assertFalse(self.rule('run hung'))
-        self.assertTrue(self.rule('run hung', NOW+1))
+        row['started'] -= 1
+        self.assertTrue(self.rule('run hung'))
         row['ended'] = True
+        self.assertFalse(self.rule('run hung'))
+
+    def test_hung_needs_five_completed_samples_at_same_effort(self):
+        row = self.add_run(changed=NOW-3601, started=NOW-3601)
+        for i in range(4):
+            self.add_run(run=f'finished-{i}', ended=True, started=NOW-200, end=NOW)
+        for i in range(5):
+            self.add_run(run=f'low-{i}', ended=True, started=NOW-10, end=NOW, effort='low')
+        self.assertFalse(self.rule('run hung'))
+        self.add_run(run='fifth', ended=True, started=NOW-200, end=NOW)
+        self.assertTrue(self.rule('run hung'))
+        row['changed'] = NOW
+        self.assertFalse(self.rule('run hung'))
+
+    def test_hung_median_elapsed_boundary_and_config(self):
+        row = self.add_run(changed=NOW-3601, started=NOW-7200)
+        for i in range(5):
+            self.add_run(run=f'finished-{i}', ended=True, started=NOW-2400, end=NOW)
+        self.assertFalse(self.rule('run hung'))
+        self.assertTrue(self.rule('run hung', NOW+1))
+        self.config['run hung']['median_multiplier'] = 4
+        self.assertFalse(self.rule('run hung', NOW+1))
+        self.config['run hung']['median_min_samples'] = 6
+        self.assertTrue(self.rule('run hung', NOW+1))
+        self.config['run hung']['fallback_minutes'] = 180
         self.assertFalse(self.rule('run hung', NOW+1))
 
     def test_claim_threshold_and_all_activity(self):
@@ -374,6 +400,83 @@ class Rules(unittest.TestCase):
                 self.round(NOW+1200)
                 self.assertEqual(self.calls, [('wake', name, 'deaf')] + ([('send', target, 'deaf')] if target else []))
 
+    def test_all_rules_route_open_to_owner_and_escalation_to_supervisor(self):
+        self.live()
+        self.mail(16)
+        self.mail(16, owner='lead/H/tools', subject='codex-run finished', sender='codex-run@hel8')
+        self.data['drafts'] = [dict(mailbox='s/default', state='active')]
+        self.add_run(owner='s/deploy', started=0, changed=0)
+        self.add_run(run='finished', owner='lead/H/tools', ended=True)
+        self.data['claims'] = [dict(subject='hel8-2', host='hel8', number='2', owner='lead/tools', created=0)]
+        self.data['refs'] = {'ready/test': 'tip'}
+        self.state['refs'] = {'ready/test': dict(tip='tip', since=0)}
+        self.data['leases'] = [dict(subject='pkg:test', owner='lead/H/tools', since=0,
+                                    waiters=[dict(owner='s/default', since=0)])]
+        self.data['records/sessions'] = [dict(kind='context-hook', name='lead/H/tools', time=ISO(0))]
+        self.data['questions'] = [dict(subject='question', deadline=ISO(0))]
+        self.data['records/post-sent'] = [dict(id='failed', kind='send', time=ISO(NOW),
+                                              **{'from': 'lead/tools', 'exit': 2})]
+        candidates = self.judge()
+        self.assertEqual({c['rule'] for c in candidates.values()}, set(API['RULES']))
+        for candidate in candidates.values():
+            self.assertNotIn('first_to', candidate)
+            self.assertEqual(candidate['escalate_to'], self.names[candidate['owner']]['supervisor'])
+        self.round()
+        self.calls.clear()
+        self.round(NOW+20000)
+        self.round(NOW+20001)
+        escalations = [c for c in self.calls if c[0] == 'send']
+        self.assertEqual(len(escalations), sum(bool(c['escalate_to']) for c in candidates.values()))
+
+    def test_silent_catchup_migrates_legacy_and_ignores_cleared_conditions(self):
+        self.data['questions'] = [dict(subject='old', deadline=ISO(0)), dict(subject='active', deadline=ISO(0))]
+        self.round()
+        # Legacy silent mode persisted notified/escalated as true without a mode marker.
+        self.state.pop('posts_enabled')
+        self.calls.clear()
+        self.data['questions'].pop(0)
+        candidates = self.judge()
+        notices = []
+        def send(kind, to, candidate):
+            notices.append((kind, to, candidate))
+            return 0
+        for tick in (NOW+1, NOW+2, NOW+3):
+            API['reconcile'](self.state, candidates, {}, self.config, tick, send)
+        self.assertEqual(len(notices), 1)
+        self.assertEqual(notices[0][2]['subject'], 'active')
+        self.assertEqual(notices[0][2]['was_silent_since'], ISO(NOW))
+        self.assertNotIn('question due\told', self.state['episodes'])
+
+    def test_silent_overdue_catchup_posts_supervisor_once_with_retry_and_freeze(self):
+        self.live('s/deploy')
+        self.mail(11, owner='s/deploy')
+        candidates = self.judge()
+        for tick in (NOW, NOW+1200):
+            API['reconcile'](self.state, candidates, {}, self.config, tick, self.action, post=False)
+        self.calls.clear()
+        notices = []
+        def send(kind, to, candidate):
+            notices.append((kind, to, candidate))
+            return 2 if len(notices) == 1 else 3
+        API['reconcile'](self.state, candidates, {'mail': 'unavailable'}, self.config, NOW+1201, send)
+        self.assertEqual(notices, [])
+        for tick in (NOW+1202, NOW+1203, NOW+1204):
+            API['reconcile'](self.state, candidates, {}, self.config, tick, send)
+        self.assertEqual([(kind, to) for kind, to, _ in notices], [('send', 'director')]*2)
+        self.assertTrue(all(c['was_silent_since'] == ISO(NOW) for _, _, c in notices))
+
+    def test_silent_recent_catchup_to_owner_then_normal_escalation(self):
+        self.live()
+        self.mail(11)
+        candidates = self.judge()
+        API['reconcile'](self.state, candidates, {}, self.config, NOW, self.action, post=False)
+        self.calls.clear()
+        API['reconcile'](self.state, candidates, {}, self.config, NOW+1, self.action)
+        API['reconcile'](self.state, candidates, {}, self.config, NOW+2, self.action)
+        self.assertEqual(self.calls, [('send', 'lead/tools', 'deaf')])
+        API['reconcile'](self.state, candidates, {}, self.config, NOW+1200, self.action)
+        self.assertEqual(self.calls[-1], ('send', 's/default', 'deaf'))
+
     def test_paused_not_ours_and_rules_disabled(self):
         self.live()
         self.mail(11)
@@ -414,7 +517,7 @@ class Rules(unittest.TestCase):
         self.assertEqual(len(candidates), 1)
         self.assertIn('records/post-sent', candidates[0]['deps'])
         self.assertEqual(candidates[0]['owner'], 's/default')
-        self.assertEqual(candidates[0]['escalate_to'], 'ops')
+        self.assertEqual(candidates[0]['escalate_to'], 'director')
         self.round()
         self.assertEqual(self.calls, [('send', 's/default', 'delivery failed')])
         self.data.pop('records/post-sent')
@@ -515,6 +618,8 @@ home=Path(os.environ['HOME'])
 if sys.argv[1]=='waiters': print((home/'waiters').read_text(),end='')
 else:
  with (home/'post.log').open('a') as out: out.write(__import__('json').dumps(sys.argv[1:])+'\\n')
+ if sys.argv[1]=='send':
+  with (home/'bodies.log').open('a') as out: out.write(__import__('json').dumps(sys.stdin.read())+'\\n')
  if sys.argv[1]=='wake': print(os.environ.get('WAKE_RESULT','queued'))
  sys.exit(int(os.environ.get('POST_EXIT','0')))
 """)
@@ -542,7 +647,7 @@ else: sys.exit(1 if sys.argv[2] in os.environ.get('UNOWNED','').split(',') else 
         self.write(self.bin / name, '#!/usr/bin/env python3\n'+program).chmod(0o700)
     def invoke(self, dry=False, code=0, post=True, **env):
         config = self.write(self.home/'watch.toml', TOOL.with_suffix('.toml').read_text().replace(
-            'post = false', 'post = true' if post else 'post = false'))
+            'post = true', 'post = true' if post else 'post = false'))
         result = subprocess.run([str(TOOL), '--once', '--config', str(config)] + (['--dry-run'] if dry else []),
                                 env=dict(self.env, **env), capture_output=True, text=True)
         self.assertEqual(result.returncode, code, result.stdout+result.stderr)
@@ -609,7 +714,7 @@ else: sys.exit(1 if sys.argv[2] in os.environ.get('UNOWNED','').split(',') else 
                 self.assertTrue((scratch / 'brief.md').exists())
                 self.assertEqual(gone(), [])
 
-    def test_codex_cli_reads_unit_and_sends_deaf_directly_to_coordinator(self):
+    def test_codex_cli_reads_unit_and_sends_deaf_to_owner(self):
         path = self.write(self.tmp/'post/lead+u+jig/new/owner-mail.md',
                           'Id: owner-mail\nFrom: test@hel8\nTo: lead/u/jig@hel8\nSubject: synthetic\n\n')
         old = datetime.now(timezone.utc).timestamp()-660
@@ -618,7 +723,7 @@ else: sys.exit(1 if sys.argv[2] in os.environ.get('UNOWNED','').split(',') else 
         active = self.invoke(dry=True, UNIT_EXIT='0', FAIL_INPUT='claude')
         self.assertNotIn('deaf lead/u/jig', active.stdout)
         inactive = self.invoke(dry=True, UNIT_EXIT='3', FAIL_INPUT='claude')
-        self.assertIn("would post send --as watch s/upgrades 'watch: deaf lead/u/jig'", inactive.stdout)
+        self.assertIn("would post send --as watch lead/u/jig 'watch: deaf lead/u/jig'", inactive.stdout)
         self.assertNotIn('post wake lead/u/jig', inactive.stdout)
         failed = self.invoke(dry=True, UNIT_EXIT='1')
         self.assertNotIn('watch: deaf lead/u/jig', failed.stdout)
@@ -658,7 +763,7 @@ else: sys.exit(1 if sys.argv[2] in os.environ.get('UNOWNED','').split(',') else 
         self.invoke()
         self.assertEqual(sum(e['kind']=='alert-open' for e in self.events()), 2)
     def test_silent_mode_publishes_without_sending_or_waking(self):
-        self.assertFalse(tomllib.loads(TOOL.with_suffix('.toml').read_text())['alerts']['post'])
+        self.assertTrue(tomllib.loads(TOOL.with_suffix('.toml').read_text())['alerts']['post'])
         self.mail()
         self.write(self.home/'remote', json.dumps({'runs': [dict(
             run='hung', owner='lead/jig', cwd='/synthetic/slots/1', started=0, changed=0, effort='high', ended=False)], 'heavy': [], 'errors': []}))
@@ -682,6 +787,58 @@ else: sys.exit(1 if sys.argv[2] in os.environ.get('UNOWNED','').split(',') else 
         self.assertTrue(any(e['kind'] == 'alert-escalate' for e in self.events()))
         self.assertFalse((self.home/'post.log').exists())
         self.assertEqual(sum(e['kind'] == 'heartbeat' for e in self.events()), 2)
+
+    def test_cli_open_and_escalation_destinations_evidence_and_dedup(self):
+        owners = ['lead/jig', 's/qa', 'ops', 's/deploy']
+        self.write(self.home/'remote', json.dumps({'runs': [dict(
+            run=owner.replace('/', '-'), owner=owner, cwd='/synthetic', started=0,
+            changed=0, effort='high', ended=False) for owner in owners], 'heavy': [], 'errors': []}))
+        self.invoke()
+        sends = [json.loads(line) for line in (self.home/'post.log').read_text().splitlines()]
+        self.assertEqual({a[3] for a in sends}, set(owners))
+        self.assertTrue(all(a[:3] == ['send', '--as', 'watch'] for a in sends))
+        state = self.state()
+        for episode in state['episodes'].values():
+            episode['opened'] -= 1800
+        self.write(self.home/'.local/state/watch/state.json', json.dumps(state))
+        self.invoke()
+        self.invoke()
+        sends = [json.loads(line) for line in (self.home/'post.log').read_text().splitlines()]
+        self.assertEqual(len(sends), 8)
+        expected = {e['subject']: e['supervisor'] for e in self.events() if e['kind'] == 'alert-escalate'}
+        self.assertEqual(len(expected), 4)
+        bodies = [json.loads(line) for line in (self.home/'bodies.log').read_text().splitlines()]
+        for argv, body in zip(sends[4:], bodies[4:]):
+            subject = argv[4].removeprefix('watch: run hung ')
+            self.assertEqual(argv[3], expected[subject])
+            self.assertLessEqual(len(body.splitlines()), 6)
+            self.assertIn('output unchanged since', body)
+            self.assertIn('elapsed_s=', body)
+
+    def test_cli_silent_to_live_catchup_is_marked_and_not_repeated(self):
+        mail = self.mail()
+        self.write(self.home/'remote', json.dumps({'runs': [dict(
+            run='hung', owner='s/deploy', cwd='/synthetic', started=0, changed=0,
+            effort='high', ended=False)], 'heavy': [], 'errors': []}))
+        self.invoke(post=False)
+        state = self.state()
+        for episode in state['episodes'].values():
+            episode['opened'] -= 3600
+            # Simulate the already deployed silent state schema.
+            episode.pop('silent_since')
+            episode['escalated'] = True
+        state.pop('posts_enabled')
+        self.write(self.home/'.local/state/watch/state.json', json.dumps(state))
+        mail.unlink()
+        self.invoke()
+        self.invoke()
+        sends = [json.loads(line) for line in (self.home/'post.log').read_text().splitlines()]
+        self.assertEqual(len(sends), 1)
+        self.assertEqual(sends[0][3], 'director')
+        self.assertEqual(sends[0][4], 'watch: run hung builder/hung')
+        body = json.loads((self.home/'bodies.log').read_text())
+        self.assertIn('(was silent since ', body)
+        self.assertFalse(any(e['rule'] == 'deaf' for e in self.state()['episodes'].values()))
 
     def test_alerts_and_heartbeat_use_one_push_per_poll(self):
         pushes = self.home/'pushes'
