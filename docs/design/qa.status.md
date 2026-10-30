@@ -32,6 +32,9 @@ Contract: `docs/design/qa.md`, sections 2–7.
   of saved reservation and counted bytes, with one retried notice. Per-walk
   exception handling keeps measurement, preservation and pruning retryable
   while other walks and later watcher passes continue.
+  Repair 3 makes queue, claim/orphan release, launch and evidence-refusal notice
+  identities stable by operation. Diagnostic changes refresh the same receipt
+  without resending accepted messages; manual measurement shares that path.
   Added repair probes run in process with fresh HOME and fake services.
 - **JSON contracts are built.** Both tools expose the metadata interfaces in
   design section 2. `tools/qa/fixtures/logins-list.json` and
@@ -62,10 +65,12 @@ Contract: `docs/design/qa.md`, sections 2–7.
 `tools/qa/test_qa.py` along with the repository gate, with isolated temporary
 HOME and fake services. This branch runs only
 `python3 -I -B tools/qa/test_qa.py`, as assigned. The original feature run
-passed 208 tests; the first repair run passed 220. Repair 2 passed 230 tests
-in 124.944 seconds (125.212 seconds shell wall time; 287.290 seconds CPU).
-Ten new in-process tests join the twelve earlier probes: all 22 passed
-separately in 1.207 seconds (1.253 seconds CPU), with no child interpreters.
+passed 208 tests; the first repair run passed 220 and repair 2 passed 230.
+Repair 3 passed 231 tests in 86.691 seconds (86.902 seconds shell wall time;
+274.626 seconds CPU). One new in-process regression test covers 100 changing
+queue failures plus claim/orphan release, evidence refusal, measurement and
+overdue-launch notices. All 23 in-process probes passed separately in 1.220
+seconds (1.395 seconds CPU), with no child interpreters.
 The 208 existing child-isolated cases are unchanged in count. The full suite
 still exceeds the ten-second per-file CPU budget; the suite framework rewrite
 is separate work.

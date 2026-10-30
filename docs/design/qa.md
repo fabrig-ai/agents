@@ -110,7 +110,8 @@ prove that the session and its deployments have stopped.
 
 **Queue scarcity and dependencies.** Starts and resumes waiting for scratch
 bytes, a slot, login, pending release or landed dependency retain their
-request and starter.
+request and starter. Admission failures keep one notice per queue entry and
+step; changing diagnostics update its receipt without another accepted message.
 The watcher tries ready entries by kind after cleanup, without letting a busy
 entry block later ready work. Main resolves at admission. Saved admission
 identity prevents a recovered launch from starting twice. Resumes keep the
@@ -139,6 +140,9 @@ release. Another owner's or successor's claim is never released.
 the slot while retaining notes and deployment instructions for resume. Stuck
 ends keep cleanup pending. Notices and completion posts have saved receipts;
 failed sends retry, and acceptance followed by a crash may repeat delivery.
+Notice identities contain only the queue entry, walk/attempt or claim lifetime
+and step, never exception text, diagnostic paths or times. The latest subject
+and diagnostic replace the text in the same receipt without clearing delivery.
 The watcher commits no walk record today. Full ordering and orphan rules are
 in `tools/qa/qa.md`, “Deployment and cleanup”.
 
@@ -195,8 +199,11 @@ outboxes, evidence history, login registry, slots, warm targets and transcripts.
 `tools/qa/passes.md`, sections 9 and 13a, specifies scans and pruning. Walk
 preservation is built: remote publication requires both an explicitly set
 repository and branch. Safe local copies and receipts survive scratch, pins and pauses prevent age-pruning, and an
-accepted unchanged scan refusal can expire after seven days. Remote retries
-follow custody cleanup outside admission; they never delay returns/releases.
+accepted scan refusal can expire after seven days. The evidence refusal notice
+and starter's refused status each have one stable walk/step identity; changing
+refusal diagnostics refresh the saved receipt without another accepted message.
+Remote retries follow custody cleanup outside admission; they never delay
+returns/releases.
 Ordinary exceptions from a walk's measurement, preservation or pruning step
 cannot end the watcher: continue other walks and retry the step next pass.
 Queued admission failures likewise leave the preservation phase running.

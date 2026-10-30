@@ -299,8 +299,9 @@ Dependency readiness fetches the selected existing slot clone without
 switching it or taking a login; admission rechecks dependencies after claiming
 and fetching, before checkout. Main resolves then, never at enqueue time.
 Refusal keeps the entry with its last reason and one pending director notice
-per distinct reason. A resume whose state is no longer paused is removed with
-a notice. A saved admission ID on the attempt lets a restart remove an entry
+per entry and admission step. Changing diagnostics update that receipt's text
+without sending another accepted message. A resume whose state is no longer
+paused is removed with a notice. A saved admission ID on the attempt lets a restart remove an entry
 whose launcher was already accepted or is still being recovered, without
 launching twice. Queue corruption refuses listing/admission; the watcher
 isolates it and continues cleanup.
@@ -390,9 +391,14 @@ queue its resume; the watcher completes the release before admission.
 Attention notices are pending steps in `tmp/qa/attention/`: key, recipient,
 subject, body and delivery receipt saved before sending. Failed or
 interrupted posts retry at every check; exit 0 or 3 records delivery.
-Release failures have one notice per claim lifetime and distinct failure
-reason. Unknown holders and overdue launches retain one logical notice per
-identity. Existing interrupted attention receipts become pending too.
+Notice keys identify only the queue entry, walk/attempt or claim lifetime and
+step, never diagnostic exception text, paths or timestamps. Release failures
+have one notice per claim lifetime and step. Changing subject/body text updates
+the same durable receipt, preserving its delivery result; accepted messages
+are not resent. Unknown holders and overdue launches likewise retain one
+logical notice per identity and step. Manual admission can reserve/update a
+pending receipt for the watcher director. Existing interrupted attention
+receipts become pending too.
 Delivery is at least once: acceptance followed by a crash before saving can
 repeat a post. Completion posts and per-login alerts keep their saved
 receipts and the same retry rule. One failure never prevents other steps.
@@ -470,7 +476,9 @@ The cap includes the index. Over cap, omit `evidence/` whole, then `scripts/`
 whole; document/index overflow refuses. Other scan failures refuse the entire
 copy. The index records walk, host, source, runs, files/bytes and omissions.
 A refusal retains scratch initially and reserves one retried director notice
-per refusal digest. Repair through its safe path/line and let the watcher retry;
+per walk's evidence preparation step. New refusal diagnostics update that
+receipt; a changing refusal digest cannot create another notice or starter
+refused-status message. Repair through its safe path/line and let the watcher retry;
 never open a suspected credential to investigate a match.
 
 `qa keep NAME` uses this same path for an ended managed walk (exit 0 prints
@@ -510,8 +518,9 @@ under `DEV_TMP/qa-focused/`. `qa pin NAME` and `qa unpin NAME` durably change it
 pin under the admission lock. Paused/pinned walks, held logins (including older
 attempt holders), pending/live claims, live or unknown units/jobs/launchers,
 pending publication or status delivery, and unaccepted refusal notices all
-retain scratch. An unchanged refusal can expire after its notice and status
-are accepted; a changed refusal needs its own accepted notice. Fresh inventory,
+retain scratch. A refused walk can expire after its initial notice and refused
+status are accepted, with the latest diagnostic saved in the same receipt;
+changing that diagnostic does not require a new message. Fresh inventory,
 claim and process observations precede deletion. New walks durably record
 the scratch directory's device/inode before claiming. Pruning saves a random
 quarantine name under the same anchored parent, atomically moves the candidate

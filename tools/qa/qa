@@ -591,7 +591,8 @@ class Watch:
         return command(words, timeout=60)
 
     def notify_once(self, key, subject, body):
-        # One logical notice, delivered at least once across checks/restarts.
+        # Stable operation identity; diagnostics can change after delivery.
+        # Failed sends retain the same receipt and retry across checks/restarts.
         parent = self.directory / 'attention'
         path = parent / (hashlib.sha256(key.encode()).hexdigest() + '.json')
         no_links(self.workspace.tmp, path)
@@ -600,15 +601,21 @@ class Watch:
             need(isinstance(receipt, dict) and receipt.get('key') == key
                  and receipt.get('attempted') is True
                  and isinstance(receipt.get('subject'), str) and isinstance(receipt.get('body'), str)
-                 and isinstance(receipt.get('recipient', self.director), str)
-                 and re.fullmatch(ADDRESS, receipt.get('recipient', self.director))
+                 and ('recipient' not in receipt or isinstance(receipt['recipient'], str)
+                      and re.fullmatch(ADDRESS, receipt['recipient']))
                  and ('delivered' not in receipt or type(receipt['delivered']) is bool),
                  f'{path}: invalid alert receipt', 4)
         except FileNotFoundError:
             receipt = dict(key=key, attempted=True, subject=subject, body=body,
-                           recipient=self.director, time=timestamp(), delivered=False)
+                           time=timestamp(), delivered=False)
+            if self.director:
+                receipt['recipient'] = self.director
             replace(path, (json.dumps(receipt) + '\n').encode(), durable=True)
-        if receipt.get('delivered', receipt.get('result') in ('exit 0', 'exit 3')):
+        if receipt['subject'] != subject or receipt['body'] != body:
+            receipt.update(subject=subject, body=body)
+            replace(path, (json.dumps(receipt) + '\n').encode(), durable=True)
+        # Manual admission can reserve/update a notice for the watcher director.
+        if not self.director or receipt.get('delivered', receipt.get('result') in ('exit 0', 'exit 3')):
             return
         if key in self.attention_attempted:
             return
@@ -646,11 +653,9 @@ class Watch:
         if not self.director:
             return  # A failed start has no director; the watcher sends this notice.
         claim = state['slot_claim']
-        # Tokenized claims each have their own lifetime; reasons have separate receipts.
+        # One release notice per claim lifetime, independent of the diagnostic.
         key = ('slot release ' + claim['what'] if ' claim ' in claim['what']
                else f'slot release {state["walk"]} attempt {state.get("attempt", 1)}')
-        reason = re.sub(r' \(since [^()\n]+\); held [^\n]+', '', claim['release_result'])
-        key += ' reason ' + reason
         self.notify_once(key,
                          f'qa: slot release unconfirmed for {state["walk"]}',
                          f'Walk {state["walk"]}, attempt {state.get("attempt", 1)}: release unconfirmed.\n'
@@ -852,7 +857,7 @@ class Watch:
                     else:
                         reason = f'exit {result.returncode}: {result.stderr.strip() or result.stdout.strip()}'
                         log(f'{name}: orphan release failed: {reason}; trying next check')
-                        self.notify_once(key + ' reason ' + reason, f'qa: orphan release pending for {name}',
+                        self.notify_once(key + ' release', f'qa: orphan release pending for {name}',
                                          f'Claim {claim["host"]} {number}; WHAT: {what}. {reason}. Retrying.\n')
                 except (OSError, Problem, ValueError, UnicodeError, KeyError, TypeError, RecursionError) as error:
                     log(f'orphan claim observation failed ({error}); claim left held')
@@ -1561,7 +1566,7 @@ class Watch:
                 try:
                     entry['reason'] = str(error)
                     self.save_queue(entry)
-                    self.notify_once('queue ' + entry['id'] + ' reason ' + str(error),
+                    self.notify_once('queue ' + entry['id'] + ' admission',
                                      'qa: queued walk refused', f'Queue {entry["id"]}: {error}. Kept queued.\n')
                 except Exception:
                     log(f'queue {entry["id"]}: cannot save refusal notice; entry kept')
@@ -1578,7 +1583,7 @@ class Watch:
         if seconds < 600:
             return
         attempt = state.get('attempt', 1)
-        self.notify_once(f'overdue launch {state["walk"]} attempt {attempt} started {state["started"]}',
+        self.notify_once(f'overdue launch {state["walk"]} attempt {attempt}',
                          f'qa: overdue launch for {state["walk"]}',
                          f'Walk {state["walk"]}, attempt {attempt}: overdue launch.\n'
                          f'Waiting {int(seconds)} seconds since {state["started"]} (grace 600 seconds).\n'
@@ -1956,7 +1961,10 @@ class Watch:
         raise Problem('evidence push unconfirmed after five tries; retry next check', 1)
 
     def evidence_identity(self, saved):
-        return saved['status'] + ':' + saved.get('digest', saved.get('refusal_digest', ''))
+        # A changing refusal updates its diagnostic, not its delivered status.
+        if saved['status'] == 'refused':
+            return 'refused'
+        return saved['status'] + ':' + saved.get('digest', '')
 
     def evidence_status(self, saved):
         status = saved['status']
@@ -1980,7 +1988,7 @@ class Watch:
                 log(f'{state["walk"]}: evidence pending ({type(error).__name__}); custody cleanup continues')
                 return saved
         if saved['status'] == 'refused':
-            self.notify_once('evidence refused ' + state['walk'] + ' ' + saved['refusal_digest'],
+            self.notify_once('evidence refused ' + state['walk'],
                              'qa: evidence refused', f'Walk {state["walk"]}: {saved["refusal"]}. Scratch retained.\n')
         identity = self.evidence_identity(saved)
         if state.get('posted') and saved['status'] != 'waiting' and saved.get('announced') != identity:
@@ -2008,7 +2016,7 @@ class Watch:
                 or saved.get('announced') != self.evidence_identity(saved)):
             return
         if saved['status'] == 'refused':
-            key = 'evidence refused ' + state['walk'] + ' ' + saved['refusal_digest']
+            key = 'evidence refused ' + state['walk']
             notice = self.directory / 'attention' / (hashlib.sha256(key.encode()).hexdigest() + '.json')
             if not self.read_state(notice).get('delivered'):
                 return
@@ -2164,19 +2172,7 @@ class Watch:
                 f'Counted {counted} bytes; charging {charge} bytes, at least the saved reservation.\n'
                 'The watcher retries measurement on the next admission pass.\n')
         try:
-            if self.director:
-                self.notify_once(key, subject, body)
-            else:
-                # Manual admission has no director. Reserve the same receipt for
-                # the watcher, whose retry uses its configured director address.
-                path = self.directory / 'attention' / (hashlib.sha256(key.encode()).hexdigest() + '.json')
-                no_links(self.workspace.tmp, path)
-                try:
-                    self.read_state(path)
-                except FileNotFoundError:
-                    receipt = dict(key=key, attempted=True, subject=subject, body=body,
-                                   time=timestamp(), delivered=False)
-                    replace(path, (json.dumps(receipt) + '\n').encode(), durable=True)
+            self.notify_once(key, subject, body)
         except Exception as error:
             log(f'{state["walk"]}: scratch size notice pending ({type(error).__name__})')
         return charge

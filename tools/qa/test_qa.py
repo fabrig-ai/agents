@@ -4246,7 +4246,7 @@ def empty_and_unknown_claim_results_refuse_even_if_record_was_created(lab):
     assert [c[2] for c in lab.calls('claim') if c[0] == 'claim'] == ['1', '2']
 
 
-def release_preflight_mismatch_alerts_each_reason_and_keeps_successors(lab):
+def release_preflight_mismatch_updates_one_notice_and_keeps_successors(lab):
     lab.walk()
     lab.configure(inactive=True, claim_list_lines=['hetzner6 1 [s/qa]: free'])
     lab.watch()
@@ -4257,10 +4257,10 @@ def release_preflight_mismatch_alerts_each_reason_and_keeps_successors(lab):
     lab.configure(claim_list_lines=['hetzner6 1 [s/qa]: s/qa: different WHAT (since 2026-10-29T00:00:00+00:00); held 0d 00:00:00'])
     lab.watch()
     assert not [c for c in lab.calls('claim') if c[0] == 'release']
-    assert len([m for m in lab.sent() if 'slot release unconfirmed' in m['args'][2]]) == 3
+    assert len([m for m in lab.sent() if 'slot release unconfirmed' in m['args'][2]]) == 1
     lab.configure(claim_list_lines=['hetzner6 1 [s/qa]: s/qa: different WHAT (since 2026-10-29T00:00:00+00:00); held 1d 00:00:00'])
     lab.watch()
-    assert len([m for m in lab.sent() if 'slot release unconfirmed' in m['args'][2]]) == 3
+    assert len([m for m in lab.sent() if 'slot release unconfirmed' in m['args'][2]]) == 1
     assert slot_claims(lab)
 
 
@@ -4295,7 +4295,7 @@ def remote_release_timeout_keeps_successors_on_retry(lab):
     lab.watch()
     assert slot_claims(lab)['1']['what'] == 'a newer claim'
     assert len([c for c in lab.calls('claim') if c[0] == 'release']) == 1
-    assert len([m for m in lab.sent() if 'slot release unconfirmed' in m['args'][2]]) == 2
+    assert len([m for m in lab.sent() if 'slot release unconfirmed' in m['args'][2]]) == 1
 
 
 def a_release_crash_before_call_retries_the_durable_intent(lab):
@@ -4560,7 +4560,7 @@ tool['Watch'].slot_call = slot_call
     assert slot_claims(lab)[str(started['slot'])]['what'] == claim['what'] + ' successor'
     assert [c for c in lab.calls('claim') if c[0] == 'release'] == [release]
     notices = [m for m in lab.sent() if 'slot release unconfirmed' in m['args'][2]]
-    assert len(notices) == 2
+    assert len(notices) == 1
     assert claim['what'] in notices[0]['body'] and 'matching WHAT' in notices[0]['body']
 
 
@@ -4820,7 +4820,7 @@ def an_after_resume_builds_main_only_after_every_commit_lands(lab):
     assert len(lab.calls('codex-run')) == 2
 
 
-def a_watcher_refusal_keeps_the_queue_and_posts_each_reason_once(lab):
+def a_watcher_refusal_keeps_the_queue_and_updates_one_notice(lab):
     lab.env['QA_WALK_SLOTS'] = 'forgejo=1'
     lab.walk()
     _, state = lab.walk_state()
@@ -4836,7 +4836,10 @@ def a_watcher_refusal_keeps_the_queue_and_posts_each_reason_once(lab):
     assert len(notices()) == 1 and len(queued_entries(lab)) == 1
     lab.configure(cargo_refusal=3)
     lab.watch()
-    assert len(notices()) == 2
+    assert len(notices()) == 1
+    receipt, = (lab.tmp / 'qa/attention').glob('*.json')
+    latest = json.loads(receipt.read_text())
+    assert queued_entries(lab)[0]['reason'] in latest['body']
     lab.configure(cargo_refusal=0)
     lab.watch()
     assert not queued_entries(lab) and len(lab.calls('codex-run')) == 2
@@ -5559,17 +5562,19 @@ def evidence_prune_rechecks_custody_claims_processes_and_paths(lab):
     assert not directory.exists()
 
 
-def evidence_refused_prune_waits_for_current_accepted_notice(lab):
+def evidence_refused_prune_keeps_one_accepted_notice_with_latest_diagnostic(lab):
     lab.walk(now='2026-10-01T00:00:00Z')
     directory, _ = lab.walk_state()
     lab.end_run(report='token=first-literal\n')
     lab.watch(now='2026-10-01T00:00:00Z')
     (directory / 'report.md').write_text('token=second-literal\n')
     lab.watch(now='2026-10-08T00:00:00Z', extra={'QA_POST_STATUS': '1'})
-    assert directory.exists()
-    lab.watch(now='2026-10-08T00:00:00Z')
+    # The refusal diagnostic changes in the existing delivered receipt; it
+    # does not require another message before otherwise eligible pruning.
     assert not directory.exists()
-    assert len([p for p in lab.sent() if p['args'][2] == 'qa: walk scratch pruned']) == 1
+    assert len([p for p in lab.sent() if p['args'][2] == 'qa: evidence refused']) == 1
+    lab.watch(now='2026-10-08T00:00:00Z')
+    assert len([p for p in lab.sent() if p['args'][2] == 'qa: walk scratch pruned']) == 2
 
 
 def evidence_invalid_settings_cannot_block_login_return(lab):
@@ -5641,7 +5646,7 @@ CASES = (
     evidence_check_is_network_free_and_does_not_adopt_scratch,
     evidence_lost_push_ack_and_collision_preserve_saved_identity,
     evidence_prune_rechecks_custody_claims_processes_and_paths,
-    evidence_refused_prune_waits_for_current_accepted_notice,
+    evidence_refused_prune_keeps_one_accepted_notice_with_latest_diagnostic,
     evidence_invalid_settings_cannot_block_login_return,
     scratch_budget_counts_paused_pinned_and_saved_reservations,
     evidence_scan_rules_and_placeholders,
@@ -5667,7 +5672,7 @@ CASES = (
     a_damaged_queue_keeps_custody_cleanup_running,
     a_busy_slot_start_is_queued_then_started,
     an_after_resume_builds_main_only_after_every_commit_lands,
-    a_watcher_refusal_keeps_the_queue_and_posts_each_reason_once,
+    a_watcher_refusal_keeps_the_queue_and_updates_one_notice,
     the_queue_lists_and_cancels_without_taking_resources,
     a_queued_resume_no_longer_paused_is_dropped_with_notice,
     pending_attention_notices_retry_until_post_accepts,
@@ -5694,7 +5699,7 @@ CASES = (
     fleet_settings_accept_commas_and_plus_without_whitespace,
     failed_remote_or_unreadable_claim_never_prepares_or_falls_back,
     empty_and_unknown_claim_results_refuse_even_if_record_was_created,
-    release_preflight_mismatch_alerts_each_reason_and_keeps_successors,
+    release_preflight_mismatch_updates_one_notice_and_keeps_successors,
     release_waits_for_give_back_even_when_all_units_are_stopped,
     remote_release_timeout_keeps_successors_on_retry,
     a_release_crash_before_call_retries_the_durable_intent,
@@ -6332,6 +6337,116 @@ class EvidenceRepairTests(unittest.TestCase):
                 self.watch.scratch_room([(directory, state)])
         self.assertIn('500 bytes used', str(failure.exception))
         self.assertEqual(deadlines, [10, 10])
+
+    def test_changing_failures_update_one_notice_without_resending(self):
+        from contextlib import ExitStack
+        watch = self.watch
+        original_call = watch.call
+        messages = []
+        def call(tool, *args):
+            if tool == 'post':
+                messages.append((args[-2], Path(args[-1]).read_text()))
+            return original_call(tool, *args)
+        watch.call = call
+        for index, site in enumerate(('queue', 'claim', 'orphan', 'evidence', 'measurement', 'overdue'), 1):
+            with self.subTest(site=site), ExitStack() as patches:
+                attention = watch.directory / 'attention'
+                if attention.exists():
+                    shutil.rmtree(attention)
+                self.posts.clear()
+                messages.clear()
+                watch.attention_attempted.clear()
+                self.walks.clear()
+                directory, state = self.walk(index)
+                saved = self.kept(state)
+                changing = [0]
+                subject = None
+                rounds = 100 if site == 'queue' else 4
+                if site == 'queue':
+                    entry = dict(id='a' * 32, kind='forgejo', repo='fabrig', rung='repair', cap=180,
+                                 build='main', resume=None, after=[], login=['chatgpt'], reason='',
+                                 starter='owner@fixture', since=state['started'], order=1)
+                    watch.save_queue(entry)
+                    watch.walks_valid = True
+                    def failed_start(*args):
+                        raise RuntimeError(f'fixture temp-{changing[0]} scratch-{changing[0]}')
+                    patches.enter_context(self.patch.dict(watch.check_queue.__globals__, start_walk=failed_start))
+                    invoke = watch.check_queue
+                elif site == 'claim':
+                    state['slot_claim'] = dict(host='fixture', slot=1, owner='s/qa', ssh='',
+                                              what='qa walk ' + state['walk'] + ' attempt 1 claim ' + 'a' * 32)
+                    def invoke():
+                        state['slot_claim']['release_result'] = f'fixture temp-{changing[0]}'
+                        watch.claim_notice(state)
+                elif site == 'orphan':
+                    patches.enter_context(self.patch.dict(watch.options,
+                        QA_WALK_KINDS={'forgejo': dict(numbers=[1])}))
+                    host, owner = watch.options['QA_SLOT_HOST'], watch.options['QA_CLAIM_OWNER']
+                    what = 'qa walk ' + state['walk'] + ' attempt 1 claim ' + 'a' * 32
+                    key = f'orphan slot {host} 1 {owner} {what}'
+                    observation = dict(key=key, since=state['started'], released=False,
+                                       name=state['walk'], slot=1, what=what, host=host)
+                    path = watch.directory / 'orphans' / (hashlib.sha256(key.encode()).hexdigest() + '.json')
+                    self.tool['replace'](path, json.dumps(observation).encode())
+                    row = f'{host} 1 [{owner}]: {owner}: {what} (since 2026-10-01T00:00:00Z); held fixture'
+                    def slot_call(claim, operation, *args):
+                        return subprocess.CompletedProcess([], 0, row, '') if operation == 'list' else \
+                            subprocess.CompletedProcess([], 1, '', f'fixture temp-{changing[0]}')
+                    patches.enter_context(self.patch.object(watch, 'slot_call', slot_call))
+                    patches.enter_context(self.patch.object(watch, 'orphan_live', lambda *a: None))
+                    invoke = lambda: watch.repair_slot_claims([])
+                elif site == 'evidence':
+                    saved.pop('digest')
+                    saved.update(status='refused')
+                    saved.pop('announced')
+                    patches.enter_context(self.patch.object(watch, 'prune_walk', lambda *a: None))
+                    subject = 'qa: evidence refused'
+                    def invoke():
+                        saved.update(refusal=f'fixture temp-{changing[0]}', refusal_digest=f'{changing[0]:064x}')
+                        watch.preserve_walk(directory, state, None, saved)
+                elif site == 'measurement':
+                    patches.enter_context(self.patch.dict(self.ev, directory_bytes=lambda *a, **kw:
+                        dict(bytes=100 + changing[0], complete=False, missing=False, reason='OSError')))
+                    def invoke():
+                        # Manual admission must also refresh its pending receipt.
+                        watch.director = '' if changing[0] < 2 else 'director@fixture'
+                        watch.scratch_measurement(directory, state)
+                else:
+                    state.update(stage='starting', run='')
+                    def invoke():
+                        state['started'] = f'2026-10-0{changing[0] + 1}T00:00:00Z'
+                        watch.overdue_launch_notice(state, f'fixture temp-{changing[0]}')
+                for attempt in range(rounds):
+                    changing[0] = attempt
+                    watch.attention_attempted.clear()  # Separate watcher passes.
+                    invoke()
+                receipts = list(attention.glob('*.json'))
+                self.assertEqual(len(receipts), 1, (site, len(receipts)))
+                receipt = watch.read_state(receipts[0])
+                self.assertTrue(receipt['delivered'])
+                diagnostic = 'Counted 103 bytes' if site == 'measurement' else f'fixture temp-{rounds - 1}'
+                self.assertIn(diagnostic, receipt['body'])
+                self.assertNotIn('temp-', receipt['key'])
+                self.assertNotIn('2026-', receipt['key'])
+                matching = [message for message in messages if subject is None or message[0] == subject]
+                self.assertEqual(len(matching), 1, (site, messages))
+                if site == 'queue':
+                    self.assertIn('scratch-99', watch.queue_entries()[0]['reason'])
+                if site == 'evidence':
+                    self.assertEqual(len(messages), 2)  # One director notice and one starter status.
+                    # Stable identities still require initial notice acceptance
+                    # before an otherwise eligible refused walk can be pruned.
+                    receipt['delivered'] = False
+                    self.tool['replace'](receipts[0], json.dumps(receipt).encode())
+                    self.tool['Watch'].prune_walk(watch, directory, state, saved)
+                    self.assertTrue(directory.exists())
+                    receipt['delivered'] = True
+                    self.tool['replace'](receipts[0], json.dumps(receipt).encode())
+                # A fresh watcher retries the durable receipt without resending it.
+                fresh = self.tool['Watch'](watch.workspace, 'director@fixture')
+                fresh.call = call
+                fresh.retry_notices()
+                self.assertEqual(len(messages), 2 if site == 'evidence' else 1)
 
     def test_watcher_retries_each_failed_step_and_reaches_next_walk_and_pass(self):
         watch = self.watch
