@@ -15,6 +15,7 @@ logins take POOL --any --as HOLDER [--note TEXT] [--run ID] [--wait SECONDS | --
 logins drop NAME --as HOLDER
 logins drop POOL --any --as HOLDER
 logins give NAME --as HOLDER
+logins set-run NAME --as HOLDER --run ID
 logins list [NAME] [--json]
 ```
 
@@ -170,6 +171,15 @@ only, never login contents or paths inside a login. The offline consumer
 fixture is `tools/qa/fixtures/logins-list.json`; the custody tests check its
 schema and reproduce it through real commands against fake state.
 
+`logins set-run NAME --as HOLDER --run ID` attaches a newly launched run to
+that holder's current hold, or replaces its previous run. The ID has the same
+validation as take's `--run`. An unheld login or another holder's hold refuses
+with exit 2. This operation holds the custody locks through its owner check and
+atomic metadata replacement. It preserves the holder, note, original `since`,
+waiters and event log. Repeating the same ID succeeds without rewriting the
+hold. It works while a login is away from rest and never opens or reads the
+login; only custody metadata changes. The next JSON listing reports that ID.
+
 ## Locks, compatibility and callers
 
 Every operation takes the global flock first, then every login's exclusive
@@ -192,10 +202,11 @@ before restoring an older executable. No login contents need to be accessed.
 
 Live passes and walks use the QA caller's admission controls. QA's takes use
 `--any --now`, so they hold no queue reservation ahead of walks. A managed
-walk take passes its current run ID with `--run` when known. Current starts
-and resumes acquire logins before launching the new run, so their take-time
-run is normally unknown and JSON reports null; it is not inferred from the
-holder, note or an earlier attempt's run. Manual live
+walk take passes its current run ID with `--run` when known. Starts and resumes acquire logins before launching the new run, so their
+take-time run is normally unknown. After launch QA records the returned run
+with `set-run` on each of its holds, and retries failed bindings at each check.
+Recovery binds the recovered run too; no ID is inferred from the holder, note
+or an earlier attempt's run. Manual live
 runs use `qa take` and `qa give`. Custody alone gives no permission to exceed
 those caps. The operator checks saturation and stuck holders through `list`.
 Before switching the installed tool, stop outstanding old `logins take --wait`

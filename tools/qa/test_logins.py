@@ -1354,6 +1354,62 @@ CASES += (json_lists_empty_resting_and_missing_logins, json_lists_a_walk_run_eve
           consumer_fixture_matches_real_json_output, qa_takes_forward_known_runs_to_custody)
 
 
+def a_holder_sets_its_run_without_changing_the_hold_or_queue(lab):
+    lab.clock('2026-10-30T10:00:00Z')
+    lab.login()
+    holder = 'walk/forgejo/rung-a-1'
+    assert lab.run('take', CHATGPT, '--as', holder, '--note', 'rung a')[0] == 0
+    assert lab.run('take', CHATGPT, '--as', 'manual/waiter')[0] == 1
+    original = lab.read('holder.json')
+    queue = (lab.tmp / 'logins/waiting.json').read_bytes()
+    events = lab.log()
+    lab.clock('2026-10-30T10:02:00Z')
+    assert lab.run('set-run', CHATGPT, '--as', holder, '--run', 'run-live') == (
+        0, f'run set: {CHATGPT} by {holder}: run-live\n', '')
+    assert lab.read('holder.json') == dict(original, run='run-live')
+    assert (lab.tmp / 'logins/waiting.json').read_bytes() == queue and lab.log() == events
+    assert json_listing(lab)[0]['run'] == 'run-live'
+    path = lab.directory() / 'holder.json'
+    before = path.stat().st_mtime_ns
+    assert lab.run('set-run', CHATGPT, '--as', holder, '--run', 'run-live')[0] == 0
+    assert path.stat().st_mtime_ns == before
+    assert lab.run('set-run', CHATGPT, '--as', holder, '--run', 'run-next')[0] == 0
+    assert lab.read('holder.json') == dict(original, run='run-next')
+
+
+def setting_a_run_refuses_another_holder_free_hold_and_invalid_ids(lab):
+    lab.login()
+    assert lab.run('set-run', CHATGPT, '--as', 'manual/a', '--run', 'run-a')[0] == 2
+    assert lab.run('take', CHATGPT, '--as', 'manual/owner')[0] == 0
+    original = lab.read('holder.json')
+    assert lab.run('set-run', CHATGPT, '--as', 'manual/a', '--run', 'run-a')[0] == 2
+    for value in ('', '/tmp/a', 'has space', 'has\nnewline', 'a' * 257):
+        code, out, err = lab.run('set-run', CHATGPT, '--as', 'manual/owner', '--run', value)
+        assert code == 2 and not out and '--run' in err
+    assert lab.read('holder.json') == original
+    assert lab.run('set-run', 'missing', '--as', 'manual/a', '--run', 'run-a')[0] == 2
+
+
+def a_run_can_be_set_while_away_without_reading_the_login(lab):
+    path = lab.login()
+    assert lab.run('take', CHATGPT, '--as', 'walk/forgejo/a')[0] == 0
+    path.rename(lab.root / 'away')
+    lab.driver(f"""
+    def audit(event, args):
+        if event == 'open' and args[0] in ({str(path)!r}, {str(lab.root / 'away')!r}):
+            raise AssertionError('opened a login')
+    sys.addaudithook(audit)
+    sys.exit(module.main())
+    """)
+    assert lab.run('set-run', CHATGPT, '--as', 'walk/forgejo/a', '--run', 'run-away')[0] == 0
+    assert json_listing(lab)[0]['run'] == 'run-away'
+
+
+CASES += (a_holder_sets_its_run_without_changing_the_hold_or_queue,
+          setting_a_run_refuses_another_holder_free_hold_and_invalid_ids,
+          a_run_can_be_set_while_away_without_reading_the_login)
+
+
 def run_one(name, root):
     # Each case owns its process, umask, signal handlers and child processes.
     assert ctypes.CDLL(None).prctl(36, 1, 0, 0, 0) == 0, 'cannot become child subreaper'

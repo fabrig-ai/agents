@@ -8,6 +8,7 @@ logins take POOL --any --as HOLDER [--note TEXT] [--run ID] [--wait SECONDS | --
 logins drop NAME --as HOLDER
 logins drop POOL --any --as HOLDER
 logins give NAME --as HOLDER
+logins set-run NAME --as HOLDER --run ID
 logins list [NAME] [--json]
 """
 import argparse
@@ -431,6 +432,14 @@ class Login:
         replace(self.directory / 'log.tsv', event)
         print(f'replaced: {self.name} at {self.path}')
 
+    def set_run(self, holder, run):
+        current = self.read('holder.json', None)
+        need(current is not None and current['holder'] == holder,
+             f'{self.name} is not held by {holder}')
+        if current.get('run') != run:
+            self.write('holder.json', dict(current, run=run))
+        print(f'run set: {self.name} by {holder}: {run}')
+
     def give(self, holder):
         current = self.read('holder.json', None)
         if current is not None:
@@ -523,6 +532,10 @@ def main():
     give = sub.add_parser('give')
     give.add_argument('name')
     give.add_argument('--as', dest='holder', required=True)
+    binding = sub.add_parser('set-run')
+    binding.add_argument('name')
+    binding.add_argument('--as', dest='holder', required=True)
+    binding.add_argument('--run', required=True)
     listing = sub.add_parser('list')
     listing.add_argument('name', nargs='?')
     listing.add_argument('--json', action='store_true', dest='json_output')
@@ -534,6 +547,7 @@ def main():
             need(re.fullmatch(HOLDER, args.holder), 'invalid holder name')
         if args.command == 'take':
             need(note_ok(args.note), '--note needs at most 120 characters and no newline or tab')
+        if args.command in ('take', 'set-run'):
             need(args.run is None or run_ok(args.run), '--run needs an ID of at most 256 letters, digits, _, ., :, @ or -')
         workspace = Workspace()
         if args.command == 'list':
@@ -558,6 +572,9 @@ def main():
             with workspace.locked():
                 dropped = workspace.drop(args.name, args.pool, args.holder)
                 print(('dropped: ' if dropped else 'not waiting: ') + args.name)
+        elif args.command == 'set-run':
+            with workspace.locked(queue_readonly=True):
+                workspace.login(args.name).set_run(args.holder, args.run)
         elif args.command == 'give':
             with workspace.locked():
                 workspace.login(args.name).give(args.holder)
