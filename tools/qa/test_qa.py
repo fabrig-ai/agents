@@ -265,7 +265,7 @@ elif name == 'systemctl':
             print('ActiveState=' + (override or ('deactivating' if saved and saved.get('stopping') else
                                                 'active' if saved and alive(saved['pid']) else 'inactive')))
             if '--property=Job' in args:
-                print('Job=' + config.get('unit_jobs', {}).get(unit, '0'))
+                print('Job=' + config.get('unit_jobs', {}).get(unit, ''))
             print('WorkingDirectory=' + (saved['directory'] if saved else ''))
             sys.exit(0)
         present = (runs / run / 'unit').exists()
@@ -277,7 +277,7 @@ elif name == 'systemctl':
             print('LoadState=' + config.get('unit_load', 'loaded' if present else 'not-found'))
             print('ActiveState=' + active)
             if '--property=Job' in args:
-                print('Job=' + config.get('unit_job', '0'))
+                print('Job=' + config.get('unit_job', ''))
         sys.exit(0)
     import subprocess
     if args[1] == '_finish-stop':
@@ -2634,7 +2634,7 @@ def queued_and_running_start_jobs_keep_custody(lab):
     directory, state = walk_with_logins(lab, CHATGPT)
     lab.env['QA_WALK_SLOTS'] = 'forgejo=1 claude=3,4'
     lab.env['QA_WALK_KINDS'] = 'forgejo=1:chatgpt'
-    for job in ('42', '43', ''):
+    for job in ('42', '43', 'unknown', '-1', '0 waiting'):
         lab.configure(unit_load='loaded', unit_state='inactive', unit_job=job)
         lab.watch()
         saved = lab.walk_state()[1]
@@ -2669,6 +2669,19 @@ tool['Watch'].launcher_alive = launcher_alive
     saved = lab.walk_state()[1]
     assert saved['stage'] == 'running' and not saved['given'] and not saved['released']
     assert not any(args[0] == 'give' for args in lab.calls('logins'))
+
+
+def an_ended_not_found_session_with_an_empty_job_releases_custody(lab):
+    directory, state = walk_with_logins(lab, CHATGPT)
+    lab.end_run(state)
+    (lab.tmp / 'codex-run' / state['run'] / 'unit').unlink()
+    # Real systemd reports LoadState=not-found, ActiveState=inactive, Job=.
+    lab.watch()
+    saved = lab.walk_state()[1]
+    assert saved['stage'] == 'ended' and saved['given'] == [CHATGPT]
+    assert saved['released'] and saved['posted'] and saved['end_logged']
+    assert lab.sent()[-1]['args'][1:3] == [saved['starter'], 'qa: walk rung-b0-1 ended']
+    assert not [args for args in lab.calls('systemctl') if args[1] == 'stop']
 
 
 def a_missing_walk_unit_is_ended_after_the_launch_grace(lab):
@@ -4692,6 +4705,7 @@ CASES = (
     a_linked_walk_state_keeps_its_grant_held,
     a_manual_take_refuses_unknown_inventory_and_a_broken_cap,
     a_manual_take_selects_its_pool_and_give_passes_through,
+    an_ended_not_found_session_with_an_empty_job_releases_custody,
     a_missing_walk_unit_is_ended_after_the_launch_grace,
     a_pause_with_a_login_out_ends_stuck,
     a_paused_walk_frees_its_slot_and_logins,

@@ -335,7 +335,9 @@ without retry; its receipt remains available for reconciliation. Ordinary
 stuck-login and starter-post retry rules below are separate.
 
 A queued or running unit job, including on a loaded inactive unit, keeps
-custody and the slot. A live or uncertain task launcher also prevents stop
+custody and the slot. An empty `Job=` or numeric zero means no pending job;
+a nonzero numeric job keeps custody, and any other value is unknown.
+A live or uncertain task launcher also prevents stop
 confirmation, even with an ended marker; the unit and job are rechecked after
 the launcher scan. Unknown state keeps it held. A strict `logins list` precedes gives; invalid
 inventory gives nothing. A `walk/...` login with a missing saved grant is

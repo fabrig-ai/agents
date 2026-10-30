@@ -842,10 +842,12 @@ class Watch:
                 log(f'{unit}: WorkingDirectory is not the walk directory; keeping logins held')
                 return 'unknown'
             # ActiveState alone cannot exclude a queued or running start job.
-            if not re.fullmatch(r'[0-9]+', fields['Job']):
+            # systemd reports no job as an empty value; accept zero too.
+            job = fields['Job']
+            if job and not re.fullmatch(r'[0-9]+', job):
                 log(f'{unit}: cannot establish pending job; keeping custody')
                 return 'unknown'
-            if int(fields['Job']) != 0:
+            if job and int(job) != 0:
                 log(f'{unit}: pending job; keeping custody and slot')
                 return 'launching'
             stopped = (load == 'loaded' and active in ('inactive', 'failed')
