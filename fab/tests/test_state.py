@@ -83,7 +83,7 @@ class FoldTest(unittest.TestCase):
             ("run.ended", {"outcome": "infra"}, "runnable"),
             ("run.ended", {"outcome": "done"}, "done"),
             ("question.asked", {"text": "Question"}, "parked"),
-            ("question.answered", {}, "runnable"),
+            ("question.answered", {}, "waiting"),
             ("branch.ready", {"tip": "b"}, "ready"),
             ("branch.landed", {"tip": "b", "main": "m"}, "landed"),
             ("branch.rejected", {}, "rejected"),
@@ -193,3 +193,12 @@ walk = false
             (home / "tasks").mkdir()
             (home / "plan.toml").write_text('draft = "draft"\nrepo = "repo"\npart = []\n')
             self.assertEqual(self.run_status(home), (0, "", ""))
+
+
+class AnswerUnparksOnlyTest(unittest.TestCase):
+    def test_an_answer_never_reopens_a_landed_task(self):
+        tasks = {"d/a": Task("d/a", "p", "feature", "agents", (), (), "high", 25, "", "a.md")}
+        events = [{"ev": "run.started", "task": "d/a", "run": "d/a-1", "branch": "d/a"},
+                  {"ev": "branch.landed", "task": "d/a", "tip": "t", "main": "t"},
+                  {"ev": "question.answered", "task": "d/a", "answer": "x"}]
+        self.assertEqual(state.fold(tasks, events)["d/a"].status, "landed")
