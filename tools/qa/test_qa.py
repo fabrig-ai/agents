@@ -3998,7 +3998,7 @@ def claim_release_waits_for_session_and_deployment_stop(lab):
     dead(pid)
 
 
-def claim_release_failure_is_alerted_once_without_retry(lab):
+def claim_release_failure_is_retried_and_alerted_once(lab):
     lab.walk()
     lab.configure(inactive=True, claim_release_refusal=True)
     lab.watch()
@@ -4011,12 +4011,12 @@ def claim_release_failure_is_alerted_once_without_retry(lab):
     lab.configure(claim_release_refusal=False)
     lab.watch()
     lab.watch()
-    assert len(releases()) == 1 and not lab.walk_state()[1]['slot_claim']['released']
+    assert len(releases()) == 2 and lab.walk_state()[1]['slot_claim']['released']
     notices = [row for row in lab.sent() if 'slot release unconfirmed' in row['args'][2]]
     assert len(notices) == 1 and notices[0]['args'][1] == 'director@fixture'
 
 
-def a_claim_lost_between_acceptance_and_save_is_alerted(lab):
+def a_claim_lost_between_acceptance_and_save_gets_orphan_grace(lab):
     driven_walk(lab, '''Watch = tool['Watch']
 original = Watch.slot_call
 def slot_call(self, claim, *args):
@@ -4035,17 +4035,17 @@ Watch.slot_call = slot_call
     assert set(slot_claims(lab)) == {'1', '2', '7'}
     assert lab.walk_state()[1]['released']
     lab.watch()
-    assert len(lab.sent()) == 1 and lab.sent()[0]['args'][1] == 'director@fixture'
+    assert not lab.sent()  # No release or notice before the orphan grace.
     assert not [c for c in lab.calls('claim') if c[0] == 'release']
 
 
-def an_orphan_claim_without_any_state_is_alert_only(lab):
+def an_orphan_claim_without_any_state_waits_for_grace(lab):
     hold_slot(lab, 1, what='qa walk rung-crashed-1 attempt 1')
     hold_slot(lab, 2, owner='ops', what='qa walk rung-other-1 attempt 1')
     lab.watch()
     lab.watch()
     assert set(slot_claims(lab)) == {'1', '2'}
-    assert len(lab.sent()) == 1 and 'Unsaved claim:' in lab.sent()[0]['body']
+    assert not lab.sent()  # Grace has not elapsed.
     assert not [c for c in lab.calls('claim') if c[0] == 'release']
 
 
@@ -4111,7 +4111,7 @@ def a_pause_releases_and_resume_reclaims_a_named_slot(lab):
     assert not (lab.tmp / 'qa/repos').exists()
 
 
-def a_pause_with_unconfirmed_release_stays_blocked_without_retry(lab):
+def a_pause_with_unconfirmed_release_waits_for_retry(lab):
     directory, state = walk_with_logins(lab, CHATGPT)
     lab.configure(claim_release_refusal=True)
     state = pause_walk(lab, directory, state)
@@ -4121,8 +4121,8 @@ def a_pause_with_unconfirmed_release_stays_blocked_without_retry(lab):
     assert 'slot claim release is still pending' in result.stderr
     lab.configure(claim_release_refusal=False)
     lab.watch()
-    assert not lab.walk_state()[1]['slot_claim']['released']
-    assert len([c for c in lab.calls('claim') if c[0] == 'release']) == 1
+    assert lab.walk_state()[1]['slot_claim']['released']
+    assert len([c for c in lab.calls('claim') if c[0] == 'release']) == 2
     assert len(lab.calls('codex-run')) == 1
 
 
@@ -4226,7 +4226,7 @@ def empty_and_unknown_claim_results_refuse_even_if_record_was_created(lab):
     assert [c[2] for c in lab.calls('claim') if c[0] == 'claim'] == ['1', '2']
 
 
-def release_preflight_mismatch_is_alerted_once_and_never_released(lab):
+def release_preflight_mismatch_alerts_each_reason_and_keeps_successors(lab):
     lab.walk()
     lab.configure(inactive=True, claim_list_lines=['hetzner6 1 [s/qa]: free'])
     lab.watch()
@@ -4237,7 +4237,7 @@ def release_preflight_mismatch_is_alerted_once_and_never_released(lab):
     lab.configure(claim_list_lines=['hetzner6 1 [s/qa]: s/qa: different WHAT (since 2026-10-29T00:00:00+00:00); held 0d 00:00:00'])
     lab.watch()
     assert not [c for c in lab.calls('claim') if c[0] == 'release']
-    assert len([m for m in lab.sent() if 'slot release unconfirmed' in m['args'][2]]) == 1
+    assert len([m for m in lab.sent() if 'slot release unconfirmed' in m['args'][2]]) == 3
     assert slot_claims(lab)
 
 
@@ -4255,7 +4255,7 @@ def release_waits_for_give_back_even_when_all_units_are_stopped(lab):
     assert len([c for c in lab.calls('claim') if c[0] == 'release']) == 1
 
 
-def remote_release_timeout_after_effect_is_terminal(lab):
+def remote_release_timeout_keeps_successors_on_retry(lab):
     lab.env['QA_CLAIM_SSH'] = 'claims@hel8'
     lab.walk()
     lab.configure(inactive=True, hang={'claim:release': 'after'})
@@ -4272,10 +4272,10 @@ def remote_release_timeout_after_effect_is_terminal(lab):
     lab.watch()
     assert slot_claims(lab)['1']['what'] == 'a newer claim'
     assert len([c for c in lab.calls('claim') if c[0] == 'release']) == 1
-    assert len([m for m in lab.sent() if 'slot release unconfirmed' in m['args'][2]]) == 1
+    assert len([m for m in lab.sent() if 'slot release unconfirmed' in m['args'][2]]) == 2
 
 
-def a_release_crash_before_call_never_retries_the_durable_intent(lab):
+def a_release_crash_before_call_retries_the_durable_intent(lab):
     lab.walk()
     lab.configure(inactive=True)
     driven_watch(lab, '''import os
@@ -4289,8 +4289,9 @@ tool['Watch'].slot_call = slot_call
     assert lab.walk_state()[1]['slot_claim']['release_status'] == 'release unconfirmed'
     lab.watch()
     lab.watch()
-    assert slot_claims(lab) and not [c for c in lab.calls('claim') if c[0] == 'release']
-    assert len([m for m in lab.sent() if 'slot release unconfirmed' in m['args'][2]]) == 1
+    assert not slot_claims(lab) and lab.walk_state()[1]['slot_claim']['released']
+    assert len([c for c in lab.calls('claim') if c[0] == 'release']) == 1
+    assert not [m for m in lab.sent() if 'slot release unconfirmed' in m['args'][2]]
 
 
 def unknown_walk_holders_alert_once_and_hand_holders_are_untouched(lab):
@@ -4392,8 +4393,10 @@ def a_launcher_without_metadata_keeps_custody_and_admission(lab):
             saved_receipt = json.loads(receipt.read_text())
             assert saved_receipt['attempted'] and saved_receipt['result'] == 'exit 2'
             assert saved_receipt['body'] == notice['body']
-            lab.watch(now=future)  # New service, same reservation, no retry after failure.
-            assert lab.sent() == [notice]
+            lab.watch(now=future)  # A failed post retries despite the busy admission lock.
+            assert lab.sent() == [notice, notice]
+            lab.watch(now=future)
+            assert lab.sent() == [notice, notice]
             assert (lab.tmp / 'qa/walks' / (state['walk'] + '.json')).read_bytes() == custody
             assert {name: lab.calls(name) for name in calls} == calls
             saved = lab.walk_state()[1]
@@ -4534,7 +4537,7 @@ tool['Watch'].slot_call = slot_call
     assert slot_claims(lab)[str(started['slot'])]['what'] == claim['what'] + ' successor'
     assert [c for c in lab.calls('claim') if c[0] == 'release'] == [release]
     notices = [m for m in lab.sent() if 'slot release unconfirmed' in m['args'][2]]
-    assert len(notices) == 1
+    assert len(notices) == 2
     assert claim['what'] in notices[0]['body'] and 'matching WHAT' in notices[0]['body']
 
 
@@ -4743,7 +4746,63 @@ assert called
     assert result.returncode == 0, (result.stdout, result.stderr)
 
 
+def pending_attention_notices_retry_until_post_accepts(lab):
+    lab.walk()
+    lab.configure(inactive=True, claim_release_refusal=True)
+    lab.watch(extra={'QA_POST_STATUS': '2'})
+    notices = lambda: [m for m in lab.sent() if 'slot release unconfirmed' in m['args'][2]]
+    assert len(notices()) == 1
+    lab.watch(extra={'QA_POST_STATUS': '3'})
+    assert len(notices()) == 2
+    lab.watch()
+    assert len(notices()) == 2
+    receipts = [json.loads(p.read_text()) for p in (lab.tmp / 'qa/attention').glob('*.json')]
+    assert receipts and all(r['delivered'] for r in receipts)
+
+
+def orphan_claims_release_after_ten_minutes_with_exact_what(lab):
+    lab.walk()
+    _, live = lab.walk_state()
+    orphan = 'qa walk rung-orphan-1 attempt 1 claim ' + 'a' * 32
+    hold_slot(lab, 2, what=orphan)
+    hold_slot(lab, 3, owner='ops', what='qa walk rung-other-1 attempt 1')
+    lab.watch(now='2026-10-30T00:00:00Z')
+    lab.watch(now='2026-10-30T00:09:59Z')
+    assert set(slot_claims(lab)) == {'1', '2', '3'}
+    lab.watch(now='2026-10-30T00:10:00Z')
+    assert set(slot_claims(lab)) == {'1', '3'}
+    assert ['release', 'hetzner6', '2', 's/qa', '--what', orphan] in lab.calls('claim')
+    assert slot_claims(lab)['1']['what'] == live['slot_claim']['what']
+    lab.watch(now='2026-10-30T00:20:00Z')
+    assert len([m for m in lab.sent() if 'orphan slot released' in m['args'][2]]) == 1
+
+
+def orphan_claims_keep_live_or_uncertain_runs_and_reset_grace(lab):
+    lab.walk()
+    directory, state = lab.walk_state()
+    (lab.tmp / 'qa/walks' / (state['walk'] + '.json')).unlink()
+    # The walk state is gone, but its codex-run unit is live.
+    lab.watch(now='2026-10-30T00:00:00Z')
+    lab.watch(now='2026-10-30T00:20:00Z')
+    assert slot_claims(lab) and not [c for c in lab.calls('claim') if c[0] == 'release']
+    lab.configure(inactive=True)
+    lab.watch(now='2026-10-30T00:21:00Z')
+    lab.configure(unit_query_failure=True)
+    result = lab.watch(now='2026-10-30T00:30:00Z')
+    assert 'orphan claim kept' in result.stdout
+    lab.configure(unit_query_failure=False)
+    lab.watch(now='2026-10-30T00:31:00Z')
+    assert slot_claims(lab)
+    lab.watch(now='2026-10-30T00:41:00Z')
+    assert not slot_claims(lab)
+
+
+
 CASES = (
+    pending_attention_notices_retry_until_post_accepts,
+    orphan_claims_release_after_ten_minutes_with_exact_what,
+    orphan_claims_keep_live_or_uncertain_runs_and_reset_grace,
+
     a_local_successor_claim_survives_atomic_release,
     a_remote_successor_claim_survives_atomic_release,
     claim_lifetimes_remain_unique_when_names_attempts_and_times_repeat,
@@ -4763,10 +4822,10 @@ CASES = (
     fleet_settings_accept_commas_and_plus_without_whitespace,
     failed_remote_or_unreadable_claim_never_prepares_or_falls_back,
     empty_and_unknown_claim_results_refuse_even_if_record_was_created,
-    release_preflight_mismatch_is_alerted_once_and_never_released,
+    release_preflight_mismatch_alerts_each_reason_and_keeps_successors,
     release_waits_for_give_back_even_when_all_units_are_stopped,
-    remote_release_timeout_after_effect_is_terminal,
-    a_release_crash_before_call_never_retries_the_durable_intent,
+    remote_release_timeout_keeps_successors_on_retry,
+    a_release_crash_before_call_retries_the_durable_intent,
     unknown_walk_holders_alert_once_and_hand_holders_are_untouched,
     a_saved_attempt_holder_authorizes_only_its_exact_stray,
 
@@ -4778,13 +4837,13 @@ CASES = (
     target_stays_warm_and_trim_failure_is_logged_before_fetch,
     claims_over_ssh_quote_both_shell_levels_and_use_saved_endpoint,
     claim_release_waits_for_session_and_deployment_stop,
-    claim_release_failure_is_alerted_once_without_retry,
-    a_claim_lost_between_acceptance_and_save_is_alerted,
-    an_orphan_claim_without_any_state_is_alert_only,
+    claim_release_failure_is_retried_and_alerted_once,
+    a_claim_lost_between_acceptance_and_save_gets_orphan_grace,
+    an_orphan_claim_without_any_state_waits_for_grace,
     a_saved_claim_precedes_any_checkout_preparation,
     a_release_saved_after_a_crash_never_releases_a_successor,
     a_pause_releases_and_resume_reclaims_a_named_slot,
-    a_pause_with_unconfirmed_release_stays_blocked_without_retry,
+    a_pause_with_unconfirmed_release_waits_for_retry,
     local_and_remote_claims_are_bounded_and_unknown_acceptance_is_alerted,
     named_slot_settings_validate_and_override_the_old_counts,
 
