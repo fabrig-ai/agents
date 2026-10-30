@@ -22,6 +22,7 @@ class Part:
     mode: str
     needs: tuple[str, ...]
     design: str
+    done: bool = False  # built without task specs (by hand); counts as landed for its readers
 
 
 @dataclass(frozen=True)
@@ -106,7 +107,8 @@ def load_plan(path: Path) -> Plan:
                     value(item, "title", (str,), required=True),
                     value(item, "mode", (str,), required=True),
                     strings(item, "needs", required=True),
-                    value(item, "design", (str,), required=True))
+                    value(item, "design", (str,), required=True),
+                    value(item, "done", (bool,), False))
         if part.mode not in MODES:
             raise PlanError(f"{path}: part {part.id} has unknown mode {part.mode!r}")
         if part.id in parts:

@@ -19,6 +19,7 @@ title = "Package, command, runner seam and the 30 s test runner"
 mode = "feature"
 needs = []
 design = "docs/design/fab.md, 2 and 8"
+done = true
 
 [[part]]
 id = "files"
@@ -33,6 +34,7 @@ title = "hosts.toml, slot claims, sweep and reclaim signatures, heavy's exit cod
 mode = "feature"
 needs = ["package"]
 design = "docs/design/fab.md, 7"
+done = true
 
 # Slice 1: an agents task runs and lands with fab.
 
@@ -58,6 +60,7 @@ title = "Measure a slot's peak during a broad build, to set the slot bound"
 mode = "probe"
 needs = []
 design = "docs/design/fab.md, 7"
+done = true
 
 [[part]]
 id = "slots"

@@ -150,10 +150,13 @@ def decide(plan: Plan, tasks: Mapping[str, Task], events: list[dict], hosts: Map
     if len(candidates) < plan.low * capacity:
         by_part = {part: [identifier for identifier, task in tasks.items() if task.part == part]
                    for part in plan.parts}
-        eligible = [part.id for part in plan.parts.values() if not by_part[part.id]
-                    and all(by_part.get(need) and all(views[identifier].status == "landed"
-                                                     for identifier in by_part[need])
-                            for need in part.needs)]
+        def landed(part_id):
+            part = plan.parts.get(part_id)
+            return part is not None and (part.done or bool(by_part[part_id]) and all(
+                views[identifier].status == "landed" for identifier in by_part[part_id]))
+
+        eligible = [part.id for part in plan.parts.values() if not part.done and not by_part[part.id]
+                    and all(landed(need) for need in part.needs)]
         if eligible:
             actions.append(Action("design", detail=", ".join(eligible)))
     return actions

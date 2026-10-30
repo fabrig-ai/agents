@@ -160,6 +160,11 @@ class DecideTest(unittest.TestCase):
         actions = self.decide(tasks, events, spec=spec)
         self.assertEqual(actions[-1], Action("design", detail="a"))
 
+    def test_a_done_part_is_never_designed_and_counts_as_landed_for_its_readers(self):
+        spec = make_plan(plan.Part("built", "built", "feature", (), "design.md", done=True),
+                         part("reader", ("built",)))
+        self.assertEqual(self.decide([], spec=spec), [Action("design", detail="reader")])
+
     def test_design_buffer_counts_rejections_and_total_places(self):
         spec = make_plan(part("core"), part("next"))
         tasks = [task("a"), task("b")]

@@ -54,6 +54,11 @@ class PlanTest(unittest.TestCase):
         self.assertEqual(self.read(FULL), expected)
         self.assertIs(type(self.read(FULL).high), float)
 
+    def test_a_part_may_be_marked_done(self):
+        text = FULL.replace('design = "docs/design/fab.md, 4"', 'design = "docs/design/fab.md, 4"\ndone = true')
+        self.assertTrue(self.read(text).parts["core"].done)
+        self.assertFalse(self.read(FULL).parts["core"].done)
+
     def test_partial_buffer_uses_the_other_default(self):
         self.assertEqual(self.read(MINIMAL + "[buffer]\nlow = 2\n").high, 2.0)
         self.assertEqual(self.read(MINIMAL + "[buffer]\nhigh = 4\n").low, 1.0)

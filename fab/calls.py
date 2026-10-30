@@ -112,7 +112,7 @@ def skeleton_brief(plan: Plan, part_id: str, tasks: dict[str, Task], statuses: d
     rows = ["| Part | Title | Mode | Needs | Status |", "| --- | --- | --- | --- | --- |"]
     for item in plan.parts.values():
         specs = [task for task in tasks.values() if task.part == item.id]
-        status = ("done" if specs and all(statuses.get(task.id) == "landed" for task in specs)
+        status = ("done" if item.done or specs and all(statuses.get(task.id) == "landed" for task in specs)
                   else "designed" if specs else "not designed")
         rows.append(f"| {item.id} | {item.title} | {item.mode} | {', '.join(item.needs) or '-'} | {status} |")
     rows.extend(["", "| Slice | Story | Parts | Walk |", "| --- | --- | --- | --- |"])
