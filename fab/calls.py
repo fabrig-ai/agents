@@ -102,12 +102,26 @@ def design_text(root: Path, citation: str) -> str:
         return f"Design unavailable: {path} ({' '.join(str(error).splitlines())})"
 
 
+def drafts_text(plan: Plan, root: Path) -> str:
+    """The plan's sources, the user's own words every call checks its work against: the text of
+    each source that is a file under root, under a `## <path>` heading; a source that is not a
+    file here is listed by name."""
+    parts = []
+    for source in plan.sources:
+        path = root / source
+        if source and not Path(source).is_absolute() and path.is_file():
+            parts.append(f"## {source}\n\n{path.read_text(encoding='utf-8')}")
+        else:
+            parts.append(f"## {source}\n\n(not a file in this repository)")
+    return "\n\n".join(parts) or "(none)"
+
+
 def skeleton_brief(plan: Plan, part_id: str, tasks: dict[str, Task], statuses: dict[str, str],
                    root: Path, *, call_id: str, branch: str, report: str) -> str:
     """The skeleton author's brief: its role text; the call's facts (call, branch, report path);
     the plan's parts and slices as a table with each part's status (designed, done, or not
-    designed); the part to design (id, title, mode, needs, design citation); the cited design
-    text; the inventory; and the task specs that exist for the part's needs, as examples of
+    designed); the part to design (id, title, mode, needs, design citation); the user's drafts
+    (drafts_text); the cited design text; the inventory; and the task specs that exist for the part's needs, as examples of
     the format. Raises ValueError past BRIEF_LIMIT, naming the largest section."""
     part = plan.parts[part_id]
     examples = []
@@ -122,6 +136,7 @@ def skeleton_brief(plan: Plan, part_id: str, tasks: dict[str, Task], statuses: d
         ("Plan parts and slices", _parts_table(plan, tasks, statuses)),
         ("Part to design", f"- Id: {part.id}\n- Title: {part.title}\n- Mode: {part.mode}\n"
          f"- Needs: {', '.join(part.needs) or '(none)'}\n- Design: {part.design}"),
+        ("The user's drafts", drafts_text(plan, root)),
         ("Cited design", design_text(root, part.design)),
         ("Inventory", render_inventory(inventory(root))),
         ("Task spec examples", "\n\n".join(examples) or "(none)"),
@@ -142,13 +157,16 @@ def _parts_table(plan: Plan, tasks: Mapping[str, Task], statuses: Mapping[str, s
 
 
 def answer_brief(questions: list[dict], tasks: dict[str, Task], root: Path, *, call_id: str,
-                 branch: str, report: str) -> str:
-    """The answerer's brief: its role text; the call's facts; each open question (task, run,
-    text) with its task spec and the run's report path; the inventory."""
+                 branch: str, report: str, plan: Plan | None = None) -> str:
+    """The answerer's brief: its role text; the call's facts; the user's drafts when the plan
+    is given; each open question (task, run, text) with its task spec and the run's report
+    path; the inventory."""
     sections = [
         ("Role", ROLES["answer"].read_text(encoding="utf-8")),
         ("Call facts", _facts(call_id, branch, report)),
     ]
+    if plan is not None:
+        sections.append(("The user's drafts", drafts_text(plan, root)))
     for question in questions:
         task = tasks[question["task"]]
         path = Path(task.path)
@@ -203,6 +221,7 @@ def review_brief(plan: Plan, tasks: dict[str, Task], events: list[dict], root: P
          f"\n\nSpecs: docs/plan/{plan.draft}/tasks/"),
         ("Landed since the last review", "\n\n".join(records) or "(none)"),
         ("Taste", TASTE.read_text(encoding="utf-8")),
+        ("The user's drafts", drafts_text(plan, root)),
         ("Designs", "\n\n".join(f"## {path}\n\n{design_text(root, citation)}"
                                  for path, citation in designs.items())),
         ("Inventory", render_inventory(inventory(root))),
@@ -345,7 +364,7 @@ def main(argv: list[str]) -> int:
             subject = f"{plan.draft}/review"
         else:
             questions = [item for item in open_questions(events) if item["task"] in tasks]
-            text = answer_brief(questions, tasks, root, **facts)
+            text = answer_brief(questions, tasks, root, plan=plan, **facts)
             subject = plan.draft
         if args.brief_only:
             print(text)

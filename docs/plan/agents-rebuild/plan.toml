@@ -4,7 +4,7 @@ repo = "agents"
 sources = [
   "docs/design/draft/code-producing-pipeline.md",
   "docs/design/draft/landing-pipeline.md",
-  "Execution modes for the code-producing pipeline (Claude Docs, 2026-10-30)",
+  "docs/design/draft/execution-modes.md",
 ]
 
 [buffer]

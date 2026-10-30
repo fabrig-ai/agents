@@ -465,3 +465,14 @@ class MainTest(unittest.TestCase):
                         self.assertEqual(calls.main(["skeleton", "absent", "--plan", str(directory)]), 1)
                     start.assert_not_called()
                     self.assertIn(reason, output.getvalue())
+
+
+class DraftsTextTest(unittest.TestCase):
+    def test_sources_that_are_files_are_carried_whole(self):
+        with tmp_home() as root:
+            (root / "docs").mkdir()
+            (root / "docs/draft.md").write_text("The user's words.\n")
+            spec = Plan("draft", "agents", ("docs/draft.md", "A doc elsewhere"), 1.0, 2.0, {}, ())
+            text = calls.drafts_text(spec, root)
+            self.assertIn("## docs/draft.md\n\nThe user's words.", text)
+            self.assertIn("## A doc elsewhere\n\n(not a file in this repository)", text)
