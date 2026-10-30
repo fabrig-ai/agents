@@ -79,9 +79,10 @@
 - **Subjects can share a task's id:** a skeleton call's subject
   `<draft>/<part>` equals the id of a task named after its part (`gates`).
   A `question.answered` that unparks the subject also makes that task
-  runnable in the fold, even after it has landed. Nothing answers a call's
-  question by hand yet; the user's channel (13.6) must name subjects apart
-  from tasks.
+  runnable in the fold, even after it has landed. 13.6 names subjects
+  apart from tasks (`call.answered`); until `channel-tick` lands, a
+  subject still unparks on a `question.answered` naming it, and call
+  questions are answered that way by hand.
 - **The flow is a skeleton:** `fab/flow.py` holds 13.2's target, calm and
   measure, and `fab.dispatch.places` and `decide` take a `calm` argument they
   do not use yet. The task `flow` fills them after `gates-tick`; until then
@@ -96,6 +97,16 @@
   contract and retire calls, tick a plan being cut, skip a retired plan and
   review a retire call with the consistency pass. Until then every part is
   designed by a skeleton call, and plans are cut by hand.
+- **The user's channel is a skeleton:** `fab/channel.py` holds 13.6's
+  fold of the user's open questions, the page and `fab page
+  show|write|answer`. The task `channel` fills the fold, the reports'
+  listing and the page's text; `channel-tick` fills the command and the
+  page's writing, and makes the tick rewrite the page. It also makes
+  `call.answered` the only answer that unparks a subject or resets a
+  chain, and carries the user's answers into every later brief of the
+  subject. Until then nothing writes `FAB_HOME/user.md`. The open questions
+  of the log today are the retire and accounting skeleton calls'. The page
+  is a file on hel8: where else the user reads it is the user's (14).
 - **Parts done by hand have no task specs** (package, slot-probe), so the
   tick's design line lists them.
 - **The slot bound of 25 GB is one measurement** (10-30 20:18Z): a

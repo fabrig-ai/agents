@@ -45,6 +45,7 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
 | `FAB_HOME/runs/<run>/` on hel8 | each run's brief, its collected report and metadata |
 | `FAB_HOME/reports/` on hel8 | the standing reports, one file per draft and day (section 10) |
 | `FAB_HOME/digests/<run>.md` on hel8 | each gated branch's structure digest (section 12) |
+| `FAB_HOME/user.md` on hel8 | the user's page: their open questions and the latest reports (13.6) |
 | `FAB_HOME/repos/<repo>` on each machine | fab's own clones; `FAB_HOME/wt/<run>` worktrees for runs that build nothing |
 | `~/src/fabrig/slots/<n>` on a builder | warm fabrig checkouts (unchanged); `slots/<n>.claim` the slot's claim (section 7) |
 | `FAB_HOME/after-landing.jsonl` on the after-landing builder | its verdicts; `FAB_HOME/after-landing/` its state and each run's logs (section 11) |
@@ -72,10 +73,11 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
 | `branch.landed` | task, branch, tip, main | on main |
 | `branch.rejected` | task, branch, tip, step, log | the landing refused it; a repair or rebase follows |
 | `question.asked` | task, run, text | the task parks until answered |
-| `question.answered` | task, by, answer | the task may run again |
+| `question.answered` | task, by, answer | the task may run again; it names a task, never a call's subject |
 | `call.started` / `call.ended` | call, role, subject; outcome, tokens | a Claude call |
 | `call.finished` | call, role, outcome | the dispatcher landed a call's branch, or failed to |
 | `call.parked` | call, subject, reason, report | a call's branch waits for the user (13.1) |
+| `call.answered` | subject, call, by, question, answer | the user answered a subject's question or parked chain (13.6) |
 | `note` | text | anything a person wants on the record |
 
 - **New kinds are additive.** The fold ignores types it does not know, so a
@@ -362,7 +364,8 @@ and Claude reads the code's structure in batches, never on the landing path.
   skeleton call's does. It never holds up a landing.
 - **A question from a call parks its subject:** a skeleton or review call
   that ends with a question starts no further call for that subject until
-  `question.answered` names it.
+  `call.answered` names it (13.6), or a later call of the subject ends
+  done.
 
 ## 13. Growing toward the full model
 
@@ -396,7 +399,7 @@ it, and the flow grows from a small start rather than to a fixed cap.
     `amends`. A run ending `Infra:` is reviewed again, up to three times.
   - A second refusal, an amend call that does not end done, or a third
     `Infra:` logs `call.parked`.
-  - A `question.answered` naming the subject starts the chain's counts
+  - A `call.answered` naming the subject (13.6) starts the chain's counts
     afresh: the branch's tip is reviewed again, and may be amended once
     more.
   - While a subject's chain is open, no call starts for that subject; no
@@ -556,6 +559,31 @@ before it lands (13.1).
 - **Questions that are the user's** (budgets, machines, what is hard to
   reverse) park their task and are listed, with the daily reports, on one
   page the user reads; nothing else goes to the user.
+- **Whoever asks decides it is the user's,** never the page. Three things
+  are (`fab.channel.asks`, folded from the plans and the log):
+  - a plan's `[[question]]` with no answer, the cut's (13.3);
+  - a call that ended `Question:` (section 12);
+  - a call's chain parked after its review refused twice (13.1).
+  A task's questions are the foreman's and the answerer's and never reach
+  the page; an answer call that cannot settle one ends `Question:` itself.
+- **The page** is `FAB_HOME/user.md` on hel8 (`fab/channel.py`):
+  - the open questions, the plans' first, then the log's in the order they
+    were asked, each with what to read and how to answer it;
+  - then each standing report's latest day (section 10): its path and its
+    Signals lines, not its figures.
+  The tick rewrites it at its end; `fab page show|write [PLAN_DIR...]`
+  makes it on demand. Its plans are those in `FAB_HOME/plans` (13.4) and
+  those named. The drafts send the reports to the director, who passes the
+  user what needs the user; the director reads the same page.
+- **Answers come back on the same path.** `fab page answer SUBJECT TEXT` on
+  hel8 logs `call.answered` and rewrites the page. The subject's calls may
+  start again, and a parked chain's counts start afresh (13.1). Every later
+  call of the subject, and every review run of its chain, carries the
+  user's answers in its brief (`# The user's answers`). A plan's question
+  is answered in its plan.toml, landed with `fab land`.
+- **Subjects are named apart from tasks:** `question.answered` names a task
+  and `call.answered` a subject. A part and a task of the same name never
+  unpark each other.
 
 ### 13.7 Probes
 
@@ -603,3 +631,8 @@ before it lands (13.1).
 - The designer's calls for repositories other than this one, and changes to
   designs outside `docs/design/fab*`, once calls land through tools/land or
   fabrig's queue.
+- The user's page published where the user reads it without hel8 (the
+  status page, a doc), once the user says where; a notification when a
+  question joins it.
+- A plan's question answered by `fab page answer`, writing plan.toml and
+  landing it as the foreman lands its answers.
