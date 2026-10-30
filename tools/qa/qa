@@ -889,7 +889,24 @@ class Watch:
                 # Other users' launchers cannot own our user-manager task.
                 if process.stat().st_uid != os.getuid():
                     continue
-                data = read_bytes(process / 'cmdline', 1024 * 1024 + 1)
+                path = process / 'cmdline'
+                try:
+                    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                except FileNotFoundError:
+                    raise
+                except OSError as error:
+                    raise Problem(f'{path}: cannot open safely ({error.strerror})', 4) from None
+                with os.fdopen(descriptor, 'rb') as source:
+                    info = os.fstat(source.fileno())
+                    # Non-dumpable processes can have our UID on /proc/PID but
+                    # root-owned cmdline files. Our codex-run launchers are
+                    # ordinary dumpable processes, so these cannot be ours.
+                    # Preserve all other descriptor refusals before skipping.
+                    if (stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+                            and info.st_uid != os.getuid()):
+                        continue
+                    check_file(source, path)
+                    data = source.read(1024 * 1024 + 1)
             except (FileNotFoundError, ProcessLookupError):
                 continue
             except OSError:

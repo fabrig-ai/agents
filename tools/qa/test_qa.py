@@ -2671,6 +2671,46 @@ tool['Watch'].launcher_alive = launcher_alive
     assert not any(args[0] == 'give' for args in lab.calls('logins'))
 
 
+def a_non_dumpable_process_does_not_block_walk_cleanup(lab):
+    directory, state = walk_with_logins(lab, CHATGPT)
+    lab.end_run(state)
+    (lab.tmp / 'codex-run' / state['run'] / 'unit').unlink()
+    # Fixture entries use live fixture PIDs so prune_dead_launchers retains them.
+    foreign = lab.root / 'proc' / str(os.getpid()) / 'cmdline'
+    launcher = lab.root / 'proc' / str(os.getppid()) / 'cmdline'
+    for path in (foreign, launcher):
+        path.parent.mkdir(exist_ok=True)
+        path.write_bytes(b'\0'.join(os.fsencode(word) for word in
+                         (lab.root / 'codex-run', 'task', directory / 'task.md')) + b'\0')
+    # Reuse the descriptor-ownership simulation from the unsafe-metadata cases;
+    # only this fixture inode looks unowned, with no chown or real /proc access.
+    patch = f'''import os
+from pathlib import Path
+from types import SimpleNamespace
+original_fstat = os.fstat
+info = Path({str(foreign)!r}).stat()
+def fstat(fd):
+    actual = original_fstat(fd)
+    if (actual.st_dev, actual.st_ino) == (info.st_dev, info.st_ino):
+        return SimpleNamespace(st_mode=actual.st_mode, st_nlink=actual.st_nlink,
+                               st_uid=os.getuid() + 1)
+    return actual
+os.fstat = fstat
+'''
+    driven_watch(lab, patch)
+    saved = lab.walk_state()[1]
+    assert not saved['given'] and not saved['released'] and not saved['posted']
+    assert not any(args[0] == 'give' for args in lab.calls('logins'))
+    launcher.unlink()
+    launcher.parent.rmdir()
+    result = driven_watch(lab, patch)
+    saved = lab.walk_state()[1]
+    assert saved['stage'] == 'ended' and saved['given'] == [CHATGPT]
+    assert saved['released'] and saved['posted'] and saved['end_logged']
+    assert 'cleanup failed' not in result.stdout + result.stderr
+    assert lab.sent()[-1]['args'][1:3] == [saved['starter'], 'qa: walk rung-b0-1 ended']
+
+
 def an_ended_not_found_session_with_an_empty_job_releases_custody(lab):
     directory, state = walk_with_logins(lab, CHATGPT)
     lab.end_run(state)
@@ -3521,11 +3561,14 @@ def unsafe_metadata_is_rejected_without_reading(lab, shape):
             with patch('os.fstat', fstat), patch('os.fdopen', lambda *a, **kw: guarded(real_fdopen(*a, **kw))), \
                     patch('io.open', lambda *a, **kw: guarded(real_open(*a, **kw))), redirect_stdout(output):
                 try:
-                    read()
+                    result = read()
                 except tool['Problem'] as error:
                     assert str(target) in str(error), (label, error)
                 else:
-                    assert str(target) in output.getvalue(), (label, output.getvalue())
+                    if label == 'cmdline' and shape == 'unowned':
+                        assert result is False
+                    else:
+                        assert str(target) in output.getvalue(), (label, output.getvalue())
             target.unlink()
             alias.unlink(missing_ok=True)
 
@@ -4705,6 +4748,7 @@ CASES = (
     a_linked_walk_state_keeps_its_grant_held,
     a_manual_take_refuses_unknown_inventory_and_a_broken_cap,
     a_manual_take_selects_its_pool_and_give_passes_through,
+    a_non_dumpable_process_does_not_block_walk_cleanup,
     an_ended_not_found_session_with_an_empty_job_releases_custody,
     a_missing_walk_unit_is_ended_after_the_launch_grace,
     a_pause_with_a_login_out_ends_stuck,
