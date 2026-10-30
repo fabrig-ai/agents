@@ -5,8 +5,10 @@ live story, starts deployment units, and watches walks to their end. It is a
 standalone Python 3.13 tool using the standard library and local commands.
 
 ```
-qa walk fabrig a [--kind forgejo] [--build REF] [--login POOL]... [--cap MINUTES]
-qa walk fabrig a --resume rung-a-12 --build REF [--cap MINUTES]
+qa walk fabrig a [--kind forgejo] [--build REF] [--after COMMIT]... [--login POOL]... [--cap MINUTES]
+qa walk fabrig a --resume rung-a-12 [--build REF] [--after COMMIT]... [--cap MINUTES]
+qa queue
+qa queue cancel ID
 qa take forgejo [--login chatgpt] --as walk/forgejo/WHAT [--note TEXT]
 qa give NAME --as walk/forgejo/WHAT
 qa deploy DIRECTORY NAME -- COMMAND...
@@ -237,7 +239,7 @@ first line is 1–200 characters without controls or Unicode line separators.
 After complete cleanup, a pause frees the slot and logins but retains
 scratch, notes, deployment commands and the paused line in state. Resume
 requires the same repository and rung, a completed and posted pause, an
-explicit build, and no pool or kind changes. It preserves the walk's number
+explicit build (or `--after`), and no pool or kind changes. It preserves the walk's number
 and prior attempts, reclaims and prepares a kind slot through the same
 protocol before taking fresh grants, archives the current
 report as `report-ATTEMPT.md`, removes `paused` and the old give-back, and
@@ -246,6 +248,37 @@ It tells the session to restart kept data with REF's binary, check its
 configuration, and start fresh in the same scratch if the kept store cannot
 open. Failed resume preparation or launch returns only the new grants and
 restores paused state for another attempt.
+
+### Queued starts and resumes
+
+`--after COMMIT` may repeat; each value is a 4–40 digit hexadecimal commit
+identity. Every commit must be an ancestor of freshly fetched origin/main.
+A resume with `--after` may omit `--build`; it then resolves main's tip when
+it actually starts. Other resumes still require an explicit build.
+
+A start or resume waiting for its kind's slot, a login, its own pending
+release, or an `--after` dependency saves a queue entry and prints
+`queued ID` (a resume prints its walk name), exit zero. Other invalid input
+or preparation errors still refuse. Queue entries in `tmp/qa/queue/` retain
+a random ID, repository, rung, kind, requested pools, REF, cap, dependencies,
+starter address, enqueue time and last reason. Queue writes and cancellation
+share the walks lock and use durable sibling writes and rename.
+`qa queue` lists ID, kind, rung, resume name, after, since and last reason;
+`qa queue cancel ID` removes an entry without touching any walk.
+
+After cleanup each check tries the oldest ready entry of each kind, through
+the same admission function as a typed start, with its saved starter. Busy
+entries and unlanded dependencies do not prevent a later ready entry of that
+kind. At most one entry per kind is attempted beyond readiness in one check.
+Dependency readiness fetches the selected existing slot clone without
+switching it or taking a login; admission rechecks dependencies after claiming
+and fetching, before checkout. Main resolves then, never at enqueue time.
+Refusal keeps the entry with its last reason and one pending director notice
+per distinct reason. A resume whose state is no longer paused is removed with
+a notice. A saved admission ID on the attempt lets a restart remove an entry
+whose launcher was already accepted or is still being recovered, without
+launching twice. Queue corruption refuses listing/admission; the watcher
+isolates it and continues cleanup.
 
 ## Deployment and cleanup
 
@@ -316,30 +349,42 @@ and release. External reconciliation cannot cause this release to delete
 a different WHAT, but must never copy a previous claim's lifetime token.
 The claim executable must support `--what`; there is no owner-only fallback.
 
-Before the preflight/command, state durably records `release_status` as
-`release unconfirmed`, with a result describing possible interruption.
-Any failure (including an atomic WHAT mismatch), timeout, ambiguous reply
-or crash leaves that terminal status:
-the service never retries the release, even after a free slot or successor
-claim appears. It alerts the director once per claim lifetime. Legacy claims
-retain their existing alert receipts. Successful confirmation saves
-`slot_claim.released=true` and `release_status=released`. This bookkeeping
-does not gate login returns or pause/end notices. Resume stays blocked while
-its old claim is unconfirmed; the director reconciles it before further use.
+### Retried end steps
 
-Each check also observes this owner's walk/attempt claims on configured kind
-slots. A claim without a saved slot is alert-only and remains held: absent
-custody cannot prove unit and give-back completion. Other owners,
-descriptions, slots and foreign repositories remain untouched. Unreadable
-saved custody disables these observations. There is no automatic orphan
-claim release.
+Before release, state durably records `release_status=release unconfirmed`.
+Each check retries pending claim releases after confirming unit stops and
+login returns, under the walks lock and through the saved endpoint. The
+owner and exact WHAT must still match before the atomic `--what` release.
+An observed free slot after an unconfirmed release confirms custody gone;
+a different claim stays held and cannot be released by this attempt.
+Each confirmed success is saved. A paused walk with a pending release can
+queue its resume; the watcher completes the release before admission.
 
-One-time director notices use durable reservations in `tmp/qa/attention/`,
-one hashed JSON receipt and body per release attempt, orphan claim, unknown
-login holder or overdue launch. The reservation precedes `post`, so a service
-restart or crash cannot repeat the post attempt. An interrupted or failed post is recorded
-without retry; its receipt remains available for reconciliation. Ordinary
-stuck-login and starter-post retry rules below are separate.
+Attention notices are pending steps in `tmp/qa/attention/`: key, recipient,
+subject, body and delivery receipt saved before sending. Failed or
+interrupted posts retry at every check; exit 0 or 3 records delivery.
+Release failures have one notice per claim lifetime and distinct failure
+reason. Unknown holders and overdue launches retain one logical notice per
+identity. Existing interrupted attention receipts become pending too.
+Delivery is at least once: acceptance followed by a crash before saving can
+repeat a post. Completion posts and per-login alerts keep their saved
+receipts and the same retry rule. One failure never prevents other steps.
+
+### Orphan slot claims
+
+At each check, `claim list` observes the configured inventory slots through
+the configured endpoint. Only this QA owner's `qa walk NAME attempt A`
+claims qualify. A starting or running walk, saved custody still needing
+cleanup, a live codex-run unit/job or launcher, an opaque legacy state, or
+an unreadable observation keeps the claim and logs why. Other owners and
+unrelated WHAT values are untouched. Invalid saved custody disables sweeping.
+
+The first unambiguously idle observation is saved in `tmp/qa/orphans/`, keyed
+by host, slot, owner and exact WHAT. Any live or uncertain observation resets
+the grace. After ten minutes of idle observations, and a claim at least ten
+minutes old, the watcher rechecks the inventory and releases with `--what`
+under the walks lock. Failure retries at the next check; success is saved
+and queues one delivered notice. No login content is read for this decision.
 
 A queued or running unit job, including on a loaded inactive unit, keeps
 custody and the slot. An empty `Job=` or numeric zero means no pending job;
@@ -400,8 +445,8 @@ the director one "overdue launch" notice naming the walk, attempt, elapsed
 seconds and observation. The busy-lock path only reads saved state and sends
 notices; it never saves walk progress, stops units, returns logins or releases
 claims. A free admission lock permits the other walks' normal checks to continue.
-The notice uses the one-time attention receipts: reservation precedes sending,
-restarts never resend, and failed or interrupted sends remain for reconciliation.
+The notice uses the pending attention receipts: reservation precedes sending,
+and failed or interrupted sends retry until delivery is recorded.
 After a negative scan, recovery checks metadata again before cancelling,
 covering a launcher that publishes meta and exits during the scan. A
 refused foreground command records `launch_complete`; it may be cancelled without the grace only after the same negative launcher
