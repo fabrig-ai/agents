@@ -2074,16 +2074,25 @@ def supervise(path, fd):
         real_popen = app.subprocess.Popen
         invocations = []
         def delayed_start(argv, *args, **kwargs):
-            if '_supervise' in argv:
-                invocation = json.loads(Path(argv[-2]).read_text())
-                self.assertFalse(invocation['deadline_bound'])
-                self.assertEqual(invocation['wall_bound'], 1801)
-                # Startup is the explicit handshake: expire absolute time only
-                # after the runner has persisted its invocation and count.
-                self.assertEqual(json.loads(self.runner.path.read_text())['bisect']['count'], 1)
-                self.clock.advance(wall=3600, monotonic=3600)
-                invocations.append(invocation)
-            return real_popen(argv, *args, **kwargs)
+            if '_supervise' not in argv:
+                return real_popen(argv, *args, **kwargs)
+            invocation = json.loads(Path(argv[-2]).read_text())
+            self.assertFalse(invocation['deadline_bound'])
+            self.assertEqual(invocation['wall_bound'], 1801)
+            # Expire absolute time after the invocation/count are persisted,
+            # before the real guardian can perform its startup deadline check.
+            self.assertEqual(json.loads(self.runner.path.read_text())['bisect']['count'], 1)
+            self.clock.advance(wall=3600, monotonic=3600)
+            invocations.append(invocation)
+            guardian = real_popen(argv, *args, **kwargs)
+            # The fixture's started marker precedes supervise(). Wait for its
+            # result before the runner can poll: at this clock value an unknown
+            # completion correctly triggers an overdue/slot-retained ops fault.
+            result = Path(invocation['result'])
+            self.wait_for(lambda: result.exists() or guardian.poll() is not None,
+                          'guardian startup deadline result')
+            self.assertTrue(result.exists(), 'guardian exited without a startup deadline result')
+            return guardian
         before = len(self.calls('tiers'))
         with mock.patch.object(app.subprocess, 'Popen', side_effect=delayed_start):
             self.runner.run()
