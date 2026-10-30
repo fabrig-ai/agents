@@ -737,15 +737,15 @@ class WiringTests(Sandbox):
                     stop = hooks["Stop"][0]["hooks"][0]
                     argv = shlex.split(stop["command"])
                     if flag == "1":
-                        self.assertEqual(set(hooks), {"Stop", "SessionStart", "UserPromptSubmit"})
+                        self.assertEqual(set(hooks), {"Stop", "SessionStart", "SessionEnd", "UserPromptSubmit"})
                         self.assertEqual(hooks["Stop"], hooks["UserPromptSubmit"])
-                        self.assertEqual(hooks["Stop"], hooks["SessionStart"])
+                        self.assertEqual(hooks["Stop"], hooks["SessionStart"][:1])
                         self.assertNotIn("matcher", hooks["SessionStart"][0])
                         self.assertEqual([argv[i + 1] for i, token in enumerate(argv) if token == "--watch"],
                                          lib.watched(role, "dm", "jig" if role == "lead" else None))
                         self.assertEqual(stop["timeout"], 30)
                     else:
-                        self.assertEqual(set(hooks), {"Stop", "SessionStart"})
+                        self.assertEqual(set(hooks), {"Stop", "SessionStart", "SessionEnd"})
                         self.assertNotIn("--watch", argv)
                         self.assertEqual(hooks["SessionStart"][0]["matcher"], "compact")
 
@@ -773,7 +773,8 @@ class WiringTests(Sandbox):
         path = Path(values["lead_start_dir"]) / ".claude/settings.json"
         path.parent.mkdir(parents=True)
         original = {"model": "opus[1m]", "permissions": {"allow": ["Read"]},
-                    "hooks": {"Stop": [{"old": True}], "SessionStart": [{"old": True}],
+                    "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "session-context --hook"}]}],
+                              "SessionStart": [{"hooks": [{"type": "command", "command": "session-context --hook"}]}],
                               "PreToolUse": [{"other": True}]}}
         path.write_text(json.dumps(original))
         result = self.command("start", "wire", "dm")
@@ -790,7 +791,7 @@ class WiringTests(Sandbox):
             "session-context", "--hook", "--role", "lead", "--name", "lead/jig",
             "--coordinator", "s/dynamic-memory@hel8", "--handover", values["coordinator_handover"], "--handle", "dm",
         ])
-        self.assertEqual(settings["hooks"]["SessionStart"], [{"matcher": "compact", "hooks": [stop]}])
+        self.assertEqual(settings["hooks"]["SessionStart"][:1], [{"matcher": "compact", "hooks": [stop]}])
         self.assertEqual(self.calls(), [])
         self.assertEqual(len(self.all_calls()), 1)
         self.assertEqual(self.all_calls()[0]["argv"], ["--capabilities"])
@@ -816,7 +817,7 @@ class WiringTests(Sandbox):
         for role, values in (("lead", lib.names("dm", "skein")), ("coordinator", lib.names("dm"))):
             path, _, _ = lib.hook_settings(values, role, {"hook-gating"})
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps({"keep": True, "hooks": {"Stop": ["old"], "SessionStart": ["old"], "Notification": ["keep"]}}))
+            path.write_text(json.dumps({"keep": True, "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "session-context --hook"}]}], "SessionStart": [{"hooks": [{"type": "command", "command": "session-context --hook"}]}], "Notification": ["keep"]}}))
         result = self.command("start", "wire", "dm")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("lacks hook-gating", result.stdout)
@@ -826,7 +827,7 @@ class WiringTests(Sandbox):
             settings = json.loads(path.read_text())
             self.assertTrue(settings["keep"])
             self.assertEqual(settings["hooks"]["Notification"], ["keep"])
-            self.assertNotIn("SessionStart", settings["hooks"])
+            self.assertEqual(len(settings["hooks"]["SessionStart"]), 1)
             if role == "lead":
                 self.assertEqual(settings["hooks"]["Stop"][0]["hooks"][0]["command"], "session-context --hook")
             else:
@@ -843,7 +844,7 @@ class WiringTests(Sandbox):
             hooks = json.loads(path.read_text())["hooks"]
             command = hooks["Stop"][0]["hooks"][0]["command"]
             self.assertEqual("--name lead/skein" in command, gating == "1")
-            self.assertEqual("SessionStart" in hooks, gating == "1")
+            self.assertIn("SessionStart", hooks)
         self.assertEqual((scratch / "brief.md").read_text(), "Work on the named part.\n")
 
     def test_wire_dry_run_creates_nothing_and_only_visits_existing_leads(self):
@@ -1017,14 +1018,14 @@ class DirectorTests(Sandbox):
             self.assertTrue(settings["keep"])
             self.assertEqual(settings["hooks"]["Notification"], ["keep"])
             if gating == "0":
-                self.assertEqual(settings["hooks"], {"Notification": ["keep"]})
+                self.assertEqual(set(settings["hooks"]), {"Notification", "SessionStart", "SessionEnd"})
                 self.assertIn("director hooks skipped", result.stdout)
                 continue
             argv = shlex.split(settings["hooks"]["Stop"][0]["hooks"][0]["command"])
             for option, expected in (("--role", "director"), ("--name", "director"), ("--name-prefix", "director/"), ("--handover", values["director_handover"])):
                 self.assertEqual(argv[argv.index(option) + 1], expected)
             if drift == "1":
-                self.assertEqual(settings["hooks"]["Stop"], settings["hooks"]["SessionStart"])
+                self.assertEqual(settings["hooks"]["Stop"], settings["hooks"]["SessionStart"][:1])
                 self.assertEqual(settings["hooks"]["Stop"], settings["hooks"]["UserPromptSubmit"])
                 self.assertEqual([argv[i + 1] for i, token in enumerate(argv) if token == "--watch"], lib.watched("director", "director"))
             else:
@@ -1044,6 +1045,31 @@ class DirectorTests(Sandbox):
             self.assertIn("director-records.md", result.stdout)
             self.assertEqual(list(self.home.iterdir()), [])
         self.assertTrue(all(call["argv"] == ["agents", "--json"] for call in self.calls()))
+
+
+class ReapSettingsTests(Sandbox):
+    def test_all_roles_capabilities_foreign_groups_and_repeat_wire(self):
+        foreign = {"type": "command", "command": "foreign-command"}
+        for role, values in (("lead", lib.names("dm", "jig")),
+                             ("coordinator", lib.names("ab")), ("director", lib.names("director"))):
+            for capabilities in (set(), {"hook-gating"}, {"hook-gating", "role-drift"}):
+                with self.subTest(role=role, capabilities=capabilities):
+                    path = Path(values[f"{role}_start_dir"]) / ".claude/settings.json"
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    original = [{"matcher": "resume", "hooks": [foreign, {"type": "command", "command": "session-context --hook"}]},
+                                {"hooks": [foreign.copy()]}]
+                    path.write_text(json.dumps({"hooks": {event: original for event in (
+                        "Stop", "SessionStart", "SessionEnd", "UserPromptSubmit")}}))
+                    path, settings, _ = lib.hook_settings(values, role, capabilities)
+                    for event, groups in settings["hooks"].items():
+                        self.assertEqual(groups[:2], [{"matcher": "resume", "hooks": [foreign]}, {"hooks": [foreign]}])
+                        reapers = [group for group in groups if any("reap-hook" in hook["command"] for hook in group["hooks"])]
+                        self.assertEqual(len(reapers), int(event in ("SessionStart", "SessionEnd")))
+                        if reapers:
+                            self.assertNotIn("matcher", reapers[0])
+                            self.assertEqual(shlex.split(reapers[0]["hooks"][0]["command"])[1:], [values[f"{role}_name"]])
+                    lib.atomic_json(path, settings)
+                    self.assertEqual(lib.hook_settings(values, role, capabilities)[1], settings)
 
 
 if __name__ == "__main__":

@@ -71,7 +71,8 @@ if several have, pass a session id explicitly (exit 2 lists their ids and mtimes
 
 `start` writes `<start dir>/.claude/settings.json`; `wire` refreshes the
 coordinator plus existing lead directories, or just the director. Replace owned
-Stop/SessionStart/UserPromptSubmit entries; preserve other settings/hooks.
+session-context and reap-hook commands in Stop/SessionStart/UserPromptSubmit/SessionEnd;
+preserve foreign commands and their order, even inside mixed hook groups.
 Files are written to siblings and renamed.
 
 Probe PATH's `session-context --capabilities` once. With hook-gating, install
@@ -79,7 +80,8 @@ shell-quoted PATH commands with a 30-second timeout. Lead gates match their name
 coordinators match `coordinator/H/` (plus `coord-next` for the incumbent);
 the director matches `director/` plus `director`, using role `director`.
 Without hook-gating, leads get only plain `session-context --hook` as Stop;
-coordinators/director get no owned hooks. Print why.
+coordinators/director get no context hooks. Print why. All Claude roles still
+get the reaper hooks described below.
 
 With role-drift, all three events use the same command and repeatable `--watch`
 paths; SessionStart has no matcher. Otherwise use Stop and compact SessionStart
@@ -97,6 +99,19 @@ Watched files baseline silently under `seen/SESSION_ID/` (0700 directories,
 resume/compact SessionStart or inactive Stop, naming up to eight changed headings.
 A due handover comes first in the same output. Changes on other events remain
 pending. Cleanup runs daily for sessions idle over seven days. Hooks always exit 0.
+
+
+Every Claude role also gets `reap-hook ROLE_NAME` on every SessionStart source
+and on SessionEnd, regardless of context capabilities. The hook reads Claude's
+JSON from stdin. Start records `claude-session`, the full session id and
+`~/.claude/jobs/<first eight id characters>`. Owner comes from session-context's
+`names.json` cache (including short/full id matches), with the launcher's role
+name as fallback; the hook never queries Claude. End records the same id and
+starts `systemctl --user start --no-block reap.service`. Missing reap, command
+failures and malformed input are silent; the hook always exits 0, with a 1.5 s
+budget and 0.4 s command timeouts. Resumed starts safely repeat the start record.
+`wire H` / `wire director` refresh these hooks too. Codex leads use codex-run's
+lifecycle instead of Claude hooks.
 
 ## Ownership for post wake
 
@@ -138,7 +153,8 @@ Director prompts follow monorepo/director-role.md sections 4–6, with read-only
 warm-up on director-next until explicit takeover. Keep installed links unchanged.
 
 Tests: `python3 -I -B tools/test_session_start.py` and
-`python3 -I -B tools/session/test_session_context.py`, temporary HOME and fakes.
+`python3 -I -B tools/session/test_session_context.py` and
+`python3 -I -B tools/session/test_reap_hook.py`, temporary HOME and fakes.
 
 Coordinators may set `lead_kind = "claude" | "codex"` (default `claude`);
 `u` uses Codex. Lead inventory rows include `kind`; Codex rows have `unit`

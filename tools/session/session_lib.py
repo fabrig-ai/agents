@@ -267,6 +267,17 @@ def watched(role, handle, area=None):
     return [str(path) for path in paths]
 
 
+def owned_hook(hook):
+    if not isinstance(hook, dict) or hook.get("type") != "command":
+        return False
+    try:
+        argv = shlex.split(hook.get("command", ""))
+    except ValueError:
+        return False
+    return bool(argv) and (Path(argv[0]).name == "reap-hook" or
+                           (Path(argv[0]).name == "session-context" and "--hook" in argv))
+
+
 def hook_settings(values, role, capabilities):
     directory = values[f"{role}_start_dir"]
     path = Path(directory) / ".claude/settings.json"
@@ -274,8 +285,21 @@ def hook_settings(values, role, capabilities):
     if not isinstance(settings, dict) or not isinstance(settings.get("hooks", {}), dict):
         raise ValueError(f"invalid settings object: {path}")
     hooks = settings.setdefault("hooks", {})
-    for event in ("Stop", "SessionStart", "UserPromptSubmit"):
-        hooks.pop(event, None)
+    # Remove only commands we own, including those mixed into foreign groups.
+    for event in ("Stop", "SessionStart", "UserPromptSubmit", "SessionEnd"):
+        groups = []
+        for group in hooks.get(event, []):
+            if not isinstance(group, dict) or not isinstance(group.get("hooks"), list):
+                groups.append(group)
+                continue
+            remaining = [hook for hook in group["hooks"] if not owned_hook(hook)]
+            if remaining or not group["hooks"]:
+                groups.append({**group, "hooks": remaining})
+        if groups:
+            hooks[event] = groups
+        else:
+            hooks.pop(event, None)
+    owned = {}
     if "hook-gating" in capabilities:
         command = ["session-context", "--hook", "--role", role]
         if role == "lead":
@@ -293,18 +317,22 @@ def hook_settings(values, role, capabilities):
             for watch_path in watched(role, values["handle"], values.get("area")):
                 command += ["--watch", watch_path]
         hook = {"type": "command", "command": shlex.join(command), "timeout": 30}
-        hooks["Stop"] = [{"hooks": [hook]}]
-        hooks["SessionStart"] = [{"hooks": [hook.copy()]} if drift else {"matcher": "compact", "hooks": [hook.copy()]}]
+        owned["Stop"] = [{"hooks": [hook]}]
+        owned["SessionStart"] = [{"hooks": [hook.copy()]} if drift else {"matcher": "compact", "hooks": [hook.copy()]}]
         if drift:
-            hooks["UserPromptSubmit"] = [{"hooks": [hook.copy()]}]
+            owned["UserPromptSubmit"] = [{"hooks": [hook.copy()]}]
         reason = "hook-gating and role-drift available" if drift else "hook-gating available"
     elif role == "lead":
-        hooks["Stop"] = [{"hooks": [{"type": "command", "command": "session-context --hook", "timeout": 30}]}]
+        owned["Stop"] = [{"hooks": [{"type": "command", "command": "session-context --hook", "timeout": 30}]}]
         reason = "PATH session-context lacks hook-gating; using the plain legacy Stop hook"
     else:
         reason = f"{role} hooks skipped: PATH session-context lacks hook-gating"
-    if not hooks:
-        settings.pop("hooks")
+    for event, groups in owned.items():
+        hooks.setdefault(event, []).extend(groups)
+    reap = {"type": "command", "command": shlex.join([
+        str(ROOT / "tools/session/reap-hook"), values[f"{role}_name"]]), "timeout": 2}
+    for event in ("SessionStart", "SessionEnd"):
+        hooks.setdefault(event, []).append({"hooks": [reap.copy()]})
     return path, settings, reason
 
 
