@@ -137,6 +137,8 @@ class Builder:
             if run.get(key) is not None:
                 self.data[key] = run[key]
         self.data['remote_pgid'] = self.data.get('pgid')
+        if value.get('upload'):
+            self.data['upload'] = value['upload']
         if value.get('remote_dir'):
             self.data['remote_dir'] = value['remote_dir']
         self.save()
@@ -222,7 +224,10 @@ class Builder:
         try:
             if not self.data['restored']:
                 # Never turn unseen remote completion into permission to clean up.
-                if self.data.get('restoration_pending') or self.data['phase'] == 'claim_unknown' or self.data['prepare_uncertain'] or self.data['launch_requested'] and not self.data['exit_seen']:
+                if (self.data.get('restoration_pending') or self.data['phase'] == 'claim_unknown' or
+                        self.data['prepare_uncertain'] or
+                        self.data.get('upload_requested') and not self.data.get('upload_seen') or
+                        self.data['launch_requested'] and not self.data['exit_seen']):
                     self.keep('remote end is unknown')
                     return
                 try:
@@ -243,11 +248,11 @@ class Builder:
         finally:
             signal.pthread_sigmask(signal.SIG_SETMASK, blocked)
 
-    def check(self, root, base, limit, gate, require_green=True):
-        for key in ('boot', 'supervisor_pid', 'supervisor_start_ticks', 'start_ticks'):
+    def check(self, root, base, limit, gate, require_green=True, sha=None):
+        for key in ('boot', 'supervisor_pid', 'supervisor_start_ticks', 'start_ticks', 'upload'):
             self.data.pop(key, None)
-        self.data.update(sha=run('git', 'rev-parse', 'HEAD'), remote_dir=None, pgid=None, remote_pgid=None, phase='allocating',
-                         prepare_uncertain=True, launch_requested=False, exit_seen=False, restored=False, restoration_pending=False)
+        self.data.update(sha=sha or run('git', 'rev-parse', 'HEAD'), remote_dir=None, pgid=None, remote_pgid=None, phase='allocating',
+                         prepare_uncertain=True, upload_requested=False, upload_seen=False, launch_requested=False, exit_seen=False, restored=False, restoration_pending=False)
         self.save()
         prepared = self.remote('prepare')
         candidate = prepared['remote_dir']
@@ -257,13 +262,25 @@ class Builder:
         self.save()
         with tempfile.TemporaryDirectory(prefix='agents-land-') as directory:
             bundle = Path(directory) / 'candidate.bundle'
-            subprocess.run(['git', 'bundle', 'create', str(bundle), 'HEAD'], cwd=root, check=True)
+            bundle_ref = 'refs/heads/agents-land-' + self.data['id']
+            subprocess.run(['git', 'update-ref', bundle_ref, self.data['sha']], cwd=root, check=True)
+            try:
+                subprocess.run(['git', 'bundle', 'create', str(bundle), bundle_ref], cwd=root, check=True)
+            finally:
+                subprocess.run(['git', 'update-ref', '-d', bundle_ref], cwd=root, check=True)
+            self.data.update(upload_requested=True, upload_seen=False, phase='uploading')
+            self.save()  # Durable unknown-end intent precedes upload dispatch.
             with bundle.open('rb') as stream:
-                ssh(self.data['target'], 'sh', '-c', 'cat > ' + shlex.quote(candidate + '/candidate.bundle'),
-                    stdin=stream, timeout=15)
-            print(f'land: shipped HEAD bundle to {self.slot[0]}:{candidate}', flush=True)
+                receipt = json.loads(ssh(self.data['target'], 'python3', '-I', '-B', '-c',
+                                         self.source, 'upload', json.dumps(self.data),
+                                         stdin=stream, timeout=15))
+            if receipt.get('sha') != self.data['sha'] or receipt.get('phase') != 'finished' or receipt.get('exit_code') != 0:
+                raise ValueError('upload receipt unavailable or mismatched')
+            self.data.update(upload_seen=True, upload=receipt, phase='uploaded')
+            self.save()
+            print(f'land: shipped HEAD bundle ({self.data["sha"]}) to {self.slot[0]}:{candidate}', flush=True)
             script = (f'git clone -q {shlex.quote(candidate)}/candidate.bundle {shlex.quote(candidate)}/repo && '
-                      f'cd {shlex.quote(candidate)}/repo && mkdir {shlex.quote(candidate)}/tmp && '
+                      f'cd {shlex.quote(candidate)}/repo && git checkout -q --detach {self.data["sha"]} && mkdir {shlex.quote(candidate)}/tmp && '
                       f'TMPDIR={shlex.quote(candidate)}/tmp HEAVY_LABEL={shlex.quote(self.what)} '
                       f'nice -n 19 ionice -c3 tools/check.sh --tier gate '
                       f'{("--changed " + shlex.quote(base) + " ") if base else ""}'
@@ -275,6 +292,8 @@ class Builder:
             self.save()
             observation = self.remote('wait', str(limit + 5))
             value = observation.get('run') or {}
+            if value.get('sha') != self.data['sha']:
+                raise ValueError('remote receipt SHA mismatch')
             if value.get('phase') != 'finished' or type(value.get('exit_code')) is not int:
                 raise ValueError('remote exit status unavailable')
             self.observe(observation)
@@ -416,6 +435,11 @@ def main():
         code = reconcile(root, args.reconcile, args.kill)
         print(f'land: reconcile exit {code}; {gate.budget_mode(budget)}', flush=True)
         return code
+    checkout_lock = Path(run('git', 'rev-parse', '--git-path', 'agents-land.lock')).open('a')
+    try:
+        fcntl.flock(checkout_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        raise ValueError('another land holds .git/agents-land.lock')
     if run('git', 'status', '--porcelain', '--untracked-files=all'):
         raise ValueError('refusing a dirty tree')
     branch = run('git', 'branch', '--show-current')
@@ -429,7 +453,7 @@ def main():
         if subprocess.run(['flock', '-n', '-o', lock, 'true']).returncode:
             print(f'land: waiting for another agents gate on this host ({lock})', flush=True)
         os.environ['AGENTS_GATE_HELD'] = '1'
-        os.execvp('flock', ['flock', '-o', lock, sys.executable, *sys.argv])
+        os.execvp('flock', ['flock', '-o', lock, sys.executable, '-I', '-B', *sys.argv])
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, interrupted)
     before_rebase = run('git', 'rev-parse', 'HEAD')
@@ -438,6 +462,7 @@ def main():
     gate = load_gate(root)
     config = gate.configuration(root)
     budget = config['budget']
+    candidate_sha = run('git', 'rev-parse', 'HEAD')
     base = run('git', 'rev-parse', 'origin/main')
     own_paths = gate.changed_paths(root, base)
     own_selection = set(gate.select(root, config, own_paths, include_smoke=False))
@@ -448,11 +473,15 @@ def main():
             print('LAND: LOCAL FALLBACK — no builder claim; running on this host', flush=True)
         else:
             hosts = tomllib.loads((root / 'fleet/hosts.toml').read_text())['hosts']
-            builder = Builder(hosts, args.inventory, args.host, run('git', 'rev-parse', 'HEAD'))
+            builder = Builder(hosts, args.inventory, args.host, candidate_sha)
             builder.claim()
+        def unchanged():
+            if run('git', 'rev-parse', 'HEAD') != candidate_sha:
+                raise ValueError('HEAD moved during land; refusing push')
         def check(current_base):
+            unchanged()
             if builder:
-                return builder.check(root, current_base, gate.hard_wall(budget), gate)
+                return builder.check(root, current_base, gate.hard_wall(budget), gate, sha=candidate_sha)
             with tempfile.TemporaryDirectory(prefix='land-local-') as directory:
                 result_file = Path(directory) / 'result.json'
                 subprocess.run([str(root / 'tools/check.sh'), '--tier', 'gate', '--changed', current_base,
@@ -462,6 +491,7 @@ def main():
                     raise ValueError('local gate has unobserved tests; rerun')
                 return result
         check(base)
+        unchanged()
         subprocess.run(['git', 'fetch', 'origin'], check=True, timeout=15)
         latest = run('git', 'rev-parse', 'origin/main')
         if latest != base:
@@ -469,24 +499,33 @@ def main():
             # a docs-only upstream change cannot conflict through smoke alone.
             upstream = gate.changed_paths(root, base, latest)
             overlap = own_selection & set(gate.select(root, config, upstream, include_smoke=False))
+            unchanged()
             subprocess.run(['git', 'rebase', 'origin/main'], check=True, timeout=15)
+            prior_sha = candidate_sha
+            candidate_sha = run('git', 'rev-parse', 'HEAD')
             if overlap:
                 print('land: upstream overlaps selected tests; checking once more', flush=True)
                 check(latest)
+            else:
+                if builder:
+                    builder.data['rebase'] = dict(checked_sha=prior_sha, permitted_sha=candidate_sha, base=latest)
+                    builder.save()
+                print(f'land: no-overlap rebase: checked {prior_sha}; permitted {candidate_sha} on {latest}', flush=True)
             subprocess.run(['git', 'fetch', 'origin'], check=True, timeout=15)
             if run('git', 'rev-parse', 'origin/main') != latest:
                 raise ValueError('second upstream race; rerun tools/land')
+        unchanged()
         elapsed = time.monotonic() - started
         if budget['enforce'] and elapsed > budget['merge_wall_s']:
             raise ValueError(f'merge wall budget: {elapsed:.3f}s > {budget["merge_wall_s"]}s')
         if args.dry_run:
             print('land: DRY RUN green; stopping before push', flush=True)
         else:
-            subprocess.run(['git', 'push', 'origin', 'HEAD:main'], check=True, timeout=15)
+            subprocess.run(['git', 'push', 'origin', candidate_sha + ':refs/heads/main'], check=True, timeout=15)
         completed_at = time.monotonic()
         if not args.dry_run:
             try:
-                delete_landed_branch(branch, before_rebase, run('git', 'rev-parse', 'HEAD'), args.keep_branch)
+                delete_landed_branch(branch, before_rebase, candidate_sha, args.keep_branch)
             except (OSError, subprocess.SubprocessError) as error:
                 print(f'land: main pushed; WARNING branch cleanup failed: {type(error).__name__}', file=sys.stderr)
     finally:

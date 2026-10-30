@@ -181,6 +181,9 @@ owner = "s/deploy"
 [files."tools/qa/test_qa_periodic.py"]
 owner = "s/qa"
 
+[files."tools/test_periodic.py"]
+owner = "s/deploy"
+
 [select]
 "tools/fleet-sync" = ["tools/test_bootstrap.py", "tools/test_bootstrap_periodic.py", "tools/test_bootstrap_safety.py", "tools/test_bootstrap_safety_periodic.py", "tools/test_bootstrap_stages.py", "tools/test_bootstrap_stages_periodic.py", "tools/test_fleet_sync.py", "tools/test_fleet_sync_2.py", "tools/test_fleet_sync_2_periodic.py", "tools/test_fleet_sync_2b.py", "tools/test_fleet_sync_2c.py", "tools/test_fleet_sync_3.py", "tools/test_fleet_sync_3_periodic.py", "tools/test_fleet_sync_3b.py", "tools/test_fleet_sync_3c_manifest.py", "tools/test_fleet_sync_4.py", "tools/test_fleet_sync_4_periodic.py", "tools/test_fleet_sync_periodic.py", "tools/test_fleet_sync_policy.py", "tools/test_peer_seed.py", "tools/test_peer_seed_periodic.py", "tools/test_review2_fleet_sync.py", "tools/test_review2_fleet_sync_periodic.py", "tools/test_review_fleet_sync.py", "tools/test_review_fleet_sync_periodic.py"]
 "fleet/**" = ["tools/test_bootstrap.py", "tools/test_bootstrap_periodic.py", "tools/test_bootstrap_safety.py", "tools/test_bootstrap_safety_periodic.py", "tools/test_bootstrap_stages.py", "tools/test_bootstrap_stages_periodic.py", "tools/test_fleet_sync.py", "tools/test_fleet_sync_2.py", "tools/test_fleet_sync_2_periodic.py", "tools/test_fleet_sync_2b.py", "tools/test_fleet_sync_2c.py", "tools/test_fleet_sync_3.py", "tools/test_fleet_sync_3_periodic.py", "tools/test_fleet_sync_3b.py", "tools/test_fleet_sync_3c_manifest.py", "tools/test_fleet_sync_4.py", "tools/test_fleet_sync_4_periodic.py", "tools/test_fleet_sync_periodic.py", "tools/test_fleet_sync_policy.py", "tools/test_peer_seed.py", "tools/test_peer_seed_periodic.py", "tools/test_review2_fleet_sync.py", "tools/test_review2_fleet_sync_periodic.py", "tools/test_review_fleet_sync.py", "tools/test_review_fleet_sync_periodic.py"]

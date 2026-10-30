@@ -48,7 +48,11 @@ before asking the user about budgets (fabrig testing-strategy, section 8.1).
 ## 3. Land and races
 
 `tools/land [--host NAME] [--local] [--dry-run] [--keep-branch]` refuses dirty trees, main and
-detached HEAD, then fetches and performs a plain rebase on origin/main.
+detached HEAD, then fetches and performs a plain rebase on origin/main. A
+checkout flock at `.git/agents-land.lock` (resolved with `git rev-parse --git-path` for
+linked worktrees) is held from the initial checks through push. After the
+initial rebase, land pins the exact candidate SHA; any unexpected HEAD change
+during the run refuses the landing.
 Auto selection matches hetzner3, hetzner7 and hetzner6 pool slots against
 hel8's central free list. Before claiming, it reads `df -B1 --output=avail
 "$HOME"` over SSH, skips unknown disk readings or availability below the
@@ -60,7 +64,9 @@ still authoritative if that list races. Claims use owner `s/deploy-gate` and
 a unique `agents-gate <sha> <token>` description. There is no owner-only
 release or stale-claim stealing.
 
-A builder receives a full HEAD bundle in a private temporary directory and
+A builder receives a full bundle of that pinned SHA in a private temporary
+directory. A temporary local ref pins bundle construction, the builder checks
+out that SHA detached, and land validates the remote receipt against it. It
 runs `nice -n 19 ionice -c3 tools/check.sh --tier gate --changed BASE` with a
 hard wall backstop of 905 s in report-only mode or 65 s when enforced,
 including lock waiting (configured hard wall plus 5 s). A detached supervisor records
@@ -76,11 +82,17 @@ Unknown completion or restoration keeps the exact claim. This includes an SSH
 drop, timeout, or interrupt before the exit status was received. Durable 0600
 records in `~/.local/state/agents-gate/unreconciled/<token>.json` hold host,
 slot, owner, WHAT, SHA, remote directory and process identity. Intent is saved
-before dispatch, so an unseen launch/claim reply is also recoverable.
+before claim, upload and gate-launch dispatch. Upload intent and its receipt
+live in the same unknown-end record. A remote upload wrapper records its own
+PID and the uploader's process group, boot ID and start ticks before releasing
+a pipe barrier that permits the copy. A lost or interrupted upload retains the
+claim and directory until reconciliation proves both wrapper and uploader gone;
+removing a pathname is never proof that its writer ended. Cleanup and upload
+launch share a remote lock and cancellation fence.
 
 `tools/land --reconcile [CLAIM]` inspects those builders read-only first,
-including the group, directory and heavy snapshot. Live processes are reported
-and keep the claim. Only `--reconcile ... --kill` may terminate a live run;
+including both upload and gate process groups/supervisors, the directory and
+heavy snapshot. Live processes are reported and keep the claim. Only `--reconcile ... --kill` may terminate a live run;
 it verifies the saved process identity and kills no heavy task. Once ended,
 reconciliation blocks delayed launches, removes any remaining owned directory,
 rechecks restoration and releases the exact WHAT. Missing/corrupt observation
@@ -89,9 +101,13 @@ a live lander and reconciliation from acting together. `--local` explicitly
 announces its unclaimed fallback; selection, budgets and host lock still apply.
 
 After green, fetch again. A moved main is rebased; disjoint test selections
-permit push, overlapping selections require one further check. A second
-upstream race refuses and asks for a rerun. A plain `HEAD:main` push also
-refuses a final race. `--dry-run` follows the real flow but stops before push.
+permit push under the no-overlap rule: record the previously checked SHA,
+the exact new rebased SHA and upstream base in the claim record and output.
+Overlapping selections require one further check of the new SHA and a matching
+receipt. A second upstream race refuses and asks for a rerun. Immediately before
+push, HEAD must still equal the permitted SHA. A plain
+`<SHA>:refs/heads/main` push binds the update to that commit and refuses a final
+upstream race. `--dry-run` follows the real flow but stops before push.
 After a successful main push, delete origin's landed branch only if its tip
 matches the local pre-rebase tip or landed HEAD. The ordinary deletion push
 checks the server-advertised OID through a temporary pre-push guard, chaining
@@ -111,11 +127,19 @@ checks on each host. Local landing holds it through fetch/rebase/check/push.
 the lock override. This is cooperation, not verified exclusion.
 
 Every two hours `agents-periodic.timer` runs `tools/periodic`: periodic first,
-then the full gate without selection. Builder role units render only with
-`machine_env.AGENTS_PERIODIC = 1`, currently hetzner3 alone. The service also
-checks the runtime flag, uses nice 19 and idle IO. It mails each failed,
-over-budget or starved file's owner using `post send --as agents-periodic
-OWNER@hel8`; missing owners and runner failures go to ops. Fleet periodic files retain exhaustive process, historical and host matrices;
+then the full gate without selection. The deployed `current` release is a Git
+archive; its `.fleet-release.json` supplies the exact release SHA. The runner
+makes a private `git clone --shared --no-checkout` from fleet-sync's
+`~/src/fabrig/agents` clone into mktemp, checks out that SHA detached and runs
+both tiers there. The fleet clone is read-only; private refs, index and checkout
+are removed on exit. This retains the history used by `git log`, `git show` and
+`git archive` fixtures even if fleet's clone HEAD advances after deployment.
+Direct invocation from a Git checkout pins its HEAD in the same way.
+Builder role units render only with `machine_env.AGENTS_PERIODIC = 1`.
+Periodic is paused as of ed5c048; the coordinator re-enables h3 after this fix
+lands. The service also checks the runtime flag, uses nice 19 and idle IO. It mails each failed,
+over-budget (CPU or `wall_s > wall_limit_s`) or starved file's owner using
+`post send --as agents-periodic OWNER@hel8`; missing owners and runner failures go to ops. Fleet periodic files retain exhaustive process, historical and host matrices;
 the gate retains focused component, safety and rollout checks. QA
 compatibility matrices in `tools/qa/test_qa_periodic.py` belong to the periodic
 tier and route failures to s/qa, alongside the bounded QA gate core. Historical

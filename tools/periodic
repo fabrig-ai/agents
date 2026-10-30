@@ -1,21 +1,41 @@
 #!/usr/bin/env python3
 """Run periodic then full gate; mail failing owners (gate.md §4)."""
-import importlib.util
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 
 
+def snapshot(release, directory):
+    metadata = release / '.fleet-release.json'
+    if metadata.exists():
+        sha = json.loads(metadata.read_text())['sha']
+        source = Path.home() / 'src/fabrig/agents'
+    else:
+        source = release
+        sha = subprocess.check_output(['git', '-C', str(source), 'rev-parse', 'HEAD'], text=True).strip()
+    if not isinstance(sha, str) or not re.fullmatch('[0-9a-f]{40}', sha):
+        raise ValueError('invalid periodic release SHA')
+    root = Path(directory) / 'repo'
+    # Shared objects are read-only; checkout/index/refs and all tests are private.
+    subprocess.run(['git', 'clone', '--shared', '--no-checkout', str(source), str(root)], check=True)
+    subprocess.run(['git', '-C', str(root), 'checkout', '--detach', sha], check=True)
+    if subprocess.check_output(['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True).strip() != sha:
+        raise ValueError('periodic snapshot SHA mismatch')
+    return root
+
+
 def main():
     if os.environ.get('AGENTS_PERIODIC') != '1':
         print('agents-periodic: disabled (AGENTS_PERIODIC != 1)')
         return 0
-    root = Path(__file__).resolve().parent.parent
+    release = Path(__file__).resolve().parent.parent
     failed = False
     with tempfile.TemporaryDirectory(prefix='agents-periodic-') as directory:
+        root = snapshot(release, directory)
         for tier in ('periodic', 'gate'):
             report = Path(directory) / (tier + '.json')
             code = subprocess.run([str(root / 'tools/check.sh'), '--tier', tier,
@@ -24,7 +44,7 @@ def main():
             notices = []
             if result:
                 for row in result['files']:
-                    if row['failed'] or row['over'] or row['starved']:
+                    if row['failed'] or row['over'] or row['starved'] or row['wall_s'] > row['wall_limit_s']:
                         notices.append((row.get('owner') or 'ops', json.dumps(row, indent=2)))
                 if code and not notices or result['reasons'] and not notices:
                     notices.append(('ops', json.dumps(result, indent=2)))
