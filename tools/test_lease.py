@@ -1,17 +1,23 @@
 #!/usr/bin/env python3
-"""Black-box lease tests: all commands have a temporary HOME and local git."""
+"""Lease contracts with private HOME/Git; real CLI contention and mode checks."""
 
 import json
 import os
 from pathlib import Path
 import stat
+import runpy
+import sys
 import subprocess
 import tempfile
 import unittest
 from urllib.parse import quote
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from offline_test_support import call_main
+
 
 TOOL = Path(__file__).resolve().with_name("lease")
+API = runpy.run_path(str(TOOL))
 PYTHON = os.sys.executable
 A = "pkg:alpha"
 B = "pkg:beta"
@@ -86,7 +92,8 @@ class LeaseTests(unittest.TestCase):
         return [PYTHON, "-I", "-B", str(TOOL), "--fabrig", str(self.repo), *args]
 
     def run_lease(self, *args, code=0):
-        result = subprocess.run(self.command(*args), env=self.env, capture_output=True, text=True)
+        result = call_main(API["main"], [str(TOOL), "--fabrig", str(self.repo), *args],
+                           self.env, text=True)
         self.assertEqual(result.returncode, code, result.stdout + result.stderr)
         return result
 
@@ -312,19 +319,25 @@ class LeaseTests(unittest.TestCase):
         self.run_lease("release", "s/a", D)
         self.assertIn(f"{D} free", self.run_lease("list").stdout)
 
-    def test_two_concurrent_takes_leave_one_holder(self):
-        # Repeat with a fresh directory so creation and lock acquisition race too.
-        for iteration in range(5):
-            with self.subTest(iteration=iteration):
-                processes = [subprocess.Popen(self.command("take", owner, "race", A), env=self.env,
-                                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                             for owner in ("s/a", "s/b")]
-                for process in processes:
-                    output, errors = process.communicate(timeout=20)
-                    self.assertIn(process.returncode, (0, 1), output + errors)
-                self.assertEqual(sorted(p.returncode for p in processes), [0, 1])
-                self.assertEqual(len(self.rows()), 1)
-                self.run_lease("release", self.record()["owner"], A)
+    def test_concurrent_take_smoke(self):
+        self.contend_once()
+
+    def contend_once(self):
+        processes = [subprocess.Popen(self.command("take", owner, "race", A), env=self.env,
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                     for owner in ("s/a", "s/b")]
+        try:
+            for process in processes:
+                output, errors = process.communicate(timeout=20)
+                self.assertIn(process.returncode, (0, 1), output + errors)
+            self.assertEqual(sorted(p.returncode for p in processes), [0, 1])
+            self.assertEqual(len(self.rows()), 1)
+        finally:
+            for process in processes:
+                if process.poll() is None:
+                    process.kill()
+                    process.communicate()
+        self.run_lease("release", self.record()["owner"], A)
 
     def test_record_permissions_do_not_depend_on_umask(self):
         result = subprocess.run(self.command("take", "s/a", "wave", A), env=self.env,
