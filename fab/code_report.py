@@ -10,12 +10,17 @@ the draft or one of its plan's parts.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections import Counter
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from datetime import date, timedelta
 
+from fab import report
+from fab.calls import open_questions
 from fab.hosts import Host
 from fab.plan import Plan, Task
 from fab.report import Figure, Signal, Sources, Window
+from fab.state import fold
 
 IDLE_GAP = 10  # minutes with none of the draft's runs in flight, while work remains, that make a gap
 TOP_STOPS = 10  # stops listed, longest first
@@ -90,21 +95,56 @@ class Stop:
 def spans(draft: str, events: list[dict]) -> list[Span]:
     """One Span per run.started of the draft's tasks, in log order, with the first run.ended of
     the same run after it (end and outcome), or end and outcome None."""
-    raise NotImplementedError
+    endings = {}
+    runs = []
+    for event in reversed(events):
+        if event.get("ev") == "run.ended":
+            endings[event["run"]] = event
+        elif event.get("ev") == "run.started" and _belongs(draft, event):
+            ended = endings.get(event["run"], {})
+            runs.append(Span(event["run"], event["task"], event.get("kind", ""),
+                             event["ts"], ended.get("ts"), ended.get("outcome")))
+    return list(reversed(runs))
 
 
 def peak(runs: list[Span], start: str, end: str) -> int:
     """The most spans in flight at one instant within [start, end). A span is in flight over
     [span.start, span.end), or from span.start on when end is None; at a ts where one ends and
     another starts, the one ending counts as gone."""
-    raise NotImplementedError
+    changes = Counter()
+    for run in runs:
+        left, right = max(start, run.start), min(end, run.end or end)
+        if left < right:
+            changes[left] += 1
+            changes[right] -= 1
+    active = most = 0
+    for ts in sorted(changes):
+        active += changes[ts]
+        most = max(most, active)
+    return most
 
 
 def hourly(draft: str, events: list[dict], window: Window) -> list[Hour]:
     """One Hour per whole UTC hour from the window's start (the last one cut at the window's
     end): peak over spans(draft, events) within it, and the counts of the draft's run.started,
     branch.ready and branch.landed whose ts it holds."""
-    raise NotImplementedError
+    runs = spans(draft, events)
+    records = [event for event in report.within(events, window) if _belongs(draft, event)]
+    hours = []
+    start = window.start
+    while start < window.end:
+        hour = int(start[11:13])
+        if hour < 23:
+            boundary = f"{start[:11]}{hour + 1:02}:00:00.000Z"
+        else:
+            tomorrow = date.fromisoformat(start[:10]) + timedelta(days=1)
+            boundary = f"{tomorrow.isoformat()}T00:00:00.000Z"
+        end = min(boundary, window.end)
+        counts = Counter(event["ev"] for event in records if start <= event["ts"] < end)
+        hours.append(Hour(start, peak(runs, start, end), counts["run.started"],
+                          counts["branch.ready"], counts["branch.landed"]))
+        start = end
+    return hours
 
 
 def gaps(plan: Plan, tasks: Mapping[str, Task], events: list[dict], window: Window) -> list[Gap]:
@@ -113,7 +153,31 @@ def gaps(plan: Plan, tasks: Mapping[str, Task], events: list[dict], window: Wind
     window's end is cut there), counted only when at its start some task is not landed by
     fab.state.fold(tasks, <events with ts before the start>). cause: the counts of those
     not-landed statuses, `<status> <n>` joined by ", ", most first, then by name."""
-    raise NotImplementedError
+    occupied = sorted((max(window.start, run.start), min(window.end, run.end or window.end))
+                      for run in spans(plan.draft, events)
+                      if run.start < window.end and (run.end is None or run.end > window.start))
+    idle = []
+    cursor = window.start
+    for start, end in occupied:
+        if start >= end:
+            continue
+        if cursor < start:
+            idle.append((cursor, start))
+        cursor = max(cursor, end)
+    if cursor < window.end:
+        idle.append((cursor, window.end))
+    result = []
+    for start, end in idle:
+        duration = report.minutes(start, end)
+        if duration < IDLE_GAP:
+            continue
+        views = fold(tasks, (event for event in events if event["ts"] < start))
+        counts = Counter(view.status for view in views.values() if view.status != "landed")
+        if counts:
+            cause = ", ".join(f"{status} {count}" for status, count in
+                              sorted(counts.items(), key=lambda item: (-item[1], item[0])))
+            result.append(Gap(start, duration, cause))
+    return result
 
 
 def stops(draft: str, events: list[dict], window: Window) -> list[Stop]:
@@ -126,7 +190,31 @@ def stops(draft: str, events: list[dict], window: Window) -> list[Stop]:
     - infra: a run.ended with outcome infra, for its own minutes; detail the run; never open.
     - rejected: a branch.rejected, until the task's next branch.landed; detail its step.
     With no such later event before the window's end, minutes run to the end and open is True."""
-    raise NotImplementedError
+    result = []
+    for index, event in enumerate(events):
+        if not _belongs(draft, event) or not window.holds(event["ts"]):
+            continue
+        kind, closing, detail = "", "", ""
+        if event["ev"] == "question.asked":
+            kind, closing = "question", "question.answered"
+            detail = event["text"].split("\n", 1)[0][:80]
+        elif event["ev"] == "run.ended" and event.get("outcome") == "failed":
+            kind, closing, detail = "failed", "run.started", event["report"]
+        elif event["ev"] == "run.ended" and event.get("outcome") == "infra":
+            result.append(Stop("infra", event["task"], event["ts"],
+                               float(event.get("minutes", 0)), False, event["run"]))
+            continue
+        elif event["ev"] == "branch.rejected":
+            kind, closing, detail = "rejected", "branch.landed", event["step"]
+        if not kind:
+            continue
+        ended = next((later for later in events[index + 1:]
+                      if later.get("task") == event["task"] and later.get("ev") == closing
+                      and later["ts"] < window.end), None)
+        end = ended["ts"] if ended is not None else window.end
+        result.append(Stop(kind, event["task"], event["ts"],
+                           report.minutes(event["ts"], end), ended is None, detail))
+    return sorted(result, key=lambda stop: (-stop.minutes, stop.start))[:TOP_STOPS]
 
 
 def figures(plan: Plan, tasks: Mapping[str, Task], events: list[dict],
@@ -152,7 +240,58 @@ def figures(plan: Plan, tasks: Mapping[str, Task], events: list[dict],
     - lane_wait, disk_wait, disk_refused: fab.report.heavy_waits over the hosts with role
       builder.
     Counts are ints, minutes and rates floats."""
-    raise NotImplementedError
+    history = [event for event in events if _belongs(plan.draft, event)]
+    records = report.within(history, window)
+    counts = Counter(event["ev"] for event in records)
+    ended = [event for event in records if event["ev"] == "run.ended"]
+    outcomes = Counter(event.get("outcome") for event in ended)
+    landed = {event["task"] for event in records if event["ev"] == "branch.landed"}
+    task_runs = [event for event in history if event["task"] in landed]
+    answers, latest = [], {}
+    for event in history:
+        if event["ev"] == "question.asked":
+            latest[event["task"]] = event["ts"]
+        elif event["ev"] == "question.answered" and window.holds(event["ts"]):
+            if event["task"] in latest:
+                answers.append(report.minutes(latest[event["task"]], event["ts"]))
+    subjects = {plan.draft, *(f"{plan.draft}/{part}" for part in plan.parts)}
+    calls = [event for event in report.within(events, window)
+             if event["ev"] == "call.ended" and event.get("subject") in subjects]
+    input_tokens = output_tokens = 0
+    for event in calls:
+        try:
+            incoming, cached, outgoing = map(int, str(event.get("tokens", "")).split("/"))
+        except ValueError:
+            continue
+        input_tokens += incoming + cached
+        output_tokens += outgoing
+    builders = [name for name, host in hosts.items() if "builder" in host.roles]
+    waits = report.heavy_waits(heavy, builders, window)
+    return {
+        "runs": counts["run.started"],
+        **{outcome: outcomes[outcome] for outcome in ("done", "question", "infra", "failed")},
+        "ready": counts["branch.ready"],
+        "landed": counts["branch.landed"],
+        "rejected": counts["branch.rejected"],
+        "peak": peak(spans(plan.draft, events), window.start, window.end),
+        "places": sum(hosts[name].places for name in builders),
+        "codex_minutes": _run_minutes(ended),
+        "runs_per_task": sum(event["ev"] == "run.started" for event in task_runs) / len(landed)
+                         if landed else None,
+        "minutes_per_task": _run_minutes(task_runs) / len(landed) if landed else None,
+        "questions": counts["question.asked"],
+        "question_rate": counts["question.asked"] / len(ended) if ended else None,
+        "answer_median": report.quantile(answers, 0.5),
+        "answer_max": max(answers, default=None),
+        "open": len(open_questions(event for event in history if event["ts"] < window.end)),
+        "idle_minutes": sum((gap.minutes for gap in gaps(plan, tasks, events, window)), 0.0),
+        "infra_minutes": _run_minutes(event for event in ended if event.get("outcome") == "infra"),
+        "calls": len(calls),
+        "call_minutes": sum((float(event.get("minutes", 0)) for event in calls), 0.0),
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        **{key: waits[key] for key in ("lane_wait", "disk_wait", "disk_refused")},
+    }
 
 
 def parts(plan: Plan, tasks: Mapping[str, Task], events: list[dict], window: Window) -> list[tuple]:
@@ -160,7 +299,20 @@ def parts(plan: Plan, tasks: Mapping[str, Task], events: list[dict], window: Win
     those landed by fab.state.fold over the whole log, its run.started in the window, its
     run.ended minutes in the window rounded to one decimal, its question.asked in the
     window)."""
-    raise NotImplementedError
+    views = fold(tasks, events)
+    records = report.within(events, window)
+    rows = []
+    for part in plan.parts:
+        identifiers = {task.id for task in tasks.values() if task.part == part}
+        if not identifiers:
+            continue
+        history = [event for event in records if event.get("task") in identifiers]
+        rows.append((part, len(identifiers),
+                     sum(views[identifier].status == "landed" for identifier in identifiers),
+                     sum(event["ev"] == "run.started" for event in history),
+                     round(_run_minutes(history), 1),
+                     sum(event["ev"] == "question.asked" for event in history)))
+    return rows
 
 
 def signals(current: Mapping[str, Figure], previous: Mapping[str, Figure],
@@ -175,7 +327,26 @@ def signals(current: Mapping[str, Figure], previous: Mapping[str, Figure],
     - each unread source: `unread: <entry>`; "the report is partial: the machine's ssh and fab
       install"; "ops".
     A None figure counts as 0."""
-    raise NotImplementedError
+    result = []
+    idle, rejected = current.get("idle_minutes") or 0, current.get("rejected") or 0
+    before = previous.get("rejected") or 0
+    infra, refused = current.get("infra") or 0, current.get("disk_refused") or 0
+    if idle > 0:
+        result.append(Signal(f"{report.show(idle)} minutes in idle gaps",
+                             "its cause: a missing pre-approved list, a parked task, no free place",
+                             "the dispatcher's keeper"))
+    if rejected > 0 and rejected > before:
+        result.append(Signal(f"rejections rising: {report.show(rejected)} (prev {report.show(before)})",
+                             "readers' tests before ready; the precheck; the task's scope",
+                             "the skeleton author; ops"))
+    if infra > 0 or refused > 0:
+        result.append(Signal(f"{report.show(infra)} runs ended Infra, "
+                             f"{report.show(refused)} builds refused for disk",
+                             "capacity: bounded slots, more or bigger builders", "ops"))
+    result.extend(Signal(f"unread: {entry}",
+                         "the report is partial: the machine's ssh and fab install", "ops")
+                  for entry in unread)
+    return result
 
 
 def render(plan: Plan, tasks: Mapping[str, Task], sources: Sources, hosts: Mapping[str, Host],
@@ -195,4 +366,48 @@ def render(plan: Plan, tasks: Mapping[str, Task], sources: Sources, hosts: Mappi
     - `## Rejections by step`: a table Step, Count of the window's branch.rejected by step,
       most first, then by step.
     Minutes are shown through fab.report.show; sections are separated by one blank line."""
-    raise NotImplementedError
+    events = sources.log
+    current = figures(plan, tasks, events, sources.heavy, hosts, window)
+    previous = figures(plan, tasks, events, sources.heavy, hosts, window.previous())
+    history = [event for event in events if _belongs(plan.draft, event)]
+    first_run = next((event["ts"] for event in history if event["ev"] == "run.started"), None)
+    first_landing = next((event["ts"] for event in history if event["ev"] == "branch.landed"), None)
+    if first_run is None:
+        first = "No run yet."
+    elif first_landing is None:
+        first = f"First run {first_run}; No landing yet."
+    else:
+        first = (f"First run {first_run}; first landing {first_landing}, "
+                 f"{report.show(report.minutes(first_run, first_landing))} minutes later.")
+    sections = [
+        [f"# Code report: {plan.draft}, {window.start[:10]}",
+         f"{window.start} to {window.end}; each figure beside the previous window's.", first],
+        ["## Figures", *report.figure_table(FIGURES, current, previous)],
+        ["## Signals", *report.signal_lines(signals(current, previous, sources.unread))],
+        ["## Hours", *report.table(("Hour", "In flight", "Started", "Ready", "Landed"),
+            ((hour.start[11:13] + ":00", hour.peak, hour.started, hour.ready, hour.landed)
+             for hour in hourly(plan.draft, events, window)))],
+        ["## Idle gaps", *report.table(("Start", "Minutes", "Cause"),
+            ((gap.start, report.show(gap.minutes), gap.cause)
+             for gap in gaps(plan, tasks, events, window)))],
+        ["## Stops, longest first", *report.table(("Kind", "Task", "Start", "Minutes", "Open", "Detail"),
+            ((stop.kind, stop.task, stop.start, report.show(stop.minutes),
+              "yes" if stop.open else "no", stop.detail)
+             for stop in stops(plan.draft, events, window)))],
+        ["## Parts", *report.table(("Part", "Tasks", "Landed", "Runs", "Codex minutes", "Questions"),
+            ((*row[:4], report.show(row[4]), row[5]) for row in parts(plan, tasks, events, window)))],
+    ]
+    rejections = Counter(event.get("step", "") for event in report.within(history, window)
+                         if event["ev"] == "branch.rejected")
+    sections.append(["## Rejections by step", *report.table(("Step", "Count"),
+                     sorted(rejections.items(), key=lambda item: (-item[1], item[0])))])
+    return "\n\n".join("\n".join(section) for section in sections) + "\n"
+
+
+def _belongs(draft: str, event: dict) -> bool:
+    return event.get("task", "").startswith(draft + "/")
+
+
+def _run_minutes(events: Iterable[dict]) -> float:
+    return sum((float(event.get("minutes", 0)) for event in events
+                if event["ev"] == "run.ended"), 0.0)
