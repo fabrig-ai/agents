@@ -728,8 +728,9 @@ class FleetTest(unittest.TestCase):
         self.assertNotIn("jobs", tomllib.loads((self.home / ".cargo/config.toml").read_text())["build"])
         self.assertEqual((self.home / "src/rust/tmp/machine.env").read_text(),
                          "PLAN_MIN_DISK_GB=40\nKACHE_MAX_GB=50\nKACHE_LOCAL_ONLY=1\nQA_SLOTS=2\nHEAVY_BUILD_SLOTS=3\n"
-                         "QA_WALK_KINDS=forgejo=2:chatgpt,claude=2:claude\nQA_WALK_SLOTS=forgejo=8,claude=4\n"
-                         "QA_SLOT_HOST=hetzner6\nQA_CLAIM_OWNER=s/qa\nQA_CLAIM_SSH=free@204.168.210.29\n")
+                         "QA_WALK_KINDS=forgejo=2:chatgpt,claude=2:claude\nQA_WALK_SLOTS=forgejo=8+1,claude=4+3\n"
+                         "QA_SLOT_HOST=hetzner6\nQA_CLAIM_OWNER=s/qa\nQA_CLAIM_SSH=free@204.168.210.29\n"
+                         "QA_STUCK_TO=s/qa@hel8\n")
         settings = json.loads((self.home / ".claude/settings.json").read_text())
         self.assertNotIn("HEAVY_BUILD_JOBS", settings["env"])
         self.assertNotIn("PATH", settings["env"])
@@ -822,10 +823,11 @@ class FleetTest(unittest.TestCase):
         original = hosts.read_text()
         values = {
             "QA_WALK_KINDS": "forgejo=2:chatgpt,claude=2:claude",
-            "QA_WALK_SLOTS": "forgejo=8,claude=4",
+            "QA_WALK_SLOTS": "forgejo=8+1,claude=4+3",
             "QA_SLOT_HOST": "hetzner6",
             "QA_CLAIM_OWNER": "s/qa",
             "QA_CLAIM_SSH": "free@204.168.210.29",
+            "QA_STUCK_TO": "s/qa@hel8",
         }
         existing = tomllib.loads(original)["hosts"]["hetzner6"]["machine_env"]
         self.assertEqual({key: existing[key] for key in values}, values)
