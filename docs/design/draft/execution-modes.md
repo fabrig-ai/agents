@@ -1,6 +1,7 @@
 <!-- The user's execution model, copied verbatim from the Claude Docs doc of 2026-10-30
      (https://claude.ai/artifact/WEpCY6bb7m3Tn9onFdFKEr). The user's input: agents read it,
-     never edit it. -->
+     never edit it. Amended at the user's word of 10-30 ~23:30Z: the context budget is a
+     600k target, measured, not capped (it was 120k, hard). -->
 
 # Execution modes for the code-producing pipeline
 
@@ -11,7 +12,7 @@
 The pipeline runs every draft through one shared mechanism, configured by one of four execution modes; a big feature uses Feature mode, which starts its first implementer about an hour after the draft lands and delivers working end-to-end slices from about T+6. Claude designs and reviews in short calls, code runs the loop, and Codex writes the bulk, for a Claude to Codex weight near 0.1-0.2 instead of today's 1.09. The times and costs below are estimates.
 
 - **One mechanism, four presets.** The dispatcher, gates, merge queue, ledger and the Claude and Codex roles are shared. Feature, Migration, Fix and Probe set what is designed, in what order, and how much Claude is involved. One draft can mix modes, part by part.
-- **Claude is called, not resident.** Every Claude call is a fresh session on a brief that code compiles from files, under about 120k tokens, and ends by writing files. No Claude session waits, polls or watches a run.
+- **Claude is called, not resident.** Every Claude call is a fresh session on a brief that code compiles from files, measured against a target of about 600k tokens of context, and ends by writing files. No Claude session waits, polls or watches a run.
 - **Design flows part by part (Feature mode).** A thin cut names the parts, their dependencies, the shared contracts and the slices, without detail. Each part is then designed on its own, several at once, and shared contracts are early parts that only their readers wait for.
 - **Design is pulled, not pushed.** The dispatcher keeps a buffer of ready tasks about one to two times the implementer slots, and asks for the next part's design when it runs low. Design stays just ahead of the code, so later parts are designed with what earlier ones taught.
 - **Skeletons fix the shape.** Each part's design ends as code: modules, types, the shared primitives' signatures with doc comments, `todo!()` bodies, and the test vocabulary. Codex fills bodies inside that shape, so later work fills in rather than restructures.
@@ -45,7 +46,7 @@ The memory is files, not sessions: `plan.md` (parts, dependencies, modes, slices
 Every Claude call follows five rules:
 
 - **Its brief is compiled by code** from those files, never gathered by a Claude session reading around.
-- **It has a hard budget** of about 120k context tokens and no shell loop; a skeleton call may run the build to fix its own compile errors.
+- **It has a context target** of about 600k tokens, measured, not capped, and no shell loop; a skeleton call may run the build to fix its own compile errors.
 - **Its structural decisions are code where they can be:** a skeleton, a test helper, a taste-file pair. Codex follows code more reliably than prose.
 - **Its output is a file** a Codex reviewer and the gates check before the dispatcher acts on it.
 - **Calls on independent parts run in parallel.** Total cost depends on the work, not the concurrency.
@@ -162,7 +163,7 @@ Feature mode spends about a seventh of today's Claude weight while Codex work st
 
 |  | Dynamic memory, measured | Feature mode on `landing-model.md`, estimated |
 |---|---|---|
-| Claude | coordinator and 4 leads resident; 9,611 turns at a median 336-402k context | about 45 calls, most small; about 2,000 turns at about 60k context, capped at 120k |
+| Claude | coordinator and 4 leads resident; 9,611 turns at a median 336-402k context | about 45 calls, most small; about 2,000 turns at about 60k context, measured against 600k |
 | Claude weight | about 484M | about 50-90M |
 | Code Claude writes | none (task files and docs) | skeletons and test vocabulary, about 10-15% of the lines |
 | Codex | about 89 hours, about 443M weight | about 100 hours (implementers 44, test-writers 20, self-critics 10, the rest 26), about 450-560M weight |

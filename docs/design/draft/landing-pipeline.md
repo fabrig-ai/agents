@@ -23,7 +23,7 @@ Draft, 2026-10-30, the user's (written down by the director from the user's word
 
 ## 3. Metrics
 
-Per hour and per day, per coordinator where it applies:
+Per hour and per day, per draft where it applies:
 - **Ready-to-landed latency:** median and 90th percentile; the count of ready branches waiting and the oldest wait.
 - **Queue utilisation:** the share of time a batch is running; batches per hour; branches per batch.
 - **Batch outcomes:** green, red, error, conflict; the share of red batches.
@@ -41,7 +41,7 @@ Per hour and per day, per coordinator where it applies:
 | ready branches waiting or the oldest wait grows for an hour | look for a stuck batch; else capacity (section 2, headroom) | ops |
 | utilisation above the target for a day | throughput work: parallel or speculative batches, a second gate, the gate's slowest step | ops, with the pipeline's designer |
 | a collateral rejection (false red) | the red's cause found and ledgered; a test failing under load retried once before bisecting; a flake goes to its owner | ops, the test's owner |
-| a real rejection the branch's own checks could have caught | the precheck learns it (a tool check), not the lead (a rule) | ops |
+| a real rejection the branch's own checks could have caught | the precheck learns it (a tool check), not a role's text (a rule) | ops |
 | a step or tier over its CPU budget | the three questions: does the test belong to this tier; can it be made faster; else report to the user | the tier's owner |
 | starved warnings rising | the CPU picture: builders, gate, concurrency | ops |
 | after-landing lag growing, or coverage below all | coalescing, runner capacity, the tier's budget | the after-landing owner |
