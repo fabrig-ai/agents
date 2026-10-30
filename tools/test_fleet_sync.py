@@ -1,8 +1,12 @@
 """Integration tests: all processes use a disposable HOME and local git origins."""
 
 import argparse
+import atexit
+import contextlib
+import io
 import datetime as dt
 import fcntl
+from functools import lru_cache
 import importlib.machinery
 import importlib.util
 import json
@@ -10,6 +14,7 @@ import os
 from pathlib import Path
 import shutil
 import stat
+import sys
 import subprocess
 import tempfile
 import tomllib
@@ -116,8 +121,51 @@ print(json.dumps({"host": host, "agents_sha": "a" * 40, "fabrig_sha": "b" * 40,
 '''
 
 
-class FleetFixture(unittest.TestCase):
+# Every file runs cases serially in its own interpreter. Keep an immutable
+# baseline outside the case directory, and restore private repositories/files
+# at the same paths (the committed fixture declarations contain absolute URLs).
+# Copies never use hardlinks: commits, refs, modes and mtimes remain case-local.
+_BASELINE = None
+_DEPLOYED = {}
+
+
+@lru_cache(maxsize=16)
+def runner_code(source, filename):
+    return compile(source, filename, "exec")
+
+
+@lru_cache(maxsize=16)
+def historical_source(revision, asset="tools/fleet-sync"):
+    return subprocess.check_output(["git", "-C", str(ROOT), "show", f"{revision}:{asset}"], text=True)
+
+
+@lru_cache(maxsize=4)
+def historical_archive(revision, subtree):
+    return subprocess.check_output(["git", "-C", str(ROOT), "archive", revision, subtree])
+
+
+class FleetTest(unittest.TestCase):
     def setUp(self):
+        global _BASELINE
+        if _BASELINE is None:
+            self.build_fixture()
+            template = tempfile.TemporaryDirectory(prefix="fleet-baseline-")
+            atexit.register(template.cleanup)
+            shutil.copytree(self.directory, Path(template.name) / "tree", symlinks=True)
+            values = {key: getattr(self, key) for key in (
+                "directory", "home", "bin", "env", "fabrig", "fabrig_origin",
+                "system_bins", "source", "origin", "sha")}
+            values["env"] = dict(values["env"])
+            _BASELINE = template, values
+        else:
+            template, values = _BASELINE
+            shutil.copytree(Path(template.name) / "tree", values["directory"], symlinks=True,
+                            ignore=shutil.ignore_patterns(".git", "*-origin.git"))
+            self.__dict__.update(values)
+            self.env = dict(values["env"])
+            self.addCleanup(shutil.rmtree, self.directory)
+
+    def build_fixture(self):
         self.temp = tempfile.TemporaryDirectory(prefix="fleet-test-")
         self.addCleanup(self.temp.cleanup)
         self.directory = Path(self.temp.name)
@@ -136,7 +184,8 @@ class FleetFixture(unittest.TestCase):
         put(self.bin / "systemd-analyze", "#!/bin/bash\nexit 0\n", True)
         put(self.bin / "ssh", SSH, True)
         for command, output in {"claude": "2.1.312 (Claude Code)", "codex": "codex-cli 0.162.1",
-                                "cargo-nextest": "cargo-nextest 0.9.148", "kache": "kache 1.2.2-gitrev.2", "rustc": "rustc 1.95.0 (fixture)"}.items():
+                                "cargo-nextest": "cargo-nextest 0.9.148", "kache": "kache 1.2.2-gitrev.2", "rustc": "rustc 1.95.0 (fixture)", "chromium": "Chromium 147.0.7727.101",
+                                "forgejo": "Forgejo version 17.0.0", "forgejo-runner": "forgejo-runner 13.2.0"}.items():
             put(self.bin / command, f"#!/bin/bash\nprintf '%s\\n' '{output}'\n", True)
         self.fabrig = self.directory / "fabrig-source"
         self.fabrig.mkdir()
@@ -178,7 +227,19 @@ class FleetFixture(unittest.TestCase):
         hosts = tomllib.loads((ROOT / "fleet/hosts.toml").read_text())["hosts"]
         self.env["FAKE_SSH_HOSTS"] = json.dumps({h["ssh"]: name for name, h in hosts.items()})
 
+    def ensure_git(self):
+        """Materialize private refs/origins only for cases that actually use git."""
+        if _BASELINE is None:
+            return
+        template, _ = _BASELINE
+        for relative in ("fabrig-source/.git", "agents-source/.git", "fabrig-origin.git", "agents-origin.git"):
+            destination = self.directory / relative
+            if not destination.exists():
+                shutil.copytree(Path(template.name) / "tree" / relative, destination)
+
     def process(self, *args, cwd=None, expected=0, env=None):
+        if str(args[0]) == "git" or (str(args[0]) == "python3" and "--self-check" not in args):
+            self.ensure_git()
         result = subprocess.run([str(a) for a in args], cwd=cwd, env=env or self.env,
                                 capture_output=True, text=True, timeout=60)
         if expected is not None:
@@ -208,6 +269,75 @@ class FleetFixture(unittest.TestCase):
                               "--host", "hel8", "--json", *args, expected=expected, env=env)
         return json.loads(result.stdout) if result.stdout else None
 
+    def inspect_sync(self, *args, expected=0, env=None, script=None):
+        """Real parser/check/status/control paths, without interpreter startup."""
+        result = self.cli("python3", "-I", "-B", script or self.source / "tools/fleet-sync",
+                          "--host", "hel8", "--json", *args, expected=expected, env=env)
+        return json.loads(result.stdout) if result.stdout else None
+
+    def deployed(self, *components):
+        """Restore the immutable result of one real deployment, for setup only."""
+        global _DEPLOYED
+        if components not in _DEPLOYED:
+            if components:
+                self.component_sync(*components)
+            else:
+                self.sync()
+            template = tempfile.TemporaryDirectory(prefix="fleet-deployed-")
+            atexit.register(template.cleanup)
+            shutil.copytree(self.home, Path(template.name) / "home", symlinks=True)
+            _DEPLOYED[components] = template
+        else:
+            shutil.rmtree(self.home)
+            shutil.copytree(Path(_DEPLOYED[components].name) / "home", self.home, symlinks=True)
+        return self.state()
+
+    def release_fixture(self, clone=True):
+        """Build the previous-release inputs without running another deployment.
+
+        Candidate checks still run the real release stage/CLI. This fixture only
+        supplies its already-existing tree, detached checkout and state.
+        """
+        release = self.home / "src/fabrig/releases" / ("agents-" + self.sha)
+        shutil.copytree(self.source, release, symlinks=True,
+                        ignore=shutil.ignore_patterns(".git", "old"))
+        put(release / ".fleet-release.json", json.dumps({"origin": str(self.origin), "sha": self.sha}))
+        with patch.dict(os.environ, self.env, clear=True):
+            module, _ = self.runner()
+            module.atomic_link(self.home / "src/fabrig/current", release)
+            put(release / ".fleet-promoted", module.now())
+        if clone:
+            self.process("git", "clone", self.origin, self.home / "src/fabrig/agents")
+            self.git(self.home / "src/fabrig/agents", "switch", "--detach", self.sha)
+        state = self.component_sync("render", "links", "units")
+        state["agents_sha"] = self.sha
+        put(self.home / ".local/state/fleet-sync/state.json", json.dumps(state))
+        put(self.home / ".local/state/fleet-sync/lock", "")
+        return state
+
+    def component_sync(self, *components, check=False, env=None, expected=0, host="hel8", timer=False):
+        """Exercise selected production stages; full CLI handoffs have own tests."""
+        with patch.dict(os.environ, env or self.env, clear=True):
+            module, runner = self.runner(check=check, host=host)
+            runner.args.timer = timer
+            # Release-stage tests keep real git, self-check and smoke children,
+            # then return instead of replacing this test interpreter. The new
+            # implementation/lock-fd handoff is exercised through sync().
+            if "release" in components:
+                self.assertTrue(runner.acquire())
+            try:
+                with patch.object(os, "execve"):
+                    for component in components:
+                        runner.attempt(component, getattr(runner, component))
+                        if component == "release" and not any(i["result"] == "failed" for i in runner.state["items"]):
+                            runner.d = module.Declarations(self.current(), self.home)
+                code = runner.finish()
+            finally:
+                if runner.lock_fd is not None:
+                    os.close(runner.lock_fd)
+            self.assertEqual(code, expected, runner.state["items"])
+            return runner.state
+
     def state(self):
         return json.loads((self.home / ".local/state/fleet-sync/state.json").read_text())
 
@@ -220,12 +350,75 @@ class FleetFixture(unittest.TestCase):
     def fabrig_item(self, state):
         return next(i for i in state["items"] if i["item"] == "fabrig")
 
-    def runner(self, check=False):
-        loader = importlib.machinery.SourceFileLoader("fleet_sync_test", str(self.source / "tools/fleet-sync"))
+    def load_runner(self, script=None):
+        script = script or self.source / "tools/fleet-sync"
+        loader = importlib.machinery.SourceFileLoader("fleet_sync_test", str(script))
         module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
-        loader.exec_module(module)
+        exec(runner_code(Path(loader.path).read_text(), loader.path), module.__dict__)
+        return module
+
+    def cli(self, *argv, expected=0, env=None, cwd=None):
+        """Run parser/read-only CLI tables in-process; process smoke tests use process()."""
+        output, error = io.StringIO(), io.StringIO()
+        previous_umask = os.umask(0o077)
+        try:
+            with (
+                contextlib.chdir(cwd or Path.cwd()),
+                patch.dict(os.environ, env or self.env, clear=True),
+                patch.object(sys, "argv", list(map(str, argv[3:]))),
+                patch.object(os, "execve", side_effect=AssertionError("read-only CLI attempted exec")),
+                contextlib.redirect_stdout(output), contextlib.redirect_stderr(error),
+            ):
+                module = self.load_runner(argv[3])
+                try:
+                    code = module.main()
+                except SystemExit as exit:
+                    code = exit.code or 0
+                except (OSError, ValueError, subprocess.SubprocessError) as failure:
+                    print(f"fleet-sync: {failure}", file=error)
+                    code = 1
+        finally:
+            os.umask(previous_umask)
+        result = subprocess.CompletedProcess(argv, code, output.getvalue(), error.getvalue())
+        self.assertEqual(code, expected, result.stdout + result.stderr)
+        return result
+
+    def runner(self, check=False, host="hel8"):
+        module = self.load_runner()
         args = argparse.Namespace(check=check, timer=False, resume_fd=None)
-        return module, module.Runner(args, module.Declarations(self.source, self.home), "hel8")
+        declarations = module.Declarations(self.source, self.home)
+        runner = module.Runner(args, declarations, declarations.host(host))
+        command = runner.cmd
+        def cmd(*argv, **kwargs):
+            if argv[0] == "git":
+                self.ensure_git()
+            search = f"{self.home}/.local/bin:{self.home}/.cargo/bin:" + os.environ["PATH"]
+            executable = shutil.which(str(argv[0]), path=search)
+            path = Path(executable) if executable else None
+            # Stage tests execute their existing Python fake programs directly.
+            # SSH keeps its real transport child; installed artifacts keep their
+            # real version probes. Full sync() always uses actual children.
+            if (path is None or path.parent != self.bin or path.name == "ssh"
+                    or not path.read_bytes().startswith(b"#!/usr/bin/env python3\n")):
+                return command(*argv, **kwargs)
+            output, error = io.StringIO(), io.StringIO()
+            code = 0
+            with (
+                patch.object(sys, "argv", [str(path), *map(str, argv[1:])]),
+                patch.dict(os.environ, {**runner.environment(), "PATH": search, **kwargs.get("extra_env", {})}),
+                contextlib.redirect_stdout(output), contextlib.redirect_stderr(error),
+            ):
+                try:
+                    exec(runner_code(path.read_text(), str(path)), {"__name__": "__main__", "__file__": str(path)})
+                except SystemExit as exit:
+                    code = exit.code or 0
+            out, err = output.getvalue(), error.getvalue()
+            runner.log.append(f"$ {module.shlex.join(map(str, argv))}\n{out}{err}")
+            if code not in kwargs.get("allowed", (0,)):
+                raise module.CommandError(code, f"{path.name} exited {code}: {(err or out).strip()[-600:]}")
+            return out.encode() if kwargs.get("binary") else out.strip()
+        runner.cmd = cmd
+        return module, runner
 
     def prepare_integer_machine_env(self):
         """Retain current host declarations with the historical integer schema."""
@@ -260,24 +453,42 @@ class FleetFixture(unittest.TestCase):
                 os.readlink(path) if path.is_symlink() else path.read_bytes() if path.is_file() else None)
         return rows
 
-
-class FleetTest(FleetFixture):
     def test_empty_home_and_idempotence(self):
+        protected = ("src/fabrig/claims", "src/fabrig/leases", "src/fabrig/queue", "src/fabrig/slots",
+                     ".local/state/heavy", ".local/state/agents-heavy", ".local/state/fabrig/heavy",
+                     "src/rust/tmp/heavy", "src/rust/tmp/codex-run", "src/rust/tmp/owners", "src/rust/tmp/logins",
+                     "src/rust/tmp/post/inbox", "src/rust/tmp/post/outbox", "src/rust/tmp/post/sent")
+        for relative in protected:
+            put(self.home / relative / "sentinel", "opaque state\n")
+        before = {relative: self.snapshot(root=self.home / relative) for relative in protected}
+        unit = "gate-worker.service"
+        put(self.source / "fleet/units" / unit,
+            "# fleet-sync: start-once\n[Unit]\nDescription=Gate worker\n[Service]\nType=simple\nExecStart=/bin/true\n[Install]\nWantedBy=default.target\n")
+        roles = self.source / "fleet/units/roles.toml"
+        put(roles, roles.read_text() + f'"{unit}" = ["session"]\n')
+        self.sha = self.publish()
         first = self.sync()
+        enable = ["--user", "enable", "--now", "--no-reload", unit]
+        self.assertEqual(self.calls().count(enable), 1)
+        self.assertLess(self.calls().index(["--user", "daemon-reload"]), self.calls().index(enable))
+        self.assertTrue((self.home / (unit + ".active")).exists())
         self.assertTrue(any(i["result"] == "changed" for i in first["items"]))
         self.assertEqual(self.current().name, "agents-" + self.sha)
         self.assertFalse((self.current() / "old").exists())
         self.assertEqual(os.readlink(self.home / ".local/bin/fleet-sync"), str(self.home / "src/fabrig/current/tools/fleet-sync"))
         self.assertEqual(self.git(self.home / "src/fabrig/agents", "branch", "--show-current"), "")
-        self.assertFalse(any(i["result"] not in ("ok", "warn") for i in self.sync()["items"]))
+        self.assertFalse(any(i["result"] not in ("ok", "warn") for i in self.component_sync("release", "fabrig", "links", "render", "units", "versions")["items"]))
+        self.assertEqual(self.calls().count(enable), 1)
         cargo = tomllib.loads((self.home / ".cargo/config.toml").read_text())
         self.assertEqual(cargo["build"]["jobs"], 4)
         self.assertFalse((self.home / "src/rust/tmp/post/machines").exists())
         for path in (".profile", ".bashrc", ".config/fabrig/env.sh"):
             self.process("bash", "-n", self.home / path)
 
+        self.assertEqual(before, {relative: self.snapshot(root=self.home / relative) for relative in protected})
+
     def test_new_main_executes_new_implementation(self):
-        self.sync()
+        self.release_fixture()
         put(self.source / "fleet/env", (self.source / "fleet/env").read_text() + "DEPLOYED=yes\n")
         script = self.source / "tools/fleet-sync"
         put(script, script.read_text().replace('"wrote file"', '"new implementation wrote file"'), True)
@@ -291,7 +502,7 @@ class FleetTest(FleetFixture):
         self.assertIn("--self-check", (self.home / ".local/state/fleet-sync/run.log").read_text())
 
     def test_failed_self_check_keeps_current(self):
-        self.sync()
+        self.release_fixture()
         current = self.current()
         settings = self.home / ".claude/settings.json"
         before = settings.read_bytes()
@@ -303,12 +514,12 @@ class FleetTest(FleetFixture):
         self.assertTrue(any(i["item"] == "agents" and i["result"] == "failed" for i in state["items"]))
 
     def test_pin_and_hold(self):
-        self.sync()
+        self.release_fixture()
         original = self.current()
         put(self.source / "fleet/env", (self.source / "fleet/env").read_text() + "NEW=1\n")
         self.publish()
         put(self.home / ".config/fleet-sync/pin", self.sha + "\n")
-        self.sync()
+        self.component_sync("release")
         self.assertEqual(self.current(), original)
         put(self.home / ".config/fleet-sync/hold", "maintenance\nmore detail\n")
         before = self.snapshot()
@@ -318,39 +529,151 @@ class FleetTest(FleetFixture):
         self.assertEqual(before, self.snapshot())
 
     def test_dirty_clone_refused(self):
-        self.sync()
+        self.release_fixture()
         put(self.home / "src/fabrig/agents/untracked", "dirt\n")
-        state = self.sync(expected=1)
+        state = self.component_sync("release", expected=1)
         self.assertIn("dirty clone", state["items"][0]["reason"])
 
     def test_foreign_and_symlink_clones_refused(self):
-        self.sync()
+        self.release_fixture()
         clone = self.home / "src/fabrig/agents"
         self.git(clone, "remote", "set-url", "origin", self.fabrig_origin)
-        self.assertIn("foreign origin", self.sync(expected=1)["items"][0]["reason"])
+        self.assertIn("foreign origin", self.component_sync("release", expected=1)["items"][0]["reason"])
         moved = clone.with_name("moved")
         clone.rename(moved)
         clone.symlink_to(moved)
-        self.assertIn("symlink clone", self.sync(expected=1)["items"][0]["reason"])
+        self.assertIn("symlink clone", self.component_sync("release", expected=1)["items"][0]["reason"])
 
-    def test_non_symlink_tool_refused(self):
-        put(self.home / ".local/bin/fleet-sync", "mine\n")
-        state = self.sync(expected=1)
-        self.assertEqual((self.home / ".local/bin/fleet-sync").read_text(), "mine\n")
-        self.assertTrue(any(i["item"] == "link:fleet-sync" and i["result"] == "failed" for i in state["items"]))
 
-    def test_backups_once_and_modes(self):
-        put(self.home / ".cargo/config.toml", "# personal\n")
-        put(self.home / ".profile", "# original profile\n")
-        self.sync()
-        backup = self.home / ".cargo/config.toml.pre-fleet-sync"
-        self.assertEqual(backup.read_text(), "# personal\n")
-        self.assertFalse((self.home / ".claude/settings.json.pre-fleet-sync").exists())
-        put(self.home / ".cargo/config.toml", "# later edit\n")
-        self.sync()
-        self.assertEqual(backup.read_text(), "# personal\n")
-        for path, mode in ((".cargo/config.toml", 0o600), (".profile", 0o644), (".config/fabrig/env.sh", 0o644)):
-            self.assertEqual(stat.S_IMODE((self.home / path).stat().st_mode), mode)
+    def test_check_writes_nothing_empty_and_configured(self):
+        before = self.snapshot(exclude_mirror=True)
+        self.inspect_sync("--check", expected=1)
+        self.assertEqual(before, self.snapshot(exclude_mirror=True))
+        self.release_fixture()
+        put(self.home / ".cargo/config.toml", "# drift\n")
+        before = self.snapshot(exclude_mirror=True)
+        self.inspect_sync("--check", expected=1)
+        self.assertEqual(before, self.snapshot(exclude_mirror=True))
+
+    def test_unknown_host_no_writes(self):
+        before = self.snapshot()
+        result = self.process("python3", "-I", "-B", self.source / "tools/fleet-sync", "--host", "unknown", expected=2)
+        self.assertIn("unknown host", result.stderr)
+        self.assertEqual(before, self.snapshot())
+
+    def test_timer_lock_is_quiet(self):
+        path = self.home / ".local/state/fleet-sync/lock"
+        put(path, "")
+        with path.open("r") as stream:
+            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            before = self.snapshot()
+            self.assertIsNone(self.inspect_sync("--timer"))
+            self.assertEqual(before, self.snapshot())
+            self.assertEqual(self.inspect_sync("--check")["items"], [
+                {"item": "lock", "result": "busy", "reason": "a run is in progress; check again"}])
+
+
+    def test_status_from_outside_fleet(self):
+        script = self.source / "tools/fleet-sync"
+        put(script, script.read_text().replace("import socket\n", "import socket\nsocket.gethostname = lambda: 'outside-fleet'\n"), True)
+        result = self.process("python3", "-I", "-B", self.source / "tools/fleet-sync", "status", "--json", expected=1)
+        self.assertEqual(len(json.loads(result.stdout)["hosts"]), HOST_COUNT)
+        calls = [json.loads(line) for line in (self.home / "ssh.log").read_text().splitlines()]
+        self.assertEqual(len(calls), HOST_COUNT)
+
+
+    def test_status_unreachable(self):
+        self.release_fixture()
+        self.component_sync("versions", timer=True)
+        state = self.sync("status", expected=1)
+        self.assertEqual(len(state["hosts"]), HOST_COUNT)
+        self.assertIn("unreachable", next(h for h in state["hosts"] if h["host"] == "hetzner3"))
+        self.assertTrue(next(h for h in state["hosts"] if h["host"] == "hel8")["last_timer_end"])
+        calls = [json.loads(line) for line in (self.home / "ssh.log").read_text().splitlines()]
+        self.assertEqual(len(calls), HOST_COUNT - 1)
+        self.assertTrue(all("StrictHostKeyChecking=yes" in c and "BatchMode=yes" in c for c in calls))
+
+    def test_release_retention(self):
+        self.release_fixture()
+        directory = self.home / "src/fabrig/releases"
+        for n in range(12):
+            path = directory / f"agents-{n:040x}"
+            path.mkdir()
+            os.utime(path, (n + 1, n + 1))
+        self.component_sync("release")
+        self.assertEqual(len(list(directory.glob("agents-*"))), 10)
+        self.assertTrue(self.current().is_dir())
+
+    def test_invalid_declaration_changes_nothing(self):
+        put(self.source / "fleet/unparsed.txt", "surprise\n")
+        before = self.snapshot()
+        self.process("python3", "-I", "-B", self.source / "tools/fleet-sync", "--host", "hel8", expected=2)
+        self.assertEqual(before, self.snapshot())
+
+
+class LandTest(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="land-test-")
+        self.addCleanup(self.temp.cleanup)
+        self.directory = Path(self.temp.name)
+        self.home = self.directory / "home"
+        self.home.mkdir()
+        self.env = {**os.environ, "HOME": str(self.home), "GIT_CONFIG_GLOBAL": "/dev/null",
+                    "GIT_CONFIG_NOSYSTEM": "1", "GIT_AUTHOR_NAME": "Fixture", "GIT_AUTHOR_EMAIL": "fixture@example.invalid",
+                    "GIT_COMMITTER_NAME": "Fixture", "GIT_COMMITTER_EMAIL": "fixture@example.invalid"}
+        self.source = self.directory / "source"
+        self.source.mkdir()
+        put(self.source / "tools/land", (ROOT / "tools/land").read_text(), True)
+        put(self.source / "tools/check.sh", '#!/bin/bash\necho gate >> "$HOME/gates"\n[[ ! -f "$HOME/fail-gate" ]]\n', True)
+        self.git("init", "-b", "main")
+        self.git("add", ".")
+        self.git("commit", "-qm", "fixture")
+        self.origin = self.directory / "origin.git"
+        self.run_command("git", "clone", "--bare", self.source, self.origin)
+        self.git("remote", "add", "origin", self.origin)
+        self.git("switch", "-c", "feature")
+        put(self.source / "feature", "feature\n")
+        self.git("add", ".")
+        self.git("commit", "-qm", "feature")
+
+    def run_command(self, *args, expected=0):
+        result = subprocess.run([str(a) for a in args], cwd=self.source, env=self.env,
+                                capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+        return result.stdout.strip()
+
+    def git(self, *args):
+        return self.run_command("git", *args)
+
+    def land(self, expected=0):
+        return self.run_command("python3", "-I", "-B", "tools/land", expected=expected)
+
+    def test_fast_forward(self):
+        self.land()
+        self.assertEqual(self.git("rev-parse", "HEAD"), self.run_command("git", "--git-dir", self.origin, "rev-parse", "main"))
+        self.assertEqual((self.home / "gates").read_text(), "gate\n")
+
+    def test_dirty_refused(self):
+        put(self.source / "dirt", "dirt\n")
+        self.land(expected=1)
+        self.assertFalse((self.home / "gates").exists())
+
+    def test_rebase_checks_twice(self):
+        other = self.directory / "other"
+        self.run_command("git", "clone", self.origin, other)
+        put(other / "upstream", "upstream\n")
+        self.run_command("git", "-C", other, "add", ".")
+        self.run_command("git", "-C", other, "commit", "-qm", "upstream")
+        self.run_command("git", "-C", other, "push", "origin", "main")
+        self.land()
+        self.assertEqual((self.home / "gates").read_text(), "gate\ngate\n")
+        self.assertTrue((self.source / "upstream").exists())
+
+    def test_gate_failure_prevents_push(self):
+        before = self.run_command("git", "--git-dir", self.origin, "rev-parse", "main")
+        put(self.home / "fail-gate", "fail\n")
+        self.land(expected=1)
+        self.assertEqual(before, self.run_command("git", "--git-dir", self.origin, "rev-parse", "main"))
 
 
 if __name__ == "__main__":

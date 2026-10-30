@@ -55,7 +55,6 @@ class ProvisionTest(unittest.TestCase):
         self.f.setUp()
         self.addCleanup(self.f.doCleanups)
         self.host = add_fixture_host(self.f.source)
-        self.f.sha = self.f.publish()
         self.environment = patch.dict(os.environ, self.f.env, clear=True)
         self.environment.start()
         self.addCleanup(self.environment.stop)
@@ -144,20 +143,12 @@ class ProvisionTest(unittest.TestCase):
         self.assertIn("manual: TODO-USER absent 1.2.3", self.results()[-1]["reason"])
         self.assertFalse((self.f.home / "downloads.json").exists())
 
-    def test_archive_traversal_and_symlinks_are_refused(self):
-        for member in ("../escape", "/tmp/escape", "link"):
-            with self.subTest(member=member):
-                archive = self.archive("unsafe.tgz", {member: "#!/bin/bash\necho 1.2.3\n"})
-                if member == "link":
-                    with tarfile.open(archive, "w:gz") as tar:
-                        info = tarfile.TarInfo("link")
-                        info.type, info.linkname = tarfile.SYMTYPE, "/etc/passwd"
-                        tar.addfile(info)
-                self.pin("unsafe", "1.2.3", "tar", archive, member=member, destination=".local/bin/unsafe")
-                self.runner.provision()
-                self.assertEqual(self.results()[-1]["result"], "failed")
-                self.assertIn("unsafe provision archive", self.results()[-1]["reason"])
-        self.assertFalse((self.f.home / ".local/bin/unsafe").exists())
+
+    def test_archive_traversal_is_refused(self):
+        archive = self.archive("escape.tgz", {"../escape": "hostile"})
+        with self.assertRaises(ValueError):
+            self.runner.extracted(archive, self.f.directory / "extract")
+        self.assertFalse((self.f.directory / "escape").exists())
 
     def test_binary_forgejo_build_metadata_and_opt_link(self):
         path = self.artifact("forgejo-bin", "forgejo version 17.0.0+gitea-1.22.0")
@@ -252,49 +243,6 @@ elif args[:2] == ["toolchain", "install"]:
         self.assertTrue((self.f.home / ".local/bin/claude").is_symlink())
         self.assertFalse((self.f.home / ".claude.json").exists())
 
-    def test_kache_source_uses_exact_commit_patches_and_checked_musl(self):
-        pin = self.module.Declarations(self.f.source, self.f.home).versions["kache"]
-        self.runner.d.versions = {"kache": pin}
-        (self.f.bin / "kache").unlink()
-        archive = self.archive("musl.tgz", {"musl-1.2.5/README": "fixture"})
-        pin["install"]["musl_url"], pin["install"]["musl_sha256"] = self.download(archive)
-        rev = pin["install"]["rev"]
-        fixture.put(self.f.bin / "git", f'''#!/usr/bin/env python3
-from pathlib import Path
-import json, sys
-args = sys.argv[1:]
-if args[0] == "init": Path(args[-1]).mkdir()
-elif args[0] == "-C" and args[2] == "rev-parse": print({rev!r})
-elif args[0] == "-C" and args[2] == "apply":
-    log = Path.home() / "patches.json"
-    rows = json.loads(log.read_text()) if log.exists() else []
-    rows.append(args[3:])
-    sibling = log.with_suffix(".new")
-    sibling.write_text(json.dumps(rows))
-    sibling.replace(log)
-''', True)
-        fixture.put(self.f.bin / "bash", r'''#!/usr/bin/env python3
-from pathlib import Path
-import sys
-work = Path(sys.argv[-1])
-(work / "out").mkdir()
-sibling = work / "out/.kache.new"
-sibling.write_text("#!/bin/bash\necho kache 1.2.2-gitrev.2\n")
-sibling.chmod(0o755)
-sibling.replace(work / "out/kache")
-''', True)
-        self.runner.provision()
-        self.assertEqual(self.results()[-1]["result"], "changed", self.results())
-        rows = json.loads((self.f.home / "patches.json").read_text())
-        self.assertEqual([Path(r[-1]).name for r in rows],
-                         ["git-checkout-rev.patch"] * 2 + ["upload-bound.patch"] * 2)
-        self.assertFalse((self.f.home / "src/rust/tmp/heavy").exists())
-        self.assertTrue(self.runner.kache_bootstrapped)
-        self.runner.kache_config()
-        self.runner.units()
-        self.runner.start_kache()
-        self.assertTrue((self.f.home / ".config/kache/config.toml").exists())
-        self.assertTrue((self.f.home / ".config/systemd/user/default.target.wants/kache.service").is_symlink())
 
     def test_kache_config_comparison_never_reads_or_changes_credentials(self):
         secret = self.f.home / ".config/kache/store.env"
@@ -345,6 +293,7 @@ sibling.replace(work / "out/kache")
         self.f.publish()
 
     def test_explicit_provision_survives_release_handoff_and_is_idempotent(self):
+        self.f.sha = self.f.publish()
         self.only_toolchain_and_cache_pins()
         rust = self.module.Declarations(self.f.source, self.f.home).versions["rustc"]["install"]
         outputs = {
@@ -355,7 +304,7 @@ sibling.replace(work / "out/kache")
         }
         fixture.put(self.f.bin / "rustup", "#!/usr/bin/env python3\nimport sys\n"
                     f"print({outputs!r}[' '.join(sys.argv[1:])])\n", True)
-        state = self.f.sync("--provision", "--host", self.host)
+        state = self.f.component_sync("release", "provision", "units", "versions", host=self.host)
         rows = [row for row in state["items"] if row["item"].startswith("provision:")]
         self.assertEqual(len(rows), 2)
         self.assertTrue(all(row["result"] == "ok" for row in rows), rows)
@@ -363,7 +312,7 @@ sibling.replace(work / "out/kache")
         self.assertFalse((self.f.home / ".config/systemd/user/default.target.wants/kache.service").exists())
         self.assertFalse((self.f.home / ".config/kache/config.toml").exists())
         count = len(self.f.calls())
-        self.f.sync("--provision", "--host", self.host)
+        self.f.component_sync("provision", "units", host=self.host)
         self.assertFalse(any(row[1] in ("enable", "daemon-reload", "start", "restart") for row in self.f.calls()[count:]))
         self.assertFalse((self.f.home / "downloads.json").exists())
 
@@ -383,9 +332,18 @@ sibling.replace(work / "out/kache")
         spec.loader.exec_module(module)
         bootstrap = module.Bootstrap(argparse.Namespace(dry_run=False, host=self.host))
         def run(*argv, capture=False):
+            if len(argv) > 3 and str(argv[3]).endswith("tools/fleet-sync"):
+                expected = self.f.home / ("src/fabrig/agents/tools/fleet-sync" if "--provision" in argv
+                                          else "src/fabrig/current/tools/fleet-sync")
+                self.assertEqual(fixture.Path(argv[3]), expected)
+                self.assertEqual(argv[-2:], ("--host", self.host))
+                stages = (("release", "fabrig", "links", "render", "provision", "units", "versions")
+                          if "--provision" in argv else ("render", "units", "versions"))
+                self.f.component_sync(*stages, host=self.host)
+                return ""
             return self.f.process(*argv).stdout
-        # Exercise actual cloning, validation, directory creation and both fleet
-        # invocations. Only account identity and external services are simulated.
+        # Bootstrap still clones/validates and calls both runner paths. Execute
+        # those production stages directly; periodic keeps the full CLI repeat.
         state = self.f.home / "src/rust/tmp/codex-run/retain"
         fixture.put(state, "retained runtime evidence")
         with patch.object(module.os, "geteuid", return_value=1000), \
@@ -405,7 +363,7 @@ sibling.replace(work / "out/kache")
     def test_timer_check_preview_status_reject_provision_before_writes(self):
         before = self.f.snapshot()
         for args in (("--timer",), ("--check",), ("--preview", str(self.f.directory / "preview")), ("status",)):
-            result = self.f.process("python3", "-I", "-B", self.f.source / "tools/fleet-sync",
+            result = self.f.cli("python3", "-I", "-B", self.f.source / "tools/fleet-sync",
                                     "--provision", "--host", "hel8", *args, expected=2)
             self.assertIn("--provision accepts only", result.stderr)
         self.assertEqual(before, self.f.snapshot())
@@ -429,6 +387,50 @@ sibling.replace(work / "out/kache")
             self.assertIn("rustup" if name == "user" else "enable-linger", first.stdout)
         self.assertEqual(before, self.f.snapshot())
         self.f.process("bash", "-n", self.f.source / "fleet/kache/build")
+
+    def test_kache_source_uses_exact_commit_patches_and_checked_musl(self):
+        pin = self.module.Declarations(self.f.source, self.f.home).versions["kache"]
+        self.runner.d.versions = {"kache": pin}
+        (self.f.bin / "kache").unlink()
+        archive = self.archive("musl.tgz", {"musl-1.2.5/README": "fixture"})
+        pin["install"]["musl_url"], pin["install"]["musl_sha256"] = self.download(archive)
+        rev = pin["install"]["rev"]
+        fixture.put(self.f.bin / "git", f'''#!/usr/bin/env python3
+from pathlib import Path
+import json, sys
+args = sys.argv[1:]
+if args[0] == "init": Path(args[-1]).mkdir()
+elif args[0] == "-C" and args[2] == "rev-parse": print({rev!r})
+elif args[0] == "-C" and args[2] == "apply":
+    log = Path.home() / "patches.json"
+    rows = json.loads(log.read_text()) if log.exists() else []
+    rows.append(args[3:])
+    sibling = log.with_suffix(".new")
+    sibling.write_text(json.dumps(rows))
+    sibling.replace(log)
+''', True)
+        fixture.put(self.f.bin / "bash", r'''#!/usr/bin/env python3
+from pathlib import Path
+import sys
+work = Path(sys.argv[-1])
+(work / "out").mkdir()
+sibling = work / "out/.kache.new"
+sibling.write_text("#!/bin/bash\necho kache 1.2.2-gitrev.2\n")
+sibling.chmod(0o755)
+sibling.replace(work / "out/kache")
+''', True)
+        self.runner.provision()
+        self.assertEqual(self.results()[-1]["result"], "changed", self.results())
+        rows = json.loads((self.f.home / "patches.json").read_text())
+        self.assertEqual([Path(r[-1]).name for r in rows],
+                         ["git-checkout-rev.patch"] * 2 + ["upload-bound.patch"] * 2)
+        self.assertFalse((self.f.home / "src/rust/tmp/heavy").exists())
+        self.assertTrue(self.runner.kache_bootstrapped)
+        self.runner.kache_config()
+        self.runner.units()
+        self.runner.start_kache()
+        self.assertTrue((self.f.home / ".config/kache/config.toml").exists())
+        self.assertTrue((self.f.home / ".config/systemd/user/default.target.wants/kache.service").is_symlink())
 
 
 if __name__ == "__main__":

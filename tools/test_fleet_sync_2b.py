@@ -58,7 +58,7 @@ class FleetSync2bTest(fixture.FleetTest):
     def test_archive_check_and_preview_cover_all_items_without_real_writes(self):
         archive = self.archive()
         before = self.snapshot()
-        state = self.sync("--check", script=archive / "tools/fleet-sync", expected=1)
+        state = self.inspect_sync("--check", script=archive / "tools/fleet-sync", expected=1)
         self.assertEqual(next(i["result"] for i in state["items"] if i["item"] == "agents"), "drift")
         for name in ("fabrig", ".cargo/config.toml", "src/rust/tmp/post/machines", "version:codex"):
             self.assertTrue(any(i["item"] == name for i in state["items"]), name)
@@ -83,10 +83,12 @@ class FleetSync2bTest(fixture.FleetTest):
                 self.assertEqual(runner.source(), ("declared-fallback", "unknown"))
 
     def test_agents_failure_in_check_does_not_skip_other_checks(self):
-        self.sync()
-        fixture.put(self.home / "src/fabrig/agents/untracked", "dirty\n")
         before = self.snapshot(exclude_mirror=True)
-        state = self.sync("--check", expected=1)
+        with patch.dict(os.environ, self.env, clear=True):
+            _, runner = self.runner(check=True)
+            runner.item("agents", "failed", "fixture agents failure")
+            self.assertEqual(runner.run(), 1)
+            state = runner.state
         self.assertEqual(state["items"][0]["item"], "agents")
         self.assertEqual(state["items"][0]["result"], "failed")
         for name in ("fabrig", ".cargo/config.toml", "src/rust/tmp/post/machines", "version:claude", "enabled:fleet-sync.timer"):
@@ -112,7 +114,7 @@ class FleetSync2bTest(fixture.FleetTest):
         fixture.put(path, "# operator order\n\n" + "\n\n".join(rows) + "\n# end\n")
         before = (path.read_bytes(), path.stat().st_mtime_ns)
         for flags in ((), ("--check",)):
-            state = self.sync(*flags, env={**self.env, "USER": "free"})
+            state = self.component_sync("render", check=bool(flags), env={**self.env, "USER": "free"})
             self.assertEqual(self.routing_item(state)["result"], "ok")
             self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), before)
         self.assertFalse(path.with_name("machines.pre-fleet-sync").exists())
@@ -126,7 +128,7 @@ class FleetSync2bTest(fixture.FleetTest):
         fixture.put(path, self.routing_text(mapping))
         before = path.read_bytes()
         for flags in ((), ("--check",)):
-            item = self.routing_item(self.sync(*flags, env={**self.env, "USER": "free"}))
+            item = self.routing_item(self.component_sync("render", check=bool(flags), env={**self.env, "USER": "free"}))
             self.assertEqual(item["result"], "warn")
             self.assertEqual(item["reason"], "names differ: extra, hetzner3, hetzner7; check-only")
             self.assertEqual(path.read_bytes(), before)
@@ -141,14 +143,14 @@ class FleetSync2bTest(fixture.FleetTest):
             with self.subTest(extra=extra):
                 # Identical duplicate entries are still a single mapping.
                 fixture.put(path, desired + extra)
-                item = self.routing_item(self.sync("--check", expected=1, env={**self.env, "USER": "free"}))
+                item = self.routing_item(self.component_sync("render", check=True, expected=1, env={**self.env, "USER": "free"}))
                 self.assertEqual(item["result"], "ok" if name == "hel8" else "warn")
                 if name != "hel8":
                     self.assertEqual(item["reason"], f"names differ: {name}; check-only")
         mapping = self.routing()
         mapping["hetzner7"] = mapping["hetzner7"].removeprefix("free@")
         fixture.put(path, self.routing_text(mapping))
-        item = self.routing_item(self.sync("--check", expected=1, env={**self.env, "USER": "another-user"}))
+        item = self.routing_item(self.component_sync("render", check=True, expected=1, env={**self.env, "USER": "another-user"}))
         self.assertEqual(item["reason"], "names differ: hetzner7; check-only")
 
     def test_preview_reports_routing_meaning_without_writing_it(self):

@@ -12,7 +12,7 @@ import test_fleet_sync as fixture
 
 class FleetSync2cTest(fixture.FleetTest):
     def preview_run(self, directory, expected=0, cwd=None):
-        return self.process("python3", "-I", "-B", self.source / "tools/fleet-sync",
+        return self.cli("python3", "-I", "-B", self.source / "tools/fleet-sync",
                             "--host", "hel8", "--preview", directory, expected=expected, cwd=cwd)
 
     def test_preview_defers_all_version_launchers_but_check_keeps_them(self):
@@ -31,7 +31,7 @@ class FleetSync2cTest(fixture.FleetTest):
         self.assertNotIn("version:", result.stdout)
         self.assertEqual(before, self.snapshot())
         self.assertTrue(all(not (self.home / ("probe-" + name)).exists() for name in versions))
-        state = self.sync("--check", expected=1)
+        state = self.inspect_sync("--check", expected=1)
         for name in versions:
             self.assertTrue((self.home / ("probe-" + name)).exists())
             expected = "warn" if "hel8" in versions[name].get("version_only_hosts", []) else "ok"
@@ -114,7 +114,7 @@ class FleetSync2cTest(fixture.FleetTest):
         path = self.home / "src/rust/tmp/post/machines"
         fixture.put(path, text)
         before = self.snapshot()
-        state = self.sync("--check", expected=1, env={**self.env, "USER": "free"})
+        state = self.inspect_sync("--check", expected=1, env={**self.env, "USER": "free"})
         item = next(i for i in state["items"] if i["item"] == "src/rust/tmp/post/machines")
         self.assertEqual(item["result"], "warn")
         self.assertEqual(item["reason"], "names differ: hel8; check-only")

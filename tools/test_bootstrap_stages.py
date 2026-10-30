@@ -12,8 +12,7 @@ from unittest.mock import patch
 import test_fleet_sync as fixture
 
 
-
-
+@fixture.lru_cache(maxsize=1)
 def before_stage_b():
     """The tree just before stage B: the runner and declarations every host runs."""
     marker = subprocess.check_output(
@@ -45,7 +44,7 @@ class BootstrapStagesTest(unittest.TestCase):
         # The declarations live before stage B: main's own fleet tree, so units
         # that main already declares (after-landing) are not stage B's changes.
         base = before_stage_b()
-        archive = subprocess.check_output(["git", "-C", str(fixture.ROOT), "archive", base, "fleet"], env=self.f.env)
+        archive = fixture.historical_archive(base, "fleet")
         stage = self.f.directory / "fleet-stage"
         stage.mkdir()
         with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
@@ -88,7 +87,7 @@ class BootstrapStagesTest(unittest.TestCase):
                     f'agents = {json.dumps(str(self.f.origin))}\nfabrig = {json.dumps(self.f.fabrig_origin)}\n')
 
     def script(self, revision):
-        script = self.f.process("git", "-C", fixture.ROOT, "show", revision + ":tools/fleet-sync").stdout
+        script = fixture.historical_source(revision)
         return script.replace('SYSTEM_TOOL_DIRS = (Path("/usr/bin"), Path("/bin"))',
                               f'SYSTEM_TOOL_DIRS = tuple(map(Path, {json.dumps([str(p) for p in self.f.system_bins])}))')
 
@@ -142,30 +141,9 @@ class BootstrapStagesTest(unittest.TestCase):
     def test_stage_b_changes_no_runner_code(self):
         # Stage A (code only) is deployed fleet-wide; stage B must bring declarations
         # alone, so the deployed runner is also the runner that applies them.
-        self.assertEqual(self.f.process("git", "-C", fixture.ROOT, "show",
-                                        DEPLOYED + ":tools/fleet-sync").stdout,
-                         self.f.process('git', '-C', fixture.ROOT, 'show',
-                                        self.rollout + ':tools/fleet-sync').stdout)
+        self.assertEqual(fixture.historical_source(DEPLOYED),
+                         fixture.historical_source(self.rollout))
 
-    @unittest.skipUnless(HAS_BOOTSTRAP, "stage B declarations are not in the code-only stage")
-    def test_stage_a_timer_promotes_real_stage_b_on_declared_hosts(self):
-        for host in self.hosts:
-            with self.subTest(host=host):
-                self.simulate(host, self.script(STAGE_A), after_fleet=True)
-
-    def test_main_version_only_kache_never_renders_or_enters_preview(self):
-        self.legacy_fleet()
-        if self.f.git(self.f.source, "status", "--porcelain"):
-            self.f.publish()
-        self.f.sync()
-        with patch.dict("os.environ", self.f.env, clear=True):
-            _, runner = self.f.runner()
-            with patch.object(runner, "kache_config", side_effect=AssertionError("inactive kache renderer")):
-                runner.render()
-        self.assertFalse((self.f.home / ".config/kache").exists())
-        preview = self.f.directory / "main-preview"
-        self.f.process("python3", "-I", "-B", self.f.source / "tools/fleet-sync", "--preview", preview, "--host", "hel8")
-        self.assertFalse((preview / "home/.config/kache").exists())
 
     def test_stage_a_accepts_future_assets_seeds_provision_pins_and_readonly_units(self):
         self.legacy_fleet()

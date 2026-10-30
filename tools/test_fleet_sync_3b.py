@@ -13,7 +13,7 @@ BUSY = {"item": "lock", "result": "busy", "reason": "a run is in progress; check
 
 class FleetSync3bTest(fixture.FleetTest):
     def test_busy_check_reports_one_item_without_altering_backoff(self):
-        self.sync()
+        self.release_fixture()
         saved = self.state()
         saved.update(consecutive_failures=2, last_failure=dt.datetime.now(dt.UTC).isoformat())
         fixture.put(self.home / ".local/state/fleet-sync/state.json", json.dumps(saved))
@@ -33,11 +33,11 @@ class FleetSync3bTest(fixture.FleetTest):
             self.assertIn("busy", text)
             self.assertIn("a run is in progress; check again", text)
             self.assertIn("hel8: 1 busy", text)
-            self.assertIsNone(self.sync("--timer"))
+            self.assertIsNone(self.inspect_sync("--timer"))
             self.assertEqual(self.snapshot(), before)
 
     def test_status_treats_local_and_remote_busy_as_nonfailures(self):
-        self.sync()
+        self.release_fixture()
         fixture.put(self.bin / "ssh", '''#!/usr/bin/env python3
 import json, os, sys
 host = json.loads(os.environ["FAKE_SSH_HOSTS"])[sys.argv[-2]]
@@ -49,17 +49,17 @@ print(json.dumps({"host": host, "items": items}))
         with (self.home / ".local/state/fleet-sync/lock").open("rb") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             before = self.snapshot()
-            status = self.sync("status")
+            status = self.inspect_sync("status")
             for row in status["hosts"]:
                 self.assertEqual(row["items"], [BUSY])
             text = self.process("python3", "-I", "-B", self.source / "tools/fleet-sync",
                                 "status", "--host", "hel8").stdout
             self.assertEqual(text.count("busy lock: a run is in progress; check again"), len(status["hosts"]))
-            self.sync("status", expected=1, env={**self.env, "FAKE_REMOTE_DRIFT": "1"})
+            self.inspect_sync("status", expected=1, env={**self.env, "FAKE_REMOTE_DRIFT": "1"})
             self.assertEqual(self.snapshot(), before)
 
     def test_system_executable_names_fail_self_check_and_block_promotion(self):
-        self.sync()
+        self.release_fixture()
         current = self.current()
         manifest = self.source / "tools/installed"
         original = manifest.read_text()
@@ -67,7 +67,7 @@ print(json.dumps({"host": host, "items": items}))
             with self.subTest(directory=directory):
                 fixture.put(directory / name, "#!/bin/sh\nexit 0\n", True)
                 fixture.put(manifest, original + f"{name} fleet-sync\n")
-                checked = self.process("python3", "-I", "-B", self.source / "tools/fleet-sync",
+                checked = self.cli("python3", "-I", "-B", self.source / "tools/fleet-sync",
                                        "--host", "hel8", "--self-check", expected=2)
                 self.assertIn(f"shadows system command: {name}", checked.stderr)
                 self.publish()
@@ -82,12 +82,12 @@ print(json.dumps({"host": host, "items": items}))
         manifest = self.source / "tools/installed"
         allowed = manifest.read_text() + "nonexec fleet-sync\ndirectory-tool fleet-sync\nlocal-command fleet-sync\n"
         fixture.put(manifest, allowed)
-        self.process("python3", "-I", "-B", self.source / "tools/fleet-sync", "--host", "hel8", "--self-check")
+        self.cli("python3", "-I", "-B", self.source / "tools/fleet-sync", "--host", "hel8", "--self-check")
         (self.system_bins[1] / "linked-command").symlink_to(self.bin / "local-command")
         for name in ("linked-command", "watch"):
             with self.subTest(name=name):
                 fixture.put(manifest, allowed + f"{name} fleet-sync\n")
-                self.process("python3", "-I", "-B", self.source / "tools/fleet-sync",
+                self.cli("python3", "-I", "-B", self.source / "tools/fleet-sync",
                              "--host", "hel8", "--self-check", expected=2)
 
 

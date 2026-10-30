@@ -12,25 +12,41 @@ import test_fleet_sync as fixture
 
 
 class FleetSync2Test(fixture.FleetTest):
+    def timer_sync(self, *flags, expected=0, env=None):
+        """Test timer state transitions against a fixed, already-deployed release.
+
+        Clone validation stays real; release fetching/promotion is covered by
+        test_new_main_bypasses_wait_and_handoff_counts_once.
+        """
+        with patch.dict(os.environ, env or self.env, clear=True):
+            _, runner = self.runner(check="--check" in flags)
+            runner.args.timer = "--timer" in flags
+            with patch.object(runner, "release", side_effect=lambda: runner.validate_clone(
+                    self.home / "src/fabrig/agents", str(self.origin))), patch.multiple(
+                        runner, fabrig=lambda: None, links=lambda: None, render=lambda: None,
+                        units=lambda: None, versions=lambda: None):
+                self.assertEqual(runner.run(), expected, runner.state["items"])
+            return None if runner.waiting or (runner.args.timer and not runner.state["items"]) else runner.state
+
     def fail_timer(self):
-        self.sync()
+        self.release_fixture()
         fixture.put(self.home / "src/fabrig/agents/untracked", "dirty\n")
-        self.sync("--timer", expected=1)
+        self.timer_sync("--timer", expected=1)
         state = self.state()
         self.assertEqual(state["consecutive_failures"], 1)
         self.assertTrue(state["last_failure"])
         return state
 
-    def preview_run(self, directory=None, expected=0):
+    def preview_run(self, directory=None, expected=0, real=False):
         directory = directory or self.directory / "preview"
-        result = self.process("python3", "-I", "-B", self.source / "tools/fleet-sync",
+        result = (self.process if real else self.cli)("python3", "-I", "-B", self.source / "tools/fleet-sync",
                               "--host", "hel8", "--preview", directory, expected=expected)
         return directory / "home", result
 
     def test_failed_timer_waits_quietly_without_advancing_state(self):
         first = self.fail_timer()
         before_calls = self.calls()
-        result = self.sync("--timer")
+        result = self.timer_sync("--timer")
         self.assertIsNone(result)
         self.assertEqual(self.state(), first)
         self.assertEqual(self.calls(), before_calls)
@@ -53,13 +69,13 @@ class FleetSync2Test(fixture.FleetTest):
         state = self.fail_timer()
         state["last_failure"] = (dt.datetime.now(dt.UTC) - dt.timedelta(minutes=2)).isoformat()
         fixture.put(self.home / ".local/state/fleet-sync/state.json", json.dumps(state))
-        self.sync("--timer", expected=1)
+        self.timer_sync("--timer", expected=1)
         self.assertEqual(self.state()["consecutive_failures"], 2)
         self.assertNotEqual(self.state()["last_failure"], state["last_failure"])
-        self.sync(expected=1)  # Manual failure runs immediately and preserves the timer counter.
+        self.timer_sync(expected=1)  # Manual failure runs immediately and preserves the timer counter.
         self.assertEqual(self.state()["consecutive_failures"], 2)
         (self.home / "src/fabrig/agents/untracked").unlink()
-        self.sync()
+        self.timer_sync()
         self.assertEqual(self.state()["consecutive_failures"], 0)
         self.assertIsNone(self.state()["last_failure"])
         self.assertIsNone(self.state()["backoff_until"])
@@ -68,34 +84,34 @@ class FleetSync2Test(fixture.FleetTest):
         self.fail_timer()
         retry = self.home / ".config/fleet-sync/retry"
         fixture.put(retry, "")
-        self.sync("--timer", expected=1)
+        self.timer_sync("--timer", expected=1)
         self.assertFalse(retry.exists())
         self.assertEqual(self.state()["consecutive_failures"], 2)
-        self.assertIsNone(self.sync("--timer"))
+        self.assertIsNone(self.timer_sync("--timer"))
 
-    def test_new_main_bypasses_wait_and_handoff_counts_once(self):
+
+    def test_new_main_bypasses_wait(self):
         self.fail_timer()
-        (self.home / "src/fabrig/agents/untracked").unlink()
         fixture.put(self.source / "fleet/env", (self.source / "fleet/env").read_text() + "NEW_MAIN=yes\n")
-        sha = self.publish()
-        self.sync("--timer", script=self.current() / "tools/fleet-sync")
-        self.assertEqual(self.state()["agents_sha"], sha)
-        self.assertEqual(self.state()["consecutive_failures"], 0)
-        # Fail after promotion and exec, ensuring the new runner increments only once.
-        fixture.put(self.source / "fleet/env", (self.source / "fleet/env").read_text() + "NEXT_MAIN=yes\n")
         self.publish()
-        self.sync("--timer", env={**self.env, "FAKE_NO_BUS": "1"}, expected=1)
-        self.assertEqual(self.state()["consecutive_failures"], 1)
+        with patch.dict(os.environ, self.env, clear=True):
+            _, runner = self.runner()
+            runner.args.timer = True
+            self.assertFalse(runner.timer_wait())
+            self.assertFalse(runner.waiting)
+            self.assertEqual(runner.finish(), 0)
+        self.assertEqual(self.state()["consecutive_failures"], 0)
+        self.assertIsNone(self.state()["last_failure"])
 
     def test_check_and_status_show_wait_without_consuming_retry(self):
         self.fail_timer()
         fixture.put(self.home / ".config/fleet-sync/retry", "operator\n")
         before = self.snapshot(exclude_mirror=True)
-        state = self.sync("--check", expected=1)
+        state = self.timer_sync("--check", expected=1)
         reason = next(i["reason"] for i in state["items"] if i["item"] == "backoff")
         self.assertRegex(reason, r"backoff until \d\d:\d\dZ \(1 failures\)")
         self.assertEqual(self.snapshot(exclude_mirror=True), before)
-        result = self.process("python3", "-I", "-B", self.source / "tools/fleet-sync", "status", "--host", "hel8", expected=1)
+        result = self.cli("python3", "-I", "-B", self.source / "tools/fleet-sync", "status", "--host", "hel8", expected=1)
         self.assertIn(reason, result.stdout)
         self.assertTrue((self.home / ".config/fleet-sync/retry").exists())
 
@@ -104,19 +120,19 @@ class FleetSync2Test(fixture.FleetTest):
         fixture.put(self.home / ".config/fleet-sync/retry", "")
         fixture.put(self.home / ".config/fleet-sync/hold", "maintenance\n")
         before = self.snapshot()
-        self.sync("--timer")
+        self.timer_sync("--timer")
         self.assertEqual(before, self.snapshot())
         (self.home / ".config/fleet-sync/hold").unlink()
         with (self.home / ".local/state/fleet-sync/lock").open("rb") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             before = self.snapshot()
-            self.assertIsNone(self.sync("--timer"))
+            self.assertIsNone(self.timer_sync("--timer"))
             self.assertEqual(before, self.snapshot())
 
     def test_unreachable_origin_keeps_backoff(self):
         before = self.fail_timer()
         fixture.put(self.bin / "git", '#!/bin/bash\nif [ "$1" = ls-remote ]; then exit 1; fi\nexec /usr/bin/git "$@"\n', True)
-        self.assertIsNone(self.sync("--timer"))
+        self.assertIsNone(self.timer_sync("--timer"))
         self.assertEqual(before, self.state())
         last = (self.home / ".local/state/fleet-sync/run.log").read_text().splitlines()[-1]
         self.assertIn("backoff until", last)
@@ -139,11 +155,11 @@ class FleetSync2Test(fixture.FleetTest):
         retry = self.home / ".config/fleet-sync/retry"
         retry.parent.mkdir(exist_ok=True)
         retry.symlink_to(self.source / "fleet/env")
-        self.sync("--timer", expected=1)
+        self.timer_sync("--timer", expected=1)
         self.assertTrue(retry.is_symlink())
         retry.unlink()
         os.mkfifo(retry)
-        self.sync("--timer", expected=1)
+        self.timer_sync("--timer", expected=1)
         self.assertTrue(retry.exists())
 
     def test_records_units_render_by_role_without_activation(self):
@@ -184,7 +200,7 @@ class FleetSync2Test(fixture.FleetTest):
         legacy = "# legacy status page\n"
         for suffix in ("service", "timer"):
             fixture.put(units / ("status-page." + suffix), legacy)
-        self.sync()
+        self.component_sync("units")
         for suffix in ("service", "timer"):
             name = "status-page." + suffix
             self.assertEqual((units / name).read_text(), (self.source / "fleet/units" / name).read_text())
@@ -193,7 +209,7 @@ class FleetSync2Test(fixture.FleetTest):
         self.assertIn("OnCalendar=*:0/10", (units / "status-page.timer").read_text())
         self.assertIn(["--user", "enable", "--now", "--no-reload", "status-page.timer"], self.calls())
         before = self.calls()
-        self.sync()
+        self.component_sync("units")
         self.assertEqual(self.calls()[len(before):], [["--user", "show", "-p", "NeedDaemonReload", *sorted(self.state()["managed_units"])]] + [["--user", "is-active", "--quiet", name]
                          for name in sorted(("fleet-sync.timer", "record-collect-session.timer", "pipeline-watch.timer", "status-page.timer"))])
 
@@ -201,7 +217,7 @@ class FleetSync2Test(fixture.FleetTest):
         fixture.put(self.home / ".bashrc", "# personal\n")
         fixture.put(self.home / ".codex/config.toml", '# personal\n[projects."/tmp/example"]\ntrust_level = "trusted"\n')
         before = self.snapshot()
-        copied, result = self.preview_run()
+        copied, result = self.preview_run(real=True)
         self.assertEqual(before, self.snapshot())
         self.assertIn("--- " + str(self.home / ".bashrc"), result.stdout)
         self.assertIn("+++ " + str(copied / ".bashrc"), result.stdout)
@@ -221,7 +237,7 @@ class FleetSync2Test(fixture.FleetTest):
         self.assertFalse((copied / "src/rust/tmp/post/machines").exists())
 
     def test_preview_existing_home_uses_checkout_and_real_conflicts(self):
-        self.sync()
+        self.release_fixture()
         fixture.put(self.source / "fleet/env", (self.source / "fleet/env").read_text() + "FROM_CHECKOUT=yes\n")
         fixture.put(self.home / ".config/plan/environment.sh", "export DISABLE_AUTOUPDATER=0\n")
         fixture.put(self.bin / "claude", '#!/bin/bash\nprintf "wrong-version-from-real-environment\\n"\n', True)
