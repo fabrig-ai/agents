@@ -7,21 +7,24 @@
 
 ## 1. In one page
 
-- **Main is the fleet's desired state.** Every host converges itself to agents
-  origin/main once a minute. A landing takes effect fleet-wide within about a
-  minute, with nobody logging in.
+- **Main is the fleet's desired state.** Every host's timer converges it to
+  agents origin/main once a minute. A healthy host that is not held or pinned
+  picks up a landing at its next run, usually within a minute, with nobody
+  logging in.
 - **Declarations, not scripts.** `fleet/` says what each host has: roles, tools,
   environment, settings, units and pinned versions. `tools/fleet-sync` makes the
   host match and reports what it could not.
 - **Same settings everywhere.** Hosts differ only by role and by the few
   per-host values declared in `fleet/hosts.toml`. Sessions choose model and
   effort at launch; the shared defaults are a starting point only.
-- **Converge, never take over.** fleet-sync owns only what it created or
-  declares. It never restarts a running service, never adopts what an
-  operator already runs, and leaves credentials, logins and run state alone.
-- **A new host is reproducible.** One root script, one user script, then
-  `fleet-sync --provision` brings a fresh Debian 13 machine to the same state
-  from pinned artifacts, without copying any login.
+- **Converge, never take over.** fleet-sync owns what it created and what
+  `fleet/` declares, and its journal records that ownership. It never restarts
+  a running service. It never adopts check-only paths that an operator already
+  runs. It leaves credentials, logins and run state alone.
+- **A new host is reproducible.** One root script and one user script, whose
+  `fleet-sync --provision` step brings a fresh Debian 13 machine to the same
+  state from pinned artifacts, without copying any login. Not yet proven on a
+  rebuild (status file).
 
 ## 2. Declarations
 
@@ -43,8 +46,8 @@ marks paths that are compared and warned about but never written (mail routing,
 an existing kache).
 
 **Tools.** `tools/installed` lists the agents commands linked into
-`~/.local/bin` through the `current` release. A name that would shadow a
-system command is refused.
+`~/.local/bin` through the `current` release. A name that matches an executable in
+`/usr/bin` or `/bin` is refused.
 
 **Units.** `fleet/units/` holds systemd user units; `fleet/units/roles.toml`
 maps each to the roles that run it. fleet-sync enables timers. A service marked
@@ -60,20 +63,25 @@ and warn; installing a pin is the explicit `--provision`.
 **One run, five steps,** under a per-host lock:
 
 1. **Agents release.** Fetch main, build an immutable release directory, run
-   its self-check and smoke test, then switch the `current` symlink atomically
-   and continue with the new runner. A failing candidate never becomes current.
-2. **Fabrig tools.** Run fabrig's own installer only when fabrig's `tools/` changed,
-   under the install lock that ops also uses. Ops can defer this step.
+   its self-check and a smoke check, then switch the `current` symlink
+   atomically and continue with the new runner. The smoke check proves that the
+   new runner can read the host's configuration; drift (exit 1) is allowed. A
+   candidate that cannot run never becomes current.
+2. **Fabrig tools.** Run fabrig's own installer only when fabrig's `tools/`
+   changed, when its links are wrong, or when its clone is missing. It runs under
+   the install lock that ops also uses. Ops can defer this step.
 3. **Links and rendered files.** Atomic writes, a one-time backup of
    pre-existing files, and a recheck against competing edits.
 4. **Units.** Write and enable declared units. Reload only when needed, and
-   remove only units the journal shows fleet-sync created.
+   remove only units the ownership journal records.
 5. **Record.** Write state, items and run log. Repeated failures back off
    (1 minute up to 60), but a new main commit skips the wait.
 
-**Effect timing.** A rendered file is in place within a minute. Sessions read
-the Claude settings live, except model and effort, which apply at the next
-start. Changed services report `restart pending` for their owners.
+**Effect timing.** A rendered file is in place at the next run. Claude
+documents that it reloads its settings live, except model and effort, which
+apply at the next start. That is Claude's behaviour, which fleet-sync's tests
+do not establish. Changed long-running and start-once services report
+`restart pending` for their owners.
 
 **Operator controls** under `~/.config/fleet-sync/`:
 
@@ -82,9 +90,13 @@ start. Changed services report `restart pending` for their owners.
 - `defer-fabrig` skips step 2;
 - `retry` skips one backoff and is the only control fleet-sync removes.
 
-**Read-only modes.** `--check` reports drift. `--preview DIR` converges a copy of
-the managed files and prints diffs, for a first deployment. `status` checks every
-host over SSH and prints a recovery command for a bad release.
+**Read-only modes.**
+- `--check` reports drift. Its only write is fetching an existing private
+  fabrig mirror.
+- `--preview DIR` converges a copy of the managed files inside DIR and prints
+  diffs, for a first deployment.
+- `status` runs the check on every host over SSH and prints a recovery command
+  for a bad release.
 
 ## 4. Safety boundaries
 
@@ -100,7 +112,8 @@ host over SSH and prints a recovery command for a bad release.
 
 ## 5. New hosts
 
-**Bootstrap** (`fleet/bootstrap/README.md`):
+**Bootstrap** (`fleet/bootstrap/README.md`; unproven, and its README still
+names the retired hetzner2):
 
 1. USER preparation.
 2. `root.sh`: packages, the user, sudo, linger, unattended upgrades and the
@@ -111,9 +124,11 @@ host over SSH and prints a recovery command for a bad release.
    3. runs `fleet-sync --provision` to install the pinned tools;
    4. runs a normal convergence, after which the timer takes over.
 
-Native tools come from peers (hetzner3 preferred, hel8 too) and are verified
-against the SHA256 manifests in `fleet/seeds/`. Downloads are allowed only over
-HTTPS with a pinned SHA256.
+**Six native tools come from peers.** hetzner3 is preferred, and hel8 also
+serves. Each is verified against its pin: single files by the SHA256 in
+`fleet/versions.toml`, trees by the manifests in `fleet/seeds/`. Rust comes
+from rustup, which checks its own distribution hashes. kache is built from
+source at a pinned revision. Any download must be HTTPS with a pinned SHA256.
 
 **Signing in is the user's.** Claude and Codex logins are never copied between
 machines; the bootstrap ends at the login step.
