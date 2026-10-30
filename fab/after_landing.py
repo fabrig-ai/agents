@@ -139,27 +139,13 @@ class AfterLanding:
                   "failed": 0, "seconds": 0.0, "log": str(first_log), "cases": []}
         stage = "junit"
 
-        def invoke(name, extra):
-            report = directory / f"{name}.xml"
-            config = directory / f"{name}.toml"
-            # A replay in the same second must not accept a report from the interrupted run.
-            report.unlink(missing_ok=True)
-            atomic.write(config, nextest.overlay(config_text, profile, report))
-            started = time.monotonic()
-            try:
-                code = tiers.run_pair(self.repo, target, ["--config-file", str(config), *extra],
-                                      directory / f"{name}.log", sh=self.sh)
-            finally:
-                result["seconds"] += time.monotonic() - started
-            return code, report
-
         try:
             config_text = (self.repo / tiers.NEXTEST_CONFIG).read_text(encoding="utf-8")
             configured = tiers.load(self.repo)
             if profile not in configured:
                 raise ValueError(f"unknown tier profile: {profile}")
             target = configured[profile]
-            code, report = invoke(profile, [])
+            code, report = self._invoke(profile, profile, [], directory, config_text, target, result)
             if code not in (0, tiers.TEST_FAILED):
                 result["reason"] = f"exit {code}"
                 return result
@@ -178,16 +164,9 @@ class AfterLanding:
                     number += 1
                     name = f"{profile}-{number}"
                     expression = nextest.exact_filter(case.binary, case.test)
-                    code, report = invoke(name, ["-E", expression])
-                    if code not in (0, tiers.TEST_FAILED):
-                        raise ValueError(f"exit {code}")
-                    selected = nextest.junit(report, profile)
-                    if (len(selected) != 1 or selected[0].key != case.key
-                            or selected[0].result == "skipped"):
-                        raise ValueError("JUnit must select exactly the failed test, not skipped")
-                    rerun = selected[0].result
-                    if (code == tiers.TEST_FAILED) != (rerun == "fail"):
-                        raise ValueError(f"exit {code} inconsistent with JUnit results")
+                    code, report = self._invoke(profile, name, ["-E", expression], directory,
+                                                config_text, target, result)
+                    rerun = self._rerun(report, profile, code, case)
                     rerun_log = str(directory / f"{name}.log")
                 classified.append((case, state(case.result, rerun,
                                                self.state["tests"].get(case.key)), rerun_log))
@@ -229,6 +208,51 @@ class AfterLanding:
         pairs = [self.pair(profile, tip, directory) for profile in self.tier_set]
         previous = self.state["cursor"]
         landed = suspects(self.repo, previous, tip, sh=self.sh)
+        counts, tests, states = self._record_tests(pairs, tip)
+        faulted = any(pair["status"] == "faulted" for pair in pairs)
+        outcome = verdict(states, faulted)
+        freed = slots.remove(slots.sweep_plan(self.repo / "target", started_ns))
+        record = log.append(
+            "run", path=self.log_path, tip=tip, previous=previous or "",
+            branches=[item.branch for item in landed if item.branch], commits=len(landed),
+            verdict=outcome, **counts,
+            pairs=[f'{pair["profile"]}:{pair["status"]}:{pair["selected"]}:{pair["failed"]}:'
+                   f'{pair["seconds"]:.1f}' for pair in pairs],
+            faults=[f'{pair["profile"]}: {pair["reason"]}' for pair in pairs
+                    if pair["status"] == "faulted"], log=str(directory), freed=freed)
+        saved = {"cursor": previous if faulted else tip,
+                 "last": {"tip": tip, "verdict": outcome}, "tests": tests}
+        atomic.write(self.state_path, json.dumps(saved, sort_keys=True) + "\n")
+        self.state = saved
+        return record
+
+    def _invoke(self, profile, name, extra, directory, config_text, target, result):
+        report = directory / f"{name}.xml"
+        config = directory / f"{name}.toml"
+        # A replay must not accept a report from the interrupted run.
+        report.unlink(missing_ok=True)
+        atomic.write(config, nextest.overlay(config_text, profile, report))
+        started = time.monotonic()
+        try:
+            code = tiers.run_pair(self.repo, target, ["--config-file", str(config), *extra],
+                                  directory / f"{name}.log", sh=self.sh)
+        finally:
+            result["seconds"] += time.monotonic() - started
+        return code, report
+
+    def _rerun(self, report, profile, code, case):
+        if code not in (0, tiers.TEST_FAILED):
+            raise ValueError(f"exit {code}")
+        selected = nextest.junit(report, profile)
+        if (len(selected) != 1 or selected[0].key != case.key
+                or selected[0].result == "skipped"):
+            raise ValueError("JUnit must select exactly the failed test, not skipped")
+        rerun = selected[0].result
+        if (code == tiers.TEST_FAILED) != (rerun == "fail"):
+            raise ValueError(f"exit {code} inconsistent with JUnit results")
+        return rerun
+
+    def _record_tests(self, pairs, tip):
         counts = dict.fromkeys((*CONFIRMED, "flake", "recovered"), 0)
         tests = dict(self.state["tests"])
         states = []
@@ -250,22 +274,7 @@ class AfterLanding:
                 if current != "unobserved":
                     tests[case.key] = {"result": "red" if current in CONFIRMED else "pass",
                                        "commit": tip}
-        faulted = any(pair["status"] == "faulted" for pair in pairs)
-        outcome = verdict(states, faulted)
-        freed = slots.remove(slots.sweep_plan(self.repo / "target", started_ns))
-        record = log.append(
-            "run", path=self.log_path, tip=tip, previous=previous or "",
-            branches=[item.branch for item in landed if item.branch], commits=len(landed),
-            verdict=outcome, **counts,
-            pairs=[f'{pair["profile"]}:{pair["status"]}:{pair["selected"]}:{pair["failed"]}:'
-                   f'{pair["seconds"]:.1f}' for pair in pairs],
-            faults=[f'{pair["profile"]}: {pair["reason"]}' for pair in pairs
-                    if pair["status"] == "faulted"], log=str(directory), freed=freed)
-        saved = {"cursor": previous if faulted else tip,
-                 "last": {"tip": tip, "verdict": outcome}, "tests": tests}
-        atomic.write(self.state_path, json.dumps(saved, sort_keys=True) + "\n")
-        self.state = saved
-        return record
+        return counts, tests, states
 
     def cycle(self) -> bool:
         """In the slot: `git fetch -q origin main`, the tip `git rev-parse origin/main`. Nothing

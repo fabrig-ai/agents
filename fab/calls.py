@@ -311,15 +311,7 @@ def start(role: str, subject: str, repo: Path, brief: str, *, sh: Runner = run,
                     env=environment)
         atomic.write(directory / "result.json", result.out)
         atomic.write(directory / "stderr.log", result.err)
-        try:
-            data = json.loads(result.out)
-        except json.JSONDecodeError:
-            data = {}
-        usage = data.get("usage", {}) if isinstance(data, dict) else {}
-        if not isinstance(usage, dict):
-            usage = {}
-        tokens = "/".join(str(usage.get(key, 0)) for key in
-                          ("input_tokens", "cache_read_input_tokens", "output_tokens"))
+        tokens = _usage(result.out)
         try:
             report_text = report_path.read_text(encoding="utf-8")
         except (OSError, UnicodeError):
@@ -387,3 +379,17 @@ def _brief(sections: list[tuple[str, str]]) -> str:
         name, body = max(sections, key=lambda item: len(item[1]))
         raise ValueError(f"brief exceeds BRIEF_LIMIT ({BRIEF_LIMIT} characters); largest section: {name} ({len(body)})")
     return text
+
+
+def _usage(output):
+    """Format call token counts, treating malformed usage as empty."""
+    try:
+        data = json.loads(output)
+    except json.JSONDecodeError:
+        data = {}
+    usage = data.get("usage", {}) if isinstance(data, dict) else {}
+    if not isinstance(usage, dict):
+        usage = {}
+    tokens = "/".join(str(usage.get(key, 0)) for key in
+                      ("input_tokens", "cache_read_input_tokens", "output_tokens"))
+    return tokens
