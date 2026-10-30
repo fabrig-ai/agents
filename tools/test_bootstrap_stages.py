@@ -35,7 +35,9 @@ class BootstrapStagesTest(unittest.TestCase):
         self.f = fixture.FleetFixture(methodName="runTest")
         self.f.setUp()
         self.addCleanup(self.f.doCleanups)
-        self.code = (self.f.source / "tools/fleet-sync").read_text()
+        # Verify the historical rollout, independently of later runner changes.
+        self.rollout = DEPLOYED.removesuffix('^') if DEPLOYED != 'HEAD' else 'HEAD'
+        self.code = self.script(self.rollout)
         self.hosts_toml = (self.f.source / "fleet/hosts.toml").read_text()
         self.hosts = tuple(tomllib.loads(self.hosts_toml)["hosts"])
 
@@ -59,6 +61,18 @@ class BootstrapStagesTest(unittest.TestCase):
             if path.is_file() and name not in touched:
                 (stage / name).parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(path, stage / name)
+        # Units added after stage B must have their current role declarations
+        # on both sides, without backporting stage B's new kache ownership.
+        roles = 'fleet/units/roles.toml'
+        before_roles = tomllib.loads(subprocess.check_output(
+            ['git', '-C', str(fixture.ROOT), 'show', base + ':' + roles], text=True))['units']
+        rollout_roles = tomllib.loads(subprocess.check_output(
+            ['git', '-C', str(fixture.ROOT), 'show', marker + ':' + roles], text=True))['units']
+        current_roles = tomllib.loads((self.f.source / roles).read_text())['units']
+        added = rollout_roles.keys() - before_roles.keys()
+        fixture.put(stage / roles, '[units]\n' + ''.join(
+            json.dumps(unit) + ' = ' + json.dumps(assigned) + '\n'
+            for unit, assigned in current_roles.items() if unit not in added))
         retired = self.f.directory / "retired-fleet"
         (self.f.source / "fleet").rename(retired)
         (stage / "fleet").rename(self.f.source / "fleet")
@@ -130,7 +144,8 @@ class BootstrapStagesTest(unittest.TestCase):
         # alone, so the deployed runner is also the runner that applies them.
         self.assertEqual(self.f.process("git", "-C", fixture.ROOT, "show",
                                         DEPLOYED + ":tools/fleet-sync").stdout,
-                         (fixture.ROOT / "tools/fleet-sync").read_text())
+                         self.f.process('git', '-C', fixture.ROOT, 'show',
+                                        self.rollout + ':tools/fleet-sync').stdout)
 
     @unittest.skipUnless(HAS_BOOTSTRAP, "stage B declarations are not in the code-only stage")
     def test_stage_a_timer_promotes_real_stage_b_on_declared_hosts(self):

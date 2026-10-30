@@ -154,6 +154,18 @@ print('descendant_pid',child.pid,flush=True)
         with self.assertRaises(ProcessLookupError):
             os.kill(int(line.split()[1]), 0)
 
+    def test_priority_and_tier_wall_backstop(self):
+        source = """import os,subprocess
+assert os.getpriority(os.PRIO_PROCESS, 0) == 19
+assert 'idle' in subprocess.check_output(['ionice', '-p', str(os.getpid())], text=True)
+"""
+        result = GateTests.run_gate(self, {'test_priority.py': source})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        result = GateTests.run_gate(self, {'test_hang.py': 'import time; time.sleep(30)',
+                                         'gate.toml': '[budget]\nmerge_wall_s = 0.15\n'})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('1 starved/unobserved', result.stderr)
+
     def test_selection_mapping_smoke_unknown_and_changed_git_diff(self):
         import importlib.util
         spec = importlib.util.spec_from_file_location('gate_selection_fixture', GATE.with_name('gate.py'))

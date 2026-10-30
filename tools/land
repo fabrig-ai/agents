@@ -9,6 +9,7 @@ import argparse
 import importlib.util
 import json
 import os
+import re
 from pathlib import Path
 import shlex
 import signal
@@ -124,15 +125,16 @@ class Builder:
         finally:
             signal.pthread_sigmask(signal.SIG_SETMASK, blocked)
 
-    def check(self, root, base, limit, gate):
+    def check(self, root, base, limit, gate, require_green=True):
         remote = None
         with tempfile.TemporaryDirectory(prefix='agents-land-') as directory:
             bundle = Path(directory) / 'candidate.bundle'
             subprocess.run(['git', 'bundle', 'create', str(bundle), 'HEAD'], cwd=root, check=True)
             try:
-                remote = ssh(self.target, 'mktemp', '-d', '/tmp/agents-gate.XXXXXXXX', timeout=10)
-                if not remote.startswith('/tmp/agents-gate.') or any(c not in '/-._abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789' for c in remote):
+                candidate = ssh(self.target, 'mktemp', '-d', '/tmp/agents-gate.XXXXXXXX', timeout=10)
+                if not re.fullmatch(r'/tmp/agents-gate\.[A-Za-z0-9]+', candidate):
                     raise ValueError('invalid builder temporary path')
+                remote = candidate
                 with bundle.open('rb') as stream:
                     ssh(self.target, 'sh', '-c', 'cat > ' + shlex.quote(remote + '/candidate.bundle'),
                         stdin=stream, timeout=15)
@@ -180,7 +182,7 @@ with (root/'run.lock').open('a') as lock:
                 finally:
                     print(ssh(self.target, 'cat', remote + '/table', timeout=10), flush=True)
                 result = json.loads(ssh(self.target, 'cat', remote + '/result.json', timeout=10))
-                if code or result['code'] or result['starved']:
+                if require_green and (code or result['code'] or result['starved']):
                     raise ValueError(f'builder gate incomplete or red (exit {code}, starved {result["starved"]})')
                 return result
             finally:
@@ -248,6 +250,7 @@ def main():
     own_paths = gate.changed_paths(root, base)
     own_selection = set(gate.select(root, config, own_paths, include_smoke=False))
     builder = None
+    completed_at = None
     try:
         if args.local:
             print('LAND: LOCAL FALLBACK — no builder claim; running on this host', flush=True)
@@ -288,10 +291,14 @@ def main():
             print('land: DRY RUN green; stopping before push', flush=True)
         else:
             subprocess.run(['git', 'push', 'origin', 'HEAD:main'], check=True, timeout=15)
-        print(f'land: merge wall {time.monotonic() - started:.3f}s / {budget["merge_wall_s"]}s', flush=True)
+        completed_at = time.monotonic()
     finally:
-        if builder:
-            builder.release()
+        try:
+            if builder:
+                builder.release()
+        finally:
+            print(f'land: merge wall {(completed_at or time.monotonic()) - started:.3f}s / '
+                  f'{budget["merge_wall_s"]}s', flush=True)
 
 
 if __name__ == '__main__':

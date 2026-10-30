@@ -42,6 +42,7 @@ if target=='central':
  else: sys.exit(2)
 else:
  if args[0]=='mktemp':
+  if os.environ.get('BAD_TEMP'): print('/tmp/agents-gate.x/../outside'); sys.exit(0)
   path=subprocess.check_output(args,text=True).strip()
   (home/'remote').write_text(path)
   print(path)
@@ -218,6 +219,13 @@ class LandTests(unittest.TestCase):
         self.land(expected=1)
         self.assertEqual(self.tip(),self.original)
         self.assertFalse((self.home/'ssh.log').exists())
+
+    def test_invalid_remote_temporary_path_is_never_removed(self):
+        self.env['BAD_TEMP']='1'
+        self.land('--host','hetzner7',expected=1)
+        self.assert_released()
+        self.assertFalse(any(args[0]=='rm' for args in self.calls()))
+        self.assertEqual(self.tip(),self.original)
 
     def test_local_rebases_before_one_check(self):
         put(self.home/'upstream/b/upstream','new')

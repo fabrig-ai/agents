@@ -27,13 +27,14 @@ files (all files if empty); other unknown paths select every gate file.
 
 Up to eight workers share a per-host lock. They use nice 19 and idle IO when
 ionice is available. `wait4` reports each child's user+system CPU, including its
-waited descendants, and wall time. The table names file, owner, CPU, wall,
+waited and adopted descendants, and wall time. The table names file, owner, CPU, wall,
 budget and status. `--json PATH` saves the same observations atomically.
 Defaults: file CPU 8 s, file wall 15 s, tier CPU 100 s, merge wall 60 s.
 With enforcement enabled, CPU overruns fail by name and workers also receive
 an OS CPU ceiling. Wall expiry kills the file's process group and warns
 starved/unobserved; it never turns an unexecuted assertion into a pass. A
-landing refuses an incomplete gate. Repair tier membership or inefficiency
+landing refuses an incomplete gate. A tier also stops at `merge_wall_s`;
+files not yet started are listed as unobserved. Repair tier membership or inefficiency
 before asking the user about budgets (fabrig testing-strategy, section 8.1).
 
 ## 3. Land and races
@@ -52,7 +53,7 @@ A builder receives a full HEAD bundle in a private temporary directory and
 runs `nice -n 19 ionice -c3 tools/check.sh --tier gate --changed BASE` with a
 65 s hard wall backstop, including lock waiting. Results return before cleanup.
 On interruption cleanup cancels launch and kills this run's process group
-before releasing. SSH errors fail closed. `--local` loudly announces its
+and drains escaped fixture sessions before releasing. SSH errors fail closed. `--local` loudly announces its
 unclaimed in-place fallback; selection, budgets and lock still apply.
 
 After green, fetch again. A moved main is rebased; disjoint test selections
