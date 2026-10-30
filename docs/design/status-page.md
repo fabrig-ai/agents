@@ -6,8 +6,9 @@ in `docs/design/status-page.status.md`; it is not implemented by this renderer.
 
 ## 1. In one page
 
-- **The index at status.fabrig.ai projects pipeline facts.** It combines records
-  events, draft metadata and live capacity/subscription probes. It publishes
+- **The index at status.fabrig.ai projects pipeline facts.** It combines recent
+  host-spool events, durable records metadata and live capacity/subscription
+  probes. It publishes
   counts, fixed labels and public descriptions, not private work identifiers.
 - **Every source can fail separately.** Missing measurements stay unknown;
   an empty event source says no events yet. Failure does not erase good sources.
@@ -21,27 +22,35 @@ in `docs/design/status-page.status.md`; it is not implemented by this renderer.
 
 | Section | Sources and meaning |
 |---|---|
-| Summary tiles | Draft count; six-hour mean landings/hour; running runs; merged subscription count; open user questions |
+| Summary tiles | Draft count; two-hour mean landings/hour; running runs; merged subscription count; open user questions |
 | Drafts | Records `drafts/*/draft.toml`, ordered by `director/priorities.toml` then metadata priority/name; descriptions from the first heading in fabrig's source document; last landing only with an explicit draft join |
-| Landings and the queue | Queue batch/attempt events: six one-hour landing buckets, latest 20 batches, fixed outcomes and durations, rejections by known step; ready-to-landing remains unknown |
-| Work in flight | Run/session lifecycle events for running runs and live leads/coordinators; live `claim list` for held/total slots; collected claim-event count |
+| Landings and the queue | Last two hours of queue batch/attempt events: two one-hour landing buckets, latest 20 batches, fixed outcomes and durations, rejections by known step; ready-to-landing remains unknown |
+| Work in flight | Last two hours of run/session lifecycle events for observed running runs and live leads/coordinators; live `claim list` for held/total slots; collected claim-event count |
 | Waiting on the user | Unanswered records questions: count and oldest asking time |
-| Costs | Completed run, heavy and queue events in last-hour and last-24-hour windows, globally and per explicit draft |
+| Costs | Completed run, heavy and queue events in last-hour and last-two-hour windows, globally and per explicit draft |
 | Machines and capacity | Concurrent local/SSH probes for machine load, CPUs, available memory, disk and public IPs |
 | Subscriptions | CLI usage/limit/reset probes merged by opaque account identity across hosts; optional samples for rates and projections |
 | Links | Existing sibling release page, without reading its contents |
 
 **Records paths in this section belong to the records repository.** The page
-pulls before reading unless `--no-pull` is set. Runtime roots default to
+pulls durable records through the sibling `tools/records/record` before reading
+unless `--no-pull` is set. Runtime roots default to
 `~/src/fabrig/records` and fabrig's `~/src/fabrig/main`. Machine targets come
 from runtime `~/src/rust/tmp/post/machines`; remote machines receive the probe
-code over stdin. There is no import or runtime dependency on this tree's `old/`.
+code and the spool reader over stdin. Raw queue, runs, heavy, claims and sessions
+come from `~/src/fabrig/events/<source>/<UTC-day>.jsonl` on each host, bounded
+to the last two hours. An absent source is empty; malformed inputs fail that
+source, and unavailable probes name the configured host while other sections
+still render. Raw events are not read from the records checkout. There is no
+import or runtime dependency on this tree's `old/`.
 
 **Count landings from attempts, not batches.** A green attempt in a non-dry
 batch contributes one branch landing. Missing batch evidence cannot establish
 that it was not dry. Deduplicate events by host and id; do not count the batch
 again. Session/run counts are last collected lifecycle facts, not independent
-process checks, so missed stops remain a collector limitation.
+process checks. The event sections say **last two hours**: a start before that
+window cannot establish current membership by itself, and missed stops remain
+a collector limitation.
 
 ## 3. Costs and uncertainty
 
@@ -86,5 +95,5 @@ is s/deploy. This design specifies the renderer's behavior, not live installatio
 - Build the records-backed release renderer and its row/page commands, with
   keeper validation and public-field validation, as detailed in the status file.
 - Import the director's current release page and compare before switching.
-- Consume the records host spool and summaries when that migration lands.
+- Consume durable task summaries when the summarizer is implemented.
 - Collect exact ready timestamps and explicit draft joins to fill unknowns.

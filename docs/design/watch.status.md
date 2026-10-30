@@ -1,15 +1,21 @@
 # Watch status
 
-2026-10-30. Owner: s/multi-coord. Baseline: origin/main `1335337`.
+2026-10-30. Owner: s/multi-coord. Baseline: origin/main `580a456` plus `mc/events-1-r`.
 Contract: `docs/design/watch.md`, sections 2–4.
 
 ## Present
 
 - All ten rules, enabled posts, episodes, clear confirmation, silent catch-up,
   SSH probes, fired-marker events and Codex-owner liveness are implemented.
+- Raw rule inputs come from the local and SSH-probed host spools, bounded to
+  two hours. Failed inputs name their source and host. Alerts and heartbeats
+  append to hel8's watch spool with atomic pruning; git publication/deferral
+  paths are gone. Compact condition facts retain long-lived rule behavior across
+  spool expiry, and saved episode dependencies migrate to spool input names.
+- Replay reads a single-host spool directory.
 - The hel8 two-minute service/timer is declared in `fleet/units/`; heartbeat
   interval is 900 seconds in `tools/records/watch.toml`. No deployment was
-  performed or live service state checked by this docs task.
+  performed or live service state checked by this rebase/docs task.
 
 ## Plan differences and remaining gaps
 
@@ -24,9 +30,6 @@ Contract: `docs/design/watch.md`, sections 2–4.
 - **Escalation follows inventory.** The early plan hard-coded ops for idle
   claims, director for lease stalls, and ops for delivery failures. Code uses
   the actual owner's supervisor. The design follows code.
-- **Events remain in records git.** SSH probes provide live run/heavy state;
-  they do not yet fetch host-spool events. Records' migration to a two-hour
-  spool is `docs/design/records.status.md`.
 - **Part expectations need lifecycle records.** Gone uses committed briefs
   and closings, while the launcher does not yet write them. It deliberately
   does not infer unfinished work from scratch files or registry presence.
@@ -35,7 +38,7 @@ Contract: `docs/design/watch.md`, sections 2–4.
   that implements that alarm.
 - **No login-held rule exists.** It remains Later, with no invented threshold.
 - **Replay has limits.** `tools/records/replay_watch.py` reconstructs retained
-  lifecycle evidence with synthetic quiet-output assumptions; it cannot prove
+  spooled lifecycle evidence with synthetic quiet-output assumptions; it cannot prove
   actual historical hangs or true-positive rates. Fixture tests are evidence
   of behavior, not a fleet acceptance run.
 
