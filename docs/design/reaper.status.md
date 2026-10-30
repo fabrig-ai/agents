@@ -1,6 +1,6 @@
 # Reaper status
 
-2026-10-30. Owner: s/deploy. Baseline: `origin/main` at `37c0fd9`, plus
+2026-10-30. Owner: s/deploy. Baseline: `origin/main` at `a0e79d1`, plus
 `deploy/reap-1`. Contract: `docs/design/reaper.md`, sections 2–6.
 
 ## 1. In one page
@@ -9,9 +9,10 @@
 `Reaper.execute`/the CLI refuse `--live` while that setting remains. No machine
 action or legacy-cleanup retirement is part of this branch.
 
-**Effective producer wiring is incomplete.** Session hooks are s/multi-coord's
-and Codex finality is ops'. Keep the fleet in dry-run through their adoption and
-ops' first-day review; see sections 2–3 for current evidence and surprises.
+**The session-hook argument mismatch is resolved.** The reaper accepts the
+landed hook unchanged, including its full session ID, short jobs path and
+ownerless end. Producer deployment and Codex finality remain separate rollout
+work; keep the fleet in dry-run through adoption and ops' first-day review.
 
 ## 2. Present and evidence
 
@@ -40,20 +41,23 @@ ops' first-day review; see sections 2–3 for current evidence and surprises.
 
 ## 3. Gaps and departures
 
-- **Session hooks have landed since the task was written.** `tools/session/start`
-  has retire; `tools/session/session_lib.py` publishes hooks when
-  `session-reap-hook` is on PATH. That code is evidence of hook support, not
-  evidence that existing runtime settings have been refreshed.
-- **Those hooks do not yet match this record interface.**
-  `tools/session/reap-hook` sends a full session ID with its eight-character job
-  path on start; `Reaper.record` requires the path to match the ID. On end the
-  hook omits owner, while the reap parser requires owner. Recording is best
-  effort and therefore cannot prove adoption by exit status. The hook owner
-  must reconcile both arguments and refresh existing settings. This branch
-  preserves the reaper interface and does not change another owner's hooks.
-- **Codex finality is not supplied by this branch.** There is no codex-run
-  producer here. Ops must publish the specified atomic `final.json` after real
-  finality; missing metadata keeps runs. Never infer or backfill it.
+**Producer states are explicit.** Source compatibility does not prove runtime
+adoption; this branch refreshes no existing project settings.
+
+| Producer | Owner | State and evidence |
+|---|---|---|
+| SessionStart/SessionEnd | s/multi-coord | Landed `tools/session/reap-hook` is compatible. `tools/reap/test_reap.py` drives that real hook against reap through start, resume, end, duplicate end and the one-hour threshold. Existing settings still need producer-owner rollout verification. |
+| Retired role paths | s/multi-coord | `tools/session/session_retire.py` supplies start owner and an ownerless end; both are accepted. `tools/test_session_start.py` covers retire, and reaper tests cover ownerless ends for every kind. Runtime use is not established by these source tests. |
+| Ops scratch | ops | Record interface is available and tested; automatic producer adoption is not demonstrated here. |
+| QA scratch | s/qa | Record interface is available; producer adoption remains with s/qa. Fixed QA never-paths still override records. |
+| Codex run finality | ops | No codex-run producer is supplied by this repository. The consumer accepts atomic final JSON with fractional UTC time, but ops owns publication/adoption. Missing metadata keeps runs; never infer or backfill it. |
+
+Ownerless ends inherit the start owner. Orphan ends cannot create eligibility;
+explicit owner mismatches leave the ledger unchanged. Full Claude session IDs
+protect the matching short jobs directory through both records and live inventory.
+The fixed never-paths now also include the complete mailbox-home registry at
+runtime `~/src/fabrig/homes`, with a live-mode temporary-HOME regression.
+
 - **Borrower coverage is bounded.** Repository discovery covers six levels per
   named root and skips generated trees. A new deeper clone layout requires
   review. Cached borrower evidence cannot detect a borrower added during a run;
@@ -65,13 +69,14 @@ ops' first-day review; see sections 2–3 for current evidence and surprises.
 state. It covers the real timeout's deep build-tree shape, excluded generated
 subtrees, working/bare/linked Git metadata, scan budgets and caching, remote
 claims and failure paths, all fixed never-paths, UTC timestamp variants, resumed
-records and preservation/removal guards. Run the focused and complete gates
+records, real session-hook integration, owner inheritance/orphan ends and
+preservation/removal guards. Run the focused and complete gates
 through plain `tools/check.sh`; never set its lock environment variables.
 Host evidence and test counts for this revision are in the external deployment
-report `/home/free/src/fabrig/deploy/notes/reap-1c-report.md`.
+report `/home/free/src/fabrig/deploy/notes/reap-1d-report.md`.
 
 ## 5. Later
 
-- Reconcile and deploy session hooks; ops supplies real Codex finality.
+- Verify deployed session settings and producer adoption; ops supplies real Codex finality.
 - Review one dry-run day before a separate reviewed live-mode commit.
 - After live, retire the legacy tidy/pruning work with ops and update this file.

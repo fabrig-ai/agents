@@ -71,7 +71,7 @@ unbounded search. New clone layouts require review of the depth limit.
 **Never paths are code rules.** Protect credentials and SSH/Codex private state,
 primary/current/release clones, claims, leases, queue, heavy/post/login state,
 QA scratch, reaper/fleet state, durable bookkeeping and archives. In particular
-protect all of `~/src/fabrig/{archive,events,records}`, `~/src/rust/records` and
+protect all of `~/src/fabrig/{archive,events,records,homes}`, `~/src/rust/records` and
 `~/src/rust/tmp/owners`. Protect their ancestors and descendants too. The command
 reference lists the other exact paths. TOML cannot disable any keep rule.
 
@@ -93,13 +93,19 @@ private, locked, fsynced JSONL under runtime `~/.local/state/reap/records.jsonl`
 The identity is `(kind, id)`; owner names may contain `/`. Repeated starts merge
 paths without resetting a live record. Repeated ends preserve the earliest end
 in that lifetime. A start after end resumes the record, keeps it live until the
-next end, and starts a new retention epoch. Unknown/malformed rows are ignored.
+next end, and starts a new retention epoch. Start requires an owner; end may
+omit it and inherits the most recent start's owner. An explicit end owner must
+match that start. A mismatch appends nothing and returns the normal best-effort
+record diagnostic. An end without any matching start is retained in the ledger
+but never contributes paths or eligibility, including to a later start.
+Unknown/malformed rows are ignored.
 Producers receive exit 0 with a diagnostic on recording errors; `--strict` is
 available for checks. Detailed syntax remains in `tools/reap/reap.md`.
 
 **Session hooks belong to s/multi-coord.** SessionStart records kind
-`claude-session` for the actual `.claude/jobs/<id>` directory, with that same job
-ID and an owner. SessionEnd supplies the same identity and owner, then requests
+`claude-session` with the full session ID, its direct-child jobs path
+`.claude/jobs/<full-id[:8]>`, and an owner. Other paths are rejected. SessionEnd
+supplies that same full ID without an owner, then requests
 `systemctl --user start --no-block reap.service`. Hooks must remain best effort.
 An explicit retired-role record hands over only stopped, private paths; it does
 not authorize removal of a live or claimed path.

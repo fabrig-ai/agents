@@ -92,7 +92,7 @@ class ReapTests(unittest.TestCase):
         self.record('start', path, kind, identity)
         reaper = self.reaper()
         reaper.now = NOW-days*DAY
-        reaper.record(argparse.Namespace(event='end', kind=kind, owner='coordinator/dm/stamp', id=identity, path=[]))
+        reaper.record(argparse.Namespace(event='end', kind=kind, owner=None, id=identity, path=[]))
 
     def selected(self, result):
         return {Path(row['path']) for row in result['candidates'] if row['action'] in ('would delete', 'deleted')}
@@ -373,7 +373,7 @@ class ReapTests(unittest.TestCase):
         for kind, retention in self.config['kinds'].items():
             with self.subTest(kind=kind):
                 identity = kind
-                path = self.old(f'.claude/jobs/{identity}' if kind == 'claude-session' else f'scratch/{kind}', directory=True)
+                path = self.old(f'.claude/jobs/{identity[:8]}' if kind == 'claude-session' else f'scratch/{kind}', directory=True)
                 paths.add(path)
                 args = argparse.Namespace(event='start', kind=kind, owner='lead/q/temper', id=identity, path=[str(path)])
                 reaper = self.reaper()
@@ -398,7 +398,7 @@ class ReapTests(unittest.TestCase):
         for kind, retention in self.config['kinds'].items():
             with self.subTest(kind=kind):
                 identity = kind
-                path = self.old(f'.claude/jobs/{identity}' if kind == 'claude-session' else f'scratch/{kind}', directory=True)
+                path = self.old(f'.claude/jobs/{identity[:8]}' if kind == 'claude-session' else f'scratch/{kind}', directory=True)
                 args = argparse.Namespace(event='start', kind=kind, owner='coordinator/dm/stamp', id=identity, path=[str(path)])
                 reaper = self.reaper()
                 reaper.now = NOW-3*retention
@@ -426,7 +426,7 @@ class ReapTests(unittest.TestCase):
         for kind, retention in self.config['kinds'].items():
             with self.subTest(kind=kind):
                 identity = kind
-                path = self.old(f'.claude/jobs/{identity}' if kind == 'claude-session'
+                path = self.old(f'.claude/jobs/{identity[:8]}' if kind == 'claude-session'
                                 else f'src/rust/tmp/logs/{kind}', directory=True)
                 args = argparse.Namespace(event='start', kind=kind, owner='lead/q/temper', id=identity, path=[str(path)])
                 writer = self.reaper()
@@ -459,6 +459,115 @@ class ReapTests(unittest.TestCase):
     def test_claude_record_cannot_name_other_paths(self):
         with self.assertRaisesRegex(ValueError, 'jobs directory'):
             self.record('start', self.home / 'scratch/one', 'claude-session')
+
+    def test_real_session_hook_lifecycle_against_reaper(self):
+        identity = '63cf764d-1df5-478f-92de-5aeb424fda12'
+        path = self.old(f'.claude/jobs/{identity[:8]}', 30, True)
+        (self.bin / 'reap').symlink_to(ROOT / 'tools/reap/reap')
+        target = self.home / '.local/state/reap/records.jsonl'
+        def hook(event):
+            result = subprocess.run([sys.executable, '-I', '-B', str(ROOT / 'tools/session/reap-hook'),
+                                     'lead/q/temper'], input=json.dumps(dict(
+                                         hook_event_name=event, session_id=identity)),
+                                    capture_output=True, text=True, timeout=5,
+                                    env=dict(os.environ, SESSION_CONTEXT_STATE=str(self.home / 'hook-cache')))
+            self.assertEqual((result.returncode, result.stdout, result.stderr), (0, '', ''))
+            return [json.loads(line) for line in target.read_text().splitlines()]
+        lines = hook('SessionStart')
+        self.assertEqual(len(lines), 1)
+        self.assertEqual((lines[0]['id'], lines[0]['paths'], lines[0]['owner']),
+                         (identity, [str(path)], 'lead/q/temper'))
+        self.assertEqual(hook('SessionStart'), lines)  # Resume while live is idempotent.
+        probe = self.reaper()
+        self.reason(probe.execute({'claude-jobs'}, 'dry-run'), 'record active')
+        lines = hook('SessionEnd')
+        self.assertEqual(len(lines), 2)
+        self.assertEqual(lines[-1]['owner'], 'lead/q/temper')
+        ended = lines[-1]['time']
+        self.assertEqual(hook('SessionEnd'), lines)
+        probe = self.reaper()
+        probe.now = ended + 3600 - .01
+        self.assertEqual(probe.execute({'recorded'}, 'dry-run')['candidates'], [])
+        probe.now = ended + 3600
+        self.assertEqual(self.selected(probe.execute({'recorded'}, 'dry-run')), {path})
+        self.assertEqual(len(hook('SessionStart')), 3)  # Resume after end is live again.
+        self.assertIsNone(self.reaper().records[('claude-session', identity)]['ended'])
+        self.assertEqual(len(hook('SessionEnd')), 4)
+        calls = [json.loads(line)['args'] for line in (self.home / 'systemctl.calls').read_text().splitlines()]
+        self.assertEqual(calls, [['--user', 'start', '--no-block', 'reap.service']] * 3)
+
+    def test_full_session_id_only_accepts_its_short_direct_jobs_child(self):
+        identity = '63cf764d-1df5-478f-92de-5aeb424fda12'
+        for relative in (f'.claude/jobs/{identity}', '.claude/jobs/different',
+                         f'.claude/jobs/{identity[:8]}/nested', '.claude/jobs'):
+            with self.subTest(relative=relative), self.assertRaisesRegex(ValueError, 'jobs directory'):
+                self.record('start', self.home / relative, 'claude-session', identity)
+        path = self.old(f'.claude/jobs/{identity[:8]}', 30, True)
+        self.ended(path, 'claude-session', identity)
+        self.fake('claude', json.dumps([dict(sessionId=identity, status='running')]))
+        self.reason(self.run_class('recorded'), 'live session')
+
+    def test_ownerless_end_inherits_start_owner_for_every_kind(self):
+        for kind in self.config['kinds']:
+            with self.subTest(kind=kind):
+                path = self.home / (f'.claude/jobs/{kind[:8]}' if kind == 'claude-session' else f'scratch/{kind}')
+                self.record('start', path, kind, kind, owner='start/owner')
+                result = subprocess.run([sys.executable, '-I', '-B', str(ROOT / 'tools/reap/reap'),
+                                         'record', 'end', '--kind', kind, '--id', kind],
+                                        capture_output=True, text=True, timeout=5)
+                self.assertEqual((result.returncode, result.stdout, result.stderr), (0, '', ''))
+                record = self.reaper().records[(kind, kind)]
+                self.assertEqual(record['owner'], 'start/owner')
+                self.assertIsNotNone(record['ended'])
+                rows = [json.loads(line) for line in (self.home / '.local/state/reap/records.jsonl').read_text().splitlines()]
+                self.assertEqual(rows[-1]['owner'], 'start/owner')
+
+    def test_orphan_end_is_recorded_but_never_supplies_eligibility(self):
+        for kind in self.config['kinds']:
+            with self.subTest(kind=kind):
+                path = self.old(f'.claude/jobs/{kind[:8]}' if kind == 'claude-session' else f'scratch/{kind}', directory=True)
+                self.record('end', path, kind, kind, owner=None)
+                ledger = self.home / '.local/state/reap/records.jsonl'
+                row = json.loads(ledger.read_text().splitlines()[-1])
+                self.assertEqual((row['event'], row['id'], row['owner']), ('end', kind, None))
+                self.assertNotIn((kind, kind), self.reaper().records)
+        self.assertEqual(self.run_class('recorded')['candidates'], [])
+        # An orphan's paths cannot hitchhike on a later, unrelated start.
+        self.record('start', self.home / 'scratch/new', 'ops-scratch', 'ops-scratch')
+        self.assertEqual(self.reaper().records[('ops-scratch', 'ops-scratch')]['paths'],
+                         {str(self.home / 'scratch/new')})
+
+    def test_end_owner_mismatch_is_silent_success_with_one_diagnostic(self):
+        path = self.home / 'scratch/run'
+        self.record('start', path, 'codex-run', owner='ops/one')
+        ledger = self.home / '.local/state/reap/records.jsonl'
+        before = ledger.read_bytes()
+        args = [sys.executable, '-I', '-B', str(ROOT / 'tools/reap/reap'),
+                'record', 'end', '--kind', 'codex-run', '--id', 'one', '--owner']
+        result = subprocess.run([*args, 'ops/two'], capture_output=True, text=True, timeout=5)
+        self.assertEqual((result.returncode, result.stdout), (0, ''))
+        self.assertEqual(len(result.stderr.splitlines()), 1)
+        self.assertIn('owner', result.stderr)
+        self.assertEqual(ledger.read_bytes(), before)
+        self.assertIsNone(self.reaper().records[('codex-run', 'one')]['ended'])
+        result = subprocess.run([*args, 'ops/one'], capture_output=True, text=True, timeout=5)
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (0, '', ''))
+        self.assertIsNotNone(self.reaper().records[('codex-run', 'one')]['ended'])
+
+    def test_start_requires_owner(self):
+        result = subprocess.run([sys.executable, '-I', '-B', str(ROOT / 'tools/reap/reap'),
+                                 'record', 'start', '--kind', 'ops-scratch', '--id', 'missing-owner'],
+                                capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(len(result.stderr.splitlines()), 1)
+        self.assertFalse((self.home / '.local/state/reap/records.jsonl').exists())
+
+    def test_mailbox_homes_are_never_reaped(self):
+        path = self.old('src/fabrig/homes', directory=True)
+        self.assertTrue(self.reaper().never(path / 'mailbox'))
+        self.ended(path)
+        self.reason(self.run_class('recorded', True), 'never path')
+        self.assertTrue((path / 'payload').exists())
 
     def test_record_errors_never_fail_caller(self):
         result = subprocess.run([sys.executable, '-I', '-B', str(ROOT / 'tools/reap/reap'), 'record', 'start'], capture_output=True, text=True)
@@ -755,7 +864,7 @@ class ReapTests(unittest.TestCase):
         for path in ['src/rust/tmp/logins/a', 'src/rust/tmp/qa-focused/a', 'src/rust/tmp/qa/a',
                      'src/rust/tmp/heavy/a', 'src/rust/tmp/post/a', 'src/fabrig/claims/a',
                      'src/fabrig/events/a', 'src/fabrig/records/a', 'src/rust/records/a',
-                     'src/fabrig/archive/a', 'src/rust/tmp/owners/a',
+                     'src/fabrig/archive/a', 'src/rust/tmp/owners/a', 'src/fabrig/homes/a',
                      'src/fabrig/leases/a', 'src/fabrig/queue/a', 'src/fabrig/main/a', 'src/fabrig/agents/a',
                      'src/fabrig/current/a', 'src/fabrig/releases/a', '.local/state/fleet-sync/a',
                      '.local/state/fabrig/a', '.local/state/heavy/a', '.ssh/id', '.claude/.credentials.json',
