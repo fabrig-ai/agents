@@ -24,6 +24,24 @@ from fab.plan import Plan, Task
 from fab.sh import Failed, Runner, run, ssh
 
 MAX_RUNS = 4  # a task with this many runs and still not landed parks for judgement
+ANSWER_AFTER = 30  # minutes the oldest open question waits before an answer call
+ANSWER_AT = 4  # open questions that start an answer call at once
+
+
+def call_actions(plan: Plan, tasks: Mapping[str, Task], events: list[dict], design: list[str],
+                 now: str) -> list[Action]:
+    """The Claude calls to start or finish now (docs/design/fab.md, 10), after decide's actions.
+
+    A call is in flight from its call.started to its call.ended; at most one call of each role
+    is in flight. finish: every call.ended with outcome done and no later call.finished for
+    it, with branch from its call.started: land its branch (agents repo), and for an answer
+    call log question.answered for each task its report's `Answered:` line names. start:
+    an answer call (subject the plan's draft) when no answer call is in flight and the open
+    questions (fab.calls.open_questions) number ANSWER_AT or more, or the oldest is ANSWER_AFTER
+    minutes old at `now`; a skeleton call for design[0] (decide's design list) when no
+    skeleton call is in flight. Actions: Action("call", task=<subject>, run_kind=<role>) and
+    Action("finish", run=<call id>, run_kind=<role>, branch=<branch>)."""
+    raise NotImplementedError
 
 
 @dataclass(frozen=True)
@@ -128,7 +146,11 @@ def tick(plan_dir: Path, *, sh: Runner = run, hosts: Mapping[str, Host] | None =
     through fab.land.main with the branch, ready by pushing the branch's tip to `ready/<branch>`
     in its repository's clone under FAB_HOME/repos (logging branch.ready), start through
     fab.run.start, park by logging question.asked with the detail as text. Design actions are
-    printed, not acted on. A failed action is printed and logged as a note; the others still
+    printed; call_actions' follow them: call starts `fab call <role> [<part>] --plan PLAN_DIR`
+    in a user unit (`systemd-run --user --collect --unit fab-call-<role>-<n>`), which logs
+    the call's own events, and returns at once; finish lands the call's branch through
+    fab.land.main, logs any question.answered, then call.finished (call, role, outcome of the
+    landing). A failed action is printed and logged as a note; the others still
     run. Returns the actions taken. One tick at a time: a flock on FAB_HOME/tick.lock (a second
     tick exits at once)."""
     home = log.home()

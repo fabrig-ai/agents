@@ -182,10 +182,15 @@ def start(role: str, subject: str, repo: Path, brief: str, *, sh: Runner = run,
     a unit, not here). Create the worktree FAB_HOME/calls/<id>/wt on a new branch
     `calls/<id>` from origin/main of repo (a clone), write the brief to FAB_HOME/calls/<id>/brief.md,
     log call.started (call, role, subject, branch), run claude_argv in the worktree with
-    TIMEOUT, keep its JSON output as result.json, read the report (FAB_HOME/calls/<id>/report.md),
+    TIMEOUT, keep its JSON output as result.json and its stderr as stderr.log, read the report
+    (FAB_HOME/calls/<id>/report.md),
     log call.ended (call, role, subject, outcome as fab.run.outcome of the report, or failed
     when there is none; tokens from the JSON usage as "input/cache_read/output"; minutes), and
-    remove the worktree, keeping the branch. Returns {call, branch, outcome, report}."""
+    remove the worktree, keeping the branch. Returns {call, branch, outcome, report}.
+
+    The call is a fresh top-level session: claude runs with the environment minus every
+    variable starting with CLAUDECODE or CLAUDE_CODE_, so a call started from inside another
+    Claude session is not refused as nested."""
     if role not in ROLES:
         raise ValueError(f"unknown call role {role!r}")
     call_id = f"{role}-{uuid.uuid4().hex}"
