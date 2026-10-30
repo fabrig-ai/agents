@@ -19,6 +19,8 @@ OUTCOMES = {"Done:": "done", "Question:": "question", "Infra:": "infra", "Failed
 REMOTES = {"agents": "git@github.com:fabrig-ai/agents.git", "fabrig": "git@github.com:fabrig-ai/fabrig.git"}
 ROLE = Path(__file__).resolve().parent / "roles" / "implementer.md"
 NOTIFY = "fab@hel8"  # codex-run posts its end here; nothing waits on it
+SLOTTED = ("fabrig",)  # repositories whose runs build in a builder's warm slot
+LAUNCHER = "codex-run"  # "codex-run" (fabrig's) or "fab" (fab codex start); see fab/codex.py
 
 
 def remote_home(host: Host) -> str:
@@ -86,6 +88,13 @@ def start(task: Task, host: Host, *, kind: str = "implement", events: Iterable[d
     The brief is also kept on this machine at FAB_HOME/runs/<run>/brief.md. run.started carries
     run, task, kind, host, dir (the worktree), branch, base ("origin/main"), codex (the id),
     state (codex-run's state directory) and report (the builder's report path).
+
+    A task of a repository in SLOTTED builds in a slot instead of a worktree: claim the first
+    idle slot (`fab slot list`, then `fab slot claim N RUN TASK`; none idle is a ValueError
+    naming the host), then in `~/src/fabrig/slots/<n>` fetch origin and switch to the branch
+    (`git switch -C <branch> origin/main`; repair: `origin/<branch>`). dir is the slot, and
+    run.started also carries slot (the number). The launcher is `fab codex start` (same
+    arguments and output as codex-run task) once LAUNCHER says so.
     """
     events = list(events)
     branch = branch_for(task, kind, events)
@@ -155,7 +164,12 @@ def collect(run_id: str, events: Iterable[dict], hosts: dict[str, Host], *, sh: 
     """Collect an ended run once: copy its report to FAB_HOME/runs/<run>/report.md here, log
     run.ended (run, task, outcome, report, minutes since run.started) and, for a question,
     question.asked with the report's first 15 lines as text. Returns the outcome; None while the
-    run is still going or when it was already collected."""
+    run is still going or when it was already collected.
+
+    Then free what the run held on the builder: a slot run's `fab slot release N RUN` (its
+    output, the bytes freed, goes into run.ended as freed); a worktree run's
+    `git worktree remove --force` of its dir (the branch stays on origin). A failure to free
+    is noted in run.ended as free_error, never a refusal."""
     events = list(events)
     if any(event.get("ev") == "run.ended" and event.get("run") == run_id
            for event in [*events, *log.read(log_path)]):

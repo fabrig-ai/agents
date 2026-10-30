@@ -74,6 +74,13 @@ needs = ["slots"]
 design = "docs/design/fab.md, 7"
 
 [[part]]
+id = "codex"
+title = "fab codex: Codex runs as user units, replacing codex-run"
+mode = "migration"
+needs = ["package"]
+design = "docs/design/fab.md, 5"
+
+[[part]]
 id = "gate"
 title = "fabrig's selection and check steps, shared by the queue and precheck"
 mode = "migration"
@@ -158,7 +165,7 @@ walk = true
 [[slice]]
 id = 2
 story = "A fabrig branch lands through fab's queue; a build short of disk waits and resumes while idle slots are reclaimed"
-parts = ["slot-contract", "slot-probe", "slots", "heavy", "gate", "queue", "precheck", "cutover-landing"]
+parts = ["slot-contract", "slot-probe", "slots", "heavy", "codex", "gate", "queue", "precheck", "cutover-landing"]
 walk = true
 
 [[slice]]
