@@ -40,11 +40,9 @@ class BootstrapStagesTest(unittest.TestCase):
         self.hosts = tuple(tomllib.loads(self.hosts_toml)["hosts"])
 
     def legacy_fleet(self):
-        self.historical_fleet(before_stage_b())
-
-    def historical_fleet(self, base, seeds=False):
-        # Freeze both sides of the bootstrap promotion. Later fleet additions
-        # (such as reap.timer) must not become stage B lifecycle changes.
+        # The declarations live before stage B: main's own fleet tree, so units
+        # that main already declares (after-landing) are not stage B's changes.
+        base = before_stage_b()
         archive = subprocess.check_output(["git", "-C", str(fixture.ROOT), "archive", base, "fleet"], env=self.f.env)
         stage = self.f.directory / "fleet-stage"
         stage.mkdir()
@@ -61,6 +59,17 @@ class BootstrapStagesTest(unittest.TestCase):
             if path.is_file() and name not in touched:
                 (stage / name).parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(path, stage / name)
+        # roles.toml is a stage B change, but later unit files copied above
+        # still need their current role entries on both sides of promotion.
+        roles_path = stage / "fleet/units/roles.toml"
+        roles = tomllib.loads(roles_path.read_text())["units"]
+        current_roles = tomllib.loads((self.f.source / "fleet/units/roles.toml").read_text())["units"]
+        for name, assigned in current_roles.items():
+            if "fleet/units/" + name not in touched:
+                roles[name] = assigned
+        fixture.put(roles_path, "[units]\n" + "".join(
+            json.dumps(name) + " = " + json.dumps(assigned) + "\n"
+            for name, assigned in sorted(roles.items())))
         retired = self.f.directory / "retired-fleet"
         (self.f.source / "fleet").rename(retired)
         (stage / "fleet").rename(self.f.source / "fleet")
@@ -71,7 +80,7 @@ class BootstrapStagesTest(unittest.TestCase):
         # Seed flags belong to stage B, not the historical version-only inputs.
         fixture.put(self.f.source / "fleet/hosts.toml", "\n".join(
             line for line in self.hosts_toml.splitlines()
-            if seeds or line.partition("=")[0].strip() != "seed") + "\n")
+            if line.partition("=")[0].strip() != "seed") + "\n")
         fixture.put(self.f.source / "fleet/repositories.toml",
                     f'agents = {json.dumps(str(self.f.origin))}\nfabrig = {json.dumps(self.f.fabrig_origin)}\n')
 
@@ -105,7 +114,10 @@ class BootstrapStagesTest(unittest.TestCase):
         calls = len(self.f.calls())
         fixture.put(self.f.source / "tools/fleet-sync", self.code, True)
         if after_fleet:
-            self.historical_fleet(before_stage_b().removesuffix("^"), seeds=True)
+            shutil.rmtree(self.f.source / "fleet")
+            shutil.copytree(fixture.ROOT / "fleet", self.f.source / "fleet")
+            fixture.put(self.f.source / "fleet/repositories.toml",
+                        f'agents = {json.dumps(str(self.f.origin))}\nfabrig = {json.dumps(self.f.fabrig_origin)}\n')
         else:
             # Same fleet, a different runner: promotion must not need new declarations.
             fixture.put(self.f.source / "tools/stage-a-fixture", "# code-only release marker\n")
