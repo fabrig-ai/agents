@@ -169,14 +169,7 @@ def execute(run_id: str, *, sh: Runner = run, sleep: Callable[[float], None] | N
             stdout.flush()
             stderr.flush()
             stdout.seek(event_offset)
-            events = []
-            for line in stdout.read().splitlines():
-                try:
-                    event = json.loads(line)
-                except (ValueError, UnicodeDecodeError):
-                    continue
-                if isinstance(event, dict):
-                    events.append(event)
+            events = _events(stdout.read())
             all_events.extend(events)
             stderr.seek(error_offset)
             errors = stderr.read().decode("utf-8", errors="replace")
@@ -235,3 +228,16 @@ def main(argv: list[str]) -> int:
     except (OSError, ValueError, Failed) as error:
         print("fab codex: " + " ".join(str(error).splitlines()), file=sys.stderr)
         return 2
+
+
+def _events(output):
+    """Read dictionary events, skipping torn or stray lines."""
+    events = []
+    for line in output.splitlines():
+        try:
+            event = json.loads(line)
+        except (ValueError, UnicodeDecodeError):
+            continue
+        if isinstance(event, dict):
+            events.append(event)
+    return events

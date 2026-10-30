@@ -64,13 +64,7 @@ def precheck(slot: Path, tip: str, *, home: Path | None = None, sh: Runner = run
             receipt["steps"] = [f"{step.name}:{step.code}:{step.seconds:.3f}" for step in results]
             receipt["outcome"] = "green" if all(step.green for step in results) else "red"
     finally:
-        # Reset while detached so the implementer's branch never moves to the merge.
-        git("reset", "--hard", original)
-        if branch:
-            git("checkout", "--force", branch.removeprefix("refs/heads/"))
-        else:
-            git("checkout", "--detach", "--force", original)
-        git("clean", "-fd")
+        _restore(git, original, branch)
     receipt["at"] = log.now()
     atomic.write(directory / f"{tip}.json", json.dumps(receipt, indent=2) + "\n")
     return receipt
@@ -86,3 +80,14 @@ def main(argv: list[str]) -> int:
     path = Path(receipt["log"]).with_suffix(".json")
     print(f"{path}: {receipt['outcome']}")
     return 0 if receipt["outcome"] == "green" else 1
+
+
+def _restore(git, original, branch):
+    """Restore HEAD without moving the implementer branch to the merge."""
+    # Reset while detached so the implementer's branch never moves to the merge.
+    git("reset", "--hard", original)
+    if branch:
+        git("checkout", "--force", branch.removeprefix("refs/heads/"))
+    else:
+        git("checkout", "--detach", "--force", original)
+    git("clean", "-fd")

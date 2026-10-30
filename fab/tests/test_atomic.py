@@ -53,3 +53,18 @@ class AtomicTest(unittest.TestCase):
     def test_extend_creates_missing_file_and_parents(self):
         atomic.extend(self.path, "first\n")
         self.assertEqual(self.path.read_text(encoding="utf-8"), "first\n")
+
+    def test_sibling_is_hidden_in_destination_directory(self):
+        path = self.home / "file"
+        replace = Path.replace
+
+        def rename(sibling, destination):
+            self.assertEqual(destination, path)
+            self.assertEqual(sibling.parent, path.parent)
+            self.assertTrue(sibling.name.startswith(".file."))
+            self.assertEqual(sibling.read_text(encoding="utf-8"), "complete")
+            return replace(sibling, destination)
+
+        with patch("fab.atomic.Path.replace", autospec=True, side_effect=rename) as renamed:
+            atomic.write(path, "complete")
+        renamed.assert_called_once()
