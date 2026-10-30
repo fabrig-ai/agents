@@ -557,8 +557,8 @@ before it lands (13.1).
 ### 13.6 A channel to the user
 
 - **Questions that are the user's** (budgets, machines, what is hard to
-  reverse) park their task and are listed, with the daily reports, on one
-  page the user reads; nothing else goes to the user.
+  reverse) park their task and are listed, with the reports' signals that
+  are the user's, on one page the user reads; nothing else goes to the user.
 - **Whoever asks decides it is the user's,** never the page. Three things
   are (`fab.channel.asks`, folded from the plans and the log):
   - a plan's `[[question]]` with no answer, the cut's (13.3);
@@ -569,8 +569,10 @@ before it lands (13.1).
 - **The page** is `FAB_HOME/user.md` on hel8 (`fab/channel.py`):
   - the open questions, the plans' first, then the log's in the order they
     were asked, each with what to read and how to answer it;
-  - then each standing report's latest day (section 10): its path and its
-    Signals lines, not its figures.
+  - then, from each standing report's latest day (section 10), its path and
+    only the Signals lines whose owner is the user (the drafts' signal
+    tables: targets, capacity, a usage limit, a budget the three questions
+    could not settle); the rest of each report is the director's.
   The tick rewrites it at its end; `fab page show|write [PLAN_DIR...]`
   makes it on demand. Its plans are those in `FAB_HOME/plans` (13.4) and
   those named. The drafts send the reports to the director, who passes the

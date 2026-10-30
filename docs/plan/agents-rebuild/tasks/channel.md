@@ -61,3 +61,10 @@ the fold reads.
 - `render` quotes bodies as they are: no escaping of Markdown in a report's
   lines.
 - Private helpers are yours; the public functions keep their signatures.
+
+## Answers
+
+- 2026-10-30, the designer, before the first run: the page quotes from each
+  report only the Signals lines whose owner is the user (13.6); a report's
+  other signals stay in the report, which is the director's. The drafts
+  send reports to the director, who passes the user only what needs them.
