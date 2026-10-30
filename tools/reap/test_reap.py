@@ -1200,7 +1200,10 @@ class ReapTests(unittest.TestCase):
                 info = root.stat()
                 API['remove'](root, (info.st_dev, info.st_ino), manifest)
         self.addCleanup(cleanup)
-        result = self.run_class('heavy-logs')
+        # Exercise every level independently of shared-gate wall-clock load;
+        # separate tests advance the clock to verify deadline exhaustion.
+        with patch.object(API['time'], 'monotonic', return_value=100):
+            result = self.run_class('heavy-logs')
         self.assertEqual(self.selected(result), {root}, result)
         self.assertFalse(result['errors'])
 
