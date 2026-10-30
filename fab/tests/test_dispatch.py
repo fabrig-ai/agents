@@ -223,6 +223,14 @@ class CallActionsTest(unittest.TestCase):
                                  if expected else [])
         self.assertEqual(self.actions(), [])
 
+    def test_a_part_with_a_successful_skeleton_call_is_not_designed_again(self):
+        done = [dict(self.call("skeleton", "s1"), subject="draft/core"),
+                dict(ev="call.ended", call="s1", role="skeleton", outcome="done")]
+        skeleton = [a for a in self.actions(done, ["core", "next"]) if a.kind == "call"]
+        self.assertEqual(skeleton, [Action("call", task="next", run_kind="skeleton")])
+        failed = [done[0], dict(done[1], outcome="failed")]
+        self.assertEqual(self.actions(failed, ["core"]), [Action("call", task="core", run_kind="skeleton")])
+
     def test_only_first_design_part_and_role_exclusion(self):
         questions = [self.question(ts="2026-10-30T12:00:00.000Z")]
         answer = Action("call", task="draft", run_kind="answer")

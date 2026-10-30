@@ -39,8 +39,9 @@ def call_actions(plan: Plan, tasks: Mapping[str, Task], events: list[dict], desi
     call log question.answered for each task its report's `Answered:` line names. start:
     an answer call (subject the plan's draft) when no answer call is in flight and the open
     questions (fab.calls.open_questions) number ANSWER_AT or more, or the oldest is ANSWER_AFTER
-    minutes old at `now`; a skeleton call for design[0] (decide's design list) when no
-    skeleton call is in flight. Actions: Action("call", task=<subject>, run_kind=<role>) and
+    minutes old at `now`; a skeleton call for the first part of decide's design list that has
+    no successful skeleton call yet (subject `<draft>/<part>`), when no skeleton call is in
+    flight. Actions: Action("call", task=<subject>, run_kind=<role>) and
     Action("finish", run=<call id>, run_kind=<role>, branch=<branch>)."""
     started = {event["call"]: event for event in events if event.get("ev") == "call.started"}
     flight = dict(started)
@@ -63,8 +64,14 @@ def call_actions(plan: Plan, tasks: Mapping[str, Task], events: list[dict], desi
                       >= timedelta(minutes=ANSWER_AFTER))
         if len(questions) >= ANSWER_AT or old_enough:
             actions.append(Action("call", task=plan.draft, run_kind="answer"))
-    if "skeleton" not in roles and design:
-        actions.append(Action("call", task=design[0], run_kind="skeleton"))
+    # A part whose skeleton call succeeded is designed even before its specs reach this plan:
+    # the tick that lands them decides on the plan it read before landing.
+    designed = {started[identifier].get("subject") for identifier in started
+                if any(event.get("ev") == "call.ended" and event.get("call") == identifier
+                       and event.get("outcome") == "done" for event in events)}
+    fresh = [part for part in design if f"{plan.draft}/{part}" not in designed]
+    if "skeleton" not in roles and fresh:
+        actions.append(Action("call", task=fresh[0], run_kind="skeleton"))
     return actions
 
 
