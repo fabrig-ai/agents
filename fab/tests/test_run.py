@@ -1,4 +1,5 @@
 import io
+import json
 import shlex
 import unittest
 from contextlib import redirect_stdout
@@ -26,8 +27,12 @@ def command(call):
 
 def starter():
     def answer(call):
-        if command(call)[:2] == ["codex-run", "task"]:
+        argv = command(call)
+        if argv[:2] == ["codex-run", "task"] or argv[:3] == ["fab", "codex", "start"]:
             return Result(0, "codex-123 /state/codex-123\n")
+        if argv == ["fab", "slot", "list"]:
+            return Result(0, json.dumps({"slot": 1, "claim": {"run": "busy"}, "idle": None})
+                          + "\n" + json.dumps({"slot": 2, "claim": None, "idle": 0}) + "\n")
         return Result(0)
     return FakeRunner().on(["ssh"], answer)
 
@@ -149,6 +154,101 @@ class RunStartTest(unittest.TestCase):
             self.assertEqual(len(log.read(path)), 1)
             self.assertEqual(log.read(), [])
 
+    def test_start_fabrig_claims_slot_and_switches_for_every_kind(self):
+        for kind in run.KINDS:
+            with self.subTest(kind=kind), tmp_home() as home:
+                fake = starter()
+                task = replace(TASK, repo="fabrig")
+                events = [started(kind="rebase", branch="draft/task-r1")]
+                run_id = run.start(task, HOST, kind=kind, events=events, sh=fake)
+                branch = {"repair": "draft/task-r1", "rebase": "draft/task-r2"}.get(kind, TASK.id)
+                source = "origin/" + branch if kind == "repair" else "origin/main"
+                slot = ROOT.parent / "slots/2"
+                directory = ROOT / "runs" / run_id
+                commands = [command(call) for call in fake.calls]
+                self.assertEqual(commands[3:7], [
+                    ["fab", "slot", "list"],
+                    ["fab", "slot", "claim", "2", run_id, TASK.id],
+                    ["git", "-C", str(slot), "fetch", "origin"],
+                    ["git", "-C", str(slot), "switch", "-C", branch, source]])
+                expected = ["codex-run", "task", "--effort", task.effort, "--to", run.NOTIFY]
+                if kind == "review":
+                    expected.append("--read-only")
+                self.assertEqual(commands[-1], [*expected, str(directory / "brief.md"), str(slot),
+                                               str(directory / "report.md")])
+                self.assertEqual(len(commands), 9)
+                record, = log.read()
+                self.assertEqual({key: value for key, value in record.items() if key != "ts"},
+                                 {"ev": "run.started", "run": run_id, "task": TASK.id, "kind": kind,
+                                  "host": HOST.name, "dir": str(slot), "branch": branch,
+                                  "base": "origin/main", "codex": "codex-123", "slot": 2,
+                                  "state": "/state/codex-123", "report": str(directory / "report.md")})
+                self.assertEqual((home / "fab/runs" / run_id / "brief.md").read_text(),
+                                 fake.calls[-2].input)
+
+    def test_start_fabrig_selects_the_oldest_idle_rank(self):
+        fallback = starter()
+        def answer(call):
+            if command(call) == ["fab", "slot", "list"]:
+                return Result(0, '\n'.join(json.dumps(entry) for entry in [
+                    {"slot": 1, "claim": None, "idle": 1},
+                    {"slot": 2, "claim": None, "idle": 0},
+                    {"slot": 3, "claim": None, "idle": 2}]) + "\n")
+            return fallback(call.argv, input=call.input)
+
+        with tmp_home():
+            fake = FakeRunner().on(["ssh"], answer)
+            run.start(replace(TASK, repo="fabrig"), HOST, sh=fake)
+            self.assertEqual(command(fake.calls[4]),
+                             ["fab", "slot", "claim", "2", "draft/task-1", TASK.id])
+            self.assertEqual(log.read()[0]["slot"], 2)
+
+    def test_start_fabrig_refuses_when_no_slot_is_idle(self):
+        for listing in ("", json.dumps({"slot": 1, "claim": {"run": "busy"}, "idle": None}) + "\n"):
+            with self.subTest(listing=listing), tmp_home() as home:
+                def answer(call):
+                    return Result(0, listing) if command(call) == ["fab", "slot", "list"] else Result(0)
+
+                fake = FakeRunner().on(["ssh"], answer)
+                with self.assertRaisesRegex(ValueError, HOST.name + ": no idle slot"):
+                    run.start(replace(TASK, repo="fabrig"), HOST, sh=fake)
+                self.assertEqual(command(fake.calls[-1]), ["fab", "slot", "list"])
+                self.assertEqual(len(fake.calls), 4)
+                self.assertEqual(log.read(), [])
+                self.assertFalse((home / "fab/runs").exists())
+
+    def test_start_fabrig_does_not_launch_if_the_claim_fails(self):
+        fallback = starter()
+        def answer(call):
+            if command(call)[:3] == ["fab", "slot", "claim"]:
+                return Result(1, err="already claimed")
+            return fallback(call.argv, input=call.input)
+
+        with tmp_home():
+            fake = FakeRunner().on(["ssh"], answer)
+            with self.assertRaises(Failed):
+                run.start(replace(TASK, repo="fabrig"), HOST, sh=fake)
+            self.assertEqual(command(fake.calls[-1])[:3], ["fab", "slot", "claim"])
+            self.assertEqual(log.read(), [])
+
+    def test_start_with_fab_launcher_preserves_arguments_and_events(self):
+        for repo in ("agents", "fabrig"):
+            for kind in run.KINDS:
+                with self.subTest(repo=repo, kind=kind), tmp_home(), patch.object(run, "LAUNCHER", "fab"):
+                    fake = starter()
+                    task = replace(TASK, repo=repo, effort="medium")
+                    run_id = run.start(task, HOST, kind=kind, sh=fake)
+                    worktree = ROOT.parent / "slots/2" if repo == "fabrig" else ROOT / "wt" / run_id
+                    directory = ROOT / "runs" / run_id
+                    expected = ["fab", "codex", "start", "--effort", "medium", "--to", run.NOTIFY]
+                    if kind == "review":
+                        expected.append("--read-only")
+                    self.assertEqual(command(fake.calls[-1]), [*expected, str(directory / "brief.md"),
+                                                               str(worktree), str(directory / "report.md")])
+                    record, = log.read()
+                    self.assertEqual(record["codex"], "codex-123")
+                    self.assertEqual(record["state"], "/state/codex-123")
+
     def test_start_quotes_shell_paths(self):
         with tmp_home():
             fake = starter()
@@ -265,9 +365,78 @@ class RunCollectTest(unittest.TestCase):
                                     "report": str(report_path), "minutes": 12.5})
             self.assertIsNone(run.collect(record["run"], [record], {HOST.name: HOST},
                                           sh=fake, log_path=path))
-            self.assertEqual(len(fake.calls), 1)
+            self.assertEqual(len(fake.calls), 2)
+            self.assertEqual(command(fake.calls[-1]),
+                             ["git", "-C", record["dir"], "worktree", "remove", "--force", record["dir"]])
             self.assertEqual(log.read(path), [entry])
             self.assertEqual(log.read(), [])
+
+    def test_collect_command_removes_a_dirty_linked_worktree_and_keeps_its_branch(self):
+        # Real git checks removal from inside the linked worktree, including untracked files.
+        with tmp_home() as home:
+            _, clone = git_pair(home)
+            worktree = home / "run checkout"
+            git(clone, "worktree", "add", "-b", TASK.id, str(worktree), "origin/main")
+            sibling = worktree / "untracked.tmp"
+            sibling.write_text("left by the run\n")
+            sibling.replace(worktree / "untracked")
+            record = started(dir=str(worktree))
+            fake = FakeRunner().on(["ssh"], Result(0, "ended\nDone: checked\n"))
+            self.assertEqual(run.collect(record["run"], [record], {HOST.name: HOST}, sh=fake), "done")
+            argv = command(fake.calls[-1])
+            git(home, *argv[1:])
+            self.assertFalse(worktree.exists())
+            self.assertEqual(git(clone, "rev-parse", TASK.id), git(clone, "rev-parse", "origin/main"))
+
+    def test_collect_slot_releases_and_logs_bytes_freed_once(self):
+        for freed in (0, 123456789):
+            with self.subTest(freed=freed), tmp_home():
+                record = started(slot=2, dir=str(ROOT.parent / "slots/2"))
+                def answer(call):
+                    if command(call)[:3] == ["fab", "slot", "release"]:
+                        return Result(0, f"{freed}\n")
+                    return Result(0, "ended\nDone: checked\n")
+
+                fake = FakeRunner().on(["ssh"], answer)
+                self.assertEqual(run.collect(record["run"], [record], {HOST.name: HOST}, sh=fake), "done")
+                self.assertEqual([command(call) for call in fake.calls][1:],
+                                 [["fab", "slot", "release", "2", record["run"]]])
+                entry, = log.read()
+                self.assertEqual(entry["freed"], freed)
+                self.assertNotIn("free_error", entry)
+                self.assertEqual(Path(entry["report"]).read_text(), "Done: checked\n")
+                self.assertIsNone(run.collect(record["run"], [record], {HOST.name: HOST}, sh=fake))
+                self.assertEqual(len(fake.calls), 2)
+                self.assertEqual(log.read(), [entry])
+
+    def test_collect_cleanup_failure_still_collects_and_records_the_question(self):
+        for slotted in (False, True):
+            for failure in ("command", "os", "bad output"):
+                if failure == "bad output" and not slotted:
+                    continue
+                with self.subTest(slotted=slotted, failure=failure), tmp_home():
+                    record = started(**({"slot": 0, "dir": str(ROOT.parent / "slots/0")} if slotted else {}))
+                    def answer(call):
+                        if command(call)[0] == "bash":
+                            return Result(0, "ended\nQuestion: choose?\nDetails.\n")
+                        if failure == "os":
+                            raise OSError("cannot execute ssh")
+                        if failure == "bad output":
+                            return Result(0, "invalid bytes\n")
+                        return Result(1, err="cleanup unavailable")
+
+                    fake = FakeRunner().on(["ssh"], answer)
+                    self.assertEqual(run.collect(record["run"], [record], {HOST.name: HOST}, sh=fake),
+                                     "question")
+                    ended, question = log.read()
+                    self.assertIn({"command": "cleanup unavailable", "os": "cannot execute ssh",
+                                   "bad output": "invalid bytes"}[failure], ended["free_error"])
+                    self.assertNotIn("freed", ended)
+                    self.assertEqual(ended["outcome"], "question")
+                    self.assertEqual(Path(ended["report"]).read_text(), "Question: choose?\nDetails.\n")
+                    self.assertEqual(question["ev"], "question.asked")
+                    self.assertIsNone(run.collect(record["run"], [record], {HOST.name: HOST}, sh=fake))
+                    self.assertEqual(len(fake.calls), 2)
 
     def test_collect_question_logs_first_fifteen_lines(self):
         with tmp_home():

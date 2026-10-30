@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import shlex
 import tempfile
 from collections.abc import Iterable
@@ -117,7 +118,20 @@ def start(task: Task, host: Host, *, kind: str = "implement", events: Iterable[d
     clone = shlex.join(["git", "clone", "--", REMOTES[task.repo], str(repo)])
     remote(["bash", "-c", f"if ! test -d {shlex.quote(str(repo / '.git'))}; then {clone}; fi"])
     remote(["git", "-C", str(repo), "fetch", "origin"])
-    if kind == "repair":
+    slot = None
+    if task.repo in SLOTTED:
+        listed = remote(["fab", "slot", "list"])
+        idle = [entry for line in listed.out.splitlines() if line.strip()
+                if (entry := json.loads(line))["claim"] is None]
+        if not idle:
+            raise ValueError(f"{host.name}: no idle slot")
+        slot = min(idle, key=lambda entry: entry["idle"])["slot"]
+        remote(["fab", "slot", "claim", str(slot), run_id, task.id])
+        worktree = root.parent / "slots" / str(slot)
+        remote(["git", "-C", str(worktree), "fetch", "origin"])
+        source = f"origin/{branch}" if kind == "repair" else base
+        remote(["git", "-C", str(worktree), "switch", "-C", branch, source])
+    elif kind == "repair":
         source = f"origin/{branch}"
         remote(["git", "-C", str(repo), "worktree", "add", "--detach", str(worktree), source])
         remote(["git", "-C", str(worktree), "checkout", "--ignore-other-worktrees", "-B", branch, source])
@@ -127,7 +141,8 @@ def start(task: Task, host: Host, *, kind: str = "implement", events: Iterable[d
     remote(["bash", "-c", f"cat > {shlex.quote(str(temporary))} && "
             + shlex.join(["mv", "--", str(temporary), str(brief_path)])], input=text)
     _write(log.home() / "runs" / run_id / "brief.md", text)
-    command = ["codex-run", "task", "--effort", task.effort, "--to", NOTIFY]
+    command = ["fab", "codex", "start"] if LAUNCHER == "fab" else ["codex-run", "task"]
+    command.extend(["--effort", task.effort, "--to", NOTIFY])
     if kind == "review":
         command.append("--read-only")
     result = remote([*command, str(brief_path), str(worktree), str(report_path)])
@@ -135,9 +150,10 @@ def start(task: Task, host: Host, *, kind: str = "implement", events: Iterable[d
     if len(fields) != 2 or not fields[1].startswith("/") or "\n" in fields[1]:
         raise ValueError("codex-run did not return an id and absolute state directory")
     codex, state = fields
+    held = {} if slot is None else {"slot": slot}
     log.append("run.started", path=log_path, run=run_id, task=task.id, kind=kind,
                host=host.name, dir=str(worktree), branch=branch, base=base,
-               codex=codex, state=state, report=str(report_path))
+               codex=codex, state=state, report=str(report_path), **held)
     return run_id
 
 
@@ -187,8 +203,19 @@ def collect(run_id: str, events: Iterable[dict], hosts: dict[str, Host], *, sh: 
     stamp = log.now()
     minutes = max(0.0, (datetime.fromisoformat(stamp)
                        - datetime.fromisoformat(started["ts"])).total_seconds() / 60)
+    freed = {}
+    try:
+        if "slot" in started:
+            result = sh(ssh(host.ssh, ["fab", "slot", "release", str(started["slot"]), run_id]),
+                        check=True)
+            freed["freed"] = int(result.out.strip())
+        else:
+            sh(ssh(host.ssh, ["git", "-C", started["dir"], "worktree", "remove", "--force",
+                              started["dir"]]), check=True)
+    except (OSError, ValueError, Failed) as error:
+        freed["free_error"] = str(error)
     log.append("run.ended", path=log_path, ts=stamp, run=run_id, task=started["task"],
-               outcome=current["outcome"], report=str(report_path), minutes=minutes)
+               outcome=current["outcome"], report=str(report_path), minutes=minutes, **freed)
     if current["outcome"] == "question":
         log.append("question.asked", path=log_path, task=started["task"], run=run_id,
                    text="\n".join(current["report"].splitlines()[:15]))
