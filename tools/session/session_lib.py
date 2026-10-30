@@ -183,9 +183,11 @@ def inventory():
         "aliases": [director["director_legacy_name"], director["warmup_name"]],
         "start_dir": director["director_start_dir"], "supervisor": None, "paused": False,
     })
-    for mailbox in ("ops", "s/deploy"):
+    for mailbox in ("ops", "s/deploy", "s/multi-coord"):
         rows.append({"role": "fixed", "mailbox": mailbox, "supervisor": "director",
                      "always_watched": True, "note": "always watched; bypass owns"})
+    rows[-1].update(name_prefix="s/multi-coord/", aliases=["s/multi-coord-next"],
+                    warmup_name="s/multi-coord-next")
     return rows
 
 
