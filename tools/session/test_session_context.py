@@ -44,7 +44,7 @@ class SessionContext(unittest.TestCase):
         self.bin = self.base / "bin"
         self.bin.mkdir()
         fake = self.bin / "claude"
-        fake.write_text(f"#!{sys.executable}\n" + '''import json, os, sys
+        fake.write_text(f"#!{sys.executable} -B\n" + '''import json, os, sys
 with open(os.environ["FAKE_LOG"], "a") as stream:
     stream.write(json.dumps(sys.argv[1:]) + "\\n")
 print(os.environ.get("FAKE_AGENTS", "[]"))
@@ -67,7 +67,7 @@ sys.exit(int(os.environ.get("FAKE_EXIT", "0")))
         env = dict(self.env)
         if session_id is not None:
             env["CLAUDE_CODE_SESSION_ID"] = session_id
-        return subprocess.run([sys.executable, "-I", str(TOOL), *args], cwd=self.cwd, env=env,
+        return subprocess.run([sys.executable, "-I", "-B", str(TOOL), *args], cwd=self.cwd, env=env,
                               text=True, capture_output=True, stdin=subprocess.DEVNULL)
 
     def test_latest_call_below_threshold(self):
@@ -133,7 +133,7 @@ sys.exit(int(os.environ.get("FAKE_EXIT", "0")))
 
     def hook(self, event, *args):
         event = {"hook_event_name": "Stop", **event}
-        return subprocess.run([sys.executable, "-I", str(TOOL), "--hook", *args], cwd=self.cwd, env=self.env,
+        return subprocess.run([sys.executable, "-I", "-B", str(TOOL), "--hook", *args], cwd=self.cwd, env=self.env,
                               input=json.dumps(event), text=True, capture_output=True)
 
     def test_hook_asks_for_a_handover_once(self):
@@ -174,9 +174,34 @@ sys.exit(int(os.environ.get("FAKE_EXIT", "0")))
         (owner / "events.jsonl").write_text(json.dumps(
             {"type": "thread.started", "thread_id": thread}) + "\n")
         env = dict(self.env, DEV_ROOT=str(self.base / "dev"))
-        by_owner = subprocess.run([sys.executable, "-I", str(TOOL), "--owner", "ops"], cwd=self.cwd,
+        by_owner = subprocess.run([sys.executable, "-I", "-B", str(TOOL), "--owner", "ops"], cwd=self.cwd,
                                   env=env, text=True, capture_output=True)
         self.assertEqual(by_owner.stdout, result.stdout)
+
+    def test_owner_uses_the_latest_started_thread(self):
+        retired = "01a10000-0000-7000-8000-000000000001"
+        current = "01a10000-0000-7000-8000-000000000002"
+        self.codex_rollout(retired, 380_000, 475_000)
+        self.codex_rollout(current, 95_000, 475_000)
+        owner = self.base / "dev/tmp/owners/ops/codex"
+        owner.mkdir(parents=True)
+        rows = [{"type": "thread.started", "thread_id": retired},
+                {"type": "thread.started", "thread_id": retired},
+                {"type": "thread.started", "thread_id": current},
+                {"type": "thread.started", "thread_id": current},
+                {"type": "thread.started"},
+                {"type": "thread.started", "thread_id": ""},
+                {"type": "turn.completed", "thread_id": retired}]
+        (owner / "events.jsonl").write_text(
+            "".join(json.dumps(row) + "\n" for row in rows) + "not json\n")
+        env = dict(self.env, DEV_ROOT=str(self.base / "dev"))
+        result = subprocess.run([sys.executable, "-I", "-B", str(TOOL), "--owner", "ops"],
+                                cwd=self.cwd, env=env, stdin=subprocess.DEVNULL,
+                                text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("95,000 of 475,000 tokens (20%)", result.stdout)
+        self.assertNotIn("REACHED", result.stdout)
+        self.assertEqual(result.stdout, self.run_tool("--codex", current).stdout)
 
     def test_no_transcript_is_refused(self):
         result = self.run_tool("eeee")
@@ -280,7 +305,7 @@ sys.exit(int(os.environ.get("FAKE_EXIT", "0")))
 
     def test_hook_always_exits_zero_on_bad_input(self):
         for payload, args in (("not json", []), ("[]", []), ("{}", ["--window", "bad"]), ("{}", ["--role", "bad"]), ("{}", ["--name"])):
-            result = subprocess.run([sys.executable, "-I", str(TOOL), "--hook", *args],
+            result = subprocess.run([sys.executable, "-I", "-B", str(TOOL), "--hook", *args],
                                     env=self.env, cwd=self.cwd, input=payload, text=True, capture_output=True)
             self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "", ""))
 

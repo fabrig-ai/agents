@@ -131,9 +131,12 @@ def claude_usage(path, window, counts=True, tail_only=False):
 def owner_thread(name):
     root = os.path.realpath(os.environ.get('DEV_ROOT', os.path.expanduser('~/src/rust')))
     events = os.path.join(root, 'tmp/owners', name.split('/')[-1], 'codex/events.jsonl')
+    thread = None
     for d in records(events) if os.path.exists(events) else ():
         if d.get('type') == 'thread.started' and d.get('thread_id'):
-            return d['thread_id']
+            thread = d['thread_id']
+    if thread:
+        return thread
     sys.exit(f'session-context: no Codex thread for owner {name}')
 
 
