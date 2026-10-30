@@ -12,8 +12,11 @@ Contract: `docs/design/fleet.md`, sections 1–6.
   detached OpenSSH ControlPersist=600 master and service KillMode=process.
   Fleet renders GIT_SSH=fleet-git-ssh to env.sh/environment.d and installs its
   wrapper; other unit owners retain responsibility for master survival at exit.
-  Inspections never create masters. Fixture coverage: `tools/test_fleet_sync_mux.py` (9 tests),
-  including cleanup and publickey backoff. No live-host deployment was run.
+  Every creator now uses the same strict SSH option set; the Bash wrapper
+  escapes literal HOME percent signs, backslashes and quotes like the runner.
+  Inspections never create masters. Fixture coverage: `tools/test_fleet_sync_mux.py` (10 tests),
+  including option equivalence, literal-HOME paths, cleanup and publickey backoff.
+  No live-host deployment or shared-master rotation was run.
 
 - Release promotion, rendering, links, installer locking, unit journals, controls,
   backoff, inspection and recovery exist (`tools/fleet-sync:831`, `:953`, `:1114`, `:1312`, `:1340`, `:1972`, `:2032`, `:2060`, `:2232`).

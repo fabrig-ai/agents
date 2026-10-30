@@ -1,2 +1,5 @@
-#!/bin/sh
-exec ssh -o ControlMaster=auto -o ControlPersist=600 -o "ControlPath=\"$HOME/.local/state/github-ssh/%C\"" "$@"
+#!/bin/bash
+control=${HOME//%/%%}
+control=${control//\\/\\\\}
+control=${control//\"/\\\"}
+exec ssh -T -o BatchMode=yes -o StrictHostKeyChecking=yes -o UpdateHostKeys=no -o ConnectTimeout=5 -o ControlMaster=auto -o ControlPersist=600 -o "ControlPath=\"$control/.local/state/github-ssh/%C\"" "$@"
