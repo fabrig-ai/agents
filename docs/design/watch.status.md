@@ -1,11 +1,24 @@
 # Watch status
 
-2026-10-30. Owner: s/multi-coord. Baseline: origin/main `580a456` plus `mc/events-1-r`.
+2026-10-30. Owner: s/multi-coord. Watch-health work stacks on `mc/gate-cut`.
 Contract: `docs/design/watch.md`, sections 2–4.
 
 ## Present
 
-- All ten rules, enabled posts, episodes, clear confirmation, silent catch-up,
+- Decision 0025 mail health repairs are implemented: fixed s/multi-coord
+  inventory, idle/saved-bypass gated stop-confirm-resume, exact id/copy checks,
+  launcher dry-run-before-start, one retry, remedy result events, safe orphan
+  cleanup, and report-only dead waiter records.
+- Mail reports open one episode per reader, with unread count/oldest age and
+  current turn length. Escalation waits for two remedy failures or more than
+  30 minutes after remedy; readers without a remedy escalate once after 30
+  minutes. Only coordinator/infrastructure subjects route to director.
+- Handovers key on session id and clear on owner exit, successor or a matching
+  files-current acknowledgement (including the preceding 30 minutes).
+- Network git uses configured origins and a shared SSH control socket; records
+  fetch occurs only when main changed. This branch changes no installed service.
+
+- All original ten rules plus orphan/dead waiter reconciliation, enabled posts, episodes, clear confirmation, silent catch-up,
   SSH probes, fired-marker events and Codex-owner liveness are implemented.
 - Raw rule inputs come from the local and SSH-probed host spools, bounded to
   two hours. Failed inputs name their source and host. Alerts and heartbeats
@@ -24,9 +37,6 @@ Contract: `docs/design/watch.md`, sections 2–4.
   requires unchanged output for 60 minutes AND elapsed above the median limit,
   using at least five completions or a 90-minute fallback. The design reflects
   this implemented rule; the early proposed rule is not an operational promise.
-- **Gone notifies before escalation.** The old plan sent straight to the
-  supervisor and described restarting. Code first posts the subject's mailbox,
-  then the inventory supervisor after 30 minutes. It launches nothing.
 - **Escalation follows inventory.** The early plan hard-coded ops for idle
   claims, director for lease stalls, and ops for delivery failures. Code uses
   the actual owner's supervisor. The design follows code.
@@ -44,5 +54,6 @@ Contract: `docs/design/watch.md`, sections 2–4.
 
 ## Verification
 
-`tools/records/test_watch.py` and `tools/records/test_watch_replay.py` use
+`tools/records/test_watch.py`, `tools/records/test_watch_periodic.py` and
+`tools/records/test_watch_replay.py` use
 synthetic producers and temporary HOME. `bash tools/check.sh` runs both.
