@@ -6,10 +6,10 @@ using the release's `tools/records/watch` executable. The installed command name
 is reserved as `pipeline-watch` so it does not shadow procps `watch`.
 Without `--once` the tool repeats every 120 seconds.
 `watch --dry-run --once` prints the exact proposed post commands, bounded
-metadata evidence and JSONL publication. It never calls send, wake or append,
+metadata evidence and JSONL spool output. It never calls send, wake or append,
 changes the watch state, or advances the live records clone. Its one `record
-pull` uses a disposable clone, deleted on exit. All publications use the
-sibling `record` executable from this checkout. No legacy code is imported.
+pull` uses a disposable clone, deleted on exit. Durable drafts and questions use the sibling `record` reader. Raw events never
+use that writer. No legacy code is imported.
 
 `watch.toml` enables `[alerts] post = true`. Setting it to false still evaluates
 conditions, persists episodes, and publishes alert events and heartbeats, while
@@ -22,7 +22,7 @@ satisfies escalation; otherwise it goes to the owner and the normal escalation
 clock continues. Failed sends retry. Legacy silent state migrates using each
 episode's original opening time, even if its suppressed actions were already
 marked handled. Suppressed historical events in the publication outbox never
-replay mailbox actions. Unlike `--dry-run`, silent mode updates state and records.
+replay mailbox actions. Unlike `--dry-run`, silent mode updates state and the local spool.
 
 `watch.toml` enables each of the ten rules and holds every timing threshold.
 Conditions use strict "older than" comparisons; escalation is due at its
@@ -73,12 +73,25 @@ A selected executable's failure is reported without trying another copy. Each
 heartbeat's `inputs` object records the selected paths as `session-start` and
 `lease`.
 
+The private watch state retains compact condition facts across spool expiry: last
+claim/lease activity and batch time, attempted ready tips, pending handovers and
+acknowledgements, and unresolved delivery dispositions. It stores the needed
+identities/times, never copies raw streams or context readings. This preserves
+long-running conditions and the 4-hour lease threshold after raw inputs expire.
+Successful delivery tombstones expire after 2 hours; lease facts disappear when
+the live lease disappears.
+
 Inputs are independent. A failed command, malformed reading or unavailable
 records stream freezes dependent episodes; it never opens an alert on its own.
 A heartbeat names failed inputs and skipped rules. Missing lease is a skipped
 input. Builders come from `post/machines`; SSH pipes this version of the probe
-into a login shell, with host-key updates disabled. The probe reads only run
-meta, completion TSV/markers, output mtime, task header, and live heavy state.
+into a login shell, with host-key updates disabled. The probe reads run
+meta, completion TSV/markers, output mtime, task header, live heavy state, and the
+last 2 hours of `queue`, `heavy`, `sessions`, `post` and `post-sent` in each
+host's `~/src/fabrig/events/` spool. Hel8 reads its local spool. Rule input names
+are `spool/queue`, `spool/heavy`, `spool/sessions`, `spool/post`, `spool/post-sent`;
+SSH failures name both source and host and freeze dependent episodes. Absent
+source directories are valid empty streams. Malformed sources fail independently.
 Live heavy is necessary to prove a claim idle; an unavailable snapshot prevents
 that inference. All SSH reads have timeouts and run concurrently.
 
@@ -89,7 +102,7 @@ available producer ledgers, grouped by effort. `minutes`, `median_multiplier`,
 `median_min_samples` and `fallback_minutes` configure both run-hung conditions.
 Lease activity requires explicit package/subject
 keys or an event for a branch lent by that lease; unrelated coordinator activity
-does not prove package activity. The sessions collector supplies durable `handover-needed` events from
+does not prove package activity. The sessions collector supplies spooled `handover-needed` events from
 `session-context --fired --json`, including updates with the same
 `first_fired`. Watch uses that first time for ordering and the lateness
 clock: later firings do not reset it or reopen an acknowledged handover.
@@ -109,37 +122,17 @@ one first action, one escalation, and a close event after two successful clear
 runs. A recurrence alerts again. Post exit 0 or 3 counts as delivered; failed
 sends are retried, while wake is attempted only once. There is no additional
 global throttle: independent subjects must not suppress one another. Persisted
-pending events form an outbox; append retries reuse stable event ids. All
-alert-open/escalate/close events publish immediately through `record append --as
-watch watch hel8`, with owner, supervisor and available join keys. A heartbeat
-publishes at most once per `[watch] heartbeat_seconds` (900 seconds by default),
-unless an alert opens, escalates or closes, or the set of failed input names
-changes, including recovery. Changing only an error's text does not trigger one.
-Changes in watch's publication-deferral count also make a heartbeat due.
-The first run publishes a heartbeat. The two-minute poll observes the fifteen-
-minute threshold on the next run (normally sixteen minutes). Each run still
-persists its evaluation state. Events and any pending retries share one append;
-quiet runs with an empty outbox do not append. Record makes up to five attempts
-on push races, pausing a random 1–5 seconds between tries. At most one push
-succeeds per run; retries cost only rejected attempts. Exhaustion or a rebase
-conflict retains pending events and prints `watch: deferred (k/6): <record's reason>`.
-State counts consecutive deferrals in `deferrals`: the first five exit 0, the
-sixth and later exit 2. Successful publication or a real publication error resets
-the count; real failures exit 2 immediately. Error and deferral lines include
-record's stderr. A confirmed publication prints `watch: published N events`;
-empty runs print `published 0 events`. Pending events drain only after record
-fetches origin and confirms that it contains the commit, even after a lost
-acknowledgement.
-
-Heartbeat `inputs.publication` exposes watch's preceding deferral count and
-reason, and `inputs.record-collect` exposes each collector's publication status
-and `deferrals`. A change in watch's count also makes a heartbeat due. These are
-snapshots taken before the current publication attempt; queued heartbeats are
-never rewritten during a retry. Reasons in heartbeat inputs are capped at 1024
-characters, and automatic record errors omit the saved event payload to avoid
-embedding earlier heartbeats recursively. The pipeline-watch timer adds up to 60
-seconds of random delay.
-`watch` is an append-only writer. Like post itself, sending and local state
+pending events form an outbox; local retries reuse stable event ids. All alert
+and heartbeat events append to `~/src/fabrig/events/watch/YYYY-MM-DD.jsonl` on
+hel8 through `event_spool.py`, with the same 2-hour retention and atomic source
+locking as the collector. A failed spool write exits 2 with a reason and keeps
+the outbox; success drains it. There are no git push deferrals or counters.
+A heartbeat is due on the first poll, any alert transition, a change in failed
+input names, or after `[watch] heartbeat_seconds` (900 by default). Changing only
+an error's text does not trigger one. Quiet polls still persist evaluation state
+and prune the watch spool. A normal run prints `watch: spooled N events`.
+The pipeline-watch timer adds up to 60 seconds of random delay.
+Like post itself, sending and local state
 commit cannot be one transaction: a process death immediately after send and
 before state persistence can repeat that send after restart.
 
@@ -162,10 +155,10 @@ and send to the owner; an unresolved episode escalates to the coordinator. Faile
 episodes. Codex `handover-needed` threshold events drive the same handover clock
 and acknowledgements; the coordinator remains the lead's supervisor.
 
-Replay retained lifecycle records without invoking any producers or post:
+Replay retained lifecycle events from one host spool without invoking any producers or post:
 
 ```sh
-python3 -I -B tools/records/replay_watch.py /path/to/records --day 2026-10-29 --day 2026-10-30
+python3 -I -B tools/records/replay_watch.py /path/to/events --day 2026-10-29 --day 2026-10-30
 ```
 
 This uses historical completions as they become available, seeds medians from
@@ -174,5 +167,5 @@ watch window. Lifecycle events lack output modification times, inventory and
 probe availability. The replay gives runs a synthetic watched owner and assumes
 output never changed after start, so its count is an upper bound for that input
 reconstruction, not confirmed true hangs. It cannot establish the exact number
-of real episodes or their truth. `test_watch_replay.py` uses synthetic records
+of real episodes or their truth. `test_watch_replay.py` uses synthetic spools
 and a temporary HOME to check boundaries and prevent future median leakage.
