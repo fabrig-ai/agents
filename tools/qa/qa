@@ -549,7 +549,12 @@ class Watch:
         try:
             receipt = self.read_state(path)
             need(isinstance(receipt, dict) and receipt.get('key') == key
-                 and receipt.get('attempted') is True, f'{path}: invalid alert receipt', 4)
+                 and receipt.get('attempted') is True
+                 and isinstance(receipt.get('subject'), str) and isinstance(receipt.get('body'), str)
+                 and isinstance(receipt.get('recipient', self.director), str)
+                 and re.fullmatch(ADDRESS, receipt.get('recipient', self.director))
+                 and ('delivered' not in receipt or type(receipt['delivered']) is bool),
+                 f'{path}: invalid alert receipt', 4)
         except FileNotFoundError:
             receipt = dict(key=key, attempted=True, subject=subject, body=body,
                            recipient=self.director, time=timestamp(), delivered=False)
@@ -581,18 +586,22 @@ class Watch:
         for path in sorted(parent.glob('*.json')):
             try:
                 receipt = self.read_state(path)
+                need(isinstance(receipt.get('key'), str)
+                     and path.stem == hashlib.sha256(receipt['key'].encode()).hexdigest(),
+                     'invalid notice identity', 4)
                 self.notify_once(receipt['key'], receipt['subject'], receipt['body'])
-            except (OSError, Problem, ValueError, KeyError, TypeError, UnicodeError, RecursionError):
+            except (OSError, Problem, ValueError, KeyError, TypeError, AttributeError, UnicodeError, RecursionError):
                 log(f'{path}: cannot retry notice; receipt kept')
 
     def claim_notice(self, state):
         if not self.director:
             return  # A failed start has no director; the watcher sends this notice.
         claim = state['slot_claim']
-        # Preserve old alert receipts; tokenized claims each have their own lifetime.
+        # Tokenized claims each have their own lifetime; reasons have separate receipts.
         key = ('slot release ' + claim['what'] if ' claim ' in claim['what']
                else f'slot release {state["walk"]} attempt {state.get("attempt", 1)}')
-        key += " reason " + claim["release_result"]
+        reason = re.sub(r' \(since [^()\n]+\); held [^\n]+', '', claim['release_result'])
+        key += ' reason ' + reason
         self.notify_once(key,
                          f'qa: slot release unconfirmed for {state["walk"]}',
                          f'Walk {state["walk"]}, attempt {state.get("attempt", 1)}: release unconfirmed.\n'
@@ -625,8 +634,10 @@ class Watch:
             listed = self.slot_call(claim, 'list')
             prefix = f"{claim['host']} {claim['slot']} ["
             rows = [row for row in listed.stdout.splitlines() if row.startswith(prefix)]
-            need(listed.returncode == 0 and len(rows) == 1,
-                 f'claim list exit {listed.returncode}: {listed.stderr.strip() or listed.stdout.strip()}', 4)
+            need(listed.returncode == 0,
+                 f'claim list exit {listed.returncode}: {listed.stderr.strip() or "unavailable"}', 4)
+            need(len(rows) == 1,
+                 f'claim list expected one row for {claim["host"]}-{claim["slot"]}; observed {len(rows)}', 4)
             if pending and re.fullmatch(re.escape(prefix) + r'[^]\r\n]+\]: free', rows[0]):
                 claim.update(released=True, release_status='released', release_result='claim list confirms free')
                 self.save(directory, state)
@@ -725,74 +736,77 @@ class Watch:
             rows = listed.stdout.splitlines()
             self.orphan_receipts(claim, rows)
             for row in rows:
-                match = re.fullmatch(pattern, row)
-                if not match or int(match[1]) not in numbers:
-                    continue
-                number, what, name = int(match[1]), match[2], match[3]
-                # Saved claim lifetimes are retried by release_slot, with their
-                # unit/login guards. The orphan sweep must not bypass those.
-                if any(a.get('slot_claim', {}).get('what') == what
-                       and a.get('slot') == number for _, s in walks
-                       for a in [s, *s.get('attempts', [])]):
-                    continue
-                key = f'orphan slot {claim["host"]} {number} {claim["owner"]} {what}'
-                path = self.directory / 'orphans' / (hashlib.sha256(key.encode()).hexdigest() + '.json')
-                no_links(self.workspace.tmp, path)
                 try:
-                    reason = self.orphan_live(name, walks)
-                    need(sum(r.startswith(f'{claim["host"]} {number} [') for r in rows) == 1,
-                         'ambiguous inventory rows', 4)
-                    since = datetime.fromisoformat(match[5].replace('Z', '+00:00'))
-                    need(since.tzinfo is not None, 'claim age lacks timezone', 4)
-                except (OSError, Problem, ValueError, UnicodeError) as error:
-                    reason = f'cannot establish idle claim: {error}'
-                if reason:
-                    path.unlink(missing_ok=True)
-                    log(f'{name}: orphan claim kept: {reason}')
-                    continue
-                try:
-                    observation = self.read_state(path)
-                    need(observation['key'] == key, 'invalid orphan observation', 4)
-                    first = utc(observation['since'])
-                except FileNotFoundError:
-                    observation = dict(key=key, since=timestamp(), released=False,
-                                       name=name, slot=number, what=what, host=claim['host'])
-                    first = utc(observation['since'])
+                    match = re.fullmatch(pattern, row)
+                    if not match or int(match[1]) not in numbers:
+                        continue
+                    number, what, name = int(match[1]), match[2], match[3]
+                    # Saved claim lifetimes are retried by release_slot, with their
+                    # unit/login guards. The orphan sweep must not bypass those.
+                    if any(a.get('slot_claim', {}).get('what') == what
+                           and a.get('slot') == number for _, s in walks
+                           for a in [s, *s.get('attempts', [])]):
+                        continue
+                    key = f'orphan slot {claim["host"]} {number} {claim["owner"]} {what}'
+                    path = self.directory / 'orphans' / (hashlib.sha256(key.encode()).hexdigest() + '.json')
+                    no_links(self.workspace.tmp, path)
+                    try:
+                        reason = self.orphan_live(name, walks)
+                        need(sum(r.startswith(f'{claim["host"]} {number} [') for r in rows) == 1,
+                             'ambiguous inventory rows', 4)
+                        since = datetime.fromisoformat(match[5].replace('Z', '+00:00'))
+                        need(since.tzinfo is not None, 'claim age lacks timezone', 4)
+                    except (OSError, Problem, ValueError, UnicodeError) as error:
+                        reason = f'cannot establish idle claim: {error}'
+                    if reason:
+                        path.unlink(missing_ok=True)
+                        log(f'{name}: orphan claim kept: {reason}')
+                        continue
+                    try:
+                        observation = self.read_state(path)
+                        need(observation['key'] == key, 'invalid orphan observation', 4)
+                        first = utc(observation['since'])
+                    except FileNotFoundError:
+                        observation = dict(key=key, since=timestamp(), released=False,
+                                           name=name, slot=number, what=what, host=claim['host'])
+                        first = utc(observation['since'])
+                        replace(path, (json.dumps(observation) + '\n').encode(), durable=True)
+                    if observation.get('released'):
+                        continue
+                    now = utc(timestamp())
+                    if (now - first).total_seconds() < 600 or (now - since).total_seconds() < 600:
+                        log(f'{name}: orphan claim kept: ten-minute idle grace')
+                        continue
+                    # Reobserve immediately before the atomic compare-and-release.
+                    again = self.slot_call(claim, 'list')
+                    need(again.returncode == 0 and sum(r.split('; held ', 1)[0] == row.split('; held ', 1)[0]
+                                 for r in again.stdout.splitlines()) == 1
+                         and sum(r.startswith(f'{claim["host"]} {number} [')
+                                 for r in again.stdout.splitlines()) == 1,
+                         'orphan inventory changed; keeping claim', 4)
+                    try:
+                        reason = self.orphan_live(name, walks)
+                    except (OSError, Problem, ValueError, UnicodeError) as error:
+                        reason = f'cannot establish idle claim: {error}'
+                    if reason:
+                        path.unlink(missing_ok=True)
+                        log(f'{name}: orphan claim kept: {reason}')
+                        continue
+                    observation['release_pending'] = True
                     replace(path, (json.dumps(observation) + '\n').encode(), durable=True)
-                if observation.get('released'):
-                    continue
-                now = utc(timestamp())
-                if (now - first).total_seconds() < 600 or (now - since).total_seconds() < 600:
-                    log(f'{name}: orphan claim kept: ten-minute idle grace')
-                    continue
-                # Reobserve immediately before the atomic compare-and-release.
-                again = self.slot_call(claim, 'list')
-                need(again.returncode == 0 and sum(r.split('; held ', 1)[0] == row.split('; held ', 1)[0]
-                             for r in again.stdout.splitlines()) == 1
-                     and sum(r.startswith(f'{claim["host"]} {number} [')
-                             for r in again.stdout.splitlines()) == 1,
-                     'orphan inventory changed; keeping claim', 4)
-                try:
-                    reason = self.orphan_live(name, walks)
-                except (OSError, Problem, ValueError, UnicodeError) as error:
-                    reason = f'cannot establish idle claim: {error}'
-                if reason:
-                    path.unlink(missing_ok=True)
-                    log(f'{name}: orphan claim kept: {reason}')
-                    continue
-                observation['release_pending'] = True
-                replace(path, (json.dumps(observation) + '\n').encode(), durable=True)
-                result = self.slot_call(claim, 'release', claim['host'], number, claim['owner'], '--what', what)
-                expected = f'{claim["host"]}-{number} released by {claim["owner"]}'
-                if result.returncode == 0 and result.stdout.strip() == expected:
-                    observation['released'] = True
-                    replace(path, (json.dumps(observation) + '\n').encode(), durable=True)
-                    self.orphan_notice(observation)
-                else:
-                    reason = f'exit {result.returncode}: {result.stderr.strip() or result.stdout.strip()}'
-                    log(f'{name}: orphan release failed: {reason}; trying next check')
-                    self.notify_once(key + ' reason ' + reason, f'qa: orphan release pending for {name}',
-                                     f'Claim {claim["host"]} {number}; WHAT: {what}. {reason}. Retrying.\n')
+                    result = self.slot_call(claim, 'release', claim['host'], number, claim['owner'], '--what', what)
+                    expected = f'{claim["host"]}-{number} released by {claim["owner"]}'
+                    if result.returncode == 0 and result.stdout.strip() == expected:
+                        observation['released'] = True
+                        replace(path, (json.dumps(observation) + '\n').encode(), durable=True)
+                        self.orphan_notice(observation)
+                    else:
+                        reason = f'exit {result.returncode}: {result.stderr.strip() or result.stdout.strip()}'
+                        log(f'{name}: orphan release failed: {reason}; trying next check')
+                        self.notify_once(key + ' reason ' + reason, f'qa: orphan release pending for {name}',
+                                         f'Claim {claim["host"]} {number}; WHAT: {what}. {reason}. Retrying.\n')
+                except (OSError, Problem, ValueError, UnicodeError, KeyError, TypeError, RecursionError) as error:
+                    log(f'orphan claim observation failed ({error}); claim left held')
         except (OSError, Problem, ValueError, UnicodeError, KeyError, TypeError):
             log('slot claim observation failed; claims left held')
 
@@ -808,7 +822,8 @@ class Watch:
             attempts[-1] = snapshot
         path = self.directory / 'walks' / (state['walk'] + '.json')
         replace(path, (json.dumps(state, indent=2) + '\n').encode(),
-                durable=state.get('slot_claim', {}).get('release_status') == 'release unconfirmed')
+                durable=bool(state.get('queue_id'))
+                or state.get('slot_claim', {}).get('release_status') == 'release unconfirmed')
         self.states[('walk', state['walk'])] = state
 
 
@@ -1244,7 +1259,7 @@ class Watch:
                     self.legacy_walks.append(state)
                     for attempt in [state, *state.get('attempts', [])]:
                         for login in attempt.get('logins', {}):
-                            self.legacy_claims.add((state['holder'], login))
+                            self.legacy_claims.add((attempt.get('holder', state['holder']), login))
                     continue
                 need(name == path.stem and re.fullmatch(r'rung-[a-z0-9][a-z0-9-]*-[1-9][0-9]*', name)
                      and state['repo'] in REPOSITORIES and name == 'rung-' + state['rung'] + '-' + state.get('clock_walk', name.rsplit('-', 1)[-1])
@@ -1390,6 +1405,16 @@ class Watch:
         no_links(self.workspace.tmp, path)
         replace(path, (json.dumps(entry, indent=2) + '\n').encode(), durable=True)
 
+    def drop_queue(self, identity):
+        path = self.directory / 'queue' / (identity + '.json')
+        no_links(self.workspace.tmp, path)
+        path.unlink()
+        descriptor = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
     def enqueue(self, args, reason):
         # A repeated resume request updates neither its place nor its inputs.
         entries = self.queue_entries()
@@ -1414,13 +1439,12 @@ class Watch:
             return
         attempted = set()
         for entry in entries:
-            path = self.directory / 'queue' / (entry['id'] + '.json')
             try:
                 walks = self.local_walks()
                 saved = [a for _, s in walks for a in [s, *s.get('attempts', [])]
                          if a.get('queue_id') == entry['id']]
                 if any(a.get('run') for a in saved):
-                    path.unlink()
+                    self.drop_queue(entry['id'])
                     continue
                 if entry['resume']:
                     state = next((s for _, s in walks if s['walk'] == entry['resume']), None)
@@ -1428,7 +1452,7 @@ class Watch:
                                          and not any(a['stage'] == 'starting' for a in saved)):
                         self.notify_once('queue dropped ' + entry['id'], 'qa: queued resume dropped',
                                          f'Queue {entry["id"]}: {entry["resume"]} is no longer paused.\n')
-                        path.unlink()
+                        self.drop_queue(entry['id'])
                         continue
                 if entry['kind'] in attempted:
                     continue
@@ -1439,7 +1463,7 @@ class Watch:
                 status = start_walk(args, self.workspace, self, entry)
                 attempted.add(entry['kind'])
                 if status == 0:
-                    path.unlink()
+                    self.drop_queue(entry['id'])
                 else:
                     entry['reason'] = 'launch outcome is still unknown; admission waits for the watcher'
                     self.save_queue(entry)
@@ -1451,8 +1475,11 @@ class Watch:
                 attempted.add(entry['kind'])
                 entry['reason'] = str(error)
                 self.save_queue(entry)
-                self.notify_once('queue ' + entry['id'] + ' reason ' + str(error),
-                                 'qa: queued walk refused', f'Queue {entry["id"]}: {error}. Kept queued.\n')
+                try:
+                    self.notify_once('queue ' + entry['id'] + ' reason ' + str(error),
+                                     'qa: queued walk refused', f'Queue {entry["id"]}: {error}. Kept queued.\n')
+                except (OSError, Problem, ValueError, UnicodeError):
+                    log(f'queue {entry["id"]}: cannot save refusal notice; entry kept')
 
     def admission_ready(self, walks):
         for _, state in walks:
@@ -1781,7 +1808,7 @@ def queue(args, workspace):
         entries = service.queue_entries()
         if args.queue_action == 'cancel':
             need(any(e['id'] == args.id for e in entries), 'unknown queue ID: ' + args.id)
-            (service.directory / 'queue' / (args.id + '.json')).unlink()
+            service.drop_queue(args.id)
             print('cancelled ' + args.id)
         else:
             print('id\tkind\trung\tresume\tafter\tsince\tlast reason')
@@ -1838,6 +1865,8 @@ def start_walk(args, workspace, service=None, entry=None):
             need(state['stage'] == 'paused' and state.get('released') and state.get('end_logged')
                  and state.get('posted') and not service.outstanding(state), 'walk pause is not complete')
             kind = state.get('kind', next(iter(kinds)))
+            need(not entry or (kind == entry['kind'] and state['requests'] == entry['login']),
+                 'queued resume kind or pools changed')
             need(kind in kinds and set(state['requests']) <= set(kinds[kind]['pools']),
                  'saved walk kind or pools are no longer configured')
             args.queue_kind, args.queue_login = kind, state['requests']

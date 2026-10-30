@@ -533,7 +533,7 @@ class Lab:
             self.git(checkout, 'remote', 'add', 'origin', str(self.origins / 'fabrig.git'))
         self.slots = self.home / 'src/fabrig/slots'
         self.slots.mkdir(parents=True)
-        for number in range(1, 8):
+        for number in range(1, 5):
             shutil.copytree(checkout, self.slots / str(number))
 
 
@@ -3320,6 +3320,7 @@ def a_resume_recovers_its_thread_from_events(lab):
 
 
 def walk_kind_settings_are_validated_and_follow_precedence(lab):
+    shutil.copytree(lab.products['fabrig'], lab.slots / '5')
     invalid = ('', 'Forgejo=2:chatgpt', 'forge-jo=2:chatgpt', 'forgejo=0:chatgpt',
                'forgejo=2:chatgpt-2', 'forgejo=2:chatgpt,chatgpt',
                'forgejo=1:chatgpt forgejo=1:claude', 'forgejo=1:', 'forgejo=1:chatgpt\nclaude=1:claude')
@@ -4245,6 +4246,9 @@ def release_preflight_mismatch_alerts_each_reason_and_keeps_successors(lab):
     lab.watch()
     assert not [c for c in lab.calls('claim') if c[0] == 'release']
     assert len([m for m in lab.sent() if 'slot release unconfirmed' in m['args'][2]]) == 3
+    lab.configure(claim_list_lines=['hetzner6 1 [s/qa]: s/qa: different WHAT (since 2026-10-29T00:00:00+00:00); held 1d 00:00:00'])
+    lab.watch()
+    assert len([m for m in lab.sent() if 'slot release unconfirmed' in m['args'][2]]) == 3
     assert slot_claims(lab)
 
 
@@ -4937,7 +4941,97 @@ tool['Watch'].call = call
     assert lab.walk_states()[-1][1]['stage'] == 'running'
 
 
+def the_watcher_selects_the_oldest_ready_entry_once_per_kind(lab):
+    stamp = '2026-10-30T00:00:00Z'
+    lab.walk('first', now=stamp)
+    lab.walk('second', now=stamp)
+    originals = lab.walk_states()
+    lab.walk('blocked', '--after', 'a' * 40, now=stamp)
+    lab.walk('ready-one', now=stamp)
+    lab.walk('ready-two', now=stamp)
+    entries = sorted(queued_entries(lab), key=lambda e: e['order'])
+    assert [e['rung'] for e in entries] == ['blocked', 'ready-one', 'ready-two']
+    for _, state in originals:
+        lab.end_run(state)
+    lab.watch(now='2026-10-30T00:00:01Z')
+    assert {e['rung'] for e in queued_entries(lab)} == {'blocked', 'ready-two'}
+    assert len(lab.calls('codex-run')) == 3
+    assert any(s['rung'] == 'ready-one' and s['stage'] == 'running' for _, s in lab.walk_states())
+    # There is still a free slot, but each check starts only one per kind.
+    lab.watch(now='2026-10-30T00:00:02Z')
+    assert [e['rung'] for e in queued_entries(lab)] == ['blocked']
+    assert len(lab.calls('codex-run')) == 4
+
+
+def a_busy_inventory_slot_is_queued_and_runs_when_freed(lab):
+    lab.env['QA_WALK_SLOTS'] = 'forgejo=1'
+    hold_slot(lab, 1, owner='ops')
+    lab.walk()
+    entry, = queued_entries(lab)
+    assert 'slot hetzner6 1 is busy' in entry['reason']
+    assert not lab.calls('codex-run') and not lab.calls('cargo')
+    lab.watch()
+    assert queued_entries(lab) and slot_claims(lab)['1']['owner'] == 'ops'
+    # Fake the external owner's release, without invoking a real service.
+    path = lab.root / 'claims.json'
+    temporary = path.with_suffix('.new')
+    temporary.write_text('{}')
+    temporary.replace(path)
+    lab.watch()
+    assert not queued_entries(lab) and len(lab.calls('codex-run')) == 1
+    assert lab.walk_states()[-1][1]['slot_claim']['owner'] == 's/qa'
+
+
+def orphan_release_and_its_notice_survive_an_interrupted_save(lab):
+    what = 'qa walk rung-orphan-1 attempt 1 claim ' + 'b' * 32
+    hold_slot(lab, 1, what=what)
+    lab.watch(now='2026-10-30T00:00:00Z')
+    driven_watch(lab, '''import os
+original = tool['Watch'].slot_call
+def slot_call(self, claim, *args):
+    result = original(self, claim, *args)
+    if args[0] == 'release':
+        os._exit(77)
+    return result
+tool['Watch'].slot_call = slot_call
+''', status=77, now='2026-10-30T00:10:00Z')
+    assert not slot_claims(lab) and not lab.sent()
+    lab.watch(now='2026-10-30T00:10:01Z', extra={'QA_POST_STATUS': '2'})
+    lab.watch(now='2026-10-30T00:10:02Z', extra={'QA_POST_STATUS': '3'})
+    lab.watch(now='2026-10-30T00:10:03Z')
+    notices = [m for m in lab.sent() if 'orphan slot released' in m['args'][2]]
+    assert len(notices) == 2 and all(what in m['body'] for m in notices)
+    assert len([c for c in lab.calls('claim') if c[0] == 'release']) == 1
+
+
+def a_damaged_queue_keeps_custody_cleanup_running(lab):
+    lab.walk()
+    _, state = lab.walk_state()
+    lab.walk('waiting', '--after', 'a' * 40)
+    entry, = queued_entries(lab)
+    path = lab.tmp / 'qa/queue' / (entry['id'] + '.json')
+    outside = lab.root / 'queue-target'
+    path.rename(outside)
+    path.symlink_to(outside)
+    original = outside.read_bytes()
+    lab.run('queue', status=4)
+    attention = lab.tmp / 'qa/attention' / ('a' * 64 + '.json')
+    attention.parent.mkdir(parents=True, exist_ok=True)
+    attention.write_text('[]')
+    lab.end_run(state)
+    result = lab.watch()
+    assert 'cannot read walk queue' in result.stdout
+    assert 'cannot retry notice' in result.stdout
+    assert outside.read_bytes() == original
+    assert lab.walk_state()[1]['stage'] == 'ended' and not slot_claims(lab)
+    assert len(lab.calls('codex-run')) == 1
+
+
 CASES = (
+    the_watcher_selects_the_oldest_ready_entry_once_per_kind,
+    a_busy_inventory_slot_is_queued_and_runs_when_freed,
+    orphan_release_and_its_notice_survive_an_interrupted_save,
+    a_damaged_queue_keeps_custody_cleanup_running,
     a_busy_slot_start_is_queued_then_started,
     an_after_resume_builds_main_only_after_every_commit_lands,
     a_watcher_refusal_keeps_the_queue_and_posts_each_reason_once,

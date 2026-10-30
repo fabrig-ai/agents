@@ -261,8 +261,9 @@ release, or an `--after` dependency saves a queue entry and prints
 `queued ID` (a resume prints its walk name), exit zero. Other invalid input
 or preparation errors still refuse. Queue entries in `tmp/qa/queue/` retain
 a random ID, repository, rung, kind, requested pools, REF, cap, dependencies,
-starter address, enqueue time, monotonic queue order and last reason. Queue writes and cancellation
-share the walks lock and use durable sibling writes and rename.
+starter address, enqueue time, monotonic queue order and last reason. Queue
+writes and cancellation share the walks lock. Writes use durable siblings
+and rename; cancellation fsyncs the queue directory after removing its entry.
 `qa queue` lists ID, kind, rung, resume name, after, since and last reason;
 `qa queue cancel ID` removes an entry without touching any walk.
 
@@ -472,7 +473,8 @@ test keeps systemd programs on PATH with no executable override.
 Run `python3 -I -B tools/qa/test_qa.py`. Every unittest case runs in its own
 process, session and temporary HOME/DEV_ROOT with local git origins, fake
 services, fake local and remote claims, fake disk observations, slot clones
-under the temporary HOME and fixture launcher observations; descendants are
+under the temporary HOME, an empty Git template independent of host hooks,
+and fixture launcher observations; descendants are
 killed and reaped. Fixture drivers cap sleeps during fake stop confirmation
 at 10 ms while retaining real monotonic deadlines and all unit/export completion
 assertions; installed polling remains two seconds. Successful-stop cases wait
