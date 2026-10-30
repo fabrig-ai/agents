@@ -84,3 +84,22 @@ Enforcement and budgets remain unchanged. Periodic remains paused at ed5c048;
 the coordinator will re-enable AGENTS_PERIODIC on h3 after landing. This branch
 requires no machine action before review and is pushed without landing.
 Validation and actual auto-host dry-run timing are in the gate-fix-1 task report.
+
+
+## 6. Follow-up repair, gate-fix-1b
+
+Unit rendering coverage derives the enabled host set from the current
+AGENTS_PERIODIC declarations and exercises a separately flagged fixture host;
+main's entirely paused host list passes. The fleet selector now includes all
+landing fixture files, disk admission and periodic coverage; a smoke regression
+checks fleet host/unit selection against declaration readers in both tiers.
+
+Local bundle scratch has a durable identity and exact local_dir in the claim
+record before remote dispatch. Known failures/successes remove it; unknown ends
+retain it until reconciliation proves restoration. Failed-gate, interrupted and
+dropped-upload/wait fixtures assert local removal or retention as appropriate.
+Builder allocation recovery distinguishes local scratch when fake SSH shares a
+filesystem. Two prepare-only allocations from failed fixture development were
+verified to lack any launch/upload artifacts, recorded and removed on hel8.
+No periodic flag or budget change is included; this remains an append-only
+review branch. The gate-fix-1b report records final checks and auto-host timing.

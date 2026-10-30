@@ -21,7 +21,9 @@
 
 `tools/check.sh [--tier gate|periodic] [--changed BASE] [FILES ...]` defaults
  to gate, excluding `test_*_periodic.py`; periodic selects only those files.
-Explicit files override tier discovery. Changed selection uses
+Explicit files override tier discovery. Fleet changes also select the landing,
+disk-admission and periodic fixtures that read host/unit declarations; smoke
+checks guard coverage of those declaration readers in both tiers. Changed selection uses
 `git diff --name-only BASE...HEAD` and the glob map, plus the always-run smoke
 set. Docs and Markdown select smoke; unmapped tools select their directory's
 files (all files if empty); other unknown paths select every gate file.
@@ -63,6 +65,15 @@ Hel8's SSH target comes from `fleet/hosts.toml`. Atomic claim admission is
 still authoritative if that list races. Claims use owner `s/deploy-gate` and
 a unique `agents-gate <sha> <token>` description. There is no owner-only
 release or stale-claim stealing.
+
+Lander-side bundle scratch uses `/tmp/agents-gate.<token>.local.<random>`
+with a matching private identity. Its exact `local_dir` is durably recorded
+before remote preparation or upload. Known ends remove both builder and local
+scratch, including red gates and bundle failures. Unknown ends keep the local
+directory, claim and record; reconciliation removes local scratch only after
+remote termination/restoration proof, validating the saved path and identity.
+An interrupted local allocation has a durable intent and a token-scoped
+recovery prefix. Builder allocation recovery excludes this local namespace.
 
 A builder receives a full bundle of that pinned SHA in a private temporary
 directory. A temporary local ref pins bundle construction, the builder checks
