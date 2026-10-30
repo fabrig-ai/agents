@@ -8,10 +8,13 @@ takes it as it takes a red landing.
 
 from __future__ import annotations
 
+import fcntl
+import tempfile
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from fab import digest, log, run as runs
 from fab.digest import SIZE_CAP, Digest
 from fab.plan import Task
 from fab.sh import Runner, run
@@ -143,4 +146,38 @@ def screen(task: Task, events: Iterable[dict], *, sh: Runner = run,
     digest written. Any findings: log branch.rejected (task, branch, tip, step
     `gate:<the first finding's gate>`, log the digest's path or "" without one, findings
     findings_text(findings)). The task's status becomes rejected and decide starts a repair."""
-    raise NotImplementedError
+    started = next((event for event in reversed(list(events))
+                    if event.get("ev") == "run.started" and event.get("task") == task.id), None)
+    if started is None:
+        raise ValueError(f"{task.id}: no run.started")
+    branch, run_id = started["branch"], started["run"]
+    home = log.home()
+    home.mkdir(parents=True, exist_ok=True)
+    repo = home / "repos" / task.repo
+    written = ""
+    with open(home / "land-agents.lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if not (repo / ".git").exists():
+            repo.parent.mkdir(parents=True, exist_ok=True)
+            sh(["git", "clone", runs.REMOTES[task.repo], str(repo)], check=True)
+        sh(["git", "fetch", "origin", "--prune"], cwd=str(repo), check=True)
+        tip = sh(["git", "rev-parse", "--verify", f"refs/remotes/origin/{branch}^{{commit}}"],
+                 cwd=str(repo), check=True).out.strip()
+        base = sh(["git", "merge-base", "refs/remotes/origin/main", tip],
+                  cwd=str(repo), check=True).out.strip()
+        changed = digest.changes(repo, base, tip, sh=sh)
+        with tempfile.TemporaryDirectory(dir=home) as directory:
+            before = digest.archive(repo, base, Path(directory) / "base", sh=sh)
+            after = digest.archive(repo, tip, Path(directory) / "tip", sh=sh)
+            try:
+                summary = digest.build(task, run_id, branch, base, tip, changed, before, after)
+            except SyntaxError as error:
+                findings = [Finding(PARSE, f"`{error.filename}:{error.lineno}` {error.msg}")]
+            else:
+                written = str(home / "digests" / f"{run_id}.md")
+                runs._write(Path(written), digest.render(summary))
+                findings = check(summary, banned_names(runs.TASTE.read_text(encoding="utf-8")))
+    if findings:
+        log.append("branch.rejected", path=log_path, task=task.id, branch=branch, tip=tip,
+                   step=f"gate:{findings[0].gate}", log=written, findings=findings_text(findings))
+    return findings

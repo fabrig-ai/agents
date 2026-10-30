@@ -1,13 +1,18 @@
+import fcntl
+import shutil
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
+from fab import gates, log, run as runs, state
 from fab.calls import Signature
 from fab.digest import Clone, Digest, Function
 from fab.gates import Finding, banned_names, check, findings_text, words
 from fab.plan import Task
 from fab.run import brief
-from fab.tests.support import tmp_home
+from fab.sh import Failed, Result, run
+from fab.tests.support import FakeRunner, git, git_pair, tmp_home
 
 
 CLEAN = Digest("draft/task-1", "draft/task", "feature", "draft/task", "a" * 40, "b" * 40,
@@ -154,3 +159,130 @@ class FindingsTextTest(unittest.TestCase):
                        rejection={"step": "gate:files", "log": "/digest.md", "text": text})
         quoted = result.split("```text\n", 1)[1].split("\n```", 1)[0]
         self.assertEqual(quoted + "\n", text)
+
+
+class ScreenTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        root = cls.enterClassContext(tmp_home())
+        cls.fixture_origin, cls.fixture_repo = git_pair(root)
+        runs._write(cls.fixture_repo / "fab/x.py", 'def x():\n    """Return a count."""\n    return 1\n')
+        git(cls.fixture_repo, "add", "fab/x.py")
+        git(cls.fixture_repo, "commit", "-q", "-m", "Add package")
+        git(cls.fixture_repo, "push", "-q", "origin", "HEAD:main")
+        cls.base = git(cls.fixture_repo, "rev-parse", "HEAD")
+
+    def setUp(self):
+        self.home = self.enterContext(tmp_home())
+        self.origin, self.branch_repo = self.home / "origin.git", self.home / "clone"
+        shutil.copytree(self.fixture_origin, self.origin)
+        shutil.copytree(self.fixture_repo, self.branch_repo)
+        git(self.branch_repo, "remote", "set-url", "origin", str(self.origin))
+        self.repo = log.home() / "repos" / "agents"
+        shutil.copytree(self.branch_repo, self.repo)
+        git(self.branch_repo, "checkout", "-qb", "draft/task-r1")
+        self.task = Task("draft/task", "part", "feature", "agents", (), ("fab/x.py",),
+                         "high", 20, "Implement x.", "task.md")
+        self.events = [dict(ev="run.started", task=self.task.id, run="draft/task-1",
+                            branch="draft/missing"),
+                       dict(ev="run.started", task=self.task.id, run="draft/task-2",
+                            branch="draft/task-r1"),
+                       dict(ev="run.started", task="draft/other", run="draft/other-1",
+                            branch="draft/other")]
+        self.path = self.home / "events.jsonl"
+        self.digest = log.home() / "digests" / "draft/task-2.md"
+
+    def push(self, path="fab/x.py", text='def x():\n    """Return a count."""\n    return 2\n'):
+        runs._write(self.branch_repo / path, text)
+        git(self.branch_repo, "add", path)
+        git(self.branch_repo, "commit", "-q", "-m", "Change task file")
+        git(self.branch_repo, "push", "-q", "origin", "HEAD")
+        return git(self.branch_repo, "rev-parse", "HEAD")
+
+    def test_clean_branch_writes_digest_without_logging_or_changing_checkout(self):
+        tip = self.push()
+        self.assertEqual(gates.screen(self.task, iter(self.events), log_path=self.path), [])
+        rendered = self.digest.read_text()
+        self.assertIn("# Digest: draft/task-2\n", rendered)
+        self.assertIn(f"Base: `{self.base[:12]}`; tip: `{tip[:12]}`", rendered)
+        self.assertIn("`fab/x.py` production +1 -1", rendered)
+        self.assertEqual(log.read(self.path), [])
+        self.assertEqual(log.read(), [])
+        self.assertEqual(git(self.repo, "rev-parse", "HEAD"), self.base)
+        self.assertEqual(sorted(p.name for p in log.home().iterdir()),
+                         ["digests", "land-agents.lock", "repos"])
+
+    def test_outside_files_rejects_after_releasing_lock_with_digest_and_findings(self):
+        tip = self.push("extra.md", "Outside the task.\n")
+        append = log.append
+
+        def rejected(ev, **fields):
+            with open(log.home() / "land-agents.lock", "a") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return append(ev, **fields)
+
+        def locked_git(argv, **kwargs):
+            self.assertTrue(kwargs["check"])
+            with open(log.home() / "land-agents.lock", "a") as lock:
+                with self.assertRaises(BlockingIOError):
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return run(argv, **kwargs)
+
+        with patch("fab.log.append", side_effect=rejected):
+            findings = gates.screen(self.task, self.events, sh=locked_git, log_path=self.path)
+        self.assertEqual(findings, [Finding("files", "`extra.md` is outside the task's files")])
+        records = log.read(self.path)
+        self.assertEqual(len(records), 1)
+        self.assertEqual({key: value for key, value in records[0].items() if key != "ts"},
+                         dict(ev="branch.rejected", task=self.task.id, branch="draft/task-r1",
+                              tip=tip, step="gate:files", log=str(self.digest),
+                              findings=findings_text(findings)))
+        self.assertTrue(self.digest.is_file())
+        self.assertEqual(log.read(), [])
+        self.assertEqual(state.fold({self.task.id: self.task}, self.events + records)[self.task.id].status,
+                         "rejected")
+
+    def test_parse_failure_rejects_without_digest(self):
+        tip = self.push(text="def x(:\n")
+        findings = gates.screen(self.task, self.events, log_path=self.path)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].gate, "parse")
+        self.assertIn("/tip/fab/x.py:1` invalid syntax", findings[0].text)
+        record, = log.read(self.path)
+        self.assertEqual((record["step"], record["log"], record["tip"]), ("gate:parse", "", tip))
+        self.assertEqual(record["findings"], findings_text(findings))
+        self.assertFalse(self.digest.exists())
+        self.assertEqual(sorted(p.name for p in log.home().iterdir()), ["land-agents.lock", "repos"])
+
+    def test_no_task_run_raises_before_commands_or_files(self):
+        fake = FakeRunner()
+        with self.assertRaisesRegex(ValueError, self.task.id):
+            gates.screen(self.task, self.events[-1:], sh=fake, log_path=self.path)
+        self.assertEqual(fake.calls, [])
+        self.assertFalse((log.home() / "land-agents.lock").exists())
+        self.assertEqual(log.read(self.path), [])
+
+    def test_missing_origin_branch_raises_without_digest_or_log(self):
+        with self.assertRaises(Failed):
+            gates.screen(self.task, self.events, log_path=self.path)
+        self.assertFalse(self.digest.exists())
+        self.assertEqual(log.read(self.path), [])
+        self.assertEqual(log.read(), [])
+
+    def test_missing_clone_uses_repository_remote(self):
+        self.push()
+        shutil.rmtree(self.repo)
+        with patch.dict(runs.REMOTES, agents=str(self.origin)):
+            self.assertEqual(gates.screen(self.task, self.events, log_path=self.path), [])
+        self.assertEqual(git(self.repo, "remote", "get-url", "origin"), str(self.origin))
+        self.assertTrue(self.digest.is_file())
+
+    def test_git_failure_never_writes_digest_or_rejection(self):
+        for command in ("fetch", "rev-parse", "merge-base", "diff", "archive"):
+            with self.subTest(command=command):
+                fake = FakeRunner().on(["git", command], Result(1, err="git failed"))
+                with self.assertRaises(Failed):
+                    gates.screen(self.task, self.events, sh=fake, log_path=self.path)
+                self.assertFalse(self.digest.exists())
+                self.assertEqual(log.read(self.path), [])
+                self.assertFalse(any(p.name.startswith("tmp") for p in log.home().iterdir()))
