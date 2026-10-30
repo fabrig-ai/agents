@@ -74,17 +74,24 @@ needs = ["slots"]
 design = "docs/design/fab.md, 7"
 
 [[part]]
+id = "gate"
+title = "fabrig's selection and check steps, shared by the queue and precheck"
+mode = "migration"
+needs = ["package"]
+design = "docs/design/fab.md, 6"
+
+[[part]]
 id = "queue"
 title = "fabrig's merge queue, ported from tools/queue/mq's core"
 mode = "migration"
-needs = ["files", "heavy"]
+needs = ["files", "gate"]
 design = "docs/design/fab.md, 6"
 
 [[part]]
 id = "precheck"
 title = "Precheck in the implementer's slot, with the queue's selection"
 mode = "migration"
-needs = ["queue"]
+needs = ["gate"]
 design = "docs/design/fab.md, 6"
 
 [[part]]
@@ -158,7 +165,7 @@ walk = true
 [[slice]]
 id = 2
 story = "A fabrig branch lands through fab's queue; a build short of disk waits and resumes while idle slots are reclaimed"
-parts = ["slot-contract", "slot-probe", "slots", "heavy", "queue", "precheck", "cutover-landing"]
+parts = ["slot-contract", "slot-probe", "slots", "heavy", "gate", "queue", "precheck", "cutover-landing"]
 walk = true
 
 [[slice]]

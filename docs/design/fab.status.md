@@ -11,7 +11,9 @@
 - **The event log** (`fab/log.py`) and the machines (`fab/hosts.py`,
   `fab/hosts.toml`, `fab hosts check`).
 - **Skeletons, bodies to fill:** `fab/plan.py`, `fab/state.py` (task
-  `files`), `fab/land.py` (task `land`), `fab/run.py` (task `run`).
+  `files`), `fab/land.py` (task `land`), `fab/run.py` (task `run`);
+  `fab/slots.py`, `fab/heavy.py` with `bin/heavy`, `fab/gate.py`,
+  `fab/queue.py`, `fab/precheck.py` (tasks of the same names, slice 2).
 
 ## Gaps and departures
 

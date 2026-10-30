@@ -127,12 +127,19 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
   It rebases onto main, runs `bin/fab test`, pushes main fast-forward only,
   deletes the branch and logs `branch.landed`. A conflict or a red logs
   `branch.rejected`.
-- **fabrig:** its merge queue, ported from `tools/queue/mq`'s core: ready refs
-  oldest first, a batch merged on main, the selected checks through `heavy`,
-  bisection of a red batch, a push that expects main's parent, ready and task
-  branches deleted. The port drops train, worker and recovery, and the
-  publication journal (section 9). Precheck keeps its check: the tip merged
-  with main, the queue's own selection, in the implementer's slot.
+- **fabrig:** its merge queue (`fab/queue.py` on hetzner8), ported from
+  `tools/queue/mq`'s core: ready refs oldest first, a batch merged on main,
+  the selected checks through `heavy --gate`, bisection of a red batch, a push
+  that expects main's parent, ready and task branches deleted. Its record is
+  `FAB_HOME/queue.jsonl` there (`batch`, `landed`, `rejected`), which the
+  dispatcher reads; the tips it has tried are its only other state. The port
+  drops train, worker and recovery, and the publication journal (section 9).
+- **The selection and the steps are shared** (`fab/gate.py`): the queue runs
+  them in the gate lane on the batch, precheck in the build lane on the tip
+  merged with main, in the implementer's slot. Precheck writes its receipt to
+  `FAB_HOME/precheck/<tip>.json` on the builder. The gate's lists
+  (`always.txt`, `read-by-tests.txt`) move with the cutover from fabrig's
+  `tools/queue/` to its `.config/gate/`.
 
 ## 7. Slots and disk
 
@@ -160,6 +167,11 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
   released first; first their incremental data and stale executables, then
   the whole target (kache refills it). A claimed slot is touched only by its
   own run's sweep.
+- **Lanes are flocks:** the build lane is `builds` lock files, the gate lane
+  one; a holder that dies frees its place, so heavy needs no ledger or
+  reconciler. The command runs in a systemd user scope with its lane's CPU
+  weight (gate 10000, build 1000). Each command appends its lane and disk
+  waits to `FAB_HOME/heavy.jsonl` on its machine, the metrics' source.
 - **One floor:** the headroom. The current tools' separate floors (45, 40 and
   80 GB) go when `heavy` moves here.
 

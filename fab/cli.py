@@ -12,6 +12,9 @@ COMMANDS = {
     "land": ("fab.land", "land a branch of this repository"),
     "run": ("fab.run", "start, inspect and collect Codex runs"),
     "hosts": ("fab.hosts", "the machines and their disk budget"),
+    "slot": ("fab.slots", "a builder's slots: claim, release, reclaim"),
+    "queue": ("fab.queue", "fabrig's merge queue"),
+    "precheck": ("fab.precheck", "the queue's checks on a branch, in its slot"),
 }
 
 
