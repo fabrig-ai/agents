@@ -299,6 +299,7 @@ def settings(workspace, cleanup=False):
     # Same precedence and valid machine.env lines as kit.sh's machine_setting.
     values = dict(QA_INTERVAL_SECONDS='300', QA_GIVE_BACK_SECONDS='90', QA_STOP_SECONDS='50',
                   QA_WALK_KINDS='forgejo=2:chatgpt claude=2:claude',
+                  QA_WALK_SCRATCH_BYTES='2000000000', QA_SCRATCH_BUDGET_BYTES='48000000000',
                   QA_EVIDENCE_KIB='2048', QA_EVIDENCE_SECONDS='120', QA_EVIDENCE_REMOTE='', QA_EVIDENCE_BRANCH='evidence',
                   QA_STUCK_TO='', QA_WALK_SLOTS='', QA_SLOT_HOST='hetzner6', QA_CLAIM_OWNER='s/qa', QA_CLAIM_SSH='free@204.168.210.29')
     path = workspace.tmp / 'machine.env'
@@ -307,7 +308,7 @@ def settings(workspace, cleanup=False):
     except OSError:
         text = ''  # An absent machine file supplies no settings.
     for line in text.split('\n'):
-        match = re.fullmatch(r'(QA_INTERVAL_SECONDS|QA_GIVE_BACK_SECONDS|QA_STOP_SECONDS|QA_EVIDENCE_KIB|QA_EVIDENCE_SECONDS)=([0-9]+)', line)
+        match = re.fullmatch(r'(QA_INTERVAL_SECONDS|QA_GIVE_BACK_SECONDS|QA_STOP_SECONDS|QA_WALK_SCRATCH_BYTES|QA_SCRATCH_BUDGET_BYTES|QA_EVIDENCE_KIB|QA_EVIDENCE_SECONDS)=([0-9]+)', line)
         if match:
             values[match[1]] = match[2]
         key, sep, value = line.partition('=')
@@ -317,7 +318,7 @@ def settings(workspace, cleanup=False):
     text_values = {key: os.environ.get(key, values.pop(key)) for key in
                    ('QA_WALK_SLOTS', 'QA_SLOT_HOST', 'QA_CLAIM_OWNER', 'QA_CLAIM_SSH', 'QA_STUCK_TO', 'QA_EVIDENCE_REMOTE', 'QA_EVIDENCE_BRANCH')}
     errors = []
-    preservation_keys = ('QA_EVIDENCE_KIB', 'QA_EVIDENCE_SECONDS')
+    preservation_keys = ('QA_WALK_SCRATCH_BYTES', 'QA_SCRATCH_BUDGET_BYTES', 'QA_EVIDENCE_KIB', 'QA_EVIDENCE_SECONDS')
     def configured(ok, why):
         if not ok and cleanup:
             errors.append(why)
@@ -869,7 +870,7 @@ class Watch:
             attempts[-1] = snapshot
         path = self.directory / 'walks' / (state['walk'] + '.json')
         replace(path, (json.dumps(state, indent=2) + '\n').encode(),
-                durable=bool(state.get('queue_id')) or 'pinned' in state
+                durable=bool(state.get('queue_id')) or 'pinned' in state or 'scratch_bytes' in state
                 or state.get('slot_claim', {}).get('release_status') == 'release unconfirmed')
         self.states[('walk', state['walk'])] = state
 
@@ -1320,6 +1321,8 @@ class Watch:
                 need('kind' not in state or isinstance(state['kind'], str)
                      and re.fullmatch(r'[a-z][a-z0-9]*', state['kind']), 'invalid saved walk kind', 4)
                 need('pinned' not in state or type(state['pinned']) is bool, 'invalid pin', 4)
+                need('scratch_bytes' not in state or type(state['scratch_bytes']) is int
+                     and state['scratch_bytes'] > 0, 'invalid scratch reservation', 4)
                 walk_attempt(state)
                 if 'attempts' in state or 'attempt' in state:
                     need(type(state['attempt']) is int and state['attempt'] >= 1
@@ -2018,6 +2021,23 @@ class Watch:
         self.notify_once('pruned ' + state['walk'], 'qa: walk scratch pruned',
                          f'Walk {state["walk"]}: scratch pruned after seven days; evidence {saved["status"]}.\n')
 
+    def scratch_room(self, walks, resume=None):
+        total = 0
+        for directory, state in walks:
+            active = state['stage'] not in ('ended', 'paused') or not state.get('released')
+            if active:
+                total += state.get('scratch_bytes', self.options['QA_WALK_SCRATCH_BYTES'])
+            if not active or state.get('pinned'):
+                total += evidence['directory_bytes'](directory)
+        if resume:
+            directory, previous = next((d, s) for d, s in walks if s['walk'] == resume)
+            if not previous.get('pinned'):
+                total -= evidence['directory_bytes'](directory)
+        reserve = self.options['QA_WALK_SCRATCH_BYTES']
+        defer(total + reserve <= self.options['QA_SCRATCH_BUDGET_BYTES'],
+              f'scratch budget: {total} bytes used + {reserve} reserved exceeds '
+              f'{self.options["QA_SCRATCH_BUDGET_BYTES"]} bytes')
+
     def check(self, options):
         log('checking')
         self.options = options
@@ -2293,6 +2313,7 @@ def start_walk(args, workspace, service=None, entry=None):
             defer(not state.get('slot_claim') or state['slot_claim']['released'], 'slot claim release is still pending')
             state['kind'] = kind
             need(kinds[kind]['numbers'], f'no walk slots configured for kind {kind}', 1)
+            service.scratch_room(walks, name)
             service.walk_room(state['requests'], kind)
             service.claims(walks)
             saved_slot = next((a['slot'] for a in [state, *reversed(state.get('attempts', []))]
@@ -2321,6 +2342,7 @@ def start_walk(args, workspace, service=None, entry=None):
             need(kinds[kind]['numbers'], f'no walk slots configured for kind {kind}', 1)
             args.queue_kind, args.queue_login = kind, requests
             args.queue_starter = entry['starter'] if entry else starter + '@' + workspace.machine()
+            service.scratch_room(walks)
             holders = service.walk_room(requests, kind)
             service.claims(walks)
             slot_number = service.free_slot(walks, kind)
@@ -2349,6 +2371,7 @@ def start_walk(args, workspace, service=None, entry=None):
                          slot=None, holder='walk/' + kind + '/' + name, logins={}, kinds={}, pools={}, run='',
                          stage='reserving', requests=requests, given=[], released=False, run_recorded=[],
                          start_logged=False, end_logged=False, posted=False, report_attempt=1)
+        state['scratch_bytes'] = options['QA_WALK_SCRATCH_BYTES']
         if entry:
             state['queue_id'] = entry['id']
         else:

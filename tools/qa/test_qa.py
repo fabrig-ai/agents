@@ -5379,6 +5379,26 @@ def evidence_prune_preserves_pauses_and_pending_publication(lab):
     assert other_dir.exists() and lab.walk_states()[1][1]['slot_claim']['released']
 
 
+def scratch_bytes_queue_counts_reservations_and_retained_data(lab):
+    lab.env.update(QA_WALK_SCRATCH_BYTES='1000', QA_SCRATCH_BUDGET_BYTES='2500')
+    lab.walk()
+    first, state = lab.walk_state()
+    lab.walk('b1')
+    assert len(lab.walk_states()) == 2
+    # A different kind has slots/logins available but the byte budget is exhausted.
+    lab.walk('b2', '--kind', 'claude')
+    entries = json.loads(lab.run('queue', '--json').stdout)
+    assert len(entries) == 1 and 'scratch budget' in entries[0]['reason']
+    assert len(lab.walk_states()) == 2
+    # Active walks reserve bytes; ended/paused/pinned scratch is measured instead.
+    lab.end_run(state)
+    lab.watch()
+    assert len(lab.walk_states()) == 2  # retained generated files exceed tiny budget
+    shutil.rmtree(first)
+    lab.watch()
+    assert len(lab.walk_states()) == 3 and json.loads(lab.run('queue', '--json').stdout) == []
+
+
 def evidence_snapshot_never_opens_credentials_or_unsafe_entries(lab):
     from unittest.mock import patch
     module = runpy.run_path(str(KIT / 'evidence.py'))
@@ -5556,6 +5576,29 @@ def evidence_invalid_settings_cannot_block_login_return(lab):
     assert (lab.tmp / 'qa/evidence' / state['walk'] / 'report.md').exists()
 
 
+def scratch_budget_counts_paused_pinned_and_saved_reservations(lab):
+    lab.env.update(QA_WALK_SCRATCH_BYTES='1000', QA_SCRATCH_BUDGET_BYTES='48000000000')
+    lab.walk()
+    directory, state = lab.walk_state()
+    assert state['scratch_bytes'] == 1000
+    # Configuration changes do not change active reservations already granted.
+    lab.env.update(QA_WALK_SCRATCH_BYTES='2000', QA_SCRATCH_BUDGET_BYTES='3000')
+    lab.walk('b1')
+    assert len(lab.walk_states()) == 2
+    lab.run('pin', state['walk'])
+    lab.env['QA_WALK_SCRATCH_BYTES'] = '1'
+    lab.walk('b2', '--kind', 'claude')
+    assert len(lab.walk_states()) == 2 and 'scratch budget' in lab.run('queue').stdout
+    lab.run('queue', 'cancel', json.loads(lab.run('queue', '--json').stdout)[0]['id'])
+    (directory / 'paused').write_text('waiting for repair\n')
+    lab.end_run(state)
+    lab.watch()
+    assert lab.walk_states()[0][1]['stage'] == 'paused'
+    lab.run('unpin', state['walk'])
+    lab.walk('b2', '--kind', 'claude')
+    assert len(lab.walk_states()) == 2  # Paused bytes still consume budget without a pin.
+
+
 def evidence_archive_damage_cannot_authorize_pruning(lab):
     lab.walk(now='2026-10-01T00:00:00Z')
     directory, state = lab.walk_state()
@@ -5590,6 +5633,7 @@ CASES = (
     evidence_prune_rechecks_custody_claims_processes_and_paths,
     evidence_refused_prune_waits_for_current_accepted_notice,
     evidence_invalid_settings_cannot_block_login_return,
+    scratch_budget_counts_paused_pinned_and_saved_reservations,
     evidence_scan_rules_and_placeholders,
     evidence_snapshot_checks_names_types_and_limits,
     evidence_keep_is_local_and_immutable_by_default,
@@ -5597,6 +5641,7 @@ CASES = (
     evidence_remote_is_append_only_and_retryable,
     evidence_prune_requires_seven_days_and_pin_guards,
     evidence_prune_preserves_pauses_and_pending_publication,
+    scratch_bytes_queue_counts_reservations_and_retained_data,
     a_queued_walk_uses_the_first_free_inventory_slot,
     plus_slot_lists_validate_and_keep_legacy_forms,
     unknown_slot_inventory_refuses_without_claiming,
