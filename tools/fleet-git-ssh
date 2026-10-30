@@ -1,0 +1,2 @@
+#!/bin/sh
+exec ssh -o ControlMaster=auto -o ControlPersist=600 -o "ControlPath=\"$HOME/.local/state/github-ssh/%C\"" "$@"

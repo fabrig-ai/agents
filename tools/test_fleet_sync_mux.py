@@ -1,5 +1,6 @@
 """Git transport regressions with local origins and a disposable fake SSH master."""
 
+import json
 import os
 from pathlib import Path
 import shlex
@@ -51,7 +52,8 @@ print(pid)
 
 GIT = '''#!/usr/bin/env python3
 import os, shlex, subprocess, sys
-result = subprocess.run(shlex.split(os.environ['GIT_SSH_COMMAND']) + ['git@github.com', sys.argv[-1]])
+ssh = shlex.split(os.environ['GIT_SSH_COMMAND']) if os.environ.get('GIT_SSH_COMMAND') else [os.environ['GIT_SSH']]
+result = subprocess.run(ssh + ['git@github.com', sys.argv[-1]])
 sys.exit(result.returncode)
 '''
 
@@ -64,6 +66,40 @@ class MultiplexTest(fixture.FleetTest):
         # shortcut that executes Python fake commands in this interpreter.
         runner.cmd = module.Runner.cmd.__get__(runner)
         return module, runner
+
+    def test_rendered_wrapper_environment_shares_fleet_master(self):
+        self.sync()
+        shell = self.home / '.config/fabrig/env.sh'
+        manager = self.home / '.config/environment.d/90-fabrig.conf'
+        self.assertIn('export GIT_SSH=fleet-git-ssh\n', shell.read_text())
+        self.assertIn('GIT_SSH=fleet-git-ssh\n', manager.read_text())
+        self.assertTrue((self.home / '.local/bin/fleet-git-ssh').is_symlink())
+        self.fake_transport()
+        with patch.dict(os.environ, self.env, clear=True):
+            module, runner = self.runner()
+            with self.assertRaisesRegex(ValueError, 'whitespace'):
+                module.env_value('ssh -o ControlMaster=auto', self.home)
+            self.assertEqual(module.env_value('a=b', self.home), 'a=b')
+            pid = int(runner.cmd('git', 'probe'))
+            self.addCleanup(self.stop_master, pid)
+            env = {k: v for k, v in self.env.items() if k not in ('GIT_SSH', 'GIT_SSH_COMMAND')}
+            # Each tool can inherit this login-shell environment without a private path.
+            command = '. "$HOME/.config/fabrig/env.sh"; exec git probe'
+            inherited = self.process('bash', '--noprofile', '--norc', '-c', command, env=env)
+            self.assertEqual(int(inherited.stdout), pid)
+            # Non-login units get the same declaration and PATH from environment.d.
+            values = dict(line.split('=', 1) for line in manager.read_text().splitlines())
+            values['PATH'] = str(self.bin) + ':' + values['PATH']  # Fake services before system tools.
+            inherited = self.process('git', 'probe', env={**env, **values})
+            self.assertEqual(int(inherited.stdout), pid)
+
+    def test_wrapper_forwards_ssh_arguments_and_exit_status(self):
+        fixture.put(self.bin / 'ssh', '#!/usr/bin/env python3\nimport json,sys\nprint(json.dumps(sys.argv[1:]))\nsys.exit(37)\n', True)
+        args = ['-p', '2222', 'git@github.com', "git-upload-pack 'some repo'"]
+        result = self.process(self.source / 'tools/fleet-git-ssh', *args, expected=37)
+        self.assertEqual(json.loads(result.stdout), [
+            '-o', 'ControlMaster=auto', '-o', 'ControlPersist=600',
+            '-o', f'ControlPath="{self.home}/.local/state/github-ssh/%C"', *args])
 
     def fake_transport(self):
         fixture.put(self.bin / "git", GIT, True)
@@ -82,7 +118,7 @@ class MultiplexTest(fixture.FleetTest):
             pid = int(runner.cmd("git", "probe"))
             self.addCleanup(self.stop_master, pid)
             self.assertEqual(os.getsid(pid), pid)
-            control = self.home / ".local/state/fleet-sync/ssh"
+            control = self.home / ".local/state/github-ssh"
             self.assertEqual(stat.S_IMODE(control.stat().st_mode), 0o700)
             command = shlex.split(runner.git_ssh_command())
             for option in ("ControlMaster=auto", "ControlPersist=600", f'ControlPath="{control}/%C"'):
@@ -106,13 +142,13 @@ class MultiplexTest(fixture.FleetTest):
                 with self.assertRaises(module.CommandError) as error:
                     runner.cmd("git", "probe")
                 self.assertEqual(error.exception.code, 42)
-                self.assertFalse((self.home / ".local/state/fleet-sync/ssh").exists())
+                self.assertFalse((self.home / ".local/state/github-ssh").exists())
 
     def test_control_directory_repairs_mode_and_refuses_symlink(self):
         with patch.dict(os.environ, self.env, clear=True):
             _, runner = self.runner()
             runner.git_ssh_command()
-            control = self.home / ".local/state/fleet-sync/ssh"
+            control = self.home / ".local/state/github-ssh"
             control.chmod(0o755)
             _, check = self.runner(check=True)
             with self.assertRaisesRegex(ValueError, "0700"):
@@ -136,7 +172,7 @@ class MultiplexTest(fixture.FleetTest):
             runner.safe = module.SafeHome(runner.home)
             option = next(arg for arg in shlex.split(runner.git_ssh_command()) if arg.startswith("ControlPath="))
             # ssh_config parses the embedded quotes after the shell parses its argument.
-            self.assertEqual(shlex.split(option.split("=", 1)[1])[0], str(runner.home).replace("%", "%%") + "/.local/state/fleet-sync/ssh/%C")
+            self.assertEqual(shlex.split(option.split("=", 1)[1])[0], str(runner.home).replace("%", "%%") + "/.local/state/github-ssh/%C")
 
     def test_timeout_and_interrupt_do_not_wait_for_or_kill_master(self):
         self.fake_transport()

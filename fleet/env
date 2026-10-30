@@ -5,3 +5,4 @@ DISABLE_AUTOUPDATER=1
 # Central state (claims, leases, records, mailbox homes) lives on hel8; tools reach it over ssh (0013).
 FABRIG_CENTRAL=free@204.168.210.29
 FABRIG_CENTRAL_HOST=hel8
+GIT_SSH=fleet-git-ssh

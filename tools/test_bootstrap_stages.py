@@ -92,9 +92,16 @@ class BootstrapStagesTest(unittest.TestCase):
                               f'SYSTEM_TOOL_DIRS = tuple(map(Path, {json.dumps([str(p) for p in self.f.system_bins])}))')
 
     def snapshot(self):
-        return {name: row for name, row in self.f.snapshot(exclude_mirror=True).items()
+        rows = {name: row for name, row in self.f.snapshot(exclude_mirror=True).items()
                 if not any(name == prefix or name.startswith(prefix + "/") for prefix in
-                           ("src/fabrig", ".local/state/fleet-sync")) and name != "systemctl.log"}
+                           ("src/fabrig", ".local/state/fleet-sync", ".local/state/github-ssh"))
+                and name != "systemctl.log"}
+        # A later runner may introduce its shared SSH state directory. Preserve
+        # parent mode checks, but ignore size/mtime changes from that new entry.
+        if ".local/state" in rows:
+            mode, _, _, data = rows[".local/state"]
+            rows[".local/state"] = (mode, None, None, data)
+        return rows
 
     def simulate(self, host, before_code, after_fleet):
         self.legacy_fleet()

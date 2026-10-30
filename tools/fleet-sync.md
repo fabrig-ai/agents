@@ -80,9 +80,28 @@ The sole removable control is retry: after acquiring the lock, a timer reads
 and removes ~/.config/fleet-sync/retry, bypassing its current backoff once.
 Hold and a busy lock leave retry untouched; checks and previews never consume it.
 
-All Git SSH operations, including installer subprocesses and backoff probes,
-share `GIT_SSH_COMMAND` with `-o ControlMaster=auto -o ControlPersist=600`
-and `-o ControlPath=<HOME>/.local/state/fleet-sync/ssh/%C`. The no-follow safe
+GitHub connection: the per-host contract for every tool is the shared
+ControlPath `~/.local/state/github-ssh/%C`, ControlMaster=auto and
+ControlPersist=600. Tools must inherit `GIT_SSH`/`GIT_SSH_COMMAND` or call
+`fleet-git-ssh`; they must not invent a different master path.
+
+We use the preferred two-line `tools/fleet-git-ssh` wrapper, installed through
+current at `~/.local/bin/fleet-git-ssh`. `fleet/env` sets `GIT_SSH=fleet-git-ssh`,
+which fleet renders into env.sh and environment.d with the same PATH.
+The environment value validator accepts `=` but refuses whitespace, so a raw
+multi-word GIT_SSH_COMMAND cannot be declared there; its rules are unchanged.
+Every login shell (`bash -lc` units and sessions) sources env.sh. The user
+manager reads environment.d only at its start; daemon-reload does not refresh
+its environment. Existing sessions can source env.sh; fleet does not restart
+the user manager. Tools supplying their own environment must retain GIT_SSH or
+call the wrapper. Explicit GIT_SSH_COMMAND/core.sshCommand overrides take
+precedence over GIT_SSH and must honor the same connection contract.
+Service owners must preserve a master created by their unit at unit exit;
+the shared environment alone does not change their unit's cleanup policy.
+
+Fleet-sync's Git operations, including installer subprocesses and backoff
+probes, share its stricter `GIT_SSH_COMMAND` with `-o ControlMaster=auto -o ControlPersist=600`
+and `-o ControlPath=<HOME>/.local/state/github-ssh/%C`. The no-follow safe
 HOME directory helper creates the control directory with 0700; normal runs
 repair its mode in place, and checks refuse an existing insecure directory.
 The expanded path (HOME bytes plus slash and the 40-byte %C hash) must be under
@@ -101,8 +120,9 @@ still invoke fleet-sync's own tracked-child cleanup. A forced SIGKILL of the
 runner bypasses that cleanup. The master expires after 600 idle seconds;
 minute polling can keep it alive longer. Healthy runs therefore need at most
 one GitHub authentication per host per 10 min for the same SSH host/user/port,
-unless GitHub disconnects it. Other tools do not inherit this multiplexing
-outside fleet-sync's subprocesses.
+unless GitHub disconnects it. Other tools use the same master through the
+wrapper and fleet-rendered environment, without fleet-sync's additional
+BatchMode=yes, StrictHostKeyChecking=yes and UpdateHostKeys=no options.
 
 `--check` (including local/remote `status` checks and candidate smoke checks)
 and `--preview` use `ControlMaster=no` and `ControlPersist=no`: they may attach
