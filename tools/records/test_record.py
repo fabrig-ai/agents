@@ -51,8 +51,8 @@ since = {STAMP}
 VALID = {
     'README.md': b'# Records\n',
     'AGENTS.md': b'# Rules\n',
-    'events/queue/hel8/2026-10-29.jsonl': json.dumps(dict(
-        id='one', time=STAMP, source='queue', host='hel8', kind='land', branch='mc/a')).encode() + b'\n',
+    'events/after-landing/hel8/2026-10-29.jsonl': json.dumps(dict(
+        id='one', time=STAMP, source='after-landing', host='hel8', kind='land', branch='mc/a')).encode() + b'\n',
     'drafts/example/draft.toml': DRAFT,
     'drafts/example/parts/tools-records/brief.md': b'# Brief\n',
     'drafts/example/parts/tools-records/closing.toml': CLOSING,
@@ -126,7 +126,7 @@ class RecordTests(unittest.TestCase):
             self.validate(name, data)
 
     def event(self, identity='one', host='hel8', stamp=STAMP, **extra):
-        return json.dumps(dict(id=identity, time=stamp, source='queue', host=host, kind='land', **extra)).encode() + b'\n'
+        return json.dumps(dict(id=identity, time=stamp, source='after-landing', host=host, kind='land', **extra)).encode() + b'\n'
 
     def prepare(self, repo=None):
         self.run_record('pull', repo=repo)
@@ -185,15 +185,15 @@ class RecordTests(unittest.TestCase):
         self.assert_clean()
 
     def test_event_validation(self):
-        name = 'events/queue/hel8/2026-10-29.jsonl'
+        name = 'events/after-landing/hel8/2026-10-29.jsonl'
         self.validate(name, self.event(task='mc/a', extra=dict(count=1)))
         for data in (b'[]\n', b'{}\n', b'null\n', b'{oops}\n', b'\n',
                      self.event(stamp='2026-10-30T00:00:00Z'), self.event(host='other'),
                      self.event(task=1), self.event() + self.event(),
                      self.event(payload='x' * (16 * 1024)), self.event(count=float('nan'))):
             self.assert_invalid(name, data)
-        for name in ('events/Queue/hel8/2026-10-29.jsonl', 'events/queue/-host/2026-10-29.jsonl',
-                     'events/queue/hel8/2026-02-30.jsonl'):
+        for name in ('events/Queue/hel8/2026-10-29.jsonl', 'events/after-landing/-host/2026-10-29.jsonl',
+                     'events/after-landing/hel8/2026-02-30.jsonl'):
             self.assert_invalid(name, self.event())
 
     def test_whole_fixture_tree_and_explicit_archive_refusal(self):
@@ -212,27 +212,23 @@ class RecordTests(unittest.TestCase):
 
     def test_append_idempotence_and_midnight(self):
         data = self.event(stamp='2026-10-29T23:59:59Z') + self.event('two', stamp='2026-10-30T00:00:00Z')
-        self.run_record('append', '--as', 'ops', 'queue', 'hel8', data=data + data)
+        self.run_record('append', '--as', 'ops', 'after-landing', 'hel8', data=data + data)
         head = self.git(self.clone, 'rev-parse', 'HEAD')
-        self.run_record('append', '--as', 'ops', 'queue', 'hel8', data=data)
+        self.run_record('append', '--as', 'ops', 'after-landing', 'hel8', data=data)
         self.assertEqual(head, self.git(self.clone, 'rev-parse', 'HEAD'))
         for stamp in ('2026-10-29', '2026-10-30'):
-            self.assertEqual(len((self.clone / f'events/queue/hel8/{stamp}.jsonl').read_bytes().splitlines()), 1)
+            self.assertEqual(len((self.clone / f'events/after-landing/hel8/{stamp}.jsonl').read_bytes().splitlines()), 1)
         self.assert_clean()
-        self.run_record('write', '--as', 'ops', 'events/queue/hel8/2026-10-29.jsonl', data=self.event(), code=1)
+        self.run_record('write', '--as', 'ops', 'events/after-landing/hel8/2026-10-29.jsonl', data=self.event(), code=1)
         self.run_record('append', '--as', 'ops', 'Queue', 'hel8', data=self.event(), code=1)
 
     def test_batch_append_is_atomic_and_idempotent(self):
-        first = self.event()
-        second = json.dumps(dict(id='one', time=STAMP, source='heavy', host='hel8', kind='command')).encode() + b'\n'
-        before = self.git(self.origin, 'rev-list', '--count', 'main')
-        self.run_record('append', '--as', 'collect', '--batch', 'hel8', data=first + second + first)
-        self.assertEqual(int(self.git(self.origin, 'rev-list', '--count', 'main')), int(before) + 1)
+        data = self.event() + self.event('two')
+        self.run_record('append', '--as', 'after-landing', '--batch', 'hel8', data=data + data)
         head = self.git(self.origin, 'rev-parse', 'main')
-        for source in ('queue', 'heavy'):
-            self.assertEqual(len((self.clone/f'events/{source}/hel8/2026-10-29.jsonl').read_bytes().splitlines()), 1)
-        self.run_record('append', '--as', 'collect', '--batch', 'hel8', data=first + second)
+        self.run_record('append', '--as', 'after-landing', '--batch', 'hel8', data=data)
         self.assertEqual(self.git(self.origin, 'rev-parse', 'main'), head)
+        self.assertEqual((self.clone/'events/after-landing/hel8/2026-10-29.jsonl').read_bytes(), data)
         self.assert_clean()
 
     def test_batch_refuses_all_lines_if_any_source_is_missing_or_invalid(self):
@@ -243,7 +239,7 @@ class RecordTests(unittest.TestCase):
                     dict(id='bad', time=STAMP, source='../bad', host='hel8', kind='command'),
                     dict(id='bad', time=STAMP, source='heavy', host='wrong', kind='command'), []):
             with self.subTest(row=row):
-                self.run_record('append', '--as', 'collect', '--batch', 'hel8',
+                self.run_record('append', '--as', 'after-landing', '--batch', 'hel8',
                                 data=good + json.dumps(row).encode() + b'\n', code=1)
                 self.assertFalse((self.clone/'events').exists())
                 self.assertEqual(self.git(self.origin, 'rev-parse', 'main'), head)
@@ -251,7 +247,7 @@ class RecordTests(unittest.TestCase):
 
     def test_automatic_append_retries_twice_then_succeeds(self):
         self.prepare()
-        for writer in ('collect', 'watch'):
+        for writer in ('after-landing',):
             with self.subTest(writer=writer):
                 counter = self.home / (writer + '-attempts')
                 self.hook(self.clone,
@@ -262,8 +258,8 @@ class RecordTests(unittest.TestCase):
                     f'git -C {shlex.quote(str(self.seed))} add AGENTS.md\n'
                     f'git -C {shlex.quote(str(self.seed))} commit -m "advance origin" >&2\n'
                     f'git -C {shlex.quote(str(self.seed))} push origin main >&2\nfi\n')
-                source = 'watch' if writer == 'watch' else 'queue'
-                data = self.event(writer).replace(b'queue', source.encode())
+                source = 'after-landing'
+                data = self.event(writer).replace(b'after-landing', source.encode())
                 self.run_record('append', '--as', writer, source, 'hel8', data=data, wait=False)
                 self.assertEqual(len(counter.read_text().splitlines()), 3)
                 self.assertEqual((self.clone / f'events/{source}/hel8/2026-10-29.jsonl').read_bytes(), data)
@@ -292,7 +288,7 @@ class RecordTests(unittest.TestCase):
 
     def test_lost_acknowledgement_replays_ids_without_duplicates(self):
         self.prepare()
-        for writer in ('collect', 'watch'):
+        for writer in ('after-landing',):
             for rejected in (0, 4):
                 with self.subTest(writer=writer, rejected=rejected):
                     counter = self.home / f'{writer}-{rejected}-attempts'
@@ -304,9 +300,9 @@ class RecordTests(unittest.TestCase):
                         f'git -C {shlex.quote(str(self.seed))} add AGENTS.md\n'
                         f'git -C {shlex.quote(str(self.seed))} commit -m "advance origin" >&2\n'
                         f'git -C {shlex.quote(str(self.seed))} push origin main >&2\nfi\n')
-                    source = 'watch' if writer == 'watch' else 'queue'
+                    source = 'after-landing'
                     identities = [f'{writer}-{rejected}-{n}' for n in range(2)]
-                    data = b''.join(self.event(identity).replace(b'queue', source.encode()) for identity in identities)
+                    data = b''.join(self.event(identity).replace(b'after-landing', source.encode()) for identity in identities)
                     with self.push_transport('lost-ack'):
                         self.run_record('append', '--as', writer, source, 'hel8', data=data + data, wait=False)
                     self.assertEqual(len(counter.read_text().splitlines()), rejected + 1)
@@ -319,7 +315,7 @@ class RecordTests(unittest.TestCase):
     def test_success_exit_without_origin_commit_is_not_confirmation(self):
         self.prepare()
         with self.push_transport('false-success'):
-            result = self.run_record('append', '--as', 'collect', '--batch', 'hel8', data=self.event(), code=2)
+            result = self.run_record('append', '--as', 'after-landing', '--batch', 'hel8', data=self.event(), code=2)
         self.assertIn(b'not confirmed by origin', result.stderr)
         self.assertFalse((self.clone / 'events').exists())
         self.assert_clean()
@@ -339,7 +335,7 @@ class RecordTests(unittest.TestCase):
             f'git -C {shlex.quote(str(self.seed))} push origin main >&2\nfi\n')
         processes = []
         def start(identity):
-            process = subprocess.Popen([str(TOOL), 'append', '--as', 'collect', 'queue', 'hel8'],
+            process = subprocess.Popen([str(TOOL), 'append', '--as', 'after-landing', 'after-landing', 'hel8'],
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=self.env)
             processes.append(process)
             process.stdin.write(self.event(identity))
@@ -368,19 +364,24 @@ class RecordTests(unittest.TestCase):
                 if process.poll() is None:
                     process.kill()
                     process.communicate()
-        rows = self.git(self.origin, 'show', 'main:events/queue/hel8/2026-10-29.jsonl').splitlines()
+        rows = self.git(self.origin, 'show', 'main:events/after-landing/hel8/2026-10-29.jsonl').splitlines()
         self.assertCountEqual([json.loads(row)['id'] for row in rows], ['first', 'second'])
         self.assert_clean()
 
     def test_collector_identity_is_append_only(self):
-        data = VALID['events/queue/hel8/2026-10-29.jsonl']
-        self.run_record('append', '--as', 'collect', 'queue', 'hel8', data=data)
-        self.run_record('write', '--as', 'collect', 'README.md', data=b'# No\n', code=1)
+        data = VALID['events/after-landing/hel8/2026-10-29.jsonl']
+        self.run_record('append', '--as', 'after-landing', 'after-landing', 'hel8', data=data)
+        self.run_record('write', '--as', 'after-landing', 'README.md', data=b'# No\n', code=1)
 
-    def test_watch_identity_is_append_only(self):
-        self.run_record('append', '--as', 'watch', 'watch', 'hel8',
-                        data=self.event().replace(b'queue', b'watch'))
-        self.run_record('write', '--as', 'watch', 'README.md', data=b'# No\n', code=1)
+    def test_raw_events_refused_for_every_writer(self):
+        for writer in ('ops', 'director', 'collect', 'watch', 'after-landing'):
+            for source in ('runs', 'queue', 'heavy', 'sessions', 'watch', 'post-sent'):
+                with self.subTest(writer=writer, source=source):
+                    data = self.event().replace(b'after-landing', source.encode())
+                    self.run_record('append', '--as', writer, source, 'hel8', data=data, code=1)
+                    self.run_record('write', '--as', writer,
+                                    f'events/{source}/hel8/2026-10-29.jsonl', data=data, code=1)
+        self.assertFalse((self.clone/'events').exists())
 
     @contextmanager
     def writer_declaration(self, declaration):
@@ -394,30 +395,28 @@ class RecordTests(unittest.TestCase):
             yield
 
     def test_writer_declaration_parsed(self):
-        self.assertEqual(API['append_writers'](), {
-            'collect': ['runs', 'queue', 'heavy', 'sessions', 'claims', 'leases', 'post', 'post-sent'],
-            'watch': ['watch'], 'after-landing': ['after-landing']})
+        self.assertEqual(API['append_writers'](), {'after-landing': ['after-landing']})
 
     def test_after_landing_source_and_atomic_batch_restrictions(self):
-        own = self.event().replace(b'queue', b'after-landing')
+        own = self.event()
         self.run_record('append', '--as', 'after-landing', 'after-landing', 'hel8', data=own)
         head = self.git(self.origin, 'rev-parse', 'main')
         for writer in ('collect', 'watch', 'after-landing'):
             with self.subTest(writer=writer):
                 other = 'watch' if writer != 'watch' else 'queue'
                 self.run_record('append', '--as', writer, other, 'hel8',
-                                data=self.event().replace(b'queue', other.encode()), code=1)
+                                data=self.event().replace(b'after-landing', other.encode()), code=1)
         self.run_record('append', '--as', 'after-landing', '--batch', 'hel8',
-                        data=own.replace(b'one', b'two') + self.event(), code=1)
+                        data=own.replace(b'one', b'two') + self.event().replace(b'after-landing', b'runs'), code=1)
         self.assertEqual(head, self.git(self.origin, 'rev-parse', 'main'))
         self.assertEqual((self.clone / 'events/after-landing/hel8/2026-10-29.jsonl').read_bytes(), own)
-        self.assertFalse((self.clone / 'events/queue').exists())
+        self.assertFalse((self.clone / 'events/runs').exists())
         self.assert_clean()
 
     def test_new_declaration_controls_sources_and_overrides_post_permissions(self):
-        with self.writer_declaration(b'[new-producer]\nsources = ["queue"]\n[ops]\nsources = ["watch"]\n'):
-            self.run_record('append', '--as', 'new-producer', 'queue', 'hel8', data=self.event())
-            self.run_record('append', '--as', 'ops', 'queue', 'hel8', data=self.event(), code=1)
+        with self.writer_declaration(b'[new-producer]\nsources = ["after-landing"]\n[ops]\nsources = ["watch"]\n'):
+            self.run_record('append', '--as', 'new-producer', 'after-landing', 'hel8', data=self.event())
+            self.run_record('append', '--as', 'ops', 'after-landing', 'hel8', data=self.event(), code=1)
             for writer in ('new-producer', 'ops'):
                 self.run_record('write', '--as', writer, 'README.md', data=b'# No\n', code=1)
         self.assert_clean()
@@ -441,14 +440,14 @@ class RecordTests(unittest.TestCase):
         self.assertFalse(self.clone.exists())
 
     def test_malformed_declaration_refuses_every_append(self):
-        for declaration in (None, b'broken = [', b'\xff', b'', b'writer = "queue"',
-                            b'[writer]\nsources = "queue"', b'[writer]\nsources = []',
-                            b'[writer]\nsources = [1]', b'[writer]\nsources = ["../queue"]',
-                            b'[writer]\nsources = ["queue"]\nextra = true',
-                            b'["bad writer"]\nsources = ["queue"]'):
+        for declaration in (None, b'broken = [', b'\xff', b'', b'writer = "after-landing"',
+                            b'[writer]\nsources = "after-landing"', b'[writer]\nsources = []',
+                            b'[writer]\nsources = [1]', b'[writer]\nsources = ["../after-landing"]',
+                            b'[writer]\nsources = ["after-landing"]\nextra = true',
+                            b'["bad writer"]\nsources = ["after-landing"]'):
             with self.subTest(declaration=declaration), self.writer_declaration(declaration):
-                for writer in ('ops', 'collect', 'watch', 'after-landing'):
-                    self.run_record('append', '--as', writer, 'queue', 'hel8', data=self.event(), code=2)
+                for writer in ('ops', 'after-landing', 'watch', 'after-landing'):
+                    self.run_record('append', '--as', writer, 'after-landing', 'hel8', data=self.event(), code=2)
         self.assertFalse(self.clone.exists())
 
     def test_write_show_pull_and_numbering(self):
@@ -588,7 +587,7 @@ class RecordTests(unittest.TestCase):
                   f'git -C {shlex.quote(str(self.seed))} add AGENTS.md\n'
                   f'git -C {shlex.quote(str(self.seed))} commit -m "advance origin" >&2\n'
                   f'git -C {shlex.quote(str(self.seed))} push origin main >&2\n')
-        result = self.run_record('append', '--as', 'collect', '--batch', 'hel8',
+        result = self.run_record('append', '--as', 'after-landing', '--batch', 'hel8',
                                  data=self.event(), code=3, wait=False)
         self.assertIn(b'five attempts', result.stderr)
         self.assertNotIn(b'original input follows', result.stderr)
@@ -598,14 +597,14 @@ class RecordTests(unittest.TestCase):
 
     def test_automatic_conflict_defers_without_unfinished_rebase(self):
         self.prepare()
-        name = 'events/queue/hel8/2026-10-29.jsonl'
+        name = 'events/after-landing/hel8/2026-10-29.jsonl'
         path = self.seed / name
         path.parent.mkdir(parents=True)
         path.write_bytes(self.event('remote'))
         self.git(self.seed, 'add', name)
         self.git(self.seed, 'commit', '-m', 'conflicting event file')
         self.hook(self.clone, f'git -C {shlex.quote(str(self.seed))} push origin main >&2\n')
-        result = self.run_record('append', '--as', 'collect', 'queue', 'hel8',
+        result = self.run_record('append', '--as', 'after-landing', 'after-landing', 'hel8',
                                  data=self.event('local'), code=3, wait=False)
         self.assertIn(b'rebase conflict', result.stderr)
         self.assertEqual((self.clone / name).read_bytes(), self.event('remote'))
@@ -676,10 +675,10 @@ class RecordTests(unittest.TestCase):
 
     def test_concurrent_appends_different_hosts(self):
         with self.racing_clones() as other:
-            self.race(other, [('append', '--as', 'ops', 'queue', host) for host in ('hel8', 'hetzner8')],
+            self.race(other, [('append', '--as', 'ops', 'after-landing', host) for host in ('hel8', 'hetzner8')],
                       [self.event(host=host) for host in ('hel8', 'hetzner8')])
             for host in ('hel8', 'hetzner8'):
-                self.assertEqual((self.clone / f'events/queue/{host}/2026-10-29.jsonl').read_bytes(), self.event(host=host))
+                self.assertEqual((self.clone / f'events/after-landing/{host}/2026-10-29.jsonl').read_bytes(), self.event(host=host))
 
     def test_concurrent_next_decisions_and_questions(self):
         for directory, suffix, body in (('director/decisions', 'md', DECISION),
@@ -875,21 +874,21 @@ class RecordTests(unittest.TestCase):
         now = datetime.now(timezone.utc)
         stamps = [now, now - timedelta(minutes=30), now - timedelta(hours=2), now + timedelta(hours=2)]
         events = b''.join(self.event(str(i), stamp=t.isoformat()) for i, t in enumerate(stamps))
-        self.run_record('append', '--as', 'ops', 'queue', 'hel8', data=events)
-        run_event = json.dumps(dict(id='run1', source='runs', host='hel8', kind='end', time=now.isoformat())).encode()
-        self.run_record('append', '--as', 'ops', 'runs', 'hel8', data=run_event)
+        self.run_record('append', '--as', 'ops', 'after-landing', 'hel8', data=events)
+        run_event = json.dumps(dict(id='run1', source='after-landing', host='hel8', kind='end', time=now.isoformat())).encode()
+        self.run_record('append', '--as', 'ops', 'after-landing', 'hel8', data=run_event)
         # A second clone supplies data this reader has not fetched yet.
         other = self.home / 'other-status'
         self.run_record('draft', 'fresh', '--as', 'director', '--coordinator', 'multi',
                         '--mailbox', 's/multi', '--source', 'draft.md', repo=other)
         head = self.git(self.origin, 'rev-parse', 'main')
         status = json.loads(self.run_record('status', '--as', 'director', '--json').stdout)
-        self.assertEqual(status['events_last_hour'], {'queue': 2, 'runs': 1})
+        self.assertEqual(status['events_last_hour'], {'after-landing': 3})
         self.assertIn('fresh', [r['name'] for r in status['drafts']])
         output = self.run_record('status', '--as', 'director').stdout
         self.assertLess(output.index(b'two queued'), output.index(b'one active'))
         self.assertLess(output.index(b'Overdue question'), output.index(b'Future question'))
-        self.assertIn(b'queue=2, runs=1', output)
+        self.assertIn(b'after-landing=3', output)
         self.assertNotIn(b'Answered question', output)
         self.assertEqual(head, self.git(self.clone, 'rev-parse', 'HEAD'))
         self.assert_clean()
@@ -915,7 +914,7 @@ class RecordTests(unittest.TestCase):
         self.run_record('write', '--as', 'lead/q/jig', 'director/questions/next.toml',
                         data=QUESTION.replace(b'by = "director"', b'by = "lead/q/jig"'))
         self.run_record('check')
-        for writer in ('collect', 'watch'):
+        for writer in ('after-landing',):
             self.run_record('ask', '--as', writer, '--question', 'Scope?', '--option', 'a',
                             '--recommendation', 'a', '--deadline', '+1', code=1)
 
