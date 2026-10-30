@@ -17,7 +17,7 @@ use it for surveys. `status [--json]` reads the last report without changing it.
 | heavy-logs | `src/rust/tmp/logs/*`, except durable `heavy.tsv` | mtime, 7 d |
 | precheck-logs | `src/fabrig/slots/*.precheck-logs/*` | mtime, 3 d |
 | notes | files below `src/fabrig/{notes,tasks}`, except `queue.jsonl` and `queue.out` | mtime, 7 d |
-| codex-sessions | files below `.codex/sessions` only | mtime, 14 d |
+| codex-sessions | `rollout*.jsonl` below `.codex/sessions` only | mtime, 14 d |
 | recorded | producer paths with an ended record | kind-specific, below |
 
 Records allow ended Claude jobs to expire after one hour. Other kind defaults:
