@@ -5,6 +5,9 @@ from test_fleet_sync import *
 
 class PeriodicFleetTest(FleetTest):
     def test_env_value_behavior_matches_main(self):
+        # This comparison predates the separately staged quota asset. Keep
+        # both candidates on that historical input schema (test_pquota covers it).
+        (self.source / "fleet/bootstrap/pquota").unlink(missing_ok=True)
         self.assertGreater(self.prepare_integer_machine_env(), 0)
         baseline = "f7334e8aa68c325076c5c0eda16f6ae6c0c217fa"
         script = self.source / "tools/fleet-sync"
@@ -60,6 +63,9 @@ class PeriodicFleetTest(FleetTest):
         self.assertEqual(before, self.snapshot())
 
     def test_integer_machine_env_matches_main_runner_for_every_host(self):
+        # This comparison predates the separately staged quota asset. Keep
+        # both candidates on that historical input schema (test_pquota covers it).
+        (self.source / "fleet/bootstrap/pquota").unlink(missing_ok=True)
         # Pin the main runner used when this schema expansion was branched.
         baseline = "f7334e8aa68c325076c5c0eda16f6ae6c0c217fa"
         hosts = tomllib.loads((ROOT / "fleet/hosts.toml").read_text())["hosts"]

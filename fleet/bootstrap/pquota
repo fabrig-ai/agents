@@ -1,0 +1,401 @@
+#!/usr/bin/env python3
+"""Ops-reviewed XFS root project-quota boot proposal. Default: read-only plan."""
+
+import argparse
+from contextlib import contextmanager
+from datetime import datetime, timezone
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import pwd
+import re
+import shlex
+import socket
+import stat
+import subprocess
+import sys
+import tempfile
+import tomllib
+
+DROPIN = '/etc/default/grub.d/90-fabrig-pquota.cfg'
+CONTENT = 'GRUB_CMDLINE_LINUX="$GRUB_CMDLINE_LINUX rootflags=pquota"\n'
+STATE = '/var/lib/fabrig-pquota/state.json'
+GRUB = '/boot/grub/grub.cfg'
+BOOT = '/proc/sys/kernel/random/boot_id'
+PATH = '/usr/sbin:/usr/bin:/sbin:/bin'
+# Atomic snapshots are the documented read-only heavy interface (design 12).
+# Run as free, without instantiating Ledger (which would flush/reconcile).
+HEAVY_SNAPSHOT = """from pathlib import Path
+import sys
+sys.stdout.write((Path.home() / 'src/rust/tmp/heavy/state.json').read_text())
+"""
+
+
+def now():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def has_pquota(line):
+    return any(t.startswith('rootflags=') and 'pquota' in t.split('=', 1)[1].split(',')
+               for t in shlex.split(line))
+
+
+class Pquota:
+    def __init__(self, host, central='free@204.168.210.29', root=Path('/'), env=None):
+        self.host, self.central, self.root = host, central, Path(root)
+        self.env = env or dict(PATH=PATH, LANG='C', LC_ALL='C')
+
+    def path(self, absolute):
+        return self.root / absolute.lstrip('/')
+
+    def read(self, absolute):
+        return self.path(absolute).read_text()
+
+    def run(self, *args):
+        result = subprocess.run(args, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                timeout=60, env=self.env, check=False)
+        if result.returncode:
+            raise ValueError(f'{shlex.join(args)}: exit {result.returncode}: {result.stderr.strip()}')
+        return result.stdout
+
+    def user(self, *args):
+        uid = pwd.getpwnam('free').pw_uid
+        return self.run('runuser', '-u', 'free', '--', 'env', '-i', 'HOME=/home/free',
+                        f'PATH=/home/free/.local/bin:{PATH}', f'XDG_RUNTIME_DIR=/run/user/{uid}',
+                        f'DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{uid}/bus',
+                        'LANG=C', *args)
+
+    def safe(self, absolute):
+        path = self.path(absolute)
+        for parent in (path, *path.parents):
+            if parent.is_symlink():
+                raise ValueError(f'refusing symlink: {parent}')
+        if path.exists() and not path.is_file():
+            raise ValueError(f'not a regular file: {path}')
+        return path
+
+    def sync(self, directory):
+        fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+    def write(self, absolute, content, mode=0o600):
+        path = self.safe(absolute)
+        if path.exists() and path.read_text() == content:
+            if stat.S_IMODE(path.stat().st_mode) != mode:
+                os.chmod(path, mode)
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temporary = tempfile.mkstemp(prefix='.' + path.name + '.', dir=path.parent)
+        try:
+            with os.fdopen(fd, 'w') as out:
+                os.fchmod(out.fileno(), mode)
+                out.write(content)
+                out.flush()
+                os.fsync(out.fileno())
+            os.replace(temporary, path)
+            self.sync(path.parent)
+        finally:
+            Path(temporary).unlink(missing_ok=True)
+
+    @contextmanager
+    def locked(self):
+        path = self.safe('/var/lib/fabrig-pquota/lock')
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open('a') as stream:
+            os.chmod(path, 0o600)
+            fcntl.flock(stream, fcntl.LOCK_EX)
+            yield
+
+    def save(self, state):
+        self.write(STATE, json.dumps(state, indent=2, sort_keys=True) + '\n')
+
+    def state(self):
+        state = json.loads(self.safe(STATE).read_text())
+        if not isinstance(state, dict):
+            raise ValueError('malformed pquota state')
+        if state.get('version') != 1 or state.get('host') != self.host:
+            raise ValueError('missing/foreign pquota state')
+        return state
+
+    def claims(self):
+        output = self.user('ssh', '-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
+                           '-o', 'UpdateHostKeys=no', '-o', 'ConnectTimeout=10',
+                           self.central, 'claim list')
+        rows, seen = [], set()
+        for line in output.splitlines():
+            match = re.fullmatch(r'([a-z][a-z0-9-]*) ([1-9][0-9]*) \[([^\]\r\n]+)\]: (.+)', line)
+            if not match or match.group(1, 2) in seen:
+                raise ValueError('unrecognized/duplicate central claim list row')
+            seen.add(match.group(1, 2))
+            host, number, share, detail = match.groups()
+            if detail != 'free' and not re.fullmatch(
+                    r'.+: .+ \(since [^()]+\); held [0-9]+d [0-9]{2}:[0-9]{2}:[0-9]{2}(; lent by .+)?', detail):
+                raise ValueError('unrecognized central claim detail')
+            if host == self.host and detail != 'free':
+                rows.append(f'{host} {number} [{share}]: {detail}')
+        if not seen:
+            raise ValueError('empty central inventory; cannot establish claim state')
+        return rows
+
+    def heavy(self):
+        self.user('/home/free/src/fabrig/main/tools/heavy/heavy', '--installed')
+        data = json.loads(self.user('python3', '-I', '-B', '-c', HEAVY_SNAPSHOT))
+        if (not isinstance(data, dict) or data.get('version') != 1 or
+                not data.get('installation') or not isinstance(data.get('tasks'), dict)):
+            raise ValueError('missing/unsupported heavy installation snapshot')
+        busy = []
+        for token, task in data['tasks'].items():
+            if not isinstance(task, dict) or not isinstance(task.get('state'), str):
+                raise ValueError('malformed heavy task')
+            if task['state'] != 'released':
+                busy.append(f'{token}:{task["state"]}')
+        if busy:
+            raise ValueError('heavy unfinished tasks: ' + ', '.join(busy))
+        return 'installed; zero unfinished tasks (atomic snapshot)'
+
+    def marker(self):
+        path = self.safe('/var/lib/fabrig-pquota/fence')
+        info = path.stat()
+        if info.st_uid != 0 or info.st_mode & 0o022:
+            raise ValueError('ops marker must be root-owned and not group/world writable')
+        fields = path.read_text().strip().split(None, 1)
+        if len(fields) != 2 or fields[0] != self.host or not fields[1].strip():
+            raise ValueError('ops marker must contain exact host and nonempty ops reason')
+        return ' '.join(fields)
+
+    def identity(self):
+        hosts = tomllib.loads((Path(__file__).resolve().parents[1] / 'hosts.toml').read_text())['hosts']
+        actual = socket.gethostname().split('.', 1)[0]
+        if self.host not in hosts or actual not in (self.host, hosts[self.host]['hostname']):
+            raise ValueError(f'host mismatch: requested {self.host}, actual {actual}')
+        return actual
+
+    def mount(self):
+        data = json.loads(self.run('findmnt', '--json', '--target', '/', '--output', 'TARGET,SOURCE,FSTYPE,OPTIONS'))
+        rows = data['filesystems']
+        if len(rows) != 1 or rows[0]['target'] != '/' or rows[0]['fstype'] != 'xfs':
+            raise ValueError('root must be a single XFS mount')
+        return rows[0]
+
+    def fence(self):
+        checks = []
+        for name, probe in [('host identity', self.identity), ('XFS root', self.mount),
+                            ('ops marker', self.marker), ('central claims', self.claims),
+                            ('heavy idle', self.heavy)]:
+            try:
+                value = probe()
+                ok = not value if name == 'central claims' else True
+                checks.append((ok, name, str(value)))
+            except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+                checks.append((False, name, str(error)))
+        return checks
+
+    def require_fence(self):
+        checks = self.fence()
+        for ok, name, detail in checks:
+            print(f'{"PASS" if ok else "FAIL"} fence {name}: {detail}')
+        if not all(row[0] for row in checks):
+            raise ValueError('fence refused; no boot changes/reboot authorized')
+        return checks
+
+    def digest(self):
+        return hashlib.sha256(self.path(GRUB).read_bytes()).hexdigest()
+
+    def default_entry(self):
+        # Deliberately narrow: numbered top-level entries only. Saved/one-shot,
+        # submenu, custom defaults or unknown generated syntax require ops review.
+        defaults = re.findall(r'^\s*GRUB_DEFAULT=(.*)$', self.read('/etc/default/grub'), re.M)
+        fields = shlex.split(defaults[-1]) if defaults else ['0']
+        if not fields:
+            raise ValueError('empty GRUB_DEFAULT')
+        value = fields[0]
+        if not value.isdecimal():
+            raise ValueError('unsupported GRUB_DEFAULT; require numeric top-level entry')
+        # Other drop-ins may override GRUB_DEFAULT. Never guess shell semantics.
+        directory = self.path('/etc/default/grub.d')
+        for path in sorted(directory.glob('*.cfg')):
+            if path.name != Path(DROPIN).name and re.search(r'\bGRUB_DEFAULT\s*=', path.read_text()):
+                raise ValueError('GRUB_DEFAULT in another drop-in requires ops review')
+        environment = self.run('grub-editenv', str(self.path('/boot/grub/grubenv')), 'list')
+        if any(line.startswith(('next_entry=', 'saved_entry=')) and line.partition('=')[2]
+               for line in environment.splitlines()):
+            raise ValueError('saved/one-shot GRUB entry requires ops review')
+        config = self.read(GRUB)
+        selected = re.findall(r'^\s*set default=(.*?)\s*$', config, re.M)
+        allowed_variables = ('"${next_entry}"', '"${saved_entry}"', '"$next_entry"', '"$saved_entry"')
+        literals = [item for item in selected if item not in allowed_variables]
+        if not literals or any(shlex.split(item) != [value] for item in literals):
+            raise ValueError('generated default does not match GRUB_DEFAULT')
+        entries = list(re.finditer(r'^(menuentry|submenu)\s', config, re.M))
+        index = int(value)
+        if index >= len(entries) or entries[index].group(1) != 'menuentry':
+            raise ValueError('default is missing or a submenu')
+        end = entries[index + 1].start() if index + 1 < len(entries) else len(config)
+        block = config[entries[index].start():end]
+        lines = re.findall(r'^\s*linux(?:efi)?\s+(.+)$', block, re.M)
+        if len(lines) != 1:
+            raise ValueError('default must contain exactly one Linux boot line')
+        return lines[0]
+
+    def check_entry(self, enabled):
+        line = self.default_entry()
+        flags = [t for t in shlex.split(line) if t.startswith('rootflags=')]
+        if has_pquota(line) != enabled or (enabled and len(flags) != 1):
+            raise ValueError(f'generated default rootflags verification failed: {line}')
+        return line
+
+    def plan(self):
+        for name, probe in [('cmdline', lambda: self.read('/proc/cmdline').strip()),
+                            ('mount', self.mount),
+                            ('quota state', lambda: self.run('xfs_quota', '-x', '-c', 'state', '/').strip() or '(empty output; accounting not established)'),
+                            ('GRUB default', self.default_entry)]:
+            try:
+                print(f'{name}: {probe()}')
+            except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+                print(f'UNAVAILABLE {name}: {error}')
+        print(f'would atomically write {DROPIN}:\n{CONTENT}', end='')
+        print('would run: update-grub\nwould verify default Linux entry rootflags=pquota; would NOT reboot')
+        for ok, name, detail in self.fence():
+            print(f'{"PASS" if ok else "FAIL"} fence {name}: {detail}')
+        print('LIMIT: no host-disable CLI or central claim history; ops must stop producers and retain fence through boot.')
+
+    def prepare(self):
+        checks = self.require_fence()
+        path = self.safe(DROPIN)
+        if path.exists() and path.read_text() != CONTENT:
+            raise ValueError('foreign drop-in; refusing overwrite')
+        # Refuse unrelated existing quota parameters before changing boot input.
+        self.default_entry()
+        previous = self.state() if self.path(STATE).exists() else None
+        if previous and previous.get('phase') == 'prepared':
+            if previous['boot_id'] != self.read(BOOT).strip():
+                raise ValueError('already rebooted; verify before starting a new prepare')
+            if not path.exists() or self.digest() != previous['grub_after']:
+                raise ValueError('prepared boot files drifted; investigate before retry')
+            self.check_entry(True)
+            print('PASS already prepared; preserved original boot evidence')
+            return
+        if previous and previous.get('phase') in ('preparing', 'rolling-back'):
+            raise ValueError('incomplete transaction; use rollback after investigating')
+        state = dict(version=1, host=self.host, phase='preparing', prepared_at=now(),
+                     boot_id=self.read(BOOT).strip(), before_cmdline=self.read('/proc/cmdline').strip(),
+                     before_mount=self.mount(), grub_before=self.digest(), fence=checks,
+                     claims_before=[])
+        self.save(state)  # Durable intent precedes the first GRUB mutation.
+        self.write(DROPIN, CONTENT, 0o644)
+        self.run('update-grub')
+        state.update(grub_after=self.digest(), default_after=self.check_entry(True), phase='prepared')
+        self.save(state)
+        print('PASS prepared; reboot remains a separate explicit action')
+
+    def rollback(self):
+        # Recovery must work after fresh bootstrap too, which creates no
+        # prepare record. This changes the next boot only; reboot stays fenced.
+        self.identity()
+        state = self.state() if self.path(STATE).exists() else dict(
+            version=1, host=self.host, origin='rollback-without-prepare')
+        path = self.safe(DROPIN)
+        if path.exists() and path.read_text() != CONTENT:
+            raise ValueError('foreign drop-in; refusing removal')
+        state.update(phase='rolling-back', rollback_started=now(), rollback_grub_before=self.digest())
+        self.save(state)
+        if path.exists():
+            path.unlink()
+            self.sync(path.parent)
+        self.run('update-grub')
+        state.update(phase='rolled-back', rollback_at=now(), rollback_boot_id=self.read(BOOT).strip(),
+                     rollback_grub_after=self.digest(), rollback_default=self.check_entry(False))
+        self.save(state)
+        print('PASS rollback prepared; reboot separately, then prove pquota absent and stop rollout')
+
+    def reboot(self):
+        state = self.state()
+        if state.get('phase') not in ('prepared', 'rolled-back'):
+            raise ValueError('no successful prepare/rollback')
+        expected_boot = state['boot_id'] if state['phase'] == 'prepared' else state['rollback_boot_id']
+        if self.read(BOOT).strip() != expected_boot:
+            raise ValueError('boot already changed; refusing repeated reboot')
+        key = 'grub_after' if state['phase'] == 'prepared' else 'rollback_grub_after'
+        if self.digest() != state[key]:
+            raise ValueError('GRUB changed after preparation')
+        self.check_entry(state['phase'] == 'prepared')
+        # Last external observations before reboot; no intervening GRUB work.
+        self.require_fence()
+        self.run('systemctl', 'reboot')
+
+    def verify(self):
+        checks = []
+        def check(name, probe):
+            try:
+                ok, detail = probe()
+            except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+                ok, detail = False, str(error)
+            checks.append(ok)
+            detail = str(detail).replace("\n", " | ")
+            print(f'{"PASS" if ok else "FAIL"} {name}: {detail}')
+        check('cmdline rootflags=pquota', lambda: (has_pquota(self.read('/proc/cmdline')), self.read('/proc/cmdline').strip()))
+        def mount():
+            row = self.mount()
+            return 'prjquota' in row['options'].split(','), row
+        check('XFS mount prjquota', mount)
+        def quota():
+            output = self.run('xfs_quota', '-x', '-c', 'state', '/')
+            project = re.search(r'^Project quota state on / .*?$(.*?)(?=^\S|\Z)', output, re.M | re.S)
+            section = project.group(1) if project else ''
+            return (bool(re.search(r'^\s*Accounting:\s+ON\s*$', section, re.M)) and
+                    bool(re.search(r'^\s*Enforcement:\s+ON\s*$', section, re.M)), output.strip())
+        check('project accounting/enforcement ON', quota)
+        def boot():
+            state = self.state()
+            return (state.get('phase') == 'prepared' and self.read(BOOT).strip() != state['boot_id'],
+                    self.read(BOOT).strip())
+        check('boot changed since prepare', boot)
+        check('fleet-sync.timer active', lambda: (self.user('systemctl', '--user', 'is-active', 'fleet-sync.timer').strip() == 'active', 'free user timer'))
+        check('heavy installed and idle', lambda: (True, self.heavy()))
+        def claims():
+            rows = self.claims()
+            return not rows, rows or 'no current claims; central records survive reboot'
+        check('central claims after boot', claims)
+        # The current authority has no journal. A transient claim cannot be
+        # excluded by snapshots. Do not turn that missing evidence into PASS.
+        check('no claims appeared during downtime', lambda: (False, 'UNPROVEN: central claim list has no history; ops audit required'))
+        return all(checks)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('command', nargs='?', choices=('plan', 'prepare', 'reboot', 'verify', 'rollback'), default='plan')
+    parser.add_argument('--host', required=True)
+    parser.add_argument('--central', default='free@204.168.210.29', help='hel8 SSH authority (as free)')
+    parser.add_argument('--yes', action='store_true')
+    args = parser.parse_args()
+    if not re.fullmatch(r'[a-z][a-z0-9-]*', args.host):
+        parser.error('invalid host')
+    if not re.fullmatch(r'[a-zA-Z0-9_.@:-]+', args.central) or args.central.startswith('-'):
+        parser.error('invalid central SSH destination')
+    mutation = args.command in ('prepare', 'reboot', 'rollback')
+    if mutation and not args.yes:
+        parser.error(f'{args.command} requires --yes')
+    if os.geteuid() != 0:
+        parser.error('run as root: sudo python3 -I fleet/bootstrap/pquota ...')
+    tool = Pquota(args.host, args.central)
+    if mutation:
+        with tool.locked():
+            getattr(tool, args.command)()
+    elif args.command == 'verify':
+        return 0 if tool.verify() else 1
+    else:
+        tool.plan()
+    return 0
+
+
+if __name__ == '__main__':
+    try:
+        sys.exit(main())
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+        sys.exit(f'pquota: {error}')

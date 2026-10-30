@@ -72,6 +72,9 @@ class BootstrapStagesTest(unittest.TestCase):
         fixture.put(stage / roles, '[units]\n' + ''.join(
             json.dumps(unit) + ' = ' + json.dumps(assigned) + '\n'
             for unit, assigned in current_roles.items() if unit not in added))
+        # The later pquota asset has its own compatibility landing. It is not
+        # input to this historical bootstrap stage-A/stage-B proof.
+        (stage / "fleet/bootstrap/pquota").unlink(missing_ok=True)
         retired = self.f.directory / "retired-fleet"
         (self.f.source / "fleet").rename(retired)
         (stage / "fleet").rename(self.f.source / "fleet")
@@ -118,6 +121,7 @@ class BootstrapStagesTest(unittest.TestCase):
         if after_fleet:
             shutil.rmtree(self.f.source / "fleet")
             shutil.copytree(fixture.ROOT / "fleet", self.f.source / "fleet")
+            (self.f.source / "fleet/bootstrap/pquota").unlink(missing_ok=True)
             fixture.put(self.f.source / "fleet/repositories.toml",
                         f'agents = {json.dumps(str(self.f.origin))}\nfabrig = {json.dumps(self.f.fabrig_origin)}\n')
         else:
@@ -141,8 +145,13 @@ class BootstrapStagesTest(unittest.TestCase):
     def test_stage_b_changes_no_runner_code(self):
         # Stage A (code only) is deployed fleet-wide; stage B must bring declarations
         # alone, so the deployed runner is also the runner that applies them.
-        self.assertEqual(fixture.historical_source(DEPLOYED),
-                         fixture.historical_source(self.rollout))
+        # Compare the two historical stage commits. Later parser work is
+        # independently staged and must not rewrite what this proof covers.
+        stage_b = DEPLOYED.removesuffix("^")
+        self.assertEqual(self.f.process("git", "-C", fixture.ROOT, "show",
+                                        DEPLOYED + ":tools/fleet-sync").stdout,
+                         self.f.process("git", "-C", fixture.ROOT, "show",
+                                        stage_b + ":tools/fleet-sync").stdout)
 
 
     def test_stage_a_accepts_future_assets_seeds_provision_pins_and_readonly_units(self):
