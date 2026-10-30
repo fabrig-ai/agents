@@ -33,7 +33,9 @@
 | `old/` | nobody | the legacy archive, read only |
 
 - **`record` validates every write:** the path's schema, size caps, a secret scan, and the writer's right to the path. It commits under a lock and pushes with a rebase retry. Each call makes one commit; the summarizer makes one per run.
-- **Git history is the archive.** Nothing is deleted to save space, so what enters must be worth keeping. Raw events never enter (the 10-30 rewrite removed them, keeping only `events/after-landing/`).
+- **Git history is the archive.** Nothing is deleted to save space, so what enters must be worth keeping. Raw events never enter through the writer. After the spool tools are deployed
+  on every host, a separate history rewrite removes historical raw events while
+  keeping `events/after-landing/`; see `docs/design/records.status.md`.
 
 ## 3. A role's state, journal and incidents
 
@@ -73,6 +75,11 @@
   - **A task ends** when its branch lands or is withdrawn, or when a run without a branch ends. Its summary then goes into `tasks/<date>/`. It holds the task, branch, draft, coordinator, area and part; the launch, ready, landed or ended times; the outcome; runs (count, minutes, tokens, model, effort); queue attempts and rejected steps; and the waits (run end to first attempt, first attempt to landing).
   - Open tasks are carried in the summarizer's local state across the 2-hour window.
 - **The task header** (`codex-run`'s check, `+++` TOML at the top of each task file) is what makes the join exact: `task`, `coordinator`, `draft`, and `branch` unless read-only.
+  Unclosed or invalid TOML headers, invalid join values and unreadable task files
+  do not stop run collection. Affected events omit task and recipient joins and
+  carry a short, content-free `header_error`; run identity, lifecycle and cost
+  remain. The runs summary counts annotated events, so affected start and end
+  events count twice. Other producer failures still fail collection.
 
 ## 5. Habits (for the prompts and role files)
 

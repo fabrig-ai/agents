@@ -8,12 +8,13 @@
 - **Watch detects abandoned progress.** Sessions, mail, runs, slots, leases,
   branches and questions each have an owner and a timed escalation.
 - **Live state and events are different evidence.** The launcher supplies
-  identity and supervision; probes supply liveness; records supply history.
+  identity and supervision; probes supply liveness and recent host-spool events;
+  records supply durable draft and question facts.
   Missing evidence freezes dependent alerts instead of inventing a failure.
 - **One episode per rule and subject.** Act once, escalate once, close after
   two successful clear polls, and permit a new episode on recurrence.
 - **Every transition is an event.** A heartbeat exposes failed inputs and
-  publication trouble. Ops owns noticing a missing watch heartbeat.
+  skipped rules. Ops owns noticing a missing watch heartbeat.
 
 ## 2. Inputs and identity
 
@@ -35,16 +36,24 @@ Codex leads use registered user-unit state rather than Claude sessions/waiters.
 waiters and unread headers, claims, leases and ready refs. Hosts come from the
 runtime `~/src/rust/tmp/post/machines`. The watch sends its own versioned Python
 probe over SSH to read run metadata, completion markers/TSV, task headers,
-output modification times and live heavy state. It reads no mail bodies or
+output modification times, live heavy state and the last two hours of the
+queue, heavy, sessions, post and post-sent spools. It reads no mail bodies or
 run output contents. Host probes run concurrently with timeouts and strict SSH
 host-key checking. An unavailable heavy probe prevents an idle-slot inference.
 
-**Read historical events from records today.** Queue, heavy, sessions, post and
-post-sent streams join live observations. Draft briefs/closings establish part
+**Read recent events from host spools.** Hel8 reads its local
+`~/src/fabrig/events/<source>/<UTC-day>.jsonl`; every other host returns the
+same bounded streams through the existing SSH probe. The probe carries its
+reader code, so no separate remote reader installation is required. Rule input
+names are `spool/queue`, `spool/heavy`, `spool/sessions`, `spool/post` and
+`spool/post-sent`. An absent source is empty; malformed sources or failed probes
+name the source/host and freeze dependent episodes.
+
+**Read durable expectations from records.** Draft briefs/closings establish part
 expectations; director questions establish deadlines. A ready tip's age is the
 time continuously observed at that exact tip, not its unobservable ref creation
-time. Attempts for an older tip do not count. The future host-spool input is
-tracked in `docs/design/watch.status.md` and `docs/design/records.md`, section 4.
+time. Attempts for an older tip do not count. Raw-event retention is specified
+in `docs/design/records.md`, section 4.
 
 ## 3. Rules and escalation
 
@@ -76,7 +85,7 @@ the first fired time, never a sampled percentage or a later repeat firing.
 Lead `files current` metadata and explicit successor/start evidence acknowledge
 handover. Send failures use sent metadata, never subject or body contents.
 
-## 4. Episodes, publication and heartbeat
+## 4. Episodes, spooling and heartbeat
 
 **Persist private episodes under a lock** by sibling rename. One subject must
 not throttle another. Failed post sends retry; delivered exit 0 or 3 is accepted.
@@ -84,27 +93,34 @@ A successful clear poll counts toward closure only when dependencies succeeded.
 Mail send and state persistence cannot be one transaction, so death immediately
 after sending can repeat an action on restart.
 
-**Alert-open, escalate and close publish immediately** through the sibling
-records writer's append command. Stable event ids and a pending outbox preserve
-publication across retries. The first five consecutive deferred publications
-remain successful polls with diagnostics; the sixth fails until recovery.
-Real publication errors fail immediately. Confirm origin contains the commit
-before draining pending events.
+**Alert-open, escalate, close and heartbeat append locally** to hel8's
+`~/src/fabrig/events/watch/<UTC-day>.jsonl`. The shared spool writer uses the
+same source lock, atomic day replacement and two-hour pruning as the collectors.
+Stable event ids and a pending outbox preserve local retries. A spool failure
+exits 2 with a reason and keeps pending events; success drains them. There are
+no git push deferrals, origin-confirmation steps or publication counters here.
+Quiet polls also prune the watch spool.
+
+**Keep compact condition facts beyond raw-event expiry.** Private watch state
+retains last claim/lease activity and batch time, attempted ready tips,
+unresolved handovers and acknowledgements, and delivery dispositions. Store
+needed identities, timestamps and joins rather than raw streams, mail subjects
+or context samples. This keeps unresolved alerts and the four-hour lease clock
+intact when source events age out. Successful delivery tombstones expire after
+two hours; lease facts disappear with the live lease.
 
 **A quiet heartbeat is due every 900 seconds,** observed at the next poll.
-Alert transitions, failed-input-set changes and publication-deferral changes
-also make it due. Heartbeats report selected executables, failed/skipped inputs
-and preceding watch/collector publication status. A changing error string alone
-does not force publication. Local episode state is still saved on quiet polls.
+Alert transitions and failed-input-set changes also make it due. Heartbeats
+report selected executables and failed/skipped inputs. A changing error string
+alone does not force a heartbeat. Local episode state is saved on quiet polls.
 
 **Silent mode preserves evidence.** Disabling `alerts.post` evaluates and
-publishes without mail or wake. Re-enabling posts catches up once per still-live
+writes spool events without mail or wake. Re-enabling posts catches up once per still-live
 episode, with its original opening time; already-overdue episodes go directly
 to the supervisor. Current defaults enable posts. Dry-run is different: it
-persists nothing and never publishes or sends.
+persists no watch state or spool events and never sends.
 
 ## 5. Later
 
 - Add the planned `login held` rule with its owner, evidence and ladder.
-- Read raw events from each host's spool after the records migration.
 - Add an independent missing-heartbeat alarm for ops.
