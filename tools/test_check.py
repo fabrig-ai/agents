@@ -1,5 +1,7 @@
 """The gate discovers nested tests and propagates failures in disposable trees."""
 import fcntl
+import json
+import time
 import os
 from pathlib import Path
 import subprocess
@@ -18,6 +20,7 @@ class GateTests(unittest.TestCase):
             tools = root / "tools"
             tools.mkdir()
             (tools / "check.sh").write_bytes(GATE.read_bytes())
+            (tools / "gate.py").write_bytes(GATE.with_name("gate.py").read_bytes())
             for name, content in sources.items():
                 path = tools / name
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -105,6 +108,73 @@ class T(unittest.TestCase):
         self.assertIn("broken import", result.stderr)
 
 
+class BudgetSelectionTests(unittest.TestCase):
+    def test_tiers_and_explicit_files(self):
+        sources = {'test_gate.py': "print('gate marker')",
+                   'test_sweep_periodic.py': "print('periodic marker')"}
+        result = GateTests.run_gate(self, sources)
+        self.assertIn('gate marker', result.stderr)
+        self.assertNotIn('periodic marker', result.stderr)
+        result = GateTests.run_gate(self, sources, '--tier', 'periodic')
+        self.assertIn('periodic marker', result.stderr)
+        self.assertNotIn('gate marker', result.stderr)
+        result = GateTests.run_gate(self, sources, 'tools/test_sweep_periodic.py')
+        self.assertIn('periodic marker', result.stderr)
+
+    def test_wait4_counts_waited_descendant_cpu_and_enforces_named_budget(self):
+        source = """import subprocess,sys
+subprocess.run([sys.executable, '-c', 'import time; end=time.process_time()+0.08\\nwhile time.process_time()<end: pass'],check=True)
+"""
+        config = '[budget]\nfile_cpu_s = 0.01\ntier_cpu_s = 0.01\nenforce = false\n[files."tools/test_cpu.py"]\nowner = "lead/test"\n'
+        sources = {'test_cpu.py': source, 'gate.toml': config}
+        result = GateTests.run_gate(self, sources)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('REPORT ONLY: file CPU budget: tools/test_cpu.py (lead/test)', result.stderr)
+        self.assertIn('REPORT ONLY: tier CPU budget: gate', result.stderr)
+        sources['gate.toml'] = config.replace('false', 'true')
+        result = GateTests.run_gate(self, sources)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn('FAIL: file CPU budget', result.stderr)
+
+    def test_wall_limit_reports_unobserved(self):
+        result = GateTests.run_gate(self, {'test_hang.py': 'import time; time.sleep(10)',
+                                         'gate.toml': '[budget]\nfile_wall_s = 0.1\n'})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('1 starved/unobserved', result.stderr)
+
+    def test_selection_mapping_smoke_unknown_and_changed_git_diff(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('gate_selection_fixture', GATE.with_name('gate.py'))
+        gate = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(gate)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            names = ['tools/test_smoke.py', 'tools/a/test_a.py', 'tools/b/test_b.py']
+            for name in names:
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text('')
+            config = dict(smoke=[names[0]], select={'tools/a/**': [names[1]]})
+            cases = [(['tools/a/code'], names[:2]), (['docs/a.txt'], names[:1]),
+                     (['README.md'], names[:1]), (['tools/b/new'], [names[0], names[2]]),
+                     (['other'], names), (['tools/empty/new'], names)]
+            for changes, expected in cases:
+                self.assertEqual(gate.select(root, config, changes), sorted(expected))
+            env = dict(os.environ, GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1',
+                       GIT_AUTHOR_NAME='Fixture', GIT_AUTHOR_EMAIL='fixture@example.invalid',
+                       GIT_COMMITTER_NAME='Fixture', GIT_COMMITTER_EMAIL='fixture@example.invalid')
+            def git(*args):
+                return subprocess.check_output(['git', *args], cwd=root, env=env, stderr=subprocess.DEVNULL).decode().strip()
+            git('init', '-b', 'main')
+            git('add', '.')
+            git('commit', '-qm', 'base')
+            base = git('rev-parse', 'HEAD')
+            (root/'README.md').write_text('new')
+            git('add', '.')
+            git('commit', '-qm', 'doc')
+            self.assertEqual(gate.changed_paths(root, base), ['README.md'])
+
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -118,6 +188,7 @@ class GateLockTests(unittest.TestCase):
             tools = root / "tools"
             tools.mkdir()
             (tools / "check.sh").write_bytes(GATE.read_bytes())
+            (tools / "gate.py").write_bytes(GATE.with_name("gate.py").read_bytes())
             (tools / "test_ok.py").write_text(source)
             lock = root / "gate.lock"
             env = {k: v for k, v in os.environ.items() if k != "AGENTS_GATE_HELD"}
@@ -157,6 +228,7 @@ class GateLockTests(unittest.TestCase):
             tools = root / "tools"
             tools.mkdir()
             (tools / "check.sh").write_bytes(GATE.read_bytes())
+            (tools / "gate.py").write_bytes(GATE.with_name("gate.py").read_bytes())
             (tools / "test_ok.py").write_text(source)
             env = {k: v for k, v in os.environ.items() if k != "AGENTS_GATE_HELD"}
             env.update(HOME=str(root / "home"), AGENTS_GATE_LOCK=str(root / "gate.lock"))

@@ -40,7 +40,7 @@ class ExitObservationTests(unittest.TestCase):
             self.assertTrue(exiting(123))
 
 
-class Review2Test(fixture.FleetTest):
+class Review2Test(fixture.FleetFixture):
     def test_candidate_cannot_exclude_recovery_timer(self):
         self.sync()
         current = self.current()

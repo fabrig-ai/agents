@@ -32,7 +32,7 @@ MUTATIONS = {"enable", "disable", "start", "stop", "restart", "daemon-reload"}
 
 class BootstrapStagesTest(unittest.TestCase):
     def setUp(self):
-        self.f = fixture.FleetTest(methodName="runTest")
+        self.f = fixture.FleetFixture(methodName="runTest")
         self.f.setUp()
         self.addCleanup(self.f.doCleanups)
         self.code = (self.f.source / "tools/fleet-sync").read_text()

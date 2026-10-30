@@ -709,6 +709,8 @@ class Declarations:
     def host_units(self, name):
         wanted = {unit for unit, assigned in self.unit_roles.items()
                   if "*" in assigned or set(assigned) & set(self.hosts[name]["roles"])}
+        if self.hosts[name]['machine_env'].get('AGENTS_PERIODIC') != 1:
+            wanted -= {'agents-periodic.service', 'agents-periodic.timer'}
         if not RECOVERY_UNITS <= wanted or not RECOVERY_UNITS <= self.units.keys():
             raise ValueError("host rendering must retain both fleet-sync recovery units")
         return wanted

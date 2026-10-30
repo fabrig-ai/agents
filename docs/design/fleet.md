@@ -49,6 +49,11 @@ an existing kache).
 `~/.local/bin` through the `current` release. A name that matches an executable in
 `/usr/bin` or `/bin` is refused.
 
+**Periodic gate.** Agents checks run every two hours on the sole builder with
+`machine_env.AGENTS_PERIODIC = 1` (hetzner3). Both periodic units are omitted
+on other hosts and the service checks the flag again; see `docs/design/gate.md`,
+section 4.
+
 **Units.** `fleet/units/` holds systemd user units; `fleet/units/roles.toml`
 maps each to the roles that run it. fleet-sync enables timers. A service marked
 start-once is started on its first install only. Its owner coordinates that
@@ -73,7 +78,12 @@ and warn; installing a pin is the explicit `--provision`.
    the install lock that ops also uses. Ops can defer this step.
 3. **Links and rendered files.** Atomic writes, a one-time backup of
    pre-existing files, and a recheck against competing edits.
-4. **Units.** Write and enable declared units. Reload only when needed, and
+4. **Periodic gate.** Agents checks run every two hours on the sole builder with
+`machine_env.AGENTS_PERIODIC = 1` (hetzner3). Both periodic units are omitted
+on other hosts and the service checks the flag again; see `docs/design/gate.md`,
+section 4.
+
+**Units.** Write and enable declared units. Reload only when needed, and
    remove only units the ownership journal records.
 5. **Record.** Write state, items and run log. Repeated failures back off
    (1 minute up to 60), but a new main commit skips the wait.

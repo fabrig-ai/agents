@@ -1,44 +1,283 @@
 #!/usr/bin/env python3
-"""Check, rebase, check if changed, and fast-forward origin/main."""
+"""Usage: tools/land [--host NAME] [--local] [--dry-run] [--inventory PATH]
 
+Rebase, test a bundle on a claimed builder, then fast-forward main. --dry-run
+executes the real claim/bundle/check/release flow and stops before pushing.
+--local is an explicit fallback with the same budgets and selection.
+"""
+import argparse
+import importlib.util
+import json
 import os
 from pathlib import Path
+import shlex
+import signal
 import subprocess
 import sys
+import tempfile
+import time
+import tomllib
+import uuid
+
+OWNER = 's/deploy-gate'
+ALIASES = {'h3': 'hetzner3', 'h7': 'hetzner7', 'h6': 'hetzner6'}
 
 
-def run(*args):
-    return subprocess.check_output(args, text=True).strip()
+def run(*args, **kwargs):
+    return subprocess.check_output(args, text=True, **kwargs).strip()
+
+
+def ssh(target, *command, **kwargs):
+    return run('ssh', '-oBatchMode=yes', '-oConnectTimeout=5', target,
+               shlex.join(str(a) for a in command), **kwargs)
+
+
+def load_gate(root):
+    spec = importlib.util.spec_from_file_location('agents_gate', root / 'tools/gate.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def pools(path):
+    result = set()
+    for line in path.read_text().splitlines():
+        fields = line.split('#', 1)[0].split()
+        if not fields:
+            continue
+        for field in fields[1:]:
+            number, separator, share = field.partition('=')
+            pair = (fields[0], number)
+            if not separator or not number.isdecimal() or not share or pair in result:
+                raise ValueError(f'invalid slot inventory: {line}')
+            if share == 'pool':
+                result.add(pair)
+    return result
+
+
+def interrupted(signum, frame):
+    raise KeyboardInterrupt(f'signal {signum}')
+
+
+class Builder:
+    def __init__(self, hosts, inventory, requested, sha):
+        self.hosts = hosts
+        self.hel8 = hosts['hel8']['ssh']
+        self.inventory = inventory
+        self.requested = ALIASES.get(requested, requested)
+        self.what = f'agents-gate {sha} {uuid.uuid4().hex}'
+        self.slot = None
+        self.target = None
+
+    def claim(self):
+        available = pools(self.inventory)
+        free = {tuple(line.split()) for line in
+                ssh(self.hel8, 'claim', 'list', '--free', OWNER, timeout=10).splitlines()}
+        choices = [self.requested] if self.requested else ['hetzner3', 'hetzner7', 'hetzner6']
+        for host in choices:
+            if host not in self.hosts or 'builder' not in self.hosts[host]['roles']:
+                raise ValueError(f'not a builder: {host}')
+            for h, n in sorted(available & free, key=lambda p: (p[0], int(p[1]))):
+                if h != host:
+                    continue
+                # Record the intent while signals are blocked. A lost SSH reply
+                # still gets an exact-WHAT release; it cannot release a successor.
+                blocked = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM, signal.SIGHUP})
+                self.slot = (h, n)
+                self.target = self.hosts[h]['ssh']
+                try:
+                    reply = ssh(self.hel8, 'claim', 'claim', h, n, OWNER, self.what, timeout=10)
+                except subprocess.CalledProcessError as error:
+                    if error.returncode == 1:
+                        self.slot = None
+                        continue
+                    self.release()
+                    raise
+                except BaseException:
+                    self.release()
+                    raise
+                finally:
+                    signal.pthread_sigmask(signal.SIG_SETMASK, blocked)
+                print(f'land: claimed {h} slot {n}: {reply}', flush=True)
+                return
+        raise ValueError('no free builder pool slot; use --local explicitly if necessary')
+
+    def release(self):
+        if self.slot is None:
+            return
+        host, number = self.slot
+        blocked = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM, signal.SIGHUP})
+        try:
+            # Retry transient transport failures. Never release by owner alone.
+            for attempt in range(3):
+                try:
+                    reply = ssh(self.hel8, 'claim', 'release', host, number, OWNER,
+                                '--what', self.what, timeout=10)
+                    print(f'land: released {host} slot {number}: {reply}', flush=True)
+                    self.slot = None
+                    return
+                except (OSError, subprocess.SubprocessError):
+                    if attempt == 2:
+                        raise RuntimeError(f'RELEASE FAILED: {host} {number}; exact claim {self.what!r}')
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, blocked)
+
+    def check(self, root, base, limit, gate):
+        remote = None
+        with tempfile.TemporaryDirectory(prefix='agents-land-') as directory:
+            bundle = Path(directory) / 'candidate.bundle'
+            subprocess.run(['git', 'bundle', 'create', str(bundle), 'HEAD'], cwd=root, check=True)
+            try:
+                remote = ssh(self.target, 'mktemp', '-d', '/tmp/agents-gate.XXXXXXXX', timeout=10)
+                if not remote.startswith('/tmp/agents-gate.') or any(c not in '/-._abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789' for c in remote):
+                    raise ValueError('invalid builder temporary path')
+                with bundle.open('rb') as stream:
+                    ssh(self.target, 'sh', '-c', 'cat > ' + shlex.quote(remote + '/candidate.bundle'),
+                        stdin=stream, timeout=15)
+                print(f'land: shipped HEAD bundle to {self.slot[0]}:{remote}', flush=True)
+                script = (f'git clone -q {shlex.quote(remote)}/candidate.bundle {shlex.quote(remote)}/repo && '
+                          f'cd {shlex.quote(remote)}/repo && '
+                          f'timeout --foreground --signal=TERM --kill-after=2s {limit + 5:g}s '
+                          f'nice -n 19 ionice -c3 tools/check.sh --tier gate --changed {shlex.quote(base)} '
+                          f'--json {shlex.quote(remote)}/result.json > {shlex.quote(remote)}/table 2>&1')
+                code = 0
+                try:
+                    supervisor = """import fcntl,os,subprocess,sys
+from pathlib import Path
+root=Path(sys.argv[1])
+with (root/'run.lock').open('a') as lock:
+ fcntl.flock(lock,fcntl.LOCK_EX)
+ if (root/'cancelled').exists(): sys.exit(125)
+ child=subprocess.Popen(['sh','-c',sys.argv[2]],start_new_session=True)
+ sibling=root/'run.pid.new'
+ sibling.write_text(str(child.pid))
+ sibling.replace(root/'run.pid')
+ fcntl.flock(lock,fcntl.LOCK_UN)
+ code=child.wait()
+ fcntl.flock(lock,fcntl.LOCK_EX)
+ (root/'run.pid').unlink(missing_ok=True)
+ sys.exit(code)
+"""
+                    ssh(self.target, 'python3', '-I', '-B', '-c', supervisor, remote, script,
+                        timeout=limit + 10)
+                except subprocess.CalledProcessError as error:
+                    code = error.returncode
+                finally:
+                    print(ssh(self.target, 'cat', remote + '/table', timeout=10), flush=True)
+                result = json.loads(ssh(self.target, 'cat', remote + '/result.json', timeout=10))
+                if code or result['code'] or result['starved']:
+                    raise ValueError(f'builder gate incomplete or red (exit {code}, starved {result["starved"]})')
+                return result
+            finally:
+                if remote:
+                    blocked = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM, signal.SIGHUP})
+                    try:
+                        # Cancel under the launch lock, then kill this run's whole
+                        # group before removing its temporary directory.
+                        cleanup = """import fcntl,os,signal,sys
+from pathlib import Path
+root=Path(sys.argv[1])
+with (root/'run.lock').open('a') as lock:
+ fcntl.flock(lock,fcntl.LOCK_EX)
+ (root/'cancelled').touch()
+ p=root/'run.pid'
+ if p.exists():
+  try: os.killpg(int(p.read_text()),signal.SIGKILL)
+  except ProcessLookupError: pass
+"""
+                        ssh(self.target, 'python3', '-I', '-B', '-c', cleanup, remote, timeout=10)
+                        ssh(self.target, 'rm', '-rf', '--', remote, timeout=10)
+                    finally:
+                        signal.pthread_sigmask(signal.SIG_SETMASK, blocked)
 
 
 def main():
-    if len(sys.argv) != 1:
-        sys.exit("usage: tools/land")
-    if not os.environ.get("AGENTS_GATE_HELD"):
-        # Hold the host's gate lock across both checks, the rebase and the push.
-        lock = os.environ.get("AGENTS_GATE_LOCK", str(Path.home() / ".local/state/agents-gate.lock"))
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--host')
+    parser.add_argument('--local', action='store_true')
+    parser.add_argument('--dry-run', action='store_true')
+    parser.add_argument('--inventory', type=Path,
+                        default=Path('/home/free/src/fabrig/main/tools/slots/hosts'))
+    args = parser.parse_args()
+    if args.local and args.host:
+        parser.error('--host and --local are mutually exclusive')
+    started = time.monotonic()
+    root = Path(run('git', 'rev-parse', '--show-toplevel'))
+    os.chdir(root)
+    if run('git', 'status', '--porcelain', '--untracked-files=all'):
+        raise ValueError('refusing a dirty tree')
+    if run('git', 'branch', '--show-current') in ('', 'main'):
+        raise ValueError('use a named branch other than main')
+    # Local mode retains the host lock across rebase, checks and push. A
+    # remote check acquires its builder's check.sh lock instead.
+    if args.local and not os.environ.get('AGENTS_GATE_HELD'):
+        lock = os.environ.get('AGENTS_GATE_LOCK', str(Path.home() / '.local/state/agents-gate.lock'))
         Path(lock).parent.mkdir(parents=True, exist_ok=True)
-        if subprocess.run(["flock", "-n", "-o", lock, "true"]).returncode:
-            print(f"land: waiting for another agents gate on this host ({lock})", file=sys.stderr, flush=True)
-        os.environ["AGENTS_GATE_HELD"] = "1"
-        os.execvp("flock", ["flock", "-o", lock, sys.executable, *sys.argv])
-    root = Path(run("git", "rev-parse", "--show-toplevel"))
-    if run("git", "status", "--porcelain", "--untracked-files=all"):
-        sys.exit("land: refusing a dirty tree")
-    branch = run("git", "branch", "--show-current")
-    if not branch or branch == "main":
-        sys.exit("land: use a named branch other than main")
-    subprocess.run([str(root / "tools/check.sh")], check=True)
-    before = run("git", "rev-parse", "HEAD")
-    subprocess.run(["git", "fetch", "origin"], check=True)
-    subprocess.run(["git", "rebase", "origin/main"], check=True)
-    if run("git", "rev-parse", "HEAD") != before:
-        subprocess.run([str(root / "tools/check.sh")], check=True)
-    subprocess.run(["git", "push", "origin", "HEAD:main"], check=True)
+        if subprocess.run(['flock', '-n', '-o', lock, 'true']).returncode:
+            print(f'land: waiting for another agents gate on this host ({lock})', flush=True)
+        os.environ['AGENTS_GATE_HELD'] = '1'
+        os.execvp('flock', ['flock', '-o', lock, sys.executable, *sys.argv])
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, interrupted)
+    subprocess.run(['git', 'fetch', 'origin'], check=True, timeout=15)
+    subprocess.run(['git', 'rebase', 'origin/main'], check=True, timeout=15)
+    gate = load_gate(root)
+    config = gate.configuration(root)
+    budget = config['budget']
+    base = run('git', 'rev-parse', 'origin/main')
+    own_paths = gate.changed_paths(root, base)
+    own_selection = set(gate.select(root, config, own_paths, include_smoke=False))
+    builder = None
+    try:
+        if args.local:
+            print('LAND: LOCAL FALLBACK — no builder claim; running on this host', flush=True)
+        else:
+            hosts = tomllib.loads((root / 'fleet/hosts.toml').read_text())['hosts']
+            builder = Builder(hosts, args.inventory, args.host, run('git', 'rev-parse', 'HEAD'))
+            builder.claim()
+        def check(current_base):
+            if builder:
+                return builder.check(root, current_base, budget['merge_wall_s'], gate)
+            with tempfile.TemporaryDirectory(prefix='land-local-') as directory:
+                result_file = Path(directory) / 'result.json'
+                subprocess.run([str(root / 'tools/check.sh'), '--tier', 'gate', '--changed', current_base,
+                                '--json', str(result_file)], check=True, timeout=budget['merge_wall_s'] + 5)
+                result = json.loads(result_file.read_text())
+                if result['starved']:
+                    raise ValueError('local gate has unobserved tests; rerun')
+                return result
+        check(base)
+        subprocess.run(['git', 'fetch', 'origin'], check=True, timeout=15)
+        latest = run('git', 'rev-parse', 'origin/main')
+        if latest != base:
+            # Upstream selection excludes the common, always-run smoke set;
+            # a docs-only upstream change cannot conflict through smoke alone.
+            upstream = gate.changed_paths(root, base, latest)
+            overlap = own_selection & set(gate.select(root, config, upstream, include_smoke=False))
+            subprocess.run(['git', 'rebase', 'origin/main'], check=True, timeout=15)
+            if overlap:
+                print('land: upstream overlaps selected tests; checking once more', flush=True)
+                check(latest)
+            subprocess.run(['git', 'fetch', 'origin'], check=True, timeout=15)
+            if run('git', 'rev-parse', 'origin/main') != latest:
+                raise ValueError('second upstream race; rerun tools/land')
+        elapsed = time.monotonic() - started
+        if budget['enforce'] and elapsed > budget['merge_wall_s']:
+            raise ValueError(f'merge wall budget: {elapsed:.3f}s > {budget["merge_wall_s"]}s')
+        if args.dry_run:
+            print('land: DRY RUN green; stopping before push', flush=True)
+        else:
+            subprocess.run(['git', 'push', 'origin', 'HEAD:main'], check=True, timeout=15)
+        print(f'land: merge wall {time.monotonic() - started:.3f}s / {budget["merge_wall_s"]}s', flush=True)
+    finally:
+        if builder:
+            builder.release()
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     try:
         main()
-    except subprocess.CalledProcessError as error:
-        sys.exit(error.returncode)
+    except KeyboardInterrupt:
+        sys.exit('land: interrupted; rerun')
+    except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as error:
+        sys.exit(f'land: {error}')

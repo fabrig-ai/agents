@@ -1,0 +1,12 @@
+[Unit]
+Description=Agents periodic and full gate on the designated builder
+
+[Service]
+Type=oneshot
+EnvironmentFile=-%h/src/rust/tmp/machine.env
+ExecCondition=/bin/bash -c '[[ $${AGENTS_PERIODIC:-0} == 1 ]]'
+ExecStart=/bin/bash -lc 'exec "$$HOME/src/fabrig/current/tools/periodic"'
+Nice=19
+IOSchedulingClass=idle
+TimeoutStartSec=10min
+WorkingDirectory=%h

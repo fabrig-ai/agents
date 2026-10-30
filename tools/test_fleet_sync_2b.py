@@ -12,7 +12,7 @@ from unittest.mock import patch
 import test_fleet_sync as fixture
 
 
-class FleetSync2bTest(fixture.FleetTest):
+class FleetSync2bTest(fixture.FleetFixture):
     def archive(self):
         archive = self.directory / "agents.tar"
         sibling = archive.with_name(archive.name + ".new")

@@ -51,7 +51,7 @@ env = {{}}
 class ProvisionTest(unittest.TestCase):
     def setUp(self):
         # Composition avoids running FleetTest's inherited tests twice.
-        self.f = fixture.FleetTest(methodName="runTest")
+        self.f = fixture.FleetFixture(methodName="runTest")
         self.f.setUp()
         self.addCleanup(self.f.doCleanups)
         self.host = add_fixture_host(self.f.source)

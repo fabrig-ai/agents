@@ -5,6 +5,9 @@ Contract: `docs/design/fleet.md`, sections 1–6.
 
 ## Present
 
+- Agents periodic units are gated by builder role and AGENTS_PERIODIC=1; only
+  hetzner3 declares the flag (`tools/fleet-sync`, `tools/test_land.py`).
+
 - Release promotion, rendering, links, installer locking, unit journals, controls,
   backoff, inspection and recovery exist (`tools/fleet-sync:831`, `:953`, `:1114`, `:1312`, `:1340`, `:1972`, `:2032`, `:2060`, `:2232`).
 - Safe access, provisioning and owner-controlled restarts have fixture coverage in

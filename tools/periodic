@@ -1,0 +1,47 @@
+#!/usr/bin/env python3
+"""Run periodic then full gate; mail failing owners (gate.md §4)."""
+import importlib.util
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+
+
+def main():
+    if os.environ.get('AGENTS_PERIODIC') != '1':
+        print('agents-periodic: disabled (AGENTS_PERIODIC != 1)')
+        return 0
+    root = Path(__file__).resolve().parent.parent
+    failed = False
+    with tempfile.TemporaryDirectory(prefix='agents-periodic-') as directory:
+        for tier in ('periodic', 'gate'):
+            report = Path(directory) / (tier + '.json')
+            code = subprocess.run([str(root / 'tools/check.sh'), '--tier', tier,
+                                   '--json', str(report)], cwd=root).returncode
+            result = json.loads(report.read_text()) if report.exists() else None
+            notices = []
+            if result:
+                for row in result['files']:
+                    if row['failed'] or row['over'] or row['starved']:
+                        notices.append((row.get('owner') or 'ops', json.dumps(row, indent=2)))
+                if code and not notices or result['reasons'] and not notices:
+                    notices.append(('ops', json.dumps(result, indent=2)))
+            else:
+                notices.append(('ops', f'{tier} produced no result table (exit {code})'))
+            for index, (owner, text) in enumerate(notices):
+                body = Path(directory) / f'{tier}-{index}.txt'
+                sibling = body.with_suffix('.new')
+                sibling.write_text(text + '\n')
+                sibling.replace(body)
+                mailed = subprocess.run(['post', 'send', '--as', 'agents-periodic',
+                                         owner + '@hel8', 'agents ' + tier + ' failure', str(body)],
+                                        timeout=30).returncode
+                failed |= bool(mailed)
+            failed |= bool(code or notices)
+    return int(failed)
+
+
+if __name__ == '__main__':
+    sys.exit(main())

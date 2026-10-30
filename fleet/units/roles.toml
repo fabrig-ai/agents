@@ -15,3 +15,5 @@
 "after-landing.service" = ["after-landing"]
 "qa-watch.service" = ["qa"]
 "kache.service" = ["*"]
+"agents-periodic.service" = ["builder"]
+"agents-periodic.timer" = ["builder"]

@@ -8,7 +8,7 @@ from unittest.mock import patch
 import test_fleet_sync as fixture
 
 
-class FleetSync3Test(fixture.FleetTest):
+class FleetSync3Test(fixture.FleetFixture):
     def setUp(self):
         super().setUp()
         # Exercise path support independently of either production manifest stage.

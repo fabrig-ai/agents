@@ -10,7 +10,7 @@ from unittest.mock import patch
 import test_fleet_sync as fixture
 
 
-class FleetSync2cTest(fixture.FleetTest):
+class FleetSync2cTest(fixture.FleetFixture):
     def preview_run(self, directory, expected=0, cwd=None):
         return self.process("python3", "-I", "-B", self.source / "tools/fleet-sync",
                             "--host", "hel8", "--preview", directory, expected=expected, cwd=cwd)

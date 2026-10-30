@@ -1,66 +1,83 @@
 # Gate
 
-2026-10-30. Owner: s/deploy. Code: `tools/check.sh`, `tools/land`.
-Code departures: `docs/design/gate.status.md`.
+2026-10-30. Owner: s/deploy. Code: `tools/check.sh`, `tools/gate.py`,
+`tools/land`, `tools/periodic`. Status: `docs/design/gate.status.md`.
 
 ## 1. In one page
 
-- **Agents has no merge queue.** A branch lands by `tools/land`; that is the
-  required workflow, not an enforced one. It checks,
-  rebases onto origin/main, checks again if anything moved, and fast-forwards
-  main. It never force-pushes.
-- **Main deploys itself.** Every host polls main each minute and deploys a
-  landing at its next healthy run (`docs/design/fleet.md`, section 3). The
-  gate is therefore the only review the fleet gets before running new code.
-- **One gate per host at a time.** Concurrent full gates starve each other and
-  the sessions on the host, so both commands serialize on one host lock
-  (by convention: see section 4).
-- **Tests keep off the real host's state.** Each test file runs with its own
-  HOME and temporary directory, with fixtures that fake services and remotes.
-  Local git and processes are real; there is no sandbox.
+- **Land on a claimed builder.** `tools/land` rebases, ships HEAD as a complete
+  git bundle, checks selected tests at nice 19 and idle IO, then fast-forwards
+  main. Agents work must not consume fabrig's pipeline capacity unclaimed.
+- **Keep the merge below 60 seconds.** `tools/gate.toml` declares ownership,
+  selection and CPU/wall budgets. Enforcement starts report-only; only the
+  user turns it on. No force push, queue, or production service calls in tests.
+- **Tests use disposable HOME and TMPDIR.** Each file has a fresh interpreter.
+  Shared fixture classes carry no inherited test cases; each behavior runs once.
+- **Main deploys itself.** Hosts poll main; this entrypoint remains policy,
+  rather than remote branch protection (`docs/design/fleet.md`, section 3).
 
-## 2. Check
+## 2. Check and budgets
 
-**`tools/check.sh [FILES]`** runs every `tools/**/test_*.py`, or only the
-named files, in parallel worker processes. Each file gets a fresh interpreter
-with an isolated HOME and TMPDIR and no stdin. The output is in discovery
-order, followed by a one-line summary. The exit code is 1 if any file failed.
+`tools/check.sh [--tier gate|periodic] [--changed BASE] [FILES ...]` defaults
+ to gate, excluding `test_*_periodic.py`; periodic selects only those files.
+Explicit files override tier discovery. Changed selection uses
+`git diff --name-only BASE...HEAD` and the glob map, plus the always-run smoke
+set. Docs and Markdown select smoke; unmapped tools select their directory's
+files (all files if empty); other unknown paths select every gate file.
 
-**Use focused files while developing.** Run the full gate once before landing.
-`tools/land` runs it anyway.
+Up to eight workers share a per-host lock. They use nice 19 and idle IO when
+ionice is available. `wait4` reports each child's user+system CPU, including its
+waited descendants, and wall time. The table names file, owner, CPU, wall,
+budget and status. `--json PATH` saves the same observations atomically.
+Defaults: file CPU 8 s, file wall 15 s, tier CPU 100 s, merge wall 60 s.
+With enforcement enabled, CPU overruns fail by name and workers also receive
+an OS CPU ceiling. Wall expiry kills the file's process group and warns
+starved/unobserved; it never turns an unexecuted assertion into a pass. A
+landing refuses an incomplete gate. Repair tier membership or inefficiency
+before asking the user about budgets (fabrig testing-strategy, section 8.1).
 
-## 3. Land
+## 3. Land and races
 
-**`tools/land`** takes no arguments. It refuses a dirty tree, `main` and a
-detached HEAD. The sequence:
+`tools/land [--host NAME] [--local] [--dry-run]` refuses dirty trees, main and
+detached HEAD, then fetches and performs a plain rebase on origin/main.
+Auto selection tries hetzner3, hetzner7, hetzner6 (h3/h7/h6 aliases), matching
+pool slots from fabrig's slots inventory against hel8's central free list.
+Hel8's SSH target comes from `fleet/hosts.toml`. Atomic claim admission is
+still authoritative if that list races. Claims use owner `s/deploy-gate` and
+a unique `agents-gate <sha> <token>` description. Finally releases with that
+exact description, including failed runs and interrupts; release errors fail
+loudly. There is no owner-only release or stale-claim stealing.
 
-1. Run the full check.
-2. Fetch, then rebase onto origin/main.
-3. Run the full check again if the rebase moved HEAD.
-4. Push `HEAD:main`.
+A builder receives a full HEAD bundle in a private temporary directory and
+runs `nice -n 19 ionice -c3 tools/check.sh --tier gate --changed BASE` with a
+65 s hard wall backstop, including lock waiting. Results return before cleanup.
+On interruption cleanup cancels launch and kills this run's process group
+before releasing. SSH errors fail closed. `--local` loudly announces its
+unclaimed in-place fallback; selection, budgets and lock still apply.
 
-If someone else pushed in between, the push fails, and the lander rebases and
-lands again.
+After green, fetch again. A moved main is rebased; disjoint test selections
+permit push, overlapping selections require one further check. A second
+upstream race refuses and asks for a rerun. A plain `HEAD:main` push also
+refuses a final race. `--dry-run` follows the real flow but stops before push.
+Report the elapsed time from entry through push (or dry-run completion).
 
-**Rebase first.** Rebase onto origin/main before `tools/land`, so the first
-check already covers current main and the second rarely runs.
+## 4. Lock and periodic checks
 
-## 4. Host lock
+`~/.local/state/agents-gate.lock` (`AGENTS_GATE_LOCK` override) serializes
+checks on each host. Local landing holds it through fetch/rebase/check/push.
+`AGENTS_GATE_HELD` is a trusted nesting marker; fixture children strip it and
+the lock override. This is cooperation, not verified exclusion.
 
-**`~/.local/state/agents-gate.lock`** (override: `AGENTS_GATE_LOCK`):
-- `check.sh` re-executes itself under `flock` on it;
-- `tools/land` holds it across both checks, the rebase and the push;
-- a waiting gate prints one line saying so.
-
-**`AGENTS_GATE_HELD`** marks the nested run inside an outer holder. Any
-nonempty value skips the lock, because the callers are trusted rather than
-verified. Sessions never set it themselves and never wrap the gate in their
-own `flock`. Test fixtures strip both variables, so the gate's own tests never
-take the real lock.
+Every two hours `agents-periodic.timer` runs `tools/periodic`: periodic first,
+then the full gate without selection. Builder role units render only with
+`machine_env.AGENTS_PERIODIC = 1`, currently hetzner3 alone. The service also
+checks the runtime flag, uses nice 19 and idle IO. It mails each failed,
+over-budget or starved file's owner using `post send --as agents-periodic
+OWNER@hel8`; missing owners and runner failures go to ops. No periodic tests
+have been invented or moved merely to escape a gate budget.
 
 ## 5. Later
 
-- An enforced landing entrypoint, so main moves only through `tools/land`
-  (ops request).
-- Keep the per-file timings that the gate already prints with the landing
-  record, to spot slow or flaky tests.
+- Enforce the landing entrypoint with remote main protection.
+- Retain timing history with landing records; current tables are printed and
+  optionally saved through `--json`.
