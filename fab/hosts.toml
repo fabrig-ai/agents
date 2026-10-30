@@ -4,10 +4,12 @@
 
 [hel8]
 ssh = "free@204.168.210.29"
+hostname = "debian-8gb-hel1-1"
 roles = ["dispatcher"]
 
 [hetzner6]
 ssh = "free@2.29.120.8"
+hostname = "debian-16gb-hel1-6"
 roles = ["builder"]
 disk_gb = 305
 places = 6
@@ -19,4 +21,5 @@ builds = 3
 
 [hetzner8]
 ssh = "free@2.29.110.236"
+hostname = "debian-16gb-hel1-8"
 roles = ["gate"]

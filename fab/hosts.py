@@ -16,6 +16,7 @@ class Host:
     name: str
     ssh: str
     roles: tuple[str, ...]
+    hostname: str = ""  # what the machine calls itself, so tools find their own entry
     disk_gb: int = 0
     places: int = 0
     slots: int = 0

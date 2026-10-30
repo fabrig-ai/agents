@@ -9,6 +9,7 @@ from __future__ import annotations
 import fcntl
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -35,14 +36,19 @@ class Settings:
 
 
 def settings(host: str | None = None, *, path: Path | None = None) -> Settings:
-    """This machine's settings: host (default the FAB_HOST environment variable) names its
-    fab/hosts.toml entry, whose builds and headroom_gb override the defaults; an unknown or
-    missing host keeps the defaults."""
-    host = os.environ.get("FAB_HOST") if host is None else host
+    """This machine's settings: host (default the FAB_HOST environment variable, else the entry
+    whose hostname is this machine's) names its fab/hosts.toml entry, whose builds and
+    headroom_gb override the defaults; an unknown or missing host keeps the defaults."""
+    with (path or Path(__file__).with_name("hosts.toml")).open("rb") as source:
+        entries = tomllib.load(source)
+    if host is None:
+        host = os.environ.get("FAB_HOST")
+    if host is None:
+        this = socket.gethostname()
+        host = next((name for name, entry in entries.items() if entry.get("hostname") == this), "")
     if not host:
         return Settings()
-    with (path or Path(__file__).with_name("hosts.toml")).open("rb") as source:
-        entry = tomllib.load(source).get(host, {})
+    entry = entries.get(host, {})
     defaults = Settings()
     return Settings(builds=entry.get("builds", defaults.builds),
                     headroom=entry.get("headroom_gb", defaults.headroom // GB) * GB)

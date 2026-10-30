@@ -1,6 +1,7 @@
 import fcntl
 import io
 import os
+import socket
 import subprocess
 import threading
 import time
@@ -200,6 +201,11 @@ class SettingsTest(unittest.TestCase):
         self.assertEqual(heavy.settings("", path=self.path), heavy.Settings())
         os.environ.pop("FAB_HOST")
         self.assertEqual(heavy.settings(path=self.path), heavy.Settings())
+
+    def test_without_fab_host_this_machine_is_found_by_hostname(self):
+        os.environ.pop("FAB_HOST")
+        write(self.path, f'[mine]\nhostname = "{socket.gethostname()}"\nbuilds = 5\n')
+        self.assertEqual(heavy.settings(path=self.path).builds, 5)
 
 
 class WrapTest(unittest.TestCase):
