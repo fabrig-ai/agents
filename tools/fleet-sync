@@ -693,6 +693,19 @@ class Declarations:
                 raise ValueError(f"missing executable tool: {line}")
             self.tools[name] = path
 
+        self.retired_links = parsed.get("retired-links.toml", {}).get("links", {})
+        if not isinstance(self.retired_links, dict):
+            raise ValueError("retired links must be a table")
+        for name, entry in self.retired_links.items():
+            if (not TOOL_NAME.fullmatch(name) or not isinstance(entry, dict)
+                    or set(entry) != {"legacy_root", "reason"}
+                    or entry["legacy_root"] != "~/src/rust/agents/"
+                    or not isinstance(entry["reason"], str) or not entry["reason"].strip()
+                    or any(c in entry["reason"] for c in "\r\n")):
+                raise ValueError(f"invalid retired link: {name}")
+            if name in self.tools:
+                raise ValueError(f"tool is both installed and retired: {name}")
+
     def host(self, name, allow_unknown=False):
         name = name or os.environ.get("FLEET_HOST")
         if name:
@@ -1113,8 +1126,76 @@ class Runner:
         if any(not TOOL_NAME.fullmatch(name) for name in self.link_owned):
             raise ValueError("invalid tool link ownership record")
 
+    def retired_target(self, text, legacy_root):
+        # Compare lexically, then reject further symlinks without following them.
+        # Walk the original spelling: normalizing away a symlink/.. could hide it.
+        target = self.home / ".local/bin" / text
+        normalized = Path(os.path.normpath(target))
+        root = self.home / legacy_root.removeprefix("~/")
+        if not normalized.is_relative_to(root):
+            return False
+        directory = os.open(target.anchor, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            parts = target.parts[1:]
+            for index, part in enumerate(parts):
+                try:
+                    info = os.stat(part, dir_fd=directory, follow_symlinks=False)
+                except FileNotFoundError:
+                    return True  # Dangling links into the legacy root are retired.
+                if stat.S_ISLNK(info.st_mode):
+                    return False
+                if index == len(parts) - 1 or not stat.S_ISDIR(info.st_mode):
+                    return True
+                child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
+                os.close(directory)
+                directory = child
+            return True
+        finally:
+            os.close(directory)
+
+    def retire_links(self):
+        journal_path = ".local/state/fleet-sync/retired_links.json"
+        journal = self.safe.json(journal_path, [])
+        source = self.real_safe if self.previewing else self.safe
+        for name, entry in self.d.retired_links.items():
+            relative = f".local/bin/{name}"
+            item = f"retired-link:{name}"
+            try:
+                text = source.readlink(relative)  # lstat first; never follow the leaf.
+                if text is None:
+                    recorded = any(record["name"] == name for record in journal)
+                    self.item(item, "ok" if recorded else "warn",
+                              "already retired" if recorded else "link is absent; retained")
+                    continue
+                if not self.retired_target(text, entry["legacy_root"]):
+                    self.item(item, "warn", "link is outside legacy root or passes through another symlink; retained")
+                    continue
+                if self.args.check:
+                    self.item(item, "drift", f"would retire {name} (-> {text})")
+                    continue
+                with self.safe.parent(relative) as (directory, leaf):
+                    info = os.stat(leaf, dir_fd=directory, follow_symlinks=False)
+                    if not stat.S_ISLNK(info.st_mode) or os.readlink(leaf, dir_fd=directory) != text:
+                        self.item(item, "warn", "link changed; retry next run")
+                        continue
+                    record = {"name": name, "text": text, "time": now(),
+                              "release": self.state.get("agents_sha") or self.source()[1]}
+                    journal.append(record)
+                    self.safe.save(journal_path, json.dumps(journal, indent=2) + "\n")
+                    # Recheck after journaling; a user replacement must survive.
+                    info = os.stat(leaf, dir_fd=directory, follow_symlinks=False)
+                    if not stat.S_ISLNK(info.st_mode) or os.readlink(leaf, dir_fd=directory) != text:
+                        self.item(item, "warn", "link changed; retry next run")
+                        continue
+                    os.unlink(leaf, dir_fd=directory)
+                self.item(item, "changed", f"would retire {name} (-> {text})" if self.previewing
+                          else f"retired {name} (-> {text})")
+            except (OSError, ValueError) as error:
+                self.item(item, "warn", str(error))
+
     def links(self):
-        for tool in sorted(self.link_owned - self.d.tools.keys()):
+        self.retire_links()
+        for tool in sorted(self.link_owned - self.d.tools.keys() - self.d.retired_links.keys()):
             relative = f".local/bin/{tool}"
             try:
                 old = self.safe.readlink(relative)
@@ -2111,11 +2192,13 @@ class Runner:
             if data is not None:
                 copy.save(path, data)
         link_before = {}
-        for tool in self.d.tools.keys() | self.link_owned:
+        for tool in self.d.tools.keys() | self.link_owned | self.d.retired_links.keys():
             path = f".local/bin/{tool}"
             try:
                 target = self.real_safe.readlink(path)
             except ValueError:
+                if tool in self.d.retired_links:
+                    continue  # retire_links warns from real HOME without reading the file.
                 # Preserve regular-file conflicts so links() reports the real refusal.
                 data = self.real_safe.read(path)
                 before[path] = data
@@ -2127,6 +2210,9 @@ class Runner:
         recorded = self.real_safe.read(".local/state/fleet-sync/links.json")
         if recorded is not None:
             copy.save(".local/state/fleet-sync/links.json", recorded)
+        recorded = self.real_safe.read(".local/state/fleet-sync/retired_links.json")
+        if recorded is not None:
+            copy.save(".local/state/fleet-sync/retired_links.json", recorded)
         self.safe, self.previewing = copy, True
         try:
             self.item("agents", "deferred", "preview: using invoking checkout declarations; no release deployment")
