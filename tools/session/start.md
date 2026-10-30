@@ -175,7 +175,8 @@ START_OWNS_PAUSED (paused wins); wrong arity exits 2.
 returns JSON. Coordinator rows include handle, mailbox, warmup_name, name_prefix,
 legacy_names, aliases, start_dir, supervisor and paused. Lead rows add name,
 area, branch_key, scratch and coordinator_mailbox. The director has no supervisor;
-ops and s/deploy have always_watched=true and supervisor director. Pause state
+ops, s/deploy and s/multi-coord have always_watched=true and supervisor director.
+The multi coordinator matches `s/multi-coord/<stamp>` or `s/multi-coord-next`. Pause state
 uses the same local records reader as owns, also inherited by leads. No network
 or session query; target latency under 150 ms. `tools/session/names` is unchanged.
 
