@@ -37,6 +37,7 @@ paths and records-repository data paths are labelled where they are introduced.
 | `docs/design/watch.md` | s/multi-coord | `tools/records/watch`, `tools/records/watch.toml`; stuck-work detection |
 | `docs/design/status-page.md` | s/multi-coord | `tools/records/status-page`; public index and planned release data |
 | `docs/design/fleet.md` | s/deploy | `fleet/`, `tools/fleet-sync`, `tools/installed`, `fleet/bootstrap/`; references `tools/fleet-sync.md`, `fleet/**/README.md` |
+| `docs/design/logins.md` | s/deploy | `tools/logins/`; agent login shelf, bound snapshots and custody metadata |
 | `docs/design/gate.md` | s/deploy | `tools/check.sh`, `tools/land`; host gate lock |
 | `docs/design/qa.md` | s/qa | `tools/qa/`; custody, rung walks and planned passes, evidence and live tiers |
 | `docs/design/after-landing.md` | s/dynamic-memory | `tools/after-landing/`; published-tip checks, verdicts, routing and bisection |
