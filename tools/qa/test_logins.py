@@ -18,6 +18,9 @@ import signal
 import tempfile
 import unittest
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import qa_test_support as support
+
 HUNG_TOOL_S = 300
 HUNG_CASE_S = 900
 
@@ -54,8 +57,14 @@ class Lab:
         self.serial = 0
 
     def run(self, *args):
-        result = subprocess.run([*self.argv, *args], env=self.env, text=True,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=HUNG_TOOL_S)
+        body = getattr(self, 'driver_body', None) if self.argv[-1] == str(self.root / 'driver.py') else None
+        # Audit hooks cannot be removed; crash failpoints must really exit.
+        if body is not None and ('addaudithook' in body or '._exit(' in body):
+            result = subprocess.run([*self.argv, *args], env=self.env, text=True,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=HUNG_TOOL_S)
+        else:
+            result = support.execute(support.load(SCRIPT), body or 'import sys; sys.exit(module.main())',
+                                     [str(SCRIPT), *args], self.env, self.root)
         return result.returncode, result.stdout, result.stderr
 
     def source(self, mode=0o600):
@@ -97,6 +106,7 @@ class Lab:
         write_text(directory / filename, json.dumps(value) + '\n')
 
     def driver(self, body):
+        self.driver_body = textwrap.dedent(body)
         driver = self.root / 'driver.py'
         write_text(driver, 'import importlib.machinery, importlib.util, sys\n'
                           f'loader = importlib.machinery.SourceFileLoader("logins", {str(SCRIPT)!r})\n'
@@ -986,6 +996,13 @@ sys.exit(module.main())
 def a_wait_that_runs_out_leaves_the_queue(lab):
     lab.login()
     lab.run('take', CHATGPT, '--as', 'a')
+    lab.driver("""clock = [0.0]
+def sleep(seconds):
+    clock[0] += seconds
+module.time.monotonic = lambda: clock[0]
+module.time.sleep = sleep
+sys.exit(module.main())
+""")
     code, out, err = lab.run('take', CHATGPT, '--as', 'b', '--wait', '0.2')
     assert code == 1 and not out and 'held by a' in err
     assert lab.read('waiting.json') == []
@@ -1447,36 +1464,17 @@ def run_one(name, root):
 
 
 class LoginsTests(unittest.TestCase):
-    """Each original fixture is one discoverable unittest, in a bounded worker."""
+    """Fresh state per case; only audit, crash and IPC operations spawn."""
 
 
 def isolated_case(case):
     def test(self):
         with tempfile.TemporaryDirectory(prefix='logins-test-') as directory:
-            root = Path(directory)
-            env = dict(os.environ, HOME=str(root / 'home'), DEV_ROOT=str(root),
-                       DEV_TMP=str(root / 'tmp'))
-            proc = subprocess.Popen([sys.executable, '-I', '-B', str(Path(__file__).resolve()),
-                                     '--one', case.__name__, directory], env=env,
-                                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                    stderr=subprocess.STDOUT, text=True, start_new_session=True)
+            previous = os.umask(0o077)
             try:
-                output, _ = proc.communicate(timeout=HUNG_CASE_S)
-            except BaseException:
-                try:
-                    os.killpg(proc.pid, signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
-                try:
-                    proc.communicate(timeout=5)
-                except subprocess.TimeoutExpired:
-                    try:
-                        os.killpg(proc.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                    proc.communicate()
-                raise
-            self.assertEqual(proc.returncode, 0, output)
+                case(Lab(Path(directory)))
+            finally:
+                os.umask(previous)
     test.__name__ = 'test_' + case.__name__
     return test
 
