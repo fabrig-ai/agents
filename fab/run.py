@@ -254,6 +254,33 @@ def _prepare_and_launch(task: Task, host: Host, kind: str, remote, *, run_id: st
     return run_id
 
 
+def fetch_clone(host: Host, repo: str, *, sh: Runner = run) -> Path:
+    """Make sure the builder has a fresh clone of repo and return its path there:
+    `<remote_home(host)>/repos/<repo>`. Over ssh, each with check=True: `mkdir -p` of
+    `<remote_home>/repos`, `/wt` and `/runs`; clone REMOTES[repo] into it when it has no .git (one bash
+    -c test, as start does); `git -C <clone> fetch origin`. ValueError for a repo not in
+    REMOTES, before any command. start uses it for every run; fab.call_review for review runs."""
+    raise NotImplementedError
+
+
+def launch(host: Host, run_id: str, *, task: str, kind: str, workdir: str, branch: str,
+           base: str, brief: str, effort: str, read_only: bool = False, sh: Runner = run,
+           log_path: Path | None = None, **fields) -> str:
+    """Start Codex on host in workdir, a checkout the caller prepared, log run.started and
+    return run_id. start uses it for every run; fab.call_review for review runs.
+
+    Over ssh, check=True: write brief to `<remote_home(host)>/runs/<run>/brief.md` (mkdir -p
+    its directory, `cat` to brief.md.tmp, then `mv`, in one bash -c with the brief on stdin);
+    keep a copy at this machine's FAB_HOME/runs/<run>/brief.md (_write); then LAUNCHER's
+    command, `fab codex start --effort <effort>` or `codex-run task --effort <effort> --to
+    NOTIFY`, with `--read-only` when read_only, then BRIEF, workdir and REPORT, REPORT being
+    `<remote_home(host)>/runs/<run>/report.md`. Its output must be `<id> <absolute state
+    directory>` on one line, else ValueError. run.started carries run, task, kind, host
+    (host.name), dir (workdir), branch, base, codex (the id), state, report (REPORT) and
+    fields, flat as fab.log.record takes them."""
+    raise NotImplementedError
+
+
 def status(started: dict, host: Host, *, sh: Runner = run) -> dict:
     """Whether a run has ended, from its run.started record: one ssh reading codex-run's
     `<state>/ended` marker and, once ended, the report. Returns {"run", "ended", "outcome",

@@ -74,6 +74,8 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
 | `question.asked` | task, run, text | the task parks until answered |
 | `question.answered` | task, by, answer | the task may run again |
 | `call.started` / `call.ended` | call, role, subject; outcome, tokens | a Claude call |
+| `call.finished` | call, role, outcome | the dispatcher landed a call's branch, or failed to |
+| `call.parked` | call, subject, reason, report | a call's branch waits for the user (13.1) |
 | `note` | text | anything a person wants on the record |
 
 - **New kinds are additive.** The fold ignores types it does not know, so a
@@ -365,14 +367,34 @@ it, and the flow grows from a small start rather than to a fixed cap.
 
 ### 13.1 Design and acceptance are separate
 
-- **A Claude call's output is reviewed before it lands.** A skeleton or
-  answer call's branch gets a read-only Codex review run (kind `review`,
-  effort medium) with the call's brief and its diff: at most ten lines on
-  contradictions with the design, layering breaches, gaps a task would hit,
-  and duplicates of what the inventory already holds. Its report's first
-  line is `Done: approve` or `Failed: <findings>`. Approved, the branch lands;
-  refused, the findings go back as an answer-style amendment call on the
-  same branch, once; refused twice, the part parks for the user.
+- **A Claude call's output is reviewed before it lands.** A skeleton,
+  answer or structure review call's branch gets a read-only Codex review run
+  (kind `review`, effort medium, `fab/roles/call-reviewer.md`). Its brief
+  holds the call's brief and its diff from the merge base with main. It
+  reports at most ten lines on contradictions with the design, layering
+  breaches, gaps a task would hit, and duplicates of what the inventory
+  already holds. Its report's first line is `Done: approve` or `Failed:
+  <findings>`. Approved, the branch lands. Refused, the findings go back
+  once, as an amend call (`fab/roles/amender.md`) on the same branch.
+  Refused twice, the call's subject parks for the user.
+- **A chain** (`fab/call_review.py`) is a call that ended done, the amend
+  calls on its branch, and their review runs; the tick folds it from the log
+  and takes its next step:
+  - review runs are ordinary runs: `run.started` with task the root call's
+    id (run `<call>-<n>`), kind `review`, `call` the call reviewed and its
+    `tip`. The tick collects them as any run.
+  - A review run takes the builder with most free places, even at none,
+    since it builds nothing.
+  - The amend call is `fab call amend ROOT`, its `call.started` carrying
+    `amends`. A run ending `Infra:` is reviewed again, up to three times.
+  - A second refusal, an amend call that does not end done, or a third
+    `Infra:` logs `call.parked`.
+  - A `question.answered` naming the subject starts the chain's counts
+    afresh: the branch's tip is reviewed again, and may be amended once
+    more.
+  - While a subject's chain is open, no call starts for that subject; no
+    answer call starts while an answer chain is open, and no review call
+    while a review chain is open.
 - **Acceptance tests are not the implementer's.** A part's skeleton names,
   per task, the acceptance tests it needs. A test-writer run (Codex, high,
   kind `tests`) writes them on the task's branch from the design and the

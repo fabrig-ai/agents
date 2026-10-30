@@ -54,6 +54,19 @@
   branch lands ungated and no review call starts. Once it does, a change to a
   function already over 60 lines (`fab.dispatch.tick` among them) fails
   `size` and must split it.
+- **The review of calls' output is a skeleton:** `fab/call_review.py`
+  (chains, the review run's brief and start, the amend brief) and
+  `fab.run.fetch_clone` and `fab.run.launch` hold 13.1's contracts.
+  `fab/roles/call-reviewer.md` and `fab/roles/amender.md` are written. The
+  task `call-review` fills them; `call-review-tick` makes the tick review
+  calls' branches and run amend calls, after `review-call` and
+  `gates-tick`. Until it lands, a call's branch lands unreviewed.
+- **Subjects can share a task's id:** a skeleton call's subject
+  `<draft>/<part>` equals the id of a task named after its part (`gates`).
+  A `question.answered` that unparks the subject also makes that task
+  runnable in the fold, even after it has landed. Nothing answers a call's
+  question by hand yet; the user's channel (13.6) must name subjects apart
+  from tasks.
 - **Parts done by hand have no task specs** (package, slot-probe), so the
   tick's design line lists them.
 - **The slot bound of 25 GB is one measurement** (10-30 20:18Z): a
