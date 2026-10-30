@@ -12,8 +12,8 @@ operations and unpublished commits refuse. Nothing imports the frozen `old/` kit
 record pull
 record write --as s/multi drafts/example/draft.toml --from /tmp/draft.toml
 record write --as director director/decisions/next.md < /tmp/decision.md
-record append --as ops queue hel8 < /tmp/events.jsonl
-record append --as collect --batch hel8 < /tmp/all-sources.jsonl
+record append --as after-landing after-landing hel8 < /tmp/verdicts.jsonl
+record append --as after-landing --batch hel8 < /tmp/verdicts.jsonl
 record check [PATH ...]
 record show director/priorities.toml
 ```
@@ -33,7 +33,7 @@ clone safety or conflict), and 2 for usage or operational errors.
 
 ## Data and validation
 
-The allowlist covers event JSONL; draft metadata; part briefs and closings;
+The allowlist covers after-landing event JSONL; draft metadata; part briefs and closings;
 draft and director decisions; director priorities and questions; session
 handover/state/common snapshots; README files and root AGENTS.md. Unknown paths,
 traversal, symlinks, invalid UTF-8, CR characters, credentials and private keys
@@ -49,13 +49,17 @@ under `old/` always refuse, including `old/README.md`. The clone safety checks
 still reject symlinks anywhere in the tracked tree. No generated state is stored.
 `RECORDS_BRANCH` selects a branch for `check` only; every other command uses main.
 
-Events are grouped by source, hostname and each event's UTC date. Existing ids
+Raw events belong in each host's `~/src/fabrig/events/` spool. Every writer and
+batch refuses `events/` paths except `events/after-landing/`; declarations cannot
+override this restriction. Only after-landing remains in writers.toml.
+
+Durable events are grouped by source, hostname and each event's UTC date. Existing ids
 in that file, including duplicates within one input, are skipped. Every new line
 and resulting file is validated; existing bytes remain intact. All changed files
 are written to a temporary sibling, flushed and renamed over their destinations,
 then committed together and pushed once. An idempotent call creates no commit.
 
-`record append --as collect --batch HOST` takes each line's `source` instead of
+`record append --as after-landing --batch HOST` takes each line's `source` instead of
 a positional source and groups all source/date files into that one commit.
 Every line must supply a valid source and match HOST; any invalid line refuses
 the whole batch before any file is changed. The per-source form stays available.
@@ -91,28 +95,11 @@ The `after-landing` producer appends source `after-landing` with these kinds:
 Both join on `branch` and `commit` where known, carry log paths rather than log
 contents, and stay within the 16 KB line cap.
 
-## Scheduled push rate
+## Scheduled pushes
 
-With the declared timers, each collector invocation makes at most one successful
-push, regardless of its source count. These are upper bounds in a steady scheduled
-hour, excluding boot catch-up, manual invocations and other records writers:
-
-| Host/role | Collector runs/hour | Quiet watch heartbeats/hour | Worst-case pushes/hour |
-|---|---:|---:|---:|
-| hel8 / session | 30 | at most 4 | 60 (30 collector + 30 watch) |
-| builder (for example hetzner6) | 12 | 0 | 12 |
-| hetzner8 / gate | 30 | 0 | 30 |
-
-Hel8 normally has up to 34 pushes/hour while alerts and failed-input sets stay
-unchanged: sessions emits fresh context readings each poll and watch publishes
-only its heartbeat. Alert transitions or changes in the failed-input set can
-make watch publish on every two-minute poll, giving the 60/hour worst case.
-Builders and the gate push only when their batch contains new facts, so idle
-runs can produce zero pushes. Status-page only pulls records (six times/hour);
-fleet-sync also contributes no records pushes. Automatic writers try at most
-five times per run. Retries cost only rejected attempts; the successful push
-rate above is unchanged. Collector and pipeline-watch timers use up to 60 seconds
-of randomized delay to spread hosts' publications.
+Collectors and watch never push records. After-landing still publishes durable
+verdicts through this writer, as do director and agent judgement commands. Units
+need no change for the local event spool transition.
 
 ## Races and recovery
 
@@ -135,9 +122,8 @@ leaving the caller's durable outbox for its next poll with exact ids and
 timestamps. Other writers exit 1. Other publication failures also undo the local
 write; manual writers report the input for recovery, while automatic callers
 retain it in their outboxes. Operational failures exit 2. Inputs rejected during
-validation are not echoed. Collect and watch report record's stderr and treat
-five consecutive deferrals as successful runs; the sixth and later exit 2 until
-publication succeeds. Real failures exit 2 immediately.
+validation are not echoed. The caller owns its outbox and retry policy. Collector and watch spool recovery
+is independent of this git writer.
 
 `next.md` in decision directories and `next.toml` in director questions allocate
 the first free number from 0001 to 9999 while locked. If another clone claims
