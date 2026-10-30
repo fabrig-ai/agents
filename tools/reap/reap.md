@@ -13,7 +13,7 @@ use it for surveys. `status [--json]` reads the last report without changing it.
 | Class | HOME-relative discovery | Age |
 | --- | --- | --- |
 | claude-jobs | `.claude/jobs/<id>`, checked against `claude agents --json --all` and live PIDs | directory mtime, 24 h |
-| codex-runs | `src/rust/tmp/codex-run/<run>` with a regular `ended` marker | marker mtime, 7 d |
+| codex-runs | `src/rust/tmp/codex-run/<run>` with regular `final.json`, `state` landed/withdrawn, unit inactive/unknown | final JSON UTC `time`, 7 d |
 | heavy-logs | `src/rust/tmp/logs/*`, except durable `heavy.tsv` | mtime, 7 d |
 | precheck-logs | `src/fabrig/slots/*.precheck-logs/*` | mtime, 3 d |
 | notes | files below `src/fabrig/{notes,tasks}`, except `queue.jsonl` and `queue.out` | mtime, 7 d |
@@ -24,8 +24,14 @@ Records allow ended Claude jobs to expire after one hour. Other kind defaults:
 ops-scratch and retired-scratch three days; qa-scratch and codex-run seven days.
 An unfinished record protects its paths even against generic discovery. A
 resumed `start` merges paths and clears the previous end. Duplicate start/end
-calls do not extend retention. Unknown/malformed JSONL lines are ignored.
+calls do not extend retention: the earliest end since the most recent start
+sets the clock. A resumed start stays live until a new end starts a new clock.
+Unknown/malformed JSONL lines are ignored.
 Overlapping candidates are counted and removed once; a parent owns its bytes.
+Codex finality is never inferred from `ended` or mtimes. Missing, unreadable or
+unknown `final.json` keeps the run as `codex-run not final`; failed systemctl
+queries also keep it. Records cannot override this guard, which runs again
+before removal. Top-level non-directories, including `runs.tsv`, stay intact.
 
 Producers use these three commands (owner names may contain `/`):
 
@@ -58,7 +64,8 @@ keeps jobs. Symlink candidates, symlinked parents and special files are refused.
 Nested symlinks are never followed; removal only unlinks them.
 
 Never paths include `src/rust/tmp/{logins,qa*,heavy,post}`,
-`src/fabrig/{claims,leases,queue,main,agents,current,releases}`,
+`src/fabrig/{claims,leases,queue,main,agents,current,releases,events,records}`,
+`src/rust/records`,
 `.local/state/{fleet-sync,fabrig,heavy,reap}`, `.ssh`, `.claude/.credentials.json`,
 `.claude.json`, Codex state outside `.codex/sessions`, and `archive`.
 Claude jobs bookkeeping (`pins.json`) is also protected. Their ancestors are protected
