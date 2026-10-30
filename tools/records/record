@@ -101,6 +101,7 @@ def host_name(value):
 def path_class(name):
     if re.fullmatch(r'events/[^/]+/[^/]+/\d{4}-\d{2}-\d{2}\.jsonl', name):
         _, source, host, stamp = name.split('/')
+        need(source == 'after-landing', 'raw events belong in the host spool')
         need(re.fullmatch('[a-z][a-z0-9-]*', source) and host_name(host),
              f'{name}: invalid event source or host')
         try:
@@ -204,6 +205,7 @@ def validate(root, name, data):
     text = text_content(data, name)
     if kind == 'events':
         _, source, host, stamp = name.split('/')
+        need(source == 'after-landing', 'raw events belong in the host spool')
         seen = set()
         for number, line in enumerate(data.splitlines(), 1):
             label = f'{name}:{number}'
@@ -410,6 +412,7 @@ def append_files(root, source, host, data, allowed_sources=None):
          'invalid event source or host')
     need(allowed_sources is None or source is None or source in allowed_sources,
          'writer may not append this source')
+    need(source is None or source == 'after-landing', 'raw events belong in the host spool')
     text_content(data, 'append input')
     groups = {}
     for number, line in enumerate(data.splitlines(), 1):
@@ -422,6 +425,7 @@ def append_files(root, source, host, data, allowed_sources=None):
              f'{label}: invalid or missing source')
         need(allowed_sources is None or row_source in allowed_sources,
              f'{label}: writer may not append source {row_source}')
+        need(row_source == 'after-landing', 'raw events belong in the host spool')
         stamp = event(row, row_source, host, label)
         name = f'events/{row_source}/{host}/{stamp}.jsonl'
         groups.setdefault(name, []).append((row['id'], line))
@@ -604,7 +608,7 @@ def status_data(root, now):
         recency.setdefault(path, len(recency))
     decisions.sort(key=lambda row: recency[row['path']])
     counts = {}
-    for path in records_paths(root, 'events/*/*/*.jsonl'):
+    for path in records_paths(root, 'events/after-landing/*/*.jsonl'):
         data = safe(root, path).read_bytes()
         validate(root, path, data)
         for line in data.splitlines():
