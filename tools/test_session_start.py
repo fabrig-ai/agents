@@ -624,10 +624,10 @@ class InventoryTests(Sandbox):
         result = self.command("start", "names", "--json")
         self.assertEqual((result.returncode, result.stderr), (0, ""))
         rows = json.loads(result.stdout)
-        self.assertEqual(len(rows), 18)
+        self.assertEqual(len(rows), 23)
         by_mailbox = {row["mailbox"]: row for row in rows}
         self.assertEqual(len(by_mailbox), len(rows))
-        for handle, mailbox, default in (("dm", "s/dynamic-memory", True), ("q", "s/qa", False), ("u", "s/upgrades", False)):
+        for handle, mailbox, default in (("dm", "s/dynamic-memory", True), ("q", "s/qa", False), ("u", "s/upgrades", False), ("lf", "s/ladder", False)):
             coordinator = by_mailbox[mailbox]
             self.assertEqual(coordinator["role"], "coordinator")
             self.assertEqual(coordinator["handle"], handle)
@@ -651,15 +651,10 @@ class InventoryTests(Sandbox):
                 self.assertEqual(lead["supervisor"], mailbox)
                 self.assertEqual(lead["coordinator_mailbox"], mailbox)
                 self.assertEqual(lead["scratch"], str(self.home / "src/fabrig/leads" / key))
-                self.assertEqual(lead["kind"], "codex" if handle == "u" else "claude")
-                if handle == "u":
-                    self.assertNotIn("start_dir", lead)
-                    self.assertEqual(lead["unit"], "codex-owner-lead-u-" + area)
-                    self.assertEqual(lead["owner_state"], str(self.home / "src/rust/tmp/owners" / area / "codex"))
-                else:
-                    self.assertEqual(lead["start_dir"], str(self.home / "src/rust/tmp/supervise/leads" / key))
-                    self.assertNotIn("unit", lead)
-                    self.assertNotIn("owner_state", lead)
+                self.assertEqual(lead["kind"], "claude")
+                self.assertEqual(lead["start_dir"], str(self.home / "src/rust/tmp/supervise/leads" / key))
+                self.assertNotIn("unit", lead)
+                self.assertNotIn("owner_state", lead)
                 self.assertFalse(lead["paused"])
         director = by_mailbox["director"]
         self.assertEqual(director["name_prefix"], "director/")

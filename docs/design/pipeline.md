@@ -41,8 +41,11 @@ Records hold decisions and questions (`docs/design/records.md`, sections 2–3).
 ## 3. Names, launches and tasks
 
 **The registry is `pipeline/coordinators.toml`.** Handles map to unique `s/...`
-mailboxes; exactly one is default. The default `dm` retains `lead/AREA`, branch
-key `AREA` and coordinator prefix `coord`. Others use `lead/H/AREA`, branch key
+mailboxes; exactly one is default. Active handles are `dm` (dynamic-memory),
+`q` (QA), `u` (upgrades) and `lf` (ladder: product fixes for QA findings).
+All currently use the default Claude leads. The default `dm` retains
+`lead/AREA`, branch key `AREA` and coordinator prefix `coord`. Others use
+`lead/H/AREA`, branch key
 `H-AREA` and coordinator prefix `H`. Areas are skein, smith, jig and temper.
 `tools/session/start names --json` gives identities, aliases, supervisors and
 pause state. `tools/session/names H [AREA]` gives derived paths and names.

@@ -6,10 +6,12 @@ Contract: `docs/design/pipeline.md`, sections 2–5.
 ## Present
 
 - Registry, derived names, JSON inventory, launch prompts and the standalone
-  lease tool are here. The registry currently has dm, q and u; u selects Codex
-  leads. The rules also describe roles not registered as active coordinators.
-- Agents' gate and landing command exist. This branch changes docs only and
-  does not invoke landing or deployment.
+  lease tool are here. The registry currently has dm, q, u and lf; all use
+  default Claude leads. Director decisions 0023 and 0021 restore upgrades'
+  Claude leads and register ladder for product fixes from QA findings.
+  The rules also describe roles not registered as active coordinators.
+- Agents' gate and landing command exist. This registry change does not invoke
+  landing or deployment.
 
 ## Gaps and departures
 
