@@ -551,8 +551,13 @@ before it lands (13.1).
   result; call.ended already carries Claude's. The code report shows the
   Claude to Codex weight (input 1, cache write 1.25, cache read 0.1, output 5
   for Claude and 8 for Codex) and each call's peak context.
-- **A call is bounded:** `--max-turns` and a context target of about 120k
-  tokens; a call over it ends `Failed:` and its brief is split.
+- **A call is measured, not capped, for now** (the user, 10-30): no context
+  cap and no turn limit (no `--max-turns`); a call is stopped only by its
+  40-minute timeout. call.ended carries its peak context and turns, and the
+  code report flags calls over the model's 120k target. Of the first eleven
+  calls, seven peaked over 120k (130k-190k) and all ended well; the user
+  sets a cap, if any, from the measurements. The code may hold an unset
+  bound for later; nothing ends a call for its size now.
 
 ### 13.6 A channel to the user
 
