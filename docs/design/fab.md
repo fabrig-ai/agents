@@ -650,6 +650,28 @@ only the backstop.
   work the next decision depends on (a landing that makes tasks runnable,
   a finished call), it starts the next tick at its end.
 
+### 13.10 The timeline's flow
+
+The user's example timeline (`execution-modes.md`, "Example") is the order of
+things fab follows, whatever the clock says:
+
+- **Intake:** a draft landing in a repository's `docs/design/draft/` starts
+  its intake: the surveys, then the cut. Nobody starts a cut by hand.
+- **Surveys:** read-only Codex runs (medium, kind `survey`), at intake (the
+  readers of what the draft changes, the primitives in reach with their
+  signatures, each area's test world) and before each skeleton call (the
+  primitives in reach, refreshed); their reports go into the cut's and the
+  skeleton call's briefs, beside the code-built inventory.
+- **The buffer's order:** among runnable tasks, consolidation tasks from a
+  structure review come first ("at the head of the buffer"), then repairs and
+  rebases, then tasks of contract parts, then tasks by their part's slice, in
+  plan order.
+- **Then, as written:** contracts land alone and their readers are pulled;
+  probes run beside and their decisions land before their readers' skeletons;
+  answers come in batches, at once when they hold up work; slices complete
+  on their story tests; QA walks the walkable slices (once QA is here); the
+  last call retires the draft. Each is a part above or in section 14.
+
 ## 14. Later
 
 - The self-critique: a read-only Codex run against the skeleton and the taste

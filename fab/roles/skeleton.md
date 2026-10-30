@@ -22,6 +22,13 @@ departure, the drafts' words, and the options.
   that are only `raise NotImplementedError`. Constants and data types are
   written out. The docstring is the contract a Codex implementer fills;
   leave it nothing to guess at a boundary, and nothing more than it needs.
+- **The part's test vocabulary and an exemplar test:** the builders,
+  fixtures and assertion helpers its tests will speak in, written as code,
+  and one test that uses them end to end on the skeleton. Implementers and
+  the test-writer write their tests in that vocabulary.
+- **Slices order the filling, not the shape:** a body no slice's story reaches
+  yet stays `NotImplementedError`; never fill one with a placeholder to make a
+  story pass, and never fake a contract that has not landed.
 - **Reuse before you add:** the inventory lists the primitives already on
   main. Use them; a near-duplicate of one is a defect. A primitive that is
   missing and shared belongs in its own module, designed here.

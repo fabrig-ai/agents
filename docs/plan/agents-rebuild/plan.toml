@@ -248,6 +248,27 @@ needs = ["calls"]
 design = "docs/design/fab.md, 13.3"
 
 [[part]]
+id = "surveys"
+title = "Survey runs at intake and before each skeleton call, their reports in the briefs"
+mode = "feature"
+needs = ["calls", "run"]
+design = "docs/design/fab.md, 13.10"
+
+[[part]]
+id = "intake"
+title = "A draft landing starts its surveys and its cut"
+mode = "feature"
+needs = ["designer", "surveys", "events"]
+design = "docs/design/fab.md, 13.10"
+
+[[part]]
+id = "buffer-order"
+title = "Runnable tasks in the timeline's order: consolidations first, then repairs, contracts, slices"
+mode = "feature"
+needs = ["dispatch"]
+design = "docs/design/fab.md, 13.10"
+
+[[part]]
 id = "events"
 title = "Events start the tick, coalesced; the timer only a 30-minute backstop"
 mode = "feature"
@@ -285,5 +306,5 @@ design = "docs/design/fab.md, 13.6"
 [[slice]]
 id = 6
 story = "A draft goes from its cut to landed code with design, acceptance and review by separate sessions, growing from two runs in flight to many"
-parts = ["call-review", "acceptance", "critique", "foreman", "foreman-repairs", "flow", "designer", "plans", "accounting", "probe", "user-channel", "landing-checks", "events"]
+parts = ["call-review", "acceptance", "critique", "foreman", "foreman-repairs", "flow", "designer", "plans", "accounting", "probe", "user-channel", "landing-checks", "events", "surveys", "intake", "buffer-order"]
 walk = false
