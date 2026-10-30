@@ -15,7 +15,7 @@ Walks remain described by [qa.md](qa.md).
 - **The watcher starts passes.** It selects the newest main with a published
   after-landing **green** run containing the chosen merges, batches up to five
   marked merges per pass, and caps each session at 120 minutes (section 4).
-- **A pass has one existing numeric slot.** Pass slots 11 and 12 on hetzner6 are
+- **A pass has one existing numeric slot.** Pass slots 2 and 6 on hetzner6 are
   dedicated s/qa shares, separate from the walk shares (section 13). Claims,
   preparation, launch recovery,
   deployment supervision and cleanup reuse today's walk contracts. ChatGPT
@@ -279,7 +279,7 @@ a retry is a new pass and request, preserving the previous report.
 ## 5. Slots, logins and safe admission
 
 `QA_PASS_SLOTS` lists existing numeric fabrig slots on `QA_SLOT_HOST`. Its
-length is the pass cap. Configure `11,12` on hetzner6 as dedicated s/qa
+length is the pass cap. Configure `2,6` on hetzner6 as dedicated s/qa
 shares (section 13); no inferred free pair, fallback clone or walk slot is
 a pass slot. Clone readiness and disk admission still gate activation. Reject duplicate pass numbers and overlap with any configured
 walk kind. Each concurrent pass claims and prepares exactly one slot with
@@ -803,7 +803,7 @@ records and evidence origins are fixed/validated in production.
 
 | Setting | Default / activation value | Validation and use |
 |---|---|---|
-| `QA_PASS_SLOTS` | empty / `11,12` on hetzner6 | Same compact number-list grammar as walk slots; empty disables starts |
+| `QA_PASS_SLOTS` | empty / `2,6` on hetzner6 | Same compact number-list grammar as walk slots; empty disables starts |
 | `QA_BATCH` | 5 | Positive marked merges per pass |
 | `QA_CAP_MINUTES` | 120 | Positive; persisted at launch |
 | `QA_LOGIN_RESERVE` | 2 | Nonnegative; at least each pool's summed walk slot caps |
@@ -1084,11 +1084,11 @@ evidence, secret rules and guarded seven-day retention. Depart deliberately:
 
 ## 13. Questions — answered by coordinator q, 2026-10-30
 
-- **Slots — answered:** dedicated s/qa pass shares on hetzner6 are **11 and
-  12**. The selected walk allocation is forgejo **8 and 9**, claude **4 and
-  10**, once disk allows. Apply those settings only with ready clones and
-  successful disk checks; this document does not claim the extra slots are
-  already provisioned. Reserve 2 covers forgejo's two ChatGPT slots and
+- **Slots — answered:** dedicated s/qa pass shares on hetzner6 are **2 and
+  6**. The selected walk allocation is forgejo **8 and 1**, claude **4 and
+  3**: existing slots with warm targets, so no new target is made (5 and 7
+  stay pool). Apply those settings only with the hosts change landed and
+  successful disk checks. Reserve 2 covers forgejo's two ChatGPT slots and
   claude's two Claude slots separately; the common admission validation
   still checks the actually configured mappings during rollout.
 - **Binding/rung and host — answered:** use the **reviewed live ChatGPT
