@@ -133,13 +133,18 @@ The next number follows the maximum occupied number for the rung/kind;
 occupied filenames and manual holders cannot collide with generated names.
 
 Unknown-repository states (including temper and jig) are opaque: they are
-never resumed, ended, returned or rewritten, and their claims, including
-saved attempt claims, protect logins from stray or conflicting gives. Their
-names count for numbering. Invalid or unreadable state blocks admission;
-the watcher isolates it, disables stray sweeping and continues other valid
-walks' cleanup. State reads refuse links, nonregular or multiply linked
-files, reads above 1 MiB and invalid custody or attempt histories. Conflicting
-claims return a login for neither owner. No existing pass state is managed.
+never resumed, ended, returned or rewritten. Their claims, including saved
+attempt claims, protect logins from stray or conflicting gives only while
+`logins list` shows the login held by that legacy state's holder. If inventory
+is unavailable or the login's holder cannot be established, the claim stays
+protected. A login currently held by any legacy holder is never given, even
+without a saved claim naming it. Fabrig walks' own claims and other conflict
+rules are unchanged. Legacy names count for numbering. Invalid or unreadable
+state blocks admission; the watcher isolates it, disables stray sweeping and
+continues other valid walks' cleanup. State reads refuse links, nonregular
+or multiply linked files, reads above 1 MiB and invalid custody or attempt
+histories. Conflicting claims return a login for neither owner. No existing
+pass state is managed.
 
 Every content read or copy opens the file without following its final link,
 then checks that same descriptor for a regular file, exactly one link and

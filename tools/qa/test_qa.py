@@ -3183,6 +3183,99 @@ def unsafe_stuck_list(lab, shape):
 
 
 
+def legacy_login_claims(lab):
+    originals = {}
+    for number in (7, 8, 9):
+        state = dict(walk=f'rung-a-{number}', repo='temper', rung='a',
+                     holder=f'walk/forgejo/rung-a-{number}',
+                     logins={CHATGPT: str(lab.root / 'foreign-rest')} if number == 7 else {},
+                     attempts=[dict(logins={CHATGPT: str(lab.root / 'old-foreign-rest')})])
+        write_walk(lab, state)
+        path = lab.tmp / 'qa/walks' / (state['walk'] + '.json')
+        originals[path] = (path.read_bytes(), path.stat().st_mtime_ns)
+    return originals
+
+
+def assert_legacy_unchanged(originals):
+    for path, original in originals.items():
+        assert (path.read_bytes(), path.stat().st_mtime_ns) == original
+
+
+def stale_legacy_claims_allow_a_fabrig_walk_to_end(lab):
+    lab.walk()
+    _, state = lab.walk_state()
+    originals = legacy_login_claims(lab)
+    lab.end_run(state)
+    lab.watch()
+    current = next(saved for _, saved in lab.walk_states() if saved['walk'] == state['walk'])
+    assert current['stage'] == 'ended' and current['given'] == [CHATGPT]
+    assert current['released'] and current['posted'] and current['slot_claim']['released']
+    assert lab.calls('logins').count(['give', CHATGPT, '--as', state['holder']]) == 1
+    assert_legacy_unchanged(originals)
+
+
+def a_current_legacy_holder_keeps_its_login(lab):
+    lab.walk()
+    _, state = lab.walk_state()
+    originals = legacy_login_claims(lab)
+    holder = 'walk/forgejo/rung-a-8'  # Only a historical attempt names this login.
+    lab.configure(login_holders={CHATGPT: holder})
+    lab.end_run(state)
+    result = lab.watch()
+    assert f'{CHATGPT}: conflicting custody claims' in result.stdout and holder in result.stdout
+    assert not any(call[0] == 'give' and call[1] == CHATGPT for call in lab.calls('logins'))
+    assert json.loads((lab.root / 'tools.json').read_text())['login_holders'][CHATGPT] == holder
+    assert_legacy_unchanged(originals)
+
+
+def a_legacy_holder_is_protected_even_without_a_named_claim(lab):
+    lab.walk()
+    _, state = lab.walk_state()
+    foreign = dict(walk='rung-a-7', repo='temper', rung='a',
+                   holder='walk/forgejo/rung-a-7', logins={}, attempts=[])
+    write_walk(lab, foreign)
+    path = lab.tmp / 'qa/walks/rung-a-7.json'
+    originals = {path: (path.read_bytes(), path.stat().st_mtime_ns)}
+    lab.configure(login_holders={CHATGPT: foreign['holder']})
+    lab.end_run(state)
+    lab.watch()
+    assert not any(call[0] == 'give' and call[1] == CHATGPT for call in lab.calls('logins'))
+    assert json.loads((lab.root / 'tools.json').read_text())['login_holders'][CHATGPT] == foreign['holder']
+    assert_legacy_unchanged(originals)
+
+
+def unavailable_inventory_preserves_legacy_claims(lab):
+    lab.walk()
+    _, state = lab.walk_state()
+    originals = legacy_login_claims(lab)
+    lab.end_run(state)
+    for config in ({'login_list_failure': True},
+                   {'login_list_failure': False, 'list_lines': ['unreadable inventory']}):
+        lab.configure(**config)
+        result = lab.watch()
+        assert 'cannot list stray logins:' in result.stdout
+        assert f'{CHATGPT}: conflicting custody claims' in result.stdout
+        assert not any(call[0] == 'give' for call in lab.calls('logins'))
+        assert_legacy_unchanged(originals)
+    lab.configure(list_lines=[])
+    lab.watch()
+    current = next(saved for _, saved in lab.walk_states() if saved['walk'] == state['walk'])
+    assert current['stage'] == 'ended' and current['given'] == [CHATGPT]
+    assert_legacy_unchanged(originals)
+
+
+def an_unknown_login_holder_preserves_legacy_claims(lab):
+    lab.walk()
+    _, state = lab.walk_state()
+    originals = legacy_login_claims(lab)
+    lab.configure(logins_held=[], login_holders={})
+    lab.end_run(state)
+    result = lab.watch()
+    assert f'{CHATGPT}: conflicting custody claims' in result.stdout
+    assert not any(call[0] == 'give' and call[1] == CHATGPT for call in lab.calls('logins'))
+    assert_legacy_unchanged(originals)
+
+
 def legacy_repository_walks_are_opaque_and_count_for_numbering(lab):
     lab.walk('a')
     directory, state = lab.walk_state()
@@ -4722,6 +4815,11 @@ CASES = (
     deeply_nested_and_oversized_states_keep_custody_without_stopping_checks,
     walk_kind_settings_are_validated_and_follow_precedence,
     a_resume_recovers_its_thread_from_events,
+    stale_legacy_claims_allow_a_fabrig_walk_to_end,
+    a_current_legacy_holder_keeps_its_login,
+    a_legacy_holder_is_protected_even_without_a_named_claim,
+    unavailable_inventory_preserves_legacy_claims,
+    an_unknown_login_holder_preserves_legacy_claims,
     legacy_repository_walks_are_opaque_and_count_for_numbering,
     saved_alerts_retry_when_the_run_state_is_unknown,
     the_stuck_list_is_read_at_each_check,

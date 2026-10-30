@@ -677,11 +677,20 @@ class Watch:
                     claimed.setdefault(name, []).append(owner)
             except (KeyError, TypeError, ValueError, RecursionError, AttributeError):
                 log(f'{owner}: invalid state claims; keeping custody')
-        for holder, name in self.legacy_claims:
+        for holder, name in self.current_legacy_claims():
             claimed.setdefault(name, []).append(holder)
         self.conflicts = {name for name, owners in claimed.items() if len(owners) > 1}
         for name in sorted(self.conflicts):
             log(f'{name}: conflicting custody claims by {", ".join(claimed[name])}; keeping custody')
+
+    def current_legacy_claims(self):
+        # Missing inventory or an unknown holder cannot retire a legacy claim.
+        return {(holder, name) for holder, name in self.legacy_claims
+                if self.holders.get(name, holder) == holder}
+
+    def legacy_holders(self):
+        return {attempt.get('holder', state['holder']) for state in self.legacy_walks
+                for attempt in [state, *state.get('attempts', [])]}
 
     def outstanding(self, state):
         return {name: path for name, path in state.get('logins', {}).items() if name not in state.get('given', [])}
@@ -690,7 +699,11 @@ class Watch:
         self.claims([(directory, state)])
         if not self.giving:
             return
+        foreign = self.legacy_holders()
         for name in self.outstanding(state):
+            if self.holders.get(name) in foreign:
+                log(f'{name}: held by a legacy walk; keeping custody')
+                continue
             if name in self.conflicts:
                 continue
             if kind and state.get('kinds', {}).get(name, 'moved') != kind:
@@ -784,21 +797,20 @@ class Watch:
 
     def give_strays(self, walks, sweep_walks=True):
         # A take can survive the caller before its grant is saved.
-        held = {(state['holder'], name) for _, state in walks for name in self.outstanding(state)}
-        held |= self.legacy_claims
         listing = self.call('logins', 'list')
         inventory = login_inventory(listing.stdout) if listing.returncode == 0 else None
         self.giving = inventory is not None
+        self.holders = inventory if inventory is not None else {}
+        self.claims(walks)
         if inventory is None:
-            self.holders = {}
             log('cannot list stray logins: ' + (listing.stderr.strip() if listing.returncode
                                                 else 'the listing is not in its form'))
             return
-        self.holders = inventory
+        held = {(state['holder'], name) for _, state in walks for name in self.outstanding(state)}
+        held |= self.current_legacy_claims()
         managed = {attempt.get('holder', state['holder']) for _, state in walks
                    for attempt in [state, *state.get('attempts', [])]}
-        foreign = {attempt.get('holder', state['holder']) for state in self.legacy_walks
-                   for attempt in [state, *state.get('attempts', [])]}
+        foreign = self.legacy_holders()
         if not sweep_walks:
             return
         pending = {state['holder'] for _, state in walks
@@ -1061,8 +1073,8 @@ class Watch:
                 state = self.read_state(path)
                 name = state['walk']
                 if state['repo'] not in REPOSITORIES:
-                    # Opaque foreign state is never managed or rewritten. Preserve
-                    # every claim, including one in an earlier attempt, conservatively.
+                    # Opaque foreign state is never managed or rewritten. Collect
+                    # all claims; current inventory decides which still hold custody.
                     need(name == path.stem and isinstance(name, str)
                          and re.fullmatch(r'rung-[a-z0-9][a-z0-9-]*-[1-9][0-9]*', name),
                          'invalid legacy walk identity', 4)
@@ -1323,7 +1335,6 @@ class Watch:
             self.states.clear()
             self.classes.clear()
             walks = self.local_walks(strict=False)
-            self.claims(walks)
             self.give_strays(walks, sweep_walks=self.walks_valid)
             for directory, state in walks:
                 try:
