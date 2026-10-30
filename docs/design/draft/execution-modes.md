@@ -1,7 +1,8 @@
 <!-- The user's execution model, copied verbatim from the Claude Docs doc of 2026-10-30
      (https://claude.ai/artifact/WEpCY6bb7m3Tn9onFdFKEr). The user's input: agents read it,
      never edit it. Amended at the user's word of 10-30 ~23:30Z: the context budget is a
-     600k target, measured, not capped (it was 120k, hard). -->
+     600k target, measured, not capped (it was 120k, hard); questions are answered at once when
+     they hold up other work, otherwise at 4 or after 30 minutes (it was every 2 hours or at 4). -->
 
 # Execution modes for the code-producing pipeline
 
@@ -38,7 +39,7 @@ Every mode uses the same roles and files; a mode only decides which roles a part
 | QA walker | as the QA design says | Walks a walkable slice on real backends; its findings enter Fix mode |
 | Designer | Claude, high | The cut, shared contracts, decisions after a probe, retiring the draft |
 | Skeleton author | Claude, high | A part's compiling skeleton, test vocabulary and task specs; small amendments when a primitive is missing |
-| Answerer | Claude, medium | Queued design questions and amendment requests, in one pass every 2 hours or at 4 |
+| Answerer | Claude, medium | Queued design questions and amendment requests, in one pass: at once when one holds up other work, otherwise at 4 or after 30 minutes |
 | Structure reviewer | Claude, high | Every branch's digest, full code for flags and a sample; names consolidations and grows the taste file |
 
 The memory is files, not sessions: `plan.md` (parts, dependencies, modes, slices, each part's state), the design sections, the skeletons, the taste file (good and bad pairs from this codebase), the primitives inventory, and the ledger as data.

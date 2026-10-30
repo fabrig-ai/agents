@@ -283,9 +283,11 @@ class DecideTest(unittest.TestCase):
 
 class CallActionsTest(unittest.TestCase):
     def setUp(self):
+        # These tests are about batching; blocking() has its own tests below.
+        self.enterContext(patch.object(dispatch, "blocking", return_value=False))
         self.plan = make_plan(part("core"), part("next"))
         self.tasks = {t.id: t for t in (task(str(n)) for n in range(dispatch.ANSWER_AT))}
-        self.now = "2026-10-30T14:00:00.000Z"
+        self.now = "2026-10-30T12:30:00.000Z"
 
     def actions(self, events=(), design=()):
         return dispatch.call_actions(self.plan, self.tasks, list(events), list(design), self.now)
@@ -490,6 +492,7 @@ class CallActionsTest(unittest.TestCase):
 
 class TickTest(unittest.TestCase):
     def setUp(self):
+        self.enterContext(patch.object(dispatch, "blocking", return_value=False))
         self.home = self.enterContext(tmp_home())
         self.directory = self.home / "plan"
         write(self.directory / "plan.toml", '''draft = "draft"
@@ -1174,3 +1177,24 @@ walk = false
             self.tick()
         self.assertEqual(self.calls, [])
         self.assertFalse(log.default_path().exists())
+
+
+class BlockingTest(unittest.TestCase):
+    def setUp(self):
+        self.tasks = {t.id: t for t in (task("a"), task("b", needs=("draft/a",)), task("c"))}
+        self.asked = event("question.asked", "a", text="Which?")
+
+    def test_a_question_on_a_task_others_need_blocks_at_once(self):
+        busy = started("c")
+        self.assertTrue(dispatch.blocking(self.tasks, [busy, self.asked], [self.asked]))
+
+    def test_a_question_nobody_waits_on_does_not_block_while_work_moves(self):
+        tasks = {k: v for k, v in self.tasks.items() if k != "draft/b"}
+        moving = [started("c"), self.asked]
+        self.assertFalse(dispatch.blocking(tasks, moving, [self.asked]))
+        self.assertFalse(dispatch.blocking(tasks, [self.asked], [self.asked], design=["next"]))
+        self.assertFalse(dispatch.blocking(tasks, [self.asked], [self.asked], calls_in_flight=True))
+
+    def test_nothing_moving_while_work_remains_blocks(self):
+        tasks = {"draft/a": self.tasks["draft/a"]}
+        self.assertTrue(dispatch.blocking(tasks, [self.asked], [self.asked]))

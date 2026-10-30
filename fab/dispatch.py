@@ -13,7 +13,7 @@ import io
 import json
 import sys
 from collections import Counter
-from collections.abc import Iterable, Mapping
+from collections.abc import Sequence, Iterable, Mapping
 from contextlib import redirect_stdout
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -25,10 +25,27 @@ from fab.plan import Plan, Task
 from fab.sh import Failed, Runner, run, ssh
 
 MAX_RUNS = 4  # a task with this many runs and still not landed parks for judgement
-ANSWER_AFTER = 120  # minutes the oldest open question waits before an answer call
+ANSWER_AFTER = 30  # minutes the oldest open question waits before an answer call (the user, 10-30)
 ANSWER_AT = 4  # open questions that start an answer call at once
 REVIEW_AT = 10  # tasks landed since the last review call that start one at once
 REVIEW_AFTER = 4 * 60  # minutes since the last review call that start one with any landed
+
+
+def blocking(tasks: Mapping[str, Task], events: list[dict], questions: list[dict], *,
+             calls_in_flight: bool = False, design: Sequence[str] = ()) -> bool:
+    """Whether an open question holds up other work, so it is answered at once rather than
+    batched (the user, 10-30: keep the system live): a task not landed needs a task that is
+    parked on one of the questions; or nothing moves while work remains: no run or call in
+    flight, no task runnable or rejected, no part waiting for design, and some task not
+    landed."""
+    views = state.fold(tasks, events)
+    parked = {event["task"] for event in questions}
+    open_work = [view for view in views.values() if view.status != "landed"]
+    if any(need in parked for view in open_work for need in tasks[view.id].needs):
+        return True
+    moving = (calls_in_flight or bool(design) or bool(in_flight(events))
+              or any(view.status in ("runnable", "rejected") for view in open_work))
+    return not moving and bool(open_work)
 
 
 def call_actions(plan: Plan, tasks: Mapping[str, Task], events: list[dict], design: list[str],
@@ -56,7 +73,8 @@ def call_actions(plan: Plan, tasks: Mapping[str, Task], events: list[dict], desi
         old_enough = (datetime.fromisoformat(now) -
                       min(datetime.fromisoformat(event["ts"]) for event in questions)
                       >= timedelta(minutes=ANSWER_AFTER))
-        if len(questions) >= ANSWER_AT or old_enough:
+        if len(questions) >= ANSWER_AT or old_enough or blocking(
+                tasks, events, questions, calls_in_flight=bool(roles), design=design):
             actions.append(Action("call", task=plan.draft, run_kind="answer"))
     # A part whose skeleton call succeeded is designed even before its specs reach this plan:
     # the tick that lands them decides on the plan it read before landing.

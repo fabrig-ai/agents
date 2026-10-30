@@ -444,8 +444,10 @@ it, and the flow grows from a small start rather than to a fixed cap.
   `fab/roles/foreman.md`; it writes no code, code records what it decides) with the task spec and the report: when
   the spec's pre-approved options answer it, the foreman's answer is
   recorded in the spec's Answers section and the task runs again; otherwise
-  the question queues for the answerer, every 2 hours or at 4 queued, as the
-  user's model says.
+  the question queues for the answerer: at once when it holds up other work
+  (a task waits on the parked one, or nothing is running while work remains),
+  otherwise at 4 queued or after 30 minutes (the user, 10-30; the model said 2
+  hours).
   - `fab/foreman.py` folds where each open question stands: at the
     foreman, deciding, settled or queued. Questions of implement, repair and
     rebase runs go to the foreman; the rest (a park at the run limit, one
