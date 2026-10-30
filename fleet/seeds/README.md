@@ -1,5 +1,9 @@
 # Peer artifact content pins
 
+Scale-down 0037: hetzner6 replaces hetzner3 as the preferred seed; its
+artifacts were checked against these pins before this branch. Chromium,
+Forgejo and its runner allow only hetzner6. The survey below is historical.
+
 2026-10-29 read-only hashes, modes and link metadata from hetzner3 and hel8.
 Only the six versioned artifact paths in versions.toml are eligible. Claude's
 versions directory was listed: h3 has only the binaries 2.1.310/311/312;
@@ -27,7 +31,7 @@ and resource files agree except these two text files:
 h3's launcher/config selects the bundle's config/extensions and CHROME_WRAPPER;
 hel8's launcher sources /etc/chromium.d and uses system extensions/wrapper.
 Builders run browser tests, so h3's tree is canonical in chromium.sha256;
-hel8's manifest is removed. Chromium's seed_hosts allowlist contains only h3.
+hel8's manifest is removed. Chromium now allows only hetzner6 as its seed.
 hel8's own copy gets a version-only warning during --check and is never
 reinstalled by normal runs. A matching pin is always required for explicit
 provisioning; hel8's older nextest will also be refused as a fallback.
@@ -53,7 +57,7 @@ headers, every hash, link and mode, then promotes a sibling and recreates links.
 No copied program is run before verification. A failed peer can fall back to
 another declared seed only if its contents match the exact same pins.
 Only seed=true hosts allowed by an optional seed_hosts list are eligible,
-and a host never transfers from itself. Chromium allows only hetzner3.
+and a host never transfers from itself. Chromium allows only hetzner6.
 
 URL remains optional. For a single file it must serve the raw binary whose
 SHA256 is the same content pin. A tree URL must serve a tar with the exact pinned

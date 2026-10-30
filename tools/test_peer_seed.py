@@ -59,8 +59,15 @@ class PeerSeedTest(unittest.TestCase):
         self.addCleanup(self.h.doCleanups)
         self.f, self.runner, self.module = self.h.f, self.h.runner, self.h.module
         self.runner.name = self.h.host
+        self.primary, self.alternative = "seed-a", "seed-b"
+        hosts = self.f.source / "fleet/hosts.toml"
+        # Transfer fixtures do not depend on the live roster or its seed policy.
+        fixture.put(hosts, hosts.read_text() + "".join(
+            f'\n[hosts.{name}]\nseed = true\nhostname = "{name}"\nssh = "free@{name}.invalid"\nroles = ["fixture"]\nmachine_env = {{}}\nenv = {{}}\n'
+            for name in (self.primary, self.alternative)))
+        self.runner.d.hosts = self.module.Declarations(self.f.source, self.f.home).hosts
         self.peers = {}
-        for name in ("hetzner3", "hel8"):
+        for name in (self.primary, self.alternative):
             home = self.f.directory / ("peer-" + name)
             home.mkdir()
             self.peers[name] = home
@@ -69,18 +76,19 @@ class PeerSeedTest(unittest.TestCase):
 
     def file_pin(self, name="forgejo", version="17.0.0", mode=0o755):
         relative = self.module.seed_location(name, version)
-        source = self.peers["hetzner3"] / relative
+        source = self.peers[self.primary] / relative
         fixture.put(source, f"#!/bin/bash\necho '{version}'\n", True)
         source.chmod(mode)
         pin = dict(version=version, command=[name, "--version"], install=dict(
-            kind="binary", seed="peer", source=relative, destination=relative,
+            kind="binary", seed="peer", seed_hosts=[self.primary, self.alternative],
+            source=relative, destination=relative,
             sha256=hashlib.sha256(source.read_bytes()).hexdigest(), mode=f"{mode:04o}"))
         self.runner.d.versions = {name: pin}
         return source, pin
 
     def tree_pin(self, name="chromium", version="147.0.7727.101"):
         relative = self.module.seed_location(name, version)
-        source = self.peers["hetzner3"] / relative
+        source = self.peers[self.primary] / relative
         source.mkdir(parents=True)
         if name == "chromium":
             entrypoint = "usr/lib/chromium/chromium"
@@ -102,7 +110,8 @@ class PeerSeedTest(unittest.TestCase):
         text = manifest(source)
         fixture.put(self.f.source / f"fleet/seeds/{name}.sha256", text)
         pin = dict(version=version, command=[name, "--version"], install=dict(
-            kind=kind, seed="peer", source=relative, release=relative,
+            kind=kind, seed="peer", seed_hosts=[self.primary, self.alternative],
+            source=relative, release=relative,
             manifest=f"seeds/{name}.sha256", entrypoint=entrypoint))
         self.runner.d.versions = {name: pin}
         return source, pin
@@ -196,8 +205,8 @@ class PeerSeedTest(unittest.TestCase):
     def test_codex_full_package_current_and_command_links_without_auth_or_state(self):
         source, pin = self.tree_pin("codex", "0.162.1")
         # No auth directory is part of either source manifest or transfer.
-        fixture.put(self.peers["hetzner3"] / ".codex/auth.json", "never copy this")
-        fixture.put(self.peers["hetzner3"] / ".codex/state.json", "never copy this either")
+        fixture.put(self.peers[self.primary] / ".codex/auth.json", "never copy this")
+        fixture.put(self.peers[self.primary] / ".codex/state.json", "never copy this either")
         self.runner.provision()
         self.assertEqual(self.result()["result"], "changed", self.result())
         current = self.f.home / ".codex/packages/standalone/current"
@@ -234,7 +243,7 @@ class PeerSeedTest(unittest.TestCase):
 
     def test_peer_source_symlink_cannot_escape_artifact_allowlist(self):
         source, _ = self.file_pin()
-        outside = self.peers["hetzner3"] / ".ssh/never-read"
+        outside = self.peers[self.primary] / ".ssh/never-read"
         fixture.put(outside, "private fixture bytes")
         source.unlink()
         source.symlink_to(outside)
@@ -266,7 +275,7 @@ class PeerSeedTest(unittest.TestCase):
 
     def test_disagreement_is_reported_without_selecting_or_transferring_a_peer(self):
         _, pin = self.tree_pin()
-        pin["install"]["disagreement"] = "observed h3/hel8 launcher disagreement"
+        pin["install"]["disagreement"] = "observed seed-a/seed-b launcher disagreement"
         self.runner.provision()
         self.assertEqual(self.result()["result"], "warn")
         self.assertIn("peer disagreement", self.result()["reason"])
@@ -308,12 +317,14 @@ class PeerSeedTest(unittest.TestCase):
 
     def test_alternative_seed_is_used_only_when_it_matches_the_same_pin(self):
         source, pin = self.file_pin()
-        alternative = self.peers["hel8"] / pin["install"]["source"]
+        alternative = self.peers[self.alternative] / pin["install"]["source"]
         fixture.put(alternative, source.read_text(), True)
         source.unlink()
         self.runner.provision()
         self.assertEqual(self.result()["result"], "changed", self.result())
-        self.assertIn("from hel8", self.result()["reason"])
+        self.assertIn(f"from {self.alternative}", self.result()["reason"])
+        self.assertEqual([call[-2] for call in self.calls()],
+                         [self.runner.d.hosts[name]["ssh"] for name in (self.primary, self.alternative)])
 
 
 if __name__ == "__main__":

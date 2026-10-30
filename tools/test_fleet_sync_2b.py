@@ -122,23 +122,26 @@ class FleetSync2bTest(fixture.FleetTest):
     def test_routing_difference_lists_exact_missing_extra_changed_names(self):
         path = self.home / "src/rust/tmp/post/machines"
         mapping = self.routing()
-        mapping.pop("hetzner7")
-        mapping["hetzner3"] = "someone-else@2.29.124.199"
+        missing, changed = sorted(name for name in mapping if name != "hel8")[:2]
+        mapping.pop(missing)
+        mapping[changed] = "someone-else@changed.example"
         mapping["extra"] = "unexpected.example"
         fixture.put(path, self.routing_text(mapping))
         before = path.read_bytes()
         for flags in ((), ("--check",)):
             item = self.routing_item(self.component_sync("render", check=bool(flags), env={**self.env, "USER": "free"}))
             self.assertEqual(item["result"], "warn")
-            self.assertEqual(item["reason"], "names differ: extra, hetzner3, hetzner7; check-only")
+            names = ", ".join(sorted(("extra", changed, missing)))
+            self.assertEqual(item["reason"], f"names differ: {names}; check-only")
             self.assertEqual(path.read_bytes(), before)
         self.assertFalse(path.with_name("machines.pre-fleet-sync").exists())
 
     def test_routing_uses_user_and_rejects_ambiguous_or_malformed_names(self):
         path = self.home / "src/rust/tmp/post/machines"
+        remote = next(name for name in self.routing() if name != "hel8")
         desired = self.routing_text(self.routing())
         cases = (("hel8 local\n", "hel8"), ("mystery\n", "mystery"),
-                 ("hetzner7 wrong.example\n", "hetzner7"))
+                 (f"{remote} wrong.example\n", remote))
         for extra, name in cases:
             with self.subTest(extra=extra):
                 # Identical duplicate entries are still a single mapping.
@@ -148,10 +151,10 @@ class FleetSync2bTest(fixture.FleetTest):
                 if name != "hel8":
                     self.assertEqual(item["reason"], f"names differ: {name}; check-only")
         mapping = self.routing()
-        mapping["hetzner7"] = mapping["hetzner7"].removeprefix("free@")
+        mapping[remote] = mapping[remote].removeprefix("free@")
         fixture.put(path, self.routing_text(mapping))
         item = self.routing_item(self.component_sync("render", check=True, expected=1, env={**self.env, "USER": "another-user"}))
-        self.assertEqual(item["reason"], "names differ: hetzner7; check-only")
+        self.assertEqual(item["reason"], f"names differ: {remote}; check-only")
 
     def test_preview_reports_routing_meaning_without_writing_it(self):
         path = self.home / "src/rust/tmp/post/machines"

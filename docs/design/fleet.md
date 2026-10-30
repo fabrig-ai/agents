@@ -30,7 +30,10 @@
 
 **`fleet/hosts.toml`** names each host, its SSH address, roles and per-host
 values (`env`, `machine_env`, seed eligibility). Roles today: session (hel8),
-builder, qa, after-landing and gate. A host is identified by `--host`, then
+builder and qa (hetzner6), and gate (hetzner8). These are the three fleet
+members (0037). No host has the after-landing role; its declared service renders
+nowhere until ops and green choose its host after the pipeline pause (0036).
+A host is identified by `--host`, then
 `FLEET_HOST`, then its hostname.
 
 **Rendered files.** fleet-sync renders, from `fleet/`:
@@ -55,10 +58,10 @@ reach claims, leases, records and mailbox homes through that target.
 `~/.local/bin` through the `current` release. A name that matches an executable in
 `/usr/bin` or `/bin` is refused.
 
-**Periodic gate.** Agents checks run every two hours on the sole builder with
-`machine_env.AGENTS_PERIODIC = 1` (hetzner3). Both periodic units are omitted
-on other hosts and the service checks the flag again; see `docs/design/gate.md`,
-section 4.
+**Periodic gate.** Agents checks run every two hours on builders with
+`machine_env.AGENTS_PERIODIC = 1`. No remaining host declares the flag during
+the pause. Both periodic units are omitted on unflagged hosts and the service
+checks the flag again; see `docs/design/gate.md`, section 4.
 
 **Units.** `fleet/units/` holds systemd user units; `fleet/units/roles.toml`
 maps each to the roles that run it. fleet-sync enables timers. A service marked
@@ -84,10 +87,10 @@ and warn; installing a pin is the explicit `--provision`.
    the install lock that ops also uses. Ops can defer this step.
 3. **Links and rendered files.** Atomic writes, a one-time backup of
    pre-existing files, and a recheck against competing edits.
-4. **Periodic gate.** Agents checks run every two hours on the sole builder with
-`machine_env.AGENTS_PERIODIC = 1` (hetzner3). Both periodic units are omitted
-on other hosts and the service checks the flag again; see `docs/design/gate.md`,
-section 4.
+4. **Periodic gate.** Agents checks run every two hours on builders with
+`machine_env.AGENTS_PERIODIC = 1`. No remaining host declares the flag during
+the pause. Both periodic units are omitted on unflagged hosts and the service
+checks the flag again; see `docs/design/gate.md`, section 4.
 
 **Units.** Write and enable declared units. Reload only when needed, and
    remove only units the ownership journal records.
@@ -143,8 +146,10 @@ names the retired hetzner2):
    3. runs `fleet-sync --provision` to install the pinned tools;
    4. runs a normal convergence, after which the timer takes over.
 
-**Six native tools come from peers.** hetzner3 is preferred, and hel8 also
-serves. Each is verified against its pin: single files by the SHA256 in
+**Six native tools come from peers.** hetzner6 is preferred, and hel8 also
+serves where the artifact permits it. Chromium, Forgejo and forgejo-runner
+allow only hetzner6; Chromium retains the canonical manifest and excludes hel8.
+Each is verified against its pin: single files by the SHA256 in
 `fleet/versions.toml`, trees by the manifests in `fleet/seeds/`. Rust comes
 from rustup, which checks its own distribution hashes. kache is built from
 source at a pinned revision. Any download must be HTTPS with a pinned SHA256.
@@ -167,6 +172,7 @@ machines; the bootstrap ends at the login step.
 
 ## 7. Later
 
+- Ops and green choose after-landing's new host after the pipeline pause.
 - Declare the slot guard timer in `fleet/units`, replacing the builders'
   transient timer.
 - Retire the legacy old-kit units still present on some hosts.

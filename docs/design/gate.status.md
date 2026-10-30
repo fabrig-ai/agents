@@ -16,6 +16,9 @@ at teardown, preserving process-group exit observations and CPU accounting.
 
 ## 2. Claimed landing
 
+Scale-down 0037 derives builder candidates from `fleet/hosts.toml` roles; only
+hetzner6 remains eligible. No claims or landing runs are made during the pause.
+
 `tools/land` and `tools/land_remote.py` require a received exit, empty process
 group, removed directory and clear read-only heavy observation before normal
 release. Unknown ends/restoration retain the claim and durable private record;
@@ -35,8 +38,8 @@ removal of the gate's private temporary directory.
 
 ## 3. Periodic and cost
 
-The two-hour builder units render only for flagged hetzner3; the service checks
-the flag too. `tools/periodic` runs both tiers and mails file owners or ops.
+The two-hour builder units render only for flagged builders; none of the
+remaining hosts declares AGENTS_PERIODIC. The service checks the flag too. `tools/periodic` runs both tiers and mails file owners or ops.
 Existing companion `load_tests` hooks exclude inherited cases. The combined
 candidate adopts s/deploy's component fixtures and periodic compatibility
 split; all 55 original fleet test method names remain represented, and the
@@ -57,10 +60,9 @@ The gate-land-2 report supplies updated measurements after the QA split.
 Acceptance depends on observed file, tier and merge budgets; report-only
 labels or starved files cannot establish a passing candidate. Enforcement remains false; the CPU
 and merge-wall targets remain unchanged.
-See the task report for real hetzner7 dry-run and full-gate measurements and
-focused validation. This branch is pushed for review, not landed.
-Machine action after landing: fleet-sync installs the new timer on hetzner3;
-no manual enablement or machine changes were performed by this task.
+The earlier gate-land-2 report records real hetzner7 dry-run and full-gate
+measurements and the then-planned timer installation on hetzner3. Both hosts
+are retired from the 0037 roster; these are historical measurements.
 
 
 ## 5. Review fixes, 2026-10-30 (gate-fix-1)
@@ -81,7 +83,7 @@ Coverage adds `tools/test_periodic.py` and extends the landing/race/reconcile
 fixtures. The unit fixture follows the declared flag and exercises re-enablement.
 
 Enforcement and budgets remain unchanged. Periodic remains paused at ed5c048;
-the coordinator will re-enable AGENTS_PERIODIC on h3 after landing. This branch
+re-enablement requires a decision after the pipeline pause (0036). This branch
 requires no machine action before review and is pushed without landing.
 Validation and actual auto-host dry-run timing are in the gate-fix-1 task report.
 

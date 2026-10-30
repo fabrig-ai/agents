@@ -5,8 +5,14 @@ Contract: `docs/design/fleet.md`, sections 1–6.
 
 ## Present
 
-- Agents periodic units are gated by builder role and AGENTS_PERIODIC=1; only
-  hetzner3 declares the flag (`tools/fleet-sync`, `tools/test_land.py`).
+- **Scale-down 0037 is prepared only.** The roster is hel8 (session), hetzner6
+  (builder/qa, preferred seed) and hetzner8 (gate). Chromium, Forgejo and its
+  runner seed only from hetzner6; hel8 remains ineligible for Chromium.
+- Agents periodic units require builder role and AGENTS_PERIODIC=1; no
+  remaining host declares the flag. The pipeline remains paused (0036).
+- **After-landing renders nowhere.** Its service still names retired hetzner7,
+  but no remaining host has its role. Its new host is ops and green's decision
+  after the pause; no activation or host changes are authorized here.
 
 - Release promotion, rendering, links, installer locking, unit journals, controls,
   backoff, inspection and recovery exist (`tools/fleet-sync:831`, `:953`, `:1114`, `:1312`, `:1340`, `:1972`, `:2032`, `:2060`, `:2232`).
@@ -22,7 +28,7 @@ Contract: `docs/design/fleet.md`, sections 1–6.
   of absent kache may write/start it (`tools/fleet-sync:1833`, `:1862`, `:1898`).
 - **Slot guards remain transient.** No declaration in `fleet/units/roles.toml`;
   read-only `systemctl --user show fabrig-slot-guard.timer -p LoadState,ActiveState,Transient`
-  found active/Transient=yes on hetzner3/6/7 at 2026-10-30 11:21 UTC.
+  found active/Transient=yes on hetzner6 (also the now-retired hetzner3/7) at 2026-10-30 11:21 UTC.
 - **Legacy units remain.** Read-only `systemctl --user list-unit-files` and
   `list-units --all` for these names at 11:21 UTC confirmed the list below, compared
   with `fleet/units/roles.toml`. Heavy, ops and runtime units are excluded.
@@ -30,17 +36,12 @@ Contract: `docs/design/fleet.md`, sections 1–6.
   | Host | Legacy units outside fleet declarations |
   |---|---|
   | hel8 | fleet-tend.service (static), fleet-tend.timer (enabled); fleet-watch.service (static), fleet-watch.timer (disabled); issue-router.service (enabled) |
-  | hetzner3 | fleet-tend.service (static), fleet-tend.timer (enabled); agents-after-landing@.service (indirect), instances hearth, jig, skein, smith, temper.1of2, temper.2of2 present; kache-prune.service (static/failed), kache-prune.timer (disabled) |
   | hetzner6 | fleet-tend.service (static), fleet-tend.timer (enabled); agents-qa-watch.service (disabled) |
-  | hetzner7 | fleet-tend.service (static), fleet-tend.timer (enabled) |
   | hetzner8 | fleet-tend.service (static), fleet-tend.timer (enabled) |
 
-  Kache-prune's legacy provenance is recorded in `fleet/bootstrap/inventory.md:135`;
-  current ops ownership is unproven. Read-only `systemctl --user status kache-prune.service` and
-  `journalctl --user -u kache-prune.service -n 30` show failure since 2026-10-27 08:04:26 UTC: “code=killed, status=15/TERM”, then “Failed with result 'signal'.” No cause or safe removal is established.
 - **Journald's cap is bootstrap-only** (`fleet/bootstrap/bootstrap.py:119`).
-  Read-only `/etc/systemd/journald.conf.d/` checks on all five hosts at 11:21 UTC
-  found hel8's 90-fabrig.conf/SystemMaxUse=200M; the directory was absent on h3/6/7/8.
+  Read-only `/etc/systemd/journald.conf.d/` checks at 11:21 UTC found
+  hel8's 90-fabrig.conf/SystemMaxUse=200M; the directory was absent on hetzner6/8.
 - **The bypass decision remains pending.** `fleet/claude/settings.json:1` sets
   permissions.defaultMode=auto; the user's decision on bypass is pending.
 - **Factory tooling remains in fabrig.** `tools/fleet-sync:1086` uses its
@@ -52,6 +53,11 @@ Contract: `docs/design/fleet.md`, sections 1–6.
 
 ## Verification
 
-Fresh read-only host checks: 2026-10-30 11:21 UTC; hel8 via existing strict trust on h3.
-Tools/fleet are unchanged since the prior full gate (26 files, 0 failures); no rerun.
-The smoke probe used disposable HOME/fake services. No machine action required.
+Earlier read-only host checks: 2026-10-30 11:21 UTC; hel8 via existing strict trust on h3.
+Scale-down validation is recorded in the scaledown-0037 task report. Historical
+bootstrap fixtures retain their landing's roster; transfer and routing fixtures
+are independent of retired hosts. No landing or machine action in this task.
+
+## Later
+
+Ops and green choose after-landing's new host after the pause.

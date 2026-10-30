@@ -55,8 +55,8 @@ checkout flock at `.git/agents-land.lock` (resolved with `git rev-parse --git-pa
 linked worktrees) is held from the initial checks through push. After the
 initial rebase, land pins the exact candidate SHA; any unexpected HEAD change
 during the run refuses the landing.
-Auto selection matches hetzner3, hetzner7 and hetzner6 pool slots against
-hel8's central free list. Before claiming, it reads `df -B1 --output=avail
+Auto selection derives builder candidates from roles in `fleet/hosts.toml`
+(currently hetzner6) and matches their pool slots against hel8's central free list. Before claiming, it reads `df -B1 --output=avail
 "$HOME"` over SSH, skips unknown disk readings or availability below the
 larger of 85 GiB and `machine_env.PLAN_MIN_DISK_GB`, and prefers the host with
 most available bytes. Explicit `--host` (including h3/h7/h6 aliases) selects
@@ -161,8 +161,8 @@ notice writer used by file/runner failures and returns failure. The temporary
 snapshot is removed even when setup or notification fails; neither tier runs
 when setup fails.
 Builder role units render only with `machine_env.AGENTS_PERIODIC = 1`.
-Periodic is paused as of ed5c048; the coordinator re-enables h3 after this fix
-lands. The service also checks the runtime flag, uses nice 19 and idle IO. It mails each failed,
+Periodic remains paused (0036); no remaining host declares the flag.
+Re-enablement needs a decision after the pause. The service also checks the runtime flag, uses nice 19 and idle IO. It mails each failed,
 over-budget (CPU or `wall_s > wall_limit_s`) or starved file's owner using
 `post send --as agents-periodic OWNER@hel8`; missing owners and runner failures go to ops. Fleet periodic files retain exhaustive process, historical and host matrices;
 the gate retains focused component, safety and rollout checks. QA

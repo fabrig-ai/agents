@@ -37,7 +37,9 @@ class BootstrapStagesTest(unittest.TestCase):
         # Verify the historical rollout, independently of later runner changes.
         self.rollout = DEPLOYED.removesuffix('^') if DEPLOYED != 'HEAD' else 'HEAD'
         self.code = self.script(self.rollout)
-        self.hosts_toml = (self.f.source / "fleet/hosts.toml").read_text()
+        # Preserve the roster at the bootstrap landing, including its h3 seed.
+        self.hosts_toml = fixture.historical_source(self.rollout, "fleet/hosts.toml")
+        fixture.put(self.f.source / "fleet/hosts.toml", self.hosts_toml)
         self.hosts = tuple(tomllib.loads(self.hosts_toml)["hosts"])
 
     def legacy_fleet(self):
@@ -118,6 +120,9 @@ class BootstrapStagesTest(unittest.TestCase):
         if after_fleet:
             shutil.rmtree(self.f.source / "fleet")
             shutil.copytree(fixture.ROOT / "fleet", self.f.source / "fleet")
+            # The landing's allowlists must match its historical seed roster.
+            for asset in ("fleet/hosts.toml", "fleet/versions.toml"):
+                fixture.put(self.f.source / asset, fixture.historical_source(self.rollout, asset))
             fixture.put(self.f.source / "fleet/repositories.toml",
                         f'agents = {json.dumps(str(self.f.origin))}\nfabrig = {json.dumps(self.f.fabrig_origin)}\n')
         else:

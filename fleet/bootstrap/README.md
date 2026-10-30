@@ -1,5 +1,10 @@
 # Rebuild a fleet member (Debian 13 amd64)
 
+Historical procedure: the target and peer/routing examples predate scale-down
+0037. The fleet is now hel8, hetzner6 and hetzner8, with hetzner6 the canonical
+seed. Retarget and review this procedure before use (docs/design/fleet.md,
+section 7); the pipeline remains paused.
+
 Target: hetzner2 / debian-16gb-hel1-2, drained gate2. See [inventory](inventory.md)
 for the read-only 2026-10-29 survey and the state that a wipe would destroy.
 The sequence is USER preparation, **one root script**, **one user script**,

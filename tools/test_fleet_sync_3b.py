@@ -42,7 +42,7 @@ class FleetSync3bTest(fixture.FleetTest):
 import json, os, sys
 host = json.loads(os.environ["FAKE_SSH_HOSTS"])[sys.argv[-2]]
 items = [{"item": "lock", "result": "busy", "reason": "a run is in progress; check again"}]
-if os.environ.get("FAKE_REMOTE_DRIFT") and host == "hetzner3":
+if os.environ.get("FAKE_REMOTE_DRIFT") and host == os.environ["FAKE_UNREACHABLE_HOST"]:
     items = [{"item": "agents", "result": "drift", "reason": "release differs"}]
 print(json.dumps({"host": host, "items": items}))
 ''', True)

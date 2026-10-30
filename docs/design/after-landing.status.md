@@ -14,9 +14,12 @@ Contract: `docs/design/after-landing.md`, sections 1–9.
   routing, records-before-posts, trim and bounded first-parent bisection.
   `tools/after-landing/test_after_landing.py` exercises these with temporary
   HOME, local git origins and fake tiers, heavy, registry, records and post.
-- **The declared service uses hetzner7 slot 4.** The evidence is
+- **The declared service is unassigned after scale-down 0037.** It retains
+  retired hetzner7 slot 4, but no remaining host has the after-landing role;
+  it renders nowhere. Ops and green decide its new host after the pause.
+  The evidence is
   `fleet/units/after-landing.service` (`--slot .../slots/4 --host hetzner7`),
-  `fleet/units/roles.toml` and `fleet/hosts.toml` (`hosts.hetzner7`). The command's
+  `fleet/units/roles.toml` and the remaining roles in `fleet/hosts.toml`. The command's
   standalone default is slot 9 (`arguments`), not the service's slot. These are
   checked-in deployment declarations; this task did not inspect live service
   state, claims or activation.

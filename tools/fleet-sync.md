@@ -7,7 +7,7 @@ The fresh-machine procedure is fleet/bootstrap/README.md. Explicit manual
 incompatible with timer/check/preview/status. Normal runs only probe versions.
 The six native tools use `seed = "peer"`: exact file SHA256/modes or the
 fleet/seeds tree manifests, including every file, symlink and directory mode.
-Only seed=true hosts are eligible; h3 is preferred, never self. Check local
+Only seed=true hosts are eligible; h6 is preferred, never self. Check local
 content before running anything; matching artifacts/links need no writes or
 SSH. Missing links alone are repaired locally. Transfer only allowlisted paths
 through strict SSH/no-follow opens, stream tar into private staging, verify all
@@ -27,7 +27,7 @@ Its config and unit are check-only in policy.toml: normal runs only compare and
 warn, without ownership adoption, unit verification or lifecycle operations.
 No store.env or drop-in is inspected; existing stores/caches are never changed.
 Ops agrees any takeover host by host and manages shared-store setup/restarts.
-Chromium uses h3's canonical tree with a hetzner3-only seed_hosts allowlist;
+Chromium retains its canonical tree with a hetzner6-only seed_hosts allowlist;
 hel8's own copy gets a version-only warning, without normal reinstallation.
 Bootstrap rollout has two separate landings. Stage A is code only and keeps
 main's fleet declarations unchanged, including version-only kache (no config

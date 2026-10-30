@@ -23,7 +23,9 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 FABRIG_TOOLS = Path("/home/free/src/fabrig/main/tools")
-HOST_COUNT = len(tomllib.loads((ROOT / "fleet/hosts.toml").read_text())["hosts"])
+HOSTS = tomllib.loads((ROOT / "fleet/hosts.toml").read_text())["hosts"]
+HOST_COUNT = len(HOSTS)
+REMOTE_HOST = next(name for name in sorted(HOSTS) if name != "hel8")
 
 
 def put(path, content, executable=False):
@@ -113,7 +115,7 @@ with (pathlib.Path.home() / "ssh.log").open("a") as f:
     f.write(json.dumps(sys.argv[1:]) + "\\n")
 hosts = json.loads(os.environ["FAKE_SSH_HOSTS"])
 host = hosts[sys.argv[-2]]
-if host == "hetzner3":
+if host == os.environ["FAKE_UNREACHABLE_HOST"]:
     print("fixture unreachable", file=sys.stderr)
     sys.exit(255)
 print(json.dumps({"host": host, "agents_sha": "a" * 40, "fabrig_sha": "b" * 40,
@@ -225,6 +227,7 @@ class FleetTest(unittest.TestCase):
         self.origin = self.repository(self.source, "agents-origin.git")
         self.sha = self.git(self.source, "rev-parse", "HEAD").strip()
         hosts = tomllib.loads((ROOT / "fleet/hosts.toml").read_text())["hosts"]
+        self.env["FAKE_UNREACHABLE_HOST"] = REMOTE_HOST
         self.env["FAKE_SSH_HOSTS"] = json.dumps({h["ssh"]: name for name, h in hosts.items()})
 
     def ensure_git(self):
@@ -587,7 +590,7 @@ class FleetTest(unittest.TestCase):
         self.component_sync("versions", timer=True)
         state = self.sync("status", expected=1)
         self.assertEqual(len(state["hosts"]), HOST_COUNT)
-        self.assertIn("unreachable", next(h for h in state["hosts"] if h["host"] == "hetzner3"))
+        self.assertIn("unreachable", next(h for h in state["hosts"] if h["host"] == REMOTE_HOST))
         self.assertTrue(next(h for h in state["hosts"] if h["host"] == "hel8")["last_timer_end"])
         calls = [json.loads(line) for line in (self.home / "ssh.log").read_text().splitlines()]
         self.assertEqual(len(calls), HOST_COUNT - 1)

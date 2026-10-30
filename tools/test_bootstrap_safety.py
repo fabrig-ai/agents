@@ -128,16 +128,26 @@ class BootstrapSafetyTest(unittest.TestCase):
         self.assertEqual(row["result"], "warn")
         self.assertIn("version-only", row["reason"])
 
-    def test_canonical_chromium_is_h3_and_hel8_is_not_an_eligible_seed(self):
+    def test_scaled_down_fleet_has_no_after_landing_role_or_units(self):
+        declarations = self.module.Declarations(fixture.ROOT, self.f.home)
+        self.assertEqual(set(declarations.hosts), {"hel8", "hetzner6", "hetzner8"})
+        self.assertEqual(declarations.unit_roles["after-landing.service"], ["after-landing"])
+        for name, host in declarations.hosts.items():
+            with self.subTest(host=name):
+                self.assertNotIn("after-landing", host["roles"])
+                self.assertNotIn("after-landing.service", declarations.host_units(name))
+
+    def test_canonical_chromium_is_h6_and_hel8_is_not_an_eligible_seed(self):
         pin = self.module.Declarations(self.f.source, self.f.home).versions["chromium"]
-        self.assertEqual(pin["install"]["seed_hosts"], ["hetzner3"])
+        self.assertEqual(pin["install"]["seed_hosts"], ["hetzner6"])
+        self.assertTrue(self.runner.d.hosts["hetzner6"]["seed"])
         self.assertEqual(pin["install"]["manifest"], "seeds/chromium.sha256")
         self.assertNotIn("disagreement", pin["install"])
         entries = self.module.seed_entries(self.f.source, pin["install"])
         self.assertEqual(entries["bin/chromium"]["sha256"], "bd85bf00571aeda9573b75107beb07e1be4fd926068755251058a737e465f7bc")
         self.assertFalse((self.f.source / "fleet/seeds/chromium-hel8.sha256").exists())
         self.runner.d.versions = {"chromium": pin}
-        self.runner.name = "hetzner3"  # Cannot seed from self or fall back to hel8.
+        self.runner.name = "hetzner6"  # Cannot seed from self or fall back to hel8.
         with patch.object(self.runner, "cmd", side_effect=AssertionError("unauthorized seed")):
             self.runner.provision()
         self.assertEqual(self.h.results()[-1]["result"], "failed")

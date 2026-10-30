@@ -1784,7 +1784,7 @@ class Runner:
         self.safe.directory(".local/state/fleet-sync", create=True)
         peers = sorted((n for n, host in self.d.hosts.items() if host.get("seed", False) and n != self.name
                         and n in install.get("seed_hosts", self.d.hosts)),
-                       key=lambda n: (n != "hetzner3", n))
+                       key=lambda n: (n != "hetzner6", n))
         candidates = [None] if install.get("url") else peers
         failures = []
         for peer in candidates:
