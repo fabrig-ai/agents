@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import argparse
+import sys
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 
-from fab.plan import Task
+from fab import log
+from fab.plan import PlanError, Task, load_plan, load_tasks, problems
 
 STATUSES = ("waiting", "runnable", "running", "parked", "done", "ready", "landed", "rejected")
 
@@ -32,12 +36,52 @@ def fold(tasks: Mapping[str, Task], events: Iterable[dict]) -> dict[str, TaskVie
     - branch.ready: ready, tip. branch.landed: landed, tip, main. branch.rejected: rejected.
     A task never started is waiting while any need is not landed, otherwise runnable.
     """
-    raise NotImplementedError
+    views = {identifier: TaskView(identifier) for identifier in tasks}
+    for event in events:
+        view = views.get(event.get("task"))
+        if view is None:
+            continue
+        match event.get("ev"):
+            case "run.started":
+                view.status = "running"
+                view.runs.append(event["run"])
+                view.branch = event.get("branch")
+            case "run.ended":
+                outcome = event.get("outcome")
+                if outcome == "done":
+                    view.status = "done"
+                elif outcome in ("question", "failed"):
+                    view.status = "parked"
+                    if outcome == "failed":
+                        view.question = "Failed: " + event["report"]
+                elif outcome == "infra":
+                    view.status = "runnable"
+            case "question.asked":
+                view.status = "parked"
+                view.question = event["text"]
+            case "question.answered":
+                view.status = "runnable"
+                view.question = None
+            case "branch.ready":
+                view.status = "ready"
+                view.tip = event["tip"]
+            case "branch.landed":
+                view.status = "landed"
+                view.tip = event["tip"]
+                view.main = event["main"]
+            case "branch.rejected":
+                view.status = "rejected"
+    for identifier, view in views.items():
+        if view.status == "waiting" and all(
+            need in views and views[need].status == "landed" for need in tasks[identifier].needs
+        ):
+            view.status = "runnable"
+    return views
 
 
 def runnable(views: Mapping[str, TaskView]) -> list[str]:
     """Ids whose status is runnable, in the views' order."""
-    raise NotImplementedError
+    return [identifier for identifier, view in views.items() if view.status == "runnable"]
 
 
 def main(argv: list[str]) -> int:
@@ -45,4 +89,24 @@ def main(argv: list[str]) -> int:
 
     PLAN_DIR holds plan.toml and tasks/; the log is FAB_HOME's.
     """
-    raise NotImplementedError
+    parser = argparse.ArgumentParser(prog="fab status", description=__doc__)
+    parser.add_argument("plan_dir", type=Path, metavar="PLAN_DIR")
+    args = parser.parse_args(argv)
+    try:
+        plan = load_plan(args.plan_dir / "plan.toml")
+        tasks = load_tasks(args.plan_dir / "tasks", plan.draft, plan.repo)
+    except PlanError as error:
+        print(error, file=sys.stderr)
+        return 1
+    issues = problems(plan, tasks)
+    if issues:
+        print("\n".join(issues), file=sys.stderr)
+        return 1
+    views = fold(tasks, log.iterate())
+    rows = [(view.id, view.status, str(len(view.runs)), view.branch or "-")
+            for view in views.values()]
+    if rows:
+        widths = [max(len(row[column]) for row in rows) for column in range(3)]
+        for row in rows:
+            print(" ".join(f"{cell:<{width}}" for cell, width in zip(row[:3], widths)) + " " + row[3])
+    return 0
