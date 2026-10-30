@@ -72,10 +72,12 @@ else:
             path.chmod(0o755)
         self.env = {
             "HOME": str(self.home), "PATH": str(self.bin), "FAKE_LOG": str(self.log),
-            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONDONTWRITEBYTECODE": "1", "RECORDS_REPO": str(self.base / "records"),
         }
         self.addCleanup(patch.stopall)
-        patch.dict(os.environ, {"HOME": str(self.home)}).start()
+        patch.dict(os.environ, {"HOME": str(self.home), "RECORDS_REPO": self.env["RECORDS_REPO"]}).start()
+        self.draft("dm", "active", "green")
+        self.draft("ab", "active", "another")
         patch.object(lib, "REGISTRY", self.registry).start()
         # Parent expectations and child launches must share a minute even when
         # scheduling crosses a real clock boundary.
@@ -124,6 +126,13 @@ sys.addaudithook(local_only)
 
     def all_calls(self):
         return [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
+
+    def draft(self, handle, state, directory="draft"):
+        records = Path(self.env.get("RECORDS_REPO", self.home / "src/fabrig/records"))
+        path = records / "drafts" / directory / "draft.toml"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f'coordinator = "{handle}"\nstate = "{state}"\n')
+        return path
 
     def brief(self, handle="dm", area="skein"):
         scratch = Path(lib.names(handle, area)["lead_scratch"])
@@ -214,6 +223,87 @@ class NamesTests(Sandbox):
         self.assertEqual(lib.state_time(state), "02:48Z")
         state.write_text("(empty)\n")
         self.assertEqual(lib.state_time(state), "unknown")
+
+
+class DraftTests(Sandbox):
+    def test_one_active_draft_ignores_done_and_other_coordinators(self):
+        self.draft("dm", "done", "dynamic-memory")
+        self.assertEqual(lib.resolve_draft("dm"), "green")
+        self.assertEqual(lib.resolve_draft("ab"), "another")
+        self.assertEqual(self.all_calls(), [])
+
+    def test_no_or_several_active_drafts_refuse_lead_with_candidates(self):
+        self.brief()
+        for mode, candidates in (("none", "(none)"), ("several", "first, second")):
+            with self.subTest(mode=mode):
+                self.env["RECORDS_REPO"] = str(self.base / mode)
+                self.draft("dm", "done", "old")
+                if mode == "several":
+                    self.draft("dm", "active", "second")
+                    self.draft("dm", "active", "first")
+                result = self.command("start", "lead", "dm", "skein", "--dry-run")
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn(candidates, result.stderr)
+                self.assertIn("--draft", result.stderr)
+        self.assertEqual(self.all_calls(), [])
+
+    def test_explicit_draft_can_select_owned_inactive_draft(self):
+        self.draft("dm", "done", "dynamic-memory")
+        self.brief()
+        for role, rest in (("lead", ("skein",)), ("coordinator", ())):
+            result = self.command("start", role, "dm", *rest, "--draft", "dynamic-memory", "--dry-run")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('draft = "dynamic-memory"', result.stdout)
+
+    def test_explicit_missing_or_foreign_draft_fails_before_commands(self):
+        self.brief()
+        for role, rest in (("lead", ("skein",)), ("coordinator", ())):
+            for draft in ("missing", "another", "../green"):
+                result = self.command("start", role, "dm", *rest, "--draft", draft, "--dry-run")
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn("must exist with coordinator", result.stderr)
+        self.assertEqual(self.all_calls(), [])
+
+    def test_rendered_lead_header_has_filled_joins(self):
+        self.brief("ab", "smith")
+        result = self.command("start", "lead", "ab", "smith", "--dry-run")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        header = result.stdout.split("prompt:\n", 1)[1].split("+++", 2)[1]
+        self.assertEqual(lib.tomllib.loads(header), dict(task="<task>", branch="ab-smith/<task>",
+                         coordinator="s/another-draft", draft="another", area="smith", part="<the part>"))
+        self.assertIn("for a `--read-only` survey, omit `branch`", result.stdout)
+        self.assertIn("`codex-run header TASK` checks a file", result.stdout)
+        self.assertIn("warns without a header today and will refuse", result.stdout)
+
+    def test_coordinator_header_prefix_and_unknown_draft_including_warmup(self):
+        for handle, prefix in (("dm", "coord"), ("ab", "ab")):
+            result = self.command("start", "coordinator", handle, "--dry-run")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(f'branch = "{prefix}/<task>"', result.stdout)
+        for mode in ("none", "several"):
+            self.env["RECORDS_REPO"] = str(self.base / mode)
+            if mode == "several":
+                self.draft("dm", "active", "first")
+                self.draft("dm", "active", "second")
+            for rest in ((), ("--next",)):
+                result = self.command("start", "coordinator", "dm", *rest, "--dry-run")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("draft is unknown; ask the director", result.stdout)
+
+    def test_inventory_draft_is_unique_active_or_null(self):
+        self.draft("dm", "done", "dynamic-memory")
+        def coordinators():
+            result = self.command("start", "names", "--json")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return {row["handle"]: row["draft"] for row in json.loads(result.stdout)
+                    if row["role"] == "coordinator"}
+        self.assertEqual(coordinators(), {"dm": "green", "ab": "another"})
+        self.draft("dm", "active", "second")
+        self.draft("ab", "done", "another")
+        self.assertEqual(coordinators(), {"dm": None, "ab": None})
+        self.env["RECORDS_REPO"] = str(self.base / "absent")
+        self.assertEqual(coordinators(), {"dm": None, "ab": None})
+        self.assertEqual(self.all_calls(), [])
 
 
 class CodexLeadTests(Sandbox):
@@ -503,13 +593,6 @@ class LaunchTests(Sandbox):
 
 
 class OwnershipTests(Sandbox):
-    def draft(self, handle, state, directory="draft"):
-        records = Path(self.env.get("RECORDS_REPO", self.home / "src/fabrig/records"))
-        path = records / "drafts" / directory / "draft.toml"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(f'coordinator = "{handle}"\nstate = "{state}"\n')
-        return path
-
     def test_every_owned_name_class_is_silent_and_local(self):
         for name in ["director", "director/", "director/20261029T1200Z"] + [
             name for handle in ("dm", "ab") for name in [

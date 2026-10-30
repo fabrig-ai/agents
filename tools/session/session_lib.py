@@ -136,23 +136,42 @@ def render(template, values):
     return Template(template.read_text()).substitute(values)
 
 
-def paused_coordinators():
-    """Read the local records checkout once, shared by ownership and inventory."""
-    paused = set()
+def records_drafts():
+    """Read only the local records checkout; never fetch or query sessions."""
     records = Path(os.environ.get("RECORDS_REPO", Path.home() / "src/fabrig/records")).expanduser()
-    for path in (records / "drafts").glob("*/draft.toml"):
+    drafts = {}
+    for path in sorted((records / "drafts").glob("*/draft.toml")):
         with path.open("rb") as stream:
-            draft = tomllib.load(stream)
-        handle = draft.get("coordinator")
-        if isinstance(handle, str) and draft.get("state") == "paused":
-            paused.add(handle)
-    return paused
+            drafts[path.parent.name] = tomllib.load(stream)
+    return drafts
+
+
+def active_drafts(handle, drafts):
+    return sorted(name for name, draft in drafts.items()
+                  if draft.get("coordinator") == handle and draft.get("state") == "active")
+
+
+def resolve_draft(handle, selected=None, drafts=None):
+    drafts = records_drafts() if drafts is None else drafts
+    if selected is not None:
+        if selected not in drafts or drafts[selected].get("coordinator") != handle:
+            raise ValueError(f"--draft {selected!r} must exist with coordinator = {handle!r}")
+        return selected
+    candidates = active_drafts(handle, drafts)
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def paused_coordinators(drafts=None):
+    drafts = records_drafts() if drafts is None else drafts
+    return {draft["coordinator"] for draft in drafts.values()
+            if isinstance(draft.get("coordinator"), str) and draft.get("state") == "paused"}
 
 
 def inventory():
     """Watch identities and supervisors; no live session queries or network."""
     entries = registry()
-    paused = paused_coordinators()
+    drafts = records_drafts()
+    paused = paused_coordinators(drafts)
     rows = []
     for handle in entries:
         values = names(handle)
@@ -162,6 +181,7 @@ def inventory():
             "warmup_name": values["warmup_name"], "name_prefix": values["coordinator_name_prefix"],
             "legacy_names": legacy, "aliases": list(dict.fromkeys([values["warmup_name"], *legacy])),
             "start_dir": values["coordinator_start_dir"], "supervisor": "director", "paused": handle in paused,
+            "draft": resolve_draft(handle, drafts=drafts),
         })
         for area in AREAS:
             lead = names(handle, area)

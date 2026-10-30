@@ -32,8 +32,8 @@ its `handover.md` and `state.md` paths. Session names differ from post names.
 All start directories stay under `~/src/rust/` for Claude's directory trust.
 
 ```
-tools/session/start lead H AREA [--model M] [--effort E] [--dry-run]
-tools/session/start coordinator H [--next] [--model M] [--effort E] [--dry-run]
+tools/session/start lead H AREA [--draft D] [--model M] [--effort E] [--dry-run]
+tools/session/start coordinator H [--draft D] [--next] [--model M] [--effort E] [--dry-run]
 tools/session/start director [--next] [--effort E] [--dry-run]
 tools/session/start wire H|director [--dry-run]
 tools/session/start owns NAME
@@ -43,6 +43,14 @@ tools/session/start names [--json]
 Default effort: high for leads, xhigh for coordinators/director. Omit `--model`
 unless explicitly supplied; shared settings select the model/context window.
 Prompts use strict `string.Template.substitute`; unknown placeholders fail.
+
+Draft resolution reads only `RECORDS_REPO` (default `~/src/fabrig/records`),
+using the single `drafts/*/draft.toml` with `coordinator = H` and `state = "active"`.
+Done drafts are ignored. `--draft D` selects an existing draft belonging to H,
+regardless of state. With no unique active draft, a lead refuses and names the
+candidates and `--draft`; a coordinator starts with instructions to ask the
+director. Lead and coordinator prompts require task TOML headers with these
+joins; Codex owner leads still receive only their brief, and owner runs are exempt.
 
 Write the lead's scratch `brief.md` first. Preserve inherited `common.md` and
 `state.md`; create missing ones as `(empty)` plus newline by sibling rename.
@@ -116,7 +124,8 @@ START_OWNS_PAUSED (paused wins); wrong arity exits 2.
 
 `start names --json` supplies watch's JSON array; unflagged `start names` also
 returns JSON. Coordinator rows include handle, mailbox, warmup_name, name_prefix,
-legacy_names, aliases, start_dir, supervisor and paused. Lead rows add name,
+legacy_names, aliases, start_dir, supervisor, paused and draft (null when no
+unique active draft exists). Lead rows add name,
 area, branch_key, scratch and coordinator_mailbox. The director has no supervisor;
 ops and s/deploy have always_watched=true and supervisor director. Pause state
 uses the same local records reader as owns, also inherited by leads. No network

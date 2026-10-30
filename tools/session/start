@@ -10,9 +10,9 @@ import time
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from session_lib import (ROOT, AREAS, clone, create_empty, session_capabilities, list_sessions,
+from session_lib import (ROOT, AREAS, active_drafts, clone, create_empty, session_capabilities, list_sessions,
                          inventory, live_session, names, owns, publish_settings, recent_warmup, record_warmup,
-                         render, session_id, state_time, watched, unit_active)
+                         records_drafts, render, resolve_draft, session_id, state_time, watched, unit_active)
 
 
 def main():
@@ -28,6 +28,7 @@ def main():
             command.add_argument("--next", action="store_true")
         if role != "director":
             command.add_argument("--model")
+            command.add_argument("--draft")
         command.add_argument("--effort", default="high" if role == "lead" else "xhigh")
         command.add_argument("--dry-run", action="store_true")
     wire = commands.add_parser("wire", help="refresh project hooks without starting sessions")
@@ -63,10 +64,20 @@ def main():
                 if Path(lead["lead_start_dir"]).is_dir():
                     publish_settings(lead, "lead", capabilities, args.dry_run)
             return 0
+        if args.role in ("lead", "coordinator"):
+            drafts = records_drafts()
+            draft = resolve_draft(handle, args.draft, drafts)
+            values["draft"] = draft or "<draft from director>"
+            values["draft_context"] = (f"Your records draft is {draft}." if draft else
+                                       "Your draft is unknown; ask the director before tasking work.")
         if args.role == "lead":
             scratch = Path(values["lead_scratch"])
             if not (scratch / "brief.md").is_file():
                 print(f"start: refused: missing brief: {scratch / 'brief.md'}", file=sys.stderr)
+                return 1
+            if draft is None:
+                candidates = ", ".join(active_drafts(handle, drafts)) or "(none)"
+                print(f"start: refused: active drafts for {handle}: {candidates}; select --draft D", file=sys.stderr)
                 return 1
             if values["lead_kind"] == "codex":
                 argv = ["codex-run", "owner", "--effort", args.effort]

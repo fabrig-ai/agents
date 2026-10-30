@@ -327,9 +327,9 @@ class Sandbox(unittest.TestCase):
         self.scenario = dict(registry=[
             dict(role='lead', branch_key='skein', coordinator_mailbox='s/dynamic-memory'),
             dict(role='lead', branch_key='q-jig', coordinator_mailbox='s/qa'),
-            dict(role='coordinator', handle='dm', mailbox='s/dynamic-memory'),
-            dict(role='coordinator', handle='q', mailbox='s/qa'),
-            dict(role='coordinator', handle='u', mailbox='s/upgrades'),
+            dict(role='coordinator', handle='dm', mailbox='s/dynamic-memory', draft='green'),
+            dict(role='coordinator', handle='q', mailbox='s/qa', draft='qa'),
+            dict(role='coordinator', handle='u', mailbox='s/upgrades', draft=None),
         ], pairs={profile: dict(main=[dict(test='one')]) for profile in ('qa-skein', 'qa-jig')})
         self.save_scenario()
         self.argv = ['once', '--slot', str(self.slot), '--state-dir', str(self.home / 'state'),
