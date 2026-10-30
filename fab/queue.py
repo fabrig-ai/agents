@@ -178,7 +178,11 @@ class Queue:
         branch. Red: a single branch is rejected with its failing step and marked tried.
         Records: `batch` (branches, parent, selection, steps as "name:code:seconds", outcome
         green, red, conflict or error, log), `landed` (branch, tip, main), `rejected` (branch,
-        tip, step, log). The checkout is left clean and detached."""
+        tip, step, log). The checkout is left clean and detached.
+
+        Whatever the outcome, the attempt ends by bounding the gate's target as a slot's is
+        (docs/design/fab.md, 7): fab.slots.remove(fab.slots.sweep_plan(repo / "target",
+        <the attempt's start in ns>)), the bytes freed going into the batch record as freed."""
         started = log.now()
         batch_id = datetime.strptime(started, "%Y-%m-%dT%H:%M:%S.%fZ").strftime("%Y%m%dT%H%M%SZ")
         detail = self.home / "queue" / (batch_id + ".log")
