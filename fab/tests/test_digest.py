@@ -176,7 +176,11 @@ class Queue:
         self.assertEqual(digest.long_functions("fab/api.py", "", short), [])
         self.assertEqual(digest.long_functions("fab/api.py", long, long), [])
         changed = long.replace("long_20 = 20", "long_20 = 100")
-        self.assertEqual(digest.long_functions("fab/api.py", long, changed), [expected])
+        # A ratchet: changed without growing passes; grown past where it was fails.
+        self.assertEqual(digest.long_functions("fab/api.py", long, changed), [])
+        self.assertEqual(digest.long_functions("fab/api.py", long, function("long", 62)),
+                         [digest.Function("fab/api.py", "long", 1, 62)])
+        self.assertEqual(digest.long_functions("fab/api.py", short, long), [expected])
         self.assertEqual(digest.long_functions("fab/api.py", function("long", 62), long), [])
         self.assertEqual(digest.long_functions("fab/api.py", "", short, cap=59),
                          [digest.Function("fab/api.py", "short", 1, 60)])

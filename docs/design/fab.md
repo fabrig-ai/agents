@@ -326,7 +326,8 @@ and Claude reads the code's structure in batches, never on the landing path.
   - `files`: every changed path is within the task's globs;
   - `shape`: no signature the base has is changed or removed, unless the
     task's kind is `interface` or `migration`;
-  - `size`: no new or changed function is longer than 60 lines;
+  - `size`: no function the branch adds, or makes longer, is over 60 lines
+    (a ratchet: touching an old long function without growing it passes);
   - `names`: no new public name or module holds a word from the banned list
     in `fab/taste.md`;
   - `docs`: every new public function, class and method has a docstring;

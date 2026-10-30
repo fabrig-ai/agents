@@ -146,11 +146,15 @@ def functions(module: str, text: str) -> list[Function]:
 
 def long_functions(module: str, before: str, after: str, cap: int = SIZE_CAP) -> list[Function]:
     """functions(module, after) longer than cap lines whose span [start, start + lines) holds
-    at least one of added_lines(before, after): new or changed. A long function the branch did
-    not touch, or only shortened, is not listed."""
+    at least one of added_lines(before, after), and that the branch made long: new, or longer
+    than it was before (by name). A ratchet: a long function the branch did not touch, only
+    shortened, or changed without growing is not listed, so a change touching old debt does not
+    have to pay it off."""
     added = added_lines(before, after)
+    was = {function.name: function.lines for function in functions(module, before)} if before else {}
     return [function for function in functions(module, after)
             if function.lines > cap
+            and function.lines > was.get(function.name, 0)
             and any(function.start <= line < function.start + function.lines for line in added)]
 
 
