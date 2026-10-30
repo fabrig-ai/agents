@@ -38,6 +38,7 @@ paths and records-repository data paths are labelled where they are introduced.
 | `docs/design/status-page.md` | s/multi-coord | `tools/records/status-page`; public index and planned release data |
 | `tools/fleet-sync.md`; `fleet/bootstrap/README.md`, `fleet/kache/README.md`, `fleet/seeds/README.md` (current `fleet/**/README.md`) | s/deploy | Fleet, fleet-sync, gate (`tools/land`, `tools/check.sh`), units and bootstrap; to move into docs/design by its owner |
 | `docs/design/qa.md` | s/qa | `tools/qa/`; custody, rung walks and planned passes, evidence and live tiers |
+| `docs/design/reaper.md` | s/deploy | `tools/reap/`, `fleet/reap.toml`, `fleet/units/reap.service`, `fleet/units/reap.timer`; disposable output and lifetime records |
 | `docs/design/after-landing.md` | s/dynamic-memory | `tools/after-landing/`; published-tip checks, verdicts, routing and bisection |
 
 **Migration is owned work.** The remaining migration rows list current text and coverage
