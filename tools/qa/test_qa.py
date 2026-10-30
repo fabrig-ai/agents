@@ -5397,6 +5397,14 @@ def scratch_bytes_queue_counts_reservations_and_retained_data(lab):
     lab.watch()
     assert len(lab.walk_states()) == 2  # retained generated files exceed tiny budget
     shutil.rmtree(first)
+    # This fixture simulates a confirmed prune. An unexplained missing scratch
+    # directory instead keeps its reservation under conservative measurement.
+    path = lab.tmp / 'qa/preservation' / (state['walk'] + '.json')
+    kept = json.loads(path.read_text())
+    kept['pruned'] = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    sibling = path.with_suffix('.new')
+    sibling.write_text(json.dumps(kept))
+    sibling.replace(path)
     lab.watch()
     assert len(lab.walk_states()) == 3 and json.loads(lab.run('queue', '--json').stdout) == []
 
@@ -6140,6 +6148,244 @@ class EvidenceRepairTests(unittest.TestCase):
                 self.assertEqual(saved['status'], 'waiting' if remote and branch else 'kept-locally')
                 self.assertEqual(bool(saved['remote']), bool(remote and branch))
                 self.assertFalse((self.watch.directory / 'evidence.git').exists())
+
+
+    def _measurement_entries(self, names, error=None):
+        class Entries:
+            def __init__(self):
+                self.values = iter(names)
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                self.close()
+            def __iter__(self):
+                return self
+            def __next__(self):
+                from types import SimpleNamespace
+                try:
+                    return SimpleNamespace(name=next(self.values))
+                except StopIteration:
+                    if error is not None:
+                        raise error
+                    raise
+            def close(self):
+                pass
+        return Entries()
+
+    def test_scratch_size_accepts_more_than_4096_entries(self):
+        from types import SimpleNamespace
+        directory, _ = self.walk()
+        original_stat = os.stat
+        def metadata(path, *args, **kwargs):
+            if isinstance(path, str) and path.startswith('fake-'):
+                return SimpleNamespace(st_size=3, st_mode=0o100600)
+            return original_stat(path, *args, **kwargs)
+        with self.patch.object(os, 'scandir', lambda fd: self._measurement_entries(
+                f'fake-{n}' for n in range(5000))), self.patch.object(os, 'stat', metadata):
+            result = self.ev['directory_bytes'](directory)
+        self.assertTrue(result['complete'])
+        self.assertEqual(result['bytes'], directory.stat().st_size + 15000)
+
+    def test_scratch_size_has_no_depth_cap_and_never_follows_links_or_reads_content(self):
+        directory, _ = self.walk()
+        descendants = []
+        deepest = directory
+        for _ in range(40):
+            deepest /= 'box'
+            deepest.mkdir()
+            descendants.append(deepest)
+        payload = deepest / 'state'
+        payload.write_text('fixture data')
+        outside = self.root / 'outside'
+        outside.mkdir()
+        (outside / 'large').write_bytes(b'x' * 10000)
+        link = deepest / 'outside-link'
+        link.symlink_to(outside, target_is_directory=True)
+        expected = (directory.stat().st_size + (directory / 'report.md').stat().st_size
+                    + sum(p.stat().st_size for p in descendants) + payload.stat().st_size + link.lstat().st_size)
+        opened = os.open
+        def directories_only(path, flags, *args, **kwargs):
+            self.assertTrue(flags & os.O_DIRECTORY, 'measurement opened file contents')
+            self.assertNotEqual(path, 'outside-link', 'measurement followed a symlink')
+            return opened(path, flags, *args, **kwargs)
+        with self.patch.object(os, 'open', directories_only):
+            result = self.ev['directory_bytes'](directory)
+        self.assertTrue(result['complete'])
+        self.assertEqual(result['bytes'], expected)
+
+    def test_scratch_measurement_keeps_partial_counts_on_filesystem_errors(self):
+        directory, _ = self.walk()
+        (directory / 'large').write_bytes(b'x' * 20000)
+        expected = directory.stat().st_size + 20000
+        for error in (PermissionError('fixture'), FileNotFoundError('fixture'), OSError('fixture'), RuntimeError('fixture')):
+            with self.subTest(error=type(error).__name__), self.patch.object(os, 'scandir',
+                    lambda fd: self._measurement_entries(['large'], error)):
+                result = self.ev['directory_bytes'](directory)
+                self.assertFalse(result['complete'])
+                self.assertEqual(result['bytes'], expected)
+                self.assertEqual(result['reason'], type(error).__name__)
+
+    def test_scratch_time_limit_preserves_counted_bytes(self):
+        directory, _ = self.walk()
+        (directory / 'large').write_bytes(b'x' * 20000)
+        expected = directory.stat().st_size + 20000
+        clock = [0]
+        stat_call = os.stat
+        def slow_stat(path, *args, **kwargs):
+            info = stat_call(path, *args, **kwargs)
+            if path == 'large' and kwargs.get('dir_fd') is not None:
+                clock[0] = 11
+            return info
+        with self.patch.object(time, 'monotonic', lambda: clock[0]), self.patch.object(os, 'stat', slow_stat), \
+                self.patch.object(os, 'scandir', lambda fd: self._measurement_entries(['large'])):
+            result = self.ev['directory_bytes'](directory)
+        self.assertFalse(result['complete'])
+        self.assertEqual(result['bytes'], expected)
+        self.assertEqual(result['reason'], 'TimeoutError')
+
+    def test_incomplete_size_charges_maximum_and_retries_one_notice(self):
+        directory, state = self.walk(scratch_bytes=100)
+        calls = []
+        original_call = self.watch.call
+        def post(tool, *args):
+            if tool == 'post':
+                calls.append(args)
+                return subprocess.CompletedProcess([], 1 if len(calls) == 1 else 0, '', '')
+            return original_call(tool, *args)
+        self.watch.call = post
+        for counted in (40, 150):
+            self.watch.options.update(QA_WALK_SCRATCH_BYTES=10, QA_SCRATCH_BUDGET_BYTES=max(100, counted) + 9)
+            measurement = dict(bytes=counted, complete=False, reason='PermissionError', missing=False)
+            with self.patch.dict(self.ev, directory_bytes=lambda *a, **kw: measurement):
+                with self.assertRaises(self.tool['Deferred']) as failure:
+                    self.watch.scratch_room([(directory, state)])
+            self.assertIn(f'{max(100, counted)} bytes used', str(failure.exception))
+            self.watch.attention_attempted.clear()
+            self.watch.retry_notices()
+        self.assertEqual(len(calls), 2)
+        notices = list((self.watch.directory / 'attention').glob('*.json'))
+        self.assertEqual(len(notices), 1)
+        self.assertTrue(self.watch.read_state(notices[0])['delivered'])
+
+    def test_manual_measurement_notice_waits_for_the_watcher_director(self):
+        directory, state = self.walk(scratch_bytes=100)
+        self.watch.director = ''
+        def failed(*args, **kwargs):
+            raise OSError('fixture')
+        with self.patch.dict(self.ev, directory_bytes=failed):
+            self.watch.scratch_room([(directory, state)])
+        self.assertFalse(self.posts)
+        notices = list((self.watch.directory / 'attention').glob('*.json'))
+        self.assertEqual(len(notices), 1)
+        self.watch.director = 'director@fixture'
+        self.watch.retry_notices()
+        self.assertEqual(len(self.posts), 1)
+        self.assertTrue(self.watch.read_state(notices[0])['delivered'])
+
+    def test_missing_or_invalid_measurement_state_keeps_reservation(self):
+        directory, state = self.walk(scratch_bytes=100)
+        (directory / 'report.md').unlink()
+        directory.rmdir()
+        self.assertEqual(self.watch.scratch_measurement(directory, state), 100)
+        self.assertEqual(len(self.posts), 1)
+        # Malformed preservation metadata must not lose a valid partial count,
+        # escape admission, or make measurement visit an unvalidated path.
+        self.watch.options.update(QA_WALK_SCRATCH_BYTES=10, QA_SCRATCH_BUDGET_BYTES=159)
+        for saved in ([], None, {'quarantine': '../outside'}):
+            paths = []
+            def size(path, **kwargs):
+                paths.append(path)
+                return dict(bytes=150, complete=True, reason=None, missing=False)
+            self.tool['replace'](self.watch.preservation_path(state), json.dumps(saved).encode())
+            with self.subTest(saved=saved):
+                self.assertEqual(self.watch.scratch_measurement(directory, state), 100)
+            with self.subTest(saved=saved), self.patch.dict(self.ev, directory_bytes=size):
+                with self.assertRaises(self.tool['Deferred']) as failure:
+                    self.watch.scratch_room([(directory, state)])
+                self.assertIn('150 bytes used', str(failure.exception))
+                self.assertEqual(paths, [directory])
+        self.assertEqual(len(self.posts), 1)
+
+    def test_notice_failure_cannot_escape_size_admission(self):
+        directory, state = self.walk(scratch_bytes=100)
+        def failed(*args, **kwargs):
+            raise self.ev['Refusal']('fixture', 'enumeration bound')
+        def no_notice(*args, **kwargs):
+            raise RuntimeError('fixture notice unavailable')
+        self.watch.options.update(QA_WALK_SCRATCH_BYTES=10, QA_SCRATCH_BUDGET_BYTES=109)
+        with self.patch.dict(self.ev, directory_bytes=failed), self.patch.object(self.watch, 'notify_once', no_notice):
+            with self.assertRaises(self.tool['Deferred']):
+                self.watch.scratch_room([(directory, state)])
+
+    def test_quarantine_shares_size_deadline_and_uses_one_reservation_floor(self):
+        directory, state = self.walk(scratch_bytes=500)
+        quarantine = '.qa-prune-' + state['walk'] + '-' + 'a' * 32
+        self.watch.save_preservation(state, self.kept(state, quarantine=quarantine))
+        deadlines = []
+        def partial(path, deadline=None):
+            deadlines.append(deadline)
+            return dict(bytes=100 if path == directory else 200, complete=path == directory,
+                        reason=None if path == directory else 'TimeoutError', missing=False)
+        self.watch.options.update(QA_WALK_SCRATCH_BYTES=10, QA_SCRATCH_BUDGET_BYTES=509)
+        with self.patch.object(time, 'monotonic', lambda: 0), self.patch.dict(self.ev, directory_bytes=partial):
+            with self.assertRaises(self.tool['Deferred']) as failure:
+                self.watch.scratch_room([(directory, state)])
+        self.assertIn('500 bytes used', str(failure.exception))
+        self.assertEqual(deadlines, [10, 10])
+
+    def test_watcher_retries_each_failed_step_and_reaches_next_walk_and_pass(self):
+        watch = self.watch
+        watch.stuck_addresses = lambda: []
+        watch.give_strays = lambda *a, **kw: None
+        watch.repair_slot_claims = lambda *a: None
+        watch.finish_walk = lambda directory, state, kept: state
+        watch.save_queue = lambda entry: None
+        watch.drop_queue = lambda identity: self.fail('fixture entry should remain queued')
+        original_preserve = watch.preserve_walk
+        for index, (phase, error_type) in enumerate((p, e) for p in ('measurement', 'prepare', 'preserve', 'prune')
+                for e in (self.ev['Refusal'], OSError, RuntimeError)):
+            with self.subTest(phase=phase, error=error_type.__name__):
+                self.walks.clear()
+                first = self.walk(index * 2 + 1)
+                second = self.walk(index * 2 + 2)
+                events = []
+                def failure():
+                    return error_type('fixture', 'fake refusal') if error_type is self.ev['Refusal'] else error_type('fixture')
+                def size(path, **kwargs):
+                    events.append(('measurement', path.name))
+                    if phase == 'measurement' and path == first[0]:
+                        raise failure()
+                    return dict(bytes=10, complete=True, reason=None, missing=False)
+                def prepare(directory, state):
+                    events.append(('prepare', state['walk']))
+                    if phase == 'prepare' and state['walk'] == first[1]['walk']:
+                        raise failure()
+                    return self.kept(state)
+                def prune(directory, state, saved):
+                    events.append(('prune', state['walk']))
+                    if phase == 'prune' and state['walk'] == first[1]['walk']:
+                        raise failure()
+                def preserve(directory, state, descriptor, saved=None):
+                    events.append(('preserve', state['walk']))
+                    if phase == 'preserve' and state['walk'] == first[1]['walk']:
+                        raise failure()
+                    return original_preserve(directory, state, descriptor, saved)
+                def start(args, workspace, service, entry):
+                    service.scratch_room([first if entry['kind'] == 'forgejo' else second])
+                    return 1
+                entries = [dict(id=str(n) * 32, kind=kind, repo='fabrig', rung='repair', cap=180,
+                                build='main', resume=None, after=[], login=['chatgpt'], reason=None)
+                           for n, kind in ((1, 'forgejo'), (2, 'claude'))]
+                watch.queue_entries = lambda: entries
+                watch.release_slot = lambda directory, state: events.append(('cleanup', state['walk']))
+                watch.prepare_evidence, watch.prune_walk, watch.preserve_walk = prepare, prune, preserve
+                with self.patch.dict(self.ev, directory_bytes=size), \
+                        self.patch.dict(watch.check_queue.__globals__, start_walk=start):
+                    watch.check(watch.options)
+                    watch.check(watch.options)
+                for step in ('cleanup', 'measurement', 'prepare', 'preserve', 'prune'):
+                    self.assertEqual(events.count((step, second[1]['walk'])), 2, (phase, step, events))
+                self.assertEqual(events.count((phase, first[1]['walk'])), 2, events)
 
 
 if __name__ == '__main__':

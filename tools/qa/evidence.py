@@ -12,6 +12,7 @@ CAP = 2048 * 1024
 MAX_ENTRIES = 4096
 MAX_DEPTH = 32
 MAX_SECONDS = 5
+SCRATCH_SECONDS = 10
 SECRET = re.compile(
     r'-----BEGIN [^\n-]*PRIVATE KEY-----|'
     r'(?<![\w-])(?:gh[pousr]_[A-Za-z0-9_-]{20,}|github_pat_[A-Za-z0-9_-]{20,}|'
@@ -332,25 +333,69 @@ def tree_digest(files):
     return digest.hexdigest()
 
 
-def directory_bytes(directory):
-    """Metadata only, never follow links or open file contents for admission."""
-    traversal = Traversal()
-    def size(parent, depth=0):
-        total = 0
-        for name in traversal.names(parent, depth):
-            info = os.stat(name, dir_fd=parent, follow_symlinks=False)
-            total += info.st_size
-            if stat.S_ISDIR(info.st_mode):
-                fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
-                try:
-                    total += size(fd, depth + 1)
-                finally:
-                    os.close(fd)
-        return total
+def directory_bytes(directory, deadline=None):
+    """Stream metadata only; scratch has a time bound, no entry/depth cap.
+
+    Preserve the partial count on any ordinary failure. The caller supplies one
+    deadline for both the normal scratch name and an interrupted quarantine.
+    """
+    total, reason, missing = 0, None, False
+    opened = False
+    stack = []
+    deadline = time.monotonic() + SCRATCH_SECONDS if deadline is None else deadline
+
+    def check_time():
+        if time.monotonic() >= deadline:
+            raise TimeoutError('scratch measurement deadline')
+
+    def close_level():
+        fd, entries, owned = stack.pop()
+        try:
+            entries.close()
+        finally:
+            if owned:
+                os.close(fd)
+
     try:
+        check_time()
         with opened_directory(directory) as root:
-            return os.fstat(root).st_size + size(root)
-    except FileNotFoundError:
-        if not Path(directory).exists():
-            return 0
-        raise
+            opened = True
+            total += os.fstat(root).st_size
+            try:
+                stack.append((root, os.scandir(root), False))
+                while stack:
+                    check_time()
+                    parent, entries, _ = stack[-1]
+                    try:
+                        entry = next(entries)
+                    except StopIteration:
+                        close_level()
+                        check_time()
+                        continue
+                    check_time()
+                    info = os.stat(entry.name, dir_fd=parent, follow_symlinks=False)
+                    total += info.st_size
+                    check_time()
+                    if stat.S_ISDIR(info.st_mode):
+                        child = os.open(entry.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                                        dir_fd=parent)
+                        try:
+                            current = os.fstat(child)
+                            if (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino):
+                                raise OSError('scratch directory changed')
+                            children = os.scandir(child)
+                        except BaseException:
+                            os.close(child)
+                            raise
+                        stack.append((child, children, True))
+            finally:
+                # Close every descriptor even if enumeration or cleanup failed.
+                while stack:
+                    try:
+                        close_level()
+                    except Exception as error:
+                        reason = reason or type(error).__name__
+    except Exception as error:
+        reason = type(error).__name__
+        missing = not opened and isinstance(error, FileNotFoundError)
+    return dict(bytes=total, complete=reason is None, reason=reason, missing=missing)

@@ -629,7 +629,7 @@ class Watch:
         parent = self.directory / 'attention'
         try:
             no_links(self.workspace.tmp, parent)
-        except (OSError, Problem) as error:
+        except Exception as error:
             log(f'cannot retry notices: {error}; cleanup continues')
             return
         for path in sorted(parent.glob('*.json')):
@@ -639,7 +639,7 @@ class Watch:
                      and path.stem == hashlib.sha256(receipt['key'].encode()).hexdigest(),
                      'invalid notice identity', 4)
                 self.notify_once(receipt['key'], receipt['subject'], receipt['body'])
-            except (OSError, Problem, ValueError, KeyError, TypeError, AttributeError, UnicodeError, RecursionError):
+            except Exception:
                 log(f'{path}: cannot retry notice; receipt kept')
 
     def claim_notice(self, state):
@@ -1516,7 +1516,7 @@ class Watch:
             return
         try:
             entries = self.queue_entries()
-        except (OSError, Problem, ValueError, KeyError, TypeError, RecursionError) as error:
+        except Exception as error:
             log(f'cannot read walk queue: {error}; cleanup continues')
             return
         attempted = set()
@@ -1550,17 +1550,20 @@ class Watch:
                     entry['reason'] = 'launch outcome is still unknown; admission waits for the watcher'
                     self.save_queue(entry)
             except Deferred as error:
-                if entry['reason'] != str(error):
+                try:
+                    if entry['reason'] != str(error):
+                        entry['reason'] = str(error)
+                        self.save_queue(entry)
+                except Exception:
+                    log(f'queue {entry["id"]}: cannot save deferred reason; entry kept')
+            except Exception as error:
+                attempted.add(entry['kind'])
+                try:
                     entry['reason'] = str(error)
                     self.save_queue(entry)
-            except (OSError, Problem, ValueError, KeyError, TypeError, UnicodeError) as error:
-                attempted.add(entry['kind'])
-                entry['reason'] = str(error)
-                self.save_queue(entry)
-                try:
                     self.notify_once('queue ' + entry['id'] + ' reason ' + str(error),
                                      'qa: queued walk refused', f'Queue {entry["id"]}: {error}. Kept queued.\n')
-                except (OSError, Problem, ValueError, UnicodeError):
+                except Exception:
                     log(f'queue {entry["id"]}: cannot save refusal notice; entry kept')
 
     def admission_ready(self, walks):
@@ -2111,6 +2114,73 @@ class Watch:
             os.close(descriptor)
         return True
 
+    def scratch_measurement(self, directory, state):
+        """One ten-second metadata budget and one reservation floor per walk."""
+        reservation = state.get('scratch_bytes', self.options['QA_WALK_SCRATCH_BYTES'])
+        deadline = time.monotonic() + evidence['SCRATCH_SECONDS']
+        counted, failures = 0, []
+
+        def measure(path):
+            nonlocal counted
+            try:
+                result = evidence['directory_bytes'](path, deadline=deadline)
+                need(isinstance(result, dict) and type(result.get('bytes')) is int
+                     and result['bytes'] >= 0 and type(result.get('complete')) is bool
+                     and type(result.get('missing')) is bool, 'invalid scratch measurement', 4)
+                counted += result['bytes']
+                return result
+            except Exception as error:
+                return dict(bytes=0, complete=False, missing=False, reason=type(error).__name__)
+
+        normal = measure(directory)
+        saved, quarantine = {}, None
+        try:
+            try:
+                saved = self.read_state(self.preservation_path(state))
+            except FileNotFoundError:
+                pass
+            quarantine = saved.get('quarantine')
+            need(quarantine is None or isinstance(quarantine, str) and re.fullmatch(
+                 r'\.qa-prune-' + re.escape(state['walk']) + r'-[0-9a-f]{32}', quarantine),
+                 'invalid scratch quarantine', 4)
+        except Exception as error:
+            failures.append(type(error).__name__)
+            saved, quarantine = {}, None
+        pending = measure(directory.parent / quarantine) if quarantine else None
+        for result, alternate in ((normal, pending), (pending, normal)):
+            if result is None or result['complete']:
+                continue
+            # A missing name is expected after a confirmed prune, or while the
+            # other validated name still exists across the quarantine rename.
+            if result['missing'] and (saved.get('pruned') or alternate is not None and not alternate['missing']):
+                continue
+            failures.append(result.get('reason') or 'incomplete')
+        if not failures:
+            return counted
+        charge = max(reservation, counted)
+        key = 'scratch measurement incomplete ' + state['walk']
+        subject = 'qa: scratch size incomplete'
+        body = (f'Walk {state["walk"]}: metadata size measurement incomplete (limit 10 seconds).\n'
+                f'Counted {counted} bytes; charging {charge} bytes, at least the saved reservation.\n'
+                'The watcher retries measurement on the next admission pass.\n')
+        try:
+            if self.director:
+                self.notify_once(key, subject, body)
+            else:
+                # Manual admission has no director. Reserve the same receipt for
+                # the watcher, whose retry uses its configured director address.
+                path = self.directory / 'attention' / (hashlib.sha256(key.encode()).hexdigest() + '.json')
+                no_links(self.workspace.tmp, path)
+                try:
+                    self.read_state(path)
+                except FileNotFoundError:
+                    receipt = dict(key=key, attempted=True, subject=subject, body=body,
+                                   time=timestamp(), delivered=False)
+                    replace(path, (json.dumps(receipt) + '\n').encode(), durable=True)
+        except Exception as error:
+            log(f'{state["walk"]}: scratch size notice pending ({type(error).__name__})')
+        return charge
+
     def scratch_room(self, walks, resume=None):
         total = 0
         for directory, state in walks:
@@ -2118,17 +2188,7 @@ class Watch:
             if active:
                 total += state.get('scratch_bytes', self.options['QA_WALK_SCRATCH_BYTES'])
             if (not active or state.get('pinned')) and (state['walk'] != resume or state.get('pinned')):
-                total += evidence['directory_bytes'](directory)
-                try:
-                    saved = self.read_state(self.preservation_path(state))
-                except FileNotFoundError:
-                    saved = {}
-                quarantine = saved.get('quarantine')
-                need(quarantine is None or isinstance(quarantine, str) and re.fullmatch(
-                     r'\.qa-prune-' + re.escape(state['walk']) + r'-[0-9a-f]{32}', quarantine),
-                     'invalid scratch quarantine', 4)
-                if quarantine:
-                    total += evidence['directory_bytes'](directory.parent / quarantine)
+                total += self.scratch_measurement(directory, state)
         reserve = self.options['QA_WALK_SCRATCH_BYTES']
         defer(total + reserve <= self.options['QA_SCRATCH_BUDGET_BYTES'],
               f'scratch budget: {total} bytes used + {reserve} reserved exceeds '
@@ -2141,7 +2201,10 @@ class Watch:
         self.alert_attempted = set()
         self.release_attempted = set()
         self.attention_attempted = set()
-        self.retry_notices()
+        try:
+            self.retry_notices()
+        except Exception:
+            log('notice retries pending; cleanup continues')
         with self.walks_locked(wait=False) as walking:
             if not walking:
                 # An orphan launcher can hold admission indefinitely. Read atomic
@@ -2150,7 +2213,7 @@ class Watch:
                 for directory, state in self.local_walks(strict=False):
                     try:
                         self.overdue_launch_notice(state, 'admission descriptor held (walks lock busy)')
-                    except (Problem, OSError, ValueError, UnicodeError) as error:
+                    except Exception as error:
                         why = str(error) if isinstance(error, Problem) else type(error).__name__
                         log(f'{state["walk"]}: overdue launch notice failed ({why}); keeping custody')
                 return
@@ -2166,12 +2229,17 @@ class Watch:
                         self.check_walk(directory, state)
                     else:
                         self.release_slot(directory, state)
-                except (Problem, OSError, ValueError, RecursionError, UnicodeError,
-                        KeyError, TypeError, AttributeError) as error:
+                except Exception as error:
                     why = str(error) if isinstance(error, Problem) else type(error).__name__
                     log(f'{state["walk"]}: cleanup failed ({why}); keeping logins and scratch')
-            self.repair_slot_claims(walks)
-            self.check_queue()
+            try:
+                self.repair_slot_claims(walks)
+            except Exception:
+                log('slot claim repairs pending; preservation continues')
+            try:
+                self.check_queue()
+            except Exception:
+                log('queued admission pending; preservation continues')
         # Every walk gets custody cleanup before any bounded scan or publisher.
         for directory, state in walks:
             if not state.get('end_logged') or not state.get('decision'):
@@ -2183,12 +2251,12 @@ class Watch:
                     if not paused:
                         try:
                             saved = self.prepare_evidence(directory, state)
-                        except (Problem, OSError, ValueError, UnicodeError):
+                        except Exception:
                             log(f'{state["walk"]}: evidence preparation pending; cleanup complete')
                     state = self.finish_walk(directory, state, saved)
                     if saved is not None and not paused:
                         self.preserve_walk(directory, state, descriptor, saved)
-            except (Problem, OSError, ValueError, UnicodeError, KeyError, TypeError, RecursionError):
+            except Exception:
                 log(f'{state["walk"]}: preservation pending; scratch retained')
 
 
