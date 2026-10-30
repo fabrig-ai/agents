@@ -19,6 +19,7 @@ KINDS = ("implement", "repair", "rebase", "review")
 OUTCOMES = {"Done:": "done", "Question:": "question", "Infra:": "infra", "Failed:": "failed"}
 REMOTES = {"agents": "git@github.com:fabrig-ai/agents.git", "fabrig": "git@github.com:fabrig-ai/fabrig.git"}
 ROLE = Path(__file__).resolve().parent / "roles" / "implementer.md"
+TASTE = Path(__file__).resolve().parent / "taste.md"  # banned names and pairs; every brief carries it
 NOTIFY = "fab@hel8"  # codex-run posts its end here; nothing waits on it
 SLOTTED = ("fabrig",)  # repositories whose runs build in a builder's warm slot
 LAUNCHER = "fab"  # "fab" (fab codex start) or "codex-run" (fabrig's, retired); see fab/codex.py
@@ -61,7 +62,8 @@ def outcome(report: str) -> str:
 
 
 def role_text(repo: str) -> str:
-    """The implementer's role text, then the repository's notes (fab/roles/<repo>.md) when it has any."""
+    """The implementer's role text, then the taste file (TASTE), then the repository's notes
+    (fab/roles/<repo>.md) when it has any, each separated by one blank line."""
     notes = ROLE.with_name(f"{repo}.md")
     return ROLE.read_text() + (f"\n{notes.read_text()}" if notes.exists() else "")
 
@@ -139,6 +141,9 @@ def start(task: Task, host: Host, *, kind: str = "implement", events: Iterable[d
     (`git switch -C <branch> origin/main`; repair: `origin/<branch>`). dir is the slot, and
     run.started also carries slot (the number). The launcher is `fab codex start` (same
     arguments and output as codex-run task) once LAUNCHER says so.
+
+    A rejection's text is its `findings` when it has them (a gate's, fab.gates.screen), read
+    from no machine; otherwise rejection_text from the first gate host.
     """
     events = list(events)
     branch = branch_for(task, kind, events)

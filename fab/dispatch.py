@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from fab import calls, hosts as machines, land, log, plan as specs, run as runs, state
+from fab import calls, gates, hosts as machines, land, log, plan as specs, run as runs, state
 from fab.hosts import Host
 from fab.plan import Plan, Task
 from fab.sh import Failed, Runner, run, ssh
@@ -27,6 +27,8 @@ from fab.sh import Failed, Runner, run, ssh
 MAX_RUNS = 4  # a task with this many runs and still not landed parks for judgement
 ANSWER_AFTER = 30  # minutes the oldest open question waits before an answer call
 ANSWER_AT = 4  # open questions that start an answer call at once
+REVIEW_AT = 10  # tasks landed since the last review call that start one at once
+REVIEW_AFTER = 4 * 60  # minutes since the last review call that start one with any landed
 
 
 def call_actions(plan: Plan, tasks: Mapping[str, Task], events: list[dict], design: list[str],
@@ -42,8 +44,13 @@ def call_actions(plan: Plan, tasks: Mapping[str, Task], events: list[dict], desi
     minutes old at `now`; a skeleton call for the first part of decide's design list that has
     no successful skeleton call yet (subject `<draft>/<part>`) and is not parked by a call
     that ended with a question (until question.answered names the subject), when no skeleton
-    call is in flight. Actions: Action("call", task=<subject>, run_kind=<role>) and
-    Action("finish", run=<call id>, run_kind=<role>, branch=<branch>)."""
+    call is in flight; a review call (subject `<draft>/review`), when no review call is in
+    flight, the subject is not parked, and the branches landed since the last review call
+    (fab.calls.landed_after with fab.calls.last_review(events): any outcome, so a failed one
+    waits for the next threshold) number REVIEW_AT or more, or are at least one with
+    REVIEW_AFTER minutes passed at `now` since that call.started (since the first of them when
+    there was no review call). Actions: Action("call", task=<subject>, run_kind=<role>) and
+    Action("finish", run=<call id>, run_kind=<role>, branch=<branch>), the review last."""
     started = {event["call"]: event for event in events if event.get("ev") == "call.started"}
     flight = dict(started)
     pending = {}
@@ -187,7 +194,10 @@ def tick(plan_dir: Path, *, sh: Runner = run, hosts: Mapping[str, Host] | None =
     host with role gate, ts being the latest `queue_ts` already imported; each `landed` or
     `rejected` record naming a task of this plan becomes branch.landed or branch.rejected,
     carrying queue_ts. Then take decide's actions: collect through fab.run.collect, land
-    through fab.land.main with the branch, ready by pushing the branch's tip to `ready/<branch>`
+    through fab.land.main with the branch (a task of a repository in fab.gates.REPOS first
+    through fab.gates.screen: with any finding the branch is not landed, screen having
+    logged branch.rejected, and the action's detail is `rejected gate:<gate>[,<gate>...]`,
+    the findings' gates in order), ready by pushing the branch's tip to `ready/<branch>`
     in its repository's clone under FAB_HOME/repos (logging branch.ready), start through
     fab.run.start, park by logging question.asked with the detail as text. Design actions are
     printed; call_actions' follow them: call starts `fab call <role> [<part>] --plan PLAN_DIR`

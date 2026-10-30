@@ -45,6 +45,15 @@
   commands that do nothing until those land. The old
   `tools/after-landing` (hetzner7, slot 4) keeps running and posting; no
   unit runs fab's yet, and its builder and slot are the user's to choose.
+- **Gates and the structure review are a skeleton:** `fab/digest.py` and
+  `fab/gates.py` hold section 12's signatures and contracts, and
+  `fab.calls.review_brief`, `last_review` and `landed_after` the review
+  call's; `fab/taste.md` and `fab/roles/reviewer.md` are written. The tasks
+  `digest`, `digest-render`, `gates`, `taste-brief` and `review-call` fill
+  them; `gates-tick` turns the gates on in the tick. Until it lands every
+  branch lands ungated and no review call starts. Once it does, a change to a
+  function already over 60 lines (`fab.dispatch.tick` among them) fails
+  `size` and must split it.
 - **Parts done by hand have no task specs** (package, slot-probe), so the
   tick's design line lists them.
 - **The slot bound of 25 GB is one measurement** (10-30 20:18Z): a

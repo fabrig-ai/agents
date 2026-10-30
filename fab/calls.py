@@ -15,7 +15,7 @@ import shlex
 import sys
 import time
 import uuid
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -156,6 +156,34 @@ def answer_brief(questions: list[dict], tasks: dict[str, Task], root: Path, *, c
                          f"{(root / path).read_text(encoding='utf-8')}"))
     sections.append(("Inventory", render_inventory(inventory(root))))
     return _brief(sections)
+
+
+def review_brief(plan: Plan, tasks: dict[str, Task], events: list[dict], root: Path, *,
+                 call_id: str, branch: str, report: str) -> str:
+    """The structure reviewer's brief (docs/design/fab.md, 12): its role text (ROLES["review"]);
+    the call's facts; "Plan parts and slices", the same table skeleton_brief writes (shared,
+    not copied), statuses from fab.state.fold(tasks, events), and a line `Specs:
+    docs/plan/<draft>/tasks/`; "Landed since the last review": per record of
+    landed_after(events, tasks, last_review(events, done=True)), in log order, a heading
+    `## <task> (`<branch>`, main `<main[:12]>`)` and the text of FAB_HOME/digests/<run>.md for
+    the task's last run.started before that record, or `(no digest)` when it has none or
+    the file is missing; `(none)` when nothing landed; "Taste", the text of fab.run.TASTE;
+    "Designs", per distinct path cited by the landed tasks' parts (the citation before its
+    comma), in first-landed order, `## <path>` and design_text(root, citation); "Inventory".
+    Raises ValueError past BRIEF_LIMIT, naming the largest section."""
+    raise NotImplementedError
+
+
+def last_review(events: Iterable[dict], *, done: bool = False) -> str | None:
+    """The ts of the latest call.started with role review; with done, only of one whose
+    call.ended (same call) has outcome done. None when there is none."""
+    raise NotImplementedError
+
+
+def landed_after(events: Iterable[dict], tasks: Mapping[str, Task], ts: str | None) -> list[dict]:
+    """branch.landed records of the given tasks whose ts is later than ts (every one when ts is
+    None), in log order. Timestamps compare as strings (fab.log.now's fixed format)."""
+    raise NotImplementedError
 
 
 def open_questions(events: Iterable[dict]) -> list[dict]:
