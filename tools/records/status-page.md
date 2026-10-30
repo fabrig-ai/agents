@@ -33,14 +33,17 @@ The page reloads after five minutes and carries `noindex`.
 
 The collector in [record-collect](record-collect) is the source of truth, with
 its usage and limits in [record-collect.md](record-collect.md). The page consumes
-that output directly. No alternative snapshot or invented ready/landing event
-format is supported. Missing `events/` directories or empty source directories
+that output directly: locally and through its existing SSH probe, which returns
+the last 2 hours of queue, runs, heavy, claims and sessions alongside capacity
+and subscription data. A failed source/probe names the unavailable host; other
+sections still render. Durable drafts and questions continue to come from records. No alternative snapshot or invented ready/landing event
+format is supported. Missing spool directories or empty source directories
 render **no events yet**. A missing repository, malformed JSON/TOML, unreadable
 source or failed probe renders **unknown** with a fixed error classification.
 Sources fail independently. Raw exceptions, command output and paths never
 render.
 
-Events live at `events/<source>/<host>/*.jsonl` and have `id`, `source`, `host`,
+Events live at `~/src/fabrig/events/<source>/*.jsonl` on each host and have `id`, `source`, `host`,
 `kind` and UTC `time`. Identical `(host, id)` events count once and are ordered
 by time. Joins and other private fields are never displayed as text.
 
@@ -59,18 +62,17 @@ by time. Joins and other private fields are never displayed as text.
   failed, cancelled, skipped; other values unknown) and duration.
   `kind=attempt` joins its batch by `(host, batch_start)`. A green attempt
   in a non-dry batch is one branch landing. Batch rows themselves never add
-  landings. Six consecutive one-hour intervals cover exactly the preceding
-  six hours. Red/conflict attempts count rejections by `rejected_step`;
+  landings. Two consecutive one-hour intervals cover exactly the preceding
+  2 hours. Red/conflict attempts count rejections by `rejected_step`;
   unknown/private step names render as `other`. No branch, suite name or log
   is rendered. Missing batch records cannot establish dry status and contribute
   no landing. Ready-to-landing time is **unknown: ready timestamps not
   collected**. Neither batch start nor branch history is substituted for ready.
 - **Runs:** `run-start` and `run-end` update private `(host, run)` identities.
   A start without a later end counts as running, with no guessed expiry.
-- **Sessions:** `session-start`, `session-name` and `context` supply the latest
+- **Sessions:** `session-start` and `session-name` supply the latest
   name/role for a private `(host, session)` identity; `session-end` removes it.
-  Context events also establish current membership for sessions whose start
-  predates `--since`. Recognized roles match the collector: `lead/...`,
+ Recognized roles match the collector: `lead/...`,
   `coordinator/...`, `s/...`, coordinator, coord-next and coordinator-next.
   Only lead/coordinator counts render. These are last collected lifecycle facts,
   not independent process probes; missed stops remain a collector limitation.
@@ -83,9 +85,13 @@ by time. Joins and other private fields are never displayed as text.
   beside `--out` if present. Its contents are never read. No link without --out.
 - **Post/leases:** the page does not read their private metadata at all.
 
+Landings and the queue, work in flight and costs are labeled **last 2 hours**.
+Lifecycle counts reflect only transitions retained in that window; a start before
+the window cannot establish current membership on its own.
+
 ### Costs
 
-Costs show **Last 24 hours** and **Last hour**, using event completion times.
+Costs show **Last 2 hours** and **Last hour**, using event completion times.
 A completed event contributes its full measurements to each applicable window;
 running work is not estimated or prorated. Future and older events are excluded.
 Tables contain only global totals and per-draft aggregates. The event's own
@@ -141,14 +147,10 @@ buckets/batches/rejections/dry runs, live slots, real session transitions,
 cost windows/attribution/missing measurements, subscription sampling and rate,
 fake Claude/Codex probes, poisoned fields, partial failures, empty events and
 atomic replacement. The contract test reuses test_record_collect.py's producer
-fixture builders and actually executes record-collect and record against a local
-bare origin before rendering, including session renames/stops and green attempts.
+fixture builders and actually executes record-collect into a temporary spool with a local
+bare records origin left untouched before rendering, including session renames/stops and green attempts.
 
-For acceptance, create a temporary bare clone of real records, then a scratch
-clone of that local origin. Run `record-collect runs sessions claims post --since
-2026-10-29T11:00Z` with RECORDS_REPO/RECORDS_ORIGIN pointing only to the scratch
-repositories. Isolate the collector's HOME/cursors, exposing real producer trees
-read only and using the real Claude/session-context probes with their real HOME.
-Render the scratch records with --no-pull and real machine/subscription probes.
-Record the headings, work counts, cost tables and privacy grep, excluding CSS.
-Never write `/var/www/status/`. Fleet deployment remains separate.
+For acceptance, isolate HOME, cursors and spool; expose real producer files read
+only. Run available collector sources, then render with a scratch durable records
+clone and `--no-pull`. Never write `/var/www/status/`. Fleet deployment remains
+separate; existing collector command lines and units are compatible.

@@ -81,6 +81,29 @@ class Spool(unittest.TestCase):
         rows = SPOOL['read'](self.root, 'sessions', NOW)
         self.assertEqual([r['id'] for r in rows], ['start'])
 
+    def test_real_stdin_probes_include_the_shared_reader(self):
+        # Execute shipped sources with only fake capacity/subscription commands.
+        self.append([event('fresh', 60), event('expired', 7260)])
+        self.append([event('queue', 60, 'queue')], 'queue')
+        for name, argument in (('watch', '--probe'), ('status-page', 'collect')):
+            with self.subTest(probe=name):
+                tool = Path(__file__).with_name(name)
+                source = SPOOL['probe_source'](tool)
+                env = dict(os.environ, PATH='/usr/bin:/bin', STATUS_NOW=str(NOW),
+                           STATUS_PROBE_TIMEOUT='0.1')
+                if name == 'status-page':
+                    for function in ('part_machine', 'part_claude_usage', 'part_codex_usage'):
+                        source = source.replace(', ' + function + ')', ', lambda *args: {})')
+                # Freeze the probe clock before its own imports/main.
+                source = f'import time\ntime.time = lambda: {NOW}\n' + source
+                result = subprocess.run(['python3', '-I', '-B', '-', argument], input=source,
+                                        text=True, capture_output=True, env=env, timeout=15)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                data = json.loads(result.stdout)
+                self.assertIn('spools', data)
+                self.assertEqual([r['id'] for r in data['spools']['queue']], ['queue'])
+                if name == 'status-page':
+                    self.assertEqual([r['id'] for r in data['spools']['runs']], ['fresh'])
 
 
 if __name__ == '__main__':

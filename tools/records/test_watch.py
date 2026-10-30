@@ -34,7 +34,7 @@ class Rules(unittest.TestCase):
         }
         self.data = dict(names=self.names, owned={n: True for n in self.names}, agents=[], waiters={}, mail=[],
                          claims=[], leases=[], refs={}, questions=[], drafts=[])
-        self.data.update({k: [] for k in ('runs/hel8', 'heavy/hel8', 'records/queue', 'records/heavy', 'records/sessions', 'records/post', 'records/post-sent')})
+        self.data.update({k: [] for k in ('runs/hel8', 'heavy/hel8', 'spool/queue', 'spool/heavy', 'spool/sessions', 'spool/post', 'spool/post-sent')})
         self.calls = []
     def judge(self, now=NOW):
         return API['evaluate'](self.data, self.state, self.config, now)
@@ -113,9 +113,9 @@ class Rules(unittest.TestCase):
 
     def test_codex_handover_uses_threshold_event_and_coordinator_supervisor(self):
         self.codex(True)
-        self.data['records/sessions'] = [dict(kind='context', name='lead/tools', percent=90, time=ISO(NOW-1300))]
+        self.data['spool/sessions'] = [dict(kind='context', name='lead/tools', percent=90, time=ISO(NOW-1300))]
         self.assertFalse(self.rule('handover late'))
-        self.data['records/sessions'].append(dict(kind='handover-needed', session_kind='codex-owner',
+        self.data['spool/sessions'].append(dict(kind='handover-needed', session_kind='codex-owner',
             name='lead/tools', session='owner:1', time=ISO(NOW-1200), first_fired=ISO(NOW-1200)))
         self.assertFalse(self.rule('handover late'))
         late, = self.rule('handover late', NOW+1)
@@ -124,7 +124,7 @@ class Rules(unittest.TestCase):
         self.assertIn(('send', 'lead/tools', 'handover late'), self.calls)
         self.round(NOW+1201)
         self.assertIn(('send', 's/default', 'handover late'), self.calls)
-        self.data['records/sessions'].append(dict(kind='files-current', name='lead/tools', time=ISO(NOW)))
+        self.data['spool/sessions'].append(dict(kind='files-current', name='lead/tools', time=ISO(NOW)))
         self.assertFalse(self.rule('handover late', NOW+1202))
 
     def test_deaf_threshold_live_and_dead_waiter(self):
@@ -219,12 +219,12 @@ class Rules(unittest.TestCase):
         self.data['heavy/hel8'] = []
         self.assertFalse(self.rule('idle claim', NOW+3))
         self.assertTrue(self.rule('idle claim', NOW+2704))
-        self.data['records/heavy'] = [dict(time=ISO(NOW+2704), host='hel8', cwd='/synthetic/slots/1')]
+        self.data['spool/heavy'] = [dict(time=ISO(NOW+2704), host='hel8', cwd='/synthetic/slots/1')]
         self.assertFalse(self.rule('idle claim', NOW+2705))
         self.add_run()
         self.assertFalse(self.rule('idle claim', NOW+9999))
         self.data['runs/hel8'] = []
-        self.data['records/queue'] = [dict(kind='batch', time=ISO(NOW+9999), steps=[dict(suites=[dict(cwd='/synthetic/slots/1')])])]
+        self.data['spool/queue'] = [dict(kind='batch', time=ISO(NOW+9999), steps=[dict(suites=[dict(cwd='/synthetic/slots/1')])])]
         self.assertFalse(self.rule('idle claim', NOW+10000))
 
     def test_unqueued_tip_age_attempt_and_batch_edges(self):
@@ -232,10 +232,10 @@ class Rules(unittest.TestCase):
         self.judge()
         self.assertFalse(self.rule('unqueued', NOW+1200))
         self.assertEqual([r['subject'] for r in self.rule('unqueued', NOW+1201)], ['queue'])
-        self.data['records/queue'] = [dict(kind='batch', time=ISO(NOW+1800))]
+        self.data['spool/queue'] = [dict(kind='batch', time=ISO(NOW+1800))]
         self.assertFalse(self.rule('unqueued', NOW+1800))
         self.assertEqual([r['subject'] for r in self.rule('unqueued', NOW+1801)], ['ready/tools/task'])
-        self.data['records/queue'].append(dict(kind='attempt', time=ISO(NOW+1801), branch='ready/tools/task', tip='a'*40))
+        self.data['spool/queue'].append(dict(kind='attempt', time=ISO(NOW+1801), branch='ready/tools/task', tip='a'*40))
         self.assertFalse(self.rule('unqueued', NOW+1801))
         self.data['refs']['ready/tools/task'] = 'b'*40
         self.assertFalse(self.rule('unqueued', NOW+1801))
@@ -248,7 +248,7 @@ class Rules(unittest.TestCase):
         self.data['leases'] = [row]
         self.assertFalse(self.rule('lease stall'))
         self.assertTrue(self.rule('lease stall', NOW+1))
-        self.data['records/heavy'] = [dict(time=ISO(NOW), packages=['example'])]
+        self.data['spool/heavy'] = [dict(time=ISO(NOW), packages=['example'])]
         self.assertFalse(self.rule('lease stall', NOW+1))
         row['waiters'][0]['since'] = ISO(NOW-7200)
         self.assertFalse(self.rule('lease stall'))
@@ -258,32 +258,32 @@ class Rules(unittest.TestCase):
 
     def test_handover_edge_successor_and_files_current(self):
         hook = dict(kind='context-hook', name='lead/tools', session='old', time=ISO(NOW-1200))
-        self.data['records/sessions'] = [hook]
+        self.data['spool/sessions'] = [hook]
         self.assertFalse(self.rule('handover late'))
         self.assertTrue(self.rule('handover late', NOW+1))
         for following in ('files-current', 'successor', 'session-start'):
             with self.subTest(following=following):
-                self.data['records/sessions'] = [hook, dict(kind=following, name='lead/tools', session='new', time=ISO(NOW))]
+                self.data['spool/sessions'] = [hook, dict(kind=following, name='lead/tools', session='new', time=ISO(NOW))]
                 self.assertFalse(self.rule('handover late', NOW+1))
 
     def test_handover_repeated_hooks_do_not_reset_clock_and_post_ack_clears(self):
-        self.data['records/sessions'] = [dict(kind='context-hook', name='lead/tools', session='old',
+        self.data['spool/sessions'] = [dict(kind='context-hook', name='lead/tools', session='old',
                                              time=ISO(NOW-age)) for age in (1201, 1000, 10)]
         self.assertTrue(self.rule('handover late'))
-        self.data['records/post'] = [dict(kind='mail', time=ISO(NOW), subject='files current',
+        self.data['spool/post'] = [dict(kind='mail', time=ISO(NOW), subject='files current',
                                           **{'from': 'lead/tools@hel8'})]
         self.assertFalse(self.rule('handover late'))
 
     def test_high_context_reading_does_not_prove_hook_fired(self):
-        self.data['records/sessions'] = [dict(kind='context', name='lead/tools', session='old',
+        self.data['spool/sessions'] = [dict(kind='context', name='lead/tools', session='old',
                                              percent=99, time=ISO(NOW-9999))]
         self.assertFalse(self.rule('handover late'))
 
     def test_lease_long_waiter_is_independent_of_activity_inputs(self):
         self.data['leases'] = [dict(subject='pkg:example', owner='s/default', since=ISO(NOW-10),
                                     waiters=[dict(since=ISO(NOW-7201))])]
-        self.data.pop('records/heavy')
-        events = self.round(errors={'records/heavy': 'failed'})
+        self.data.pop('spool/heavy')
+        events = self.round(errors={'spool/heavy': 'failed'})
         self.assertEqual([e['rule'] for e in events], ['lease stall'])
 
     def test_gone_uses_unfinished_part_from_records(self):
@@ -324,9 +324,9 @@ class Rules(unittest.TestCase):
         row.update(post_status=2, told=True)
         self.assertFalse(self.rule('delivery failed'))
         event = dict(id='event', kind='send', time=ISO(NOW), message_id='mail', **{'from': 's/default', 'exit': 2})
-        self.data['records/post'] = [event]
+        self.data['spool/post'] = [event]
         self.assertTrue(self.rule('delivery failed'))
-        self.data['records/post'].append(dict(event, time=ISO(NOW+1), exit=0))
+        self.data['spool/post'].append(dict(event, time=ISO(NOW+1), exit=0))
         self.assertFalse(self.rule('delivery failed'))
 
     def test_dedup_close_recurrence_and_failed_input_freeze(self):
@@ -412,9 +412,9 @@ class Rules(unittest.TestCase):
         self.state['refs'] = {'ready/test': dict(tip='tip', since=0)}
         self.data['leases'] = [dict(subject='pkg:test', owner='lead/H/tools', since=0,
                                     waiters=[dict(owner='s/default', since=0)])]
-        self.data['records/sessions'] = [dict(kind='context-hook', name='lead/H/tools', time=ISO(0))]
+        self.data['spool/sessions'] = [dict(kind='context-hook', name='lead/H/tools', time=ISO(0))]
         self.data['questions'] = [dict(subject='question', deadline=ISO(0))]
-        self.data['records/post-sent'] = [dict(id='failed', kind='send', time=ISO(NOW),
+        self.data['spool/post-sent'] = [dict(id='failed', kind='send', time=ISO(NOW),
                                               **{'from': 'lead/tools', 'exit': 2})]
         candidates = self.judge()
         self.assertEqual({c['rule'] for c in candidates.values()}, set(API['RULES']))
@@ -502,32 +502,67 @@ class Rules(unittest.TestCase):
 
     def test_handover_updates_keep_first_clock_and_do_not_reopen_after_ack(self):
         first = ISO(NOW-1300)
-        self.data['records/sessions'] = [
+        self.data['spool/sessions'] = [
             dict(kind='handover-needed', name='lead/tools', session='old', time=ISO(NOW-10),
                  first_fired=first, last_fired=ISO(NOW-10))]
         self.assertTrue(self.rule('handover late'))
-        self.data['records/sessions'].append(dict(kind='files-current', name='lead/tools', time=ISO(NOW-100)))
+        self.data['spool/sessions'].append(dict(kind='files-current', name='lead/tools', time=ISO(NOW-100)))
         self.assertFalse(self.rule('handover late'))
 
     def test_post_sent_failures_retry_and_missing_stream_freeze(self):
         row = dict(id='send-fail', kind='send', time=ISO(NOW), message_id='mail',
                    **{'from': 's/default@hel8', 'exit': 2})
-        self.data['records/post-sent'] = [row]
+        self.data['spool/post-sent'] = [row]
         candidates = self.rule('delivery failed')
         self.assertEqual(len(candidates), 1)
-        self.assertIn('records/post-sent', candidates[0]['deps'])
+        self.assertIn('spool/post-sent', candidates[0]['deps'])
         self.assertEqual(candidates[0]['owner'], 's/default')
         self.assertEqual(candidates[0]['escalate_to'], 'director')
         self.round()
         self.assertEqual(self.calls, [('send', 's/default', 'delivery failed')])
-        self.data.pop('records/post-sent')
-        self.round(NOW+1, errors={'records/post-sent': 'missing'})
+        self.data.pop('spool/post-sent')
+        self.round(NOW+1, errors={'spool/post-sent': 'missing'})
         self.assertTrue(self.state['episodes'])
-        self.data['records/post-sent'] = [row, dict(row, id='send-ok', exit=0, time=ISO(NOW+1))]
+        self.data['spool/post-sent'] = [row, dict(row, id='send-ok', exit=0, time=ISO(NOW+1))]
         self.assertFalse(self.rule('delivery failed'))
         self.round(NOW+2)
         self.round(NOW+3)
         self.assertFalse(self.state['episodes'])
+
+    def test_handover_and_delivery_survive_event_expiry_and_clear_on_new_evidence(self):
+        self.data['spool/sessions'] = [dict(kind='handover-needed', name='lead/tools',
+                    session='old', time=ISO(NOW-1300), first_fired=ISO(NOW-1300))]
+        self.data['spool/post-sent'] = [dict(id='failed', kind='send', message_id='mail',
+                    time=ISO(NOW), exit=2, **{'from':'s/default@hel8'})]
+        self.assertTrue(self.rule('handover late'))
+        self.assertTrue(self.rule('delivery failed'))
+        self.data['spool/sessions'] = []
+        self.data['spool/post-sent'] = []
+        self.assertTrue(self.rule('handover late', NOW+7201))
+        self.assertTrue(self.rule('delivery failed', NOW+7201))
+        self.data['spool/sessions'] = [dict(kind='files-current', name='lead/tools', time=ISO(NOW+7202))]
+        self.data['spool/post-sent'] = [dict(id='retry', kind='send', message_id='mail',
+                    time=ISO(NOW+7202), exit=0, **{'from':'s/default@hel8'})]
+        self.assertFalse(self.rule('handover late', NOW+7202))
+        self.assertFalse(self.rule('delivery failed', NOW+7202))
+        self.data['spool/sessions'] = []
+        self.data['spool/post-sent'] = []
+        self.assertFalse(self.rule('handover late', NOW+15000))
+        self.assertFalse(self.rule('delivery failed', NOW+15000))
+
+    def test_lease_and_attempt_facts_outlast_the_spool_window(self):
+        self.data['leases'] = [dict(subject='pkg:example', owner='s/default',
+                    since=ISO(NOW-18000), waiters=[dict(since=ISO(NOW+8000))])]
+        self.data['spool/heavy'] = [dict(time=ISO(NOW), packages=['example'])]
+        self.assertFalse(self.rule('lease stall'))
+        self.data['spool/heavy'] = []
+        self.assertFalse(self.rule('lease stall', NOW+10800))
+        self.assertTrue(self.rule('lease stall', NOW+14401))
+        self.data['refs'] = {'ready/tools/a':'tip'}
+        self.data['spool/queue'] = [dict(kind='attempt', branch='ready/tools/a', tip='tip', time=ISO(NOW))]
+        self.assertFalse([c for c in self.rule('unqueued') if c['subject']=='ready/tools/a'])
+        self.data['spool/queue'] = []
+        self.assertFalse([c for c in self.rule('unqueued', NOW+7201) if c['subject']=='ready/tools/a'])
 
     def test_launcher_pause_and_supervisor_are_authoritative(self):
         self.live()
@@ -541,7 +576,7 @@ class Rules(unittest.TestCase):
 
     def test_fixed_identity_episodes_freeze_when_names_is_unavailable(self):
         self.names['ops']['always_watched'] = True
-        self.data['records/post-sent'] = [dict(id='fixed-fail', kind='send', time=ISO(NOW),
+        self.data['spool/post-sent'] = [dict(id='fixed-fail', kind='send', time=ISO(NOW),
                                              message_id='fixed-mail', **{'from': 'ops', 'exit': 2})]
         self.round()
         self.assertTrue(self.state['episodes'])
@@ -615,7 +650,7 @@ class Integration(unittest.TestCase):
         self.write(self.home / 'claims', '')
         self.write(self.home / 'waiters', '')
         self.write(self.home / 'leases', '[]')
-        self.write(self.home / 'remote', '{"runs":[],"heavy":[],"errors":[]}')
+        self.write(self.home / 'remote', json.dumps(dict(runs=[], heavy=[], errors=[], spools={s: [] for s in API['EVENT_SOURCES']})))
         self.env = dict(os.environ, PATH=str(self.bin)+os.pathsep+os.environ['PATH'],
                         RECORDS_REPO=str(self.home / 'records'), RECORDS_ORIGIN=str(self.origin))
         self.fake('systemctl', "import os, sys\nassert sys.argv[1:4] == ['--user', 'is-active', '--quiet']\nsys.exit(int(os.environ.get('UNIT_EXIT', '3')))\n")
@@ -655,7 +690,9 @@ else: sys.exit(1 if sys.argv[2] in os.environ.get('UNOWNED','').split(',') else 
     def invoke(self, dry=False, code=0, post=True, **env):
         config = self.write(self.home/'watch.toml', TOOL.with_suffix('.toml').read_text().replace(
             'post = true', 'post = true' if post else 'post = false'))
-        result = subprocess.run([str(TOOL), '--once', '--config', str(config)] + (['--dry-run'] if dry else []),
+        wrapper = ("import runpy,sys\nfrom unittest.mock import patch\nsys.argv=sys.argv[1:]\n"
+                   f"with patch('time.time', return_value={NOW}):\n api=runpy.run_path(sys.argv[0])\n sys.exit(api['main']())")
+        result = subprocess.run(['python3', '-I', '-B', '-c', wrapper, str(TOOL), '--once', '--config', str(config)] + (['--dry-run'] if dry else []),
                                 env=dict(self.env, **env), capture_output=True, text=True)
         self.assertEqual(result.returncode, code, result.stdout+result.stderr)
         return result
@@ -663,14 +700,13 @@ else: sys.exit(1 if sys.argv[2] in os.environ.get('UNOWNED','').split(',') else 
         self.write(self.home/'agents.json', '[{"name":"lead/jig","sessionId":"session","status":"busy"}]')
         path = self.write(self.tmp/'post/lead+jig/new/synthetic.md',
                           'Id: synthetic\nFrom: test@hel8\nTo: lead/jig@hel8\nSubject: synthetic\n\nPRIVATE BODY MUST NEVER APPEAR\n')
-        old = datetime.now(timezone.utc).timestamp()-660
+        old = NOW-660
         os.utime(path, (old, old))
         return path
     def state(self):
         return json.loads((self.home/'.local/state/watch/state.json').read_text())
     def events(self):
-        self.git('-C', str(self.seed), 'pull', '--ff-only')
-        return [json.loads(line) for path in (self.seed/'events/watch/hel8').glob('*.jsonl') for line in path.read_text().splitlines()]
+        return [json.loads(line) for path in (self.home/'src/fabrig/events/watch').glob('*.jsonl') for line in path.read_text().splitlines()]
     def test_gone_part_lifecycle_for_claude_and_codex(self):
         draft = self.seed / 'drafts/experiment'
         for kind, name, handle, coordinator in (
@@ -684,7 +720,7 @@ else: sys.exit(1 if sys.argv[2] in os.environ.get('UNOWNED','').split(',') else 
                 closing = part / 'closing.toml'
                 brief.unlink(missing_ok=True)
                 closing.unlink(missing_ok=True)
-                post_events = self.seed / 'events/post/hel8/2026-10-29.jsonl'
+                post_events = self.home / 'src/fabrig/events/post/2026-10-29.jsonl'
                 post_events.unlink(missing_ok=True)
                 scratch = self.home / 'src/fabrig/leads' / ('jig' if kind == 'claude' else 'u-jig')
 
@@ -709,7 +745,7 @@ else: sys.exit(1 if sys.argv[2] in os.environ.get('UNOWNED','').split(',') else 
                 publish()
                 self.assertTrue(gone())
                 # Files current with a handed-over/open part still needs a successor.
-                self.write(post_events, json.dumps(dict(id='synthetic-ack', kind='mail', time=ISO(NOW),
+                self.write(post_events, json.dumps(dict(id='synthetic-ack', source='post', host='hel8', kind='mail', time=ISO(NOW),
                            subject='files current', **{'from': name+'@hel8', 'to': coordinator+'@hel8'}))+'\n')
                 self.write(closing, 'outcome="handed-over"\nopen=["remaining work"]\n')
                 publish()
@@ -724,7 +760,7 @@ else: sys.exit(1 if sys.argv[2] in os.environ.get('UNOWNED','').split(',') else 
     def test_codex_cli_reads_unit_and_sends_deaf_to_owner(self):
         path = self.write(self.tmp/'post/lead+u+jig/new/owner-mail.md',
                           'Id: owner-mail\nFrom: test@hel8\nTo: lead/u/jig@hel8\nSubject: synthetic\n\n')
-        old = datetime.now(timezone.utc).timestamp()-660
+        old = NOW-660
         os.utime(path, (old, old))
         # Unit liveness is independent of Claude availability.
         active = self.invoke(dry=True, UNIT_EXIT='0', FAIL_INPUT='claude')
@@ -773,7 +809,7 @@ else: sys.exit(1 if sys.argv[2] in os.environ.get('UNOWNED','').split(',') else 
         self.assertTrue(tomllib.loads(TOOL.with_suffix('.toml').read_text())['alerts']['post'])
         self.mail()
         self.write(self.home/'remote', json.dumps({'runs': [dict(
-            run='hung', owner='lead/jig', cwd='/synthetic/slots/1', started=0, changed=0, effort='high', ended=False)], 'heavy': [], 'errors': []}))
+            run='hung', owner='lead/jig', cwd='/synthetic/slots/1', started=0, changed=0, effort='high', ended=False)], 'heavy': [], 'errors': [], 'spools': {s: [] for s in API['EVENT_SOURCES']}}))
         result = self.invoke(post=False)
         self.assertIn('would post wake lead/jig', result.stdout)
         self.assertIn('would post send --as watch lead/jig', result.stdout)
@@ -799,7 +835,7 @@ else: sys.exit(1 if sys.argv[2] in os.environ.get('UNOWNED','').split(',') else 
         owners = ['lead/jig', 's/qa', 'ops', 's/deploy']
         self.write(self.home/'remote', json.dumps({'runs': [dict(
             run=owner.replace('/', '-'), owner=owner, cwd='/synthetic', started=0,
-            changed=0, effort='high', ended=False) for owner in owners], 'heavy': [], 'errors': []}))
+            changed=0, effort='high', ended=False) for owner in owners], 'heavy': [], 'errors': [], 'spools': {s: [] for s in API['EVENT_SOURCES']}}))
         self.invoke()
         sends = [json.loads(line) for line in (self.home/'post.log').read_text().splitlines()]
         self.assertEqual({a[3] for a in sends}, set(owners))
@@ -826,7 +862,7 @@ else: sys.exit(1 if sys.argv[2] in os.environ.get('UNOWNED','').split(',') else 
         mail = self.mail()
         self.write(self.home/'remote', json.dumps({'runs': [dict(
             run='hung', owner='s/deploy', cwd='/synthetic', started=0, changed=0,
-            effort='high', ended=False)], 'heavy': [], 'errors': []}))
+            effort='high', ended=False)], 'heavy': [], 'errors': [], 'spools': {s: [] for s in API['EVENT_SOURCES']}}))
         self.invoke(post=False)
         state = self.state()
         for episode in state['episodes'].values():
@@ -847,28 +883,16 @@ else: sys.exit(1 if sys.argv[2] in os.environ.get('UNOWNED','').split(',') else 
         self.assertIn('(was silent since ', body)
         self.assertFalse(any(e['rule'] == 'deaf' for e in self.state()['episodes'].values()))
 
-    def test_alerts_and_heartbeat_use_one_push_per_poll(self):
-        pushes = self.home/'pushes'
-        hook = self.write(self.origin/'hooks/post-receive',
-            '#!/usr/bin/env python3\nfrom pathlib import Path\n'
-            f'with Path({str(pushes)!r}).open("a") as out: out.write("push\\n")\n')
-        hook.chmod(0o700)
+    def test_alerts_and_heartbeat_leave_records_remote_untouched(self):
+        before = self.git('--git-dir', str(self.origin), 'rev-parse', 'main')
         mail = self.mail()
         self.invoke()
-        self.assertEqual(pushes.read_text().splitlines(), ['push'])
-        self.invoke()
-        self.assertEqual(pushes.read_text().splitlines(), ['push'])
+        self.assertTrue(self.events())
         mail.unlink()
         self.invoke()
-        self.assertEqual(pushes.read_text().splitlines(), ['push'])
         self.invoke()
-        self.assertEqual(pushes.read_text().splitlines(), ['push', 'push'])
-        self.assertEqual(sum(e['kind'] == 'alert-close' for e in self.events()), 1)
-        state = self.state()
-        state['heartbeat']['time'] -= 900
-        API['atomic'](self.home/'.local/state/watch/state.json', state)
-        self.invoke()
-        self.assertEqual(pushes.read_text().splitlines(), ['push'] * 3)
+        self.assertTrue(any(e['kind'] == 'alert-close' for e in self.events()))
+        self.assertEqual(self.git('--git-dir', str(self.origin), 'rev-parse', 'main'), before)
 
     def test_heartbeat_interval_and_failed_input_changes(self):
         self.invoke()
@@ -901,107 +925,40 @@ else: sys.exit(1 if sys.argv[2] in os.environ.get('UNOWNED','').split(',') else 
         self.invoke(FAIL_INPUT='ssh')
         self.assertTrue(self.state()['episodes'])
         self.assertIn('runs/builder', self.events()[-1]['inputs_failed'])
-    def test_publication_failure_keeps_outbox_and_replays_without_repeating_wake(self):
+    def test_spool_failure_retains_outbox_without_repeating_wake(self):
         self.mail()
-        hook = self.write(self.origin/'hooks/pre-receive', '#!/bin/sh\necho synthetic-denial >&2\nexit 1\n')
-        hook.chmod(0o700)
-        self.assertIn('synthetic-denial', self.invoke(code=2).stderr)
-        self.assertTrue(self.state()['pending'])
-        ids = [e['id'] for e in self.state()['pending']]
-        hook.unlink()
+        spool = self.home/'src/fabrig/events/watch'
+        spool.parent.mkdir(parents=True, exist_ok=True)
+        spool.write_text('block the source directory')
+        self.assertIn('spool failed', self.invoke(code=2).stderr)
+        saved = {e['id'] for e in self.state()['pending']}
+        self.assertTrue(saved)
+        spool.unlink()
         self.invoke()
         self.assertFalse(self.state()['pending'])
-        events = self.events()
-        self.assertTrue(set(ids).issubset({e['id'] for e in events}))
-        self.assertEqual(len(events), len({e['id'] for e in events}))
+        self.assertTrue(saved <= {e['id'] for e in self.events()})
         self.assertEqual((self.home/'post.log').read_text().count('wake'), 1)
 
-    def publication_tool(self):
-        # Preserve the release layout so watch resolves its session library.
-        tools = self.home / 'publication-tool' / 'tools'
-        tool = tools / 'records' / TOOL.name
-        self.write(tool, TOOL.read_text()).chmod(0o700)
-        library = TOOL.parent.parent / 'session' / 'session_lib.py'
-        self.write(tools / 'session' / library.name, library.read_text())
-        record = TOOL.with_name('record')
-        program = ("#!/usr/bin/env -S python3 -I -B\n"
-                   "import json, os, sys\nfrom pathlib import Path\n"
-                   "reply = Path(os.environ['HOME']) / 'publication.json'\n"
-                   "if sys.argv[1] == 'append' and reply.exists():\n"
-                   " settings = json.loads(reply.read_text())\n"
-                   " print(settings['reason'], file=sys.stderr)\n"
-                   " sys.exit(settings['code'])\n"
-                   f"os.execv({str(record)!r}, [{str(record)!r}] + sys.argv[1:])\n")
-        self.write(tool.with_name('record'), program).chmod(0o700)
-        self.write(tool.with_suffix('.toml'), TOOL.with_suffix('.toml').read_text())
-        return tool
-
-    def test_publication_defers_until_sixth_run_and_recovers(self):
-        self.mail()
-        self.write(self.home / '.local/state/record-collect/queue.publication.json',
-                   json.dumps(dict(deferrals=4, status='deferred', reason='record: collector busy')))
-        reply = self.write(self.home / 'publication.json', json.dumps(dict(code=3, reason='record: origin busy')))
-        tool = self.publication_tool()
-        with patch(__name__ + '.TOOL', tool):
-            ids = None
-            for count in range(1, 8):
-                result = self.invoke(code=2 if count >= 6 else 0)
-                self.assertIn(f'watch: deferred ({count}/6): record: origin busy', result.stderr)
-                self.assertEqual(self.state()['deferrals'], count)
-                self.assertNotIn('published ', result.stdout)
-                heartbeat = [e for e in self.state()['pending'] if e['kind'] == 'heartbeat'][-1]
-                self.assertEqual(heartbeat['inputs']['publication']['deferrals'], count - 1)
-                self.assertEqual(heartbeat['inputs']['record-collect']['queue']['deferrals'], 4)
-                if count > 1:
-                    self.assertIn('publication', heartbeat['inputs_failed'])
-                    self.assertEqual(heartbeat['inputs']['publication']['reason'], 'record: origin busy')
-                current = {event['id'] for event in self.state()['pending']}
-                if ids is None:
-                    ids = current
-                self.assertTrue(ids <= current)
-            self.write(reply, json.dumps(dict(code=2, reason='record: transport broken')))
-            self.assertIn('transport broken', self.invoke(code=2).stderr)
-            self.write(reply, json.dumps(dict(code=3, reason='record: origin busy')))
-            self.assertIn('deferred (1/6):', self.invoke().stderr)
-            reply.unlink()
-            result = self.invoke()
-            self.assertRegex(result.stdout, r'watch: published [1-9][0-9]* events')
-            self.assertEqual(self.state()['deferrals'], 0)
-            self.assertFalse(self.state()['pending'])
-        events = self.events()
-        self.assertTrue(ids <= {event['id'] for event in events})
-        self.assertEqual(len(events), len({event['id'] for event in events}))
-        self.assertEqual((self.home / 'post.log').read_text().count('wake'), 1)
-
-    def test_watch_outbox_waits_for_origin_confirmation(self):
-        self.mail()
-        self.fake('git', f"""import os, subprocess, sys
-from pathlib import Path
-args = sys.argv[1:]
-if args[0] == 'ls-remote':
- print((Path(os.environ['HOME'])/'refs').read_text(), end='')
- sys.exit(0)
-push = len(args) > 2 and args[2] == 'push' and args[1] == {str(self.home / 'records')!r}
-if push and os.environ.get('PUSH_REPLY') == 'false-success': sys.exit(0)
-result = subprocess.run([{self.real_git!r}, *args])
-if push and result.returncode == 0 and os.environ.get('PUSH_REPLY') == 'lost-ack':
- print('synthetic acknowledgement lost', file=sys.stderr)
- sys.exit(1)
-sys.exit(result.returncode)
-""")
-        result = self.invoke(code=2, PUSH_REPLY='false-success')
-        self.assertIn('not confirmed by origin', result.stderr)
-        self.assertNotIn('published ', result.stdout)
-        saved = [event['id'] for event in self.state()['pending']]
-        self.assertTrue(saved)
-        before = self.git('--git-dir', str(self.origin), 'rev-parse', 'main')
-        result = self.invoke(PUSH_REPLY='lost-ack')
-        self.assertRegex(result.stdout, r'watch: published [1-9][0-9]* events')
-        self.assertFalse(self.state()['pending'])
-        self.assertNotEqual(self.git('--git-dir', str(self.origin), 'rev-parse', 'main'), before)
-        ids = [event['id'] for event in self.events()]
-        for identity in saved:
-            self.assertEqual(ids.count(identity), 1)
+    def test_local_and_remote_spools_and_named_probe_failure(self):
+        local = dict(id='local', source='queue', host='hel8', kind='batch', time=ISO(NOW-60))
+        remote = dict(id='remote', source='queue', host='builder', kind='attempt', time=ISO(NOW-30))
+        self.write(self.home/'src/fabrig/events/queue/2026-10-29.jsonl', json.dumps(local)+'\n')
+        reply = dict(runs=[], heavy=[], errors=[], spools={s: [] for s in API['EVENT_SOURCES']})
+        reply['spools']['queue'] = [remote, dict(remote, id='expired', time=ISO(NOW-7260))]
+        self.write(self.home/'remote', json.dumps(reply))
+        with patch.dict(os.environ, self.env), patch('time.time', return_value=NOW):
+            inputs = API['Inputs'](False).collect(self.home/'records')
+        self.assertEqual([r['id'] for r in inputs.data['spool/queue']], ['local', 'remote'])
+        reply['spools']['queue'] = [dict(remote, time='invalid')]
+        self.write(self.home/'remote', json.dumps(reply))
+        with patch.dict(os.environ, self.env), patch('time.time', return_value=NOW):
+            inputs = API['Inputs'](False).collect(self.home/'records')
+        self.assertIn('spool/queue/builder', inputs.errors)
+        self.assertIn('spool/heavy', inputs.data)
+        self.invoke(FAIL_INPUT='ssh')
+        failed = self.events()[-1]['inputs_failed']
+        self.assertIn('spool/queue/builder', failed)
+        self.assertIn('builder', failed['spool/queue'])
 
     def test_dry_run_keeps_existing_state_bytes_unchanged(self):
         self.mail()
@@ -1078,7 +1035,7 @@ sys.exit(result.returncode)
         helper = release / 'session/session_lib.py'
         helper.parent.mkdir(parents=True)
         shutil.copy2(TOOL.parents[1] / 'session/session_lib.py', helper)
-        for name in ('watch', 'record', 'watch.toml'):
+        for name in ('watch', 'record', 'watch.toml', 'event_spool.py'):
             target = release / 'records' / name
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(original_tool.with_name(name), target)
@@ -1105,8 +1062,6 @@ sys.exit(result.returncode)
                     expected = {'session-start': str(launcher if fallback else self.bin / 'session-start'),
                                 'lease': str(release / 'lease' if fallback else self.bin / 'lease')}
                     self.assertEqual({key: heartbeat['inputs'][key] for key in expected}, expected)
-                    self.assertEqual(heartbeat['inputs']['publication']['deferrals'], 0)
-                    self.assertEqual(heartbeat['inputs']['record-collect'], {})
                     self.assertFalse(heartbeat['inputs_failed'])
                     self.assertIn('would post wake lead/jig', result.stdout)
             calls = [json.loads(line) for line in (self.home / 'launcher.log').read_text().splitlines()]
@@ -1120,7 +1075,7 @@ sys.exit(result.returncode)
         row = dict(id='synthetic', time=ISO(NOW), source='watch', host='hel8', kind='heartbeat')
         result = subprocess.run([str(record),'append','--as','watch','watch','hel8'], input=json.dumps(row)+'\n',
                                 env=self.env, text=True, capture_output=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.returncode, 1, result.stderr)
         result = subprocess.run([str(record),'write','--as','watch','README.md'], input='# Refused\n',
                                 env=self.env, text=True, capture_output=True)
         self.assertEqual(result.returncode, 1)

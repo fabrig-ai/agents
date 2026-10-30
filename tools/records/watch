@@ -19,6 +19,11 @@ import tempfile
 import time
 import tomllib
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import event_spool
+
+EVENT_SOURCES = ('queue', 'heavy', 'sessions', 'post', 'post-sent')
+
 JOIN = 'coordinator draft area part task branch run session'.split()
 RULES = ('deaf', 'gone', 'report unread', 'run hung', 'idle claim', 'unqueued',
          'lease stall', 'handover late', 'question due', 'delivery failed')
@@ -165,6 +170,12 @@ def probe():
                 result['heavy'].append({'cwd': cwd, 'state': task['state']})
     except (OSError, ValueError, KeyError, TypeError) as error:
         result['errors'].append('heavy:' + type(error).__name__)
+    result['spools'] = {}
+    for source in EVENT_SOURCES:
+        try:
+            result['spools'][source] = event_spool.read(event_spool.root(), source, time.time())
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            result['errors'].append('spool/' + source + ':' + type(error).__name__)
     return result
 
 
@@ -272,19 +283,6 @@ class Inputs:
     def records(self, root):
         checked([str(Path(__file__).with_name('record')), 'pull'],
                 env=dict(os.environ, RECORDS_REPO=str(root)))
-        for source in ('queue', 'heavy', 'sessions', 'post', 'post-sent'):
-            def events(source=source):
-                directory = root / 'events' / source
-                if not directory.is_dir():
-                    raise ValueError('events directory absent')
-                rows = [json.loads(line) for path in sorted(directory.glob('*/*.jsonl'))
-                        for line in path.read_text().splitlines()]
-                for row in rows:
-                    stamp(row['time'])
-                    if not isinstance(row['kind'], str) or not isinstance(row['id'], str):
-                        raise ValueError('invalid event')
-                return rows
-            self.read('records/' + source, events)
         def questions():
             rows = [dict(tomllib.loads(p.read_text()), subject=p.stem)
                     for p in sorted((root / 'director/questions').glob('*.toml'))]
@@ -310,22 +308,6 @@ class Inputs:
 
     def collect(self, records):
         self.read('records', lambda: self.records(records))
-        def collector_publications():
-            directory = Path.home() / '.local/state/record-collect'
-            if directory.is_symlink():
-                raise ValueError('collector state symlink refused')
-            result = {}
-            for path in sorted(directory.glob('*.publication.json')):
-                if path.is_symlink():
-                    raise ValueError('collector publication state symlink refused')
-                row = json.loads(path.read_text())
-                if type(row.get('deferrals')) is not int or row['deferrals'] < 0:
-                    raise ValueError('invalid collector deferrals')
-                result[path.name.removesuffix('.publication.json')] = dict(
-                    deferrals=row['deferrals'], status=str(row.get('status', 'unknown')),
-                    reason=str(row.get('reason', ''))[:1024])
-            return result
-        self.read('record-collect', collector_publications)
         self.read('names', lambda: identities(checked([self.executables['session-start'], 'names', '--json'])))
         self.data.setdefault('names', {})
         sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'session'))
@@ -357,8 +339,10 @@ class Inputs:
                     result[name] = address
             return result
         self.read('machines', machines)
-        pairs = self.data.get('machines', {'hel8': 'local'})
-        source = Path(__file__).read_text()
+        pairs = dict(self.data.get('machines', {}))
+        if 'local' not in pairs.values():
+            pairs['hel8'] = 'local'
+        probe_code = event_spool.probe_source(__file__)
         def read_host(pair):
             host, address = pair
             try:
@@ -368,7 +352,7 @@ class Inputs:
                     result = json.loads(checked(
                         ['ssh', '-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
                          '-o', 'ConnectTimeout=5', '-o', 'UpdateHostKeys=no', address,
-                         "bash -lc 'exec python3 -I -B - --probe'"], data=source, timeout=45))
+                         "bash -lc 'exec python3 -I -B - --probe'"], data=probe_code, timeout=45))
                 for kind in ('runs', 'heavy'):
                     errors = [e for e in result['errors'] if e.startswith(kind + ':')]
                     if errors:
@@ -389,11 +373,39 @@ class Inputs:
                                 if type(row['ended']) is not bool:
                                     raise ValueError('invalid run completion')
                         self.data[kind + '/' + host] = rows
+                for source in EVENT_SOURCES:
+                    key = 'spool/' + source
+                    try:
+                        if any(e.startswith(key + ':') for e in result['errors']):
+                            raise ValueError('source unavailable')
+                        rows = result['spools'][source]
+                        if not isinstance(rows, list):
+                            raise ValueError('invalid spool rows')
+                        for row in rows:
+                            event_spool.validate(row, source)
+                        self.data[key + '/' + host] = rows
+                    except (OSError, ValueError, KeyError, TypeError) as error:
+                        self.errors[key + '/' + host] = type(error).__name__
             except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
-                for kind in ('runs', 'heavy'):
+                for kind in ('runs', 'heavy', *('spool/' + s for s in EVENT_SOURCES)):
                     self.errors[kind + '/' + host] = type(error).__name__
         with ThreadPoolExecutor(max_workers=8) as pool:
             list(pool.map(read_host, pairs.items()))
+        for source in EVENT_SOURCES:
+            key = 'spool/' + source
+            failed = [host for host in pairs if key + '/' + host in self.errors]
+            if failed:
+                self.errors[key] = 'unavailable hosts: ' + ', '.join(sorted(failed))
+            else:
+                rows, seen = [], set()
+                now = time.time()
+                for host in pairs:
+                    for row in self.data.get(key + '/' + host, []):
+                        identity = (row['host'], row['id'])
+                        if now - 7200 <= stamp(row['time']) <= now and identity not in seen:
+                            rows.append(row)
+                            seen.add(identity)
+                self.data[key] = sorted(rows, key=lambda row: stamp(row['time']))
         self.data['owned'] = {}
         for name, identity in self.data['names'].items():
             if identity.get('always_watched'):
@@ -522,7 +534,7 @@ def evaluate(data, state, config, now):
                     deps, **joins)
     for claim in data.get('claims', []):
         host, number = claim['host'], claim['number']
-        deps = ['claims', 'runs/' + host, 'heavy/' + host, 'records/heavy', 'records/queue']
+        deps = ['claims', 'runs/' + host, 'heavy/' + host, 'spool/heavy', 'spool/queue']
         if any(dep not in data for dep in deps):
             continue
         def in_slot(cwd):
@@ -531,8 +543,8 @@ def evaluate(data, state, config, now):
         busy |= any(in_slot(r.get('cwd')) for r in data['heavy/' + host])
         activity = [claim['created']]
         activity += [r['end'] for h, r in runs if h == host and r.get('end') and in_slot(r.get('cwd'))]
-        activity += [stamp(r['time']) for r in data['records/heavy'] if r.get('host') == host and in_slot(r.get('cwd'))]
-        for batch in data['records/queue']:
+        activity += [stamp(r['time']) for r in data['spool/heavy'] if r.get('host') == host and in_slot(r.get('cwd'))]
+        for batch in data['spool/queue']:
             if batch.get('kind') != 'batch':
                 continue
             for step in batch.get('steps', []):
@@ -547,7 +559,8 @@ def evaluate(data, state, config, now):
             observation.update(busy=True, idle_since=now)
         elif observation['busy']:
             observation.update(busy=False, idle_since=now)
-        activity.append(observation['idle_since'])
+        observation['last_activity'] = max(activity + [observation.get('last_activity', claim['created'])])
+        activity.extend((observation['idle_since'], observation['last_activity']))
         if not busy and older(max(activity), config['idle claim']['minutes']):
             add('idle claim', claim['subject'], claim['owner'],
                 [f'claim since={iso(claim["created"])}; last activity={iso(max(activity))}', 'no live run, heavy command or recent precheck'],
@@ -560,39 +573,55 @@ def evaluate(data, state, config, now):
                 del seen[branch]
     for branch, tip in refs.items():
         if seen.get(branch, {}).get('tip') != tip:
-            seen[branch] = dict(tip=tip, since=now)
+            seen[branch] = dict(tip=tip, since=now, attempted=False)
         attempted = any(r.get('kind') == 'attempt' and r.get('branch') == branch and r.get('tip') == tip
-                        for r in data.get('records/queue', []))
-        if not attempted and older(seen[branch]['since'], config['unqueued']['minutes']):
+                        for r in data.get('spool/queue', []))
+        seen[branch]['attempted'] = attempted or seen[branch].get('attempted', False)
+        if not seen[branch]['attempted'] and older(seen[branch]['since'], config['unqueued']['minutes']):
             add('unqueued', branch, 'ops', [f'tip={tip}', f'ready tip first observed={iso(seen[branch]["since"])}; no attempt'],
-                ['refs', 'records/queue'], branch=branch)
+                ['refs', 'spool/queue'], branch=branch)
     if refs:
-        batches = [stamp(r['time']) for r in data.get('records/queue', []) if r.get('kind') == 'batch' and not r.get('dry')]
-        last = max(batches) if batches else min(r['since'] for r in seen.values())
+        batches = [stamp(r['time']) for r in data.get('spool/queue', []) if r.get('kind') == 'batch' and not r.get('dry')]
+        if batches:
+            state['last_batch'] = max(batches + [state.get('last_batch', 0)])
+        last = state.get('last_batch', min(r['since'] for r in seen.values()))
         if older(last, config['unqueued']['batch_minutes']):
             add('unqueued', 'queue', 'ops', [f'ready refs={len(refs)}; last batch/first observation={iso(last)}'],
-                ['refs', 'records/queue'])
+                ['refs', 'spool/queue'])
+    lease_activity = state.setdefault('lease_activity', {})
+    if 'leases' in data:
+        subjects = {row['subject'] for row in data['leases']}
+        for subject in list(lease_activity):
+            if subject not in subjects:
+                del lease_activity[subject]
     for row in data.get('leases', []):
         waiting = row.get('waiters', [])
-        if not waiting or not row.get('owner'):
+        if not row.get('owner'):
             continue
         owner, subject = row['owner'], row['subject']
-        events = [e for key in ('records/heavy', 'records/queue', 'records/sessions') for e in data.get(key, [])]
+        events = [e for key in ('spool/heavy', 'spool/queue', 'spool/sessions') for e in data.get(key, [])]
         # Package activity must explicitly name the package/subject; never infer
         # activity from an unrelated event by the same coordinator.
         activity = [stamp(row['since'])] + [stamp(e['time']) for e in events if e.get('subject') == subject or
                     subject in e.get('subjects', []) or subject.removeprefix('pkg:') in e.get('packages', []) or
                     (e.get('branch') and e.get('branch') in row.get('lends', []))]
+        signature = [owner, stamp(row['since'])]
+        prior = lease_activity.get(subject, {})
+        if prior.get('signature') == signature:
+            activity.append(prior['time'])
+        lease_activity[subject] = dict(signature=signature, time=max(activity))
+        if not waiting:
+            continue
         oldest = min(stamp(w['since']) for w in waiting)
         wait_past = older(oldest, config['lease stall']['waiter_minutes'])
-        activity_deps = ['records/heavy', 'records/queue', 'records/sessions']
+        activity_deps = ['spool/heavy', 'spool/queue', 'spool/sessions']
         stalled = all(dep in data for dep in activity_deps) and older(max(activity), config['lease stall']['minutes'])
         if wait_past or stalled:
             add('lease stall', subject, owner, [f'waiters={len(waiting)}; oldest waiter={iso(oldest)}',
                 f'last package event/lease start={iso(max(activity))}'],
                 ['leases'] + ([] if wait_past else activity_deps))
     session_events = [dict(e, time=e['first_fired']) if e.get('kind') == 'handover-needed' and e.get('first_fired') else e
-                      for e in data.get('records/sessions', [])]
+                      for e in data.get('spool/sessions', [])]
     for name, identity in names.items():
         aliases = identity.get('aliases', []) + [name]
         prefix = identity.get('name_prefix')
@@ -602,12 +631,19 @@ def evaluate(data, state, config, now):
         events = [e for e in session_events if belongs(e)]
         # Acknowledgements are metadata, never mail bodies. Read or unread both
         # prove the lead posted files current, so use collected post events.
-        events += [dict(e, kind='files-current') for e in data.get('records/post', [])
+        events += [dict(e, kind='files-current') for e in data.get('spool/post', [])
                    if e.get('kind') == 'mail' and e.get('from', '').split('@')[0] in aliases
                    and identity.get('role') == 'lead'
                    and e.get('subject', '').strip().casefold().startswith('files current')]
+        facts = state.setdefault('handovers', {}).setdefault(name, {})
+        events.extend(list(facts.values()))
         hook = None
         for event in sorted(events, key=lambda e: stamp(e['time'])):
+            projection = {key: event[key] for key in ['kind', 'time', *JOIN] if key in event}
+            if event.get('kind') in ('files-current', 'successor', 'handover'):
+                facts['ack'] = projection
+            elif event.get('kind') == 'session-start':
+                facts['start'] = projection
             kind = event.get('kind')
             followed = (kind in ('files-current', 'successor', 'handover') or
                         (kind == 'session-start' and hook and event.get('session') != hook.get('session')))
@@ -618,20 +654,34 @@ def evaluate(data, state, config, now):
             # Repeated hook notifications must not restart the existing clock.
             if fired and hook is None:
                 hook = event
+        if hook:
+            facts['hook'] = {key: hook[key] for key in ['kind', 'time', *JOIN] if key in hook}
+        else:
+            facts.pop('hook', None)
         if hook and older(hook['time'], config['handover late']['minutes']):
             add('handover late', name, name, [f'context hook={hook["time"]}; no successor or files current'],
-                ['records/sessions'], **{k: hook[k] for k in JOIN if k in hook})
+                ['spool/sessions'], **{k: hook[k] for k in JOIN if k in hook})
     for row in data.get('questions', []):
         if not row.get('answer') and now > stamp(row['deadline']):
             add('question due', row['subject'], 'director', [f'question={row["subject"]}; deadline={iso(stamp(row["deadline"]))}'],
                 ['questions'])
     deliveries = {}
-    for source in ('records/post', 'records/post-sent'):
+    stored = state.setdefault('deliveries', {})
+    for message, saved in list(stored.items()):
+        if saved['row']['exit'] != 2 and stamp(saved['row']['time']) < now - 7200:
+            del stored[message]
+        else:
+            deliveries[message] = (saved['row'], saved['source'])
+    for source in ('spool/post', 'spool/post-sent'):
         for row in data.get(source, []):
             if row.get('kind') in ('send', 'delivery', 'delivery-failed') and 'exit' in row:
                 message = row.get('message_id', row['id'])
                 if message not in deliveries or stamp(row['time']) >= stamp(deliveries[message][0]['time']):
-                    deliveries[message] = (row, source)
+                    # Retain only facts needed to resolve this message, not the
+                    # source payload or mail subject. Success tombstones expire.
+                    fact = {k: row[k] for k in ['id', 'time', 'exit', 'from', *JOIN] if k in row}
+                    deliveries[message] = (fact, source)
+                    stored[message] = dict(row=fact, source=source)
     for message, (row, source) in deliveries.items():
         if row.get('exit') == 2:
             add('delivery failed', message, row['from'].split('@')[0], ['post send exited 2; message_id=' + message],
@@ -724,7 +774,6 @@ def state_file(dry):
 def heartbeat_due(state, events, errors, now, seconds):
     previous = state.get('heartbeat', {})
     return (bool(events) or sorted(errors) != previous.get('failed_inputs') or
-            state.get('deferrals', 0) != previous.get('deferrals', 0) or
             now - previous.get('time', now) >= seconds)
 
 
@@ -734,13 +783,13 @@ def run(dry, config, post, heartbeat_seconds):
         # Even record pull creates locks and may fast-forward. In a preview its
         # dedicated disposable clone protects the real records clone and state.
         records = Path(temp) / 'records' if dry else Path(os.environ.get('RECORDS_REPO', '~/src/fabrig/records')).expanduser()
+        for episode in state.get('episodes', {}).values():
+            episode['deps'] = [dep.replace('records/', 'spool/', 1) if dep.startswith('records/') else dep
+                               for dep in episode['deps']]
         inputs = Inputs(dry).collect(records)
         data, errors = inputs.data, inputs.errors
-        deferrals = state.get('deferrals', 0)
-        if deferrals:
-            errors['publication'] = f'deferred ({deferrals}/6): ' + state.get('publication_reason', 'publication unconfirmed')[:1024]
         # Missing dependencies must not be interpreted as a quiet input.
-        for source in ('drafts', 'questions', 'records/queue', 'records/heavy', 'records/sessions', 'records/post', 'records/post-sent'):
+        for source in ('drafts', 'questions', 'spool/queue', 'spool/heavy', 'spool/sessions', 'spool/post', 'spool/post-sent'):
             if source not in data:
                 errors.setdefault(source, 'unavailable')
         for episode in state.get('episodes', {}).values():
@@ -776,10 +825,10 @@ def run(dry, config, post, heartbeat_seconds):
         dependencies = {
             'deaf': ['agents', 'waiters', 'mail'], 'gone': ['names', 'agents', 'drafts'],
             'report unread': ['agents', 'waiters', 'mail'], 'run hung': [],
-            'idle claim': ['claims', 'records/heavy', 'records/queue'],
-            'unqueued': ['refs', 'records/queue'],
+            'idle claim': ['claims', 'spool/heavy', 'spool/queue'],
+            'unqueued': ['refs', 'spool/queue'],
             'lease stall': ['names', 'leases'],
-            'handover late': ['names', 'records/sessions'],
+            'handover late': ['names', 'spool/sessions'],
             'question due': ['names', 'questions'], 'delivery failed': [],
         }
         skipped = {rule: [dep for dep in dependencies[rule] if dep in errors]
@@ -790,38 +839,28 @@ def run(dry, config, post, heartbeat_seconds):
                                kind='heartbeat', rules_evaluated=[r for r in RULES if config[r]['enabled'] and r not in skipped],
                                rules_skipped=skipped,
                                alerts_open=len(state['episodes']),
-                               inputs=dict(inputs.executables, publication=dict(deferrals=deferrals,
-                                           reason=state.get('publication_reason', '')[:1024]),
-                                           **{'record-collect': data.get('record-collect', {})}), inputs_failed=errors))
-            state['heartbeat'] = dict(time=now, failed_inputs=sorted(errors), deferrals=deferrals)
+                               inputs=dict(inputs.executables), inputs_failed=errors))
+            state['heartbeat'] = dict(time=now, failed_inputs=sorted(errors))
         pending = state.setdefault('pending', [])
         pending.extend(events)
         payload = ''.join(json.dumps(e, sort_keys=True) + '\n' for e in pending)
         if dry:
             if pending:
-                print('would record append --as watch watch hel8')
+                print('would spool watch hel8')
                 print(payload, end='')
         else:
             # Persist evaluations and the outbox even when no publication is due.
             atomic(path, state)
-            if pending:
-                result = command([str(Path(__file__).with_name('record')), 'append', '--as', 'watch', 'watch', 'hel8'],
-                                 data=payload, timeout=180)
-                if result.returncode:
-                    reason = ' '.join(result.stderr.splitlines()) or f'record append exited {result.returncode}'
-                    state['deferrals'] = state.get('deferrals', 0) + 1 if result.returncode == 3 else 0
-                    state['publication_reason'] = reason
-                    atomic(path, state)
-                    if result.returncode == 3:
-                        print(f'watch: deferred ({state["deferrals"]}/6): {reason}', file=sys.stderr)
-                        return 2 if state['deferrals'] >= 6 else 0
-                    print(f'watch: record append failed (exit {result.returncode}); events retained: {reason}', file=sys.stderr)
-                    return 2
-                state['deferrals'] = 0
-                state.pop('publication_reason', None)
-                state['pending'] = []
-                atomic(path, state)
-            print(f'watch: published {len(pending)} events')
+            try:
+                event_spool.append('watch', pending, now)
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                print(f'watch: spool failed; events retained: {error}', file=sys.stderr)
+                return 2
+            state['pending'] = []
+            state.pop('deferrals', None)
+            state.pop('publication_reason', None)
+            atomic(path, state)
+            print(f'watch: spooled {len(pending)} events')
         print(f'watch: {len(candidates)} conditions; {len(state["episodes"])} open; {len(errors)} failed inputs')
     return 0
 
