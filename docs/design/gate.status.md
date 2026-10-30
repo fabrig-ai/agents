@@ -44,15 +44,18 @@ six obsolete gate batches are removed. The cut's legacy lander fixtures are
 superseded by the new gate's dedicated landing/race/reconciliation coverage. Historical rollout comparisons stay
 pinned. Every discovered gate/periodic file has an owner row; QA limits are
 10/15 s for test_qa and 3/8 s for test_logins (CPU/wall). Enforcement stays false.
-The gate-land-1 report records full-selection and periodic measurements,
+Main's QA split is integrated: `tools/qa/test_qa_periodic.py` is periodic,
+owned by s/qa, and included in the QA selector. The gate-land-2 report records
+full-selection and periodic measurements after rebasing onto the QA cut,
 including actual targets, ownership totals and claimed builder restoration.
 
 ## 4. Remaining boundaries and validation
 
 Remote branch protection and trusted lock-marker verification remain deferred.
-The 60 s green-merge target is **not met**: current full-suite costs exceed
-the requested targets. Report-only measurements now retain the full selection;
-any starved file still prevents landing. Enforcement remains false; the CPU
+The preceding gate-land-1 measurement exceeded the 60 s merge target.
+The gate-land-2 report supplies updated measurements after the QA split.
+Acceptance depends on observed file, tier and merge budgets; report-only
+labels or starved files cannot establish a passing candidate. Enforcement remains false; the CPU
 and merge-wall targets remain unchanged.
 See the task report for real hetzner7 dry-run and full-gate measurements and
 focused validation. This branch is pushed for review, not landed.

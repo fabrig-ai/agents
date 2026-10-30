@@ -116,7 +116,9 @@ then the full gate without selection. Builder role units render only with
 checks the runtime flag, uses nice 19 and idle IO. It mails each failed,
 over-budget or starved file's owner using `post send --as agents-periodic
 OWNER@hel8`; missing owners and runner failures go to ops. Fleet periodic files retain exhaustive process, historical and host matrices;
-the gate retains focused component, safety and rollout checks. Historical
+the gate retains focused component, safety and rollout checks. QA
+compatibility matrices in `tools/qa/test_qa_periodic.py` belong to the periodic
+tier and route failures to s/qa, alongside the bounded QA gate core. Historical
 rollout assertions compare pinned revisions rather than today's declarations.
 
 ## 5. Later
