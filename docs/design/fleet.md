@@ -153,15 +153,27 @@ root/default entries. Mounted, fstab and selected GRUB roots must resolve to the
 same block-device UUID before writes. Main GRUB defaults and every drop-in use a
 literal assignment/comment grammar; unsupported shell input refuses. It keeps
 write-once originals; state binds the manifest digest and exact complete file
-set, required before restore or original verification.
+set, required before restore or original verification. Root probes are always
+uncached low-level blkid (`-c /dev/null -p`), preserving read-only plan behavior.
+GRUB_SAVEDEFAULT=true, saved defaults and non-empty saved_entry refuse before
+boot writes. Bootstrap sets final host identity and creates the same bound
+prepare-intent/recovery transaction before its drop-in write, then uses the same
+completion checks. Interrupted bootstrap restores the exact originals; its
+recovery-only state cannot authorize reboot or a probe without a fenced prepare.
 It records boot, installed-source/digest, non-secret machine.env and start-once
 service proof. Reboot and verify recheck unchanged claims, sources and environment.
-Reboot refuses enabled retained/start-once services, WantedBy installation links
-and enabled or active timer/path triggers. Owners disable without --now; verify
+Reboot refuses enabled retained/start-once services and transitive activation
+from default.target, enabled boot units or active timer/path/socket triggers.
+Walk Wants/Requires/BindsTo/Upholds and their reverse edges, PartOf/ConsistsOf
+and trigger edges, including intermediate targets. The read-only graph walk
+refuses unknown or incomplete graphs and stops at 256 units or 2048 edges.
+Owners disable without --now; verify
 records unchanged prevention, then owners restore enablement and start once only
 after acceptance. Before any probe, verify requires a valid changed boot UUID,
 the prepared kernel release, unchanged root UUID and post-prepare boot digests,
-intact bound originals and exactly the prepared command-line options.
+intact bound originals and exactly the prepared command-line options. Only a
+leading BOOT_IMAGE token matching the selected kernel path may be normalized;
+all other option order and multiplicity are preserved.
 Verify explicitly mutates only a bounded private scratch project: project/inherit
 flags must propagate and a >1MiB unprivileged write must fail with EDQUOT; project,
 limit and directory cleanup are mandatory. Failed prerequisites skip the probe.

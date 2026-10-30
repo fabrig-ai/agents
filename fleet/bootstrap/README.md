@@ -427,11 +427,17 @@ command-line variable or another GRUB drop-in, dynamic command-line expansion,
 unknown drop-in shell code, another fstab quota option, an unidentified default,
 multiple fstab root rows or multiple `root=` arguments on the default Linux line.
 Ordinary recovery/kernel menu entries remain valid when the numeric top-level
-default is unambiguous. Saved/one-shot/submenu defaults refuse. Existing kernel
+default is unambiguous. `GRUB_SAVEDEFAULT=true` in either main defaults or a
+drop-in refuses before any backup/state/drop-in write, even with a numeric
+default and initially empty grubenv. `GRUB_DEFAULT=saved`, a non-empty
+`saved_entry`, one-shot and submenu defaults also refuse; environment transitions
+that save the selected entry are unsupported. Existing kernel
 options must survive `update-grub` unchanged. Mounted root, fstab root (device
 or UUID) and the selected entry's `root=` must resolve through blkid to the same
-non-empty UUID before any backup or boot-intent write. Unresolved identities
-refuse. The selected kernel must have a literal versioned vmlinuz path.
+non-empty UUID before any backup or boot-intent write. Every blkid call uses
+`-c /dev/null -p` for an uncached low-level probe; UUID references probe the
+`/dev/disk/by-uuid/UUID` device path directly. Plan never updates a blkid cache.
+Unresolved identities refuse. The selected kernel must have a literal versioned vmlinuz path.
 
 Both `/etc/default/grub` and every grub.d file accept only literal `KEY=value`
 or `KEY="value"` assignments, comments and blank lines. Expansion, command
@@ -474,6 +480,9 @@ non-empty new boot UUID; the running kernel release equal to the prepared
 entry's version; the unchanged root UUID; all post-prepare boot-file digests;
 the bound original manifest and payloads; and `/proc/cmdline` containing exactly
 the prepared entry's options, including the one added `rootflags=pquota`.
+Only a leading `BOOT_IMAGE=PATH` loader token is normalized, and PATH must
+exactly equal the selected entry's kernel path. Every other option retains its
+order and multiplicity; extra/misplaced metadata or different paths refuse.
 An alternate kernel, missing or extra option, empty boot ID or changed boot
 input fails verification and skips the probe. It also checks
 XFS prjquota, project accounting AND enforcement, unchanged installed sources
@@ -496,20 +505,25 @@ Verification checks and the probe receipt are recorded in state.json. No probe
 runs under plan, prepare or reboot, and no service is started by the helper.
 
 Before the reboot, owners drain and stop producers, then **disable without
-`--now`** the relevant services and timer/path triggers, preserving and recording
+`--now`** the relevant services and timer/path/socket triggers, preserving and recording
 prior enablement and application state. For example, as the owning user:
 
 ```sh
 systemctl --user stop after-landing.service
 systemctl --user disable after-landing.service
-# Stop and disable each associated timer/path as well, without --now.
+# Stop and disable each associated timer/path/socket as well, without --now.
 ```
 
-Reboot refuses enabled retained/start-once producers, WantedBy links and enabled
-or active timer/path triggers pointing to them. It checks both UnitFileState and
-installation enablement, inventories timer/path units and follows TriggeredBy.
-Verify repeats and records this prevention proof; an inactive service alone is
-insufficient.
+Reboot refuses enabled retained/start-once producers and any route to them from
+`default.target`, an enabled boot unit or an active timer/path/socket. It walks
+Wants/Requires/BindsTo/Upholds, their reverse properties, PartOf/ConsistsOf, and
+Triggers/TriggeredBy transitively, including triggers activating intermediate
+targets. Both UnitFileState and installation enablement are checked. The graph
+is bounded to 256 units and 2048 edges; absent dependencies, missing properties,
+unknown installation states, unresolved templates and unsupported graphs refuse.
+Verify repeats and records units, roots, edges and reachability; an inactive
+service alone is insufficient. Owners must remove boot dependency routes as
+well as disable direct enablement; stop and disable relevant triggers.
 Stopping an enabled WantedBy=default.target unit once does not prevent it from
 autostarting at boot. Coordinate a fleet convergence hold so it cannot re-enable
 those services; keep fleet-sync.timer itself active for the post-boot check.
@@ -561,6 +575,19 @@ the asset/bootstrap changes; do not squash those stages. All host flags remain
 off. A reviewed `pquota = true` host table entry opts a **fresh** XFS host into
 root bootstrap. `root.sh` delegates to `bootstrap.py root`; it shares boot safety
 and write-once backups with pquota and writes the same drop-in atomically.
+Root bootstrap sets the final host name first so recovery recognizes the host.
+Before the drop-in write, the real guard uses the same prepare-intent helper to
+save phase `preparing`, original manifest binding/membership, boot/root/kernel
+identity and original configuration proof. After regeneration it uses the same
+completion checks and records phase `prepared`. An interruption after either
+the drop-in or update-grub can be rolled back with the bound originals; an
+incomplete transaction requires rollback before retry. A completed same-boot
+retry preserves the original binding and preparation time.
+
+Bootstrap has not installed the fleet/claim/source machinery at this point;
+its state is explicitly marked as a bootstrap recovery transaction. It cannot
+authorize the helper's reboot or mutating verify probe. Establish the full
+fenced prepare workflow (rollback first) before using those operations.
 False changes no quota boot input. A new host needs one drained reboot and
 manual acceptance after root bootstrap; fleet-scale will add orchestration
 later. Existing hosts use the full fenced prepare/reboot/verify procedure.

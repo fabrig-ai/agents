@@ -41,6 +41,10 @@ sys.stdout.write((Path.home() / 'src/rust/tmp/heavy/state.json').read_text())
 
 
 ORIGINAL = '/var/lib/fabrig-pquota/original'
+GRAPH_FORWARD = ('Wants', 'Requires', 'BindsTo', 'Upholds', 'ConsistsOf', 'Triggers')
+GRAPH_REVERSE = ('WantedBy', 'RequiredBy', 'BoundBy', 'UpheldBy', 'PartOf', 'TriggeredBy')
+GRAPH_LIMIT = 256
+GRAPH_EDGE_LIMIT = 2048
 MACHINE_KEYS = frozenset(('PLAN_MIN_MEM_GB', 'PLAN_MIN_DISK_GB', 'PLAN_LAND_ROOM_GB',
     'HEAVY_BUILD_SLOTS', 'HEAVY_BUILD_JOBS', 'KACHE_MAX_GB', 'KACHE_LOCAL_ONLY',
     'QA_SLOTS', 'QA_BATCH', 'QA_CAP_MINUTES', 'QA_INTERVAL_SECONDS', 'FLEET_QUIET',
@@ -355,7 +359,7 @@ class Pquota:
         return dict(path=snapshot['path'], digest=snapshot['digest'], slots=held, admission_closed=snapshot['admission_closed'])
 
     def unit(self, name, allow_absent=False):
-        output = self.user('systemctl', '--user', 'show', name, '--property=LoadState,ActiveState,SubState,UnitFileState,WantedBy,TriggeredBy,Triggers')
+        output = self.user('systemctl', '--user', 'show', name, '--property=' + ','.join(('LoadState', 'ActiveState', 'SubState', 'UnitFileState', *GRAPH_FORWARD, *GRAPH_REVERSE)))
         row = dict(line.split('=', 1) for line in output.splitlines() if '=' in line)
         if allow_absent and row.get('LoadState') == 'not-found' and row.get('ActiveState') == 'inactive':
             return row
@@ -407,43 +411,81 @@ class Pquota:
             if status['ActiveState'] == 'active'}))
 
     def boot_prevention(self, services):
-        # is-enabled inspects installation links, including links whose targets
-        # are not loaded. WantedBy also catches loaded target dependencies.
+        # Resolve both directions so reverse-only systemd evidence cannot hide a
+        # startup edge. PartOf/ConsistsOf is conservatively treated as activation.
         producers = set(services['states'])
-        triggers = set()
-        rows = json.loads(self.user('systemctl', '--user', 'list-unit-files',
-            '--type=timer,path', '--output=json', '--no-pager'))
+        roots = {'default.target'}
+        pending = set(producers) | roots
+        rows = json.loads(self.user('systemctl', '--user', 'list-unit-files', '--output=json', '--no-pager'))
         if not isinstance(rows, list):
-            raise ValueError('unreadable timer/path installation inventory')
+            raise ValueError('unreadable unit installation inventory')
+        disabled = {'disabled', 'static', 'indirect', 'masked', 'masked-runtime'}
+        boot_states = {'enabled', 'enabled-runtime', 'linked', 'linked-runtime', 'alias', 'generated'}
+        evidence, graph = {}, {}
         for row in rows:
-            name = row['unit_file']
-            if not re.fullmatch(r'[a-zA-Z0-9_.@:-]+\.(timer|path)', name):
-                raise ValueError('unsupported trigger unit name')
-            triggers.add(name)
-        for status in services['states'].values():
-            triggers.update(status.get('TriggeredBy', '').split())
-        evidence = {}
-        def prevention(name, status):
-            # is-enabled exits nonzero for disabled/static/masked. The output
-            # still conveys the state; unknown/error output is never accepted.
-            installed = self.user('systemctl', '--user', 'is-enabled', name, returncodes=(0, 1)).strip()
-            allowed = {'disabled', 'static', 'indirect', 'masked', 'masked-runtime'}
-            if (installed not in allowed or status.get('UnitFileState') not in allowed or
-                    status.get('WantedBy', '').strip()):
-                raise ValueError(f'owner must disable {name} without --now before reboot: {status}; is-enabled={installed}')
-            return dict(status=status, installation=installed)
-        for name, status in services['states'].items():
+            name, state = row['unit_file'], row['state']
+            if state not in disabled | boot_states:
+                raise ValueError(f'unsupported unit installation state: {name}: {state}')
+            if state in boot_states:
+                roots.add(name)
+                pending.add(name)
+            if name.endswith(('.timer', '.path', '.socket')):
+                pending.add(name)
+        edges = set()
+        while pending:
+            if len(evidence) >= GRAPH_LIMIT:
+                raise ValueError('activation graph exceeds supported unit bound')
+            name = sorted(pending)[0]
+            pending.remove(name)
+            if '@.' in name or not re.fullmatch(r'[a-zA-Z0-9_.@:-]+\.(service|target|timer|path|socket|slice|scope|mount|automount|device|swap)', name):
+                raise ValueError(f'unsupported activation graph unit: {name}')
+            status = self.unit(name, allow_absent=name in producers)
             if status['LoadState'] == 'not-found':
+                # An absent declaration is safe only when no dependency or
+                # trigger refers to it; incoming references are checked below.
                 evidence[name] = dict(status=status, installation='not-found')
-            else:
-                evidence[name] = prevention(name, status)
-        for name in sorted(triggers):
-            status = self.unit(name)
-            if producers.intersection(status.get('Triggers', '').split()):
-                evidence[name] = prevention(name, status)
-                if status['ActiveState'] != 'inactive':
-                    raise ValueError(f'producer trigger must be stopped: {name}')
-        return evidence
+                continue
+            required = {*GRAPH_FORWARD, *GRAPH_REVERSE, 'UnitFileState'}
+            if not required <= status.keys():
+                raise ValueError(f'incomplete activation graph properties: {name}')
+            installed = self.user('systemctl', '--user', 'is-enabled', name, returncodes=(0, 1)).strip()
+            if installed not in disabled | boot_states or status['UnitFileState'] not in disabled | boot_states:
+                raise ValueError(f'unresolved installation state: {name}')
+            if installed in boot_states or status['UnitFileState'] in boot_states:
+                roots.add(name)
+            if name in producers and (installed not in disabled or status['UnitFileState'] not in disabled):
+                raise ValueError(f'owner must disable {name} without --now before reboot')
+            if name.endswith(('.timer', '.path', '.socket')) and status['ActiveState'] != 'inactive':
+                roots.add(name)
+            evidence[name] = dict(status=status, installation=installed)
+            for key in GRAPH_FORWARD + GRAPH_REVERSE:
+                for other in status[key].split():
+                    source, destination = (name, other) if key in GRAPH_FORWARD else (other, name)
+                    edges.add((source, destination))
+                    if len(edges) > GRAPH_EDGE_LIMIT:
+                        raise ValueError('activation graph exceeds supported edge bound')
+                    graph.setdefault(source, set()).add(destination)
+                    if other not in evidence:
+                        pending.add(other)
+        missing = {node for edge in edges for node in edge if evidence[node]['status']['LoadState'] != 'loaded'}
+        if missing:
+            raise ValueError(f'unresolved activation graph dependencies: {sorted(missing)}')
+        reached, paths = set(), {root: [root] for root in roots}
+        todo = sorted(roots)
+        while todo:
+            node = todo.pop(0)
+            if node in reached:
+                continue
+            reached.add(node)
+            if node in producers:
+                raise ValueError('producer reachable at boot/through active trigger: ' + ' -> '.join(paths[node]))
+            for other in sorted(graph.get(node, ())):
+                if other not in paths:
+                    paths[other] = paths[node] + [other]
+                if other not in reached:
+                    todo.append(other)
+        return dict(units=evidence, roots=sorted(roots), edges=[list(edge) for edge in sorted(edges)],
+                    reached=sorted(reached), unit_bound=GRAPH_LIMIT, edge_bound=GRAPH_EDGE_LIMIT)
 
     def preboot(self):
         sources = self.installed()
@@ -493,12 +535,12 @@ class Pquota:
     def root_uuid(self, specification):
         if specification.startswith('UUID='):
             expected = str(uuid.UUID(specification[5:]))
-            device = self.run('blkid', '-U', expected).strip()
+            device = '/dev/disk/by-uuid/' + expected
         else:
             expected, device = None, specification
         if not re.fullmatch(r'/dev/[a-zA-Z0-9_./:-]+', device):
             raise ValueError(f'unresolved block root: {specification}')
-        value = self.run('blkid', '-s', 'UUID', '-o', 'value', device).strip()
+        value = self.run('blkid', '-c', '/dev/null', '-p', '-s', 'UUID', '-o', 'value', device).strip()
         identity = str(uuid.UUID(value))
         if identity == str(uuid.UUID(int=0)) or (expected and expected != identity):
             raise ValueError(f'conflicting root UUID: {specification}')
@@ -567,7 +609,10 @@ class Pquota:
                     match = re.fullmatch(r'\s*([A-Z][A-Z0-9_]*)=(?:"([^"\\$`\r\n]*)"|([a-zA-Z0-9_./,:=+@%-]*))(?:\s+#.*)?\s*', line)
                     if not match:
                         raise ValueError(f'unsupported literal GRUB input in {name}: {line}')
-                    if re.search(r'rootflags\s*=', match.group(2) or match.group(3) or ''):
+                    value = match.group(2) if match.group(2) is not None else match.group(3)
+                    if match.group(1) == 'GRUB_SAVEDEFAULT' and value == 'true':
+                        raise ValueError('GRUB_SAVEDEFAULT=true is unsupported')
+                    if re.search(r'rootflags\s*=', value):
                         raise ValueError(f'existing rootflags in {name}; refuse append')
         roots = []
         for line in files['/etc/fstab'].decode().splitlines():
@@ -800,6 +845,8 @@ class Pquota:
     def prepare(self):
         self.identity()
         previous = self.state() if self.path(STATE).exists() else None
+        if previous and previous.get('transaction_origin') == 'bootstrap' and previous.get('phase') != 'rolled-back':
+            raise ValueError('bootstrap recovery transaction; rollback before establishing fenced prepare')
         if previous and previous.get('phase') == 'prepared':
             self.bind_policy(previous)
             self.require_fence_unchanged(previous)
@@ -822,23 +869,51 @@ class Pquota:
         if {k: v['sha256'] for k, v in backup['files'].items()} != safety['files']:
             raise ValueError('boot originals changed since write-once backup')
         occupancy = self.require_fence()  # Immediately before committing boot intent.
+        state = self.prepare_intent(safety, backup, proof, occupancy)
+        self.write(DROPIN, CONTENT, 0o644)
+        self.run('update-grub')
+        self.finish_prepare(state)
+        print('PASS prepared; owner restarts after boot: ' + ', '.join(proof['services']['owner_restarts']))
+
+    def prepare_intent(self, safety, backup, proof, occupancy, origin='prepare'):
         state = dict(version=1, host=self.host, phase='preparing', prepared_at=now(),
             boot_id=proof['boot_id'], before_cmdline=self.read('/proc/cmdline').strip(),
             before_mount=self.mount(), grub_before=self.digest(), default_before=safety['default'],
-            proof=proof, occupancy=occupancy, policy=self.policy, central=self.central, fence=self.last_fence_checks,
+            proof=proof, occupancy=occupancy, policy=self.policy, central=self.central, fence=getattr(self, 'last_fence_checks', []), transaction_origin=origin,
             root_uuid=safety['root_uuid'], prepared_kernel=safety['kernel'],
             original_binding=dict(files=sorted(backup['files']), sha256=hashlib.sha256(
                 self.safe(ORIGINAL + '/manifest.json').read_bytes()).hexdigest()))
         self.save(state)
-        self.write(DROPIN, CONTENT, 0o644)
-        self.run('update-grub')
+        return state
+
+    def finish_prepare(self, state):
         line = self.check_entry(True)
-        if [t for t in shlex.split(line) if t != 'rootflags=pquota'] != shlex.split(safety['default']):
+        if [t for t in shlex.split(line) if t != 'rootflags=pquota'] != shlex.split(state['default_before']):
             raise ValueError('update-grub changed existing default Linux options')
         after = self.boot_safety(enabled=True)
         state.update(grub_after=self.digest(), default_after=line, phase='prepared', boot_files_after=after['files'])
         self.save(state)
-        print('PASS prepared; owner restarts after boot: ' + ', '.join(proof['services']['owner_restarts']))
+
+    def bootstrap_begin(self):
+        # Fresh bootstrap has not installed the fleet/source/claim machinery.
+        # Its transaction is recovery evidence, never a bypass of those fences.
+        self.identity()  # Rollback must recognize this host even after interruption.
+        if self.path(STATE).exists():
+            state = self.state()
+            if state.get('phase') != 'rolled-back':
+                if state.get('transaction_origin') != 'bootstrap' or state.get('phase') != 'prepared':
+                    raise ValueError('existing or interrupted transaction; investigate and rollback')
+                self.originals(require_binding=True)
+                if (self.boot_id() != state['boot_id'] or
+                        self.boot_safety(enabled=True)['files'] != state['boot_files_after']):
+                    raise ValueError('bootstrap boot/configuration changed; investigate')
+                return state
+        safety = self.boot_safety()
+        backup = self.backup()
+        if {k: v['sha256'] for k, v in backup['files'].items()} != safety['files']:
+            raise ValueError('boot originals changed since write-once backup')
+        proof = dict(boot_id=self.boot_id())
+        return self.prepare_intent(safety, backup, proof, None, origin='bootstrap')
 
     def bind_policy(self, state):
         if self.central != state['central']:
@@ -876,6 +951,8 @@ class Pquota:
 
     def reboot(self):
         state = self.state()
+        if state.get('transaction_origin') == 'bootstrap':
+            raise ValueError('bootstrap recovery state cannot authorize reboot; establish a fenced prepare')
         self.bind_policy(state)
         if state.get('phase') not in ('prepared', 'rolled-back'):
             raise ValueError('no successful prepare/rollback')
@@ -902,8 +979,19 @@ class Pquota:
         self.save(state)
         self.run('systemctl', 'reboot')
 
+    def expected_options(self, state):
+        prepared = shlex.split(state['default_after'])
+        running = shlex.split(self.read('/proc/cmdline'))
+        if running and running[0].startswith('BOOT_IMAGE='):
+            if running.pop(0) != 'BOOT_IMAGE=' + prepared[0]:
+                raise ValueError('BOOT_IMAGE does not match prepared kernel path')
+        # No sorting, deduplication or normalization of any other token.
+        return running == prepared[1:]
+
     def verify(self):
         state = self.state()
+        if state.get('transaction_origin') == 'bootstrap':
+            raise ValueError('bootstrap recovery state cannot authorize a probe; establish a fenced prepare')
         self.bind_policy(state)
         checks = []
         def check(name, probe):
@@ -920,7 +1008,7 @@ class Pquota:
         check('root device identity unchanged', lambda: self.root_uuid(self.mount()['source']) == state['root_uuid'])
         check('post-prepare boot input digests unchanged', lambda: self.boot_safety(enabled=True)['files'] == state['boot_files_after'])
         check('original manifest and payloads intact', lambda: self.originals(require_binding=True))
-        check('exact prepared kernel options', lambda: shlex.split(self.read('/proc/cmdline')) == shlex.split(state['default_after'])[1:])
+        check('exact prepared kernel options', lambda: self.expected_options(state))
         check('owner boot prevention preserved', lambda: self.boot_prevention(self.services()))
         check('cmdline rootflags=pquota', lambda: has_pquota(self.read('/proc/cmdline')))
         check('XFS mount prjquota', lambda: 'prjquota' in self.mount()['options'].split(','))

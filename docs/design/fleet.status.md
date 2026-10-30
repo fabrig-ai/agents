@@ -13,6 +13,10 @@ Contract: `docs/design/fleet.md`, sections 1–6.
   Accepted ops review fixes now cover boot-time producer/trigger prevention,
   root UUID agreement, exact new-boot proof, literal GRUB input grammar and
   state-bound complete original manifests. Regression fixtures fail on 9e656e9.
+  Re-review fixes add bounded dependency/target/socket activation proof, validated
+  leading BOOT_IMAGE metadata, uncached root probes, saved-default refusal and
+  shared bound bootstrap recovery transactions. Five fixtures fail on 36872fd;
+  real-guard/fake-service recovery covers both drop-in and regeneration interruptions.
   Only plan has run on a real host; boot/quota enforcement remains unproved.
   Deploy the compatibility parser fleet-wide before the asset/bootstrap stage.
 
