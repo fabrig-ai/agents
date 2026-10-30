@@ -12,7 +12,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta
 from unittest.mock import patch
 
-from fab import cli, dispatch, flow, gates, log, plan, state
+from fab import call_review, cli, dispatch, flow, gates, log, plan, state
 from fab.dispatch import Action, MAX_RUNS
 from fab.hosts import Host
 from fab.sh import Result, ssh
@@ -56,6 +56,33 @@ def write(path, text):
     sibling = path.with_name(path.name + ".tmp")
     sibling.write_text(text)
     sibling.replace(path)
+
+
+def chain_history(status, *, role="skeleton", root="root", subject="draft/core"):
+    events = [dict(ev="call.started", call=root, role=role, subject=subject,
+                   branch=f"calls/{root}", ts="2026-10-30T00:00:00.000Z"),
+              dict(ev="call.ended", call=root, outcome="done")]
+    if status == "review":
+        return events
+    events.append(dict(ev="run.started", run=f"{root}-1", task=root, kind="review", host="builder"))
+    if status == "reviewing":
+        return events
+    events.append(dict(ev="run.ended", run=f"{root}-1", outcome="done" if status in
+                       ("approved", "finished") else "failed", report="first-refusal.md"))
+    if status in ("approved", "amend"):
+        return events
+    if status == "finished":
+        return events + [dict(ev="call.finished", call=root, outcome="done")]
+    events.append(dict(ev="call.started", call=f"{root}-amend", role="amend", amends=root,
+                       subject=subject, branch=f"calls/{root}"))
+    if status == "amending":
+        return events
+    events.extend([dict(ev="call.ended", call=f"{root}-amend", outcome="done"),
+                   dict(ev="run.started", run=f"{root}-2", task=root, kind="review", host="builder"),
+                   dict(ev="run.ended", run=f"{root}-2", outcome="failed", report="last-refusal.md")])
+    if status == "parked":
+        events.append(dict(ev="call.parked", call=root, subject=subject))
+    return events
 
 
 class DecideTest(unittest.TestCase):
@@ -316,27 +343,65 @@ class CallActionsTest(unittest.TestCase):
         self.assertEqual(self.actions(questions + [self.call("skeleton")], ["core"]), [answer])
         self.assertEqual(self.actions(questions + [self.call(), self.call("skeleton", "s")], ["core"]), [])
 
-    def test_ended_releases_role_and_only_done_finishes_once(self):
+    def test_ended_releases_role_and_only_done_needs_review(self):
         for outcome in ("done", "failed", "question", "infra"):
             with self.subTest(outcome=outcome):
                 events = [self.call("skeleton"), dict(ev="call.ended", call="a", outcome=outcome)]
-                finish = Action("finish", run="a", run_kind="skeleton", branch="calls/a")
+                vet = Action("vet", task="a", run="a", run_kind="skeleton", branch="calls/a")
                 skeleton = Action("call", task="next", run_kind="skeleton")
                 self.assertEqual(self.actions(events, ["next"]),
-                                 [finish, skeleton] if outcome == "done" else [skeleton])
+                                 [vet, skeleton] if outcome == "done" else [skeleton])
                 events.append(dict(ev="call.finished", call="a", outcome="failed"))
                 self.assertEqual(self.actions(events, ["next"]), [skeleton])
 
-    def test_finish_uses_matching_start_and_later_finished_record(self):
+    def test_chain_order_uses_done_endings_and_later_finished_record(self):
         events = [self.call("skeleton", "s"), self.call(),
                   dict(ev="call.finished", call="a", outcome="done"),
                   dict(ev="call.ended", call="a", outcome="done"),
                   dict(ev="call.ended", call="s", outcome="done")]
         self.assertEqual(self.actions(events),
-                         [Action("finish", run="a", run_kind="answer", branch="calls/a"),
-                          Action("finish", run="s", run_kind="skeleton", branch="calls/s")])
+                         [Action("vet", task="a", run="a", run_kind="answer", branch="calls/a"),
+                          Action("vet", task="s", run="s", run_kind="skeleton", branch="calls/s")])
         events.append(dict(ev="call.finished", call="a", outcome="done"))
         self.assertEqual([a.run for a in self.actions(events)], ["s"])
+
+    def test_each_chain_state_and_steps_before_new_calls(self):
+        for status in call_review.STATES:
+            with self.subTest(status=status):
+                history = chain_history(status)
+                latest = "root-amend" if status in ("hold", "parked") else "root"
+                step = {
+                    "review": [Action("vet", task="root", run=latest, run_kind="skeleton", branch="calls/root")],
+                    "approved": [Action("finish", task="root", run=latest, run_kind="skeleton", branch="calls/root")],
+                    "amend": [Action("call", task="root", run_kind="amend")],
+                    "hold": [Action("hold", task="draft/core", run="root", detail="refused after its amendment")],
+                }.get(status, [])
+                self.assertEqual(self.actions(history, ["core", "next"]),
+                                 [*step, Action("call", task="next", run_kind="skeleton")])
+
+    def test_amend_call_in_flight_reserves_role_across_chains(self):
+        history = chain_history("amending", root="one") + chain_history("amend", root="two")
+        self.assertEqual(self.actions(history), [])
+        history = chain_history("amend", root="one") + chain_history("amend", root="two")
+        self.assertEqual(self.actions(history), [Action("call", task="one", run_kind="amend")])
+
+    def test_open_answer_chain_blocks_until_finished(self):
+        for status in call_review.STATES:
+            with self.subTest(status=status):
+                history = chain_history(status, role="answer", subject="other-draft")
+                actions = self.actions(history + [self.question(ts="2026-10-30T12:00:00.000Z")])
+                starts = [action for action in actions if action.kind == "call" and action.run_kind == "answer"]
+                self.assertEqual(starts, [Action("call", task="draft", run_kind="answer")]
+                                 if status == "finished" else [])
+
+    def test_open_review_chain_blocks_until_finished(self):
+        for status in call_review.STATES:
+            with self.subTest(status=status):
+                history = chain_history(status, role="review", subject="other/review")
+                actions = self.actions(history + self.landings(dispatch.REVIEW_AT))
+                starts = [action for action in actions if action.kind == "call" and action.run_kind == "review"]
+                self.assertEqual(starts, [Action("call", task="draft/review", run_kind="review")]
+                                 if status == "finished" else [])
 
     def landings(self, count, ts="2026-10-30T12:29:00.000Z"):
         tasks = [task(str(n)) for n in range(count)]
@@ -516,6 +581,16 @@ walk = false
         self.tick()
         self.assertEqual([(e["ev"], e["task"]) for e in log.read()], [("branch.landed", "draft/a")])
 
+    def test_queue_import_skips_torn_and_incomplete_records(self):
+        record = dict(ev="landed", ts="001", branch="draft/a", tip="tip", main="main")
+        self.fake.on(ssh("fake@gate", ["fab", "queue", "log"])[:-1],
+                     Result(0, '\n'.join(('torn {', 'null', '[]', '{"ev":"landed"}',
+                                           '{"ev":"landed","branch":3,"ts":"001"}', json.dumps(record)))))
+        self.tick()
+        self.assertEqual([entry["ev"] for entry in log.read()], ["branch.landed"])
+        self.assertEqual(log.read()[0]["tip"], "tip")
+
+
     def test_import_queue_records_once_including_shared_timestamps_and_rebases(self):
         self.add_task("b")
         self.add_task("c")
@@ -652,6 +727,10 @@ walk = false
                     dict(ev="call.ended", call=identifier, role=role, outcome="done"), path=path)
         return log.home() / "calls" / identifier / "report.md"
 
+    def approve(self, root="answer-1", number=1, path=None):
+        self.append(dict(ev="run.started", run=f"{root}-{number}", task=root, kind="review", host="builder"),
+                    dict(ev="run.ended", run=f"{root}-{number}", outcome="done"), path=path)
+
     def test_answer_unit_uses_role_start_count_and_no_part_argument(self):
         self.completed_call("answer", "old")
         self.append(dict(ev="call.finished", call="old", outcome="done"))
@@ -673,10 +752,129 @@ walk = false
         self.assertEqual(self.fake.argvs()[-1][-5:],
                          ["fab", "call", "answer", "--plan", str(self.directory)])
 
+    def test_vet_selects_freest_builder_then_name_even_with_no_free_places(self):
+        self.append(event("question.asked", text="Which?"))
+        self.completed_call("skeleton", "root")
+        self.append(dict(ev="run.started", run="busy-1", task="other/one", host="z"),
+                    dict(ev="run.started", run="busy-2", task="other/two", host="z"))
+        for capacity, expected in ((3, "a"), (4, "a"), (5, "z"), (0, "a")):
+            with self.subTest(capacity=capacity):
+                hosts = {"z": Host("z", "fake@z", ("builder",), places=capacity),
+                         "a": Host("a", "fake@a", ("builder",), places=min(2, capacity)),
+                         "gate": Host("gate", "fake@gate", ("gate",), places=100)}
+                path = log.default_path()
+                with patch.object(call_review, "start") as vet:
+                    actions = self.tick(hosts=hosts, log_path=path)
+                self.assertEqual(actions[-1], Action("vet", task="root", run="root",
+                                                     run_kind="skeleton", branch="calls/root"))
+                vet.assert_called_once_with(call_review.chains(log.read())["root"], "agents",
+                                             self.directory.resolve(), hosts[expected], log.read(),
+                                             sh=self.fake, log_path=path)
+                self.land.assert_not_called()
+
+    def test_vet_uses_checkout_root_and_current_events_after_collect(self):
+        self.append(started())
+        self.fake = FakeRunner().on(["git", "rev-parse", "--show-toplevel"], Result(0, "/fake/repo\n"))
+
+        def collect(*args, **kwargs):
+            self.append(ended(outcome="question"), event("question.asked", text="Which?"))
+            self.completed_call("skeleton", "root")
+
+        self.collect.side_effect = collect
+        with patch.object(call_review, "start") as vet:
+            actions = self.tick()
+        self.assertEqual([action.kind for action in actions], ["collect", "vet"])
+        self.assertEqual(str(vet.call_args.args[2]), "/fake/repo")
+        self.assertEqual(vet.call_args.args[4], log.read())
+        self.land.assert_not_called()
+
+    def test_vet_without_builder_fails_without_landing(self):
+        self.append(event("question.asked", text="Which?"))
+        self.completed_call("skeleton", "root")
+        with patch.object(call_review, "start") as vet:
+            self.tick(hosts={})
+        vet.assert_not_called()
+        self.land.assert_not_called()
+        self.assertEqual(log.read()[-1]["text"], "vet root failed: no builder configured for call review")
+        self.assertNotIn("call.finished", [entry["ev"] for entry in log.read()])
+
+    def test_done_calls_of_every_role_wait_for_review(self):
+        self.append(event("question.asked", text="Which?"))
+        for role in call_review.REVIEWED:
+            self.completed_call(role, role)
+        with patch.object(call_review, "start") as vet:
+            actions = self.tick()
+        self.assertEqual([action.kind for action in actions], ["vet", "vet", "vet"])
+        self.assertEqual([action.run_kind for action in actions], list(call_review.REVIEWED))
+        self.assertEqual(vet.call_count, 3)
+        self.land.assert_not_called()
+
+    def test_hold_logs_last_refusal_once_and_answer_reopens_chain(self):
+        path = self.home / "custom.jsonl"
+        self.append(event("question.asked", text="Which?"), *chain_history("hold"), path=path)
+        actions = self.tick(log_path=path)
+        self.assertEqual(actions, [Action("hold", task="draft/core", run="root",
+                                          detail="refused after its amendment")])
+        self.assertEqual({key: value for key, value in log.read(path)[-1].items() if key != "ts"},
+                         dict(ev="call.parked", call="root", subject="draft/core",
+                              reason="refused after its amendment", report="last-refusal.md"))
+        self.assertEqual(self.tick(log_path=path), [])
+        self.assertEqual(sum(entry["ev"] == "call.parked" for entry in log.read(path)), 1)
+        self.append(event("question.answered", "core"), path=path)
+        with patch.object(call_review, "start") as vet:
+            self.assertEqual(self.tick(log_path=path)[0].kind, "vet")
+        vet.assert_called_once()
+        self.assertEqual(log.read(), [])
+
+    def test_hold_without_refusal_report_uses_empty_path(self):
+        self.append(event("question.asked", text="Which?"), *chain_history("review"))
+        for number in range(call_review.INFRA_LIMIT):
+            self.append(dict(ev="run.started", run=f"root-{number}", task="root", kind="review", host="builder"),
+                        dict(ev="run.ended", run=f"root-{number}", outcome="infra"))
+        self.tick()
+        self.assertEqual((log.read()[-1]["ev"], log.read()[-1]["report"]), ("call.parked", ""))
+        self.assertEqual(self.tick(), [])
+
+    def test_amend_unit_passes_root_and_counts_amend_starts(self):
+        self.append(event("question.asked", text="Which?"), *chain_history("amend"),
+                    dict(ev="call.started", call="old-amend", role="amend", amends="other"),
+                    dict(ev="call.ended", call="old-amend", outcome="failed"))
+        self.assertEqual(self.tick(), [Action("call", task="root", run_kind="amend")])
+        self.assertEqual(self.fake.argvs()[-1],
+                         ["systemd-run", "--user", "--collect", "--unit", "fab-call-amend-2",
+                          "fab", "call", "amend", "root", "--plan", str(self.directory)])
+        self.land.assert_not_called()
+
+    def test_finish_answer_uses_latest_call_line_then_root_fallback(self):
+        for text in ("Answered: draft/a draft/a\n", "No answer line\n", None):
+            with self.subTest(text=text):
+                self.append(event("question.asked", text="Which?"))
+                root = "root-" + str(self.land.call_count)
+                write(self.completed_call(identifier=root), "Done: answered\nAnswered: draft/a\n")
+                self.append(dict(ev="run.started", run=f"{root}-1", task=root, kind="review", host="builder"),
+                            dict(ev="run.ended", run=f"{root}-1", outcome="failed"),
+                            dict(ev="call.started", call=f"{root}-amend", role="amend", amends=root,
+                                 subject="draft", branch=f"calls/{root}"),
+                            dict(ev="call.ended", call=f"{root}-amend", outcome="done"))
+                # A different root answer proves an amend line takes precedence.
+                if text and text.startswith("Answered:"):
+                    write(log.home() / "calls" / root / "report.md", "Answered: draft/wrong\n")
+                if text is not None:
+                    write(log.home() / "calls" / f"{root}-amend" / "report.md", "Done: amended\n" + text)
+                self.approve(root, number=2)
+                self.assertEqual(self.tick(hosts={}), [Action("finish", task=root, run=f"{root}-amend",
+                                                             run_kind="answer", branch=f"calls/{root}")])
+                answered = [entry for entry in log.read() if entry["ev"] == "question.answered"
+                            and entry["call"] == f"{root}-amend"]
+                self.assertEqual([entry["task"] for entry in answered], ["draft/a"])
+                self.assertEqual(log.read()[-1]["call"], f"{root}-amend")
+                self.land.assert_called_with([f"calls/{root}"])
+
     def test_finish_lands_then_parses_answered_line_and_logs_once(self):
         self.add_task("b")
         self.append(event("question.asked", text="Which?"), event("question.asked", "b", text="Why?"))
         report = self.completed_call()
+        self.approve()
         write(report, "Done: answered\nOther: draft/ignored\nAnswered: draft/a  draft/b draft/a\nDetails.\n")
 
         def landing(argv):
@@ -687,7 +885,7 @@ walk = false
 
         self.land.side_effect = landing
         actions = self.tick(hosts={})
-        self.assertEqual(actions, [Action("finish", run="answer-1", run_kind="answer", branch="calls/answer-1")])
+        self.assertEqual(actions, [Action("finish", task="answer-1", run="answer-1", run_kind="answer", branch="calls/answer-1")])
         answered = [e for e in log.read() if e["ev"] == "question.answered"]
         self.assertEqual([(e["task"], e["call"]) for e in answered],
                          [("draft/a", "answer-1"), ("draft/b", "answer-1")])
@@ -696,11 +894,13 @@ walk = false
         self.assertEqual(self.tick(hosts={}), [])
         self.land.assert_called_once()
         self.assertEqual(self.out.getvalue().splitlines(),
-                         ["flow draft target 2, 0 in flight", "finish - ", "flow draft target 2, 0 in flight"])
+                         ["flow draft target 2, 0 in flight", "finish answer-1 ",
+                          "flow draft target 2, 0 in flight"])
 
     def test_finish_skeleton_needs_no_report_and_respects_explicit_log(self):
         path = self.home / "custom.jsonl"
         self.completed_call("skeleton", "s1", path=path)
+        self.approve("s1", path=path)
         self.tick(hosts={}, log_path=path)
         self.land.assert_called_once_with(["calls/s1"])
         self.assertEqual(log.read(), [])
@@ -712,6 +912,7 @@ walk = false
             with self.subTest(failure=failure):
                 identifier = f"answer-{self.land.call_count}"
                 write(self.completed_call(identifier=identifier), "Done: answered\nAnswered: draft/a\n")
+                self.approve(identifier)
                 if isinstance(failure, Exception):
                     self.land.side_effect = failure
                 else:
@@ -719,7 +920,7 @@ walk = false
                 self.tick(hosts={})
                 note, finished = log.read()[-2:]
                 self.assertEqual(note["ev"], "note")
-                self.assertIn("finish - failed:", note["text"])
+                self.assertIn(f"finish {identifier} failed:", note["text"])
                 self.assertEqual((finished["ev"], finished["call"], finished["role"], finished["outcome"]),
                                  ("call.finished", identifier, "answer", "failed"))
                 count = self.land.call_count

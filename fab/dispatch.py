@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from fab import calls, flow, gates, hosts as machines, land, log, plan as specs, run as runs, state
+from fab import call_review, calls, flow, gates, hosts as machines, land, log, plan as specs, run as runs, state
 from fab.hosts import Host
 from fab.plan import Plan, Task
 from fab.sh import Failed, Runner, run, ssh
@@ -33,40 +33,26 @@ REVIEW_AFTER = 4 * 60  # minutes since the last review call that start one with 
 
 def call_actions(plan: Plan, tasks: Mapping[str, Task], events: list[dict], design: list[str],
                  now: str) -> list[Action]:
-    """The Claude calls to start or finish now (docs/design/fab.md, 13), after decide's actions.
+    """Advance each call review chain in root-ending order, then start eligible calls.
 
-    A call is in flight from its call.started to its call.ended; at most one call of each role
-    is in flight. finish: every call.ended with outcome done and no later call.finished for
-    it, with branch from its call.started: land its branch (agents repo), and for an answer
-    call log question.answered for each task its report's `Answered:` line names. start:
-    an answer call (subject the plan's draft) when no answer call is in flight and the open
-    questions (fab.calls.open_questions) number ANSWER_AT or more, or the oldest is ANSWER_AFTER
-    minutes old at `now`; a skeleton call for the first part of decide's design list that has
-    no successful skeleton call yet (subject `<draft>/<part>`) and is not parked by a call
-    that ended with a question (until question.answered names the subject), when no skeleton
-    call is in flight; a review call (subject `<draft>/review`), when no review call is in
-    flight, the subject is not parked, and the branches landed since the last review call
-    (fab.calls.landed_after with fab.calls.last_review(events): any outcome, so a failed one
-    waits for the next threshold) number REVIEW_AT or more, or are at least one with
-    REVIEW_AFTER minutes passed at `now` since that call.started (since the first of them when
-    there was no review call). Actions: Action("call", task=<subject>, run_kind=<role>) and
-    Action("finish", run=<call id>, run_kind=<role>, branch=<branch>), the review last."""
+    Review yields vet, approved yields finish, amend yields an amend call, and hold parks
+    the subject. Reviewing, amending, parked and finished chains take no step. Open chains
+    block their subject and further answer or review calls of their role. Calls in flight
+    also reserve their role. Skeleton parts whose calls ended done stay designed.
+    Answer calls use ANSWER_AT or ANSWER_AFTER; structure reviews use REVIEW_AT or
+    REVIEW_AFTER since the last review started. Question outcomes park a subject until
+    question.answered names it. Pure; see docs/design/fab.md, 12 and 13.1."""
     started = {event["call"]: event for event in events if event.get("ev") == "call.started"}
-    flight = dict(started)
-    pending = {}
-    for event in events:
-        identifier = event.get("call")
-        if event.get("ev") == "call.ended":
-            flight.pop(identifier, None)
-            if event.get("outcome") == "done" and identifier in started:
-                pending[identifier] = started[identifier]
-        elif event.get("ev") == "call.finished":
-            pending.pop(identifier, None)
-    actions = [Action("finish", run=identifier, run_kind=event["role"], branch=event["branch"])
-               for identifier, event in pending.items()]
+    ended = {event["call"] for event in events if event.get("ev") == "call.ended"}
+    flight = {key: event for key, event in started.items() if key not in ended}
+    chains = call_review.chains(events)
+    actions = _chain_actions(chains, any(event["role"] == "amend" for event in flight.values()))
+    open_chains = [chain for chain in chains.values() if chain.state != "finished"]
+    subjects = {chain.subject for chain in open_chains}
     roles = {event["role"] for event in flight.values()}
+    roles.update(chain.role for chain in open_chains if chain.role in ("answer", "review"))
     questions = [event for event in calls.open_questions(events) if event["task"] in tasks]
-    if "answer" not in roles and questions:
+    if "answer" not in roles and plan.draft not in subjects and questions:
         old_enough = (datetime.fromisoformat(now) -
                       min(datetime.fromisoformat(event["ts"]) for event in questions)
                       >= timedelta(minutes=ANSWER_AFTER))
@@ -78,12 +64,28 @@ def call_actions(plan: Plan, tasks: Mapping[str, Task], events: list[dict], desi
                 if any(event.get("ev") == "call.ended" and event.get("call") == identifier
                        and event.get("outcome") == "done" for event in events)}
     parked = _parked_subjects(events, started)
-    fresh = [part for part in design if f"{plan.draft}/{part}" not in designed | parked]
+    fresh = [part for part in design if f"{plan.draft}/{part}" not in designed | parked | subjects]
     if "skeleton" not in roles and fresh:
         actions.append(Action("call", task=fresh[0], run_kind="skeleton"))
     subject = f"{plan.draft}/review"
-    if "review" not in roles and subject not in parked and _review_due(tasks, events, now):
+    if "review" not in roles and subject not in parked | subjects and _review_due(tasks, events, now):
         actions.append(Action("call", task=subject, run_kind="review"))
+    return actions
+
+
+def _chain_actions(chains: Mapping[str, call_review.Chain], amending: bool) -> list[Action]:
+    """Translate chain states in order, reserving at most one amend call at a time."""
+    actions = []
+    for chain in chains.values():
+        if chain.state in ("review", "approved"):
+            actions.append(Action("vet" if chain.state == "review" else "finish",
+                                  task=chain.root, run=chain.latest, branch=chain.branch,
+                                  run_kind=chain.role))
+        elif chain.state == "amend" and not amending:
+            actions.append(Action("call", task=chain.root, run_kind="amend"))
+            amending = True
+        elif chain.state == "hold":
+            actions.append(Action("hold", task=chain.subject, run=chain.root, detail=chain.reason))
     return actions
 
 
@@ -108,7 +110,7 @@ def _review_due(tasks: Mapping[str, Task], events: list[dict], now: str) -> bool
 
 @dataclass(frozen=True)
 class Action:
-    kind: str  # collect, land, ready, start, park, design
+    kind: str  # collect, land, ready, start, park, design, call, vet, hold, finish
     task: str | None = None
     run: str | None = None
     host: str | None = None
@@ -327,12 +329,12 @@ def _ready(action: Action, task: Task, hosts: Mapping[str, Host], *, sh: Runner,
 
 
 def _call(action: Action, plan_dir: Path, *, sh: Runner, log_path: Path | None) -> None:
-    """Launch a designer call in its numbered user unit."""
+    """Launch a designer or amend call in its numbered user unit, passing the part or root."""
     events = log.read(log_path)
     number = 1 + sum(event.get("ev") == "call.started" and
                      event.get("role") == action.run_kind for event in events)
     argv = ["fab", "call", action.run_kind]
-    if action.run_kind == "skeleton":
+    if action.run_kind in ("skeleton", "amend"):
         argv.append(action.task)
     argv.extend(["--plan", str(plan_dir.resolve())])
     sh(["systemd-run", "--user", "--collect", "--unit",
@@ -340,43 +342,40 @@ def _call(action: Action, plan_dir: Path, *, sh: Runner, log_path: Path | None) 
 
 
 def _finish(action: Action, *, log_path: Path | None) -> None:
-    """Land a finished call and log the subjects its answer report names."""
+    """Land an approved branch and record answers from the latest call's report or its root's."""
     _land_branch(action.branch)
-    if action.run_kind == "answer":
-        report = (log.home() / "calls" / action.run / "report.md").read_text(encoding="utf-8")
-        answered = next((line.removeprefix("Answered:").split()
-                         for line in report.splitlines()
-                         if line.startswith("Answered:")), [])
-        for identifier in dict.fromkeys(answered):
-            log.append("question.answered", path=log_path, task=identifier,
-                       call=action.run)
+    chain = call_review.chains(log.read(log_path))[action.task]
+    if chain.role == "answer":
+        for identifier in dict.fromkeys(_answered(chain)):
+            log.append("question.answered", path=log_path, task=identifier, call=chain.latest)
 
 
 def _take(action: Action, tasks: Mapping[str, Task], hosts: Mapping[str, Host], plan_dir: Path, *,
-          sh: Runner, log_path: Path | None) -> None:
-    """Carry out one action, recording failures without stopping subsequent actions."""
+          plan: Plan, checkout: Path, sh: Runner, log_path: Path | None) -> None:
+    """Take a task or call-chain action, isolating failures and logging each finish outcome."""
     detail = action.detail
     outcome = "failed"
     try:
         match action.kind:
             case "collect":
-                runs.collect(action.run, log.read(log_path), hosts, sh=sh, log_path=log_path)
+                _collect(action, hosts, sh=sh, log_path=log_path)
             case "land":
                 detail = _land_task(action, tasks, sh=sh, log_path=log_path)
             case "ready":
                 _ready(action, tasks[action.task], hosts, sh=sh, log_path=log_path)
             case "start":
-                runs.start(tasks[action.task], hosts[action.host], kind=action.run_kind,
-                           events=log.read(log_path), sh=sh, log_path=log_path,
-                           rejection=action.rejection)
+                _start(action, tasks, hosts, sh=sh, log_path=log_path)
             case "call":
                 _call(action, plan_dir, sh=sh, log_path=log_path)
+            case "vet":
+                _vet(action, plan, checkout, hosts, sh=sh, log_path=log_path)
+            case "hold":
+                _hold(action, log_path=log_path)
             case "finish":
                 _finish(action, log_path=log_path)
                 outcome = "done"
             case "park":
-                log.append("question.asked", path=log_path, task=action.task,
-                           run=action.run, text=action.detail)
+                _park(action, log_path=log_path)
     except Exception as error:
         detail = "failed: " + " ".join(str(error).splitlines())
         log.append("note", path=log_path,
@@ -390,26 +389,15 @@ def _take(action: Action, tasks: Mapping[str, Task], hosts: Mapping[str, Host], 
 
 def tick(plan_dir: Path, *, sh: Runner = run, hosts: Mapping[str, Host] | None = None,
          log_path: Path | None = None) -> list[Action]:
-    """One tick for the plan in plan_dir (a checkout of its repository's main, fetched first).
+    """Fetch the plan checkout and take its task actions, then its call review chain steps.
 
-    First, import the merge queue's new records: `fab queue log --since <ts>` over ssh on the
-    host with role gate, ts being the latest `queue_ts` already imported; each `landed` or
-    `rejected` record naming a task of this plan becomes branch.landed or branch.rejected,
-    carrying queue_ts. Then measure the builders (fab.flow.measure with sh, at fab.log.now())
-    and take decide's actions, given that calm: flow is only printed, collect through
-    fab.run.collect, land through fab.land.main with the branch (a task of a repository in fab.gates.REPOS first
-    through fab.gates.screen: with any finding the branch is not landed, screen having
-    logged branch.rejected, and the action's detail is `rejected gate:<gate>[,<gate>...]`,
-    the findings' gates in order), ready by pushing the branch's tip to `ready/<branch>`
-    in its repository's clone under FAB_HOME/repos (logging branch.ready), start through
-    fab.run.start, park by logging question.asked with the detail as text. Design actions are
-    printed; call_actions' follow them: call starts `fab call <role> [<part>] --plan PLAN_DIR`
-    in a user unit (`systemd-run --user --collect --unit fab-call-<role>-<n>`), which logs
-    the call's own events, and returns at once; finish lands the call's branch through
-    fab.land.main, logs any question.answered, then call.finished (call, role, outcome of the
-    landing). A failed action is printed and logged as a note; the others still
-    run. Returns the actions taken. One tick at a time: a flock on FAB_HOME/tick.lock (a second
-    tick exits at once)."""
+    Hold a nonblocking FAB_HOME/tick.lock, validate the plan, import queue events and measure
+    builders through fab.flow.measure before deciding. Collect runs, gate and land tasks,
+    publish ready branches and start runs through
+    the runner. Re-read events for call decisions: vet on the freest builder, amend in a user
+    unit, park refusals once, or land approved branches and record answers and call.finished.
+    Every action reports one line; a failure logs a note and leaves later actions running.
+    Return the actions taken. See docs/design/fab.md, 12 and 13.1."""
     home = log.home()
     home.mkdir(parents=True, exist_ok=True)
     with open(home / "tick.lock", "a") as lock:
@@ -417,9 +405,10 @@ def tick(plan_dir: Path, *, sh: Runner = run, hosts: Mapping[str, Host] | None =
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             return []
-        checkout = sh(["git", "rev-parse", "--show-toplevel"], cwd=str(plan_dir))
-        if checkout.ok and checkout.out.strip():
-            sh(["git", "fetch", "origin"], cwd=checkout.out.strip(), check=True)
+        result = sh(["git", "rev-parse", "--show-toplevel"], cwd=str(plan_dir))
+        checkout = Path(result.out.strip()) if result.ok and result.out.strip() else plan_dir.resolve()
+        if result.ok and result.out.strip():
+            sh(["git", "fetch", "origin"], cwd=str(checkout), check=True)
         plan = specs.load_plan(plan_dir / "plan.toml")
         tasks = specs.load_tasks(plan_dir / "tasks", plan.draft, plan.repo)
         issues = specs.problems(plan, tasks)
@@ -428,19 +417,74 @@ def tick(plan_dir: Path, *, sh: Runner = run, hosts: Mapping[str, Host] | None =
         hosts = machines.load() if hosts is None else hosts
         events = log.read(log_path)
         _import_queue(tasks, events, hosts, sh=sh, log_path=log_path)
-
         calm = flow.measure(hosts, log.now(), sh=sh)
         actions = decide(plan, tasks, events, hosts, calm)
-
         for action in actions:
-            _take(action, tasks, hosts, plan_dir, sh=sh, log_path=log_path)
+            _take(action, tasks, hosts, plan_dir, plan=plan, checkout=checkout,
+                  sh=sh, log_path=log_path)
         design = [part for action in actions if action.kind == "design"
                   for part in action.detail.split(", ")]
         followups = call_actions(plan, tasks, log.read(log_path), design, log.now())
         actions.extend(followups)
         for action in followups:
-            _take(action, tasks, hosts, plan_dir, sh=sh, log_path=log_path)
+            _take(action, tasks, hosts, plan_dir, plan=plan, checkout=checkout,
+                  sh=sh, log_path=log_path)
         return actions
+
+
+def _collect(action: Action, hosts: Mapping[str, Host], *, sh: Runner,
+             log_path: Path | None) -> None:
+    """Collect an in-flight task or call review run using current events."""
+    runs.collect(action.run, log.read(log_path), hosts, sh=sh, log_path=log_path)
+
+
+def _start(action: Action, tasks: Mapping[str, Task], hosts: Mapping[str, Host], *,
+           sh: Runner, log_path: Path | None) -> None:
+    """Start a task run with current events and the decision's rejection context."""
+    runs.start(tasks[action.task], hosts[action.host], kind=action.run_kind,
+               events=log.read(log_path), sh=sh, log_path=log_path, rejection=action.rejection)
+
+
+def _vet(action: Action, plan: Plan, checkout: Path, hosts: Mapping[str, Host], *,
+         sh: Runner, log_path: Path | None) -> None:
+    """Review the current chain on the builder with most free places, even when none are free."""
+    events = log.read(log_path)
+    free = places(hosts, in_flight(events))
+    if not free:
+        raise ValueError("no builder configured for call review")
+    name = min(free, key=lambda name: (-free[name], name))
+    chain = call_review.chains(events)[action.task]
+    call_review.start(chain, plan.repo, checkout, hosts[name], events, sh=sh, log_path=log_path)
+
+
+def _hold(action: Action, *, log_path: Path | None) -> None:
+    """Park a chain's subject with the last refusing review's report path, when available."""
+    events = log.read(log_path)
+    chain = call_review.chains(events)[action.run]
+    refusal = chain.refusals[-1] if chain.refusals else None
+    report = next((event.get("report", "") for event in reversed(events)
+                   if refusal is not None and event.get("ev") == "run.ended"
+                   and event.get("run") == refusal), "")
+    log.append("call.parked", path=log_path, call=chain.root, subject=chain.subject,
+               reason=action.detail, report=report)
+
+
+def _answered(chain: call_review.Chain) -> list[str]:
+    """Read the latest call's Answered line, falling back to the root when absent or unreadable."""
+    for identifier in dict.fromkeys((chain.latest, chain.root)):
+        try:
+            report = (log.home() / "calls" / identifier / "report.md").read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            continue
+        for line in report.splitlines():
+            if line.startswith("Answered:"):
+                return line.removeprefix("Answered:").split()
+    return []
+
+
+def _park(action: Action, *, log_path: Path | None) -> None:
+    """Park a task that exhausted its run allowance by asking for judgement."""
+    log.append("question.asked", path=log_path, task=action.task, run=action.run, text=action.detail)
 
 
 def main(argv: list[str]) -> int:
