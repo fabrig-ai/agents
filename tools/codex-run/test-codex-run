@@ -950,7 +950,7 @@ PYISOLATION
                END { printf "%.3f", s }' "$t/times")
     printf 'test-codex-run: %s checks passed in %ss (%ss CPU)\n' "$checks" "$elapsed" "$cpu"
     if [[ -s $fake/reap-violations ]]; then cat "$fake/reap-violations" >&2; return 1; fi
-    awk -v cpu="$cpu" -v wall="$elapsed" 'BEGIN { exit !(cpu < 60 && wall < 180) }'
+    awk -v cpu="$cpu" -v wall="$elapsed" 'BEGIN { exit !(cpu < 15 && wall < 60) }'
 }
 
 # Optional adoption has the same report, row, post and exit for each unavailable

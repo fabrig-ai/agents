@@ -13,8 +13,9 @@ maintenance locks and holds continue at their original builder paths.
 Agents' focused gate files are `test_codex_run.py`, `test_final.py` and
 `test_stale.py`; the latter two also retain the bash suite's fixture entrypoints.
 `test_codex_run_periodic.py` wraps the complete bash suite in a temporary
-workspace. Its guard permits 60 CPU seconds and 180 wall seconds in place of
-the copied design's 15/60 limits. Owner `ops` and intended tiers are recorded
+workspace. Its original guard requires CPU below 15 seconds and wall below
+60 seconds; periodic classification does not relax either assertion.
+Owner `ops` and intended tiers are recorded
 in `tools/gate.toml`. Until the tier-aware gate lands, default `check.sh`
 discovery also includes periodic files.
 The installation description below records fabrig's existing installation;
