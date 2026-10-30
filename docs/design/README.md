@@ -39,6 +39,7 @@ paths and records-repository data paths are labelled where they are introduced.
 | `docs/design/fleet.md` | s/deploy | `fleet/`, `tools/fleet-sync`, `tools/installed`, `fleet/bootstrap/`; references `tools/fleet-sync.md`, `fleet/**/README.md` |
 | `docs/design/gate.md` | s/deploy | `tools/check.sh`, `tools/land`; host gate lock |
 | `docs/design/qa.md` | s/qa | `tools/qa/`; custody, rung walks and planned passes, evidence and live tiers |
+| `docs/design/reaper.md` | s/deploy | `tools/reap/`, `fleet/reap.toml`, `fleet/units/reap.service`, `fleet/units/reap.timer`; disposable output and lifetime records |
 | `docs/design/after-landing.md` | s/dynamic-memory | `tools/after-landing/`; published-tip checks, verdicts, routing and bisection |
 
 **Migration is owned work.** The remaining migration rows list current text and coverage
