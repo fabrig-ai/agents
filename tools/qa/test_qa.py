@@ -341,10 +341,17 @@ elif name == 'logins':
         config['login_queue'] = [row for row in config.get('login_queue', []) if row != entry]
         (root / 'tools.json').write_text(json.dumps(config))
         sys.exit(0)
-    assert args[0] in ('take', 'give'), args
+    assert args[0] in ('take', 'give', 'set-run'), args
     login = args[1]
     position = args.index('--as')
     holder = args[position + 1]
+    if args[0] == 'set-run':
+        if config.get('set_run_refusal') or login not in held or holders.get(login) != holder:
+            sys.exit(2)
+        config.setdefault('login_runs', {})[login] = args[args.index('--run') + 1]
+        publish_marker('tools.json', json.dumps(config))
+        print('run set: ' + login)
+        sys.exit(0)
     if login in config.get('logins_refused', []):
         print('fixture login refused', file=sys.stderr)
         sys.exit(4)
@@ -1381,7 +1388,8 @@ def a_walk_takes_a_login_and_a_slot_and_starts(lab):
     assert rows[0] == 'time\trung\twalk\tevent\tnote'
     assert len(rows) == 2 and rows[1].split('\t')[1:4] == ['b0', '1', 'walk-start']
     assert main[:9] in rows[1] and CHATGPT in rows[1]
-    assert lab.calls('logins') == [['list'], ['list'], ['take', CHATGPT, '--any', '--now', '--as', state['holder'],
+    assert 'Never take give-back.lock' in task and 'use a different lock name' in task
+    assert [c for c in lab.calls('logins') if c[0] != 'set-run'] == [['list'], ['list'], ['take', CHATGPT, '--any', '--now', '--as', state['holder'],
                                   '--note', str(directory)]]
     assert lab.calls('codex-run') == [['task', '--to', 'qa-watch', '--on-stop', str(directory / 'on-stop'),
                                       str(directory / 'task.md'), str(checkout), str(directory / 'report.md')]]
@@ -3565,7 +3573,7 @@ def a_walk_with_no_login_stops_its_units(lab):
     result = subprocess.run([str(lab.root / 'logins'), 'give', CHATGPT, '--as', state['holder']],
                             env=lab.env, capture_output=True, text=True, timeout=HUNG_TOOL_S)
     assert result.returncode == 0, result.stderr
-    state.update(logins={}, kinds={}, pools={}, given=[])
+    state.update(logins={}, kinds={}, pools={}, given=[], run_recorded=[])
     write_walk(lab, state)
     unit, pid = deployment(lab, directory)
     lab.end_run(state)
@@ -3763,7 +3771,7 @@ def conflicting_walk_claims_give_for_neither(lab):
     first, original = lab.walk_state()
     lab.walk('b1')
     second, other = lab.walk_states()[1]
-    forged = dict(other, logins=original['logins'], kinds=original['kinds'], pools=original['pools'])
+    forged = dict(other, run_recorded=[], logins=original['logins'], kinds=original['kinds'], pools=original['pools'])
     write_walk(lab, forged)
     lab.end_run(original)
     lab.end_run(other)
@@ -3779,7 +3787,7 @@ def a_new_walk_grant_checks_existing_claims_before_giving(lab):
     lab.walk('b0')
     _, original = lab.walk_state()
     claimed = 'chatgpt-2'
-    forged = dict(original, logins={claimed: str(lab.root / 'resting' / claimed)},
+    forged = dict(original, run_recorded=[], logins={claimed: str(lab.root / 'resting' / claimed)},
                   kinds={claimed: 'moved'}, pools={CHATGPT: claimed})
     write_walk(lab, forged)
     result = lab.run('walk', 'fabrig', 'b1', status=1)
@@ -5117,6 +5125,76 @@ tool['Watch'].stuck_addresses = stuck_addresses
     assert not [c for c in lab.calls('logins') if c[0] == 'take']
 
 
+def a_walk_records_its_launched_run_on_every_hold(lab):
+    lab.env['QA_WALK_KINDS'] = 'forgejo=2:chatgpt+claude'
+    directory, state = walk_with_logins(lab, CHATGPT, CLAUDE)
+    assert set(state['run_recorded']) == {CHATGPT, CLAUDE}
+    config = json.loads((lab.root / 'tools.json').read_text())
+    assert all(config['login_runs'][login] == state['run'] for login in state['logins'])
+    calls = [json.loads(line) for line in (lab.root / 'tools.jsonl').read_text().splitlines()]
+    launch = next(i for i, c in enumerate(calls) if c['tool'] == 'codex-run')
+    assert all(i > launch for i, c in enumerate(calls) if c['tool'] == 'logins' and c['args'][0] == 'set-run')
+    state = pause_walk(lab, directory, state)
+    old_run = state['run']
+    lab.run('walk', 'fabrig', 'b0', '--resume', state['walk'], '--build', 'main')
+    resumed = lab.walk_state()[1]
+    assert resumed['run'] != old_run and set(resumed['run_recorded']) == {CHATGPT, CLAUDE}
+    config = json.loads((lab.root / 'tools.json').read_text())
+    assert all(config['login_runs'][login] == resumed['run'] for login in resumed['logins'])
+
+
+def a_failed_run_binding_retries_without_cancelling_the_walk(lab):
+    lab.configure(set_run_refusal=True)
+    lab.walk()
+    _, state = lab.walk_state()
+    assert state['stage'] == 'running' and state['run_recorded'] == []
+    lab.configure(set_run_refusal=False)
+    lab.watch()
+    assert lab.walk_state()[1]['run_recorded'] == [CHATGPT]
+    assert json.loads((lab.root / 'tools.json').read_text())['login_runs'][CHATGPT] == state['run']
+    before = [c for c in lab.calls('logins') if c[0] == 'set-run']
+    lab.watch()
+    assert [c for c in lab.calls('logins') if c[0] == 'set-run'] == before
+    assert len(lab.calls('codex-run')) == 1
+
+
+def a_recovered_launch_binds_its_run_to_the_hold(lab):
+    driven_walk(lab, '''original = tool['Watch'].call
+def call(self, name, *args):
+    result = original(self, name, *args)
+    if name == 'codex-run':
+        result.returncode = 124
+    return result
+tool['Watch'].call = call
+''', status=1)
+    assert not lab.walk_state()[1]['run']
+    lab.watch()
+    state = lab.walk_state()[1]
+    assert state['stage'] == 'running' and state['run_recorded'] == [CHATGPT]
+    assert json.loads((lab.root / 'tools.json').read_text())['login_runs'][CHATGPT] == state['run']
+    assert len(lab.calls('codex-run')) == 1
+
+
+def the_queue_json_fixture_matches_real_output(lab):
+    fixture = json.loads((KIT / 'fixtures/qa-queue.json').read_text())
+    missing = 'a' * 40
+    assert lab.run('queue', '--json').stdout == '[]\n'
+    patch = "tool['secrets'].token_hex = lambda count: '1' * 32\ntool['main'].__globals__['timestamp'] = lambda: '2026-10-30T10:00:00Z'\n"
+    driven_walk(lab, patch, '--after', missing)
+    directory, state = walk_with_logins(lab, CHATGPT)
+    pause_walk(lab, directory, state)
+    patch = "tool['secrets'].token_hex = lambda count: '2' * 32\ntool['main'].__globals__['timestamp'] = lambda: '2026-10-30T10:01:00Z'\n"
+    driven_walk(lab, patch, '--resume', state['walk'], '--after', missing)
+    output = json.loads(lab.run('queue', '--json').stdout)
+    assert output == fixture, output
+    for row in output:
+        assert {'id', 'kind', 'rung', 'resume', 'after', 'since', 'reason'} <= row.keys()
+        assert re.fullmatch(r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ', row['since'])
+        assert row['resume'] is None or isinstance(row['resume'], str)
+    for row in output:
+        lab.run('queue', 'cancel', row['id'])
+    assert lab.run('queue', '--json').stdout == '[]\n'
+
 
 CASES = (
     a_queued_walk_uses_the_first_free_inventory_slot,
@@ -5124,7 +5202,10 @@ CASES = (
     unknown_slot_inventory_refuses_without_claiming,
     a_machine_stuck_recipient_replaces_the_fallback_file,
     stuck_recipient_settings_validate_and_follow_precedence,
-
+    a_walk_records_its_launched_run_on_every_hold,
+    a_failed_run_binding_retries_without_cancelling_the_walk,
+    a_recovered_launch_binds_its_run_to_the_hold,
+    the_queue_json_fixture_matches_real_output,
     the_watcher_selects_the_oldest_ready_entry_once_per_kind,
     a_busy_inventory_slot_is_queued_and_runs_when_freed,
     orphan_release_and_its_notice_survive_an_interrupted_save,

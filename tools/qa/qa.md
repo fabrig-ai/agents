@@ -7,7 +7,7 @@ standalone Python 3.13 tool using the standard library and local commands.
 ```
 qa walk fabrig a [--kind forgejo] [--build REF] [--after COMMIT]... [--login POOL]... [--cap MINUTES]
 qa walk fabrig a --resume rung-a-12 [--build REF] [--after COMMIT]... [--cap MINUTES]
-qa queue
+qa queue [--json]
 qa queue cancel ID
 qa take forgejo [--login chatgpt] --as walk/forgejo/WHAT [--note TEXT]
 qa give NAME --as walk/forgejo/WHAT
@@ -272,6 +272,14 @@ and rename; cancellation fsyncs the queue directory after removing its entry.
 `qa queue` lists ID, kind, rung, resume name, after, since and last reason;
 `qa queue cancel ID` removes an entry without touching any walk.
 
+`qa queue --json` writes one JSON array, oldest entry first, with one object
+per entry: string `id`, `kind`, `rung`; `resume` (name or null); `after` (array
+of commit strings); `since` (UTC RFC 3339, `YYYY-MM-DDTHH:MM:SSZ`); and
+`reason` (last refusal string or null). Empty output is `[]`. Fields may be
+added, never renamed or removed; consumers ignore unknown fields. Invalid
+queue state refuses without emitting a partial document. The consumer fixture
+`tools/qa/fixtures/qa-queue.json` is checked against real CLI output.
+
 After cleanup each check tries the oldest ready entry of each kind, through
 the same admission function as a typed start, with its saved starter. Busy
 entries and unlanded dependencies do not prevent a later ready entry of that
@@ -306,7 +314,9 @@ command arguments survive. The deployment is independent of the session.
 
 The wrapper runs executable regular `give-back` from its own directory with
 closed stdin, under `give-back.lock`. Lock wait and execution share one bound;
-process-group leftovers are killed even after successful export. Output and
+process-group leftovers are killed even after successful export. A walker's
+helper must never acquire `give-back.lock`: the wrapper already holds it. Any
+lock taken inside the helper must use another name. Output and
 status append to `give-back.log`; unsafe logs cannot prevent export. An absent
 or linked exporter is skipped. Wrapper errors never fail the unit. A child
 that creates a new session can escape this process-group cleanup; systemd's
@@ -426,6 +436,17 @@ the report path, exit and anything still out, retried until accepted. Delivery
 is at least once: a crash after acceptance but before its save may repeat it.
 The rung owner reads the report and files findings; the tool commits no record.
 
+### Run metadata on login holds
+
+Starts and resumes take their logins before the new run is known, through
+`Watch.take_login`. Once codex-run returns its ID, QA saves the running attempt
+and uses `logins set-run NAME --as HOLDER --run ID` on each held grant. Each
+successful binding is saved per attempt. Failed bindings retry at each check
+without cancelling a live session; recovered launches bind their recovered ID
+as well. A resumed attempt resets those receipts and records its new run.
+`logins list --json` therefore exposes the current walk's run. No credential
+is opened or inspected to attach this metadata.
+
 ## codex-run and installation
 
 Dependencies (`codex-run`, `logins`, `post`, `systemctl`, `systemd-run`, `cargo`,
@@ -470,7 +491,9 @@ qa prepares it with trim and codex-run applies its numeric-slot lifetime
 interlock and normal startup trimming.
 
 `tools/installed` links `qa` to `tools/qa/qa` through fleet-sync. Installation
-does not start a watcher. A deployment stops the legacy agents-qa-watch unit
+does not start a watcher. Deploy `logins` with `set-run` before `qa`, or switch
+both together, then restart the QA watcher. No credential migration is needed.
+A deployment stops the legacy agents-qa-watch unit
 before starting the walk-only service; old pass state, foreign walks, their
 custody and pending alerts require the director's reconciliation separately.
 The existing director and stuck-address paths remain the service's settings.

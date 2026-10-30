@@ -214,7 +214,7 @@ processes and restart their requests after the switch. Keep the state tree in
 place; no `add`, `replace` or credential migration is part of installation.
 
 Exit status is 0 for success, 1 for unavailable custody, invalid resting login
-or refused replacement/move, 2 for invalid input, unknown names/pools or giving
+or refused replacement/move, 2 for invalid input, unknown names/pools or giving or updating
 another holder's login, and 4 for unsafe/invalid state or operational errors.
 Diagnostics keep the `logins: ` prefix on stderr; grants and success messages
 are on stdout. Argparse supplies usage diagnostics for malformed options.
@@ -237,7 +237,9 @@ state, the default HOME-based root, and an inherited admission lock. Eleven
 JSON/run cases cover empty/resting/missing logins, moved holdings, legacy
 holders, use classification, waiter ordering and preservation, take modes,
 idempotency, invalid IDs/state, exit codes, privacy, the consumer fixture,
-and QA forwarding known run IDs. The existing exact plain-output assertion
+and QA forwarding known run IDs. Three set-run cases cover own-holder updates,
+idempotency and preserved metadata/queues, refusal of other holders and invalid
+IDs, and updating a moved login without opening it. The existing exact plain-output assertion
 also exercises a holder with run metadata. Each case
 has its own Linux subreaper process and session with signal cleanup, tracked
 child reaping, a 300-second tool hang bound and a 900-second case hang bound.

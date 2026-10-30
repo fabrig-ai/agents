@@ -37,7 +37,7 @@ UNIT_POLL_SECONDS = 2
 POST_WAIT_MARGIN_SECONDS = 5
 ADDRESS = r'[a-z][a-z0-9-]*(/[a-z0-9][a-z0-9-]*)*@[a-z][a-z0-9-]*'
 ATTEMPT_KEYS = ('attempt holder ref main cap started slot slot_claim checkout launch_complete logins kinds pools requests run stage given released '
-                'start_logged end_logged posted capped decision pause_line resume_run report_attempt alerts queue_id').split()
+                'start_logged end_logged posted capped decision pause_line resume_run report_attempt alerts queue_id run_recorded').split()
 
 
 class Problem(Exception):
@@ -532,6 +532,23 @@ class Watch:
         if run:
             options += ['--run', run]
         return self.call('logins', 'take', pool, '--any', '--now', '--as', holder, *options)
+
+    def record_run(self, directory, state):
+        if not state.get('run'):
+            return
+        recorded = state.setdefault('run_recorded', [])
+        for login in self.outstanding(state):
+            if login in recorded:
+                continue
+            try:
+                result = self.call('logins', 'set-run', login, '--as', state['holder'], '--run', state['run'])
+                if result.returncode == 0:
+                    recorded.append(login)
+                    self.save(directory, state)
+                else:
+                    log(f'{state["walk"]}: run metadata for {login} pending; trying next check')
+            except (OSError, Problem, UnicodeError):
+                log(f'{state["walk"]}: cannot record run for {login}; trying next check')
 
     def slot_call(self, claim, *args):
         words = [str(self.workspace.tool('claim')), *map(str, args)]
@@ -1213,6 +1230,7 @@ class Watch:
             state['run'] = matches[0]
             state['stage'] = 'running'
             self.save(directory, state)
+            self.record_run(directory, state)
             log(f'{state["walk"]}: recovered run {state["run"]}')
 
     @contextmanager
@@ -1567,6 +1585,7 @@ class Watch:
         self.release_slot(directory, state)
 
     def check_walk(self, directory, state):
+        self.record_run(directory, state)
         if state.get('stage') == 'cancelled':
             self.cancel_walk(directory, state)
             return
@@ -1745,6 +1764,9 @@ def walk_attempt(state):
     need('launch_complete' not in state or type(state['launch_complete']) is bool,
          'invalid saved launch completion', 4)
     check_alerts(state)
+    recorded = state.get('run_recorded', [])
+    need(isinstance(recorded, list) and all(isinstance(name, str) and name in state['logins'] for name in recorded)
+         and len(recorded) == len(set(recorded)), 'invalid run binding progress', 4)
     need('queue_id' not in state or isinstance(state['queue_id'], str)
          and re.fullmatch(r'[0-9a-f]{32}', state['queue_id']), 'invalid admission ID', 4)
     if 'report_attempt' in state:
@@ -1837,6 +1859,10 @@ def queue(args, workspace):
             need(any(e['id'] == args.id for e in entries), 'unknown queue ID: ' + args.id)
             service.drop_queue(args.id)
             print('cancelled ' + args.id)
+        elif args.json_output:
+            print(json.dumps([{key: entry[key] or None if key == 'reason' else entry[key]
+                               for key in ('id', 'kind', 'rung', 'resume', 'after', 'since', 'reason')}
+                              for entry in entries]))
         else:
             print('id\tkind\trung\tresume\tafter\tsince\tlast reason')
             for entry in entries:
@@ -1916,7 +1942,7 @@ def start_walk(args, workspace, service=None, entry=None):
                          started=timestamp(), slot=None, logins={}, kinds={}, pools={}, given=[],
                          requests=state['requests'], run='', holder='walk/' + kind + '/' + name,
                          stage='reserving', released=False, start_logged=False, end_logged=False,
-                         posted=False, capped=False, resume_run=previous_run, alerts={})
+                         posted=False, capped=False, resume_run=previous_run, alerts={}, run_recorded=[])
             state.pop('decision', None)
             state.pop('slot_claim', None)
             state.pop('checkout', None)
@@ -1955,7 +1981,7 @@ def start_walk(args, workspace, service=None, entry=None):
                          clock_walk=name[len('rung-' + args.rung + '-'):], ref=ref, main=main,
                          starter=args.queue_starter, cap=args.cap or 180, started=timestamp(),
                          slot=None, holder='walk/' + kind + '/' + name, logins={}, kinds={}, pools={}, run='',
-                         stage='reserving', requests=requests, given=[], released=False,
+                         stage='reserving', requests=requests, given=[], released=False, run_recorded=[],
                          start_logged=False, end_logged=False, posted=False, report_attempt=1)
         if entry:
             state['queue_id'] = entry['id']
@@ -2073,7 +2099,8 @@ def start_walk(args, workspace, service=None, entry=None):
             task += (f'\nMove file logins into deployments as the binding says; directory logins are used in place.\n'
                      f'At once after moving a login, write {directory}/give-back: an executable\n'
                      'that exports each moved login back to its resting path, every program named by\n'
-                     'its absolute path (it runs outside your shell). Run it before the deployment\n'
+                     'its absolute path (it runs outside your shell). Never take give-back.lock in your helper: the stop wrapper holds it.\n'
+                     'If the helper needs its own lock, use a different lock name. Run it before the deployment\n'
                      'stops; check by stat alone (a non-empty regular file, 0600). Your session and\n'
                      'deployment stops run the same file under one lock. Never run logins, never\n'
                      'read or copy a login. Stop using directory logins before their units stop.\n'
@@ -2126,6 +2153,7 @@ def start_walk(args, workspace, service=None, entry=None):
                  launched.stderr.strip() or 'codex-run refused launch', 1)
             state.update(run=words[0], stage='running')
             service.save(directory, state)
+            service.record_run(directory, state)
         except (Problem, OSError, ValueError, UnicodeError):
             if state['stage'] == 'starting':
                 service.recover_run(directory, state)
@@ -2194,6 +2222,7 @@ def main():
     walking.add_argument('--login', action='append', default=[])
     walking.add_argument('--cap', type=int)
     queued = sub.add_parser('queue')
+    queued.add_argument('--json', action='store_true', dest='json_output')
     queue_actions = queued.add_subparsers(dest='queue_action')
     cancelling = queue_actions.add_parser('cancel')
     cancelling.add_argument('id')
