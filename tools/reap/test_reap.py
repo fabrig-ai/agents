@@ -298,6 +298,12 @@ class ReapTests(unittest.TestCase):
                 put(alternate, os.path.relpath(target, alternate.parent.parent) if relative else str(target))
                 self.reason(self.run_class('heavy-logs'), 'alternates target')
 
+    def test_quoted_alternates_fail_closed(self):
+        path = self.old('src/rust/tmp/logs/store', directory=True)
+        put(self.home / 'src/borrower/.git/objects/info/alternates', json.dumps(str(path / 'objects')))
+        self.reason(self.run_class('heavy-logs', True), 'alternates incomplete: ValueError')
+        self.assertTrue(path.exists())
+
     def test_alternates_under_jobs(self):
         path = self.old('src/rust/tmp/logs/store', directory=True)
         put(self.home / '.claude/jobs/job/.git/objects/info/alternates', str(path / 'objects'))

@@ -451,6 +451,8 @@ class Reaper:
                         for line in content.decode(errors='strict').splitlines():
                             if not line:
                                 continue
+                            if line.startswith('"'):
+                                raise ValueError('quoted alternates require review')
                             target = Path(line)
                             if not target.is_absolute():
                                 target = child.parent.parent / target

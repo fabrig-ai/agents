@@ -52,7 +52,8 @@ If permissions prevent full `/proc` inspection, a narrow passwordless-sudo
 helper reads only process cwd/fd link targets and maps; no file contents through
 fds or process environment are read. Failure still keeps candidates.
 Alternates scans have depth limits (64 under `src`, 32 under jobs) and a shared
-thirty-second deadline; reaching a limit fails closed. Unknown Claude inventory
+thirty-second deadline; reaching a limit fails closed. Quoted alternates
+paths also keep candidates for review rather than risk missing a borrower. Unknown Claude inventory
 keeps jobs. Symlink candidates, symlinked parents and special files are refused.
 Nested symlinks are never followed; removal only unlinks them.
 
