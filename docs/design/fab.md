@@ -362,10 +362,10 @@ and Claude reads the code's structure in batches, never on the landing path.
   renames, splits; kind `interface` when a signature changes) into the plan
   and new pairs into the taste file, on its branch, which lands as a
   skeleton call's does. It never holds up a landing.
-- **A question from a call parks its subject:** a skeleton or review call
-  that ends with a question starts no further call for that subject until
-  `call.answered` names it (13.6), or a later call of the subject ends
-  done.
+- **A question from a call parks its subject:** a skeleton, answer or
+  review call that ends with a question starts no further call for that
+  subject until `call.answered` names it (13.6), or a later call of the
+  subject ends done. An answer call's subject is its draft.
 
 ## 13. Growing toward the full model
 

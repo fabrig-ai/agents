@@ -104,7 +104,9 @@
   page's writing, and makes the tick rewrite the page. It also makes
   `call.answered` the only answer that unparks a subject or resets a
   chain, and carries the user's answers into every later brief of the
-  subject. Until then nothing writes `FAB_HOME/user.md`. The open questions
+  subject, and makes an answer call's `Question:` park its draft. Until
+  then nothing writes `FAB_HOME/user.md`, and an answer call that ends
+  `Question:` starts again on the next tick. The open questions
   of the log today are the retire and accounting skeleton calls'. The page
   is a file on hel8: where else the user reads it is the user's (14).
 - **Parts done by hand have no task specs** (package, slot-probe), so the

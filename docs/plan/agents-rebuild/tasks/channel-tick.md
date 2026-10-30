@@ -38,8 +38,14 @@ functions, as `tick-split` does.
   - `_parked_subjects` gives the subjects of `fab.channel.asks((), events)`
     of kind `call`: one rule for the page and the tick. Its `started`
     argument goes if nothing else needs it.
-  - `call_actions`' docstring says a question parks its subject until
-    `call.answered` names it, or a later call of the subject ends done.
+  - `call_actions` computes the parked subjects before the answer
+    branch, which also requires `plan.draft` not parked: an answer call
+    that ended `Question:` starts no answer call again until
+    `call.answered` names the draft, or a later call of the draft ends
+    done. Skeleton and review keep their parked checks.
+  - `call_actions`' docstring says a question parks its subject, an
+    answer call's being its draft, until `call.answered` names it, or a
+    later call of the subject ends done.
   - `tick`, after the call actions, rewrites the page in a private
     function: `fab.channel.write(fab.channel.compose(
     fab.channel.plan_dirs([plan_dir]), log.read(log_path), log.now()))`,
@@ -88,6 +94,11 @@ functions, as `tick-split` does.
   - a call that asked parks its part until `call.answered` names it;
   - a `question.answered` naming the subject leaves it parked;
   - a later done call of the subject unparks it;
+  - an answer call that ended `Question:` starts no answer call, with
+    open questions past ANSWER_AT, while its draft is parked; a
+    `question.answered` naming the draft leaves it parked; a
+    `call.answered` naming the draft, or a later done call of the draft,
+    starts one again;
   - a tick writes the page, and a page that cannot be written prints its
     failure line while the tick returns its actions.
   The test that answers with `question.answered` today moves to
