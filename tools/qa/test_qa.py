@@ -1062,6 +1062,44 @@ def a_walk_takes_a_login_and_a_slot_and_starts(lab):
     assert lab.walk_state()[1]['stage'] == 'running' and lab.head() == before and not lab.sent()
 
 
+def full_starter_addresses_receive_pass_pause_and_finding_ends(lab):
+    lab.env['POST_NAME'] = 's/qa@hel8'
+    machines = lab.tmp / 'post/machines'
+    machines.parent.mkdir()
+    temporary = machines.with_name('machines.new')
+    temporary.write_text('hetzner6 local\n')
+    temporary.replace(machines)
+    for outcome in ('pass', 'pause', 'finding'):
+        lab.walk('b0')
+        directory, state = lab.walk_states()[-1]
+        assert state['starter'] == 's/qa@hel8'
+        if outcome == 'pause':
+            state = pause_walk(lab, directory, state)
+            assert state['stage'] == 'paused'
+        else:
+            report = '## Findings\nNone.\n' if outcome == 'pass' else '## Findings\nBlocking defect.\n'
+            lab.end_run(state, report=report, code=int(outcome == 'finding'))
+            lab.watch()
+        subject = f'qa: walk {state["walk"]} ' + ('paused' if outcome == 'pause' else 'ended')
+        sent, = [args for args in lab.calls('post') if args[:1] == ['send'] and args[4] == subject]
+        assert sent[:5] == ['send', '--as', 'qa-watch', 's/qa@hel8', subject]
+
+
+def a_bare_starter_name_receives_ends_on_the_local_machine(lab):
+    lab.env['POST_NAME'] = 's/qa'
+    machines = lab.tmp / 'post/machines'
+    machines.parent.mkdir()
+    temporary = machines.with_name('machines.new')
+    temporary.write_text('hetzner6 local\n')
+    temporary.replace(machines)
+    lab.walk()
+    _, state = lab.walk_state()
+    assert state['starter'] == 's/qa@hetzner6'
+    lab.end_run(state)
+    lab.watch()
+    assert lab.sent()[-1]['args'][1:3] == ['s/qa@hetzner6', 'qa: walk rung-b0-1 ended']
+
+
 def a_refused_login_starts_nothing(lab):
     lab.env['QA_WALK_KINDS'] = 'forgejo=2:chatgpt,claude'
     lab.configure(logins_busy=[CLAUDE])
@@ -1127,13 +1165,16 @@ Watch.call = call
 
 
 def a_walk_refuses_invalid_inputs_before_taking_anything(lab):
-    cases = [([], {'POST_NAME': ''}), ([], {'POST_NAME': 'bad@host'}),
-             (['--cap', '0'], {}), (['--login', 'chatgpt-2'], {}),
+    cases = [([], {'POST_NAME': value}) for value in (
+        '', 's/qa@', '@hel8', 's/qa@@hel8', 's/qa@hel8@hetzner6',
+        's/qa@-hel8', 's/qa@hel8/path', 'S/qa@hel8', 's/qa@hel8\n', 'bad name')]
+    cases += [(['--cap', '0'], {}), (['--login', 'chatgpt-2'], {}),
              (['--login', CHATGPT, '--login', CHATGPT], {})]
     for args, extra in cases:
         lab.run('walk', 'fabrig', 'b0', *args, status=2, extra=extra)
     lab.run('walk', 'fabrig', 'Bad', status=2)
     assert not (lab.tmp / 'qa').exists() and not lab.calls('logins') and not lab.calls('codex-run')
+    assert not lab.calls('claim')
 
 
 def a_walk_resolves_origin_branches_and_commit_prefixes(lab):
@@ -1466,8 +1507,10 @@ def a_linked_pause_marker_is_not_read(lab):
 
 
 def a_second_pause_has_its_own_clock_event(lab):
+    lab.env['POST_NAME'] = 's/qa@hel8'
     directory, state = walk_with_logins(lab)
     state = pause_walk(lab, directory, state, line='attempt 2: this is user text')
+    lab.env['POST_NAME'] = 'o/resumer@hetzner6'
     lab.run('walk', 'fabrig', 'b0', '--resume', 'rung-b0-1', '--build', 'main')
     state = lab.walk_state()[1]
     # The bound is characters, with the terminating newline outside it.
@@ -1482,6 +1525,8 @@ def a_second_pause_has_its_own_clock_event(lab):
     rows = [row.split('\t') for row in (directory.parent / 'b0/loop.tsv').read_text().splitlines()[1:]]
     assert rows[-2][3] == 'walk-resume' and rows[-2][4].startswith('kind forgejo attempt 3: ')
     assert rows[-1][3] == 'walk-end' and (directory / 'report-2.md').is_file()
+    assert lab.walk_state()[1]['starter'] == 's/qa@hel8'
+    assert len(lab.sent()) == 3 and all(post['args'][1] == 's/qa@hel8' for post in lab.sent())
 
 
 def an_interrupted_resume_releases_only_its_new_grant(lab):
@@ -3145,12 +3190,16 @@ Watch.slot_call = slot_call
 
 
 def a_pause_releases_and_resume_waits_for_its_own_slot(lab):
+    lab.env['POST_NAME'] = 's/qa@hel8'
     directory, state = walk_with_logins(lab, CHATGPT)
     paused = pause_walk(lab, directory, state)
+    lab.env['POST_NAME'] = 'o/resumer@hetzner6'
     assert paused['slot_claim']['released'] and not slot_claims(lab)
     hold_slot(lab, 1, owner='ops')
     lab.run('walk', 'fabrig', 'b0', '--resume', state['walk'], '--build', 'main')
     assert lab.walk_state()[1]['stage'] == 'paused' and lab.walk_state()[1]['attempt'] == 1
+    entry, = queued_entries(lab)
+    assert entry['starter'] == 's/qa@hel8'
     lab.env['QA_WALK_SLOTS'] = 'forgejo=2+1'
     lab.watch()
     assert queued_entries(lab) and len(lab.calls('codex-run')) == 1
@@ -3167,6 +3216,10 @@ def a_pause_releases_and_resume_waits_for_its_own_slot(lab):
     assert resumed['attempts'][0]['slot_claim']['released']
     assert (directory / 'prepare-2.log').is_file()
     assert lab.calls('codex-run')[-1][-2] == str(lab.slots / '1')
+    assert resumed['starter'] == 's/qa@hel8'
+    lab.end_run(resumed)
+    lab.watch()
+    assert lab.sent()[-1]['args'][1:3] == ['s/qa@hel8', 'qa: walk rung-b0-1 ended']
 
 
 def a_pause_with_unconfirmed_release_queues_resume_until_retry(lab):
@@ -3676,6 +3729,7 @@ def queued_entries(lab):
 
 
 def a_busy_slot_start_is_queued_then_started(lab):
+    lab.env['POST_NAME'] = 's/qa@hel8'
     lab.env['QA_WALK_SLOTS'] = 'forgejo=1'
     lab.walk()
     _, first = lab.walk_state()
@@ -3683,6 +3737,8 @@ def a_busy_slot_start_is_queued_then_started(lab):
     assert re.search(r'queued [0-9a-f]{32}\n', result.stdout)
     entry, = queued_entries(lab)
     assert entry['kind'] == 'forgejo' and entry['rung'] == 'b0'
+    assert entry['starter'] == 's/qa@hel8'
+    lab.env['POST_NAME'] = 'o/watcher@hetzner6'
     assert len(lab.calls('codex-run')) == 1
     lab.watch()
     assert len(lab.calls('codex-run')) == 1
@@ -3691,9 +3747,12 @@ def a_busy_slot_start_is_queued_then_started(lab):
     assert not queued_entries(lab) and len(lab.calls('codex-run')) == 2
     second = lab.walk_states()[-1][1]
     assert second['stage'] == 'running' and second['slot'] == 1
-    assert second['starter'] == first['starter'] and second['queue_id'] == entry['id']
+    assert second['starter'] == first['starter'] == 's/qa@hel8' and second['queue_id'] == entry['id']
     lab.watch()
     assert len(lab.calls('codex-run')) == 2
+    lab.end_run(second)
+    lab.watch()
+    assert lab.sent()[-1]['args'][1:3] == ['s/qa@hel8', 'qa: walk rung-b0-2 ended']
 
 
 
@@ -4450,6 +4509,8 @@ def evidence_archive_damage_cannot_authorize_pruning(lab):
 
 
 CASES = (
+    full_starter_addresses_receive_pass_pause_and_finding_ends,
+    a_bare_starter_name_receives_ends_on_the_local_machine,
     evidence_archive_damage_cannot_authorize_pruning,
     evidence_snapshot_never_opens_credentials_or_unsafe_entries,
     evidence_snapshot_detects_replacement_before_read,

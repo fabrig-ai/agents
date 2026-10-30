@@ -2434,9 +2434,11 @@ def walk(args, workspace):
 
 
 def start_walk(args, workspace, service=None, entry=None):
-    starter = entry['starter'].rsplit('@', 1)[0] if entry else os.environ.get('POST_NAME', '')
-    need(re.fullmatch(r'[a-z][a-z0-9-]*(/[a-z0-9][a-z0-9-]*)*', starter),
-         'POST_NAME must be set to a valid starter name')
+    starter = entry['starter'] if entry else os.environ.get('POST_NAME', '')
+    if '@' not in starter:
+        starter += '@' + workspace.machine()
+    need(re.fullmatch(ADDRESS, starter),
+         'POST_NAME must be set to a valid starter name or NAME@MACHINE address')
     need(re.fullmatch(r'[a-z0-9][a-z0-9-]*', args.rung), 'invalid rung name')
     need(args.cap is None or args.cap >= 1, '--cap must be at least 1')
     need(args.resume is None or re.fullmatch(r'rung-[a-z0-9][a-z0-9-]*-[1-9][0-9]*', args.resume)
@@ -2475,7 +2477,7 @@ def start_walk(args, workspace, service=None, entry=None):
             need(kind in kinds and set(state['requests']) <= set(kinds[kind]['pools']),
                  'saved walk kind or pools are no longer configured')
             args.queue_kind, args.queue_login = kind, state['requests']
-            args.queue_starter = entry['starter'] if entry else starter + '@' + workspace.machine()
+            args.queue_starter = state['starter']
             defer(not state.get('slot_claim') or state['slot_claim']['released'], 'slot claim release is still pending')
             state['kind'] = kind
             need(kinds[kind]['numbers'], f'no walk slots configured for kind {kind}', 1)
@@ -2507,7 +2509,7 @@ def start_walk(args, workspace, service=None, entry=None):
             need(set(requests) <= set(kinds[kind]['pools']), 'login is not a pool of kind ' + kind)
             need(kinds[kind]['numbers'], f'no walk slots configured for kind {kind}', 1)
             args.queue_kind, args.queue_login = kind, requests
-            args.queue_starter = entry['starter'] if entry else starter + '@' + workspace.machine()
+            args.queue_starter = starter
             service.scratch_room(walks)
             holders = service.walk_room(requests, kind)
             service.claims(walks)

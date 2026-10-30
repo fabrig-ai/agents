@@ -89,6 +89,15 @@ old attempts supply an inferred run. Details remain in `tools/qa/logins.md`.
 
 ## 4. Walk admission and execution
 
+**Save the starter's mailbox.** `POST_NAME` accepts a bare name or a full
+`NAME@MACHINE` address validated by the existing address pattern. A full
+address is saved as given; a bare name gets the local machine from
+`DEV_ROOT/tmp/post/machines`, falling back to the hostname. A coordinator
+starting a walk on a builder from another host can set `POST_NAME=s/qa@hel8`
+to receive completion, pause and evidence notices there. Invalid names or
+addresses refuse before any claim or login take. Queued starts keep their
+saved starter, and direct or queued resumes keep the original walk's starter.
+
 **A kind's ordered numeric slots define its cap.** Count manual, stuck and
 in-flight holdings too. Under the shared admission lock, select a free
 configured slot and obtain a central claim with a unique saved lifetime token.

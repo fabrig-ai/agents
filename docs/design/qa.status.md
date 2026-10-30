@@ -12,6 +12,13 @@ Contract: `docs/design/qa.md`, sections 2–8.
   slot preparation, disk admission, starts/resumes, deployment supervision,
   launch recovery, cleanup and notices. `fleet/units/qa-watch.service` declares
   the service; this task neither deploys nor inspects a running instance.
+- **Starter mailbox routing is built.** `POST_NAME` accepts a validated full
+  `NAME@MACHINE` address or a bare name qualified with the local machine.
+  Queue admission and direct/queued resumes preserve the saved starter.
+  In-process fake-service tests cover pass, pause and finding end recipients,
+  local bare-name routing, queue/resume preservation and invalid-address
+  refusal before any claim or login take. Contract: `docs/design/qa.md`,
+  section 4, “Save the starter's mailbox”.
 - **Queue, retries and orphan claims are built.** Starts/resumes retain
   dependencies and admission identity; end steps retry independently; idle
   orphan claims require grace and token-checked release. Ordered per-kind slot
@@ -42,15 +49,15 @@ Contract: `docs/design/qa.md`, sections 2–8.
   respective test suites. This establishes producers, not deployed consumers.
 
 - **Offline tests have fast and periodic files.** `tools/qa/test_qa.py` keeps
-  182 cases (159 walk cases plus 23 evidence repair probes);
+  184 cases (161 walk cases plus 23 evidence repair probes);
   `tools/qa/test_qa_periodic.py` keeps 49 unchanged integration cases, including
   two evidence publication matrices. All 74 custody cases remain in
   `tools/qa/test_logins.py`, with two added fixture-isolation regressions.
   Fresh state, cached production code, scoped injections, lazy metadata
   fixtures and bounded real crash/IPC children replace ordinary CLI startups.
-  Production code is unchanged. The current `tools/check.sh` has no tier
-  selection and still discovers periodic files by default; explicit file runs
-  verify the split until the gate owner's runner rollout.
+  The framework rewrite left production code unchanged; the starter mailbox
+  repair changes address resolution under design section 4. The current
+  `tools/check.sh` selects gate or periodic files through `tools/gate.toml`.
 
 ## Plan differences and remaining gaps
 
@@ -72,8 +79,20 @@ Contract: `docs/design/qa.md`, sections 2–8.
 
 ## Verification
 
+The starter mailbox repair passes all 184 QA gate cases. Measured through
+`tools/check.sh tools/qa/test_qa.py`, the file's CPU/wall seconds are
+8.869/8.839 before and 8.465/8.445 after, within its 10-second CPU budget.
+The full gate passes 35 files in 19.454 wall seconds (91.560 CPU seconds);
+QA uses 6.901 CPU / 7.682 wall seconds there. The unrelated
+`tools/test_land_reconcile.py` exceeds its report-only CPU budget; there are
+no failed or unobserved files. Measurements use temporary HOME and fake
+services. Details and the repair commit are in
+`/home/free/src/fabrig/notes/q/qa-walk-notify-report.md`.
+
 The framework rewrite preserves all 305 original case names: QA 231 becomes
 182 gate + 49 periodic; custody keeps 74 and adds two context/crash regressions.
+The starter mailbox repair adds two gate cases and extends existing invalid
+input, queue and resume cases, bringing QA's gate file to 184 cases.
 The periodic assertions are unchanged. Focused whole-file CPU/wall samples
 are QA 8.538/8.494 and 8.712/8.663 seconds; custody 1.841/1.642 and
 1.918/1.710 seconds. The periodic file passes twice at about 67.5 CPU / 12.8
@@ -85,4 +104,7 @@ and local Git origins. See the assigned measurement report
 `/home/free/src/fabrig/notes/q/qa-gate-budget-report.md` for two before/after
 CPU and wall samples, the evidence-case classifications, full-gate result,
 case-name accounting and commit IDs. Neither production code nor budget rows
-change, and this branch requires no machine action or watcher restart.
+change in the framework rewrite. The starter mailbox repair requires updating
+`tools/qa/qa` on the builder before new direct starts accept full addresses;
+restart the QA watcher to use the repaired queue/resume routing in its process.
+Existing saved walk starter addresses are preserved.

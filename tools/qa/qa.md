@@ -111,9 +111,16 @@ The fleet supplies clean fabrig clones in slots 8 and 4, and installed
 `claim` on hel8 reads the fleet's current inventory. The SSH target must
 provide noninteractive access and a login shell with `claim` on PATH.
 
-`POST_NAME` supplies the starter's name; the machine comes from the `local`
-entry in `DEV_ROOT/tmp/post/machines`, else the hostname. The starter, rung,
-cap, requested pools and REF are checked before any login is taken.
+`POST_NAME` accepts a bare starter name or a full `NAME@MACHINE` address.
+A full address is validated by the same address pattern as `--director` and
+saved as given; a bare name gets the machine from the `local` entry in
+`DEV_ROOT/tmp/post/machines`, else the hostname. When starting a walk on a
+builder from another host, set the address of the mailbox you actually read,
+for example `POST_NAME=s/qa@hel8 qa walk fabrig a` on hetzner6. Completion,
+pause and evidence notices then reach `s/qa@hel8`. Queued starts and resumes
+keep their saved starter; resuming from another mailbox does not change the
+walk's starter. Invalid names or addresses refuse before any claim or login
+take. The rung, cap, requested pools and REF are checked before any login is taken.
 Admission holds `tmp/qa/walks.lock`, shared by starts, resumes and manual
 takes. A kind holds at most its slots' number of logins of each pool,
 counting every holder `walk/KIND/...`, including stuck or manual holdings.
