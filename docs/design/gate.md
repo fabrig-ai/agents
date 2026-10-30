@@ -12,8 +12,8 @@
   selection and CPU/wall budgets. Enforcement starts report-only; only the
   user turns it on. No force push, queue, or production service calls in tests.
 - **Tests use disposable HOME and TMPDIR.** Each file has a fresh interpreter.
-  Discovery honors existing `load_tests` hooks; base fleet cases are split into
-  files for per-file accounting, with the same aggregate tier budget.
+  Discovery honors existing `load_tests` hooks. Fleet gate cases use focused
+  component fixtures; exhaustive compatibility sweeps run in periodic files.
 - **Main deploys itself.** Hosts poll main; this entrypoint remains policy,
   rather than remote branch protection (`docs/design/fleet.md`, section 3).
 
@@ -34,6 +34,8 @@ budget and status. Every tier/check/landing summary says `budget: REPORT-ONLY
 (not enforced)` or `budget: ENFORCED`; report-mode merge-wall overruns say
 `OVER (report-only)`. `--json PATH` saves the same observations atomically.
 Defaults: file CPU 8 s, file wall 15 s, tier CPU 100 s, merge wall 60 s.
+QA exceptions are `test_qa.py` CPU 10 s / wall 15 s and `test_logins.py`
+CPU 3 s / wall 8 s. Every gate and periodic file has an owner row.
 Report-only mode lets every selected file complete, regardless of CPU, file
 wall or merge-wall targets. Overruns say `OVER (report-only)`; a separate
 `report_hard_wall_s = 900` safety cap guards hangs. With enforcement enabled,
@@ -113,8 +115,9 @@ then the full gate without selection. Builder role units render only with
 `machine_env.AGENTS_PERIODIC = 1`, currently hetzner3 alone. The service also
 checks the runtime flag, uses nice 19 and idle IO. It mails each failed,
 over-budget or starved file's owner using `post send --as agents-periodic
-OWNER@hel8`; missing owners and runner failures go to ops. No periodic tests
-have been invented or moved merely to escape a gate budget.
+OWNER@hel8`; missing owners and runner failures go to ops. Fleet periodic files retain exhaustive process, historical and host matrices;
+the gate retains focused component, safety and rollout checks. Historical
+rollout assertions compare pinned revisions rather than today's declarations.
 
 ## 5. Later
 

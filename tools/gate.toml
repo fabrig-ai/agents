@@ -16,10 +16,14 @@ owner = "s/dynamic-memory"
 # 13144ab feat(logins): let holders attach launched runs to their own custody
 [files."tools/qa/test_logins.py"]
 owner = "s/qa"
+file_cpu_s = 3
+file_wall_s = 8
 
 # ae34d66 feat(qa): publish walk runs and expose the queue JSON contract
 [files."tools/qa/test_qa.py"]
 owner = "s/qa"
+file_cpu_s = 10
+file_wall_s = 15
 
 # 4101e72 Confirm origin before acknowledging saved record batches
 [files."tools/records/test_record.py"]
@@ -98,30 +102,6 @@ owner = "s/deploy"
 owner = "s/deploy"
 
 # New gate coverage
-[files."tools/test_fleet_sync_cases_1.py"]
-owner = "s/deploy"
-
-# New gate coverage
-[files."tools/test_fleet_sync_cases_2.py"]
-owner = "s/deploy"
-
-# New gate coverage
-[files."tools/test_fleet_sync_cases_3.py"]
-owner = "s/deploy"
-
-# New gate coverage
-[files."tools/test_fleet_sync_cases_4.py"]
-owner = "s/deploy"
-
-# New gate coverage
-[files."tools/test_fleet_sync_cases_5.py"]
-owner = "s/deploy"
-
-# New gate coverage
-[files."tools/test_fleet_sync_cases_6.py"]
-owner = "s/deploy"
-
-# New gate coverage
 [files."tools/test_gate_smoke.py"]
 owner = "s/deploy"
 
@@ -165,10 +145,43 @@ owner = "s/deploy"
 [files."tools/test_land_disk.py"]
 owner = "s/deploy"
 
+[files."tools/test_bootstrap_periodic.py"]
+owner = "s/deploy"
+
+[files."tools/test_bootstrap_safety_periodic.py"]
+owner = "s/deploy"
+
+[files."tools/test_bootstrap_stages_periodic.py"]
+owner = "s/deploy"
+
+[files."tools/test_fleet_sync_2_periodic.py"]
+owner = "s/deploy"
+
+[files."tools/test_fleet_sync_3_periodic.py"]
+owner = "s/deploy"
+
+[files."tools/test_fleet_sync_4_periodic.py"]
+owner = "s/deploy"
+
+[files."tools/test_fleet_sync_periodic.py"]
+owner = "s/deploy"
+
+[files."tools/test_fleet_sync_policy.py"]
+owner = "s/deploy"
+
+[files."tools/test_peer_seed_periodic.py"]
+owner = "s/deploy"
+
+[files."tools/test_review2_fleet_sync_periodic.py"]
+owner = "s/deploy"
+
+[files."tools/test_review_fleet_sync_periodic.py"]
+owner = "s/deploy"
+
 [select]
-"tools/fleet-sync" = ["tools/test_bootstrap.py", "tools/test_bootstrap_safety.py", "tools/test_bootstrap_stages.py", "tools/test_fleet_sync.py", "tools/test_fleet_sync_2.py", "tools/test_fleet_sync_2b.py", "tools/test_fleet_sync_2c.py", "tools/test_fleet_sync_3.py", "tools/test_fleet_sync_3b.py", "tools/test_fleet_sync_3c_manifest.py", "tools/test_fleet_sync_4.py", "tools/test_fleet_sync_cases_1.py", "tools/test_fleet_sync_cases_2.py", "tools/test_fleet_sync_cases_3.py", "tools/test_fleet_sync_cases_4.py", "tools/test_fleet_sync_cases_5.py", "tools/test_fleet_sync_cases_6.py", "tools/test_peer_seed.py", "tools/test_review2_fleet_sync.py", "tools/test_review_fleet_sync.py"]
-"fleet/**" = ["tools/test_bootstrap.py", "tools/test_bootstrap_safety.py", "tools/test_bootstrap_stages.py", "tools/test_fleet_sync.py", "tools/test_fleet_sync_2.py", "tools/test_fleet_sync_2b.py", "tools/test_fleet_sync_2c.py", "tools/test_fleet_sync_3.py", "tools/test_fleet_sync_3b.py", "tools/test_fleet_sync_3c_manifest.py", "tools/test_fleet_sync_4.py", "tools/test_fleet_sync_cases_1.py", "tools/test_fleet_sync_cases_2.py", "tools/test_fleet_sync_cases_3.py", "tools/test_fleet_sync_cases_4.py", "tools/test_fleet_sync_cases_5.py", "tools/test_fleet_sync_cases_6.py", "tools/test_peer_seed.py", "tools/test_review2_fleet_sync.py", "tools/test_review_fleet_sync.py"]
-"tools/installed" = ["tools/test_bootstrap.py", "tools/test_bootstrap_safety.py", "tools/test_bootstrap_stages.py", "tools/test_fleet_sync.py", "tools/test_fleet_sync_2.py", "tools/test_fleet_sync_2b.py", "tools/test_fleet_sync_2c.py", "tools/test_fleet_sync_3.py", "tools/test_fleet_sync_3b.py", "tools/test_fleet_sync_3c_manifest.py", "tools/test_fleet_sync_4.py", "tools/test_fleet_sync_cases_1.py", "tools/test_fleet_sync_cases_2.py", "tools/test_fleet_sync_cases_3.py", "tools/test_fleet_sync_cases_4.py", "tools/test_fleet_sync_cases_5.py", "tools/test_fleet_sync_cases_6.py", "tools/test_peer_seed.py", "tools/test_review2_fleet_sync.py", "tools/test_review_fleet_sync.py"]
+"tools/fleet-sync" = ["tools/test_bootstrap.py", "tools/test_bootstrap_periodic.py", "tools/test_bootstrap_safety.py", "tools/test_bootstrap_safety_periodic.py", "tools/test_bootstrap_stages.py", "tools/test_bootstrap_stages_periodic.py", "tools/test_fleet_sync.py", "tools/test_fleet_sync_2.py", "tools/test_fleet_sync_2_periodic.py", "tools/test_fleet_sync_2b.py", "tools/test_fleet_sync_2c.py", "tools/test_fleet_sync_3.py", "tools/test_fleet_sync_3_periodic.py", "tools/test_fleet_sync_3b.py", "tools/test_fleet_sync_3c_manifest.py", "tools/test_fleet_sync_4.py", "tools/test_fleet_sync_4_periodic.py", "tools/test_fleet_sync_periodic.py", "tools/test_fleet_sync_policy.py", "tools/test_peer_seed.py", "tools/test_peer_seed_periodic.py", "tools/test_review2_fleet_sync.py", "tools/test_review2_fleet_sync_periodic.py", "tools/test_review_fleet_sync.py", "tools/test_review_fleet_sync_periodic.py"]
+"fleet/**" = ["tools/test_bootstrap.py", "tools/test_bootstrap_periodic.py", "tools/test_bootstrap_safety.py", "tools/test_bootstrap_safety_periodic.py", "tools/test_bootstrap_stages.py", "tools/test_bootstrap_stages_periodic.py", "tools/test_fleet_sync.py", "tools/test_fleet_sync_2.py", "tools/test_fleet_sync_2_periodic.py", "tools/test_fleet_sync_2b.py", "tools/test_fleet_sync_2c.py", "tools/test_fleet_sync_3.py", "tools/test_fleet_sync_3_periodic.py", "tools/test_fleet_sync_3b.py", "tools/test_fleet_sync_3c_manifest.py", "tools/test_fleet_sync_4.py", "tools/test_fleet_sync_4_periodic.py", "tools/test_fleet_sync_periodic.py", "tools/test_fleet_sync_policy.py", "tools/test_peer_seed.py", "tools/test_peer_seed_periodic.py", "tools/test_review2_fleet_sync.py", "tools/test_review2_fleet_sync_periodic.py", "tools/test_review_fleet_sync.py", "tools/test_review_fleet_sync_periodic.py"]
+"tools/installed" = ["tools/test_bootstrap.py", "tools/test_bootstrap_periodic.py", "tools/test_bootstrap_safety.py", "tools/test_bootstrap_safety_periodic.py", "tools/test_bootstrap_stages.py", "tools/test_bootstrap_stages_periodic.py", "tools/test_fleet_sync.py", "tools/test_fleet_sync_2.py", "tools/test_fleet_sync_2_periodic.py", "tools/test_fleet_sync_2b.py", "tools/test_fleet_sync_2c.py", "tools/test_fleet_sync_3.py", "tools/test_fleet_sync_3_periodic.py", "tools/test_fleet_sync_3b.py", "tools/test_fleet_sync_3c_manifest.py", "tools/test_fleet_sync_4.py", "tools/test_fleet_sync_4_periodic.py", "tools/test_fleet_sync_periodic.py", "tools/test_fleet_sync_policy.py", "tools/test_peer_seed.py", "tools/test_peer_seed_periodic.py", "tools/test_review2_fleet_sync.py", "tools/test_review2_fleet_sync_periodic.py", "tools/test_review_fleet_sync.py", "tools/test_review_fleet_sync_periodic.py"]
 "tools/qa/**" = ["tools/qa/test_qa.py", "tools/qa/test_logins.py"]
 "tools/session/**" = ["tools/session/test_reap_hook.py", "tools/session/test_session_context.py", "tools/test_session_start.py"]
 "tools/records/**" = ["tools/records/test_record.py", "tools/records/test_record_collect.py", "tools/records/test_status_page.py", "tools/records/test_watch.py", "tools/records/test_watch_replay.py"]

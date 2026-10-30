@@ -37,10 +37,15 @@ removal of the gate's private temporary directory.
 
 The two-hour builder units render only for flagged hetzner3; the service checks
 the flag too. `tools/periodic` runs both tiers and mails file owners or ops.
-Existing companion `load_tests` hooks already exclude inherited cases. The
-base fleet behaviors are partitioned for per-file accounting, with no aggregate
-CPU saving claimed and no change to the 100 s tier budget.
-No existing behavior was moved to periodic solely because it was slow.
+Existing companion `load_tests` hooks exclude inherited cases. The combined
+candidate adopts s/deploy's component fixtures and periodic compatibility
+split; all 55 original fleet test method names remain represented, and the
+six obsolete gate batches are removed. The cut's legacy lander fixtures are
+superseded by the new gate's dedicated landing/race/reconciliation coverage. Historical rollout comparisons stay
+pinned. Every discovered gate/periodic file has an owner row; QA limits are
+10/15 s for test_qa and 3/8 s for test_logins (CPU/wall). Enforcement stays false.
+The gate-land-1 report records full-selection and periodic measurements,
+including actual targets, ownership totals and claimed builder restoration.
 
 ## 4. Remaining boundaries and validation
 
