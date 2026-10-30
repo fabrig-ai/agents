@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from fab import gate, log
+from fab import gate, log, slots
 from fab.sh import Runner, run
 
 
@@ -183,6 +183,7 @@ class Queue:
         Whatever the outcome, the attempt ends by bounding the gate's target as a slot's is
         (docs/design/fab.md, 7): fab.slots.remove(fab.slots.sweep_plan(repo / "target",
         <the attempt's start in ns>)), the bytes freed going into the batch record as freed."""
+        started_ns = time.time_ns()
         started = log.now()
         batch_id = datetime.strptime(started, "%Y-%m-%dT%H:%M:%S.%fZ").strftime("%Y%m%dT%H%M%SZ")
         detail = self.home / "queue" / (batch_id + ".log")
@@ -277,6 +278,10 @@ class Queue:
                     self._git("reset", "--hard", "origin/main")
                     self._git("clean", "-fd")
             finally:
+                try:
+                    record["freed"] = slots.remove(slots.sweep_plan(self.repo / "target", started_ns))
+                except Exception as error:
+                    record["sweep_error"] = str(error)
                 log.append("batch", path=self.log_path, ts=started, **record)
 
     def cycle(self) -> bool:

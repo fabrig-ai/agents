@@ -296,6 +296,65 @@ class ShellTest(unittest.TestCase):
         self.assertEqual(selections, ['full'] * 5)
         self.assertEqual(q.state['tried']['draft/bad'], 'bad')
 
+    def test_attempt_sweeps_old_build_output_after_green_and_red_checks(self):
+        started_ns = 1_700_000_000_000_000_000
+        branch = queue.Branch('draft/task', 'tip', 0)
+        for green in (True, False):
+            with self.subTest(green=green):
+                repo = self.home / str(green)
+                incremental = repo / 'target/debug/incremental'
+                old = repo / 'target/debug/deps/old-test'
+                fresh = old.with_name('fresh-test')
+                write(incremental / 'cache', 'incremental data')
+                write(old, 'old executable')
+                old.chmod(0o755)
+                os.utime(old, ns=(started_ns - 1, started_ns - 1))
+                expected_freed = sum(path.stat().st_blocks * 512 for path in
+                                     (incremental, incremental / 'cache', old))
+                fake = FakeRunner().on(['git', 'rev-parse'], Result(0, 'parent\n')).on(
+                    ['check'], Result(0 if green else 1))
+                q = queue.Queue(repo, home=self.home / ('runtime-' + str(green)), sh=fake)
+
+                def checks(repo, selected, paths, meta, *, lane):
+                    write(fresh, 'fresh executable')
+                    fresh.chmod(0o755)
+                    os.utime(fresh, ns=(started_ns, started_ns))
+                    return [gate.Step('check', ('check',), str(repo))]
+
+                with patch('fab.queue.time.time_ns', return_value=started_ns), \
+                        patch('fab.queue.build_batch', return_value=([branch], [])), \
+                        patch('fab.gate.changed_paths', return_value=['README.md']), \
+                        patch('fab.gate.check_steps', side_effect=checks):
+                    self.assertEqual(q.attempt([branch]), green)
+                self.assertFalse(incremental.exists())
+                self.assertFalse(old.exists())
+                self.assertEqual(fresh.read_text(), 'fresh executable')
+                batch, = [entry for entry in log.read(q.log_path) if entry['ev'] == 'batch']
+                self.assertEqual(batch['outcome'], 'green' if green else 'red')
+                self.assertEqual(batch['freed'], expected_freed)
+                self.assertNotIn('sweep_error', batch)
+
+    def test_sweep_failure_preserves_attempt_result_and_error(self):
+        branch = queue.Branch('draft/task', 'tip', 0)
+        for operation in ('sweep_plan', 'remove'):
+            for fails in (False, True):
+                with self.subTest(operation=operation, fails=fails):
+                    fake = FakeRunner().on(['git', 'rev-parse'], Result(0, 'parent\n'))
+                    if fails:
+                        fake.on(['git', 'status'], Result(0, '?? untracked\n'))
+                    q = queue.Queue(self.home / 'clone', sh=fake)
+                    with patch('fab.queue.build_batch', return_value=([], [])), \
+                            patch('fab.queue.slots.' + operation, side_effect=OSError('sweep refused')):
+                        if fails:
+                            with self.assertRaisesRegex(RuntimeError, 'uncommitted or untracked'):
+                                q.attempt([branch])
+                        else:
+                            self.assertTrue(q.attempt([branch]))
+                    batch = log.read(q.log_path)[-1]
+                    self.assertEqual(batch['outcome'], 'error' if fails else 'green')
+                    self.assertEqual(batch['sweep_error'], 'sweep refused')
+                    self.assertNotIn('freed', batch)
+
     def test_failed_cleanup_keeps_contained_tip_eligible_for_retry(self):
         branch = queue.Branch('draft/task', 'tip', 0)
         fake = FakeRunner().on(['git', 'rev-parse'], Result(0, 'parent\n')).on(
