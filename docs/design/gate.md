@@ -12,7 +12,8 @@
   selection and CPU/wall budgets. Enforcement starts report-only; only the
   user turns it on. No force push, queue, or production service calls in tests.
 - **Tests use disposable HOME and TMPDIR.** Each file has a fresh interpreter.
-  Shared fixture classes carry no inherited test cases; each behavior runs once.
+  Discovery honors existing `load_tests` hooks; base fleet cases are split into
+  files for per-file accounting, with the same aggregate tier budget.
 - **Main deploys itself.** Hosts poll main; this entrypoint remains policy,
   rather than remote branch protection (`docs/design/fleet.md`, section 3).
 

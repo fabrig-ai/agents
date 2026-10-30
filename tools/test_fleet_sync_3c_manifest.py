@@ -6,7 +6,7 @@ import unittest
 import test_fleet_sync as fixture
 
 
-class ManifestActivationTest(fixture.FleetFixture):
+class ManifestActivationTest(fixture.FleetTest):
     def test_agreed_manifest_links_preserve_legacy_record_and_system_watch(self):
         legacy = self.home / ".local/bin/record"
         legacy.parent.mkdir(parents=True)

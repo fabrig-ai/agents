@@ -16,7 +16,7 @@ from unittest.mock import patch
 import test_fleet_sync as fixture
 
 
-class ReviewTest(fixture.FleetFixture):
+class ReviewTest(fixture.FleetTest):
     def setUp(self):
         super().setUp()
         fixture.put(self.bin / "systemd-analyze", '''#!/usr/bin/env python3

@@ -11,7 +11,7 @@ from unittest.mock import patch
 import test_fleet_sync as fixture
 
 
-class FleetSync2Test(fixture.FleetFixture):
+class FleetSync2Test(fixture.FleetTest):
     def fail_timer(self):
         self.sync()
         fixture.put(self.home / "src/fabrig/agents/untracked", "dirty\n")

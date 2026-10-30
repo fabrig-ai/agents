@@ -22,14 +22,17 @@ lost claim replies, race overlap, refusals and plain pushes (`tools/test_land.py
 
 The two-hour builder units render only for flagged hetzner3; the service checks
 the flag too. `tools/periodic` runs both tiers and mails file owners or ops.
-Fleet fixture reuse no longer inherits all base test cases into nine suites;
-base behaviors are partitioned into bounded files without dropping assertions.
+Existing companion `load_tests` hooks already exclude inherited cases. The
+base fleet behaviors are partitioned for per-file accounting, with no aggregate
+CPU saving claimed and no change to the 100 s tier budget.
 No existing behavior was moved to periodic solely because it was slow.
 
 ## 4. Remaining boundaries and validation
 
 Remote branch protection and trusted lock-marker verification remain deferred.
-The 60 s merge target is measured, with default enforcement still false.
+The 60 s green-merge target is **not met**: current full-suite costs exceed
+the requested budgets, and wall-starved files prevent landing. Enforcement
+remains false; no budgets were raised to hide the measured costs.
 See the task report for real hetzner7 dry-run and full-gate measurements and
 focused validation. This branch is pushed for review, not landed.
 Machine action after landing: fleet-sync installs the new timer on hetzner3;

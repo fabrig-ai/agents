@@ -22,7 +22,7 @@ WantedBy=default.target
 MUTATIONS = {"enable", "disable", "daemon-reload", "start", "stop", "restart", "reload"}
 
 
-class StartOnceTest(fixture.FleetFixture):
+class StartOnceTest(fixture.FleetTest):
     def setUp(self):
         super().setUp()
         self.declaration = self.source / "fleet/units" / NAME

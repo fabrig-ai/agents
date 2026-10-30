@@ -11,7 +11,7 @@ import test_fleet_sync as fixture
 BUSY = {"item": "lock", "result": "busy", "reason": "a run is in progress; check again"}
 
 
-class FleetSync3bTest(fixture.FleetFixture):
+class FleetSync3bTest(fixture.FleetTest):
     def test_busy_check_reports_one_item_without_altering_backoff(self):
         self.sync()
         saved = self.state()
