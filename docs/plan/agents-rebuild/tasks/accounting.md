@@ -2,7 +2,7 @@
 id = "accounting"
 part = "accounting"
 kind = "feature"
-needs = []
+needs = ["channel-tick"]
 files = ["fab/accounting.py", "fab/calls.py", "fab/codex.py", "fab/run.py", "fab/code_report.py", "fab/tests/test_accounting.py", "fab/tests/test_calls.py", "fab/tests/test_codex.py", "fab/tests/test_run.py", "fab/tests/test_code_report.py"]
 effort = "high"
 minutes = 50
