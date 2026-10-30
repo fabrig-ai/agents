@@ -30,3 +30,4 @@ file
 xz-utils
 zstd
 unzip
+iproute2

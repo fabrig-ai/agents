@@ -13,6 +13,16 @@ repository resolution continues after fleet-sync promotes a release. Normal
 readmission/build acceptance remains the operator's after the scaler reports
 ready. The scaler's fake-service tests do not prove a real rebuild.
 
+Elastic creates attach Hetzner's `build` private network (currently 12769319,
+10.80.0.0/16, subnet 10.80.0.0/24). Debian 13 cloud images normally obtain the
+private NIC address through DHCP; the current root bootstrap does not override
+network managers or routes, and no extra configuration is needed for that image.
+It installs iproute2 for the scaler's address probe. Shared-cache readiness
+requires the API-assigned 10.80.0.x address on the member and a five-second TCP
+connect to h3's 10.80.0.13:3900. Missing DHCP/address/route or unreachable store
+leaves the member bootstrapping for operator investigation. Local-only mode
+skips these probes. A real image rebuild remains necessary acceptance evidence.
+
 Target: hetzner2 / debian-16gb-hel1-2, drained gate2. See [inventory](inventory.md)
 for the read-only 2026-10-29 survey and the state that a wipe would destroy.
 The sequence is USER preparation, **one root script**, **one user script**,

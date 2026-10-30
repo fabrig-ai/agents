@@ -35,7 +35,9 @@ the mirror units: the previous runner parses candidate fleet assets before exec.
 **`fleet/pool.toml`** holds:
 - the template: server type (cpx42), image (debian-13), location (hel1), roles
   (builder), machine_env and env, exactly like a hosts.toml entry;
-- the name prefix (`pool`), the Hetzner SSH key name, and the API base;
+- the name prefix (`pool`), the Hetzner SSH key name, the API base,
+  and `network = "build"` (currently id 12769319, 10.80.0.0/16,
+  subnet 10.80.0.0/24);
 - separate `kache_source = "~/.config/fleet-scale/kache-store.env"` on hel8
   and `kache_destination = "~/.config/kache/store.env"` on the member;
 - `[limits]`, empty until the user sets them: `max_members`,
@@ -44,7 +46,8 @@ the mirror units: the previous runner parses candidate fleet assets before exec.
 
 **Central registry** `~/src/fabrig/fleet/members.json` on hel8, locked like
 claims. Each member records its name (`pool-N`), Hetzner id, IPv4, ssh target,
-host key fingerprint, template revision, state (`creating`, `bootstrapping`,
+host key fingerprint, exact added trust lines, template revision, state
+(`creating-unresolved`, `creating`, `bootstrapping`,
 `ready`, `draining`, `deleting`) and times. Only fleet-scale writes it.
 
 **One reader** for consumers: `fleet-scale hosts --json` prints fixed hosts
@@ -58,16 +61,22 @@ ssh but receives no work (section 5).
    exact declared owned 0600 source before creating anything; never search for
    or derive another source. Take the registry lock, pick the next `pool-N`, record
    `creating`.
-2. **Create.** POST the server with the template, the fleet SSH key, and
-   labels `fleet=pool`, `member=pool-N`. Record the id and IPv4.
-3. **First contact.** Wait for SSH, record the host key fingerprint on first
-   connection into hel8's known_hosts (trust on first use, immediately after
-   creation; the fingerprint is kept in the registry).
+2. **Create.** Resolve the configured network name to exactly one id and POST
+   the server with `networks: [id]`, the template, the fleet SSH key, and
+   labels `fleet=pool`, `member=pool-N`. Before POST, durably record the request
+   time and `creating-unresolved`. A confirmed id moves it to `creating`;
+   record public IPv4 and the attached network's private IPv4.
+3. **First contact.** Wait for SSH using accept-new against only hel8's dedicated
+   0600 `~/.ssh/known_hosts.d/fleet-scale`. Keep its fingerprint and exact
+   added lines in the registry. All later member and seed SSH uses that file
+   with strict checking, no global known-hosts fallback or DNS host-key trust.
+   Fixed-peer public trust is imported read-only from normal known_hosts;
+   that file is never modified.
 4. **Bootstrap.** Copy `fleet/bootstrap` at the deployed release, run
    `root.sh --host pool-N` as root and `user.sh --host pool-N` as the user.
    The member's declaration comes from the template; repository origins point
    at hel8's mirrors (`~/src/fabrig/mirror/{agents,fabrig}.git`) through a
-   per-member git-only SSH key on hel8 (`restrict,command="git-shell -c ..."`).
+   per-member git-only SSH key on hel8 (`restrict,command=".../mirror-serve"`).
    Peer-seeded tools are relayed by the controller using its existing trusted
    seed access; only allowlisted artifacts are transferred and verified against
    fleet pins both before transfer and on the member. Members need no general
@@ -84,30 +93,53 @@ ssh but receives no work (section 5).
    promotion. Agent logins remain section 6, outside the scaling implementation.
 6. **Verify.** On the member: `fleet-sync --check` exits 0 (warnings only),
    the pinned tool versions answer, heavy reports installed, the fleet-sync
-   timer is active. Record `ready`.
+   timer is active. Shared-cache members must also have the API-recorded
+   10.80.0.x address on a non-loopback interface and pass a five-second bash
+   `/dev/tcp/10.80.0.13/3900` connect. The pinned kache recipe documents no
+   read-only remote status command; TCP is the reachability check.
+   `--local-only-kache` skips these network probes. Record `ready`.
 
 Any failure stops at the failing step with the member left in its state;
-`down` removes a member in any state.
+`down` cleans up a member in any state, subject to uncertain-create
+reconciliation below. Debian 13 cloud-image DHCP configures the attached NIC;
+bootstrap adds iproute2 for verification and needs no extra network service
+configuration. A missing address or route prevents shared readiness.
 
 ## 4. `down`
 
-1. **Drain.** Record `draining`. No new claims (the slots tool skips draining
+1. **Reconcile uncertain creates.** Without an id, `down` and `list` query
+   both labels, retrying for ten seconds. Exactly one match records its id;
+   multiple matches refuse. Empty results keep `creating-unresolved` until a
+   fresh query at least ten minutes after the recorded create request remains
+   empty. Only `down` may then retire it. API errors never establish absence.
+   `list` flags unresolved entries and records reconciliation errors; if the
+   registry is busy it shows the last complete snapshot without waiting.
+2. **Drain.** Record `draining`. No new claims (the slots tool skips draining
    members once adopted). Wait for its claims and heavy jobs to end, with a
-   five-minute bound; `--force` is the user's or ops' explicit call. Heavy's
-   version-1 atomic snapshot, under a shared read-only host lock, must show
-   every task released. Missing/unknown snapshots fail closed; no heavy state
-   is created or reconciled by the drain probe.
-2. **Return logins** to the pool (section 6).
-3. **Deregister.** Remove its git-only key from hel8, its known_hosts line, and
-   its registry entry (kept in a `retired` list with times).
-4. **Delete** the server by id and verify the API reports it gone.
+   five-minute bound; `--force` explicitly bypasses only this drain.
+   Heavy's version-1 atomic snapshot, under a shared read-only host lock,
+   must show every task released. Missing/unknown snapshots fail closed.
+   Partial builders without ready_at have no work and skip this probe.
+3. **Return logins** to the pool (section 6, later).
+4. **Delete.** With a recorded id, GET only that id, require both exact pool
+   labels and DELETE only it. Never expand this set through label search.
+   A mismatching label refuses even under --force. Confirm absence by GET.
+5. **Deregister.** Only after confirmed deletion (or fresh empty reconciliation
+   after the grace), remove its marked git key and the exact recorded lines
+   from the dedicated trust file, preserving unrelated, hashed and multi-alias
+   entries. Keep the member in `retired` with times. Interrupted deletion stays
+   tracked; retries of retired names are idempotent.
 
 ## 5. Mirrors and access
 
 **hel8 serves two bare mirrors,** refreshed every minute by `mirror.timer`
 (session role): agents and fabrig from GitHub. Members fetch only; mirrors
-reject receive-pack ref updates through a pre-receive hook, since git-shell alone also permits receive-pack. They have
-no GitHub credential. A member's key on hel8 runs git-shell only.
+use a forced `mirror-serve` command with `restrict`. It parses
+SSH_ORIGINAL_COMMAND with shlex, without a shell, and execs only
+`git-upload-pack` for exactly `~/src/fabrig/mirror/{agents,fabrig}.git`.
+Other commands, extra arguments, parent traversal and symlink paths refuse
+with exit 1. Pre-receive hooks remain additional protection. Members have no
+GitHub credential. The forced helper is in the deployed current release.
 
 **Pushing from members** is out of scope in this pass: members run builds,
 gates and tier work that produce no branches. Implementer slots on members
@@ -115,7 +147,12 @@ need a push path; that is a later design with the login pool.
 
 **hel8's fleet SSH key** (`~/.ssh/fleet-scale`, created by fleet-scale on
 first use, 0600, registered in the Hetzner project by its public half) is
-used only for root bootstrap of new members. No agent reads it.
+used for member bootstrap and subsequent controller/operator access.
+`fleet-scale ssh NAME [CMD]` resolves the recorded address and applies strict
+dedicated trust and identity options. Direct operator access uses
+`ssh -o StrictHostKeyChecking=yes -o UserKnownHostsFile=~/.ssh/known_hosts.d/fleet-scale
+-o GlobalKnownHostsFile=/dev/null -o IdentitiesOnly=yes -i ~/.ssh/fleet-scale free@IP`.
+No agent reads the private key.
 
 ## 6. Agent login pool (decisions 0015, 0017)
 

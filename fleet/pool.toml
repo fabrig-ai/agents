@@ -1,4 +1,5 @@
 prefix = "pool"
+network = "build"
 ssh_key = "fleet-scale"
 api_base = "https://api.hetzner.cloud/v1"
 token_file = "~/src/rust/tmp/hetzner/api-token"

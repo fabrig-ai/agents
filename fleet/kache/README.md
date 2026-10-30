@@ -33,3 +33,10 @@ remote selectors are compared only when its config already has [cache.remote].
 Fleet never inspects store.env or drop-ins, and never changes existing cache or
 store contents. Ops must agree host by host before any existing-install takeover;
 shared-store setup and any drained-host restart remain operator procedures.
+
+For elastic shared-store builders, fleet-scale attaches the build network and
+checks the private address plus a five-second bash TCP connect to
+10.80.0.13:3900 before readiness. This recipe documents no read-only kache
+remote-reachability status command; the TCP check is the supported probe and
+does not establish authenticated store read/write acceptance. Local-only
+builders skip it. No cache content is changed by verification.

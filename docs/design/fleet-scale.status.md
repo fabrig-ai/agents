@@ -8,7 +8,8 @@ The implementation relays pinned peer artifacts through hel8, with verification
 at both ends, because git-only member authorization cannot run seed exports.
 Deletion precedes final deregistration so interrupted API deletion remains
 tracked and cleanable. Authorization and known_hosts changes retain backups.
-Mirrors reject receive-pack updates; git-shell alone is not read-only.
+Mirrors are served through the exact-path mirror-serve forced command;
+pre-receive hooks provide additional protection.
 
 Validation uses disposable HOMEs, a loopback fake API, fake SSH/scp and local
 key utilities. No real Hetzner call, key registration, hel8 SSH edit, or server
@@ -32,3 +33,14 @@ member's non-secret 0600 settings. Shared templates omit KACHE_LOCAL_ONLY and
 new-member bootstrap installs remote selectors/drop-in after credential
 streaming, then restarts that fresh cache. Existing fixed-host policy is unchanged.
 Tests use synthetic credentials only; no live source is read by this task.
+
+Scale-1c closes all six independent-review findings: exact read-only mirror
+commands, isolated 0600 host trust and exact-line removal, recorded-id-only
+deletion, bounded uncertain-create reconciliation with a ten-minute visibility
+grace, and build-network attachment plus private-address/TCP readiness checks.
+Debian 13 cloud-image DHCP remains responsible for the private NIC; bootstrap
+adds iproute2 and no network manager overrides. Kache has no documented
+read-only remote status command, so the bounded TCP probe is the store check.
+The fixture now covers all eight pin commands and all six peer artifacts,
+including tree formats, plus a real Git fetch without sshd. No live rebuild,
+DHCP or authenticated store acceptance has been performed.

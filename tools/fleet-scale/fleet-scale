@@ -2,6 +2,7 @@
 """Create and retire fleet builders (docs/design/fleet-scale.md §§2–5)."""
 import argparse
 import contextlib
+from collections import Counter
 import fcntl
 import hashlib
 import ipaddress
@@ -24,7 +25,9 @@ import urllib.parse
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[2]
-STATES = ("creating", "bootstrapping", "ready", "draining", "deleting")
+RECONCILE_SECONDS = 10
+CREATE_GRACE_SECONDS = 600
+STATES = ("creating-unresolved", "creating", "bootstrapping", "ready", "draining", "deleting")
 
 
 # Read-only heavy v1 snapshot contract, fabrig tools/heavy/design.md §§2–3.
@@ -108,13 +111,13 @@ def atomic(path, data, backup=False, mode=0o600):
 
 
 @contextlib.contextmanager
-def lock(path):
+def lock(path, blocking=True):
     safe(path).parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise Error("lock is not a regular file")
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        fcntl.flock(fd, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
         yield
     finally:
         os.close(fd)
@@ -136,8 +139,8 @@ class Registry:
     def write(self, data):
         atomic(self.path, json.dumps(data, indent=2) + "\n")
 
-    def locked(self):
-        return lock(self.path.with_suffix(".lock"))
+    def locked(self, blocking=True):
+        return lock(self.path.with_suffix(".lock"), blocking)
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -206,7 +209,8 @@ class Fleet:
             raise Error("max_members must be a nonnegative integer")
         self.registry = Registry(self.home)
         self.keypath = self.home / ".ssh/fleet-scale"
-        self.known = self.home / ".ssh/known_hosts"
+        self.known = self.home / ".ssh/known_hosts.d/fleet-scale"
+        self.user_known = self.home / ".ssh/known_hosts"
         self.api = API(self.config["api_base"], self.expand(self.config["token_file"]))
 
     def expand(self, path):
@@ -224,12 +228,27 @@ class Fleet:
             raise Error(f"{Path(str(argv[0])).name} failed (exit {result.returncode})")
         return result.stdout or b""
 
-    def ssh(self, member, command, user="free", stdin=None, stdout=None, timeout=600):
+    def trust_options(self, first=False):
+        return ("-o", f"UserKnownHostsFile={self.known}", "-o", "GlobalKnownHostsFile=/dev/null",
+                "-o", "StrictHostKeyChecking=" + ("accept-new" if first else "yes"),
+                "-o", "UpdateHostKeys=no", "-o", "VerifyHostKeyDNS=no", "-o", "HashKnownHosts=no")
+
+    def ssh(self, member, command=None, user="free", stdin=None, stdout=None, timeout=600, first=False):
         return self.run("ssh", "-T", "-i", self.keypath, "-o", "IdentitiesOnly=yes", "-o", "ForwardAgent=no",
-                        "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
-                        "-o", "UpdateHostKeys=no", "-o", "ConnectTimeout=5",
-                        "-o", f"UserKnownHostsFile={self.known}", f"{user}@{member['ipv4']}",
-                        command, stdin=stdin, stdout=stdout, timeout=timeout)
+                        "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", *self.trust_options(first),
+                        f"{user}@{member['ipv4']}", *([] if command is None else [command]),
+                        stdin=stdin, stdout=stdout, timeout=timeout)
+
+    def connect(self, name, command):
+        member = self.registry.read()["members"].get(name)
+        if not member or not member.get("ipv4"):
+            raise Error("member has no recorded SSH address")
+        argv = ["ssh", "-t" if sys.stdin.isatty() else "-T", "-i", str(self.keypath),
+                "-o", "IdentitiesOnly=yes", "-o", "ForwardAgent=no", "-o", "BatchMode=yes",
+                "-o", "ConnectTimeout=5", *self.trust_options(), "free@" + member["ipv4"]]
+        if command is not None:
+            argv.append(command)
+        return subprocess.run(argv, check=False).returncode
 
     def feed(self, member, command, data, user="free"):
         with tempfile.TemporaryFile() as stream:
@@ -278,7 +297,9 @@ class Fleet:
                 fields = public.split()
                 if len(fields) < 2 or fields[0] != "ssh-ed25519" or not re.fullmatch(r"[A-Za-z0-9+/=]+", fields[1]):
                     raise Error("invalid member public key")
-                line = ('restrict,command="git-shell -c \\"$SSH_ORIGINAL_COMMAND\\"" '
+                helper = str(self.home / "src/fabrig/current/tools/fleet-scale/mirror-serve")
+                forced = shlex.quote(helper).replace("\\", "\\\\").replace('"', '\\"')
+                line = ('restrict,command="' + forced + '" '
                         + " ".join(fields[:2]) + " " + marker + "\n").encode()
                 # Prepend so an unrelated final line without a newline is
                 # preserved byte-for-byte through add/remove.
@@ -287,50 +308,86 @@ class Fleet:
             if after != before:
                 atomic(path, after, backup=True)
 
+    def known_bytes(self):
+        if not safe(self.known).exists():
+            return b""
+        with opened(self.known) as stream:
+            return stream.read()
+
     def trust(self, data, member):
         deadline = time.monotonic() + 300
-        while True:
-            try:
-                public = self.run("ssh-keyscan", "-T", "5", "-t", "ed25519", member["ipv4"], timeout=15)
-                if public.strip():
-                    break
-            except Error:
-                pass
-            if time.monotonic() >= deadline:
-                raise Error("first SSH contact timed out")
-            time.sleep(2)
-        # Fingerprint only the newly scanned host, never unrelated known_hosts.
-        with tempfile.TemporaryDirectory() as directory:
-            scan = Path(directory) / "scan"
-            scan.write_bytes(public)
-            fingerprint = self.run("ssh-keygen", "-lf", scan).decode().split()[1]
         with lock(self.home / ".ssh/.fleet-scale.lock"):
-            old = b""
-            if safe(self.known).exists():
-                with opened(self.known) as stream:
-                    old = stream.read()
-            atomic(self.known, old + (b"\n" if old and not old.endswith(b"\n") else b"") + public, backup=True)
-        self.stamp(data, member, fingerprint=fingerprint)
-        while True:
+            before = self.known_bytes()
+            if before and not before.endswith(b"\n"):
+                raise Error("dedicated trust file must end with a newline before first contact")
+            atomic(self.known, before)
+            # Persist the baseline before first contact so cleanup also handles
+            # interruption between OpenSSH's append and our next registry write.
+            baseline = [line.decode() for line in before.splitlines(keepends=True)
+                        if line.split()[:1] == [member["ipv4"].encode()]]
+            self.stamp(data, member, trust_baseline=baseline, trust_pending=True)
             try:
-                self.ssh(member, "true", user="root", timeout=15)
-                return
-            except Error:
-                if time.monotonic() >= deadline:
-                    raise Error("root SSH readiness timed out")
-                time.sleep(2)
+                while True:
+                    try:
+                        self.ssh(member, "true", user="root", timeout=15, first=True)
+                        break
+                    except Error:
+                        if time.monotonic() >= deadline:
+                            raise Error("first SSH contact timed out")
+                        time.sleep(2)
+            finally:
+                lines = self.added_trust(member)
+                atomic(self.known, self.known_bytes())  # enforce 0600 after OpenSSH
+                self.stamp(data, member, known_hosts_lines=lines, trust_pending=False)
+            public = self.run("ssh-keygen", "-F", member["ipv4"], "-f", self.known)
+            with tempfile.TemporaryDirectory() as directory:
+                scan = Path(directory) / "scan"
+                atomic(scan, public)
+                fingerprint = self.run("ssh-keygen", "-lf", scan).decode().split()[1]
+            self.stamp(data, member, fingerprint=fingerprint)
+
+    def added_trust(self, member):
+        baseline = Counter(line.encode() for line in member.get("trust_baseline", []))
+        added = []
+        for line in self.known_bytes().splitlines(keepends=True):
+            if line.split()[:1] != [member["ipv4"].encode()]:
+                continue
+            if baseline[line]:
+                baseline[line] -= 1
+            else:
+                added.append(line.decode())
+        return added
 
     def untrust(self, member):
-        if not member.get("ipv4") or not safe(self.known).exists():
+        if not safe(self.known).exists():
             return
         with lock(self.home / ".ssh/.fleet-scale.lock"):
-            with opened(self.known) as stream:
-                before = stream.read()
-            with tempfile.TemporaryDirectory(dir=self.known.parent) as directory:
-                temporary = Path(directory) / "known_hosts"
-                temporary.write_bytes(before)
-                self.run("ssh-keygen", "-R", member["ipv4"], "-f", temporary)
-                atomic(self.known, temporary.read_bytes(), backup=True)
+            lines = self.added_trust(member) if member.get("trust_pending") else member.get("known_hosts_lines", [])
+            remove = Counter(line.encode() for line in lines)
+            retained = []
+            for line in self.known_bytes().splitlines(keepends=True):
+                if remove[line]:
+                    remove[line] -= 1
+                else:
+                    retained.append(line)
+            atomic(self.known, b"".join(retained), backup=True)
+
+    def peer_trust(self, address):
+        # Fixed peers must already be trusted; import public keys read-only.
+        with lock(self.home / ".ssh/.fleet-scale.lock"):
+            before = self.known_bytes()
+            atomic(self.known, before)
+            try:
+                trusted = self.run("ssh-keygen", "-F", address, "-f", self.known)
+            except Error:
+                trusted = self.run("ssh-keygen", "-F", address, "-f", safe(self.user_known))
+            rows = [line + b"\n" for line in trusted.splitlines() if line and not line.startswith(b"#")]
+            if not rows:
+                raise Error("fixed peer must already be trusted")
+            additions = b"".join(line for line in rows if line not in before.splitlines(keepends=True))
+            if additions:
+                atomic(self.known, before + (b"\n" if before and not before.endswith(b"\n") else b"") + additions)
+            return b"".join(rows)
 
     def archive(self, member):
         with tempfile.TemporaryFile() as archive:
@@ -353,11 +410,9 @@ class Fleet:
         if not re.fullmatch(r"[a-z][a-z0-9_-]*@[A-Za-z0-9.-]+", central):
             raise Error("invalid central SSH target")
         user, address = central.split("@")
-        trusted = self.run("ssh-keygen", "-F", address, "-f", self.known)
-        if not trusted.strip():
-            raise Error("hel8 must already be trusted in known_hosts")
-        self.feed(member, 'set -eu; umask 077; tmp=$(mktemp ~/.ssh/.known_hosts.XXXXXX); cat > "$tmp"; mv "$tmp" ~/.ssh/known_hosts', trusted)
-        config = f"Host FABRIG_CENTRAL\n HostName {address}\n User {user}\n HostKeyAlias {address}\n IdentityFile ~/.ssh/fleet-member\n IdentitiesOnly yes\n StrictHostKeyChecking yes\n UpdateHostKeys no\n"
+        trusted = self.peer_trust(address)
+        self.feed(member, 'set -eu; umask 077; mkdir -p ~/.ssh/known_hosts.d; tmp=$(mktemp ~/.ssh/known_hosts.d/.fleet-scale.XXXXXX); cat > "$tmp"; mv "$tmp" ~/.ssh/known_hosts.d/fleet-scale', trusted)
+        config = f"Host FABRIG_CENTRAL\n HostName {address}\n User {user}\n HostKeyAlias {address}\n IdentityFile ~/.ssh/fleet-member\n UserKnownHostsFile ~/.ssh/known_hosts.d/fleet-scale\n GlobalKnownHostsFile /dev/null\n IdentitiesOnly yes\n StrictHostKeyChecking yes\n UpdateHostKeys no\n"
         self.feed(member, 'set -eu; umask 077; tmp=$(mktemp ~/.ssh/.config.XXXXXX); cat > "$tmp"; mv "$tmp" ~/.ssh/config', config)
 
     def seeds(self, member):
@@ -378,7 +433,8 @@ class Fleet:
                     try:
                         with (work / "archive").open("wb") as output:
                             command = shlex.join(["python3", "-B", "-c", module["SEED_EXPORT"], json.dumps([install["source"], entries, install["kind"] != "binary"])])
-                            self.run("ssh", "-T", "-o", "ForwardAgent=no", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "UpdateHostKeys=no", hosts[peer]["ssh"], command, stdout=output)
+                            self.peer_trust(hosts[peer]["ssh"].split("@")[-1])
+                            self.run("ssh", "-T", "-o", "ForwardAgent=no", "-o", "BatchMode=yes", *self.trust_options(), hosts[peer]["ssh"], command, stdout=output)
                         module["Runner"].unpack_seed(None, work / "archive", work / "verified", entries)
                         break
                     except (Error, OSError, ValueError, tarfile.TarError):
@@ -417,6 +473,17 @@ finally:
             raise Error("kache credential SHA256 mismatch")
 
     def verify(self, member):
+        if not member.get("local_only_kache"):
+            interfaces = json.loads(self.ssh(member, "ip -j -4 address show scope global"))
+            addresses = [ipaddress.IPv4Address(addr["local"]) for interface in interfaces
+                         if interface.get("ifname") != "lo"
+                         for addr in interface.get("addr_info", []) if addr.get("family") == "inet"]
+            expected = member.get("private_ipv4")
+            if not expected or not any(str(ip) == expected and ip in ipaddress.IPv4Network("10.80.0.0/24")
+                                       for ip in addresses):
+                raise Error("shared kache requires the build network private IPv4 address")
+            self.ssh(member, "timeout 5 bash -c 'exec 3<>/dev/tcp/10.80.0.13/3900'", timeout=15)
+
         check = json.loads(self.ssh(member, "bash -lc 'fleet-sync --check --json'"))
         if any(row.get("result") not in ("ok", "warn", "held", "deferred", "skipped") for row in check["items"]):
             raise Error("fleet-sync verification reported drift or failure")
@@ -463,15 +530,22 @@ finally:
             data["members"][name] = member
             data["next"] += 1
             self.stamp(data, member, step="create")
+            networks = self.api.request("GET", "/networks?" + urllib.parse.urlencode({"name": self.config["network"]}))["networks"]
+            matches = [row for row in networks if row.get("name") == self.config["network"]]
+            if len(matches) != 1:
+                raise Error("build network name must resolve to exactly one network")
+            network = int(matches[0]["id"])
+            self.stamp(data, member, state="creating-unresolved", create_requested_at=time.time(), network_id=network)
             template = self.config["template"]
             result = self.api.request("POST", "/servers", {key: template[key] for key in ("server_type", "image", "location")} | {
-                "name": name, "ssh_keys": [self.config["ssh_key"]], "labels": {"fleet": "pool", "member": name}, "start_after_create": True})
+                "name": name, "ssh_keys": [self.config["ssh_key"]], "labels": {"fleet": "pool", "member": name}, "start_after_create": True, "networks": [network]})
             server = result["server"]
-            self.stamp(data, member, id=int(server["id"]))
+            self.stamp(data, member, state="creating", id=int(server["id"]))
             self.api.poll(result["action"]["id"])
             server = self.api.request("GET", f"/servers/{member['id']}")["server"]
             address = str(ipaddress.IPv4Address(server["public_net"]["ipv4"]["ip"]))
-            self.stamp(data, member, ipv4=address, ssh="free@" + address, step="trust")
+            private = [row["ip"] for row in server.get("private_net", []) if row.get("network") == network]
+            self.stamp(data, member, private_ipv4=private[0] if len(private) == 1 else None, ipv4=address, ssh="free@" + address, step="trust")
             self.trust(data, member)
             self.stamp(data, member, state="bootstrapping", step="root")
             self.archive(member)
@@ -514,6 +588,36 @@ finally:
             raise Error("cannot prove heavy idle; use --force only after operator drain")
         return status["idle"]
 
+    def reconcile(self, data, member):
+        if member.get("id"):
+            return True
+        requested = member.get("create_requested_at", member.get("created_at", time.time()))
+        self.stamp(data, member, state="creating-unresolved", create_requested_at=requested)
+        deadline = time.monotonic() + RECONCILE_SECONDS
+        while True:
+            queried_at = time.time()
+            rows = self.api.servers(member["name"])
+            if len(rows) > 1:
+                raise Error("several servers match member labels; refusing reconciliation")
+            if rows:
+                row = rows[0]
+                labels = row.get("labels", {})
+                if labels.get("fleet") != "pool" or labels.get("member") != member["name"]:
+                    raise Error("server lacks matching pool labels")
+                server_id = int(row["id"])
+                if server_id <= 0:
+                    raise Error("invalid server id")
+                self.stamp(data, member, state="creating", id=server_id, reconciled_at=time.time())
+                return True
+            now = time.time()
+            self.stamp(data, member, reconciled_at=now)
+            if queried_at >= requested + CREATE_GRACE_SECONDS:
+                self.stamp(data, member, absence_confirmed_at=now)
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(2)
+
     def down(self, name, force=False, dry=False):
         if not re.fullmatch(re.escape(self.config["prefix"]) + r"-[1-9][0-9]*", name):
             raise Error("invalid member name")
@@ -530,6 +634,8 @@ finally:
                     return
                 raise Error("unknown member")
             member = data["members"][name]
+            if not member.get("id") and not self.reconcile(data, member):
+                raise Error("create remains unresolved; retry after the 10 minute visibility grace")
             previous = member["state"]
             self.stamp(data, member, state="draining", step="drain")
             if not force and member.get("ready_at") and previous != "deleting":
@@ -539,27 +645,23 @@ finally:
                         raise Error("drain timed out; member remains draining")
                     time.sleep(2)
             self.stamp(data, member, state="deleting", step="recover-server")
-            # A POST can succeed before the client records its id. Labels recover it.
-            servers = self.api.servers(name)
-            ids = {int(row["id"]) for row in servers}
-            if member.get("id"):
-                ids.add(int(member["id"]))
+            # A recorded id is authoritative: never union it with label matches.
+            server_id = member.get("id")
             self.stamp(data, member, step="delete")
-            for server_id in ids:
-                server = self.api.request("GET", f"/servers/{server_id}", missing=True)
-                if server is None:
-                    continue
-                labels = server["server"].get("labels", {})
-                if labels.get("fleet") != "pool" or labels.get("member") != name:
-                    raise Error("refusing to delete a server without matching pool labels")
-                result = self.api.request("DELETE", f"/servers/{server_id}", missing=True)
-                if result and result.get("action"):
-                    self.api.poll(result["action"]["id"])
-                deadline = time.monotonic() + 300
-                while self.api.request("GET", f"/servers/{server_id}", missing=True) is not None:
-                    if time.monotonic() >= deadline:
-                        raise Error("server deletion not yet confirmed")
-                    time.sleep(2)
+            if server_id:
+                server = self.api.request("GET", f"/servers/{int(server_id)}", missing=True)
+                if server is not None:
+                    labels = server["server"].get("labels", {})
+                    if labels.get("fleet") != "pool" or labels.get("member") != name:
+                        raise Error("refusing to delete a server without matching pool labels")
+                    result = self.api.request("DELETE", f"/servers/{int(server_id)}", missing=True)
+                    if result and result.get("action"):
+                        self.api.poll(result["action"]["id"])
+                    deadline = time.monotonic() + 300
+                    while self.api.request("GET", f"/servers/{int(server_id)}", missing=True) is not None:
+                        if time.monotonic() >= deadline:
+                            raise Error("server deletion not yet confirmed")
+                        time.sleep(2)
             self.stamp(data, member, step="deregister")
             self.authorization(name)
             self.untrust(member)
@@ -567,10 +669,22 @@ finally:
             data["retired"].append(member)
             del data["members"][name]
             self.registry.write(data)
-        print(f"{name} retired; server deletion confirmed")
+        print(f"{name} retired; " + ("server deletion confirmed" if member.get("id") else "no server found after visibility grace"))
 
     def listing(self, json_output=False):
-        data = self.registry.read()
+        try:
+            with self.registry.locked(blocking=False):
+                data = self.registry.read()
+                for member in data["members"].values():
+                    if member["state"] in ("creating", "creating-unresolved") and not member.get("id"):
+                        try:
+                            self.reconcile(data, member)
+                            member.pop("reconciliation_error", None)
+                        except Error as error:
+                            member["reconciliation_error"] = str(error)
+                        self.registry.write(data)
+        except BlockingIOError:
+            data = self.registry.read()
         if json_output:
             print(json.dumps(data, sort_keys=True))
         elif not data["members"]:
@@ -604,6 +718,9 @@ def main():
     hosts = commands.add_parser("hosts")
     hosts.add_argument("--json", action="store_true", required=True)
     commands.add_parser("key")
+    ssh = commands.add_parser("ssh")
+    ssh.add_argument("name")
+    ssh.add_argument("remote_command", nargs="?")
     args = parser.parse_args()
     try:
         fleet = Fleet()
@@ -613,6 +730,8 @@ def main():
             fleet.down(args.name, args.force, args.dry_run)
         elif args.command == "list":
             fleet.listing(args.json)
+        elif args.command == "ssh":
+            return fleet.connect(args.name, args.remote_command)
         elif args.command == "hosts":
             fleet.hosts()
         else:

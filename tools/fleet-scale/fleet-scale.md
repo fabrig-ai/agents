@@ -19,6 +19,8 @@ fleet-scale up --local-only-kache
 fleet-scale list
 fleet-scale list --json
 fleet-scale hosts --json
+fleet-scale ssh pool-1
+fleet-scale ssh pool-1 'uname -a'
 fleet-scale down pool-1 --dry-run
 fleet-scale down pool-1
 fleet-scale down pool-1 --force
@@ -34,16 +36,25 @@ before `up`; the user's existing Hetzner key is not used for new servers.
 `fleet=pool,member=pool-N`, waits for its action and root SSH, records a TOFU
 fingerprint, bootstraps, and verifies before printing
 `pool-N ready free@IP`. It uses only the declared fleet key for member SSH.
-The registry records creating/bootstrapping/ready/draining/deleting and the
+The registry records creating-unresolved/creating/bootstrapping/ready/draining/deleting and the
 current step. A failed command leaves the entry visible in `list`. Clean up
 with `down NAME`; investigate errors before another `up` (which reserves a new
-name). A lost create response is recovered by labels during deletion.
+name). Before POST it records the create-request time and creating-unresolved.
+`down` and `list` retry both-label reconciliation for ten seconds. Exactly one
+match resolves the id; multiple matches refuse. Empty results remain unresolved
+until a fresh query at least ten minutes after the create request is still empty.
+`list` flags that state; only `down` then retires it. Failed queries never prove
+absence. A known id always selects only that server, regardless of label twins.
 
 Member git access is a separate key generated on the member. Its exact marked
-line on hel8 uses `restrict,command="git-shell -c \"$SSH_ORIGINAL_COMMAND\""`.
-Mirrors reject receive-pack updates with a pre-receive hook; members fetch only.
+line on hel8 uses `restrict,command=".../current/tools/fleet-scale/mirror-serve"`.
+The helper parses SSH_ORIGINAL_COMMAND without a shell and execs only
+git-upload-pack for the two exact mirror directories. Other paths/commands,
+symlinks, parent traversal, extra args and injection refuse with exit 1.
+Pre-receive hooks remain an additional guard.
 Members receive no GitHub identity or agent login. The central SSH alias uses
-hel8's already trusted known_hosts entry. All six peer-seeded tools are relayed
+hel8's already trusted public host key imported read-only into the dedicated
+trust file. Member aliases also use a dedicated trust file. All six peer-seeded tools are relayed
 through hel8 with existing admin SSH access to the eligible seeds: the exact
 allowlisted content is checked against fleet pins before transfer and again
 before installation. No general SSH grant on a seed is needed by the member.
@@ -79,7 +90,7 @@ missing, malformed, foreign-queue or unknown-version snapshots fail closed.
 `--force` explicitly bypasses draining after an independent operator drain.
 Partial bootstrap states do not receive work and can be removed without that
 probe. Deletion is verified by GET returning 404; only then are the marked
-key and that IP's known_hosts lines removed and the entry moved to `retired`.
+key and only its exact recorded dedicated trust lines removed and the entry moved to `retired`.
 A partial cleanup remains `deleting` and can be retried. Already retired names
 are idempotent. Claims on members are not assigned by current consumers; their
 adoption of the ready-only `hosts --json` feed is later work.
@@ -96,7 +107,8 @@ disabled. The token is read exclusively from its owned 0600 file for the
 Authorization header. API bodies and subprocess output are never printed on
 failure. Registry mutation holds a flock across each operation, serializing
 allocation/deletion/cleanup, and uses fsynced sibling renames. Readers see the
-last complete state while another operation holds the lock. SSH file edits use
+last complete state while another operation holds the lock; `list` skips
+reconciliation when that lock is busy. SSH file edits use
 a separate lock and preserve a `.fleet-scale.bak` backup. No real infrastructure
 is contacted by tests.
 
@@ -104,3 +116,28 @@ Verification runs `fleet-sync --check --json` (exit zero, no failed/drift or
 busy/held results), each pinned version command, `heavy --installed` and
 `systemctl --user is-active fleet-sync.timer`. Exit 0 means success; exit 1
 means failure with a recoverable registry state; argparse errors exit 2.
+
+Member trust lives exclusively in `~/.ssh/known_hosts.d/fleet-scale` (0600).
+First contact uses accept-new there; every subsequent scaler SSH call uses
+StrictHostKeyChecking=yes and that UserKnownHostsFile, disables global
+known-hosts/DNS fallback and host-key updates. The normal `~/.ssh/known_hosts`
+is read only for already approved fixed-peer public keys and never edited.
+Cleanup matches exact recorded lines with counts, preserving unrelated hashed
+and multi-alias entries; it never runs ssh-keygen -R. First-contact baselines
+are journaled so interruption before recording additions is recoverable.
+
+Use `fleet-scale ssh NAME [CMD]` for operator access, or:
+```
+ssh -o UserKnownHostsFile=~/.ssh/known_hosts.d/fleet-scale \
+    -o GlobalKnownHostsFile=/dev/null -o StrictHostKeyChecking=yes \
+    -o IdentitiesOnly=yes -i ~/.ssh/fleet-scale free@IP
+```
+
+`up` resolves `network = "build"` (currently 12769319) and attaches it in the
+create request. Debian 13 cloud-image DHCP brings up the private NIC;
+bootstrap installs iproute2 for verification, with no additional network
+service changes. Shared readiness requires the API-recorded private 10.80.0.x
+address and a successful `timeout 5 bash -c 'exec 3<>/dev/tcp/10.80.0.13/3900'`.
+The kache recipe documents no read-only remote status command; this TCP probe
+tests store reachability without writing the cache. Local-only mode still
+attaches the configured network but skips both network probes.

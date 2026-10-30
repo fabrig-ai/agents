@@ -12,6 +12,7 @@ import subprocess
 import tarfile
 import tempfile
 import threading
+import time
 import tomllib
 import unittest
 from unittest.mock import patch
@@ -24,21 +25,33 @@ TOKEN = 'TEST-TOKEN-MUST-NEVER-LEAK-95b633'
 ARTIFACT = b'#!/bin/sh\necho 2.1.312\n'
 
 SSH = r'''#!/usr/bin/env python3
-import hashlib, io, json, os, pathlib, sys, tarfile
+import hashlib, io, json, os, pathlib, shlex, subprocess, sys, tarfile
 home = pathlib.Path.home()
 command = sys.argv[-1]
 registry = home / 'src/fabrig/fleet/members.json'
 members = json.loads(registry.read_text())['members'] if registry.exists() else {}
 with (home / 'ssh.log').open('a') as log:
     log.write(json.dumps({'argv':sys.argv[1:], 'states':{k:v['state'] for k,v in members.items()}, 'steps':{k:v.get('step') for k,v in members.items()}})+'\n')
+if 'StrictHostKeyChecking=accept-new' in sys.argv:
+    known = pathlib.Path(next(arg.split('=',1)[1] for arg in sys.argv if arg.startswith('UserKnownHostsFile=')))
+    address = sys.argv[-2].split('@')[-1]
+    found = subprocess.run(['ssh-keygen','-F',address,'-f',str(known)],capture_output=True)
+    if found.returncode:
+        with known.open('a') as stream:
+            stream.write(address+' '+' '.join((home/'member.pub').read_text().split()[:2])+'\n')
 if os.environ.get('FAIL_SSH') and os.environ['FAIL_SSH'] in command:
     print('TEST-TOKEN-MUST-NEVER-LEAK-95b633', file=sys.stderr)
     sys.exit(7)
 if "seed file" in command or 'os.fdopen(home' in command or 'tarfile.open' in command:
+    source, entries, tree = json.loads(shlex.split(command)[-1])
     data = b'#!/bin/sh\necho 2.1.312\n'
     with tarfile.open(fileobj=sys.stdout.buffer, mode='w|') as tar:
-        item=tarfile.TarInfo('payload'); item.mode=0o755; item.size=len(data)
-        tar.addfile(item, io.BytesIO(data))
+        for name, entry in entries.items():
+            item=tarfile.TarInfo(name); item.mode=entry['mode']
+            if entry.get('type') == 'dir':
+                item.type=tarfile.DIRTYPE; tar.addfile(item)
+            else:
+                item.size=len(data); tar.addfile(item, io.BytesIO(data))
 elif 'fleet-member.pub' in command:
     print((home/'member.pub').read_text())
 elif 'hashlib.file_digest' in command:
@@ -58,7 +71,13 @@ elif 'fleet-sync --check' in command:
 elif 'fleet-scale-idle' in command:
     print(os.environ.get('HEAVY_STATUS', '{"idle":true}'))
 elif '--version' in command:
-    print('fixture 2.1.312')
+    pins=json.loads((home/'pins.json').read_text())
+    executable=shlex.split(shlex.split(command)[-1])[0]
+    print('wrong' if os.environ.get('WRONG_VERSION') == executable else pins[executable])
+elif 'ip -j -4 address' in command:
+    print('[]' if os.environ.get('NO_PRIVATE_IP') else '[{"ifname":"enp7s0","addr_info":[{"family":"inet","local":"10.80.0.20"}]}]')
+elif '/dev/tcp/10.80.0.13/3900' in command:
+    sys.exit(1 if os.environ.get('NO_STORE_TCP') else 0)
 elif 'is-active' in command:
     print(os.environ.get('TIMER_STATUS','active'))
 else:
@@ -102,17 +121,22 @@ class FakeAPI(BaseHTTPRequestHandler):
                 f.keys.append(body | {'id': 11})
                 return self.respond(201, {'ssh_key': f.keys[-1]})
             return self.respond(200, {'ssh_keys': f.keys})
+        if route.path == '/v1/networks':
+            return self.respond(200, {'networks':f.networks})
         if route.path == '/v1/servers':
             if self.command == 'POST':
                 number = f.next_id
                 f.next_id += 1
-                row = body | {'id': number, 'public_net': {'ipv4': {'ip': '192.0.2.' + str(number)}}}
+                row = body | {'private_net':[{'network':12769319,'ip':'10.80.0.20'}], 'id': number, 'public_net': {'ipv4': {'ip': '192.0.2.' + str(number)}}}
                 f.servers[number] = row
                 if f.lost_create:
                     return self.respond(500, {'error': TOKEN})
                 return self.respond(201, {'server':row, 'action':{'id':1}})
             selector = parse_qs(route.query)['label_selector'][0]
             member = selector.split('member=')[-1] if 'member=' in selector else None
+            if f.hidden_lists:
+                f.hidden_lists -= 1
+                return self.respond(200, {'servers':[]})
             rows = [v for v in f.servers.values() if member is None or v['labels'].get('member') == member]
             return self.respond(200, {'servers':rows})
         if route.path.startswith('/v1/actions/'):
@@ -159,12 +183,14 @@ class ScaleTest(unittest.TestCase):
         subprocess.run(['ssh-keygen','-q','-t','ed25519','-N','','-f',str(self.home / 'member')], check=True)
         public = (self.home / 'member.pub').read_text()
         put(self.bin / 'ssh-keyscan', '#!/bin/sh\nprintf "%s %s\\n" "$5" '+shlex_quote(' '.join(public.split()[:2]))+'\n', 0o755)
-        put(self.home / '.ssh/known_hosts', '204.168.210.29 '+public+'198.51.100.9 '+public)
+        put(self.home / '.ssh/known_hosts', '204.168.210.29 '+public+'2.29.124.199 '+public+'198.51.100.9 '+public)
         put(self.home / '.ssh/authorized_keys', '# retained comment\nssh-ed25519 AAAA other-user\n')
         self.original_auth = (self.home / '.ssh/authorized_keys').read_bytes()
         put(self.home / 'src/rust/tmp/hetzner/api-token', TOKEN)
         put(self.home / '.config/fleet-scale/kache-store.env', 'PRIVATE-KACHE-FIXTURE\n')
         self.requests, self.keys, self.servers = [], [], {}
+        self.hidden_lists = 0
+        self.networks = [{'name':'build','id':12769319,'ip_range':'10.80.0.0/16','subnets':[{'ip_range':'10.80.0.0/24'}]}]
         self.api_failure, self.lost_create = None, False
         self.action_status, self.next_id = 'success', 1
         server = ThreadingHTTPServer(('127.0.0.1',0), FakeAPI)
@@ -175,7 +201,25 @@ class ScaleTest(unittest.TestCase):
         self.addCleanup(server.shutdown)
         config = self.root / 'fleet/pool.toml'
         config.write_text(config.read_text().replace('https://api.hetzner.cloud/v1',f'http://127.0.0.1:{server.server_port}/v1'))
-        (self.root / 'fleet/versions.toml').write_text('[claude]\nversion="2.1.312"\ncommand=["claude","--version"]\n[claude.install]\nkind="binary"\nseed="peer"\nsource=".local/share/claude/versions/2.1.312"\ndestination=".local/share/claude/versions/2.1.312"\nmode="0755"\nsha256="'+hashlib.sha256(ARTIFACT).hexdigest()+'"\n')
+        # Exercise every real pin/command and all six peer kinds with synthetic,
+        # verified payloads; no production binaries or manifests are fetched.
+        versions = tomllib.loads((SOURCE/'fleet/versions.toml').read_text())
+        text = (SOURCE/'fleet/versions.toml').read_text()
+        digest = hashlib.sha256(ARTIFACT).hexdigest()
+        for pin in versions.values():
+            install = pin.get('install', {})
+            if install.get('seed') != 'peer':
+                continue
+            if install['kind'] == 'binary':
+                text = text.replace(install['sha256'], digest)
+            else:
+                entry = install['entrypoint']
+                parents = list(reversed(Path(entry).parents))
+                manifest = ''.join('directory 0755  '+str(parent)+'\n' for parent in parents)
+                manifest += digest+'  '+entry+'\nmode 0755  '+entry+'\n'
+                put(self.root/'fleet'/install['manifest'], manifest)
+        put(self.root/'fleet/versions.toml', text)
+        put(self.home/'pins.json', json.dumps({pin['command'][0]:pin['version'] for pin in versions.values()}))
         self.fleet = Fleet(self.root, self.home)
         with contextlib.redirect_stdout(io.StringIO()):
             self.fleet.key()
@@ -211,7 +255,21 @@ class ScaleTest(unittest.TestCase):
         self.assertEqual((self.home/'remote-credential').read_bytes(), b'PRIVATE-KACHE-FIXTURE\n')
         self.assertNotIn(TOKEN, (self.home/'ssh.log').read_text())
         create = next(row[2] for row in self.requests if row[:2] == ('POST','/v1/servers'))
+        self.assertEqual(create['networks'], [12769319])
+        self.assertEqual(member['network_id'], 12769319)
+        self.assertEqual(member['private_ipv4'], '10.80.0.20')
         self.assertEqual(create['ssh_keys'], ['fleet-scale'])
+        versions=tomllib.loads((SOURCE/'fleet/versions.toml').read_text())
+        log=(self.home/'ssh.log').read_text()
+        for pin in versions.values():
+            self.assertIn(pin['command'][0], log)
+        for name,pin in versions.items():
+            if pin.get('install',{}).get('seed') == 'peer':
+                self.assertIn('--seed '+name, log)
+        for row in rows:
+            self.assertIn('UserKnownHostsFile='+str(self.fleet.known),row['argv'])
+            self.assertIn('GlobalKnownHostsFile=/dev/null',row['argv'])
+            self.assertIn('StrictHostKeyChecking='+('accept-new' if row['argv'][-1]=='true' else 'yes'),row['argv'])
         self.assertEqual(create['server_type'], 'cpx42')
         self.assertEqual(create['labels'], {'fleet':'pool','member':'pool-1'})
 
@@ -240,7 +298,7 @@ class ScaleTest(unittest.TestCase):
         result = self.invoke('up')
         self.assertEqual(result.returncode, 1)
         self.assertIn('HTTP 500', result.stderr)
-        self.assertEqual(self.fleet.registry.read()['members']['pool-1']['state'], 'creating')
+        self.assertEqual(self.fleet.registry.read()['members']['pool-1']['state'], 'creating-unresolved')
 
     def test_lost_create_response_is_recovered_by_label(self):
         self.lost_create = True
@@ -254,7 +312,7 @@ class ScaleTest(unittest.TestCase):
         path = self.home/'.ssh/authorized_keys'
         self.assertTrue(path.read_bytes().endswith(self.original_auth))
         grant=path.read_text().splitlines()[0]
-        self.assertTrue(grant.startswith('restrict,command="git-shell -c \\"$SSH_ORIGINAL_COMMAND\\"" ssh-ed25519 '), grant)
+        self.assertTrue(grant.startswith('restrict,command="'+str(self.home/'src/fabrig/current/tools/fleet-scale/mirror-serve')+'" ssh-ed25519 '), grant)
         self.assertTrue(grant.endswith(' fleet-scale:pool-1'))
         self.assertEqual(path.with_name(path.name+'.fleet-scale.bak').read_bytes(), self.original_auth)
         self.assertEqual(self.invoke('down','pool-1').returncode, 0)
@@ -415,7 +473,7 @@ for _ in range(15):
         self.assertEqual(self.invoke('down','pool-1').returncode,0)
 
     def test_bad_verification_never_records_ready(self):
-        for environment in ({'CHECK_RESULT':'drift'},{'TIMER_STATUS':'inactive'}):
+        for environment in ({'CHECK_RESULT':'drift'},{'TIMER_STATUS':'inactive'},{'WRONG_VERSION':'rustc'}):
             result=self.invoke('up',**environment)
             self.assertEqual(result.returncode,1)
             data=self.fleet.registry.read()
@@ -562,6 +620,8 @@ for _ in range(15):
         log=(self.home/'ssh.log').read_text()
         self.assertNotIn('hashlib.file_digest',log)
         self.assertNotIn('bootstrap.py kache',log)
+        self.assertNotIn('ip -j -4 address',log)
+        self.assertNotIn('/dev/tcp/',log)
         self.assertNotIn('PRIVATE-KACHE',result.stdout+result.stderr+log)
         module=runpy.run_path(str(SOURCE/'tools/fleet-sync'),run_name='local_only_sync')
         declarations=module['Declarations'](SOURCE,self.home,'pool-1')
@@ -643,6 +703,187 @@ for _ in range(15):
         self.assertFalse(any(row['result'] in ('failed','drift') for row in runner.state['items']),runner.state['items'])
 
 
+    def test_trust_preserves_hashed_multialias_and_unrelated_entries(self):
+        public=' '.join((self.home/'member.pub').read_text().split()[:2])
+        hashed=self.directory/'hashed'
+        put(hashed,'192.0.2.1 '+public+'\n')
+        subprocess.run(['ssh-keygen','-H','-f',str(hashed)],check=True,capture_output=True)
+        unrelated=hashed.read_bytes()+('192.0.2.1,unrelated-alias '+public+'\n203.0.113.4 '+public+'\n').encode()
+        normal=self.home/'.ssh/known_hosts'
+        put(normal,normal.read_bytes()+unrelated)
+        before=normal.read_bytes()
+        # Preload fixed peers to make dedicated-file cleanup byte exact.
+        put(self.fleet.known, before)
+        dedicated=self.fleet.known.read_bytes()
+        member=self.up()
+        self.assertEqual(member['known_hosts_lines'],[]) # reused hashed trust, owns nothing
+        self.assertEqual(self.invoke('down','pool-1').returncode,0)
+        self.assertEqual(normal.read_bytes(),before)
+        self.assertEqual(self.fleet.known.read_bytes(),dedicated)
+        self.assertEqual(self.fleet.known.stat().st_mode&0o777,0o600)
+
+    def test_cleanup_removes_only_exact_recorded_line(self):
+        member=self.up()
+        normal=(self.home/'.ssh/known_hosts').read_bytes()
+        before=self.fleet.known.read_bytes()
+        owned=member['known_hosts_lines'][0].encode()
+        other=owned.replace(b'192.0.2.1 ',b'192.0.2.1,another-alias ')
+        put(self.fleet.known,before+other+owned)
+        self.assertEqual(self.invoke('down','pool-1').returncode,0)
+        self.assertEqual(self.fleet.known.read_bytes(),before.replace(owned,b'',1)+other+owned)
+        self.assertEqual((self.home/'.ssh/known_hosts').read_bytes(),normal)
+
+    def test_interrupted_first_contact_trust_is_recoverable(self):
+        member=self.up()
+        data=self.fleet.registry.read()
+        member=data['members']['pool-1']
+        member['trust_pending']=True
+        member.pop('known_hosts_lines')
+        self.fleet.registry.write(data)
+        self.assertEqual(self.invoke('down','pool-1').returncode,0)
+        self.assertNotIn(b'192.0.2.1 ',self.fleet.known.read_bytes())
+
+    def test_operator_ssh_uses_dedicated_trust(self):
+        self.up()
+        result=self.invoke('ssh','pool-1','echo operator')
+        self.assertEqual(result.returncode,0,result.stderr)
+        argv=json.loads((self.home/'ssh.log').read_text().splitlines()[-1])['argv']
+        self.assertIn('UserKnownHostsFile='+str(self.fleet.known),argv)
+        self.assertIn('StrictHostKeyChecking=yes',argv)
+        self.assertEqual(argv[-2:],['free@192.0.2.1','echo operator'])
+        self.assertEqual(self.invoke('ssh','pool-404').returncode,1)
+
+    def test_recorded_id_deletes_only_101_not_label_twin_202(self):
+        self.up()
+        data=self.fleet.registry.read()
+        data['members']['pool-1']['id']=101
+        self.fleet.registry.write(data)
+        row=self.servers.pop(1)
+        self.servers[101]=row|{'id':101}
+        self.servers[202]=row|{'id':202}
+        self.requests.clear()
+        result=self.invoke('down','pool-1','--force')
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual(set(self.servers),{202})
+        self.assertEqual([path for method,path,_ in self.requests if method=='DELETE'],['/v1/servers/101'])
+        self.assertFalse(any('label_selector' in path for _,path,_ in self.requests))
+
+
+    def test_recorded_id_absent_never_deletes_label_twin(self):
+        self.up()
+        self.servers[202]=self.servers.pop(1)|{'id':202}
+        result=self.invoke('down','pool-1','--force')
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual(set(self.servers),{202})
+        self.assertFalse(any(method=='DELETE' for method,_,_ in self.requests))
+
+    def test_both_labels_required_for_recorded_id(self):
+        self.up()
+        for labels in ({'fleet':'pool'},{'member':'pool-1'},{'fleet':'pool','member':'pool-2'}):
+            self.servers[1]['labels']=labels
+            self.assertEqual(self.invoke('down','pool-1','--force').returncode,1)
+            self.assertIn(1,self.servers)
+
+    def test_bad_label_from_missing_id_search_refuses(self):
+        self.lost_create=True
+        self.assertEqual(self.invoke('up').returncode,1)
+        self.servers[1]['labels']['fleet']='fixed'
+        self.assertEqual(self.invoke('down','pool-1','--force').returncode,1)
+        self.assertIn(1,self.servers)
+
+    def test_list_while_registry_busy_shows_unresolved_snapshot(self):
+        self.api_failure='POST /v1/servers'
+        self.assertEqual(self.invoke('up').returncode,1)
+        self.requests.clear()
+        with self.fleet.registry.locked():
+            result=self.invoke('list')
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertIn('creating-unresolved',result.stdout)
+        self.assertEqual(self.requests,[])
+
+    def test_missing_id_multiple_label_matches_refuses(self):
+        self.lost_create=True
+        self.assertEqual(self.invoke('up').returncode,1)
+        self.servers[2]=self.servers[1]|{'id':2}
+        self.assertEqual(self.invoke('down','pool-1','--force').returncode,1)
+        self.assertEqual(set(self.servers),{1,2})
+        self.assertEqual(self.fleet.registry.read()['members']['pool-1']['state'],'creating-unresolved')
+
+    def test_delayed_create_visibility_retries_in_down(self):
+        self.lost_create=True
+        self.assertEqual(self.invoke('up').returncode,1)
+        self.hidden_lists=2
+        with patch('time.sleep'):
+            self.fleet.down('pool-1')
+        self.assertEqual(self.servers,{})
+        self.assertEqual(self.fleet.registry.read()['members'],{})
+
+    def test_list_reconciles_delayed_create(self):
+        self.lost_create=True
+        self.assertEqual(self.invoke('up').returncode,1)
+        self.hidden_lists=2
+        output=io.StringIO()
+        with patch('time.sleep'),contextlib.redirect_stdout(output):
+            self.fleet.listing(True)
+        member=json.loads(output.getvalue())['members']['pool-1']
+        self.assertEqual(member['id'],1)
+        self.assertEqual(member['state'],'creating')
+
+    def test_empty_reconciliation_requires_fresh_ten_minute_query(self):
+        self.api_failure='POST /v1/servers'
+        self.assertEqual(self.invoke('up').returncode,1)
+        self.api_failure=None
+        data=self.fleet.registry.read()
+        requested=data['members']['pool-1']['create_requested_at']
+        output=io.StringIO()
+        globals_=Fleet.reconcile.__globals__
+        with patch.dict(globals_,RECONCILE_SECONDS=0),patch('time.time',return_value=requested+599):
+            with self.assertRaises(Error):self.fleet.down('pool-1')
+            with contextlib.redirect_stdout(output):self.fleet.listing()
+        self.assertIn('creating-unresolved',output.getvalue())
+        self.assertEqual(len(self.fleet.registry.read()['members']),1)
+        # A failed fresh query cannot use the previous empty response as proof.
+        self.api_failure='GET /v1/servers'
+        with patch('time.time',return_value=requested+600):
+            with self.assertRaises(Error):self.fleet.down('pool-1')
+        self.api_failure=None
+        with patch('time.time',return_value=requested+600):
+            self.fleet.down('pool-1')
+        self.assertEqual(self.fleet.registry.read()['members'],{})
+
+    def test_empty_then_late_server_is_not_leaked(self):
+        self.lost_create=True
+        self.assertEqual(self.invoke('up').returncode,1)
+        self.hidden_lists=1
+        with patch.dict(Fleet.reconcile.__globals__,RECONCILE_SECONDS=0):
+            with self.assertRaises(Error):self.fleet.down('pool-1')
+        self.assertEqual(len(self.servers),1)
+        self.assertEqual(self.invoke('down','pool-1').returncode,0)
+        self.assertEqual(self.servers,{})
+
+    def test_network_name_missing_or_ambiguous_refuses_before_create(self):
+        for networks in ([],self.networks*2):
+            self.networks=networks
+            self.assertEqual(self.invoke('up').returncode,1)
+        self.assertFalse(any(method=='POST' and path=='/v1/servers' for method,path,_ in self.requests))
+
+    def test_private_network_and_store_required_for_shared_ready(self):
+        for environment in ({'NO_PRIVATE_IP':'1'},{'NO_STORE_TCP':'1'}):
+            result=self.invoke('up',**environment)
+            self.assertEqual(result.returncode,1,result.stderr)
+            data=self.fleet.registry.read()
+            name=next(iter(data['members']))
+            self.assertEqual(data['members'][name]['state'],'bootstrapping')
+            self.assertEqual(self.invoke('down',name,'--force').returncode,0)
+
+    def test_local_only_skips_unavailable_network_verification(self):
+        result=self.invoke('up','--local-only-kache',NO_PRIVATE_IP='1',NO_STORE_TCP='1')
+        self.assertEqual(result.returncode,0,result.stderr)
+        log=(self.home/'ssh.log').read_text()
+        self.assertNotIn('ip -j -4 address',log)
+        self.assertNotIn('/dev/tcp/',log)
+
+
 def shlex_quote(value):
     import shlex
     return shlex.quote(value)
@@ -683,7 +924,7 @@ def failure_test(fragment, step):
 
 for _label,_fragment,_step in (
         ('archive','tar -xf','root'),('root','root.sh','root'),('copy','cp -a','root'),
-        ('member_key','fleet-member.pub','member-key'),('central_trust','mv "$tmp" ~/.ssh/known_hosts','member-key'),
+        ('member_key','fleet-member.pub','member-key'),('central_trust','mv "$tmp" ~/.ssh/known_hosts.d/fleet-scale','member-key'),
         ('seed','bootstrap.py seed','seeds'),('credential','hashlib.file_digest','credential'),
         ('member_settings','bootstrap.py member','member-settings'),('kache','bootstrap.py kache','kache'),
         ('user','user.sh','user'),('heavy_install','--install-reconciler','user'),
