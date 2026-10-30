@@ -38,13 +38,13 @@ paths and records-repository data paths are labelled where they are introduced.
 | `docs/design/status-page.md` | s/multi-coord | `tools/records/status-page`; public index and planned release data |
 | `tools/fleet-sync.md`; `fleet/bootstrap/README.md`, `fleet/kache/README.md`, `fleet/seeds/README.md` (current `fleet/**/README.md`) | s/deploy | Fleet, fleet-sync, gate (`tools/land`, `tools/check.sh`), units and bootstrap; to move into docs/design by its owner |
 | `tools/qa/qa.md`, `tools/qa/logins.md`, `tools/qa/passes.md` (current `tools/qa/*.md`) | s/qa | `tools/qa/`; to move into docs/design by its owner |
-| `tools/after-landing/design.md` | s/dynamic-memory | `tools/after-landing/`; to move into docs/design by its owner |
+| `docs/design/after-landing.md` | s/dynamic-memory | `tools/after-landing/`; published-tip checks, verdicts, routing and bisection |
 
-**Migration is owned work.** The last three rows list current text and coverage
+**Migration is owned work.** The remaining migration rows list current text and coverage
 responsibility. They do not assert that every tool already has a full design.
 Command-reference material remains beside code when its owner extracts a design.
 
 ## 4. Later
 
-- Complete the last three owners' design moves and fill uncovered code contracts.
+- Complete the remaining owners' design moves and fill uncovered code contracts.
 - Bring the remaining pipeline tools and role files over from fabrig, with designs.

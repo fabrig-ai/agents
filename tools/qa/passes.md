@@ -240,7 +240,7 @@ slot. No pass may build in this metadata clone.
 
 Read `events/after-landing/HOST/DATE.jsonl` for the configured producer host.
 Use **after-landing-run** events, whose actual fields include `commit`,
-`attempt`, `verdict` and `pairs` (after-landing/design.md, 4 and 6). For each
+`attempt`, `verdict` and `pairs` (`docs/design/after-landing.md`, 4 and 6). For each
 tip use its latest numeric attempt; conflicting duplicate identities are an
 input fault. A usable run has verdict `green`, all configured pairs ran, and
 no confirmed red. Red, partial, individual test/recovery events and bisection
@@ -1273,7 +1273,7 @@ from today's roster.
 Read a consistent, confirmed records main snapshot using the existing records
 pull path. Its events are `events/after-landing/HOST/DATE.jsonl` for
 `QA_AFTER_LANDING_HOST`. No new writer, permission or records event is needed.
-The published contract is `tools/after-landing/design.md` sections 4 and 6,
+The published contract is `docs/design/after-landing.md`, sections 4 and 6,
 `tools/records/record.md`, and the existing after-landing event serializer.
 
 Use the envelope `source="after-landing"`, `host`, `kind`, `id`, `time`, and
@@ -1283,7 +1283,7 @@ configured profile name to result; require every enrolled profile, each with
 `status="ran"`, and empty per-pair `red` arrays (confirmed identities), with
 `verdict="green"`. Counts `selected`, `executed`, `failed` describe tests;
 `failed` alone does not mean confirmed red, since reruns may establish flakes.
-Use the reviewed tier set from after-landing design section 3, not every
+Use the reviewed tier set from `docs/design/after-landing.md`, section 3, not every
 profile appearing in fabrig's tier configuration.
 
 Today's serializer can publish a compacted event with `pairs_count`, bounded
