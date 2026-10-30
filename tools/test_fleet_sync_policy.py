@@ -372,7 +372,7 @@ class FleetPolicyTest(FleetTest):
                          "PLAN_MIN_DISK_GB=40\nKACHE_MAX_GB=50\nKACHE_LOCAL_ONLY=1\nQA_SLOTS=2\nHEAVY_BUILD_SLOTS=3\n"
                          "QA_WALK_KINDS=forgejo=2:chatgpt,claude=2:claude\nQA_WALK_SLOTS=forgejo=8+1,claude=4+3\n"
                          "QA_SLOT_HOST=hetzner6\nQA_CLAIM_OWNER=s/qa\nQA_CLAIM_SSH=free@204.168.210.29\n"
-                         "QA_STUCK_TO=s/qa@hel8\n")
+                         "QA_STUCK_TO=s/qa@hel8\nSESSION_SLOTS=2\n")
         settings = json.loads((self.home / ".claude/settings.json").read_text())
         self.assertNotIn("HEAVY_BUILD_JOBS", settings["env"])
         self.assertNotIn("PATH", settings["env"])
