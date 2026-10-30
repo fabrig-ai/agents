@@ -334,7 +334,7 @@ class Reaper:
                         except (FileNotFoundError, NotADirectoryError):
                             pass
                 elif cls == 'precheck-logs':
-                    for root in self.children(self.home / 'src/fabrig/slots'):
+                    for root in self.children(self.home / self.config['classes'][cls]['root']):
                         if root.name.endswith('.precheck-logs'):
                             for path in self.children(root):
                                 add(path, cls)
@@ -365,11 +365,13 @@ class Reaper:
 
     def never(self, path):
         fixed = ['src/rust/tmp/logins', 'src/rust/tmp/heavy', 'src/rust/tmp/post',
-                 '.ssh', '.claude/.credentials.json', '.claude.json', '.codex/auth.json',
+                 '.ssh', '.claude/.credentials.json', '.claude/jobs/pins.json', '.claude.json', '.codex/auth.json',
                  'archive', '.local/state/reap', 'src/rust/tmp/logs/heavy.tsv']
         fixed += [f'src/fabrig/{name}' for name in ('claims', 'leases', 'queue', 'main', 'agents', 'current', 'releases')]
         fixed += [f'.local/state/{name}' for name in ('fleet-sync', 'fabrig', 'heavy')]
         if not inside(path, self.home) or any(intersects(path, self.home / p) for p in fixed):
+            return True
+        if inside(path, self.home / '.codex') and not inside(path, self.home / '.codex/sessions'):
             return True
         qa = self.home / 'src/rust/tmp'
         if inside(path, qa) and len(path.relative_to(qa).parts) and path.relative_to(qa).parts[0].startswith('qa'):

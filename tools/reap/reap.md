@@ -59,7 +59,8 @@ Nested symlinks are never followed; removal only unlinks them.
 Never paths include `src/rust/tmp/{logins,qa*,heavy,post}`,
 `src/fabrig/{claims,leases,queue,main,agents,current,releases}`,
 `.local/state/{fleet-sync,fabrig,heavy,reap}`, `.ssh`, `.claude/.credentials.json`,
-`.claude.json`, `.codex/auth.json`, and `archive`. Their ancestors are protected
+`.claude.json`, Codex state outside `.codex/sessions`, and `archive`.
+Claude jobs bookkeeping (`pins.json`) is also protected. Their ancestors are protected
 too. The queue append targets and `logs/heavy.tsv` are also fixed exclusions.
 Heavy reads its TSV for ID allocation and completed-task recovery, so it must
 survive retention. Completed heavy logs are read for a waiting client's tail;

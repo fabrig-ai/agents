@@ -368,7 +368,7 @@ class ReapTests(unittest.TestCase):
                      'src/fabrig/leases/a', 'src/fabrig/queue/a', 'src/fabrig/main/a', 'src/fabrig/agents/a',
                      'src/fabrig/current/a', 'src/fabrig/releases/a', '.local/state/fleet-sync/a',
                      '.local/state/fabrig/a', '.local/state/heavy/a', '.ssh/id', '.claude/.credentials.json',
-                     '.claude.json', '.codex/auth.json', 'archive/a', 'src/fabrig', '.codex', '.claude']:
+                     '.claude.json', '.claude/jobs/pins.json', '.codex/auth.json', '.codex/config.toml', '.codex/history.jsonl', 'archive/a', 'src/fabrig', '.codex', '.claude']:
             with self.subTest(path=path):
                 self.assertTrue(reaper.never(self.home / path))
         self.assertTrue(reaper.never(Path(self.temp.name)))
