@@ -1,9 +1,13 @@
+import io
 import json
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timezone
+from unittest.mock import patch
 
 from fab import hosts, log, report
 from fab.heavy import EX_TEMPFAIL
+from fab.run import _write
 from fab.sh import Result, ssh
 from fab.tests.support import FakeRunner, tmp_home
 
@@ -160,3 +164,124 @@ class ReportTest(unittest.TestCase):
                              home / "fab" / "reports" / "plan" / "2026-10-29.md")
             self.assertEqual(report.report_path(report.LANDING, "2026-10-29"),
                              home / "fab" / "reports" / "landing" / "2026-10-29.md")
+
+
+class ReportCommandTest(unittest.TestCase):
+    def setUp(self):
+        self.home = self.enterContext(tmp_home())
+        self.sources = report.Sources([], [], {}, ["queue: unavailable"])
+        self.selected = hosts.parse(HOSTS)
+        self.gather = self.enterContext(patch("fab.report.gather", return_value=self.sources))
+        self.load_hosts = self.enterContext(patch("fab.hosts.load", return_value=self.selected))
+        self.enterContext(patch("fab.log.now", return_value=END))
+
+    def plan(self, draft="sample"):
+        directory = self.home / draft
+        _write(directory / "plan.toml", f'''draft = "{draft}"
+repo = "agents"
+[[part]]
+id = "core"
+title = "Core"
+mode = "feature"
+needs = []
+design = "docs/design/fab.md"
+[[slice]]
+id = 1
+story = "Report"
+parts = ["core"]
+walk = false
+''')
+        _write(directory / "tasks" / "task.md", '''+++
+id = "task"
+part = "core"
+kind = "feature"
++++
+Implement the task.
+''')
+        return directory
+
+    def command(self, argv):
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = report.main(argv)
+        return code, out.getvalue(), err.getvalue()
+
+    def test_report_command_code_print_and_write(self):
+        directory = self.plan()
+        code, text, err = self.command(["code", str(directory)])
+        self.assertEqual((code, err), (0, ""))
+        self.assertTrue(text.startswith("# Code report: sample, 2026-10-30\n"))
+        self.assertIn(f"{END} to {END}", text)
+        self.assertIn("queue: unavailable", text)
+        self.assertFalse((self.home / "fab" / "reports").exists())
+        self.load_hosts.assert_called_once_with()
+        self.gather.assert_called_once_with(self.selected, "2026-10-23T00:00:00.000Z")
+        code, written, err = self.command(["code", str(directory), "--write"])
+        path = self.home / "fab" / "reports" / "sample" / "2026-10-30.md"
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(written, text + str(path) + "\n")
+        self.assertEqual(path.read_text(), text)
+
+    def test_report_command_landing_day_and_write(self):
+        code, text, err = self.command(["landing", "--day", "2026-10-29", "--write"])
+        path = self.home / "fab" / "reports" / "landing" / "2026-10-29.md"
+        self.assertEqual((code, err), (0, ""))
+        self.assertTrue(text.startswith("# Landing report, 2026-10-29\n"))
+        self.assertIn(f"{START} to {END}", text)
+        self.assertEqual(text, path.read_text() + str(path) + "\n")
+        self.gather.assert_called_once_with(self.selected, "2026-10-21T00:00:00.000Z")
+
+    def test_report_command_daily_keeps_existing_reports(self):
+        directories = [self.plan(), self.plan("another")]
+        argv = ["daily", *(str(path) for path in directories)]
+        code, text, err = self.command(argv)
+        paths = [self.home / "fab" / "reports" / name / "2026-10-29.md"
+                 for name in ("sample", "another", "landing")]
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(text.splitlines(), [f"{path} written" for path in paths])
+        self.gather.assert_called_once_with(self.selected, "2026-10-21T00:00:00.000Z")
+        contents = [path.read_bytes() for path in paths]
+        stats = [path.stat() for path in paths]
+        self.assertTrue(contents[0].startswith(b"# Code report: sample, 2026-10-29\n"))
+        with patch("fab.run._write") as write:
+            code, text, err = self.command(argv)
+        write.assert_not_called()
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(text.splitlines(), [f"{path} kept" for path in paths])
+        self.assertEqual([path.read_bytes() for path in paths], contents)
+        self.assertEqual([path.stat() for path in paths], stats)
+
+    def test_report_command_daily_continues_after_plan_errors(self):
+        valid = self.plan()
+        broken = self.plan("broken")
+        task = broken / "tasks" / "task.md"
+        _write(task, task.read_text().replace('part = "core"', 'part = "missing"'))
+        missing = self.home / "missing"
+        code, text, err = self.command(["daily", str(missing), str(broken), str(valid)])
+        self.assertEqual(code, 1)
+        self.assertIn(str(missing / "plan.toml"), err)
+        self.assertIn("task broken/task names unknown part missing", err)
+        self.assertFalse((self.home / "fab" / "reports" / "broken").exists())
+        for name in ("sample", "landing"):
+            path = self.home / "fab" / "reports" / name / "2026-10-29.md"
+            self.assertTrue(path.is_file())
+            self.assertIn(f"{path} written", text)
+        self.gather.assert_called_once_with(self.selected, "2026-10-21T00:00:00.000Z")
+
+    def test_report_command_code_plan_error(self):
+        directory = self.home / "missing"
+        code, text, err = self.command(["code", str(directory), "--write"])
+        self.assertEqual((code, text), (1, ""))
+        self.assertIn(str(directory / "plan.toml"), err)
+        self.assertFalse((self.home / "fab" / "reports").exists())
+
+    def test_report_command_bad_arguments(self):
+        for argv in (["landing", "--day", "bad"], ["landing", "--day", "2026-10-31"],
+                     ["code", "missing", "--day", "2026-02-30"], [], ["daily"],
+                     ["code"], ["daily", "missing", "--write"]):
+            with self.subTest(argv=argv), redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as error:
+                    report.main(argv)
+                self.assertEqual(error.exception.code, 2)
+        self.load_hosts.assert_not_called()
+        self.gather.assert_not_called()

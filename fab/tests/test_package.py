@@ -14,6 +14,7 @@ class CliTest(unittest.TestCase):
             self.assertEqual(cli.main(["--help"]), 0)
             self.assertEqual(cli.main(["nonesuch"]), 2)
         self.assertIn("test", out.getvalue())
+        self.assertIn("report", out.getvalue())
         self.assertIn("unknown command", err.getvalue())
 
 

@@ -221,4 +221,80 @@ def main(argv: list[str]) -> int:
     or `<path> kept`. Exit 0; 1 when a plan does not load or has problems (the message on
     stderr, nothing written for it, the other reports still written); 2 on bad arguments or a
     bad day."""
-    raise NotImplementedError
+    import argparse
+    import sys
+
+    from fab import code_report, hosts, landing_report
+    from fab.plan import PlanError, load_plan, load_tasks, problems
+    from fab.run import _write
+
+    parser = argparse.ArgumentParser(prog="fab report")
+    commands = parser.add_subparsers(dest="command", required=True)
+    code = commands.add_parser("code")
+    code.add_argument("plan_dir", type=Path, metavar="PLAN_DIR")
+    landing = commands.add_parser("landing")
+    for command in (code, landing):
+        command.add_argument("--day")
+        command.add_argument("--write", action="store_true")
+    daily = commands.add_parser("daily")
+    daily.add_argument("plan_dirs", type=Path, nargs="+", metavar="PLAN_DIR")
+    args = parser.parse_args(argv)
+    now = log.now()
+    day = (stamp(moment(now) - timedelta(days=1))[:10] if args.command == "daily"
+           else args.day)
+    try:
+        window = day_window(day, now)
+    except ValueError as error:
+        parser.error(str(error))
+    day = window.start[:10]
+    since = stamp(moment(window.previous().start) - timedelta(days=LOOKBACK_DAYS))
+
+    def load(directory):
+        plan = load_plan(directory / "plan.toml")
+        tasks = load_tasks(directory / "tasks", plan.draft, plan.repo)
+        issues = problems(plan, tasks)
+        if issues:
+            raise PlanError(f"{directory}: " + "\n".join(issues))
+        return plan, tasks
+
+    try:
+        selected = hosts.load()
+        sources = gather(selected, since)
+        if args.command == "daily":
+            failed = False
+            for directory in args.plan_dirs:
+                try:
+                    plan, tasks = load(directory)
+                except PlanError as error:
+                    print(error, file=sys.stderr)
+                    failed = True
+                    continue
+                path = report_path(plan.draft, day)
+                if path.exists():
+                    print(f"{path} kept")
+                else:
+                    _write(path, code_report.render(plan, tasks, sources, selected, window))
+                    print(f"{path} written")
+            path = report_path(LANDING, day)
+            if path.exists():
+                print(f"{path} kept")
+            else:
+                _write(path, landing_report.render(sources, selected, window))
+                print(f"{path} written")
+            return 1 if failed else 0
+        if args.command == "code":
+            plan, tasks = load(args.plan_dir)
+            name = plan.draft
+            text = code_report.render(plan, tasks, sources, selected, window)
+        else:
+            name = LANDING
+            text = landing_report.render(sources, selected, window)
+        print(text, end="")
+        if args.write:
+            path = report_path(name, day)
+            _write(path, text)
+            print(path)
+    except (OSError, RuntimeError, ValueError) as error:
+        print(f"fab report: {error}", file=sys.stderr)
+        return 1
+    return 0

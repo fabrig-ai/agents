@@ -10,6 +10,7 @@ COMMANDS = {
     "call": ("fab.calls", "run a Claude call on a compiled brief"),
     "tick": ("fab.dispatch", "collect, land and start a plan's tasks"),
     "test": ("fab.testrun", "run every test; fail past the 30 s budget"),
+    "report": ("fab.report", "the standing reports of a plan and of the landing"),
     "status": ("fab.state", "a plan's tasks and their status"),
     "land": ("fab.land", "land a branch of this repository"),
     "run": ("fab.run", "start, inspect and collect Codex runs"),
