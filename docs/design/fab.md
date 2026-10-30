@@ -629,6 +629,27 @@ before it lands (13.1).
   collateral, recorded as such, and the branch is retried without counting
   against it; failing twice, it is the branch's.
 
+### 13.9 Events drive the tick
+
+At the user's word (10-30): the loop reacts to what happens, and polling is
+only the backstop.
+
+- **An event starts a tick.** Whatever ends work the dispatcher waits for
+  starts `fab-tick.service` on hel8: a Codex run's unit when it stops (its
+  ExecStopPost, over ssh from the builder), a Claude call when it ends, the
+  queue when it records `landed` or `rejected`, `fab land` when it lands, a
+  question answered by hand.
+- **Events coalesce.** Starting the tick while one runs or waits to run adds
+  nothing: systemd keeps at most one start pending, so a burst of events
+  makes one tick after the running one, never a queue of them. A tick reads
+  every new record anyway.
+- **The timer is the backstop,** never the driver: it ticks at most every 30
+  minutes, for a lost event or a host that could not reach hel8. Until the
+  events are in place the timer stays at 2 minutes.
+- **A tick that wants another starts one:** when a tick's own actions end
+  work the next decision depends on (a landing that makes tasks runnable,
+  a finished call), it starts the next tick at its end.
+
 ## 14. Later
 
 - The self-critique: a read-only Codex run against the skeleton and the taste
