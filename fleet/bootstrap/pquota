@@ -168,19 +168,19 @@ class Pquota:
     def read(self, absolute):
         return self.path(absolute).read_text()
 
-    def run(self, *args):
+    def run(self, *args, returncodes=(0,)):
         result = subprocess.run(args, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 timeout=60, env=self.env, check=False)
-        if result.returncode:
+        if result.returncode not in returncodes:
             raise ValueError(f'{shlex.join(args)}: exit {result.returncode}: {result.stderr.strip()}')
         return result.stdout
 
-    def user(self, *args):
+    def user(self, *args, returncodes=(0,)):
         uid = pwd.getpwnam('free').pw_uid
         return self.run('runuser', '-u', 'free', '--', 'env', '-i', 'HOME=/home/free',
                         f'PATH=/home/free/.local/bin:{PATH}', f'XDG_RUNTIME_DIR=/run/user/{uid}',
                         f'DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{uid}/bus',
-                        'LANG=C', *args)
+                        'LANG=C', *args, returncodes=returncodes)
 
     def safe(self, absolute):
         path = self.path(absolute)
@@ -355,7 +355,7 @@ class Pquota:
         return dict(path=snapshot['path'], digest=snapshot['digest'], slots=held, admission_closed=snapshot['admission_closed'])
 
     def unit(self, name, allow_absent=False):
-        output = self.user('systemctl', '--user', 'show', name, '--property=LoadState,ActiveState,SubState,UnitFileState')
+        output = self.user('systemctl', '--user', 'show', name, '--property=LoadState,ActiveState,SubState,UnitFileState,WantedBy,TriggeredBy,Triggers')
         row = dict(line.split('=', 1) for line in output.splitlines() if '=' in line)
         if allow_absent and row.get('LoadState') == 'not-found' and row.get('ActiveState') == 'inactive':
             return row
@@ -406,10 +406,49 @@ class Pquota:
         return dict(states=rows, owner_restarts=sorted(retained | {name for name, status in rows.items()
             if status['ActiveState'] == 'active'}))
 
+    def boot_prevention(self, services):
+        # is-enabled inspects installation links, including links whose targets
+        # are not loaded. WantedBy also catches loaded target dependencies.
+        producers = set(services['states'])
+        triggers = set()
+        rows = json.loads(self.user('systemctl', '--user', 'list-unit-files',
+            '--type=timer,path', '--output=json', '--no-pager'))
+        if not isinstance(rows, list):
+            raise ValueError('unreadable timer/path installation inventory')
+        for row in rows:
+            name = row['unit_file']
+            if not re.fullmatch(r'[a-zA-Z0-9_.@:-]+\.(timer|path)', name):
+                raise ValueError('unsupported trigger unit name')
+            triggers.add(name)
+        for status in services['states'].values():
+            triggers.update(status.get('TriggeredBy', '').split())
+        evidence = {}
+        def prevention(name, status):
+            # is-enabled exits nonzero for disabled/static/masked. The output
+            # still conveys the state; unknown/error output is never accepted.
+            installed = self.user('systemctl', '--user', 'is-enabled', name, returncodes=(0, 1)).strip()
+            allowed = {'disabled', 'static', 'indirect', 'masked', 'masked-runtime'}
+            if (installed not in allowed or status.get('UnitFileState') not in allowed or
+                    status.get('WantedBy', '').strip()):
+                raise ValueError(f'owner must disable {name} without --now before reboot: {status}; is-enabled={installed}')
+            return dict(status=status, installation=installed)
+        for name, status in services['states'].items():
+            if status['LoadState'] == 'not-found':
+                evidence[name] = dict(status=status, installation='not-found')
+            else:
+                evidence[name] = prevention(name, status)
+        for name in sorted(triggers):
+            status = self.unit(name)
+            if producers.intersection(status.get('Triggers', '').split()):
+                evidence[name] = prevention(name, status)
+                if status['ActiveState'] != 'inactive':
+                    raise ValueError(f'producer trigger must be stopped: {name}')
+        return evidence
+
     def preboot(self):
         sources = self.installed()
         return dict(sources=sources, environment=self.environment(), services=self.services(sources),
-                    boot_id=self.read(BOOT).strip())
+                    boot_id=self.boot_id())
 
     def heavy(self):
         self.user('/home/free/src/fabrig/main/tools/heavy/heavy', '--installed')
@@ -451,6 +490,36 @@ class Pquota:
             raise ValueError('root must be a single XFS mount')
         return rows[0]
 
+    def root_uuid(self, specification):
+        if specification.startswith('UUID='):
+            expected = str(uuid.UUID(specification[5:]))
+            device = self.run('blkid', '-U', expected).strip()
+        else:
+            expected, device = None, specification
+        if not re.fullmatch(r'/dev/[a-zA-Z0-9_./:-]+', device):
+            raise ValueError(f'unresolved block root: {specification}')
+        value = self.run('blkid', '-s', 'UUID', '-o', 'value', device).strip()
+        identity = str(uuid.UUID(value))
+        if identity == str(uuid.UUID(int=0)) or (expected and expected != identity):
+            raise ValueError(f'conflicting root UUID: {specification}')
+        return identity
+
+    def boot_id(self):
+        value = self.read(BOOT).strip()
+        parsed = uuid.UUID(value)
+        if str(parsed) != value or not parsed.int:
+            raise ValueError('invalid boot ID')
+        return value
+
+    def entry_kernel(self, line):
+        path = shlex.split(line)[0]
+        # Generated Debian entries name the release explicitly. An unversioned
+        # alias or unknown naming scheme needs manual review, never a guess.
+        match = re.fullmatch(r'(?:/boot)?/vmlinuz-([a-zA-Z0-9_.+-]+)', path)
+        if not match:
+            raise ValueError('default kernel must have a literal versioned vmlinuz path')
+        return match.group(1)
+
     def fence(self):
         checks = []
         for name, probe in [('host identity', self.identity), ('XFS root', self.mount),
@@ -481,7 +550,7 @@ class Pquota:
         directory = self.path('/etc/default/grub.d')
         if directory.is_symlink():
             raise ValueError('symlink grub.d')
-        names += ['/' + p.relative_to(self.root).as_posix() for p in sorted(directory.glob('*.cfg'))]
+        names += ['/' + p.relative_to(self.root).as_posix() for p in sorted(directory.glob('*'))]
         return {name: self.safe(name).read_bytes() for name in names}
 
     def boot_safety(self, enabled=False):
@@ -490,23 +559,16 @@ class Pquota:
             if name == '/etc/default/grub' or name.startswith('/etc/default/grub.d/'):
                 if name == DROPIN and enabled and data == CONTENT.encode():
                     continue
-                text = data.decode()
-                # Comments are harmless; no shell evaluation or expansion here.
-                lines = [line for line in text.splitlines() if not line.lstrip().startswith('#')]
-                for line in lines:
-                    if not line.strip():
+                for line in data.decode().splitlines():
+                    if not line.strip() or line.lstrip().startswith('#'):
                         continue
-                    if name.startswith('/etc/default/grub.d/') and not re.fullmatch(r'\s*GRUB_[A-Z0-9_]+=.*', line):
-                        raise ValueError(f'unknown shell configuration in {name}')
-                    assignment = re.fullmatch(r'\s*GRUB_CMDLINE_LINUX(?:_DEFAULT)?=(.*)', line)
-                    if assignment:
-                        fields = shlex.split(assignment.group(1), comments=True)
-                        if len(fields) != 1 and assignment.group(1).strip() not in ('\"\"', "''"):
-                            raise ValueError(f'unknown boot command line in {name}')
-                        if '$' in assignment.group(1) or '`' in assignment.group(1):
-                            raise ValueError(f'dynamic boot command line in {name}')
-                if any(re.search(r'rootflags\s*=', line) for line in lines):
-                    raise ValueError(f'existing rootflags in {name}; refuse append')
+                    # This is a literal data grammar, not a shell parser. No
+                    # escaping, command separators, interpolation or sourcing.
+                    match = re.fullmatch(r'\s*([A-Z][A-Z0-9_]*)=(?:"([^"\\$`\r\n]*)"|([a-zA-Z0-9_./,:=+@%-]*))(?:\s+#.*)?\s*', line)
+                    if not match:
+                        raise ValueError(f'unsupported literal GRUB input in {name}: {line}')
+                    if re.search(r'rootflags\s*=', match.group(2) or match.group(3) or ''):
+                        raise ValueError(f'existing rootflags in {name}; refuse append')
         roots = []
         for line in files['/etc/fstab'].decode().splitlines():
             fields = line.partition('#')[0].split()
@@ -529,11 +591,28 @@ class Pquota:
             raise ValueError('generated default already has rootflags')
         if enabled:
             self.check_entry(True)
-        return dict(files={name: hashlib.sha256(data).hexdigest() for name, data in files.items()}, default=line)
+        identities = [self.root_uuid(spec) for spec in (self.mount()['source'], roots[0][0],
+            next(t[5:] for t in tokens if t.startswith('root=')))]
+        if len(set(identities)) != 1:
+            raise ValueError('mounted, fstab and selected GRUB root identities differ')
+        return dict(files={name: hashlib.sha256(data).hexdigest() for name, data in files.items()},
+                    default=line, root_uuid=identities[0], kernel=self.entry_kernel(line))
 
-    def originals(self):
-        directory = self.path(ORIGINAL)
-        manifest = json.loads(self.safe(ORIGINAL + '/manifest.json').read_text())
+    def originals(self, require_binding=False):
+        raw = self.safe(ORIGINAL + '/manifest.json').read_bytes()
+        manifest = json.loads(raw)
+        if self.path(STATE).exists():
+            binding = self.state().get('original_binding')
+            if not binding:
+                raise ValueError('missing original manifest binding in state')
+            if (hashlib.sha256(raw).hexdigest() != binding['sha256'] or
+                    sorted(manifest['files']) != binding['files']):
+                raise ValueError('original manifest digest/membership mismatch')
+        elif require_binding:
+            raise ValueError('prepared state required to validate original membership')
+        mandatory = {'/etc/default/grub', '/etc/fstab', GRUB, '/boot/grub/grubenv'}
+        if not mandatory <= manifest.get('files', {}).keys():
+            raise ValueError('missing mandatory original boot files')
         if manifest.get('version') != 1 or manifest.get('host') != self.host:
             raise ValueError('foreign original backup')
         for name, item in manifest['files'].items():
@@ -582,7 +661,9 @@ class Pquota:
         return self.originals()
 
     def restore(self, manifest):
-        existing = {'/' + p.relative_to(self.root).as_posix() for p in self.path('/etc/default/grub.d').glob('*.cfg')}
+        if manifest != self.originals(require_binding=True):
+            raise ValueError('original manifest mismatch before restore')
+        existing = {'/' + p.relative_to(self.root).as_posix() for p in self.path('/etc/default/grub.d').glob('*')}
         unexpected = existing - manifest['files'].keys() - {DROPIN}
         if unexpected:
             raise ValueError(f'boot configuration added since backup: {sorted(unexpected)}')
@@ -596,6 +677,8 @@ class Pquota:
             self.sync(self.path(DROPIN).parent)
 
     def verify_originals(self, manifest):
+        if manifest != self.originals(require_binding=True):
+            raise ValueError('original manifest mismatch before verification')
         for name, item in manifest['files'].items():
             if hashlib.sha256(self.safe(name).read_bytes()).hexdigest() != item['sha256']:
                 raise ValueError(f'restored digest mismatch: {name}')
@@ -668,7 +751,7 @@ class Pquota:
             raise ValueError('unsupported GRUB_DEFAULT; require numeric top-level entry')
         # Other drop-ins may override GRUB_DEFAULT. Never guess shell semantics.
         directory = self.path('/etc/default/grub.d')
-        for path in sorted(directory.glob('*.cfg')):
+        for path in sorted(directory.glob('*')):
             if path.name != Path(DROPIN).name and re.search(r'\bGRUB_DEFAULT\s*=', path.read_text()):
                 raise ValueError('GRUB_DEFAULT in another drop-in requires ops review')
         environment = self.run('grub-editenv', str(self.path('/boot/grub/grubenv')), 'list')
@@ -742,7 +825,10 @@ class Pquota:
         state = dict(version=1, host=self.host, phase='preparing', prepared_at=now(),
             boot_id=proof['boot_id'], before_cmdline=self.read('/proc/cmdline').strip(),
             before_mount=self.mount(), grub_before=self.digest(), default_before=safety['default'],
-            proof=proof, occupancy=occupancy, policy=self.policy, central=self.central, fence=self.last_fence_checks)
+            proof=proof, occupancy=occupancy, policy=self.policy, central=self.central, fence=self.last_fence_checks,
+            root_uuid=safety['root_uuid'], prepared_kernel=safety['kernel'],
+            original_binding=dict(files=sorted(backup['files']), sha256=hashlib.sha256(
+                self.safe(ORIGINAL + '/manifest.json').read_bytes()).hexdigest()))
         self.save(state)
         self.write(DROPIN, CONTENT, 0o644)
         self.run('update-grub')
@@ -769,7 +855,7 @@ class Pquota:
 
     def rollback(self):
         self.identity()
-        manifest = self.originals()
+        manifest = self.originals(require_binding=True)
         state = self.state() if self.path(STATE).exists() else dict(version=1, host=self.host)
         if self.path(DROPIN).exists() and self.safe(DROPIN).read_text() != CONTENT:
             raise ValueError('foreign drop-in; refusing rollback')
@@ -807,6 +893,7 @@ class Pquota:
         latest = self.preboot()
         if latest['sources'] != state['proof']['sources'] or latest['environment'] != state['proof']['environment']:
             raise ValueError('installed source/environment changed since prepare')
+        state['reboot_prevention'] = self.boot_prevention(latest['services'])
         state['reboot_services'] = latest['services']
         state['proof']['services']['owner_restarts'] = sorted(set(state['proof']['services']['owner_restarts']) | set(latest['services']['owner_restarts']))
         self.save(state)
@@ -828,7 +915,13 @@ class Pquota:
                 ok, detail = False, str(error)
             checks.append(dict(name=name, pass_result=ok, detail=detail))
             print(f'{"PASS" if ok else "FAIL"} {name}: {str(detail).replace(chr(10), " | ")}')
-        check('boot changed since prepare', lambda: state['phase'] == 'prepared' and self.read(BOOT).strip() != state['boot_id'])
+        check('boot changed since prepare', lambda: state['phase'] == 'prepared' and self.boot_id() != state['boot_id'])
+        check('prepared kernel running', lambda: self.run('uname', '-r').strip() == state['prepared_kernel'])
+        check('root device identity unchanged', lambda: self.root_uuid(self.mount()['source']) == state['root_uuid'])
+        check('post-prepare boot input digests unchanged', lambda: self.boot_safety(enabled=True)['files'] == state['boot_files_after'])
+        check('original manifest and payloads intact', lambda: self.originals(require_binding=True))
+        check('exact prepared kernel options', lambda: shlex.split(self.read('/proc/cmdline')) == shlex.split(state['default_after'])[1:])
+        check('owner boot prevention preserved', lambda: self.boot_prevention(self.services()))
         check('cmdline rootflags=pquota', lambda: has_pquota(self.read('/proc/cmdline')))
         check('XFS mount prjquota', lambda: 'prjquota' in self.mount()['options'].split(','))
         def quota():
