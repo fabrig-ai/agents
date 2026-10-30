@@ -13,8 +13,9 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
+from fab import calls, log, run as runs
 from fab.hosts import Host
-from fab.sh import Runner, run
+from fab.sh import Runner, run, ssh
 
 REVIEWED = ("skeleton", "answer", "review")  # call roles whose branch is reviewed before it lands
 AMEND = "amend"  # the role of the call that answers a refusal on the same branch
@@ -71,7 +72,28 @@ def chains(events: Iterable[dict]) -> dict[str, Chain]:
     - hold, reason `refused after its amendment`: it refused.
 
     Pure: no file is read. Records missing a field the rule reads are skipped."""
-    raise NotImplementedError
+    started, owners, folded, reviews = {}, {}, {}, {}
+    for position, event in enumerate(events):
+        kind = event.get("ev", "")
+        if kind in ("call.started", "call.ended"):
+            _fold_call(event, position, started, owners, folded)
+        elif kind in ("run.started", "run.ended"):
+            _fold_review(event, position, folded, reviews)
+        elif kind == "call.finished" and event.get("call") in owners:
+            owners[event["call"]]["finished"] = True
+        elif kind == "call.parked" and event.get("call") in folded:
+            folded[event["call"]]["parked"] = position
+        elif kind == "question.answered" and "task" in event:
+            for chain in folded.values():
+                if chain["subject"] == event["task"] and chain["parked"] >= 0:
+                    chain["reset"] = position
+    result = {}
+    for root, chain in folded.items():
+        state, reason = _state(chain)
+        result[root] = Chain(root, chain["role"], chain["subject"], chain["branch"],
+                             tuple(chain["calls"]), chain["latest"], tuple(chain["refusals"]),
+                             state, reason)
+    return result
 
 
 def brief(chain: Chain, *, run_id: str, base: str, tip: str, stat: str, diff: str,
@@ -96,7 +118,31 @@ def brief(chain: Chain, *, run_id: str, base: str, tip: str, stat: str, diff: st
        brief:`, then the text of FAB_HOME/calls/<root>/brief.md, or `(brief missing: <path>)`.
 
     Never refuses for size: the call's brief is already bounded by fab.calls.BRIEF_LIMIT."""
-    raise NotImplementedError
+    facts = [f"- Run: {run_id}", f"- Call: {chain.root} ({chain.role})"]
+    if chain.latest != chain.root:
+        facts.append(f"- Amended by: {chain.latest}")
+    facts.extend([f"- Subject: {chain.subject}", f"- Branch: `{chain.branch}`",
+                  f"- Base: `{base}`", f"- Tip: `{tip}`", f"- Report: write it to `{report}`",
+                  f"Your checkout is the tip, read-only; `git diff {base} {tip}` is the change."])
+    sections = [ROLE.read_text().rstrip("\n"), "# Your review\n\n" + "\n".join(facts)]
+    if chain.refusals:
+        sections.append("# Earlier findings\n\n" + _findings(chain.refusals))
+    cut = len(diff) > DIFF_LIMIT
+    if cut:
+        newline = diff.rfind("\n", 0, DIFF_LIMIT + 1)
+        diff = diff[:newline] if newline >= 0 else ""
+    stat, diff = stat.removesuffix("\n"), diff.removesuffix("\n")
+    change = f"# The diff\n\n```text\n{stat}\n```\n\n```diff\n{diff}\n```"
+    if cut:
+        change += f"\n\nThe diff is cut at {DIFF_LIMIT} characters; read the rest with `git diff {base} {tip}`."
+    sections.append(change)
+    path = log.home() / "calls" / chain.root / "brief.md"
+    try:
+        text = path.read_text()
+    except (OSError, UnicodeError):
+        text = f"(brief missing: {path})"
+    sections.append("# The call's brief\n\nWhat the call was asked, verbatim, to the end of this brief:\n\n" + text)
+    return "\n\n".join(sections) + ("" if text.endswith("\n") else "\n")
 
 
 def amend_brief(chain: Chain, *, call_id: str, branch: str, report: str) -> str:
@@ -115,7 +161,16 @@ def amend_brief(chain: Chain, *, call_id: str, branch: str, report: str) -> str:
        when the chain has no refusals.
 
     ValueError past fab.calls.BRIEF_LIMIT, as every call's brief."""
-    raise NotImplementedError
+    directory = log.home() / "calls"
+    facts = [f"- Call: {chain.root} ({chain.role})", f"- Subject: {chain.subject}",
+             f"- Branch: `{chain.branch}`", f"- Its brief: `{directory / chain.root / 'brief.md'}`"]
+    facts.extend(f"- Amended by: {call} (report `{directory / call / 'report.md'}`)"
+                 for call in chain.calls[1:])
+    facts.append("Read its brief first: it is the task you are finishing.")
+    return calls._brief([("Role", AMENDER.read_text().rstrip("\n")),
+                         ("Call facts", calls._facts(call_id, branch, report)),
+                         ("The call you amend", "\n".join(facts)),
+                         ("Findings", _findings(chain.refusals))])
 
 
 def start(chain: Chain, repo: str, checkout: Path, host: Host, events: Iterable[dict], *,
@@ -138,4 +193,120 @@ def start(chain: Chain, repo: str, checkout: Path, host: Host, events: Iterable[
     A failure after the worktree is added removes it (`git -C <clone> worktree remove --force
     <worktree>`, errors ignored) and re-raises. fab.run.collect ends the run as any other:
     its run.ended carries the outcome the chain reads, and frees the worktree."""
-    raise NotImplementedError
+    def git(*argv):
+        return sh(["git", *argv], cwd=str(checkout), check=True).out
+
+    git("fetch", "origin")
+    tip = git("rev-parse", "--verify", f"refs/remotes/origin/{chain.branch}^{{commit}}").strip()
+    base = git("merge-base", "refs/remotes/origin/main", tip).strip()
+    stat = git("diff", "--stat", base, tip)
+    diff = git("diff", base, tip)
+    run_id = runs.next_run(chain.root, events)
+    root = Path(runs.remote_home(host))
+    clone = runs.fetch_clone(host, repo, sh=sh)
+    worktree = str(root / "wt" / run_id)
+    sh(ssh(host.ssh, ["git", "-C", str(clone), "worktree", "add", "--detach", worktree, tip]),
+       check=True)
+    try:
+        text = brief(chain, run_id=run_id, base=base, tip=tip, stat=stat, diff=diff,
+                     report=str(root / "runs" / run_id / "report.md"))
+        return runs.launch(host, run_id, task=chain.root, kind=KIND, workdir=worktree,
+                           branch=chain.branch, base=base, brief=text, effort=EFFORT,
+                           read_only=True, call=chain.latest, tip=tip, sh=sh, log_path=log_path)
+    except BaseException:
+        try:
+            sh(ssh(host.ssh, ["git", "-C", str(clone), "worktree", "remove", "--force", worktree]))
+        except Exception:
+            pass
+        raise
+
+
+def _fold_call(event: dict, position: int, started: dict, owners: dict, folded: dict) -> None:
+    """Join calls to their roots, keeping end positions for the state precedence."""
+    call = event.get("call")
+    if call is None:
+        return
+    if event["ev"] == "call.started":
+        if event.get("role") == AMEND and event.get("amends") in folded and call not in owners:
+            chain = folded[event["amends"]]
+            amendment = {"call": call, "position": position, "outcome": None}
+            chain["amendments"].append(amendment)
+            chain["calls"].append(call)
+            owners[call] = chain
+            started[call] = amendment
+        elif event.get("role") in REVIEWED and "amends" not in event:
+            if all(field in event for field in ("subject", "branch")):
+                started.setdefault(call, event)
+        return
+    if "outcome" not in event or call not in started:
+        return
+    if call in owners:
+        chain = owners[call]
+        amendment = started[call]
+        if call != chain["root"] and amendment["outcome"] is None:
+            amendment["outcome"] = event["outcome"]
+            if event["outcome"] == "done":
+                chain["latest"], chain["latest_position"] = call, position
+    elif event["outcome"] == "done":
+        first = started[call]
+        folded[call] = owners[call] = {
+            "root": call, "role": first["role"], "subject": first["subject"],
+            "branch": first["branch"], "calls": [call], "latest": call,
+            "latest_position": position, "refusals": [], "amendments": [], "reviews": [],
+            "reset": -1, "parked": -1, "finished": False,
+        }
+
+
+def _state(chain: dict) -> tuple[str, str]:
+    """Choose the first applicable state from the chain's ordered records."""
+    reset = chain["reset"]
+    amendments = [call for call in chain["amendments"] if call["position"] > reset]
+    reviews = chain["reviews"]
+    if chain["finished"]:
+        return "finished", ""
+    if chain["parked"] > reset:
+        return "parked", ""
+    if any(call["outcome"] is None for call in amendments):
+        return "amending", ""
+    if amendments and amendments[-1]["outcome"] != "done":
+        return "hold", f"the amend call ended {amendments[-1]['outcome']}"
+    latest = reviews[-1] if reviews else None
+    if latest and latest["outcome"] is None:
+        return "reviewing", ""
+    if latest is None or latest["position"] <= max(chain["latest_position"], reset):
+        return "review", ""
+    if latest["outcome"] == "infra":
+        count = sum(review["outcome"] == "infra" and review["position"] > reset for review in reviews)
+        return ("review", "") if count < INFRA_LIMIT else ("hold", f"{INFRA_LIMIT} review runs ended infra")
+    if latest["outcome"] == "done":
+        return "approved", ""
+    return ("hold", "refused after its amendment") if amendments else ("amend", "")
+
+
+def _findings(refusals: tuple[str, ...]) -> str:
+    """Quote each refusal once, with a bounded excerpt and an unreadable-report marker."""
+    findings = []
+    for run_id in refusals:
+        try:
+            text = (log.home() / "runs" / run_id / "report.md").read_text()
+        except (OSError, UnicodeError):
+            text = "(report missing)"
+        findings.append(f"## {run_id}\n\n" + "\n".join(text.splitlines()[:FINDINGS_LINES]))
+    return "\n\n".join(findings) if findings else "(none)"
+
+
+def _fold_review(event: dict, position: int, folded: dict, reviews: dict) -> None:
+    """Attach review runs and their first complete ending to an existing root."""
+    if event["ev"] == "run.started" and event.get("kind") == KIND:
+        root, run_id = event.get("task"), event.get("run")
+        if root in folded and run_id is not None and run_id not in reviews:
+            review = {"position": position, "outcome": None}
+            reviews[run_id] = (folded[root], review)
+            folded[root]["reviews"].append(review)
+    elif event["ev"] == "run.ended" and "run" in event and "outcome" in event:
+        if event["run"] in reviews:
+            chain, review = reviews[event["run"]]
+            if review["outcome"] is None:
+                review["outcome"] = event["outcome"]
+                if event["outcome"] not in ("done", "infra"):
+                    chain["refusals"].append(event["run"])
