@@ -434,7 +434,7 @@ class InventoryTests(Sandbox):
         result = self.command("start", "names", "--json")
         self.assertEqual((result.returncode, result.stderr), (0, ""))
         rows = json.loads(result.stdout)
-        self.assertEqual(len(rows), 23)
+        self.assertEqual(len(rows), 24)
         by_mailbox = {row["mailbox"]: row for row in rows}
         self.assertEqual(len(by_mailbox), len(rows))
         for handle, mailbox, default in (("dm", "s/dynamic-memory", True), ("q", "s/qa", False), ("u", "s/upgrades", False), ("lf", "s/ladder", False)):
@@ -471,7 +471,9 @@ class InventoryTests(Sandbox):
         self.assertEqual(director["legacy_names"], ["director"])
         self.assertIsNone(director["supervisor"])
         self.assertFalse(director["paused"])
-        for name in ("ops", "s/deploy"):
+        self.assertEqual(by_mailbox["s/multi-coord"]["name_prefix"], "s/multi-coord/")
+        self.assertEqual(by_mailbox["s/multi-coord"]["aliases"], ["s/multi-coord-next"])
+        for name in ("ops", "s/deploy", "s/multi-coord"):
             self.assertEqual(by_mailbox[name]["supervisor"], "director")
             self.assertTrue(by_mailbox[name]["always_watched"])
             self.assertIn("always watched", by_mailbox[name]["note"])
