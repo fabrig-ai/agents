@@ -239,8 +239,8 @@ class RunStartTest(unittest.TestCase):
                 commands = [command(call) for call in fake.calls]
                 self.assertEqual(len(commands), 7 if kind == "repair" else 6)
                 self.assertTrue(all(call.argv[5] == HOST.ssh for call in fake.calls))
-                self.assertEqual(commands[0], ["mkdir", "-p", str(repo.parent), str(worktree.parent),
-                                               str(directory)])
+                self.assertEqual(commands[0], ["mkdir", "-p", str(repo.parent), str(ROOT / "wt"),
+                                               str(ROOT / "runs")])
                 self.assertEqual(commands[1][:2], ["bash", "-c"])
                 self.assertIn(f"if ! test -d {repo}/.git; then ", commands[1][2])
                 self.assertIn(shlex.join(["git", "clone", "--", run.REMOTES[TASK.repo], str(repo)]),
@@ -255,7 +255,7 @@ class RunStartTest(unittest.TestCase):
                     self.assertEqual(commands[3], ["git", "-C", str(repo), "worktree", "add", "-b",
                                                    branch, str(worktree), "origin/main"])
                 self.assertEqual(commands[-2], ["bash", "-c",
-                    f"cat > {directory}/brief.md.tmp && mv -- {directory}/brief.md.tmp {directory}/brief.md"])
+                    f"mkdir -p {directory} && cat > {directory}/brief.md.tmp && mv -- {directory}/brief.md.tmp {directory}/brief.md"])
                 expected = ["fab", "codex", "start", "--effort", "high"]
                 if kind == "review":
                     expected.append("--read-only")
@@ -390,7 +390,7 @@ class RunStartTest(unittest.TestCase):
             commands = [command(call) for call in fake.calls]
             self.assertEqual(commands[3][-3], task.id)
             tokens = shlex.split(commands[4][2])
-            self.assertEqual(tokens[2], str(ROOT / "runs" / (task.id + "-1") / "brief.md.tmp"))
+            self.assertEqual(tokens[6], str(ROOT / "runs" / (task.id + "-1") / "brief.md.tmp"))
             self.assertEqual(commands[-1][-2], str(ROOT / "wt" / (task.id + "-1")))
 
     def test_start_refuses_bad_kind_or_repo_before_ssh(self):
@@ -714,4 +714,99 @@ class StartUndoTest(unittest.TestCase):
             self.assertEqual(undo[:2], ["bash", "-c"])
             self.assertIn("worktree remove --force", undo[2])
             self.assertIn("branch -D", undo[2])
+            self.assertEqual(log.read(), [])
+
+
+class FetchCloneTest(unittest.TestCase):
+    def test_clone_commands_and_returned_path(self):
+        with tmp_home():
+            fake = FakeRunner()
+            clone = run.fetch_clone(HOST, "agents", sh=fake)
+            self.assertEqual(clone, ROOT / "repos/agents")
+            self.assertEqual([command(call) for call in fake.calls], [
+                ["mkdir", "-p", str(ROOT / "repos"), str(ROOT / "wt"), str(ROOT / "runs")],
+                ["bash", "-c", f"if ! test -d {clone}/.git; then "
+                 + shlex.join(["git", "clone", "--", run.REMOTES["agents"], str(clone)]) + "; fi"],
+                ["git", "-C", str(clone), "fetch", "origin"]])
+            self.assertTrue(all(call.argv[5] == HOST.ssh for call in fake.calls))
+            self.assertEqual(log.read(), [])
+
+    def test_unknown_repository_is_refused_before_commands(self):
+        with tmp_home():
+            fake = FakeRunner()
+            with self.assertRaisesRegex(ValueError, "unknown repository"):
+                run.fetch_clone(HOST, "unknown", sh=fake)
+            self.assertEqual(fake.calls, [])
+
+    def test_command_failure_is_checked(self):
+        for step in range(3):
+            with self.subTest(step=step), tmp_home():
+                fake = FakeRunner()
+                def answer(call):
+                    return Result(1 if len(fake.calls) == step + 1 else 0)
+                fake.on(["ssh"], answer)
+                with self.assertRaises(Failed):
+                    run.fetch_clone(HOST, "agents", sh=fake)
+                self.assertEqual(len(fake.calls), step + 1)
+
+
+class LaunchTest(unittest.TestCase):
+    def launch(self, fake, **fields):
+        """Launch in a prepared directory with explicit review facts."""
+        return run.launch(HOST, "call-2", task="call", kind="review", workdir="/checkout",
+                          branch="calls/call", base="base-sha", brief="Review this.\n",
+                          effort="medium", sh=fake, **fields)
+
+    def test_launch_writes_atomically_and_carries_flat_event_fields(self):
+        with tmp_home() as home:
+            fake = starter()
+            path = home / "custom/log.jsonl"
+            run_id = self.launch(fake, read_only=True, log_path=path, call="amend-1", tip="tip-sha", slot=2)
+            self.assertEqual(run_id, "call-2")
+            directory = ROOT / "runs/call-2"
+            self.assertEqual([command(call) for call in fake.calls], [
+                ["bash", "-c", f"mkdir -p {directory} && cat > {directory}/brief.md.tmp "
+                 f"&& mv -- {directory}/brief.md.tmp {directory}/brief.md"],
+                ["fab", "codex", "start", "--effort", "medium", "--read-only",
+                 str(directory / "brief.md"), "/checkout", str(directory / "report.md")]])
+            self.assertEqual(fake.calls[0].input, "Review this.\n")
+            self.assertEqual((home / "fab/runs/call-2/brief.md").read_text(), "Review this.\n")
+            record, = log.read(path)
+            self.assertEqual({key: value for key, value in record.items() if key != "ts"},
+                             {"ev": "run.started", "run": run_id, "task": "call", "kind": "review",
+                              "host": HOST.name, "dir": "/checkout", "branch": "calls/call",
+                              "base": "base-sha", "codex": "codex-123", "state": "/state/codex-123",
+                              "report": str(directory / "report.md"), "call": "amend-1",
+                              "tip": "tip-sha", "slot": 2})
+            self.assertEqual(log.read(), [])
+
+    def test_both_launchers_respect_read_only(self):
+        for launcher in ("fab", "codex-run"):
+            for read_only in (False, True):
+                with self.subTest(launcher=launcher, read_only=read_only), tmp_home(), \
+                        patch.object(run, "LAUNCHER", launcher):
+                    fake = starter()
+                    self.launch(fake, read_only=read_only)
+                    argv = command(fake.calls[-1])
+                    expected = (["fab", "codex", "start", "--effort", "medium"] if launcher == "fab"
+                                else ["codex-run", "task", "--effort", "medium", "--to", run.NOTIFY])
+                    if read_only:
+                        expected.append("--read-only")
+                    self.assertEqual(argv[:-3], expected)
+
+    def test_malformed_answer_is_refused_without_logging(self):
+        for answer in ("", "id", "id relative", "id /state\nextra /state", "id /state\rwrong"):
+            with self.subTest(answer=answer), tmp_home():
+                fake = FakeRunner().on(["ssh"], Result(0, answer))
+                with self.assertRaisesRegex(ValueError, "id and absolute state directory"):
+                    self.launch(fake)
+                self.assertEqual(log.read(), [])
+
+    def test_failed_write_never_launches(self):
+        with tmp_home() as home:
+            fake = FakeRunner().on(["ssh"], Result(1, err="write failed"))
+            with self.assertRaises(Failed):
+                self.launch(fake)
+            self.assertEqual(len(fake.calls), 1)
+            self.assertFalse((home / "fab/runs/call-2/brief.md").exists())
             self.assertEqual(log.read(), [])

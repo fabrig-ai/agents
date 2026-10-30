@@ -155,36 +155,20 @@ def start(task: Task, host: Host, *, kind: str = "implement", events: Iterable[d
         raise ValueError(f"unknown repository {task.repo!r}")
     run_id = next_run(task.id, events)
     root = Path(remote_home(host))
-    repo = root / "repos" / task.repo
     worktree = root / "wt" / run_id
     directory = root / "runs" / run_id
     brief_path, report_path = directory / "brief.md", directory / "report.md"
     base = "origin/main"
-    if rejection is not None:
-        if "findings" in rejection:
-            red = rejection["findings"]
-        else:
-            try:
-                gates = sorted((host for host in hosts.load().values() if "gate" in host.roles),
-                               key=lambda host: host.name)
-                if not gates:
-                    raise ValueError("no gate host configured")
-                red = rejection_text(rejection, gates[0], sh=sh)
-            except (OSError, ValueError) as error:
-                red = "(log unreadable: " + " ".join(str(error).splitlines()) + ")"
-        rejection = {**rejection, "text": red}
+    rejection = _rejection(rejection, sh=sh)
     text = brief(task, role_text(task.repo), run_id=run_id, branch=branch, base=base,
                  report=str(report_path), rejection=rejection)
 
     def remote(argv, *, input=None):
         return sh(ssh(host.ssh, argv), input=input, check=True)
 
-    remote(["mkdir", "-p", str(repo.parent), str(worktree.parent), str(directory)])
-    clone = shlex.join(["git", "clone", "--", REMOTES[task.repo], str(repo)])
-    remote(["bash", "-c", f"if ! test -d {shlex.quote(str(repo / '.git'))}; then {clone}; fi"])
-    remote(["git", "-C", str(repo), "fetch", "origin"])
+    repo = fetch_clone(host, task.repo, sh=sh)
     try:
-        return _prepare_and_launch(task, host, kind, remote, run_id=run_id, branch=branch,
+        return _prepare_and_launch(task, host, kind, sh, run_id=run_id, branch=branch,
                                    base=base, root=root, repo=repo, worktree=worktree,
                                    brief_path=brief_path, report_path=report_path, text=text,
                                    log_path=log_path)
@@ -213,6 +197,11 @@ def _undo_start(task: Task, remote, *, run_id: str, branch: str, repo: Path, wor
 def _prepare_and_launch(task: Task, host: Host, kind: str, remote, *, run_id: str, branch: str,
                         base: str, root: Path, repo: Path, worktree: Path, brief_path: Path,
                         report_path: Path, text: str, log_path: Path | None) -> str:
+    sh = remote
+
+    def remote(argv, *, input=None):
+        return sh(ssh(host.ssh, argv), input=input, check=True)
+
     slot = None
     if task.repo in SLOTTED:
         listed = remote(["fab", "slot", "list"])
@@ -232,26 +221,10 @@ def _prepare_and_launch(task: Task, host: Host, kind: str, remote, *, run_id: st
         remote(["git", "-C", str(worktree), "checkout", "--ignore-other-worktrees", "-B", branch, source])
     else:
         remote(["git", "-C", str(repo), "worktree", "add", "-b", branch, str(worktree), base])
-    temporary = brief_path.with_name("brief.md.tmp")
-    remote(["bash", "-c", f"cat > {shlex.quote(str(temporary))} && "
-            + shlex.join(["mv", "--", str(temporary), str(brief_path)])], input=text)
-    _write(log.home() / "runs" / run_id / "brief.md", text)
-    if LAUNCHER == "fab":
-        command = ["fab", "codex", "start", "--effort", task.effort]
-    else:
-        command = ["codex-run", "task", "--effort", task.effort, "--to", NOTIFY]
-    if kind == "review":
-        command.append("--read-only")
-    result = remote([*command, str(brief_path), str(worktree), str(report_path)])
-    fields = result.out.strip().split(maxsplit=1)
-    if len(fields) != 2 or not fields[1].startswith("/") or "\n" in fields[1]:
-        raise ValueError("codex-run did not return an id and absolute state directory")
-    codex, state = fields
     held = {} if slot is None else {"slot": slot}
-    log.append("run.started", path=log_path, run=run_id, task=task.id, kind=kind,
-               host=host.name, dir=str(worktree), branch=branch, base=base,
-               codex=codex, state=state, report=str(report_path), **held)
-    return run_id
+    return launch(host, run_id, task=task.id, kind=kind, workdir=str(worktree), branch=branch,
+                  base=base, brief=text, effort=task.effort, read_only=kind == "review",
+                  sh=sh, log_path=log_path, **held)
 
 
 def fetch_clone(host: Host, repo: str, *, sh: Runner = run) -> Path:
@@ -260,7 +233,18 @@ def fetch_clone(host: Host, repo: str, *, sh: Runner = run) -> Path:
     `<remote_home>/repos`, `/wt` and `/runs`; clone REMOTES[repo] into it when it has no .git (one bash
     -c test, as start does); `git -C <clone> fetch origin`. ValueError for a repo not in
     REMOTES, before any command. start uses it for every run; fab.call_review for review runs."""
-    raise NotImplementedError
+    if repo not in REMOTES:
+        raise ValueError(f"unknown repository {repo!r}")
+    root = Path(remote_home(host))
+    clone = root / "repos" / repo
+    sh(ssh(host.ssh, ["mkdir", "-p", str(clone.parent), str(root / "wt"), str(root / "runs")]),
+       check=True)
+    command = shlex.join(["git", "clone", "--", REMOTES[repo], str(clone)])
+    sh(ssh(host.ssh, ["bash", "-c",
+                    f"if ! test -d {shlex.quote(str(clone / '.git'))}; then {command}; fi"]),
+       check=True)
+    sh(ssh(host.ssh, ["git", "-C", str(clone), "fetch", "origin"]), check=True)
+    return clone
 
 
 def launch(host: Host, run_id: str, *, task: str, kind: str, workdir: str, branch: str,
@@ -278,7 +262,30 @@ def launch(host: Host, run_id: str, *, task: str, kind: str, workdir: str, branc
     directory>` on one line, else ValueError. run.started carries run, task, kind, host
     (host.name), dir (workdir), branch, base, codex (the id), state, report (REPORT) and
     fields, flat as fab.log.record takes them."""
-    raise NotImplementedError
+    directory = Path(remote_home(host)) / "runs" / run_id
+    brief_path, report_path = directory / "brief.md", directory / "report.md"
+    temporary = brief_path.with_name("brief.md.tmp")
+    write = (shlex.join(["mkdir", "-p", str(directory)])
+             + f" && cat > {shlex.quote(str(temporary))} && "
+             + shlex.join(["mv", "--", str(temporary), str(brief_path)]))
+    sh(ssh(host.ssh, ["bash", "-c", write]), input=brief, check=True)
+    _write(log.home() / "runs" / run_id / "brief.md", brief)
+    if LAUNCHER == "fab":
+        command = ["fab", "codex", "start", "--effort", effort]
+    else:
+        command = ["codex-run", "task", "--effort", effort, "--to", NOTIFY]
+    if read_only:
+        command.append("--read-only")
+    result = sh(ssh(host.ssh, [*command, str(brief_path), workdir, str(report_path)]), check=True)
+    response = result.out.strip()
+    answer = response.split(maxsplit=1)
+    if len(answer) != 2 or not answer[1].startswith("/") or "\n" in response or "\r" in response:
+        raise ValueError("codex-run did not return an id and absolute state directory")
+    codex, state = answer
+    log.append("run.started", path=log_path, run=run_id, task=task, kind=kind,
+               host=host.name, dir=workdir, branch=branch, base=base,
+               codex=codex, state=state, report=str(report_path), **fields)
+    return run_id
 
 
 def status(started: dict, host: Host, *, sh: Runner = run) -> dict:
@@ -414,3 +421,21 @@ def _write(path: Path, text: str) -> None:
             temporary.replace(path)
         finally:
             temporary.unlink(missing_ok=True)
+
+
+def _rejection(rejection: dict | None, *, sh: Runner) -> dict | None:
+    """Supply findings or a gate-log excerpt without changing the rejection record."""
+    if rejection is not None:
+        if "findings" in rejection:
+            red = rejection["findings"]
+        else:
+            try:
+                gates = sorted((host for host in hosts.load().values() if "gate" in host.roles),
+                               key=lambda host: host.name)
+                if not gates:
+                    raise ValueError("no gate host configured")
+                red = rejection_text(rejection, gates[0], sh=sh)
+            except (OSError, ValueError) as error:
+                red = "(log unreadable: " + " ".join(str(error).splitlines()) + ")"
+        rejection = {**rejection, "text": red}
+    return rejection
