@@ -140,11 +140,30 @@ subprocess.run([sys.executable, '-c', 'import time; end=time.process_time()+0.15
         self.assertIn('FAIL: file CPU budget', result.stderr)
         self.assertIn('budget: ENFORCED', result.stderr)
 
-    def test_wall_limit_reports_unobserved(self):
-        result = GateTests.run_gate(self, {'test_hang.py': 'import time; time.sleep(10)',
-                                         'gate.toml': '[budget]\nfile_wall_s = 0.1\n'})
+    def test_report_only_slow_file_completes_and_enforced_file_is_unobserved(self):
+        sources = {'test_slow.py': "import time; time.sleep(0.2); print('completed slow file')",
+                   'gate.toml': '[budget]\nfile_wall_s = 0.1\nmerge_wall_s = 0.1\nenforce = false\n'}
+        result = GateTests.run_gate(self, sources)
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('completed slow file', result.stderr)
+        self.assertIn('0 starved/unobserved', result.stderr)
+        self.assertIn('OVER (report-only)', result.stderr)
+        self.assertIn('file wall budget: tools/test_slow.py', result.stderr)
+        sources['gate.toml'] = sources['gate.toml'].replace('false', 'true').replace('merge_wall_s = 0.1', 'merge_wall_s = 60')
+        result = GateTests.run_gate(self, sources)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertNotIn('completed slow file', result.stderr)
         self.assertIn('1 starved/unobserved', result.stderr)
+        self.assertIn('1 failed', result.stderr)
+
+    def test_signal_killed_file_is_unobserved_in_both_modes(self):
+        for enforce in ('false', 'true'):
+            result = GateTests.run_gate(self, {
+                'test_killed.py': 'import os,signal; os.kill(os.getpid(),signal.SIGKILL)',
+                'gate.toml': '[budget]\nenforce = ' + enforce + '\n'})
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn('1 starved/unobserved', result.stderr)
+            self.assertIn('1 failed', result.stderr)
 
     def test_detached_descendants_are_drained_and_counted(self):
         result = GateTests.run_gate(self, {'test_detached.py': """import subprocess,sys
@@ -163,11 +182,12 @@ assert 'idle' in subprocess.check_output(['ionice', '-p', str(os.getpid())], tex
 """
         result = GateTests.run_gate(self, {'test_priority.py': source})
         self.assertEqual(result.returncode, 0, result.stderr)
-        result = GateTests.run_gate(self, {'test_hang.py': 'import time; time.sleep(30)',
-                                         'gate.toml': '[budget]\nmerge_wall_s = 0.15\n'})
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('1 starved/unobserved', result.stderr)
-        self.assertIn('OVER (report-only)', result.stderr)
+        for mode in ('enforce = true', 'report_hard_wall_s = 0.15'):
+            result = GateTests.run_gate(self, {'test_hang.py': 'import time; time.sleep(30)',
+                                             'gate.toml': '[budget]\nmerge_wall_s = 0.1\n' + mode + '\n'})
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn('1 starved/unobserved', result.stderr)
+            self.assertIn('1 failed', result.stderr)
 
     def test_selection_mapping_smoke_unknown_and_changed_git_diff(self):
         import importlib.util

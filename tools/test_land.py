@@ -46,6 +46,11 @@ if target=='central':
   if os.environ.get('LOSE_RELEASE_REPLY'): sys.exit(255)
  else: sys.exit(2)
 else:
+ if args==['sh','-c','df -B1 --output=avail \"$HOME\"']:
+  if os.environ.get('DISK_UNKNOWN'): sys.exit(255)
+  spaces=json.loads(os.environ.get('DISK_SPACES','{}'))
+  print('Avail\n'+str(spaces.get(target,100*1024**3)))
+  sys.exit(0)
  if action=='prepare' and os.environ.get('BAD_TEMP'):
   print(json.dumps(dict(remote_dir='/tmp/agents-gate.x/../outside')))
   sys.exit(0)
@@ -117,7 +122,7 @@ class LandFixture(unittest.TestCase):
         put(self.source / 'tools/gate.toml', '[budget]\nenforce = false\n[select]\n"a/**" = ["tools/a/test_a.py"]\n"b/**" = ["tools/b/test_b.py"]\n')
         for name in ('a','b'):
             put(self.source / f'tools/{name}/test_{name}.py', '')
-        put(self.source / 'fleet/hosts.toml', '[hosts.hel8]\nssh="central"\nroles=["session"]\n[hosts.hetzner7]\nssh="builder"\nroles=["builder"]\n[hosts.hetzner3]\nssh="builder"\nroles=["builder"]\n')
+        put(self.source / 'fleet/hosts.toml', '[hosts.hel8]\nssh="central"\nroles=["session"]\n[hosts.hetzner7]\nssh="builder7"\nroles=["builder"]\n[hosts.hetzner3]\nssh="builder3"\nroles=["builder"]\n')
         self.inventory = self.root / 'hosts'
         put(self.inventory, 'hetzner7 4=pool\nhetzner3 1=pool\n')
         self.git('init', '-b', 'main')

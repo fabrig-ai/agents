@@ -6,6 +6,7 @@ file_cpu_s = 8
 file_wall_s = 15
 tier_cpu_s = 100
 merge_wall_s = 60
+report_hard_wall_s = 900
 enforce = false
 
 # a09a62a test(after-landing): synchronize startup deadline completion
@@ -159,6 +160,9 @@ owner = "s/deploy"
 owner = "s/deploy"
 
 [files."tools/test_land_branches.py"]
+owner = "s/deploy"
+
+[files."tools/test_land_disk.py"]
 owner = "s/deploy"
 
 [select]

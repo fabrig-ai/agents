@@ -7,8 +7,11 @@
 Implemented in `tools/gate.py` and `tools/gate.toml`: tier/changed/explicit
 selection, safe fallbacks, smoke, owners, wait4 CPU and wall tables, optional
 JSON, report-only defaults and named enforcement. OS CPU caps apply when
-enforcement is enabled; wall backstops always apply. Wall-starved files stay
-unobserved and cannot authorize a landing.
+enforcement is enabled. Report-only runs complete past budget targets, with
+`OVER (report-only)` labels and a separate 900 s safety cap. Enforced runs
+retain file and merge-wall hard limits. Killed/starved files always fail and
+stay unobserved. Slow-completion, enforced-kill and hang-guard fixtures cover
+these behaviors.
 
 ## 2. Claimed landing
 
@@ -24,7 +27,10 @@ Successful main pushes clean up only matching remote branch tips and, unless
 between the first observation and deletion's handshake; it chains existing
 hooks without forcing updates. Both budget modes and report-only wall overruns
 are printed and tested. Coverage: `tools/test_land{,_races,_reconcile,_branches}.py`,
-`tools/test_check.py`. This follow-up made no production landing or builder run.
+`tools/test_check.py`. Disk admission reads HOME availability over SSH before auto claims, skips
+low/unknown readings and prefers most free space; fixtures cover both the
+85 GiB and higher plan floors. Restoration explicitly verifies and prints
+removal of the gate's private temporary directory.
 
 ## 3. Periodic and cost
 
@@ -39,8 +45,9 @@ No existing behavior was moved to periodic solely because it was slow.
 
 Remote branch protection and trusted lock-marker verification remain deferred.
 The 60 s green-merge target is **not met**: current full-suite costs exceed
-the requested budgets, and wall-starved files prevent landing. Enforcement
-remains false; no budgets were raised to hide the measured costs.
+the requested targets. Report-only measurements now retain the full selection;
+any starved file still prevents landing. Enforcement remains false; the CPU
+and merge-wall targets remain unchanged.
 See the task report for real hetzner7 dry-run and full-gate measurements and
 focused validation. This branch is pushed for review, not landed.
 Machine action after landing: fleet-sync installs the new timer on hetzner3;

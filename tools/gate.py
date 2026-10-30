@@ -18,7 +18,7 @@ import time
 import tomllib
 
 DEFAULTS = dict(file_cpu_s=8, file_wall_s=15, tier_cpu_s=100,
-                merge_wall_s=60, enforce=False)
+                merge_wall_s=60, report_hard_wall_s=900, enforce=False)
 RUN_FILE = """
 import importlib.util
 from pathlib import Path
@@ -133,7 +133,7 @@ def run_file(root, path, limits, enforce):
     if time.monotonic() >= DEADLINE:
         return dict(file=path, owner=limits.get('owner', 'ops'), cpu_s=0.0, wall_s=0.0,
                     budget_s=limits['file_cpu_s'], wall_limit_s=limits['file_wall_s'],
-                    over=False, starved=True, failed=False, code=None,
+                    over=False, starved=True, failed=True, code=None,
                     output='unobserved: tier wall limit expired before this file started\n')
     priority(None)
     if not shutil.which('ionice'):
@@ -158,7 +158,7 @@ def run_file(root, path, limits, enforce):
                     pid, status, usage = os.wait4(child.pid, os.WNOHANG)
                     if pid:
                         break
-                    if time.monotonic() >= min(started + limits['file_wall_s'], DEADLINE):
+                    if time.monotonic() >= min(started + (limits['file_wall_s'] if enforce else limits['report_hard_wall_s']), DEADLINE):
                         starved = True
                         os.killpg(child.pid, signal.SIGKILL)
                         _, status, usage = os.wait4(child.pid, 0)
@@ -175,12 +175,12 @@ def run_file(root, path, limits, enforce):
             output.seek(0)
             text = output.read().decode(errors='replace')
     cpu = usage.ru_utime + usage.ru_stime + descendant_cpu
+    starved = starved or child.returncode < 0
     over = cpu > limits['file_cpu_s'] or child.returncode in (-signal.SIGXCPU, -signal.SIGKILL) and not starved
     return dict(file=path, owner=limits.get('owner', 'ops'), cpu_s=cpu,
                 wall_s=time.monotonic() - started, budget_s=limits['file_cpu_s'],
                 wall_limit_s=limits['file_wall_s'], over=over, starved=starved,
-                failed=(child.returncode != 0 and not starved) or (starved and any(
-                    marker in text for marker in (' ... FAIL', ' ... ERROR', 'Traceback (most recent call last)'))), code=child.returncode, output=text)
+                failed=starved or child.returncode != 0, code=child.returncode, output=text)
 
 
 def atomic_json(path, result):
@@ -195,6 +195,10 @@ def atomic_json(path, result):
 
 def budget_mode(budget):
     return 'budget: ENFORCED' if budget['enforce'] else 'budget: REPORT-ONLY (not enforced)'
+
+
+def hard_wall(budget):
+    return budget['merge_wall_s'] if budget['enforce'] else budget['report_hard_wall_s']
 
 
 def wall_status(elapsed, budget):
@@ -228,7 +232,7 @@ def main():
         paths = discover(root, args.tier)
     started = time.monotonic()
     global DEADLINE
-    DEADLINE = started + budget['merge_wall_s']
+    DEADLINE = started + hard_wall(budget)
     results = []
     workers = min(8, os.cpu_count() or 1)
     print('Selected: ' + ', '.join(paths), file=sys.stderr, flush=True)
@@ -246,13 +250,17 @@ def main():
     cpu = sum(r['cpu_s'] for r in results)
     failed = sum(r['failed'] for r in results)
     reasons = [f"file CPU budget: {r['file']} ({r['owner']})" for r in results if r['over']]
+    reasons.extend(f"file wall budget: {r['file']} ({r['owner']})"
+                   for r in results if r['wall_s'] > r['wall_limit_s'])
+    if wall > budget['merge_wall_s']:
+        reasons.append(f"merge wall budget: {wall:.3f}s > {budget['merge_wall_s']}s")
     if cpu > budget['tier_cpu_s']:
         reasons.append(f"tier CPU budget: {args.tier} {cpu:.3f}s > {budget['tier_cpu_s']}s")
     print('FILE OWNER CPU_s WALL_s BUDGET_s STATUS', file=sys.stderr)
     for r in results:
-        status = 'over' if r['over'] else 'ok'
+        status = ('OVER (enforced)' if budget['enforce'] else 'OVER (report-only)') if (r['over'] or r['wall_s'] > r['wall_limit_s']) else 'ok'
         if r['starved']:
-            status += ',starved/unobserved'
+            status = 'starved/unobserved'
         if r['failed']:
             status += ',failed'
         print(f"{r['file']} {r['owner']} {r['cpu_s']:.3f} {r['wall_s']:.3f} {r['budget_s']:g} {status}", file=sys.stderr)
@@ -260,7 +268,8 @@ def main():
           f"merge wall {wall:.3f}s / {budget['merge_wall_s']:g}s; "
           f"{budget_mode(budget)}{wall_status(wall, budget)}", file=sys.stderr)
     for reason in reasons:
-        print(('FAIL: ' if budget['enforce'] else 'REPORT ONLY: ') + reason, file=sys.stderr)
+        print(('FAIL: ' if budget['enforce'] else 'REPORT ONLY: ') + reason +
+              ('' if budget['enforce'] else '; OVER (report-only)'), file=sys.stderr)
     starved = sum(r['starved'] for r in results)
     print(f'Checked {len(paths)} files in {wall:.3f}s ({workers} workers; {failed} failed; '
           f'{starved} starved/unobserved); {budget_mode(budget)}{wall_status(wall, budget)}', file=sys.stderr)

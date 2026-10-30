@@ -33,19 +33,25 @@ budget and status. Every tier/check/landing summary says `budget: REPORT-ONLY
 (not enforced)` or `budget: ENFORCED`; report-mode merge-wall overruns say
 `OVER (report-only)`. `--json PATH` saves the same observations atomically.
 Defaults: file CPU 8 s, file wall 15 s, tier CPU 100 s, merge wall 60 s.
-With enforcement enabled, CPU overruns fail by name and workers also receive
-an OS CPU ceiling. Wall expiry kills the file's process group and warns
-starved/unobserved; it never turns an unexecuted assertion into a pass. A
-landing refuses an incomplete gate. A tier also stops at `merge_wall_s`;
-files not yet started are listed as unobserved. Repair tier membership or inefficiency
+Report-only mode lets every selected file complete, regardless of CPU, file
+wall or merge-wall targets. Overruns say `OVER (report-only)`; a separate
+`report_hard_wall_s = 900` safety cap guards hangs. With enforcement enabled,
+CPU overruns fail by name, workers receive an OS CPU ceiling, and file wall
+and merge-wall targets become hard limits. Any killed or starved file fails
+in either mode and is labelled unobserved, including files that never started.
+A landing refuses an incomplete gate. Repair tier membership or inefficiency
 before asking the user about budgets (fabrig testing-strategy, section 8.1).
 
 ## 3. Land and races
 
 `tools/land [--host NAME] [--local] [--dry-run] [--keep-branch]` refuses dirty trees, main and
 detached HEAD, then fetches and performs a plain rebase on origin/main.
-Auto selection tries hetzner3, hetzner7, hetzner6 (h3/h7/h6 aliases), matching
-pool slots from fabrig's slots inventory against hel8's central free list.
+Auto selection matches hetzner3, hetzner7 and hetzner6 pool slots against
+hel8's central free list. Before claiming, it reads `df -B1 --output=avail
+"$HOME"` over SSH, skips unknown disk readings or availability below the
+larger of 85 GiB and `machine_env.PLAN_MIN_DISK_GB`, and prefers the host with
+most available bytes. Explicit `--host` (including h3/h7/h6 aliases) selects
+that builder directly; disk admission applies to automatic selection.
 Hel8's SSH target comes from `fleet/hosts.toml`. Atomic claim admission is
 still authoritative if that list races. Claims use owner `s/deploy-gate` and
 a unique `agents-gate <sha> <token>` description. There is no owner-only
@@ -53,13 +59,14 @@ release or stale-claim stealing.
 
 A builder receives a full HEAD bundle in a private temporary directory and
 runs `nice -n 19 ionice -c3 tools/check.sh --tier gate --changed BASE` with a
-65 s hard wall backstop, including lock waiting. A detached supervisor records
+hard wall backstop of 905 s in report-only mode or 65 s when enforced,
+including lock waiting (configured hard wall plus 5 s). A detached supervisor records
 its process group, boot/start identity and exit status. It drains its fixture
 descendants on completion; losing SSH does not terminate the remote run.
 
 **Release requires a known end.** Normal landing must receive the remote exit
 status, prove the process group and supervisor ended, remove the working
-directory and assert that heavy's read-only snapshot has no task submitted
+directory, verify it no longer exists, print that removal, and assert that heavy's read-only snapshot has no task submitted
 from it. Gate scratch stays below that directory and submissions would carry
 the unique claim label, so either cwd or label identifies a violation. A heavy submission is a bug; land never submits or cancels heavy work.
 Unknown completion or restoration keeps the exact claim. This includes an SSH

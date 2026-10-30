@@ -127,7 +127,7 @@ class Builder:
         if not isinstance(target, str) or not re.fullmatch('[A-Za-z0-9_.@:-]+', target) or target.startswith('-'):
             raise ValueError('invalid saved SSH target')
         reply = ssh(target, 'python3', '-I', '-B', '-c', self.source, action,
-                    json.dumps(self.data), *args, timeout=80 if action == 'wait' else 10)
+                    json.dumps(self.data), *args, timeout=float(args[0]) + 10 if action == 'wait' else 10)
         return json.loads(reply)
 
     def observe(self, value):
@@ -153,6 +153,24 @@ class Builder:
         free = {tuple(line.split()) for line in
                 ssh(self.data['hel8'], 'claim', 'list', '--free', OWNER, timeout=10).splitlines()}
         choices = [self.requested] if self.requested else ['hetzner3', 'hetzner7', 'hetzner6']
+        if not self.requested:
+            admitted = []
+            for host in choices:
+                if host not in self.hosts or not any(h == host for h, _ in available & free):
+                    continue
+                info = self.hosts[host]
+                minimum = max(85, info.get('machine_env', {}).get('PLAN_MIN_DISK_GB', 0)) * 1024**3
+                try:
+                    reply = ssh(info['ssh'], 'sh', '-c', 'df -B1 --output=avail "$HOME"', timeout=10)
+                    space = int(reply.splitlines()[-1].strip())
+                except (ValueError, OSError, subprocess.SubprocessError):
+                    print(f'land: skip {host}: HOME disk availability unknown', flush=True)
+                    continue
+                if space < minimum:
+                    print(f'land: skip {host}: HOME available {space} bytes < {minimum} bytes', flush=True)
+                    continue
+                admitted.append((host, space))
+            choices = [host for host, _ in sorted(admitted, key=lambda item: -item[1])]
         for host in choices:
             if host not in self.hosts or 'builder' not in self.hosts[host]['roles']:
                 raise ValueError(f'not a builder: {host}')
@@ -193,6 +211,7 @@ class Builder:
         proof = self.remote('cleanup')
         if proof['exists'] or proof['processes'] or proof['supervisors'] or proof['heavy']:
             raise ValueError('remote restoration is unknown')
+        print(f'land: restored {self.data["host"]}: removed {self.data["remote_dir"]}; no processes or heavy tasks', flush=True)
         self.data.update(restored=True, restoration_pending=False, phase='restored')
         self.save()
 
@@ -433,11 +452,11 @@ def main():
             builder.claim()
         def check(current_base):
             if builder:
-                return builder.check(root, current_base, budget['merge_wall_s'], gate)
+                return builder.check(root, current_base, gate.hard_wall(budget), gate)
             with tempfile.TemporaryDirectory(prefix='land-local-') as directory:
                 result_file = Path(directory) / 'result.json'
                 subprocess.run([str(root / 'tools/check.sh'), '--tier', 'gate', '--changed', current_base,
-                                '--json', str(result_file)], check=True, timeout=budget['merge_wall_s'] + 5)
+                                '--json', str(result_file)], check=True, timeout=gate.hard_wall(budget) + 5)
                 result = json.loads(result_file.read_text())
                 if result['starved']:
                     raise ValueError('local gate has unobserved tests; rerun')
