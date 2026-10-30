@@ -231,7 +231,7 @@ def supervise(spec_path, inherited_fd):
             return 0
         with open(spec['log'], 'ab', buffering=0) as output:
             if spec.get('deadline') is not None and time.time() >= spec['deadline']:
-                write_json(spec['result'], dict(code=2, timeout=True, elapsed=0))
+                write_json(spec['result'], dict(code=2, timeout=True, timeout_cause='deadline', elapsed=0))
                 return 0
             env = dict(os.environ, HEAVY_CLASS='background', PYTHONUNBUFFERED='1')
             # The shim also makes --heavy apply to prerequisites inside tiers/run.
@@ -243,14 +243,18 @@ def supervise(spec_path, inherited_fd):
                                          pass_fds=(inherited_fd, *spec.get('lease_fds', [])))
             except OSError as error:
                 output.write(str(error).encode() + b'\n')
-                write_json(spec['result'], dict(code=2, timeout=False, elapsed=0))
+                write_json(spec['result'], dict(code=2, timeout=False, timeout_cause=None, elapsed=0))
                 return 0
             start = time.monotonic()
-            timed_out = False
+            wall_start = time.time()
+            wall_bound = spec.get('wall_bound', spec['bound'])
+            timed_out, timeout_cause = False, None
             while child.poll() is None:
-                expired = (time.monotonic() - start >= spec['bound'] or
-                           (spec.get('deadline') is not None and time.time() >= spec['deadline']))
-                if not timed_out and expired:
+                wall_expired = time.monotonic() - start >= wall_bound
+                deadline_expired = spec.get('deadline') is not None and time.time() >= spec['deadline']
+                if not timed_out and (wall_expired or deadline_expired):
+                    cause = ('deadline' if deadline_expired and
+                             (not wall_expired or spec['deadline'] <= wall_start + wall_bound) else 'wall')
                     # Stop the tier runner, leaving heavy's client able to report
                     # its token/end. The shim's gate closes the submission race.
                     try:
@@ -259,8 +263,8 @@ def supervise(spec_path, inherited_fd):
                         continue
                     with lock(Path(spec['gate']), wait=True):
                         atomic(Path(spec['blocked']), '')
-                    timed_out = True
-                    write_json(spec['waiting'], dict(reason='wall bound; heavy end unknown'))
+                    timed_out, timeout_cause = True, cause
+                    write_json(spec['waiting'], dict(reason=cause + ' bound; heavy end unknown', timeout_cause=cause))
                 if timed_out:
                     tokens, ended = heavy_tokens(spec['log'])
                     if (not heavy_starting(spec['log']) and
@@ -282,7 +286,7 @@ def supervise(spec_path, inherited_fd):
                     break
                 time.sleep(.05)
                 tokens, ended = heavy_tokens(spec['log'])
-        write_json(spec['result'], dict(code=code, timeout=timed_out,
+        write_json(spec['result'], dict(code=code, timeout=timed_out, timeout_cause=timeout_cause,
                                        elapsed=time.monotonic() - start))
     return 0
 
@@ -431,7 +435,16 @@ class Runner:
         detail = json.loads(Path(notification['details']).read_text())
         branch_suspects = [suspect for suspect in detail['suspects'] if suspect['kind'] == 'branch']
         try:
-            routes = self.resolve({suspect['key'] for suspect in branch_suspects}) if branch_suspects else {}
+            if branch_suspects:
+                if notification.get('routing_leads') is None:
+                    # Pre-upgrade unresolved notifications can still be pinned
+                    # without switching the slot or reading a probe's file.
+                    notification['routing_leads'] = git(
+                        self.args.slot, 'show', detail['tip'] + ':tools/queue/leads.txt')
+                routes = self.resolve({suspect['key'] for suspect in branch_suspects},
+                                      leads=notification['routing_leads'])
+            else:
+                routes = {}
         except Fault as error:
             notification['error'] = str(error)
             return str(error)
@@ -553,7 +566,7 @@ class Runner:
         self.state['hour'] = dict(start=time.time(), seen=0, completed=0, coalesced=0, trim_bytes=0, bisect_seconds=0)
         self.save()
 
-    def resolve(self, keys):
+    def resolve(self, keys, *, leads=None):
         result = command([self.args.registry, 'names', '--json'])
         if result.returncode:
             raise Fault('launcher registry unreadable')
@@ -574,7 +587,9 @@ class Runner:
                 elif row.get('role') == 'coordinator':
                     key = 'coord' if row['mailbox'].split('@')[0] == 's/dynamic-memory' else row['handle']
                     add(routes, key, row['mailbox'])
-            for line in (self.args.slot / 'tools/queue/leads.txt').read_text().splitlines():
+            if leads is None:
+                leads = (self.args.slot / 'tools/queue/leads.txt').read_text()
+            for line in leads.splitlines():
                 if line.strip() and not line.lstrip().startswith('#'):
                     key, address = line.split()
                     add(fallback, key, address)
@@ -730,7 +745,7 @@ sys.exit(code if code >= 0 else 128 - code)
             argv += ['-E', ' | '.join('(' + exact_filter(*json.loads(key)[1:]) + ')' for key in identities)]
         invocation = dict(directory=str(self.directory), slot=str(self.args.slot), log=str(directory / 'output.log'),
                           result=str(directory / 'result.json'), waiting=str(directory / 'waiting.json'),
-                          shim=str(shim), heavy=self.args.heavy, command=argv, bound=bound,
+                          shim=str(shim), heavy=self.args.heavy, command=argv, bound=bound, wall_bound=section_bound,
                           lease_fds=self.lease_fds, gate=str(gate), blocked=str(blocked), started_at=time.time(),
                           deadline_bound=identities is not None and bound < section_bound,
                           deadline=phase['deadline'] if identities is not None else None)
@@ -759,7 +774,7 @@ sys.exit(code if code >= 0 else 128 - code)
         self.save()
         logs = dict(log=str(directory / 'output.log'), junit=str(xml), elapsed=result['elapsed'])
         if result['timeout']:
-            if invocation.get('deadline_bound'):
+            if result.get('timeout_cause') == 'deadline':
                 raise BisectBound('bisection deadline wall bound passed', logs=[logs['log']], wall=logs['elapsed'])
             raise Fault('pair wall bound passed', logs=[logs['log']], wall=logs['elapsed'])
         if identities is not None and result['code'] == BUILD_FAILED:
@@ -918,20 +933,25 @@ sys.exit(code if code >= 0 else 128 - code)
 
     def finish(self):
         active, item = self.state['active'], self.state['queue'][0]
+        identifier = f'{active["tip"]}:{active["attempt"]}'
+        new = [test for outcome in active['pairs'].values() for test in outcome.get('new', [])]
+        group = dict(id=identifier, records=[], posts=[], recorded=False)
+        if new:
+            # Read routing at TIP, not at a probe checkout or a later retry.
+            leads = git(self.args.slot, 'show', active['tip'] + ':tools/queue/leads.txt')
+            detail = self.artifact('notification', dict(tip=active['tip'], suspects=item['suspects'], new=new))
+            group['notification'] = dict(details=detail, resolved=False, error=None, routing_leads=leads)
+        phase = self.pending_bisection(active, new, group)
+        # No completion state has changed if any preparation read raises. The
+        # outer fault handler can save its notice without leaking a run post.
         item['pairs'].update(active['pairs'])
         faulted = [profile for profile, outcome in item['pairs'].items() if outcome['status'] == 'faulted']
         red = any(outcome.get('red') for outcome in item['pairs'].values())
         verdict = 'red' if red else 'partial' if faulted else 'green'
-        identifier = f'{active["tip"]}:{active["attempt"]}'
-        new = [test for outcome in active['pairs'].values() for test in outcome.get('new', [])]
         branches = [suspect['branch'] for suspect in item['suspects'] if suspect['kind'] == 'branch']
         for event in active['events'].values():
             if event['state'] == 'new' and branches:
                 event.update(branch=branches[0], branches=branches)
-        group = dict(id=identifier, records=[], posts=[], recorded=False)
-        if new:
-            detail = self.artifact('notification', dict(tip=active['tip'], suspects=item['suspects'], new=new))
-            group['notification'] = dict(details=detail, resolved=False, error=None)
         routing_error = self.route_notification(group)
         event = self.event('after-landing-run', identifier, commit=active['tip'], attempt=active['attempt'],
                            suspects=item['suspects'], coalesced=item['coalesced'], verdict=verdict,
@@ -940,7 +960,9 @@ sys.exit(code if code >= 0 else 128 - code)
                            wall=time.time() - active['started'], routing_fault=routing_error)
         group['records'] = [self.bounded_event(record) for record in [*active['events'].values(), event]]
         self.state['outbox'].append(group)
-        self.state['bisect'] = self.pending_bisection(active, new, group)
+        if phase:
+            phase['run_destinations'] = group['notification'].get('destinations')
+        self.state['bisect'] = phase
         if self.state['bisect']:
             # Today's code accepts only version 1, so it stops before polling,
             # delivery or a checkout rather than ignoring an unfamiliar phase.
@@ -999,6 +1021,7 @@ sys.exit(code if code >= 0 else 128 - code)
         now = time.time()
         return dict(tip=active['tip'], attempt=active['attempt'], run_id=run_group['id'],
                     run_destinations=run_group['notification'].get('destinations'),
+                    routing_leads=run_group['notification'].get('routing_leads'),
                     groups=groups, started=now, deadline=now + 45 * 60, count=0,
                     invocation=None, probe=None, completed=None, arrived=[])
 
@@ -1163,7 +1186,7 @@ sys.exit(code if code >= 0 else 128 - code)
                                                 events=[record['id'] for record in records]))
         notification = dict(bisect=True, resolved=False, error=None, run_id=phase['run_id'],
                             run_destinations=phase['run_destinations'], culprit_keys=sorted(culprit_keys),
-                            other=other, details=detail)
+                            other=other, details=detail, routing_leads=phase.get('routing_leads'))
         outbox = dict(id=identifier, records=records, recorded=False, posts=[],
                       after=phase['run_id'], notification=notification)
         routing_error = self.route_notification(outbox)
@@ -1182,7 +1205,13 @@ sys.exit(code if code >= 0 else 128 - code)
         if destinations is None:
             return None  # The preceding run still has unresolved routing.
         try:
-            routes = self.resolve(set(notification['culprit_keys'])) if notification['culprit_keys'] else {}
+            if notification['culprit_keys']:
+                if notification.get('routing_leads') is None:
+                    tip = json.loads(Path(notification['details']).read_text())['tip']
+                    notification['routing_leads'] = git(self.args.slot, 'show', tip + ':tools/queue/leads.txt')
+                routes = self.resolve(set(notification['culprit_keys']), leads=notification['routing_leads'])
+            else:
+                routes = {}
         except Fault as error:
             notification['error'] = str(error)
             return str(error)

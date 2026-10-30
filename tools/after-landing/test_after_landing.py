@@ -206,9 +206,8 @@ class Lease:
 """
 
 
-# Run the production entry points with a file-controlled guardian clock.
-# Every invocation starts frozen; only skein expires when explicitly released.
-# The first clock read acknowledges initialization before the test may advance it.
+# Runner and guardian share frozen absolute and monotonic clocks. Only a test's
+# explicit atomic advance changes either clock; real time is a watchdog only.
 CLOCK_GUARDIAN = r"""import importlib.machinery
 import importlib.util
 import json
@@ -222,24 +221,55 @@ spec = importlib.util.spec_from_loader(loader.name, loader)
 app = importlib.util.module_from_spec(spec)
 loader.exec_module(app)
 app.__file__ = __file__
+def clock_value(name):
+    return json.loads((Path.home() / 'clock.json').read_text())[name]
+app.time = SimpleNamespace(time=lambda: clock_value('wall'),
+                           monotonic=lambda: clock_value('monotonic'),
+                           time_ns=lambda: int(clock_value('wall') * 1_000_000_000), sleep=time.sleep)
 if sys.argv[1] != '_supervise':
     sys.exit(app.main())
 path = Path(sys.argv[2])
 invocation = json.loads(path.read_text())
 initialized = False
+start_mono = None
 def now():
-    global initialized
+    global initialized, start_mono
+    value = clock_value('monotonic')
     if not initialized:
         initialized = True
+        start_mono = value
         app.atomic(path.parent / 'clock-started', '')
-        return 0
+        return value
+    # Older section 2 fixtures advance this invocation's monotonic clock only.
     if invocation['command'][1] == 'skein' and (Path.home() / 'expire-skein').exists():
-        return invocation['bound'] + 1
-    return 0
-app.time = SimpleNamespace(monotonic=now, sleep=time.sleep, time=time.time)
+        return max(value, start_mono + invocation.get('wall_bound', invocation['bound']) + 1)
+    return value
+app.time.monotonic = now
 app.atomic(path.parent / 'started', '')
 sys.exit(app.supervise(path, int(sys.argv[3])))
 """
+
+
+class ControlledClock:
+    def __init__(self, home):
+        self.path = home / 'clock.json'
+        app.write_json(self.path, dict(wall=1_800_000_000, monotonic=0))
+        self.sleep = time.sleep
+
+    def time(self):
+        return json.loads(self.path.read_text())['wall']
+
+    def monotonic(self):
+        return json.loads(self.path.read_text())['monotonic']
+
+    def time_ns(self):
+        return int(self.time() * 1_000_000_000)
+
+    def advance(self, *, wall=0, monotonic=0):
+        value = json.loads(self.path.read_text())
+        value['wall'] += wall
+        value['monotonic'] += monotonic
+        app.write_json(self.path, value)
 
 
 class Sandbox(unittest.TestCase):
@@ -261,6 +291,10 @@ class Sandbox(unittest.TestCase):
         # Retain only a safe system PATH, with no personal wrappers/services.
         os.environ['PATH'] = '/usr/local/bin:/usr/bin:/bin'
         self.addCleanup(self.environment.stop)
+        self.clock = ControlledClock(self.home)
+        clock_patch = mock.patch.object(app, 'time', self.clock)
+        clock_patch.start()
+        self.addCleanup(clock_patch.stop)
         self.seed = self.home / 'seed'
         self.origin = self.home / 'origin.git'
         self.slot = self.home / 'slot'
@@ -954,7 +988,7 @@ class SupervisionTests(Sandbox):
         self.args.poll_interval = 10
         published = threading.Event()
         clock = SimpleNamespace(monotonic=lambda: 11 if published.is_set() else 0,
-                                time=time.time, time_ns=time.time_ns, sleep=time.sleep)
+                                time=self.clock.time, time_ns=self.clock.time_ns, sleep=time.sleep)
         self.scenario['pairs']['qa-skein']['wait'] = True
         self.save_scenario()
         self.runner.poll()
@@ -1471,9 +1505,8 @@ class BisectionTests(Sandbox):
         def expire_after_middle(index, commit, outcomes, logs):
             real_save(index, commit, outcomes, logs)
             if commit == commits[2]:
-                phase['deadline'] = time.time() - 1
-                self.runner.save()
-        phase['deadline'] = time.time() + 120
+                self.clock.advance(wall=121, monotonic=121)
+        phase['deadline'] = self.clock.time() + 120
         with mock.patch.object(self.runner, 'save_bisect_probe', side_effect=expire_after_middle):
             self.runner.run()
         self.runner.deliver()
@@ -1620,19 +1653,34 @@ class BisectionTests(Sandbox):
     def test_hourly_counts_bisection_minutes_and_arriving_tips(self):
         self.setup_interval(4)
         phase = self.pending()
+        self.clock.advance(wall=30, monotonic=30)
         new, _ = self.advance('skein')
         self.runner.poll()
         self.assertEqual(phase['arrived'], [new])
-        phase['started'] -= 120
-        self.runner.save()
-        self.runner.run()
-        self.runner.deliver()
-        self.assertEqual(self.bisect_events()[0]['arrived'], [new])
-        self.runner.state['hour']['start'] -= 3601
+        self.clock.advance(wall=90, monotonic=90)
+        self.runner.state['hour']['start'] = self.clock.time() - 3600
         self.runner.hourly()
         self.runner.deliver()
-        self.assertTrue(any('bisection minutes: 2.' in row['body'] for row in self.calls('post')))
-
+        coverage = [post['body'] for post in self.calls('post') if 'bisection minutes:' in post['body']]
+        self.assertEqual(len(coverage), 2)
+        self.assertTrue(all(body.rstrip().endswith('bisection minutes: 2.0') for body in coverage))
+        self.assertEqual(self.runner.state['hour']['bisect_seconds'], 0)
+        self.assertEqual(self.runner.state['bisect']['accounted_at'], phase['started'] + 120)
+        self.runner = app.Runner(self.args)
+        self.clock.advance(wall=60, monotonic=60)
+        self.runner.run()
+        self.runner.deliver()
+        event, = self.bisect_events()
+        self.assertEqual(event['arrived'], [new])
+        self.assertEqual(event['wall'], 180)
+        self.assertEqual(self.runner.state['hour']['bisect_seconds'], 60)
+        self.clock.advance(wall=3600, monotonic=3600)
+        self.runner.hourly()
+        self.runner.deliver()
+        coverage = [post['body'] for post in self.calls('post') if 'bisection minutes:' in post['body']]
+        self.assertEqual(len(coverage), 4)
+        self.assertTrue(all(body.rstrip().endswith('bisection minutes: 1.0') for body in coverage[2:]))
+        self.assertEqual(self.runner.state['hour']['bisect_seconds'], 0)
 
     def test_deadline_cancels_and_drains_before_final_trim(self):
         self.assert_bisect_wall_termination(deadline_capped=True)
@@ -1643,7 +1691,7 @@ class BisectionTests(Sandbox):
     def assert_bisect_wall_termination(self, *, deadline_capped):
         self.setup_interval(4)
         phase = self.pending()
-        phase['deadline'] = time.time() + (60 if deadline_capped else 3600)
+        phase['deadline'] = self.clock.time() + (60 if deadline_capped else 3600)
         self.runner.save()
         self.at(self.base, hang=True)
         before = len(self.calls('tiers'))
@@ -1664,7 +1712,8 @@ class BisectionTests(Sandbox):
             invocation = phase['invocation']
             self.assertLessEqual(invocation['bound'], 60 if deadline_capped else 1801)
             self.assertEqual(invocation['deadline_bound'], deadline_capped)
-            app.atomic(self.home / 'expire-skein', '')
+            advance = 60 if deadline_capped else 1802
+            self.clock.advance(wall=advance, monotonic=advance)
             self.wait_for(lambda: self.calls('heavy'), 'bisection cancellation', worker)
             self.wait_for(lambda: Path(invocation['waiting']).exists(), 'guardian waiting for heavy', worker)
             self.assertTrue(worker.is_alive())
@@ -1672,13 +1721,14 @@ class BisectionTests(Sandbox):
             self.assertEqual(len(self.calls('tiers')) - before, 1)
             self.assertIsNotNone(self.runner.state['bisect'])
             if not deadline_capped:
-                phase['deadline'] = time.time() - 1
-                self.runner.save()
+                self.clock.advance(wall=2000, monotonic=2000)
         finally:
             app.atomic(self.home / 'allow-end', '')
             worker.join(timeout=120)
         self.assertFalse(worker.is_alive())
         self.assertFalse(failures, failures)
+        result = json.loads(Path(invocation['result']).read_text())
+        self.assertEqual(result['timeout_cause'], 'deadline' if deadline_capped else 'wall')
         self.runner.deliver()
         self.assertEqual(self.bisect_events()[0]['result'], 'range' if deadline_capped else 'inconclusive')
         self.assertEqual(len(self.calls('trim')), 2)
@@ -1878,6 +1928,174 @@ class BisectionTests(Sandbox):
         self.assertEqual(event['id'], commits[-1] + ':1:bisect:1')
         self.assertEqual(event['culprit_commit'], commits[1])
         self.assertEqual(self.probe_commits(event), [self.base, commits[1], commits[0]])
+
+
+    def test_finish_preparation_failure_preserves_state_and_never_duplicates_posts(self):
+        self.setup_interval(3)
+        self.runner.poll()
+        with mock.patch.object(self.runner, 'finish'):
+            self.runner.run()
+        before = json.loads(json.dumps(self.runner.state))
+        saved_before = self.runner.path.read_bytes()
+        real_git = app.git
+        def fail_parent_read(slot, *argv):
+            if argv[0] == 'rev-parse' and argv[-1].endswith('^1'):
+                raise app.Fault('injected bisection preparation failure')
+            return real_git(slot, *argv)
+        with mock.patch.object(app, 'git', side_effect=fail_parent_read):
+            with self.assertRaisesRegex(app.Fault, 'injected bisection preparation failure'):
+                self.runner.finish()
+        self.assertEqual(self.runner.state, before)
+        self.assertEqual(self.runner.path.read_bytes(), saved_before)
+        # The same outer error path as follow/once may safely save and deliver
+        # the ops fault. No unfinished run notification may have escaped.
+        self.runner.fault('injected bisection preparation failure')
+        self.runner.deliver()
+        self.assertEqual([post['args'][3] for post in self.calls('post')], ['ops@hel8'])
+        self.runner = app.Runner(self.args)
+        self.runner.run()
+        self.runner.deliver()
+        run_posts = [post for post in self.calls('post') if 'new reds: ' in post['body']]
+        self.assertEqual(len(run_posts), 2)
+        self.assertEqual({post['args'][3] for post in run_posts}, {'s/dynamic-memory@hel8', 's/qa@hel8'})
+        self.assertEqual(self.runner.state['last_run']['verdict'], 'red')
+        self.assertIsNone(self.runner.state['active'])
+
+    def test_bisect_routes_and_retries_use_tip_snapshot_after_historical_probe(self):
+        self.passing_history()
+        culprit, _ = self.advance('mc')
+        leads = self.seed / 'tools/queue/leads.txt'
+        app.atomic(leads, leads.read_text().replace('mc s/multi-coord@hel8', 'mc s/current-multi@hel8'))
+        self.git(self.seed, 'add', 'tools/queue/leads.txt')
+        tip, _ = self.advance('skein')
+        self.scenario['pairs']['qa-skein'] = dict(main=[dict(test='one', result='fail')])
+        self.at(self.base)
+        self.pending()
+        self.assertEqual({post['args'][3] for post in self.calls('post')},
+                         {'s/current-multi@hel8', 's/dynamic-memory@hel8'})
+        self.scenario['registry_fault'] = True
+        self.save_scenario()
+        self.runner = app.Runner(self.args)
+        self.runner.run()
+        self.runner.deliver()
+        self.assertEqual(self.bisect_events()[0]['culprit_commit'], culprit)
+        self.assertEqual(self.git(self.slot, 'rev-parse', 'HEAD'), culprit)
+        self.assertNotEqual(culprit, tip)
+        self.scenario['registry_fault'] = False
+        self.save_scenario()
+        self.runner = app.Runner(self.args)
+        self.runner.poll()
+        result_posts = [post for post in self.calls('post') if 'bisection results' in post['body']]
+        self.assertEqual({post['args'][3] for post in result_posts},
+                         {'s/current-multi@hel8', 's/dynamic-memory@hel8'})
+        self.assertFalse(self.runner.state['outbox'])
+
+    def test_saved_guardian_deadline_cause_overrides_prestart_wall_cap(self):
+        self.setup_interval(4)
+        phase = self.pending()
+        phase['deadline'] = app.time.time() + 3600
+        self.runner.save()
+        real_popen = app.subprocess.Popen
+        results = []
+        class FinishedGuardian:
+            def poll(self):
+                return 0
+            def wait(self):
+                return 0
+        def popen(argv, *args, **kwargs):
+            if '_supervise' not in argv:
+                return real_popen(argv, *args, **kwargs)
+            spec_path = Path(argv[-2])
+            invocation = json.loads(spec_path.read_text())
+            self.assertFalse(invocation['deadline_bound'])
+            # A guardian delayed past the absolute deadline publishes its
+            # actual cause even though the pre-start shorter cap was the wall.
+            app.write_json(Path(invocation['result']), dict(
+                code=2, timeout=True, timeout_cause='deadline', elapsed=0))
+            app.atomic(spec_path.parent / 'started', '')
+            results.append(invocation)
+            return FinishedGuardian()
+        with mock.patch.object(app.subprocess, 'Popen', side_effect=popen):
+            self.runner.run()
+        self.runner.deliver()
+        self.assertEqual(len(results), 1)
+        self.assertEqual(self.bisect_events()[0]['result'], 'range')
+        self.assertFalse([post for post in self.calls('post') if post['args'][3] == 'ops@hel8'])
+
+    def test_guardian_obeys_both_frozen_clocks_and_explicit_advances(self):
+        subject = self.home / 'clock-probe-subject.py'
+        app.atomic(subject, '''import json
+import os
+from pathlib import Path
+import tempfile
+import time
+
+def atomic(path, text):
+    fd, sibling = tempfile.mkstemp(dir=path.parent)
+    with os.fdopen(fd, 'w') as output:
+        output.write(text)
+    os.replace(sibling, path)
+
+def supervise(path, fd):
+    for number in (0, 1):
+        atomic(Path.home() / ('clock-snapshot-' + str(number)),
+               json.dumps([time.time(), time.monotonic()]))
+        while not (Path.home() / ('clock-release-' + str(number))).exists():
+            time.sleep(.01)
+    return 0
+''')
+        probe_tool = self.home / 'clock-probe.py'
+        app.atomic(probe_tool, CLOCK_GUARDIAN.replace('TOOL_PATH', repr(str(subject))))
+        invocation = self.home / 'clock-probe-spec.json'
+        app.write_json(invocation, dict(command=['run', 'skein'], bound=100))
+        clock_path = self.home / 'clock.json'
+        app.write_json(clock_path, dict(wall=10000, monotonic=10))
+        worker = subprocess.Popen([sys.executable, '-I', '-B', str(probe_tool),
+                                   '_supervise', str(invocation), '-1'])
+        try:
+            self.wait_file(self.home / 'clock-snapshot-0', worker)
+            self.assertEqual(json.loads((self.home / 'clock-snapshot-0').read_text()), [10000, 10])
+            app.write_json(clock_path, dict(wall=10037, monotonic=15))
+            app.atomic(self.home / 'clock-release-0', '')
+            self.wait_file(self.home / 'clock-snapshot-1', worker)
+            self.assertEqual(json.loads((self.home / 'clock-snapshot-1').read_text()), [10037, 15])
+        finally:
+            app.atomic(self.home / 'clock-release-0', '')
+            app.atomic(self.home / 'clock-release-1', '')
+            worker.wait(timeout=120)
+        self.assertEqual(worker.returncode, 0)
+
+
+    def test_guardian_records_deadline_expiry_during_startup(self):
+        self.setup_interval(4)
+        phase = self.pending()
+        phase['deadline'] = self.clock.time() + 3600
+        self.runner.save()
+        real_popen = app.subprocess.Popen
+        invocations = []
+        def delayed_start(argv, *args, **kwargs):
+            if '_supervise' in argv:
+                invocation = json.loads(Path(argv[-2]).read_text())
+                self.assertFalse(invocation['deadline_bound'])
+                self.assertEqual(invocation['wall_bound'], 1801)
+                # Startup is the explicit handshake: expire absolute time only
+                # after the runner has persisted its invocation and count.
+                self.assertEqual(json.loads(self.runner.path.read_text())['bisect']['count'], 1)
+                self.clock.advance(wall=3600, monotonic=3600)
+                invocations.append(invocation)
+            return real_popen(argv, *args, **kwargs)
+        before = len(self.calls('tiers'))
+        with mock.patch.object(app.subprocess, 'Popen', side_effect=delayed_start):
+            self.runner.run()
+        self.runner.deliver()
+        self.assertEqual(len(invocations), 1)
+        result = json.loads(Path(invocations[0]['result']).read_text())
+        self.assertTrue(result['timeout'])
+        self.assertEqual(result['timeout_cause'], 'deadline')
+        self.assertEqual(result['elapsed'], 0)
+        self.assertEqual(len(self.calls('tiers')), before)
+        self.assertEqual(self.bisect_events()[0]['result'], 'range')
+        self.assertFalse([post for post in self.calls('post') if post['args'][3] == 'ops@hel8'])
 
 
 class ParserTests(unittest.TestCase):
