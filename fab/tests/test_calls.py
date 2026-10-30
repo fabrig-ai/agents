@@ -120,6 +120,35 @@ def _private(): pass
             self.assertIn("Design unavailable", calls.design_text(root, "broken.md"))
 
 
+class ReviewHistoryTest(unittest.TestCase):
+    def test_last_review_uses_start_timestamp_and_matching_done_outcome(self):
+        failed = {"ev": "call.started", "role": "review", "call": "failed", "ts": "003"}
+        done = {"ev": "call.started", "role": "review", "call": "done", "ts": "001"}
+        events = [done, {"ev": "call.ended", "call": "done", "outcome": "done", "ts": "002"},
+                  failed, {"ev": "call.ended", "call": "failed", "outcome": "failed", "ts": "004"}]
+        self.assertIsNone(calls.last_review([]))
+        self.assertIsNone(calls.last_review([failed], done=True))
+        self.assertEqual(calls.last_review([failed]), "003")
+        self.assertEqual(calls.last_review(iter(events)), "003")
+        self.assertEqual(calls.last_review(iter(events), done=True), "001")
+        events.append({"ev": "call.started", "role": "answer", "call": "answer", "ts": "005"})
+        events.append({"ev": "call.ended", "call": "answer", "outcome": "done", "ts": "006"})
+        self.assertEqual(calls.last_review(events, done=True), "001")
+        events.append({"ev": "call.started", "role": "review", "call": "running", "ts": "007"})
+        self.assertEqual(calls.last_review(events), "007")
+        self.assertEqual(calls.last_review(events, done=True), "001")
+
+    def test_landed_after_filters_tasks_and_timestamp_in_log_order(self):
+        tasks = {"demo/one": object(), "demo/two": object()}
+        first = {"ev": "branch.landed", "task": "demo/two", "ts": "001"}
+        second = {"ev": "branch.landed", "task": "demo/one", "ts": "003"}
+        events = [first, {"ev": "branch.landed", "task": "other/one", "ts": "004"},
+                  {"ev": "run.started", "task": "demo/one", "ts": "002"}, second]
+        self.assertEqual(calls.landed_after(iter(events), tasks, None), [first, second])
+        self.assertEqual(calls.landed_after(events, tasks, "001"), [second])
+        self.assertEqual(calls.landed_after(events, tasks, "003"), [])
+
+
 class BriefTest(unittest.TestCase):
     def test_skeleton_sections_full_specs_and_part_statuses(self):
         with tmp_home() as root:
@@ -161,6 +190,76 @@ class BriefTest(unittest.TestCase):
             write(root / "design.md", "x" * calls.BRIEF_LIMIT)
             with self.assertRaisesRegex(ValueError, "BRIEF_LIMIT.*largest section: Cited design"):
                 calls.skeleton_brief(plan, "core", tasks, {}, root, call_id="c", branch="b", report="r")
+
+    def test_review_sections_digests_shared_design_and_missing_digest(self):
+        with tmp_home() as root:
+            plan, tasks = fixture(root)
+            write(log.home() / "digests/demo/one-1.md", "Stale digest")
+            write(log.home() / "digests/demo/one-2.md", "# Digest: public changes\nKeep this text.")
+            write(log.home() / "digests/demo/one-3.md", "Future digest")
+            events = [
+                {"ev": "run.started", "task": "demo/one", "run": "demo/one-1"},
+                {"ev": "run.started", "task": "demo/one", "run": "demo/one-2"},
+                {"ev": "branch.landed", "task": "demo/one", "branch": "demo/one-r1",
+                 "main": "1234567890abcdef", "tip": "tip-one", "ts": "001"},
+                {"ev": "run.started", "task": "demo/one", "run": "demo/one-3"},
+                {"ev": "branch.landed", "task": "demo/three", "branch": "demo/three",
+                 "main": "fedcba0987654321", "tip": "tip-three", "ts": "002"},
+            ]
+            for has_run in (False, True):
+                with self.subTest(has_run=has_run):
+                    history = events[:]
+                    if has_run:
+                        history.insert(-1, {"ev": "run.started", "task": "demo/three", "run": "demo/three-1"})
+                    text = calls.review_brief(plan, tasks, history, root,
+                                              call_id="r1", branch="calls/r1", report="/review.md")
+                    for section in ("Role", "Call facts", "Plan parts and slices",
+                                    "Landed since the last review", "Taste", "Designs", "Inventory"):
+                        self.assertIn(f"# {section}\n\n", text)
+                    for fragment in (calls.ROLES["review"].read_text(), "Call: r1", "calls/r1", "/review.md",
+                                     "Plan: demo", "Repository: agents", "Specs: docs/plan/demo/tasks/",
+                                     "| base | Base primitives | feature | - | designed |",
+                                     "| core | Call core | feature | base | done |",
+                                     "| next | Next part | probe | core | not designed |",
+                                     "| 1 | Build the core | base, core | True |", "Explore next",
+                                     "## demo/one (`demo/one-r1`, main `1234567890ab`)",
+                                     "## demo/three (`demo/three`, main `fedcba098765`)",
+                                     "# Digest: public changes\nKeep this text.", "(no digest)",
+                                     calls.TASTE.read_text(), "Existing primitive."):
+                        self.assertIn(fragment, text)
+                    self.assertLess(text.index("## demo/one"), text.index("## demo/three"))
+                    self.assertEqual(text.count("## design.md\n"), 1)
+                    self.assertEqual(text.count((root / "design.md").read_text()), 1)
+                    self.assertNotIn("Stale digest", text)
+                    self.assertNotIn("Future digest", text)
+
+    def test_review_empty_and_done_review_cutoff(self):
+        with tmp_home() as root:
+            plan, tasks = fixture(root)
+            first = {"ev": "branch.landed", "task": "demo/one", "branch": "demo/one",
+                     "main": "m1", "tip": "tip-one", "ts": "001"}
+            events = [first, {"ev": "call.started", "role": "review", "call": "done", "ts": "002"},
+                      {"ev": "branch.landed", "task": "demo/three", "branch": "demo/three",
+                       "main": "m2", "tip": "tip-three", "ts": "003"},
+                      {"ev": "call.ended", "call": "done", "outcome": "done", "ts": "004"},
+                      {"ev": "call.started", "role": "review", "call": "failed", "ts": "005"},
+                      {"ev": "call.ended", "call": "failed", "outcome": "failed", "ts": "006"}]
+            text = calls.review_brief(plan, tasks, events, root, call_id="c", branch="b", report="r")
+            self.assertNotIn("## demo/one", text)
+            self.assertIn("## demo/three", text)
+            empty = calls.review_brief(plan, tasks, [], root, call_id="c", branch="b", report="r")
+            self.assertIn("# Landed since the last review\n\n(none)", empty)
+            self.assertNotIn("# Full design", empty)
+
+    def test_review_limit_names_largest_section(self):
+        with tmp_home() as root:
+            plan, tasks = fixture(root)
+            write(log.home() / "digests/run.md", "x" * calls.BRIEF_LIMIT)
+            events = [{"ev": "run.started", "task": "demo/one", "run": "run"},
+                      {"ev": "branch.landed", "task": "demo/one", "branch": "branch",
+                       "main": "main", "tip": "tip", "ts": "001"}]
+            with self.assertRaisesRegex(ValueError, "BRIEF_LIMIT.*largest section: Landed since the last review"):
+                calls.review_brief(plan, tasks, events, root, call_id="c", branch="b", report="r")
 
     def test_answer_sections_and_empty_questions(self):
         with tmp_home() as root:
@@ -316,8 +415,8 @@ class StartTest(unittest.TestCase):
 
 
 class MainTest(unittest.TestCase):
-    def test_brief_only_for_both_roles_through_cli(self):
-        for role in ("skeleton", "answer"):
+    def test_brief_only_for_all_roles_through_cli(self):
+        for role in ("skeleton", "answer", "review"):
             with self.subTest(role=role), tmp_home() as root:
                 fixture(root)
                 log.append("question.asked", task="demo/one", run="demo/one-1", text="Which type?")
@@ -340,7 +439,7 @@ class MainTest(unittest.TestCase):
                 self.assertEqual(fake.calls[0].cwd, str(root / "docs/plan/demo"))
 
     def test_main_runs_compiled_brief_and_returns_report_status(self):
-        for role, outcome, code in (("skeleton", "done", 0), ("answer", "question", 1)):
+        for role, outcome, code in (("skeleton", "done", 0), ("answer", "question", 1), ("review", "done", 0)):
             with self.subTest(role=role), tmp_home() as root:
                 fixture(root)
                 fake = FakeRunner().on(["git", "rev-parse"], Result(0, str(root)))
@@ -349,7 +448,8 @@ class MainTest(unittest.TestCase):
                 argv = [role, *(["core"] if role == "skeleton" else []), "--plan", str(root / "docs/plan/demo")]
                 with patch.object(calls, "run", fake), patch.object(calls, "start", return_value=result) as start, redirect_stdout(output):
                     self.assertEqual(calls.main(argv), code)
-                self.assertEqual(start.call_args.args[:3], (role, "demo/core" if role == "skeleton" else "demo", root))
+                subject = {"skeleton": "demo/core", "answer": "demo", "review": "demo/review"}[role]
+                self.assertEqual(start.call_args.args[:3], (role, subject, root))
                 self.assertIn("# Inventory", start.call_args.args[3])
                 self.assertIs(start.call_args.kwargs["sh"], fake)
                 self.assertEqual(output.getvalue(), f"{outcome} calls/id\n")

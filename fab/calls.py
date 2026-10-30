@@ -21,13 +21,14 @@ from pathlib import Path
 
 from fab import log
 from fab.plan import Plan, Task, load_plan, load_tasks
-from fab.run import _write, outcome
+from fab.run import TASTE, _write, outcome
 from fab.sh import Failed, Runner, run
 from fab.state import fold
 
 ROLES = {
     "skeleton": Path(__file__).resolve().parent / "roles" / "skeleton.md",
     "answer": Path(__file__).resolve().parent / "roles" / "answerer.md",
+    "review": Path(__file__).resolve().parent / "roles" / "reviewer.md",
 }
 MODEL = "claude-opus-5-5"
 BRIEF_LIMIT = 200_000  # characters, about 50k tokens: what code puts in; the call reads the rest itself
@@ -109,15 +110,6 @@ def skeleton_brief(plan: Plan, part_id: str, tasks: dict[str, Task], statuses: d
     text; the inventory; and the task specs that exist for the part's needs, as examples of
     the format. Raises ValueError past BRIEF_LIMIT, naming the largest section."""
     part = plan.parts[part_id]
-    rows = ["| Part | Title | Mode | Needs | Status |", "| --- | --- | --- | --- | --- |"]
-    for item in plan.parts.values():
-        specs = [task for task in tasks.values() if task.part == item.id]
-        status = ("done" if item.done or specs and all(statuses.get(task.id) == "landed" for task in specs)
-                  else "designed" if specs else "not designed")
-        rows.append(f"| {item.id} | {item.title} | {item.mode} | {', '.join(item.needs) or '-'} | {status} |")
-    rows.extend(["", "| Slice | Story | Parts | Walk |", "| --- | --- | --- | --- |"])
-    for item in plan.slices:
-        rows.append(f"| {item.id} | {item.story} | {', '.join(item.parts)} | {item.walk} |")
     examples = []
     for task in tasks.values():
         if task.part in part.needs:
@@ -127,13 +119,26 @@ def skeleton_brief(plan: Plan, part_id: str, tasks: dict[str, Task], statuses: d
     return _brief([
         ("Role", ROLES["skeleton"].read_text(encoding="utf-8")),
         ("Call facts", _facts(call_id, branch, report)),
-        ("Plan parts and slices", f"Plan: {plan.draft}\nRepository: {plan.repo}\n\n" + "\n".join(rows)),
+        ("Plan parts and slices", _parts_table(plan, tasks, statuses)),
         ("Part to design", f"- Id: {part.id}\n- Title: {part.title}\n- Mode: {part.mode}\n"
          f"- Needs: {', '.join(part.needs) or '(none)'}\n- Design: {part.design}"),
         ("Cited design", design_text(root, part.design)),
         ("Inventory", render_inventory(inventory(root))),
         ("Task spec examples", "\n\n".join(examples) or "(none)"),
     ])
+
+
+def _parts_table(plan: Plan, tasks: Mapping[str, Task], statuses: Mapping[str, str]) -> str:
+    rows = ["| Part | Title | Mode | Needs | Status |", "| --- | --- | --- | --- | --- |"]
+    for item in plan.parts.values():
+        specs = [task for task in tasks.values() if task.part == item.id]
+        status = ("done" if item.done or specs and all(statuses.get(task.id) == "landed" for task in specs)
+                  else "designed" if specs else "not designed")
+        rows.append(f"| {item.id} | {item.title} | {item.mode} | {', '.join(item.needs) or '-'} | {status} |")
+    rows.extend(["", "| Slice | Story | Parts | Walk |", "| --- | --- | --- | --- |"])
+    for item in plan.slices:
+        rows.append(f"| {item.id} | {item.story} | {', '.join(item.parts)} | {item.walk} |")
+    return f"Plan: {plan.draft}\nRepository: {plan.repo}\n\n" + "\n".join(rows)
 
 
 def answer_brief(questions: list[dict], tasks: dict[str, Task], root: Path, *, call_id: str,
@@ -171,19 +176,55 @@ def review_brief(plan: Plan, tasks: dict[str, Task], events: list[dict], root: P
     "Designs", per distinct path cited by the landed tasks' parts (the citation before its
     comma), in first-landed order, `## <path>` and design_text(root, citation); "Inventory".
     Raises ValueError past BRIEF_LIMIT, naming the largest section."""
-    raise NotImplementedError
+    landed = landed_after(events, tasks, last_review(events, done=True))
+    records = []
+    designs = {}
+    for record in landed:
+        run_id = None
+        for event in events:
+            if event is record:
+                break
+            if event.get("ev") == "run.started" and event.get("task") == record["task"]:
+                run_id = event["run"]
+        digest = "(no digest)"
+        if run_id is not None:
+            try:
+                digest = (log.home() / "digests" / f"{run_id}.md").read_text(encoding="utf-8")
+            except FileNotFoundError:
+                pass
+        records.append(f"## {record['task']} (`{record['branch']}`, main `{record['main'][:12]}`)\n\n{digest}")
+        citation = plan.parts[tasks[record["task"]].part].design
+        designs.setdefault(citation.split(",", 1)[0].strip(), citation)
+    statuses = {key: view.status for key, view in fold(tasks, events).items()}
+    return _brief([
+        ("Role", ROLES["review"].read_text(encoding="utf-8")),
+        ("Call facts", _facts(call_id, branch, report)),
+        ("Plan parts and slices", _parts_table(plan, tasks, statuses) +
+         f"\n\nSpecs: docs/plan/{plan.draft}/tasks/"),
+        ("Landed since the last review", "\n\n".join(records) or "(none)"),
+        ("Taste", TASTE.read_text(encoding="utf-8")),
+        ("Designs", "\n\n".join(f"## {path}\n\n{design_text(root, citation)}"
+                                 for path, citation in designs.items())),
+        ("Inventory", render_inventory(inventory(root))),
+    ])
 
 
 def last_review(events: Iterable[dict], *, done: bool = False) -> str | None:
     """The ts of the latest call.started with role review; with done, only of one whose
     call.ended (same call) has outcome done. None when there is none."""
-    raise NotImplementedError
+    events = list(events)
+    completed = {event["call"] for event in events
+                 if event.get("ev") == "call.ended" and event.get("outcome") == "done"}
+    return next((event["ts"] for event in reversed(events)
+                 if event.get("ev") == "call.started" and event.get("role") == "review"
+                 and (not done or event["call"] in completed)), None)
 
 
 def landed_after(events: Iterable[dict], tasks: Mapping[str, Task], ts: str | None) -> list[dict]:
     """branch.landed records of the given tasks whose ts is later than ts (every one when ts is
     None), in log order. Timestamps compare as strings (fab.log.now's fixed format)."""
-    raise NotImplementedError
+    return [event for event in events if event.get("ev") == "branch.landed"
+            and event.get("task") in tasks and (ts is None or event["ts"] > ts)]
 
 
 def open_questions(events: Iterable[dict]) -> list[dict]:
@@ -299,6 +340,9 @@ def main(argv: list[str]) -> int:
             statuses = {key: view.status for key, view in fold(tasks, events).items()}
             text = skeleton_brief(plan, args.part, tasks, statuses, root, **facts)
             subject = f"{plan.draft}/{args.part}"
+        elif args.role == "review":
+            text = review_brief(plan, tasks, events, root, **facts)
+            subject = f"{plan.draft}/review"
         else:
             questions = [item for item in open_questions(events) if item["task"] in tasks]
             text = answer_brief(questions, tasks, root, **facts)
