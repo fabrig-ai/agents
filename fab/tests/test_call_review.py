@@ -50,7 +50,7 @@ def _review_runner():
                          (["git", "diff", "--stat"], " file | 1 +\n"),
                          (["git", "diff"], "+change\n")]:
         fake.on(argv, Result(0, output))
-    launcher = ssh(HOST.ssh, ["fab", "codex", "start", "--effort", "medium", "--read-only",
+    launcher = ssh(HOST.ssh, ["fab", "codex", "start", "--effort", "medium", "--model", run.MODEL, "--read-only",
                              str(ROOT / "runs/skeleton-1-1/brief.md"),
                              str(ROOT / "wt/skeleton-1-1"),
                              str(ROOT / "runs/skeleton-1-1/report.md")])
@@ -349,7 +349,7 @@ class StartTest(unittest.TestCase):
                  str(ROOT / "wt" / run_id), "tip-sha"]))
             directory = ROOT / "runs" / run_id
             self.assertEqual(fake.calls[-1].argv, ssh(HOST.ssh,
-                ["fab", "codex", "start", "--effort", "medium", "--read-only",
+                ["fab", "codex", "start", "--effort", "medium", "--model", run.MODEL, "--read-only",
                  str(directory / "brief.md"), str(ROOT / "wt" / run_id), str(directory / "report.md")]))
             record, = log.read(path)
             self.assertEqual({key: value for key, value in record.items() if key != "ts"},

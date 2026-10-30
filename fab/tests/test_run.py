@@ -256,7 +256,7 @@ class RunStartTest(unittest.TestCase):
                                                    branch, str(worktree), "origin/main"])
                 self.assertEqual(commands[-2], ["bash", "-c",
                     f"mkdir -p {directory} && cat > {directory}/brief.md.tmp && mv -- {directory}/brief.md.tmp {directory}/brief.md"])
-                expected = ["fab", "codex", "start", "--effort", run.EFFORTS.get(kind, "high")]
+                expected = ["fab", "codex", "start", "--effort", run.EFFORTS.get(kind, "high"), "--model", run.MODEL]
                 if kind == "review":
                     expected.append("--read-only")
                 self.assertEqual(commands[-1], [*expected, str(directory / "brief.md"), str(worktree),
@@ -302,7 +302,7 @@ class RunStartTest(unittest.TestCase):
                     ["fab", "slot", "claim", "2", run_id, TASK.id],
                     ["git", "-C", str(slot), "fetch", "origin"],
                     ["git", "-C", str(slot), "switch", "-C", branch, source]])
-                expected = ["fab", "codex", "start", "--effort", run.EFFORTS.get(kind, task.effort)]
+                expected = ["fab", "codex", "start", "--effort", run.EFFORTS.get(kind, task.effort), "--model", run.MODEL]
                 if kind == "review":
                     expected.append("--read-only")
                 self.assertEqual(commands[-1], [*expected, str(directory / "brief.md"), str(slot),
@@ -374,7 +374,7 @@ class RunStartTest(unittest.TestCase):
                     run_id = run.start(task, HOST, kind=kind, sh=fake)
                     worktree = ROOT.parent / "slots/2" if repo == "fabrig" else ROOT / "wt" / run_id
                     directory = ROOT / "runs" / run_id
-                    expected = ["fab", "codex", "start", "--effort", run.EFFORTS.get(kind, "medium")]
+                    expected = ["fab", "codex", "start", "--effort", run.EFFORTS.get(kind, "medium"), "--model", run.MODEL]
                     if kind == "review":
                         expected.append("--read-only")
                     self.assertEqual(command(fake.calls[-1]), [*expected, str(directory / "brief.md"),
@@ -768,7 +768,7 @@ class LaunchTest(unittest.TestCase):
             self.assertEqual([command(call) for call in fake.calls], [
                 ["bash", "-c", f"mkdir -p {directory} && cat > {directory}/brief.md.tmp "
                  f"&& mv -- {directory}/brief.md.tmp {directory}/brief.md"],
-                ["fab", "codex", "start", "--effort", "medium", "--read-only",
+                ["fab", "codex", "start", "--effort", "medium", "--model", run.MODEL, "--read-only",
                  str(directory / "brief.md"), "/checkout", str(directory / "report.md")]])
             self.assertEqual(fake.calls[0].input, "Review this.\n")
             self.assertEqual((home / "fab/runs/call-2/brief.md").read_text(), "Review this.\n")
@@ -789,8 +789,8 @@ class LaunchTest(unittest.TestCase):
                     fake = starter()
                     self.launch(fake, read_only=read_only)
                     argv = command(fake.calls[-1])
-                    expected = (["fab", "codex", "start", "--effort", "medium"] if launcher == "fab"
-                                else ["codex-run", "task", "--effort", "medium", "--to", run.NOTIFY])
+                    expected = (["fab", "codex", "start", "--effort", "medium", "--model", run.MODEL] if launcher == "fab"
+                                else ["codex-run", "task", "--effort", "medium", "--model", run.MODEL, "--to", run.NOTIFY])
                     if read_only:
                         expected.append("--read-only")
                     self.assertEqual(argv[:-3], expected)

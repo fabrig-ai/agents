@@ -31,7 +31,7 @@ ROLES = {
     "review": Path(__file__).resolve().parent / "roles" / "reviewer.md",
     "amend": Path(__file__).resolve().parent / "roles" / "amender.md",
 }
-MODEL = "claude-opus-5-5"
+MODEL = "claude-opus-5-5"  # every Claude call's model, explicit (the user, 10-30): Opus 5.5
 BRIEF_LIMIT = 200_000  # characters, about 50k tokens: what code puts in; the call reads the rest itself
 TIMEOUT = 40 * 60
 

@@ -21,6 +21,7 @@ REMOTES = {"agents": "git@github.com:fabrig-ai/agents.git", "fabrig": "git@githu
 ROLE = Path(__file__).resolve().parent / "roles" / "implementer.md"
 TASTE = Path(__file__).resolve().parent / "taste.md"  # banned names and pairs; every brief carries it
 NOTIFY = "fab@hel8"  # codex-run posts its end here; nothing waits on it
+MODEL = "gpt-6.1-sol"  # every Codex run's model, explicit (the user, 10-30): Sol 6.1
 # The Codex efforts the user's model sets by role (execution-modes.md): implementers high,
 # reviewers medium; a task spec's effort applies only to kinds not named here.
 EFFORTS = {"implement": "high", "repair": "high", "rebase": "high", "review": "medium"}
@@ -259,7 +260,8 @@ def launch(host: Host, run_id: str, *, task: str, kind: str, workdir: str, branc
     Over ssh, check=True: write brief to `<remote_home(host)>/runs/<run>/brief.md` (mkdir -p
     its directory, `cat` to brief.md.tmp, then `mv`, in one bash -c with the brief on stdin);
     keep a copy at this machine's FAB_HOME/runs/<run>/brief.md (_write); then LAUNCHER's
-    command, `fab codex start --effort <effort>` or `codex-run task --effort <effort> --to
+    command, `fab codex start --effort <effort> --model MODEL` or `codex-run task --effort <effort>
+    --model MODEL --to
     NOTIFY`, with `--read-only` when read_only, then BRIEF, workdir and REPORT, REPORT being
     `<remote_home(host)>/runs/<run>/report.md`. Its output must be `<id> <absolute state
     directory>` on one line, else ValueError. run.started carries run, task, kind, host
@@ -274,9 +276,9 @@ def launch(host: Host, run_id: str, *, task: str, kind: str, workdir: str, branc
     sh(ssh(host.ssh, ["bash", "-c", write]), input=brief, check=True)
     _write(log.home() / "runs" / run_id / "brief.md", brief)
     if LAUNCHER == "fab":
-        command = ["fab", "codex", "start", "--effort", effort]
+        command = ["fab", "codex", "start", "--effort", effort, "--model", MODEL]
     else:
-        command = ["codex-run", "task", "--effort", effort, "--to", NOTIFY]
+        command = ["codex-run", "task", "--effort", effort, "--model", MODEL, "--to", NOTIFY]
     if read_only:
         command.append("--read-only")
     result = sh(ssh(host.ssh, [*command, str(brief_path), workdir, str(report_path)]), check=True)
