@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import ast
 import difflib
+import tarfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -265,14 +266,66 @@ def render(digest: Digest) -> str:
     is longer than DIGEST_LIMIT, it keeps the most whole lines from the start that leave room
     for a last line `(cut at <DIGEST_LIMIT> characters)`, so the result, final newline
     included, is at most DIGEST_LIMIT characters."""
-    raise NotImplementedError
+    totals = ", ".join(
+        f"{kind} +{sum(change.added for change in digest.changes if change.kind == kind)}"
+        f" -{sum(change.removed for change in digest.changes if change.kind == kind)}"
+        for kind in KINDS)
+    lines = [f"# Digest: {digest.run}", "", f"- Task: {digest.task} ({digest.kind})",
+             f"- Branch: `{digest.branch}`", f"- Base: `{digest.base[:12]}`; tip: `{digest.tip[:12]}`",
+             f"- Lines: {totals}"]
+    public = [f"- module added `{path}`" for path in digest.modules]
+    public.extend(f"- added `{entry.text}` ({entry.module}) — {entry.doc or 'no docstring'}"
+                  for entry in digest.added)
+    public.extend(f"- removed `{entry.text}` ({entry.module})" for entry in digest.removed)
+    public.extend(f"- changed `{before.text}` -> `{after.text}` ({after.module})"
+                  for before, after in digest.changed)
+    sections = [
+        ("Changed paths", [f"- `{entry.path}` {entry.kind} +{entry.added} -{entry.removed}"
+                           for entry in digest.changes]),
+        ("Public items", public),
+        ("Outside the task's files", [f"- `{path}`" for path in digest.outside]),
+        (f"Functions over {SIZE_CAP} lines",
+         [f"- `{entry.module}:{entry.start}` {entry.name}: {entry.lines} lines"
+          for entry in digest.long]),
+        ("Repeated blocks", [f"- `{entry.path}:{entry.start}-{entry.end}` repeats "
+                             f"`{entry.other}:{entry.other_start}`" for entry in digest.clones]),
+    ]
+    for title, entries in sections:
+        lines.extend(["", f"## {title}"])
+        lines.extend(entry if len(entry) <= LINE_CAP else entry[:LINE_CAP - 3] + "..."
+                     for entry in entries[:LIST_CAP])
+        if not entries:
+            lines.append("- none")
+        if len(entries) > LIST_CAP:
+            lines.append(f"- ... and {len(entries) - LIST_CAP} more")
+    rendered = "\n".join(lines) + "\n"
+    if len(rendered) <= DIGEST_LIMIT:
+        return rendered
+    cut = f"(cut at {DIGEST_LIMIT} characters)\n"
+    kept = []
+    remaining = DIGEST_LIMIT - len(cut)
+    for line in rendered.splitlines(keepends=True):
+        if len(line) > remaining:
+            break
+        kept.append(line)
+        remaining -= len(line)
+    return "".join(kept) + cut
 
 
 def changes(repo: Path, base: str, tip: str, *, sh: Runner = run) -> list[Change]:
     """`git diff --numstat -z --no-renames <base> <tip> --` in repo (check=True): each record
     `added<TAB>removed<TAB>path` ends with NUL; a binary file's `-` counts are 0. Each path
     gets its kind from classify. In git's order."""
-    raise NotImplementedError
+    result = sh(["git", "diff", "--numstat", "-z", "--no-renames", base, tip, "--"],
+                cwd=str(repo), check=True)
+    found = []
+    for record in result.out.split("\0"):
+        if not record:
+            continue
+        added, removed, path = record.split("\t", 2)
+        found.append(Change(path, classify(path), 0 if added == "-" else int(added),
+                            0 if removed == "-" else int(removed)))
+    return found
 
 
 def archive(repo: Path, rev: str, dest: Path, *, sh: Runner = run) -> Path:
@@ -280,4 +333,13 @@ def archive(repo: Path, rev: str, dest: Path, *, sh: Runner = run) -> Path:
     `git archive --format=tar -o <dest>.tar <rev> -- <PACKAGE>` in repo (check=True), then
     tarfile extractall into dest with filter="data", then the tar removed. A rev without
     PACKAGE/ fails as git does (fab.sh.Failed)."""
-    raise NotImplementedError
+    dest.mkdir(parents=True)
+    tar = Path(str(dest) + ".tar")
+    try:
+        sh(["git", "archive", "--format=tar", "-o", str(tar), rev, "--", PACKAGE],
+           cwd=str(repo), check=True)
+        with tarfile.open(tar) as tree:
+            tree.extractall(dest, filter="data")
+    finally:
+        tar.unlink(missing_ok=True)
+    return dest

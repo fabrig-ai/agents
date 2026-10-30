@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
+from unittest.mock import patch
 from pathlib import Path
 
 from fab import digest
 from fab.calls import Signature
 from fab.plan import Task
-from fab.tests.support import tmp_home
+from fab.sh import Failed, Result
+from fab.tests.support import FakeRunner, git, git_pair, tmp_home
 
 
 def write(path: Path, text: str) -> None:
@@ -316,3 +319,156 @@ class BuildTest(unittest.TestCase):
             task = Task("demo/bad", "gates", "feature", "agents", (), ("**",), "high", 1, "", "spec.md")
             with self.assertRaises(SyntaxError):
                 digest.build(task, "r", "b", "base", "tip", [], root / "base", root / "tip")
+
+
+class RenderTest(unittest.TestCase):
+    def small(self):
+        return digest.Digest(
+            "demo/digest-1", "demo/digest", "feature", "topic", "a" * 40, "b" * 40,
+            (digest.Change("fab/a.py", "production", 4, 2),
+             digest.Change("fab/tests/test_a.py", "tests", 3, 1),
+             digest.Change("README.md", "docs", 2, 0)),
+            (Signature("fab/a.py", "new", "def new()", "A new function."),
+             Signature("fab/a.py", "bare", "def bare()", "")),
+            (Signature("fab/a.py", "old", "def old()", ""),),
+            ((Signature("fab/a.py", "update", "def update(x)", ""),
+              Signature("fab/a.py", "update", "def update(x: int)", "")),),
+            ("fab/a.py",), ("README.md",),
+            (digest.Function("fab/a.py", "new", 10, 61),),
+            (digest.Clone("fab/a.py", 20, 27, "fab/b.py", 3),))
+
+    def test_render_exact_every_section_and_deterministic(self):
+        expected = """# Digest: demo/digest-1
+
+- Task: demo/digest (feature)
+- Branch: `topic`
+- Base: `aaaaaaaaaaaa`; tip: `bbbbbbbbbbbb`
+- Lines: production +4 -2, tests +3 -1, docs +2 -0
+
+## Changed paths
+- `fab/a.py` production +4 -2
+- `fab/tests/test_a.py` tests +3 -1
+- `README.md` docs +2 -0
+
+## Public items
+- module added `fab/a.py`
+- added `def new()` (fab/a.py) — A new function.
+- added `def bare()` (fab/a.py) — no docstring
+- removed `def old()` (fab/a.py)
+- changed `def update(x)` -> `def update(x: int)` (fab/a.py)
+
+## Outside the task's files
+- `README.md`
+
+## Functions over 60 lines
+- `fab/a.py:10` new: 61 lines
+
+## Repeated blocks
+- `fab/a.py:20-27` repeats `fab/b.py:3`
+"""
+        self.assertEqual(digest.render(self.small()), expected)
+        self.assertEqual(digest.render(self.small()), digest.render(self.small()))
+
+    def test_render_empty_sections(self):
+        empty = digest.Digest("r", "t", "docs", "b", "base", "tip",
+                              (), (), (), (), (), (), (), ())
+        self.assertEqual(digest.render(empty), """# Digest: r
+
+- Task: t (docs)
+- Branch: `b`
+- Base: `base`; tip: `tip`
+- Lines: production +0 -0, tests +0 -0, docs +0 -0
+
+## Changed paths
+- none
+
+## Public items
+- none
+
+## Outside the task's files
+- none
+
+## Functions over 60 lines
+- none
+
+## Repeated blocks
+- none
+""")
+
+    def test_render_list_and_line_caps(self):
+        paths = tuple(f"fab/{index}.py" for index in range(digest.LIST_CAP + 2))
+        result = digest.render(replace(self.small(), outside=paths))
+        section = result.split("## Outside the task's files\n")[1].split("\n\n")[0]
+        self.assertEqual(section.splitlines(),
+                         [f"- `{path}`" for path in paths[:digest.LIST_CAP]] + ["- ... and 2 more"])
+        for length in (digest.LINE_CAP - 1, digest.LINE_CAP, digest.LINE_CAP + 1):
+            with self.subTest(length=length):
+                path = "x" * (length - len("- ``"))
+                result = digest.render(replace(self.small(), outside=(path,)))
+                line = result.split("## Outside the task's files\n")[1].splitlines()[0]
+                entry = f"- `{path}`"
+                self.assertEqual(line, entry if length <= digest.LINE_CAP
+                                 else entry[:digest.LINE_CAP - 3] + "...")
+
+    def test_render_digest_limit_keeps_maximum_whole_lines(self):
+        paths = tuple(f"fab/{index}/" + "x" * 150 for index in range(digest.LIST_CAP + 2))
+        large = replace(self.small(), outside=paths, modules=paths,
+                        changes=tuple(digest.Change(path, "production", 1, 0) for path in paths))
+        with patch.object(digest, "DIGEST_LIMIT", 100_000):
+            full = digest.render(large)
+        self.assertGreater(len(full), digest.DIGEST_LIMIT)
+        result = digest.render(large)
+        cut = f"(cut at {digest.DIGEST_LIMIT} characters)\n"
+        self.assertTrue(result.endswith(cut))
+        self.assertLessEqual(len(result), digest.DIGEST_LIMIT)
+        prefix = result[:-len(cut)]
+        self.assertTrue(prefix.endswith("\n"))
+        self.assertTrue(full.startswith(prefix))
+        next_line = full[len(prefix):].splitlines(keepends=True)[0]
+        self.assertGreater(len(result) + len(next_line), digest.DIGEST_LIMIT)
+        self.assertEqual(result, digest.render(large))
+
+
+class ChangesTest(unittest.TestCase):
+    def test_changes_numstat_nul_records_and_binary_counts(self):
+        sh = FakeRunner().on(["git", "diff"], Result(
+            0, "4\t2\tfab/a\tfile.py\0-\t-\timage.png\0" "3\t1\tfab/tests/test_a.py\0"
+            "2\t0\tdocs/guide.md\0"))
+        with tmp_home() as root:
+            result = digest.changes(root, "base", "tip", sh=sh)
+            self.assertEqual(sh.argvs(), [["git", "diff", "--numstat", "-z", "--no-renames",
+                                          "base", "tip", "--"]])
+            self.assertEqual(sh.calls[0].cwd, str(root))
+        self.assertEqual(result, [digest.Change("fab/a\tfile.py", "production", 4, 2),
+                                  digest.Change("image.png", "production", 0, 0),
+                                  digest.Change("fab/tests/test_a.py", "tests", 3, 1),
+                                  digest.Change("docs/guide.md", "docs", 2, 0)])
+
+    def test_changes_empty_and_failed_diff(self):
+        with tmp_home() as root:
+            self.assertEqual(digest.changes(root, "base", "tip", sh=FakeRunner()), [])
+            sh = FakeRunner().on(["git", "diff"], Result(1, err="diff failed"))
+            with self.assertRaises(Failed):
+                digest.changes(root, "base", "tip", sh=sh)
+
+
+class ArchiveTest(unittest.TestCase):
+    def test_archive_only_package_and_missing_package_fails(self):
+        with tmp_home() as root:
+            _, repo = git_pair(root)
+            before = git(repo, "rev-parse", "HEAD")
+            write(repo / "fab/x.py", "def x(): pass\n")
+            git(repo, "add", "fab/x.py")
+            git(repo, "commit", "-q", "-m", "Add package")
+            dest = root / "tree"
+            self.assertEqual(digest.archive(repo, "HEAD", dest), dest)
+            self.assertEqual((dest / "fab/x.py").read_text(), "def x(): pass\n")
+            self.assertEqual(sorted(path.relative_to(dest).as_posix() for path in dest.rglob("*")),
+                             ["fab", "fab/x.py"])
+            self.assertFalse(Path(str(dest) + ".tar").exists())
+            with self.assertRaises(FileExistsError):
+                digest.archive(repo, "HEAD", dest)
+            missing = root / "missing"
+            with self.assertRaises(Failed):
+                digest.archive(repo, before, missing)
+            self.assertFalse(Path(str(missing) + ".tar").exists())
