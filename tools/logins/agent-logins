@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
 import shlex
 import stat
 import subprocess
@@ -54,6 +55,109 @@ except OSError:
 try:
     os.execvp(operation, [operation, '--', '/proc/self/fd/' + str(fd)])
 except OSError:
+    sys.exit(4)
+'''
+
+# Mutations run at the credential's host. Python only handles O_PATH or
+# write-only descriptors; cat handles stdin and sha256sum handles reads.
+MUTATE = r'''
+import os, re, stat, subprocess, sys
+os.umask(0o077)
+operation, path, token, digest = sys.argv[1:]
+if not re.fullmatch(r'[0-9a-f]{32}', token):
+    sys.exit(4)
+path = os.path.abspath(os.path.expanduser(path))
+parts = path.split('/')[1:]
+stage = '.agent-logins-' + token
+fds = []
+def private(name):
+    try:
+        fd = os.open(name, os.O_PATH | os.O_NOFOLLOW, dir_fd=parent)
+    except FileNotFoundError:
+        sys.exit(3)
+    fds.append(fd)
+    info = os.fstat(fd)
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+            or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1 or info.st_size == 0):
+        sys.exit(4)
+    return fd, info
+def verify(fd, info):
+    result = subprocess.run(['sha256sum', '--', '/proc/self/fd/' + str(fd)],
+                            pass_fds=(fd,), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                            stdin=subprocess.DEVNULL, timeout=120)
+    if (result.returncode != 0 or result.stdout != (digest + '  /proc/self/fd/' + str(fd) + '\n').encode('ascii')):
+        sys.exit(7)
+    current = os.fstat(fd)
+    if (current.st_size, current.st_mtime_ns, current.st_ctime_ns) != (info.st_size, info.st_mtime_ns, info.st_ctime_ns):
+        sys.exit(7)
+try:
+    parent = os.open('/', os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    fds.append(parent)
+    for index, part in enumerate(parts[:-1]):
+        if operation == 'stage' and index == len(parts) - 2:
+            try:
+                os.mkdir(part, 0o700, dir_fd=parent)
+            except FileExistsError:
+                pass
+        try:
+            parent = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+        except FileNotFoundError:
+            sys.exit(3 if operation in ('probe', 'remove', 'discard') else 4)
+        fds.append(parent)
+    info = os.fstat(parent)
+    if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700:
+        sys.exit(4)
+    filename = parts[-1]
+    if operation == 'probe':
+        try:
+            os.stat(filename, dir_fd=parent, follow_symlinks=False)
+        except FileNotFoundError:
+            sys.exit(3)
+        sys.exit(5)
+    if operation == 'stage':
+        try:
+            os.stat(filename, dir_fd=parent, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            sys.exit(5)
+        fd = os.open(stage, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=parent)
+        fds.append(fd)
+        result = subprocess.run(['cat'], stdin=0, stdout=fd, stderr=subprocess.DEVNULL, timeout=120)
+        if result.returncode != 0:
+            sys.exit(4)
+        os.fsync(fd)
+    elif operation == 'install':
+        fd, info = private(stage)
+        verify(fd, info)
+        try:
+            # link/unlink publishes without overwriting a raced-in credential.
+            os.link(stage, filename, src_dir_fd=parent, dst_dir_fd=parent, follow_symlinks=False)
+        except FileExistsError:
+            sys.exit(5)
+        os.unlink(stage, dir_fd=parent)
+    elif operation == 'remove':
+        fd, info = private(filename)
+        verify(fd, info)
+        current = os.stat(filename, dir_fd=parent, follow_symlinks=False)
+        if (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns, current.st_ctime_ns) != (
+                info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns):
+            sys.exit(7)
+        os.unlink(filename, dir_fd=parent)
+    elif operation == 'discard':
+        info = os.stat(stage, dir_fd=parent, follow_symlinks=False)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1):
+            sys.exit(4)
+        os.unlink(stage, dir_fd=parent)
+    else:
+        sys.exit(4)
+    os.fsync(parent)
+except FileNotFoundError:
+    # A missing executable or a pathname lost during mutation is not proof
+    # that the active credential was absent before the operation.
+    sys.exit(4)
+except (OSError, ValueError, subprocess.SubprocessError):
     sys.exit(4)
 '''
 
@@ -118,13 +222,37 @@ def private_file(parent, name, flags):
     return fd
 
 
+def command(helper, *args, target=None):
+    result = ['python3', '-I', '-B', '-c', helper, *map(str, args)]
+    if target is not None:
+        result = ['ssh', '-T', '-o', 'BatchMode=yes', '--', target, shlex.join(result)]
+    return result
+
+
+def mutate(operation, path, target=None, token=None, digest='', stdin=None):
+    return subprocess.run(command(MUTATE, operation, path, token or secrets.token_hex(16), digest, target=target),
+                          stdin=stdin if stdin is not None else subprocess.DEVNULL,
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120).returncode
+
+
+def stream_to_host(source, path, target, token):
+    producer = subprocess.Popen(command(SOURCE, 'cat', source), stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    try:
+        code = mutate('stage', path, target, token, stdin=producer.stdout)
+        producer.stdout.close()
+        need(producer.wait(timeout=120) == 0 and code == 0, f'{path}: credential streaming failed')
+    finally:
+        producer.stdout.close()
+        if producer.poll() is None:
+            producer.kill()
+            producer.wait()
+
+
 def transfer(operation, path, target=None, output=None):
     need(operation in ('cat', 'sha256sum') and (operation != 'cat' or output is not None),
          'cat requires a file descriptor sink')
-    command = ['python3', '-I', '-B', '-c', SOURCE, operation, str(path)]
-    if target is not None:
-        command = ['ssh', '-T', '-o', 'BatchMode=yes', '--', target, shlex.join(command)]
-    result = subprocess.run(command, stdin=subprocess.DEVNULL,
+    result = subprocess.run(command(SOURCE, operation, path, target=target), stdin=subprocess.DEVNULL,
                             stdout=output if output is not None else subprocess.PIPE,
                             stderr=subprocess.DEVNULL, timeout=120)
     if result.returncode == 3:
@@ -156,8 +284,8 @@ class Shelf:
                     info = os.stat('lock', dir_fd=root, follow_symlinks=False)
                     need((info.st_dev, info.st_ino) == (os.fstat(lock).st_dev, os.fstat(lock).st_ino),
                          'lock: replaced while waiting')
-                    self.validate_layout()
                     self.load()
+                    self.validate_layout()
                     yield
                 finally:
                     os.close(lock)
@@ -189,6 +317,7 @@ class Shelf:
             os.stat('state.json', dir_fd=self.fd, follow_symlinks=False)
         except FileNotFoundError:
             self.entries = []
+            self.pending = None
             return
         fd = private_file(self.fd, 'state.json', os.O_RDONLY)
         try:
@@ -196,8 +325,11 @@ class Shelf:
                 data = json.load(stream)
         except (ValueError, UnicodeError):
             raise Problem('state.json: invalid metadata') from None
-        need(isinstance(data, dict) and set(data) == {'version', 'entries'} and data['version'] == 1
+        need(isinstance(data, dict) and {'version', 'entries'} <= set(data) <= {'version', 'entries', 'pending'}
+             and data['version'] == 1
              and isinstance(data['entries'], list), 'state.json: invalid schema')
+        self.pending = data.get('pending')
+        need(self.pending is None, 'unfinished custody transfer: operator recovery required; do not use either copy')
         self.entries = data['entries']
         seen = set()
         for row in self.entries:
@@ -215,19 +347,35 @@ class Shelf:
             need(row['kind'] in ('snapshot', 'own') and isinstance(row['status'], str),
                  'state.json: invalid custody')
             if row['kind'] == 'own':
-                need(row['origin'] == 'signed-in' and row['status'] == 'free', 'state.json: invalid own login')
+                need(row['origin'] == 'signed-in', 'state.json: invalid own login')
+                initial = 'free'
             else:
                 origin = row['origin']
                 need(isinstance(origin, dict) and set(origin) == {'host', 'path'}
                      and isinstance(origin['host'], str) and re.fullmatch(ID, origin['host'])
-                     and origin['path'] == '~/' + ('.claude/.credentials.json' if provider == 'claude' else '.codex/auth.json')
-                     and row['status'] == 'bound:' + origin['host'], 'state.json: invalid snapshot')
+                     and origin['path'] == '~/' + ('.claude/.credentials.json' if provider == 'claude' else '.codex/auth.json'),
+                     'state.json: invalid snapshot')
+                initial = 'bound:' + origin['host']
             for field in ('created_at', 'updated_at'):
                 need(isinstance(row[field], str) and re.fullmatch(r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ', row[field]),
                      'state.json: invalid time')
-            need(isinstance(row['moves'], list) and len(row['moves']) == 1
+            need(isinstance(row['moves'], list) and len(row['moves']) >= 1
                  and row['moves'][0] == {'at': row['created_at'], 'event': 'capture' if row['kind'] == 'snapshot' else 'register',
-                                         'to': row['status']}, 'state.json: invalid moves')
+                                         'to': initial}, 'state.json: invalid moves')
+            status = initial
+            for move in row['moves'][1:]:
+                need(isinstance(move, dict) and set(move) == {'at', 'event', 'to', 'sha256'}
+                     and isinstance(move['at'], str) and re.fullmatch(r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ', move['at'])
+                     and isinstance(move['sha256'], str) and re.fullmatch(HASH, move['sha256']),
+                     'state.json: invalid move')
+                need((move['event'] == 'release' and status.startswith(('bound:', 'lent:')) and move['to'] == 'free')
+                     or (move['event'] == 'lend' and status == 'free' and isinstance(move['to'], str)
+                         and re.fullmatch('lent:' + ID, move['to'])), 'state.json: invalid custody transition')
+                status = move['to']
+            need(status == row['status'] and row['moves'][-1]['at'] == row['updated_at'],
+                 'state.json: inconsistent custody history')
+            if len(row['moves']) > 1:
+                need(row['moves'][-1]['sha256'] == row['sha256'], 'state.json: inconsistent hash history')
             self.check_entry(provider, identity)
 
     def check_entry(self, provider, identity):
@@ -242,7 +390,10 @@ class Shelf:
         fd, name = tempfile.mkstemp(prefix='.state-', dir=self.root)
         try:
             with os.fdopen(fd, 'w') as stream:
-                json.dump({'version': 1, 'entries': self.entries}, stream, indent=2)
+                data = {'version': 1, 'entries': self.entries}
+                if self.pending is not None:
+                    data['pending'] = self.pending
+                json.dump(data, stream, indent=2)
                 stream.write('\n')
                 stream.flush()
                 os.fsync(stream.fileno())
@@ -278,7 +429,8 @@ class Shelf:
         self.check_entry(provider, identity)
         path = self.root / provider / identity / FILES[provider]
         existing = next((row for row in self.entries if (row['provider'], row['id']) == (provider, identity)), None)
-        need(existing is None or existing['kind'] == 'own', f'{path}: snapshot cannot become free')
+        need(existing is None or (existing['kind'] == 'own' and existing['status'] == 'free'),
+             f'{path}: held login or snapshot cannot be registered')
         digest = transfer('sha256sum', path)
         need(digest is not None, f'{path}: absent')
         if existing is not None:
@@ -287,7 +439,7 @@ class Shelf:
             self.add(provider, identity, digest)
         print(f'{path}: {digest}')
 
-    def capture(self, host, dry_run):
+    def host(self, host, provider):
         need(re.fullmatch(ID, host), 'invalid host')
         # The current release is intentionally a symlink. No checkout fallback.
         hosts = self.home / 'src/fabrig/current/fleet/hosts.toml'
@@ -299,10 +451,14 @@ class Shelf:
             raise Problem('fleet/hosts.toml: unknown host or invalid roster') from None
         need(isinstance(target, str) and re.fullmatch(r'[A-Za-z0-9_.@:-]+', target)
              and not target.startswith('-'), 'fleet/hosts.toml: invalid ssh target')
+        relative = Path('.claude' if provider == 'claude' else '.codex') / FILES[provider]
+        return (self.home / relative, None) if host == 'hel8' else (Path('~') / relative, target)
+
+    def capture(self, host, dry_run):
         for provider, filename in FILES.items():
-            relative = Path('.claude' if provider == 'claude' else '.codex') / filename
-            source = self.home / relative if host == 'hel8' else Path('~') / relative
-            remote = None if host == 'hel8' else target
+            source, remote = self.host(host, provider)
+            need(not any(row['provider'] == provider and row['status'] == 'lent:' + host for row in self.entries),
+                 f'{host}:{source}: lent login; use release first')
             if dry_run:
                 print(f'{host}:{source} -> {self.root / provider} (dry-run)')
                 continue
@@ -321,8 +477,11 @@ class Shelf:
                     digest = transfer('sha256sum', temporary)
                     expected = transfer('sha256sum', source, remote)
                     need(expected is not None and digest == expected, f'{host}:{source}: sha256 mismatch')
+                    need(not any(row['provider'] == provider and row['sha256'] == digest and row['status'] == 'free'
+                                 for row in self.entries), f'{host}:{source}: hash already free on shelf; custody conflict')
                     if any(row['provider'] == provider and row['kind'] == 'snapshot'
-                           and row['origin']['host'] == host and row['sha256'] == digest for row in self.entries):
+                           and row['origin']['host'] == host and row['status'] == 'bound:' + host
+                           and row['sha256'] == digest for row in self.entries):
                         print(f'{host}:{source}: {digest} unchanged')
                         continue
                     # Full hashes avoid collisions; suffixes protect prepared/unregistered entries.
@@ -347,6 +506,138 @@ class Shelf:
                         if not (destination / filename).exists():
                             destination.rmdir()
 
+    def entry(self, identity, provider=None):
+        need(isinstance(identity, str) and re.fullmatch(ID, identity), 'invalid login id')
+        matches = [row for row in self.entries if row['id'] == identity
+                   and (provider is None or row['provider'] == provider)]
+        need(len(matches) == 1, 'unknown or ambiguous login id (lend IDs must identify one provider)')
+        return matches[0]
+
+    def begin(self, event, row, host, digest, **paths):
+        self.pending = dict(event=event, provider=row['provider'], id=row['id'], host=host, sha256=digest, **paths)
+        self.save()
+
+    def cancel(self):
+        self.pending = None
+        self.save()
+
+    def moved(self, row, event, status, digest):
+        time = now()
+        row.update(status=status, sha256=digest, updated_at=time)
+        row['moves'].append(dict(at=time, event=event, to=status, sha256=digest))
+        self.pending = None
+        self.save()
+
+    def release(self, host, provider, dry_run=False):
+        source, remote = self.host(host, provider)
+        lent = [row for row in self.entries if row['provider'] == provider and row['status'] == 'lent:' + host]
+        bound = [row for row in self.entries if row['provider'] == provider and row['status'] == 'bound:' + host]
+        need(len(lent) <= 1, 'multiple lent entries for host; operator review required')
+        matches = lent or bound
+        need(matches, f'{host}:{source}: no bound or lent entry')
+        # Previous capture versions remain unavailable historical placeholders.
+        row = matches[-1]
+        path = self.root / provider / row['id'] / FILES[provider]
+        if dry_run:
+            print(f'{host}:{source} -> {path}; remove {host}:{source} (dry-run)')
+            return
+        fd, name = tempfile.mkstemp(prefix='.release-new-', dir=path.parent)
+        temporary = Path(name)
+        backup = path.parent / ('.release-old-' + secrets.token_hex(16))
+        try:
+            with os.fdopen(fd, 'wb') as stream:
+                need(transfer('cat', source, remote, stream) is not None, f'{host}:{source}: absent; release refused')
+                stream.flush()
+                os.fsync(stream.fileno())
+            digest = transfer('sha256sum', temporary)
+            need(digest is not None and digest == transfer('sha256sum', source, remote),
+                 f'{host}:{source}: sha256 mismatch; both copies unchanged')
+            self.begin('release', row, host, digest, backup=str(backup), temporary=str(temporary))
+            try:
+                os.rename(path, backup)
+                os.replace(temporary, path)
+                with directory(path.parent, private=True) as parent:
+                    os.fsync(parent)
+                need(transfer('sha256sum', path) == digest, f'{path}: installed shelf sha256 mismatch')
+            except Exception:
+                if backup.exists():
+                    os.replace(backup, path)
+                self.cancel()
+                raise
+            # A lost SSH response may follow a successful unlink. Keep the new
+            # shelf copy plus journal/backup until an operator reconciles it.
+            code = mutate('remove', source, remote, digest=digest)
+            if code == 7:
+                os.replace(backup, path)
+                self.cancel()
+                raise Problem(f'{host}:{source}: source changed; release refused; shelf restored')
+            need(code == 0, f'{host}:{source}: release incomplete; custody blocked for operator recovery')
+            self.moved(row, 'release', 'free', digest)
+            backup.unlink()
+            with directory(path.parent, private=True) as parent:
+                os.fsync(parent)
+            print(f'{path}: free {digest}; removed {host}:{source}')
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def lend(self, identity, host, dry_run=False, provider=None):
+        row = self.entry(identity, provider)
+        provider = row['provider']
+        destination, remote = self.host(host, provider)
+        path = self.root / provider / identity / FILES[provider]
+        need(row['status'] == 'free', f'{path}: only free entries can be lent')
+        need(not any(other['provider'] == provider and other['status'] == 'lent:' + host for other in self.entries),
+             f'{host}:{destination}: release first')
+        if dry_run:
+            print(f'{path} -> {host}:{destination} (dry-run; destination absence not checked)')
+            return
+        probe = mutate('probe', destination, remote)
+        need(probe != 5, f'{host}:{destination}: release first')
+        need(probe == 3, f'{host}:{destination}: unsafe or unavailable destination')
+        digest = transfer('sha256sum', path)
+        need(digest == row['sha256'], f'{path}: free shelf credential changed; lend refused')
+        token = secrets.token_hex(16)
+        staged = destination.parent / ('.agent-logins-' + token)
+        staged_exists = True
+        try:
+            stream_to_host(path, destination, remote, token)
+            need(transfer('sha256sum', staged, remote) == digest and transfer('sha256sum', path) == digest,
+                 f'{host}:{destination}: sha256 mismatch; both ends unchanged')
+            self.begin('lend', row, host, digest, temporary=str(staged))
+            code = mutate('install', destination, remote, token, digest)
+            if code in (5, 7):
+                self.cancel()
+                raise Problem(f'{host}:{destination}: release first or staged sha256 changed; lend refused')
+            need(code == 0, f'{host}:{destination}: lend incomplete; custody blocked for operator recovery')
+            staged_exists = False
+            try:
+                need(transfer('sha256sum', destination, remote) == digest,
+                     f'{host}:{destination}: installed sha256 mismatch')
+            except Exception:
+                code = mutate('remove', destination, remote, digest=digest)
+                if code in (0, 3):
+                    self.cancel()
+                    raise Problem(f'{host}:{destination}: verification failed; installed copy removed; shelf remains free') from None
+                raise Problem(f'{host}:{destination}: verification failed; custody blocked for operator recovery') from None
+            self.moved(row, 'lend', 'lent:' + host, digest)
+            print(f'{path} -> {host}:{destination}: lent:{host} {digest}')
+        finally:
+            if staged_exists:
+                try:
+                    mutate('discard', destination, remote, token)
+                except (OSError, subprocess.SubprocessError):
+                    pass  # An unused private temporary may need manual cleanup.
+
+    def swap(self, host, provider, identity):
+        self.release(host, provider)
+        try:
+            self.lend(identity, host, provider=provider)
+        except (Problem, OSError, subprocess.SubprocessError, ValueError, TypeError):
+            if self.pending is not None:
+                raise Problem(f'SWAP FAILED AFTER RELEASE: previous login is free on shelf; {host} custody is uncertain; '
+                              'do not use either copy until operator recovery') from None
+            raise Problem(f'SWAP FAILED AFTER RELEASE: previous login is free on shelf; {host} has no {provider} credential') from None
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -354,6 +645,18 @@ def main():
     capture = commands.add_parser('capture')
     capture.add_argument('host')
     capture.add_argument('--dry-run', action='store_true')
+    release = commands.add_parser('release')
+    release.add_argument('host')
+    release.add_argument('provider', choices=FILES)
+    release.add_argument('--dry-run', action='store_true')
+    lend = commands.add_parser('lend')
+    lend.add_argument('id')
+    lend.add_argument('host')
+    lend.add_argument('--dry-run', action='store_true')
+    swap = commands.add_parser('swap')
+    swap.add_argument('host')
+    swap.add_argument('provider', choices=FILES)
+    swap.add_argument('id')
     for name in ('prepare', 'register'):
         command = commands.add_parser(name)
         command.add_argument('provider', choices=FILES)
@@ -375,6 +678,12 @@ def main():
                         print(f'{shelf.root / row["provider"] / row["id"]}: {row["status"]} {row["sha256"]}')
             elif args.command == 'capture':
                 shelf.capture(args.host, args.dry_run)
+            elif args.command == 'release':
+                shelf.release(args.host, args.provider, args.dry_run)
+            elif args.command == 'lend':
+                shelf.lend(args.id, args.host, args.dry_run)
+            elif args.command == 'swap':
+                shelf.swap(args.host, args.provider, args.id)
             else:
                 getattr(shelf, args.command)(args.provider, args.id)
         return 0
