@@ -8,6 +8,30 @@ import test_land as fixture
 
 
 class LandRaceTests(fixture.LandFixture):
+    def test_local_checkout_lock_stays_held_while_waiting_for_host_gate(self):
+        host_lock = self.home / '.local/state/agents-gate.lock'
+        host_lock.parent.mkdir(parents=True, exist_ok=True)
+        with host_lock.open('a') as lock, (self.home / 'local-output').open('w') as output:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            child = subprocess.Popen(['python3', '-I', '-B', 'tools/land', '--local', '--dry-run'],
+                                     cwd=self.source, env=self.env, stdout=output, stderr=output)
+            try:
+                deadline = time.monotonic() + 5
+                while 'waiting for another agents gate' not in (self.home / 'local-output').read_text():
+                    self.assertIsNone(child.poll())
+                    self.assertLess(time.monotonic(), deadline)
+                    time.sleep(.01)
+                # Let the re-exec, if any, reach its blocked host-lock acquisition.
+                time.sleep(.1)
+                with (self.source / '.git/agents-land.lock').open('a') as checkout:
+                    with self.assertRaises(BlockingIOError):
+                        fcntl.flock(checkout, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                child.send_signal(signal.SIGINT)
+                child.wait(timeout=5)
+        self.assertFalse((self.home / 'ssh.log').exists())
+        self.assertEqual(self.tip(), self.original)
+
     def test_checkout_lock_refuses_another_lander_before_remote_work(self):
         with (self.source / '.git/agents-land.lock').open('a') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
