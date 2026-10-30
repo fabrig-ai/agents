@@ -2,6 +2,10 @@
 """Ops-reviewed XFS root project-quota boot proposal. Default: read-only plan."""
 
 import argparse
+import base64
+import errno
+from email import policy as email_policy
+from email.parser import Parser
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import fcntl
@@ -12,6 +16,9 @@ from pathlib import Path
 import pwd
 import re
 import shlex
+import shutil
+import struct
+import uuid
 import socket
 import stat
 import subprocess
@@ -33,6 +40,113 @@ sys.stdout.write((Path.home() / 'src/rust/tmp/heavy/state.json').read_text())
 """
 
 
+ORIGINAL = '/var/lib/fabrig-pquota/original'
+MACHINE_KEYS = frozenset(('PLAN_MIN_MEM_GB', 'PLAN_MIN_DISK_GB', 'PLAN_LAND_ROOM_GB',
+    'HEAVY_BUILD_SLOTS', 'HEAVY_BUILD_JOBS', 'KACHE_MAX_GB', 'KACHE_LOCAL_ONLY',
+    'QA_SLOTS', 'QA_BATCH', 'QA_CAP_MINUTES', 'QA_INTERVAL_SECONDS', 'FLEET_QUIET',
+    'QA_WALK_KINDS', 'QA_WALK_SLOTS', 'QA_SLOT_HOST', 'QA_CLAIM_OWNER', 'QA_CLAIM_SSH',
+    'QA_STUCK_TO'))
+CENTRAL_SNAPSHOT = r"""import hashlib, json, pathlib, shutil, subprocess
+path = pathlib.Path(shutil.which('claim')).resolve()
+inventory = path.with_name('hosts')
+before = inventory.read_bytes()
+result = subprocess.run([str(path), 'list'], text=True, capture_output=True, check=True)
+if inventory.read_bytes() != before: raise RuntimeError('inventory changed during claim list')
+print(json.dumps(dict(path=str(inventory), declaration=before.decode(),
+    digest=hashlib.sha256(before).hexdigest(), listing=result.stdout)))
+"""
+INSTALLED_PROOF = r"""import hashlib, json, pathlib, subprocess
+home = pathlib.Path.home()
+main = home / 'src/fabrig/main'
+current = (home / 'src/fabrig/current').resolve(strict=True)
+heavy = (main / 'tools/heavy/heavy').resolve(strict=True)
+files = ('heavy', 'heavy-recovery.py', 'kit.sh', 'gate-policy.sh', 'recovery_message.py', 'receipt_inputs.py')
+units = {}
+for path in sorted((current / 'fleet/units').glob('*.service')):
+    data = path.read_bytes()
+    if data.splitlines()[0:1] == [b'# fleet-sync: start-once']:
+        units[path.name] = hashlib.sha256(data).hexdigest()
+if not units: raise RuntimeError('installed start-once unit declarations unavailable')
+print(json.dumps(dict(fabrig_head=subprocess.check_output(['git', '-C', str(main), 'rev-parse', 'HEAD'], text=True).strip(),
+    agents_current=str(current), heavy_path=str(heavy),
+    heavy_digests={name: hashlib.sha256((heavy.parent / name).read_bytes()).hexdigest() for name in files},
+    start_once_units=units)))
+"""
+MACHINE_ENV = r"""import json, pathlib, sys
+keys = set(json.loads(sys.argv[1]))
+values = {}
+for line in (pathlib.Path.home() / 'src/rust/tmp/machine.env').read_text().splitlines():
+    key, sep, value = line.partition('=')
+    if sep and key in keys:
+        if key in values: raise RuntimeError('duplicate machine.env key')
+        values[key] = value
+if not values: raise RuntimeError('machine.env summary empty')
+print(json.dumps(values))
+"""
+SUBMITTERS = r"""# pquota-heavy-submitters-v2: executable/action metadata only, no payload arguments.
+import json, pathlib, subprocess
+rows = []
+for line in subprocess.check_output(['ps', '-u', 'free', '-o', 'pid=,comm='], text=True).splitlines():
+    pid, command = line.strip().split(None, 1)
+    if command in ('heavy', 'heavy-recovery', 'heavy-recovery.'):
+        rows.append(dict(pid=int(pid), tool='heavy submitter/wrapper'))
+        continue
+    if command not in ('bash', 'sh') and not command.startswith('python'):
+        continue
+    try:
+        with pathlib.Path('/proc/' + pid + '/cmdline').open('rb') as stream:
+            def argument():
+                data = bytearray()
+                for _ in range(4096):
+                    byte = stream.read(1)
+                    if byte in (b'', b'\0'):
+                        return data.decode()
+                    data.extend(byte)
+                raise RuntimeError('unbounded executable metadata')
+            executable = pathlib.Path(argument()).name
+            if executable not in ('bash', 'sh') and not executable.startswith('python'):
+                continue
+            for _ in range(32):
+                item = argument()
+                if not item or item in ('-c', '-m', '-lc', '-ec', '-ic'):
+                    break  # Never read shell/Python command bodies.
+                if item.startswith('-'):
+                    continue
+                name = pathlib.Path(item).name
+                if name == 'heavy':
+                    rows.append(dict(pid=int(pid), tool='heavy submitter/wrapper'))
+                elif name == 'heavy-recovery.py':
+                    action = argument()
+                    if action not in ('--reconcile', '--installed'):
+                        rows.append(dict(pid=int(pid), tool='heavy submitter/wrapper'))
+                break  # Never inspect another script's arguments or any payload.
+    except (FileNotFoundError, ProcessLookupError):
+        pass  # This process has ended; unreadable live metadata still refuses.
+print(json.dumps(rows))
+"""
+READ_POST = r"""import pathlib, sys
+path = pathlib.Path(sys.argv[1])
+if path.suffix != '.md' or path.is_symlink() or not path.is_file(): raise RuntimeError('expected explicit regular .md approval post')
+if path.stat().st_size > 1048576: raise RuntimeError('approval post too large')
+sys.stdout.write(path.read_text())
+"""
+PROBE_WRITE = r"""import errno, json, os, sys
+os.chdir(sys.argv[1])
+os.setgroups([])
+os.setgid(int(sys.argv[3]))
+os.setuid(int(sys.argv[2]))
+os.mkdir('child')
+written, code = 0, 0
+try:
+    with open('child/payload', 'xb', buffering=0) as out:
+        while written < 2 * 1024 * 1024:
+            written += out.write(b'x' * 65536)
+            os.fsync(out.fileno())  # Commit each chunk; do not mistake delayed allocation for enforcement.
+except OSError as error: code = error.errno
+print(json.dumps(dict(errno=code, bytes=written)))
+"""
+
+
 def now():
     return datetime.now(timezone.utc).isoformat()
 
@@ -43,9 +157,10 @@ def has_pquota(line):
 
 
 class Pquota:
-    def __init__(self, host, central='free@204.168.210.29', root=Path('/'), env=None):
+    def __init__(self, host, central='free@204.168.210.29', root=Path('/'), env=None, policy=None):
         self.host, self.central, self.root = host, central, Path(root)
         self.env = env or dict(PATH=PATH, LANG='C', LC_ALL='C')
+        self.policy = policy or {}
 
     def path(self, absolute):
         return self.root / absolute.lstrip('/')
@@ -85,16 +200,17 @@ class Pquota:
 
     def write(self, absolute, content, mode=0o600):
         path = self.safe(absolute)
-        if path.exists() and path.read_text() == content:
+        data = content.encode() if isinstance(content, str) else content
+        if path.exists() and path.read_bytes() == data:
             if stat.S_IMODE(path.stat().st_mode) != mode:
                 os.chmod(path, mode)
             return
         path.parent.mkdir(parents=True, exist_ok=True)
         fd, temporary = tempfile.mkstemp(prefix='.' + path.name + '.', dir=path.parent)
         try:
-            with os.fdopen(fd, 'w') as out:
+            with os.fdopen(fd, 'wb') as out:
                 os.fchmod(out.fileno(), mode)
-                out.write(content)
+                out.write(data)
                 out.flush()
                 os.fsync(out.fileno())
             os.replace(temporary, path)
@@ -122,25 +238,178 @@ class Pquota:
             raise ValueError('missing/foreign pquota state')
         return state
 
-    def claims(self):
-        output = self.user('ssh', '-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
-                           '-o', 'UpdateHostKeys=no', '-o', 'ConnectTimeout=10',
-                           self.central, 'claim list')
-        rows, seen = [], set()
-        for line in output.splitlines():
+    def snapshot(self):
+        command = shlex.join(('python3', '-I', '-B', '-c', CENTRAL_SNAPSHOT))
+        data = json.loads(self.user('ssh', '-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
+            '-o', 'UpdateHostKeys=no', '-o', 'ConnectTimeout=10', self.central, command))
+        if hashlib.sha256(data['declaration'].encode()).hexdigest() != data['digest']:
+            raise ValueError('central inventory digest does not match declaration')
+        pool = {}
+        for line in data['declaration'].splitlines():
+            fields = line.partition('#')[0].split()
+            if not fields:
+                continue
+            host, *shares = fields
+            if not shares:
+                raise ValueError('empty central slot pool')
+            for share in shares:
+                number, sep, owner = share.partition('=')
+                if not sep or not number.isdecimal() or int(number) < 1 or not owner:
+                    raise ValueError('invalid central inventory share')
+                pair = (host, str(int(number)))
+                if pair in pool:
+                    raise ValueError('duplicate central inventory slot')
+                pool[pair] = owner
+        rows = {}
+        for line in data['listing'].splitlines():
             match = re.fullmatch(r'([a-z][a-z0-9-]*) ([1-9][0-9]*) \[([^\]\r\n]+)\]: (.+)', line)
-            if not match or match.group(1, 2) in seen:
-                raise ValueError('unrecognized/duplicate central claim list row')
-            seen.add(match.group(1, 2))
-            host, number, share, detail = match.groups()
-            if detail != 'free' and not re.fullmatch(
-                    r'.+: .+ \(since [^()]+\); held [0-9]+d [0-9]{2}:[0-9]{2}:[0-9]{2}(; lent by .+)?', detail):
-                raise ValueError('unrecognized central claim detail')
-            if host == self.host and detail != 'free':
-                rows.append(f'{host} {number} [{share}]: {detail}')
-        if not seen:
-            raise ValueError('empty central inventory; cannot establish claim state')
-        return rows
+            if not match:
+                raise ValueError('unrecognized central claim list row')
+            host, slot, share, detail = match.groups()
+            pair = (host, slot)
+            if pair in rows or pool.get(pair) != share:
+                raise ValueError('claim list and inventory disagree')
+            row = dict(slot=slot, share=share, owner=None, what=None, created=None)
+            if detail != 'free':
+                held = re.fullmatch(r'([^:]+): (.+) \(since ([^()]+)\); held [0-9]+d [0-9]{2}:[0-9]{2}:[0-9]{2}(?:; lent by .+)?', detail)
+                if not held:
+                    raise ValueError('unrecognized central claim detail')
+                row.update(zip(('owner', 'what', 'created'), held.groups()))
+            rows[pair] = row
+        if not pool or rows.keys() != pool.keys():
+            raise ValueError('empty/incomplete central claim list')
+        selected = [row for (host, _), row in rows.items() if host == self.host]
+        return dict(path=data['path'], digest=data['digest'], slots=selected, admission_closed=not selected)
+
+    def approval(self, row, retained):
+        reference = retained['post']
+        path = self.policy.get('approval_files', {}).get(reference)
+        if not path:
+            raise ValueError(f'approval {reference}: explicit --approval-file required; no non-consuming post metadata API')
+        raw = self.user('python3', '-I', '-B', '-c', READ_POST, path)
+        message = Parser(policy=email_policy.default).parsestr(raw)
+        if any(len(message.get_all(key, [])) != 1 for key in ('From', 'Id')):
+            raise ValueError('approval requires exactly one From and Id header')
+        sender = str(message['From']).strip()
+        approver = retained['approver']
+        if sender not in (approver, approver + '@hel8') or str(message['Id']).strip() != reference:
+            raise ValueError('approval sender/Id mismatch')
+        body = message.get_payload()
+        fields = {}
+        for key in ('slot', 'what', 'plan', 'service'):
+            values = re.findall(r'^' + key + r': ([^\r\n]+)$', body, re.M)
+            if len(values) != 1:
+                raise ValueError(f'approval requires one {key}: line')
+            fields[key] = values[0]
+        if fields['slot'] != f'{self.host}:{row["slot"]}' or fields['what'] != row['what']:
+            raise ValueError('approval slot/WHAT mismatch')
+        if not re.search(r'preserv', fields['plan'], re.I) or not re.search(r'restart', fields['plan'], re.I):
+            raise ValueError('approval plan must describe preservation and restart')
+        service = self.policy.get('retained_services', {}).get(row['slot'])
+        if fields['service'] != service or not service or not re.fullmatch(r'[a-zA-Z0-9_.@:-]+\.service', service):
+            raise ValueError('approval service must match --retained-service')
+        status = self.unit(service)
+        if status['ActiveState'] != 'inactive':
+            raise ValueError(f'retained service must be drained and inactive: {service}: {status}')
+        return dict(post=reference, from_identity=sender, approver=approver,
+            sha256=hashlib.sha256(raw.encode()).hexdigest(), plan=fields['plan'], service=service)
+
+    def claims(self, display=False):
+        snapshot = self.snapshot()
+        print(f'central inventory {snapshot["path"]} sha256={snapshot["digest"]}') if display else None
+        if display and snapshot['admission_closed']:
+            print(f'PASS occupancy {self.host}: no eligible slots; pinned claim inventory rejects every acquisition')
+        errors, held = [], []
+        retained = {item['slot']: item for item in self.policy.get('retained_claims', [])}
+        used = set()
+        for row in snapshot['slots']:
+            item = dict(row)
+            try:
+                if row['owner'] is None:
+                    raise ValueError('FREE; ops maintenance claim missing')
+                if row['slot'] in retained:
+                    option = retained[row['slot']]
+                    if row['owner'] != option['owner']:
+                        raise ValueError('retained claim owner mismatch')
+                    item['approval'] = self.approval(row, option)
+                    item['kind'] = 'retained'
+                    used.add(row['slot'])
+                elif (self.policy.get('maintenance_owner') and self.policy.get('maintenance_what') and
+                      row['owner'] == self.policy['maintenance_owner'] and row['what'] == self.policy['maintenance_what']):
+                    item['kind'] = 'maintenance'
+                else:
+                    raise ValueError('foreign claim or wrong maintenance WHAT; bound retained approval missing')
+                if display:
+                    print(f'PASS occupancy {self.host}:{row["slot"]} [{row["share"]}] {row["owner"]}: {row["what"]} ({item["kind"]})')
+                held.append(item)
+            except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+                errors.append(f'{self.host}:{row["slot"]}: {error}')
+                if display:
+                    print(f'FAIL occupancy {self.host}:{row["slot"]} [{row["share"]}] {row["owner"]}: {row["what"]}: {error}')
+        if self.policy.get('inventory_digest') != snapshot['digest']:
+            errors.append('missing/changed --inventory-digest (covers entire host pool and share declaration)')
+        if used != retained.keys():
+            errors.append('retained option does not match a configured occupied slot')
+        if errors:
+            raise ValueError('; '.join(errors))
+        return dict(path=snapshot['path'], digest=snapshot['digest'], slots=held, admission_closed=snapshot['admission_closed'])
+
+    def unit(self, name, allow_absent=False):
+        output = self.user('systemctl', '--user', 'show', name, '--property=LoadState,ActiveState,SubState,UnitFileState')
+        row = dict(line.split('=', 1) for line in output.splitlines() if '=' in line)
+        if allow_absent and row.get('LoadState') == 'not-found' and row.get('ActiveState') == 'inactive':
+            return row
+        if row.get('LoadState') != 'loaded' or row.get('ActiveState') not in ('active', 'inactive', 'failed'):
+            raise ValueError(f'unreadable unit state: {name}')
+        return row
+
+    def nonclaim_writers(self):
+        rows = json.loads(self.user('systemctl', '--user', 'list-units', '--all', '--type=service,scope',
+                                   '--output=json', '--no-pager'))
+        if not isinstance(rows, list):
+            raise ValueError('unreadable user unit status')
+        busy = []
+        for row in rows:
+            name = row['unit']
+            if name.startswith(('codex-run-', 'after-landing', 'agents-after-landing')) and row['active'] != 'inactive':
+                busy.append(name)
+            if name.startswith('skein-heavy-') and not re.fullmatch(r'skein-heavy-[0-9a-f]+-reconcile\.service', name):
+                if row['active'] not in ('inactive', 'failed'):
+                    busy.append(name)
+        if busy:
+            raise ValueError('live user scopes/writers: ' + ', '.join(busy))
+        submitters = json.loads(self.user('python3', '-I', '-B', '-c', SUBMITTERS))
+        if submitters:
+            raise ValueError(f'heavy submitters/wrappers still present: {submitters}')
+        return 'no heavy scopes/submitters or codex-run/after-landing units'
+
+    def installed(self):
+        result = json.loads(self.user('python3', '-I', '-B', '-c', INSTALLED_PROOF))
+        if not re.fullmatch(r'[0-9a-f]{40,64}', result['fabrig_head']) or not result['start_once_units']:
+            raise ValueError('installed source identity unavailable')
+        if len(result['heavy_digests']) != 6 or any(not re.fullmatch(r'[0-9a-f]{64}', v) for v in result['heavy_digests'].values()):
+            raise ValueError('installed heavy digest unavailable')
+        return result
+
+    def environment(self):
+        result = json.loads(self.user('python3', '-I', '-B', '-c', MACHINE_ENV, json.dumps(sorted(MACHINE_KEYS))))
+        if not isinstance(result, dict) or not result or not result.keys() <= MACHINE_KEYS or any(not isinstance(v, str) for v in result.values()):
+            raise ValueError('invalid nonsecret machine.env summary')
+        return result
+
+    def services(self, installed=None):
+        installed = installed or self.installed()
+        rows = {name: self.unit(name, allow_absent=True) for name in installed['start_once_units']}
+        retained = set(self.policy.get('retained_services', {}).values())
+        for name in retained - rows.keys():
+            rows[name] = self.unit(name)
+        return dict(states=rows, owner_restarts=sorted(retained | {name for name, status in rows.items()
+            if status['ActiveState'] == 'active'}))
+
+    def preboot(self):
+        sources = self.installed()
+        return dict(sources=sources, environment=self.environment(), services=self.services(sources),
+                    boot_id=self.read(BOOT).strip())
 
     def heavy(self):
         self.user('/home/free/src/fabrig/main/tools/heavy/heavy', '--installed')
@@ -152,7 +421,7 @@ class Pquota:
         for token, task in data['tasks'].items():
             if not isinstance(task, dict) or not isinstance(task.get('state'), str):
                 raise ValueError('malformed heavy task')
-            if task['state'] != 'released':
+            if task['state'] != 'released' or task.get('release_complete', True) is not True or task.get('cgroup_empty', True) is not True:
                 busy.append(f'{token}:{task["state"]}')
         if busy:
             raise ValueError('heavy unfinished tasks: ' + ', '.join(busy))
@@ -185,11 +454,11 @@ class Pquota:
     def fence(self):
         checks = []
         for name, probe in [('host identity', self.identity), ('XFS root', self.mount),
-                            ('ops marker', self.marker), ('central claims', self.claims),
-                            ('heavy idle', self.heavy)]:
+                            ('ops marker', self.marker), ('heavy idle', self.heavy),
+                            ('non-claim writers', self.nonclaim_writers), ('central occupancy', self.claims)]:
             try:
                 value = probe()
-                ok = not value if name == 'central claims' else True
+                ok = True
                 checks.append((ok, name, str(value)))
             except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
                 checks.append((False, name, str(error)))
@@ -201,10 +470,190 @@ class Pquota:
             print(f'{"PASS" if ok else "FAIL"} fence {name}: {detail}')
         if not all(row[0] for row in checks):
             raise ValueError('fence refused; no boot changes/reboot authorized')
-        return checks
+        return self.claims()
 
     def digest(self):
         return hashlib.sha256(self.path(GRUB).read_bytes()).hexdigest()
+
+    def boot_files(self):
+        names = ['/etc/default/grub', '/etc/fstab', GRUB, '/boot/grub/grubenv']
+        directory = self.path('/etc/default/grub.d')
+        if directory.is_symlink():
+            raise ValueError('symlink grub.d')
+        names += ['/' + p.relative_to(self.root).as_posix() for p in sorted(directory.glob('*.cfg'))]
+        return {name: self.safe(name).read_bytes() for name in names}
+
+    def boot_safety(self, enabled=False):
+        files = self.boot_files()
+        for name, data in files.items():
+            if name == '/etc/default/grub' or name.startswith('/etc/default/grub.d/'):
+                if name == DROPIN and enabled and data == CONTENT.encode():
+                    continue
+                text = data.decode()
+                # Comments are harmless; no shell evaluation or expansion here.
+                lines = [line for line in text.splitlines() if not line.lstrip().startswith('#')]
+                for line in lines:
+                    if not line.strip():
+                        continue
+                    if name.startswith('/etc/default/grub.d/') and not re.fullmatch(r'\s*GRUB_[A-Z0-9_]+=.*', line):
+                        raise ValueError(f'unknown shell configuration in {name}')
+                    assignment = re.fullmatch(r'\s*GRUB_CMDLINE_LINUX(?:_DEFAULT)?=(.*)', line)
+                    if assignment:
+                        fields = shlex.split(assignment.group(1), comments=True)
+                        if len(fields) != 1 and assignment.group(1).strip() not in ('\"\"', "''"):
+                            raise ValueError(f'unknown boot command line in {name}')
+                        if '$' in assignment.group(1) or '`' in assignment.group(1):
+                            raise ValueError(f'dynamic boot command line in {name}')
+                if any(re.search(r'rootflags\s*=', line) for line in lines):
+                    raise ValueError(f'existing rootflags in {name}; refuse append')
+        roots = []
+        for line in files['/etc/fstab'].decode().splitlines():
+            fields = line.partition('#')[0].split()
+            if not fields:
+                continue
+            if len(fields) < 4:
+                raise ValueError('unrecognized fstab entry')
+            if fields[1] == '/':
+                roots.append(fields)
+            for option in fields[3].split(','):
+                if re.search(r'quota|qnoenforce$', option):
+                    raise ValueError('quota mount option already in fstab')
+        if len(roots) != 1 or roots[0][2] != 'xfs':
+            raise ValueError('fstab must have exactly one XFS root entry')
+        line = self.default_entry()
+        tokens = shlex.split(line)
+        if len([t for t in tokens if t.startswith('root=')]) != 1:
+            raise ValueError('default Linux line must name exactly one root')
+        if not enabled and any(t.startswith('rootflags=') for t in tokens):
+            raise ValueError('generated default already has rootflags')
+        if enabled:
+            self.check_entry(True)
+        return dict(files={name: hashlib.sha256(data).hexdigest() for name, data in files.items()}, default=line)
+
+    def originals(self):
+        directory = self.path(ORIGINAL)
+        manifest = json.loads(self.safe(ORIGINAL + '/manifest.json').read_text())
+        if manifest.get('version') != 1 or manifest.get('host') != self.host:
+            raise ValueError('foreign original backup')
+        for name, item in manifest['files'].items():
+            if not name.startswith(('/etc/', '/boot/grub/')) or '..' in Path(name).parts:
+                raise ValueError('invalid original backup path')
+            data = self.safe(ORIGINAL + '/files' + name).read_bytes()
+            if hashlib.sha256(data).hexdigest() != item['sha256']:
+                raise ValueError('original backup digest mismatch')
+        return manifest
+
+    def backup(self):
+        final = self.path(ORIGINAL)
+        if final.exists():
+            return self.originals()
+        data = self.boot_files()
+        if DROPIN in data:
+            raise ValueError('existing pquota drop-in without original backup')
+        final.parent.mkdir(parents=True, exist_ok=True)
+        stage = Path(tempfile.mkdtemp(prefix='.original-', dir=final.parent))
+        manifest = dict(version=1, host=self.host, files={})
+        try:
+            for name, content in data.items():
+                destination = stage / 'files' / name.lstrip('/')
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                with destination.open('wb') as out:
+                    out.write(content)
+                    out.flush()
+                    os.fsync(out.fileno())
+                destination.chmod(0o600)
+                info = self.safe(name).stat()
+                manifest['files'][name] = dict(sha256=hashlib.sha256(content).hexdigest(),
+                    mode=stat.S_IMODE(info.st_mode), uid=info.st_uid, gid=info.st_gid)
+            file = stage / 'manifest.json'
+            file.write_text(json.dumps(manifest, indent=2, sort_keys=True) + '\n')
+            file.chmod(0o600)
+            with file.open('rb') as stream:
+                os.fsync(stream.fileno())
+            for directory in sorted((p for p in stage.rglob('*') if p.is_dir()), key=lambda p: len(p.parts), reverse=True):
+                self.sync(directory)
+            self.sync(stage)
+            os.rename(stage, final)
+            self.sync(final.parent)
+        finally:
+            if stage.exists():
+                shutil.rmtree(stage)
+        return self.originals()
+
+    def restore(self, manifest):
+        existing = {'/' + p.relative_to(self.root).as_posix() for p in self.path('/etc/default/grub.d').glob('*.cfg')}
+        unexpected = existing - manifest['files'].keys() - {DROPIN}
+        if unexpected:
+            raise ValueError(f'boot configuration added since backup: {sorted(unexpected)}')
+        for name, item in manifest['files'].items():
+            self.write(name, self.safe(ORIGINAL + '/files' + name).read_bytes(), item['mode'])
+            os.chown(self.safe(name), item['uid'], item['gid'])
+        if DROPIN not in manifest['files'] and self.path(DROPIN).exists():
+            if self.safe(DROPIN).read_text() != CONTENT:
+                raise ValueError('foreign pquota drop-in')
+            self.path(DROPIN).unlink()
+            self.sync(self.path(DROPIN).parent)
+
+    def verify_originals(self, manifest):
+        for name, item in manifest['files'].items():
+            if hashlib.sha256(self.safe(name).read_bytes()).hexdigest() != item['sha256']:
+                raise ValueError(f'restored digest mismatch: {name}')
+        return True
+
+    def project_attrs(self, directory):
+        # Linux FS_IOC_FSGETXATTR, struct fsxattr (linux/fs.h UAPI).
+        fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            flags, _, _, project, _, _ = struct.unpack('=5I8s', fcntl.ioctl(fd, 0x801c581f, bytes(28)))
+        finally:
+            os.close(fd)
+        return dict(project=project, inherit=bool(flags & 0x200))
+
+    def probe(self):
+        # Never called by plan. Unique unused project ID and private directory;
+        # all quota mutation is confined to this temporary project.
+        report = self.run('xfs_quota', '-x', '-c', 'report -p -n -b', '/')
+        used = {int(value) for value in re.findall(r'^\s*#?([0-9]+)\s', report, re.M)}
+        if 'Project quota on /' not in report or not used:
+            raise ValueError('unrecognized project quota inventory; no probe authorized')
+        project = 0x60000000 + (uuid.uuid4().int % 0x10000000)
+        if project in used:
+            raise ValueError('probe project ID collision; retry with no mutation')
+        base = self.path('/var/lib/fabrig-pquota/probe')
+        self.safe('/var/lib/fabrig-pquota/probe/.guard')
+        base.mkdir(parents=True, exist_ok=True, mode=0o700)
+        directory = Path(tempfile.mkdtemp(prefix='project-', dir=base))
+        account = pwd.getpwnam('free')
+        os.chown(directory, account.pw_uid, account.pw_gid)
+        setup = False
+        result, errors = {}, []
+        try:
+            setup = True  # Partial project setup also requires cleanup.
+            self.run('xfs_quota', '-x', '-c', f'project -s -p {directory} {project}', '/')
+            self.run('xfs_quota', '-x', '-c', f'limit -p bsoft=0 bhard=1m {project}', '/')
+            parent = self.project_attrs(directory)
+            if parent != dict(project=project, inherit=True):
+                raise ValueError('probe parent project/inherit flag missing')
+            result = json.loads(self.run('python3', '-I', '-B', '-c', PROBE_WRITE, str(directory),
+                                        str(account.pw_uid), str(account.pw_gid)))
+            child = self.project_attrs(directory / 'child')
+            if child != parent:
+                raise ValueError('new subdirectory did not inherit project and inherit flag')
+            if result.get('errno') != errno.EDQUOT or result.get('bytes', 2**30) >= 2 * 1024 * 1024:
+                raise ValueError(f'probe must fail specifically with EDQUOT: {result}')
+            result.update(project=project, inherited=True, hard_cap_bytes=1048576)
+        finally:
+            if setup:
+                for command in (f'project -C -p {directory} {project}', f'limit -p bsoft=0 bhard=0 {project}'):
+                    try:
+                        self.run('xfs_quota', '-x', '-c', command, '/')
+                    except (OSError, ValueError, subprocess.SubprocessError) as error:
+                        errors.append(str(error))
+            if not errors:
+                shutil.rmtree(directory)
+            if errors:
+                raise ValueError(f'probe cleanup incomplete at {directory}: {errors}')
+        return result
 
     def default_entry(self):
         # Deliberately narrow: numbered top-level entries only. Saved/one-shot,
@@ -251,120 +700,155 @@ class Pquota:
 
     def plan(self):
         for name, probe in [('cmdline', lambda: self.read('/proc/cmdline').strip()),
-                            ('mount', self.mount),
-                            ('quota state', lambda: self.run('xfs_quota', '-x', '-c', 'state', '/').strip() or '(empty output; accounting not established)'),
-                            ('GRUB default', self.default_entry)]:
+                ('mount', self.mount), ('quota state', lambda: self.run('xfs_quota', '-x', '-c', 'state', '/').strip()),
+                ('boot safety', self.boot_safety), ('pre-boot sources/environment/services', self.preboot),
+                ('full occupancy', lambda: self.claims(display=True))]:
             try:
                 print(f'{name}: {probe()}')
             except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
                 print(f'UNAVAILABLE {name}: {error}')
         print(f'would atomically write {DROPIN}:\n{CONTENT}', end='')
-        print('would run: update-grub\nwould verify default Linux entry rootflags=pquota; would NOT reboot')
+        print('would run: update-grub; preserve existing boot options; would NOT reboot')
         for ok, name, detail in self.fence():
             print(f'{"PASS" if ok else "FAIL"} fence {name}: {detail}')
-        print('LIMIT: no host-disable CLI or central claim history; ops must stop producers and retain fence through boot.')
+        print('plan is read-only; verify explicitly performs a bounded scratch quota/inheritance probe.')
 
     def prepare(self):
-        checks = self.require_fence()
-        path = self.safe(DROPIN)
-        if path.exists() and path.read_text() != CONTENT:
-            raise ValueError('foreign drop-in; refusing overwrite')
-        # Refuse unrelated existing quota parameters before changing boot input.
-        self.default_entry()
+        self.identity()
         previous = self.state() if self.path(STATE).exists() else None
         if previous and previous.get('phase') == 'prepared':
-            if previous['boot_id'] != self.read(BOOT).strip():
-                raise ValueError('already rebooted; verify before starting a new prepare')
-            if not path.exists() or self.digest() != previous['grub_after']:
-                raise ValueError('prepared boot files drifted; investigate before retry')
-            self.check_entry(True)
-            print('PASS already prepared; preserved original boot evidence')
+            self.bind_policy(previous)
+            self.require_fence_unchanged(previous)
+            if previous['boot_id'] != self.read(BOOT).strip() or self.digest() != previous['grub_after']:
+                raise ValueError('prepared boot/config drift; investigate')
+            if self.boot_safety(enabled=True)['files'] != previous['boot_files_after']:
+                raise ValueError('prepared boot input files drifted')
+            self.originals()
+            if self.preboot() != previous['proof']:
+                raise ValueError('pre-boot source/environment/service proof drift')
+            print('PASS already prepared; original backups and evidence preserved')
             return
         if previous and previous.get('phase') in ('preparing', 'rolling-back'):
-            raise ValueError('incomplete transaction; use rollback after investigating')
+            raise ValueError('incomplete transaction; investigate and rollback')
+        safety = self.boot_safety()
+        self.require_fence()
+        proof = self.preboot()  # No boot mutation if source/env/service proof fails.
+        self.claims()  # Establish current approval and occupancy before backup.
+        backup = self.backup()
+        if {k: v['sha256'] for k, v in backup['files'].items()} != safety['files']:
+            raise ValueError('boot originals changed since write-once backup')
+        occupancy = self.require_fence()  # Immediately before committing boot intent.
         state = dict(version=1, host=self.host, phase='preparing', prepared_at=now(),
-                     boot_id=self.read(BOOT).strip(), before_cmdline=self.read('/proc/cmdline').strip(),
-                     before_mount=self.mount(), grub_before=self.digest(), fence=checks,
-                     claims_before=[])
-        self.save(state)  # Durable intent precedes the first GRUB mutation.
+            boot_id=proof['boot_id'], before_cmdline=self.read('/proc/cmdline').strip(),
+            before_mount=self.mount(), grub_before=self.digest(), default_before=safety['default'],
+            proof=proof, occupancy=occupancy, policy=self.policy, central=self.central)
+        self.save(state)
         self.write(DROPIN, CONTENT, 0o644)
         self.run('update-grub')
-        state.update(grub_after=self.digest(), default_after=self.check_entry(True), phase='prepared')
+        line = self.check_entry(True)
+        if [t for t in shlex.split(line) if t != 'rootflags=pquota'] != shlex.split(safety['default']):
+            raise ValueError('update-grub changed existing default Linux options')
+        after = self.boot_safety(enabled=True)
+        state.update(grub_after=self.digest(), default_after=line, phase='prepared', boot_files_after=after['files'])
         self.save(state)
-        print('PASS prepared; reboot remains a separate explicit action')
+        print('PASS prepared; owner restarts after boot: ' + ', '.join(proof['services']['owner_restarts']))
+
+    def bind_policy(self, state):
+        if self.central != state['central']:
+            raise ValueError('central authority differs from prepare')
+        if self.policy and self.policy != state['policy']:
+            raise ValueError('fence/approval policy differs from prepare')
+        self.policy = state['policy']
+
+    def require_fence_unchanged(self, state):
+        occupancy = self.require_fence()
+        if occupancy != state['occupancy']:
+            raise ValueError('central claim incarnation, inventory or retained approval changed since prepare')
+        return occupancy
 
     def rollback(self):
-        # Recovery must work after fresh bootstrap too, which creates no
-        # prepare record. This changes the next boot only; reboot stays fenced.
         self.identity()
-        state = self.state() if self.path(STATE).exists() else dict(
-            version=1, host=self.host, origin='rollback-without-prepare')
-        path = self.safe(DROPIN)
-        if path.exists() and path.read_text() != CONTENT:
-            raise ValueError('foreign drop-in; refusing removal')
-        state.update(phase='rolling-back', rollback_started=now(), rollback_grub_before=self.digest())
+        manifest = self.originals()
+        state = self.state() if self.path(STATE).exists() else dict(version=1, host=self.host)
+        if self.path(DROPIN).exists() and self.safe(DROPIN).read_text() != CONTENT:
+            raise ValueError('foreign drop-in; refusing rollback')
+        state.update(phase='rolling-back', rollback_started=now())
         self.save(state)
-        if path.exists():
-            path.unlink()
-            self.sync(path.parent)
+        self.restore(manifest)
         self.run('update-grub')
+        self.check_entry(False)
+        # Generated GRUB may differ cosmetically. Restore the byte-exact known
+        # original after regeneration, then prove all original digests/default.
+        self.restore(manifest)
+        self.verify_originals(manifest)
+        self.check_entry(False)
         state.update(phase='rolled-back', rollback_at=now(), rollback_boot_id=self.read(BOOT).strip(),
-                     rollback_grub_after=self.digest(), rollback_default=self.check_entry(False))
+                     rollback_grub_after=self.digest())
         self.save(state)
-        print('PASS rollback prepared; reboot separately, then prove pquota absent and stop rollout')
+        print('PASS restored all original file digests; reboot remains separate and fenced')
 
     def reboot(self):
         state = self.state()
+        self.bind_policy(state)
         if state.get('phase') not in ('prepared', 'rolled-back'):
             raise ValueError('no successful prepare/rollback')
-        expected_boot = state['boot_id'] if state['phase'] == 'prepared' else state['rollback_boot_id']
-        if self.read(BOOT).strip() != expected_boot:
+        expected = state['boot_id'] if state['phase'] == 'prepared' else state['rollback_boot_id']
+        if self.read(BOOT).strip() != expected:
             raise ValueError('boot already changed; refusing repeated reboot')
         key = 'grub_after' if state['phase'] == 'prepared' else 'rollback_grub_after'
         if self.digest() != state[key]:
             raise ValueError('GRUB changed after preparation')
         self.check_entry(state['phase'] == 'prepared')
-        # Last external observations before reboot; no intervening GRUB work.
-        self.require_fence()
+        manifest = self.originals()
+        expected_files = state['boot_files_after'] if state['phase'] == 'prepared' else {k: v['sha256'] for k, v in manifest['files'].items()}
+        if self.boot_safety(enabled=state['phase'] == 'prepared')['files'] != expected_files:
+            raise ValueError('boot input files changed after preparation')
+        latest = self.preboot()
+        if latest['sources'] != state['proof']['sources'] or latest['environment'] != state['proof']['environment']:
+            raise ValueError('installed source/environment changed since prepare')
+        state['reboot_services'] = latest['services']
+        state['proof']['services']['owner_restarts'] = sorted(set(state['proof']['services']['owner_restarts']) | set(latest['services']['owner_restarts']))
+        self.save(state)
+        self.require_fence_unchanged(state)
         self.run('systemctl', 'reboot')
 
     def verify(self):
+        state = self.state()
+        self.bind_policy(state)
         checks = []
         def check(name, probe):
             try:
-                ok, detail = probe()
+                value = probe()
+                ok = bool(value)
+                detail = value
             except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
                 ok, detail = False, str(error)
-            checks.append(ok)
-            detail = str(detail).replace("\n", " | ")
-            print(f'{"PASS" if ok else "FAIL"} {name}: {detail}')
-        check('cmdline rootflags=pquota', lambda: (has_pquota(self.read('/proc/cmdline')), self.read('/proc/cmdline').strip()))
-        def mount():
-            row = self.mount()
-            return 'prjquota' in row['options'].split(','), row
-        check('XFS mount prjquota', mount)
+            checks.append(dict(name=name, pass_result=ok, detail=detail))
+            print(f'{"PASS" if ok else "FAIL"} {name}: {str(detail).replace(chr(10), " | ")}')
+        check('boot changed since prepare', lambda: state['phase'] == 'prepared' and self.read(BOOT).strip() != state['boot_id'])
+        check('cmdline rootflags=pquota', lambda: has_pquota(self.read('/proc/cmdline')))
+        check('XFS mount prjquota', lambda: 'prjquota' in self.mount()['options'].split(','))
         def quota():
             output = self.run('xfs_quota', '-x', '-c', 'state', '/')
             project = re.search(r'^Project quota state on / .*?$(.*?)(?=^\S|\Z)', output, re.M | re.S)
             section = project.group(1) if project else ''
-            return (bool(re.search(r'^\s*Accounting:\s+ON\s*$', section, re.M)) and
-                    bool(re.search(r'^\s*Enforcement:\s+ON\s*$', section, re.M)), output.strip())
+            return bool(re.search(r'^\s*Accounting:\s+ON\s*$', section, re.M) and
+                        re.search(r'^\s*Enforcement:\s+ON\s*$', section, re.M))
         check('project accounting/enforcement ON', quota)
-        def boot():
-            state = self.state()
-            return (state.get('phase') == 'prepared' and self.read(BOOT).strip() != state['boot_id'],
-                    self.read(BOOT).strip())
-        check('boot changed since prepare', boot)
-        check('fleet-sync.timer active', lambda: (self.user('systemctl', '--user', 'is-active', 'fleet-sync.timer').strip() == 'active', 'free user timer'))
-        check('heavy installed and idle', lambda: (True, self.heavy()))
-        def claims():
-            rows = self.claims()
-            return not rows, rows or 'no current claims; central records survive reboot'
-        check('central claims after boot', claims)
-        # The current authority has no journal. A transient claim cannot be
-        # excluded by snapshots. Do not turn that missing evidence into PASS.
-        check('no claims appeared during downtime', lambda: (False, 'UNPROVEN: central claim list has no history; ops audit required'))
-        return all(checks)
+        check('installed sources unchanged', lambda: self.installed() == state['proof']['sources'])
+        check('machine.env unchanged', lambda: self.environment() == state['proof']['environment'])
+        check('fleet-sync.timer active', lambda: self.user('systemctl', '--user', 'is-active', 'fleet-sync.timer').strip() == 'active')
+        check('maintenance and retained claims unchanged; all writers drained', lambda: self.require_fence_unchanged(state))
+        # A failed prerequisite never authorizes any live quota operation.
+        if all(row['pass_result'] for row in checks):
+            check('project inheritance and EDQUOT scratch probe', self.probe)
+        else:
+            check('project inheritance and EDQUOT scratch probe', lambda: False)
+        state['verification'] = dict(at=now(), boot_id=self.read(BOOT).strip(), checks=checks)
+        self.save(state)
+        status = 'PASS' if all(row['pass_result'] for row in checks) else 'FAIL'
+        print(status + ' owner restart list (starts none; wait for accepted verification): ' + ', '.join(state['proof']['services']['owner_restarts']))
+        return all(row['pass_result'] for row in checks)
 
 
 def main():
@@ -373,6 +857,12 @@ def main():
     parser.add_argument('--host', required=True)
     parser.add_argument('--central', default='free@204.168.210.29', help='hel8 SSH authority (as free)')
     parser.add_argument('--yes', action='store_true')
+    parser.add_argument('--inventory-digest')
+    parser.add_argument('--maintenance-owner')
+    parser.add_argument('--maintenance-what')
+    parser.add_argument('--retained-claim', action='append', default=[], metavar='SLOT:CLAIM_OWNER:APPROVER:POST_ID')
+    parser.add_argument('--approval-file', action='append', default=[], metavar='POST_ID:ABSOLUTE_MD_PATH')
+    parser.add_argument('--retained-service', action='append', default=[], metavar='SLOT:UNIT.service')
     args = parser.parse_args()
     if not re.fullmatch(r'[a-z][a-z0-9-]*', args.host):
         parser.error('invalid host')
@@ -383,12 +873,35 @@ def main():
         parser.error(f'{args.command} requires --yes')
     if os.geteuid() != 0:
         parser.error('run as root: sudo python3 -I fleet/bootstrap/pquota ...')
-    tool = Pquota(args.host, args.central)
+    options = {}
+    if args.inventory_digest or args.maintenance_owner or args.maintenance_what or args.retained_claim or args.approval_file or args.retained_service:
+        if args.inventory_digest and not re.fullmatch(r'[0-9a-f]{64}', args.inventory_digest):
+            parser.error('inventory digest must be sha256')
+        options = dict(inventory_digest=args.inventory_digest, maintenance_owner=args.maintenance_owner,
+                       maintenance_what=args.maintenance_what, retained_claims=[], approval_files={}, retained_services={})
+        for item in args.retained_claim:
+            fields = item.split(':', 3)
+            if len(fields) != 4 or not fields[0].isdecimal() or not all(fields):
+                parser.error('retained claim requires SLOT:CLAIM_OWNER:APPROVER:POST_ID')
+            row = dict(zip(('slot', 'owner', 'approver', 'post'), fields))
+            if row['slot'] in {r['slot'] for r in options['retained_claims']}:
+                parser.error('duplicate retained slot')
+            options['retained_claims'].append(row)
+        for argument, key in ((args.approval_file, 'approval_files'), (args.retained_service, 'retained_services')):
+            for item in argument:
+                name, sep, value = item.partition(':')
+                if not sep or not name or not value or name in options[key]:
+                    parser.error('invalid/duplicate approval file or retained service')
+                if key == 'approval_files' and (not Path(value).is_absolute() or Path(value).suffix != '.md'):
+                    parser.error('approval file must be an explicit absolute .md post path')
+                options[key][name] = value
+    tool = Pquota(args.host, args.central, policy=options)
     if mutation:
         with tool.locked():
             getattr(tool, args.command)()
     elif args.command == 'verify':
-        return 0 if tool.verify() else 1
+        with tool.locked():
+            return 0 if tool.verify() else 1
     else:
         tool.plan()
     return 0

@@ -274,150 +274,257 @@ provisioning is a separate explicit operator action; existing kache takeover
 requires host-by-host agreement. Reverts also go through tools/land; preserve
 parser compatibility and keep private logins and operational evidence intact.
 
-## XFS project quota proposal: ops review, dry-run first
+## XFS project quota proposal: full occupancy, ops review first
 
-`pquota` is a Python 3.13 stdlib root tool, separate from convergence. No
-existing host is opted in. Commands below are an operator procedure, **not
-permission to edit GRUB or reboot a live builder**. It enables accounting and
-enforcement only; it assigns no project IDs, roots or limits and establishes
-no build containment. See `docs/design/fleet.md`, sections 4–5, and ops'
-`bounded-slots-design-reviewed-20261030T1215.md` for the separate containment work.
+`pquota` is a Python 3.13 stdlib root tool. No host is opted in. This is an
+operator procedure for review; this task authorizes **no live prepare, reboot,
+rollback or quota operation**. It enables XFS accounting; project roots, limits,
+write containment and admission budgets are separate work. Keep existing floors.
 
-Read-only proof (the command defaults to `plan`):
+### Choose and drain a host
+
+Ops chooses the **first fully drainable builder**, likely **h6 after QA's
+producer and upgrade claims are released**, then the remaining builders. **H8
+is last**, under a legitimate queue-rollout drain. Firm times come from ops after
+reviewing the script, owner approvals, claims and heavy proof. Retain the >=2h
+soak with quota, heavy and slot checks green before the next host; any failure
+rolls back that host and stops the rollout. Never reboot hosts together.
+
+Stop all claim and non-claim producers and drain their submitters/children,
+including QA, codex-run, after-landing and queue paths. Keep heavy's reconciler
+running until releases and scopes have drained. A stopped submitter or a
+released claim alone does not prove its children have ended. The helper checks
+heavy's installed atomic v1 ledger (every task released), no heavy payload or
+wrapper user units, no heavy submitter/wrapper processes, and no active
+`codex-run-*`, `after-landing*` or retained legacy `agents-after-landing*` units.
+It never reconciles, stops services, or changes heavy's state. Reads run as free.
+Inventory any non-default heavy queues separately: this tool reads the documented
+`~/src/rust/tmp/heavy/state.json` queue and the canonical fabrig heavy entrypoint.
+
+Start with the default **read-only** plan:
 
 ```sh
-sudo python3 -I fleet/bootstrap/pquota --host hetzner7
-sudo python3 -I fleet/bootstrap/pquota plan --host hetzner7
+sudo python3 -I fleet/bootstrap/pquota plan --host hetzner6
 ```
 
-The plan prints cmdline, XFS root options, `xfs_quota -x -c state /`, the
-selected Linux boot line, exact proposed drop-in and `update-grub`, plus each
-fence observation. It writes no file, takes no lock and invokes no update,
-reconcile or reboot command. Unavailable observations are displayed, not
-interpreted as an empty queue. The default central address is hel8,
-`free@204.168.210.29`; `--central` can supply its trusted SSH destination.
-Root drops to `free` for SSH, heavy and user-systemd reads. No root SSH keys,
-credentials or root heavy ledger access are used. SSH keeps strict host checking.
+It prints current boot/mount/quota state, safe source/environment summaries,
+start-once service states, every host slot's occupancy/share and missing proof,
+and the exact central inventory SHA256. It makes no local state/backup, GRUB,
+service, quota or reboot changes. Strict SSH is retained; it uses hel8 at
+`free@204.168.210.29` by default (`--central` selects another trusted route).
 
-**Claim and queue fence contract.** The deployed `tools/slots/claim` has no
-`--json` or unavailable-host command. Its documented interface is
-`ssh free@204.168.210.29 'claim list'` (slots design section 3), parsed strictly
-and filtered by exact host. It runs at the hel8 authority and records survive
-a builder reboot; never delete, copy, release or recreate claims to reboot.
-There is no expiry. A host absent from the nonempty inventory (currently h8)
-has no claimable slots. The slots design describes assigning draining slots
-to ops and removing the drained host from inventory; that is an inventory
-change requiring owner coordination, not a CLI host-disable operation.
-The marker plus zero claims is the available fence. Ops must first stop all
-claim producers and heavy submitters, including QA/after-landing/queue paths,
-and keep them stopped throughout reboot and review. This is an operational
-fence, not an atomic authority-side admission barrier.
+### Occupy every central slot; never force-release a claim
 
-Heavy has no status CLI. The tool calls its documented read-only
-`heavy --installed`, then reads the atomic version-1
-`/home/free/src/rust/tmp/heavy/state.json` snapshot **as free**, without
-constructing Ledger or running reconciliation (heavy design sections 2, 12).
-Every task must be `released`; queued, waiting, disk-retry, launching, active,
-finishing, closing and unknown states all refuse. Missing/unreadable/unsupported
-state or command failure refuses. This proposal covers that default queue;
-ops must inventory and drain any queues using DEV_ROOT/DEV_TMP overrides too.
-A snapshot cannot block a concurrent submitter. End all producer lifetimes
-before creating the marker. Do not stop recovery before it drains its children.
+The installed central claim tool has claim/release/list, without JSON or a
+host-disable API. The helper runs it via SSH as free, resolves its installed
+path and reads its adjacent `tools/slots/hosts`, as documented in slots design
+section 3. It reads declaration/list/declaration and refuses a changed read.
+`--inventory-digest` is **SHA256 of that entire declaration's exact bytes**:
+all host slot pools AND all shares are pinned, including slots added later.
+The listing must cover precisely those configured pairs and shares. An empty or
+unreadable whole inventory refuses. H8 currently has no eligible claim slots:
+with the entire declaration pinned, the claim CLI rejects every h8 acquisition.
+That closed admission domain is recorded explicitly; adding any slot changes
+the digest and refuses. It does not replace h8's separate queue-rollout drain.
 
-After stopping new claims/submissions and draining existing lifetimes, ops
-creates a root-owned, non-group/world-writable marker. The script never makes
-it. Example (replace the reason with the actual drain evidence):
+For every host slot, ops either places its exact maintenance claim or retains an
+approved stopped-service claim. A free slot, foreign claim, wrong WHAT, changed
+inventory or unreadable authority refuses. The tool **never claims or releases**.
+Ops first agrees any lending with the share owner, then uses the authority:
+
+```sh
+ssh free@204.168.210.29 'claim claim hetzner6 1 ops "pquota maintenance REVIEW-REF" --lent-by s/qa'
+# Repeat for EVERY configured slot; pool slots need no --lent-by.
+```
+
+The lending argument must match the actual inventory share, with its owner's
+agreement. Use a unique maintenance WHAT for this maintenance lifetime. Claims
+are central, have no expiry, and survive a builder reboot. Keep them all held
+through post-boot verification and owner readmission. Pin the printed digest:
+
+```sh
+sudo python3 -I fleet/bootstrap/pquota plan --host hetzner6 \
+  --inventory-digest SHA256 --maintenance-owner ops \
+  --maintenance-what 'pquota maintenance REVIEW-REF'
+```
+
+### Retaining a long-lived claim requires a bound approval
+
+H7:4's `ops` / `after-landing 20261029T1846Z` claim persists by design. Never
+force-release it. Its claim owner and service approver may differ. Retain it
+only with an actual approval from the named tool owner (s/dynamic-memory here):
+
+```sh
+--retained-claim 4:ops:s/dynamic-memory:APPROVAL_POST_ID \
+--approval-file APPROVAL_POST_ID:/home/free/APPROVAL_POST_ID.md \
+--retained-service 4:after-landing.service
+```
+
+All three options are repeatable for distinct slots/posts. Use an explicit
+regular `.md` post file readable by free, copied through the trusted post
+workflow if necessary. This fallback avoids consuming messages with `post read`;
+the installed tooling has no documented non-consuming metadata read API.
+Do not scan mailboxes or supply credentials. An arbitrary caller's reference is
+insufficient. The original post must contain exactly one Id/From header and
+these structured body lines (the service line binds the stopped service):
+
+```text
+Id: APPROVAL_POST_ID
+From: s/dynamic-memory@hel8
+To: ops@hel8
+
+slot: hetzner7:4
+what: after-landing 20261029T1846Z
+service: after-landing.service
+plan: preserve the owner's existing state and restart once after verified readmission
+```
+
+The From identity must match APPROVER, not merely the caller; the claim's owner
+must match CLAIM_OWNER, and slot/WHAT must match the live central record. The
+plan must describe preservation and restart. The declared service must be loaded
+and **inactive**, after its owner has drained its children. Sender, post ID,
+content hash, plan, service, owner, WHAT and claim creation time are bound into
+state.json. File provenance is the operator's trusted-post responsibility;
+From-line validation is not a cryptographic signature. Changing the claim's
+incarnation or approval after prepare refuses even if the owner/WHAT look alike.
+
+Alternatively, the claim owner deliberately releases its own exact claim under
+the producer freeze, ops immediately occupies that slot with maintenance custody,
+and the original owner deliberately reclaims only after successful verification
+and ops' release. Coordinate any brief vacancy: no new producers are enabled.
+Do not synthesize an owner release or discard the service's durable state.
+
+### Prepare and choose the reboot moment
+
+After producer freeze, full occupancy and drainage, ops creates a root-owned,
+non-group/world-writable marker (the script never creates it):
 
 ```sh
 sudo install -d -m 700 /var/lib/fabrig-pquota
-printf '%s\n' 'hetzner7 ops: producers stopped; claims empty; heavy drained; review REF' |
+printf '%s\n' 'hetzner6 ops: all producers stopped; heavy drained; approvals REVIEW-REF' |
   sudo tee /var/lib/fabrig-pquota/fence >/dev/null
 sudo chmod 600 /var/lib/fabrig-pquota/fence
-sudo python3 -I fleet/bootstrap/pquota prepare --yes --host hetzner7
-# Review state.json, generated default and pre-boot proof before choosing time:
-sudo python3 -I fleet/bootstrap/pquota reboot --yes --host hetzner7
-# Once SSH returns, still fenced:
-sudo python3 -I fleet/bootstrap/pquota verify --host hetzner7
+sudo python3 -I fleet/bootstrap/pquota prepare --yes --host hetzner6 \
+  --inventory-digest SHA256 --maintenance-owner ops \
+  --maintenance-what 'pquota maintenance REVIEW-REF'
+# Include retained-claim/file/service arguments when applicable.
+# Review state.json and original/ before choosing the moment:
+sudo python3 -I fleet/bootstrap/pquota reboot --yes --host hetzner6
 ```
 
-Prepare atomically installs exactly:
+Prepare records sources (fabrig main HEAD, agents `current` release path and
+start-once declaration hashes, all six installed heavy runtime-file digests),
+boot ID, each start-once unit's actual pre-boot state and owner restart list,
+and only allowlisted non-secret machine.env key/value pairs. Submitter inspection reads only bounded executable/action metadata; it never
+reads payload arguments or process environments, and records no credentials. Reboot/verify require
+sources and environment unchanged; arrange fleet pinning/deployment freezes
+with ops rather than accepting a new release mid-maintenance. Owners retain the
+plan's active-service list before drainage; retained stopped services remain in
+the restart list even though they are inactive in the immediate pre-boot proof.
+
+Unknown/conflicting boot input refuses: any existing rootflags in either kernel
+command-line variable or another GRUB drop-in, dynamic command-line expansion,
+unknown drop-in shell code, another fstab quota option, an unidentified default,
+multiple fstab root rows or multiple `root=` arguments on the default Linux line.
+Ordinary recovery/kernel menu entries remain valid when the numeric top-level
+default is unambiguous. Saved/one-shot/submenu defaults refuse. Existing kernel
+options must survive `update-grub` unchanged. The only added input is exactly:
 
 ```sh
 GRUB_CMDLINE_LINUX="$GRUB_CMDLINE_LINUX rootflags=pquota"
 ```
 
-at `/etc/default/grub.d/90-fabrig-pquota.cfg`, runs `update-grub`, and verifies
-the default entry, not a stray occurrence elsewhere. Only numeric top-level
-GRUB_DEFAULT entries are supported. Saved/one-shot/submenu defaults and defaults
-overridden in other drop-ins refuse for ops investigation. Its durable
-`/var/lib/fabrig-pquota/state.json` includes original cmdline/mount, boot ID,
-pre/post grub.cfg hashes and fence proof; a same-boot prepared retry preserves
-these originals. An interrupted/failed update retains intent; do not reboot
-until a successful prepare or rollback. Root writes reject symlink paths.
-Mutating commands require `--yes` and serialize locally. Prepare and reboot
-recheck the fence; reboot additionally checks successful preparation, unchanged boot/config and
-selected entry. Reboot is never implicit.
+at `/etc/default/grub.d/90-fabrig-pquota.cfg`. Before this change, a private,
+atomic, **write-once** `/var/lib/fabrig-pquota/original/` stores the original
+`/etc/default/grub`, all GRUB drop-ins, fstab, generated grub.cfg and binary
+grubenv, with digests/modes/ownership in a manifest. Retries validate and never
+replace this backup. A changed/corrupt original or incomplete transaction
+refuses for investigation. Prepared retries preserve original evidence.
 
-Each verify line is PASS or FAIL: rootflags, XFS prjquota, project accounting
-and enforcement, changed boot ID, free's fleet-sync timer, heavy installation
-and idle state, and the new authoritative claim list. Any current claims are
-reported, including work created during downtime. **The central list has no
-history**: a claim created and released while the host was down is unobservable.
-Consequently the separate downtime-history check always prints FAIL/UNPROVEN
-and verify exits 1 on the current protocol. Do not claim an automated green
-readmission from this proposal: ops must review independent authority-side
-producer/audit evidence. A future claim-history interface is required for that
-check to pass automatically. This deliberate gap blocks unattended rollout.
+Prepare and reboot recheck the full fence immediately. The stored policy is
+used by reboot/verify; supplied overrides must match it, as must the central
+route. Reboot also proves the same boot/config and claim incarnations as prepare.
+The marker is extra ops evidence: **full central occupancy**, rather than zero
+claims plus a marker, prevents ordinary claim acquisition. Inventory must stay
+pinned and every claim holder must honor the maintenance lifetime. Non-claim
+writers still require the independent producer freeze and drainage proof.
 
-For rollback, keep the host drained and marker intact:
+### Verify, then owners restart once
 
 ```sh
-sudo python3 -I fleet/bootstrap/pquota rollback --yes --host hetzner7
-sudo python3 -I fleet/bootstrap/pquota reboot --yes --host hetzner7
+sudo python3 -I fleet/bootstrap/pquota verify --host hetzner6
 ```
 
-Rollback works even without a prepare record (fresh-bootstrap rescue), and
-does not depend on claim/heavy availability. It removes only the exact owned
-drop-in, regenerates GRUB, verifies the
-default no longer has pquota and records hashes/result. It does not reboot or
-disable quota on the running mount. After the separate reboot, ops proves the
-boot ID changed, pquota absent from cmdline/default and quota accounting off,
-then checks fleet-sync, heavy and claims before considering readmission.
-Pre-existing pquota from another source will prevent successful rollback;
-resolve that source with ops. Never reset claims/heavy to make checks pass.
+**Verify is no longer read-only.** It first checks new boot ID, cmdline pquota,
+XFS prjquota, project accounting AND enforcement, unchanged installed sources
+and environment, fleet-sync.timer, and the complete unchanged maintenance and
+retained occupancy/drainage proof. Failure skips all quota mutation. Unlike the
+old zero-claim proposal, no unsupported claim-history assertion blocks a valid
+occupancy proof; release/recreate of a pinned claim is detected by creation time.
 
-**Out-of-band rescue:** use the Hetzner console, select the boot entry, press
-GRUB `e`, delete `rootflags=pquota` from its Linux line, and boot with Ctrl-X
-or F10. This edits one boot only. Once up, keep producers stopped, restore the
-marker/fence proof, then run `rollback --yes`; investigate before another boot.
-The initial quota-enabled mount may scan about 1.4 million inodes; allow console
-access and a maintenance window. Remount cannot enable XFS accounting.
+Only after every prerequisite passes, it creates a private scratch directory
+under `/var/lib/fabrig-pquota/probe`, chooses an unused numeric project from the
+kernel's project-quota report, sets it with `project -s -p DIR ID`, and applies
+a **1 MiB hard cap**. A helper drops to free before creating a subdirectory and
+attempting at most **2 MiB**. Linux FS_IOC_FSGETXATTR must show the same project
+and project-inherit flag on both directories, and the write must fail with
+**EDQUOT** (success, ENOSPC, or any other error fails). The tool clears the
+project assignment and limit and removes the scratch tree in a finally path.
+Freeze other quota administration during this bounded probe. Partial cleanup
+fails verification and preserves the path for explicit ops reconciliation.
+Verification checks and the probe receipt are recorded in state.json. No probe
+runs under plan, prepare or reboot, and no service is started by the helper.
 
-**Staggered rollout:** one host at a time: **h7, h6, h3, h8** (full names
-hetzner7, hetzner6, hetzner3, hetzner8). H8 runs the queue and goes last.
-Before each host, retain pre-boot plan, central claim/producer evidence and
-heavy drainage. After boot retain verify plus ops' heavy recovery and slot
-checks. Require all proof green, including resolving the history gap above,
-then soak for **at least two hours** before touching the next host. Any failure
-triggers rollback of that host and stops the rollout; never roll back or
-reboot multiple hosts at once. Keep console access and the previous known-good
-boot available. Re-enable producers and remove the marker only after ops accepts
-the proof; a rollback does not silently readmit the host.
+Before the reboot, owners stop and **disable** the relevant enabled services and
+their triggers, preserving and recording prior enablement and application state.
+Stopping an enabled WantedBy=default.target unit once does not prevent it from
+autostarting at boot. Coordinate a fleet convergence hold so it cannot re-enable
+those services; keep fleet-sync.timer itself active for the post-boot check.
+The helper records UnitFileState but never changes enablement or convergence
+controls. Owners retain the pre-drain plan's active-service list as well as the
+immediate pre-boot state, then restore the agreed enablement and restart their
+listed start-once services **once**, preserving their existing state, claims and
+recovery evidence, after ops accepts the quota proof.
+Fleet-sync does not restart an existing start-once service for its owner.
+For **h8**, the current transient queue wrapper is **not durable across boot**:
+ops owns the normal16 official queue restart, the **authority lock and checkout
+lock**, and their preserved queue/claim/checkout identities. Do not replace that
+with an ad-hoc wrapper, reset the queue, or synthesize lock evidence. These are
+ops' steps under a legitimate queue-rollout drain, not actions of this helper.
+Readmit and release maintenance claims only after verify and the owner/slot
+checks pass. Retained claims remain with their existing owners.
 
-**Landing order:** this branch is a two-stage proposal. Land the compatibility
-commit (fleet-sync's pquota boolean and asset allowlist) first, and wait until
-all hosts report that release. Only then land the script/bootstrap/docs/tests
-commit. An older runner validates a candidate with its own asset allowlist,
-so shipping the new fleet asset before that barrier can strand promotion.
-Do not squash the stages into one main landing.
+### Rollback and console rescue
 
-**New hosts:** add `pquota = true` to the host's table in `fleet/hosts.toml`
-only after the parser code is deployed (fleet design section 6). Omission is
-false; no host is enabled by this branch. `root.sh` delegates to `bootstrap.py
-root`, and both install the same drop-in atomically and run `update-grub` only
-when enabled. False leaves existing boot configuration alone. The new host
-requires **one drained reboot after root bootstrap** and manual mount/quota,
-service and claim proof before readmission. Fresh bootstrap has no pquota
-prepare record; the prepare/verify transaction above is for existing hosts.
-Fleet-sync validates the flag but never changes boot configuration. Fleet-scale
-will add new-host reboot orchestration later.
+Keep the host drained and claims held:
+
+```sh
+sudo python3 -I fleet/bootstrap/pquota rollback --yes --host hetzner6
+sudo python3 -I fleet/bootstrap/pquota reboot --yes --host hetzner6
+```
+
+Rollback validates the write-once backup, restores original files, removes only
+the exact owned new drop-in, runs update-grub, then restores the exact original
+generated bytes and verifies **every original digest** and selected default.
+Unexpected new drop-ins or a foreign pquota file refuse. It does not reboot or
+disable accounting on the running mount. The subsequent reboot retains the
+same occupancy/source/writer fence. After boot, ops proves pquota absent, quota
+accounting off, changed boot ID and intact services/claims before readmission.
+A missing/corrupt backup requires console/operator investigation, not guessing.
+
+Out-of-band rescue: Hetzner console, GRUB `e`, delete `rootflags=pquota` from
+the Linux line, then Ctrl-X/F10 to boot. Keep producers stopped, then rollback
+from the validated backup. Initial accounting may scan ~1.4 million inodes;
+allow a maintenance window and console access. XFS cannot enable accounting
+through remount.
+
+### Bootstrap and landing order
+
+Land the parser compatibility commit first and wait for it fleet-wide before
+the asset/bootstrap changes; do not squash those stages. All host flags remain
+off. A reviewed `pquota = true` host table entry opts a **fresh** XFS host into
+root bootstrap. `root.sh` delegates to `bootstrap.py root`; it shares boot safety
+and write-once backups with pquota and writes the same drop-in atomically.
+False changes no quota boot input. A new host needs one drained reboot and
+manual acceptance after root bootstrap; fleet-scale will add orchestration
+later. Existing hosts use the full fenced prepare/reboot/verify procedure.

@@ -156,17 +156,30 @@ source at a pinned revision. Any download must be HTTPS with a pinned SHA256.
 machines; the bootstrap ends at the login step.
 
 **Existing XFS roots:** `fleet/bootstrap/pquota` defaults to a read-only plan.
-Explicit prepare/rollback/reboot require `--yes`. Prepare and reboot require
-a matching root-owned ops marker, zero authoritative hel8 claims and an
-installed idle heavy snapshot. Rollback can prepare recovery without a prior
-prepare record or available claim/heavy service; its reboot remains fenced.
-The script records boot/config evidence and verifies the selected default
-Linux entry. Ops stops all claim/submission producers through boot; there is
-no atomic host-disable CLI. Verification checks boot, quota and user services.
-The current claim list has no history, so downtime claim absence stays
-FAIL/UNPROVEN pending authority audit support. This blocks automated rollout.
-The README specifies console rescue and h7/h6/h3/h8 rollout with >=2h soak and
-per-host rollback on failure. No live boot action is implicit in convergence.
+Prepare/reboot require a root-owned ops marker, pinned central inventory and
+full occupancy of every host slot: exact maintenance claims or retained claims
+bound to live owner/WHAT/incarnation, an approver's post and a drained inactive
+service. Approval posts name slot/WHAT/service and a preservation/restart plan.
+The tool never acquires/releases claims or starts services. Heavy tasks, scopes,
+submitters and codex-run/after-landing units must be drained. Non-claim producers
+remain frozen independently. The inventory SHA256 covers all pool/share bytes.
+
+Prepare refuses conflicting/unknown root flags, quota fstab options and ambiguous
+root/default entries; it keeps write-once original boot files and their digests.
+It records boot, installed-source/digest, non-secret machine.env and start-once
+service proof. Reboot and verify recheck unchanged claims, sources and environment.
+Verify explicitly mutates only a bounded private scratch project: project/inherit
+flags must propagate and a >1MiB unprivileged write must fail with EDQUOT; project,
+limit and directory cleanup are mandatory. Failed prerequisites skip the probe.
+Rollback restores and verifies original digests. Reboot is always separate.
+
+Ops schedules the first fully drainable builder (likely h6 after QA drainage),
+then remaining builders, with h8 last under a legitimate queue drain. Require
+>=2h green soak per host; failure rolls back that host and stops rollout. Owners
+restart their recorded start-once services once with state preserved. H8's
+normal16 official restart and both authority/checkout locks are ops-owned; the
+transient wrapper is not durable across reboot. Times await reviewed proof.
+The README specifies exact fence/approval options, backup/probe and console rescue.
 
 **Readmission** follows the verification list in the bootstrap README.
 
@@ -191,4 +204,4 @@ per-host rollback on failure. No live boot action is implicit in convergence.
 - An enforced landing entrypoint (ops request).
 - The automatic reaper: `docs/design/reaper.md`, once it lands.
 
-- Add authoritative claim history and atomic host admission fencing before automated quota rollout.
+- Add an authority-native host drain API; preserve inventory and claim incarnations during the current full-occupancy procedure.
