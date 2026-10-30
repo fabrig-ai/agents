@@ -296,8 +296,10 @@ class BriefTest(unittest.TestCase):
         brief, worktree = Path("/a b's/brief.md"), Path("/work tree")
         argv = calls.claude_argv(brief, worktree)
         self.assertEqual(argv[:2], ["claude", "-p"])
-        self.assertEqual(argv[3:], ["--model", calls.MODEL, "--output-format", "json",
+        self.assertEqual(argv[3:], ["--model", calls.MODEL, "--effort", "high", "--output-format", "json",
                                     "--dangerously-skip-permissions", f"--add-dir={worktree}"])
+        self.assertEqual(calls.claude_argv(brief, worktree, effort="medium")[6], "medium")
+        self.assertEqual((calls.role_effort("answer"), calls.role_effort("skeleton")), ("medium", "high"))
         self.assertEqual(len(argv[2].splitlines()), 1)
         self.assertIn("Read and follow", argv[2])
         self.assertIn("brief.md", argv[2])

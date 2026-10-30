@@ -21,6 +21,9 @@ REMOTES = {"agents": "git@github.com:fabrig-ai/agents.git", "fabrig": "git@githu
 ROLE = Path(__file__).resolve().parent / "roles" / "implementer.md"
 TASTE = Path(__file__).resolve().parent / "taste.md"  # banned names and pairs; every brief carries it
 NOTIFY = "fab@hel8"  # codex-run posts its end here; nothing waits on it
+# The Codex efforts the user's model sets by role (execution-modes.md): implementers high,
+# reviewers medium; a task spec's effort applies only to kinds not named here.
+EFFORTS = {"implement": "high", "repair": "high", "rebase": "high", "review": "medium"}
 SLOTTED = ("fabrig",)  # repositories whose runs build in a builder's warm slot
 LAUNCHER = "fab"  # "fab" (fab codex start) or "codex-run" (fabrig's, retired); see fab/codex.py
 
@@ -223,7 +226,7 @@ def _prepare_and_launch(task: Task, host: Host, kind: str, remote, *, run_id: st
         remote(["git", "-C", str(repo), "worktree", "add", "-b", branch, str(worktree), base])
     held = {} if slot is None else {"slot": slot}
     return launch(host, run_id, task=task.id, kind=kind, workdir=str(worktree), branch=branch,
-                  base=base, brief=text, effort=task.effort, read_only=kind == "review",
+                  base=base, brief=text, effort=EFFORTS.get(kind, task.effort), read_only=kind == "review",
                   sh=sh, log_path=log_path, **held)
 
 

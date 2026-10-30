@@ -256,7 +256,7 @@ class RunStartTest(unittest.TestCase):
                                                    branch, str(worktree), "origin/main"])
                 self.assertEqual(commands[-2], ["bash", "-c",
                     f"mkdir -p {directory} && cat > {directory}/brief.md.tmp && mv -- {directory}/brief.md.tmp {directory}/brief.md"])
-                expected = ["fab", "codex", "start", "--effort", "high"]
+                expected = ["fab", "codex", "start", "--effort", run.EFFORTS.get(kind, "high")]
                 if kind == "review":
                     expected.append("--read-only")
                 self.assertEqual(commands[-1], [*expected, str(directory / "brief.md"), str(worktree),
@@ -280,7 +280,8 @@ class RunStartTest(unittest.TestCase):
             path = home / "custom/events.jsonl"
             run.start(replace(TASK, repo="fabrig", effort="medium"), HOST, sh=fake, log_path=path)
             self.assertIn(run.REMOTES["fabrig"], command(fake.calls[1])[2])
-            self.assertEqual(command(fake.calls[-1])[3:5], ["--effort", "medium"])
+            # An implement run is high whatever the spec says: the model's implementer.
+            self.assertEqual(command(fake.calls[-1])[3:5], ["--effort", "high"])
             self.assertEqual(len(log.read(path)), 1)
             self.assertEqual(log.read(), [])
 
@@ -301,7 +302,7 @@ class RunStartTest(unittest.TestCase):
                     ["fab", "slot", "claim", "2", run_id, TASK.id],
                     ["git", "-C", str(slot), "fetch", "origin"],
                     ["git", "-C", str(slot), "switch", "-C", branch, source]])
-                expected = ["fab", "codex", "start", "--effort", task.effort]
+                expected = ["fab", "codex", "start", "--effort", run.EFFORTS.get(kind, task.effort)]
                 if kind == "review":
                     expected.append("--read-only")
                 self.assertEqual(commands[-1], [*expected, str(directory / "brief.md"), str(slot),
@@ -373,7 +374,7 @@ class RunStartTest(unittest.TestCase):
                     run_id = run.start(task, HOST, kind=kind, sh=fake)
                     worktree = ROOT.parent / "slots/2" if repo == "fabrig" else ROOT / "wt" / run_id
                     directory = ROOT / "runs" / run_id
-                    expected = ["fab", "codex", "start", "--effort", "medium"]
+                    expected = ["fab", "codex", "start", "--effort", run.EFFORTS.get(kind, "medium")]
                     if kind == "review":
                         expected.append("--read-only")
                     self.assertEqual(command(fake.calls[-1]), [*expected, str(directory / "brief.md"),

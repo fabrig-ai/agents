@@ -277,8 +277,20 @@ def open_questions(events: Iterable[dict]) -> list[dict]:
     return pending
 
 
-def claude_argv(brief_path: Path, workdir: Path, *, model: str = MODEL) -> list[str]:
-    """`claude -p <prompt> --model <model> --output-format stream-json --verbose
+# Each Claude role's effort, as the user's model sets it (execution-modes.md, the roles table):
+# the answerer is medium; the designer's calls, the skeleton author, its amendments and the
+# structure reviewer are high. Passed explicitly, so a user's own default never leaks in.
+EFFORTS = {"answer": "medium"}
+EFFORT = "high"
+
+
+def role_effort(role: str) -> str:
+    """The effort a call of this role runs at: EFFORTS, else EFFORT."""
+    return EFFORTS.get(role, EFFORT)
+
+
+def claude_argv(brief_path: Path, workdir: Path, *, model: str = MODEL, effort: str = EFFORT) -> list[str]:
+    """`claude -p <prompt> --model <model> --effort <effort> --output-format stream-json --verbose
     --dangerously-skip-permissions --add-dir=<workdir>`, the prompt being a one-line
     instruction to read and follow brief_path. The stream (one JSON event per line; claude
     needs --verbose for it under -p) carries every message's usage, so claude_usage finds the
@@ -286,8 +298,8 @@ def claude_argv(brief_path: Path, workdir: Path, *, model: str = MODEL) -> list[
     comes first and --add-dir takes `=`: --add-dir accepts several directories and would
     otherwise take the prompt for one."""
     return ["claude", "-p", f"Read and follow the brief at {shlex.quote(str(brief_path))}.",
-            "--model", model, "--output-format", "json", "--dangerously-skip-permissions",
-            f"--add-dir={workdir}"]
+            "--model", model, "--effort", effort, "--output-format", "json",
+            "--dangerously-skip-permissions", f"--add-dir={workdir}"]
 
 
 def start(role: str, subject: str, repo: Path, brief: str, *, sh: Runner = run,
@@ -332,7 +344,8 @@ def start(role: str, subject: str, repo: Path, brief: str, *, sh: Runner = run,
                    branch=branch, **fields)
         environment = {key: value for key, value in os.environ.items()
                        if not key.startswith(("CLAUDECODE", "CLAUDE_CODE_"))}
-        result = sh(claude_argv(brief_path, worktree), cwd=str(worktree), timeout=TIMEOUT,
+        result = sh(claude_argv(brief_path, worktree, effort=role_effort(role)), cwd=str(worktree),
+                    timeout=TIMEOUT,
                     env=environment)
         _write(directory / "result.json", result.out)
         _write(directory / "stderr.log", result.err)
