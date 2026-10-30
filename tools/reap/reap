@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import re
+import socket
 import stat
 import subprocess
 import sys
@@ -223,6 +224,7 @@ class Reaper:
         self.refresh_records()
         self.live = set()
         self.claude_error = False
+        self.alternates_cache = None
 
     def refresh_records(self):
         self.records = {}
@@ -286,7 +288,11 @@ class Reaper:
                     final = json.load(stream)
             if not isinstance(final, dict) or final.get('state') not in ('landed', 'withdrawn'):
                 raise ValueError('not final')
-            when = datetime.fromisoformat(final['time'])
+            text = final['time']
+            if not isinstance(text, str) or not re.fullmatch(
+                    r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|\+00:00)', text):
+                raise ValueError('final time must be ISO-8601 UTC')
+            when = datetime.fromisoformat(text)
             if when.utcoffset() is None or when.utcoffset().total_seconds() != 0:
                 raise ValueError('final time must be UTC')
             timestamp = when.timestamp()
@@ -404,7 +410,8 @@ class Reaper:
         fixed = ['src/rust/tmp/logins', 'src/rust/tmp/heavy', 'src/rust/tmp/post',
                  '.ssh', '.claude/.credentials.json', '.claude/jobs/pins.json', '.claude.json', '.codex/auth.json',
                  'archive', '.local/state/reap', 'src/rust/tmp/logs/heavy.tsv',
-                 'src/fabrig/events', 'src/fabrig/records', 'src/rust/records']
+                 'src/fabrig/events', 'src/fabrig/records', 'src/rust/records',
+                 'src/fabrig/archive', 'src/rust/tmp/owners']
         fixed += [f'src/fabrig/{name}' for name in ('claims', 'leases', 'queue', 'main', 'agents', 'current', 'releases')]
         fixed += [f'.local/state/{name}' for name in ('fleet-sync', 'fabrig', 'heavy')]
         if not inside(path, self.home) or any(intersects(path, self.home / p) for p in fixed):
@@ -420,31 +427,47 @@ class Reaper:
                 return True
         return False
 
+    def claim_slots(self):
+        # Fabrig tools/slots/design.md section 3: builders read hel8 over SSH.
+        host = socket.gethostname().split('.', 1)[0]
+        hosts = tomllib.loads(read(ROOT / 'fleet/hosts.toml'))['hosts']
+        names = [name for name, data in hosts.items() if host in (name, data['hostname'])]
+        if len(names) != 1:
+            raise ValueError('unknown claim host')
+        name = names[0]
+        authority = name == 'hel8'
+        args = ['claim', 'list'] if authority else [
+            'ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5', hosts['hel8']['ssh'],
+            'bash -lc \'claim list\'']
+        output = command(args, timeout=10)
+        observed = False
+        slots = []
+        for line in output.splitlines():
+            if not line.strip():
+                continue
+            match = re.fullmatch(r'(\S+)\s+(\d+)\s+\[[^\]]+\]:\s*(.+)', line)
+            if not match:
+                raise ValueError('unrecognized claim row')
+            if not authority and match[1] != name:
+                continue
+            observed = True
+            if match[3] != 'free':
+                slots.extend([match[2], match[1] + '-' + match[2]])
+        if not authority and not observed:
+            raise ValueError('host absent from claim inventory')
+        return slots
+
     def snapshot(self):
-        used, borrowed, slots, failures = [], [], [], []
+        used, failures = [], []
         try:
-            output = command(['claim', 'list'])
-            for line in output.splitlines():
-                if not line.strip():
-                    continue
-                match = re.fullmatch(r'\S+\s+(\d+)\s+\[[^\]]+\]:\s*(.+)', line)
-                if not match:
-                    raise ValueError('unrecognized claim row')
-                if match[2] != 'free':
-                    slots.extend([match[1], line.split()[0] + '-' + match[1]])
+            slots = self.claim_slots()
         except (OSError, ValueError, subprocess.SubprocessError):
             slots = None
-        deadline = time.monotonic() + 30
-        for root, depth in [('src', 64), ('.claude/jobs', 32)]:
-            try:
-                borrowed.extend(self.alternates(self.home / root, depth, deadline))
-            except FileNotFoundError:
-                pass
-            except (OSError, ValueError) as exc:
-                failures.append(f'alternates incomplete: {type(exc).__name__}')
-                detail = f'alternates {root}: {exc}'
-                if detail not in self.errors:
-                    self.errors.append(detail)
+        if self.alternates_cache is None:
+            self.alternates_cache = self.scan_alternates()
+        borrowed, scan = self.alternates_cache
+        if not scan['complete']:
+            failures.append('alternates incomplete: ' + scan['reason'])
         try:
             processes = process_paths(self.proc)
             if processes['errors'] and self.proc == Path('/proc'):
@@ -467,51 +490,127 @@ class Reaper:
             self.errors.append('claim inventory unavailable')
         return dict(used=used, borrowed=borrowed, slots=slots, failures=failures)
 
-    def alternates(self, root, depth, deadline):
-        found = []
-        def visit(path, fd, remaining):
-            if time.monotonic() > deadline:
-                raise ValueError('walk time limit')
-            # scandir uses directory-entry types, avoiding a stat/open walk for
-            # every ordinary file in large source/build trees.
+    def scan_alternates(self):
+        """Inspect Git metadata once; never walk build output or object stores."""
+        started = time.monotonic()
+        deadline = started + 20
+        roots = ['src', '.claude/jobs', 'src/rust/tmp']
+        stats = dict(complete=False, reason=None, budget_seconds=20, depth=6,
+                     roots=roots, directories=0, git_directories=0, missing_git_directories=0, alternates_files=0)
+        found, visited, gitdirs = set(), set(), set()
+
+        def budget():
+            if time.monotonic() >= deadline:
+                raise ValueError('scan time limit')
+
+        def metadata(path):
+            budget()
+            try:
+                with regular(path) as fd:
+                    data = os.pread(fd, 1048577, 0)
+            except FileNotFoundError:
+                return None
+            if len(data) > 1048576:
+                raise ValueError('oversized Git metadata')
+            try:
+                text = data.decode('utf-8')
+            except UnicodeDecodeError:
+                raise ValueError('invalid UTF-8 Git metadata') from None
+            if '\0' in text:
+                raise ValueError('NUL in Git metadata')
+            return text
+
+        def gitdir(path):
+            budget()
+            path = absolute(path)
+            if path in gitdirs:
+                return
+            gitdirs.add(path)
+            # Verify the directory even when neither optional file exists.
+            try:
+                with directory(path):
+                    pass
+            except FileNotFoundError:
+                # Archived worktrees can retain pointers to deleted temporary
+                # Git directories. There is no object store left to borrow.
+                stats['missing_git_directories'] += 1
+                return
+            stats['git_directories'] += 1
+            common = metadata(path / 'commondir')
+            if common is not None:
+                value = common.rstrip('\r\n')
+                if not value:
+                    raise ValueError('invalid commondir')
+                gitdir(path / value)
+            content = metadata(path / 'objects/info/alternates')
+            if content is not None:
+                stats['alternates_files'] += 1
+                for line in content.splitlines():
+                    budget()
+                    if not line:
+                        continue
+                    if line.startswith('"'):
+                        raise ValueError('quoted alternates require review')
+                    target = absolute(path / 'objects' / line)
+                    found.update((target, Path(os.path.realpath(target))))
+
+        def visit(path, depth, fd):
+            budget()
+            info = os.fstat(fd)
+            identity = (info.st_dev, info.st_ino)
+            if identity in visited:
+                return
+            visited.add(identity)
+            stats['directories'] += 1
+            if path.name.endswith('.git'):
+                gitdir(path)
+                return
             with os.scandir(fd) as entries:
                 for entry in entries:
-                    if time.monotonic() > deadline:
-                        raise ValueError('walk time limit')
+                    budget()
+                    if entry.name in ('target', 'node_modules', '.cache'):
+                        continue
                     child = path / entry.name
-                    if child.parts[-3:] == ('objects', 'info', 'alternates'):
-                        if not entry.is_file(follow_symlinks=False):
-                            raise ValueError('unsafe alternates file')
-                        try:
-                            with regular(child) as alt_fd:
-                                content = os.pread(alt_fd, 1048577, 0)
-                            if len(content) > 1048576:
-                                raise ValueError('oversized alternates file')
-                        except FileNotFoundError:
-                            continue
-                        for line in content.decode(errors='strict').splitlines():
-                            if not line:
-                                continue
-                            if line.startswith('"'):
-                                raise ValueError('quoted alternates require review')
-                            target = Path(line)
-                            if not target.is_absolute():
-                                target = child.parent.parent / target
-                            found.extend([absolute(target), Path(os.path.realpath(target))])
-                    if entry.is_dir(follow_symlinks=False):
-                        if remaining == 0:
-                            raise ValueError(f'walk depth limit at {child}')
+                    if entry.name == '.git':
+                        if entry.is_dir(follow_symlinks=False):
+                            gitdir(child)
+                        elif entry.is_file(follow_symlinks=False):
+                            pointer = metadata(child)
+                            if pointer is None:
+                                continue  # Removed during discovery.
+                            value = pointer.rstrip('\r\n')
+                            if not value.startswith('gitdir: ') or not value[8:]:
+                                raise ValueError('invalid gitdir pointer')
+                            gitdir(path / value[8:])
+                        else:
+                            raise ValueError('unsafe gitdir pointer')
+                    elif depth < 6 and entry.is_dir(follow_symlinks=False):
                         try:
                             child_fd = os.open(entry.name, DIRECTORY, dir_fd=fd)
+                            try:
+                                visit(child, depth + 1, child_fd)
+                            finally:
+                                os.close(child_fd)
                         except FileNotFoundError:
-                            continue
-                        try:
-                            visit(child, child_fd, remaining - 1)
-                        finally:
-                            os.close(child_fd)
-        with directory(root) as fd:
-            visit(root, fd, depth)
-        return found
+                            continue  # Transient source directories are normal.
+        try:
+            # Explicit tmp root gives it its own depth allowance. Inode caching
+            # avoids overlap with src while retaining the deeper search window.
+            for root in reversed(roots):
+                try:
+                    with directory(self.home / root) as fd:
+                        visit(self.home / root, 0, fd)
+                except FileNotFoundError:
+                    pass
+            budget()
+            stats['complete'] = True
+        except (OSError, ValueError, RecursionError) as exc:
+            stats['reason'] = str(exc) if isinstance(exc, ValueError) else type(exc).__name__
+            detail = 'alternates: ' + stats['reason']
+            if detail not in self.errors:
+                self.errors.append(detail)
+        stats['elapsed_seconds'] = round(time.monotonic() - started, 6)
+        return sorted(found), stats
 
     def git_repositories(self, path):
         repos = []
@@ -635,6 +734,7 @@ class Reaper:
     def execute(self, classes, mode):
         if mode == 'live' and self.config['mode'] != 'live':
             raise ValueError('--live refused: fleet/reap.toml is dry-run')
+        self.alternates_cache = None
         candidates = self.discover(classes)
         snapshot = self.snapshot()
         for item in candidates:
@@ -658,7 +758,7 @@ class Reaper:
                     continue
                 for repo, state in unsafe:
                     item['bundles'].append(self.bundle(repo, state[0]))
-                # Refresh process/claim/borrower state immediately before each
+                # Refresh process/claim state immediately before each
                 # removal; discovery and earlier archive work are not proof.
                 if self.fingerprint(path)[1] != fingerprint:
                     raise ValueError('candidate changed during inspection/archive')
@@ -683,7 +783,7 @@ class Reaper:
                                kept=len(members) - len(selected))
         return dict(time=self.now, mode=mode, classes=totals,
                     kept=dict(Counter(item['reason'] for item in candidates if item['action'] == 'kept')),
-                    errors=self.errors, candidates=candidates)
+                    alternates_scan=self.alternates_cache[1] if self.alternates_cache else None, errors=self.errors, candidates=candidates)
 
     def timer_run(self):
         if not os.environ.get('INVOCATION_ID'):

@@ -15,7 +15,7 @@ import tempfile
 import time
 import tomllib
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[2]
 API = runpy.run_path(str(ROOT / 'tools/reap/reap'))
@@ -46,6 +46,9 @@ class ReapTests(unittest.TestCase):
         self.bin.mkdir()
         self.config = tomllib.loads((ROOT / 'fleet/reap.toml').read_text())
         self.env = patch.dict(os.environ, HOME=str(self.home), PATH=f'{self.bin}:/usr/bin:/bin', INVOCATION_ID='')
+        self.host = patch("socket.gethostname", return_value="hel8")
+        self.host.start()
+        self.addCleanup(self.host.stop)
         self.env.start()
         self.addCleanup(self.env.stop)
         for tool, output in [('claude', '[]'), ('claim', ''), ('post', ''), ('systemctl', '1000000')]:
@@ -171,6 +174,22 @@ class ReapTests(unittest.TestCase):
         self.assertEqual(result['kept'], {'codex-run not final': len(bad)})
         self.assertFalse(self.selected(result))
         self.assertFalse((self.home / 'systemctl.calls').exists())
+
+    def test_codex_final_time_accepts_only_utc_iso_variants(self):
+        self.fake('systemctl', 'inactive', 3)
+        path = self.old('src/rust/tmp/codex-run/timestamp', directory=True)
+        for text in ('2000-01-01T00:00:00Z', '2000-01-01T00:00:00+00:00',
+                     '2000-01-01T00:00:00.123456Z', '2000-01-01T00:00:00.123456+00:00'):
+            with self.subTest(text=text):
+                put(path / 'final.json', json.dumps(dict(state='landed', time=text)))
+                self.assertIsNone(self.reaper().codex_finality(path)[1])
+        for text in ('2000-01-01T00:00:00-00:00', '2000-01-01 00:00:00Z',
+                     '20000101T000000Z', '2000-01-01T00:00:00+0000',
+                     '2000-01-01T00:00:00', '2000-01-01T00:00:00,123Z',
+                     '2000-01-01T00:00:00+01:00'):
+            with self.subTest(text=text):
+                put(path / 'final.json', json.dumps(dict(state='landed', time=text)))
+                self.assertEqual(self.reaper().codex_finality(path)[1], 'codex-run not final')
 
     def test_codex_nonregular_final_json_kept(self):
         outside = put(Path(self.temp.name) / 'outside.json', '{"state":"landed","time":"2000-01-01T00:00:00Z"}')
@@ -500,6 +519,35 @@ class ReapTests(unittest.TestCase):
         self.fake('claim', 'bad output')
         self.reason(self.run_class('precheck-logs'), 'claim unavailable')
 
+    def test_builder_claims_use_authority_and_filter_host(self):
+        self.old('src/fabrig/slots/2.precheck-logs/item', 8)
+        self.fake('ssh', 'hetzner6 2 [pool]: other: build\nhetzner3 2 [pool]: free')
+        self.fake('claim', 'bad local inventory', 1)
+        for host in ('hetzner3', 'debian-16gb-hel1-3.example'):
+            with self.subTest(host=host), patch('socket.gethostname', return_value=host):
+                self.assertEqual(len(self.selected(self.run_class('precheck-logs'))), 1)
+        self.assertFalse((self.home / 'claim.calls').exists())
+        calls = [json.loads(line)['args'] for line in (self.home / 'ssh.calls').read_text().splitlines()]
+        self.assertTrue(all(call == ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5',
+                                    'free@204.168.210.29', "bash -lc 'claim list'"] for call in calls))
+        self.fake('ssh', 'hetzner3 2 [pool]: owner: live')
+        with patch('socket.gethostname', return_value='hetzner3'):
+            self.reason(self.run_class('precheck-logs'), 'claimed slot')
+
+    def test_builder_failed_unknown_or_missing_authority_keeps_slots(self):
+        self.old('src/fabrig/slots/2.precheck-logs/item', 8)
+        for output, code in (('', 1), ('invalid', 0), ('hetzner6 2 [pool]: free', 0), ('', 0)):
+            with self.subTest(output=output, code=code):
+                self.fake('ssh', output, code)
+                with patch('socket.gethostname', return_value='hetzner3'):
+                    self.reason(self.run_class('precheck-logs'), 'claim unavailable')
+        for error in (FileNotFoundError('ssh'), subprocess.TimeoutExpired('ssh', 10)):
+            with patch('socket.gethostname', return_value='hetzner3'):
+                with patch.dict(Reaper.claim_slots.__globals__, command=Mock(side_effect=error)):
+                    self.reason(self.run_class('precheck-logs'), 'claim unavailable')
+        with patch('socket.gethostname', return_value='unknown'):
+            self.reason(self.run_class('precheck-logs'), 'claim unavailable')
+
     def test_alternates_absolute_and_relative(self):
         for relative in (False, True):
             with self.subTest(relative=relative):
@@ -512,7 +560,7 @@ class ReapTests(unittest.TestCase):
     def test_quoted_alternates_fail_closed(self):
         path = self.old('src/rust/tmp/logs/store', directory=True)
         put(self.home / 'src/borrower/.git/objects/info/alternates', json.dumps(str(path / 'objects')))
-        self.reason(self.run_class('heavy-logs', True), 'alternates incomplete: ValueError')
+        self.reason(self.run_class('heavy-logs', True), 'alternates incomplete: quoted alternates require review')
         self.assertTrue(path.exists())
 
     def test_alternates_under_jobs(self):
@@ -554,11 +602,128 @@ class ReapTests(unittest.TestCase):
         self.assertEqual(commands[0][:5], ['sudo', '-n', '/usr/bin/python3', '-I', '-B'])
         self.assertEqual(Path(commands[0][-1]), ROOT / 'tools/reap/proc_paths.py')
 
-    def test_alternates_limit_fails_closed(self):
-        self.old('src/rust/tmp/logs/item')
-        deep = self.home / 'src' / Path(*(['deep'] * 65))
-        deep.mkdir(parents=True)
-        self.reason(self.run_class('heavy-logs'), 'alternates incomplete: ValueError')
+    def test_alternates_budget_fails_closed_and_records_elapsed(self):
+        path = self.old('src/rust/tmp/logs/item')
+        reaper = self.reaper(True)
+        with patch('time.monotonic', side_effect=[100, 121, 122]):
+            result = reaper.execute({'heavy-logs'}, 'live')
+        self.reason(result, 'alternates incomplete: scan time limit')
+        self.assertTrue(path.exists())
+        self.assertEqual(result['alternates_scan']['elapsed_seconds'], 22)
+        self.assertFalse(result['alternates_scan']['complete'])
+        reaper.save(result)
+        saved = json.loads((reaper.state / 'runs.jsonl').read_text().splitlines()[-1])
+        self.assertEqual(saved['alternates_scan'], result['alternates_scan'])
+
+    def test_alternates_build_tree_timeout_shape_is_pruned(self):
+        # Real hel8 failure: generic traversal spent its deadline inside deep
+        # build/source output before reaching later Git metadata.
+        path = self.old('src/rust/tmp/logs/store', directory=True)
+        for name in ('target', 'node_modules', '.cache'):
+            deep = self.home / 'src/project' / name / Path(*(['generated'] * 65))
+            put(deep / '.git/objects/info/alternates', '"not Git metadata in scope"')
+        put(self.home / 'src/project/.git/objects/info/alternates', str(path / 'objects'))
+        reaper = self.reaper()
+        with patch.object(Reaper, 'scan_alternates', wraps=reaper.scan_alternates) as scan:
+            result = reaper.execute({'heavy-logs'}, 'dry-run')
+        self.reason(result, 'alternates target')
+        self.assertEqual(scan.call_count, 1)
+        self.assertTrue(result['alternates_scan']['complete'])
+        self.assertEqual(result['alternates_scan']['alternates_files'], 1)
+        self.assertLess(result['alternates_scan']['directories'], 20)
+
+    def test_alternates_bare_and_linked_commondir(self):
+        path = self.old('src/rust/tmp/logs/store', directory=True)
+        bare = self.home / 'src/reference.git'
+        put(bare / 'objects/info/alternates', str(path / 'objects'))
+        common = self.home / 'other/common'
+        put(common / 'objects/info/alternates', str(path / 'objects'))
+        admin = common / 'worktrees/linked'
+        put(admin / 'commondir', '../..\n')
+        linked = self.home / 'src/linked'
+        put(linked / '.git', 'gitdir: '+str(admin)+'\n')
+        reaper = self.reaper()
+        result = reaper.execute({'heavy-logs'}, 'dry-run')
+        self.reason(result, 'alternates target')
+        self.assertEqual(result['alternates_scan']['alternates_files'], 2)
+        self.assertEqual(result['alternates_scan']['git_directories'], 3)
+
+    def test_alternates_only_git_metadata_and_no_object_walk(self):
+        path = self.old('src/rust/tmp/logs/store', directory=True)
+        put(self.home / 'src/plain/objects/info/alternates', '"irrelevant"')
+        put(self.home / 'src/project/.git/objects/pack/deep/objects/info/alternates', '"irrelevant"')
+        result = self.run_class('heavy-logs')
+        self.assertEqual(self.selected(result), {path})
+        self.assertTrue(result['alternates_scan']['complete'])
+        self.assertEqual(result['alternates_scan']['alternates_files'], 0)
+
+    def test_alternates_depth_six_and_explicit_tmp_root(self):
+        path = self.old('src/rust/tmp/logs/store', directory=True)
+        for root in ('src', '.claude/jobs', 'src/rust/tmp'):
+            deep = self.home / root / Path(*(['nested'] * 6))
+            put(deep / '.git/objects/info/alternates', str(path / 'objects'))
+            put(deep / 'beyond/.git/objects/info/alternates', '"out of scope"')
+        result = self.run_class('heavy-logs')
+        self.reason(result, 'alternates target')
+        self.assertEqual(result['alternates_scan']['alternates_files'], 3)
+        self.assertTrue(result['alternates_scan']['complete'])
+
+    def test_alternates_cached_even_at_final_removal_snapshot(self):
+        first = self.old('src/rust/tmp/logs/first')
+        second = self.old('src/rust/tmp/logs/second')
+        reaper = self.reaper(True)
+        with patch.object(Reaper, 'scan_alternates', wraps=reaper.scan_alternates) as scan:
+            result = reaper.execute({'heavy-logs'}, 'live')
+            self.assertEqual(scan.call_count, 1)
+        self.assertEqual(self.selected(result), {first, second})
+        self.assertFalse(first.exists())
+        self.assertFalse(second.exists())
+
+    def test_linked_worktree_gitdir_path_can_contain_newlines(self):
+        path = self.old('src/rust/tmp/logs/store', directory=True)
+        main = self.repo('src/primary\nwith spaces')
+        linked = self.home / 'src/linked'
+        self.git(main, 'worktree', 'add', '--detach', str(linked), 'HEAD')
+        # Git itself produces this pointer shape. Embedded newlines belong to
+        # the path, not extra metadata rows; saved h3 fixtures retained it.
+        put(main / '.git/objects/info/alternates', str(path / 'objects'))
+        result = self.run_class('heavy-logs')
+        self.reason(result, 'alternates target')
+        self.assertTrue(result['alternates_scan']['complete'])
+        self.assertEqual(result['alternates_scan']['alternates_files'], 1)
+
+    def test_archived_worktree_with_deleted_gitdir_has_no_borrower(self):
+        path = self.old('src/rust/tmp/logs/item')
+        # Real h3 shape: saved test evidence retains a worktree pointer to an
+        # already deleted temporary fixture, including spaces in its name.
+        missing = Path(self.temp.name) / 'removed-fixture/anchor with spaces/.git/worktrees/saved'
+        put(self.home / 'src/fabrig/notes/ops/evidence/saved/.git', 'gitdir: '+str(missing)+'\n')
+        result = self.run_class('heavy-logs')
+        self.assertEqual(self.selected(result), {path})
+        self.assertTrue(result['alternates_scan']['complete'])
+        self.assertEqual(result['alternates_scan']['missing_git_directories'], 1)
+
+    def test_alternates_unreadable_and_bad_git_pointers_fail_closed(self):
+        path = self.old('src/rust/tmp/logs/item')
+        marker = self.home / 'src/repo/.git'
+        for text in ('invalid', 'gitdir: '):
+            with self.subTest(text=text):
+                put(marker, text)
+                result = self.run_class('heavy-logs', True)
+                self.assertFalse(self.selected(result))
+                self.assertFalse(result['alternates_scan']['complete'])
+                self.assertTrue(path.exists())
+        marker.unlink()
+        put(marker / 'objects/info/alternates', 'not used')
+        original = API['regular']
+        @contextmanager
+        def regular(target, *args, **kwargs):
+            if target.name == 'alternates':
+                raise PermissionError('fixture')
+            with original(target, *args, **kwargs) as fd:
+                yield fd
+        with patch.dict(Reaper.scan_alternates.__globals__, regular=regular):
+            self.reason(self.run_class('heavy-logs'), 'alternates incomplete: PermissionError')
 
     def test_live_reloads_active_records(self):
         path = self.old('src/rust/tmp/logs/item', directory=True)
@@ -590,6 +755,7 @@ class ReapTests(unittest.TestCase):
         for path in ['src/rust/tmp/logins/a', 'src/rust/tmp/qa-focused/a', 'src/rust/tmp/qa/a',
                      'src/rust/tmp/heavy/a', 'src/rust/tmp/post/a', 'src/fabrig/claims/a',
                      'src/fabrig/events/a', 'src/fabrig/records/a', 'src/rust/records/a',
+                     'src/fabrig/archive/a', 'src/rust/tmp/owners/a',
                      'src/fabrig/leases/a', 'src/fabrig/queue/a', 'src/fabrig/main/a', 'src/fabrig/agents/a',
                      'src/fabrig/current/a', 'src/fabrig/releases/a', '.local/state/fleet-sync/a',
                      '.local/state/fabrig/a', '.local/state/heavy/a', '.ssh/id', '.claude/.credentials.json',
@@ -599,13 +765,14 @@ class ReapTests(unittest.TestCase):
         self.assertTrue(reaper.never(Path(self.temp.name)))
         self.assertFalse(reaper.never(self.home / 'scratch'))
 
-    def test_collectors_events_and_records_never_reaped(self):
+    def test_collectors_archives_and_owner_state_never_reaped(self):
         paths = []
-        for index, relative in enumerate(('src/fabrig/events', 'src/fabrig/records', 'src/rust/records')):
+        for index, relative in enumerate(('src/fabrig/events', 'src/fabrig/records', 'src/rust/records',
+                                          'src/fabrig/archive', 'src/rust/tmp/owners')):
             path = self.old(relative, directory=True)
             self.ended(path, identity=f'protected-{index}')
             paths.append(path)
-        self.assertEqual(self.run_class('recorded', True)['kept'], {'never path': 3})
+        self.assertEqual(self.run_class('recorded', True)['kept'], {'never path': 5})
         for path in paths:
             self.assertTrue((path / 'payload').exists())
 

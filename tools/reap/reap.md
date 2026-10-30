@@ -32,8 +32,9 @@ Unknown/malformed JSONL lines are ignored.
 Overlapping candidates are counted and removed once; a parent owns its bytes.
 Codex finality is never inferred from `ended` or mtimes. Missing, unreadable or
 unknown `final.json` keeps the run as `codex-run not final`; failed systemctl
-queries also keep it. Records cannot override this guard, which runs again
-before removal. Top-level non-directories, including `runs.tsv`, stay intact.
+queries also keep it. UTC times accept optional fractional seconds with `Z`
+or `+00:00`; other representations keep the item. Records cannot override this
+guard, which runs again before removal. Top-level non-directories, including `runs.tsv`, stay intact.
 
 Producers use these three commands (owner names may contain `/`):
 
@@ -47,26 +48,37 @@ Repeat `--path` to add paths. Record identity is `(kind, id)`; use unique IDs.
 `claude-session` accepts only `$HOME/.claude/jobs/ID`. Records use a 0600
 append-only JSONL file with `O_APPEND`, flock and fsync. Producers always get
 exit 0 on record errors, with one stderr line; `--strict` enables failure exits.
-No producer hooks or transient-unit cleanup are installed by this change.
+Producer rollout and integration gaps are tracked in `docs/design/reaper.status.md`;
+no transient-unit cleanup is installed by this change.
 
 ## Safety and archives
 
 Fixed code rules cannot be switched off in TOML. Keep anything in use through
 `/proc/*/{cwd,fd,maps}`, anything that is or contains a claimed slot, and
-anything borrowed through Git `objects/info/alternates` below HOME's `src` or
-`.claude/jobs`. Failed claim queries keep every slot. Incomplete process or
+anything borrowed through Git `objects/info/alternates` below HOME's `src`,
+`.claude/jobs` or `src/rust/tmp`. Hel8 reads installed `claim list` locally;
+other fleet hosts use its `fleet/hosts.toml` SSH target, noninteractive SSH and
+a login shell, then filter for this host. Failed, malformed or incomplete claim
+queries keep every slot. Incomplete process or
 alternates inspection keeps all affected candidates, with a reported reason.
 If permissions prevent full `/proc` inspection, a narrow passwordless-sudo
 helper reads only process cwd/fd link targets and maps; no file contents through
 fds or process environment are read. Failure still keeps candidates.
-Alternates scans have depth limits (64 under `src`, 32 under jobs) and a shared
-thirty-second deadline; reaching a limit fails closed. Quoted alternates
-paths also keep candidates for review rather than risk missing a borrower. Unknown Claude inventory
-keeps jobs. Symlink candidates, symlinked parents and special files are refused.
+Alternates scanning runs once per invocation and is cached for all candidates.
+It searches six directory levels per root, with a total twenty-second budget,
+for working-tree `.git`, bare `*.git`, and linked-worktree gitdir/commondir
+metadata. It prunes `target`, `node_modules` and `.cache`, and never descends
+Git object or pack trees. Relative alternate paths use the objects directory.
+A budget failure keeps everything. Reports, including `runs.jsonl`, include
+`alternates_scan` completion, reason, elapsed seconds and discovery counts.
+Quoted alternates paths also keep candidates for review. Confirmed missing Git
+directories (for example archived test worktree pointers) have no object store
+to borrow; count them as absent. Git metadata pointers preserve embedded
+newlines in paths. Unknown Claude inventory keeps jobs. Symlink candidates, symlinked parents and special files are refused.
 Nested symlinks are never followed; removal only unlinks them.
 
-Never paths include `src/rust/tmp/{logins,qa*,heavy,post}`,
-`src/fabrig/{claims,leases,queue,main,agents,current,releases,events,records}`,
+Never paths include `src/rust/tmp/{logins,qa*,heavy,post,owners}`,
+`src/fabrig/{claims,leases,queue,main,agents,current,releases,archive,events,records}`,
 `src/rust/records`,
 `.local/state/{fleet-sync,fabrig,heavy,reap}`, `.ssh`, `.claude/.credentials.json`,
 `.claude.json`, Codex state outside `.codex/sessions`, and `archive`.
@@ -80,9 +92,9 @@ Repositories with dirty files, stashes or branches absent from every remote
 need a verified `git bundle create --all` under `archive/reap/YYYY-MM-DD`.
 Dry runs report `would bundle` and keep them. Dirty trees also get a verified
 worktree tar alongside the bundle, preserving uncommitted/untracked contents.
-Archive failures keep the candidate. Process, claim and alternates checks run
-again immediately before deletion, and metadata fingerprints reject changes
-during inspection or archival. Removal uses directory descriptors and no-follow
+Archive failures keep the candidate. Process and claim checks run
+again immediately before deletion; alternates evidence is cached for that run.
+Metadata fingerprints reject changes during inspection or archival. Removal uses directory descriptors and no-follow
 opens, checking the candidate inode before unlink/rmdir. These checks reduce
 observed races; producers must still stop before marking output ended.
 
