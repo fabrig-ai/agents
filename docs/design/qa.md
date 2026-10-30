@@ -185,6 +185,33 @@ Never inspect a login or a suspected credential to diagnose a refusal. Publish a
 publication without replacing its saved identity. Required results and optional
 scratch captures have separate preservation obligations.
 
+**Recognize credentials in context.** Authorization/Proxy-Authorization checks
+only the credential token after the scheme, with trailing quotes/punctuation
+removed; `$auth`, `${AUTH}`, `${{ secrets.X }}` and `<token>` remain
+placeholders. A literal token or literal appended to a placeholder refuses.
+Content `-u`/`--user` checks require a preceding curl, wget, HTTPie or xh
+executable in the same command segment, never a preceding or following
+command separated by shell operators; date's UTC flag passes. Literal client
+user:password arguments still refuse. Path components retain independent
+user:password shape checks.
+
+**Reviewed omission binds one file's exact bytes.** After reading a saved
+content refusal, a person or coordinator may run `qa keep NAME --omit PATH`
+for an ended managed walk. The prior refusal saves the safe relative path,
+rule and file SHA-256. The keep checks that identity, omits only that file,
+and scans the remaining snapshot and index normally. The kept index records
+`path`, `rule`, `sha256` and `reason: omitted-after-review`. A different digest
+refuses again; reviews do not accumulate across files. Unsafe names/paths,
+links, ownership, binary/type and enumeration/size bounds remain mandatory;
+`--check` has no omission option. This is the sole reviewed scan exception.
+Manual keeps and watcher retries verify the omitted digest while scratch
+exists, including installed-snapshot and quarantine recovery. Changed or
+missing bytes retain scratch; publication, notices and seven-day pruning
+otherwise follow the normal kept-walk path. Before deleting, verify that
+digest again through the owned quarantine descriptor. Pruned walks retain
+the immutable index and snapshot without requiring the deleted source.
+See `tools/qa/qa.md`, “Walk preservation and scratch retention”.
+
 **Admission accounts for scratch bytes.** Active walks reserve 2 GB each
 against a default 48 GB budget. Retained ended and paused/pinned directories
 contribute measured bytes; pinned active scratch also contributes its size.

@@ -1,6 +1,6 @@
 # QA status
 
-2026-10-30. Keeper: s/qa. Baseline for this test rewrite: origin/main `580a456`.
+2026-10-30. Keeper: s/qa. Evidence scanner repair baseline: origin/main `35bae73`.
 Contract: `docs/design/qa.md`, sections 2–8.
 
 ## Present
@@ -43,21 +43,30 @@ Contract: `docs/design/qa.md`, sections 2–8.
   identities stable by operation. Diagnostic changes refresh the same receipt
   without resending accepted messages; manual measurement shares that path.
   Added repair probes run in process with fresh HOME and fake services.
+  Evidence scan repair 2 recognizes Authorization credential tokens and HTTP
+  client user flags without refusing date's UTC flag or workflow placeholders.
+  `qa keep NAME --omit PATH` binds a prior content refusal to its exact file
+  SHA-256 and records the one reviewed omission in the immutable kept index.
+  Changed bytes refuse before/after keep and before pruning; installed-copy
+  and quarantine recovery retain the same checks. No unsafe-file/name/path
+  bypass or automatic omission is added. No live watcher was inspected.
 - **JSON contracts are built.** Both tools expose the metadata interfaces in
   design section 2. `tools/qa/fixtures/logins-list.json` and
   `tools/qa/fixtures/qa-queue.json` are checked against real CLI output in the
   respective test suites. This establishes producers, not deployed consumers.
 
 - **Offline tests have fast and periodic files.** `tools/qa/test_qa.py` keeps
-  184 cases (161 walk cases plus 23 evidence repair probes);
+  193 cases (161 walk cases plus 32 evidence repair probes);
   `tools/qa/test_qa_periodic.py` keeps 49 unchanged integration cases, including
   two evidence publication matrices. All 74 custody cases remain in
   `tools/qa/test_logins.py`, with two added fixture-isolation regressions.
   Fresh state, cached production code, scoped injections, lazy metadata
   fixtures and bounded real crash/IPC children replace ordinary CLI startups.
   The framework rewrite left production code unchanged; the starter mailbox
-  repair changes address resolution under design section 4. The current
-  `tools/check.sh` selects gate or periodic files through `tools/gate.toml`.
+  repair changes address resolution under design section 4. The evidence
+  scanner repair adds nine in-process probes and changes preservation under
+  design section 7. The current `tools/check.sh` selects gate or periodic
+  files through `tools/gate.toml`.
 
 ## Plan differences and remaining gaps
 
@@ -89,6 +98,20 @@ no failed or unobserved files. Measurements use temporary HOME and fake
 services. Details and the repair commit are in
 `/home/free/src/fabrig/notes/q/qa-walk-notify-report.md`.
 
+Evidence scan repair 2 before this rebase: nine new probes first reproduce the scanner false
+positives and missing omit CLI. All 191 gate-file cases pass after the repair.
+Measured through `tools/check.sh`, the file uses 12.168 CPU / 23.293 wall seconds
+before and 12.776 CPU / 19.784 wall seconds in the final affected gate run. The 10-second CPU budget and
+15-second wall budget are exceeded in both samples (report-only). All 269
+QA, custody and smoke cases pass in that final run. The added
+probes use fresh temporary HOME and fake services, with no live state or SSH.
+The repair changes production code; applying it requires deploying this revision
+and restarting qa-watch to reload the scanner. This branch performs neither.
+The task report records the final affected gate result and commit SHA at
+`/home/free/src/fabrig/notes/q/qa-evidence-scan-2-report.md`.
+
+The earlier test-framework rewrite's verification follows for reference.
+
 The framework rewrite preserves all 305 original case names: QA 231 becomes
 182 gate + 49 periodic; custody keeps 74 and adds two context/crash regressions.
 The starter mailbox repair adds two gate cases and extends existing invalid
@@ -107,4 +130,7 @@ case-name accounting and commit IDs. Neither production code nor budget rows
 change in the framework rewrite. The starter mailbox repair requires updating
 `tools/qa/qa` on the builder before new direct starts accept full addresses;
 restart the QA watcher to use the repaired queue/resume routing in its process.
-Existing saved walk starter addresses are preserved.
+Existing saved walk starter addresses are preserved. The evidence scan repair
+also changes production code: deploy its updated `tools/qa/qa` and
+`tools/qa/evidence.py` and restart qa-watch to reload the scanner. Budget rows
+remain unchanged; neither repair performed deployment or a watcher restart.

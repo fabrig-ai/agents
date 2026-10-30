@@ -7,7 +7,7 @@ standalone Python 3.13 tool using the standard library and local commands.
 ```
 qa walk fabrig a [--kind forgejo] [--build REF] [--after COMMIT]... [--login POOL]... [--cap MINUTES]
 qa walk fabrig a --resume rung-a-12 [--build REF] [--after COMMIT]... [--cap MINUTES]
-qa keep NAME
+qa keep NAME [--omit PATH]
 qa keep --check DIRECTORY
 qa pin NAME
 qa unpin NAME
@@ -467,8 +467,8 @@ At final end, after custody cleanup has been attempted for every walk, the
 watcher snapshots outside the admission lock: `brief.md`, `plan.md`, `notes.md`, `report.md`, earlier `report-N.md` files,
 `scripts/` and `evidence/`. No store, deployment, binary, exporter, login or
 transcript is copied. `tools/qa/evidence.py` implements the section-9 scanner
-in `tools/qa/passes.md`: checked descriptors, owned singly linked regular
-UTF-8 files, no directory/file links, forbidden names checked before reads,
+in `tools/qa/passes.md`, with the reviewed walk omission below: checked
+descriptors, owned singly linked regular UTF-8 files, no directory/file links, forbidden names checked before reads,
 and secret-shape checks on each path component, the whole relative path,
 contents and generated `index.json`. Recovery validates indexed paths before
 opening a capture. Evidence snapshot/archive traversal is bounded to 4096
@@ -476,12 +476,21 @@ entries, depth 32 and five seconds; reaching a bound refuses and retains the
 source. Evidence enumeration is bounded before sorting. Scratch size uses the
 separate metadata-only admission measurement described below.
 Diagnostics give a safe path, line and rule, never matched values. Mask capture
-values with `[masked]` while retaining diagnostic lines. HTTP folding, JSON
-escaped keys and unknown token shapes remain scanner limits.
+values with `[masked]` while retaining diagnostic lines. Authorization and
+Proxy-Authorization scan the single credential token after the scheme, stripping
+trailing quotes/punctuation; shell variables, `${{ secrets.X }}` and `<token>`
+remain placeholders even when a command follows the header. Literal tokens and
+literal suffixes beside placeholders refuse. `-u`/`--user` checks apply only
+after curl, wget, HTTPie (`http`, `https`, `httpie`) or xh (`xh`, `xhs`) on the
+same command segment, including absolute executable paths. Shell separators
+end the segment; `date -u '+%H:%M'` passes. Literal user:password arguments
+still refuse. Paths keep independent user:password shape checks.
+HTTP folding, JSON escaped keys and unknown token shapes remain scanner limits.
 
 The cap includes the index. Over cap, omit `evidence/` whole, then `scripts/`
 whole; document/index overflow refuses. Other scan failures refuse the entire
-copy. The index records walk, host, source, runs, files/bytes and omissions.
+copy, except for the explicit reviewed omission below. The index records walk,
+host, source, runs, files/bytes and omissions.
 A refusal retains scratch initially and reserves one retried director notice
 per walk's evidence preparation step. New refusal diagnostics update that
 receipt; a changing refusal digest cannot create another notice or starter
@@ -493,6 +502,29 @@ its kept status/path or commit, 2 scan/input refusal, 1 publication pending).
 It refuses running and paused walks. `qa keep --check DIRECTORY` only snapshots
 and scans locally, with exit 0 clean or 2 refused, without adopting state or
 using the network. Pauses preserve their existing scratch without a final copy.
+
+After a person or coordinator has read a content refusal, `qa keep NAME --omit
+PATH` can omit exactly that one file from an ended walk. PATH is the exact
+relative allowlisted file path in the saved refusal, with no directory, glob,
+absolute path or `..`. The earlier refusal saves that file's SHA-256; the
+command checks the same digest and rule, then scans all remaining evidence and
+the generated index normally. The index records `path`, `rule`, `sha256` and
+`reason: omitted-after-review`. The omitted bytes never enter the kept copy.
+A changed digest refuses again and needs a fresh refusal and review. A second
+unsafe file still refuses the entire keep; reviews do not accumulate. This
+option cannot bypass names, unsafe paths, ownership, links, binary/type checks,
+limits or `--check`. There is no automatic omission and no other scan bypass.
+For a refusal saved by an older watcher without the file digest, first run
+plain `qa keep NAME` to obtain a fresh refusal.
+
+The kept snapshot remains immutable. While scratch exists, manual keep and
+watcher retries recheck the omitted source digest, including recovery of an
+installed snapshot before its receipt was saved. A changed/missing/unsafe file
+retains scratch and refuses. The watcher publishes and announces the reviewed
+copy normally and may prune it after seven days under all existing guards;
+the omitted digest is checked again against the verified quarantine directory
+before deletion. Repeating the same keep/omit is idempotent for unchanged bytes. Once pruned,
+the frozen copy needs no source file.
 
 A clean snapshot is installed through a sibling directory and rename at
 `DEV_TMP/qa/evidence/NAME/` (normally `~/src/rust/tmp/qa/evidence/NAME/`).

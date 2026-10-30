@@ -4818,6 +4818,155 @@ class EvidenceRepairTests(unittest.TestCase):
         saved.update(updates)
         return saved
 
+    def test_authorization_command_uses_only_the_credential_token(self):
+        for value in ('$auth', '${AUTH}', '${{ secrets.X }}', '<token>'):
+            line = f'git -c "http.extraHeader=Authorization: basic {value}" clone https://example.test/repo'
+            with self.subTest(value=value):
+                self.assertIsNone(self.ev['scan'](line))
+        for value in ('literal-fixture', '$auth-literal', '${AUTH}literal', '<token>literal'):
+            line = f'git -c "http.extraHeader=Authorization: basic {value}" clone https://example.test/repo'
+            with self.subTest(value=value):
+                self.assertEqual(self.ev['scan'](line), 'header/cookie-jar')
+        self.assertIsNone(self.ev['scan']('Authorization: Bearer $auth", next command'))
+        self.assertEqual(self.ev['scan']('Authorization: Bearer literal", next command'), 'header/cookie-jar')
+
+    def test_user_flags_belong_to_http_clients(self):
+        for line in ("/usr/bin/date -u '+%Y-%m-%dT%H:%M:%SZ' > stamp",
+                     "date -u '+%H:%M'", "date -u '+%H:%M'; curl https://example.test",
+                     "curl https://example.test; date -u '+%H:%M'",
+                     "echo curl; date -u '+%H:%M'", "date --user user:literal"):
+            with self.subTest(line=line):
+                self.assertIsNone(self.ev['scan'](line))
+        for client in ('curl', '/usr/bin/curl', 'wget', 'http', 'https', 'httpie', 'xh'):
+            for flag in ('-u ', '-u', '--user ', '--user='):
+                with self.subTest(client=client, flag=flag):
+                    self.assertEqual(self.ev['scan'](f'{client} {flag}user:literal https://example.test'),
+                                     'assigned/user')
+                    self.assertIsNone(self.ev['scan'](f'{client} {flag}user:$PASSWORD https://example.test'))
+
+    def keep_command(self, state, *options):
+        with self.patch.dict(self.tool['preserve_command'].__globals__, Watch=lambda *a: self.watch), \
+                self.patch.object(sys, 'argv', ['qa', 'keep', state['walk'], *options]):
+            return self.tool['main']()
+
+    def refused_walk(self, **updates):
+        directory, state = self.walk(**updates)
+        (directory / 'report.md').write_text('Authorization: Bearer literal-fixture\n')
+        saved = self.watch.prepare_evidence(directory, state)
+        self.assertEqual(saved['status'], 'refused')
+        return directory, state
+
+    def test_reviewed_omit_keeps_records_retries_and_prunes_after_seven_days(self):
+        directory, state = self.refused_walk()
+        digest = hashlib.sha256((directory / 'report.md').read_bytes()).hexdigest()
+        self.assertEqual(self.keep_command(state, '--omit', 'report.md'), 0)
+        self.assertEqual(self.keep_command(state, '--omit', 'report.md'), 0)  # Lost CLI reply is retryable.
+        files = self.watch.evidence_snapshot(state)
+        index = json.loads(files['index.json'])
+        self.assertNotIn('report.md', files)
+        self.assertIn(dict(path='report.md', rule='header/cookie-jar', sha256=digest,
+                           reason='omitted-after-review'), index['omissions'])
+        self.assertNotIn('literal-fixture', repr(files))
+        saved = self.watch.prepare_evidence(directory, state)
+        saved['ended'] = '2026-10-01T00:00:01Z'
+        self.watch.save_preservation(state, saved)
+        self.watch.preserve_walk(directory, state, 0, saved)
+        self.assertTrue(directory.exists())  # Not seven days yet.
+        self.tool['Watch'].check.__globals__['timestamp'] = lambda: '2026-10-08T00:00:01Z'
+        self.watch.preserve_walk(directory, state, 0)
+        self.assertFalse(directory.exists())
+        self.assertEqual(self.keep_command(state), 0)  # Frozen evidence survives pruning.
+        self.assertEqual(self.keep_command(state, '--omit', 'report.md'), 0)
+
+    def test_reviewed_omit_refuses_changed_file_before_and_after_keep(self):
+        directory, state = self.refused_walk()
+        original = (directory / 'report.md').read_bytes()
+        (directory / 'report.md').write_bytes(original + b'changed\n')
+        self.assertEqual(self.keep_command(state, '--omit', 'report.md'), 2)
+        self.assertFalse((self.watch.directory / 'evidence' / state['walk']).exists())
+        self.watch.prepare_evidence(directory, state)  # A fresh refusal can be reviewed.
+        self.assertEqual(self.keep_command(state, '--omit', 'report.md'), 0)
+        (directory / 'report.md').write_bytes(original)
+        self.assertEqual(self.keep_command(state), 2)
+        self.assertEqual(self.keep_command(state, '--omit', 'report.md'), 2)
+        self.tool['Watch'].check.__globals__['timestamp'] = lambda: '2026-10-20T00:00:00Z'
+        with self.assertRaises((self.tool['Problem'], self.ev['Refusal'])):
+            self.watch.preserve_walk(directory, state, 0)
+        self.assertTrue(directory.exists())
+
+    def test_reviewed_omit_cannot_skip_another_refusal_or_unreviewed_path(self):
+        directory, state = self.refused_walk()
+        self.assertEqual(self.keep_command(state, '--omit', 'notes.md'), 2)
+        for path in ('../report.md', '/report.md', 'scripts', './report.md'):
+            with self.subTest(path=path):
+                self.assertEqual(self.keep_command(state, '--omit', path), 2)
+        (directory / 'notes.md').write_text('password=literal-fixture\n')
+        self.assertEqual(self.keep_command(state, '--omit', 'report.md'), 2)
+        self.assertFalse((self.watch.directory / 'evidence' / state['walk']).exists())
+
+    def test_reviewed_omit_does_not_open_credential_names_or_links(self):
+        directory, state = self.refused_walk()
+        (directory / 'report.md').unlink()
+        (directory / 'report.md').symlink_to(directory / 'notes.md')
+        self.assertEqual(self.keep_command(state, '--omit', 'report.md'), 2)
+        (directory / 'report.md').unlink()
+        (directory / 'report.md').write_text('safe\n')
+        (directory / 'evidence').mkdir()
+        (directory / 'evidence/auth.json').write_text('fixture must not be opened\n')
+        self.watch.prepare_evidence(directory, state)
+        opened = os.open
+        def guard(path, *args, **kwargs):
+            self.assertNotEqual(path, 'auth.json')
+            return opened(path, *args, **kwargs)
+        with self.patch.object(os, 'open', guard):
+            self.assertEqual(self.keep_command(state, '--omit', 'evidence/auth.json'), 2)
+
+    def test_reviewed_omit_requires_a_prior_refusal_and_an_ended_walk(self):
+        directory, state = self.walk()
+        self.assertEqual(self.keep_command(state, '--omit', 'report.md'), 2)
+        for stage in ('running', 'paused'):
+            state['stage'] = stage
+            self.assertEqual(self.keep_command(state, '--omit', 'report.md'), 2)
+        state['stage'] = 'ended'
+        self.assertEqual(self.keep_command(state, '--check', str(directory), '--omit', 'report.md'), 2)
+
+    def test_reviewed_omit_recovery_rechecks_installed_snapshot_and_quarantine(self):
+        directory, state = self.refused_walk()
+        original = (directory / 'report.md').read_bytes()
+        self.assertEqual(self.keep_command(state, '--omit', 'report.md'), 0)
+        saved = self.watch.preservation(state)
+        self.watch.preservation_path(state).unlink()  # Rename happened, receipt save did not.
+        (directory / 'report.md').write_bytes(original + b'changed\n')
+        self.assertEqual(self.keep_command(state), 2)
+        (directory / 'report.md').write_bytes(original)
+        recovered = self.watch.prepare_evidence(directory, state)
+        self.assertEqual(recovered['digest'], saved['digest'])
+        recovered['ended'] = '2026-10-01T00:00:00Z'
+        recovered['announced'] = self.watch.evidence_identity(recovered)
+        self.watch.save_preservation(state, recovered)
+        # Crash after quarantine rename, before deleting any contents.
+        with self.patch.object(os, 'listdir', side_effect=OSError('fixture crash')):
+            with self.assertRaises(OSError):
+                self.watch.prune_walk(directory, state, recovered)
+        self.assertFalse(directory.exists())
+        self.watch.preserve_walk(directory, state, 0)
+        self.assertTrue(self.watch.preservation(state)['pruned'])
+
+    def test_reviewed_omit_index_rejects_unsafe_or_conflicting_records(self):
+        directory, state = self.refused_walk()
+        (directory / 'notes.md').write_text('safe notes\n')
+        self.assertEqual(self.keep_command(state, '--omit', 'report.md'), 0)
+        archive = self.watch.directory / 'evidence' / state['walk']
+        index_path = archive / 'index.json'
+        original = json.loads(index_path.read_text())
+        for field, value in (('path', '../report.md'), ('path', 'evidence/auth.json'),
+                             ('path', 'notes.md'), ('sha256', 'bad'), ('rule', 'name')):
+            index = json.loads(json.dumps(original))
+            index['omissions'][0][field] = value
+            index_path.write_text(json.dumps(index))
+            with self.subTest(field=field, value=value), self.assertRaises(self.ev['Refusal']):
+                self.ev['read_snapshot'](archive)
+
     def test_components_and_whole_paths_are_scanned_before_indexing(self):
         for number, name in enumerate(('--user=user:literal', 'nested/--user=user:literal'), 1):
             directory, _ = self.walk(number)

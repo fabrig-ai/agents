@@ -2,7 +2,7 @@
 """qa walk REPO RUNG [--kind KIND] [--build REF] [--login POOL]... [--cap MINUTES]
 qa walk REPO RUNG --resume NAME [--build REF] [--after COMMIT]... [--cap MINUTES]
 qa queue [cancel ID]
-qa keep NAME | --check DIRECTORY
+qa keep NAME [--omit PATH] | --check DIRECTORY
 qa pin NAME
 qa unpin NAME
 qa take KIND [--login POOL] --as walk/<KIND>/<WHAT> [--note TEXT]
@@ -1770,6 +1770,8 @@ class Watch:
                  and (not saved['branch'] and not remote or
                       re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9/_-]*', saved['branch'])
                       and all(saved['branch'].split('/'))), 'invalid saved evidence destination', 4)
+        for key in ('refusal_file', 'reviewed_omission'):
+            need(key not in saved or evidence['review_record'](saved[key]), 'invalid evidence review', 4)
         need(saved['status'] != 'kept' or isinstance(saved.get('commit'), str)
              and re.fullmatch(SHA, saved['commit']), 'invalid evidence commit', 4)
         quarantine = saved.get('quarantine')
@@ -1790,15 +1792,27 @@ class Watch:
         except evidence['Refusal'] as error:
             raise Problem(str(error), 1) from None
 
-    def prepare_evidence(self, directory, state):
+    def verify_reviewed_evidence(self, directory, state, files=None):
+        files = files if files is not None else self.evidence_snapshot(state)
+        for omission in json.loads(files['index.json']).get('omissions', []):
+            if isinstance(omission, dict) and omission.get('reason') == 'omitted-after-review':
+                try:
+                    evidence['verify_review'](directory, omission)
+                except evidence['Refusal'] as error:
+                    raise Problem(str(error)) from None
+
+    def prepare_evidence(self, directory, state, reviewed=None):
         """Local bounded work only. Never put a publisher before custody returns."""
         need(not self.options.get('QA_PRESERVATION_ERROR'), 'evidence configuration pending', 1)
         saved = self.preservation(state)
         if saved.get('pruned'):
             return saved
         if saved.get('digest'):
-            need(evidence['tree_digest'](self.evidence_snapshot(state)) == saved['digest'],
-                 'saved evidence snapshot changed', 1)
+            files = self.evidence_snapshot(state)
+            need(evidence['tree_digest'](files) == saved['digest'], 'saved evidence snapshot changed', 1)
+            source = (directory.parent / saved['quarantine']
+                      if saved.get('quarantine') and not directory.exists() else directory)
+            self.verify_reviewed_evidence(source, state, files)
             return saved
         if state.get('decision') == 'walk-pause' or state['stage'] == 'paused':
             return saved
@@ -1812,7 +1826,7 @@ class Watch:
             else:
                 metadata = dict(kind='walk', name=state['walk'], host=self.workspace.machine(), source=str(directory),
                                 runs=[a['run'] for a in state.get('attempts', [state]) if a.get('run')], record=None)
-                files, _ = evidence['snapshot'](directory, metadata, self.options['QA_EVIDENCE_KIB'] * 1024)
+                files, _ = evidence['snapshot'](directory, metadata, self.options['QA_EVIDENCE_KIB'] * 1024, reviewed)
                 root.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
                 temporary = Path(tempfile.mkdtemp(prefix=root.name + '.', dir=root.parent))
                 try:
@@ -1827,15 +1841,24 @@ class Watch:
                 finally:
                     if temporary.exists():
                         shutil.rmtree(temporary)
+            self.verify_reviewed_evidence(directory, state, files)
             remote = self.options['QA_EVIDENCE_REMOTE'] if self.options['QA_EVIDENCE_BRANCH'] else ''
             saved.update(digest=evidence['tree_digest'](files), local=str(root),
                          remote=remote, branch=self.options['QA_EVIDENCE_BRANCH'],
                          destination='walks/' + state.get('attempts', [state])[0]['started'][:10] + '-' + state['walk'],
                          status='waiting' if remote else 'kept-locally')
+            reviews = [o for o in json.loads(files['index.json']).get('omissions', [])
+                       if isinstance(o, dict) and o.get('reason') == 'omitted-after-review']
+            if reviews:
+                saved['reviewed_omission'] = reviews[0]
             saved.pop('refusal', None)
             saved.pop('refusal_digest', None)
+            saved.pop('refusal_file', None)
         except evidence['Refusal'] as error:
             saved.update(status='refused', refusal=str(error), refusal_digest=error.digest)
+            saved.pop('refusal_file', None)
+            if error.file:
+                saved['refusal_file'] = error.file
         self.save_preservation(state, saved)
         return saved
 
@@ -2103,6 +2126,11 @@ class Watch:
                 self.notify_once('prune identity mismatch ' + name, 'qa: scratch identity mismatch',
                                  f'Walk {name}: candidate identity changed; scratch retained.\n')
                 return False
+            if saved.get('reviewed_omission'):
+                try:
+                    evidence['verify_review_at'](descriptor, saved['reviewed_omission'])
+                except evidence['Refusal'] as error:
+                    raise Problem(str(error)) from None
             need(shutil.rmtree.avoids_symlink_attacks, 'safe tree removal unavailable', 4)
             # Enumerate/remove through the verified root descriptor: swapping the
             # quarantine pathname cannot redirect recursion to another directory.
@@ -2729,7 +2757,7 @@ def start_walk(args, workspace, service=None, entry=None):
 
 def preserve_command(args, workspace):
     if args.command == 'keep' and args.check:
-        need(args.name is None, 'keep --check needs only DIRECTORY')
+        need(args.name is None and args.omit is None, 'keep --check needs only DIRECTORY')
         try:
             files, _ = evidence['snapshot'](Path(args.check), {}, settings(workspace)['QA_EVIDENCE_KIB'] * 1024)
         except evidence['Refusal'] as error:
@@ -2750,7 +2778,19 @@ def preserve_command(args, workspace):
             return 0
         need(state['stage'] == 'ended' and state.get('released'), 'keep requires an ended walk')
     with service.evidence_locked() as descriptor:
-        saved = service.prepare_evidence(directory, state)
+        reviewed = None
+        if args.omit is not None:
+            prior = service.preservation(state)
+            reviewed = prior.get('reviewed_omission') if prior.get('digest') else prior.get('refusal_file')
+            need((prior.get('digest') or prior['status'] == 'refused')
+                 and evidence['review_record'](reviewed) and reviewed['path'] == args.omit,
+                 '--omit requires the exact file from a prior content refusal')
+            if not prior.get('pruned'):
+                try:
+                    evidence['verify_review'](directory, reviewed)
+                except evidence['Refusal'] as error:
+                    raise Problem(str(error)) from None
+        saved = service.prepare_evidence(directory, state, reviewed)
         need(saved['status'] != 'refused', saved.get('refusal', 'evidence refused'))
         if saved['status'] == 'waiting':
             saved['commit'] = service.publish_evidence(state, saved, descriptor)
@@ -2817,6 +2857,7 @@ def main():
     keeping = sub.add_parser('keep')
     keeping.add_argument('name', nargs='?')
     keeping.add_argument('--check', metavar='DIRECTORY')
+    keeping.add_argument('--omit', metavar='PATH')
     for verb in ('pin', 'unpin'):
         pinning = sub.add_parser(verb)
         pinning.add_argument('name')

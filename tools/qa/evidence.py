@@ -23,11 +23,18 @@ VALUE = r'''(?:"[^"\n]*"|'[^'\n]*'|\$\{\{.*?\}\}|\$\{[^}\n]*\}|<[^>\n]*>|(?:\\.|
 ASSIGN = re.compile(rf'''(?i)(?<![\w-])["']?(?:{KEYS})["']?\s*[:=]\s*({VALUE})''')
 PARAM = re.compile(r'(?i)[?&#](?:code|token|secret|key|password|access_token|refresh_token|id_token|client_secret|signature)=([^&#\s]*)')
 HEADER = re.compile(r'''(?i)\b(?P<name>(?:Proxy-)?Authorization|(?:Set-)?Cookie)["']?[ \t]*:[ \t]*(?:"(?P<double>[^"\r\n]*)"|'(?P<single>[^'\r\n]*)'|(?P<plain>[^\r\n]+))''')
+AUTH_TOKEN = re.compile(r'(?:\$\{\{.*?\}\}|[^\s])+')
+USER = re.compile(rf'''(?:^|\s)(?:-u\s*|--user(?:=|\s+))({VALUE})''')
+HTTP_CLIENT = re.compile(
+    r'''(?<![\w./-])(?:/(?:[\w.+-]+/)*)?(?:curl|wget|http|https|httpie|xh|xhs)\b'''
+    r'''(?P<args>(?:"[^"\n]*"|'[^'\n]*'|[^;&|\n])*)''')
 FORBIDDEN = re.compile(r'(?i)(?:^|[-_.])(cookies?|password|passwd|secret|token|credentials?|netrc)(?:$|[-_.])')
 
 
 class Refusal(Exception):
-    def __init__(self, path, rule, digest='', line=None):
+    def __init__(self, path, rule, digest='', line=None, file_sha256=None):
+        self.file = (dict(path=path, rule=rule, sha256=file_sha256, reason='omitted-after-review')
+                     if file_sha256 else None)
         self.rule = rule
         self.digest = digest or hashlib.sha256((path + rule).encode()).hexdigest()
         super().__init__(f'{path}' + (f':{line}' if line else '') + f': {rule}')
@@ -57,7 +64,8 @@ def scan(text):
             value = next(match[group] for group in ('double', 'single', 'plain') if match[group] is not None)
             if match['name'].lower().endswith('authorization'):
                 fields = value.split(None, 1)
-                if len(fields) == 2 and not placeholder(fields[1]):
+                credential = AUTH_TOKEN.match(fields[1]) if len(fields) == 2 else None
+                if credential and not placeholder(credential[0].rstrip("\"',;.)]`")):
                     return 'header/cookie-jar'
             else:
                 for number, pair in enumerate(value.split(';')):
@@ -76,7 +84,15 @@ def scan(text):
     for match in ASSIGN.finditer(text):
         if not placeholder(match[1]):
             return 'assigned/user'
-    for match in re.finditer(rf'''(?:^|\s)(?:-u\s*|--user(?:=|\s+))({VALUE})''', text):
+    for line in text.splitlines():
+        for client in HTTP_CLIENT.finditer(line):
+            if user_rule(client['args']):
+                return 'assigned/user'
+    return None
+
+
+def user_rule(text):
+    for match in USER.finditer(text):
         value = match[1].strip("\"'")
         if ':' in value and not placeholder(value.partition(':')[2]):
             return 'assigned/user'
@@ -84,8 +100,9 @@ def scan(text):
 
 
 def path_rule(path):
-    """A prefix must not hide a shape recognized at the start of a component."""
-    return next((rule for part in (path, *path.split('/')) if (rule := scan(part))), None)
+    """Paths keep stricter user:password checks independent of command context."""
+    return next((rule for part in (path, *path.split('/'))
+                 if (rule := scan(part) or user_rule(part))), None)
 
 
 class Traversal:
@@ -149,8 +166,71 @@ def signature(info):
             info.st_size, info.st_mtime_ns, info.st_ctime_ns)
 
 
-def snapshot(directory, metadata, cap=CAP):
+def evidence_path(path):
+    return (isinstance(path, str) and bool(re.fullmatch(
+        r'(?:brief|plan|notes|report)\.md|report-[1-9][0-9]*\.md|(?:scripts|evidence)/[^\x00-\x1f]+', path))
+        and all(p not in ('', '.', '..') for p in path.split('/'))
+        and not any(ord(c) < 32 or 127 <= ord(c) < 160 or c in '\u2028\u2029' for c in path)
+        and not path_rule(path) and not forbidden(path))
+
+
+def review_record(record):
+    return (isinstance(record, dict) and set(record) == {'path', 'rule', 'sha256', 'reason'}
+            and evidence_path(record['path'])
+            and record['rule'] in ('key/jwt', 'header/cookie-jar', 'link', 'assigned/user')
+            and isinstance(record['sha256'], str) and bool(re.fullmatch(r'[0-9a-f]{64}', record['sha256']))
+            and record['reason'] == 'omitted-after-review')
+
+
+def source_bytes(root, path, cap, expected=None):
+    """Read one owned regular file through checked, anchored descriptors."""
+    parent = os.dup(root)
+    try:
+        parts = path.split('/')
+        for part in parts[:-1]:
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+            os.close(parent)
+            parent = child
+            checked(os.fstat(parent), path, directory=True)
+        fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+        with os.fdopen(fd, 'rb') as source:
+            before = os.fstat(source.fileno())
+            checked(before, path)
+            if expected is not None and signature(before) != signature(expected):
+                raise Refusal(path, 'changed during snapshot')
+            data = source.read(cap + 1)
+            if len(data) > cap or signature(os.fstat(source.fileno())) != signature(before):
+                raise Refusal(path, 'changed during snapshot')
+        return data
+    finally:
+        os.close(parent)
+
+
+def verify_review_at(root, record):
+    """Check the digest through an already anchored source directory."""
+    if not review_record(record):
+        raise Refusal('review', 'invalid reviewed omission')
+    try:
+        data = source_bytes(root, record['path'], CAP)
+        if hashlib.sha256(data).hexdigest() != record['sha256']:
+            raise Refusal(record['path'], 'changed after review')
+    except OSError:
+        raise Refusal(record['path'], 'kind/binary') from None
+
+
+def verify_review(directory, record):
+    """A review authorizes exactly one safe path and one content digest."""
+    try:
+        with opened_directory(directory) as root:
+            verify_review_at(root, record)
+    except OSError:
+        raise Refusal('source', 'kind/binary') from None
+
+
+def snapshot(directory, metadata, cap=CAP, reviewed=None):
     """Snapshot the allowlist once, then scan and return those exact bytes."""
+    if reviewed is not None and not review_record(reviewed):
+        raise Refusal('review', 'invalid reviewed omission')
     digest = hashlib.sha256()
     traversal = Traversal()
     entries, omissions, files = [], [], {}
@@ -189,7 +269,18 @@ def snapshot(directory, metadata, cap=CAP):
                             raise Refusal(path, 'kind/binary')
                         entries.append((path, group, info))
             collect(root)
-            kept = list(entries)
+            kept = [e for e in entries if reviewed is None or e[0] != reviewed['path']]
+            if reviewed is not None:
+                entry = next((e for e in entries if e[0] == reviewed['path']), None)
+                if entry is None:
+                    raise Refusal(reviewed['path'], 'reviewed file missing')
+                data = source_bytes(root, entry[0], CAP, entry[2])
+                if hashlib.sha256(data).hexdigest() != reviewed['sha256']:
+                    raise Refusal(reviewed['path'], 'changed after review')
+                # The earlier refusal, the current rule and these exact bytes must agree.
+                if scan(data.decode('utf-8')) != reviewed['rule']:
+                    raise Refusal(reviewed['path'], 'reviewed rule changed')
+                omissions.append(dict(reviewed))
             for group in ('evidence', 'scripts'):
                 if sum(info.st_size for _, _, info in kept) <= cap:
                     break
@@ -201,37 +292,19 @@ def snapshot(directory, metadata, cap=CAP):
                 raise Refusal('documents', 'size')
             for path, group, info in kept:
                 traversal.check()
-                parent = os.dup(root)
+                data = source_bytes(root, path, cap, info)
+                digest.update(data)
                 try:
-                    parts = path.split('/')
-                    for part in parts[:-1]:
-                        child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
-                        os.close(parent)
-                        parent = child
-                        checked(os.fstat(parent), path, directory=True)
-                    fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
-                    with os.fdopen(fd, 'rb') as source:
-                        before = os.fstat(source.fileno())
-                        checked(before, path)
-                        if signature(before) != signature(info):
-                            raise Refusal(path, 'changed during snapshot')
-                        data = source.read(cap + 1)
-                        if len(data) > cap or signature(os.fstat(source.fileno())) != signature(before):
-                            raise Refusal(path, 'changed during snapshot')
-                    digest.update(data)
-                    try:
-                        text = data.decode('utf-8')
-                    except UnicodeError:
-                        raise Refusal(path, 'kind/binary') from None
-                    if '\0' in text:
-                        raise Refusal(path, 'kind/binary')
-                    rule = scan(text)
-                    if rule:
-                        line = next((i for i, line in enumerate(text.splitlines(), 1) if scan(line)), 1)
-                        raise Refusal(path, rule, line=line)
-                    files[path] = data
-                finally:
-                    os.close(parent)
+                    text = data.decode('utf-8')
+                except UnicodeError:
+                    raise Refusal(path, 'kind/binary') from None
+                if '\0' in text:
+                    raise Refusal(path, 'kind/binary')
+                rule = scan(text)
+                if rule:
+                    line = next((i for i, line in enumerate(text.splitlines(), 1) if scan(line)), 1)
+                    raise Refusal(path, rule, line=line, file_sha256=hashlib.sha256(data).hexdigest())
+                files[path] = data
         for group in ('evidence', 'scripts', None):
             index = dict(metadata, entries=sorted(files), files=len(files), bytes=sum(map(len, files.values())), omissions=omissions)
             data = (json.dumps(index, sort_keys=True, ensure_ascii=False, indent=2) + '\n').encode()
@@ -312,6 +385,10 @@ def read_snapshot(directory):
                 traversal.check()
                 if path_rule(name):
                     raise Refusal(f'index entry {number}', 'path secret-shape')
+            reviews = [o for o in index.get('omissions', [])
+                       if isinstance(o, dict) and o.get('reason') == 'omitted-after-review']
+            if len(reviews) > 1 or any(not review_record(o) or o['path'] in names for o in reviews):
+                raise Refusal('index.json', 'invalid reviewed omission')
             files = {name: read(name, number) for number, name in enumerate(names, 1)}
             if index['files'] != len(files) or index['bytes'] != sum(map(len, files.values())):
                 raise Refusal('index.json', 'invalid snapshot index')
