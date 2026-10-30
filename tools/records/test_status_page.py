@@ -30,6 +30,7 @@ class StatusPage(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.base = Path(self.temp.name)
         self.root, self.fabrig = self.base/'records', self.base/'fabrig'
+        self.spool = self.base/'src/fabrig/events'
         self.root.mkdir()
         self.fabrig.mkdir()
         self.bin = self.base/'bin'
@@ -58,7 +59,7 @@ for line in sys.stdin:
                              mem_available=8*1024**3, mem_total=16*1024**3,
                              disk_free=100*1024**3, disk_total=200*1024**3,
                              session=POISON)
-        remote = dict(machine=self.capacity, errors={}, session=POISON,
+        remote = dict(machine=self.capacity, errors={}, session=POISON, spools={key: [] for key in sp.EVENT_SOURCES},
                       claude_usage=dict(state='subscribed', plan='max', label='1234abcd',
                                         limits=[dict(name='session', used=25, resets=NOW+7200)]),
                       codex_usage=dict(state='signed-out', private=POISON))
@@ -93,12 +94,12 @@ for line in sys.stdin:
         path.chmod(0o755)
 
     def write(self, relative, content):
-        path = self.root/relative
+        path = self.spool/relative.removeprefix('events/') if relative.startswith('events/') else self.root/relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content)
 
     def event(self, source, kind, offset, **extra):
-        path = self.root/f'events/{source}/host/2026-10-29.jsonl'
+        path = self.spool/f'{source}/2026-10-29.jsonl'
         path.parent.mkdir(parents=True, exist_ok=True)
         rows = path.read_text().splitlines() if path.exists() else []
         row = dict(id=str(len(rows)), source=source, host='host', kind=kind,
@@ -115,7 +116,7 @@ for line in sys.stdin:
         proc = subprocess.run([str(SCRIPT),'--no-pull','--machines',str(self.machines),'--out',str(out), '--samples',str(self.base/'samples')], env=self.env, capture_output=True, text=True)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         page = out.read_text()
-        self.assertEqual(re.findall(r'<h2>(.*?)</h2>',page), ['Drafts','Landings and the queue','Work in flight','Waiting on the user','Costs','Machines and capacity','Subscriptions','Links'])
+        self.assertEqual(re.findall(r'<h2>(.*?)</h2>',page), ['Drafts','Landings and the queue · last 2 hours','Work in flight · last 2 hours','Waiting on the user','Costs','Machines and capacity','Subscriptions','Links'])
         for private in PRIVATE: self.assertNotIn(private, page)
         self.assertLess(page.index('Public alpha'),page.index('Public beta'))
         for wanted in ['1 open questions', '2 h 0 min ago', 'Slots held / total: 1 / 2', 'Runs running: 1', 'Leads live: 1', 'Coordinators live: 1', '9 min', 'clippy', 'ready timestamps not collected', 'href="v0.1.0.html"','100 GB', '25%']:
@@ -124,17 +125,17 @@ for line in sys.stdin:
         self.assertEqual((self.base/'samples').stat().st_mode & 0o777,0o600)
 
     def test_real_cli_probes_with_fake_claude_and_codex(self):
-        with patch.dict(os.environ,self.env,clear=True):
+        with patch.dict(os.environ,self.env,clear=True), patch.object(sp, 'part_machine', return_value={'load':[1,2,3], 'cpus':4}):
             data = sp.collect()
         self.assertEqual(data['errors'],{})
         self.assertIsInstance(data['machine']['load'],list)
         self.assertEqual(data['claude_usage']['limits'][0]['used'],25)
         self.assertEqual(data['codex_usage']['limits'][0]['used'],50)
         self.assertEqual(len(data['claude_usage']['label']),8)
-        self.assertNotIn('private@example.net',json.dumps(data))
+        self.assertNotIn('private@example.net',json.dumps({k:v for k,v in data.items() if k != 'spools'}))
 
     def test_failing_source_is_unknown_and_others_survive(self):
-        self.write('events/queue/host/2026-10-29.jsonl','{"oops":\n')
+        self.write('events/queue/2026-10-29.jsonl','{"oops":\n')
         data = self.gather()
         page = sp.render(data)
         self.assertIn('unknown · invalid data',page)
@@ -145,8 +146,26 @@ for line in sys.stdin:
         self.assertIn('Slots held / total: unknown · probe failed',page)
         for private in PRIVATE: self.assertNotIn(private,page)
 
+    def test_remote_spools_supply_sections_and_deduplicate_local_copy(self):
+        baseline = self.gather()['sources']
+        remote = dict(machine=self.capacity, errors={}, spools={key: baseline[key] for key in sp.EVENT_SOURCES})
+        self.fake('ssh', 'print('+repr(json.dumps(remote))+')')
+        merged = self.gather()['sources']
+        for key in sp.EVENT_SOURCES:
+            self.assertEqual(merged[key], baseline[key])
+        for path in self.spool.glob('*/*.jsonl'):
+            path.unlink()
+        data = self.gather()
+        page = sp.render(data)
+        self.assertIn('Runs running: 1', page)
+        self.assertIn('Leads live: 1', page)
+        self.assertIn('Last 2 hours', page)
+        self.assertEqual(len(sp.queue_data(data['sources']['queue'], NOW)['landings']), 1)
+        for private in PRIVATE:
+            self.assertNotIn(private, page)
+
     def test_empty_events_are_real_state(self):
-        for path in (self.root/'events').glob('*/*/*.jsonl'): path.unlink()
+        for path in self.spool.glob('*/*.jsonl'): path.unlink()
         page = sp.render(self.gather())
         self.assertGreaterEqual(page.count('no events yet'),5)
         self.assertNotIn('unknown',page)
@@ -187,14 +206,14 @@ for line in sys.stdin:
         self.assertEqual(list(self.base.glob('.index.html.*')),[])
 
     def test_queue_real_contract_buckets_rejections_and_duration(self):
-        rows = sp.events(self.root, 'queue')
+        rows = sp.events(self.spool, 'queue', NOW)
         queue = sp.queue_data(rows, NOW+123)
         self.assertEqual(sum(n for _,_,n in queue['hours']), 1)
         self.assertEqual(queue['batches'][0]['duration'], 541)
         self.assertEqual(queue['rejects'], {'clippy':1})
-        path=self.root/'events/queue/host/2026-10-29.jsonl'
+        path=self.spool/'queue/2026-10-29.jsonl'
         with path.open('a') as stream: stream.write(json.dumps(rows[0])+'\n')
-        self.assertEqual(len(sp.events(self.root,'queue')),len(rows))
+        self.assertEqual(len(sp.events(self.spool,'queue', NOW)),len(rows))
 
     def test_hour_boundary_dry_run_and_missing_batch(self):
         rows = [dict(host='h', id='end', time=NOW, kind='batch', start=NOW-60, end=NOW, outcome='green'),
@@ -234,14 +253,15 @@ for line in sys.stdin:
             data = sp.gather_page(self.root, self.fabrig, self.machines, True, b'')
         page = sp.render(data)
         self.assertIn('record pull exited 1', page)
+        self.assertIn('unavailable: node', page)
         self.assertIn('Public alpha', page)
         self.assertIn('unknown', page)
         for private in PRIVATE: self.assertNotIn(private, page)
 
-    def test_collector_session_rename_end_and_context(self):
+    def test_collector_session_rename_end(self):
         rows=[dict(host='h',kind='session-start',session='s',name='lead/private-worker'),
               dict(host='h',kind='session-name',session='s',name='coordinator/private/next'),
-              dict(host='h',kind='context',session='other',name='s/private')]
+              dict(host='h',kind='session-start',session='other',name='s/private')]
         counts = sp.live_count(rows,'sessions')
         self.assertEqual((counts['leads'],counts['coordinators']), (0,2))
         rows.append(dict(host='h',kind='session-end',session='s'))
@@ -270,7 +290,7 @@ for line in sys.stdin:
         self.assertEqual(hour['queue'][None]['gate'],1)
         page=sp.render(data)
         for value in PRIVATE: self.assertNotIn(value,page)
-        self.assertIn('Last 24 hours',page)
+        self.assertIn('Last 2 hours',page)
         self.assertIn('Last hour',page)
         self.assertIn('unattributed',page)
 
@@ -309,7 +329,8 @@ class CollectorContract(unittest.TestCase):
         fixture.git(fixture.seed,'push','origin','main')
         fixture.write(fixture.fabrig/'main/draft.md','# Public wave description\n')
         fixture.run_collect(*api['API']['SOURCES'])
-        with patch.object(sp,'gather',return_value={}), patch.object(sp,'slots',return_value=(1,2)), patch.dict(os.environ,STATUS_NOW=str(NOW)):
+        fixture.git(fixture.home, 'clone', str(fixture.origin), str(fixture.clone))
+        with patch.object(sp,'gather',return_value={'spools':{s:[] for s in sp.EVENT_SOURCES}}), patch.object(sp,'slots',return_value=(1,2)), patch.dict(os.environ,STATUS_NOW=str(NOW)):
             data=sp.gather_page(fixture.clone,fixture.fabrig/'main',fixture.tmp/'post/machines',False,b'')
         page=sp.render(data)
         for private in ('lead/H/tools','s/example',api['SESSION'],api['RUN'],'Synthetic status','/synthetic','ready/tools/example'):
@@ -334,12 +355,12 @@ class CollectorContract(unittest.TestCase):
         fixture.json(fixture.fabrig/'notes/queue.jsonl',row)
         session=fixture.session_fixture(name='coordinator/H/next')
         fixture.run_collect('queue','sessions')
-        counts=sp.live_count(sp.events(fixture.clone,'sessions'),'sessions')
+        counts=sp.live_count(sp.events(fixture.fabrig/'events','sessions',NOW),'sessions')
         self.assertEqual((counts['leads'],counts['coordinators']),(0,1))
-        self.assertEqual(len(sp.queue_data(sp.events(fixture.clone,'queue'),NOW)['landings']),2)
+        self.assertEqual(len(sp.queue_data(sp.events(fixture.fabrig/'events','queue',NOW),NOW)['landings']),2)
         fixture.json(fixture.home/'agents.json',[])
         fixture.run_collect('sessions')
-        self.assertEqual(sp.live_count(sp.events(fixture.clone,'sessions'),'sessions')['coordinators'],0)
+        self.assertEqual(sp.live_count(sp.events(fixture.fabrig/'events','sessions',NOW),'sessions')['coordinators'],0)
 
 
 if __name__ == '__main__': unittest.main(verbosity=2)

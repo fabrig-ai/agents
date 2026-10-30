@@ -16,7 +16,7 @@ class Replay(unittest.TestCase):
             home = Path(directory)
             records = home / 'records'
             def write(source, rows):
-                path = records / f'events/{source}/hel8/2026-10-29.jsonl'
+                path = records / f'{source}/2026-10-29.jsonl'
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(''.join(json.dumps(row)+'\n' for row in rows))
             def event(kind, run, time, **fields):

@@ -1,4 +1,4 @@
-#!/usr/bin/env -S python3.13 -S
+#!/usr/bin/env -S python3.13 -I -B -S
 """Public pipeline dashboard. See status-page.md for the input contract."""
 import argparse
 import concurrent.futures
@@ -22,6 +22,11 @@ from types import SimpleNamespace
 HOUR, DAY = 3600, 86400
 SAMPLES_KEPT = 5000
 E = html.escape
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import event_spool
+
+EVENT_SOURCES = ('queue', 'runs', 'heavy', 'claims', 'sessions')
 
 SSH = ['ssh', '-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
        '-o', 'ConnectTimeout=5', '-o', 'ServerAliveInterval=5',
@@ -777,6 +782,12 @@ def collect():
                 result[key] = future.result()
             except Exception as error:
                 result['errors'][key] = failure(error)
+    result['spools'] = {}
+    for source in EVENT_SOURCES:
+        try:
+            result['spools'][source] = events(event_spool.root(), source, now)
+        except Exception as error:
+            result['errors']['spool/' + source] = failure(error)
     return result
 
 
@@ -791,22 +802,8 @@ def timestamp(value):
     return number(value) if number(value) is not None else stamp(value)
 
 
-def events(root, source):
-    """No files is a successful empty source. Malformed files fail that source."""
-    result, seen = [], set()
-    for path in sorted((root / 'events' / source).glob('*/*.jsonl')):
-        for line in path.read_text().splitlines():
-            row = json.loads(line)
-            if not isinstance(row, dict) or row.get('source') != source or timestamp(row.get('time')) is None:
-                raise ValueError('invalid event')
-            identity = row.get('id')
-            if not isinstance(identity, str) or not isinstance(row.get('kind'), str):
-                raise ValueError('invalid event')
-            key = (row.get('host'), identity)
-            if key not in seen:
-                result.append(row)
-                seen.add(key)
-    return sorted(result, key=lambda row: timestamp(row['time']))
+def events(root, source, now=None):
+    return event_spool.read(root, source, clock() if now is None else now)
 
 
 def drafts(root, fabrig):
@@ -901,7 +898,7 @@ def live_count(rows, source):
                 live[key] = row
             elif kind == 'run-end':
                 live.pop(key, None)
-        elif kind in ('session-start', 'session-name', 'context'):
+        elif kind in ('session-start', 'session-name'):
             live[key] = row
         elif kind == 'session-end':
             live.pop(key, None)
@@ -938,7 +935,7 @@ def queue_data(rows, now):
             step = row.get('rejected_step')
             step = step if step in STEPS else 'other'
             rejects[step] = rejects.get(step, 0) + 1
-    buckets = [(now - (6-i)*HOUR, now - (5-i)*HOUR) for i in range(6)]
+    buckets = [(now - (2-i)*HOUR, now - (1-i)*HOUR) for i in range(2)]
     return dict(landings=landings, batches=sorted(batches.values(), key=lambda r:r['time'], reverse=True),
                 rejects=rejects,
                 hours=[(a, b, sum(a <= t < b or (b == now and t == now) for t, _ in landings)) for a,b in buckets])
@@ -1012,7 +1009,7 @@ def cost_cell(value, tokens=False):
 
 def costs(sources, now, errors):
     out = []
-    for window, title in ((DAY, 'Last 24 hours'), (HOUR, 'Last hour')):
+    for window, title in ((2*HOUR, 'Last 2 hours'), (HOUR, 'Last hour')):
         out.append('<h3>' + title + '</h3>')
         data = cost_data(sources, now, window)
         for source, label_, heads in (
@@ -1053,14 +1050,14 @@ def gather_page(root, fabrig, machines_file, pulling, source):
         if data['sources'].get('pull'):
             data['errors']['pull'] = data['sources']['pull']
     if not root.is_dir():
-        for key in ('drafts', 'questions', 'queue', 'runs', 'heavy', 'claims', 'sessions'):
+        for key in ('drafts', 'questions'):
             data['sources'][key] = None
             data['errors'][key] = 'not found'
     else:
         read('drafts', lambda: drafts(root, fabrig))
         read('questions', lambda: questions(root))
-        for key in ('queue', 'runs', 'heavy', 'claims', 'sessions'):
-            read(key, lambda key=key: events(root, key))
+    for key in EVENT_SOURCES:
+        read(key, lambda key=key: events(event_spool.root(), key, data['time']))
     read('slots', slots)
     try:
         pairs = machines(machines_file)
@@ -1075,6 +1072,36 @@ def gather_page(root, fabrig, machines_file, pulling, source):
                 data['fleet'][name] = future.result()
             except Exception as error:
                 data['fleet'][name] = {'errors': {'machine': failure(error)}}
+    for key in EVENT_SOURCES:
+        rows = data['sources'][key]
+        failed = []
+        for name, target in pairs:
+            if target == 'local':
+                continue
+            machine = data['fleet'][name]
+            try:
+                remote = machine['spools'][key]
+                if not isinstance(remote, list):
+                    raise ValueError('invalid spool rows')
+                for row in remote:
+                    event_spool.validate(row, key)
+                if rows is not None:
+                    rows.extend(remote)
+            except (KeyError, TypeError, ValueError):
+                failed.append(public(name, True))
+                machine.setdefault('errors', {})['spool/' + key] = 'source unavailable'
+        if failed:
+            data['sources'][key] = None
+            data['errors'][key] = 'unavailable: ' + ', '.join(failed)
+        elif rows is not None:
+            seen = set()
+            kept = []
+            for row in sorted(rows, key=lambda r: timestamp(r['time'])):
+                identity = (row['host'], row['id'])
+                if data['time'] - 2*HOUR <= timestamp(row['time']) <= data['time'] and identity not in seen:
+                    kept.append(row)
+                    seen.add(identity)
+            data['sources'][key] = kept
     return data
 
 
@@ -1113,7 +1140,7 @@ def render(data, samples=None, site=None):
                        for name, machine in data['fleet'].items() for cli in ('claude', 'codex')]
     subscribed, _ = merged_subscriptions(SimpleNamespace(usage=projected_usage))
     tiles = [('Drafts', str(len(sources['drafts'])) if sources.get('drafts') is not None else 'unknown'),
-             ('Landings per hour', f'{sum(now-6*HOUR <= at <= now for at,_ in queue["landings"])/6:.1f}' if queue is not None else 'unknown'),
+             ('Landings per hour', f'{sum(now-2*HOUR <= at <= now for at,_ in queue["landings"])/2:.1f}' if queue is not None else 'unknown'),
              ('Runs running', count_running()), ('Subscriptions', str(len(subscribed))),
              ('Waiting on the user', str(sources['questions'][0]) if sources.get('questions') is not None else 'unknown')]
     body.append('<div class="tiles">' + ''.join('<div class="tile"><div class="label">' + E(label_) + '</div><div class="value">' + E(value) + '</div></div>' for label_,value in tiles) + '</div>')
@@ -1139,7 +1166,7 @@ def render(data, samples=None, site=None):
     def queue_section(rows):
         if not rows:
             return '<p class="empty">no events yet</p>'
-        out = '<h3>Landings per hour · last 6 h</h3>'
+        out = '<h3>Landings per hour · last 2 hours</h3>'
         out += table(['Hour (UTC)', 'Landings'], [[E(utc(a, '%H:%M')+'–'+utc(b, '%H:%M')), str(n)] for a,b,n in queue['hours']])
         out += '<h3>Batches</h3>' + table(['Finished', 'Outcome', 'Duration'],
             [[when(r['time'],now), E(r['outcome']), E(length(r['duration'])) if r['duration'] is not None else 'unknown'] for r in queue['batches'][:20]], empty='No batches yet.')
@@ -1147,8 +1174,8 @@ def render(data, samples=None, site=None):
         out += '<p>Ready to landing: unknown · ready timestamps not collected</p>'
         return out
 
-    section('Landings and the queue', 'queue', queue_section)
-    body.append('<h2>Work in flight</h2><div class="panel">')
+    section('Landings and the queue · last 2 hours', 'queue', queue_section)
+    body.append('<h2>Work in flight · last 2 hours</h2><div class="panel">')
     for key, label_, field in [('runs', 'Runs running', 'runs'), ('sessions', 'Leads live', 'leads'),
                                 ('sessions', 'Coordinators live', 'coordinators')]:
         rows = sources.get(key)
@@ -1170,6 +1197,8 @@ def render(data, samples=None, site=None):
     for name in data['machines']:
         machine = shaped(data['fleet'].get(name), {})
         body.append('<div class="card"><h3>' + E(public(name, True)) + '</h3>')
+        if any(k.startswith('spool/') for k in shaped(machine.get('errors'), {})):
+            body.append(unknown('event spool unavailable'))
         capacity = machine.get('machine')
         if not isinstance(capacity, dict):
             body.append(unknown(failure_text(machine, 'machine')))
@@ -1230,7 +1259,7 @@ def main():
         return
     root = Path(os.environ.get('RECORDS_REPO', Path.home() / 'src/fabrig/records')).expanduser()
     fabrig = Path(os.environ.get('FABRIG_REPO', Path.home() / 'src/fabrig/main')).expanduser()
-    data = gather_page(root, fabrig, args.machines, not args.no_pull, Path(__file__).read_bytes())
+    data = gather_page(root, fabrig, args.machines, not args.no_pull, event_spool.probe_source(__file__).encode())
     samples = None
     if args.samples:
         try:
