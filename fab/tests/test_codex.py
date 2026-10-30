@@ -245,11 +245,17 @@ class CodexFilesTest(unittest.TestCase):
 
     def test_execute_missing_report_includes_last_message(self):
         self.fake_codex([{"last": "The last message.\n"}])
-        run_id, state = self.launch(read_only=True)
+        run_id, state = self.launch()
         self.assertEqual(codex.execute(run_id), 0)
         self.assertEqual(self.report.read_text(),
                          "Failed: the run wrote no report.\nThe last message.\n")
         self.assertTrue((state / "ended").exists())
+
+    def test_a_read_only_runs_report_is_its_last_message(self):
+        self.fake_codex([{"last": "Done: approve\n"}])
+        run_id, state = self.launch(read_only=True)
+        self.assertEqual(codex.execute(run_id), 0)
+        self.assertEqual(self.report.read_text(), "Done: approve\n")
 
     def test_execute_failure_without_report_or_last_message(self):
         self.fake_codex([{"code": 9}])

@@ -130,8 +130,9 @@ def execute(run_id: str, *, sh: Runner = run, sleep: Callable[[float], None] | N
     to events.jsonl and stderr to stderr.log; keep the thread id from the first thread.started
     event in `thread`. On failure at capacity, sleep the next DELAYS entry and resume the thread
     with `Go on with the task: the model was at capacity.`, at most len(DELAYS) times. Then: if
-    the report is missing, write it as `Failed: the run wrote no report.` followed by last.md
-    (when any); write result.json (exit, tries, tokens, ended); touch `ended` last. Returns the
+    the report is missing, write it from last.md: a read-only run's report is its last message
+    (it cannot write files), any other's is `Failed: the run wrote no report.` followed by
+    last.md (when any); write result.json (exit, tries, tokens, ended); touch `ended` last. Returns the
     codex exit code."""
     state = state_root() / run_id
     meta = json.loads((state / "meta.json").read_text(encoding="utf-8"))
@@ -188,9 +189,13 @@ def execute(run_id: str, *, sh: Runner = run, sleep: Callable[[float], None] | N
             (sleep or time.sleep)(DELAYS[tries - 1])
             prompt = "Go on with the task: the model was at capacity."
     if not report.exists():
-        message = "Failed: the run wrote no report.\n"
-        if last.exists():
-            message += last.read_text(encoding="utf-8", errors="replace")
+        if meta["read_only"] and last.exists():
+            # A read-only run cannot write its report; its last message is the report.
+            message = last.read_text(encoding="utf-8", errors="replace")
+        else:
+            message = "Failed: the run wrote no report.\n"
+            if last.exists():
+                message += last.read_text(encoding="utf-8", errors="replace")
         write(report, message)
     result = {"exit": code, "tries": tries, "tokens": tokens(all_events), "ended": log.now()}
     write(state / "result.json", json.dumps(result) + "\n")
