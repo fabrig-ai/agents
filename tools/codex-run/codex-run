@@ -11,8 +11,9 @@ umask 077
 script=$(readlink -f "${BASH_SOURCE[0]}")
 # readlink supplies the canonical absolute path; its parents need no subprocess.
 kit=${script%/*}
-fabrig=${kit%/*}
-fabrig=${fabrig%/*}
+# Slots have a separate migration; use their fabrig installation until then.
+slots=${kit%/*}/slots
+[[ -f $slots/lifetime.py ]] || slots=$HOME/src/fabrig/main/tools/slots
 root=${DEV_ROOT:-$HOME/src/rust}
 runs=$root/tmp/codex-run
 search_rule='Before any command, read the rules in the text below. Search only your worktree and the paths it names: never run rg, find, ls -R or grep -r from ~/src/rust/tmp or any directory above it, and never in ~/.local, ~/.config or /run/user. '
@@ -274,7 +275,7 @@ task_launch() {
     absolute "$task" TASK; absolute "$dir" DIR; absolute "$report" REPORT
     # One helper validates all paths before any state/reservation is created.
     # Wait for its status as well as reading its NUL-framed output.
-    exec {paths_fd}< <(python3 -I -S -B "$fabrig/tools/slots/lifetime.py" task-paths "$root" "$report" "$dir" 2>&1)
+    exec {paths_fd}< <(python3 -I -S -B "$slots/lifetime.py" task-paths "$root" "$report" "$dir" 2>&1)
     paths_pid=$!
     mapfile -d '' -t paths <&"$paths_fd"
     exec {paths_fd}<&-
@@ -319,7 +320,7 @@ task_launch() {
 
 # tools/slots/design.md, 5.2: inherited locks cover shell, retries and children.
 lease_task() {
-    local purpose=$1 expected=$1 validated helper=$fabrig/tools/slots/lifetime.py adopt='' membership=${2:-}
+    local purpose=$1 expected=$1 validated helper=$slots/lifetime.py adopt='' membership=${2:-}
     # Only this invocation's task parser supplies already-validated membership.
     if [[ -z $membership ]]; then
         validated=$(python3 -I -S -B "$helper" directory "$dir" 2>&1) || refuse "$validated"
@@ -345,12 +346,12 @@ lease_task() {
 # tools/codex-run/design.md, 4: trim only this task's writable slot.
 trim_slot() {
     [[ $read_only == 0 ]] || return 0
-    local slot slots=$HOME/src/fabrig/slots number status=0
+    local slot slot_root=$HOME/src/fabrig/slots number status=0
     slot=$(realpath -e -- "$dir") || return 0
-    [[ ${slot%/*} == "$slots" ]] || return 0
+    [[ ${slot%/*} == "$slot_root" ]] || return 0
     number=${slot##*/}
     [[ $number =~ ^[0-9]+$ ]] || return 0
-    python3 -I "$fabrig/tools/slots/trim" "$slot" </dev/null >"$state/trim.log" 2>&1 || status=$?
+    python3 -I "$slots/trim" "$slot" </dev/null >"$state/trim.log" 2>&1 || status=$?
     if ((status != 0)); then printf 'trim failed: exit %s\n' "$status" >>"$state/trim.log" || true; fi
     return 0
 }
@@ -362,7 +363,7 @@ task_run() {
     local -a paths=()
     # Validate history before reading metadata, then the metadata's directory,
     # in one helper. The framed snapshot is also what this worker parses.
-    exec {paths_fd}< <(python3 -I -S -B "$fabrig/tools/slots/lifetime.py" worker-paths "$root" "$id" 2>&1)
+    exec {paths_fd}< <(python3 -I -S -B "$slots/lifetime.py" worker-paths "$root" "$id" 2>&1)
     paths_pid=$!
     mapfile -d '' -t paths <&"$paths_fd"
     exec {paths_fd}<&-
@@ -411,7 +412,7 @@ task_stop() {
             </dev/null >>"$state/on-stop.log" 2>&1 || status=$?
         printf 'exit %s\n' "$status" >"$state/on-stop"
         if ((status != 0)); then
-            python3 -I -S -B "$fabrig/tools/slots/lifetime.py" uncertain "$dir" </dev/null || true
+            python3 -I -S -B "$slots/lifetime.py" uncertain "$dir" </dev/null || true
         fi
     else
         printf 'absent\n' >"$state/on-stop"
@@ -576,7 +577,7 @@ stale() {
 
 normalize_root() {
     # Path-only helper modes use os/sys and require no site initialization.
-    root=$(python3 -I -S -B "$fabrig/tools/slots/lifetime.py" root "$root" 2>&1) || refuse "$root"
+    root=$(python3 -I -S -B "$slots/lifetime.py" root "$root" 2>&1) || refuse "$root"
     runs=$root/tmp/codex-run
 }
 
@@ -609,6 +610,11 @@ task_final() {
         reap_trigger
     fi
 }
+
+if [[ ${1:-} == --help ]]; then
+    printf '%s\n' 'usage: codex-run task|owner|final ... | stale [--post]'
+    exit 0
+fi
 
 mode=${1:-}
 # Bootstrap before path validation: the exec'd worker validates once, before
