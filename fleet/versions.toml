@@ -79,7 +79,7 @@ source = ".local/opt/chromium-147.0.7727.101"
 release = ".local/opt/chromium-147.0.7727.101"
 entrypoint = "usr/lib/chromium/chromium"
 manifest = "seeds/chromium.sha256"
-seed_hosts = ["hetzner3"]
+seed_hosts = ["hetzner6"]
 
 
 [forgejo]
@@ -89,7 +89,7 @@ command = ["forgejo", "--version"]
 [forgejo.install]
 kind = "binary"
 seed = "peer"
-seed_hosts = ["hetzner3"]
+seed_hosts = ["hetzner6"]
 source = ".local/opt/forgejo-17.0.0/forgejo"
 destination = ".local/opt/forgejo-17.0.0/forgejo"
 sha256 = "5a3b07e124ed70b4e46ee3939515f003bd3cc85352257a9a4607a527251042ca"
@@ -103,7 +103,7 @@ command = ["forgejo-runner", "--version"]
 [forgejo-runner.install]
 kind = "binary"
 seed = "peer"
-seed_hosts = ["hetzner3"]
+seed_hosts = ["hetzner6"]
 source = ".local/opt/forgejo-runner-13.2.0/forgejo-runner"
 destination = ".local/opt/forgejo-runner-13.2.0/forgejo-runner"
 sha256 = "fadaec897f5e6641c363f87ecaf75f866f99c81b7097ec6b433e4c48123fcad1"

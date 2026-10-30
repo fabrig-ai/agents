@@ -186,7 +186,8 @@ class Builder:
         available = pools(self.inventory)
         free = {tuple(line.split()) for line in
                 ssh(self.data['hel8'], 'claim', 'list', '--free', OWNER, timeout=10).splitlines()}
-        choices = [self.requested] if self.requested else ['hetzner3', 'hetzner7', 'hetzner6']
+        choices = [self.requested] if self.requested else sorted(
+            host for host, info in self.hosts.items() if 'builder' in info.get('roles', []))
         if not self.requested:
             admitted = []
             for host in choices:
