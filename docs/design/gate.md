@@ -110,6 +110,13 @@ rechecks restoration and releases the exact WHAT. Missing/corrupt observation
 keeps the record and prints the reconcile command. A local record lock prevents
 a live lander and reconciliation from acting together. `--local` explicitly
 announces its unclaimed fallback; selection, budgets and host lock still apply.
+It uses the same pinned full-bundle builder as remote landing, clones that
+bundle into a private local mktemp, checks out the candidate SHA detached and
+runs the snapshot's check.sh with that snapshot as cwd. It verifies the private
+HEAD before and after checking, rejects red/incomplete results and prints the
+verified receipt SHA. The live checkout never supplies test bytes; concurrent
+uncommitted edits there do not change the snapshot or the pushed SHA. Snapshot,
+bundle and result files are removed on completion or failure.
 
 After green, fetch again. A moved main is rebased; disjoint test selections
 permit push under the no-overlap rule: record the previously checked SHA,
@@ -148,6 +155,11 @@ both tiers there. The fleet clone is read-only; private refs, index and checkout
 are removed on exit. This retains the history used by `git log`, `git show` and
 `git archive` fixtures even if fleet's clone HEAD advances after deployment.
 Direct invocation from a Git checkout pins its HEAD in the same way.
+Every snapshot setup exception, including missing/invalid release metadata and
+clone/checkout failures, sends a setup failure notice to ops through the same
+notice writer used by file/runner failures and returns failure. The temporary
+snapshot is removed even when setup or notification fails; neither tier runs
+when setup fails.
 Builder role units render only with `machine_env.AGENTS_PERIODIC = 1`.
 Periodic is paused as of ed5c048; the coordinator re-enables h3 after this fix
 lands. The service also checks the runtime flag, uses nice 19 and idle IO. It mails each failed,

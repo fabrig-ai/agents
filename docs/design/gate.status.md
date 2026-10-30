@@ -103,3 +103,20 @@ filesystem. Two prepare-only allocations from failed fixture development were
 verified to lack any launch/upload artifacts, recorded and removed on hel8.
 No periodic flag or budget change is included; this remains an append-only
 review branch. The gate-fix-1b report records final checks and auto-host timing.
+
+
+## 7. Second source-review repair, gate-fix-1c
+
+The local fallback now builds the same pinned bundle as remote landing and
+checks a private detached clone, verifies its SHA and result, and removes the
+snapshot. A paused-gate fixture makes an uncommitted edit in the live checkout:
+the snapshot reads committed bytes and the pushed SHA equals the tested SHA.
+All local-fallback execution for this repair stays inside the test harness.
+
+Periodic snapshot exceptions use the common ops notice path before returning
+failure. Missing metadata SHA, unavailable commit and partial clone-failure
+fixtures assert one ops notice, no tier execution and temporary cleanup.
+The gate-fix-1c report records the plain focused check and append-only push;
+this follow-up runs no real landing or dry run. Budget enforcement and the
+paused periodic declaration remain unchanged; the combined candidate supplies
+full proof before landing.

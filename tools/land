@@ -90,6 +90,37 @@ def save_record(path, value):
         os.close(directory)
 
 
+def bundle_candidate(root, sha, directory, token):
+    bundle = Path(directory) / 'candidate.bundle'
+    bundle_ref = 'refs/heads/agents-land-' + token
+    subprocess.run(['git', 'update-ref', bundle_ref, sha], cwd=root, check=True)
+    try:
+        subprocess.run(['git', 'bundle', 'create', str(bundle), bundle_ref], cwd=root, check=True)
+    finally:
+        subprocess.run(['git', 'update-ref', '-d', bundle_ref], cwd=root, check=True)
+    return bundle
+
+
+def check_local(root, base, sha, limit):
+    with tempfile.TemporaryDirectory(prefix='land-local-') as directory:
+        bundle = bundle_candidate(root, sha, directory, uuid.uuid4().hex)
+        snapshot = Path(directory) / 'repo'
+        subprocess.run(['git', 'clone', '-q', '--no-checkout', str(bundle), str(snapshot)], check=True)
+        subprocess.run(['git', '-C', str(snapshot), 'checkout', '-q', '--detach', sha], check=True)
+        if run('git', 'rev-parse', 'HEAD', cwd=snapshot) != sha:
+            raise ValueError('local snapshot SHA mismatch')
+        result_file = Path(directory) / 'result.json'
+        subprocess.run([str(snapshot / 'tools/check.sh'), '--tier', 'gate', '--changed', base,
+                        '--json', str(result_file)], cwd=snapshot, check=True, timeout=limit + 5)
+        if run('git', 'rev-parse', 'HEAD', cwd=snapshot) != sha:
+            raise ValueError('local snapshot HEAD moved during check')
+        result = json.loads(result_file.read_text())
+        if result['code'] or result['starved']:
+            raise ValueError('local gate incomplete or red; rerun')
+        print(f'land: local snapshot receipt SHA {sha}', flush=True)
+        return result | dict(sha=sha)
+
+
 class Builder:
     def __init__(self, hosts, inventory, requested, sha, saved=None):
         self.hosts = hosts
@@ -303,13 +334,7 @@ class Builder:
             raise ValueError('invalid builder temporary path')
         self.data.update(remote_dir=candidate, prepare_uncertain=False, phase='prepared')
         self.save()
-        bundle = Path(directory) / 'candidate.bundle'
-        bundle_ref = 'refs/heads/agents-land-' + self.data['id']
-        subprocess.run(['git', 'update-ref', bundle_ref, self.data['sha']], cwd=root, check=True)
-        try:
-            subprocess.run(['git', 'bundle', 'create', str(bundle), bundle_ref], cwd=root, check=True)
-        finally:
-            subprocess.run(['git', 'update-ref', '-d', bundle_ref], cwd=root, check=True)
+        bundle = bundle_candidate(root, self.data['sha'], directory, self.data['id'])
         self.data.update(upload_requested=True, upload_seen=False, phase='uploading')
         self.save()  # Durable unknown-end intent precedes upload dispatch.
         with bundle.open('rb') as stream:
@@ -529,14 +554,7 @@ def main():
             unchanged()
             if builder:
                 return builder.check(root, current_base, gate.hard_wall(budget), gate, sha=candidate_sha)
-            with tempfile.TemporaryDirectory(prefix='land-local-') as directory:
-                result_file = Path(directory) / 'result.json'
-                subprocess.run([str(root / 'tools/check.sh'), '--tier', 'gate', '--changed', current_base,
-                                '--json', str(result_file)], check=True, timeout=gate.hard_wall(budget) + 5)
-                result = json.loads(result_file.read_text())
-                if result['starved']:
-                    raise ValueError('local gate has unobserved tests; rerun')
-                return result
+            return check_local(root, current_base, candidate_sha, gate.hard_wall(budget))
         check(base)
         unchanged()
         subprocess.run(['git', 'fetch', 'origin'], check=True, timeout=15)

@@ -2,6 +2,7 @@
 import io
 import json
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import tarfile
@@ -38,14 +39,15 @@ class PeriodicSnapshotTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix='periodic-fixture-')
         self.addCleanup(self.temp.cleanup)
         self.home = Path(self.temp.name)
+        (self.home / 'tmp').mkdir()
         self.source = self.home / 'src/fabrig/agents'
         self.source.mkdir(parents=True)
         self.env = dict(os.environ, HOME=str(self.home), AGENTS_PERIODIC='1',
                         GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1',
                         GIT_AUTHOR_NAME='Fixture', GIT_AUTHOR_EMAIL='fixture@example.invalid',
                         GIT_COMMITTER_NAME='Fixture', GIT_COMMITTER_EMAIL='fixture@example.invalid',
-                        PATH=str(self.home / 'bin') + ':' + os.environ['PATH'])
-        put(self.home / 'bin/post', '#!/bin/sh\nprintf "%s\\n" "$*" >> "$HOME/mail"\n', 0o755)
+                        PATH=str(self.home / 'bin') + ':' + os.environ['PATH'], TMPDIR=str(self.home / 'tmp'))
+        put(self.home / 'bin/post', '#!/bin/sh\nprintf "%s\\n" "$*" >> "$HOME/mail"\ncat "$6" >> "$HOME/mail"\n', 0o755)
         put(self.source / 'historical', 'history')
         self.git('init', '-b', 'main')
         self.git('add', '.')
@@ -77,6 +79,39 @@ class PeriodicSnapshotTests(unittest.TestCase):
                                 cwd=self.home, env=self.env, capture_output=True, text=True, timeout=15)
         self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
         return result
+
+    def assert_setup_notice_and_cleanup(self):
+        self.run_periodic(1)
+        self.assertTrue((self.home / 'mail').is_file(), 'snapshot setup failure must notify ops')
+        mail = (self.home / 'mail').read_text()
+        self.assertEqual(mail.count('ops@hel8'), 1)
+        self.assertIn('snapshot setup failed', mail)
+        self.assertFalse((self.home / 'runs').exists())
+        self.assertFalse(list((self.home / 'tmp').iterdir()))
+        if (self.home / 'clone-path').exists():
+            self.assertFalse(Path((self.home / 'clone-path').read_text()).exists())
+
+    def trace_clone(self, fail=False):
+        real = shutil.which('git')
+        script = ("#!/usr/bin/env python3\nimport os,sys\nfrom pathlib import Path\n" +
+                  "if 'clone' in sys.argv:\n" +
+                  " path=Path(sys.argv[-1]); (Path.home()/'clone-path').write_text(str(path))\n" +
+                  (" path.mkdir(); (path/'partial').touch(); sys.exit(23)\n" if fail else '') +
+                  "os.execv(" + repr(real) + ",[" + repr(real) + ",*sys.argv[1:]])\n")
+        put(self.home / 'bin/git', script, 0o755)
+
+    def test_missing_release_sha_field_notifies_ops_and_cleans_snapshot(self):
+        put(self.release / '.fleet-release.json', '{}')
+        self.assert_setup_notice_and_cleanup()
+
+    def test_unavailable_release_sha_notifies_ops_and_cleans_partial_snapshot(self):
+        put(self.release / '.fleet-release.json', json.dumps(dict(sha='0' * 40)))
+        self.trace_clone()
+        self.assert_setup_notice_and_cleanup()
+
+    def test_clone_failure_notifies_ops_and_cleans_partial_snapshot(self):
+        self.trace_clone(fail=True)
+        self.assert_setup_notice_and_cleanup()
 
     def test_deployed_archive_runs_both_tiers_with_pinned_history(self):
         self.assertFalse((self.release / '.git').exists())
