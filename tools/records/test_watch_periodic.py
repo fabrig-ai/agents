@@ -78,10 +78,10 @@ class PeriodicIntegration(Integration):
         events = self.events()
         self.assertEqual(sum(e['kind']=='alert-open' for e in events), 1)
         self.assertEqual(sum(e['kind']=='heartbeat' for e in events), 1)
-        self.assertEqual(json.loads((self.home/'post.log').read_text()), ['wake', 'lead/jig'])
+        self.assertEqual(json.loads((self.home/'post.log').read_text()), ['send', '--as', 'watch', 'lead/jig', 'watch: deaf lead/jig'])
         state = self.home/'.local/state/watch/state.json'
         self.assertEqual(state.stat().st_mode & 0o777, 0o600)
-        self.assertEqual(next(iter(self.state()['episodes'].values()))['wake'], 'queued')
+        self.assertTrue(next(iter(self.state()['episodes'].values()))['notified'])
         mail.unlink()
         self.invoke()
         self.assertTrue(self.state()['episodes'])
@@ -98,14 +98,14 @@ class PeriodicIntegration(Integration):
         self.write(self.home/'remote', json.dumps({'runs': [dict(
             run='hung', owner='lead/jig', cwd='/synthetic/slots/1', started=0, changed=0, effort='high', ended=False)], 'heavy': [], 'errors': [], 'spools': {s: [] for s in API['EVENT_SOURCES']}}))
         result = self.invoke(post=False)
-        self.assertIn('would post wake lead/jig', result.stdout)
+        self.assertIn('would post send --as watch lead/jig', result.stdout)
         self.assertIn('would post send --as watch lead/jig', result.stdout)
         self.assertNotIn('PRIVATE BODY', result.stdout)
         self.assertFalse((self.home/'post.log').exists())
         events = self.events()
         self.assertTrue(any(e['kind'] == 'alert-open' for e in events))
         self.assertEqual(events[-1]['kind'], 'heartbeat')
-        self.assertEqual(next(e['wake'] for e in events if e.get('rule') == 'deaf'), 'suppressed')
+        self.assertFalse(next(e for e in events if e.get('rule') == 'deaf').get('remedy_attempts', 0))
         state = self.state()
         self.assertTrue(state['episodes'])
         for episode in state['episodes'].values():
@@ -290,12 +290,75 @@ class PeriodicIntegration(Integration):
                                 'lease': str(release / 'lease' if fallback else self.bin / 'lease')}
                     self.assertEqual({key: heartbeat['inputs'][key] for key in expected}, expected)
                     self.assertFalse(heartbeat['inputs_failed'])
-                    self.assertIn('would post wake lead/jig', result.stdout)
+                    self.assertIn('would post send --as watch lead/jig', result.stdout)
             calls = [json.loads(line) for line in (self.home / 'launcher.log').read_text().splitlines()]
             self.assertIn(['names', '--json'], calls)
             self.assertIn(['owns', 'lead/jig'], calls)
         finally:
             fixture.TOOL = original_tool
+
+    def test_records_fetch_only_when_main_changes_and_all_git_uses_multiplexing(self):
+        self.fake('git', f"""import json,os,sys
+from pathlib import Path
+home=Path(os.environ['HOME'])
+with (home/'git.log').open('a') as out:
+ out.write(json.dumps(dict(argv=sys.argv[1:],ssh=os.environ.get('GIT_SSH_COMMAND')))+'\\n')
+if sys.argv[1]=='ls-remote' and sys.argv[-1]=='refs/heads/ready/*':
+ print((home/'refs').read_text(),end='')
+else: os.execv({self.real_git!r}, [{self.real_git!r}]+sys.argv[1:])
+""")
+        self.invoke()
+        def fetches():
+            return [r for line in (self.home/'git.log').read_text().splitlines()
+                    if 'fetch' in (r := json.loads(line))['argv']]
+        first = len(fetches())
+        self.assertGreater(first, 0)
+        self.invoke()
+        self.assertEqual(len(fetches()), first)
+        self.write(self.seed/'README.md', '# Changed synthetic records\n')
+        self.git('-C',str(self.seed),'add','README.md')
+        self.git('-C',str(self.seed),'commit','-m','synthetic main moved')
+        self.git('-C',str(self.seed),'push','origin','main')
+        self.invoke()
+        self.assertEqual(len(fetches()), first+1)
+        network = [json.loads(line) for line in (self.home/'git.log').read_text().splitlines()
+                   if any(arg in ('ls-remote','fetch','clone') for arg in json.loads(line)['argv'])]
+        self.assertTrue(network)
+        for row in network:
+            for option in ('ControlMaster=auto','ControlPersist=600',str(self.home/'.local/state/watch/ssh-%C')):
+                self.assertIn(option,row['ssh'])
+
+    def test_cli_deaf_stop_then_resume_uses_saved_bypass_and_same_cwd(self):
+        self.mail()
+        sid = '01234567-1234-1234-1234-123456789abc'
+        agent = dict(name='lead/jig',sessionId=sid,cwd=str(self.home),state='done',status='idle')
+        self.write(self.home/'agents.json', json.dumps([agent]))
+        self.write(self.home/'.claude/jobs/01234567/state.json',json.dumps(dict(agent,
+            respawnFlags=['--permission-mode','bypassPermissions'])))
+        self.fake('claude', """import json,os,sys
+from pathlib import Path
+home=Path(os.environ['HOME'])
+agent=json.loads((home/'agents.json').read_text())[0]
+with (home/'claude.log').open('a') as out:
+ out.write(json.dumps(dict(argv=sys.argv[1:],cwd=os.getcwd()))+'\\n')
+if sys.argv[1]=='agents':
+ if '--all' in sys.argv and (home/'stopped').exists(): agent['state']='stopped'
+ print(json.dumps([agent,dict(name='director',sessionId='fixture-director',state='working',status='busy')]))
+elif sys.argv[1]=='stop': (home/'stopped').touch()
+elif sys.argv[1:3]==['--bg','--resume']:
+ assert (home/'stopped').exists()
+ print(json.dumps(dict(session_id=agent['sessionId'])))
+else: sys.exit(2)
+""")
+        self.invoke()
+        self.invoke()
+        rows = [json.loads(line) for line in (self.home/'claude.log').read_text().splitlines()]
+        actions = [r for r in rows if r['argv'][0] != 'agents']
+        self.assertEqual([r['argv'][:3] for r in actions], [['stop',sid],['--bg','--resume',sid]])
+        self.assertTrue(all(r['cwd'] == str(self.home) for r in actions))
+        self.assertEqual(sum(e['kind']=='remedy' for e in self.events()),1)
+        self.assertFalse((self.home/'post.log').exists())
+
 
     def test_writer_watch_append_only(self):
         record = TOOL.with_name('record')
