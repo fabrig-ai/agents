@@ -436,6 +436,18 @@ it, and the flow grows from a small start rather than to a fixed cap.
   attempt, and drops by one with each rejection or infra outcome, never below
   1; it may pass `places` while the builder's load and heavy's waits stay low
   (heavy and the disk wait still bound what actually builds).
+- **The target is a fold** (`fab.flow.target`) over the plan's events in the
+  log, recomputed every tick and never stored. A landing grows it only when
+  its run ended with the window full (the plan's runs in flight, that run
+  among them, at least the target): an unused target says nothing about a
+  larger one. The tick starts runs while the plan's runs in flight are below
+  it, and prints it (`flow <draft> target <n>, <m> in flight`).
+- **Calm** (`fab.flow.measure`, one ssh per builder each tick): the 5-minute
+  load per CPU below 0.7, and over the last 30 minutes of the builder's
+  `heavy.jsonl` lane and disk waits under 5 minutes in all and no disk
+  refusal. A builder with no free place that is calm takes one more run per
+  tick, never more runs than its slots; a builder that cannot be measured is
+  not calm.
 - **Longer runs are better than more round trips.** A task is one module or
   concept, about 400-500 production lines with its tests, 30-60
   implementer-minutes; the skeleton author splits finer only where parts
@@ -510,5 +522,7 @@ it, and the flow grows from a small start rather than to a fixed cap.
   branches are suspects, CPU accounting against the tiers' budgets, and the
   landing report's after-landing figures. QA walks as a run kind.
 - Elastic builders from `fab hosts check`'s numbers.
+- The flow's target and each builder's calm in the code report, beside runs
+  in flight per hour; the target shared across plans (13.4).
 - Retiring the session launcher, watch's session rules, mail, leases and the
   event collector once nothing resident remains.

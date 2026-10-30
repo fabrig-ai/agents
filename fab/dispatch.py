@@ -126,24 +126,35 @@ def in_flight(events: Iterable[dict]) -> list[dict]:
             if event.get("ev") == "run.started" and event["run"] not in ended]
 
 
-def places(hosts: Mapping[str, Host], flight: Iterable[dict]) -> dict[str, int]:
-    """Free Codex places per builder: its `places` minus its runs in flight (never below 0)."""
+def places(hosts: Mapping[str, Host], flight: Iterable[dict],
+           calm: Mapping[str, bool] | None = None) -> dict[str, int]:
+    """Free Codex places per builder: its `places` minus its runs in flight (never below 0).
+
+    `places` is a hint (docs/design/fab.md, 13.2): a builder with none free that calm names
+    True (fab.flow.measure) gets 1, while its runs in flight are fewer than its `slots` (any
+    number when slots is 0). calm None is no builder calm."""
     occupied = Counter(event["host"] for event in flight)
     return {name: max(0, host.places - occupied[name]) for name, host in hosts.items()
             if "builder" in host.roles}
 
 
-def decide(plan: Plan, tasks: Mapping[str, Task], events: list[dict], hosts: Mapping[str, Host]) -> list[Action]:
+def decide(plan: Plan, tasks: Mapping[str, Task], events: list[dict], hosts: Mapping[str, Host],
+           calm: Mapping[str, bool] | None = None) -> list[Action]:
     """The actions for now, in this order:
 
+    0. flow: one Action("flow", task=plan.draft, detail="target <n>, <m> in flight"), n being
+       fab.flow.target(plan.draft, events) and m the runs in flight of the draft's tasks
+       (task starting with `<draft>/`). It is printed, never carried out.
     1. collect: every run in flight.
     2. land (repo "agents") or ready (any other repo): every task whose status is done, with
        the branch of its last run.
-    3. start: for rejected tasks first, then runnable ones in the tasks' order, while a builder
-       has a free place (the builder with most free places first; ties by name). A rejected
-       task's run_kind is rebase when its last branch.rejected step is rebase or merge,
-       otherwise repair; a runnable task's is implement, or repair when its last run ended infra.
-       A task that already has MAX_RUNS runs gets park instead of start.
+    3. start: for rejected tasks first, then runnable ones in the tasks' order, while the
+       draft's runs in flight plus the starts so far are below the target and a builder has a
+       free place by places(hosts, flight, calm) (the builder with most free places first;
+       ties by name). A rejected task's run_kind is rebase when its last branch.rejected step
+       is rebase or merge, otherwise repair; a runnable task's is implement, or repair when its
+       last run ended infra. A task that already has MAX_RUNS runs gets park instead of start,
+       whatever the target and the places.
     4. design: when fewer tasks are runnable or rejected than plan.low times the builders'
        total places, one design action whose detail lists, in plan order, the parts that
        have no task spec yet and whose needs all have every task landed.
@@ -209,8 +220,9 @@ def tick(plan_dir: Path, *, sh: Runner = run, hosts: Mapping[str, Host] | None =
     First, import the merge queue's new records: `fab queue log --since <ts>` over ssh on the
     host with role gate, ts being the latest `queue_ts` already imported; each `landed` or
     `rejected` record naming a task of this plan becomes branch.landed or branch.rejected,
-    carrying queue_ts. Then take decide's actions: collect through fab.run.collect, land
-    through fab.land.main with the branch (a task of a repository in fab.gates.REPOS first
+    carrying queue_ts. Then measure the builders (fab.flow.measure with sh, at fab.log.now())
+    and take decide's actions, given that calm: flow is only printed, collect through
+    fab.run.collect, land through fab.land.main with the branch (a task of a repository in fab.gates.REPOS first
     through fab.gates.screen: with any finding the branch is not landed, screen having
     logged branch.rejected, and the action's detail is `rejected gate:<gate>[,<gate>...]`,
     the findings' gates in order), ready by pushing the branch's tip to `ready/<branch>`
@@ -371,7 +383,8 @@ def tick(plan_dir: Path, *, sh: Runner = run, hosts: Mapping[str, Host] | None =
 
 
 def main(argv: list[str]) -> int:
-    """`fab tick PLAN_DIR [--dry-run]`: one tick, or with --dry-run only print decide's actions."""
+    """`fab tick PLAN_DIR [--dry-run]`: one tick, or with --dry-run only print decide's actions
+    (no builder measured, so none is calm)."""
     parser = argparse.ArgumentParser(prog="fab tick", description=__doc__)
     parser.add_argument("plan_dir", type=Path, metavar="PLAN_DIR")
     parser.add_argument("--dry-run", action="store_true")

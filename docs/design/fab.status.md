@@ -67,6 +67,10 @@
   runnable in the fold, even after it has landed. Nothing answers a call's
   question by hand yet; the user's channel (13.6) must name subjects apart
   from tasks.
+- **The flow is a skeleton:** `fab/flow.py` holds 13.2's target, calm and
+  measure, and `fab.dispatch.places` and `decide` take a `calm` argument they
+  do not use yet. The task `flow` fills them after `gates-tick`; until then
+  the tick fills every builder's `places` and never passes them.
 - **Parts done by hand have no task specs** (package, slot-probe), so the
   tick's design line lists them.
 - **The slot bound of 25 GB is one measurement** (10-30 20:18Z): a
