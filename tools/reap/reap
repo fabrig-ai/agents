@@ -162,62 +162,170 @@ def append(path, row):
         append_fd(fd, row)
 
 
+class BudgetExceeded(ValueError):
+    pass
+
+
+class Budget:
+    def __init__(self, seconds, entries, parent=None):
+        self.started = time.monotonic()
+        self.deadline = self.started + seconds
+        self.limit = entries
+        self.entries = 0
+        self.parent = parent
+        self.exhausted = False
+
+    def check(self, entries=0):
+        now = time.monotonic()
+        node = self
+        while node is not None:
+            if node.exhausted or now >= node.deadline or node.entries + entries > node.limit:
+                node.exhausted = self.exhausted = True
+                raise BudgetExceeded('budget')
+            node = node.parent
+        node = self
+        while node is not None:
+            node.entries += entries
+            node = node.parent
+
+
+def ledger_lock(fd, operation, timeout=2):
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            fcntl.flock(fd, operation | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ValueError('records ledger busy; retry at next start') from None
+            time.sleep(min(.02, remaining))
+
+
 def command(args, timeout=30, input=None):
+    args = [str(a) for a in args]
     env = dict(os.environ)
-    if str(args[0]) == 'git':
-        env = {key: value for key, value in env.items() if not key.startswith('GIT_')}
-        env.update(GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1')
-    env.update(GIT_OPTIONAL_LOCKS='0', GIT_TERMINAL_PROMPT='0')
-    result = subprocess.run([str(a) for a in args], input=input, capture_output=True,
-                            text=True, timeout=timeout, stdin=None if input is not None else subprocess.DEVNULL,
-                            env=env)
+    if args[0] in ('git', '/usr/bin/git'):
+        # No caller Git overrides, pager, replacement objects, network/lazy
+        # fetching, shell helpers, hooks or repository-defined PATH programs.
+        env = dict(HOME=os.environ.get('HOME', '/nonexistent'), PATH='/usr/bin:/bin',
+                   LANG='C.UTF-8', LC_ALL='C.UTF-8', GIT_CONFIG_GLOBAL='/dev/null',
+                   GIT_CONFIG_NOSYSTEM='1', GIT_OPTIONAL_LOCKS='0', GIT_TERMINAL_PROMPT='0',
+                   GIT_NO_REPLACE_OBJECTS='1', GIT_NO_LAZY_FETCH='1', GIT_ALLOW_PROTOCOL='',
+                   GIT_PAGER='cat')
+        args = ['/usr/bin/git', '--no-pager', '-c', 'core.hooksPath=/dev/null',
+                '-c', 'core.fsmonitor=false', '-c', 'protocol.allow=never', *args[1:]]
+    result = subprocess.run(args, input=input, capture_output=True, text=True, timeout=timeout,
+                            stdin=None if input is not None else subprocess.DEVNULL, env=env)
     if result.returncode:
         raise ValueError(f'{args[0]} failed ({result.returncode})')
     return result.stdout
 
 
-def walk(path, depth=None, deadline=None):
-    """Yield metadata only; never open symlinks, pipes, sockets or devices."""
-    if deadline is not None and time.monotonic() > deadline:
-        raise ValueError('walk time limit')
-    with directory(path.parent) as parent:
-        info = os.stat(path.name, dir_fd=parent, follow_symlinks=False)
-    yield path, info
-    if stat.S_ISDIR(info.st_mode):
-        if depth == 0:
-            raise ValueError('walk depth limit')
-        with directory(path) as fd:
-            names = sorted(os.listdir(fd))
-        for name in names:
-            yield from walk(path / name, None if depth is None else depth - 1, deadline)
+def signature(info):
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
 
 
-def remove(path, expected):
-    """Directory-fd removal; renamed/symlinked parents cannot redirect a walk."""
-    def descend(parent, name, identity=None):
-        info = os.stat(name, dir_fd=parent, follow_symlinks=False)
-        if identity is not None and (info.st_dev, info.st_ino) != identity:
-            raise ValueError('candidate changed')
-        if stat.S_ISDIR(info.st_mode):
-            fd = os.open(name, DIRECTORY, dir_fd=parent)
+def walk(path, depth=None, deadline=None, budget=None, prune=None):
+    """Iterative, fd-relative metadata walk; no symlinks or whole-directory lists."""
+    frames = []
+    def charge():
+        if budget is not None:
+            budget.check(1)
+        if deadline is not None and time.monotonic() >= deadline:
+            raise BudgetExceeded('budget')
+    try:
+        with directory(path.parent) as parent:
+            charge()
+            info = os.stat(path.name, dir_fd=parent, follow_symlinks=False)
+            if prune is not None and prune(path, info):
+                return
+            yield path, info
+            if not stat.S_ISDIR(info.st_mode):
+                return
+            fd = os.open(path.name, DIRECTORY, dir_fd=parent)
+        frames.append((path, fd, os.scandir(fd), depth))
+        while frames:
+            base, fd, entries, remaining = frames[-1]
             try:
-                if (os.fstat(fd).st_dev, os.fstat(fd).st_ino) != (info.st_dev, info.st_ino):
-                    raise ValueError('directory changed')
-                for child in os.listdir(fd):
-                    descend(fd, child)
-            finally:
+                entry = next(entries)
+            except StopIteration:
+                entries.close()
                 os.close(fd)
-            os.rmdir(name, dir_fd=parent)
-        else:
-            # Nested symlinks are unlinked, never traversed. Special files keep
-            # the whole candidate during inspection, before removal begins.
-            os.unlink(name, dir_fd=parent)
+                frames.pop()
+                continue
+            charge()
+            child = base / entry.name
+            info = entry.stat(follow_symlinks=False)
+            if prune is not None and prune(child, info):
+                continue
+            yield child, info
+            if stat.S_ISDIR(info.st_mode):
+                if remaining == 0:
+                    raise BudgetExceeded('budget')
+                opened = os.open(entry.name, DIRECTORY, dir_fd=fd)
+                if signature(os.fstat(opened))[:3] != signature(info)[:3]:
+                    os.close(opened)
+                    raise ValueError('directory changed')
+                frames.append((child, opened, os.scandir(opened),
+                               None if remaining is None else remaining - 1))
+    finally:
+        for _, fd, entries, _ in reversed(frames):
+            entries.close()
+            os.close(fd)
+
+
+def remove(path, expected, manifest, budget=None):
+    """Delete only inspected entries, iteratively, checking each before mutation.
+
+    Reserve the complete finite operation plan before starting. Once admitted,
+    finish that plan without a time-budget interruption causing partial cleanup.
+    Uninspected additions are never unlinked and make rmdir refuse the directory.
+    """
+    if budget is not None:
+        budget.check(2 * len(manifest))
+    children = {}
+    for relative in manifest:
+        if relative != Path('.'):
+            children.setdefault(relative.parent, []).append(relative.name)
+    opened = set()
     with directory(path.parent) as parent:
-        descend(parent, path.name, expected)
+        stack = [('visit', parent, path.name, Path('.'), None)]
+        try:
+            while stack:
+                operation, parent_fd, name, relative, fd = stack.pop()
+                info = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+                wanted = manifest[relative]
+                if relative == Path('.') and (info.st_dev, info.st_ino) != expected:
+                    raise ValueError('candidate changed')
+                if operation == 'finish':
+                    if signature(info)[:3] != wanted[:3] or signature(os.fstat(fd))[:3] != wanted[:3]:
+                        raise ValueError('directory changed')
+                    os.rmdir(name, dir_fd=parent_fd)
+                    os.close(fd)
+                    opened.remove(fd)
+                else:
+                    if signature(info) != wanted:
+                        raise ValueError('inspected entry changed')
+                    if stat.S_ISDIR(info.st_mode):
+                        fd = os.open(name, DIRECTORY, dir_fd=parent_fd)
+                        opened.add(fd)
+                        if signature(os.fstat(fd)) != wanted:
+                            raise ValueError('directory changed')
+                        stack.append(('finish', parent_fd, name, relative, fd))
+                        for child in reversed(children.get(relative, [])):
+                            stack.append(('visit', fd, child, relative / child, None))
+                    elif stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
+                        os.unlink(name, dir_fd=parent_fd)
+                    else:
+                        raise ValueError('special file')
+        finally:
+            for fd in opened:
+                os.close(fd)
 
 
 class Reaper:
-    def __init__(self, home=None, config=None, proc=Path('/proc'), now=None):
+    def __init__(self, home=None, config=None, proc=Path('/proc'), now=None, read_records=True):
         self.home = absolute(home or Path.home())
         self.config = config or tomllib.loads(read(ROOT / 'fleet/reap.toml'))
         if self.config['mode'] not in ('dry-run', 'live'):
@@ -229,21 +337,34 @@ class Reaper:
         self.now = time.time() if now is None else now
         self.state = self.home / '.local/state/reap'
         self.errors = []
-        self.refresh_records()
+        self.records = {}
+        self.active, self.retained = [], []
+        self.records_error = False
+        if read_records:
+            self.refresh_records()
+        self.run_seconds, self.run_entries = 300, 1000000
+        self.candidate_seconds, self.candidate_entries = 30, 100000
+        self.budget = self.run_budget = None
         self.live = set()
         self.claude_error = False
         self.alternates_cache = None
+        self.discovery_incomplete = False
 
-    def refresh_records(self):
+    def refresh_records(self, fd=None):
         self.records = {}
+        self.records_error = False
         try:
-            with regular(self.state / 'records.jsonl') as fd:
-                fcntl.flock(fd, fcntl.LOCK_SH)
+            if fd is None:
+                with regular(self.state / 'records.jsonl') as opened:
+                    ledger_lock(opened, fcntl.LOCK_SH)
+                    self.records = load_records(os.pread(opened, os.fstat(opened).st_size, 0).decode(errors='replace'))
+            else:
                 self.records = load_records(os.pread(fd, os.fstat(fd).st_size, 0).decode(errors='replace'))
         except FileNotFoundError:
             pass
-        self.active = []
-        self.retained = []
+        except (OSError, ValueError):
+            self.records_error = True
+        self.active, self.retained = [], []
         for (kind, _), record in self.records.items():
             if record['ended'] is None:
                 self.active.extend(self.path(p) for p in record['paths'])
@@ -251,11 +372,30 @@ class Reaper:
                 self.retained.extend((self.path(p), record['ended'], self.config['kinds'][kind])
                                      for p in record['paths'])
 
+    def charge(self, entries=0):
+        if self.budget is not None:
+            self.budget.check(entries)
+
     def path(self, value):
         if value.startswith('~/'):
             value = str(self.home / value[2:])
         path = Path(value)
         return absolute(path if path.is_absolute() else self.home / path)
+
+    def observe(self, args, timeout=30, **kwargs):
+        self.charge()
+        if self.budget is not None:
+            node = self.budget
+            while node is not None:
+                timeout = min(timeout, max(.001, node.deadline - time.monotonic()))
+                node = node.parent
+        try:
+            result = command(args, timeout=timeout, **kwargs)
+        except subprocess.TimeoutExpired:
+            self.charge()  # Convert deadline exhaustion to the budget keep reason.
+            raise
+        self.charge()
+        return result
 
     def record(self, args):
         if args.kind not in self.config['kinds']:
@@ -271,7 +411,7 @@ class Reaper:
                 raise ValueError('claude-session paths must be its jobs directory')
         target = self.state / 'records.jsonl'
         with regular(target, os.O_RDWR | os.O_CREAT | os.O_APPEND, True) as fd:
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            ledger_lock(fd, fcntl.LOCK_EX)
             text = os.pread(fd, os.fstat(fd).st_size, 0).decode(errors='replace')
             prior = load_records(text).get((args.kind, args.id))
             owner = args.owner
@@ -289,10 +429,12 @@ class Reaper:
 
     def children(self, path):
         try:
-            with directory(path) as fd:
-                return [path / name for name in sorted(os.listdir(fd))]
+            with directory(path) as fd, os.scandir(fd) as entries:
+                for entry in entries:
+                    self.charge(1)
+                    yield path / entry.name
         except FileNotFoundError:
-            return []
+            return
 
     def codex_finality(self, path):
         """Finality is producer evidence plus an inactive unit, never a guess."""
@@ -339,7 +481,7 @@ class Reaper:
                 if age < threshold and not force:
                     return
                 found.setdefault(path, dict(path=str(path), **{'class': cls}, age_seconds=int(age),
-                                            identity=(info.st_dev, info.st_ino)))
+                                            identity=(info.st_dev, info.st_ino), mtime=info.st_mtime))
             except FileNotFoundError:
                 pass
             except (OSError, ValueError) as exc:
@@ -348,10 +490,11 @@ class Reaper:
             self.live = set()
             self.claude_error = False
             try:
-                sessions = json.loads(command(['claude', 'agents', '--json', '--all']))
+                sessions = json.loads(self.observe(['claude', 'agents', '--json', '--all']))
                 if not isinstance(sessions, list):
                     raise ValueError('claude inventory is not a list')
                 for row in sessions:
+                    self.charge(1)
                     session = row.get('sessionId') or row.get('id')
                     pid = row.get('pid')
                     # Unknown PID is kept unless explicitly ended. Positive
@@ -364,13 +507,17 @@ class Reaper:
                 self.errors.append(f'claude inventory: {exc}')
         for cls in sorted(classes):
             try:
+                if cls == 'notes':
+                    continue  # Removed: no authoritative task/copy finality.
                 if cls == 'recorded':
                     for (kind, identity), record in self.records.items():
+                        self.charge(1)
                         retention = self.config['kinds'].get(kind)
                         if retention is None or record['ended'] is None or self.now - record['ended'] < retention:
                             continue
                         # Recorded has its own kind-specific threshold.
                         for path in record['paths']:
+                            self.charge(1)
                             candidate = self.path(path)
                             if kind == 'claude-session':
                                 if candidate != self.home / '.claude/jobs' / identity[:8]:
@@ -395,13 +542,13 @@ class Reaper:
                         if root.name.endswith('.precheck-logs'):
                             for path in self.children(root):
                                 add(path, cls)
-                elif cls in ('notes', 'codex-sessions'):
+                elif cls == 'codex-sessions':
                     for root in self.config['classes'][cls]['roots']:
                         base = self.home / root
                         try:
-                            for path, info in walk(base):
+                            for path, info in walk(base, budget=self.budget):
                                 if not stat.S_ISDIR(info.st_mode):
-                                    if cls == 'codex-sessions' and not (path.name.startswith('rollout') and path.suffix == '.jsonl'):
+                                    if not (path.name.startswith('rollout') and path.suffix == '.jsonl'):
                                         continue
                                     add(path, cls)
                         except FileNotFoundError:
@@ -411,13 +558,24 @@ class Reaper:
                         if cls == 'claude-jobs' and not stat.S_ISDIR(path.lstat().st_mode):
                             continue
                         add(path, cls)
+            except BudgetExceeded:
+                self.discovery_incomplete = True
+                self.errors.append(f'discover {cls}: budget')
+                # A root marker makes unenumerated data visible in the partial
+                # report. It can never enter inspection or removal.
+                config = self.config['classes'][cls]
+                root = self.home / config.get('root', config.get('roots', ['.'])[0])
+                found[root] = dict(path=str(root), **{'class': cls}, age_seconds=0,
+                                   identity=(0, 0), mtime=self.now, pre_reason='budget')
+                break
             except (OSError, ValueError) as exc:
                 self.errors.append(f'discover {cls}: {exc}')
         # One deletion per path; remove children first to avoid double-counting.
-        result = []
+        result, parents = [], set()
         for path in sorted(found, key=lambda p: (len(p.parts), str(p))):
-            if not any(inside(path, Path(row['path'])) for row in result):
+            if not any(parent in parents for parent in path.parents):
                 result.append(found[path])
+                parents.add(path)
         return result
 
     def never(self, path):
@@ -425,7 +583,8 @@ class Reaper:
                  '.ssh', '.claude/.credentials.json', '.claude/jobs/pins.json', '.claude.json', '.codex/auth.json',
                  'archive', '.local/state/reap', 'src/rust/tmp/logs/heavy.tsv',
                  'src/fabrig/events', 'src/fabrig/records', 'src/rust/records',
-                 'src/fabrig/archive', 'src/rust/tmp/owners', 'src/fabrig/homes']
+                 'src/fabrig/archive', 'src/rust/tmp/owners', 'src/fabrig/homes',
+                 'src/fabrig/notes', 'src/fabrig/tasks']
         fixed += [f'src/fabrig/{name}' for name in ('claims', 'leases', 'queue', 'main', 'agents', 'current', 'releases')]
         fixed += [f'.local/state/{name}' for name in ('fleet-sync', 'fabrig', 'heavy')]
         if not inside(path, self.home) or any(intersects(path, self.home / p) for p in fixed):
@@ -453,7 +612,7 @@ class Reaper:
         args = ['claim', 'list'] if authority else [
             'ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5', hosts['hel8']['ssh'],
             'bash -lc \'claim list\'']
-        output = command(args, timeout=10)
+        output = self.observe(args, timeout=10)
         observed = False
         slots = []
         for line in output.splitlines():
@@ -484,11 +643,13 @@ class Reaper:
             failures.append('alternates incomplete: ' + scan['reason'])
         try:
             processes = process_paths(self.proc)
-            if processes['errors'] and self.proc == Path('/proc'):
+            self.charge(processes.get('entries', 0))
+            if processes['errors'] and 'budget' not in processes['errors'] and self.proc == Path('/proc'):
                 # Only this metadata reader runs as root, never discovery,
                 # Git, archives, record/state handling or deletion.
-                processes = json.loads(command(['sudo', '-n', '/usr/bin/python3', '-I', '-B',
+                processes = json.loads(self.observe(['sudo', '-n', '/usr/bin/python3', '-I', '-B',
                                                 Path(__file__).resolve().with_name('proc_paths.py')]))
+                self.charge(processes.get('entries', 0))
             used = [absolute(path) for path in processes['paths']]
             # Candidates outside HOME are always forbidden. Paths elsewhere
             # cannot reference anything inside a removable candidate.
@@ -519,6 +680,7 @@ class Reaper:
 
         def metadata(path):
             budget()
+            self.charge(1)
             try:
                 with regular(path) as fd:
                     data = os.pread(fd, 1048577, 0)
@@ -534,79 +696,101 @@ class Reaper:
                 raise ValueError('NUL in Git metadata')
             return text
 
-        def gitdir(path):
-            budget()
-            path = absolute(path)
-            if path in gitdirs:
-                return
-            gitdirs.add(path)
-            # Verify the directory even when neither optional file exists.
-            try:
-                with directory(path):
-                    pass
-            except FileNotFoundError:
-                # Archived worktrees can retain pointers to deleted temporary
-                # Git directories. There is no object store left to borrow.
-                stats['missing_git_directories'] += 1
-                return
-            stats['git_directories'] += 1
-            common = metadata(path / 'commondir')
-            if common is not None:
-                value = common.rstrip('\r\n')
-                if not value:
-                    raise ValueError('invalid commondir')
-                gitdir(path / value)
-            content = metadata(path / 'objects/info/alternates')
-            if content is not None:
-                stats['alternates_files'] += 1
-                for line in content.splitlines():
-                    budget()
-                    if not line:
-                        continue
-                    if line.startswith('"'):
-                        raise ValueError('quoted alternates require review')
-                    target = absolute(path / 'objects' / line)
-                    found.update((target, Path(os.path.realpath(target))))
+        def gitdir(initial):
+            pending = [initial]
+            while pending:
+                budget()
+                path = absolute(pending.pop())
+                if path in gitdirs:
+                    continue
+                gitdirs.add(path)
+                try:
+                    with directory(path):
+                        pass
+                except FileNotFoundError:
+                    stats['missing_git_directories'] += 1
+                    continue
+                stats['git_directories'] += 1
+                common = metadata(path / 'commondir')
+                if common is not None:
+                    value = common.rstrip('\r\n')
+                    if not value:
+                        raise ValueError('invalid commondir')
+                    pending.append(path / value)
+                content = metadata(path / 'objects/info/alternates')
+                if content is not None:
+                    stats['alternates_files'] += 1
+                    for line in content.splitlines():
+                        budget()
+                        if not line:
+                            continue
+                        if line.startswith('"'):
+                            raise ValueError('quoted alternates require review')
+                        target = absolute(path / 'objects' / line)
+                        found.update((target, Path(os.path.realpath(target))))
 
-        def visit(path, depth, fd):
-            budget()
-            info = os.fstat(fd)
-            identity = (info.st_dev, info.st_ino)
-            if identity in visited:
-                return
-            visited.add(identity)
-            stats['directories'] += 1
-            if path.name.endswith('.git'):
-                gitdir(path)
-                return
-            with os.scandir(fd) as entries:
-                for entry in entries:
+        def visit(path, depth, root_fd):
+            frames = [(path, depth, root_fd, None)]
+            try:
+                while frames:
+                    base, level, fd, entries = frames[-1]
                     budget()
+                    if entries is None:
+                        info = os.fstat(fd)
+                        identity = (info.st_dev, info.st_ino)
+                        if identity in visited:
+                            frames.pop()
+                            if fd != root_fd:
+                                os.close(fd)
+                            continue
+                        visited.add(identity)
+                        stats['directories'] += 1
+                        if base.name.endswith('.git'):
+                            gitdir(base)
+                            frames.pop()
+                            if fd != root_fd:
+                                os.close(fd)
+                            continue
+                        entries = os.scandir(fd)
+                        frames[-1] = (base, level, fd, entries)
+                    try:
+                        entry = next(entries)
+                    except StopIteration:
+                        entries.close()
+                        frames.pop()
+                        if fd != root_fd:
+                            os.close(fd)
+                        continue
+                    budget()
+                    self.charge(1)
                     if entry.name in ('target', 'node_modules', '.cache'):
                         continue
-                    child = path / entry.name
+                    child = base / entry.name
                     if entry.name == '.git':
                         if entry.is_dir(follow_symlinks=False):
                             gitdir(child)
                         elif entry.is_file(follow_symlinks=False):
                             pointer = metadata(child)
                             if pointer is None:
-                                continue  # Removed during discovery.
+                                continue
                             value = pointer.rstrip('\r\n')
                             if not value.startswith('gitdir: ') or not value[8:]:
                                 raise ValueError('invalid gitdir pointer')
-                            gitdir(path / value[8:])
+                            gitdir(base / value[8:])
                         else:
                             raise ValueError('unsafe gitdir pointer')
-                    elif depth < 6 and entry.is_dir(follow_symlinks=False):
+                    elif level < 6 and entry.is_dir(follow_symlinks=False):
                         try:
                             child_fd = os.open(entry.name, DIRECTORY, dir_fd=fd)
-                            try:
-                                visit(child, depth + 1, child_fd)
-                            finally:
-                                os.close(child_fd)
                         except FileNotFoundError:
-                            continue  # Transient source directories are normal.
+                            continue
+                        frames.append((child, level + 1, child_fd, None))
+            finally:
+                for _, _, fd, entries in frames:
+                    if entries is not None:
+                        entries.close()
+                    if fd != root_fd:
+                        os.close(fd)
         try:
             # Explicit tmp root gives it its own depth allowance. Inode caching
             # avoids overlap with src while retaining the deeper search window.
@@ -618,7 +802,7 @@ class Reaper:
                     pass
             budget()
             stats['complete'] = True
-        except (OSError, ValueError, RecursionError) as exc:
+        except (OSError, ValueError) as exc:
             stats['reason'] = str(exc) if isinstance(exc, ValueError) else type(exc).__name__
             detail = 'alternates: ' + stats['reason']
             if detail not in self.errors:
@@ -627,65 +811,114 @@ class Reaper:
         return sorted(found), stats
 
     def git_repositories(self, path):
-        repos = []
-        for item, info in walk(path):
+        repos = set()
+        # Object stores are data, not nested working trees. Do not enumerate
+        # every object again just to discover repositories.
+        def prune(item, info):
+            return item != path and item.parent.name == '.git'
+        for item, info in walk(path, budget=self.budget, prune=prune):
             if item.name == '.git':
                 if not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
                     raise ValueError('unsafe git directory')
-                repos.append(item.parent)
-            elif item.name == 'HEAD' and item.parent.name != '.git' and (item.parent / 'objects').is_dir() and (item.parent / 'refs').is_dir():
-                repos.append(item.parent)
-        return sorted(set(repos))
+                if not inside(item.parent, path):
+                    raise ValueError('Git repository lies outside candidate boundary')
+                repos.add(item.parent)
+            elif item.name == 'HEAD' and item.parent.name != '.git':
+                try:
+                    with directory(item.parent / 'objects'), directory(item.parent / 'refs'):
+                        repos.add(item.parent)
+                except FileNotFoundError:
+                    pass
+        return sorted(repos)
 
     def git_state(self, repo):
-        def git(*args):
-            return command(['git', '-c', 'core.fsmonitor=false', '-C', repo, *args])
-        bare = git('rev-parse', '--is-bare-repository').strip() == 'true'
-        dirty = not bare and bool(git('status', '--porcelain', '--untracked-files=all'))
-        stash = bool(git('stash', 'list'))
-        local = False
-        heads = git('for-each-ref', '--format=%(objectname)', 'refs/heads').splitlines()
-        for head in heads:
-            if not git('for-each-ref', f'--contains={head}', '--format=%(refname)', 'refs/remotes').strip():
-                local = True
-        return dirty, stash, local
+        self.charge()
+        bare = self.observe(['git', '-C', repo, 'rev-parse', '--is-bare-repository']).strip() == 'true'
+        # Includes all named refs (branches, tags, stash and other refs) and
+        # detached HEAD. Never ask Git to examine worktree contents.
+        local = bool(self.observe(['git', '-C', repo, 'rev-list', '--max-count=1',
+                              'HEAD', '--all', '--not', '--remotes']).strip())
+        self.charge()
+        return dict(bare=bare, local=local)
 
-    def bundle(self, repo, dirty):
+    def bundle(self, repo, state):
         folder = self.home / 'archive/reap' / datetime.fromtimestamp(self.now, timezone.utc).strftime('%Y-%m-%d')
         name = repo.name + '-' + hashlib.sha256(str(repo).encode()).hexdigest()[:12] + f'-{time.time_ns()}'
         with directory(folder, True):
             pass
-        # git needs a nonexistent output name; private staging contains all
-        # archive writes until both the bundle and worktree copy verify.
-        staging = Path(tempfile.mkdtemp(prefix='.bundle-', dir=folder))
-        target = staging / (name + '.bundle')
-        command(['git', '-C', repo, 'bundle', 'create', target, '--all'], timeout=120)
-        command(['git', '-C', repo, 'bundle', 'verify', target], timeout=120)
-        if dirty:
-            archive = staging / (name + '.worktree.tar')
-            # bundle --all cannot preserve uncommitted/untracked files. Save
-            # the complete tree as well, without following nested symlinks.
-            with tarfile.open(archive, 'w', dereference=False) as tar:
-                tar.add(repo, arcname=repo.name)
-            with tarfile.open(archive) as tar:
-                for member in tar:
-                    if member.isfile():
-                        stream = tar.extractfile(member)
-                        while stream.read(1024 * 1024):
-                            pass
-        for path in staging.iterdir():
-            path.chmod(0o600)
-            with regular(path) as fd:
+        staging = Path(tempfile.mkdtemp(prefix='.archive-', dir=folder))
+        published = []
+        if state['local']:
+            target = staging / (name + '.bundle')
+            self.charge()
+            self.observe(['git', '-C', repo, 'bundle', 'create', target, '--all', 'HEAD'], timeout=30)
+            self.charge()
+            self.observe(['git', '-C', repo, 'bundle', 'verify', target], timeout=30)
+            self.charge()
+            published.append(target)
+        archive = staging / (name + '.worktree.tar')
+        expected, expected_headers = {}, {}
+        def header(member):
+            return (member.type, member.mode & 0o7777, member.linkname, member.size, member.mtime)
+        def prune(item, info):
+            return item.parts[-2:] == ('.git', 'objects') or (state['bare'] and item == repo / 'objects')
+        # tar.add(recursive=True) is forbidden: the same bounded iterative walk
+        # supplies every member, and regular() refuses a replaced/special file.
+        with tarfile.open(archive, 'w', dereference=False) as tar:
+            for item, info in walk(repo, budget=self.budget, prune=prune):
+                self.charge()
+                arcname = str(Path(repo.name) / item.relative_to(repo))
+                member = tar.gettarinfo(str(item), arcname=arcname)
+                expected_headers[member.name] = header(member)
+                if member.isfile():
+                    with regular(item) as fd:
+                        if signature(os.fstat(fd)) != signature(info):
+                            raise ValueError('archive entry changed')
+                        digest = hashlib.sha256()
+                        reaper = self
+                        class Source:
+                            def read(self, size):
+                                reaper.charge()
+                                data = os.read(fd, size)
+                                digest.update(data)
+                                return data
+                        tar.addfile(member, Source())
+                        expected[member.name] = digest.hexdigest()
+                else:
+                    tar.addfile(member)
+        observed, observed_headers = {}, {}
+        with tarfile.open(archive) as tar:
+            for member in tar:
+                self.charge(1)
+                observed_headers[member.name] = header(member)
+                if member.isfile():
+                    digest = hashlib.sha256()
+                    stream = tar.extractfile(member)
+                    while True:
+                        self.charge()
+                        data = stream.read(1048576)
+                        if not data:
+                            break
+                        digest.update(data)
+                    observed[member.name] = digest.hexdigest()
+        if observed != expected or observed_headers != expected_headers:
+            raise ValueError('worktree archive verification failed')
+        published.append(archive)
+        for target in published:
+            target.chmod(0o600)
+            with regular(target) as fd:
                 os.fsync(fd)
-            path.replace(folder / path.name)
+            target.replace(folder / target.name)
         with directory(folder) as fd:
             os.fsync(fd)
         staging.rmdir()
-        return str(folder / target.name)
+        return [str(folder / target.name) for target in published]
 
     def keep(self, path, snapshot, inspect_tree=True):
         if self.never(path):
             return 'never path'
+        if self.records_error:
+            return 'records unavailable'
         with directory(path.parent) as parent:
             info = os.stat(path.name, dir_fd=parent, follow_symlinks=False)
         if stat.S_ISLNK(info.st_mode):
@@ -725,11 +958,13 @@ class Reaper:
                 for candidate in (slot_root / slot, slot_root / f'{slot}.precheck-logs'):
                     if intersects(path, candidate):
                         return 'claimed slot'
-        if any(inside(item, path) for item in snapshot['borrowed']):
+        if any(intersects(item, path) for item in snapshot['borrowed']):
             return 'alternates target'
         if snapshot['failures']:
+            if any('budget' in failure or 'scan time limit' in failure for failure in snapshot['failures']):
+                return 'budget'
             return snapshot['failures'][0]
-        for item, metadata in walk(path) if inspect_tree else []:
+        for item, metadata in walk(path, budget=self.budget) if inspect_tree else []:
             if self.never(item):
                 return 'contains never path'
             if not (stat.S_ISREG(metadata.st_mode) or stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode)):
@@ -737,59 +972,75 @@ class Reaper:
         return None
 
     def fingerprint(self, path):
-        digest = hashlib.sha256()
-        size = 0
-        for item, info in walk(path):
+        size, manifest = 0, {}
+        for item, info in walk(path, budget=self.budget):
             if stat.S_ISREG(info.st_mode):
                 size += info.st_size
-            digest.update(repr((str(item), info.st_dev, info.st_ino, info.st_mode,
-                                info.st_size, info.st_mtime_ns, info.st_ctime_ns)).encode())
-        return size, digest.hexdigest()
+            manifest[item.relative_to(path)] = signature(info)
+        return size, manifest
 
     def execute(self, classes, mode):
         if mode == 'live' and self.config['mode'] != 'live':
             raise ValueError('--live refused: fleet/reap.toml is dry-run')
+        self.run_budget = Budget(self.run_seconds, self.run_entries)
+        self.budget = self.run_budget
         self.alternates_cache = None
+        self.discovery_incomplete = False
         candidates = self.discover(classes)
-        snapshot = self.snapshot()
+        try:
+            self.charge()
+            snapshot = self.snapshot()
+            self.charge()
+        except BudgetExceeded:
+            snapshot = None
         for item in candidates:
             path = Path(item['path'])
             item.update(bytes=0, action='kept', reason=None, bundles=[])
+            self.budget = Budget(self.candidate_seconds, self.candidate_entries, self.run_budget)
             try:
-                # Metadata sizing never opens file contents (including secrets).
+                if item.get('pre_reason') == 'budget' or snapshot is None:
+                    raise BudgetExceeded('budget')
+                self.charge()
                 reason = self.keep(path, snapshot)
                 if reason:
                     item['reason'] = reason
                     continue
-                item['bytes'], fingerprint = self.fingerprint(path)
-                repos = self.git_repositories(path)
-                unsafe = [(repo, self.git_state(repo)) for repo in repos]
-                unsafe = [(repo, state) for repo, state in unsafe if any(state)]
+                item['bytes'], manifest = self.fingerprint(path)
+                repos = [(repo, self.git_state(repo)) for repo in self.git_repositories(path)]
+                self.charge()
                 if mode == 'dry-run':
-                    if unsafe:
-                        item['action'], item['reason'] = 'kept', 'would bundle'
+                    if repos:
+                        item['reason'] = 'would archive'
                     else:
                         item['action'] = 'would delete'
                     continue
-                for repo, state in unsafe:
-                    item['bundles'].append(self.bundle(repo, state[0]))
-                # Refresh process/claim state immediately before each
-                # removal; discovery and earlier archive work are not proof.
-                if self.fingerprint(path)[1] != fingerprint:
-                    raise ValueError('candidate changed during inspection/archive')
+                for repo, state in repos:
+                    item['bundles'].extend(self.bundle(repo, state))
+                # Every slow observation precedes the final fingerprint. Hold
+                # the producer ledger exclusion from final record check through
+                # removal, including generic candidates a new start may name.
                 if inside(path, self.home / '.claude/jobs'):
                     self.discover({'claude-jobs'})
                 current = self.snapshot()
-                self.refresh_records()
-                reason = self.keep(path, current, inspect_tree=False)
-                if reason:
-                    item['reason'] = reason
-                    continue
-                remove(path, tuple(item['identity']))
+                self.charge()
+                with regular(self.state / 'records.jsonl', os.O_RDWR | os.O_CREAT | os.O_APPEND, True) as fd:
+                    ledger_lock(fd, fcntl.LOCK_EX)
+                    self.refresh_records(fd)
+                    reason = self.keep(path, current, inspect_tree=False)
+                    if reason:
+                        item['reason'] = reason
+                        continue
+                    if self.fingerprint(path)[1] != manifest:
+                        raise ValueError('candidate changed during observations/archive')
+                    self.charge()
+                    remove(path, tuple(item['identity']), manifest, self.budget)
                 item['action'] = 'deleted'
+            except BudgetExceeded:
+                item['reason'] = 'budget'
             except (OSError, ValueError, subprocess.SubprocessError, tarfile.TarError) as exc:
                 item['reason'] = 'inspection/removal error'
                 self.errors.append(f'{path}: {exc}')
+        self.budget = None  # Report persistence and delivery are never budgeted out.
         totals = {}
         for cls in sorted(classes):
             members = [item for item in candidates if item['class'] == cls]
@@ -798,7 +1049,13 @@ class Reaper:
                                kept=len(members) - len(selected))
         return dict(time=self.now, mode=mode, classes=totals,
                     kept=dict(Counter(item['reason'] for item in candidates if item['action'] == 'kept')),
-                    alternates_scan=self.alternates_cache[1] if self.alternates_cache else None, errors=self.errors, candidates=candidates)
+                    alternates_scan=self.alternates_cache[1] if self.alternates_cache else None,
+                    traversal=dict(entries=self.run_budget.entries,
+                                   elapsed_seconds=round(time.monotonic()-self.run_budget.started, 6),
+                                   seconds=self.run_seconds, entry_limit=self.run_entries,
+                                   candidate_seconds=self.candidate_seconds, candidate_entries=self.candidate_entries,
+                                   discovery_incomplete=self.discovery_incomplete),
+                    errors=self.errors, candidates=candidates)
 
     def timer_run(self):
         if not os.environ.get('INVOCATION_ID'):
@@ -814,29 +1071,67 @@ class Reaper:
         full = self.state / f'run-{time.time_ns()}.json'
         result['list_path'] = str(full)
         atomic(full, result)
-        self.daily_summary(result, full)
+        try:
+            self.daily_summary(result, full)
+        except (OSError, ValueError, TypeError, AttributeError, subprocess.SubprocessError) as exc:
+            result['errors'].append(f'daily summary: {type(exc).__name__}')
         atomic(full, result)
         atomic(self.state / 'last.json', result)
         append(self.state / 'runs.jsonl', {k: v for k, v in result.items() if k != 'candidates'})
+
+    def full_list(self, result):
+        groups = {}
+        for item in result['candidates']:
+            key = (item['class'], str(Path(item['path']).parent), item['action'], item['reason'] or '')
+            groups.setdefault(key, []).append(item)
+        lines = ['First complete candidate list (grouped by class):']
+        last = None
+        for (cls, parent, action, reason), items in sorted(groups.items()):
+            if cls != last:
+                lines.append(f'Class {cls}:')
+                last = cls
+            if len(items) > 50:
+                times = [row.get('mtime', result['time']) for row in items]
+                def iso(value):
+                    try:
+                        return datetime.fromtimestamp(value, timezone.utc).isoformat()
+                    except (ValueError, OverflowError, OSError):
+                        return str(value)
+                oldest, newest = iso(min(times)), iso(max(times))
+                lines.append(f"  {len(items)} items; total reported bytes {sum(row['bytes'] for row in items)}; "
+                             f"oldest mtime {oldest}; newest mtime {newest}; directory {json.dumps(parent)}; "
+                             f"{action}; reason {reason or 'none'}")
+            else:
+                for item in sorted(items, key=lambda row: row['path']):
+                    lines.append(f"  {json.dumps(item['path'])}: {action}; reason {reason or 'none'}; bytes {item['bytes']}")
+        return lines
 
     def daily_summary(self, result, full):
         if not self.timer_run():
             return
         day = datetime.fromtimestamp(self.now, timezone.utc).strftime('%Y-%m-%d')
         marker = self.state / 'summary.json'
+        prior = {}
         try:
-            if json.loads(read(marker)).get('day') == day:
-                return
+            prior = json.loads(read(marker))
         except FileNotFoundError:
             pass
-        # Reserve before send: at-most-once, even after interrupted delivery.
-        atomic(marker, dict(day=day))
-        body = '\n'.join([f"{result['mode']} on {os.uname().nodename}: {day}",
-                          *[f"{cls}: {count['selected']} items, {count['bytes']} bytes, {count['kept']} kept"
-                            for cls, count in result['classes'].items()],
-                          f"Kept: {result['kept']}", f"Errors: {len(result['errors'])}", f'Full list: {full}']) + '\n'
+        first = not prior.get('full_sent', False)
+        if prior.get('day') == day and (not first or prior.get('full_reserved')):
+            return
+        # Reserve before send, at most once that day. A failed first delivery
+        # retries with a full list on the next day, never silently as counts.
+        atomic(marker, dict(day=day, full_sent=not first, full_reserved=first))
+        lines = [f"{result['mode']} on {os.uname().nodename}: {day}",
+                 *[f"{cls}: {count['selected']} items, {count['bytes']} bytes, {count['kept']} kept"
+                   for cls, count in result['classes'].items()],
+                 f"Kept: {result['kept']}", f"Errors: {len(result['errors'])}", f'Full JSON: {full}']
+        if first:
+            lines.extend(self.full_list(result))
+        body = '\n'.join(lines) + '\n'
         try:
             command(['post', 'send', '--as', 'reap', self.config['summary_to'], f'reap {os.uname().nodename} {day}'], input=body)
+            atomic(marker, dict(day=day, full_sent=True, full_reserved=False))
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             result['errors'].append(f'daily summary: {exc}')
 
@@ -870,7 +1165,7 @@ def main(argv=None):
         status = subs.add_parser('status')
         status.add_argument('--json', action='store_true')
         args = parser.parse_args(argv)
-        reaper = Reaper()
+        reaper = Reaper(read_records=False) if args.command == 'record' else Reaper()
         if args.command == 'record':
             reaper.record(args)
             return 0

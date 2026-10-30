@@ -18,8 +18,10 @@
 
 The source decisions are the deployment plan at runtime path
 `/home/free/src/fabrig/deploy/notes/reaper-plan.md`, including Changes after
-review, and the reap-1b/reap-1c task contracts. The explicit `final.json` rule
+review, and the reap-1b through reap-1e task contracts. The explicit `final.json` rule
 supersedes the plan's original ended-marker and ended-record-only proposals.
+The accepted independent review in reap-1e removes notes/tasks discovery until
+authoritative finality exists; the plan's builder-copy proposal is deferred.
 
 ## 2. Discovery and retention
 
@@ -31,13 +33,14 @@ supersedes the plan's original ended-marker and ended-record-only proposals.
 | codex-runs | `src/rust/tmp/codex-run/<id>`; final JSON time strictly older than 7 d, final state, inactive/unknown unit |
 | heavy-logs | `src/rust/tmp/logs/*`; mtime 7 d, excluding durable `heavy.tsv` |
 | precheck-logs | `src/fabrig/slots/*.precheck-logs/*`; mtime 3 d |
-| notes | files in `src/fabrig/{notes,tasks}`; mtime 7 d, excluding queue append targets |
 | codex-sessions | `.codex/sessions/**/rollout*.jsonl`; mtime 14 d |
 | recorded | ended producer paths; claude-session 1 h, ops-scratch/retired-scratch 3 d, qa-scratch/codex-run 7 d |
 
 **Records do not weaken fixed guards.** An unended record keeps all intersecting
 paths, including candidates found by another class. Ended records protect the
-same paths until their kind's retention expires. Discovery coalesces overlapping
+same paths until their kind's retention expires. All files in runtime
+`~/src/fabrig/{notes,tasks}` stay, including paths named by ended records.
+Discovery coalesces overlapping
 candidates; a parent accounts for each byte once. No finality is inferred or
 backfilled. `runs.tsv` and all other top-level non-directories under codex-run
 remain untouched. Unknown Claude inventory keeps jobs; unknown Codex finality
@@ -60,7 +63,9 @@ one total 20-second budget. Prune `target`, `node_modules` and `.cache`; never
 walk Git object or pack trees. Read only `.git/objects/info/alternates`, bare
 `*.git/objects/info/alternates`, and Git metadata pointers to linked worktrees'
 common directories. Resolve relative object paths against the objects directory.
-Cache the result across all candidates and final checks. Confirmed missing Git
+Protect every intersection with a borrowed object store: its ancestors,
+object files, loose objects and pack descendants. Cache the result across all
+candidates and final checks. Confirmed missing Git
 directories (for example archived test worktree pointers) have no object store
 to borrow; count them as absent. Pointer paths may contain embedded newlines.
 Incomplete, unsafe,
@@ -71,26 +76,67 @@ unbounded search. New clone layouts require review of the depth limit.
 **Never paths are code rules.** Protect credentials and SSH/Codex private state,
 primary/current/release clones, claims, leases, queue, heavy/post/login state,
 QA scratch, reaper/fleet state, durable bookkeeping and archives. In particular
-protect all of `~/src/fabrig/{archive,events,records,homes}`, `~/src/rust/records` and
+protect all of `~/src/fabrig/{archive,events,records,homes,notes,tasks}`, `~/src/rust/records` and
 `~/src/rust/tmp/owners`. Protect their ancestors and descendants too. The command
 reference lists the other exact paths. TOML cannot disable any keep rule.
 
-**Preserve repository work before live deletion.** Dirty files, stashes or
-branches absent from all remotes require a verified Git bundle under runtime
-`~/archive/reap/YYYY-MM-DD/`. Dirty trees also require a verified worktree tar.
-A dry run keeps such repositories as would-bundle; archive failures keep them.
-Symlink candidates, symlink parents and special files stay. Nested symlinks are
-unlinked without following them. Fingerprints reject changes during inspection
-or archival. Immediately before removal, refresh processes, claims, active
-records and Codex finality, then use inode-checked directory descriptors.
-The cached borrower observation cannot detect a new borrower created mid-run;
-producers must keep data quiescent before ending its lifetime.
+**Never execute repository-defined programs.** Stop detecting dirtiness.
+Every working tree is possibly dirty. Inspection uses only `rev-parse` and
+`rev-list` (or equivalent `for-each-ref`/reachability plumbing), never status,
+diff, checkout, stash porcelain, filters or index refreshes. All Git calls,
+including bundle creation/verification, use the trusted system Git, a minimal
+PATH/environment, no system/global config, no pager, disabled hooks/fsmonitor,
+no replacement objects, and no protocol or lazy fetching. Repository clean,
+process, fsmonitor and hook programs remain data, never executable helpers.
+
+**Preserve every repository before live removal.** Always create a Python
+working-tree tar under runtime `~/archive/reap/YYYY-MM-DD/`, excluding
+`.git/objects` (and a bare repository's objects directory). Include a verified
+`git bundle --all HEAD` whenever any ref, stash or HEAD has commits absent from
+all remote-tracking refs. Explicit HEAD inclusion preserves detached commits.
+Tar members come from the bounded iterative walk; file hashes read back from
+the archive must match the copied bytes. Bundles must verify. Only verified,
+fsynced artifacts are published. Dry-run keeps repositories as `would archive`.
+Archive failures keep the original. The tar preserves working files and metadata;
+commit reachability determines bundle coverage, not a dirtiness inference.
+
+**Final checks follow every slow observation.** Archive, then refresh Claude,
+claims and process observations. Acquire the same records-ledger exclusion used
+by producer writes; reread records, check all keeps and Codex finality, then
+fingerprint. Compare against the inspected metadata manifest only after those
+observations. Hold the ledger lock through removal for every candidate, since
+new records may name paths found by generic discovery too. The remover compares
+every entry's device, inode, type, size, mtime and ctime before mutation, using
+no-follow directory descriptors. It never unlinks an entry absent from the
+manifest; new directory entries make rmdir refuse removal. Symlink candidates,
+symlink parents and special files stay; nested symlinks are only unlinked.
+
+**Traversal has finite budgets.** Walk, Git discovery, tar creation and removal
+use iteration, not recursion or whole-directory sorted lists. A run has 300 s
+and 1,000,000 entries; each candidate has 30 s and 100,000 entries, charged to
+the shared run as well. Slow commands use the remaining deadline. Alternates
+retain their additional 20-second bound. Process inspection is iterative with
+an additional 20 s / 200,000-entry bound and charges observed entries to the run;
+a budget failure never prompts a privileged retry. Exhaustion keeps affected
+candidates as `budget`, preserving and mailing the partial report. Discovery
+exhaustion reports a kept root marker for unenumerated data. Persistence/mail
+are outside inspection budgets. Before mutation, reserve the finite removal
+plan's entry allowance and check time; once admitted, finish that bounded plan
+rather than interrupt it midway on a time-budget tick. Blocking kernel calls
+are not a hard real-time guarantee.
+
+These checks reduce observed races, not arbitrary concurrent filesystem writes.
+The cached borrower observation cannot detect a new borrower created mid-run.
+Ledger exclusion serializes successful starts; busy producers must retry, and
+producers must keep data quiescent before ending a lifetime.
 
 ## 4. Producer lifetime interface
 
 **Producers record identity, owner and paths.** `reap record start|end` appends
 private, locked, fsynced JSONL under runtime `~/.local/state/reap/records.jsonl`.
-The identity is `(kind, id)`; owner names may contain `/`. Repeated starts merge
+Producer lock waits are bounded at two seconds; a busy write emits one stderr
+line, exits 0 normally, and is retried at the next start. The CLI does not first
+perform a blocking ledger read. The identity is `(kind, id)`; owner names may contain `/`. Repeated starts merge
 paths without resetting a live record. Repeated ends preserve the earliest end
 in that lifetime. A start after end resumes the record, keeps it live until the
 next end, and starts a new retention epoch. Start requires an owner; end may
@@ -120,11 +166,22 @@ cannot substitute for this final evidence. Do not manufacture it for old runs.
 ## 5. Scheduling, reports and rollout
 
 **The fleet timer and end hooks invoke the same command.** The all-role service
-uses the current release through a login shell. Its timer runs after boot and
-every fifteen minutes. Normal runs take a nonblocking private lock, write a
+uses the current release through a login shell. The timer uses `OnActiveSec=1min`,
+`OnBootSec=2min`, `OnUnitActiveSec=15min`, `RandomizedDelaySec=30` and
+`AccuracySec=1s`. These settings bound activation scheduling at 91 seconds and
+boot scheduling at 151 seconds, excluding service execution and host scheduling.
+An existing timer must be reactivated to begin a new activation interval. Normal runs take a nonblocking private lock, write a
 full candidate JSON list and last report, and append per-class counts, bytes,
-kept reasons, errors and scan telemetry to `runs.jsonl`. Only a verified timer
-invocation may send one daily ops summary; manual invocations do not mail.
+kept reasons, errors, budgets and scan telemetry to `runs.jsonl`. Only a verified
+timer invocation sends ops mail; manual invocations do not mail. The first
+summary includes the complete candidate list grouped by class, with paths,
+actions and kept reasons in its body. More than 50 items with the same class,
+parent, action and reason collapse to a line with count, total reported bytes,
+oldest/newest root mtime and directory. Early-kept candidates have no measured
+recursive byte size; their reported bytes remain zero. Full JSON always keeps
+every candidate. After successful first delivery, send only daily counts.
+Reserve a date before sending to avoid same-day duplicates; if the first send
+fails, retain full-list delivery for the next day's attempt.
 `--dry-run --json --read-only` writes no reaper state, locks or mail.
 
 **Ops reviews a full dry-run day first.** Inspect complete lists and safety
@@ -147,6 +204,7 @@ Review real read-only fleet reports before any class enters live use.
 
 ## 7. Later
 
+- Restore notes/tasks discovery only for builder copies with authoritative landed/withdrawn evidence; keep every unknown task.
 - Complete producer adoption and ops' first-day review before the live-mode commit.
 - Retire legacy cleanup only after live replacement is demonstrated.
 - Review archive retention and future layouts without broadening deletion roots.

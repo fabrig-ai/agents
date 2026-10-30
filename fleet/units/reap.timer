@@ -2,9 +2,11 @@
 Description=Reap ended fleet sessions and runs every fifteen minutes
 
 [Timer]
-OnBootSec=5min
+OnActiveSec=1min
+OnBootSec=2min
 OnUnitActiveSec=15min
-RandomizedDelaySec=120
+RandomizedDelaySec=30
+AccuracySec=1s
 
 [Install]
 WantedBy=timers.target

@@ -1,7 +1,7 @@
 # Reaper status
 
-2026-10-30. Owner: s/deploy. Baseline: `origin/main` at `a0e79d1`, plus
-`deploy/reap-1`. Contract: `docs/design/reaper.md`, sections 2–6.
+2026-10-30. Owner: s/deploy. Baseline: `origin/main` at `e98c22d`, plus
+`deploy/reap-2`. Contract: `docs/design/reaper.md`, sections 2–6.
 
 ## 1. In one page
 
@@ -16,6 +16,29 @@ work; keep the fleet in dry-run through adoption and ops' first-day review.
 
 ## 2. Present and evidence
 
+- **The eight accepted independent-review findings are addressed in reap-1e.**
+  Repositories run only sanitized reachability plumbing and bundle operations;
+  tests install touch-side-effect clean/process filters, fsmonitor and hooks in
+  ordinary dry-run, read-only and live fixtures. Every worktree gets a verified
+  tar; local-only refs/stash/detached HEAD get a verified bundle, with detached
+  recovery tested. No status/diff/checkout or dirtiness detection remains.
+- Final fingerprints follow slow observations. Ledger exclusion spans final
+  checks/removal, writer waits are bounded at two seconds, and removal checks
+  each inspected entry. Tests cover late edits, late starts, entry replacement,
+  lock contention and successful retry after release.
+- Traversal uses iterative run/candidate budgets, including archives and process
+  metadata. Tests use 1,050 levels, wide trees, time/entry exhaustion and partial
+  persistence/mail. Borrowed object stores protect descendants and ancestors.
+- **Notes/tasks are disabled and fixed keeps.** The plan's builder-copy proposal
+  has no authoritative finality evidence yet. Reintroducing it is deferred in
+  `docs/design/reaper.md`, section 7; ended records cannot bypass the exclusion.
+- Timer activation is bounded at 91 seconds with the exact requested values;
+  boot scheduling is bounded at 151 seconds. `test_units_render_every_host`
+  checks the sums. Reactivate an already-running timer on reviewed deployment
+  to start its new activation interval; no host action was performed here.
+- First timer mail includes the actual grouped list, paths and reasons; large
+  homogeneous groups collapse without dropping entries from the saved JSON.
+  Tests verify grouping, mtime bounds, daily transition and budget-report mail.
 - `tools/reap/reap`, `tools/reap/test_reap.py` and `tools/reap/reap.md` implement
   class discovery, lifetime records, fixed keeps, verified archives and reports.
   `fleet/units/reap.service`, `reap.timer` and `roles.toml` declare all-role units.
@@ -73,7 +96,7 @@ records, real session-hook integration, owner inheritance/orphan ends and
 preservation/removal guards. Run the focused and complete gates
 through plain `tools/check.sh`; never set its lock environment variables.
 Host evidence and test counts for this revision are in the external deployment
-report `/home/free/src/fabrig/deploy/notes/reap-1d-report.md`.
+report `/home/free/src/fabrig/deploy/notes/reap-1e-report.md`.
 
 ## 5. Later
 

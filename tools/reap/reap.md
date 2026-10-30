@@ -16,7 +16,6 @@ use it for surveys. `status [--json]` reads the last report without changing it.
 | codex-runs | `src/rust/tmp/codex-run/<run>` with regular `final.json`, `state` landed/withdrawn, unit inactive/unknown | final JSON UTC `time`, 7 d |
 | heavy-logs | `src/rust/tmp/logs/*`, except durable `heavy.tsv` | mtime, 7 d |
 | precheck-logs | `src/fabrig/slots/*.precheck-logs/*` | mtime, 3 d |
-| notes | files below `src/fabrig/{notes,tasks}`, except `queue.jsonl` and `queue.out` | mtime, 7 d |
 | codex-sessions | `rollout*.jsonl` below `.codex/sessions` only | mtime, 14 d |
 | recorded | producer paths with an ended record | kind-specific, below |
 
@@ -28,7 +27,9 @@ calls do not extend retention: the earliest end since the most recent start
 sets the clock. A resumed start stays live until a new end starts a new clock.
 Kind retention also protects ended paths from earlier generic discovery; an
 old directory mtime cannot skip this wait.
-Unknown/malformed JSONL lines are ignored.
+Unknown/malformed JSONL lines are ignored. Notes/tasks discovery is removed:
+all of `src/fabrig/{notes,tasks}` stays, including paths in ended records,
+until authoritative landed/withdrawn evidence exists for disposable builder copies.
 Overlapping candidates are counted and removed once; a parent owns its bytes.
 Codex finality is never inferred from `ended` or mtimes. Missing, unreadable or
 unknown `final.json` keeps the run as `codex-run not final`; failed systemctl
@@ -52,7 +53,9 @@ explicit owner must match. A mismatch appends nothing and produces one stderr
 line with the usual best-effort exit 0 (`--strict` enables error exits). An end
 without a matching start is recorded but never supplies paths or eligibility.
 A later start cannot inherit that orphan end's paths or timestamp. Records use a 0600
-append-only JSONL file with `O_APPEND`, flock and fsync. Producers always get
+append-only JSONL file with `O_APPEND`, flock and fsync. Ledger lock waits are
+bounded at two seconds; a busy producer returns one diagnostic and retries at
+the next start. Successful starts serialize against live final checks/removal. Producers always get
 exit 0 on record errors, with one stderr line; `--strict` enables failure exits.
 Producer rollout and integration gaps are tracked in `docs/design/reaper.status.md`;
 no transient-unit cleanup is installed by this change.
@@ -84,7 +87,7 @@ newlines in paths. Unknown Claude inventory keeps jobs. Symlink candidates, syml
 Nested symlinks are never followed; removal only unlinks them.
 
 Never paths include `src/rust/tmp/{logins,qa*,heavy,post,owners}`,
-`src/fabrig/{claims,leases,queue,main,agents,current,releases,archive,events,records,homes}`,
+`src/fabrig/{claims,leases,queue,main,agents,current,releases,archive,events,records,homes,notes,tasks}`,
 `src/rust/records`,
 `.local/state/{fleet-sync,fabrig,heavy,reap}`, `.ssh`, `.claude/.credentials.json`,
 `.claude.json`, Codex state outside `.codex/sessions`, and `archive`.
@@ -94,15 +97,31 @@ Heavy reads its TSV for ID allocation and completed-task recovery, so it must
 survive retention. Completed heavy logs are read for a waiting client's tail;
 active processes protect those clients, and logs then get seven days.
 
-Repositories with dirty files, stashes or branches absent from every remote
-need a verified `git bundle create --all` under `archive/reap/YYYY-MM-DD`.
-Dry runs report `would bundle` and keep them. Dirty trees also get a verified
-worktree tar alongside the bundle, preserving uncommitted/untracked contents.
-Archive failures keep the candidate. Process and claim checks run
-again immediately before deletion; alternates evidence is cached for that run.
-Metadata fingerprints reject changes during inspection or archival. Removal uses directory descriptors and no-follow
-opens, checking the candidate inode before unlink/rmdir. These checks reduce
-observed races; producers must still stop before marking output ended.
+No repository-defined helper may run. Git queries use sanitized reachability
+plumbing only, never status/diff/checkout or dirtiness detection. Git receives
+no caller overrides, system/global config, pager, replacement objects or network
+protocols; PATH is `/usr/bin:/bin`, hooks/fsmonitor are disabled and Git is the
+system binary. Clean/process filters and hook programs are never invoked.
+
+Every working tree is possibly dirty. Dry-run keeps repositories as
+`would archive`. Before live removal, always write and hash-verify a Python
+worktree tar, excluding `.git/objects`; bare stores omit their objects directory.
+Any local-only ref, stash or HEAD also requires `git bundle --all HEAD` and
+verification. This includes detached HEAD recovery. Archives are private and
+published under `archive/reap/YYYY-MM-DD` only after verification and fsync.
+Failure keeps the source. Refresh slow observations first, acquire the records
+ledger exclusion, check finality/records, then compare the complete fingerprint.
+Hold the lock through fd-relative, per-entry identity/metadata-checked removal.
+Borrowed object-store intersections protect both ancestors and descendants.
+
+All traversal is iterative: run limits are 300 seconds / 1,000,000 entries,
+and candidate limits are 30 seconds / 100,000 entries charged to the same run.
+Alternates keep their 20-second limit; process metadata has a 20-second /
+200,000-entry limit. Budget exhaustion keeps affected candidates as `budget`,
+then persists and mails the partial report. Discovery exhaustion records a kept
+root marker. Removal reserves its finite entry plan before mutation; admitted
+removal finishes without a time tick interrupting it midway. This cannot bound
+a blocking kernel call or exclude arbitrary concurrent non-producer writes.
 
 ## Reports and extension
 
@@ -110,10 +129,18 @@ Each normal run holds a nonblocking lock, saves a full private `run-*.json`
 list and `last.json`, and appends a summary to `runs.jsonl` under
 `.local/state/reap`. Busy runs exit 0 silently. Reports include per-class counts,
 selected bytes, kept reasons and errors. `--json` prints every candidate.
+The timer uses activation 1 min, boot 2 min, recurrence 15 min, jitter 30 s and
+accuracy 1 s (activation bound 91 s, boot bound 151 s). Reactivate an existing
+timer on reviewed deployment to start the new activation interval.
 Only a systemd invocation whose start matches the timer's latest trigger may
 send the daily summary to `summary_to` (initially `ops@hel8`); manual CLI runs
-never mail. A date reservation before `post send --as reap` prevents duplicate
-mail after interruption; failed sends are recorded and are not retried that day.
+never mail. The first timer summary includes the complete candidate list grouped
+by class, with paths, actions and reasons. More than 50 homogeneous items under
+one parent collapse to count, total reported bytes, oldest/newest root mtime and
+directory. Early-kept directories have unmeasured recursive bytes (reported 0).
+The saved JSON retains every item. After the first successful delivery, mail
+only daily counts. A date reservation before `post send --as reap` prevents
+same-day duplicates; a failed first send retries the full list the next day.
 
 Add a class by declaring its roots and nonnegative retention seconds in
 `fleet/reap.toml`, adding its explicit discovery branch, and adding temporary

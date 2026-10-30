@@ -14,9 +14,6 @@ retention_seconds = 604800
 [classes.precheck-logs]
 root = "src/fabrig/slots"
 retention_seconds = 259200
-[classes.notes]
-roots = ["src/fabrig/notes", "src/fabrig/tasks"]
-retention_seconds = 604800
 [classes.codex-sessions]
 roots = [".codex/sessions"]
 retention_seconds = 1209600
