@@ -10,7 +10,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from fab import calls, cli, log
+from fab import call_review, calls, cli, log
 from fab.plan import Part, Plan, Slice, Task, load_tasks
 from fab.sh import Failed, Result
 from fab.tests.support import FakeRunner, tmp_home
@@ -349,6 +349,51 @@ class StartTest(unittest.TestCase):
                              {"ev": "call.ended", "call": directory.name, "role": "skeleton", "subject": "demo/core",
                               "outcome": "done", "tokens": "23/50/9", "minutes": 1.5})
 
+    def test_start_on_existing_branch_fetches_and_records_amends(self):
+        with tmp_home() as root:
+            branch = "calls/root"
+
+            def claude(call):
+                directory = Path(call.cwd).parent
+                brief = (directory / "brief.md").read_text()
+                self.assertIn(f"- Call: {directory.name}", brief)
+                self.assertIn(f"- Branch: `{branch}`", brief)
+                self.assertIn(str(directory / "report.md"), brief)
+                write(directory / "report.md", "Done: amended\n")
+                return Result(0, "{}")
+
+            fake = FakeRunner().on(["claude"], claude)
+            result = calls.start("amend", "demo/core", root, "# Call facts\n\npreview\n\n# Findings\nFix it.\n",
+                                 sh=fake, branch=branch, amends="root")
+            directory = root / "fab/calls" / result["call"]
+            self.assertEqual(result["branch"], branch)
+            self.assertEqual(result["outcome"], "done")
+            self.assertTrue(result["call"].startswith("amend-"))
+            self.assertNotEqual(result["call"], "root")
+            self.assertEqual(calls.ROLES["amend"], call_review.AMENDER)
+            self.assertEqual(fake.argvs(), [
+                ["git", "fetch", "origin"],
+                ["git", "worktree", "add", "-B", branch, str(directory / "wt"), f"origin/{branch}"],
+                calls.claude_argv(directory / "brief.md", directory / "wt"),
+                ["git", "worktree", "remove", "--force", str(directory / "wt")],
+            ])
+            self.assertEqual([call.cwd for call in fake.calls],
+                             [str(root), str(root), str(directory / "wt"), str(root)])
+            first, last = log.read()
+            self.assertEqual((first["amends"], first["subject"], first["branch"]),
+                             ("root", "demo/core", branch))
+            self.assertEqual(first["call"], last["call"])
+            self.assertEqual(last["outcome"], "done")
+
+    def test_fetch_failure_on_existing_branch_starts_nothing(self):
+        with tmp_home() as root:
+            fake = FakeRunner().on(["git", "fetch"], Result(1, err="offline"))
+            with self.assertRaises(Failed):
+                calls.start("amend", "demo/core", root, "Brief.", sh=fake,
+                            branch="calls/root", amends="root")
+            self.assertEqual(fake.argvs(), [["git", "fetch", "origin"]])
+            self.assertEqual(log.read(), [])
+
     def test_claude_receives_environment_without_nested_session_markers(self):
         with tmp_home() as root:
             environment = {"HOME": str(root), "FAB_HOME": str(root / "fab"),
@@ -453,6 +498,55 @@ class MainTest(unittest.TestCase):
                 self.assertIn("# Inventory", start.call_args.args[3])
                 self.assertIs(start.call_args.kwargs["sh"], fake)
                 self.assertEqual(output.getvalue(), f"{outcome} calls/id\n")
+
+    def amend_chain(self):
+        log.append("call.started", call="root", role="answer", subject="demo", branch="calls/root")
+        log.append("call.ended", call="root", outcome="done")
+        log.append("run.started", run="root-1", task="root", kind="review")
+        log.append("run.ended", run="root-1", outcome="failed")
+
+    def test_main_amend_brief_only_uses_chain_and_refusal(self):
+        with tmp_home() as root:
+            fixture(root)
+            self.amend_chain()
+            write(log.home() / "runs/root-1/report.md", "Failed: fix the signature\n")
+            fake = FakeRunner().on(["git", "rev-parse"], Result(0, str(root)))
+            output = io.StringIO()
+            with patch.object(calls, "run", fake), patch.object(calls, "start") as start, redirect_stdout(output):
+                self.assertEqual(calls.main(["amend", "root", "--plan", str(root / "docs/plan/demo"),
+                                             "--brief-only"]), 0)
+            start.assert_not_called()
+            self.assertEqual(output.getvalue(), call_review.amend_brief(
+                call_review.chains(log.read())["root"], call_id="(assigned at start)",
+                branch="(assigned at start)", report="(assigned at start)") + "\n")
+            self.assertIn("fix the signature", output.getvalue())
+            self.assertEqual(fake.argvs(), [["git", "rev-parse", "--show-toplevel"]])
+
+    def test_main_amend_runs_on_chain_branch_and_subject(self):
+        with tmp_home() as root:
+            fixture(root)
+            self.amend_chain()
+            fake = FakeRunner().on(["git", "rev-parse"], Result(0, str(root)))
+            with patch.object(calls, "run", fake), redirect_stdout(io.StringIO()), \
+                 patch.object(calls, "start", return_value={"outcome": "done", "branch": "calls/root"}) as start:
+                self.assertEqual(calls.main(["amend", "root", "--plan", str(root / "docs/plan/demo")]), 0)
+            self.assertEqual(start.call_args.args[:3], ("amend", "demo", root))
+            self.assertEqual(start.call_args.kwargs, dict(sh=fake, branch="calls/root", amends="root"))
+
+    def test_main_amend_refuses_unknown_root_and_every_other_state(self):
+        for status in ("unknown", *[state for state in call_review.STATES if state != "amend"]):
+            with self.subTest(status=status), tmp_home() as root:
+                fixture(root)
+                chain = call_review.Chain("root", "answer", "demo", "calls/root", ("root",), "root", (), status)
+                fake = FakeRunner().on(["git", "rev-parse"], Result(0, str(root)))
+                errors = io.StringIO()
+                with patch.object(calls, "run", fake), patch.object(calls, "start") as start, \
+                     patch.object(call_review, "chains", return_value={} if status == "unknown" else {"root": chain}), \
+                     redirect_stderr(errors):
+                    self.assertEqual(calls.main(["amend", "root", "--plan", str(root / "docs/plan/demo"),
+                                                 "--brief-only"]), 1)
+                start.assert_not_called()
+                self.assertIn("must be in state amend", errors.getvalue())
 
     def test_main_refuses_unknown_part_and_missing_plan(self):
         with tmp_home() as root:

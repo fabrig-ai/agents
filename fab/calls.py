@@ -1,8 +1,8 @@
 """Claude calls: fresh, short sessions on briefs compiled by code (docs/design/fab.md, 13).
 
 A call never waits, polls or watches. Code compiles its brief from files; the call writes
-files on a branch of its own and ends with a report whose first line is its outcome, as a
-run's does. The dispatcher lands what it wrote.
+files on its chain's branch and ends with a report whose first line is its outcome, as a
+run's does. The dispatcher reviews the branch before landing it.
 """
 
 from __future__ import annotations
@@ -29,6 +29,7 @@ ROLES = {
     "skeleton": Path(__file__).resolve().parent / "roles" / "skeleton.md",
     "answer": Path(__file__).resolve().parent / "roles" / "answerer.md",
     "review": Path(__file__).resolve().parent / "roles" / "reviewer.md",
+    "amend": Path(__file__).resolve().parent / "roles" / "amender.md",
 }
 MODEL = "claude-opus-5-5"
 BRIEF_LIMIT = 200_000  # characters, about 50k tokens: what code puts in; the call reads the rest itself
@@ -268,30 +269,25 @@ def claude_argv(brief_path: Path, workdir: Path, *, model: str = MODEL) -> list[
 
 
 def start(role: str, subject: str, repo: Path, brief: str, *, sh: Runner = run,
-          log_path: Path | None = None) -> dict:
-    """Run one call to its end (calls are short; the dispatcher waits for them in a thread or
-    a unit, not here). Create the worktree FAB_HOME/calls/<id>/wt on a new branch
-    `calls/<id>` from origin/main of repo (a clone), write the brief to FAB_HOME/calls/<id>/brief.md,
-    log call.started (call, role, subject, branch), run claude_argv in the worktree with
-    TIMEOUT, keep its JSON output as result.json and its stderr as stderr.log, read the report
-    (FAB_HOME/calls/<id>/report.md),
-    log call.ended (call, role, subject, outcome as fab.run.outcome of the report, or failed
-    when there is none; tokens from the JSON usage as "input/cache_read/output"; minutes), and
-    remove the worktree, keeping the branch. Returns {call, branch, outcome, report}.
+          log_path: Path | None = None, branch: str | None = None,
+          amends: str | None = None) -> dict:
+    """Run a fresh call, keeping its own id, directory, brief, report and result artifacts.
 
-    The call is a fresh top-level session: claude runs with the environment minus every
-    variable starting with CLAUDECODE or CLAUDE_CODE_, so a call started from inside another
-    Claude session is not refused as nested."""
+    Create FAB_HOME/calls/<id>/wt on calls/<id> from origin/main, or fetch origin and
+    reset the supplied branch from origin/<branch> with worktree add -B. Rebind Call facts,
+    log call.started (including amends when supplied), run Claude without nested-session
+    environment markers, then log call.ended with report outcome, usage and elapsed minutes.
+    Remove the worktree even on failure; return {call, branch, outcome, report}."""
     if role not in ROLES:
         raise ValueError(f"unknown call role {role!r}")
     call_id = f"{role}-{uuid.uuid4().hex}"
-    branch = f"calls/{call_id}"
+    existing = branch is not None
+    branch = branch if existing else f"calls/{call_id}"
     directory = log.home() / "calls" / call_id
     directory.mkdir(parents=True)
     worktree = directory / "wt"
     brief_path = directory / "brief.md"
     report_path = directory / "report.md"
-    # Only the facts section is rebound; quoted designs and specs stay verbatim.
     marker = "# Call facts\n\n"
     before, found, after = brief.partition(marker)
     if found:
@@ -299,32 +295,23 @@ def start(role: str, subject: str, repo: Path, brief: str, *, sh: Runner = run,
         brief = before + marker + _facts(call_id, branch, str(report_path))
         if separator:
             brief += separator + rest
-    sh(["git", "worktree", "add", "-b", branch, str(worktree), "origin/main"],
-       cwd=str(repo), check=True)
+    if existing:
+        sh(["git", "fetch", "origin"], cwd=str(repo), check=True)
+    sh(["git", "worktree", "add", "-B" if existing else "-b", branch, str(worktree),
+        f"origin/{branch}" if existing else "origin/main"], cwd=str(repo), check=True)
     began = time.monotonic()
     try:
         _write(brief_path, brief)
-        log.append("call.started", path=log_path, call=call_id, role=role, subject=subject, branch=branch)
+        fields = {"amends": amends} if amends is not None else {}
+        log.append("call.started", path=log_path, call=call_id, role=role, subject=subject,
+                   branch=branch, **fields)
         environment = {key: value for key, value in os.environ.items()
                        if not key.startswith(("CLAUDECODE", "CLAUDE_CODE_"))}
         result = sh(claude_argv(brief_path, worktree), cwd=str(worktree), timeout=TIMEOUT,
                     env=environment)
         _write(directory / "result.json", result.out)
         _write(directory / "stderr.log", result.err)
-        try:
-            data = json.loads(result.out)
-        except json.JSONDecodeError:
-            data = {}
-        usage = data.get("usage", {}) if isinstance(data, dict) else {}
-        if not isinstance(usage, dict):
-            usage = {}
-        tokens = "/".join(str(usage.get(key, 0)) for key in
-                          ("input_tokens", "cache_read_input_tokens", "output_tokens"))
-        try:
-            report_text = report_path.read_text(encoding="utf-8")
-        except (OSError, UnicodeError):
-            report_text = ""
-        status = outcome(report_text)
+        status, tokens = _call_result(result.out, report_path)
         log.append("call.ended", path=log_path, call=call_id, role=role, subject=subject,
                    outcome=status, tokens=tokens, minutes=(time.monotonic() - began) / 60)
         return {"call": call_id, "branch": branch, "outcome": status, "report": str(report_path)}
@@ -332,16 +319,38 @@ def start(role: str, subject: str, repo: Path, brief: str, *, sh: Runner = run,
         sh(["git", "worktree", "remove", "--force", str(worktree)], cwd=str(repo), check=True)
 
 
+def _call_result(text: str, report_path: Path) -> tuple[str, str]:
+    """Read the report's outcome and JSON usage, tolerating missing or malformed output."""
+    try:
+        result = json.loads(text)
+    except json.JSONDecodeError:
+        result = {}
+    usage = result.get("usage", {}) if isinstance(result, dict) else {}
+    if not isinstance(usage, dict):
+        usage = {}
+    tokens = "/".join(str(usage.get(key, 0)) for key in
+                      ("input_tokens", "cache_read_input_tokens", "output_tokens"))
+    try:
+        report_text = report_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        report_text = ""
+    return outcome(report_text), tokens
+
+
 def main(argv: list[str]) -> int:
-    """`fab call skeleton PART --plan PLAN_DIR` and `fab call answer --plan PLAN_DIR`: compile the
-    brief from the plan's repository (PLAN_DIR's checkout), run the call, print its outcome and
-    branch; exit 0 when Done, 1 otherwise. `--brief-only` prints the brief and runs nothing."""
+    """Compile and run skeleton PART, answer, review or amend ROOT with --plan PLAN_DIR.
+
+    Amend requires a known chain in state amend and reuses its subject and branch.
+    --brief-only prints the brief; otherwise print outcome and branch, exiting 0 for Done
+    and 1 for a failed call, invalid chain or compilation error."""
+    from fab import call_review
+
     parser = argparse.ArgumentParser(prog="fab call", description=__doc__)
     commands = parser.add_subparsers(dest="role", required=True)
     for role in ROLES:
         command = commands.add_parser(role)
-        if role == "skeleton":
-            command.add_argument("part")
+        if role in ("skeleton", "amend"):
+            command.add_argument("part" if role == "skeleton" else "root")
         command.add_argument("--plan", type=Path, required=True)
         command.add_argument("--brief-only", action="store_true")
     args = parser.parse_args(argv)
@@ -353,7 +362,15 @@ def main(argv: list[str]) -> int:
         root = Path(checkout.out.strip())
         events = log.read()
         facts = dict(call_id="(assigned at start)", branch="(assigned at start)", report="(assigned at start)")
-        if args.role == "skeleton":
+        options = {}
+        if args.role == "amend":
+            chain = call_review.chains(events).get(args.root)
+            if chain is None or chain.state != "amend":
+                raise ValueError(f"chain {args.root!r} must be in state amend")
+            text = call_review.amend_brief(chain, **facts)
+            subject = chain.subject
+            options = dict(branch=chain.branch, amends=chain.root)
+        elif args.role == "skeleton":
             if args.part not in plan.parts:
                 raise ValueError(f"unknown part {args.part!r}")
             statuses = {key: view.status for key, view in fold(tasks, events).items()}
@@ -369,7 +386,7 @@ def main(argv: list[str]) -> int:
         if args.brief_only:
             print(text)
             return 0
-        result = start(args.role, subject, root, text, sh=run)
+        result = start(args.role, subject, root, text, sh=run, **options)
         print(f"{result['outcome']} {result['branch']}")
         return 0 if result["outcome"] == "done" else 1
     except (OSError, ValueError, Failed) as error:
