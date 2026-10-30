@@ -10,7 +10,7 @@ from unittest.mock import patch
 from fab import log, run
 from fab.hosts import Host
 from fab.plan import Task
-from fab.sh import Failed, Result
+from fab.sh import Failed, Result, ssh
 from fab.tests.support import FakeRunner, git, git_pair, tmp_home
 
 
@@ -92,9 +92,116 @@ class RunPureTest(unittest.TestCase):
                      "/remote/report.md", *TASK.files, "25"):
             self.assertIn(fact, text)
         self.assertTrue(text.endswith(TASK.body))
+        self.assertNotIn("## The landing refused this branch", text)
+
+    def refusal(self, text):
+        return run.brief(TASK, "# Role", run_id="draft/task-2", branch=TASK.id,
+                         base="origin/main", report="/report.md",
+                         rejection={"step": "default", "log": "/queue/red.log", "text": text})
+
+    def test_brief_refusal_starts_at_last_failed_step_and_ends_at_next_step(self):
+        text = self.refusal("[default] old attempt (cwd /repo)\nstale failure\n"
+                            "[build] cargo build (cwd /repo)\nunrelated output\n"
+                            "[default] heavy check (cwd /repo)\n[ERROR] umask 022\nlast failure\n"
+                            "[later] true (cwd /repo)\nlater output\n")
+        self.assertIn("## The landing refused this branch", text)
+        self.assertIn("The landing's checks failed; reproduce this first, in the lowest tier "
+                      "that shows it. If it does not reproduce, say so in your report's first line.", text)
+        self.assertIn("- Step: `default`", text)
+        self.assertIn("- Queue log: `/queue/red.log`", text)
+        self.assertIn("[default] heavy check (cwd /repo)\n[ERROR] umask 022\nlast failure", text)
+        for absent in ("stale failure", "unrelated output", "later output", "[later]"):
+            self.assertNotIn(absent, text)
+        self.assertLess(text.index("implementer-minutes"), text.index("## The landing refused"))
+        self.assertTrue(text.endswith(TASK.body))
+
+    def test_brief_refusal_caps_log_at_120_lines_including_step_header(self):
+        lines = ["[default] check (cwd /repo)", *(f"line {i}" for i in range(150))]
+        text = self.refusal("earlier step\n" + "\n".join(lines))
+        self.assertEqual(text.split("```text\n", 1)[1].split("\n```", 1)[0].splitlines(), lines[:120])
+
+    def test_brief_refusal_keeps_path_when_log_unreadable_or_step_missing(self):
+        for log_text, why in (("(log unreadable: permission denied)", "permission denied"),
+                              ("", "step [default] not found"),
+                              ("[build] true (cwd /repo)\nok", "step [default] not found")):
+            with self.subTest(log_text=log_text):
+                text = self.refusal(log_text)
+                self.assertIn("## The landing refused this branch", text)
+                self.assertIn("`/queue/red.log`", text)
+                self.assertIn(f"(log unreadable: {why})", text)
+
+
+class RejectionTextTest(unittest.TestCase):
+    def test_log_is_read_on_gate_in_one_quoted_ssh(self):
+        gate = Host("gate", "gate@invalid", ("gate",))
+        record = {"step": "default", "log": "/queue/a b'$(touch NEVER).log"}
+        output = "[build] true (cwd /repo)\n[default] false (cwd /repo)\nred\n"
+        fake = FakeRunner().on(["ssh"], Result(0, output))
+        self.assertEqual(run.rejection_text(record, gate, sh=fake), output)
+        self.assertEqual(len(fake.calls), 1)
+        self.assertEqual(fake.calls[0].argv[5], gate.ssh)
+        self.assertEqual(command(fake.calls[0]), ["tail", "-n", "+1", "--", record["log"]])
+
+    def test_missing_unreadable_and_unavailable_logs_give_diagnostic(self):
+        gate = Host("gate", "gate@invalid", ("gate",))
+        def unavailable(call):
+            raise OSError("ssh unavailable")
+
+        for answer, why in ((Result(1, err="permission denied"), "permission denied"),
+                             (Result(255, err="offline"), "offline"), (unavailable, "ssh unavailable")):
+            with self.subTest(why=why):
+                fake = FakeRunner().on(["ssh"], answer)
+                text = run.rejection_text({"log": "/queue/red.log"}, gate, sh=fake)
+                self.assertTrue(text.startswith("(log unreadable: "))
+                self.assertIn(why, text)
+                self.assertEqual(len(fake.calls), 1)
+        fake = FakeRunner()
+        self.assertIn("no log path", run.rejection_text({}, gate, sh=fake))
+        self.assertEqual(fake.calls, [])
 
 
 class RunStartTest(unittest.TestCase):
+    def test_start_passes_rejection_log_to_remote_and_local_brief_without_mutating_record(self):
+        with tmp_home() as home:
+            gate = Host("gate", "gate@invalid", ("gate",))
+            record = {"step": "default", "log": "/queue/red.log", "tip": "same"}
+            red = "[build] true (cwd /repo)\n[default] false (cwd /repo)\nred umask\n"
+            fake = FakeRunner().on(ssh(gate.ssh, ["tail", "-n", "+1", "--", record["log"]]),
+                                   Result(0, red))
+            fake.rules.extend(starter().rules)
+            with patch.object(run.hosts, "load", return_value={HOST.name: HOST, gate.name: gate}):
+                run_id = run.start(TASK, HOST, kind="repair", sh=fake, rejection=record)
+            text = (home / "fab/runs" / run_id / "brief.md").read_text()
+            self.assertEqual(fake.calls[-2].input, text)
+            self.assertIn("red umask", text)
+            self.assertNotIn("[build]", text)
+            self.assertEqual(record, {"step": "default", "log": "/queue/red.log", "tip": "same"})
+
+    def test_start_still_launches_when_gate_log_cannot_be_read(self):
+        with tmp_home() as home:
+            gate = Host("gate", "gate@invalid", ("gate",))
+            record = {"step": "default", "log": "/queue/missing.log"}
+            fake = FakeRunner().on(ssh(gate.ssh, ["tail", "-n", "+1", "--", record["log"]]),
+                                   Result(1, err="No such file or directory"))
+            fake.rules.extend(starter().rules)
+            with patch.object(run.hosts, "load", return_value={gate.name: gate}):
+                run_id = run.start(TASK, HOST, kind="repair", sh=fake, rejection=record)
+            text = (home / "fab/runs" / run_id / "brief.md").read_text()
+            self.assertIn("## The landing refused this branch", text)
+            self.assertIn("`/queue/missing.log`", text)
+            self.assertIn("(log unreadable:", text)
+            self.assertIn("No such file or directory", text)
+            self.assertEqual(command(fake.calls[-1])[:3], ["fab", "codex", "start"])
+            self.assertEqual(log.read()[-1]["ev"], "run.started")
+
+    def test_start_still_launches_when_no_gate_is_configured(self):
+        with tmp_home() as home, patch.object(run.hosts, "load", return_value={}):
+            fake = starter()
+            run_id = run.start(TASK, HOST, sh=fake, rejection={"log": "/red", "step": "default"})
+            text = (home / "fab/runs" / run_id / "brief.md").read_text()
+            self.assertIn("(log unreadable: no gate host configured)", text)
+            self.assertEqual(command(fake.calls[-1])[:3], ["fab", "codex", "start"])
+
     def test_start_commands_and_event_for_every_kind(self):
         for kind in run.KINDS:
             with self.subTest(kind=kind), tmp_home() as home:

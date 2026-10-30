@@ -66,10 +66,32 @@ def role_text(repo: str) -> str:
     return ROLE.read_text() + (f"\n{notes.read_text()}" if notes.exists() else "")
 
 
-def brief(task: Task, role: str, *, run_id: str, branch: str, base: str, report: str) -> str:
+def brief(task: Task, role: str, *, run_id: str, branch: str, base: str, report: str,
+          rejection: dict | None = None) -> str:
     """The brief Codex gets: the role text, then a `# Your task` section listing run, branch,
-    base, report path, the files it may change and the expected minutes, then the spec's body."""
+    base, report path, the files it may change and the expected minutes, then the spec's body.
+    A rejection adds the failed step and queue log between the facts and body; start supplies
+    its log text in `text`. Only the last matching step, at most 120 lines, is included."""
     files = ", ".join(task.files) or "(none)"
+    refusal = ""
+    if rejection is not None:
+        step = rejection.get("step", "unknown")
+        lines = rejection.get("text", "(log unreadable: no log text)").splitlines()
+        starts = [i for i, line in enumerate(lines) if line.startswith(f"[{step}]")]
+        if starts:
+            lines = lines[starts[-1]:]
+            end = next((i for i, line in enumerate(lines[1:], 1)
+                        if line.startswith("[") and " (cwd " in line), len(lines))
+            lines = lines[:end]
+        elif not lines or not lines[0].startswith("(log unreadable:"):
+            lines = [f"(log unreadable: step [{step}] not found)"]
+        excerpt = "\n".join(lines[:120])
+        refusal = ("## The landing refused this branch\n\n"
+                   "The landing's checks failed; reproduce this first, in the lowest tier "
+                   "that shows it. If it does not reproduce, say so in your report's first line.\n\n"
+                   f"- Step: `{step}`\n"
+                   f"- Queue log: `{rejection.get('log', '(missing)')}`\n\n"
+                   f"```text\n{excerpt}\n```\n\n")
     return (f"{role.rstrip()}\n\n# Your task\n\n"
             f"- Task: {task.id} (spec `{task.path}`)\n"
             f"- Repository: {task.repo}\n"
@@ -79,11 +101,26 @@ def brief(task: Task, role: str, *, run_id: str, branch: str, base: str, report:
             f"- Report: write it to `{report}`\n"
             f"- Files you may change: {files}\n"
             f"- Expected: about {task.minutes} implementer-minutes\n\n"
-            f"{task.body}")
+            f"{refusal}{task.body}")
+
+
+def rejection_text(record: dict, gate_host: Host, *, sh: Runner = run) -> str:
+    """Read a rejection's queue log in one ssh on the gate; unreadable logs give a diagnostic.
+
+    brief selects the last occurrence of the failed step and caps it at 120 lines. The text
+    travels in a copy of the rejection record as `text`, leaving the logged record unchanged.
+    """
+    if not record.get("log"):
+        return "(log unreadable: rejection has no log path)"
+    try:
+        result = sh(ssh(gate_host.ssh, ["tail", "-n", "+1", "--", record["log"]]), check=True)
+    except (OSError, Failed) as error:
+        return "(log unreadable: " + " ".join(str(error).splitlines()) + ")"
+    return result.out
 
 
 def start(task: Task, host: Host, *, kind: str = "implement", events: Iterable[dict] = (),
-          sh: Runner = run, log_path: Path | None = None) -> str:
+          sh: Runner = run, log_path: Path | None = None, rejection: dict | None = None) -> str:
     """Start a run of task on host and log run.started; return the run id.
 
     On the builder, over ssh: make sure FAB_HOME/repos/<task.repo> is a clone of
@@ -114,8 +151,18 @@ def start(task: Task, host: Host, *, kind: str = "implement", events: Iterable[d
     directory = root / "runs" / run_id
     brief_path, report_path = directory / "brief.md", directory / "report.md"
     base = "origin/main"
+    if rejection is not None:
+        try:
+            gates = sorted((host for host in hosts.load().values() if "gate" in host.roles),
+                           key=lambda host: host.name)
+            if not gates:
+                raise ValueError("no gate host configured")
+            red = rejection_text(rejection, gates[0], sh=sh)
+        except (OSError, ValueError) as error:
+            red = "(log unreadable: " + " ".join(str(error).splitlines()) + ")"
+        rejection = {**rejection, "text": red}
     text = brief(task, role_text(task.repo), run_id=run_id, branch=branch, base=base,
-                 report=str(report_path))
+                 report=str(report_path), rejection=rejection)
 
     def remote(argv, *, input=None):
         return sh(ssh(host.ssh, argv), input=input, check=True)
