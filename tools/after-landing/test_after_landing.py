@@ -156,7 +156,7 @@ class BisectionTests(BisectionSandbox):
                 key = self.key(name, profile)
                 active['baseline'][key] = dict(result='pass', commit=good)
                 alerts.append(dict(identity=json.loads(key)))
-        def git(slot, *argv):
+        def git(slot, *argv, **kwargs):
             if argv[0] == 'rev-list':
                 return '\n'.join([newer, middle, tip] if argv[-1] == old + '..' + tip else [middle, tip])
             self.assertEqual(argv[0], 'rev-parse')
@@ -479,7 +479,7 @@ class ContractTests(Sandbox):
             'baseline': 'parent\nqueue baseline',
             'fast-forward': 'parent\nMerge ready/skein/not-a-merge',
         }
-        def git(slot, *argv):
+        def git(slot, *argv, **kwargs):
             self.assertEqual(slot, self.slot)
             if argv[0] == 'rev-list':
                 self.assertEqual(argv, ('rev-list', '--first-parent', '--reverse', 'previous..tip'))

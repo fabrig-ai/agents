@@ -147,13 +147,13 @@ class TrimTests(Sandbox):
         self.runner.poll()
         real_git = app.git
         checkouts = []
-        def git(slot, *argv):
+        def git(slot, *argv, **kwargs):
             if argv[0] == 'checkout':
                 checkouts.append(argv[-1])
                 self.assertEqual(len(self.calls('trim')), 1)
                 self.assertEqual(self.calls('trim')[0]['head'], self.base)
                 self.assertEqual(self.runner.state['last_trim']['id'], self.base + ':1')
-            return real_git(slot, *argv)
+            return real_git(slot, *argv, **kwargs)
         with mock.patch.object(app, 'git', side_effect=git):
             self.runner.run()
         self.assertEqual(checkouts, [next_tip])
@@ -203,11 +203,11 @@ class TrimTests(Sandbox):
         self.runner = app.Runner(self.args)
         tip, _ = self.advance()
         real_git = app.git
-        def git(slot, *argv):
+        def git(slot, *argv, **kwargs):
             if argv[0] == 'checkout':
                 self.assertEqual(len(self.calls('trim')), 1)
                 self.assertEqual(self.calls('trim')[0]['head'], self.base)
-            return real_git(slot, *argv)
+            return real_git(slot, *argv, **kwargs)
         with mock.patch.object(app, 'git', side_effect=git):
             self.poll_run()
         self.assertEqual(self.runner.state['cursor'], tip)
@@ -1403,10 +1403,10 @@ class BisectionTests(BisectionSandbox):
         before = json.loads(json.dumps(self.runner.state))
         saved_before = self.runner.path.read_bytes()
         real_git = app.git
-        def fail_parent_read(slot, *argv):
+        def fail_parent_read(slot, *argv, **kwargs):
             if argv[0] == 'rev-parse' and argv[-1].endswith('^1'):
                 raise app.Fault('injected bisection preparation failure')
-            return real_git(slot, *argv)
+            return real_git(slot, *argv, **kwargs)
         with mock.patch.object(app, 'git', side_effect=fail_parent_read):
             with self.assertRaisesRegex(app.Fault, 'injected bisection preparation failure'):
                 self.runner.finish()
