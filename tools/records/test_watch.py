@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from offline_test_support import RecordsSeed, call_main
 
 TOOL = Path(__file__).with_name('watch').resolve()
+CONFIG = Path(__file__).with_name('fixtures') / 'watch.toml'
 API = runpy.run_path(str(TOOL))
 NOW = 1793271600.0
 ISO = API['iso']
@@ -25,7 +26,7 @@ ISO = API['iso']
 
 class Rules(unittest.TestCase):
     def setUp(self):
-        self.config = tomllib.loads(TOOL.with_suffix('.toml').read_text())['rules']
+        self.config = tomllib.loads(CONFIG.read_text())['rules']
         self.state = {}
         self.names = {
             'lead/tools': dict(name='lead/tools', role='lead', supervisor='s/default', coordinator_mailbox='s/default', aliases=[]),
@@ -972,7 +973,7 @@ print(__import__('json').dumps(rows))
     def fake(self, name, program):
         self.write(self.bin / name, '#!/usr/bin/env python3\n'+program).chmod(0o700)
     def invoke(self, dry=False, code=0, post=True, **env):
-        config = self.write(self.home/'watch.toml', TOOL.with_suffix('.toml').read_text().replace(
+        config = self.write(self.home/'watch.toml', CONFIG.read_text().replace(
             'post = true', 'post = true' if post else 'post = false'))
         wrapper = ("import runpy,sys\nfrom unittest.mock import patch\nsys.argv=sys.argv[1:]\n"
                    f"with patch('time.time', return_value={NOW}):\n api=runpy.run_path(sys.argv[0])\n sys.exit(api['main']())")

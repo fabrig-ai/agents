@@ -1,0 +1,83 @@
+# Synthetic test configuration; remedies enabled independently of production policy.
+# Minutes; conditions use strict 'older than' comparisons. Disable any rule.
+[alerts]
+post = true
+
+[watch]
+interval_seconds = 120
+heartbeat_seconds = 900
+# Use the configured origins; Forgejo migration only needs these values changed.
+fabrig_remote = "git@github.com:fabrig-ai/fabrig.git"
+records_remote = "git@github.com:fabrig-ai/records.git"
+
+[rules.deaf]
+enabled = true
+remedy = true
+max_attempts = 2
+retry_seconds = 120
+stop_timeout_seconds = 60
+stop_poll_seconds = 1
+minutes = 10
+escalate_minutes = 30
+
+[rules.gone]
+enabled = true
+remedy = true
+max_attempts = 2
+retry_seconds = 120
+escalate_minutes = 30
+
+[rules."report unread"]
+enabled = true
+minutes = 15
+escalate_minutes = 30
+
+[rules."run hung"]
+enabled = true
+minutes = 60
+median_multiplier = 3
+median_min_samples = 5
+fallback_minutes = 90
+escalate_minutes = 30
+
+[rules."idle claim"]
+enabled = true
+minutes = 45
+escalate_minutes = 45
+
+[rules.unqueued]
+enabled = true
+minutes = 30
+batch_minutes = 20
+escalate_minutes = 30
+
+[rules."lease stall"]
+enabled = true
+minutes = 240
+waiter_minutes = 120
+escalate_minutes = 240
+
+[rules."handover late"]
+enabled = true
+minutes = 20
+escalate_minutes = 20
+
+[rules."question due"]
+enabled = true
+escalate_minutes = 0
+
+[rules."delivery failed"]
+enabled = true
+escalate_minutes = 20
+
+[rules."waiter orphan"]
+enabled = true
+remedy = true
+max_attempts = 2
+retry_seconds = 120
+escalate_minutes = 30
+
+[rules."waiter dead"]
+enabled = true
+remedy = false
+escalate_minutes = 30

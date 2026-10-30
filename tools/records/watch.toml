@@ -9,9 +9,10 @@ heartbeat_seconds = 900
 fabrig_remote = "git@github.com:fabrig-ai/fabrig.git"
 records_remote = "git@github.com:fabrig-ai/records.git"
 
+# Remedies off during the user's pause (director decisions 0036/0037); turn back on only on the director's word.
 [rules.deaf]
 enabled = true
-remedy = true
+remedy = false
 max_attempts = 2
 retry_seconds = 120
 stop_timeout_seconds = 60
@@ -21,7 +22,7 @@ escalate_minutes = 30
 
 [rules.gone]
 enabled = true
-remedy = true
+remedy = false
 max_attempts = 2
 retry_seconds = 120
 escalate_minutes = 30
@@ -71,7 +72,7 @@ escalate_minutes = 20
 
 [rules."waiter orphan"]
 enabled = true
-remedy = true
+remedy = false
 max_attempts = 2
 retry_seconds = 120
 escalate_minutes = 30
