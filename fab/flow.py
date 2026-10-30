@@ -8,10 +8,15 @@ place, or one more on a calm builder (fab.dispatch.places).
 
 from __future__ import annotations
 
+import json
+from collections import Counter
 from collections.abc import Iterable, Mapping
+from datetime import timedelta
 
+from fab import report
 from fab.hosts import Host
-from fab.sh import Runner, run
+from fab.run import remote_home
+from fab.sh import Failed, Runner, run, ssh
 
 START = 2  # the target when a plan starts
 FLOOR = 1  # the target never drops below this
@@ -38,7 +43,34 @@ def target(draft: str, events: Iterable[dict]) -> int:
       the target does not grow it: an unused target says nothing about a larger one.
     A run.ended without its run.started still updates the target (infra) but is not counted
     as in flight. Never raises on a record missing a field: it is skipped for that rule."""
-    raise NotImplementedError
+    limit = START
+    flight = set()
+    attempts = Counter()
+    rejected = set()
+    landed = set()
+    full = {}
+    for event in events:
+        task = event.get("task")
+        if not isinstance(task, str) or not task.startswith(draft + "/"):
+            continue
+        kind = event.get("ev")
+        identifier = event.get("run")
+        if kind == "run.started" and isinstance(identifier, str):
+            flight.add(identifier)
+            attempts[task] += 1
+        elif kind == "run.ended" and isinstance(identifier, str):
+            full[task] = identifier in flight and len(flight) >= limit
+            flight.discard(identifier)
+            if event.get("outcome") == "infra":
+                limit = max(FLOOR, limit - 1)
+        elif kind == "branch.rejected":
+            rejected.add(task)
+            limit = max(FLOOR, limit - 1)
+        elif kind == "branch.landed":
+            if task not in landed and attempts[task] == 1 and task not in rejected and full.get(task):
+                limit += 1
+            landed.add(task)
+    return limit
 
 
 def calm(output: str, now: str) -> bool:
@@ -51,7 +83,26 @@ def calm(output: str, now: str) -> bool:
     fab.report.stamp), fab.report.heavy_waits gives lane_wait + disk_wait below WAIT_LOW and
     disk_refused 0. A first or second line that does not parse, or a count below 1, is not
     calm. Never raises."""
-    raise NotImplementedError
+    try:
+        lines = output.splitlines()
+        load = float(lines[0].split()[1])
+        count = int(lines[1])
+        if count < 1 or not load / count < LOAD_LOW:
+            return False
+        records = []
+        for line in lines[2:]:
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(record, dict) and isinstance(record.get("ts"), str):
+                records.append(record)
+        end = report.moment(now)
+        window = report.Window(report.stamp(end - timedelta(minutes=WAIT_MINUTES)), report.stamp(end))
+        waits = report.heavy_waits({"builder": records}, ["builder"], window)
+        return waits["lane_wait"] + waits["disk_wait"] < WAIT_LOW and waits["disk_refused"] == 0
+    except (IndexError, ValueError, TypeError, OverflowError):
+        return False
 
 
 def measure(hosts: Mapping[str, Host], now: str, *, sh: Runner = run) -> dict[str, bool]:
@@ -59,4 +110,13 @@ def measure(hosts: Mapping[str, Host], now: str, *, sh: Runner = run) -> dict[st
     [fab.run.remote_home(host) + "/heavy.jsonl"]))` each, then calm(output, now). A command
     that fails is False for that builder and the others are still measured. Hosts without the
     builder role are left out. Never raises for a remote failure."""
-    raise NotImplementedError
+    measured = {}
+    for name, host in sorted(hosts.items()):
+        if "builder" not in host.roles:
+            continue
+        try:
+            result = sh(ssh(host.ssh, PROBE + [remote_home(host) + "/heavy.jsonl"]))
+            measured[name] = result.ok and calm(result.out, now)
+        except (OSError, Failed):
+            measured[name] = False
+    return measured
