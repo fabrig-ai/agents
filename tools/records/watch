@@ -681,12 +681,12 @@ def evaluate(data, state, config, now):
     for name, identity in names.items():
         if (identity.get('kind') != 'codex' and name != 'ops') or data.get('unit/' + name) is not False:
             continue
-        mail = [m for m in data.get('mail', []) if m['owner'] == name and older(m['delivered'], config['deaf']['minutes'])]
-        if mail:
+        mail = [m for m in data.get('mail', []) if m['owner'] == name]
+        if any(older(m['delivered'], config['deaf']['minutes']) for m in mail):
             if config['deaf']['enabled']:
                 deaf.add(name)
             oldest = min(m['delivered'] for m in mail)
-            add('deaf', name, name, [f'unread={len(mail)}; oldest={iso(oldest)}', 'Codex owner unit inactive', 'current_turn_s=' + (str(round(now-data['turn/' + name]['started'])) if data.get('turn/' + name, {}).get('started') else 'unknown')],
+            add('deaf', name, name, [f'unread={len(mail)}; oldest={iso(oldest)}; oldest_age_s={now-oldest:.0f}', 'Codex owner unit inactive', 'current_turn_s=' + (str(round(now-data['turn/' + name]['started'])) if data.get('turn/' + name, {}).get('started') else 'unknown')],
                 ['unit/' + name, 'mail'])
             candidate = candidates.get('deaf\t' + name)
             if candidate is not None:
