@@ -8,8 +8,10 @@ figures' formatting, and the command that writes the reports under FAB_HOME/repo
 
 from __future__ import annotations
 
+import argparse
 import json
 import math
+import sys
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -221,11 +223,7 @@ def main(argv: list[str]) -> int:
     or `<path> kept`. Exit 0; 1 when a plan does not load or has problems (the message on
     stderr, nothing written for it, the other reports still written); 2 on bad arguments or a
     bad day."""
-    import argparse
-    import sys
-
     from fab import code_report, hosts, landing_report
-    from fab.plan import PlanError, load_plan, load_tasks, problems
 
     parser = argparse.ArgumentParser(prog="fab report")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -248,41 +246,13 @@ def main(argv: list[str]) -> int:
     day = window.start[:10]
     since = stamp(moment(window.previous().start) - timedelta(days=LOOKBACK_DAYS))
 
-    def load(directory):
-        plan = load_plan(directory / "plan.toml")
-        tasks = load_tasks(directory / "tasks", plan.draft, plan.repo)
-        issues = problems(plan, tasks)
-        if issues:
-            raise PlanError(f"{directory}: " + "\n".join(issues))
-        return plan, tasks
-
     try:
         selected = hosts.load()
         sources = gather(selected, since)
         if args.command == "daily":
-            failed = False
-            for directory in args.plan_dirs:
-                try:
-                    plan, tasks = load(directory)
-                except PlanError as error:
-                    print(error, file=sys.stderr)
-                    failed = True
-                    continue
-                path = report_path(plan.draft, day)
-                if path.exists():
-                    print(f"{path} kept")
-                else:
-                    atomic.write(path, code_report.render(plan, tasks, sources, selected, window))
-                    print(f"{path} written")
-            path = report_path(LANDING, day)
-            if path.exists():
-                print(f"{path} kept")
-            else:
-                atomic.write(path, landing_report.render(sources, selected, window))
-                print(f"{path} written")
-            return 1 if failed else 0
+            return _daily(args.plan_dirs, day, sources, selected, window)
         if args.command == "code":
-            plan, tasks = load(args.plan_dir)
+            plan, tasks = _load(args.plan_dir)
             name = plan.draft
             text = code_report.render(plan, tasks, sources, selected, window)
         else:
@@ -297,3 +267,41 @@ def main(argv: list[str]) -> int:
         print(f"fab report: {error}", file=sys.stderr)
         return 1
     return 0
+
+
+def _load(directory):
+    from fab.plan import PlanError, load_plan, load_tasks, problems
+
+    plan = load_plan(directory / "plan.toml")
+    tasks = load_tasks(directory / "tasks", plan.draft, plan.repo)
+    issues = problems(plan, tasks)
+    if issues:
+        raise PlanError(f"{directory}: " + "\n".join(issues))
+    return plan, tasks
+
+
+def _daily(directories, day, sources, selected, window):
+    from fab import code_report, landing_report
+    from fab.plan import PlanError
+
+    failed = False
+    for directory in directories:
+        try:
+            plan, tasks = _load(directory)
+        except PlanError as error:
+            print(error, file=sys.stderr)
+            failed = True
+            continue
+        path = report_path(plan.draft, day)
+        if path.exists():
+            print(f"{path} kept")
+        else:
+            atomic.write(path, code_report.render(plan, tasks, sources, selected, window))
+            print(f"{path} written")
+    path = report_path(LANDING, day)
+    if path.exists():
+        print(f"{path} kept")
+    else:
+        atomic.write(path, landing_report.render(sources, selected, window))
+        print(f"{path} written")
+    return 1 if failed else 0
