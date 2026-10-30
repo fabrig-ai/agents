@@ -1,0 +1,9 @@
+[Unit]
+Description=Reap ended fleet sessions and runs
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h
+ExecStart=/bin/bash -lc 'exec "$$HOME/src/fabrig/current/tools/reap/reap" run'
+Nice=10
+IOSchedulingClass=idle

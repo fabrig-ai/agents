@@ -1,0 +1,719 @@
+#!/usr/bin/env -S python3 -I -B
+"""Conservative fleet garbage collection. No third-party dependencies."""
+import argparse
+from collections import Counter
+from contextlib import contextmanager
+from datetime import datetime, timezone
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import stat
+import subprocess
+import sys
+import tarfile
+import tempfile
+import time
+import tomllib
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from proc_paths import process_paths
+
+ROOT = Path(__file__).resolve().parents[2]
+DAY = 86400
+DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK
+REGULAR = os.O_NOFOLLOW | os.O_NONBLOCK
+
+
+def absolute(path):
+    return Path(os.path.abspath(path))  # Normalize dots, never resolve links.
+
+
+def inside(path, parent):
+    return path == parent or str(path).startswith(str(parent).rstrip('/') + '/')
+
+
+def intersects(a, b):
+    return inside(a, b) or inside(b, a)
+
+
+@contextmanager
+def directory(path, create=False):
+    """Walk every component without following a symlink, including parents."""
+    path = absolute(path)
+    fd = os.open('/', DIRECTORY)
+    try:
+        for part in path.parts[1:]:
+            if create:
+                try:
+                    os.mkdir(part, 0o700, dir_fd=fd)
+                except FileExistsError:
+                    pass
+            child = os.open(part, DIRECTORY, dir_fd=fd)
+            os.close(fd)
+            fd = child
+        yield fd
+    finally:
+        os.close(fd)
+
+
+@contextmanager
+def regular(path, flags=os.O_RDONLY, create=False):
+    with directory(path.parent, create) as parent:
+        fd = os.open(path.name, flags | REGULAR, 0o600, dir_fd=parent)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise ValueError(f'not a regular file: {path}')
+            if create:
+                os.fchmod(fd, 0o600)
+            yield fd
+        finally:
+            os.close(fd)
+
+
+def read(path):
+    with regular(path) as fd:
+        with os.fdopen(os.dup(fd), 'r', encoding='utf-8', errors='replace') as stream:
+            return stream.read()
+
+
+def atomic(path, value):
+    with directory(path.parent, True) as parent:
+        name = f'.{path.name}.{os.getpid()}.{time.time_ns()}'
+        fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | REGULAR, 0o600, dir_fd=parent)
+        try:
+            with os.fdopen(fd, 'w') as stream:
+                json.dump(value, stream, sort_keys=True)
+                stream.write('\n')
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.rename(name, path.name, src_dir_fd=parent, dst_dir_fd=parent)
+            os.fsync(parent)
+        finally:
+            try:
+                os.unlink(name, dir_fd=parent)
+            except FileNotFoundError:
+                pass
+
+
+def rows(text):
+    for line in text.splitlines():
+        try:
+            row = json.loads(line)
+            if isinstance(row, dict):
+                yield row
+        except (ValueError, TypeError):
+            pass
+
+
+def load_records(text):
+    records = {}
+    for row in rows(text):
+        try:
+            key = (row['kind'], row['id'])
+            if not all(isinstance(x, str) and x for x in key):
+                continue
+            when = float(row['time'])
+            paths = row.get('paths', [])
+            if not isinstance(paths, list) or not all(isinstance(p, str) for p in paths):
+                continue
+            if row['event'] not in ('start', 'end') or not (0 <= when < float('inf')):
+                continue
+            record = records.setdefault(key, dict(paths=set(), ended=None))
+            record['paths'].update(paths)
+            if row['event'] == 'start':
+                record['ended'] = None
+            elif record['ended'] is None:
+                record['ended'] = when
+        except (KeyError, ValueError, TypeError):
+            continue
+    return records
+
+
+def append_fd(fd, row):
+    data = (json.dumps(row, sort_keys=True) + '\n').encode()
+    # Recover from an interrupted final append without discarding old bytes.
+    size = os.fstat(fd).st_size
+    if size and os.pread(fd, 1, size - 1) != b'\n':
+        data = b'\n' + data
+    view = memoryview(data)
+    while view:
+        written = os.write(fd, view)
+        if written == 0:
+            raise OSError('short append')
+        view = view[written:]
+    os.fsync(fd)
+
+
+def append(path, row):
+    with regular(path, os.O_RDWR | os.O_CREAT | os.O_APPEND, True) as fd:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        append_fd(fd, row)
+
+
+def command(args, timeout=30, input=None):
+    result = subprocess.run([str(a) for a in args], input=input, capture_output=True,
+                            text=True, timeout=timeout, stdin=None if input is not None else subprocess.DEVNULL,
+                            env=dict(os.environ, GIT_OPTIONAL_LOCKS='0', GIT_TERMINAL_PROMPT='0'))
+    if result.returncode:
+        raise ValueError(f'{args[0]} failed ({result.returncode})')
+    return result.stdout
+
+
+def walk(path, depth=None, deadline=None):
+    """Yield metadata only; never open symlinks, pipes, sockets or devices."""
+    if deadline is not None and time.monotonic() > deadline:
+        raise ValueError('walk time limit')
+    with directory(path.parent) as parent:
+        info = os.stat(path.name, dir_fd=parent, follow_symlinks=False)
+    yield path, info
+    if stat.S_ISDIR(info.st_mode):
+        if depth == 0:
+            raise ValueError('walk depth limit')
+        with directory(path) as fd:
+            names = sorted(os.listdir(fd))
+        for name in names:
+            yield from walk(path / name, None if depth is None else depth - 1, deadline)
+
+
+def remove(path, expected):
+    """Directory-fd removal; renamed/symlinked parents cannot redirect a walk."""
+    def descend(parent, name, identity=None):
+        info = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        if identity is not None and (info.st_dev, info.st_ino) != identity:
+            raise ValueError('candidate changed')
+        if stat.S_ISDIR(info.st_mode):
+            fd = os.open(name, DIRECTORY, dir_fd=parent)
+            try:
+                if (os.fstat(fd).st_dev, os.fstat(fd).st_ino) != (info.st_dev, info.st_ino):
+                    raise ValueError('directory changed')
+                for child in os.listdir(fd):
+                    descend(fd, child)
+            finally:
+                os.close(fd)
+            os.rmdir(name, dir_fd=parent)
+        else:
+            # Nested symlinks are unlinked, never traversed. Special files keep
+            # the whole candidate during inspection, before removal begins.
+            os.unlink(name, dir_fd=parent)
+    with directory(path.parent) as parent:
+        descend(parent, path.name, expected)
+
+
+class Reaper:
+    def __init__(self, home=None, config=None, proc=Path('/proc'), now=None):
+        self.home = absolute(home or Path.home())
+        self.config = config or tomllib.loads(read(ROOT / 'fleet/reap.toml'))
+        if self.config['mode'] not in ('dry-run', 'live'):
+            raise ValueError('invalid configured mode')
+        for item in [*self.config['kinds'].values(), *[c['retention_seconds'] for c in self.config['classes'].values()]]:
+            if not isinstance(item, (int, float)) or not 0 <= item < float('inf'):
+                raise ValueError('retention must be nonnegative and finite')
+        self.proc = Path(proc)
+        self.now = time.time() if now is None else now
+        self.state = self.home / '.local/state/reap'
+        self.errors = []
+        self.refresh_records()
+        self.live = set()
+        self.claude_error = False
+
+    def refresh_records(self):
+        self.records = {}
+        try:
+            with regular(self.state / 'records.jsonl') as fd:
+                fcntl.flock(fd, fcntl.LOCK_SH)
+                self.records = load_records(os.pread(fd, os.fstat(fd).st_size, 0).decode(errors='replace'))
+        except FileNotFoundError:
+            pass
+        self.active = []
+        for record in self.records.values():
+            if record['ended'] is None:
+                self.active.extend(self.path(p) for p in record['paths'])
+
+    def path(self, value):
+        if value.startswith('~/'):
+            value = str(self.home / value[2:])
+        path = Path(value)
+        return absolute(path if path.is_absolute() else self.home / path)
+
+    def record(self, args):
+        if args.kind not in self.config['kinds']:
+            raise ValueError('unknown record kind')
+        if not args.owner or not args.id or '/' in args.id or args.id in ('.', '..'):
+            raise ValueError('invalid owner or id')
+        paths = sorted({str(self.path(p)) for p in args.path})
+        for path in paths:
+            if not inside(Path(path), self.home):
+                raise ValueError('record path outside HOME')
+            if args.kind == 'claude-session' and Path(path) != self.home / '.claude/jobs' / args.id:
+                raise ValueError('claude-session paths must be its jobs directory')
+        target = self.state / 'records.jsonl'
+        with regular(target, os.O_RDWR | os.O_CREAT | os.O_APPEND, True) as fd:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            text = os.pread(fd, os.fstat(fd).st_size, 0).decode(errors='replace')
+            prior = load_records(text).get((args.kind, args.id))
+            if prior and set(paths) <= prior['paths']:
+                if (args.event == 'start') == (prior['ended'] is None):
+                    return
+            append_fd(fd, dict(event=args.event, time=self.now, kind=args.kind,
+                               owner=args.owner, id=args.id, paths=paths))
+
+    def children(self, path):
+        try:
+            with directory(path) as fd:
+                return [path / name for name in sorted(os.listdir(fd))]
+        except FileNotFoundError:
+            return []
+
+    def discover(self, classes):
+        found = {}
+        def add(path, cls, timestamp=None, retention=None):
+            path = absolute(path)
+            try:
+                with directory(path.parent) as parent:
+                    info = os.stat(path.name, dir_fd=parent, follow_symlinks=False)
+                age = self.now - (info.st_mtime if timestamp is None else timestamp)
+                threshold = self.config['classes'][cls]['retention_seconds'] if retention is None else retention
+                if age < threshold:
+                    return
+                found.setdefault(path, dict(path=str(path), **{'class': cls}, age_seconds=int(age),
+                                            identity=(info.st_dev, info.st_ino)))
+            except FileNotFoundError:
+                pass
+            except (OSError, ValueError) as exc:
+                self.errors.append(f'discover {path}: {exc}')
+        if 'claude-jobs' in classes or 'recorded' in classes:
+            self.live = set()
+            self.claude_error = False
+            try:
+                sessions = json.loads(command(['claude', 'agents', '--json', '--all']))
+                if not isinstance(sessions, list):
+                    raise ValueError('claude inventory is not a list')
+                for row in sessions:
+                    session = row.get('sessionId') or row.get('id')
+                    pid = row.get('pid')
+                    # Unknown PID is kept unless explicitly ended. Positive
+                    # PIDs are checked in the same proc namespace as the guard.
+                    ended = row.get('status', row.get('state')) in ('stopped', 'completed', 'ended')
+                    if session and ((pid and (self.proc / str(int(pid))).exists()) or (not pid and not ended)):
+                        self.live.add(str(session))
+            except (OSError, ValueError, TypeError, AttributeError, subprocess.SubprocessError) as exc:
+                self.claude_error = True
+                self.errors.append(f'claude inventory: {exc}')
+        for cls in sorted(classes):
+            try:
+                if cls == 'recorded':
+                    for (kind, identity), record in self.records.items():
+                        retention = self.config['kinds'].get(kind)
+                        if retention is None or record['ended'] is None or self.now - record['ended'] < retention:
+                            continue
+                        # Recorded has its own kind-specific threshold.
+                        for path in record['paths']:
+                            add(self.path(path), cls, record['ended'], retention)
+                elif cls == 'codex-runs':
+                    for path in self.children(self.home / self.config['classes'][cls]['root']):
+                        try:
+                            with regular(path / 'ended') as fd:
+                                add(path, cls, os.fstat(fd).st_mtime)
+                        except (FileNotFoundError, NotADirectoryError):
+                            pass
+                elif cls == 'precheck-logs':
+                    for root in self.children(self.home / 'src/fabrig/slots'):
+                        if root.name.endswith('.precheck-logs'):
+                            for path in self.children(root):
+                                add(path, cls)
+                elif cls in ('notes', 'codex-sessions'):
+                    for root in self.config['classes'][cls]['roots']:
+                        base = self.home / root
+                        try:
+                            for path, info in walk(base):
+                                if not stat.S_ISDIR(info.st_mode):
+                                    add(path, cls)
+                        except FileNotFoundError:
+                            pass
+                else:
+                    for path in self.children(self.home / self.config['classes'][cls]['root']):
+                        add(path, cls)
+            except (OSError, ValueError) as exc:
+                self.errors.append(f'discover {cls}: {exc}')
+        # One deletion per path; remove children first to avoid double-counting.
+        result = []
+        for path in sorted(found, key=lambda p: (len(p.parts), str(p))):
+            if not any(inside(path, Path(row['path'])) for row in result):
+                result.append(found[path])
+        return result
+
+    def never(self, path):
+        fixed = ['src/rust/tmp/logins', 'src/rust/tmp/heavy', 'src/rust/tmp/post',
+                 '.ssh', '.claude/.credentials.json', '.claude.json', '.codex/auth.json',
+                 'archive', '.local/state/reap', 'src/rust/tmp/logs/heavy.tsv']
+        fixed += [f'src/fabrig/{name}' for name in ('claims', 'leases', 'queue', 'main', 'agents', 'current', 'releases')]
+        fixed += [f'.local/state/{name}' for name in ('fleet-sync', 'fabrig', 'heavy')]
+        if not inside(path, self.home) or any(intersects(path, self.home / p) for p in fixed):
+            return True
+        qa = self.home / 'src/rust/tmp'
+        if inside(path, qa) and len(path.relative_to(qa).parts) and path.relative_to(qa).parts[0].startswith('qa'):
+            return True
+        # An ancestor of qa is already an ancestor of other never-paths.
+        for root in ('src/fabrig/notes', 'src/fabrig/tasks'):
+            if inside(path, self.home / root) and path.name in ('queue.jsonl', 'queue.out'):
+                return True
+        return False
+
+    def snapshot(self):
+        used, borrowed, slots, failures = [], [], [], []
+        try:
+            processes = process_paths(self.proc)
+            if processes['errors'] and self.proc == Path('/proc'):
+                # Only this metadata reader runs as root, never discovery,
+                # Git, archives, record/state handling or deletion.
+                processes = json.loads(command(['sudo', '-n', '/usr/bin/python3', '-I', '-B',
+                                                Path(__file__).resolve().with_name('proc_paths.py')]))
+            used = [absolute(path) for path in processes['paths']]
+            if processes['errors']:
+                failures.append('proc incomplete: ' + ','.join(processes['errors']))
+        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
+            failures.append(f'proc incomplete: {type(exc).__name__}')
+        try:
+            output = command(['claim', 'list'])
+            for line in output.splitlines():
+                if not line.strip():
+                    continue
+                match = re.fullmatch(r'\S+\s+(\d+)\s+\[[^\]]+\]:\s*(.+)', line)
+                if not match:
+                    raise ValueError('unrecognized claim row')
+                if match[2] != 'free':
+                    slots.extend([match[1], line.split()[0] + '-' + match[1]])
+        except (OSError, ValueError, subprocess.SubprocessError):
+            slots = None
+        deadline = time.monotonic() + 30
+        for root, depth in [('src', 64), ('.claude/jobs', 32)]:
+            try:
+                borrowed.extend(self.alternates(self.home / root, depth, deadline))
+            except FileNotFoundError:
+                pass
+            except (OSError, ValueError) as exc:
+                failures.append(f'alternates incomplete: {type(exc).__name__}')
+                detail = f'alternates {root}: {exc}'
+                if detail not in self.errors:
+                    self.errors.append(detail)
+        for failure in failures:
+            if failure not in self.errors:
+                self.errors.append(failure)
+        if slots is None and 'claim inventory unavailable' not in self.errors:
+            self.errors.append('claim inventory unavailable')
+        return dict(used=used, borrowed=borrowed, slots=slots, failures=failures)
+
+    def alternates(self, root, depth, deadline):
+        found = []
+        def visit(path, fd, remaining):
+            if time.monotonic() > deadline:
+                raise ValueError('walk time limit')
+            # scandir uses directory-entry types, avoiding a stat/open walk for
+            # every ordinary file in large source/build trees.
+            with os.scandir(fd) as entries:
+                for entry in entries:
+                    if time.monotonic() > deadline:
+                        raise ValueError('walk time limit')
+                    child = path / entry.name
+                    if child.parts[-3:] == ('objects', 'info', 'alternates'):
+                        if not entry.is_file(follow_symlinks=False):
+                            raise ValueError('unsafe alternates file')
+                        try:
+                            with regular(child) as alt_fd:
+                                content = os.pread(alt_fd, 1048577, 0)
+                            if len(content) > 1048576:
+                                raise ValueError('oversized alternates file')
+                        except FileNotFoundError:
+                            continue
+                        for line in content.decode(errors='strict').splitlines():
+                            if not line:
+                                continue
+                            target = Path(line)
+                            if not target.is_absolute():
+                                target = child.parent.parent / target
+                            found.extend([absolute(target), Path(os.path.realpath(target))])
+                    if entry.is_dir(follow_symlinks=False):
+                        if remaining == 0:
+                            raise ValueError(f'walk depth limit at {child}')
+                        try:
+                            child_fd = os.open(entry.name, DIRECTORY, dir_fd=fd)
+                        except FileNotFoundError:
+                            continue
+                        try:
+                            visit(child, child_fd, remaining - 1)
+                        finally:
+                            os.close(child_fd)
+        with directory(root) as fd:
+            visit(root, fd, depth)
+        return found
+
+    def git_repositories(self, path):
+        repos = []
+        for item, info in walk(path):
+            if item.name == '.git':
+                if not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
+                    raise ValueError('unsafe git directory')
+                repos.append(item.parent)
+            elif item.name == 'HEAD' and item.parent.name != '.git' and (item.parent / 'objects').is_dir() and (item.parent / 'refs').is_dir():
+                repos.append(item.parent)
+        return sorted(set(repos))
+
+    def git_state(self, repo):
+        def git(*args):
+            return command(['git', '-c', 'core.fsmonitor=false', '-C', repo, *args])
+        bare = git('rev-parse', '--is-bare-repository').strip() == 'true'
+        dirty = not bare and bool(git('status', '--porcelain', '--untracked-files=all'))
+        stash = bool(git('stash', 'list'))
+        local = False
+        heads = git('for-each-ref', '--format=%(objectname)', 'refs/heads').splitlines()
+        for head in heads:
+            if not git('for-each-ref', f'--contains={head}', '--format=%(refname)', 'refs/remotes').strip():
+                local = True
+        return dirty, stash, local
+
+    def bundle(self, repo, dirty):
+        folder = self.home / 'archive/reap' / datetime.fromtimestamp(self.now, timezone.utc).strftime('%Y-%m-%d')
+        name = repo.name + '-' + hashlib.sha256(str(repo).encode()).hexdigest()[:12] + f'-{time.time_ns()}'
+        with directory(folder, True):
+            pass
+        # git needs a nonexistent output name; private staging contains all
+        # archive writes until both the bundle and worktree copy verify.
+        staging = Path(tempfile.mkdtemp(prefix='.bundle-', dir=folder))
+        target = staging / (name + '.bundle')
+        command(['git', '-C', repo, 'bundle', 'create', target, '--all'], timeout=120)
+        command(['git', '-C', repo, 'bundle', 'verify', target], timeout=120)
+        if dirty:
+            archive = staging / (name + '.worktree.tar')
+            # bundle --all cannot preserve uncommitted/untracked files. Save
+            # the complete tree as well, without following nested symlinks.
+            with tarfile.open(archive, 'w', dereference=False) as tar:
+                tar.add(repo, arcname=repo.name)
+            with tarfile.open(archive) as tar:
+                for member in tar:
+                    if member.isfile():
+                        stream = tar.extractfile(member)
+                        while stream.read(1024 * 1024):
+                            pass
+        for path in staging.iterdir():
+            path.chmod(0o600)
+            with regular(path) as fd:
+                os.fsync(fd)
+            path.replace(folder / path.name)
+        staging.rmdir()
+        return str(folder / target.name)
+
+    def keep(self, path, snapshot, inspect_tree=True):
+        if self.never(path):
+            return 'never path'
+        with directory(path.parent) as parent:
+            info = os.stat(path.name, dir_fd=parent, follow_symlinks=False)
+        if stat.S_ISLNK(info.st_mode):
+            return 'symlink'
+        if not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
+            return 'special file'
+        if any(intersects(path, active) for active in self.active):
+            return 'record active'
+        jobs = self.home / '.claude/jobs'
+        if inside(path, jobs):
+            if self.claude_error:
+                return 'claude inventory unavailable'
+            if any(intersects(path, jobs / identity) for identity in self.live):
+                return 'live session'
+        if any(inside(item, path) for item in snapshot['used']):
+            return 'process use'
+        slot_root = self.home / 'src/fabrig/slots'
+        if intersects(path, slot_root):
+            if snapshot['slots'] is None:
+                return 'claim unavailable'
+            for slot in snapshot['slots']:
+                for candidate in (slot_root / slot, slot_root / f'{slot}.precheck-logs'):
+                    if intersects(path, candidate):
+                        return 'claimed slot'
+        if any(inside(item, path) for item in snapshot['borrowed']):
+            return 'alternates target'
+        if snapshot['failures']:
+            return snapshot['failures'][0]
+        for item, metadata in walk(path) if inspect_tree else []:
+            if self.never(item):
+                return 'contains never path'
+            if not (stat.S_ISREG(metadata.st_mode) or stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode)):
+                return 'contains special file'
+        return None
+
+    def fingerprint(self, path):
+        digest = hashlib.sha256()
+        size = 0
+        for item, info in walk(path):
+            if stat.S_ISREG(info.st_mode):
+                size += info.st_size
+            digest.update(repr((str(item), info.st_dev, info.st_ino, info.st_mode,
+                                info.st_size, info.st_mtime_ns, info.st_ctime_ns)).encode())
+        return size, digest.hexdigest()
+
+    def execute(self, classes, mode):
+        if mode == 'live' and self.config['mode'] != 'live':
+            raise ValueError('--live refused: fleet/reap.toml is dry-run')
+        candidates = self.discover(classes)
+        snapshot = self.snapshot()
+        for item in candidates:
+            path = Path(item['path'])
+            item.update(bytes=0, action='kept', reason=None, bundles=[])
+            try:
+                # Metadata sizing never opens file contents (including secrets).
+                reason = self.keep(path, snapshot)
+                if reason:
+                    item['reason'] = reason
+                    continue
+                item['bytes'], fingerprint = self.fingerprint(path)
+                repos = self.git_repositories(path)
+                unsafe = [(repo, self.git_state(repo)) for repo in repos]
+                unsafe = [(repo, state) for repo, state in unsafe if any(state)]
+                if mode == 'dry-run':
+                    if unsafe:
+                        item['action'], item['reason'] = 'kept', 'would bundle'
+                    else:
+                        item['action'] = 'would delete'
+                    continue
+                for repo, state in unsafe:
+                    item['bundles'].append(self.bundle(repo, state[0]))
+                # Refresh process/claim/borrower state immediately before each
+                # removal; discovery and earlier archive work are not proof.
+                if self.fingerprint(path)[1] != fingerprint:
+                    raise ValueError('candidate changed during inspection/archive')
+                self.refresh_records()
+                if inside(path, self.home / '.claude/jobs'):
+                    self.discover({'claude-jobs'})
+                reason = self.keep(path, self.snapshot(), inspect_tree=False)
+                if reason:
+                    item['reason'] = reason
+                    continue
+                remove(path, tuple(item['identity']))
+                item['action'] = 'deleted'
+            except (OSError, ValueError, subprocess.SubprocessError, tarfile.TarError) as exc:
+                item['reason'] = 'inspection/removal error'
+                self.errors.append(f'{path}: {exc}')
+        totals = {}
+        for cls in sorted(classes):
+            members = [item for item in candidates if item['class'] == cls]
+            selected = [item for item in members if item['action'] in ('deleted', 'would delete')]
+            totals[cls] = dict(candidates=len(members), selected=len(selected), bytes=sum(item['bytes'] for item in selected),
+                               kept=len(members) - len(selected))
+        return dict(time=self.now, mode=mode, classes=totals,
+                    kept=dict(Counter(item['reason'] for item in candidates if item['action'] == 'kept')),
+                    errors=self.errors, candidates=candidates)
+
+    def timer_run(self):
+        if not os.environ.get('INVOCATION_ID'):
+            return False
+        try:
+            trigger = int(command(['systemctl', '--user', 'show', 'reap.timer', '-p', 'LastTriggerUSecMonotonic', '--value']).strip())
+            start = int(command(['systemctl', '--user', 'show', 'reap.service', '-p', 'ExecMainStartTimestampMonotonic', '--value']).strip())
+            return trigger > 0 and 0 <= start - trigger <= 1000000
+        except (OSError, ValueError, subprocess.SubprocessError):
+            return False
+
+    def save(self, result):
+        full = self.state / f'run-{time.time_ns()}.json'
+        result['list_path'] = str(full)
+        atomic(full, result)
+        atomic(self.state / 'last.json', result)
+        append(self.state / 'runs.jsonl', {k: v for k, v in result.items() if k != 'candidates'})
+        if not self.timer_run():
+            return
+        day = datetime.fromtimestamp(self.now, timezone.utc).strftime('%Y-%m-%d')
+        marker = self.state / 'summary.json'
+        try:
+            if json.loads(read(marker)).get('day') == day:
+                return
+        except FileNotFoundError:
+            pass
+        # Reserve before send: at-most-once, even after interrupted delivery.
+        atomic(marker, dict(day=day))
+        body = '\n'.join([f"{result['mode']} on {os.uname().nodename}: {day}",
+                          *[f"{cls}: {count['selected']} items, {count['bytes']} bytes, {count['kept']} kept"
+                            for cls, count in result['classes'].items()],
+                          f"Kept: {result['kept']}", f"Errors: {len(result['errors'])}", f'Full list: {full}']) + '\n'
+        try:
+            command(['post', 'send', '--as', 'reap', self.config['summary_to'], f'reap {os.uname().nodename} {day}'], input=body)
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            result['errors'].append(f'daily summary: {exc}')
+            atomic(self.state / 'last.json', result)
+
+
+class Parser(argparse.ArgumentParser):
+    def error(self, message):
+        raise ValueError(message)
+
+
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    recording = bool(argv and argv[0] == 'record')
+    strict = '--strict' in argv
+    try:
+        parser = Parser(description=__doc__)
+        subs = parser.add_subparsers(dest='command', required=True)
+        record = subs.add_parser('record')
+        record.add_argument('event', choices=['start', 'end'])
+        for name in ('kind', 'owner', 'id'):
+            record.add_argument('--' + name, required=True)
+        record.add_argument('--path', action='append', default=[])
+        record.add_argument('--strict', action='store_true')
+        run = subs.add_parser('run')
+        modes = run.add_mutually_exclusive_group()
+        modes.add_argument('--dry-run', action='store_true')
+        modes.add_argument('--live', action='store_true')
+        run.add_argument('--class', action='append', dest='classes')
+        run.add_argument('--json', action='store_true')
+        run.add_argument('--read-only', action='store_true', help='dry-run without state writes, locking or mail')
+        status = subs.add_parser('status')
+        status.add_argument('--json', action='store_true')
+        args = parser.parse_args(argv)
+        reaper = Reaper()
+        if args.command == 'record':
+            reaper.record(args)
+            return 0
+        if args.command == 'status':
+            try:
+                result = json.loads(read(reaper.state / 'last.json'))
+            except FileNotFoundError:
+                result = dict(message='no runs yet')
+        else:
+            mode = 'live' if args.live else 'dry-run' if args.dry_run else reaper.config['mode']
+            if mode == 'live' and reaper.config['mode'] != 'live':
+                raise ValueError('--live refused: fleet/reap.toml is dry-run')
+            if args.read_only and mode != 'dry-run':
+                raise ValueError('--read-only requires dry-run')
+            classes = set(args.classes or reaper.config['classes'])
+            if classes - reaper.config['classes'].keys():
+                raise ValueError('unknown class')
+            if args.read_only:
+                result = reaper.execute(classes, mode)
+            else:
+                with regular(reaper.state / 'lock', os.O_RDWR | os.O_CREAT, True) as fd:
+                    try:
+                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        return 0
+                    result = reaper.execute(classes, mode)
+                    reaper.save(result)
+        if args.json:
+            print(json.dumps(result, sort_keys=True))
+        elif 'classes' in result:
+            print(f"reap {result['mode']}: " + ', '.join(f"{cls}: {v['selected']} items / {v['bytes']} bytes, {v['kept']} kept" for cls, v in result['classes'].items()))
+            for reason, count in result['kept'].items():
+                print(f'kept {count}: {reason}')
+            for error in result['errors']:
+                print('error: ' + error, file=sys.stderr)
+        else:
+            print(result['message'])
+        return 0
+    except (OSError, ValueError, TypeError, subprocess.SubprocessError) as exc:
+        print('reap: ' + str(exc).replace('\n', ' '), file=sys.stderr)
+        return 0 if recording and not strict else 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())

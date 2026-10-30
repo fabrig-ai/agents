@@ -15,3 +15,5 @@
 "after-landing.service" = ["after-landing"]
 "qa-watch.service" = ["qa"]
 "kache.service" = ["*"]
+"reap.service" = ["*"]
+"reap.timer" = ["*"]
