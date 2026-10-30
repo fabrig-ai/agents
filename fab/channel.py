@@ -12,9 +12,12 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 
+from fab import log
 from fab.plan import Plan
+from fab.report import LANDING
 
 PAGE = "user.md"  # the page, under FAB_HOME
 PLANS = "plans"  # FAB_HOME/plans: the ticked plans' directories, one per line (13.4)
@@ -73,7 +76,11 @@ def asks(plans: Sequence[tuple[Plan, Path]], events: Iterable[dict]) -> list[Ask
     The log's asks come in the order their keys were last opened. A question.answered never
     closes one: it names a task. Records missing a field the rule reads are skipped. Pure:
     no file is read (fab.log.home() reads the environment only)."""
-    raise NotImplementedError
+    questions = [Ask("plan", plan.draft, question.id, question.text, "",
+                     report=str(path), parts=question.parts)
+                 for plan, path in plans for question in plan.questions
+                 if not question.answer.strip()]
+    return questions + _log_asks(events)
 
 
 def plan_dirs(given: Sequence[Path] = ()) -> list[Path]:
@@ -81,14 +88,33 @@ def plan_dirs(given: Sequence[Path] = ()) -> list[Path]:
     then given, each resolved, without duplicates (compared as resolved path strings, the
     first kept), in that order. A missing FAB_HOME/PLANS gives given alone. Directories are
     not checked: a plan being cut has none yet."""
-    raise NotImplementedError
+    try:
+        listed = (log.home() / PLANS).read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        listed = []
+    paths = [Path(line.strip()) for line in listed if line.strip()]
+    resolved = {}
+    for path in [*paths, *given]:
+        absolute = path.resolve()
+        resolved.setdefault(str(absolute), absolute)
+    return list(resolved.values())
 
 
 def signal_section(text: str) -> tuple[str, ...]:
     """The lines of a report's Signals section: those after the line equal to SIGNALS, up to
     the next line starting `## ` or the end, blank lines dropped, each right-stripped. ()
     when the report has no such line. Pure."""
-    raise NotImplementedError
+    section = []
+    reading = False
+    for line in text.splitlines():
+        if reading:
+            if line.startswith("## "):
+                break
+            if line.strip():
+                section.append(line.rstrip())
+        elif line == SIGNALS:
+            reading = True
+    return tuple(section)
 
 
 def latest_reports(directory: Path) -> list[Report]:
@@ -98,14 +124,36 @@ def latest_reports(directory: Path) -> list[Report]:
     except fab.report.LANDING, which comes last. A missing directory gives []; a file that
     cannot be read gives signals ("(unreadable: <error>)",) and stays listed. Files and
     directories whose names start with `.` are skipped (fab.atomic.write's siblings)."""
-    raise NotImplementedError
+    if not directory.exists():
+        return []
+    found = []
+    for child in directory.iterdir():
+        if child.name.startswith(".") or not child.is_dir():
+            continue
+        days = [path for path in child.iterdir() if _day_file(path)]
+        if not days:
+            continue
+        path = max(days, key=lambda path: path.name)
+        try:
+            signals = signal_section(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError) as error:
+            signals = (f"(unreadable: {error})",)
+        found.append(Report(child.name, path.stem, path, signals))
+    return sorted(found, key=lambda report: (report.name == LANDING, report.name))
 
 
 def excerpt(path: Path, lines: int = QUESTION_LINES) -> str:
     """The first lines of the file at path, each right-stripped, trailing blank ones dropped,
     joined by newlines: what the page quotes of an asking report. `(report missing)` when it
     cannot be read; `(empty report)` when nothing is left."""
-    raise NotImplementedError
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return "(report missing)"
+    quoted = [line.rstrip() for line in text.splitlines()[:lines]]
+    while quoted and not quoted[-1]:
+        quoted.pop()
+    return "\n".join(quoted) or "(empty report)"
 
 
 def answers_text(subject: str, events: Iterable[dict]) -> str:
@@ -118,7 +166,13 @@ def answers_text(subject: str, events: Iterable[dict]) -> str:
 
     (the record's fields; a missing one is shown as `-`; a multi-line answer stays as it
     is), the blocks joined by blank lines. "" when there are none. Pure."""
-    raise NotImplementedError
+    blocks = []
+    for event in events:
+        if event.get("ev") == ANSWERED and event.get("subject") == subject:
+            blocks.append(f"### {event.get('ts', '-')}, to {event.get('call', '-')}\n"
+                          f"Question: {event.get('question', '-')}\n"
+                          f"Answer ({event.get('by', '-')}): {event.get('answer', '-')}")
+    return "\n\n".join(blocks)
 
 
 def render(entries: Sequence[tuple[Ask, str]], reports: Sequence[Report], now: str,
@@ -144,7 +198,33 @@ def render(entries: Sequence[tuple[Ask, str]], reports: Sequence[Report], now: s
        its signals lines (`- none` when it has none); `(none)` when there are no reports.
     4. `## Unread`, one `- <line>` per unread entry; left out when unread is empty.
     Pure."""
-    raise NotImplementedError
+    sections = ["# The user's page\n"
+                f"{now}. Only what is the user's: budgets, machines, what is hard to reverse.",
+                "## Questions"]
+    for ask, body in entries:
+        if ask.kind == "plan":
+            heading = f"### {ask.draft}: question {ask.subject}"
+            instructions = [f"- Waits: {', '.join(ask.parts)}",
+                            f"- Answer: write its `answer` in `{ask.report}` and land it with `fab land`"]
+        else:
+            verb = "asked" if ask.kind == "call" else "parked"
+            heading = f"### {ask.subject}, {verb} {ask.since}"
+            instructions = [f"- Read: `{ask.report}`"] if ask.report or ask.kind == "call" else []
+            instructions.append(f"- Answer: `fab page answer {ask.subject} TEXT`")
+        sections.append("\n\n".join((heading, body, "\n".join(instructions))))
+    if not entries:
+        sections.append("(none)")
+    sections.append("## Daily reports")
+    for report in reports:
+        signals = [line for line in report.signals
+                   if line.endswith(" (user)") or line.startswith("(unreadable: ")]
+        sections.append(f"### {report.name}, {report.day}\n\n`{report.path}`\n\n" +
+                        "\n".join(signals or ["- none"]))
+    if not reports:
+        sections.append("(none)")
+    if unread:
+        sections.append("## Unread\n\n" + "\n".join(f"- {line}" for line in unread))
+    return "\n\n".join(sections).rstrip("\n") + "\n"
 
 
 def compose(directories: Sequence[Path], events: Sequence[dict], now: str) -> str:
@@ -190,3 +270,49 @@ def main(argv: list[str]) -> int:
     and print `answered <SUBJECT>` and the page's path. Exit 0; an OSError or ValueError
     prints `fab page: <error>` on stderr and exits 1; bad arguments exit 2 (argparse)."""
     raise NotImplementedError
+
+
+def _log_asks(events: Iterable[dict]) -> list[Ask]:
+    opened = {}
+    for event in events:
+        try:
+            ev = event["ev"]
+            if ev == ANSWERED:
+                subject = event["subject"]
+                for kind in ("call", "parked"):
+                    opened.pop((kind, subject), None)
+            elif ev == "call.finished":
+                call = event["call"]
+                for key, ask in list(opened.items()):
+                    if ask.kind == "parked" and ask.call == call:
+                        del opened[key]
+            elif ev in ("call.ended", "call.parked"):
+                subject = event["subject"]
+                if ev == "call.ended" and event["outcome"] == "done":
+                    opened.pop(("call", subject), None)
+                    continue
+                if ev == "call.parked":
+                    ask = Ask("parked", subject.split("/", 1)[0], subject,
+                              event["reason"], event["ts"], call=event["call"],
+                              report=event.get("report", ""))
+                elif event["outcome"] == "question":
+                    call = event["call"]
+                    ask = Ask("call", subject.split("/", 1)[0], subject, "", event["ts"],
+                              call=call, report=str(log.home() / "calls" / call / "report.md"))
+                else:
+                    continue
+                key = (ask.kind, subject)
+                opened.pop(key, None)
+                opened[key] = ask
+        except KeyError:
+            continue
+    return list(opened.values())
+
+
+def _day_file(path: Path) -> bool:
+    if path.name.startswith(".") or path.suffix != ".md" or not path.is_file():
+        return False
+    try:
+        return date.fromisoformat(path.stem).isoformat() == path.stem
+    except ValueError:
+        return False
