@@ -2,6 +2,7 @@
 """Converge a user's machine to the fleet declarations; see fleet-sync.md."""
 
 import argparse
+import runpy
 import concurrent.futures
 from contextlib import contextmanager
 import datetime as dt
@@ -532,7 +533,7 @@ os.close(home)
 
 
 FLEET_ASSETS = frozenset((
-    "bootstrap/README.md", "bootstrap/inventory.md", "bootstrap/packages.txt",
+    "pool.py", "bootstrap/README.md", "bootstrap/inventory.md", "bootstrap/packages.txt",
     "bootstrap/root.sh", "bootstrap/user.sh", "bootstrap/bootstrap.py",
     "kache/README.md", "kache/build", "kache/git-checkout-rev.patch",
     "kache/upload-bound.patch", "kache/config.toml", "kache/remote.toml",
@@ -542,7 +543,7 @@ FLEET_ASSETS = frozenset((
 
 
 class Declarations:
-    def __init__(self, root, home):
+    def __init__(self, root, home, requested_name=None):
         self.root = root
         fleet = root / "fleet"
         known = {"hosts.toml", "env", "claude/settings.json", "codex/config.toml",
@@ -568,6 +569,13 @@ class Declarations:
         if not known <= parsed.keys():
             raise ValueError(f"missing declarations: {sorted(known - parsed.keys())}")
         self.hosts = parsed["hosts.toml"]["hosts"]
+        if (fleet / "pool.toml").exists():
+            pool = runpy.run_path(str(fleet / "pool.py"))
+            name = requested_name or os.environ.get("FLEET_HOST") or socket.gethostname()
+            host = pool["declaration"](root, name)
+            if host:
+                self.hosts[name] = host
+                parsed["repositories.toml"] = pool["repositories"](root)
         hostnames = set()
         for name, host in self.hosts.items():
             if not re.fullmatch(r"[a-z][a-z0-9-]*", name):
@@ -884,7 +892,7 @@ class Runner:
                 atomic(stage / ".fleet-release.json", json.dumps({"origin": origin, "sha": sha}))
                 os.rename(stage, release)
         self.cmd(sys.executable, "-I", "-B", release / "tools/fleet-sync", "--self-check", "--host", self.name)
-        candidate = Declarations(release, self.home)
+        candidate = Declarations(release, self.home, self.name)
         candidate.host(self.name)
         candidate.host_units(self.name)
         self.verify_units(candidate)
@@ -2311,7 +2319,7 @@ def main():
     if args.command and (args.check or args.timer or args.self_check or args.resume_fd is not None):
         parser.error("status accepts only --json and --host")
     try:
-        declarations = Declarations(ROOT, Path.home())
+        declarations = Declarations(ROOT, Path.home(), args.host)
         name = declarations.host(args.host, allow_unknown=bool(args.command))
     except (OSError, ValueError, KeyError, TypeError) as error:
         parser.error(str(error))

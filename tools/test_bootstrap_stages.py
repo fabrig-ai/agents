@@ -26,6 +26,7 @@ def before_stage_b():
 # promote stage B now is the runner deployed fleet-wide, just before it.
 DEPLOYED = before_stage_b()
 STAGE_A = DEPLOYED
+STAGE_B = DEPLOYED.removesuffix("^")
 HAS_BOOTSTRAP = (fixture.ROOT / "fleet/bootstrap/bootstrap.py").exists()
 MUTATIONS = {"enable", "disable", "start", "stop", "restart", "daemon-reload"}
 
@@ -35,7 +36,7 @@ class BootstrapStagesTest(unittest.TestCase):
         self.f = fixture.FleetTest(methodName="runTest")
         self.f.setUp()
         self.addCleanup(self.f.doCleanups)
-        self.code = (self.f.source / "tools/fleet-sync").read_text()
+        self.code = self.script(STAGE_B)
         self.hosts_toml = (self.f.source / "fleet/hosts.toml").read_text()
         self.hosts = tuple(tomllib.loads(self.hosts_toml)["hosts"])
 
@@ -48,17 +49,8 @@ class BootstrapStagesTest(unittest.TestCase):
         stage.mkdir()
         with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
             tar.extractall(stage, filter="data")
-        # Declarations stage B did not touch come from main, so later changes to
-        # them (Claude settings, say) are on both sides and are not promotions.
-        marker = base.removesuffix("^")
-        touched = set(subprocess.check_output(
-            ["git", "-C", str(fixture.ROOT), "diff", "--name-only", base, marker, "--", "fleet"],
-            text=True).split()) if marker != base else set()
-        for path in (self.f.source / "fleet").rglob("*"):
-            name = path.relative_to(self.f.source).as_posix()
-            if path.is_file() and name not in touched:
-                (stage / name).parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(path, stage / name)
+        # Freeze both ends of this historical rollout. Mixing later units or
+        # assets with stage A's role map makes it an invalid declaration tree.
         retired = self.f.directory / "retired-fleet"
         (self.f.source / "fleet").rename(retired)
         (stage / "fleet").rename(self.f.source / "fleet")
@@ -104,7 +96,11 @@ class BootstrapStagesTest(unittest.TestCase):
         fixture.put(self.f.source / "tools/fleet-sync", self.code, True)
         if after_fleet:
             shutil.rmtree(self.f.source / "fleet")
-            shutil.copytree(fixture.ROOT / "fleet", self.f.source / "fleet")
+            archive = subprocess.check_output(
+                ["git", "-C", str(fixture.ROOT), "archive", STAGE_B, "fleet"], env=self.f.env)
+            with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
+                tar.extractall(self.f.source, filter="data")
+            fixture.put(self.f.source / "fleet/hosts.toml", self.hosts_toml)
             fixture.put(self.f.source / "fleet/repositories.toml",
                         f'agents = {json.dumps(str(self.f.origin))}\nfabrig = {json.dumps(self.f.fabrig_origin)}\n')
         else:
@@ -130,7 +126,8 @@ class BootstrapStagesTest(unittest.TestCase):
         # alone, so the deployed runner is also the runner that applies them.
         self.assertEqual(self.f.process("git", "-C", fixture.ROOT, "show",
                                         DEPLOYED + ":tools/fleet-sync").stdout,
-                         (fixture.ROOT / "tools/fleet-sync").read_text())
+                         self.f.process("git", "-C", fixture.ROOT, "show",
+                                        STAGE_B + ":tools/fleet-sync").stdout)
 
     @unittest.skipUnless(HAS_BOOTSTRAP, "stage B declarations are not in the code-only stage")
     def test_stage_a_timer_promotes_real_stage_b_on_declared_hosts(self):
