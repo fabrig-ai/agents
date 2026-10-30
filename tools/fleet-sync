@@ -533,7 +533,7 @@ os.close(home)
 
 FLEET_ASSETS = frozenset((
     "bootstrap/README.md", "bootstrap/inventory.md", "bootstrap/packages.txt",
-    "bootstrap/root.sh", "bootstrap/user.sh", "bootstrap/bootstrap.py",
+    "bootstrap/root.sh", "bootstrap/user.sh", "bootstrap/bootstrap.py", "bootstrap/pquota",
     "kache/README.md", "kache/build", "kache/git-checkout-rev.patch",
     "kache/upload-bound.patch", "kache/config.toml", "kache/remote.toml",
     "kache/20-shared-store.conf", "seeds/README.md", "seeds/codex.sha256",
@@ -577,6 +577,8 @@ class Declarations:
             hostnames.add(host["hostname"])
             if not re.fullmatch(r"[a-zA-Z0-9_.@:-]+", host["ssh"]) or host["ssh"].startswith("-"):
                 raise ValueError(f"invalid ssh address for {name}")
+            if type(host.get("pquota", False)) is not bool:
+                raise ValueError(f"pquota flag must be boolean for {name}")
             if type(host.get("seed", False)) is not bool:
                 raise ValueError(f"seed flag must be boolean for {name}")
             if not isinstance(host["roles"], list) or not all(isinstance(r, str) for r in host["roles"]):
