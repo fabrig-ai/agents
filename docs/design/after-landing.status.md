@@ -65,6 +65,8 @@ Contract: `docs/design/after-landing.md`, sections 1–9.
 
 ## Verification
 
+End-to-end cases run in the periodic tier (`tools/after-landing/test_after_landing_periodic.py`); the gate core keeps inexpensive contract coverage.
+
 The evidence above is source and offline fixture coverage, not a live fleet
 acceptance run. No test reads the former design path, so this docs-only task
 runs no after-landing tests, as requested. No code or machine action is needed.
