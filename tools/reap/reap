@@ -383,18 +383,6 @@ class Reaper:
     def snapshot(self):
         used, borrowed, slots, failures = [], [], [], []
         try:
-            processes = process_paths(self.proc)
-            if processes['errors'] and self.proc == Path('/proc'):
-                # Only this metadata reader runs as root, never discovery,
-                # Git, archives, record/state handling or deletion.
-                processes = json.loads(command(['sudo', '-n', '/usr/bin/python3', '-I', '-B',
-                                                Path(__file__).resolve().with_name('proc_paths.py')]))
-            used = [absolute(path) for path in processes['paths']]
-            if processes['errors']:
-                failures.append('proc incomplete: ' + ','.join(processes['errors']))
-        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
-            failures.append(f'proc incomplete: {type(exc).__name__}')
-        try:
             output = command(['claim', 'list'])
             for line in output.splitlines():
                 if not line.strip():
@@ -417,6 +405,18 @@ class Reaper:
                 detail = f'alternates {root}: {exc}'
                 if detail not in self.errors:
                     self.errors.append(detail)
+        try:
+            processes = process_paths(self.proc)
+            if processes['errors'] and self.proc == Path('/proc'):
+                # Only this metadata reader runs as root, never discovery,
+                # Git, archives, record/state handling or deletion.
+                processes = json.loads(command(['sudo', '-n', '/usr/bin/python3', '-I', '-B',
+                                                Path(__file__).resolve().with_name('proc_paths.py')]))
+            used = [absolute(path) for path in processes['paths']]
+            if processes['errors']:
+                failures.append('proc incomplete: ' + ','.join(processes['errors']))
+        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
+            failures.append(f'proc incomplete: {type(exc).__name__}')
         for failure in failures:
             if failure not in self.errors:
                 self.errors.append(failure)
@@ -603,10 +603,11 @@ class Reaper:
                 # removal; discovery and earlier archive work are not proof.
                 if self.fingerprint(path)[1] != fingerprint:
                     raise ValueError('candidate changed during inspection/archive')
-                self.refresh_records()
                 if inside(path, self.home / '.claude/jobs'):
                     self.discover({'claude-jobs'})
-                reason = self.keep(path, self.snapshot(), inspect_tree=False)
+                current = self.snapshot()
+                self.refresh_records()
+                reason = self.keep(path, current, inspect_tree=False)
                 if reason:
                     item['reason'] = reason
                     continue
