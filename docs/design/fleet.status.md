@@ -5,6 +5,13 @@ Contract: `docs/design/fleet.md`, sections 1–6.
 
 ## Present
 
+- Retired-link checks report `drift` before journaling and `failed` on a
+  reappeared legacy link (`docs/design/fleet.md`, section 2). Fast source
+  exclusion coverage and periodic process/preview/full bootstrap coverage use
+  temporary HOME and fake services in `tools/test_fleet_sync_retired_links*.py`.
+  Machine action on landing: fleet-sync retires the five declared PATH links;
+  the frozen old kit and ops refusal stubs are untouched.
+
 - Agents periodic units are gated by builder role and AGENTS_PERIODIC=1; only
   hetzner3 declares the flag (`tools/fleet-sync`, `tools/test_land.py`).
 

@@ -122,7 +122,13 @@ Hold and a busy lock leave retry untouched; checks and previews never consume it
    text, time and release in private state `retired_links.json` beside links.json.
    Restore manually from that journal with `ln -s "$TEXT" ~/.local/bin/NAME`;
    there is no restore command. Hold suppresses retirement; check/status report
-   drift and preview displays removals while changing only its private copy.
+   `drift` before journaling and `failed` if a journaled name reappears as a
+   legacy-root link, including a changed link spelling. Both inspections leave
+   the link and journal unchanged. Preview displays removals while changing only
+   its private copy. Bootstrap and fleet-sync never create, link or provision
+   paths under `~/src/rust/agents/`; the retired-links manifest excludes that root
+   from provisioning. Fast source scans and a full bootstrap user run with fake
+   services/downloads cover this exclusion in the retired-links test suites.
    The old kit checkout and other links are untouched.
    Journal created links in links.json;
    remove obsolete recorded links only while they still target current/releases.

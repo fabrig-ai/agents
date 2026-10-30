@@ -65,6 +65,13 @@ leave PATH (today the five that reach the old kit's own heavy). fleet-sync
 removes such a `~/.local/bin` link only while it still points into the frozen
 old kit, journals its exact link text first, and warns about anything else.
 Restoring one is a manual `ln -s` from the journal (`tools/fleet-sync.md`).
+`--check` and `status` report a matching legacy link as `drift` before retirement,
+and `failed` if that name already appears in the retirement journal, even when
+its link text changed. Both inspections preserve the link and journal. Bootstrap
+and fleet-sync never create, link or provision paths under `~/src/rust/agents/`;
+the retirement declaration is an exclusion, never an installation source.
+Temporary-HOME tests cover the executable inputs/declarations and a full user
+bootstrap with fake services and a verified fake download.
 
 **Units.** `fleet/units/` holds systemd user units; `fleet/units/roles.toml`
 maps each to the roles that run it. fleet-sync enables timers. A service marked

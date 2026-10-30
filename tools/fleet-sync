@@ -1171,7 +1171,10 @@ class Runner:
                     self.item(item, "warn", "link is outside legacy root or passes through another symlink; retained")
                     continue
                 if self.args.check:
-                    self.item(item, "drift", f"would retire {name} (-> {text})")
+                    recorded = any(record["name"] == name for record in journal)
+                    self.item(item, "failed" if recorded else "drift",
+                              f"retired link reappeared: {name} (-> {text})" if recorded
+                              else f"would retire {name} (-> {text})")
                     continue
                 with self.safe.parent(relative) as (directory, leaf):
                     info = os.stat(leaf, dir_fd=directory, follow_symlinks=False)
