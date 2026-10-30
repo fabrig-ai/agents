@@ -110,6 +110,7 @@ class ReapTests(unittest.TestCase):
     def test_claude_jobs_threshold_and_live(self):
         eligible = self.old('.claude/jobs/old', 2, True)
         self.old('.claude/jobs/new', .5, True)
+        self.old('.claude/jobs/pins.json', 30)
         live = self.old('.claude/jobs/live', 2, True)
         (self.proc / '123').mkdir()
         self.fake('claude', '[{"sessionId":"live","pid":123}]')
@@ -163,6 +164,8 @@ class ReapTests(unittest.TestCase):
     def test_codex_sessions_only_rollouts(self):
         old = self.old('.codex/sessions/2025/10/rollout.jsonl', 15)
         self.old('.codex/sessions/2026/10/new.jsonl', 1)
+        self.old('.codex/sessions/metadata.json', 30)
+        self.old('.codex/sessions/index.jsonl', 30)
         auth = self.old('.codex/auth.json', 30)
         self.assertEqual(self.selected(self.run_class('codex-sessions')), {old})
         self.assertTrue(auth.exists())
@@ -170,7 +173,7 @@ class ReapTests(unittest.TestCase):
     def test_recorded_kind_retention(self):
         for number, (kind, seconds) in enumerate(self.config['kinds'].items()):
             with self.subTest(kind=kind):
-                path = self.old(f'.claude/jobs/id{number}' if kind == 'claude-session' else f'scratch/{kind}')
+                path = self.old(f'.claude/jobs/id{number}' if kind == 'claude-session' else f'scratch/{kind}', directory=kind == 'claude-session')
                 self.ended(path, kind, f'id{number}', (seconds+1)/DAY)
         result = self.run_class('recorded')
         self.assertEqual(len(self.selected(result)), len(self.config['kinds']))

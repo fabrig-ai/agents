@@ -316,7 +316,16 @@ class Reaper:
                             continue
                         # Recorded has its own kind-specific threshold.
                         for path in record['paths']:
-                            add(self.path(path), cls, record['ended'], retention)
+                            candidate = self.path(path)
+                            if kind == 'claude-session':
+                                if candidate != self.home / '.claude/jobs' / identity:
+                                    continue
+                                try:
+                                    if not stat.S_ISDIR(candidate.lstat().st_mode):
+                                        continue
+                                except FileNotFoundError:
+                                    continue
+                            add(candidate, cls, record['ended'], retention)
                 elif cls == 'codex-runs':
                     for path in self.children(self.home / self.config['classes'][cls]['root']):
                         try:
@@ -335,11 +344,15 @@ class Reaper:
                         try:
                             for path, info in walk(base):
                                 if not stat.S_ISDIR(info.st_mode):
+                                    if cls == 'codex-sessions' and not (path.name.startswith('rollout') and path.suffix == '.jsonl'):
+                                        continue
                                     add(path, cls)
                         except FileNotFoundError:
                             pass
                 else:
                     for path in self.children(self.home / self.config['classes'][cls]['root']):
+                        if cls == 'claude-jobs' and not stat.S_ISDIR(path.lstat().st_mode):
+                            continue
                         add(path, cls)
             except (OSError, ValueError) as exc:
                 self.errors.append(f'discover {cls}: {exc}')
