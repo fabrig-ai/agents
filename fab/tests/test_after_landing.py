@@ -10,9 +10,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from fab import after_landing, log, nextest, slots, tiers
+from fab import after_landing, atomic, log, nextest, slots, tiers
 from fab.after_landing import AfterLanding, Suspect, state, suspects, verdict
-from fab.run import _write
 from fab.sh import Failed, Result
 from fab.tests.support import FakeRunner, GIT_ENV, git, git_pair, tmp_home
 
@@ -112,16 +111,10 @@ class AfterLandingTest(unittest.TestCase):
         self.home = self.enterContext(tmp_home())
         self.enterContext(patch.dict(os.environ, GIT_ENV))
         self.enterContext(patch.dict(os.environ, {"FAB_SLOTS": str(self.home / "slots")}))
-        _, clone = git_pair(self.home)
-        self.config = "".join(f"[profile.{profile}]\nretries = 0\n" for profile in self.profiles)
-        _write(clone / tiers.NEXTEST_CONFIG, self.config)
-        _write(clone / ".gitignore", "target/\n")
-        git(clone, "add", ".config", ".gitignore")
-        git(clone, "commit", "-qm", "Configure test profiles")
-        self.base = git(clone, "rev-parse", "HEAD")
         self.repo = slots.slots_dir() / "1"
-        self.repo.parent.mkdir()
-        clone.rename(self.repo)
+        self.config = "".join(f"[profile.{profile}]\nretries = 0\n" for profile in self.profiles)
+        atomic.write(self.repo / tiers.NEXTEST_CONFIG, self.config)
+        self.base = "0" * 40
         slots.claim(1, "after-landing", "after-landing")
         self.tip = self.base
         self.timeline = [self.base]
@@ -171,9 +164,9 @@ class AfterLandingTest(unittest.TestCase):
         if isinstance(response, Exception):
             raise response
         code, cases = response
-        _write(path, f"fake pair exit {code}\n")
+        atomic.write(path, f"fake pair exit {code}\n")
         if isinstance(cases, str):
-            _write(report, cases)
+            atomic.write(report, cases)
         elif cases is not None:
             root = ET.Element("testsuites", tests=str(len(cases)))
             suite = ET.SubElement(root, "testsuite", name=self.binary)
@@ -183,7 +176,7 @@ class AfterLandingTest(unittest.TestCase):
                     ET.SubElement(case, "failure").text = "assertion failed\nmore details"
                 elif result == "skipped":
                     ET.SubElement(case, "skipped")
-            _write(report, ET.tostring(root, encoding="unicode"))
+            atomic.write(report, ET.tostring(root, encoding="unicode"))
         return code
 
     def response(self, cases, *, profile="qa-skein", code=None, alone=None):
@@ -221,11 +214,11 @@ class AfterLandingTest(unittest.TestCase):
         self.advance()
         tip = self.advance("draft/two")
         incremental = self.repo / "target/debug/incremental"
-        _write(incremental / "stale", "old output")
+        atomic.write(incremental / "stale", "old output")
         stale = self.repo / "target/debug/deps/stale-test"
         fresh = stale.with_name("fresh-test")
         for path, stamp in [(stale, 1), (fresh, 300)]:
-            _write(path, "test executable")
+            atomic.write(path, "test executable")
             path.chmod(0o700)
             os.utime(path, ns=(stamp, stamp))
         freed = sum(path.stat().st_blocks * 512 for path in [incremental, incremental / "stale", stale])
@@ -421,7 +414,7 @@ class AfterLandingTest(unittest.TestCase):
         self.responses["qa-skein", None] = OSError("cannot run")
         self.assertIn("cannot run", self.runner.pair("qa-skein", self.tip, directory)["reason"])
         self.assertEqual(self.runner.pair("missing", self.tip, directory)["status"], "faulted")
-        _write(self.repo / tiers.NEXTEST_CONFIG, "bad toml [")
+        atomic.write(self.repo / tiers.NEXTEST_CONFIG, "bad toml [")
         self.assertEqual(self.runner.pair("qa-skein", self.tip, directory)["status"], "faulted")
 
     def test_unsafe_test_identity_faults_before_running_a_filter(self):
@@ -465,15 +458,17 @@ class AfterLandingTest(unittest.TestCase):
     def test_failed_state_save_retries_whole_run_without_advancing_memory(self):
         before = json.loads(json.dumps(self.runner.state))
 
+        write_file = atomic.write
+
         def write(path, text):
             if path == self.runner.state_path:
                 self.assertEqual([entry["ev"] for entry in self.records()], ["test", "run"])
                 raise OSError("state write failed")
-            _write(path, text)
+            write_file(path, text)
 
         self.response([("works", "fail")])
         self.response([("works", "pass")], alone="works")
-        with patch.object(after_landing, "_write", side_effect=write):
+        with patch("fab.atomic.write", side_effect=write):
             with self.assertRaisesRegex(OSError, "state write failed"):
                 self.runner.cycle()
         self.assertEqual(self.runner.state, before)
@@ -489,7 +484,7 @@ class AfterLandingTest(unittest.TestCase):
         def cycle():
             result = outcomes.pop(0)
             if not outcomes:
-                _write(stop, "")
+                atomic.write(stop, "")
             if isinstance(result, Exception):
                 raise result
             return result
@@ -506,7 +501,7 @@ class AfterLandingTest(unittest.TestCase):
         stamps = ["2026-10-29T00:00:00.000Z", "2026-10-30T00:00:00.000Z", "2026-10-31T00:00:00.000Z"]
         for stamp in stamps:
             log.append("run", path=self.runner.log_path, ts=stamp, verdict="green")
-        _write(self.runner.log_path, self.runner.log_path.read_text() + "{torn")
+        atomic.write(self.runner.log_path, self.runner.log_path.read_text() + "{torn")
         with contextlib.redirect_stdout(io.StringIO()) as output:
             self.assertEqual(after_landing.main(["log", "--since", stamps[1]]), 0)
         self.assertEqual([json.loads(line)["ts"] for line in output.getvalue().splitlines()], stamps[1:])

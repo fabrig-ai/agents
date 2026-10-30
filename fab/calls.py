@@ -19,9 +19,9 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from fab import log
+from fab import atomic, log
 from fab.plan import Plan, Task, load_plan, load_tasks
-from fab.run import TASTE, _write, outcome
+from fab.run import TASTE, outcome
 from fab.sh import Failed, Runner, run
 from fab.state import fold
 
@@ -303,14 +303,14 @@ def start(role: str, subject: str, repo: Path, brief: str, *, sh: Runner = run,
        cwd=str(repo), check=True)
     began = time.monotonic()
     try:
-        _write(brief_path, brief)
+        atomic.write(brief_path, brief)
         log.append("call.started", path=log_path, call=call_id, role=role, subject=subject, branch=branch)
         environment = {key: value for key, value in os.environ.items()
                        if not key.startswith(("CLAUDECODE", "CLAUDE_CODE_"))}
         result = sh(claude_argv(brief_path, worktree), cwd=str(worktree), timeout=TIMEOUT,
                     env=environment)
-        _write(directory / "result.json", result.out)
-        _write(directory / "stderr.log", result.err)
+        atomic.write(directory / "result.json", result.out)
+        atomic.write(directory / "stderr.log", result.err)
         try:
             data = json.loads(result.out)
         except json.JSONDecodeError:

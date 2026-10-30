@@ -14,7 +14,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from fab import digest, log, run as runs
+from fab import atomic, digest, log, run as runs
 from fab.digest import SIZE_CAP, Digest
 from fab.plan import Task
 from fab.sh import Runner, run
@@ -138,7 +138,7 @@ def screen(task: Task, events: Iterable[dict], *, sh: Runner = run,
     `git merge-base refs/remotes/origin/main <tip>`; fab.digest.changes(base, tip); both trees
     by fab.digest.archive into `base` and `tip` of a temporary directory under FAB_HOME,
     removed afterwards; fab.digest.build; its render written to FAB_HOME/digests/<run>.md with
-    fab.run._write. Every git command runs with check=True, so a git failure raises
+    fab.atomic.write. Every git command runs with check=True, so a git failure raises
     fab.sh.Failed, writes no digest and logs nothing. The lock is released before logging.
 
     Then the findings are check(digest, banned_names(fab.run.TASTE's text)). A SyntaxError
@@ -175,7 +175,7 @@ def screen(task: Task, events: Iterable[dict], *, sh: Runner = run,
                 findings = [Finding(PARSE, f"`{error.filename}:{error.lineno}` {error.msg}")]
             else:
                 written = str(home / "digests" / f"{run_id}.md")
-                runs._write(Path(written), digest.render(summary))
+                atomic.write(Path(written), digest.render(summary))
                 findings = check(summary, banned_names(runs.TASTE.read_text(encoding="utf-8")))
     if findings:
         log.append("branch.rejected", path=log_path, task=task.id, branch=branch, tip=tip,
