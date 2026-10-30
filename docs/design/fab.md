@@ -420,9 +420,18 @@ it, and the flow grows from a small start rather than to a fixed cap.
   output; the implementer's next run on the same branch fixes what it finds,
   once, before the branch lands or is readied. A critique with no findings
   lets it through at once.
+- **The foreman writes the rebase and repair tasks,** as the user's model
+  has it. When the landing refuses a branch, a foreman run reads the task,
+  the refusal and the failing step's log, and writes the repair: an
+  `## Repair` section appended to the task's spec, saying what failed, where
+  to look and what to change, or that the red is not the branch's (a fault
+  of the gate, a flake), in which case the tip is retried unchanged
+  (`fab queue untry`) and no repair run starts. A conflict gets a rebase
+  section the same way. The repair or rebase run then reads its spec, as
+  every run does.
 - **The foreman settles what the options settle.** A run ending with a
-  question first goes to a foreman run (Codex, medium, read-only, kind
-  `foreman`, `fab/roles/foreman.md`) with the task spec and the report: when
+  question first goes to a foreman run (Codex, medium, kind `foreman`,
+  `fab/roles/foreman.md`; it writes no code, code records what it decides) with the task spec and the report: when
   the spec's pre-approved options answer it, the foreman's answer is
   recorded in the spec's Answers section and the task runs again; otherwise
   the question queues for the answerer, every 2 hours or at 4 queued, as the
