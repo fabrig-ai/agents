@@ -289,9 +289,13 @@ def launch(host: Host, run_id: str, *, task: str, kind: str, workdir: str, branc
 
 
 def status(started: dict, host: Host, *, sh: Runner = run) -> dict:
-    """Whether a run has ended, from its run.started record: one ssh reading codex-run's
-    `<state>/ended` marker and, once ended, the report. Returns {"run", "ended", "outcome",
-    "report"}; outcome and report are None until ended."""
+    """Whether a run has ended, from its run.started record: one ssh reading the launcher's
+    `<state>/ended` marker and, once ended, `<state>/result.json` and the report. The script
+    prints `running`, or `ended`, then result.json's first line (an empty line when it is
+    missing), then the report (nothing when it is missing), each part after a newline.
+    Returns {"run", "ended", "outcome", "report", "tokens"}; outcome and report are None
+    until ended; tokens is fab.codex.tokens_field of the result line, None until ended and
+    when the line gives none."""
     marker = shlex.quote(str(Path(started["state"]) / "ended"))
     report_path = shlex.quote(started["report"])
     script = (f"if test -f {marker}; then printf 'ended\\n'; "
@@ -324,7 +328,8 @@ def launch_detached(host: Host, run_id: str, repo: str, rev: str, *, sh: Runner 
 def collect(run_id: str, events: Iterable[dict], hosts: dict[str, Host], *, sh: Runner = run,
             log_path: Path | None = None) -> str | None:
     """Collect an ended run once: copy its report to FAB_HOME/runs/<run>/report.md here, log
-    run.ended (run, task, outcome, report, minutes since run.started) and, for a question,
+    run.ended (run, task, outcome, report, minutes since run.started, and tokens when status
+    gives them, 13.5) and, for a question,
     question.asked with the report's first 15 lines as text. Returns the outcome; None while the
     run is still going or when it was already collected.
 

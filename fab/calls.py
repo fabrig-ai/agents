@@ -37,6 +37,25 @@ TIMEOUT = 40 * 60
 
 
 @dataclass(frozen=True)
+class Usage:
+    """A call's Claude usage, as claude_usage reads it from claude's stream and call.ended
+    carries it (docs/design/fab.md, 13.5). Every count is in tokens."""
+
+    input: int  # uncached input: claude's input_tokens, which excludes cache reads and writes
+    cache_write: int  # cache_creation_input_tokens
+    cache_read: int  # cache_read_input_tokens
+    output: int  # output_tokens
+    peak: int  # the largest context of one main-thread message: input + cache_write + cache_read
+    turns: int  # claude's num_turns
+
+    def log_fields(self) -> dict:
+        """call.ended's usage fields: tokens `<input>/<cache_read>/<output>` (the shape the
+        log has always had, which fab.accounting.token_counts reads), then cache_write, peak
+        and turns as ints."""
+        raise NotImplementedError
+
+
+@dataclass(frozen=True)
 class Signature:
     module: str  # repository-relative path
     name: str  # `name` or `Class.name`
@@ -259,10 +278,13 @@ def open_questions(events: Iterable[dict]) -> list[dict]:
 
 
 def claude_argv(brief_path: Path, workdir: Path, *, model: str = MODEL) -> list[str]:
-    """`claude -p <prompt> --model <model> --output-format json --dangerously-skip-permissions
-    --add-dir=<workdir>`, the prompt being a one-line instruction to read and follow brief_path.
-    The prompt comes first and --add-dir takes `=`: --add-dir accepts several directories and
-    would otherwise take the prompt for one."""
+    """`claude -p <prompt> --model <model> --output-format stream-json --verbose
+    --dangerously-skip-permissions --add-dir=<workdir>`, the prompt being a one-line
+    instruction to read and follow brief_path. The stream (one JSON event per line; claude
+    needs --verbose for it under -p) carries every message's usage, so claude_usage finds the
+    call's peak context. No --max-turns: a call is measured, not capped (13.5). The prompt
+    comes first and --add-dir takes `=`: --add-dir accepts several directories and would
+    otherwise take the prompt for one."""
     return ["claude", "-p", f"Read and follow the brief at {shlex.quote(str(brief_path))}.",
             "--model", model, "--output-format", "json", "--dangerously-skip-permissions",
             f"--add-dir={workdir}"]
@@ -276,8 +298,11 @@ def start(role: str, subject: str, repo: Path, brief: str, *, sh: Runner = run,
     Create FAB_HOME/calls/<id>/wt on calls/<id> from origin/main, or fetch origin and
     reset the supplied branch from origin/<branch> with worktree add -B. Rebind Call facts,
     log call.started (including amends when supplied), run Claude without nested-session
-    environment markers, then log call.ended with report outcome, usage and elapsed minutes.
-    Remove the worktree even on failure; return {call, branch, outcome, report}."""
+    environment markers, keep its stdout as stream.jsonl and its stderr as stderr.log, then
+    log call.ended with the report's outcome, claude_usage(stdout).log_fields() and the
+    elapsed minutes. Nothing ends a call but TIMEOUT; a call cut short there is measured from
+    what its stream holds. Remove the worktree even on failure; return {call, branch,
+    outcome, report}."""
     if role not in ROLES:
         raise ValueError(f"unknown call role {role!r}")
     call_id = f"{role}-{uuid.uuid4().hex}"
@@ -317,6 +342,28 @@ def start(role: str, subject: str, repo: Path, brief: str, *, sh: Runner = run,
         return {"call": call_id, "branch": branch, "outcome": status, "report": str(report_path)}
     finally:
         sh(["git", "worktree", "remove", "--force", str(worktree)], cwd=str(repo), check=True)
+
+
+def claude_usage(stream: str) -> Usage:
+    """A call's usage from claude's stdout, one JSON event per line (claude_argv's
+    stream-json); a line that does not parse as a JSON object is skipped.
+
+    - The messages: events with type "assistant" whose `message` is an object with a
+      `usage` object. Several events of one message share its `message.id` and its usage is
+      the last one seen; a message without an id stands alone. A message is the main
+      thread's when the event's `parent_tool_use_id` is missing or None; others are
+      subagents', whose context is their own.
+    - A usage's counts are input_tokens, cache_creation_input_tokens,
+      cache_read_input_tokens and output_tokens; a key missing or not a non-negative int
+      (bools too) counts 0. A message's context is its input + cache creation + cache read.
+    - peak: the largest context of a main-thread message; 0 when there is none.
+    - The totals and turns: from the last event with type "result", its `usage` counts and
+      its `num_turns` (0 when not an int). Without one (the call timed out or claude
+      crashed): every message's counts summed, main thread and subagents, each message once;
+      turns the number of main-thread messages.
+    Usage(input, cache_write, cache_read, output, peak, turns), the cache write being
+    cache_creation_input_tokens. Empty or unreadable output gives all zeros. Pure."""
+    raise NotImplementedError
 
 
 def _call_result(text: str, report_path: Path) -> tuple[str, str]:

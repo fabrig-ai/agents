@@ -116,9 +116,21 @@
   chain, and carries the user's answers into every later brief of the
   subject, and makes an answer call's `Question:` park its draft. Until
   then nothing writes `FAB_HOME/user.md`, and an answer call that ends
-  `Question:` starts again on the next tick. The open questions
-  of the log today are the retire and accounting skeleton calls'. The page
+  `Question:` starts again on the next tick. The open question
+  of the log today is the retire skeleton call's; the accounting call's was
+  answered in 13.5 (measured, not capped). The page
   is a file on hel8: where else the user reads it is the user's (14).
+- **Accounting is a skeleton:** `fab/accounting.py` holds 13.5's weights,
+  the draft's calls and runs and the code report's Claude and Codex
+  figures; `fab.calls.Usage` and `claude_usage` the reading of claude's
+  stream, and `fab.codex.tokens_field` the run's tokens. The task
+  `accounting` fills them, switches calls to claude's stream-json output,
+  makes `fab run status` read the run's result and adds the figures and the
+  Calls table to the code report. Until it lands, run.ended carries no
+  tokens, call.ended no peak, turns or cache writes, and no weight is shown.
+  A call's subject draws its calls into the report only when it is the draft
+  or one of its parts; the task widens that to every subject under the
+  draft (review, cut, retire, decision).
 - **Parts done by hand have no task specs** (package, slot-probe), so the
   tick's design line lists them.
 - **The slot bound of 25 GB is one measurement** (10-30 20:18Z): a

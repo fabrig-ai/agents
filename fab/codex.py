@@ -111,6 +111,16 @@ def tokens(events: Sequence[dict]) -> dict[str, int]:
     return totals
 
 
+def tokens_field(result: str) -> str | None:
+    """run.ended's tokens field (docs/design/fab.md, 13.5) from the text of a run's
+    result.json, as execute writes it: `<input>/<cached>/<output>` from its `tokens` object's
+    input_tokens, cached_input_tokens and output_tokens (a key missing or not a non-negative
+    int counts 0; Codex's input holds its cached tokens). None when the text is not a JSON
+    object or has no `tokens` object: a run cut off before its result, or codex-run's state.
+    Pure."""
+    raise NotImplementedError
+
+
 def at_capacity(events: Sequence[dict], stderr: str) -> bool:
     """Whether a turn failed because the model was at capacity (an error or turn.failed event
     whose message is CAPACITY, or CAPACITY in stderr)."""

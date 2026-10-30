@@ -2,10 +2,10 @@
 
 The metrics are the code-producing draft's (docs/design/draft/code-producing-pipeline.md,
 3) that the log records: flow, task size in runs and minutes, questions, repairs, waits and
-Claude usage. Every function here is pure; `render` puts them together for one window.
+Claude and Codex usage (fab.accounting). Every function here is pure; `render` puts them together for one window.
 
-A draft's records are those whose task is `<draft>/...`; its calls are those whose subject is
-the draft or one of its plan's parts.
+A draft's records are those whose task is `<draft>/...`; its calls and their review runs are
+fab.accounting's draft_calls and draft_runs.
 """
 
 from __future__ import annotations
@@ -234,9 +234,8 @@ def figures(plan: Plan, tasks: Mapping[str, Task], events: list[dict],
       latest question.asked before it; fab.report.quantile 0.5 and the largest; None when none.
     - open: fab.calls.open_questions over the events before the window's end, the draft's only.
     - idle_minutes: the minutes of gaps(plan, tasks, events, window), summed.
-    - calls, call_minutes: the draft's call.ended and their minutes summed. input_tokens,
-      output_tokens: from call.ended tokens `in/cached/out`, input being in plus cached; a
-      malformed value adds 0.
+    - the keys of fab.accounting.FIGURES: fab.accounting.figures(plan.draft, events,
+      window), which reads its own records (the draft's calls and Codex runs).
     - lane_wait, disk_wait, disk_refused: fab.report.heavy_waits over the hosts with role
       builder.
     Counts are ints, minutes and rates floats."""
@@ -363,6 +362,8 @@ def render(plan: Plan, tasks: Mapping[str, Task], sources: Sources, hosts: Mappi
     - `## Stops, longest first`: a table Kind, Task, Start, Minutes, Open (yes or no), Detail
       from stops.
     - `## Parts`: a table Part, Tasks, Landed, Runs, Codex minutes, Questions from parts.
+    - `## Calls`: a table Call, Role, Subject, Minutes, Turns, Peak context, Weight (M),
+      Over target from fab.accounting.call_rows, numbers through fab.report.show.
     - `## Rejections by step`: a table Step, Count of the window's branch.rejected by step,
       most first, then by step.
     Minutes are shown through fab.report.show; sections are separated by one blank line."""

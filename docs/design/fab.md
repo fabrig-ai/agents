@@ -68,13 +68,13 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
 |---|---|---|
 | `task.added` | draft, task, repo, path, sha | a task spec exists on its repository's main |
 | `run.started` | run, task, kind, host, dir, branch, base | a Codex run began; kind is implement, repair, rebase, review or foreman |
-| `run.ended` | run, task, outcome, report, minutes | outcome is done, question, infra or failed (section 5) |
+| `run.ended` | run, task, outcome, report, minutes, tokens | outcome is done, question, infra or failed (section 5); tokens is Codex's (13.5) |
 | `branch.ready` | task, branch, tip | handed to the landing pipeline |
 | `branch.landed` | task, branch, tip, main | on main |
 | `branch.rejected` | task, branch, tip, step, log | the landing refused it; a repair or rebase follows |
 | `question.asked` | task, run, text | the task parks until answered |
 | `question.answered` | task, by, answer | the task may run again; it names a task, never a call's subject |
-| `call.started` / `call.ended` | call, role, subject; outcome, tokens | a Claude call |
+| `call.started` / `call.ended` | call, role, subject; outcome, tokens, cache_write, peak, turns, minutes | a Claude call; its usage (13.5) |
 | `call.finished` | call, role, outcome | the dispatcher landed a call's branch, or failed to |
 | `call.parked` | call, subject, reason, report | a call's branch waits for the user (13.1) |
 | `call.answered` | subject, call, by, question, answer | the user answered a subject's question or parked chain (13.6) |
@@ -242,8 +242,9 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
   10 minutes or more) with the tasks' statuses at their start; runs and Codex
   minutes per landed task; questions, their rate per report and time to
   answer; Infra minutes and heavy's lane and disk waits on the builders;
-  Claude calls, minutes and tokens; the stops (questions, failed and Infra
-  runs, rejections) ranked by time lost; the same per part.
+  Claude calls, minutes and tokens, Codex's tokens and the weights (13.5);
+  the stops (questions, failed and Infra runs, rejections) ranked by time
+  lost; the same per part.
 - **The landing report** (`fab/landing_report.py`): batches, their outcomes
   and branches; the share of the day in gate steps; rejections by step (the
   red classes) and collateral ones (a rejected tip that later lands); ready to
@@ -548,9 +549,25 @@ before it lands (13.1).
 ### 13.5 Accounting
 
 - **run.ended carries Codex's tokens** (input, cached, output) from the run's
-  result; call.ended already carries Claude's. The code report shows the
-  Claude to Codex weight (input 1, cache write 1.25, cache read 0.1, output 5
-  for Claude and 8 for Codex) and each call's peak context.
+  result: `fab run status` reads the launcher's `result.json` in the ssh that
+  reads the report, and `tokens` is `<input>/<cached>/<output>`, Codex's
+  input holding its cached tokens. call.ended's `tokens` keeps its shape,
+  `<input>/<cache read>/<output>`, Claude's input holding neither cache reads
+  nor writes, and gains `cache_write`. Records from before have no
+  `cache_write` or no `tokens`, and weigh as if they had none.
+- **A call's usage comes from claude's stream** (`--output-format
+  stream-json`), kept as `FAB_HOME/calls/<id>/stream.jsonl`: the totals and
+  turns from its result event, and `peak`, the largest context (input, cache
+  write and cache read) of one message of the main thread; subagents have
+  their own context and are left out of it. A call cut short by its timeout
+  has no result event, and is measured from the messages it streamed.
+- **The code report weighs both** (`fab/accounting.py`): input 1, cache write
+  1.25, cache read 0.1, output 5 for Claude and 8 for Codex, in millions. A
+  draft's Claude calls are those whose subject is the draft or under it; its
+  Codex runs are its tasks' and the review runs of its calls. Its figures show
+  the Claude and Codex tokens, both weights, the Claude to Codex weight, the
+  largest call context and the calls over 120k; a Calls table lists each call
+  with its minutes, turns, peak context, weight and whether it is over.
 - **A call is measured, not capped, for now** (the user, 10-30): no context
   cap and no turn limit (no `--max-turns`); a call is stopped only by its
   40-minute timeout. call.ended carries its peak context and turns, and the
@@ -643,3 +660,6 @@ before it lands (13.1).
   question joins it.
 - A plan's question answered by `fab page answer`, writing plan.toml and
   landing it as the foreman lands its answers.
+- A cap on a call's context or turns, once the user sets one from the
+  measurements (13.5); Claude and Codex usage against their plans' limits,
+  once the limits are recorded somewhere fab can read.
