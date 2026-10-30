@@ -42,7 +42,12 @@ preserved from the original contract; section 8 (Later) closes this document.
 
 ## 2. The loop
 
-1. **Poll:** `git fetch` in the slot every 60 s. A new `origin/main` that
+1. **Poll:** every 60 s, compare `git ls-remote origin refs/heads/main` with
+   the slot's `origin/main` and fetch only when they differ, treating lookup
+   failures as fetch faults under the same episode rule and using
+   `GIT_SSH_COMMAND='ssh -o ControlMaster=auto -o ControlPersist=600 -o ControlPath=<state_dir>/ssh-%C'`
+   for all of the tool's own git network calls, with sockets in its private
+   0700 state directory. A new `origin/main` that
    descends from the last seen tip is appended to the tip queue; one that does
    not (rewritten history) is a fault to ops, and the tool stops polling until
    ops resets its cursor.

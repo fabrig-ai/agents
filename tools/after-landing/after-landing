@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import re
 import signal
+import shlex
 import socket
 import stat
 import subprocess
@@ -103,8 +104,12 @@ def command(argv, *, cwd=None, data=None, env=None):
         raise Fault(f'{argv[0]}: {error}') from error
 
 
-def git(slot, *argv):
-    result = command(['git', '-C', slot, *argv], env=dict(os.environ, GIT_TERMINAL_PROMPT='0'))
+def git(slot, *argv, state_dir=None):
+    env = dict(os.environ, GIT_TERMINAL_PROMPT='0')
+    if state_dir is not None:
+        env['GIT_SSH_COMMAND'] = ('ssh -o ControlMaster=auto -o ControlPersist=600 -o '
+                                  + shlex.quote(f'ControlPath={state_dir}/ssh-%C'))
+    result = command(['git', '-C', slot, *argv], env=env)
     if result.returncode:
         raise Fault(f'git {argv[0]}: {result.stderr.strip()}')
     return result.stdout.strip()
@@ -526,8 +531,14 @@ class Runner:
             self.deliver()
         if self.state['stopped']:
             return
-        git(self.args.slot, 'fetch', '-q', 'origin', 'main')
+        remote = git(self.args.slot, 'ls-remote', 'origin', 'refs/heads/main',
+                     state_dir=self.directory).split()
+        if len(remote) != 2 or remote[1] != 'refs/heads/main':
+            raise Fault('git ls-remote: origin has no refs/heads/main')
         tip = git(self.args.slot, 'rev-parse', 'origin/main')
+        if remote[0] != tip:
+            git(self.args.slot, 'fetch', '-q', 'origin', 'main', state_dir=self.directory)
+            tip = git(self.args.slot, 'rev-parse', 'origin/main')
         previous = self.state['seen']
         if previous != tip:
             if previous is not None:
@@ -1287,17 +1298,17 @@ def main(argv=None):
                               undelivered=len(state['outbox'])), sort_keys=True))
         return 0
     no_links(args.slot)
+    # Persistent evidence and SSH sockets must be outside the slot checkout.
+    if args.state_dir == args.slot or args.slot in args.state_dir.parents:
+        raise Fault('state must be outside the slot')
+    private_directory(args.state_dir)
     if args.dry_run:
-        git(args.slot, 'fetch', '-q', 'origin', 'main')
+        git(args.slot, 'fetch', '-q', 'origin', 'main', state_dir=args.state_dir)
         tip = git(args.slot, 'rev-parse', 'origin/main')
         previous = git(args.slot, 'rev-parse', 'HEAD~3')
         print(json.dumps(dict(tip=tip, previous=previous, suspects=suspects(args.slot, previous, tip),
                               profiles=tomllib.loads(args.tiers.read_text())['profiles']), indent=2))
         return 0
-    # Persistent evidence must not be in a checkout cleaned/switched by this tool.
-    if args.state_dir == args.slot or args.slot in args.state_dir.parents:
-        raise Fault('state must be outside the slot')
-    private_directory(args.state_dir)
     lease = nullcontext(None)
     slots = Path.home() / 'src/fabrig/slots'
     if args.slot.parent == slots and args.slot.name.isdecimal():

@@ -2,6 +2,7 @@
 """Gate contracts for docs/design/after-landing.md; process E2E is periodic."""
 
 import json
+import shlex
 from pathlib import Path
 import sys
 import tempfile
@@ -15,6 +16,92 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from after_landing_fixtures import (
     HERE, app, CoreSandbox as Sandbox, CoreBisectionSandbox as BisectionSandbox,
 )
+
+
+class PollTests(Sandbox):
+    def setUp(self):
+        super().setUp()
+        self.runner.state.update(seen=self.base, cursor=self.base)
+
+    def replies(self, remote):
+        local = self.base
+        def reply(argv, **kwargs):
+            nonlocal local
+            operation = argv[3]
+            if operation == 'ls-remote':
+                return SimpleNamespace(returncode=0, stdout=remote + '\trefs/heads/main\n')
+            if operation == 'fetch':
+                local = remote
+            return SimpleNamespace(returncode=0, stdout=local, stderr='')
+        return reply
+
+    def test_unchanged_remote_does_not_fetch_during_active_run(self):
+        self.runner.state['active'] = dict(tip=self.base, invocation={'running': True})
+        with mock.patch.object(app, 'command', side_effect=self.replies(self.base)) as command:
+            self.runner.poll()
+        self.assertEqual([call.args[0][3:] for call in command.call_args_list],
+                         [['ls-remote', 'origin', 'refs/heads/main'],
+                          ['rev-parse', 'origin/main']])
+        self.assertEqual(self.runner.state['seen'], self.base)
+        self.assertEqual(self.runner.state['queue'], [])
+        self.assertTrue(self.runner.state['active']['invocation']['running'])
+
+    def test_changed_remote_fetches_once_then_queues_fetched_tip(self):
+        tip = 'b' * 40
+        with mock.patch.object(app, 'command', side_effect=self.replies(tip)) as command, \
+                mock.patch.object(app, 'suspects', return_value=[]):
+            self.runner.poll()
+            self.runner.poll()
+        operations = [call.args[0][3] for call in command.call_args_list]
+        self.assertEqual(operations, ['ls-remote', 'rev-parse', 'fetch', 'rev-parse',
+                                      'merge-base', 'ls-remote', 'rev-parse'])
+        self.assertEqual(self.runner.state['seen'], tip)
+        self.assertEqual([item['tip'] for item in self.runner.state['queue']], [tip])
+        self.assertEqual(self.runner.state['cursor'], self.base)
+
+    def test_ls_remote_failure_uses_existing_fault_episode_and_keeps_cursor(self):
+        with mock.patch.object(app, 'command', return_value=SimpleNamespace(
+                returncode=1, stdout='', stderr='authentication failed')) as command, \
+                mock.patch.object(app, 'Runner', return_value=self.runner), \
+                mock.patch.object(self.runner, 'deliver'), \
+                mock.patch.object(self.runner, 'run') as run, \
+                mock.patch.object(sys, 'stderr'):
+            for _ in range(2):
+                app.main(self.argv)
+        run.assert_not_called()
+        self.assertEqual([call.args[0][3:] for call in command.call_args_list],
+                         [['ls-remote', 'origin', 'refs/heads/main']] * 2)
+        self.assertEqual(self.runner.state['cursor'], self.base)
+        self.assertEqual(self.runner.state['seen'], self.base)
+        self.assertEqual(self.runner.state['queue'], [])
+        self.assertIsNotNone(self.runner.state['fault_episode'])
+        self.assertEqual(len(self.runner.state['outbox']), 1)
+        self.assertIn('git ls-remote: authentication failed',
+                      self.runner.state['outbox'][0]['posts'][0]['body'])
+        saved = json.loads(self.runner.path.read_text())
+        self.assertEqual(saved['cursor'], self.base)
+        self.assertEqual(saved['fault_episode'], self.runner.state['fault_episode'])
+
+    def test_network_git_env_uses_private_state_socket(self):
+        directory = self.home / 'state with spaces'
+        app.private_directory(directory)
+        self.runner.directory = directory
+        with mock.patch.object(app, 'command', side_effect=self.replies('b' * 40)) as command, \
+                mock.patch.object(app, 'suspects', return_value=[]):
+            self.runner.poll()
+        networks = []
+        for call in command.call_args_list:
+            if call.args[0][3] in ('ls-remote', 'fetch'):
+                networks.append(call.args[0][3])
+                env = call.kwargs['env']
+                self.assertEqual(env['GIT_TERMINAL_PROMPT'], '0')
+                self.assertEqual(env['HOME'], str(self.home))
+                self.assertEqual(shlex.split(env['GIT_SSH_COMMAND']),
+                                 ['ssh', '-o', 'ControlMaster=auto', '-o', 'ControlPersist=600',
+                                  '-o', f'ControlPath={directory}/ssh-%C'])
+        self.assertEqual(networks, ['ls-remote', 'fetch'])
+        self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
+        self.assertNotIn('GIT_SSH_COMMAND', app.os.environ)
 
 
 class ReviewTests(Sandbox):

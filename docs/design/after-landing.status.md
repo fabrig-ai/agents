@@ -5,6 +5,10 @@ Contract: `docs/design/after-landing.md`, sections 1–9.
 
 ## Present
 
+- **Polling avoids unchanged fetches and reuses SSH connections.** Remote main
+  is checked with `ls-remote`; all tool-owned git network calls use a private
+  state-directory control socket, with no state-file format change (section 2).
+
 - **The serial loop and bisection exist.** `tools/after-landing/after-landing`
   implements polling, coalescing, confirmation, verdicts, durable replay,
   routing, records-before-posts, trim and bounded first-parent bisection.
@@ -68,5 +72,7 @@ Contract: `docs/design/after-landing.md`, sections 1–9.
 End-to-end cases run in the periodic tier (`tools/after-landing/test_after_landing_periodic.py`); the gate core keeps inexpensive contract coverage.
 
 The evidence above is source and offline fixture coverage, not a live fleet
-acceptance run. No test reads the former design path, so this docs-only task
-runs no after-landing tests, as requested. No code or machine action is needed.
+acceptance run. The SSH polling repair passed all 26 core tests using temporary
+HOME and in-process fake services; periodic tests were not run. Activation needs
+the updated script deployed and the service restarted; no state migration is
+needed.
