@@ -1,0 +1,345 @@
+"""Calls use compiled briefs and a fake Claude (docs/design/fab.md, 8 and 10)."""
+
+from __future__ import annotations
+
+import io
+import json
+import unittest
+from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
+from unittest.mock import Mock, patch
+
+from fab import calls, cli, log
+from fab.plan import Part, Plan, Slice, Task, load_tasks
+from fab.sh import Failed, Result
+from fab.tests.support import FakeRunner, tmp_home
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+def write(path, text):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    sibling = path.with_name(path.name + ".tmp")
+    sibling.write_text(text, encoding="utf-8")
+    sibling.replace(path)
+
+
+def fixture(root):
+    parts = {
+        "base": Part("base", "Base primitives", "feature", (), "design.md, 1"),
+        "core": Part("core", "Call core", "feature", ("base",), "design.md, 2 and 8"),
+        "next": Part("next", "Next part", "probe", ("core",), "design.md, 3"),
+    }
+    plan = Plan("demo", "agents", (), 1.0, 2.0, parts,
+                (Slice(1, "Build the core", ("base", "core"), True),
+                 Slice(2, "Explore next", ("next",), False)))
+    tasks = {}
+    for name, part in (("one", "base"), ("two", "base"), ("three", "core")):
+        path = f"docs/plan/demo/tasks/{name}.md"
+        spec = (f'+++\nid = "{name}"\npart = "{part}"\nkind = "feature"\n'
+                f'files = ["fab/{name}.py"]\n+++\n# Spec {name}\nDo {name}.\n')
+        write(root / path, spec)
+        tasks[f"demo/{name}"] = Task(f"demo/{name}", part, "feature", "agents", (),
+                                      (f"fab/{name}.py",), "high", 25, f"# Spec {name}\nDo {name}.\n", path)
+    write(root / "design.md", "# Full design\n\n## 1. First\nContract.\n\n## 8. Last\nKeep all sections.\n")
+    write(root / "fab/api.py", 'def primitive(value: int) -> str:\n    """Existing primitive."""\n    return str(value)\n')
+    write(root / "docs/plan/demo/plan.toml", '\n'.join([
+        'draft = "demo"', 'repo = "agents"',
+        *[f'[[part]]\nid = "{part.id}"\ntitle = "{part.title}"\nmode = "{part.mode}"\n'
+          f'needs = {json.dumps(part.needs)}\ndesign = "{part.design}"' for part in parts.values()],
+        '[[slice]]\nid = 1\nstory = "Build the core"\nparts = ["base", "core", "next"]\nwalk = true',
+    ]))
+    return plan, tasks
+
+
+class InventoryTest(unittest.TestCase):
+    def test_public_functions_classes_methods_annotations_and_order(self):
+        with tmp_home() as root:
+            write(root / "pkg/a.py", '''def first(a: int, /, b: str = "x", *args: bytes, flag: bool = True, **kw: float) -> list[str]:
+    """First line.
+
+    More details.
+    """
+    def nested(): pass
+
+class Public:
+    """Public class."""
+    def __init__(self): pass
+    def _hidden(self): pass
+    async def fetch(self, value: int) -> str:
+        """Fetch one value."""
+        pass
+
+class _Private:
+    def visible(self): pass
+
+def _private(): pass
+''')
+            write(root / "pkg/z.py", "def last(): pass\n")
+            write(root / "pkg/test_ignore.py", "invalid syntax !")
+            write(root / "pkg/api_test.py", "invalid syntax !")
+            write(root / "pkg/tests/test_nested.py", "invalid syntax !")
+            entries = calls.inventory(root, "pkg")
+            self.assertEqual([(item.module, item.name) for item in entries],
+                             [("pkg/a.py", "first"), ("pkg/a.py", "Public"),
+                              ("pkg/a.py", "Public.fetch"), ("pkg/z.py", "last")])
+            self.assertEqual(entries[0].text, "def first(a: int, /, b: str='x', *args: bytes, flag: bool=True, **kw: float) -> list[str]")
+            self.assertEqual(entries[0].doc, "First line.")
+            self.assertEqual(entries[1].text, "class Public")
+            self.assertEqual(entries[2].text, "async def fetch(self, value: int) -> str")
+            self.assertEqual(entries[-1].doc, "")
+
+    def test_repository_inventory_includes_log_append(self):
+        with tmp_home():
+            entries = calls.inventory(ROOT)
+        append = next(item for item in entries if (item.module, item.name) == ("fab/log.py", "append"))
+        self.assertIn("path: Path | None=None", append.text)
+        self.assertIn("Append one record", append.doc)
+        self.assertTrue(all("tests/" not in item.module for item in entries))
+
+    def test_render_inventory(self):
+        entries = [calls.Signature("fab/a.py", "a", "def a()", "A."),
+                   calls.Signature("fab/a.py", "b", "class B", "B."),
+                   calls.Signature("fab/z.py", "z", "def z()", "")]
+        self.assertEqual(calls.render_inventory(iter(entries)),
+                         "## fab/a.py\n\n- `def a()` — A.\n- `class B` — B.\n\n## fab/z.py\n\n- `def z()` — ")
+        self.assertEqual(calls.render_inventory([]), "")
+
+    def test_design_text_found_and_missing(self):
+        with tmp_home() as root:
+            write(root / "design.md", "# Design\nAll sections.\n")
+            self.assertEqual(calls.design_text(root, "design.md, 6 and 8"), "# Design\nAll sections.\n")
+            note = calls.design_text(root, "missing.md, 2")
+            self.assertIn("missing.md", note)
+            self.assertEqual(len(note.splitlines()), 1)
+            write(root / "broken.md", "unused")
+            sibling = root / "broken.tmp"
+            sibling.write_bytes(b"\xff")
+            sibling.replace(root / "broken.md")
+            self.assertIn("Design unavailable", calls.design_text(root, "broken.md"))
+
+
+class BriefTest(unittest.TestCase):
+    def test_skeleton_sections_full_specs_and_part_statuses(self):
+        with tmp_home() as root:
+            plan, tasks = fixture(root)
+            text = calls.skeleton_brief(plan, "core", tasks,
+                                        {"demo/one": "landed", "demo/two": "landed"}, root,
+                                        call_id="c1", branch="calls/c1", report="/reports/c1.md")
+            for fragment in (calls.ROLES["skeleton"].read_text(), "Call: c1", "calls/c1", "/reports/c1.md",
+                             "Plan: demo", "Repository: agents", "| base | Base primitives | feature | - | done |",
+                             "| core | Call core | feature | base | designed |",
+                             "| next | Next part | probe | core | not designed |",
+                             "| 1 | Build the core | base, core | True |", "Explore next",
+                             "- Id: core", "- Title: Call core", "- Mode: feature", "- Needs: base",
+                             "- Design: design.md, 2 and 8", (root / "design.md").read_text(),
+                             "## fab/api.py", "def primitive(value: int) -> str", "Existing primitive.",
+                             (root / tasks["demo/one"].path).read_text(),
+                             (root / tasks["demo/two"].path).read_text()):
+                self.assertIn(fragment, text)
+            self.assertNotIn("# Spec three", text)
+            partial = calls.skeleton_brief(plan, "core", tasks, {"demo/one": "landed", "demo/two": "done"},
+                                           root, call_id="c", branch="b", report="r")
+            self.assertIn("| base | Base primitives | feature | - | designed |", partial)
+
+    def test_absolute_spec_paths_are_presented_relative_to_the_checkout(self):
+        with tmp_home() as root:
+            plan, _ = fixture(root)
+            tasks = load_tasks(root / "docs/plan/demo/tasks", plan.draft, plan.repo)
+            skeleton = calls.skeleton_brief(plan, "core", tasks, {}, root, call_id="c", branch="b", report="r")
+            answer = calls.answer_brief([{"task": "demo/one", "run": "demo/one-1", "text": "Choose?"}],
+                                         tasks, root, call_id="c", branch="b", report="r")
+            for text in (skeleton, answer):
+                self.assertIn("(docs/plan/demo/tasks/one.md)", text)
+                self.assertNotIn(f"({root}/docs/plan", text)
+                self.assertIn("# Spec one", text)
+
+    def test_skeleton_limit_names_largest_section(self):
+        with tmp_home() as root:
+            plan, tasks = fixture(root)
+            write(root / "design.md", "x" * calls.BRIEF_LIMIT)
+            with self.assertRaisesRegex(ValueError, "BRIEF_LIMIT.*largest section: Cited design"):
+                calls.skeleton_brief(plan, "core", tasks, {}, root, call_id="c", branch="b", report="r")
+
+    def test_answer_sections_and_empty_questions(self):
+        with tmp_home() as root:
+            _, tasks = fixture(root)
+            question = {"task": "demo/one", "run": "demo/one-1", "text": "Question: which type?"}
+            text = calls.answer_brief([question], tasks, root, call_id="a1", branch="calls/a1", report="/answer.md")
+            for fragment in (calls.ROLES["answer"].read_text(), "Call: a1", "calls/a1", "/answer.md",
+                             "Task: demo/one", "Run: demo/one-1", question["text"],
+                             str(root / "fab/runs/demo/one-1/report.md"),
+                             (root / tasks["demo/one"].path).read_text(), "# Inventory", "Existing primitive."):
+                self.assertIn(fragment, text)
+            empty = calls.answer_brief([], tasks, root, call_id="a", branch="b", report="r")
+            self.assertIn("# Inventory", empty)
+            self.assertNotIn("# Question:", empty)
+
+    def test_answer_limit(self):
+        with tmp_home() as root:
+            _, tasks = fixture(root)
+            question = {"task": "demo/one", "run": "demo/one-1", "text": "x" * calls.BRIEF_LIMIT}
+            with self.assertRaisesRegex(ValueError, "largest section: Question: demo/one"):
+                calls.answer_brief([question], tasks, root, call_id="a", branch="b", report="r")
+
+    def test_open_questions_answers_clear_only_earlier_questions_for_task(self):
+        def asked(task, run):
+            return {"ev": "question.asked", "task": task, "run": run, "text": "Choose?"}
+        first, other, again, last = asked("a", "a-1"), asked("b", "b-1"), asked("a", "a-2"), asked("a", "a-3")
+        events = [{"ev": "question.answered", "task": "a"}, first, other, again,
+                  {"ev": "run.ended", "task": "b"}, {"ev": "question.answered", "task": "a"}, last]
+        self.assertEqual(calls.open_questions(iter(events)), [other, last])
+        self.assertEqual(calls.open_questions([first, again]), [first, again])
+        self.assertEqual(calls.open_questions([]), [])
+
+    def test_claude_argv(self):
+        brief, worktree = Path("/a b's/brief.md"), Path("/work tree")
+        argv = calls.claude_argv(brief, worktree)
+        self.assertEqual(argv[:-1], ["claude", "-p", "--model", calls.MODEL, "--output-format", "json",
+                                    "--dangerously-skip-permissions", "--add-dir", str(worktree)])
+        self.assertEqual(len(argv[-1].splitlines()), 1)
+        self.assertIn("Read and follow", argv[-1])
+        self.assertIn("brief.md", argv[-1])
+        self.assertEqual(calls.claude_argv(brief, worktree, model="another")[3], "another")
+
+
+class StartTest(unittest.TestCase):
+    def test_start_commands_artifacts_events_usage_and_outcome(self):
+        with tmp_home() as root:
+            plan, tasks = fixture(root)
+            text = calls.skeleton_brief(plan, "core", tasks, {}, root,
+                                        call_id="preview", branch="preview", report="preview")
+            result_json = json.dumps({"usage": {"input_tokens": 23, "cache_read_input_tokens": 50, "output_tokens": 9}})
+
+            def claude(call):
+                directory = Path(call.cwd).parent
+                brief = (directory / "brief.md").read_text()
+                self.assertIn(f"Call: {directory.name}", brief)
+                self.assertIn(f"calls/{directory.name}", brief)
+                self.assertIn(str(directory / "report.md"), brief)
+                self.assertNotIn("preview", brief)
+                self.assertIn("# Inventory", brief)
+                self.assertIn((root / tasks["demo/one"].path).read_text(), brief)
+                self.assertEqual([event["ev"] for event in log.read(root / "custom.jsonl")], ["call.started"])
+                write(directory / "report.md", "\nDone: designed core\nDetails.\n")
+                return Result(0, result_json)
+
+            fake = FakeRunner().on(["claude"], claude)
+            runner = Mock(wraps=fake)
+            with patch.object(calls.time, "monotonic", side_effect=[100.0, 190.0]):
+                result = calls.start("skeleton", "demo/core", root, text, sh=runner, log_path=root / "custom.jsonl")
+            directory = root / "fab/calls" / result["call"]
+            self.assertEqual(result, {"call": directory.name, "branch": f"calls/{directory.name}",
+                                      "outcome": "done", "report": str(directory / "report.md")})
+            self.assertEqual(fake.argvs(), [
+                ["git", "worktree", "add", "-b", result["branch"], str(directory / "wt"), "origin/main"],
+                calls.claude_argv(directory / "brief.md", directory / "wt"),
+                ["git", "worktree", "remove", "--force", str(directory / "wt")],
+            ])
+            self.assertEqual([call.cwd for call in fake.calls], [str(root), str(directory / "wt"), str(root)])
+            self.assertEqual(runner.call_args_list[1].kwargs["timeout"], calls.TIMEOUT)
+            self.assertEqual((directory / "result.json").read_text(), result_json)
+            started, ended = log.read(root / "custom.jsonl")
+            self.assertEqual({key: value for key, value in started.items() if key != "ts"},
+                             {"ev": "call.started", "call": directory.name, "role": "skeleton",
+                              "subject": "demo/core", "branch": result["branch"]})
+            self.assertEqual({key: value for key, value in ended.items() if key != "ts"},
+                             {"ev": "call.ended", "call": directory.name, "role": "skeleton", "subject": "demo/core",
+                              "outcome": "done", "tokens": "23/50/9", "minutes": 1.5})
+
+    def test_missing_report_fails_and_malformed_or_missing_usage_is_zero(self):
+        for output, tokens in (("not JSON", "0/0/0"), ("{}", "0/0/0"), ("[]", "0/0/0"),
+                               ('{"usage": null}', "0/0/0"), ('{"usage": {"output_tokens": 4}}', "0/0/4")):
+            with self.subTest(output=output), tmp_home() as root:
+                fake = FakeRunner().on(["claude"], Result(1, output, "failed"))
+                result = calls.start("answer", "demo", root, "Brief.", sh=fake)
+                self.assertEqual(result["outcome"], "failed")
+                self.assertFalse(Path(result["report"]).exists())
+                self.assertEqual(log.read()[-1]["tokens"], tokens)
+                self.assertEqual(fake.argvs()[-1][:4], ["git", "worktree", "remove", "--force"])
+
+    def test_report_sets_outcome_even_when_claude_exits_nonzero(self):
+        for prefix, expected in (("Question", "question"), ("Infra", "infra"), ("Failed", "failed"), ("Unexpected", "failed")):
+            with self.subTest(prefix=prefix), tmp_home() as root:
+                def claude(call):
+                    write(Path(call.cwd).parent / "report.md", f"{prefix}: details\n")
+                    return Result(1, "{}")
+                result = calls.start("answer", "demo", root, "Brief.", sh=FakeRunner().on(["claude"], claude))
+                self.assertEqual(result["outcome"], expected)
+                self.assertEqual(log.read()[-1]["outcome"], expected)
+
+    def test_worktree_removed_when_runner_raises(self):
+        with tmp_home() as root:
+            def fail(call):
+                raise OSError("cannot launch Claude")
+            fake = FakeRunner().on(["claude"], fail)
+            with self.assertRaisesRegex(OSError, "cannot launch"):
+                calls.start("answer", "demo", root, "Brief.", sh=fake)
+            self.assertEqual(fake.argvs()[-1][:4], ["git", "worktree", "remove", "--force"])
+
+    def test_worktree_creation_failure_never_launches_claude(self):
+        with tmp_home() as root:
+            fake = FakeRunner().on(["git", "worktree", "add"], Result(1, err="cannot add"))
+            with self.assertRaises(Failed):
+                calls.start("answer", "demo", root, "Brief.", sh=fake)
+            self.assertEqual(len(fake.calls), 1)
+            self.assertEqual(log.read(), [])
+
+    def test_invalid_role_does_not_start(self):
+        with tmp_home() as root:
+            fake = FakeRunner()
+            with self.assertRaisesRegex(ValueError, "unknown call role"):
+                calls.start("unknown", "demo", root, "Brief.", sh=fake)
+            self.assertEqual(fake.calls, [])
+
+
+class MainTest(unittest.TestCase):
+    def test_brief_only_for_both_roles_through_cli(self):
+        for role in ("skeleton", "answer"):
+            with self.subTest(role=role), tmp_home() as root:
+                fixture(root)
+                log.append("question.asked", task="demo/one", run="demo/one-1", text="Which type?")
+                log.append("question.asked", task="other/task", run="other/task-1", text="Other plan")
+                fake = FakeRunner().on(["git", "rev-parse"], Result(0, str(root) + "\n"))
+                argv = ["call", role, *(["core"] if role == "skeleton" else []),
+                        "--plan", str(root / "docs/plan/demo"), "--brief-only"]
+                output = io.StringIO()
+                with patch.object(calls, "run", fake), patch.object(calls, "start") as start, redirect_stdout(output):
+                    self.assertEqual(cli.main(argv), 0)
+                start.assert_not_called()
+                text = output.getvalue()
+                self.assertIn(calls.ROLES[role].read_text(), text)
+                self.assertIn("# Call facts", text)
+                self.assertIn("Existing primitive.", text)
+                if role == "answer":
+                    self.assertIn("Which type?", text)
+                    self.assertNotIn("Other plan", text)
+                self.assertEqual(fake.argvs(), [["git", "rev-parse", "--show-toplevel"]])
+                self.assertEqual(fake.calls[0].cwd, str(root / "docs/plan/demo"))
+
+    def test_main_runs_compiled_brief_and_returns_report_status(self):
+        for role, outcome, code in (("skeleton", "done", 0), ("answer", "question", 1)):
+            with self.subTest(role=role), tmp_home() as root:
+                fixture(root)
+                fake = FakeRunner().on(["git", "rev-parse"], Result(0, str(root)))
+                result = {"outcome": outcome, "branch": "calls/id"}
+                output = io.StringIO()
+                argv = [role, *(["core"] if role == "skeleton" else []), "--plan", str(root / "docs/plan/demo")]
+                with patch.object(calls, "run", fake), patch.object(calls, "start", return_value=result) as start, redirect_stdout(output):
+                    self.assertEqual(calls.main(argv), code)
+                self.assertEqual(start.call_args.args[:3], (role, "demo/core" if role == "skeleton" else "demo", root))
+                self.assertIn("# Inventory", start.call_args.args[3])
+                self.assertIs(start.call_args.kwargs["sh"], fake)
+                self.assertEqual(output.getvalue(), f"{outcome} calls/id\n")
+
+    def test_main_refuses_unknown_part_and_missing_plan(self):
+        with tmp_home() as root:
+            fixture(root)
+            fake = FakeRunner().on(["git", "rev-parse"], Result(0, str(root)))
+            for directory, reason in ((root / "docs/plan/demo", "unknown part"), (root / "missing", "plan.toml")):
+                with self.subTest(directory=directory):
+                    output = io.StringIO()
+                    with patch.object(calls, "run", fake), patch.object(calls, "start") as start, redirect_stderr(output):
+                        self.assertEqual(calls.main(["skeleton", "absent", "--plan", str(directory)]), 1)
+                    start.assert_not_called()
+                    self.assertIn(reason, output.getvalue())

@@ -7,13 +7,22 @@ run's does. The dispatcher lands what it wrote.
 
 from __future__ import annotations
 
+import argparse
 import ast
+import json
+import shlex
+import sys
+import time
+import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
-from fab.plan import Plan, Task
-from fab.sh import Runner, run
+from fab import log
+from fab.plan import Plan, Task, load_plan, load_tasks
+from fab.run import _write, outcome
+from fab.sh import Failed, Runner, run
+from fab.state import fold
 
 ROLES = {
     "skeleton": Path(__file__).resolve().parent / "roles" / "skeleton.md",
@@ -36,18 +45,59 @@ def inventory(root: Path, package: str = "fab") -> list[Signature]:
     """The primitives in reach: every public module-level function and class, and every public
     method, of root/<package>/*.py (not tests), from ast, in path then source order. A name
     starting with _ is private. text keeps the parameters and annotations as written."""
-    raise NotImplementedError
+    entries = []
+    for path in sorted((root / package).glob("*.py")):
+        if path.name.startswith("test_") or path.name.endswith("_test.py"):
+            continue
+        module = path.relative_to(root).as_posix()
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+
+        def add(node, prefix=""):
+            if node.name.startswith("_"):
+                return
+            if isinstance(node, ast.ClassDef):
+                text = f"class {node.name}"
+            else:
+                text = f"def {node.name}({ast.unparse(node.args)})"
+                if node.returns is not None:
+                    text += f" -> {ast.unparse(node.returns)}"
+                if isinstance(node, ast.AsyncFunctionDef):
+                    text = "async " + text
+            doc = ast.get_docstring(node) or ""
+            entries.append(Signature(module, prefix + node.name, text, doc.splitlines()[0] if doc else ""))
+            if isinstance(node, ast.ClassDef):
+                for member in node.body:
+                    if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        add(member, node.name + ".")
+
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                add(node)
+    return entries
 
 
 def render_inventory(signatures: Iterable[Signature]) -> str:
     """Markdown: a `## <module>` heading per module, then one `- `text` — doc` line per entry."""
-    raise NotImplementedError
+    lines = []
+    previous = None
+    for entry in signatures:
+        if entry.module != previous:
+            if lines:
+                lines.append("")
+            lines.extend([f"## {entry.module}", ""])
+            previous = entry.module
+        lines.append(f"- `{entry.text}` — {entry.doc}")
+    return "\n".join(lines)
 
 
 def design_text(root: Path, citation: str) -> str:
     """The text a part's `design` cites, e.g. "docs/design/fab.md, 6 and 8": the whole document
     at the cited path (sections are not cut out); an unreadable path gives a one-line note."""
-    raise NotImplementedError
+    path = citation.split(",", 1)[0].strip()
+    try:
+        return (root / path).read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        return f"Design unavailable: {path} ({' '.join(str(error).splitlines())})"
 
 
 def skeleton_brief(plan: Plan, part_id: str, tasks: dict[str, Task], statuses: dict[str, str],
@@ -57,25 +107,73 @@ def skeleton_brief(plan: Plan, part_id: str, tasks: dict[str, Task], statuses: d
     designed); the part to design (id, title, mode, needs, design citation); the cited design
     text; the inventory; and the task specs that exist for the part's needs, as examples of
     the format. Raises ValueError past BRIEF_LIMIT, naming the largest section."""
-    raise NotImplementedError
+    part = plan.parts[part_id]
+    rows = ["| Part | Title | Mode | Needs | Status |", "| --- | --- | --- | --- | --- |"]
+    for item in plan.parts.values():
+        specs = [task for task in tasks.values() if task.part == item.id]
+        status = ("done" if specs and all(statuses.get(task.id) == "landed" for task in specs)
+                  else "designed" if specs else "not designed")
+        rows.append(f"| {item.id} | {item.title} | {item.mode} | {', '.join(item.needs) or '-'} | {status} |")
+    rows.extend(["", "| Slice | Story | Parts | Walk |", "| --- | --- | --- | --- |"])
+    for item in plan.slices:
+        rows.append(f"| {item.id} | {item.story} | {', '.join(item.parts)} | {item.walk} |")
+    examples = []
+    for task in tasks.values():
+        if task.part in part.needs:
+            path = Path(task.path)
+            label = path.relative_to(root) if path.is_absolute() else path
+            examples.append(f"## {task.id} ({label})\n\n{(root / path).read_text(encoding='utf-8')}")
+    return _brief([
+        ("Role", ROLES["skeleton"].read_text(encoding="utf-8")),
+        ("Call facts", _facts(call_id, branch, report)),
+        ("Plan parts and slices", f"Plan: {plan.draft}\nRepository: {plan.repo}\n\n" + "\n".join(rows)),
+        ("Part to design", f"- Id: {part.id}\n- Title: {part.title}\n- Mode: {part.mode}\n"
+         f"- Needs: {', '.join(part.needs) or '(none)'}\n- Design: {part.design}"),
+        ("Cited design", design_text(root, part.design)),
+        ("Inventory", render_inventory(inventory(root))),
+        ("Task spec examples", "\n\n".join(examples) or "(none)"),
+    ])
 
 
 def answer_brief(questions: list[dict], tasks: dict[str, Task], root: Path, *, call_id: str,
                  branch: str, report: str) -> str:
     """The answerer's brief: its role text; the call's facts; each open question (task, run,
     text) with its task spec and the run's report path; the inventory."""
-    raise NotImplementedError
+    sections = [
+        ("Role", ROLES["answer"].read_text(encoding="utf-8")),
+        ("Call facts", _facts(call_id, branch, report)),
+    ]
+    for question in questions:
+        task = tasks[question["task"]]
+        path = Path(task.path)
+        label = path.relative_to(root) if path.is_absolute() else path
+        run_id = question["run"]
+        report_path = log.home() / "runs" / run_id / "report.md"
+        sections.append((f"Question: {task.id} ({run_id})",
+                         f"- Task: {task.id}\n- Run: {run_id}\n- Report: `{report_path}`\n\n"
+                         f"{question['text']}\n\n## Task spec ({label})\n\n"
+                         f"{(root / path).read_text(encoding='utf-8')}"))
+    sections.append(("Inventory", render_inventory(inventory(root))))
+    return _brief(sections)
 
 
 def open_questions(events: Iterable[dict]) -> list[dict]:
     """question.asked records with no later question.answered for the same task, in log order."""
-    raise NotImplementedError
+    pending = []
+    for event in events:
+        if event.get("ev") == "question.asked":
+            pending.append(event)
+        elif event.get("ev") == "question.answered":
+            pending = [item for item in pending if item["task"] != event["task"]]
+    return pending
 
 
 def claude_argv(brief_path: Path, workdir: Path, *, model: str = MODEL) -> list[str]:
     """`claude -p --model <model> --output-format json --dangerously-skip-permissions
     --add-dir <workdir>`, the prompt being a one-line instruction to read and follow brief_path."""
-    raise NotImplementedError
+    return ["claude", "-p", "--model", model, "--output-format", "json",
+            "--dangerously-skip-permissions", "--add-dir", str(workdir),
+            f"Read and follow the brief at {shlex.quote(str(brief_path))}."]
 
 
 def start(role: str, subject: str, repo: Path, brief: str, *, sh: Runner = run,
@@ -88,11 +186,101 @@ def start(role: str, subject: str, repo: Path, brief: str, *, sh: Runner = run,
     log call.ended (call, role, subject, outcome as fab.run.outcome of the report, or failed
     when there is none; tokens from the JSON usage as "input/cache_read/output"; minutes), and
     remove the worktree, keeping the branch. Returns {call, branch, outcome, report}."""
-    raise NotImplementedError
+    if role not in ROLES:
+        raise ValueError(f"unknown call role {role!r}")
+    call_id = f"{role}-{uuid.uuid4().hex}"
+    branch = f"calls/{call_id}"
+    directory = log.home() / "calls" / call_id
+    directory.mkdir(parents=True)
+    worktree = directory / "wt"
+    brief_path = directory / "brief.md"
+    report_path = directory / "report.md"
+    # Only the facts section is rebound; quoted designs and specs stay verbatim.
+    marker = "# Call facts\n\n"
+    before, found, after = brief.partition(marker)
+    if found:
+        _, separator, rest = after.partition("\n\n# ")
+        brief = before + marker + _facts(call_id, branch, str(report_path))
+        if separator:
+            brief += separator + rest
+    sh(["git", "worktree", "add", "-b", branch, str(worktree), "origin/main"],
+       cwd=str(repo), check=True)
+    began = time.monotonic()
+    try:
+        _write(brief_path, brief)
+        log.append("call.started", path=log_path, call=call_id, role=role, subject=subject, branch=branch)
+        result = sh(claude_argv(brief_path, worktree), cwd=str(worktree), timeout=TIMEOUT)
+        _write(directory / "result.json", result.out)
+        try:
+            data = json.loads(result.out)
+        except json.JSONDecodeError:
+            data = {}
+        usage = data.get("usage", {}) if isinstance(data, dict) else {}
+        if not isinstance(usage, dict):
+            usage = {}
+        tokens = "/".join(str(usage.get(key, 0)) for key in
+                          ("input_tokens", "cache_read_input_tokens", "output_tokens"))
+        try:
+            report_text = report_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            report_text = ""
+        status = outcome(report_text)
+        log.append("call.ended", path=log_path, call=call_id, role=role, subject=subject,
+                   outcome=status, tokens=tokens, minutes=(time.monotonic() - began) / 60)
+        return {"call": call_id, "branch": branch, "outcome": status, "report": str(report_path)}
+    finally:
+        sh(["git", "worktree", "remove", "--force", str(worktree)], cwd=str(repo), check=True)
 
 
 def main(argv: list[str]) -> int:
     """`fab call skeleton PART --plan PLAN_DIR` and `fab call answer --plan PLAN_DIR`: compile the
     brief from the plan's repository (PLAN_DIR's checkout), run the call, print its outcome and
     branch; exit 0 when Done, 1 otherwise. `--brief-only` prints the brief and runs nothing."""
-    raise NotImplementedError
+    parser = argparse.ArgumentParser(prog="fab call", description=__doc__)
+    commands = parser.add_subparsers(dest="role", required=True)
+    for role in ROLES:
+        command = commands.add_parser(role)
+        if role == "skeleton":
+            command.add_argument("part")
+        command.add_argument("--plan", type=Path, required=True)
+        command.add_argument("--brief-only", action="store_true")
+    args = parser.parse_args(argv)
+    try:
+        directory = args.plan.resolve()
+        plan = load_plan(directory / "plan.toml")
+        tasks = load_tasks(directory / "tasks", plan.draft, plan.repo)
+        checkout = run(["git", "rev-parse", "--show-toplevel"], cwd=str(directory), check=True)
+        root = Path(checkout.out.strip())
+        events = log.read()
+        facts = dict(call_id="(assigned at start)", branch="(assigned at start)", report="(assigned at start)")
+        if args.role == "skeleton":
+            if args.part not in plan.parts:
+                raise ValueError(f"unknown part {args.part!r}")
+            statuses = {key: view.status for key, view in fold(tasks, events).items()}
+            text = skeleton_brief(plan, args.part, tasks, statuses, root, **facts)
+            subject = f"{plan.draft}/{args.part}"
+        else:
+            questions = [item for item in open_questions(events) if item["task"] in tasks]
+            text = answer_brief(questions, tasks, root, **facts)
+            subject = plan.draft
+        if args.brief_only:
+            print(text)
+            return 0
+        result = start(args.role, subject, root, text, sh=run)
+        print(f"{result['outcome']} {result['branch']}")
+        return 0 if result["outcome"] == "done" else 1
+    except (OSError, ValueError, Failed) as error:
+        print(f"fab call: {error}", file=sys.stderr)
+        return 1
+
+
+def _facts(call_id: str, branch: str, report: str) -> str:
+    return f"- Call: {call_id}\n- Branch: `{branch}`\n- Report: write it to `{report}`"
+
+
+def _brief(sections: list[tuple[str, str]]) -> str:
+    text = "\n\n".join(f"# {name}\n\n{body}" for name, body in sections) + "\n"
+    if len(text) > BRIEF_LIMIT:
+        name, body = max(sections, key=lambda item: len(item[1]))
+        raise ValueError(f"brief exceeds BRIEF_LIMIT ({BRIEF_LIMIT} characters); largest section: {name} ({len(body)})")
+    return text
