@@ -754,7 +754,7 @@ assert sys.argv[1:] != ['--name', 'lead/u/jig']
             self.assertEqual(sum(row['id'] == event['id'] for row in rows), 1)
         self.assertEqual(self.git(self.clone, 'rev-parse', 'HEAD'), self.git(self.origin, 'rev-parse', 'main'))
 
-    def test_retry_uses_saved_batch_when_producer_changes_mid_push(self):
+    def test_reset_retry_uses_saved_batch_when_producer_changes_mid_push(self):
         row = self.queue_fixture()
         self.run_collect('queue')
         row.update(start='2026-10-29T11:03:00Z', end='2026-10-29T11:04:00Z')
@@ -778,8 +778,16 @@ assert sys.argv[1:] != ['--name', 'lead/u/jig']
             ' git("push", "origin", "main")\n')
         hook.chmod(0o700)
         before = {event['id'] for event in self.events('queue')}
+        cursor_before = (self.state / 'queue.json').read_bytes()
         tool = self.publication_tool(retry_clock=True)
         with patch(__name__ + '.TOOL', tool):
+            refused = self.run_collect('queue', code=2)
+            self.assertIn('history was rewritten upstream', refused.stderr)
+            self.assertEqual((self.state / 'queue.json').read_bytes(), cursor_before)
+            pending = self.state / 'queue.pending.json'
+            self.assertEqual(json.loads(pending.read_text())['events'],
+                             json.loads(saved.read_text())['events'])
+            self.reset_record_clone()
             result = self.run_collect('queue')
         original = json.loads(saved.read_text())['events']
         ids = {event['id'] for event in original}
@@ -789,7 +797,13 @@ assert sys.argv[1:] != ['--name', 'lead/u/jig']
         self.run_collect('queue')
         self.assertGreater(len(self.events('queue')), len(before | ids))
 
-    def test_push_races_publish_or_defer_in_one_collector_run(self):
+    def reset_record_clone(self):
+        result = subprocess.run([str(Path(__file__).with_name('record')), 'reset'],
+                                capture_output=True, text=True, env=self.env)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn('saved 1 local-only commits', result.stdout)
+
+    def test_raw_event_push_races_refuse_and_recover_saved_batch(self):
         row = self.queue_fixture()
         self.run_collect('queue')
         cursor = self.state / 'queue.json'
@@ -806,7 +820,7 @@ assert sys.argv[1:] != ['--name', 'lead/u/jig']
             ' git("pull", "--ff-only", "origin", "main")\n'
             ' (seed / "AGENTS.md").write_text("# Remote " + str(count) + "\\n")\n'
             ' git("add", "AGENTS.md")\n'
-            ' git("commit", "-m", "advance origin")\n'
+            ' git("commit", "--allow-empty", "-m", "advance origin")\n'
             ' git("push", "origin", "main")\n')
         hook.chmod(0o700)
         tool = self.publication_tool(retry_clock=True)
@@ -817,20 +831,27 @@ assert sys.argv[1:] != ['--name', 'lead/u/jig']
                     row.update(start=f'2026-10-29T11:{minute}:00Z', end=f'2026-10-29T11:{minute}:30Z')
                     path = self.fabrig / 'notes/queue.jsonl'
                     self.write(path, path.read_text() + json.dumps(row) + '\n')
-                    result = self.run_collect('queue', RACE_LIMIT=str(rejections))
-                    self.assertEqual(int(counter.read_text()), 3 if rejections == 2 else 5)
+                    result = self.run_collect('queue', RACE_LIMIT=str(rejections), code=2)
+                    self.assertEqual(int(counter.read_text()), 1)
+                    self.assertIn('history was rewritten upstream', result.stderr)
+                    self.assertEqual(cursor.read_bytes(), before)
                     pending = self.state / 'queue.pending.json'
-                    if rejections == 2:
-                        self.assertIn('record: pushed', result.stdout)
-                        self.assertNotEqual(cursor.read_bytes(), before)
-                        self.assertFalse(pending.exists())
-                    else:
-                        self.assertIn('record-collect: deferred (1/6):', result.stderr)
-                        self.assertIn('five attempts', result.stderr)
-                        self.assertEqual(cursor.read_bytes(), before)
-                        self.assertTrue(json.loads(pending.read_text())['events'])
-                        self.assertEqual(json.loads(pending.read_text())['deferrals'], 1)
+                    saved = json.loads(pending.read_text())
+                    self.assertTrue(saved['events'])
+                    self.assertEqual(saved['deferrals'], 0)
+                    # Raw commits cannot be rebased; the permanent patch archive
+                    # and durable pending batch allow an explicit reset/retry.
+                    self.reset_record_clone()
+                    recovered = self.run_collect('queue', RACE_LIMIT='0')
+                    self.assertIn('record: pushed', recovered.stdout)
+                    self.assertNotEqual(cursor.read_bytes(), before)
+                    self.assertFalse(pending.exists())
+                    rows = self.events('queue')
+                    for event in saved['events']:
+                        self.assertEqual(sum(row['id'] == event['id'] for row in rows), 1)
                     self.assertEqual(self.git(self.clone, 'status', '--porcelain'), '')
+                    self.assertEqual(self.git(self.clone, 'rev-parse', 'HEAD'),
+                                     self.git(self.origin, 'rev-parse', 'main'))
                     counter.unlink()
 
     def test_deferrals_keep_cursors_and_outbox_until_sixth_run(self):

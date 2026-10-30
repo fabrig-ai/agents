@@ -10,6 +10,7 @@ operations and unpublished commits refuse. Nothing imports the frozen `old/` kit
 
 ```
 record pull
+record reset
 record write --as s/multi drafts/example/draft.toml --from /tmp/draft.toml
 record write --as director director/decisions/next.md < /tmp/decision.md
 record append --as ops queue hel8 < /tmp/events.jsonl
@@ -27,7 +28,7 @@ append with exit 2.
 `write` accepts one judgement file and `append` accepts JSON objects, one per
 line. Both read stdin unless `--from FILE` is supplied. `--message TEXT` sets
 the complete commit message; otherwise subjects name the writer and operation.
-All commands fetch and fast-forward before acting. `show` validates its file
+All commands except `reset` fetch and fast-forward before acting. `show` validates its file
 before printing it. Exit codes are 0 for success, 1 for refusal (validation,
 clone safety or conflict), and 2 for usage or operational errors.
 
@@ -123,6 +124,26 @@ A lost acknowledgement is therefore successful if origin confirms it, including
 on the fifth attempt. Automatic writers replay the exact saved batch against the
 confirmed tree and skip ids already present; they never recollect within retries.
 A reported success without origin confirmation fails and retains the outbox.
+
+Before pulling or rebasing a rejected push, the writer counts commits local to
+`HEAD` and absent from fetched `origin/main`. More than 20 commits, or any such
+commit touching `events/` outside `events/after-landing/` (including removals and
+renames), refuses with “records history was rewritten upstream; run `record reset`”.
+Raw-event appends therefore refuse a rebase retry; only the durable after-landing
+source belongs in new repository writes. On a push-path rewrite refusal the local
+commits stay intact for reset to archive; automatic callers retain their outbox.
+
+`record reset` holds the same clone lock, fetches the current upstream, and saves
+every local-only commit as a binary/full-index patch in a new
+`~/src/fabrig/archive/records-local-<UTC stamp>/` directory, with `commits.txt`.
+This archive is permanent and must never be reaped. It prints the archive path
+and commit count, then resets to fetched `origin/main` and prints old and new
+HEAD. After a rewrite, this can include thousands of old shared-history commits.
+An already reset clone archives zero commits and keeps the same HEAD. Reset
+keeps untracked and ignored files; if one would be overwritten by an upstream
+tracked path it refuses so you can move the file. Tracked edits, foreign origins,
+symlinks and unfinished Git operations still refuse. Review saved patches before
+reapplying judgements; never reapply the old raw-event history.
 
 A rejected push triggers a fetch; only an advanced remote branch warrants a retry. The unpublished commit is rebased,
 the resulting files are validated again, and push is attempted at most five

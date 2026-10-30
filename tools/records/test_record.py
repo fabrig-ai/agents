@@ -128,6 +128,9 @@ class RecordTests(unittest.TestCase):
     def event(self, identity='one', host='hel8', stamp=STAMP, **extra):
         return json.dumps(dict(id=identity, time=stamp, source='queue', host=host, kind='land', **extra)).encode() + b'\n'
 
+    def durable_event(self, *args, **kwargs):
+        return self.event(*args, **kwargs).replace(b'queue', b'after-landing')
+
     def prepare(self, repo=None):
         self.run_record('pull', repo=repo)
 
@@ -137,6 +140,130 @@ class RecordTests(unittest.TestCase):
         self.assertEqual(self.git(clone, 'rev-parse', 'HEAD'), self.git(self.origin, 'rev-parse', 'main'))
         self.assertFalse((clone / '.git/rebase-merge').exists())
         self.assertFalse((clone / '.git/rebase-apply').exists())
+
+    def rewrite_origin(self):
+        self.git(self.seed, 'checkout', '--orphan', 'rewritten')
+        self.git(self.seed, 'rm', '-rf', '.')
+        (self.seed / 'README.md').write_bytes(b'# Rewritten records\n')
+        self.git(self.seed, 'add', '.')
+        self.git(self.seed, 'commit', '-m', 'rewritten root')
+        self.git(self.seed, 'push', '--force', 'origin', 'HEAD:main')
+        return self.git(self.origin, 'rev-parse', 'main')
+
+    def test_rewritten_history_guard_reset_archives_and_keeps_untracked(self):
+        path = self.seed / 'events/queue/hel8/2026-10-29.jsonl'
+        path.parent.mkdir(parents=True)
+        path.write_bytes(self.event())
+        self.seed_commit('old collector')
+        self.prepare()
+        (self.clone / 'AGENTS.md').write_text('# Unpublished local judgement\n')
+        self.git(self.clone, 'add', '.')
+        self.git(self.clone, 'commit', '-m', 'local judgement')
+        old = self.git(self.clone, 'rev-parse', 'HEAD')
+        new = self.rewrite_origin()
+        refused = self.run_record('pull', code=1)
+        self.assertIn(b'records history was rewritten upstream; run `record reset`', refused.stderr)
+        self.assertEqual(self.git(self.clone, 'rev-parse', 'HEAD'), old)
+        (self.clone / 'scratch.txt').write_bytes(b'keep this untracked file')
+        reset = self.run_record('reset')
+        self.assertIn(old.encode() + b' -> ' + new.encode(), reset.stdout)
+        self.assertIn(b'saved 3 local-only commits', reset.stdout)
+        archive_root = self.home / 'src/fabrig/archive'
+        archive, = archive_root.iterdir()
+        patches = sorted(archive.glob('*.patch'))
+        self.assertEqual(len(patches), 3)
+        self.assertEqual((archive / 'commits.txt').read_text().splitlines()[-1], old)
+        # The patches restore all original bytes, including the unpublished judgement.
+        restored = self.home / 'restored'
+        self.git(self.home, 'init', str(restored))
+        self.git(restored, 'am', *(str(p) for p in patches))
+        self.assertEqual(self.git(restored, 'rev-parse', 'HEAD^{tree}'),
+                         self.git(self.clone, 'rev-parse', old + '^{tree}'))
+        self.assertEqual((self.clone / 'scratch.txt').read_bytes(), b'keep this untracked file')
+        self.assertFalse((self.clone / 'events').exists())
+        self.assertEqual(self.git(self.clone, 'rev-parse', 'HEAD'), new)
+        again = self.run_record('reset')
+        self.assertIn(b'saved 0 local-only commits', again.stdout)
+        self.assertIn(new.encode() + b' -> ' + new.encode(), again.stdout)
+        self.assertEqual(len(list(archive_root.iterdir())), 2)
+        (self.clone / 'scratch.txt').unlink()
+        self.run_record('write', '--as', 'ops', 'README.md', data=b'# Normal push after reset\n')
+        self.assert_clean()
+
+    def test_history_guard_threshold_and_durable_events_exception(self):
+        self.prepare()
+        for _ in range(20):
+            self.git(self.clone, 'commit', '--allow-empty', '-m', 'local')
+        refused = self.run_record('pull', code=1)
+        self.assertIn(b'unpublished/divergent', refused.stderr)
+        self.git(self.clone, 'commit', '--allow-empty', '-m', 'one too many')
+        refused = self.run_record('pull', code=1)
+        self.assertIn(b'history was rewritten upstream', refused.stderr)
+        self.run_record('reset')
+        path = self.clone / 'events/after-landing/hel8/2026-10-29.jsonl'
+        path.parent.mkdir(parents=True)
+        path.write_bytes(self.durable_event())
+        self.git(self.clone, 'add', '.')
+        self.git(self.clone, 'commit', '-m', 'durable verdict')
+        refused = self.run_record('pull', code=1)
+        self.assertIn(b'unpublished/divergent', refused.stderr)
+        self.git(self.clone, 'mv', 'events/after-landing', 'events/raw')
+        self.git(self.clone, 'commit', '-m', 'rename to raw')
+        self.assertIn(b'history was rewritten upstream', self.run_record('pull', code=1).stderr)
+
+    def test_reset_archives_merge_empty_and_binary_commits(self):
+        self.prepare()
+        self.git(self.clone, 'checkout', '-b', 'side')
+        (self.clone / 'binary.dat').write_bytes(b'\x00\xff\x01')
+        self.git(self.clone, 'add', '.')
+        self.git(self.clone, 'commit', '-m', 'binary')
+        self.git(self.clone, 'checkout', 'main')
+        self.git(self.clone, 'commit', '--allow-empty', '-m', 'empty local commit')
+        self.git(self.clone, 'merge', '--no-ff', 'side', '-m', 'local merge')
+        saved = self.run_record('reset')
+        self.assertIn(b'saved 3 local-only commits', saved.stdout)
+        archive, = (self.home / 'src/fabrig/archive').iterdir()
+        patches = list(archive.glob('*.patch'))
+        self.assertEqual(len(patches), 3)
+        self.assertTrue(all(p.stat().st_size > 0 for p in patches))
+        self.assertTrue(any(b'GIT binary patch' in p.read_bytes() for p in patches))
+        self.assertTrue(any(b'local merge' in p.read_bytes() for p in patches))
+        for patch_file in patches:
+            sha = patch_file.stem.split('-', 1)[1]
+            self.assertTrue(patch_file.read_bytes().startswith(f'From {sha} '.encode()))
+
+    def test_reset_refuses_tracked_edits_and_untracked_collisions(self):
+        self.prepare()
+        (self.clone / 'README.md').write_text('uncommitted')
+        self.assertIn(b'tracked changes refused', self.run_record('reset', code=1).stderr)
+        self.git(self.clone, 'checkout', '--', 'README.md')
+        (self.clone / 'new.md').write_text('untracked')
+        (self.seed / 'new.md').write_text('upstream')
+        self.seed_commit('new upstream path')
+        self.assertIn(b'untracked path would be overwritten', self.run_record('reset', code=1).stderr)
+        self.assertEqual((self.clone / 'new.md').read_text(), 'untracked')
+
+    def test_push_guard_never_replays_old_events_after_force_push(self):
+        path = self.seed / 'events/queue/hel8/2026-10-29.jsonl'
+        path.parent.mkdir(parents=True)
+        path.write_bytes(self.event())
+        self.seed_commit('old collector')
+        self.prepare()
+        # Prepare a new root but postpone the force-push until record's pre-push hook.
+        self.git(self.seed, 'checkout', '--orphan', 'rewritten')
+        self.git(self.seed, 'rm', '-rf', '.')
+        (self.seed / 'README.md').write_text('# New root\n')
+        self.git(self.seed, 'add', '.')
+        self.git(self.seed, 'commit', '-m', 'rewritten')
+        self.hook(self.clone,
+                  f'git -C {shlex.quote(str(self.seed))} push --force origin HEAD:main >&2\n')
+        refused = self.run_record('write', '--as', 'ops', 'README.md', data=b'# Pending input\n', code=1)
+        self.assertIn(b'history was rewritten upstream', refused.stderr)
+        self.assertEqual(self.git(self.origin, 'rev-list', '--count', 'main'), '1')
+        self.assertTrue((self.clone / 'events').is_dir())
+        self.assertEqual((self.clone / 'README.md').read_bytes(), b'# Pending input\n')
+        self.run_record('reset')
+        self.assert_clean()
 
     def test_every_path_class(self):
         (self.seed / 'drafts/example').mkdir(parents=True)
@@ -251,7 +378,7 @@ class RecordTests(unittest.TestCase):
 
     def test_automatic_append_retries_twice_then_succeeds(self):
         self.prepare()
-        for writer in ('collect', 'watch'):
+        for writer in ('after-landing',):
             with self.subTest(writer=writer):
                 counter = self.home / (writer + '-attempts')
                 self.hook(self.clone,
@@ -262,8 +389,8 @@ class RecordTests(unittest.TestCase):
                     f'git -C {shlex.quote(str(self.seed))} add AGENTS.md\n'
                     f'git -C {shlex.quote(str(self.seed))} commit -m "advance origin" >&2\n'
                     f'git -C {shlex.quote(str(self.seed))} push origin main >&2\nfi\n')
-                source = 'watch' if writer == 'watch' else 'queue'
-                data = self.event(writer).replace(b'queue', source.encode())
+                source = 'after-landing'
+                data = self.durable_event(writer)
                 self.run_record('append', '--as', writer, source, 'hel8', data=data, wait=False)
                 self.assertEqual(len(counter.read_text().splitlines()), 3)
                 self.assertEqual((self.clone / f'events/{source}/hel8/2026-10-29.jsonl').read_bytes(), data)
@@ -292,7 +419,7 @@ class RecordTests(unittest.TestCase):
 
     def test_lost_acknowledgement_replays_ids_without_duplicates(self):
         self.prepare()
-        for writer in ('collect', 'watch'):
+        for writer in ('after-landing',):
             for rejected in (0, 4):
                 with self.subTest(writer=writer, rejected=rejected):
                     counter = self.home / f'{writer}-{rejected}-attempts'
@@ -304,9 +431,9 @@ class RecordTests(unittest.TestCase):
                         f'git -C {shlex.quote(str(self.seed))} add AGENTS.md\n'
                         f'git -C {shlex.quote(str(self.seed))} commit -m "advance origin" >&2\n'
                         f'git -C {shlex.quote(str(self.seed))} push origin main >&2\nfi\n')
-                    source = 'watch' if writer == 'watch' else 'queue'
+                    source = 'after-landing'
                     identities = [f'{writer}-{rejected}-{n}' for n in range(2)]
-                    data = b''.join(self.event(identity).replace(b'queue', source.encode()) for identity in identities)
+                    data = b''.join(self.durable_event(identity) for identity in identities)
                     with self.push_transport('lost-ack'):
                         self.run_record('append', '--as', writer, source, 'hel8', data=data + data, wait=False)
                     self.assertEqual(len(counter.read_text().splitlines()), rejected + 1)
@@ -339,10 +466,10 @@ class RecordTests(unittest.TestCase):
             f'git -C {shlex.quote(str(self.seed))} push origin main >&2\nfi\n')
         processes = []
         def start(identity):
-            process = subprocess.Popen([str(TOOL), 'append', '--as', 'collect', 'queue', 'hel8'],
+            process = subprocess.Popen([str(TOOL), 'append', '--as', 'after-landing', 'after-landing', 'hel8'],
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=self.env)
             processes.append(process)
-            process.stdin.write(self.event(identity))
+            process.stdin.write(self.durable_event(identity))
             process.stdin.close()
             process.stdin = None
             return process
@@ -368,7 +495,7 @@ class RecordTests(unittest.TestCase):
                 if process.poll() is None:
                     process.kill()
                     process.communicate()
-        rows = self.git(self.origin, 'show', 'main:events/queue/hel8/2026-10-29.jsonl').splitlines()
+        rows = self.git(self.origin, 'show', 'main:events/after-landing/hel8/2026-10-29.jsonl').splitlines()
         self.assertCountEqual([json.loads(row)['id'] for row in rows], ['first', 'second'])
         self.assert_clean()
 
@@ -588,8 +715,8 @@ class RecordTests(unittest.TestCase):
                   f'git -C {shlex.quote(str(self.seed))} add AGENTS.md\n'
                   f'git -C {shlex.quote(str(self.seed))} commit -m "advance origin" >&2\n'
                   f'git -C {shlex.quote(str(self.seed))} push origin main >&2\n')
-        result = self.run_record('append', '--as', 'collect', '--batch', 'hel8',
-                                 data=self.event(), code=3, wait=False)
+        result = self.run_record('append', '--as', 'after-landing', '--batch', 'hel8',
+                                 data=self.durable_event(), code=3, wait=False)
         self.assertIn(b'five attempts', result.stderr)
         self.assertNotIn(b'original input follows', result.stderr)
         self.assertEqual(len(counter.read_text().splitlines()), 5)
@@ -598,17 +725,17 @@ class RecordTests(unittest.TestCase):
 
     def test_automatic_conflict_defers_without_unfinished_rebase(self):
         self.prepare()
-        name = 'events/queue/hel8/2026-10-29.jsonl'
+        name = 'events/after-landing/hel8/2026-10-29.jsonl'
         path = self.seed / name
         path.parent.mkdir(parents=True)
-        path.write_bytes(self.event('remote'))
+        path.write_bytes(self.durable_event('remote'))
         self.git(self.seed, 'add', name)
         self.git(self.seed, 'commit', '-m', 'conflicting event file')
         self.hook(self.clone, f'git -C {shlex.quote(str(self.seed))} push origin main >&2\n')
-        result = self.run_record('append', '--as', 'collect', 'queue', 'hel8',
-                                 data=self.event('local'), code=3, wait=False)
+        result = self.run_record('append', '--as', 'after-landing', 'after-landing', 'hel8',
+                                 data=self.durable_event('local'), code=3, wait=False)
         self.assertIn(b'rebase conflict', result.stderr)
-        self.assertEqual((self.clone / name).read_bytes(), self.event('remote'))
+        self.assertEqual((self.clone / name).read_bytes(), self.durable_event('remote'))
         self.assert_clean()
         self.assertFalse((self.clone / '.git/rebase-merge').exists())
 
@@ -676,10 +803,10 @@ class RecordTests(unittest.TestCase):
 
     def test_concurrent_appends_different_hosts(self):
         with self.racing_clones() as other:
-            self.race(other, [('append', '--as', 'ops', 'queue', host) for host in ('hel8', 'hetzner8')],
-                      [self.event(host=host) for host in ('hel8', 'hetzner8')])
+            self.race(other, [('append', '--as', 'ops', 'after-landing', host) for host in ('hel8', 'hetzner8')],
+                      [self.durable_event(host=host) for host in ('hel8', 'hetzner8')])
             for host in ('hel8', 'hetzner8'):
-                self.assertEqual((self.clone / f'events/queue/{host}/2026-10-29.jsonl').read_bytes(), self.event(host=host))
+                self.assertEqual((self.clone / f'events/after-landing/{host}/2026-10-29.jsonl').read_bytes(), self.durable_event(host=host))
 
     def test_concurrent_next_decisions_and_questions(self):
         for directory, suffix, body in (('director/decisions', 'md', DECISION),
