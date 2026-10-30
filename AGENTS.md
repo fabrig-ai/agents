@@ -9,3 +9,4 @@
 - `old/` is reference only: never modify it or depend on it.
 - `tools/check.sh` is the gate. Main moves only through `tools/land` after the
   gate passes. A commit requiring machine action must say what action is needed.
+- Every machine gives passwordless sudo; use it where a task truly needs root, never to get round a rule (heavy's units and state, another's checkout, credentials and keys).
