@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import signal
 import stat
@@ -98,8 +99,23 @@ class MultiplexTest(fixture.FleetTest):
         args = ['-p', '2222', 'git@github.com', "git-upload-pack 'some repo'"]
         result = self.process(self.source / 'tools/fleet-git-ssh', *args, expected=37)
         self.assertEqual(json.loads(result.stdout), [
+            '-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
+            '-o', 'UpdateHostKeys=no', '-o', 'ConnectTimeout=5',
             '-o', 'ControlMaster=auto', '-o', 'ControlPersist=600',
             '-o', f'ControlPath="{self.home}/.local/state/github-ssh/%C"', *args])
+
+    def test_wrapper_and_runner_enforce_one_option_set(self):
+        fixture.put(self.bin / 'ssh', '#!/usr/bin/env python3\nimport json,sys\nprint(json.dumps(sys.argv[1:]))\n', True)
+        with patch.dict(os.environ, self.env, clear=True):
+            _, runner = self.runner()
+            commands = (json.loads(self.process(self.source / 'tools/fleet-git-ssh').stdout),
+                        shlex.split(runner.git_ssh_command()))
+        expected = {'BatchMode=yes', 'StrictHostKeyChecking=yes', 'UpdateHostKeys=no',
+                    'ConnectTimeout=5', 'ControlMaster=auto', 'ControlPersist=600',
+                    f'ControlPath="{self.home}/.local/state/github-ssh/%C"'}
+        options = tuple({argv[index + 1] for index, value in enumerate(argv[:-1]) if value == '-o'}
+                        for argv in commands)
+        self.assertEqual(options, (expected, expected))
 
     def fake_transport(self):
         fixture.put(self.bin / "git", GIT, True)
@@ -167,12 +183,26 @@ class MultiplexTest(fixture.FleetTest):
             runner.home = Path("/" + "x" * 40)
             with self.assertRaisesRegex(ValueError, "under 100 bytes"):
                 runner.git_ssh_command()
-            runner.home = self.directory / "h %"
-            runner.home.mkdir()
-            runner.safe = module.SafeHome(runner.home)
-            option = next(arg for arg in shlex.split(runner.git_ssh_command()) if arg.startswith("ControlPath="))
-            # ssh_config parses the embedded quotes after the shell parses its argument.
-            self.assertEqual(shlex.split(option.split("=", 1)[1])[0], str(runner.home).replace("%", "%%") + "/.local/state/github-ssh/%C")
+            fixture.put(self.bin / 'ssh', '#!/usr/bin/env python3\nimport json,sys\nprint(json.dumps(sys.argv[1:]))\n', True)
+            for name in ('h %', 'home%h', 'h %h"\\%z'):
+                with self.subTest(home=name):
+                    runner.home = self.directory / name
+                    runner.home.mkdir()
+                    runner.safe = module.SafeHome(runner.home)
+                    wrapper = json.loads(self.process(self.source / 'tools/fleet-git-ssh',
+                                         env={**self.env, 'HOME': str(runner.home)}).stdout)
+                    commands = (wrapper, shlex.split(runner.git_ssh_command()))
+                    # Parse ssh_config quoting, then expand tokens once as SSH does.
+                    paths = tuple(shlex.split(next(arg.split('=', 1)[1] for arg in argv
+                                                   if arg.startswith('ControlPath=')))[0]
+                                  for argv in commands)
+                    expected = str(runner.home).replace('%', '%%') + '/.local/state/github-ssh/%C'
+                    self.assertEqual(paths, (expected, expected))
+                    expanded = tuple(re.sub(r'%(.)', lambda match: {'%': '%', 'C': 'a' * 40,
+                                                                   'h': 'github.com'}[match[1]], path)
+                                     for path in paths)
+                    literal = str(runner.home / '.local/state/github-ssh' / ('a' * 40))
+                    self.assertEqual(expanded, (literal, literal))
 
     def test_timeout_and_interrupt_do_not_wait_for_or_kill_master(self):
         self.fake_transport()
