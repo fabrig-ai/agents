@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline walk cases, each a unittest in its own process and temporary HOME."""
+"""Offline QA cases with temporary HOME and fakes; cheap repair probes run in process."""
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import fcntl
@@ -5298,7 +5298,9 @@ def evidence_refusals_retry_notice_without_holding_custody(lab):
     lab.env['QA_POST_STATUS'] = '1'
     lab.watch()
     assert directory.exists() and lab.walk_state()[1]['slot_claim']['released']
-    assert not lab.calls('logins')[-1:] == [['give']]
+    assert ['give', CHATGPT, '--as', state['holder']] in lab.calls('logins')
+    inventory = json.loads((lab.root / 'tools.json').read_text())
+    assert inventory['logins_held'] == [] and CHATGPT not in inventory['login_holders']
     assert not (lab.tmp / 'qa/evidence' / state['walk']).exists()
     lab.env['QA_POST_STATUS'] = '0'
     lab.watch()
@@ -5315,7 +5317,7 @@ def evidence_refusals_retry_notice_without_holding_custody(lab):
 def evidence_remote_is_append_only_and_retryable(lab):
     origin = lab.origins / 'qa.git'
     lab.git(lab.root, 'init', '--bare', str(origin))
-    lab.env['QA_EVIDENCE_REMOTE'] = str(origin)
+    lab.env.update(QA_EVIDENCE_REMOTE=str(origin), QA_EVIDENCE_BRANCH='evidence')
     lab.walk()
     directory, state = lab.walk_state()
     lab.end_run()
@@ -5370,7 +5372,7 @@ def evidence_prune_preserves_pauses_and_pending_publication(lab):
     assert not (lab.tmp / 'qa/evidence' / state['walk']).exists()
     lab.run('keep', state['walk'], status=2)
     # A valid but unavailable fixture remote must leave scratch after expiry.
-    lab.env['QA_EVIDENCE_REMOTE'] = str(lab.origins / 'unavailable.git')
+    lab.env.update(QA_EVIDENCE_REMOTE=str(lab.origins / 'unavailable.git'), QA_EVIDENCE_BRANCH='evidence')
     lab.walk('b1', now='2026-10-01T00:00:00Z')
     other_dir, other = lab.walk_states()[1]
     lab.end_run(other)
@@ -5478,7 +5480,7 @@ def evidence_check_is_network_free_and_does_not_adopt_scratch(lab):
 def evidence_lost_push_ack_and_collision_preserve_saved_identity(lab):
     origin = lab.origins / 'qa.git'
     lab.git(lab.root, 'init', '--bare', str(origin))
-    lab.env['QA_EVIDENCE_REMOTE'] = str(origin)
+    lab.env.update(QA_EVIDENCE_REMOTE=str(origin), QA_EVIDENCE_BRANCH='evidence')
     real_git = shutil.which('git')
     wrapper = lab.root / 'git'
     executable(wrapper, f'''import os, subprocess, sys
@@ -5978,6 +5980,42 @@ class EvidenceRepairTests(unittest.TestCase):
         self.assertNotIn('literal', str(failure.exception))
         self.assertIn('entry', str(failure.exception))
 
+    def test_replacement_between_check_and_quarantine_is_restored(self):
+        directory, state = self.walk()
+        protected = directory.parent / 'paused-protected'
+        protected.mkdir()
+        (protected / 'precious').write_text('retained paused work')
+        original = directory.parent / 'original-parked'
+        stat_call = os.stat
+        swapped = False
+        def swap_after_check(path, *args, **kwargs):
+            nonlocal swapped
+            info = stat_call(path, *args, **kwargs)
+            if path == state['walk'] and kwargs.get('dir_fd') is not None and not swapped:
+                swapped = True
+                directory.rename(original)
+                protected.rename(directory)
+            return info
+        saved = self.kept(state)
+        with self.patch.object(os, 'stat', swap_after_check):
+            self.watch.prune_walk(directory, state, saved)
+        self.assertTrue(swapped)
+        self.assertEqual((directory / 'precious').read_text(), 'retained paused work')
+        self.assertTrue((original / 'report.md').exists())
+        self.assertNotIn('pruned', saved)
+        self.assertFalse(any('scratch pruned' in str(post) for post in self.posts))
+
+    def test_missing_identity_retains_scratch_and_notifies_once(self):
+        directory, state = self.walk()
+        del state['scratch_identity']
+        saved = self.kept(state)
+        self.watch.prune_walk(directory, state, saved)
+        self.watch.prune_walk(directory, state, saved)
+        self.assertTrue(directory.exists())
+        self.assertEqual(len(self.posts), 1)
+        self.assertIn('identity', str(self.posts))
+        self.assertNotIn('pruned', saved)
+
     def test_archive_entry_bound_precedes_capture_opens(self):
         directory, _ = self.walk()
         names = ['scripts/a.txt', 'scripts/b.txt', 'scripts/c.txt']
@@ -5994,6 +6032,28 @@ class EvidenceRepairTests(unittest.TestCase):
                 self.ev['read_snapshot'](directory)
         self.assertIn('bound', str(failure.exception))
 
+    def test_interrupted_quarantine_resumes_from_saved_name(self):
+        directory, state = self.walk()
+        saved = self.kept(state)
+        opened = os.open
+        def interrupted(path, *args, **kwargs):
+            if str(path).startswith('.qa-prune-'):
+                raise OSError('fixture interruption after rename')
+            return opened(path, *args, **kwargs)
+        with self.patch.object(os, 'open', interrupted), self.assertRaises(OSError):
+            self.watch.prune_walk(directory, state, saved)
+        quarantine = directory.parent / saved['quarantine']
+        self.assertFalse(directory.exists())
+        self.assertTrue((quarantine / 'report.md').exists())
+        self.assertEqual(self.watch.read_state(self.watch.preservation_path(state))['quarantine'], quarantine.name)
+        self.watch.options.update(QA_WALK_SCRATCH_BYTES=1, QA_SCRATCH_BUDGET_BYTES=1)
+        with self.assertRaises(self.tool['Deferred']):
+            self.watch.scratch_room(self.walks)
+        self.watch.prune_walk(directory, state, saved)
+        self.assertFalse(quarantine.exists())
+        self.assertIn('pruned', saved)
+        self.assertEqual(len(self.posts), 1)
+
     def test_snapshot_entry_depth_and_time_bounds(self):
         for number, limit in enumerate(('entries', 'depth', 'time'), 1):
             directory, _ = self.walk(number)
@@ -6006,6 +6066,81 @@ class EvidenceRepairTests(unittest.TestCase):
                 with self.assertRaises(self.ev['Refusal']) as failure:
                     self.ev['snapshot'](directory, {})
                 self.assertIn('bound', str(failure.exception))
+
+    def test_scan_follows_all_custody_cleanup_outside_admission(self):
+        for number in (1, 2):
+            self.walk(number, stage='ending', run=f'fixture-{number}', posted=False, end_logged=False)
+        events, scans = [], []
+        watch = self.watch
+        watch.stuck_addresses = lambda: []
+        watch.retry_notices = lambda: None
+        watch.give_strays = lambda *a, **kw: None
+        watch.repair_slot_claims = lambda *a: None
+        watch.check_queue = lambda: None
+        watch.record_run = lambda *a: None
+        watch.unit_stopped = lambda *a: True
+        watch.alert = lambda *a: None
+        watch.facts = lambda *a: dict(exit='0')
+        def end(directory, state):
+            events.extend([('give', state['walk']), ('release', state['walk'])])
+            state['released'] = True
+        watch.end = end
+        watch.walk_event = lambda directory, state, *a: state.update(end_logged=True)
+        def prepare(directory, state):
+            self.assertIsNone(watch.walk_lock)
+            self.assertEqual(len(events), 4)
+            scans.append(state['walk'])
+            raise self.tool['Problem']('fixture scan refusal')
+        watch.prepare_evidence = prepare
+        watch.check(watch.options)
+        self.assertEqual(scans, [s['walk'] for _, s in self.walks])
+
+    def test_retention_rejects_unknown_or_inconsistent_end_times(self):
+        for number, (started, ended) in enumerate((
+                ('2026-10-01T00:00:00Z', 'unknown'),
+                ('2026-10-01T00:00:00Z', '2026-09-30T00:00:00Z'),
+                ('unknown', '2026-10-01T00:00:00Z'),
+                ('2026-10-01T00:00:00Z', None),
+                (None, '2026-10-01T00:00:00Z'),
+                ('2026-10-01T00:00:00Z', '2026-10-09T00:00:00Z')), 1):
+            directory, state = self.walk(number, started=started)
+            saved = self.kept(state, ended=ended)
+            self.watch.save_preservation(state, saved)
+            with self.subTest(started=started, ended=ended):
+                with self.assertRaises(self.tool['Problem']):
+                    self.watch.preservation(state)
+
+    def test_unknown_end_time_cannot_prune(self):
+        directory, state = self.walk()
+        self.watch.prune_walk(directory, state, self.kept(state, ended='unknown'))
+        self.assertTrue(directory.exists())
+        self.assertFalse(self.posts)
+
+    def test_resume_growth_cannot_subtract_other_reservations(self):
+        directory, paused = self.walk(stage='paused')
+        other_dir, active = self.walk(2, stage='running', released=False, scratch_bytes=20)
+        self.watch.options.update(QA_WALK_SCRATCH_BYTES=20, QA_SCRATCH_BUDGET_BYTES=25)
+        def growing_size(path):
+            growing_size.calls += 1
+            return 10 if growing_size.calls == 1 else 30
+        growing_size.calls = 0
+        with self.patch.dict(self.ev, directory_bytes=growing_size):
+            with self.assertRaises(self.tool['Deferred']):
+                self.watch.scratch_room(self.walks, resume=paused['walk'])
+        self.assertLessEqual(growing_size.calls, 1)
+
+    def test_publication_needs_both_explicit_settings(self):
+        for number, (remote, branch) in enumerate((('', ''), ('repo', ''), ('', 'evidence'), ('repo', 'evidence')), 1):
+            directory, state = self.walk(number)
+            remote = str(self.root / 'qa.git') if remote else ''
+            with self.subTest(remote=bool(remote), branch=branch), self.patch.dict(os.environ,
+                    dict(QA_EVIDENCE_REMOTE=remote, **({'QA_EVIDENCE_BRANCH': branch} if branch else {}))):
+                self.watch.options = self.tool['settings'](self.watch.workspace)
+                saved = self.watch.prepare_evidence(directory, state)
+                self.assertEqual(saved['status'], 'waiting' if remote and branch else 'kept-locally')
+                self.assertEqual(bool(saved['remote']), bool(remote and branch))
+                self.assertFalse((self.watch.directory / 'evidence.git').exists())
+
 
 if __name__ == '__main__':
     if sys.argv[1:2] == ['--one']:

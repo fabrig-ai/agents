@@ -300,7 +300,7 @@ def settings(workspace, cleanup=False):
     values = dict(QA_INTERVAL_SECONDS='300', QA_GIVE_BACK_SECONDS='90', QA_STOP_SECONDS='50',
                   QA_WALK_KINDS='forgejo=2:chatgpt claude=2:claude',
                   QA_WALK_SCRATCH_BYTES='2000000000', QA_SCRATCH_BUDGET_BYTES='48000000000',
-                  QA_EVIDENCE_KIB='2048', QA_EVIDENCE_SECONDS='120', QA_EVIDENCE_REMOTE='', QA_EVIDENCE_BRANCH='evidence',
+                  QA_EVIDENCE_KIB='2048', QA_EVIDENCE_SECONDS='120', QA_EVIDENCE_REMOTE='', QA_EVIDENCE_BRANCH='',
                   QA_STUCK_TO='', QA_WALK_SLOTS='', QA_SLOT_HOST='hetzner6', QA_CLAIM_OWNER='s/qa', QA_CLAIM_SSH='free@204.168.210.29')
     path = workspace.tmp / 'machine.env'
     try:
@@ -339,7 +339,8 @@ def settings(workspace, cleanup=False):
     configured(not remote or remote == 'git@github.com:fabrig-ai/qa.git' or workspace.fixture
          and Path(remote).is_absolute() and str(Path(remote)).startswith(str(workspace.fixture) + '/'),
          'invalid QA_EVIDENCE_REMOTE')
-    configured(re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9/_-]*', text_values['QA_EVIDENCE_BRANCH'])
+    configured(not text_values['QA_EVIDENCE_BRANCH'] or
+               re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9/_-]*', text_values['QA_EVIDENCE_BRANCH'])
                and all(text_values['QA_EVIDENCE_BRANCH'].split('/')), 'invalid QA_EVIDENCE_BRANCH')
     if errors:
         values['QA_PRESERVATION_ERROR'] = '; '.join(errors)
@@ -870,7 +871,7 @@ class Watch:
             attempts[-1] = snapshot
         path = self.directory / 'walks' / (state['walk'] + '.json')
         replace(path, (json.dumps(state, indent=2) + '\n').encode(),
-                durable=bool(state.get('queue_id')) or 'pinned' in state or 'scratch_bytes' in state
+                durable=bool(state.get('queue_id')) or 'pinned' in state or 'scratch_bytes' in state or 'scratch_identity' in state
                 or state.get('slot_claim', {}).get('release_status') == 'release unconfirmed')
         self.states[('walk', state['walk'])] = state
 
@@ -1323,6 +1324,10 @@ class Watch:
                 need('pinned' not in state or type(state['pinned']) is bool, 'invalid pin', 4)
                 need('scratch_bytes' not in state or type(state['scratch_bytes']) is int
                      and state['scratch_bytes'] > 0, 'invalid scratch reservation', 4)
+                identity = state.get('scratch_identity')
+                need(identity is None or isinstance(identity, dict) and set(identity) == {'device', 'inode'}
+                     and type(identity['device']) is int and identity['device'] >= 0
+                     and type(identity['inode']) is int and identity['inode'] > 0, 'invalid scratch identity', 4)
                 walk_attempt(state)
                 if 'attempts' in state or 'attempt' in state:
                     need(type(state['attempt']) is int and state['attempt'] >= 1
@@ -1672,40 +1677,60 @@ class Watch:
             note += '; units: ' + (', '.join(remaining) if units is not None else 'unknown')
         if not state.get('end_logged'):
             self.walk_event(directory, state, state['decision'], state['pause_line'] if paused else note)
-        kept = None
-        if not paused:
-            try:
-                kept = self.prepare_evidence(directory, state)
-            except (Problem, OSError, ValueError, UnicodeError):
-                log(f'{state["walk"]}: evidence preparation pending; cleanup continues')
-        if not state.get('posted'):
-            outcome = 'paused' if paused else 'ended'
-            body = (f'Walk {state["walk"]} {outcome}; exit {facts["exit"]}.\n'
-                    f'Report: {directory}/report.md\n')
-            if kept:
-                body += 'Evidence: ' + self.evidence_status(kept) + '\n'
-            if paused:
-                body += f'Paused at: {state["pause_line"]}\n'
-            body += ''.join(f'Login {name} is not back at {path}.\n' for name, path in missing.items())
-            body += ''.join(f'Unit {unit} is still up or of unknown state.\n' for unit in remaining)
-            if units is None:
-                body += 'Deployment units are unknown.\n'
-            if missing or remaining or units is None:
-                body += 'The service tries again at each check.\n'
-            message = directory / 'post-body'
-            replace(message, body.encode())
-            sent = self.call('post', 'send', '--as', 'qa-watch', state['starter'],
-                             f'qa: walk {state["walk"]} {outcome}', message)
-            if sent.returncode in (0, 3):
-                state['posted'] = True
-                self.save(directory, state)
+
+    def finish_walk(self, directory, state, kept):
+        """Commit completion against fresh custody after the scan, never scan here."""
+        with self.walks_locked(wait=False) as locked:
+            if not locked:
+                return state
+            fresh = next((s for _, s in self.local_walks(strict=False) if s['walk'] == state['walk']), None)
+            if (not fresh or fresh['stage'] != 'ending' or not fresh.get('end_logged')
+                    or not fresh.get('decision')):
+                return fresh or state
+            state = fresh
+            paused = state['decision'] == 'walk-pause'
+            facts = self.facts(state['run'])
+            missing = self.outstanding(state)
+            units = self.deployments(directory, state)
+            remaining = [unit for unit, status in (units or {}).items() if status != 'stopped']
+            if not state.get('posted'):
+                outcome = 'paused' if paused else 'ended'
+                body = (f'Walk {state["walk"]} {outcome}; exit {facts["exit"]}.\n'
+                        f'Report: {directory}/report.md\n')
                 if kept:
-                    kept['announced'] = self.evidence_identity(kept)
-                    self.save_preservation(state, kept)
-        if (state.get('released') and state.get('end_logged') and state.get('posted') and not missing
-                and all(all(receipts.values()) for receipts in state.get('alerts', {}).values())):
-            state['stage'] = 'paused' if paused else 'ended'
-            self.save(directory, state)
+                    body += 'Evidence: ' + self.evidence_status(kept) + '\n'
+                if paused:
+                    body += f'Paused at: {state["pause_line"]}\n'
+                body += ''.join(f'Login {name} is not back at {path}.\n' for name, path in missing.items())
+                body += ''.join(f'Unit {unit} is still up or of unknown state.\n' for unit in remaining)
+                if units is None:
+                    body += 'Deployment units are unknown.\n'
+                if missing or remaining or units is None:
+                    body += 'The service tries again at each check.\n'
+                message = directory / 'post-body'
+                replace(message, body.encode())
+                sent = self.call('post', 'send', '--as', 'qa-watch', state['starter'],
+                                 f'qa: walk {state["walk"]} {outcome}', message)
+                if sent.returncode in (0, 3):
+                    state['posted'] = True
+                    self.save(directory, state)
+                    if kept:
+                        kept['announced'] = self.evidence_identity(kept)
+                        self.save_preservation(state, kept)
+            if (state.get('released') and state.get('end_logged') and state.get('posted') and not missing
+                    and all(all(receipts.values()) for receipts in state.get('alerts', {}).values())):
+                state['stage'] = 'paused' if paused else 'ended'
+                self.save(directory, state)
+
+        return state
+
+    def evidence_end(self, state, saved):
+        ended, started = saved.get('ended'), state.get('started')
+        need(isinstance(ended, str) and ended != 'unknown' and isinstance(started, str)
+             and started != 'unknown', 'concrete evidence end/start time required', 4)
+        end, start = utc(ended), utc(started)
+        need(start <= end <= utc(timestamp()), 'evidence end time inconsistent with walk start', 4)
+        return end
 
     def preservation_path(self, state):
         return self.directory / 'preservation' / (state['walk'] + '.json')
@@ -1718,8 +1743,8 @@ class Watch:
             return dict(walk=state['walk'], status='waiting')
         need(saved.get('walk') == state['walk'] and saved.get('status') in
              ('waiting', 'refused', 'kept-locally', 'kept'), 'invalid preservation state', 4)
-        if 'ended' in saved:
-            utc(saved['ended'])
+        if 'ended' in saved or saved['status'] != 'waiting':
+            self.evidence_end(state, saved)
         for key in ('digest', 'refusal_digest'):
             need(key not in saved or isinstance(saved[key], str) and re.fullmatch(r'[0-9a-f]{64}', saved[key]),
                  'invalid evidence digest', 4)
@@ -1734,10 +1759,15 @@ class Watch:
                  and str(Path(remote)).startswith(str(self.workspace.fixture) + '/')), 'invalid saved evidence remote', 4)
             expected = 'walks/' + state.get('attempts', [state])[0]['started'][:10] + '-' + state['walk']
             need(saved.get('destination') == expected and isinstance(saved.get('branch'), str)
-                 and re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9/_-]*', saved['branch'])
-                 and not saved['branch'].endswith('/'), 'invalid saved evidence destination', 4)
+                 and (not saved['branch'] and not remote or
+                      re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9/_-]*', saved['branch'])
+                      and all(saved['branch'].split('/'))), 'invalid saved evidence destination', 4)
         need(saved['status'] != 'kept' or isinstance(saved.get('commit'), str)
              and re.fullmatch(SHA, saved['commit']), 'invalid evidence commit', 4)
+        quarantine = saved.get('quarantine')
+        need(quarantine is None or isinstance(quarantine, str) and re.fullmatch(
+             r'\.qa-prune-' + re.escape(state['walk']) + r'-[0-9a-f]{32}', quarantine),
+             'invalid scratch quarantine', 4)
         return saved
 
     def save_preservation(self, state, saved):
@@ -1765,6 +1795,7 @@ class Watch:
         if state.get('decision') == 'walk-pause' or state['stage'] == 'paused':
             return saved
         saved.setdefault('ended', timestamp())
+        self.evidence_end(state, saved)
         root = self.directory / 'evidence' / state['walk']
         no_links(self.workspace.tmp, root)
         try:
@@ -1788,10 +1819,11 @@ class Watch:
                 finally:
                     if temporary.exists():
                         shutil.rmtree(temporary)
+            remote = self.options['QA_EVIDENCE_REMOTE'] if self.options['QA_EVIDENCE_BRANCH'] else ''
             saved.update(digest=evidence['tree_digest'](files), local=str(root),
-                         remote=self.options['QA_EVIDENCE_REMOTE'], branch=self.options['QA_EVIDENCE_BRANCH'],
+                         remote=remote, branch=self.options['QA_EVIDENCE_BRANCH'],
                          destination='walks/' + state.get('attempts', [state])[0]['started'][:10] + '-' + state['walk'],
-                         status='waiting' if self.options['QA_EVIDENCE_REMOTE'] else 'kept-locally')
+                         status='waiting' if remote else 'kept-locally')
             saved.pop('refusal', None)
             saved.pop('refusal_digest', None)
         except evidence['Refusal'] as error:
@@ -1813,6 +1845,8 @@ class Watch:
             yield lock.fileno()
 
     def publish_evidence(self, state, saved, descriptor):
+        need(self.options['QA_EVIDENCE_REMOTE'] and self.options['QA_EVIDENCE_BRANCH'],
+             'both evidence repository and branch must be explicitly set', 1)
         root = self.directory / 'evidence.git'
         no_links(self.workspace.tmp, root)
         deadline = time.monotonic() + self.options['QA_EVIDENCE_SECONDS']
@@ -1931,8 +1965,8 @@ class Watch:
             return 'kept-locally ' + saved['local']
         return 'waiting for evidence publication'
 
-    def preserve_walk(self, directory, state, descriptor):
-        saved = self.prepare_evidence(directory, state)
+    def preserve_walk(self, directory, state, descriptor, saved=None):
+        saved = saved if saved is not None else self.prepare_evidence(directory, state)
         due = saved.get('ended') and (utc(timestamp()) - utc(saved['ended'])).total_seconds() >= 7 * 86400
         if saved.get('digest') and (saved['status'] == 'waiting' or saved['status'] == 'kept' and due and not saved.get('pruned')):
             try:
@@ -1962,8 +1996,12 @@ class Watch:
             self.notify_once('pruned ' + state['walk'], 'qa: walk scratch pruned',
                              f'Walk {state["walk"]}: scratch pruned after seven days; evidence {saved["status"]}.\n')
             return
+        try:
+            end = self.evidence_end(state, saved)
+        except (Problem, ValueError, TypeError):
+            return
         if (saved['status'] not in ('kept', 'kept-locally', 'refused') or not saved.get('ended')
-                or (utc(timestamp()) - utc(saved['ended'])).total_seconds() < 7 * 86400
+                or (utc(timestamp()) - end).total_seconds() < 7 * 86400
                 or saved.get('announced') != self.evidence_identity(saved)):
             return
         if saved['status'] == 'refused':
@@ -2005,21 +2043,73 @@ class Watch:
             need(directory == anchor / fresh['walk'] and directory.parent == anchor,
                  'prune outside focused scratch refused', 4)
             no_links(self.workspace.tmp, directory)
+            identity = fresh.get('scratch_identity')
+            if not identity:
+                self.notify_once('prune missing identity ' + fresh['walk'], 'qa: scratch identity missing',
+                                 f'Walk {fresh["walk"]}: no saved scratch identity; scratch retained.\n')
+                return
             with evidence['opened_directory'](anchor) as parent:
-                try:
-                    checked = os.stat(fresh['walk'], dir_fd=parent, follow_symlinks=False)
-                except FileNotFoundError:
-                    checked = None
-                if checked is not None:
-                    need(checked.st_uid == os.getuid() and stat.S_ISDIR(checked.st_mode), 'unsafe prune source', 4)
-                    need(shutil.rmtree.avoids_symlink_attacks, 'safe tree removal unavailable', 4)
-                    saved['pruning'] = True
-                    self.save_preservation(fresh, saved)
-                    shutil.rmtree(fresh['walk'], dir_fd=parent)
+                if not self.quarantine_scratch(parent, fresh, saved, identity):
+                    return
             saved['pruned'] = timestamp()
             self.save_preservation(fresh, saved)
         self.notify_once('pruned ' + state['walk'], 'qa: walk scratch pruned',
                          f'Walk {state["walk"]}: scratch pruned after seven days; evidence {saved["status"]}.\n')
+
+    def quarantine_scratch(self, parent, state, saved, identity):
+        """Only the saved inode may be recursively removed, via its open descriptor."""
+        name = state['walk']
+        quarantine = saved.get('quarantine')
+        if quarantine is None:
+            quarantine = '.qa-prune-' + name + '-' + secrets.token_hex(16)
+            saved.update(quarantine=quarantine, pruning=True)
+            self.save_preservation(state, saved)
+        need(re.fullmatch(r'\.qa-prune-' + re.escape(name) + r'-[0-9a-f]{32}', quarantine),
+             'invalid scratch quarantine', 4)
+        def stat_at(path):
+            try:
+                return os.stat(path, dir_fd=parent, follow_symlinks=False)
+            except FileNotFoundError:
+                return None
+        if stat_at(quarantine) is None:
+            candidate = stat_at(name)
+            if candidate is None:
+                return bool(saved.get('pruning'))
+            need(candidate.st_uid == os.getuid() and stat.S_ISDIR(candidate.st_mode), 'unsafe prune source', 4)
+            os.rename(name, quarantine, src_dir_fd=parent, dst_dir_fd=parent)
+            os.fsync(parent)
+        descriptor = os.open(quarantine, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+        try:
+            info = os.fstat(descriptor)
+            if (dict(device=info.st_dev, inode=info.st_ino) != identity or info.st_uid != os.getuid()):
+                # Never overwrite a replacement that appeared at the original name.
+                if stat_at(name) is None:
+                    os.rename(quarantine, name, src_dir_fd=parent, dst_dir_fd=parent)
+                    os.fsync(parent)
+                    saved.pop('quarantine', None)
+                    saved.pop('pruning', None)
+                    self.save_preservation(state, saved)
+                self.notify_once('prune identity mismatch ' + name, 'qa: scratch identity mismatch',
+                                 f'Walk {name}: candidate identity changed; scratch retained.\n')
+                return False
+            need(shutil.rmtree.avoids_symlink_attacks, 'safe tree removal unavailable', 4)
+            # Enumerate/remove through the verified root descriptor: swapping the
+            # quarantine pathname cannot redirect recursion to another directory.
+            for entry in os.listdir(descriptor):
+                child = os.stat(entry, dir_fd=descriptor, follow_symlinks=False)
+                if stat.S_ISDIR(child.st_mode):
+                    shutil.rmtree(entry, dir_fd=descriptor)
+                else:
+                    os.unlink(entry, dir_fd=descriptor)
+            current = stat_at(quarantine)
+            if current and (current.st_dev, current.st_ino) == (info.st_dev, info.st_ino):
+                os.rmdir(quarantine, dir_fd=parent)
+                os.fsync(parent)
+            elif current:
+                return False
+        finally:
+            os.close(descriptor)
+        return True
 
     def scratch_room(self, walks, resume=None):
         total = 0
@@ -2027,12 +2117,18 @@ class Watch:
             active = state['stage'] not in ('ended', 'paused') or not state.get('released')
             if active:
                 total += state.get('scratch_bytes', self.options['QA_WALK_SCRATCH_BYTES'])
-            if not active or state.get('pinned'):
+            if (not active or state.get('pinned')) and (state['walk'] != resume or state.get('pinned')):
                 total += evidence['directory_bytes'](directory)
-        if resume:
-            directory, previous = next((d, s) for d, s in walks if s['walk'] == resume)
-            if not previous.get('pinned'):
-                total -= evidence['directory_bytes'](directory)
+                try:
+                    saved = self.read_state(self.preservation_path(state))
+                except FileNotFoundError:
+                    saved = {}
+                quarantine = saved.get('quarantine')
+                need(quarantine is None or isinstance(quarantine, str) and re.fullmatch(
+                     r'\.qa-prune-' + re.escape(state['walk']) + r'-[0-9a-f]{32}', quarantine),
+                     'invalid scratch quarantine', 4)
+                if quarantine:
+                    total += evidence['directory_bytes'](directory.parent / quarantine)
         reserve = self.options['QA_WALK_SCRATCH_BYTES']
         defer(total + reserve <= self.options['QA_SCRATCH_BUDGET_BYTES'],
               f'scratch budget: {total} bytes used + {reserve} reserved exceeds '
@@ -2076,16 +2172,22 @@ class Watch:
                     log(f'{state["walk"]}: cleanup failed ({why}); keeping logins and scratch')
             self.repair_slot_claims(walks)
             self.check_queue()
-        # All walks get custody cleanup before bounded Git retries; no admission
-        # lock is held by the evidence publisher.
+        # Every walk gets custody cleanup before any bounded scan or publisher.
         for directory, state in walks:
-            if state.get('decision') == 'walk-pause' or state['stage'] == 'paused':
-                continue
-            if not state.get('end_logged'):
+            if not state.get('end_logged') or not state.get('decision'):
                 continue
             try:
                 with self.evidence_locked() as descriptor:
-                    self.preserve_walk(directory, state, descriptor)
+                    saved = None
+                    paused = state['decision'] == 'walk-pause'
+                    if not paused:
+                        try:
+                            saved = self.prepare_evidence(directory, state)
+                        except (Problem, OSError, ValueError, UnicodeError):
+                            log(f'{state["walk"]}: evidence preparation pending; cleanup complete')
+                    state = self.finish_walk(directory, state, saved)
+                    if saved is not None and not paused:
+                        self.preserve_walk(directory, state, descriptor, saved)
             except (Problem, OSError, ValueError, UnicodeError, KeyError, TypeError, RecursionError):
                 log(f'{state["walk"]}: preservation pending; scratch retained')
 
@@ -2365,7 +2467,9 @@ def start_walk(args, workspace, service=None, entry=None):
             name = prefix + str(number)
             directory = focused / name
             directory.mkdir(mode=0o700)
-            state = dict(walk=name, repo=args.repo, rung=args.rung, kind=kind,
+            with evidence['opened_directory'](directory) as descriptor:
+                identity = os.fstat(descriptor)
+            state = dict(scratch_identity=dict(device=identity.st_dev, inode=identity.st_ino), walk=name, repo=args.repo, rung=args.rung, kind=kind,
                          clock_walk=name[len('rung-' + args.rung + '-'):], ref=ref, main=main,
                          starter=args.queue_starter, cap=args.cap or 180, started=timestamp(),
                          slot=None, holder='walk/' + kind + '/' + name, logins={}, kinds={}, pools={}, run='',
