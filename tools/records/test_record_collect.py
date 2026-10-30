@@ -778,14 +778,14 @@ assert sys.argv[1:] != ['--name', 'lead/u/jig']
         self.assertNotEqual(hooks()[0]['id'], hooks()[1]['id'])
         self.assertEqual(hooks()[1]['first_fired'], STAMP)
         data = dict(names={'lead/H/tools': dict(role='lead', supervisor='s/example')},
-                    owned={'lead/H/tools': True}, **{'records/sessions': self.events('sessions')})
+                    owned={'lead/H/tools': True}, **{'spool/sessions': self.events('sessions')})
         now = API['timestamp'](STAMP).timestamp() + 1300
         late = lambda: [c for c in watch['evaluate'](data, {}, config, now).values()
                         if c['rule'] == 'handover late']
         self.assertEqual(len(late()), 1)
         episodes = {}
         events = watch['reconcile'](episodes, watch['evaluate'](data, {}, config, now),
-                                    {'records/post': 'absent'}, config, now, lambda *args: 0)
+                                    {'spool/post': 'absent'}, config, now, lambda *args: 0)
         self.assertEqual([e['kind'] for e in events], ['alert-open'])
         # Replaying from a fresh cursor must not duplicate append-only hook facts.
         (self.state / 'sessions.json').unlink()
@@ -800,7 +800,7 @@ assert sys.argv[1:] != ['--name', 'lead/u/jig']
         ack, = [e for e in self.events('sessions') if e['kind'] == 'files-current']
         self.assertEqual(ack['name'], 'lead/H/tools')
         self.assertEqual(ack['message_id'], MESSAGE)
-        data['records/sessions'] = self.events('sessions')
+        data['spool/sessions'] = self.events('sessions')
         self.assertFalse(late())
         self.run_collect('sessions')
         self.assertEqual(sum(e['kind'] == 'files-current' for e in self.events('sessions')), 1)

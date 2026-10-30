@@ -1,5 +1,5 @@
 #!/usr/bin/env -S python3 -I -B
-"""Offline upper bound for run-hung episodes from records run lifecycle events.
+"""Offline upper bound for run-hung episodes from spooled run lifecycle events.
 
 Run events contain no events.jsonl mtime. Assuming no output since start gives
 an upper bound, not proof of a hang. No producer commands or mail are invoked.
@@ -15,9 +15,9 @@ import tomllib
 WATCH = runpy.run_path(str(Path(__file__).with_name('watch')))
 
 
-def replay(records, config, days):
+def replay(spool, config, days):
     starts, ends = {}, {}
-    for path in sorted((records / 'events/runs').glob('*/*.jsonl')):
+    for path in sorted((spool / 'runs').glob('*.jsonl')):
         for line in path.read_text().splitlines():
             event = json.loads(line)
             key = (event['host'], event['run'])
@@ -42,7 +42,7 @@ def replay(records, config, days):
     result = []
     for day in sorted(set(days)):
         observed = [json.loads(line) for line in
-                    (records / f'events/watch/hel8/{day}.jsonl').read_text().splitlines()]
+                    (spool / f'watch/{day}.jsonl').read_text().splitlines()]
         times = [WATCH['stamp'](event['time']) for event in observed]
         day_start = WATCH['stamp'](day + 'T00:00:00Z')
         day_end = WATCH['stamp']((date.fromisoformat(day) + timedelta(days=1)).isoformat() + 'T00:00:00Z')
@@ -73,12 +73,12 @@ def replay(records, config, days):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('records', type=Path)
+    parser.add_argument('spool', type=Path)
     parser.add_argument('--day', action='append', required=True)
     args = parser.parse_args()
     with Path(__file__).with_name('watch.toml').open('rb') as stream:
         config = tomllib.load(stream)['rules']
-    print(json.dumps(replay(args.records, config, args.day), indent=2))
+    print(json.dumps(replay(args.spool, config, args.day), indent=2))
 
 
 if __name__ == '__main__':
