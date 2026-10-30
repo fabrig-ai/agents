@@ -85,7 +85,7 @@ through SafeHome at 0700 on every host. Healthy shared connections need at most
 one GitHub authentication per host per 10 min (600 idle seconds before expiry).
 `KillMode=process` preserves fleet-sync's detached master between timer runs.
 
-`fleet/env` declares `GIT_SSH=fleet-git-ssh`. Fleet installs the two-line
+`fleet/env` declares `GIT_SSH=fleet-git-ssh`. Fleet installs the small Bash
 `tools/fleet-git-ssh` wrapper at `~/.local/bin/fleet-git-ssh` through current,
 and renders that setting into both env.sh and environment.d. Login shells
 (`bash -lc` units and sessions) source env.sh. The user manager reads
@@ -95,10 +95,20 @@ not invent another master path. A service owner must also preserve a master
 created in its unit at unit exit; inheriting this environment does not change
 that unit's cleanup policy.
 
-Fleet-sync uses the same path/options plus BatchMode=yes,
-StrictHostKeyChecking=yes and UpdateHostKeys=no. Checks/status only reuse
-masters with ControlMaster=no; preview makes no GitHub requests. The fabrig
-mirror fetches only when ls-remote differs from origin/main (`tools/fleet-sync.md`).
+Every client of the shared master uses the same strict options:
+`BatchMode=yes`, `StrictHostKeyChecking=yes`, `UpdateHostKeys=no`, plus
+`ConnectTimeout=5` and the shared multiplexing options. The wrapper and normal
+fleet-sync runner enforce one option set, so whichever creates a master first
+must use existing trust without interaction or host-key updates. Both escape
+literal `%` in HOME as `%%`, then escape backslashes/quotes for SSH's option
+parser; for example, HOME containing `%h` remains a literal directory name.
+Checks/status only reuse masters with ControlMaster=no; preview makes no
+GitHub requests. The fabrig mirror fetches only when ls-remote differs from
+origin/main (`tools/fleet-sync.md`).
+
+An existing master retains its original connection policy. During rollout its
+owner must close a pre-change master or let it expire after 600 idle seconds
+before relying on the stricter policy; fleet does not terminate shared masters.
 
 **Effect timing.** A rendered file is in place after the next successful
 convergence. That convergence can be delayed by a hold, a pin, backoff, a busy
