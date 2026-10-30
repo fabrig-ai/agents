@@ -21,5 +21,7 @@
   moves by hand (the user's 10-30 word) until `bin/fab land` lands.
 - **Sections 5-7 are designed, not built:** slots, the sweep, reclaim and
   heavy are slice 2; the dispatcher is slice 3.
-- **The slot bound of 20 GB is an estimate** from 10-30 measurements of idle
-  slots; the `slot-probe` part sets it from a broad build's peak.
+- **The slot bound of 25 GB is one measurement** (the `slot-probe` part,
+  10-30 20:18Z): a whole-workspace build from a swept slot. Repeated scoped
+  builds within one task are not measured yet; heavy.jsonl and the sweep's
+  freed bytes will show them.

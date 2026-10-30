@@ -150,9 +150,11 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
   removes its incremental data and the test executables the run did not
   write. The next task's base differs anyway, so little is lost: the edited
   crates compile once without incremental help. A swept slot holds about
-  4 GB, and a running one peaks at about 20 GB (the slot bound).
+  4 GB. The slot bound is 25 GB: a whole-workspace clippy and test build
+  from a swept slot peaked at 25 GB, 19 GB of it test executables and 3 GB
+  incremental data (hetzner6, 10-30 20:18Z, kache warm).
 - **The builder's budget:** disk = kache cap + slots x slot bound + headroom
-  (5-10 GB). hetzner6: 50 + 8 x 20 + 10 = 220 of 305 GB, the rest for QA
+  (5-10 GB). hetzner6: 50 + 8 x 25 + 10 = 260 of 305 GB, the rest for QA
   boxes, archives and the system. `fab hosts check` computes it from
   `fab/hosts.toml`.
 - **Claims are the builder's:** `slots/<n>.claim` is created exclusively and
