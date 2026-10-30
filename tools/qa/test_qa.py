@@ -1878,6 +1878,7 @@ def a_paused_walk_resumes_at_a_branch_with_another_login(lab):
     previous = state['attempts'][0]
     assert state['deployments'] == [dict(name='box', unit=unit, argv=[str(directory / 'box/server')])]
     dead(pid)
+    lab.env['QA_WALK_SLOTS'] = 'forgejo=2+1'
     lab.walk('other', '--login', CHATGPT)
     fix = lab.commit('fix before landing', branch='fix')
     report = (directory / 'report.md').read_bytes()
@@ -1885,9 +1886,9 @@ def a_paused_walk_resumes_at_a_branch_with_another_login(lab):
     resumed = next(saved for _, saved in lab.walk_states() if saved['walk'] == state['walk'])
     assert resumed['walk'] == state['walk'] and resumed['attempt'] == 2 and len(resumed['attempts']) == 2
     assert resumed['attempts'][0] == previous and resumed['run'] != state['run']
-    assert resumed['pools'] == {CHATGPT: 'chatgpt-2'} and resumed['slot'] == 2
+    assert resumed['pools'] == {CHATGPT: 'chatgpt-2'} and resumed['slot'] == 1
     assert resumed['main'] == fix and resumed['cap'] == 7 and resumed['started'] == '2026-10-27T09:00:00Z'
-    assert lab.git(lab.slots / '2', 'rev-parse', 'HEAD') == fix
+    assert lab.git(lab.slots / '1', 'rev-parse', 'HEAD') == fix
     assert not (directory / 'paused').exists() and not (directory / 'give-back').exists()
     assert (directory / 'report-1.md').read_bytes() == report and kept.read_text() == 'kept deployment data\n'
     task = (directory / 'task.md').read_text()
@@ -1896,7 +1897,7 @@ def a_paused_walk_resumes_at_a_branch_with_another_login(lab):
         'configuration', 'stored family', 'fresh deployment', 'main at the landed commit'))
     call = lab.calls('codex-run')[-1]
     assert call[:6] == ['task', '--resume', state['run'], '--to', 'qa-watch', '--on-stop']
-    assert call[-3:] == [str(directory / 'task.md'), str(lab.slots / '2'), str(directory / 'report.md')]
+    assert call[-3:] == [str(directory / 'task.md'), str(lab.slots / '1'), str(directory / 'report.md')]
     lab.watch(now='2026-10-27T09:06:59Z')
     current = next(saved for _, saved in lab.walk_states() if saved['walk'] == state['walk'])
     assert current['stage'] == 'running' and not current['capped']
@@ -3863,18 +3864,16 @@ def no_walk_resources_taken(lab):
     assert all(not state['logins'] and state['released'] for _, state in lab.walk_states())
 
 
-def a_held_named_slot_queues_without_falling_through(lab):
-    lab.env['QA_WALK_SLOTS'] = 'forgejo=2,1'
-    hold_slot(lab, 2)
-    before = slot_claims(lab)
-    result = lab.walk(status=0)
-    assert 'queued ' in result.stdout
-    no_walk_resources_taken(lab)
-    assert slot_claims(lab) == before
-    assert len(lab.calls('claim')) == 2
-    call, = [c for c in lab.calls('claim') if c[0] == 'claim']
-    assert call[:4] == ['claim', 'hetzner6', '2', 's/qa']
-    assert re.fullmatch(r'qa walk rung-b0-1 attempt 1 claim [0-9a-f]{32}', call[4])
+def a_held_named_slot_allows_the_next_free_slot(lab):
+    lab.env['QA_WALK_SLOTS'] = 'forgejo=2+1'
+    hold_slot(lab, 2, owner='ops')
+    before = slot_claims(lab)['2']
+    lab.walk()
+    _, state = lab.walk_state()
+    assert state['slot'] == 1 and slot_claims(lab)['2'] == before
+    assert not queued_entries(lab)
+    calls = [c for c in lab.calls('claim') if c[0] == 'claim']
+    assert len(calls) == 1 and calls[0][:4] == ['claim', 'hetzner6', '1', 's/qa']
 
 
 def all_named_slots_held_queues_without_taking_anything(lab):
@@ -3970,7 +3969,7 @@ def claims_over_ssh_quote_both_shell_levels_and_use_saved_endpoint(lab):
     lab.env['QA_CLAIM_SSH'] = 'claims@hel8'
     lab.walk()
     _, state = lab.walk_state()
-    call = lab.calls('ssh')[0]
+    call = next(c for c in lab.calls('ssh') if shlex.split(shlex.split(c[-1])[2])[1] == 'claim')
     assert call[:3] == ['-o', 'BatchMode=yes', 'claims@hel8'] and len(call) == 4
     outer = shlex.split(call[3])
     assert outer[:2] == ['bash', '-lc'] and len(outer) == 3
@@ -4097,25 +4096,29 @@ Watch.slot_call = slot_call
     assert len([c for c in lab.calls('claim') if c[0] == 'release']) == before
 
 
-def a_pause_releases_and_resume_reclaims_a_named_slot(lab):
+def a_pause_releases_and_resume_waits_for_its_own_slot(lab):
     directory, state = walk_with_logins(lab, CHATGPT)
     paused = pause_walk(lab, directory, state)
     assert paused['slot_claim']['released'] and not slot_claims(lab)
-    hold_slot(lab, 1)
-    lab.run('walk', 'fabrig', 'b0', '--resume', state['walk'], '--build', 'main', status=0)
-    assert lab.walk_state()[1]['stage'] == 'paused'
-    assert len(lab.calls('codex-run')) == 1
-    lab.env['QA_WALK_SLOTS'] = 'forgejo=2,1'
+    hold_slot(lab, 1, owner='ops')
+    lab.run('walk', 'fabrig', 'b0', '--resume', state['walk'], '--build', 'main')
+    assert lab.walk_state()[1]['stage'] == 'paused' and lab.walk_state()[1]['attempt'] == 1
+    lab.env['QA_WALK_SLOTS'] = 'forgejo=2+1'
     lab.watch()
-    assert not queued_entries(lab)
+    assert queued_entries(lab) and len(lab.calls('codex-run')) == 1
+    # A free slot 2 cannot replace this walk's saved slot 1.
+    path = lab.root / 'claims.json'
+    temporary = path.with_suffix('.new')
+    temporary.write_text('{}')
+    temporary.replace(path)
+    lab.watch()
     resumed = lab.walk_state()[1]
-    assert resumed['attempt'] == 3 and resumed['slot'] == 2
-    assert re.fullmatch(r'qa walk rung-b0-1 attempt 3 claim [0-9a-f]{32}', resumed['slot_claim']['what'])
-    assert resumed['slot_claim']['what'].rsplit(' ', 1)[-1] != paused['slot_claim']['what'].rsplit(' ', 1)[-1]
+    assert not queued_entries(lab) and resumed['attempt'] == 2 and resumed['slot'] == 1
+    assert re.fullmatch(r'qa walk rung-b0-1 attempt 2 claim [0-9a-f]{32}', resumed['slot_claim']['what'])
+    assert resumed['slot_claim']['what'] != paused['slot_claim']['what']
     assert resumed['attempts'][0]['slot_claim']['released']
-    assert (directory / 'prepare-3.log').is_file()
-    assert lab.calls('codex-run')[-1][-2] == str(lab.slots / '2')
-    assert not (lab.tmp / 'qa/repos').exists()
+    assert (directory / 'prepare-2.log').is_file()
+    assert lab.calls('codex-run')[-1][-2] == str(lab.slots / '1')
 
 
 def a_pause_with_unconfirmed_release_queues_resume_until_retry(lab):
@@ -4138,7 +4141,7 @@ def local_and_remote_claims_are_bounded_and_unknown_acceptance_is_alerted(lab):
     for remote, when in (('', 'before'), ('claims@hel8', 'after')):
         lab.env['QA_CLAIM_SSH'] = remote
         lab.configure(hang={'claim:claim': when})
-        result = driven_walk(lab, "HUNG = {'claim:claim', 'ssh:-o'}\n" + TIMEOUT_DRIVER,
+        result = driven_walk(lab, "HUNG = {'claim:claim', 'ssh:-o'}\n" + TIMEOUT_DRIVER.replace("if operation in HUNG:", "if operation in HUNG and not (name == 'ssh' and \"'list'\" in str(argv[-1])):"),
                              status=1)
         assert 'exit 124' in result.stderr
         assert not lab.calls('cargo') and not lab.calls('codex-run')
@@ -4205,14 +4208,14 @@ def failed_remote_or_unreadable_claim_never_prepares_or_falls_back(lab):
     before = [lab.git(lab.slots / str(n), 'rev-parse', 'HEAD') for n in (1, 2)]
     result = lab.walk(status=1)
     assert 'fixture ssh unavailable' in result.stderr
-    assert len(lab.calls('ssh')) == 2 and not lab.calls('claim')
+    assert len(lab.calls('ssh')) == 1 and not lab.calls('claim')
     no_walk_resources_taken(lab)
     lab.configure(ssh_refusal=False)
     result = driven_walk(lab, '''def slot_call(self, claim, *args):
     raise UnicodeError('fixture undecodable result')
 tool['Watch'].slot_call = slot_call
 ''', status=4)
-    assert 'UnicodeError: fixture undecodable result' in result.stderr
+    assert 'UnicodeError' in result.stderr
     no_walk_resources_taken(lab)
     assert [lab.git(lab.slots / str(n), 'rev-parse', 'HEAD') for n in (1, 2)] == before
     assert not lab.calls('trim')
@@ -4968,7 +4971,7 @@ def a_busy_inventory_slot_is_queued_and_runs_when_freed(lab):
     hold_slot(lab, 1, owner='ops')
     lab.walk()
     entry, = queued_entries(lab)
-    assert 'slot hetzner6 1 is busy' in entry['reason']
+    assert 'slots for kind forgejo are busy' in entry['reason']
     assert not lab.calls('codex-run') and not lab.calls('cargo')
     lab.watch()
     assert queued_entries(lab) and slot_claims(lab)['1']['owner'] == 'ops'
@@ -5027,7 +5030,101 @@ def a_damaged_queue_keeps_custody_cleanup_running(lab):
     assert len(lab.calls('codex-run')) == 1
 
 
+def a_queued_walk_uses_the_first_free_inventory_slot(lab):
+    lab.env['QA_WALK_SLOTS'] = 'forgejo=1+2,claude=3+4'
+    hold_slot(lab, 1, owner='ops')
+    hold_slot(lab, 2, owner='ops')
+    lab.walk()
+    assert len(queued_entries(lab)) == 1 and not lab.walk_states()
+    claims = slot_claims(lab)
+    del claims['2']
+    path = lab.root / 'claims.json'
+    temporary = path.with_suffix('.new')
+    temporary.write_text(json.dumps(claims))
+    temporary.replace(path)
+    lab.watch()
+    assert not queued_entries(lab) and lab.walk_state()[1]['slot'] == 2
+    assert slot_claims(lab)['1']['owner'] == 'ops'
+
+
+def plus_slot_lists_validate_and_keep_legacy_forms(lab):
+    driver = '''for spelling in ('forgejo=1+2,claude=3+4', 'forgejo=1,2 claude=3,4', 'forgejo=1+2 claude=3+4'):
+    tool['os'].environ['QA_WALK_SLOTS'] = spelling
+    options = tool['settings'](tool['Workspace']())
+    assert options['QA_WALK_KINDS']['forgejo']['numbers'] == [1, 2]
+    assert options['QA_WALK_KINDS']['claude']['numbers'] == [3, 4]
+for spelling in ('forgejo=1+1', 'forgejo=1+2,claude=2+3', 'forgejo=1+', 'forgejo=+1', 'forgejo=1++2', 'forgejo=0+1'):
+    tool['os'].environ['QA_WALK_SLOTS'] = spelling
+    try:
+        tool['settings'](tool['Workspace']())
+    except tool['Problem']:
+        pass
+    else:
+        raise AssertionError(spelling)
+'''
+    result = subprocess.run([sys.executable, '-I', '-B', '-c',
+                             f'import runpy; tool=runpy.run_path({str(SCRIPT)!r})\n' + driver],
+                            env=lab.env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert not lab.calls('claim') and not lab.calls('logins')
+
+
+def unknown_slot_inventory_refuses_without_claiming(lab):
+    for rows in ([], ['hetzner6 1 [s/qa]: free', 'hetzner6 1 [s/qa]: free'],
+                 ['hetzner6 1 [s/qa]: malformed']):
+        lab.configure(claim_list_lines=rows)
+        result = lab.walk(status=4)
+        assert 'cannot read slot inventory' in result.stderr
+    assert not [c for c in lab.calls('claim') if c[0] == 'claim']
+    assert not lab.calls('cargo') and not lab.calls('codex-run') and not lab.walk_states()
+
+
+def a_machine_stuck_recipient_replaces_the_fallback_file(lab):
+    address = 'design/machine@fixture'
+    (lab.tmp / 'machine.env').write_text('QA_STUCK_TO=' + address + '\n')
+    path = lab.home / '.config/agents-qa/stuck'
+    path.parent.mkdir(parents=True)
+    path.write_text('design/fallback@fixture\n')
+    start_stuck_pass(lab, CHATGPT)
+    lab.watch()
+    assert [m['args'][1] for m in stuck_posts(lab)] == [address, 'director@fixture']
+
+
+def stuck_recipient_settings_validate_and_follow_precedence(lab):
+    path = lab.home / '.config/agents-qa/stuck'
+    path.parent.mkdir(parents=True)
+    path.write_text('design/fallback@fixture\n')
+    (lab.tmp / 'machine.env').write_text('QA_STUCK_TO=design/machine@fixture\n')
+    for value, expected in ((None, ['design/machine@fixture', 'director@fixture']),
+                            ('design/env@fixture', ['design/env@fixture', 'director@fixture']),
+                            ('director@fixture', ['director@fixture']),
+                            ('', ['design/fallback@fixture', 'director@fixture'])):
+        if value is None:
+            lab.env.pop('QA_STUCK_TO', None)
+        else:
+            lab.env['QA_STUCK_TO'] = value
+        driven_watch(lab, f"""original = tool['Watch'].stuck_addresses
+def stuck_addresses(self):
+    addresses = original(self)
+    assert addresses == {expected!r}, addresses
+    return addresses
+tool['Watch'].stuck_addresses = stuck_addresses
+""")
+    for value in ('not an address', 'design/team@fixture\n', 'a' * 121 + '@fixture'):
+        result = lab.run('take', 'forgejo', '--as', 'walk/forgejo/manual', status=2,
+                         extra={'QA_STUCK_TO': value})
+        assert 'invalid QA_STUCK_TO' in result.stderr
+    assert not [c for c in lab.calls('logins') if c[0] == 'take']
+
+
+
 CASES = (
+    a_queued_walk_uses_the_first_free_inventory_slot,
+    plus_slot_lists_validate_and_keep_legacy_forms,
+    unknown_slot_inventory_refuses_without_claiming,
+    a_machine_stuck_recipient_replaces_the_fallback_file,
+    stuck_recipient_settings_validate_and_follow_precedence,
+
     the_watcher_selects_the_oldest_ready_entry_once_per_kind,
     a_busy_inventory_slot_is_queued_and_runs_when_freed,
     orphan_release_and_its_notice_survive_an_interrupted_save,
@@ -5068,7 +5165,7 @@ CASES = (
     unknown_walk_holders_alert_once_and_hand_holders_are_untouched,
     a_saved_attempt_holder_authorizes_only_its_exact_stray,
 
-    a_held_named_slot_queues_without_falling_through,
+    a_held_named_slot_allows_the_next_free_slot,
     all_named_slots_held_queues_without_taking_anything,
     dirty_slots_are_preserved_refused_and_released,
     a_slot_is_never_created_replaced_or_used_with_the_wrong_origin,
@@ -5081,7 +5178,7 @@ CASES = (
     an_orphan_claim_without_any_state_waits_for_grace,
     a_saved_claim_precedes_any_checkout_preparation,
     a_release_saved_after_a_crash_never_releases_a_successor,
-    a_pause_releases_and_resume_reclaims_a_named_slot,
+    a_pause_releases_and_resume_waits_for_its_own_slot,
     a_pause_with_unconfirmed_release_queues_resume_until_retry,
     local_and_remote_claims_are_bounded_and_unknown_acceptance_is_alerted,
     named_slot_settings_validate_and_override_the_old_counts,

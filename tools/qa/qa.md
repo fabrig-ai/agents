@@ -45,13 +45,14 @@ or unreadable settings refuse the command.
 | Setting | Default | Meaning |
 |---|---|---|
 | `QA_WALK_KINDS` | `forgejo=2:chatgpt claude=2:claude` | Ordered `KIND=COUNT:POOL[+POOL...]` entries separated by commas; legacy space-separated entries and comma-separated pools still parse; COUNT is compatibility only |
-| `QA_WALK_SLOTS` | empty | Comma-separated `KIND=N[,N...]` mappings; legacy spaces between kinds still parse |
+| `QA_WALK_SLOTS` | empty | Ordered `KIND=N[+N...]` lists, e.g. `forgejo=8+1,claude=4+3`; one-slot mappings, legacy numeric commas and spaces between kinds remain valid |
 | `QA_SLOT_HOST` | `hetzner6` | This builder's inventory host name |
 | `QA_CLAIM_OWNER` | `s/qa` | Owner of the walk's claims |
 | `QA_CLAIM_SSH` | `free@204.168.210.29` | Claims host's SSH target; empty runs installed `claim` locally |
 | `QA_STOP_SECONDS` | 50 | Wrapper's lock wait and exporter share this bound; positive and below 60 |
 | `QA_GIVE_BACK_SECONDS` | 90 | Wait for a unit's stop confirmation; nonnegative |
 | `QA_INTERVAL_SECONDS` | 300 | Mailbox wait between checks; nonnegative |
+| `QA_STUCK_TO` | empty | One stuck-login recipient; empty falls back to `~/.config/agents-qa/stuck`; director always included |
 
 A walk's cap is `--cap`, 180 minutes at a start and the saved cap at a resume;
 it must be positive. Its clock starts again on resume. Kinds start with a
@@ -69,9 +70,9 @@ An undersized login pool remains a broken-cap refusal at take time.
 The compact spelling fits fleet `machine_env` values: no whitespace,
 quotes, backslash or `$` occurs inside any value. For example,
 `forgejo=2:chatgpt+claude,claude=2:claude` gives forgejo two pools. A comma
-followed by `KIND=` starts another kind; bare numeric commas continue a slot
-list. Spaces between kinds and commas between pools remain accepted for
-existing QA_WALK_KINDS files.
+followed by `KIND=` starts another kind; `+` separates ordered slot numbers,
+and legacy bare numeric commas continue a slot list. Spaces between kinds and
+commas between pools remain accepted for existing QA_WALK_KINDS files.
 
 For hetzner6's shares, the generated `~/src/rust/tmp/machine.env` lines are:
 
@@ -162,9 +163,13 @@ process cmdlines receive the same descriptor checks.
 Each managed change is saved through a sibling file and rename. Attempts
 retain REF/SHA, cap, start, numeric slot and claim, grants, pools,
 moved/in-place kinds, run, cleanup progress, alert receipts and pause decision.
-Admission first saves an attempt without a slot, then selects the first
-configured number not already held by a saved local walk or unconfirmed
-release. It invokes
+Admission selects the first configured slot free in both saved local custody
+and a strict central `claim list` observation, then saves an attempt without
+a claim. Missing, malformed, duplicate or failed inventory observations refuse
+admission. A busy first slot permits the next free slot of that kind. A resume
+selects its own saved numeric slot, including after a failed resume attempt,
+and queues while that slot is busy; it never switches to another free slot.
+It invokes
 `claim claim HOST N OWNER 'qa walk NAME attempt A claim TOKEN'` once. TOKEN
 is a fresh random 128-bit value (32 lowercase hex digits) for each claim
 lifetime, so even repeated walk names, attempts and start timestamps do not
@@ -240,7 +245,7 @@ After complete cleanup, a pause frees the slot and logins but retains
 scratch, notes, deployment commands and the paused line in state. Resume
 requires the same repository and rung, a completed and posted pause, an
 explicit build (or `--after`), and no pool or kind changes. It preserves the walk's number
-and prior attempts, reclaims and prepares a kind slot through the same
+and prior attempts, reclaims and prepares its saved slot through the same
 protocol before taking fresh grants, archives the current
 report as `report-ATTEMPT.md`, removes `paused` and the old give-back, and
 writes a task carrying notes, earlier findings and saved deployment commands.
@@ -402,7 +407,10 @@ such as `q/manual`, is never given or alerted by this sweep. Foreign
 repository holders remain protected. Unreadable saved state disables the
 sweep so it cannot misclassify custody.
 
-Each stuck moved login alerts the director and addresses from
+Each stuck moved login alerts the director and `QA_STUCK_TO` when configured.
+The environment overrides `DEV_TMP/machine.env`; the value must be one address
+of at most 120 characters matching the file's address grammar. Invalid settings
+refuse before admission. An unset or empty value falls back to addresses from
 `~/.config/agents-qa/stuck`: one per line, comments allowed, at most 16 valid
 unique addresses in file order plus the director. The file is nonlinked,
 regular, at most 16 KiB; damaged or absent files leave the director alone.
