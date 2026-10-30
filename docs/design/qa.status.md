@@ -1,6 +1,6 @@
 # QA status
 
-2026-10-30. Keeper: s/qa. Baseline: origin/main `5c9e665`.
+2026-10-30. Keeper: s/qa. Baseline for walk preservation: origin/main `e98c22d`.
 Contract: `docs/design/qa.md`, sections 2–7.
 
 ## Present
@@ -17,6 +17,12 @@ Contract: `docs/design/qa.md`, sections 2–7.
   orphan claims require grace and token-checked release. Ordered per-kind slot
   lists define caps and resume affinity. `tools/qa/test_qa.py` covers these
   through fake services, claims, disk observations and local Git origins.
+- **Walk evidence and retention are built.** `qa keep NAME`, the final-end
+  scanner, immutable local snapshots, opt-in private branch publication,
+  retried refusal/status notices and guarded seven-day pruning share the walk
+  service. Durable pin/unpin and scratch-byte reservation/measurement protect
+  retained work and queue starts over budget. Remote publication defaults off.
+  Temporary-HOME tests cover scans, publication recovery and deletion guards.
 - **JSON contracts are built.** Both tools expose the metadata interfaces in
   design section 2. `tools/qa/fixtures/logins-list.json` and
   `tools/qa/fixtures/qa-queue.json` are checked against real CLI output in the
@@ -27,10 +33,9 @@ Contract: `docs/design/qa.md`, sections 2–7.
 - **Passes are not built or activated.** `tools/qa/passes.md` is provisional;
   its sections 12–13a specify producer prerequisites, implementation boundaries
   and rollout. The current tool admits no passes and manages no old pass state.
-- **Evidence keep/scan and seven-day pruning are not built.** Walk reports and
-  scratch remain local; no evidence repository is opened and nothing is pruned.
-  The preservation, scanning and deletion contracts are planned in
-  `tools/qa/passes.md`, sections 9 and 13a.
+- **Pass evidence/results are not built.** The walk scanner and publisher are
+  ready for reuse, but required pass reports/details, authority and publication
+  lanes in `tools/qa/passes.md`, sections 7, 9, 10 and 13a, remain future work.
 - **Live tiers between walks are not built here.** Director decisions
   0007/0001 are external context supplied by the coordinator, not decision files
   in this checkout. Concrete tier enrollment and scheduling remain to agree.
@@ -45,5 +50,8 @@ Contract: `docs/design/qa.md`, sections 2–7.
 
 `bash tools/check.sh` runs `tools/qa/test_logins.py` and
 `tools/qa/test_qa.py` along with the repository gate, with isolated temporary
-HOME and fake services. No live login, service or machine action is required
-by this documentation change.
+HOME and fake services. This branch runs only
+`python3 -I -B tools/qa/test_qa.py`, as assigned: 208 tests passed in 92.778
+seconds, including 17 new cases. No full gate or live service tests were run. Deployment requires the matching `qa` and
+`evidence.py` plus a watcher restart. Remote publication requires explicit
+private repository/branch configuration; no service is deployed here.

@@ -1,7 +1,7 @@
 # QA
 
-2026-10-30. Keeper: s/qa. Walks and custody are built; unattended passes,
-evidence preservation and live tiers are planned. Code: `tools/qa/`.
+2026-10-30. Keeper: s/qa. Walks, custody and walk evidence preservation are
+built; unattended passes and live tiers are planned. Code: `tools/qa/`.
 
 ## 1. In one page
 
@@ -18,10 +18,10 @@ evidence preservation and live tiers are planned. Code: `tools/qa/`.
 - **The watcher finishes what it starts.** Saved attempts, claims, launch
   recovery and independent retried end steps survive interruptions. Unknown
   liveness or ownership preserves custody and prevents conflicting admission.
-- **Results must survive scratch.** Walk reports are local today. Planned
-  publication keeps safe results and scanned evidence before eligible scratch
-  is pruned. Records implementation is paused by the user; the first pass
-  version publishes QA-owned data without changing records.
+- **Results must survive scratch.** Walk ends keep scanned allowlisted
+  evidence locally by default, with opt-in private publication and guarded
+  seven-day scratch pruning. Planned passes preserve required safe results
+  too. Records implementation is paused by the user; the first pass version publishes QA-owned data without changing records.
 
 ## 2. Responsibilities and boundaries
 
@@ -108,8 +108,9 @@ launchers. The watcher recovers uncertain launches from matching metadata and
 launcher observations. A missing run ID or ended worker marker alone cannot
 prove that the session and its deployments have stopped.
 
-**Queue scarcity and dependencies.** Starts and resumes waiting for a slot,
-login, pending release or landed dependency retain their request and starter.
+**Queue scarcity and dependencies.** Starts and resumes waiting for scratch
+bytes, a slot, login, pending release or landed dependency retain their
+request and starter.
 The watcher tries ready entries by kind after cleanup, without letting a busy
 entry block later ready work. Main resolves at admission. Saved admission
 identity prevents a recovered launch from starting twice. Resumes keep the
@@ -162,26 +163,37 @@ contract, with section 13a controlling first-version destinations and rollout.
 
 ## 7. Evidence and retention
 
-**Scan exactly the bytes to be published.** Planned preservation snapshots
+**Scan exactly the bytes to be published.** Walk preservation snapshots
 only allowed documents, scripts and captures, with ownership, link, type,
 size and secret-shape checks. Never inspect a login or a suspected credential
 to diagnose a refusal. Publish append-only private evidence; retry uncertain
 publication without replacing its saved identity. Required results and optional
 scratch captures have separate preservation obligations.
 
+**Admission accounts for scratch bytes.** Active walks reserve 2 GB each
+against a default 48 GB budget. Retained ended and paused/pinned directories
+contribute measured bytes; pinned active scratch also contributes its size.
+Resumes replace their own paused measurement with a new reservation. Scarcity
+queues through the existing admission queue before claiming or taking a login.
+
 **Seven days is conditional scratch expiry.** Final keep, durable status and
 notices, returned logins, stopped units/jobs/launchers and confirmed claim
 release precede deletion of owned ended scratch. Pending publication or custody
 retains it; paused walks are never age-pruned. Preserve small state and
 outboxes, evidence history, login registry, slots, warm targets and transcripts.
-`tools/qa/passes.md`, sections 9 and 13a, specifies scans and pruning. Today's
-walk service opens no evidence repository and prunes nothing.
+`tools/qa/passes.md`, sections 9 and 13a, specifies scans and pruning. Walk
+preservation is built: remote publication is off by default, safe local copies
+and receipts survive scratch, pins and pauses prevent age-pruning, and an
+accepted unchanged scan refusal can expire after seven days. Remote retries
+follow custody cleanup outside admission; they never delay returns/releases.
+Pass preservation and required result publication remain planned.
 
 ## 8. Later
 
 - Build and activate passes only after queue producer, feed coverage,
   publication, lifetime and scheduler acceptance checks in `tools/qa/passes.md`.
-- Build shared evidence keep/scan and guarded seven-day scratch pruning.
+- Reuse the built walk scanner/publisher for passes and their required result
+  publication when passes are implemented.
 - Schedule live tiers between walks under director decisions 0007/0001;
   agree concrete enrollment and scheduling with the tier owners before activation.
 - Revisit records integration only after the user's scope review; retain the

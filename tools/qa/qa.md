@@ -7,6 +7,10 @@ standalone Python 3.13 tool using the standard library and local commands.
 ```
 qa walk fabrig a [--kind forgejo] [--build REF] [--after COMMIT]... [--login POOL]... [--cap MINUTES]
 qa walk fabrig a --resume rung-a-12 [--build REF] [--after COMMIT]... [--cap MINUTES]
+qa keep NAME
+qa keep --check DIRECTORY
+qa pin NAME
+qa unpin NAME
 qa queue [--json]
 qa queue cancel ID
 qa take forgejo [--login chatgpt] --as walk/forgejo/WHAT [--note TEXT]
@@ -33,9 +37,10 @@ is checked out even if its branch subsequently moves.
 `DEV_ROOT` defaults to `~/src/rust`, independently of the executable's
 installation directory. `DEV_TMP` defaults to `DEV_ROOT/tmp`; codex-run's run
 root is always `DEV_ROOT/tmp/codex-run`, including with a separate DEV_TMP.
-No records workspace or evidence repository is opened. No pass scheduler,
-record writer, finding router, evidence scanner or `keep` command is present.
-Walk scratch and reports stay on the machine; the tool does not prune them.
+No records workspace is opened. Pass scheduling, record writers and finding
+routing are not present. Ended walks use the scanned preservation and guarded
+seven-day scratch retention described below. Remote evidence publication is
+off until explicitly configured.
 
 Settings come from environment variables, then `DEV_TMP/machine.env`, then
 these defaults. The file is data, never shell code. Numeric file entries
@@ -52,6 +57,12 @@ or unreadable settings refuse the command.
 | `QA_STOP_SECONDS` | 50 | Wrapper's lock wait and exporter share this bound; positive and below 60 |
 | `QA_GIVE_BACK_SECONDS` | 90 | Wait for a unit's stop confirmation; nonnegative |
 | `QA_INTERVAL_SECONDS` | 300 | Mailbox wait between checks; nonnegative |
+| `QA_WALK_SCRATCH_BYTES` | 2000000000 | Bytes reserved per active walk at admission, saved for that lifetime |
+| `QA_SCRATCH_BUDGET_BYTES` | 48000000000 | Budget for active reservations plus measured retained and paused/pinned scratch |
+| `QA_EVIDENCE_REMOTE` | empty | Empty keeps locally; production publication accepts `git@github.com:fabrig-ai/qa.git` |
+| `QA_EVIDENCE_BRANCH` | `evidence` | Safe branch name in that private repository |
+| `QA_EVIDENCE_KIB` | 2048 | Positive snapshot cap, at most 2048 KiB including the index |
+| `QA_EVIDENCE_SECONDS` | 120 | Positive total time bound per remote keep attempt, at most five push races |
 | `QA_STUCK_TO` | empty | One stuck-login recipient; empty falls back to `~/.config/agents-qa/stuck`; director always included |
 
 A walk's cap is `--cap`, 180 minutes at a start and the saved cap at a resume;
@@ -261,8 +272,8 @@ identity. Every commit must be an ancestor of freshly fetched origin/main.
 A resume with `--after` may omit `--build`; it then resolves main's tip when
 it actually starts. Other resumes still require an explicit build.
 
-A start or resume waiting for its kind's slot, a login, its own pending
-release, or an `--after` dependency saves a queue entry and prints
+A start or resume waiting for scratch bytes, its kind's slot, a login, its own
+pending release, or an `--after` dependency saves a queue entry and prints
 `queued ID` (a resume prints its walk name), exit zero. Other invalid input
 or preparation errors still refuse. Queue entries in `tmp/qa/queue/` retain
 a random ID, repository, rung, kind, requested pools, REF, cap, dependencies,
@@ -434,7 +445,77 @@ and all units stopped; otherwise `walk-end`. Cleanup and notices continue for
 a stuck end. The clock records the decision once; the saved starter receives
 the report path, exit and anything still out, retried until accepted. Delivery
 is at least once: a crash after acceptance but before its save may repeat it.
-The rung owner reads the report and files findings; the tool commits no record.
+The rung owner reads the report and files findings; preservation below commits
+only scanned walk evidence, with no records writer.
+
+### Walk preservation and scratch retention
+
+At final end, after custody cleanup has been attempted, the watcher snapshots
+`brief.md`, `plan.md`, `notes.md`, `report.md`, earlier `report-N.md` files,
+`scripts/` and `evidence/`. No store, deployment, binary, exporter, login or
+transcript is copied. `tools/qa/evidence.py` implements the section-9 scanner
+in `tools/qa/passes.md`: checked descriptors, owned singly linked regular
+UTF-8 files, no directory/file links, forbidden names checked before reads,
+and secret-shape checks on paths, contents and generated `index.json`.
+Diagnostics give a safe path, line and rule, never matched values. Mask capture
+values with `[masked]` while retaining diagnostic lines. HTTP folding, JSON
+escaped keys and unknown token shapes remain scanner limits.
+
+The cap includes the index. Over cap, omit `evidence/` whole, then `scripts/`
+whole; document/index overflow refuses. Other scan failures refuse the entire
+copy. The index records walk, host, source, runs, files/bytes and omissions.
+A refusal retains scratch initially and reserves one retried director notice
+per refusal digest. Repair through its safe path/line and let the watcher retry;
+never open a suspected credential to investigate a match.
+
+`qa keep NAME` uses this same path for an ended managed walk (exit 0 prints
+its kept status/path or commit, 2 scan/input refusal, 1 publication pending).
+It refuses running and paused walks. `qa keep --check DIRECTORY` only snapshots
+and scans locally, with exit 0 clean or 2 refused, without adopting state or
+using the network. Pauses preserve their existing scratch without a final copy.
+
+A clean snapshot is installed through a sibling directory and rename at
+`DEV_TMP/qa/evidence/NAME/` (normally `~/src/rust/tmp/qa/evidence/NAME/`).
+Its bytes and identity are frozen for retries. Empty `QA_EVIDENCE_REMOTE`
+confirms `kept-locally` without opening an evidence Git repository. A configured
+remote uses the separate evidence lock and bare `DEV_TMP/qa/evidence.git` to
+append `walks/FIRST-START-DATE-NAME/` to `QA_EVIDENCE_BRANCH`. Origin and push
+target are checked; URL rewriting and alternate push URLs refuse. Same path
+and tree returns the original commit; different bytes refuse the occupied
+name. Pushes are fast-forward only. Fetch/tree/ancestry confirmation handles
+lost replies; exact pending snapshots and candidate commits survive retries.
+The target settings are saved with the snapshot; later settings do not retarget
+it. Publication retries run after all walks' custody cleanup and outside the
+admission lock. A busy publisher defers. Invalid evidence settings leave
+preservation pending while custody cleanup continues.
+
+Separate `qa/preservation/NAME.json` receipts retain the observed end time,
+snapshot identity, publication, status delivery and prune tombstone. Completion
+mail names the current evidence status; a later confirmed copy sends the starter
+one retried update. No evidence error blocks login returns or claim release.
+
+Seven days from the first saved final-end observation, the watcher makes a
+final keep/confirmation attempt and may delete only that walk's owned directory
+under `DEV_TMP/qa-focused/`. `qa pin NAME` and `qa unpin NAME` durably change its
+pin under the admission lock. Paused/pinned walks, held logins (including older
+attempt holders), pending/live claims, live or unknown units/jobs/launchers,
+pending publication or status delivery, and unaccepted refusal notices all
+retain scratch. An unchanged refusal can expire after its notice and status
+are accepted; a changed refusal needs its own accepted notice. Fresh inventory,
+claim and process observations precede deletion. Descriptor-anchored removal
+rejects links and paths outside focused scratch. A tombstone and one retried
+prune notice survive removal. Foreign legacy states remain opaque. Small
+states/outboxes, evidence, clocks, slots, warm targets and run transcripts
+remain.
+
+Under the admission lock, each start/resume reserves `QA_WALK_SCRATCH_BYTES`
+against `QA_SCRATCH_BUDGET_BYTES`. Active walks retain their saved reservations
+across configuration changes. Retained ended and paused scratch is measured
+from metadata without reading file contents or following links; pinned scratch
+is measured too, including alongside an active reservation. Resume replaces
+its own paused measurement with a fresh reservation, retaining the measurement
+if pinned. A start over budget joins the existing queue with the byte reason
+and retries after cleanup/pruning; it takes no login or claim while waiting.
 
 ### Run metadata on login holds
 
@@ -492,7 +573,10 @@ interlock and normal startup trimming.
 
 `tools/installed` links `qa` to `tools/qa/qa` through fleet-sync. Installation
 does not start a watcher. Deploy `logins` with `set-run` before `qa`, or switch
-both together, then restart the QA watcher. No credential migration is needed.
+both together, then restart the QA watcher. Deploy `evidence.py` alongside
+`qa`; leave `QA_EVIDENCE_REMOTE` empty for local-only preservation, or explicitly
+configure the reviewed private repository/branch before remote publication.
+No credential migration is needed.
 A deployment stops the legacy agents-qa-watch unit
 before starting the walk-only service; old pass state, foreign walks, their
 custody and pending alerts require the director's reconciliation separately.
