@@ -3,7 +3,7 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
-from fab import call_review as review, calls, log, run
+from fab import atomic, call_review as review, calls, log, run
 from fab.hosts import Host
 from fab.sh import Failed, Result, ssh
 from fab.tests.support import FakeRunner, tmp_home
@@ -233,10 +233,10 @@ class BriefTest(unittest.TestCase):
     def test_sections_facts_findings_and_original_brief_in_order(self):
         with tmp_home() as home:
             original = "# Task\n\nKeep this verbatim.\n\n"
-            run._write(home / "fab/calls" / CHAIN.root / "brief.md", original)
+            atomic.write(home / "fab/calls" / CHAIN.root / "brief.md", original)
             for run_id in ("refusal-1", "refusal-2"):
-                run._write(home / "fab/runs" / run_id / "report.md",
-                           "\n".join(f"{run_id} line {n}" for n in range(review.FINDINGS_LINES + 1)))
+                atomic.write(home / "fab/runs" / run_id / "report.md",
+                             "\n".join(f"{run_id} line {n}" for n in range(review.FINDINGS_LINES + 1)))
             chain = replace(CHAIN, calls=(CHAIN.root, "amend-1"), latest="amend-1",
                             refusals=("refusal-1", "refusal-2"))
             text = self.brief(chain)
@@ -290,7 +290,7 @@ class BriefTest(unittest.TestCase):
         with tmp_home() as home:
             chain = replace(CHAIN, calls=(CHAIN.root, "amend-1", "amend-2"),
                             refusals=("refusal-1", "refusal-2"))
-            run._write(home / "fab/runs/refusal-1/report.md", "Failed: fix this\n")
+            atomic.write(home / "fab/runs/refusal-1/report.md", "Failed: fix this\n")
             text = review.amend_brief(chain, call_id="new-call", branch="new-branch", report="/report")
             self.assertEqual([line for line in text.splitlines() if line.startswith("# ")],
                              ["# Role", "# You are the amender", "# Call facts", "# The call you amend", "# Findings"])

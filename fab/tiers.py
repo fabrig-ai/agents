@@ -13,13 +13,12 @@ import json
 import os
 import re
 import sys
-import tempfile
 import tomllib
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fab import log as fab_log
+from fab import atomic, log as fab_log
 from fab.gate import Step, run_steps
 from fab.sh import Runner, run
 
@@ -236,11 +235,7 @@ def run_pair(repo: Path, target_pair: Pair, extra: list[str], log: Path, *, sh: 
         try:
             target = target_directory(repo, sh=sh)
         except TierError as error:
-            content = log.read_text() if log.exists() else ""
-            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=log.parent,
-                                             prefix=log.name + ".", delete=False) as sibling:
-                sibling.write(content + f"{error}\n")
-            Path(sibling.name).replace(log)
+            atomic.extend(log, f"{error}\n")
             return REFUSED
     outcomes = run_steps(steps(repo, target_pair, extra, target), log, sh=sh)
     return outcomes[-1].code if outcomes[-1].name == "nextest" else REFUSED

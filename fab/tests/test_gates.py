@@ -5,7 +5,7 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
-from fab import gates, log, run as runs, state
+from fab import atomic, gates, log, run as runs, state
 from fab.calls import Signature
 from fab.digest import Clone, Digest, Function
 from fab.gates import Finding, banned_names, check, findings_text, words
@@ -166,7 +166,7 @@ class ScreenTest(unittest.TestCase):
     def setUpClass(cls):
         root = cls.enterClassContext(tmp_home())
         cls.fixture_origin, cls.fixture_repo = git_pair(root)
-        runs._write(cls.fixture_repo / "fab/x.py", 'def x():\n    """Return a count."""\n    return 1\n')
+        atomic.write(cls.fixture_repo / "fab/x.py", 'def x():\n    """Return a count."""\n    return 1\n')
         git(cls.fixture_repo, "add", "fab/x.py")
         git(cls.fixture_repo, "commit", "-q", "-m", "Add package")
         git(cls.fixture_repo, "push", "-q", "origin", "HEAD:main")
@@ -193,7 +193,7 @@ class ScreenTest(unittest.TestCase):
         self.digest = log.home() / "digests" / "draft/task-2.md"
 
     def push(self, path="fab/x.py", text='def x():\n    """Return a count."""\n    return 2\n'):
-        runs._write(self.branch_repo / path, text)
+        atomic.write(self.branch_repo / path, text)
         git(self.branch_repo, "add", path)
         git(self.branch_repo, "commit", "-q", "-m", "Change task file")
         git(self.branch_repo, "push", "-q", "origin", "HEAD")

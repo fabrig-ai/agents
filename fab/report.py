@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from fab import log
+from fab import atomic, log
 from fab.heavy import EX_TEMPFAIL
 from fab.hosts import Host
 from fab.run import remote_home
@@ -215,7 +215,7 @@ def main(argv: list[str]) -> int:
     with since = the window's previous().start less LOOKBACK_DAYS days; print the report
     (fab.code_report.render with the plan and tasks loaded from PLAN_DIR as `fab status` loads
     them, or fab.landing_report.render); with --write also write it to report_path(<draft> or
-    LANDING, <the window's day>) through fab.run._write and print that path last.
+    LANDING, <the window's day>) through fab.atomic.write and print that path last.
     daily: for yesterday (UTC), write each plan's code report and the landing report whose
     report_path does not exist yet, gathering once; print one line per report, `<path> written`
     or `<path> kept`. Exit 0; 1 when a plan does not load or has problems (the message on
@@ -226,7 +226,6 @@ def main(argv: list[str]) -> int:
 
     from fab import code_report, hosts, landing_report
     from fab.plan import PlanError, load_plan, load_tasks, problems
-    from fab.run import _write
 
     parser = argparse.ArgumentParser(prog="fab report")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -273,13 +272,13 @@ def main(argv: list[str]) -> int:
                 if path.exists():
                     print(f"{path} kept")
                 else:
-                    _write(path, code_report.render(plan, tasks, sources, selected, window))
+                    atomic.write(path, code_report.render(plan, tasks, sources, selected, window))
                     print(f"{path} written")
             path = report_path(LANDING, day)
             if path.exists():
                 print(f"{path} kept")
             else:
-                _write(path, landing_report.render(sources, selected, window))
+                atomic.write(path, landing_report.render(sources, selected, window))
                 print(f"{path} written")
             return 1 if failed else 0
         if args.command == "code":
@@ -292,7 +291,7 @@ def main(argv: list[str]) -> int:
         print(text, end="")
         if args.write:
             path = report_path(name, day)
-            _write(path, text)
+            atomic.write(path, text)
             print(path)
     except (OSError, RuntimeError, ValueError) as error:
         print(f"fab report: {error}", file=sys.stderr)
