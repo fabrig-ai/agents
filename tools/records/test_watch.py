@@ -602,7 +602,14 @@ class Integration(unittest.TestCase):
                                    env=dict(os.environ, RECORDS_REPO=str(self.home/'records')),
                                    text=True, capture_output=True)
         self.assertEqual(inventory.returncode, 0, inventory.stderr)
-        self.write(self.home / 'names.json', inventory.stdout)
+        # Exercise Codex owners explicitly, independent of active registry choices.
+        rows = json.loads(inventory.stdout)
+        for row in rows:
+            if row.get('role') == 'lead' and row.get('handle') == 'u':
+                row.update(kind='codex', unit='codex-owner-lead-u-' + row['area'],
+                           owner_state=str(self.tmp / 'owners' / row['area'] / 'codex'))
+                row.pop('start_dir', None)
+        self.write(self.home / 'names.json', json.dumps(rows))
         self.write(self.home / 'agents.json', '[]')
         self.write(self.home / 'refs', '')
         self.write(self.home / 'claims', '')
