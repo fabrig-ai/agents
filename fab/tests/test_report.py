@@ -241,7 +241,8 @@ Implement the task.
         self.assertEqual(text.splitlines(), [f"{path} written" for path in paths])
         self.gather.assert_called_once_with(self.selected, "2026-10-21T00:00:00.000Z")
         contents = [path.read_bytes() for path in paths]
-        stats = [path.stat() for path in paths]
+        # Kept means not rewritten: same inode, size and mtime (atime moves on every read).
+        stats = [(s.st_ino, s.st_size, s.st_mtime_ns) for s in (path.stat() for path in paths)]
         self.assertTrue(contents[0].startswith(b"# Code report: sample, 2026-10-29\n"))
         with patch("fab.run._write") as write:
             code, text, err = self.command(argv)
@@ -249,7 +250,8 @@ Implement the task.
         self.assertEqual((code, err), (0, ""))
         self.assertEqual(text.splitlines(), [f"{path} kept" for path in paths])
         self.assertEqual([path.read_bytes() for path in paths], contents)
-        self.assertEqual([path.stat() for path in paths], stats)
+        self.assertEqual([(s.st_ino, s.st_size, s.st_mtime_ns) for s in (path.stat() for path in paths)],
+                         stats)
 
     def test_report_command_daily_continues_after_plan_errors(self):
         valid = self.plan()
