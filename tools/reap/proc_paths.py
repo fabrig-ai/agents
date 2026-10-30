@@ -24,9 +24,10 @@ def process_paths(root):
                 pass
             for link in links:
                 try:
-                    target = os.readlink(link).removesuffix(' (deleted)')
+                    target = os.readlink(link)
                     if target.startswith('/'):
                         used.add(target)
+                        used.add(target.removesuffix(' (deleted)'))
                 except FileNotFoundError:
                     pass
             try:
@@ -40,6 +41,7 @@ def process_paths(root):
                     parts = line.split(None, 5)
                     if len(parts) == 6 and parts[5].startswith('/'):
                         target = re.sub(r'\\([0-7]{3})', lambda m: chr(int(m[1], 8)), parts[5].rstrip('\n'))
+                        used.add(target)
                         used.add(target.removesuffix(' (deleted)'))
         except (OSError, ValueError) as exc:
             # ESRCH is the normal race with process exit. Permission or other
