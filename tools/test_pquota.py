@@ -420,6 +420,8 @@ class PquotaTests(unittest.TestCase):
     def test_preboot_source_environment_and_service_proof_recorded_without_starting(self):
         self.prepare()
         state = self.tool.state()
+        self.assertTrue(all(row['pass_result'] for row in state['fence']))
+        self.assertTrue({'heavy idle', 'non-claim writers', 'central occupancy'} <= {row['name'] for row in state['fence']})
         self.assertEqual(state['proof']['sources'], self.control['sources'])
         self.assertEqual(state['proof']['environment'], self.control['machine'])
         self.assertEqual(state['proof']['services']['states']['qa-watch.service']['ActiveState'], 'active')
@@ -464,6 +466,7 @@ class PquotaTests(unittest.TestCase):
         self.prepare()
         self.output(self.tool.reboot)
         self.assertEqual(self.calls()[-1], ['systemctl', 'reboot'])
+        self.assertTrue(all(row['pass_result'] for row in self.tool.state()['reboot_fence']))
         self.assertEqual(self.calls()[-2][0], 'ssh')
         self.put('proc/sys/kernel/random/boot_id', 'boot-after')
         self.assert_refuses(self.tool.reboot)
@@ -482,6 +485,7 @@ class PquotaTests(unittest.TestCase):
         self.assertNotIn('FAIL ', output)
         self.assertFalse(list(self.tool.path('/var/lib/fabrig-pquota/probe').iterdir()))
         self.assertTrue(self.tool.state()['verification']['checks'][-1]['detail']['inherited'])
+        self.assertTrue(all(row['pass_result'] for row in self.tool.state()['verification']['fence']))
         commands = [row[row.index('-c')+1] for row in self.calls() if row[0] == 'xfs_quota']
         self.assertTrue(any(row.startswith('project -C') for row in commands))
         self.assertTrue(any('bhard=0' in row for row in commands))
