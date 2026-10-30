@@ -135,7 +135,11 @@ def main(argv: list[str]) -> int:
     fab.slots.reclaim and fab.slots.free_bytes; past the cap print `heavy: Infra: disk: ...` to
     stderr and exit EX_TEMPFAIL. Run the wrapped command with inherited stdio and return its exit
     code. Append one record per command to FAB_HOME/heavy.jsonl (fab.log.append with path):
-    ev "heavy", lane, argv0, lane_wait, disk_wait, seconds, code."""
+    ev "heavy", lane, argv0, lane_wait, disk_wait, seconds, code.
+
+    Every command runs with umask 077, wherever heavy was started from: tests check that
+    the files they create are private, and a unit's default umask (022) fails them."""
+    os.umask(0o077)
     lane_name = "build"
     if argv[:1] == ["--gate"]:
         lane_name, argv = "gate", argv[1:]

@@ -312,3 +312,17 @@ class MainTest(unittest.TestCase):
                 self.assertEqual(heavy.main(["--gate", "true"]), 0)
                 self.assertEqual(fake.argvs(),
                                  [heavy.wrap(["true"], "gate", systemd=bool(runtime and executable))])
+
+
+class UmaskTest(unittest.TestCase):
+    def test_commands_run_with_a_private_umask(self):
+        with tmp_home() as home:
+            out = home / "umask.txt"
+            saved = os.umask(0o022)
+            try:
+                with patch.dict(os.environ, {"FAB_HOST": "", "XDG_RUNTIME_DIR": ""}), \
+                        patch.object(heavy.slots, "free_bytes", return_value=10**15):
+                    self.assertEqual(heavy.main(["sh", "-c", f"umask > {out}"]), 0)
+            finally:
+                os.umask(saved)
+            self.assertEqual(out.read_text().strip(), "0077")
