@@ -10,11 +10,18 @@ and the history are FAB_HOME/after-landing/state.json.
 
 from __future__ import annotations
 
+import argparse
+import json
 import re
+import sys
+import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
+from fab import log, nextest, slots, tiers
+from fab.run import _write
 from fab.sh import Runner, run
 
 # The pairs every tip gets, in order. A profile is enrolled only by adding it here: not the
@@ -95,7 +102,19 @@ class AfterLanding:
         "tests": {Case.key: {"result": "pass" or "red", "commit": tip}}}; otherwise start
         from all three empty. ValueError when the slot does not exist or its claim
         (fab.slots.read_claim) is missing or not RUN's: the runner touches only its own slot."""
-        raise NotImplementedError
+        self.repo = slots.slots_dir() / str(slot)
+        if self.repo.is_symlink() or not self.repo.is_dir():
+            raise ValueError(f"slot {slot} does not exist")
+        held = slots.read_claim(slot)
+        if held is None or held.run != RUN or held.task != RUN:
+            raise ValueError(f"slot {slot} is not claimed for {RUN}")
+        self.home = log.home() if home is None else home
+        self.sh = sh
+        self.tier_set = tier_set
+        self.log_path = self.home / RECORD
+        self.state_path = self.home / STATE / "state.json"
+        self.state = (json.loads(self.state_path.read_text(encoding="utf-8"))
+                      if self.state_path.exists() else {"cursor": None, "last": None, "tests": {}})
 
     def pair(self, profile: str, tip: str, directory: Path) -> dict:
         """Run one pair at tip (already checked out) and classify its tests.
@@ -116,7 +135,68 @@ class AfterLanding:
         Any of the conditions above failing, a ValueError from fab.nextest or fab.tiers, or an
         OSError faults the pair with the reason (`exit <code>`, `junit: ...`, `rerun: ...`) and
         no cases: a faulted pair says nothing about its tests."""
-        raise NotImplementedError
+        first_log = directory / f"{profile}.log"
+        result = {"profile": profile, "status": "faulted", "reason": "", "selected": 0,
+                  "failed": 0, "seconds": 0.0, "log": str(first_log), "cases": []}
+        stage = "junit"
+
+        def invoke(name, extra):
+            report = directory / f"{name}.xml"
+            config = directory / f"{name}.toml"
+            # A replay in the same second must not accept a report from the interrupted run.
+            report.unlink(missing_ok=True)
+            _write(config, nextest.overlay(config_text, profile, report))
+            started = time.monotonic()
+            try:
+                code = tiers.run_pair(self.repo, target, ["--config-file", str(config), *extra],
+                                      directory / f"{name}.log", sh=self.sh)
+            finally:
+                result["seconds"] += time.monotonic() - started
+            return code, report
+
+        try:
+            config_text = (self.repo / tiers.NEXTEST_CONFIG).read_text(encoding="utf-8")
+            configured = tiers.load(self.repo)
+            if profile not in configured:
+                raise ValueError(f"unknown tier profile: {profile}")
+            target = configured[profile]
+            code, report = invoke(profile, [])
+            if code not in (0, tiers.TEST_FAILED):
+                result["reason"] = f"exit {code}"
+                return result
+            cases = nextest.junit(report, profile)
+            result["selected"] = len(cases)
+            result["failed"] = sum(case.result == "fail" for case in cases)
+            if not cases or (code == tiers.TEST_FAILED) != bool(result["failed"]):
+                raise ValueError(f"exit {code} inconsistent with JUnit results")
+            classified = []
+            number = 0
+            for case in cases:
+                rerun = None
+                rerun_log = ""
+                if case.result == "fail":
+                    stage = "rerun"
+                    number += 1
+                    name = f"{profile}-{number}"
+                    expression = nextest.exact_filter(case.binary, case.test)
+                    code, report = invoke(name, ["-E", expression])
+                    if code not in (0, tiers.TEST_FAILED):
+                        raise ValueError(f"exit {code}")
+                    selected = nextest.junit(report, profile)
+                    if (len(selected) != 1 or selected[0].key != case.key
+                            or selected[0].result == "skipped"):
+                        raise ValueError("JUnit must select exactly the failed test, not skipped")
+                    rerun = selected[0].result
+                    if (code == tiers.TEST_FAILED) != (rerun == "fail"):
+                        raise ValueError(f"exit {code} inconsistent with JUnit results")
+                    rerun_log = str(directory / f"{name}.log")
+                classified.append((case, state(case.result, rerun,
+                                               self.state["tests"].get(case.key)), rerun_log))
+        except (ValueError, OSError) as error:
+            result["reason"] = f"{stage}: {error}"
+            return result
+        result.update(status="ran", cases=classified)
+        return result
 
     def check(self, tip: str) -> dict:
         """One run of the tier set at tip, recorded, the state saved; return the run record.
@@ -141,20 +221,80 @@ class AfterLanding:
         or "red" (confirmed) with the tip; unobserved ones keep theirs. "last" becomes this
         tip and verdict; the cursor becomes tip only when no pair faulted. A crash before the
         save redoes the run whole at the next cycle."""
-        raise NotImplementedError
+        started_ns = time.time_ns()
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        directory = self.home / STATE / f"{tip[:12]}-{stamp}"
+        directory.mkdir(parents=True, exist_ok=True)
+        self.sh(["git", "switch", "--detach", "--force", tip], cwd=str(self.repo), check=True)
+        self.sh(["git", "clean", "-fd"], cwd=str(self.repo), check=True)
+        pairs = [self.pair(profile, tip, directory) for profile in self.tier_set]
+        previous = self.state["cursor"]
+        landed = suspects(self.repo, previous, tip, sh=self.sh)
+        counts = dict.fromkeys((*CONFIRMED, "flake", "recovered"), 0)
+        tests = dict(self.state["tests"])
+        states = []
+        for pair in pairs:
+            for case, current, rerun_log in pair["cases"]:
+                states.append(current)
+                if current not in ("passing", "unobserved"):
+                    counts[current] += 1
+                    last = self.state["tests"].get(case.key)
+                    good = last["commit"] if last and last["result"] == "pass" else ""
+                    attribution = {}
+                    if current == "new":
+                        changed = suspects(self.repo, good, tip, sh=self.sh)
+                        attribution = {"branches": [item.branch for item in changed if item.branch],
+                                       "commits": len(changed)}
+                    log.append("test", path=self.log_path, tip=tip, profile=case.profile,
+                               binary=case.binary, test=case.test, state=current, error=case.error,
+                               log=pair["log"], rerun=rerun_log, good=good, **attribution)
+                if current != "unobserved":
+                    tests[case.key] = {"result": "red" if current in CONFIRMED else "pass",
+                                       "commit": tip}
+        faulted = any(pair["status"] == "faulted" for pair in pairs)
+        outcome = verdict(states, faulted)
+        freed = slots.remove(slots.sweep_plan(self.repo / "target", started_ns))
+        record = log.append(
+            "run", path=self.log_path, tip=tip, previous=previous or "",
+            branches=[item.branch for item in landed if item.branch], commits=len(landed),
+            verdict=outcome, **counts,
+            pairs=[f'{pair["profile"]}:{pair["status"]}:{pair["selected"]}:{pair["failed"]}:'
+                   f'{pair["seconds"]:.1f}' for pair in pairs],
+            faults=[f'{pair["profile"]}: {pair["reason"]}' for pair in pairs
+                    if pair["status"] == "faulted"], log=str(directory), freed=freed)
+        saved = {"cursor": previous if faulted else tip,
+                 "last": {"tip": tip, "verdict": outcome}, "tests": tests}
+        _write(self.state_path, json.dumps(saved, sort_keys=True) + "\n")
+        self.state = saved
+        return record
 
     def cycle(self) -> bool:
         """In the slot: `git fetch -q origin main`, the tip `git rev-parse origin/main`. Nothing
         to do (False) when the tip is the cursor, or is the last run's tip and that run was
         partial (its suspects stay with the cursor, so the next tip's run covers them).
         Otherwise check(tip) and True."""
-        raise NotImplementedError
+        self.sh(["git", "fetch", "-q", "origin", "main"], cwd=str(self.repo), check=True)
+        tip = self.sh(["git", "rev-parse", "origin/main"], cwd=str(self.repo), check=True).out.strip()
+        last = self.state["last"]
+        if tip == self.state["cursor"] or (last and last["tip"] == tip and last["verdict"] == "partial"):
+            return False
+        self.check(tip)
+        return True
 
     def run(self, *, stop: Path, idle: float = 60.0, sleep: Callable[[float], None] | None = None) -> None:
         """Cycle until the file stop exists, sleeping idle seconds after a cycle with nothing to
         do. An exception in a cycle appends an `error` record (error: its text) to
         FAB_HOME/RECORD, and the loop sleeps and goes on."""
-        raise NotImplementedError
+        sleep = time.sleep if sleep is None else sleep
+        while not stop.exists():
+            try:
+                worked = self.cycle()
+            except Exception as error:
+                log.append("error", path=self.log_path, error=str(error))
+                sleep(idle)
+            else:
+                if not worked:
+                    sleep(idle)
 
 
 def main(argv: list[str]) -> int:
@@ -163,4 +303,27 @@ def main(argv: list[str]) -> int:
     line, as `fab queue log` prints). Exit 0; 1 with `fab after-landing: <error>` on stderr
     for an OSError, RuntimeError or ValueError (a slot not claimed for RUN); 2 on bad
     arguments."""
-    raise NotImplementedError
+    parser = argparse.ArgumentParser(prog="fab after-landing")
+    commands = parser.add_subparsers(dest="command", required=True)
+    for command in ("run", "once"):
+        commands.add_parser(command).add_argument("--slot", type=int, required=True)
+    commands.add_parser("log").add_argument("--since")
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as error:
+        return int(error.code)
+    try:
+        if args.command == "log":
+            for entry in log.iterate(log.home() / RECORD):
+                if args.since is None or entry["ts"] >= args.since:
+                    print(json.dumps(entry, ensure_ascii=False))
+        else:
+            runner = AfterLanding(args.slot)
+            if args.command == "once":
+                runner.cycle()
+            else:
+                runner.run(stop=runner.home / "after-landing.stop")
+    except (OSError, RuntimeError, ValueError) as error:
+        print(f"fab after-landing: {error}", file=sys.stderr)
+        return 1
+    return 0
