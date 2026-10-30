@@ -478,6 +478,23 @@ class ReapTests(unittest.TestCase):
         self.reason(self.run_class('recorded'), 'would bundle')
         self.assertEqual(self.selected(self.run_class('recorded', True)), {path})
 
+    def test_inherited_git_environment_cannot_redirect_inspection(self):
+        path = self.repo(remote=False)
+        with patch.dict(os.environ, GIT_DIR=str(self.home / 'does-not-exist'), GIT_WORK_TREE='/bad'):
+            self.reason(self.run_class('recorded'), 'would bundle')
+        self.assertTrue(path.exists())
+
+    def test_failed_summary_in_both_full_report_and_journal(self):
+        os.environ['INVOCATION_ID'] = 'fixture'
+        self.fake('post', '', 1)
+        reaper = self.reaper()
+        result = reaper.execute({'notes'}, 'dry-run')
+        reaper.save(result)
+        journal = json.loads((reaper.state / 'runs.jsonl').read_text())
+        full = json.loads(Path(result['list_path']).read_text())
+        self.assertIn('daily summary: post failed', journal['errors'][0])
+        self.assertEqual(journal['errors'], full['errors'])
+
     def test_clean_remote_repo_no_bundle(self):
         path = self.repo()
         self.assertEqual(self.selected(self.run_class('recorded', True)), {path})
