@@ -49,6 +49,12 @@ an existing kache).
 `~/.local/bin` through the `current` release. A name that matches an executable in
 `/usr/bin` or `/bin` is refused.
 
+**Retired links.** `fleet/retired-links.toml` names old-kit commands that must
+leave PATH (today the five that reach the old kit's own heavy). fleet-sync
+removes such a `~/.local/bin` link only while it still points into the frozen
+old kit, journals its exact link text first, and warns about anything else.
+Restoring one is a manual `ln -s` from the journal (`tools/fleet-sync.md`).
+
 **Units.** `fleet/units/` holds systemd user units; `fleet/units/roles.toml`
 maps each to the roles that run it. fleet-sync enables timers. A service marked
 start-once is started on its first install only. Its owner coordinates that
