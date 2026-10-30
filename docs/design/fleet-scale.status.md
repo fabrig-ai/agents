@@ -34,13 +34,23 @@ new-member bootstrap installs remote selectors/drop-in after credential
 streaming, then restarts that fresh cache. Existing fixed-host policy is unchanged.
 Tests use synthetic credentials only; no live source is read by this task.
 
-Scale-1c closes all six independent-review findings: exact read-only mirror
+Scale-1c adds exact read-only mirror
 commands, isolated 0600 host trust and exact-line removal, recorded-id-only
 deletion, bounded uncertain-create reconciliation with a ten-minute visibility
-grace, and build-network attachment plus private-address/TCP readiness checks.
+grace (superseded below), and build-network attachment plus private-address/TCP readiness checks.
 Debian 13 cloud-image DHCP remains responsible for the private NIC; bootstrap
 adds iproute2 and no network manager overrides. Kache has no documented
 read-only remote status command, so the bounded TCP probe is the store check.
 The fixture now covers all eight pin commands and all six peer artifacts,
 including tree formats, plus a real Git fetch without sshd. No live rebuild,
 DHCP or authenticated store acceptance has been performed.
+
+Scale-1d resolves the re-review's remaining uncertain-create leak structurally:
+empty listings never retire unresolved records. Explicit down --forget warns
+and records operator retirement without claiming deletion. A full pool-labelled
+server scan reports orphans for retired/forgotten/unknown members; list always
+performs that read-only scan, up blocks on orphans unless --ignore-orphans,
+and reconcile --delete-orphans rechecks both labels per id before deletion.
+Tests cover the older post-600-second retirement leak, indefinite active
+tracking, explicit forget, fixed unlabelled servers, retagging and scan errors.
+No live API, credential, infrastructure or real rebuild acceptance is performed.

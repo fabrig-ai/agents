@@ -137,7 +137,7 @@ class FakeAPI(BaseHTTPRequestHandler):
             if f.hidden_lists:
                 f.hidden_lists -= 1
                 return self.respond(200, {'servers':[]})
-            rows = [v for v in f.servers.values() if member is None or v['labels'].get('member') == member]
+            rows = [v for v in f.servers.values() if (v.get('labels',{}).get('fleet') == 'pool' if member is None else v.get('labels',{}).get('member') == member)]
             return self.respond(200, {'servers':rows})
         if route.path.startswith('/v1/actions/'):
             return self.respond(200, {'action': {'status': f.action_status}})
@@ -799,7 +799,10 @@ for _ in range(15):
             result=self.invoke('list')
         self.assertEqual(result.returncode,0,result.stderr)
         self.assertIn('creating-unresolved',result.stdout)
-        self.assertEqual(self.requests,[])
+        self.assertEqual(len(self.requests),1)
+        method,path,body=self.requests[0]
+        self.assertEqual(method,'GET')
+        self.assertIn('label_selector=fleet%3Dpool',path)
 
     def test_missing_id_multiple_label_matches_refuses(self):
         self.lost_create=True
@@ -829,33 +832,28 @@ for _ in range(15):
         self.assertEqual(member['id'],1)
         self.assertEqual(member['state'],'creating')
 
-    def test_empty_reconciliation_requires_fresh_ten_minute_query(self):
+    def test_empty_reconciliation_never_retires_even_after_grace(self):
         self.api_failure='POST /v1/servers'
         self.assertEqual(self.invoke('up').returncode,1)
         self.api_failure=None
-        data=self.fleet.registry.read()
-        requested=data['members']['pool-1']['create_requested_at']
-        output=io.StringIO()
-        globals_=Fleet.reconcile.__globals__
-        with patch.dict(globals_,RECONCILE_SECONDS=0),patch('time.time',return_value=requested+599):
-            with self.assertRaises(Error):self.fleet.down('pool-1')
-            with contextlib.redirect_stdout(output):self.fleet.listing()
-        self.assertIn('creating-unresolved',output.getvalue())
-        self.assertEqual(len(self.fleet.registry.read()['members']),1)
-        # A failed fresh query cannot use the previous empty response as proof.
-        self.api_failure='GET /v1/servers'
-        with patch('time.time',return_value=requested+600):
-            with self.assertRaises(Error):self.fleet.down('pool-1')
-        self.api_failure=None
-        with patch('time.time',return_value=requested+600):
-            self.fleet.down('pool-1')
-        self.assertEqual(self.fleet.registry.read()['members'],{})
+        requested=self.fleet.registry.read()['members']['pool-1']['create_requested_at']
+        globals_=Fleet.resolve_create.__globals__
+        for elapsed in (599,600,601,86400,365*86400):
+            output=io.StringIO()
+            with patch.dict(globals_,RECONCILE_SECONDS=0),patch('time.time',return_value=requested+elapsed):
+                with self.assertRaises(Error):self.fleet.down('pool-1')
+                with contextlib.redirect_stdout(output):self.fleet.listing(True)
+            data=json.loads(output.getvalue())
+            self.assertEqual(data['members']['pool-1']['state'],'creating-unresolved')
+            self.assertEqual(data['retired'],[])
+            self.assertEqual(data['orphans'],[])
+        self.assertEqual(self.invoke('down','pool-1','--forget').returncode,0)
 
     def test_empty_then_late_server_is_not_leaked(self):
         self.lost_create=True
         self.assertEqual(self.invoke('up').returncode,1)
         self.hidden_lists=1
-        with patch.dict(Fleet.reconcile.__globals__,RECONCILE_SECONDS=0):
+        with patch.dict(Fleet.resolve_create.__globals__,RECONCILE_SECONDS=0):
             with self.assertRaises(Error):self.fleet.down('pool-1')
         self.assertEqual(len(self.servers),1)
         self.assertEqual(self.invoke('down','pool-1').returncode,0)
@@ -882,6 +880,161 @@ for _ in range(15):
         log=(self.home/'ssh.log').read_text()
         self.assertNotIn('ip -j -4 address',log)
         self.assertNotIn('/dev/tcp/',log)
+
+
+    def test_post_grace_legacy_retired_create_is_reported_and_deleted(self):
+        self.lost_create=True
+        self.assertEqual(self.invoke('up').returncode,1)
+        data=self.fleet.registry.read()
+        member=data['members'].pop('pool-1')
+        requested=member['create_requested_at']
+        # The old implementation retired this uncertain record at +600 while
+        # the successfully created server was still invisible in the API.
+        member['retired_at']=requested+600
+        data['retired'].append(member)
+        self.fleet.registry.write(data)
+        self.hidden_lists=1
+        with patch('time.time',return_value=requested+600),contextlib.redirect_stdout(io.StringIO()) as output:
+            self.fleet.reconcile()
+        self.assertIn('no orphan',output.getvalue())
+        with patch('time.time',return_value=requested+601):
+            result=self.invoke('list')
+        self.assertIn('ORPHAN',result.stdout)
+        self.assertIn('"id": 1',result.stdout)
+        snapshot=self.fleet.registry.path.read_bytes()
+        self.assertEqual(self.invoke('reconcile').returncode,0)
+        self.assertIn(1,self.servers)
+        self.assertEqual(self.fleet.registry.path.read_bytes(),snapshot)
+        self.assertEqual(self.invoke('reconcile','--delete-orphans').returncode,0)
+        self.assertEqual(self.servers,{})
+        self.assertEqual(self.fleet.registry.path.read_bytes(),snapshot)
+        self.assertEqual(self.invoke('reconcile','--delete-orphans').returncode,0)
+
+    def test_forget_warns_then_late_server_becomes_orphan(self):
+        self.lost_create=True
+        self.assertEqual(self.invoke('up').returncode,1)
+        requested=self.fleet.registry.read()['members']['pool-1']['create_requested_at']
+        self.hidden_lists=1
+        with patch.dict(Fleet.resolve_create.__globals__,RECONCILE_SECONDS=0),patch('time.time',return_value=requested+601):
+            with self.assertRaises(Error):self.fleet.down('pool-1')
+        self.assertIn('pool-1',self.fleet.registry.read()['members'])
+        self.requests.clear()
+        result=self.invoke('down','pool-1','--forget')
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertIn('WARNING',result.stderr)
+        self.assertIn('without confirmed server deletion',result.stderr)
+        self.assertEqual(self.requests,[])
+        self.assertIn(1,self.servers)
+        self.assertTrue(self.fleet.registry.read()['retired'][0]['forgotten'])
+        result=self.invoke('list','--json')
+        self.assertEqual(json.loads(result.stdout)['orphans'],[{'id':1,'member':'pool-1'}])
+        self.assertEqual(self.invoke('reconcile','--delete-orphans').returncode,0)
+        self.assertEqual(self.servers,{})
+
+    def test_active_unresolved_late_create_stays_tracked_and_uses_normal_down(self):
+        self.lost_create=True
+        self.assertEqual(self.invoke('up').returncode,1)
+        requested=self.fleet.registry.read()['members']['pool-1']['create_requested_at']
+        self.hidden_lists=1
+        with patch.dict(Fleet.resolve_create.__globals__,RECONCILE_SECONDS=0),patch('time.time',return_value=requested+601):
+            with self.assertRaises(Error):self.fleet.down('pool-1')
+        result=self.invoke('list','--json')
+        data=json.loads(result.stdout)
+        self.assertEqual(data['orphans'],[])
+        self.assertEqual(data['members']['pool-1']['id'],1)
+        self.assertEqual(self.invoke('reconcile','--delete-orphans').returncode,0)
+        self.assertIn(1,self.servers)
+        self.assertEqual(self.invoke('down','pool-1').returncode,0)
+        self.assertEqual(self.servers,{})
+
+    def test_fixed_unlabelled_servers_never_listed_or_deleted(self):
+        self.servers[101]={'id':101}
+        self.servers[102]={'id':102,'labels':{'fleet':'fixed','member':'pool-1'}}
+        for arguments in (('list',),('list','--json'),('reconcile',),('reconcile','--delete-orphans')):
+            result=self.invoke(*arguments)
+            self.assertEqual(result.returncode,0,result.stderr)
+            self.assertNotIn('101',result.stdout)
+            self.assertNotIn('102',result.stdout)
+            self.assertNotIn('ORPHAN',result.stdout)
+        self.assertEqual(set(self.servers),{101,102})
+        self.assertFalse(any(method=='DELETE' for method,_,_ in self.requests))
+
+    def test_unknown_and_retired_members_are_orphans_active_is_not(self):
+        data=self.fleet.registry.read()
+        data['members']['pool-1']={'name':'pool-1','state':'ready','id':101}
+        data['retired'].append({'name':'pool-2'})
+        self.fleet.registry.write(data)
+        for number,name in ((101,'pool-1'),(102,'pool-2'),(103,'unknown')):
+            self.servers[number]={'id':number,'labels':{'fleet':'pool','member':name}}
+        result=self.invoke('list','--json')
+        self.assertEqual(json.loads(result.stdout)['orphans'],
+                         [{'id':102,'member':'pool-2'},{'id':103,'member':'unknown'}])
+        result=self.invoke('reconcile','--delete-orphans')
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual(set(self.servers),{101})
+
+    def test_up_refuses_orphans_before_allocating_unless_explicitly_ignored(self):
+        self.servers[101]={'id':101,'labels':{'fleet':'pool','member':'unknown'}}
+        result=self.invoke('up')
+        self.assertEqual(result.returncode,1,result.stderr)
+        self.assertIn('ORPHAN',result.stderr)
+        self.assertIn('--ignore-orphans',result.stderr)
+        self.assertEqual(self.fleet.registry.read()['members'],{})
+        self.assertFalse(any(method=='POST' and path=='/v1/servers' for method,path,_ in self.requests))
+        result=self.invoke('up','--ignore-orphans')
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertIn(101,self.servers)
+        self.assertEqual(self.fleet.registry.read()['members']['pool-1']['state'],'ready')
+
+    def test_orphan_delete_rechecks_both_labels_and_leaves_retagged_server(self):
+        for labels in ({},{'fleet':'fixed','member':'unknown'},{'fleet':'pool','member':'changed'}):
+            self.servers[101]={'id':101,'labels':{'fleet':'pool','member':'unknown'}}
+            original=self.fleet.api.request
+            def request(method,path,*args,**kwargs):
+                if method=='GET' and path=='/servers/101':
+                    self.servers[101]['labels']=labels
+                return original(method,path,*args,**kwargs)
+            with patch.object(self.fleet.api,'request',side_effect=request),contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaises(Error):self.fleet.reconcile(True)
+            self.assertIn(101,self.servers)
+        self.assertFalse(any(method=='DELETE' for method,_,_ in self.requests))
+
+    def test_orphan_missing_member_label_is_reported_but_not_deleted(self):
+        self.servers[101]={'id':101,'labels':{'fleet':'pool'}}
+        result=self.invoke('list','--json')
+        self.assertEqual(json.loads(result.stdout)['orphans'],[{'id':101,'member':None}])
+        result=self.invoke('reconcile','--delete-orphans')
+        self.assertEqual(result.returncode,1)
+        self.assertIn('member label',result.stderr)
+        self.assertIn(101,self.servers)
+
+    def test_orphan_scan_failure_blocks_up_and_list(self):
+        self.api_failure='GET /v1/servers'
+        for arguments in (('up',),('up','--ignore-orphans'),('list',),('reconcile',)):
+            self.assertEqual(self.invoke(*arguments).returncode,1)
+        self.assertEqual(self.fleet.registry.read()['members'],{})
+
+    def test_list_always_scans_for_orphans_when_registry_busy(self):
+        self.servers[101]={'id':101,'labels':{'fleet':'pool','member':'late'}}
+        with self.fleet.registry.locked():
+            result=self.invoke('list')
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertIn('ORPHAN',result.stdout)
+        self.assertIn('"id": 101',result.stdout)
+
+    def test_forget_refuses_confirmed_id_and_dry_run_preserves_unresolved(self):
+        self.up()
+        self.assertEqual(self.invoke('down','pool-1','--forget').returncode,1)
+        self.assertIn(1,self.servers)
+        self.api_failure='POST /v1/servers'
+        self.assertEqual(self.invoke('up').returncode,1)
+        before=self.snapshot()
+        self.requests.clear()
+        result=self.invoke('down','pool-2','--forget','--dry-run')
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertIn('WARNING',result.stderr)
+        self.assertEqual(self.requests,[])
+        self.assertEqual(self.snapshot(),before)
 
 
 def shlex_quote(value):

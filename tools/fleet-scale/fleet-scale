@@ -26,7 +26,6 @@ import urllib.request
 
 ROOT = Path(__file__).resolve().parents[2]
 RECONCILE_SECONDS = 10
-CREATE_GRACE_SECONDS = 600
 STATES = ("creating-unresolved", "creating", "bootstrapping", "ready", "draining", "deleting")
 
 
@@ -498,7 +497,7 @@ finally:
         if self.ssh(member, "systemctl --user is-active fleet-sync.timer").strip() != b"active":
             raise Error("fleet-sync timer is not active")
 
-    def up(self, dry=False, local_only_kache=False):
+    def up(self, dry=False, local_only_kache=False, ignore_orphans=False):
         if not local_only_kache:
             try:
                 # Metadata-only preflight, before reserving a name or creating a VM.
@@ -515,6 +514,10 @@ finally:
             return
         with self.registry.locked():
             data = self.registry.read()
+            orphans = self.orphans(data)
+            self.report_orphans(orphans, stream=sys.stderr)
+            if orphans and not ignore_orphans:
+                raise Error("orphan pool servers exist; run reconcile --delete-orphans or use --ignore-orphans")
             self.capacity(data)
             name = f"{self.config['prefix']}-{data['next']}"
             metadata = self.root / ".fleet-release.json"
@@ -588,14 +591,13 @@ finally:
             raise Error("cannot prove heavy idle; use --force only after operator drain")
         return status["idle"]
 
-    def reconcile(self, data, member):
+    def resolve_create(self, data, member):
         if member.get("id"):
             return True
         requested = member.get("create_requested_at", member.get("created_at", time.time()))
         self.stamp(data, member, state="creating-unresolved", create_requested_at=requested)
         deadline = time.monotonic() + RECONCILE_SECONDS
         while True:
-            queried_at = time.time()
             rows = self.api.servers(member["name"])
             if len(rows) > 1:
                 raise Error("several servers match member labels; refusing reconciliation")
@@ -611,20 +613,21 @@ finally:
                 return True
             now = time.time()
             self.stamp(data, member, reconciled_at=now)
-            if queried_at >= requested + CREATE_GRACE_SECONDS:
-                self.stamp(data, member, absence_confirmed_at=now)
-                return True
             if time.monotonic() >= deadline:
                 return False
             time.sleep(2)
 
-    def down(self, name, force=False, dry=False):
+    def down(self, name, force=False, dry=False, forget=False):
         if not re.fullmatch(re.escape(self.config["prefix"]) + r"-[1-9][0-9]*", name):
             raise Error("invalid member name")
         if dry:
             if name not in self.registry.read()["members"]:
                 raise Error("unknown member")
-            print(f"would drain and delete {name}; remove its authorization and host trust")
+            if forget:
+                self.forget_warning(name)
+                print(f"would forget {name}; server deletion would not be confirmed")
+            else:
+                print(f"would drain and delete {name}; remove its authorization and host trust")
             return
         with self.registry.locked():
             data = self.registry.read()
@@ -634,8 +637,15 @@ finally:
                     return
                 raise Error("unknown member")
             member = data["members"][name]
-            if not member.get("id") and not self.reconcile(data, member):
-                raise Error("create remains unresolved; retry after the 10 minute visibility grace")
+            if forget:
+                if member.get("id") or member["state"] not in ("creating", "creating-unresolved"):
+                    raise Error("--forget is only for unresolved creates without a server id")
+                self.forget_warning(name)
+                self.retire(data, member, forgotten=True)
+                print(f"{name} forgotten; server deletion NOT confirmed")
+                return
+            if not member.get("id") and not self.resolve_create(data, member):
+                raise Error("create remains unresolved; retry down or explicitly use --forget")
             previous = member["state"]
             self.stamp(data, member, state="draining", step="drain")
             if not force and member.get("ready_at") and previous != "deleting":
@@ -648,28 +658,72 @@ finally:
             # A recorded id is authoritative: never union it with label matches.
             server_id = member.get("id")
             self.stamp(data, member, step="delete")
-            if server_id:
-                server = self.api.request("GET", f"/servers/{int(server_id)}", missing=True)
-                if server is not None:
-                    labels = server["server"].get("labels", {})
-                    if labels.get("fleet") != "pool" or labels.get("member") != name:
-                        raise Error("refusing to delete a server without matching pool labels")
-                    result = self.api.request("DELETE", f"/servers/{int(server_id)}", missing=True)
-                    if result and result.get("action"):
-                        self.api.poll(result["action"]["id"])
-                    deadline = time.monotonic() + 300
-                    while self.api.request("GET", f"/servers/{int(server_id)}", missing=True) is not None:
-                        if time.monotonic() >= deadline:
-                            raise Error("server deletion not yet confirmed")
-                        time.sleep(2)
+            self.delete_server(server_id, name)
             self.stamp(data, member, step="deregister")
-            self.authorization(name)
-            self.untrust(member)
-            member.update(retired_at=time.time())
-            data["retired"].append(member)
-            del data["members"][name]
-            self.registry.write(data)
-        print(f"{name} retired; " + ("server deletion confirmed" if member.get("id") else "no server found after visibility grace"))
+            self.retire(data, member)
+        print(f"{name} retired; server deletion confirmed")
+
+    def retire(self, data, member, forgotten=False):
+        self.authorization(member["name"])
+        self.untrust(member)
+        member.update(retired_at=time.time())
+        if forgotten:
+            member["forgotten"] = True
+        data["retired"].append(member)
+        del data["members"][member["name"]]
+        self.registry.write(data)
+
+    @staticmethod
+    def forget_warning(name):
+        print(f"WARNING: forgetting {name} without confirmed server deletion; "
+              "a server may still appear or incur charges. Run fleet-scale reconcile to find it.",
+              file=sys.stderr)
+
+    def delete_server(self, server_id, name):
+        if not isinstance(name, str) or not name:
+            raise Error("refusing deletion without a member label")
+        server_id = int(server_id)
+        if server_id <= 0:
+            raise Error("invalid server id")
+        server = self.api.request("GET", f"/servers/{server_id}", missing=True)
+        if server is None:
+            return
+        labels = server["server"].get("labels", {})
+        if labels.get("fleet") != "pool" or labels.get("member") != name:
+            raise Error("refusing to delete a server without matching pool labels")
+        result = self.api.request("DELETE", f"/servers/{server_id}", missing=True)
+        if result and result.get("action"):
+            self.api.poll(result["action"]["id"])
+        deadline = time.monotonic() + 300
+        while self.api.request("GET", f"/servers/{server_id}", missing=True) is not None:
+            if time.monotonic() >= deadline:
+                raise Error("server deletion not yet confirmed")
+            time.sleep(2)
+
+    def orphans(self, data, servers=None):
+        rows = self.api.servers() if servers is None else servers
+        return sorted(
+            ({"id": int(row["id"]), "member": row.get("labels", {}).get("member")}
+             for row in rows if row.get("labels", {}).get("fleet") == "pool"
+             and row.get("labels", {}).get("member") not in data["members"]),
+            key=lambda row: row["id"])
+
+    @staticmethod
+    def report_orphans(orphans, stream=None):
+        for orphan in orphans:
+            print("ORPHAN pool server: " + json.dumps(orphan, sort_keys=True), file=stream)
+
+    def reconcile(self, delete_orphans=False):
+        # Serialize deletion against local allocation/retirement, and recheck
+        # both labels on a fresh GET of each id before any DELETE.
+        with self.registry.locked():
+            orphans = self.orphans(self.registry.read())
+            self.report_orphans(orphans)
+            for orphan in orphans if delete_orphans else ():
+                self.delete_server(orphan["id"], orphan["member"])
+                print(f"orphan server {orphan['id']} deletion confirmed")
+            if not orphans:
+                print("no orphan pool servers")
 
     def listing(self, json_output=False):
         try:
@@ -678,18 +732,25 @@ finally:
                 for member in data["members"].values():
                     if member["state"] in ("creating", "creating-unresolved") and not member.get("id"):
                         try:
-                            self.reconcile(data, member)
+                            self.resolve_create(data, member)
                             member.pop("reconciliation_error", None)
                         except Error as error:
                             member["reconciliation_error"] = str(error)
                         self.registry.write(data)
+                orphans = self.orphans(data)
         except BlockingIOError:
+            # list always scans the API, even while another operation owns the
+            # registry lock. Classify against the latest complete snapshot.
+            servers = self.api.servers()
             data = self.registry.read()
+            orphans = self.orphans(data, servers)
         if json_output:
+            data["orphans"] = orphans
             print(json.dumps(data, sort_keys=True))
-        elif not data["members"]:
-            print("no active pool members")
         else:
+            self.report_orphans(orphans)
+            if not data["members"]:
+                print("no active pool members")
             for name, row in sorted(data["members"].items()):
                 print(name, row["state"], row.get("ssh", "-"), row.get("step", "-"))
 
@@ -709,15 +770,20 @@ def main():
     up = commands.add_parser("up")
     up.add_argument("--dry-run", action="store_true")
     up.add_argument("--local-only-kache", action="store_true")
+    up.add_argument("--ignore-orphans", action="store_true")
     down = commands.add_parser("down")
     down.add_argument("name")
-    down.add_argument("--force", action="store_true")
+    down_mode = down.add_mutually_exclusive_group()
+    down_mode.add_argument("--force", action="store_true")
+    down_mode.add_argument("--forget", action="store_true")
     down.add_argument("--dry-run", action="store_true")
     listing = commands.add_parser("list")
     listing.add_argument("--json", action="store_true")
     hosts = commands.add_parser("hosts")
     hosts.add_argument("--json", action="store_true", required=True)
     commands.add_parser("key")
+    reconcile = commands.add_parser("reconcile")
+    reconcile.add_argument("--delete-orphans", action="store_true")
     ssh = commands.add_parser("ssh")
     ssh.add_argument("name")
     ssh.add_argument("remote_command", nargs="?")
@@ -725,11 +791,13 @@ def main():
     try:
         fleet = Fleet()
         if args.command == "up":
-            fleet.up(args.dry_run, args.local_only_kache)
+            fleet.up(args.dry_run, args.local_only_kache, args.ignore_orphans)
         elif args.command == "down":
-            fleet.down(args.name, args.force, args.dry_run)
+            fleet.down(args.name, args.force, args.dry_run, args.forget)
         elif args.command == "list":
             fleet.listing(args.json)
+        elif args.command == "reconcile":
+            fleet.reconcile(args.delete_orphans)
         elif args.command == "ssh":
             return fleet.connect(args.name, args.remote_command)
         elif args.command == "hosts":

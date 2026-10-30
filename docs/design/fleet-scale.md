@@ -60,7 +60,9 @@ ssh but receives no work (section 5).
 1. **Name and lock.** Unless `--local-only-kache` is explicit, require the
    exact declared owned 0600 source before creating anything; never search for
    or derive another source. Take the registry lock, pick the next `pool-N`, record
-   `creating`.
+   `creating`. Before allocating a name, scan all pool-labelled servers and
+   refuse if orphans exist unless `--ignore-orphans` is explicit. Dry runs
+   perform no API calls and cannot prove orphan absence.
 2. **Create.** Resolve the configured network name to exactly one id and POST
    the server with `networks: [id]`, the template, the fleet SSH key, and
    labels `fleet=pool`, `member=pool-N`. Before POST, durably record the request
@@ -105,30 +107,58 @@ reconciliation below. Debian 13 cloud-image DHCP configures the attached NIC;
 bootstrap adds iproute2 for verification and needs no extra network service
 configuration. A missing address or route prevents shared readiness.
 
-## 4. `down`
+## 4. `down` and reconciliation
 
-1. **Reconcile uncertain creates.** Without an id, `down` and `list` query
+1. **Resolve uncertain creates.** Without an id, `down` and `list` query
    both labels, retrying for ten seconds. Exactly one match records its id;
-   multiple matches refuse. Empty results keep `creating-unresolved` until a
-   fresh query at least ten minutes after the recorded create request remains
-   empty. Only `down` may then retire it. API errors never establish absence.
+   multiple matches refuse. Empty results never establish permanent absence:
+   the member stays `creating-unresolved`, regardless of elapsed time.
+   Normal down cannot retire it until a matching server is found and deleted.
    `list` flags unresolved entries and records reconciliation errors; if the
-   registry is busy it shows the last complete snapshot without waiting.
-2. **Drain.** Record `draining`. No new claims (the slots tool skips draining
+   registry is busy it shows the last complete snapshot without waiting for
+   that lock, while still performing the orphan scan below.
+2. **Explicit forget.** `down NAME --forget` may retire an unresolved create
+   without a recorded id. It prints a warning that deletion is unconfirmed and
+   a server may still appear or incur charges. It removes the member's marked
+   authorization and exact trust lines and records `forgotten: true` in the
+   retired entry; it does not contact or delete a server. It cannot be combined
+   with `--force` and is refused for confirmed ids.
+3. **Drain.** Record `draining`. No new claims (the slots tool skips draining
    members once adopted). Wait for its claims and heavy jobs to end, with a
    five-minute bound; `--force` explicitly bypasses only this drain.
    Heavy's version-1 atomic snapshot, under a shared read-only host lock,
    must show every task released. Missing/unknown snapshots fail closed.
    Partial builders without ready_at have no work and skip this probe.
-3. **Return logins** to the pool (section 6, later).
-4. **Delete.** With a recorded id, GET only that id, require both exact pool
+4. **Return logins** to the pool (section 6, later).
+5. **Delete.** With a recorded id, GET only that id, require both exact pool
    labels and DELETE only it. Never expand this set through label search.
    A mismatching label refuses even under --force. Confirm absence by GET.
-5. **Deregister.** Only after confirmed deletion (or fresh empty reconciliation
-   after the grace), remove its marked git key and the exact recorded lines
-   from the dedicated trust file, preserving unrelated, hashed and multi-alias
-   entries. Keep the member in `retired` with times. Interrupted deletion stays
-   tracked; retries of retired names are idempotent.
+6. **Deregister.** After confirmed deletion, remove its marked git key and
+   exact recorded lines from the dedicated trust file, preserving unrelated,
+   hashed and multi-alias entries. Keep the member in `retired` with times.
+   Interrupted deletion stays tracked; retries of retired names are idempotent.
+
+**Orphan reconciliation.** `fleet-scale reconcile` scans every server labelled
+`fleet=pool`. A server whose `member` label is not an active registry entry
+is an orphan, including unknown, retired and explicitly forgotten members.
+This scan also recovers late servers whose entries were retired by older code.
+Active unresolved entries that become visible remain tracked, resolve through
+`list` or `down`, and are deleted by normal down.
+
+The command reports orphan ids/member labels without changing registry or
+servers. `reconcile --delete-orphans` holds the registry operation lock,
+GETs each reported id again and requires `fleet=pool` and the exact scanned
+member label before DELETE, then confirms absence. Missing member labels are
+reported but refuse deletion. Servers without `fleet=pool` are never reported
+or deleted. Failed queries and failed deletion remain errors, never proof of
+absence; the next full scan finds surviving or late servers again.
+
+`list` always performs this read-only full scan and prints `ORPHAN` records
+prominently, including when member-state reconciliation skips a busy lock.
+`list --json` adds an `orphans: [{id, member}]` array without persisting it.
+Real `up` scans under the operation lock before allocating and refuses while
+orphans exist, unless `--ignore-orphans` is explicit. The override reports the
+orphans and still fails on API errors. Dry-run up retains its no-API contract.
 
 ## 5. Mirrors and access
 

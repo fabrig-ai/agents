@@ -16,14 +16,18 @@ fleet-scale key
 fleet-scale up --dry-run
 fleet-scale up
 fleet-scale up --local-only-kache
+fleet-scale up --ignore-orphans
 fleet-scale list
 fleet-scale list --json
+fleet-scale reconcile
+fleet-scale reconcile --delete-orphans
 fleet-scale hosts --json
 fleet-scale ssh pool-1
 fleet-scale ssh pool-1 'uname -a'
 fleet-scale down pool-1 --dry-run
 fleet-scale down pool-1
 fleet-scale down pool-1 --force
+fleet-scale down pool-1 --forget
 ```
 
 `key` creates `~/.ssh/fleet-scale` (0600, ed25519), repairs its public half,
@@ -41,10 +45,34 @@ current step. A failed command leaves the entry visible in `list`. Clean up
 with `down NAME`; investigate errors before another `up` (which reserves a new
 name). Before POST it records the create-request time and creating-unresolved.
 `down` and `list` retry both-label reconciliation for ten seconds. Exactly one
-match resolves the id; multiple matches refuse. Empty results remain unresolved
-until a fresh query at least ten minutes after the create request is still empty.
-`list` flags that state; only `down` then retires it. Failed queries never prove
-absence. A known id always selects only that server, regardless of label twins.
+match resolves the id; multiple matches refuse. Empty results never retire an
+unresolved create, regardless of its age. It stays `creating-unresolved` until
+a matching server is found and deleted, or the operator explicitly runs
+`down NAME --forget`. Forgetting warns that deletion is unconfirmed and costs
+may continue, records `forgotten: true` in the retired entry, and removes only
+that member's authorization/trust. It does not query or delete a server.
+`--forget` requires an unresolved create without a recorded id, and is
+mutually exclusive with `--force`. A known id always selects only that server,
+regardless of label twins.
+
+`fleet-scale reconcile` lists every server labelled `fleet=pool` and prominently
+reports each whose `member` label is absent from the active registry as an
+`ORPHAN`, including servers for retired, forgotten or unknown members.
+It changes neither the registry nor servers. Active unresolved members remain
+tracked and use the normal down path once visible. `reconcile --delete-orphans`
+deletes the reported orphan ids, re-reading each server and requiring both
+labels to match the scan immediately before deletion, then confirming absence.
+A missing member label is reported but refuses deletion; servers without
+`fleet=pool` are never reported or deleted.
+
+`list` always runs this read-only orphan scan, even while the registry lock is
+busy. Text output prints `ORPHAN` records prominently; JSON includes an
+`orphans` array of `{id, member}` records. API errors fail the scan rather
+than claiming absence. A real `up` scans under the registry lock before name
+allocation and refuses while orphans exist unless `--ignore-orphans` is
+explicit. The override still reports orphans and does not skip API failures.
+Dry runs retain their no-API contract and cannot establish orphan absence.
+
 
 Member git access is a separate key generated on the member. Its exact marked
 line on hel8 uses `restrict,command=".../current/tools/fleet-scale/mirror-serve"`.
@@ -95,7 +123,7 @@ A partial cleanup remains `deleting` and can be retried. Already retired names
 are idempotent. Claims on members are not assigned by current consumers; their
 adoption of the ready-only `hosts --json` feed is later work.
 
-`list --json` emits `{members: {NAME: RECORD}, retired: [...], next: N}`;
+`list --json` emits `{members: {NAME: RECORD}, retired: [...], next: N, orphans: [{id, member}]}`;
 `hosts --json` emits `{hosts: {NAME: {hostname, ssh, roles, ...}}}`, merging
 fixed declarations and ready pool members. Dry runs read configuration and the
 registry, plus shared-source metadata: no API, SSH, credential contents, locks or writes. `max_members` counts all
@@ -108,7 +136,7 @@ Authorization header. API bodies and subprocess output are never printed on
 failure. Registry mutation holds a flock across each operation, serializing
 allocation/deletion/cleanup, and uses fsynced sibling renames. Readers see the
 last complete state while another operation holds the lock; `list` skips
-reconciliation when that lock is busy. SSH file edits use
+member-state reconciliation when that lock is busy, but still scans for orphans. SSH file edits use
 a separate lock and preserve a `.fleet-scale.bak` backup. No real infrastructure
 is contacted by tests.
 
