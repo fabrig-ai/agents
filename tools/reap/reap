@@ -122,12 +122,20 @@ def load_records(text):
                 continue
             if row['event'] not in ('start', 'end') or not (0 <= when < float('inf')):
                 continue
-            record = records.setdefault(key, dict(paths=set(), ended=None))
-            record['paths'].update(paths)
             if row['event'] == 'start':
-                record['ended'] = None
+                owner = row['owner']
+                if not isinstance(owner, str) or not owner:
+                    continue
+                record = records.setdefault(key, dict(paths=set()))
+                record.update(ended=None, owner=owner)
             else:
+                record = records.get(key)
+                # An orphan end stays in the ledger but cannot supply paths or
+                # an end time to discovery, including a later start.
+                if record is None or row.get('owner') not in (None, record['owner']):
+                    continue
                 record['ended'] = when if record['ended'] is None else min(record['ended'], when)
+            record['paths'].update(paths)
         except (KeyError, ValueError, TypeError):
             continue
     return records
@@ -252,26 +260,32 @@ class Reaper:
     def record(self, args):
         if args.kind not in self.config['kinds']:
             raise ValueError('unknown record kind')
-        if not args.owner or not args.id or '/' in args.id or args.id in ('.', '..'):
+        if (not args.id or '/' in args.id or args.id in ('.', '..')
+                or (args.event == 'start' and not args.owner) or args.owner == ''):
             raise ValueError('invalid owner or id')
         paths = sorted({str(self.path(p)) for p in args.path})
         for path in paths:
             if not inside(Path(path), self.home):
                 raise ValueError('record path outside HOME')
-            if args.kind == 'claude-session' and Path(path) != self.home / '.claude/jobs' / args.id:
+            if args.kind == 'claude-session' and Path(path) != self.home / '.claude/jobs' / args.id[:8]:
                 raise ValueError('claude-session paths must be its jobs directory')
         target = self.state / 'records.jsonl'
         with regular(target, os.O_RDWR | os.O_CREAT | os.O_APPEND, True) as fd:
             fcntl.flock(fd, fcntl.LOCK_EX)
             text = os.pread(fd, os.fstat(fd).st_size, 0).decode(errors='replace')
             prior = load_records(text).get((args.kind, args.id))
+            owner = args.owner
+            if args.event == 'end' and prior:
+                if owner is not None and owner != prior['owner']:
+                    raise ValueError('end owner does not match start owner')
+                owner = prior['owner']
             if prior and set(paths) <= prior['paths']:
-                if args.event == 'start' and prior['ended'] is None:
+                if args.event == 'start' and prior['ended'] is None and owner == prior['owner']:
                     return
                 if args.event == 'end' and prior['ended'] is not None and self.now >= prior['ended']:
                     return
             append_fd(fd, dict(event=args.event, time=self.now, kind=args.kind,
-                               owner=args.owner, id=args.id, paths=paths))
+                               owner=owner, id=args.id, paths=paths))
 
     def children(self, path):
         try:
@@ -359,7 +373,7 @@ class Reaper:
                         for path in record['paths']:
                             candidate = self.path(path)
                             if kind == 'claude-session':
-                                if candidate != self.home / '.claude/jobs' / identity:
+                                if candidate != self.home / '.claude/jobs' / identity[:8]:
                                     continue
                                 try:
                                     if not stat.S_ISDIR(candidate.lstat().st_mode):
@@ -411,7 +425,7 @@ class Reaper:
                  '.ssh', '.claude/.credentials.json', '.claude/jobs/pins.json', '.claude.json', '.codex/auth.json',
                  'archive', '.local/state/reap', 'src/rust/tmp/logs/heavy.tsv',
                  'src/fabrig/events', 'src/fabrig/records', 'src/rust/records',
-                 'src/fabrig/archive', 'src/rust/tmp/owners']
+                 'src/fabrig/archive', 'src/rust/tmp/owners', 'src/fabrig/homes']
         fixed += [f'src/fabrig/{name}' for name in ('claims', 'leases', 'queue', 'main', 'agents', 'current', 'releases')]
         fixed += [f'.local/state/{name}' for name in ('fleet-sync', 'fabrig', 'heavy')]
         if not inside(path, self.home) or any(intersects(path, self.home / p) for p in fixed):
@@ -698,7 +712,8 @@ class Reaper:
         if inside(path, jobs):
             if self.claude_error:
                 return 'claude inventory unavailable'
-            if any(intersects(path, jobs / identity) for identity in self.live):
+            if any(intersects(path, jobs / name) for identity in self.live
+                   for name in (identity, identity[:8])):
                 return 'live session'
         if any(inside(item, path) for item in snapshot['used']):
             return 'process use'
@@ -840,8 +855,9 @@ def main(argv=None):
         subs = parser.add_subparsers(dest='command', required=True)
         record = subs.add_parser('record')
         record.add_argument('event', choices=['start', 'end'])
-        for name in ('kind', 'owner', 'id'):
+        for name in ('kind', 'id'):
             record.add_argument('--' + name, required=True)
+        record.add_argument('--owner', help='required for start; inherited from start for end')
         record.add_argument('--path', action='append', default=[])
         record.add_argument('--strict', action='store_true')
         run = subs.add_parser('run')

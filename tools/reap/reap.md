@@ -40,12 +40,18 @@ Producers use these three commands (owner names may contain `/`):
 
 ```sh
 reap record start --kind ops-scratch --owner lead/q/temper --id RUN --path "$HOME/scratch/RUN"
-reap record end --kind ops-scratch --owner lead/q/temper --id RUN
+reap record end --kind ops-scratch --id RUN
 systemctl --user start --no-block reap.service
 ```
 
 Repeat `--path` to add paths. Record identity is `(kind, id)`; use unique IDs.
-`claude-session` accepts only `$HOME/.claude/jobs/ID`. Records use a 0600
+`claude-session` accepts only the direct child `$HOME/.claude/jobs/ID[:8]`,
+while retaining the full session ID as record identity. Start requires `--owner`.
+End may omit it for every kind and inherits the most recent start's owner; an
+explicit owner must match. A mismatch appends nothing and produces one stderr
+line with the usual best-effort exit 0 (`--strict` enables error exits). An end
+without a matching start is recorded but never supplies paths or eligibility.
+A later start cannot inherit that orphan end's paths or timestamp. Records use a 0600
 append-only JSONL file with `O_APPEND`, flock and fsync. Producers always get
 exit 0 on record errors, with one stderr line; `--strict` enables failure exits.
 Producer rollout and integration gaps are tracked in `docs/design/reaper.status.md`;
@@ -78,7 +84,7 @@ newlines in paths. Unknown Claude inventory keeps jobs. Symlink candidates, syml
 Nested symlinks are never followed; removal only unlinks them.
 
 Never paths include `src/rust/tmp/{logins,qa*,heavy,post,owners}`,
-`src/fabrig/{claims,leases,queue,main,agents,current,releases,archive,events,records}`,
+`src/fabrig/{claims,leases,queue,main,agents,current,releases,archive,events,records,homes}`,
 `src/rust/records`,
 `.local/state/{fleet-sync,fabrig,heavy,reap}`, `.ssh`, `.claude/.credentials.json`,
 `.claude.json`, Codex state outside `.codex/sessions`, and `archive`.
