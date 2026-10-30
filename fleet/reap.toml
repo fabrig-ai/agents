@@ -1,0 +1,31 @@
+# Live deletion requires a separate reviewed commit after fleet dry-run review.
+mode = "dry-run"
+summary_to = "ops@hel8"
+
+[classes.claude-jobs]
+root = ".claude/jobs"
+retention_seconds = 86400
+[classes.codex-runs]
+root = "src/rust/tmp/codex-run"
+retention_seconds = 604800
+[classes.heavy-logs]
+root = "src/rust/tmp/logs"
+retention_seconds = 604800
+[classes.precheck-logs]
+root = "src/fabrig/slots"
+retention_seconds = 259200
+[classes.notes]
+roots = ["src/fabrig/notes", "src/fabrig/tasks"]
+retention_seconds = 604800
+[classes.codex-sessions]
+roots = [".codex/sessions"]
+retention_seconds = 1209600
+[classes.recorded]
+retention_seconds = 0
+
+[kinds]
+claude-session = 3600
+ops-scratch = 259200
+retired-scratch = 259200
+qa-scratch = 604800
+codex-run = 604800
