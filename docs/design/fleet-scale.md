@@ -93,18 +93,25 @@ need a push path; that is a later design with the login pool.
 first use, 0600, registered in the Hetzner project by its public half) is
 used only for root bootstrap of new members. No agent reads it.
 
-## 6. Agent login pool (decision 0015)
+## 6. Agent login pool (decisions 0015, 0017)
 
-**Custody, not copies.** Claude and Codex logins are held in a pool of
-sealed login directories, about ten per subscription. A login has exactly one
-holder at a time: a pool shelf on hel8, or one machine. The custody tool moves
-it (copy, verify by sha256, remove the source) and never reads it. The user
-signs each login in once on the shelf.
+**Custody, not use.** Claude and Codex credentials rest on a shelf on hel8
+(`~/src/fabrig/logins/pool/`), one entry per login. A machine uses its own
+credential file; nothing ever uses a shelf entry in place. The custody tool
+(`agent-logins`, `docs/design/logins.md`) moves files by streaming and sha256
+checks, never reading or printing them. Signing in is the user's.
 
-**Operations:** assign a login to a machine; return it; swap a machine's login
-when its weekly limit approaches (the director asks); supply a new member at
-`up`. The design generalises `tools/qa/logins`, whose custody already moves QA
-logins without reading them. Its own design note follows this one.
+**Copy back on release** (the user, 10-30). Each machine's existing logins are
+captured as entries bound to it; while bound or lent, an entry is only a
+placeholder and may go stale. When a machine is done with a login (release,
+swap, retire, `down`), the tool copies the machine's current credential back
+over the entry, verifies it, removes it from the machine and marks the entry
+free. Only free entries are lent; lending copies the entry to the machine.
+
+**Operations:** `capture HOST`, `release HOST KIND`, `lend ID HOST`, `swap`
+(when a weekly limit approaches, on the director's request), and supply at
+`up` / copy back at `down`. About ten logins per subscription, signed in by the
+user on the shelf (`prepare`, then `register`).
 
 ## 7. Later
 
