@@ -29,7 +29,9 @@
 ## 2. Declarations
 
 **`fleet/hosts.toml`** names each host, its SSH address, roles and per-host
-values (`env`, `machine_env`, seed eligibility). Roles today: session (hel8),
+values (`env`, `machine_env`, seed eligibility, bootstrap-only `pquota`).
+`pquota` is a boolean, default false. Only explicit root bootstrap consumes it;
+convergence never writes boot configuration. Roles today: session (hel8),
 builder, qa, after-landing and gate. A host is identified by `--host`, then
 `FLEET_HOST`, then its hostname.
 
@@ -120,7 +122,8 @@ names the retired hetzner2):
 
 1. USER preparation.
 2. `root.sh`: packages, the user, sudo, linger, unattended upgrades and the
-   journald cap.
+   journald cap. With `pquota = true`, atomically writes the XFS project-quota
+   GRUB drop-in and regenerates GRUB; one drained reboot is an operator action.
 3. `user.sh`:
    1. installs the Rust toolchains;
    2. clones agents;
@@ -135,6 +138,19 @@ source at a pinned revision. Any download must be HTTPS with a pinned SHA256.
 
 **Signing in is the user's.** Claude and Codex logins are never copied between
 machines; the bootstrap ends at the login step.
+
+**Existing XFS roots:** `fleet/bootstrap/pquota` defaults to a read-only plan.
+Explicit prepare/rollback/reboot require `--yes`. Prepare and reboot require
+a matching root-owned ops marker, zero authoritative hel8 claims and an
+installed idle heavy snapshot. Rollback can prepare recovery without a prior
+prepare record or available claim/heavy service; its reboot remains fenced.
+The script records boot/config evidence and verifies the selected default
+Linux entry. Ops stops all claim/submission producers through boot; there is
+no atomic host-disable CLI. Verification checks boot, quota and user services.
+The current claim list has no history, so downtime claim absence stays
+FAIL/UNPROVEN pending authority audit support. This blocks automated rollout.
+The README specifies console rescue and h7/h6/h3/h8 rollout with >=2h soak and
+per-host rollback on failure. No live boot action is implicit in convergence.
 
 **Readmission** follows the verification list in the bootstrap README.
 
@@ -158,3 +174,5 @@ machines; the bootstrap ends at the login step.
 - Prove the bootstrap on a rebuilt host and retarget its README.
 - An enforced landing entrypoint (ops request).
 - The automatic reaper: `docs/design/reaper.md`, once it lands.
+
+- Add authoritative claim history and atomic host admission fencing before automated quota rollout.

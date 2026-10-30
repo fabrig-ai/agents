@@ -59,6 +59,9 @@ class BootstrapStagesTest(unittest.TestCase):
             if path.is_file() and name not in touched:
                 (stage / name).parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(path, stage / name)
+        # The later pquota asset has its own compatibility landing. It is not
+        # input to this historical bootstrap stage-A/stage-B proof.
+        (stage / "fleet/bootstrap/pquota").unlink(missing_ok=True)
         retired = self.f.directory / "retired-fleet"
         (self.f.source / "fleet").rename(retired)
         (stage / "fleet").rename(self.f.source / "fleet")
@@ -105,6 +108,7 @@ class BootstrapStagesTest(unittest.TestCase):
         if after_fleet:
             shutil.rmtree(self.f.source / "fleet")
             shutil.copytree(fixture.ROOT / "fleet", self.f.source / "fleet")
+            (self.f.source / "fleet/bootstrap/pquota").unlink(missing_ok=True)
             fixture.put(self.f.source / "fleet/repositories.toml",
                         f'agents = {json.dumps(str(self.f.origin))}\nfabrig = {json.dumps(self.f.fabrig_origin)}\n')
         else:
@@ -128,9 +132,13 @@ class BootstrapStagesTest(unittest.TestCase):
     def test_stage_b_changes_no_runner_code(self):
         # Stage A (code only) is deployed fleet-wide; stage B must bring declarations
         # alone, so the deployed runner is also the runner that applies them.
+        # Compare the two historical stage commits. Later parser work is
+        # independently staged and must not rewrite what this proof covers.
+        stage_b = DEPLOYED.removesuffix("^")
         self.assertEqual(self.f.process("git", "-C", fixture.ROOT, "show",
                                         DEPLOYED + ":tools/fleet-sync").stdout,
-                         (fixture.ROOT / "tools/fleet-sync").read_text())
+                         self.f.process("git", "-C", fixture.ROOT, "show",
+                                        stage_b + ":tools/fleet-sync").stdout)
 
     @unittest.skipUnless(HAS_BOOTSTRAP, "stage B declarations are not in the code-only stage")
     def test_stage_a_timer_promotes_real_stage_b_on_declared_hosts(self):
