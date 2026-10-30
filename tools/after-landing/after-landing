@@ -373,7 +373,7 @@ class Runner:
         if len(bounded['id'].encode()) > 1024:
             bounded['id'] = 'sha256:' + hashlib.sha256(event['id'].encode()).hexdigest()
         for key in ('commit', 'attempt', 'verdict', 'state', 'wall', 'tip', 'GOOD',
-                    'candidate_count', 'result', 'culprit_commit', 'good', 'bad'):
+                    'candidate_count', 'number', 'result', 'culprit_commit', 'good', 'bad'):
             if key in event:
                 bounded[key] = event[key]
         if event.get('branch'):
@@ -976,7 +976,8 @@ sys.exit(code if code >= 0 else 128 - code)
                 key = json.dumps(alert['identity'], separators=(',', ':'))
                 good = active['baseline'][key]['commit']
                 by_good.setdefault(good, []).append(key)
-            for good, identities in sorted(by_good.items()):
+            profile_groups = []
+            for good, identities in by_good.items():
                 candidates = git(self.args.slot, 'rev-list', '--first-parent', '--reverse',
                                  f'{good}..{active["tip"]}').splitlines()
                 if len(candidates) <= 1:
@@ -985,9 +986,14 @@ sys.exit(code if code >= 0 else 128 - code)
                 parent = git(self.args.slot, 'rev-parse', candidates[0] + '^1')
                 if parent != good:
                     raise Fault('bisection GOOD is not a first-parent ancestor')
-                groups.append(dict(profile=profile, identities=sorted(identities), GOOD=good,
+                profile_groups.append(dict(profile=profile, identities=sorted(identities), GOOD=good,
                                    candidates=candidates, chain=[good, *candidates], lo=0, hi=len(candidates),
                                    probes=[], result=None, culprit=None))
+            # All GOODs are on this first-parent chain; the longest interval
+            # starts at the oldest GOOD, independently of commit hash order.
+            for group in sorted(profile_groups, key=lambda group: -len(group['candidates'])):
+                group['number'] = str(len(groups) + 1)
+                groups.append(group)
         if not groups:
             return None
         now = time.time()
@@ -1002,15 +1008,9 @@ sys.exit(code if code >= 0 else 128 - code)
         if group['GOOD'] not in observed:
             return group['GOOD']
         if hi - lo == 1:
-            if observed.get(chain[lo]) == 'good':
-                if chain[hi] not in observed:
-                    # Also observe TIP itself if it is the adjacent bad. The
-                    # run's confirmation seeds the interval, not the proof.
-                    return chain[hi]
-                if observed[chain[hi]] == 'bad':
-                    group.update(result='culprit proven', culprit=chain[hi])
-                    return None
-            group['result'] = 'range'
+            # TIP's confirmed run failure is already a valid bad endpoint.
+            # Every narrowed good endpoint comes from a saved good probe.
+            group.update(result='culprit proven', culprit=chain[hi])
             return None
         middle = (lo + hi) // 2
         # With an unchanged interval this is middle, older, newer, alternating
@@ -1039,7 +1039,9 @@ sys.exit(code if code >= 0 else 128 - code)
                 count, repeated, confirmation = self.launch(group['profile'], identities=[key])
                 logs.append(confirmation)
                 if repeated is None:
-                    outcome = 'unknown'
+                    # A build failure is a whole-group outcome, including
+                    # when it happens during one isolated confirmation.
+                    return {identity: 'unbuildable' for identity in group['identities']}, logs
                 else:
                     if count != 1 or set(repeated) != {key}:
                         raise Fault('bisection confirmation selection differs', logs=[confirmation['log']])
@@ -1051,20 +1053,21 @@ sys.exit(code if code >= 0 else 128 - code)
         phase = self.state['bisect']
         group = phase['groups'][index]
         parts = []
-        # A fixed split order, and a sorted identity order within each part,
-        # keep final event numbering deterministic across restart.
-        for outcome in ('bad', 'good', 'unknown', 'unbuildable'):
+        present = set(outcomes.values())
+        # Only differing per-identity outcomes split. Unbuildable applies to
+        # the whole group and preserves its number. Suffixes never shift when
+        # an outcome is absent, and later splits append another suffix.
+        for outcome, suffix in [('bad', '1'), ('good', '2'), ('unknown', '3'), ('unbuildable', None)]:
             identities = [key for key in group['identities'] if outcomes[key] == outcome]
             if not identities:
                 continue
-            part = dict(group, identities=identities,
+            number = group['number'] + '.' + suffix if len(present) > 1 else group['number']
+            part = dict(group, identities=identities, number=number,
                         probes=[*group['probes'], dict(commit=commit, outcome=outcome,
                                                       outcomes={key: outcomes[key] for key in identities}, logs=logs)])
             position = group['chain'].index(commit)
-            if commit == group['GOOD'] and outcome == 'bad':
-                part.update(result='inconclusive', reason='GOOD fails now')
-            elif outcome == 'good' and position == group['hi']:
-                part.update(result='inconclusive', reason='bad endpoint passes now')
+            if commit == group['GOOD'] and outcome != 'good':
+                part.update(result='inconclusive', reason='GOOD is not good now: ' + outcome)
             elif outcome == 'good':
                 part['lo'] = max(group['lo'], position)
             elif outcome == 'bad':
@@ -1111,7 +1114,7 @@ sys.exit(code if code >= 0 else 128 - code)
                     self.fault(str(error))
                     self.save()
                     return
-                bounded = isinstance(error, BisectBound) or time.time() >= phase['deadline']
+                bounded = isinstance(error, BisectBound)
                 for pending in phase['groups']:
                     if pending['result'] is None:
                         pending.update(result='range' if bounded else 'inconclusive', reason=str(error))
@@ -1129,7 +1132,7 @@ sys.exit(code if code >= 0 else 128 - code)
         wall = phase['completed'] - phase['started']
         records, summaries, culprit_keys = [], [], set()
         other = False
-        for number, group in enumerate(phase['groups'], 1):
+        for group in phase['groups']:
             culprit = None
             if group['culprit']:
                 chain, hi = group['chain'], group['hi']
@@ -1140,11 +1143,14 @@ sys.exit(code if code >= 0 else 128 - code)
                     other = True
             detail = self.artifact('bisect', dict(group, tip=phase['tip'], attempt=phase['attempt'],
                                                  error=phase.get('error'), attempts=phase.get('attempts', [])))
-            summary = dict(identities=[json.loads(key) for key in group['identities']],
+            interval = dict(good=group['chain'][group['lo']], bad=group['chain'][group['hi']],
+                            between=group['chain'][group['lo'] + 1:group['hi']])
+            summary = dict(number=group['number'], interval=interval,
+                           identities=[json.loads(key) for key in group['identities']],
                            result=group['result'], good=group['chain'][group['lo']],
                            bad=group['chain'][group['hi']], culprit=culprit, details=detail)
             summaries.append(summary)
-            event = self.event('after-landing-bisect', f'{identifier}:{number}',
+            event = self.event('after-landing-bisect', f'{identifier}:{group["number"]}',
                                tip=phase['tip'], attempt=phase['attempt'], GOOD=group['GOOD'],
                                candidate_count=len(group['candidates']), wall=wall,
                                arrived=phase['arrived'], commit=group['culprit'] or phase['tip'],
@@ -1160,6 +1166,9 @@ sys.exit(code if code >= 0 else 128 - code)
                             other=other, details=detail)
         outbox = dict(id=identifier, records=records, recorded=False, posts=[],
                       after=phase['run_id'], notification=notification)
+        routing_error = self.route_notification(outbox)
+        if routing_error:
+            self.fault(routing_error, identifier + ':fault', group=outbox, save=False)
         self.state['outbox'].append(outbox)
         self.state['hour']['bisect_seconds'] += phase['completed'] - phase.get('accounted_at', phase['started'])
         self.state['bisect'] = None
@@ -1181,13 +1190,14 @@ sys.exit(code if code >= 0 else 128 - code)
         if notification['other']:
             destinations.add(self.args.ops)
         detail = json.loads(Path(notification['details']).read_text())
-        body = [f'id: {group["id"]}', f'tip: {detail["tip"]}; builder: {self.args.host}',
+        body = [f'id: {group["id"]}', f'run event id: {notification["run_id"]}',
+                f'tip: {detail["tip"]}; builder: {self.args.host}',
                 'bisection results: ' + json.dumps(detail['groups'], separators=(',', ':')),
                 'details: ' + notification['details']]
         if len('\n'.join(body).encode()) > 60000:
-            body[2] = f'bisection groups: {len(detail["groups"])}; see details'
-        group['posts'] = [dict(to=destination, body='\n'.join(body), delivered=False)
-                          for destination in sorted(destinations)]
+            body[3] = f'bisection groups: {len(detail["groups"])}; see details'
+        group['posts'].extend(dict(to=destination, body='\n'.join(body), delivered=False)
+                              for destination in sorted(destinations))
         notification.update(resolved=True, error=None)
         return None
 

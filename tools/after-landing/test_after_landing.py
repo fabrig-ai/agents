@@ -1318,13 +1318,14 @@ class BisectionTests(Sandbox):
         posts_at = [i for i, row in enumerate(self.calls()) if row['tool'] == 'post' and 'bisection results' in row['body']]
         self.assertLess(max(records_at), min(posts_at))
 
-    def test_tip_culprit_is_probed_and_proven(self):
+    def test_tip_culprit_is_proven_without_reprobe(self):
         commits = self.setup_interval(2)
         self.at(commits[0])
         self.poll_run()
         event, = self.bisect_events()
         self.assertEqual(event['culprit_commit'], commits[-1])
-        self.assertEqual(self.probe_commits(event), [self.base, commits[0], commits[1]])
+        self.assertEqual(self.probe_commits(event), [self.base, commits[0]])
+        self.assertEqual([call['head'] for call in self.calls('tiers')].count(commits[-1]), 2)
 
     def test_other_culprit_tells_ops(self):
         self.passing_history()
@@ -1377,14 +1378,17 @@ class BisectionTests(Sandbox):
         # Pinned to nextest_metadata::NextestExitCode::BUILD_FAILED:
         # https://nexte.st/rustdoc/src/nextest_metadata/exit_codes.rs
         self.assertEqual(app.BUILD_FAILED, 101)
-        commits = self.setup_interval(4)
-        for commit in [self.base, *commits[:-1]]:
+        commits = self.setup_interval(4, ('one', 'two'))
+        for commit in commits[:-1]:
             self.at(commit, code=101)
         self.poll_run()
         event, = self.bisect_events()
         self.assertEqual(event['result'], 'range')
         self.assertEqual(event['good'], self.base)
         self.assertEqual(event['bad'], commits[-1])
+        self.assertEqual(event['interval'], dict(good=self.base, bad=commits[-1], between=commits[:-1]))
+        self.assertEqual(event['number'], '1')
+        self.assertEqual(len(event['identities']), 2)
         self.assertIsNone(event['culprit_commit'])
         self.assertFalse([post for post in self.calls('post') if post['args'][3] == 'ops@hel8'])
 
@@ -1417,7 +1421,7 @@ class BisectionTests(Sandbox):
         events = self.bisect_events()
         self.assertEqual([event['identities'][0][2] for event in events], ['one', 'two', 'three'])
         self.assertEqual([event['result'] for event in events], ['culprit proven', 'culprit proven', 'range'])
-        self.assertEqual([event['id'] for event in events], [commits[-1] + f':1:bisect:{n}' for n in (1, 2, 3)])
+        self.assertEqual([event['id'] for event in events], [commits[-1] + f':1:bisect:{n}' for n in ('1.1', '1.2', '1.3')])
         self.assertEqual([event['culprit_commit'] for event in events[:2]], [commits[1], commits[2]])
 
     def test_selection_fault_ends_all_groups_and_posts_ops_once(self):
@@ -1583,6 +1587,10 @@ class BisectionTests(Sandbox):
         self.assertIsNone(self.runner.state['trim_pending'])
         self.assertFalse([row for row in self.calls('post') if 'bisection results' in row['body']])
         self.assertTrue(self.bisect_events())  # Records may proceed independently.
+        result_group = self.runner.state['outbox'][-1]
+        self.assertEqual(result_group['after'], self.runner.state['outbox'][0]['id'])
+        self.assertTrue(all('run event id: ' + result_group['after'] in post['body']
+                            for post in result_group['posts']))
         self.advance('skein')
         self.poll_run()
         self.assertEqual(self.runner.state['last_run']['verdict'], 'red')
@@ -1627,9 +1635,15 @@ class BisectionTests(Sandbox):
 
 
     def test_deadline_cancels_and_drains_before_final_trim(self):
+        self.assert_bisect_wall_termination(deadline_capped=True)
+
+    def test_section_two_wall_bound_stays_fault_when_deadline_passes_during_drain(self):
+        self.assert_bisect_wall_termination(deadline_capped=False)
+
+    def assert_bisect_wall_termination(self, *, deadline_capped):
         self.setup_interval(4)
         phase = self.pending()
-        phase['deadline'] = time.time() + 60
+        phase['deadline'] = time.time() + (60 if deadline_capped else 3600)
         self.runner.save()
         self.at(self.base, hang=True)
         before = len(self.calls('tiers'))
@@ -1648,8 +1662,8 @@ class BisectionTests(Sandbox):
                         and app.heavy_tokens(invocation['log'])[0])
             self.wait_for(queued, 'bisection heavy submission', worker)
             invocation = phase['invocation']
-            self.assertLessEqual(invocation['bound'], 60)
-            self.assertTrue(invocation['deadline_bound'])
+            self.assertLessEqual(invocation['bound'], 60 if deadline_capped else 1801)
+            self.assertEqual(invocation['deadline_bound'], deadline_capped)
             app.atomic(self.home / 'expire-skein', '')
             self.wait_for(lambda: self.calls('heavy'), 'bisection cancellation', worker)
             self.wait_for(lambda: Path(invocation['waiting']).exists(), 'guardian waiting for heavy', worker)
@@ -1657,13 +1671,16 @@ class BisectionTests(Sandbox):
             self.assertEqual(len(self.calls('trim')), 1)
             self.assertEqual(len(self.calls('tiers')) - before, 1)
             self.assertIsNotNone(self.runner.state['bisect'])
+            if not deadline_capped:
+                phase['deadline'] = time.time() - 1
+                self.runner.save()
         finally:
             app.atomic(self.home / 'allow-end', '')
             worker.join(timeout=120)
         self.assertFalse(worker.is_alive())
         self.assertFalse(failures, failures)
         self.runner.deliver()
-        self.assertEqual(self.bisect_events()[0]['result'], 'range')
+        self.assertEqual(self.bisect_events()[0]['result'], 'range' if deadline_capped else 'inconclusive')
         self.assertEqual(len(self.calls('trim')), 2)
         self.assertIsNone(self.runner.state['bisect'])
 
@@ -1676,7 +1693,8 @@ class BisectionTests(Sandbox):
         self.save_scenario()
         phase = self.pending()
         self.assertEqual([group['profile'] for group in phase['groups']], ['qa-skein', 'qa-skein', 'qa-jig'])
-        self.assertEqual({group['GOOD'] for group in phase['groups'][:2]}, {self.base, commits[0]})
+        self.assertEqual([group['GOOD'] for group in phase['groups']], [self.base, commits[0], self.base])
+        self.assertEqual([group['number'] for group in phase['groups']], ['1', '2', '3'])
         self.assertTrue(all(len(group['identities']) == 1 for group in phase['groups']))
 
     def test_large_bisect_event_keeps_result_and_private_probe_details(self):
@@ -1692,6 +1710,174 @@ class BisectionTests(Sandbox):
         detail = Path(bounded['details'])
         self.assertEqual(detail.stat().st_mode & 0o777, 0o600)
         self.assertEqual(json.loads(detail.read_text()), event)
+
+
+    def test_good_bad_and_unknown_parts_end_only_those_parts(self):
+        commits = self.setup_interval(4, ('one', 'two', 'three'))
+        self.at(self.base, [dict(test='one', result='fail'), dict(test='two'),
+                            dict(test='three', result='skip')])
+        self.poll_run()
+        events = self.bisect_events()
+        self.assertEqual([event['number'] for event in events], ['1.1', '1.2', '1.3'])
+        self.assertEqual([event['result'] for event in events],
+                         ['inconclusive', 'culprit proven', 'inconclusive'])
+        self.assertEqual([event['identities'][0][2] for event in events], ['one', 'two', 'three'])
+        self.assertEqual(events[1]['culprit_commit'], commits[0])
+        for event in (events[0], events[2]):
+            self.assertEqual(self.probe_commits(event), [self.base])
+        self.assertEqual(len([row for row in self.calls('tiers') if row['head'] == commits[-1]]), 4)
+
+    def test_good_flake_and_skipped_confirmation_are_inconclusive(self):
+        self.setup_interval(4, ('one', 'two'))
+        self.at(self.base, [dict(test='one', result='fail'), dict(test='two', result='fail')],
+                reruns={'one': dict(tests=[dict(test='one')]),
+                        'two': dict(tests=[dict(test='two', result='skip')])})
+        self.poll_run()
+        event, = self.bisect_events()
+        self.assertEqual(event['number'], '1')
+        self.assertEqual(event['result'], 'inconclusive')
+        self.assertEqual(self.probe_commits(event), [self.base])
+        self.assertEqual(json.loads(Path(event['details']).read_text())['probes'][0]['outcome'], 'unknown')
+
+    def test_good_unbuildable_is_whole_group_inconclusive(self):
+        self.setup_interval(4, ('one', 'two'))
+        self.at(self.base, code=101)
+        self.poll_run()
+        event, = self.bisect_events()
+        self.assertEqual(event['number'], '1')
+        self.assertEqual(event['result'], 'inconclusive')
+        self.assertEqual(len(event['identities']), 2)
+        self.assertEqual(self.probe_commits(event), [self.base])
+        self.assertEqual(json.loads(Path(event['details']).read_text())['probes'][0]['outcome'], 'unbuildable')
+
+    def test_confirmation_build_failure_is_whole_group_unbuildable(self):
+        commits = self.setup_interval(4, ('one', 'two'))
+        self.at(commits[1], [dict(test='one', result='fail'), dict(test='two')],
+                reruns={'one': dict(tests=[dict(test='one')], code=101)})
+        self.at(commits[0], code=101)
+        self.at(commits[2], code=101)
+        self.poll_run()
+        event, = self.bisect_events()
+        self.assertEqual(event['number'], '1')
+        self.assertEqual(event['result'], 'range')
+        self.assertEqual(len(event['identities']), 2)
+        probes = json.loads(Path(event['details']).read_text())['probes']
+        self.assertEqual([probe['outcome'] for probe in probes], ['good', 'unbuildable', 'unbuildable', 'unbuildable'])
+        self.assertEqual(len(probes[1]['logs']), 2)
+
+    def test_initial_numbers_use_first_parent_age_not_lexical_hash(self):
+        old, newer, middle, tip = ('f' * 40, 'a' * 40, 'b' * 40, 'c' * 40)
+        active = dict(tip=tip, attempt=1, profiles=['qa-jig', 'qa-skein'], baseline={})
+        alerts = []
+        for profile in active['profiles']:
+            # Deliberately insert the newer GOOD first as well.
+            for name, good in [('two', newer), ('one', old)]:
+                key = self.key(name, profile)
+                active['baseline'][key] = dict(result='pass', commit=good)
+                alerts.append(dict(identity=json.loads(key)))
+        def git(slot, *argv):
+            if argv[0] == 'rev-list':
+                return '\n'.join([newer, middle, tip] if argv[-1] == old + '..' + tip else [middle, tip])
+            self.assertEqual(argv[0], 'rev-parse')
+            return old if argv[-1] == newer + '^1' else newer
+        run = dict(id=tip + ':1', notification=dict(destinations=[]))
+        with mock.patch.object(app, 'git', side_effect=git):
+            phase = self.runner.pending_bisection(active, alerts, run)
+        self.assertEqual([group['GOOD'] for group in phase['groups']], [old, newer, old, newer])
+        self.assertEqual([group['profile'] for group in phase['groups']], ['qa-jig', 'qa-jig', 'qa-skein', 'qa-skein'])
+        self.assertEqual([group['number'] for group in phase['groups']], ['1', '2', '3', '4'])
+
+    def test_sparse_nested_split_numbers_survive_restart_and_replay(self):
+        class Crash(BaseException):
+            pass
+        commits = self.setup_interval(6, ('one', 'two', 'three'))
+        self.at(commits[2], [dict(test='one', result='fail'), dict(test='two', result='skip'),
+                            dict(test='three', result='skip')])
+        self.at(commits[0], [dict(test=name) for name in ('one', 'two', 'three')])
+        self.at(commits[1], [dict(test='one'), dict(test='two'), dict(test='three', result='skip')])
+        self.at(commits[3], [dict(test='one', result='fail'), dict(test='two', result='fail'),
+                            dict(test='three', result='skip')])
+        self.at(commits[4], [dict(test='one', result='fail'), dict(test='two', result='fail'),
+                            dict(test='three', result='skip')])
+        self.pending()
+        real_save = self.runner.save_bisect_probe
+        def crash_after_split(*args):
+            real_save(*args)
+            if args[1] == commits[2]:
+                raise Crash()
+        with mock.patch.object(self.runner, 'save_bisect_probe', side_effect=crash_after_split):
+            with self.assertRaises(Crash):
+                self.runner.run()
+        saved = json.loads(self.runner.path.read_text())['bisect']
+        self.assertEqual([group['number'] for group in saved['groups']], ['1.1', '1.3'])
+        self.scenario.update(record_code=1, post_code=1)
+        self.save_scenario()
+        self.runner = app.Runner(self.args)
+        self.runner.run()
+        self.runner.deliver()
+        outbox = self.runner.state['outbox'][-1]
+        ids = [commits[-1] + ':1:bisect:' + number for number in ('1.1', '1.3.2', '1.3.3')]
+        self.assertEqual([event['id'] for event in outbox['records']], ids)
+        self.assertEqual([event['number'] for event in outbox['records']], ['1.1', '1.3.2', '1.3.3'])
+        self.assertTrue(outbox['notification']['resolved'])  # Resolved at creation, before publication.
+        self.assertEqual(outbox['after'], commits[-1] + ':1')
+        self.scenario.update(record_code=0, post_code=3)
+        self.save_scenario()
+        self.runner = app.Runner(self.args)
+        self.runner.poll()
+        self.assertFalse(self.runner.state['outbox'])
+        self.assertEqual({event['id'] for event in self.bisect_events()}, set(ids))
+        for event in self.bisect_events():
+            self.assertNotIn(commits[-1], self.probe_commits(event))
+
+    def test_restart_mid_confirmation_discards_entire_partial_probe(self):
+        class Crash(BaseException):
+            pass
+        commits = self.setup_interval(4, ('one', 'two'))
+        self.at(commits[0], [dict(test='one'), dict(test='two')])
+        self.pending()
+        real_launch, real_popen = self.runner.launch, app.subprocess.Popen
+        launched_counts = []
+        def popen(argv, *args, **kwargs):
+            if '_supervise' in argv:
+                state = json.loads(self.runner.path.read_text())
+                phase = state['bisect']
+                self.assertIsNotNone(phase['invocation'])
+                self.assertEqual(phase['invocation']['result'], json.loads(Path(argv[-2]).read_text())['result'])
+                launched_counts.append(phase['count'])
+            return real_popen(argv, *args, **kwargs)
+        def crash_after_first_confirmation(profile, *args, **kwargs):
+            result = real_launch(profile, *args, **kwargs)
+            phase = self.runner.state['bisect']
+            if phase['count'] == 3:
+                raise Crash()
+            return result
+        with mock.patch.object(app.subprocess, 'Popen', side_effect=popen), \
+                mock.patch.object(self.runner, 'launch', side_effect=crash_after_first_confirmation):
+            with self.assertRaises(Crash):
+                self.runner.run()
+        self.assertEqual(launched_counts, [1, 2, 3])
+        saved = json.loads(self.runner.path.read_text())['bisect']
+        group, = saved['groups']
+        self.assertEqual(group['number'], '1')
+        self.assertEqual([probe['commit'] for probe in group['probes']], [self.base])
+        self.assertEqual((group['lo'], group['hi']), (0, 4))
+        self.assertEqual(saved['probe']['commit'], commits[1])
+        self.assertEqual(saved['count'], 3)
+        before = len(self.calls('tiers'))
+        self.runner = app.Runner(self.args)
+        self.assertEqual(self.runner.state['bisect']['deadline'], saved['deadline'])
+        self.runner.run()
+        self.runner.deliver()
+        redone = self.calls('tiers')[before:before + 3]
+        self.assertEqual([call['head'] for call in redone], [commits[1]] * 3)
+        self.assertIn(' | ', redone[0]['args'][-1])
+        self.assertNotIn(' | ', redone[1]['args'][-1])
+        self.assertNotIn(' | ', redone[2]['args'][-1])
+        event, = self.bisect_events()
+        self.assertEqual(event['id'], commits[-1] + ':1:bisect:1')
+        self.assertEqual(event['culprit_commit'], commits[1])
+        self.assertEqual(self.probe_commits(event), [self.base, commits[1], commits[0]])
 
 
 class ParserTests(unittest.TestCase):
