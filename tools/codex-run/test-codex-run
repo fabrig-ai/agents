@@ -12,6 +12,7 @@ HUNG_CASE_S=$((3 * HUNG_TOOL_S))
 # This deadline is the subject of the TERM-ignoring callback case.
 ON_STOP_TIMEOUT_S=1
 kit=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
+source_slots=${kit%/*}/slots
 scratch_parent=${TMPDIR:-/tmp}
 t=$(mktemp -d "$scratch_parent/.test-codex-run.XXXXXX")
 cleanup() {
@@ -25,11 +26,11 @@ cleanup() {
 }
 export HOME=$t/home DEV_ROOT=$t/workspace POST_NAME=o/caller
 export CODEX_RUN_RETRY_DELAYS='0 0 0'
-mkdir -p "$HOME" "$DEV_ROOT/fake" "$t/bin" "$t/reports" "$t/work dir" "$t/agents/tools/codex-run" "$HOME/src/fabrig/main/tools/slots"
+mkdir -p "$HOME" "$DEV_ROOT/fake" "$t/bin" "$t/reports" "$t/work dir" "$t/agents/tools/codex-run" "$t/agents/tools/slots"
 trap cleanup EXIT
 cp "$kit/codex-run" "$t/agents/tools/codex-run/codex-run"
 cp "$kit/final.py" "$t/agents/tools/codex-run/final.py"
-cp "$kit/fixtures/lifetime.py" "$HOME/src/fabrig/main/tools/slots/lifetime.py"
+cp "$source_slots/lifetime.py" "$t/agents/tools/slots/lifetime.py"
 kit=$t/agents/tools/codex-run
 # No host directory is searchable, including when a service fake is removed.
 for tool in awk bash cat chmod cmp cp cut date dirname env flock grep head jq ln mkdir mkfifo \
@@ -684,7 +685,7 @@ esac
 
 mkdir -p "$t/unsafe kit/tools/codex-run" "$t/unsafe kit/tools/slots"
 cp "$kit/codex-run" "$t/unsafe kit/tools/codex-run/codex-run"
-cp "$HOME/src/fabrig/main/tools/slots/lifetime.py" "$t/unsafe kit/tools/slots/lifetime.py"
+cp "$kit/../slots/lifetime.py" "$t/unsafe kit/tools/slots/lifetime.py"
 output=$("$t/unsafe kit/tools/codex-run/codex-run" task --on-stop "$t/return-login" \
     "$t/task file.md" "$t/work dir" "$t/reports/refused.md" 2>&1) && status=0 || status=$?
 [[ $status == 2 && ! -e $fake/launch.args && ! -e $DEV_ROOT/tmp/codex-run && ! -e $t/reports/refused.md ]]
@@ -725,7 +726,7 @@ expect 'bootstrapped worker refuses a cancelled history symlink' "$output" 'syml
 
 # A framed result must preserve paths, and success requires both all fields and
 # a successful helper exit before report reservation or detached startup.
-python3 -I -S -B - "$HOME/src/fabrig/main/tools/slots/lifetime.py" "$t" <<'PYPATHS'
+python3 -I -S -B - "$kit/../slots/lifetime.py" "$t" <<'PYPATHS'
 import os
 from pathlib import Path
 import subprocess
@@ -742,8 +743,8 @@ assert result.stdout.split(b'\0') == [os.fsencode(root), os.fsencode(report),
                                       os.fsencode(directory), b'other', b'']
 PYPATHS
 checks=$((checks + 1))
-cp "$HOME/src/fabrig/main/tools/slots/lifetime.py" "$t/lifetime.saved"
-cat >"$HOME/src/fabrig/main/tools/slots/lifetime.py" <<'PYFAULT'
+cp "$kit/../slots/lifetime.py" "$t/lifetime.saved"
+cat >"$kit/../slots/lifetime.py" <<'PYFAULT'
 import os
 import sys
 values = [*sys.argv[2:], 'other']
@@ -753,17 +754,17 @@ sys.exit(0 if short else 7)
 PYFAULT
 refusal 'complete path result with failed status refuses launch' task "$t/task file.md" "$t/work dir" "$t/reports/framed.md"
 [[ ! -e $t/reports/framed.md && ! -e $fake/launch.args ]]
-touch "$HOME/src/fabrig/main/tools/slots/short-result"
+touch "$kit/../slots/short-result"
 refusal 'successful incomplete path result refuses launch' task "$t/task file.md" "$t/work dir" "$t/reports/framed.md"
 [[ ! -e $t/reports/framed.md && ! -e $fake/launch.args ]]
-rm "$HOME/src/fabrig/main/tools/slots/short-result"
-mv "$t/lifetime.saved" "$HOME/src/fabrig/main/tools/slots/lifetime.py"
+rm "$kit/../slots/short-result"
+mv "$t/lifetime.saved" "$kit/../slots/lifetime.py"
 ln -s "$kit/codex-run" "$t/bin/aliased-run"
 output=$("$t/bin/aliased-run" stale)
 [[ -z $output && ! -e $DEV_ROOT/tmp/codex-run && ! -e $fake/launch.args ]]
 checks=$((checks + 1))
 # A worker must check both framing and helper status before parsing metadata.
-python3 -I -S -B - "$HOME/src/fabrig/main/tools/slots/lifetime.py" "$t" <<'PYWORKERPATHS'
+python3 -I -S -B - "$kit/../slots/lifetime.py" "$t" <<'PYWORKERPATHS'
 import os
 from pathlib import Path
 import subprocess
@@ -785,8 +786,8 @@ assert result.stdout.split(b'\0') == [os.fsencode(root), metadata.replace(b'\0',
 assert meta.read_bytes() == metadata
 PYWORKERPATHS
 checks=$((checks + 1))
-cp "$HOME/src/fabrig/main/tools/slots/lifetime.py" "$t/worker-lifetime.saved"
-cat >"$HOME/src/fabrig/main/tools/slots/lifetime.py" <<'PYWORKERFAULT'
+cp "$kit/../slots/lifetime.py" "$t/worker-lifetime.saved"
+cat >"$kit/../slots/lifetime.py" <<'PYWORKERFAULT'
 import os
 import sys
 short = os.path.exists(os.path.join(os.path.dirname(__file__), 'short-worker-result'))
@@ -796,11 +797,11 @@ sys.exit(0 if short else 7)
 PYWORKERFAULT
 refusal 'failed worker path helper refuses complete output' _run absent
 [[ ! -e $fake/codex.calls && ! -e $DEV_ROOT/tmp/codex-run ]]
-touch "$HOME/src/fabrig/main/tools/slots/short-worker-result"
+touch "$kit/../slots/short-worker-result"
 refusal 'incomplete worker path output refuses successful helper' _run absent
 [[ ! -e $fake/codex.calls && ! -e $DEV_ROOT/tmp/codex-run ]]
-rm "$HOME/src/fabrig/main/tools/slots/short-worker-result"
-mv "$t/worker-lifetime.saved" "$HOME/src/fabrig/main/tools/slots/lifetime.py"
+rm "$kit/../slots/short-worker-result"
+mv "$t/worker-lifetime.saved" "$kit/../slots/lifetime.py"
 refusal 'owner invalid name' owner ../oops "$t/brief.md"
 refusal 'owner relative brief' owner o/fixture relative
 refusal 'owner unreadable brief' owner o/fixture "$t/missing"
@@ -1582,7 +1583,7 @@ expect 'restart clears successful pending batch' "$(test ! -e "$restart_state/pe
 checks=$((checks + 1))
 
 # The fake trim runs only for writable numeric slots, before Codex starts.
-cat >"$HOME/src/fabrig/main/tools/slots/trim" <<'PYTRIM'
+cat >"$kit/../slots/trim" <<'PYTRIM'
 import os, pathlib, sys
 assert sys.flags.isolated == 1
 fake = pathlib.Path(os.environ['DEV_ROOT']) / 'fake'
@@ -1615,10 +1616,10 @@ touch "$fake/trim-fail"
 slot_task "$slot"
 expect 'trim failure logged without failing task' "$(<"$state/trim.log"),$(row)" 'trim failed: exit 7' $'\t0\t1\t'
 rm "$fake/trim-fail"
-mv "$HOME/src/fabrig/main/tools/slots/trim" "$HOME/src/fabrig/main/tools/slots/trim.saved"
+mv "$kit/../slots/trim" "$kit/../slots/trim.saved"
 slot_task "$slot"
 expect 'missing trim is nonfatal and diagnosed' "$(<"$state/trim.log"),$(row)" 'trim failed: exit 2' $'\t0\t1\t'
-mv "$HOME/src/fabrig/main/tools/slots/trim.saved" "$HOME/src/fabrig/main/tools/slots/trim"
+mv "$kit/../slots/trim.saved" "$kit/../slots/trim"
 rm "$fake/expect-trim"
 for excluded in "$slot" "$slot/nested" "$HOME/src/fabrig/slots/named" "$t/work dir"; do
     options=()

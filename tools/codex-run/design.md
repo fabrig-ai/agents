@@ -191,8 +191,9 @@ no notification backfill or deletion and changes no existing registry owner.
 
 Before its first Codex turn, a writable task resolves DIR and checks that
 it is exactly `~/src/fabrig/slots/<n>`, with a numeric final component.
-It runs `python3 -I <fabrig>/tools/slots/trim <slot>`, where fabrig is the
-repository containing the resolved codex-run executable. This uses the
+It runs `python3 -I <agents-release>/tools/slots/trim <slot>`, where the release
+root contains the resolved codex-run executable and its sibling slot helpers.
+There is no fallback to a fabrig installation. This uses the
 slot trim rules in `tools/slots/design.md, 2`.
 
 The trim's one-line result and any diagnostic go to the run's `trim.log`.

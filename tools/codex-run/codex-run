@@ -11,9 +11,8 @@ umask 077
 script=$(readlink -f "${BASH_SOURCE[0]}")
 # readlink supplies the canonical absolute path; its parents need no subprocess.
 kit=${script%/*}
-# Slots have a separate migration; use their fabrig installation until then.
+# Resolve both tools from the same canonical agents release, including symlinks.
 slots=${kit%/*}/slots
-[[ -f $slots/lifetime.py ]] || slots=$HOME/src/fabrig/main/tools/slots
 root=${DEV_ROOT:-$HOME/src/rust}
 runs=$root/tmp/codex-run
 search_rule='Before any command, read the rules in the text below. Search only your worktree and the paths it names: never run rg, find, ls -R or grep -r from ~/src/rust/tmp or any directory above it, and never in ~/.local, ~/.config or /run/user. '

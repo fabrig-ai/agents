@@ -2,20 +2,21 @@
 
 copied from fabrig 9a0594837 on 10-30; PATH still points at fabrig until handover
 
-Migration departures from the copied design: slot helpers and trim resolve
-from sibling `tools/slots` when present, otherwise from
-`~/src/fabrig/main/tools/slots` until slots moves. The test suite uses a pinned
-copy of `lifetime.py` only in its temporary HOME; no live fabrig checkout is
-needed for tests. State and slot directories retain their existing paths.
+Codex-run and slots are copied together from fabrig 9a0594837. Slot helpers
+and trim always resolve from the same canonical agents release root; there is
+no fabrig fallback. The test suite copies sibling `tools/slots/lifetime.py`
+into its private agents release. State and slot directories retain their
+existing paths; central claims remain exclusively on hel8, and existing local
+maintenance locks and holds continue at their original builder paths.
 `--help` now succeeds without reading run storage or invoking slot helpers.
 
 Agents' focused gate files are `test_codex_run.py`, `test_final.py` and
 `test_stale.py`; the latter two also retain the bash suite's fixture entrypoints.
 `test_codex_run_periodic.py` wraps the complete bash suite in a temporary
 workspace. Its guard permits 60 CPU seconds and 180 wall seconds in place of
-the copied design's 15/60 limits. `tools/gate.toml` was absent at the agents
-base: ownership/tier rows are supplied in the move report. Until the tier-aware
-gate lands, default `check.sh` discovery also includes periodic files.
+the copied design's 15/60 limits. Owner `ops` and intended tiers are recorded
+in `tools/gate.toml`. Until the tier-aware gate lands, default `check.sh`
+discovery also includes periodic files.
 The installation description below records fabrig's existing installation;
 this copy adds no `tools/installed` row and performs no link handover.
 
