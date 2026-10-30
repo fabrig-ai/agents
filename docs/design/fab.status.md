@@ -26,13 +26,23 @@
 
 ## Gaps and departures
 
-- **heavy is not switched over:** builders still run fabrig's old heavy;
-  fab's replaces it at the cutover, which waits for the user's word.
-- **fab queue does not run yet** on hetzner8; the old queue is stopped.
-  `cutover-fabrig` is the first change meant to land through it.
-- **The tick is run by hand,** not on a timer.
-- **Claude calls** (`fab/calls.py`) are being filled; skeletons and task
-  specs are still written by hand.
+- **Live, but transient:** fab's heavy on hel8, hetzner6 and hetzner8; fab's
+  queue (`fab-queue.service`) on hetzner8 since 10-30 21:15Z, which landed
+  the cutover; the tick (`fab-tick.timer`, every 2 minutes) on hel8. The
+  queue and the tick are transient user units: a reboot loses them. They
+  become fleet units with retire's second step.
+- **Retire, step 1 done by hand** (the user's OK, 10-30 23:17Z): the dead
+  `claim`, `precheck`, `ready-check` and `codex-run` links removed on all
+  three hosts; hel8 on fab's heavy, the old reconcile timer disabled;
+  `pipeline-watch` and the `record-collect-*` timers stopped and disabled.
+  Each host's `~/src/fabrig/fab/retire-step1.txt` says what it was.
+  `fleet-sync` is still enabled and stopped: run as it is, it would rebuild
+  `~/.local/bin` from fabrig's deleted `tools/installed`; it must learn fab
+  first. The rest of retire (post, the session launcher, lease, watch and
+  the collector's code, the old role files) waits, parked, for gates and
+  after-landing to be live.
+- **Claude calls** are made by the tick (skeleton, review, amend, answer);
+  the cut still starts by hand.
 - **Reports are a skeleton:** `fab/report.py`, `fab/code_report.py` and
   `fab/landing_report.py` hold section 10's signatures and contracts, filled
   by the tasks `report-base`, `report-code`, `report-landing` and
