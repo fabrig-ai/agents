@@ -26,7 +26,8 @@ disposable clone. Configuration is `tools/records/watch.toml`.
 
 **Take owners from `tools/session/start names --json`.** Resolve aliases,
 explicit prefixes and supervisors from that inventory, then use `owns NAME`
-to skip unowned or paused roles. Ops and s/deploy are always watched. An
+to skip unowned or paused roles. Ops, s/deploy and s/multi-coord are always watched; the latter matches
+`s/multi-coord/<stamp>` and `s/multi-coord-next`. An
 inventory error freezes all identity-dependent episodes. Leads are expected
 only for unfinished parts in active drafts, not merely because registered.
 A closing with open work or handed-over outcome still means unfinished.
@@ -58,32 +59,72 @@ in `docs/design/records.md`, section 4.
 ## 3. Rules and escalation
 
 **Thresholds live in TOML.** Conditions use strictly older-than comparisons.
-The following are today's enabled defaults. Escalation time is measured from
-episode opening, independently of a wake's outcome.
+The following are today's enabled defaults. Mail-health escalation waits for
+two failed remedies or more than 30 minutes after a remedy; an unremedied
+reader (including a Codex owner in a long turn) gets one escalation after
+30 minutes. Other rules measure escalation from episode opening.
 
 | Rule | Opens when | First action / owner | Escalate after |
 |---|---|---|---|
-| deaf | Live Claude session has no live waiter and unread mail older than 10 min; or inactive Codex owner has such mail | Wake Claude once; notify Codex owner without wake | 20 min |
-| gone | Active coordinator or unfinished lead is absent/inactive | Notify subject's mailbox | 30 min |
-| report unread | Completed run's report post is unread for 15 min and deaf does not cover it | Run owner | 15 min |
+| deaf | Live Claude session has no live waiter and unread mail older than 10 min; or inactive Codex owner has such mail | Restart idle Claude with confirmed saved bypass; Codex belongs to ops | 2 failures or >30 min after remedy |
+| gone | Active coordinator, director or unfinished lead is absent/inactive | Launcher dry run, then restart from role files; never Codex, paused or retired roles | 2 failures or >30 min after remedy |
+| report unread | Completed run's report post is unread for 15 min and deaf does not cover it | One episode per reader, all unread count/oldest age/current turn length | >30 min, once |
 | run hung | Output unchanged for 60 min AND elapsed exceeds 3× effort median (at least 5 completions), or 90 min without enough samples | Run owner | 30 min |
 | idle claim | No live run/heavy and no claim/run/heavy/precheck activity for 45 min | Holder | 45 min |
 | unqueued | Same ready tip seen for 30 min without its attempt, or ready refs and no batch for 20 min | Ops | 30 min |
 | lease stall | Holder has waiters and no package activity for 4 h, or oldest waiter exceeds 2 h | Holder | 4 h |
 | handover late | Fired handover request older than 20 min with no successor or files-current acknowledgement | Session | 20 min |
 | question due | Unanswered question passes deadline | Director | No higher tool destination |
+| waiter orphan | Waiter's session ended, or parent is pid 1 without a live mailbox session | Report; SIGTERM only with another live waiter or a gone mailbox session | Report only |
+| waiter dead | Waiter record has no live process | Report; never edit post state | Report only |
 | delivery failed | Send exit 2 without later success or completion told evidence | Sender / run owner | 20 min |
 
 **The ladder follows the owner.** Leads escalate to their coordinator;
 coordinators, ops and s/deploy escalate to the director. The director has no
-supervisor. User contact belongs to the director. A gone alert posts to the
-missing role first, then its supervisor; it does not restart sessions itself.
+supervisor. User contact belongs to the director. A gone remedy uses the launcher
+from the role files. Leads escalate to their coordinator; only coordinators,
+ops, s/deploy and s/multi-coord can escalate directly to the director.
 
 **Use precise evidence.** Lease activity must name a subject/package or a lent
 branch; unrelated coordinator activity is insufficient. Handover lateness uses
 the first fired time, never a sampled percentage or a later repeat firing.
-Lead `files current` metadata and explicit successor/start evidence acknowledge
-handover. Send failures use sent metadata, never subject or body contents.
+Handover episodes key on the fired session id. They clear when that session
+or owner ends, a successor holds the mailbox, or that session posted
+`files current` in the preceding 30 minutes or after firing. Old-owner context
+readings cannot leave an alert on the successor. Lead `files current` metadata
+and explicit successor/start evidence acknowledge handover. Send failures use sent metadata, never subject or body contents.
+
+**Repair deaf Claude sessions in place.** Only explicit `status=idle` with
+lifecycle `done` (or legacy idle activity without a lifecycle field) is eligible.
+`working` and `blocked` are not proof of idleness; `waiting` requires input.
+Read the full matching session id, cwd and `respawnFlags` from
+`~/.claude/jobs/<first-eight-id-characters>/state.json` (under
+`CLAUDE_CONFIG_DIR` when set). Refuse missing, conflicting or unknown bypass
+options. Recheck activity and saved options immediately before action. From
+that cwd, `claude stop FULLID`, poll `claude agents --json --all` for `stopped`
+for at most 60 seconds, then and only then
+`claude --bg --resume FULLID "Restart your post wait MAILBOX in the background, post read MAILBOX, and carry on."`.
+No additional flags are passed. A mismatching returned id is a copy: stop it,
+record the failed result and leave the episode open. Orphan reconciliation
+handles any waiter it leaves behind, with fresh process/session checks before
+SIGTERM. Missing stop confirmation never permits resume.
+
+**Remedies run once on success, with one retry on failure at the next interval.**
+The retry also handles the original becoming stopped after a failed resume;
+it must not create a fresh session through the launcher. Launch gone leads
+with `session-start lead H AREA`, coordinators with `session-start coordinator H`,
+and director with `session-start director`; require the identical command's
+`--dry-run` to pass first. Registry absence/retirement, pause state and Codex
+ownership forbid launching. Per-remedy switches, attempt limits, retry and stop
+poll intervals live in TOML. Every attempted result is a `remedy` event.
+
+**Share git connections and fetch only a changed records main.** All watch
+network git calls inherit SSH `ControlMaster=auto`, `ControlPersist=600` and a
+`ControlPath` under watch state (a disposable directory in dry run). Compare
+records `ls-remote` with the local origin/main before calling `record pull`.
+`watch.toml` supplies the records/fabrig origins; RECORDS_ORIGIN overrides the
+records origin for isolated fixtures and installations. The origins can move
+to Forgejo without a code change.
 
 ## 4. Episodes, spooling and heartbeat
 
@@ -93,7 +134,7 @@ A successful clear poll counts toward closure only when dependencies succeeded.
 Mail send and state persistence cannot be one transaction, so death immediately
 after sending can repeat an action on restart.
 
-**Alert-open, escalate, close and heartbeat append locally** to hel8's
+**Alert-open, remedy (with result), escalate, close and heartbeat append locally** to hel8's
 `~/src/fabrig/events/watch/<UTC-day>.jsonl`. The shared spool writer uses the
 same source lock, atomic day replacement and two-hour pruning as the collectors.
 Stable event ids and a pending outbox preserve local retries. A spool failure
@@ -115,9 +156,11 @@ report selected executables and failed/skipped inputs. A changing error string
 alone does not force a heartbeat. Local episode state is saved on quiet polls.
 
 **Silent mode preserves evidence.** Disabling `alerts.post` evaluates and
-writes spool events without mail or wake. Re-enabling posts catches up once per still-live
-episode, with its original opening time; already-overdue episodes go directly
-to the supervisor. Current defaults enable posts. Dry-run is different: it
+writes spool events without mail or remedies. `--no-post --no-remedy` also selects this mode;
+combine with `--dry-run --once` for a live read without state or spool writes. Re-enabling posts catches up once per still-live
+episode, with its original opening time; already-overdue unremedied episodes go directly
+to the supervisor. A suppressed remedy consumes no attempt; enabling actions
+performs the remedy first and starts its escalation clock. Current defaults enable posts. Dry-run is different: it
 persists no watch state or spool events and never sends.
 
 ## 5. Later

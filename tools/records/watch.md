@@ -6,43 +6,48 @@ using the release's `tools/records/watch` executable. The installed command name
 is reserved as `pipeline-watch` so it does not shadow procps `watch`.
 Without `--once` the tool repeats every 120 seconds.
 `watch --dry-run --once` prints the exact proposed post commands, bounded
-metadata evidence and JSONL spool output. It never calls send, wake or append,
+metadata evidence and JSONL spool output. It never calls send, stop, resume, launch, kill or append,
 changes the watch state, or advances the live records clone. Its one `record
 pull` uses a disposable clone, deleted on exit. Durable drafts and questions use the sibling `record` reader. Raw events never
 use that writer. No legacy code is imported.
 
 `watch.toml` enables `[alerts] post = true`. Setting it to false still evaluates
 conditions, persists episodes, and publishes alert events and heartbeats, while
-logging proposed commands without sending or waking. Silent episodes carry
+logging proposed commands without sending or repairing. `--no-post --no-remedy` selects the same
+observation mode; add `--dry-run` to preserve watch state/spools too. Silent episodes carry
 their opening time. On enabling posts, only episodes confirmed active by fresh,
 successful inputs receive a catch-up, once each, marked
 `(was silent since <time>)`. Cleared conditions do not post while awaiting their
-second clear poll. An overdue catch-up goes directly to the supervisor and
-satisfies escalation; otherwise it goes to the owner and the normal escalation
+second clear poll. An overdue catch-up without a repair goes directly to the supervisor and
+satisfies escalation. A suppressed repair runs first on enabling actions; otherwise it goes to the owner and the normal escalation
 clock continues. Failed sends retry. Legacy silent state migrates using each
 episode's original opening time, even if its suppressed actions were already
 marked handled. Suppressed historical events in the publication outbox never
 replay mailbox actions. Unlike `--dry-run`, silent mode updates state and the local spool.
 
-`watch.toml` enables each of the ten rules and holds every timing threshold.
-Conditions use strict "older than" comparisons; escalation is due at its
-interval after opening, regardless of the wake result. For escalations whose
-interval is unspecified in 3b, the defaults use the condition interval (report
-15, run 30, claim 45, ready 30, lease 240, handover 20 minutes); delivery uses
+`watch.toml` enables each rule and holds every timing threshold.
+Conditions use strict "older than" comparisons. Deaf/gone/report-unread
+escalation follows decision 0025: two failed remedies, or more than 30 minutes
+after remedy; an unremedied reader escalates once after 30 minutes. Other
+rules count their interval from opening. For escalations whose
+interval is unspecified in 3b, the defaults use the condition interval (run
+30, claim 45, ready 30, lease 240, handover 20 minutes); delivery uses
 20 minutes. These values are adjustable independently. Question due posts only
 to director; the director batches the question to the user.
 
 | Rule | Evidence / first destination | Escalation |
 |---|---|---|
-| deaf | live session, dead/missing waiter, mail mtime >10m; wake once | supervisor, 20m |
-| gone | registered active draft or unfinished lead part, absent session; owner | supervisor, 30m |
-| report unread | completed run id in codex-run post header, mtime >15m; owner, unless deaf covers it | supervisor |
+| deaf | live session, missing live waiter, mail mtime >10m; restart idle Claude with saved bypass | supervisor after two failures or >30m after remedy |
+| gone | registered active draft, director or unfinished lead part, absent session; launcher dry run then restart | supervisor after two failures or >30m after remedy |
+| report unread | completed run id in codex-run post header, mtime >15m; one episode per reader, unless deaf covers it | supervisor after >30m, once |
 | run hung | output `events.jsonl` mtime >60m AND elapsed >3× median of at least 5 completed runs at that effort (else >90m); owner | supervisor |
 | idle claim | >45m since claim or latest run/heavy/precheck activity, with no live run/heavy; holder | supervisor |
 | unqueued | unchanged ready tip observed >30m with no attempt for that tip, or >20m without a batch while refs exist; ops | supervisor |
 | lease stall | waiters and >4h without package events, or waiter >2h; holder | supervisor |
 | handover late | >20m after recorded context hook without successor or files-current metadata; session | supervisor |
 | question due | unanswered question past its deadline; director | director handles the user |
+| waiter orphan | ended session, or pid-1 parent without a live mailbox session; report and safely clean up | none |
+| waiter dead | no waiter process; report without changing post state | none |
 | delivery failed | send exit 2 without successful retry/told marker; sender (run's session owner for codex-run) | supervisor |
 
 Open sends go to the subject's mailbox or its owner. Every escalation uses the
@@ -58,7 +63,7 @@ Watch uses that contract directly: it does not infer supervisors, accept a
 mailbox-keyed object, or add identities missing from the inventory. The
 director's null supervisor becomes an empty escalation destination.
 `paused` suppresses the role and its alerts; `always_watched` bypasses owns
-for the launcher's fixed ops/deploy rows. Timestamped sessions match the
+for the launcher's fixed ops/deploy/multi-coord rows. Timestamped sessions match the
 launcher's prefix, and renamed sessions also match the last waiter holder's
 session id. Other names are checked with `session-start owns NAME`: exit 1
 skips the role, while exit 2 freezes its episodes. A failed inventory freezes
@@ -120,7 +125,8 @@ The private `~/.local/state/watch/state.json` has mode 0600, written to a siblin
 flushed and renamed under a process lock. Each `(rule, subject)` has one episode:
 one first action, one escalation, and a close event after two successful clear
 runs. A recurrence alerts again. Post exit 0 or 3 counts as delivered; failed
-sends are retried, while wake is attempted only once. There is no additional
+sends are retried. Remedies run once successfully, with at most one retry on
+failure at the configured interval. Silent/dry-run remedies consume no attempts. There is no additional
 global throttle: independent subjects must not suppress one another. Persisted
 pending events form an outbox; local retries reuse stable event ids. All alert
 and heartbeat events append to `~/src/fabrig/events/watch/YYYY-MM-DD.jsonl` on
@@ -169,3 +175,49 @@ output never changed after start, so its count is an upper bound for that input
 reconstruction, not confirmed true hangs. It cannot establish the exact number
 of real episodes or their truth. `test_watch_replay.py` uses synthetic spools
 and a temporary HOME to check boundaries and prevent future median leakage.
+
+## Automatic mail repair
+
+`[rules.deaf] remedy = true` enables the in-place Claude restart. Eligibility
+requires one live session, explicit `status=idle`, lifecycle `done` (or legacy
+idle activity without lifecycle), and matching saved cwd/full id/bypass options
+in `~/.claude/jobs/<short-id>/state.json`'s `respawnFlags`. `working`, `blocked`
+and `status=waiting` are not idle. This file is an unstable CLI detail, so unknown
+or conflicting options refuse action; no transcript or credential is needed.
+The [CLI state reference](https://code.claude.com/docs/en/agent-view#read-session-state-from-a-script)
+distinguishes lifecycle state from process activity.
+
+From its cwd, stop the full id, wait up to `stop_timeout_seconds = 60` for
+`claude agents --json --all` to confirm `stopped`, then run exactly
+`claude --bg --resume FULLID PROMPT`, with no extra flags. The prompt asks the
+reader to restart `post wait MAILBOX` in the background, `post read MAILBOX`,
+and carry on. Check the returned full id. Stop any copy and record the failed
+remedy; never resume on a stop timeout. A failed attempt retries once after
+`retry_seconds = 120`; `max_attempts = 2` bounds attempts per episode.
+
+`[rules.gone] remedy = true` launches eligible missing roles from their files,
+using `session-start lead H AREA`, `coordinator H`, or `director`, only after
+that exact launch's `--dry-run` succeeds. Paused, retired, unregistered and Codex
+roles are never launched. Fixed infrastructure without a launcher remains an
+unremedied reader. A resume failure retains its original id rather than
+starting a fresh gone-role copy. `remedy` events carry the result and attempt.
+
+Waiter reconciliation preserves every waiter record. It reports dead records,
+and reports live orphans whose recorded session ended, or whose parent is pid 1
+without a live session for the mailbox. `[rules."waiter orphan"] remedy = true`
+allows SIGTERM only if another live waiter exists or the mailbox session is
+gone. Recheck the PID's process start, actual `post wait` argv, sessions and
+other waiters before signalling. No post state file is edited.
+
+Unread report episodes key on mailbox, carrying all unread count, oldest age,
+and the current Codex turn length (`events.jsonl` start time corroborated by
+`turns.tsv`; unavailable is explicit). Handover episodes key on fired session
+id; a stopped owner, successor, or `files current` within 30 minutes before
+firing or after it clears them. A predecessor's explicitly identified ack
+cannot acknowledge a successor's hook.
+
+`watch.fabrig_remote` and `watch.records_remote` configure network origins;
+`RECORDS_ORIGIN` overrides records. Git uses SSH ControlMaster auto,
+ControlPersist 600, and ControlPath `STATE/ssh-%C`. Records main is checked
+with `ls-remote`; unchanged origin/main avoids fetch. Dry runs use disposable
+records and SSH state. No host URL is embedded in the watch code.
