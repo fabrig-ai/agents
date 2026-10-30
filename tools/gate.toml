@@ -1,0 +1,48 @@
+# Test ownership and intended tiers for the pipeline-tools move.
+# The current check.sh discovers all test_*.py files; it does not consume this
+# registry yet. Each tests row has a repository-relative path, tier and owner.
+
+[[tests]]
+path = "tools/codex-run/test_codex_run.py"
+tier = "gate"
+owner = "ops"
+
+[[tests]]
+path = "tools/codex-run/test_final.py"
+tier = "gate"
+owner = "ops"
+
+[[tests]]
+path = "tools/codex-run/test_stale.py"
+tier = "gate"
+owner = "ops"
+
+[[tests]]
+path = "tools/codex-run/test_codex_run_periodic.py"
+tier = "periodic"
+owner = "ops"
+
+[[tests]]
+path = "tools/slots/test_claim.py"
+tier = "gate"
+owner = "ops"
+
+[[tests]]
+path = "tools/slots/test_guard.py"
+tier = "gate"
+owner = "ops"
+
+[[tests]]
+path = "tools/slots/test_trim.py"
+tier = "gate"
+owner = "ops"
+
+[[tests]]
+path = "tools/slots/test_recovery.py"
+tier = "gate"
+owner = "ops"
+
+[[tests]]
+path = "tools/slots/test_recovery_periodic.py"
+tier = "periodic"
+owner = "ops"

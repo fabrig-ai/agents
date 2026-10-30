@@ -1,5 +1,16 @@
 # Slot tools status
 
+Copied with codex-run from fabrig 9a0594837 on 10-30. PATH and the `claim`
+link remain on fabrig pending handover; central claims and existing local slot
+maintenance paths are unchanged. No installed row or activation change is added.
+The original claim, guard and trim suites already use agents' gate naming.
+The full recovery suite is `test_recovery_periodic.py`; `test_recovery.py`
+selects four fast authority/lifetime contracts from it. The recovery test for
+completion ordering now runs the real lifetime helper across a Git checkout
+and restoration; full queue/precheck integration remains with the queue move.
+Owner `ops` and intended gate/periodic tiers are recorded in `tools/gate.toml`;
+the current gate discovers periodic files too until tier selection lands.
+
 Automatic idle-target policy (`tools/slots/design.md`, 5.5–5.6): FIRSTDAYDRYRUN.
 `--automatic-targets` defaults to observation; live refuses before claims or local
 state while the source gate remains set. Observational candidates stay PROTECTED.
