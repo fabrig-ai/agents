@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
@@ -223,7 +224,7 @@ class StartTest(unittest.TestCase):
                 self.assertIn((root / tasks["demo/one"].path).read_text(), brief)
                 self.assertEqual([event["ev"] for event in log.read(root / "custom.jsonl")], ["call.started"])
                 write(directory / "report.md", "\nDone: designed core\nDetails.\n")
-                return Result(0, result_json)
+                return Result(0, result_json, "Claude diagnostic\n")
 
             fake = FakeRunner().on(["claude"], claude)
             runner = Mock(wraps=fake)
@@ -240,6 +241,7 @@ class StartTest(unittest.TestCase):
             self.assertEqual([call.cwd for call in fake.calls], [str(root), str(directory / "wt"), str(root)])
             self.assertEqual(runner.call_args_list[1].kwargs["timeout"], calls.TIMEOUT)
             self.assertEqual((directory / "result.json").read_text(), result_json)
+            self.assertEqual((directory / "stderr.log").read_text(), "Claude diagnostic\n")
             started, ended = log.read(root / "custom.jsonl")
             self.assertEqual({key: value for key, value in started.items() if key != "ts"},
                              {"ev": "call.started", "call": directory.name, "role": "skeleton",
@@ -247,6 +249,24 @@ class StartTest(unittest.TestCase):
             self.assertEqual({key: value for key, value in ended.items() if key != "ts"},
                              {"ev": "call.ended", "call": directory.name, "role": "skeleton", "subject": "demo/core",
                               "outcome": "done", "tokens": "23/50/9", "minutes": 1.5})
+
+    def test_claude_receives_environment_without_nested_session_markers(self):
+        with tmp_home() as root:
+            environment = {"HOME": str(root), "FAB_HOME": str(root / "fab"),
+                           "PATH": "/fake/bin", "KEEP_ME": "yes", "CLAUDECODE": "1",
+                           "CLAUDECODE_EXTRA": "nested", "CLAUDE_CODE_SESSION": "nested",
+                           "CLAUDE_CODE_": "nested", "CLAUDE_OTHER": "keep"}
+            fake = FakeRunner()
+            runner = Mock(wraps=fake)
+            with patch.dict(os.environ, environment, clear=True):
+                result = calls.start("answer", "demo", root, "Brief.", sh=runner)
+                self.assertEqual(dict(os.environ), environment)
+            expected = {key: value for key, value in environment.items()
+                        if key in ("HOME", "FAB_HOME", "PATH", "KEEP_ME", "CLAUDE_OTHER")}
+            self.assertEqual(runner.call_args_list[1].kwargs["env"], expected)
+            self.assertNotIn("env", runner.call_args_list[0].kwargs)
+            self.assertNotIn("env", runner.call_args_list[2].kwargs)
+            self.assertEqual((Path(result["report"]).parent / "stderr.log").read_text(), "")
 
     def test_missing_report_fails_and_malformed_or_missing_usage_is_zero(self):
         for output, tokens in (("not JSON", "0/0/0"), ("{}", "0/0/0"), ("[]", "0/0/0"),
@@ -256,6 +276,7 @@ class StartTest(unittest.TestCase):
                 result = calls.start("answer", "demo", root, "Brief.", sh=fake)
                 self.assertEqual(result["outcome"], "failed")
                 self.assertFalse(Path(result["report"]).exists())
+                self.assertEqual((Path(result["report"]).parent / "stderr.log").read_text(), "failed")
                 self.assertEqual(log.read()[-1]["tokens"], tokens)
                 self.assertEqual(fake.argvs()[-1][:4], ["git", "worktree", "remove", "--force"])
 

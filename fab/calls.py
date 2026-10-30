@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import ast
 import json
+import os
 import shlex
 import sys
 import time
@@ -216,8 +217,12 @@ def start(role: str, subject: str, repo: Path, brief: str, *, sh: Runner = run,
     try:
         _write(brief_path, brief)
         log.append("call.started", path=log_path, call=call_id, role=role, subject=subject, branch=branch)
-        result = sh(claude_argv(brief_path, worktree), cwd=str(worktree), timeout=TIMEOUT)
+        environment = {key: value for key, value in os.environ.items()
+                       if not key.startswith(("CLAUDECODE", "CLAUDE_CODE_"))}
+        result = sh(claude_argv(brief_path, worktree), cwd=str(worktree), timeout=TIMEOUT,
+                    env=environment)
         _write(directory / "result.json", result.out)
+        _write(directory / "stderr.log", result.err)
         try:
             data = json.loads(result.out)
         except json.JSONDecodeError:
