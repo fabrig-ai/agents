@@ -259,6 +259,13 @@ class ReapTests(unittest.TestCase):
         fd.symlink_to(path / 'payload')
         self.reason(self.run_class('heavy-logs'), 'process use')
 
+    def test_literal_deleted_suffix_in_use_file_kept(self):
+        path = self.old('src/rust/tmp/logs/name (deleted)')
+        fd = self.proc / '42/fd/3'
+        fd.parent.mkdir(parents=True)
+        fd.symlink_to(path)
+        self.reason(self.run_class('heavy-logs'), 'process use')
+
     def test_maps_kept(self):
         path = self.old('src/rust/tmp/logs/item', directory=True)
         put(self.proc / '42/maps', f'1000-2000 r-xp 0 00:00 1 {path}/payload\n')
