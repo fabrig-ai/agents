@@ -1,0 +1,142 @@
+# Fleet
+
+2026-10-30. Owner: s/deploy. Code: `fleet/`, `tools/fleet-sync`,
+`tools/installed` and `fleet/bootstrap/`. Command references:
+`tools/fleet-sync.md`, `fleet/bootstrap/README.md`, `fleet/seeds/README.md`,
+`fleet/kache/README.md`. Code departures: `docs/design/fleet.status.md`.
+
+## 1. In one page
+
+- **Main is the fleet's desired state.** Every host converges itself to agents
+  origin/main once a minute. A landing takes effect fleet-wide within about a
+  minute, with nobody logging in.
+- **Declarations, not scripts.** `fleet/` says what each host has: roles, tools,
+  environment, settings, units and pinned versions. `tools/fleet-sync` makes the
+  host match and reports what it could not.
+- **Same settings everywhere.** Hosts differ only by role and by the few
+  per-host values declared in `fleet/hosts.toml`. Sessions choose model and
+  effort at launch; the shared defaults are a starting point only.
+- **Converge, never take over.** fleet-sync owns only what it created or
+  declares. It never restarts a running service, never adopts what an
+  operator already runs, and leaves credentials, logins and run state alone.
+- **A new host is reproducible.** One root script, one user script, then
+  `fleet-sync --provision` brings a fresh Debian 13 machine to the same state
+  from pinned artifacts, without copying any login.
+
+## 2. Declarations
+
+**`fleet/hosts.toml`** names each host, its SSH address, roles and per-host
+values (`env`, `machine_env`, seed eligibility). Roles today: session (hel8),
+builder, qa, after-landing and gate. A host is identified by `--host`, then
+`FLEET_HOST`, then its hostname.
+
+**Rendered files.** fleet-sync renders, from `fleet/`:
+
+- the login environment (`env.sh`, `environment.d`) and PATH;
+- the Claude user settings (`fleet/claude/settings.json`);
+- the declared top-level Codex keys and the Cargo config;
+- `machine.env`, the per-host values that tools read at run time;
+- marked source blocks in `.profile` and `.bashrc`.
+
+Bytes outside fleet-owned blocks or keys are preserved. `fleet/policy.toml`
+marks paths that are compared and warned about but never written (mail routing,
+an existing kache).
+
+**Tools.** `tools/installed` lists the agents commands linked into
+`~/.local/bin` through the `current` release. A name that would shadow a
+system command is refused.
+
+**Units.** `fleet/units/` holds systemd user units; `fleet/units/roles.toml`
+maps each to the roles that run it. fleet-sync enables timers. A service marked
+start-once is started on its first install only. Its owner coordinates that
+start and owns every later restart.
+
+**Versions.** `fleet/versions.toml` pins the native tools: Claude, Codex, Rust,
+nextest, kache, Chromium, Forgejo and its runner. Normal runs only probe
+and warn; installing a pin is the explicit `--provision`.
+
+## 3. Convergence
+
+**One run, five steps,** under a per-host lock:
+
+1. **Agents release.** Fetch main, build an immutable release directory, run
+   its self-check and smoke test, then switch the `current` symlink atomically
+   and continue with the new runner. A failing candidate never becomes current.
+2. **Fabrig tools.** Run fabrig's own installer only when fabrig's `tools/` changed,
+   under the install lock that ops also uses. Ops can defer this step.
+3. **Links and rendered files.** Atomic writes, a one-time backup of
+   pre-existing files, and a recheck against competing edits.
+4. **Units.** Write and enable declared units. Reload only when needed, and
+   remove only units the journal shows fleet-sync created.
+5. **Record.** Write state, items and run log. Repeated failures back off
+   (1 minute up to 60), but a new main commit skips the wait.
+
+**Effect timing.** A rendered file is in place within a minute. Sessions read
+the Claude settings live, except model and effort, which apply at the next
+start. Changed services report `restart pending` for their owners.
+
+**Operator controls** under `~/.config/fleet-sync/`:
+
+- `hold` stops all writes;
+- `pin` fixes the agents commit;
+- `defer-fabrig` skips step 2;
+- `retry` skips one backoff and is the only control fleet-sync removes.
+
+**Read-only modes.** `--check` reports drift. `--preview DIR` converges a copy of
+the managed files and prints diffs, for a first deployment. `status` checks every
+host over SSH and prints a recovery command for a bad release.
+
+## 4. Safety boundaries
+
+- **No credentials.** fleet-sync never reads keys, tokens, `.credentials.json`,
+  `~/.claude.json` or SSH configuration. It runs Claude and Codex only with `--version`.
+- **Never touched:** claims, leases, queue and slots under `~/src/fabrig`;
+  heavy's state and units; codex-run and owner state; the post spool except the
+  routing check; QA logins. Those belong to their own tools and to ops.
+- **No-follow file access** for every managed path. Child commands run in their
+  own process groups and are killed cleanly on timeout or signal.
+- **Recovery** is a revert on main. If `current` itself cannot run, the
+  previous release's runner fetches the revert (`tools/fleet-sync.md`).
+
+## 5. New hosts
+
+**Bootstrap** (`fleet/bootstrap/README.md`):
+
+1. USER preparation.
+2. `root.sh`: packages, the user, sudo, linger, unattended upgrades and the
+   journald cap.
+3. `user.sh`:
+   1. installs the Rust toolchains;
+   2. clones agents;
+   3. runs `fleet-sync --provision` to install the pinned tools;
+   4. runs a normal convergence, after which the timer takes over.
+
+Native tools come from peers (hetzner3 preferred, hel8 too) and are verified
+against the SHA256 manifests in `fleet/seeds/`. Downloads are allowed only over
+HTTPS with a pinned SHA256.
+
+**Signing in is the user's.** Claude and Codex logins are never copied between
+machines; the bootstrap ends at the login step.
+
+**Readmission** follows the verification list in the bootstrap README.
+
+## 6. Landing rules for fleet changes
+
+- **Land through the gate** (`docs/design/gate.md`): rebase onto origin/main,
+  then `tools/land`.
+- **Parsers before inputs.** A change that a running runner or service must
+  parse lands as code first. Its declarations land only after every host
+  reports that code, or with or after the service's restart. Landing both in
+  one step strands older parsers; this happened with qa-watch on 10-30.
+- **Machine actions are named in the commit** when a landing needs one, for
+  example an owner's first start.
+
+## 7. Later
+
+- Declare the slot guard timer in `fleet/units`, replacing the builders'
+  transient timer.
+- Retire the legacy old-kit units still present on some hosts.
+- Move the remaining factory tooling from fabrig `agents/` and `tools/`.
+- Prove the bootstrap on a rebuilt host and retarget its README.
+- An enforced landing entrypoint (ops request).
+- The automatic reaper: `docs/design/reaper.md`, once it lands.
