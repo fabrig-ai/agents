@@ -415,6 +415,9 @@ class Reaper:
                 processes = json.loads(command(['sudo', '-n', '/usr/bin/python3', '-I', '-B',
                                                 Path(__file__).resolve().with_name('proc_paths.py')]))
             used = [absolute(path) for path in processes['paths']]
+            # Candidates outside HOME are always forbidden. Paths elsewhere
+            # cannot reference anything inside a removable candidate.
+            used = [path for path in used if inside(path, self.home)]
             if processes['errors']:
                 failures.append('proc incomplete: ' + ','.join(processes['errors']))
         except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
