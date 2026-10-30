@@ -3,7 +3,7 @@ id = "atomic-write"
 part = "run"
 kind = "feature"
 needs = ["gates-tick"]
-files = ["fab/atomic.py", "fab/run.py", "fab/queue.py", "fab/precheck.py", "fab/codex.py", "fab/gate.py", "fab/tiers.py", "fab/after_landing.py", "fab/calls.py", "fab/report.py", "fab/gates.py", "fab/tests/test_atomic.py", "fab/tests/test_after_landing.py", "fab/tests/test_report.py", "fab/tests/test_gates.py"]
+files = ["fab/atomic.py", "fab/run.py", "fab/queue.py", "fab/precheck.py", "fab/codex.py", "fab/gate.py", "fab/tiers.py", "fab/after_landing.py", "fab/calls.py", "fab/report.py", "fab/gates.py", "fab/tests/test_atomic.py", "fab/tests/test_after_landing.py", "fab/tests/test_report.py", "fab/tests/test_gates.py", "fab/tests/test_call_review.py"]
 effort = "medium"
 minutes = 25
 +++
@@ -63,3 +63,10 @@ and 8; `AGENTS.md`.
 - The module is `fab/atomic.py`; the alternative, a function in
   `fab/log.py`, would mix the event log with every other file.
 - `write` keeps no fsync; `fab.log.append` alone makes its line durable.
+
+## Answers
+
+- 2026-10-30, the user (by hand, run atomic-write-3): yes, migrate the two
+  run._write calls in fab/tests/test_call_review.py to fab.atomic.write; the
+  file is now in files. Anything else that still calls run._write is the
+  same case: migrate it.
