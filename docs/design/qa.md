@@ -175,6 +175,14 @@ scratch captures have separate preservation obligations.
 **Admission accounts for scratch bytes.** Active walks reserve 2 GB each
 against a default 48 GB budget. Retained ended and paused/pinned directories
 contribute measured bytes; pinned active scratch also contributes its size.
+Size measurement streams metadata through anchored directory descriptors,
+never reads file contents or follows links, and has no entry or depth cap.
+Each walk has one ten-second deadline shared across its normal and quarantine
+names. An incomplete measurement charges max(saved reservation, bytes counted
+so far), reserves one retried director notice and retries on later admission
+passes. Missing names explained by a quarantine rename or confirmed prune are
+expected; an unexplained absence keeps the reservation floor. Evidence scans
+retain their separate 4096-entry, depth-32, five-second bounds.
 Resumes exclude their own unpinned paused contribution from the initial total
 and add a new reservation; changing measurements cannot subtract other work.
 Scarcity queues through the existing admission queue before claiming or taking a login.
@@ -189,6 +197,9 @@ preservation is built: remote publication requires both an explicitly set
 repository and branch. Safe local copies and receipts survive scratch, pins and pauses prevent age-pruning, and an
 accepted unchanged scan refusal can expire after seven days. Remote retries
 follow custody cleanup outside admission; they never delay returns/releases.
+Ordinary exceptions from a walk's measurement, preservation or pruning step
+cannot end the watcher: continue other walks and retry the step next pass.
+Queued admission failures likewise leave the preservation phase running.
 Scratch identity (device/inode) is saved at creation. Pruning atomically
 quarantines the candidate under its anchored parent, verifies that identity
 and removes through its descriptor. A mismatch is retained and restored when

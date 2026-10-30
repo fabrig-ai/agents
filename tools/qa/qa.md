@@ -458,9 +458,10 @@ in `tools/qa/passes.md`: checked descriptors, owned singly linked regular
 UTF-8 files, no directory/file links, forbidden names checked before reads,
 and secret-shape checks on each path component, the whole relative path,
 contents and generated `index.json`. Recovery validates indexed paths before
-opening a capture. Snapshot/archive traversal and scratch measurement are
-bounded to 4096 entries, depth 32 and five seconds; reaching a bound refuses
-and retains the source. Enumeration is bounded before sorting.
+opening a capture. Evidence snapshot/archive traversal is bounded to 4096
+entries, depth 32 and five seconds; reaching a bound refuses and retains the
+source. Evidence enumeration is bounded before sorting. Scratch size uses the
+separate metadata-only admission measurement described below.
 Diagnostics give a safe path, line and rule, never matched values. Mask capture
 values with `[masked]` while retaining diagnostic lines. HTTP folding, JSON
 escaped keys and unknown token shapes remain scanner limits.
@@ -527,13 +528,24 @@ remain.
 Under the admission lock, each start/resume reserves `QA_WALK_SCRATCH_BYTES`
 against `QA_SCRATCH_BUDGET_BYTES`. Active walks retain their saved reservations
 across configuration changes. Retained ended and paused scratch is measured
-from metadata without reading file contents or following links; pinned scratch
-is measured too, including alongside an active reservation. Resume replaces
+from metadata without reading file contents or following links. Measurement
+streams directory entries without an entry or depth cap and checks a ten-second
+deadline shared by a walk's normal and quarantine names. If measurement cannot
+finish (timeout, permission, vanished entry or another exception), charge the
+larger of that walk's saved reservation and the bytes counted so far. Reserve
+one retried director notice per walk; manual admission leaves its receipt for
+the watcher. Retry measurement on the next admission pass. Expected missing
+names during quarantine or after a confirmed prune do not incur that floor;
+an unexplained missing directory does. Pinned scratch is measured too,
+including alongside an active reservation. Resume replaces
 its own paused measurement with a fresh reservation, retaining the measurement
 if pinned. The resumed unpinned walk is skipped in the initial measurement;
 no second observation is subtracted from the total. Pending quarantine bytes
 are counted until removed. A start over budget joins the existing queue with
 the byte reason and retries after cleanup/pruning; it takes no login or claim while waiting.
+Ordinary exceptions from measurement, preservation or pruning are contained at
+the affected walk's step. Other walks continue and the failed step retries on
+the next watcher pass, including after queued admission fails.
 
 ### Run metadata on login holds
 

@@ -27,6 +27,11 @@ Contract: `docs/design/qa.md`, sections 2–7.
   custody cleanup, saved device/inode identities with verified quarantine,
   concrete retention times, stable resume accounting and explicit two-setting
   publication activation. Older walks without saved identities are retained.
+  Scratch sizing now streams metadata with a shared ten-second deadline per
+  walk and no evidence entry/depth caps. Incomplete sizing charges the larger
+  of saved reservation and counted bytes, with one retried notice. Per-walk
+  exception handling keeps measurement, preservation and pruning retryable
+  while other walks and later watcher passes continue.
   Added repair probes run in process with fresh HOME and fake services.
 - **JSON contracts are built.** Both tools expose the metadata interfaces in
   design section 2. `tools/qa/fixtures/logins-list.json` and
@@ -57,9 +62,13 @@ Contract: `docs/design/qa.md`, sections 2–7.
 `tools/qa/test_qa.py` along with the repository gate, with isolated temporary
 HOME and fake services. This branch runs only
 `python3 -I -B tools/qa/test_qa.py`, as assigned. The original feature run
-passed 208 tests. The repair run passed 220 tests in 134.695 seconds, adding
-12 in-process probes. Those probes passed separately in 2.032 seconds with
-0.772 seconds of CPU; they launch no child interpreters.
+passed 208 tests; the first repair run passed 220. Repair 2 passed 230 tests
+in 124.944 seconds (125.212 seconds shell wall time; 287.290 seconds CPU).
+Ten new in-process tests join the twelve earlier probes: all 22 passed
+separately in 1.207 seconds (1.253 seconds CPU), with no child interpreters.
+The 208 existing child-isolated cases are unchanged in count. The full suite
+still exceeds the ten-second per-file CPU budget; the suite framework rewrite
+is separate work.
 No full gate or live service tests were run. Deployment requires matching `qa` and
 `evidence.py` plus a watcher restart. Remote publication requires explicit
 configuration of both private repository and branch; no service is deployed here.
