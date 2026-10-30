@@ -113,6 +113,17 @@ Hold and a busy lock leave retry untouched; checks and previews never consume it
    contain ..; executable regular targets must resolve inside the candidate.
    Names matching executable files in /usr/bin or /bin are refused, so fleet
    tools cannot shadow system commands. Self-check validates before promotion.
+   `fleet/retired-links.toml` retires five legacy commands: after-landing, land,
+   land-set, repin and setup. Remove only symlinks whose lexical targets lie
+   under `~/src/rust/agents/`, including dangling targets, and refuse any further
+   symlink along the target path. Other links, files, directories and unrecorded
+   absences warn; an absent journaled link is ok. Installed/retired overlap fails
+   self-check (exit 2). Before unlinking, atomically journal the name, exact link
+   text, time and release in private state `retired_links.json` beside links.json.
+   Restore manually from that journal with `ln -s "$TEXT" ~/.local/bin/NAME`;
+   there is no restore command. Hold suppresses retirement; check/status report
+   drift and preview displays removals while changing only its private copy.
+   The old kit checkout and other links are untouched.
    Journal created links in links.json;
    remove obsolete recorded links only while they still target current/releases.
    Older change history provides ownership evidence during migration; unrelated
