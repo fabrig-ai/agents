@@ -16,7 +16,7 @@ from fab.report import Figure, Window
 
 CLAUDE = {"input": 1.0, "cache_write": 1.25, "cache_read": 0.1, "output": 5.0}  # weight per token
 CODEX = {"input": 1.0, "cache_read": 0.1, "output": 8.0}  # Codex reports no cache writes
-TARGET = 120_000  # tokens: the model's context target for one call; the report flags calls over it
+TARGET = 600_000  # tokens: the user's context target for one call (10-30); the report flags calls over it
 MILLION = 1_000_000  # weights are reported in millions, as the model's tables give them
 COUNTS = re.compile(r"^([0-9]+)/([0-9]+)/([0-9]+)$")  # a tokens field: `<input>/<cached>/<output>`
 
@@ -31,7 +31,7 @@ FIGURES = (  # (key, label): the code report's Claude and Codex figures, in its 
     ("codex_weight", "Codex weight, millions"),
     ("weight_ratio", "Claude to Codex weight"),
     ("peak_context", "largest Claude call context"),
-    ("over_target", "Claude calls over the 120k context target"),
+    ("over_target", "Claude calls over the 600k context target"),
 )
 
 

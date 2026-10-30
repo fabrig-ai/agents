@@ -566,14 +566,15 @@ before it lands (13.1).
   draft's Claude calls are those whose subject is the draft or under it; its
   Codex runs are its tasks' and the review runs of its calls. Its figures show
   the Claude and Codex tokens, both weights, the Claude to Codex weight, the
-  largest call context and the calls over 120k; a Calls table lists each call
+  largest call context and the calls over 600k; a Calls table lists each call
   with its minutes, turns, peak context, weight and whether it is over.
 - **A call is measured, not capped, for now** (the user, 10-30): no context
   cap and no turn limit (no `--max-turns`); a call is stopped only by its
   40-minute timeout. call.ended carries its peak context and turns, and the
-  code report flags calls over the model's 120k target. Of the first eleven
-  calls, seven peaked over 120k (130k-190k) and all ended well; the user
-  sets a cap, if any, from the measurements. The code may hold an unset
+  code report flags calls over the user's 600k target (10-30; the model's
+  draft said 120k). Of the first eleven calls, seven peaked over 120k
+  (130k-190k) and all ended well; the user sets a cap, if any, from the
+  measurements. The code may hold an unset
   bound for later; nothing ends a call for its size now.
 
 ### 13.6 A channel to the user
