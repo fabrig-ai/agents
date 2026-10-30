@@ -45,6 +45,12 @@ Bytes outside fleet-owned blocks or keys are preserved. `fleet/policy.toml`
 marks paths that are compared and warned about but never written (mail routing,
 an existing kache).
 
+**Session placement and central state (0013).** Every host's `machine.env`
+has `SESSION_SLOTS`, the number of sessions the launcher may place there (0 on
+hel8 apart from the director, and 0 on the gate host). Every login environment
+has `FABRIG_CENTRAL` (the ssh target of hel8) and `FABRIG_CENTRAL_HOST`. Tools
+reach claims, leases, records and mailbox homes through that target.
+
 **Tools.** `tools/installed` lists the agents commands linked into
 `~/.local/bin` through the `current` release. A name that matches an executable in
 `/usr/bin` or `/bin` is refused.
