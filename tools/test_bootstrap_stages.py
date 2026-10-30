@@ -126,11 +126,13 @@ class BootstrapStagesTest(unittest.TestCase):
         return state
 
     def test_stage_b_changes_no_runner_code(self):
-        # Stage A (code only) is deployed fleet-wide; stage B must bring declarations
-        # alone, so the deployed runner is also the runner that applies them.
+        # Stage B brought declarations alone. Compare its historical landing to
+        # its parent; later runner changes must not invalidate that rollout proof.
+        stage_b = DEPLOYED.removesuffix("^")
         self.assertEqual(self.f.process("git", "-C", fixture.ROOT, "show",
                                         DEPLOYED + ":tools/fleet-sync").stdout,
-                         (fixture.ROOT / "tools/fleet-sync").read_text())
+                         self.f.process("git", "-C", fixture.ROOT, "show",
+                                        stage_b + ":tools/fleet-sync").stdout)
 
     @unittest.skipUnless(HAS_BOOTSTRAP, "stage B declarations are not in the code-only stage")
     def test_stage_a_timer_promotes_real_stage_b_on_declared_hosts(self):
