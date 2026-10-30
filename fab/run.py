@@ -306,6 +306,21 @@ def status(started: dict, host: Host, *, sh: Runner = run) -> dict:
             "outcome": outcome(report) if ended else None, "report": report if ended else None}
 
 
+def launch_detached(host: Host, run_id: str, repo: str, rev: str, *, sh: Runner = run,
+                    log_path: Path | None = None, **launched) -> str:
+    """Start a read-only run on host in a fresh worktree of repo detached at rev; return
+    run_id. Review runs (fab.call_review) and foreman runs (fab.foreman) start this way.
+
+    clone = fetch_clone(host, repo, sh=sh); the worktree `<remote_home(host)>/wt/<run_id>`,
+    added with `git -C <clone> worktree add --detach <worktree> <rev>` over ssh (check=True);
+    then launch(host, run_id, workdir=<worktree>, read_only=True, sh=sh, log_path=log_path,
+    **launched), launched holding launch's other keywords (task, kind, branch, base, brief,
+    effort and run.started's extra fields). A failure after the worktree is added removes it
+    (`git -C <clone> worktree remove --force <worktree>` over ssh, errors ignored) and
+    re-raises. collect frees the worktree when the run ends, as for any worktree run."""
+    raise NotImplementedError
+
+
 def collect(run_id: str, events: Iterable[dict], hosts: dict[str, Host], *, sh: Runner = run,
             log_path: Path | None = None) -> str | None:
     """Collect an ended run once: copy its report to FAB_HOME/runs/<run>/report.md here, log

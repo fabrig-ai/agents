@@ -66,7 +66,7 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
 | ev | fields | meaning |
 |---|---|---|
 | `task.added` | draft, task, repo, path, sha | a task spec exists on its repository's main |
-| `run.started` | run, task, kind, host, dir, branch, base | a Codex run began; kind is implement, repair, rebase or review |
+| `run.started` | run, task, kind, host, dir, branch, base | a Codex run began; kind is implement, repair, rebase, review or foreman |
 | `run.ended` | run, task, outcome, report, minutes | outcome is done, question, infra or failed (section 5) |
 | `branch.ready` | task, branch, tip | handed to the landing pipeline |
 | `branch.landed` | task, branch, tip, main | on main |
@@ -421,10 +421,27 @@ it, and the flow grows from a small start rather than to a fixed cap.
   lets it through at once.
 - **The foreman settles what the options settle.** A run ending with a
   question first goes to a foreman run (Codex, medium, read-only, kind
-  `foreman`) with the task spec and the report: when the spec's pre-approved
-  options answer it, the foreman records the answer in the spec's Answers
-  section and the task runs again; otherwise the question queues for the
-  answerer, every 2 hours or at 4 queued, as the user's model says.
+  `foreman`, `fab/roles/foreman.md`) with the task spec and the report: when
+  the spec's pre-approved options answer it, the foreman's answer is
+  recorded in the spec's Answers section and the task runs again; otherwise
+  the question queues for the answerer, every 2 hours or at 4 queued, as the
+  user's model says.
+  - `fab/foreman.py` folds where each open question stands: at the
+    foreman, deciding, settled or queued. Questions of implement, repair and
+    rebase runs go to the foreman; the rest (a park at the run limit, one
+    logged by hand) queue at once. The answerer's thresholds and brief count
+    queued questions only, aged from when they queued.
+  - A foreman run is an ordinary run whose task is `<task>/foreman` (run
+    `<task>/foreman-<n>`), which no task has, so it is not one of the task's
+    runs; `asked` names the run that asked. It reads a worktree of the
+    task's repository detached at main, started as review runs are
+    (`fab.run.launch_detached`).
+  - Its report's first line is `Done: <the answer>` or `Failed: <why the
+    options do not settle it>`. Done, the tick writes the answer into the
+    spec on a branch `answers/<run>`, lands it with `fab land` and logs
+    `question.answered` (by the foreman run); a landing that fails is tried
+    again next tick. Any other outcome, infra too, queues the question: a
+    foreman runs once per question.
 - **The structure review stays its own call** (section 12), never the
   skeleton author's.
 
@@ -524,5 +541,7 @@ it, and the flow grows from a small start rather than to a fixed cap.
 - Elastic builders from `fab hosts check`'s numbers.
 - The flow's target and each builder's calm in the code report, beside runs
   in flight per hour; the target shared across plans (13.4).
+- The foreman for plans whose specs live in another repository: its answers
+  landing through that repository's landing, not `fab land`.
 - Retiring the session launcher, watch's session rules, mail, leases and the
   event collector once nothing resident remains.

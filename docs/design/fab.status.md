@@ -61,6 +61,21 @@
   task `call-review` fills them; `call-review-tick` makes the tick review
   calls' branches and run amend calls, after `review-call` and
   `gates-tick`. Until it lands, a call's branch lands unreviewed.
+- **The foreman is a skeleton:** `fab/foreman.py` (where each question
+  stands, the foreman run's brief and start, the answer written into the
+  spec) and `fab.run.launch_detached`, the read-only start review and
+  foreman runs share, hold 13.1's contracts; `fab/roles/foreman.md` is
+  written. The task `foreman` fills them, after `call-review`;
+  `foreman-tick` sends questions to the foreman from the tick, after
+  `call-review-tick`. Until it lands, every question waits for the
+  answerer. Answers land through `fab land`, so a plan whose specs live
+  outside this repository cannot be settled by its foreman yet.
+- **The foreman only settles questions.** The user's execution model
+  (`docs/design/draft/execution-modes.md`, roles) also has it write rebase
+  and mechanical repair tasks; here the dispatcher starts rebase and repair
+  runs on the rejected task itself (sections 6 and 13.1), and no part gives
+  the foreman that duty. The model lists the foreman without read-only;
+  13.1 makes it read-only, and code writes its answer into the spec.
 - **Subjects can share a task's id:** a skeleton call's subject
   `<draft>/<part>` equals the id of a task named after its part (`gates`).
   A `question.answered` that unparks the subject also makes that task
