@@ -301,14 +301,53 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
   its detail files, heavy cancellation and wall bounds beyond the steps'
   timeout, the guardian and replay of a half-run pair, and the tier runner's
   CPU accounting and budgets (still fabrig's `tools/tiers --cpu`). Each
-  attaches to the records above when numbers show it is needed (section 12).
+  attaches to the records above when numbers show it is needed (section 13).
 
-## 12. Later
+## 12. Gates and the structure review
 
-- The dispatcher's loop on a timer, the ready-task buffer and the answer
-  queue (slice 3 of `docs/plan/agents-rebuild/plan.toml`).
-- Claude calls compiled by code: skeleton author, answerer, structure
-  reviewer; gates and the structure digest.
+From the user's execution model: quality is checked by code on every branch,
+and Claude reads the code's structure in batches, never on the landing path.
+
+- **The digest** of a branch is what a reviewer needs without reading the
+  code: the public items it adds, removes or changes (from
+  `fab.calls.inventory` on its base and its tip), its changed paths split
+  into production, tests and docs with their lines, the paths outside its
+  task's `files`, functions longer than the cap, and repeated blocks. It is
+  deterministic Markdown of bounded size, written to
+  `FAB_HOME/digests/<run>.md` when a run is collected.
+- **The gates** are pure checks over the digest and the task, run when a run
+  is collected and before its branch lands or is readied:
+  - `files`: every changed path is within the task's globs;
+  - `shape`: no signature the base has is changed or removed, unless the
+    task's kind is `interface` or `migration`;
+  - `size`: no new or changed function is longer than 60 lines;
+  - `names`: no new public name from the banned list in `fab/taste.md`;
+  - `docs`: every new public function and class has a docstring;
+  - `clones`: no block of 8 or more lines repeated in the changed files or
+    between them and the rest of the package.
+  A failed gate logs `branch.rejected` with step `gate:<name>` and the
+  findings, so the repair loop takes it (section 6). The first gates read
+  Python (this repository); fabrig's, over Rust and its public API, come later.
+- **The taste file,** `fab/taste.md`, holds the banned names and pairs of
+  good and bad code from this repository, each with one line on why. It is
+  added to every implementer's brief after the role text.
+- **The structure review** is a Claude call, role `review`, when ten tasks
+  have landed since the last one or four hours have passed with any landed.
+  Its brief is the digests of the branches landed since, the taste file, the
+  inventory and the designs those branches cite; it reads full code only for
+  what the digests flag and a sample. It writes consolidation task specs
+  (merges, renames, splits) into the plan and new pairs into the taste file,
+  on its branch, which lands as a skeleton call's does. It never holds up a
+  landing.
+- **A question from a call parks its subject:** a skeleton or review call
+  that ends with a question starts no further call for that subject until
+  `question.answered` names it.
+
+## 13. Later
+
+- The self-critique: a read-only Codex run against the skeleton and the taste
+  file before ready, its findings fixed by the implementer.
+- fabrig's gates, over Rust and its public API against the skeleton.
 - `fab report daily` on a timer on hel8, with the dispatcher's; reports
   posted to the director rather than read from FAB_HOME.
 - Report metrics the records do not hold yet: lines changed per landed

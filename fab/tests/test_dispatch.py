@@ -231,6 +231,15 @@ class CallActionsTest(unittest.TestCase):
         failed = [done[0], dict(done[1], outcome="failed")]
         self.assertEqual(self.actions(failed, ["core"]), [Action("call", task="core", run_kind="skeleton")])
 
+    def test_a_call_that_asked_parks_its_part_until_answered(self):
+        asked = [dict(self.call("skeleton", "s1"), subject="draft/core"),
+                 dict(ev="call.ended", call="s1", role="skeleton", outcome="question")]
+        self.assertEqual(self.actions(asked, ["core", "next"]),
+                         [Action("call", task="next", run_kind="skeleton")])
+        answered = asked + [event("question.answered", "core", by="session", answer="see fab.md 12")]
+        self.assertEqual(self.actions(answered, ["core", "next"]),
+                         [Action("call", task="core", run_kind="skeleton")])
+
     def test_only_first_design_part_and_role_exclusion(self):
         questions = [self.question(ts="2026-10-30T12:00:00.000Z")]
         answer = Action("call", task="draft", run_kind="answer")

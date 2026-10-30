@@ -1,4 +1,4 @@
-"""The dispatcher: one idempotent tick keeps a plan's tasks moving (docs/design/fab.md, 12).
+"""The dispatcher: one idempotent tick keeps a plan's tasks moving (docs/design/fab.md, 13).
 
 `decide` is pure: from the plan, its tasks, the log and the machines it returns the actions
 to take now. `tick` gathers those inputs, carries the actions out through `fab.run`,
@@ -31,7 +31,7 @@ ANSWER_AT = 4  # open questions that start an answer call at once
 
 def call_actions(plan: Plan, tasks: Mapping[str, Task], events: list[dict], design: list[str],
                  now: str) -> list[Action]:
-    """The Claude calls to start or finish now (docs/design/fab.md, 12), after decide's actions.
+    """The Claude calls to start or finish now (docs/design/fab.md, 13), after decide's actions.
 
     A call is in flight from its call.started to its call.ended; at most one call of each role
     is in flight. finish: every call.ended with outcome done and no later call.finished for
@@ -40,8 +40,9 @@ def call_actions(plan: Plan, tasks: Mapping[str, Task], events: list[dict], desi
     an answer call (subject the plan's draft) when no answer call is in flight and the open
     questions (fab.calls.open_questions) number ANSWER_AT or more, or the oldest is ANSWER_AFTER
     minutes old at `now`; a skeleton call for the first part of decide's design list that has
-    no successful skeleton call yet (subject `<draft>/<part>`), when no skeleton call is in
-    flight. Actions: Action("call", task=<subject>, run_kind=<role>) and
+    no successful skeleton call yet (subject `<draft>/<part>`) and is not parked by a call
+    that ended with a question (until question.answered names the subject), when no skeleton
+    call is in flight. Actions: Action("call", task=<subject>, run_kind=<role>) and
     Action("finish", run=<call id>, run_kind=<role>, branch=<branch>)."""
     started = {event["call"]: event for event in events if event.get("ev") == "call.started"}
     flight = dict(started)
@@ -69,7 +70,14 @@ def call_actions(plan: Plan, tasks: Mapping[str, Task], events: list[dict], desi
     designed = {started[identifier].get("subject") for identifier in started
                 if any(event.get("ev") == "call.ended" and event.get("call") == identifier
                        and event.get("outcome") == "done" for event in events)}
-    fresh = [part for part in design if f"{plan.draft}/{part}" not in designed]
+    # A call that asked a question parks its subject until question.answered names it.
+    parked = set()
+    for event in events:
+        if event.get("ev") == "call.ended" and event.get("outcome") == "question":
+            parked.add(started.get(event.get("call"), {}).get("subject"))
+        elif event.get("ev") == "question.answered":
+            parked.discard(event.get("task"))
+    fresh = [part for part in design if f"{plan.draft}/{part}" not in designed | parked]
     if "skeleton" not in roles and fresh:
         actions.append(Action("call", task=fresh[0], run_kind="skeleton"))
     return actions
