@@ -153,8 +153,13 @@ def tick(plan_dir: Path, *, sh: Runner = run, hosts: Mapping[str, Host] | None =
             imported = {(event.get("queue_ts"), event.get("ev"), event.get("branch"),
                          event.get("tip")) for event in events if "queue_ts" in event}
             since = max((event["queue_ts"] for event in events if "queue_ts" in event), default="")
-            result = sh(ssh(hosts[gates[0]].ssh, ["fab", "queue", "log", "--since", since]), check=True)
-            for line in result.out.splitlines():
+            result = sh(ssh(hosts[gates[0]].ssh, ["fab", "queue", "log", "--since", since]))
+            if not result.ok:
+                # The queue's record is read again next tick; the other actions still run.
+                failure = " ".join((result.err or result.out).strip().splitlines()[-3:])
+                log.append("note", path=log_path, text=f"queue import failed: {failure}")
+                print(f"import - failed: {failure}")
+            for line in result.out.splitlines() if result.ok else ():
                 entry = json.loads(line)
                 if entry.get("ev") not in ("landed", "rejected"):
                     continue
@@ -187,6 +192,10 @@ def tick(plan_dir: Path, *, sh: Runner = run, hosts: Mapping[str, Host] | None =
                             raise RuntimeError(output.getvalue().strip() or "landing refused")
                     case "ready":
                         repo = home / "repos" / tasks[action.task].repo
+                        if not (repo / ".git").exists():
+                            repo.parent.mkdir(parents=True, exist_ok=True)
+                            sh(["git", "clone", "-q", runs.REMOTES[tasks[action.task].repo], str(repo)],
+                               check=True)
                         sh(["git", "fetch", "origin"], cwd=str(repo), check=True)
                         tip = sh(["git", "rev-parse", "--verify",
                                   f"refs/remotes/origin/{action.branch}^{{commit}}"],

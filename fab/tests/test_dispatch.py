@@ -263,6 +263,15 @@ walk = false
                     for c in self.fake.calls if c.argv[0] == "ssh"]
         self.assertEqual(commands, ["fab queue log --since ''", "fab queue log --since 002"])
 
+    def test_a_failed_queue_import_is_noted_and_the_tick_goes_on(self):
+        self.add_task("b")
+        self.fake.on(ssh("fake@gate", ["fab", "queue", "log"])[:-1], Result(1, err="no queue here"))
+        with redirect_stdout(io.StringIO()):
+            self.tick()
+        notes = [e["text"] for e in log.read() if e["ev"] == "note"]
+        self.assertEqual(notes, ["queue import failed: no queue here"])
+        self.assertEqual([call[0] for call in self.calls], ["start", "start"])
+
     def test_each_action_is_carried_out_in_order_and_printed(self):
         for name, repo in (("b", "agents"), ("c", "fabrig"), ("d", "agents"), ("e", "agents")):
             self.add_task(name, repo)
