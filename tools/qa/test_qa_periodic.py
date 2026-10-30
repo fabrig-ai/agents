@@ -178,7 +178,10 @@ def deploy_records_then_starts_its_unit(lab):
     binary.mkdir()
     output = directory / 'arguments'
     executable(binary / 'capture', 'import json, os, sys\nfrom pathlib import Path\n'
-        + f'Path({str(output)!r}).write_text(json.dumps([sys.argv[1:], os.environ["PATH"]]))\n')
+        + f'output = Path({str(output)!r})\n'
+          "temporary = output.with_name(output.name + '.new')\n"
+          'temporary.write_text(json.dumps([sys.argv[1:], os.environ["PATH"]]))\n'
+          'os.replace(temporary, output)\n')
     caller_path = str(binary) + os.pathsep + lab.env['PATH']
     arguments = ['one value', '$literal', '--flag']
     lab.run('deploy', str(directory), 'args', '--', 'capture', *arguments, extra={'PATH': caller_path})

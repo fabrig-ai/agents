@@ -980,8 +980,11 @@ def deploy_passes_a_literal_dollar(lab):
     directory = lab.root / P
     directory.mkdir()
     output = directory / 'arguments'
-    program = executable(directory / 'capture', 'import json, sys\nfrom pathlib import Path\n'
-                         "Path('arguments').write_text(json.dumps(sys.argv[1:]))\n")
+    program = executable(directory / 'capture', 'import json, os, sys\nfrom pathlib import Path\n'
+                         "output = Path('arguments')\n"
+                         "temporary = output.with_name(output.name + '.new')\n"
+                         "temporary.write_text(json.dumps(sys.argv[1:]))\n"
+                         "os.replace(temporary, output)\n")
     args = ['$HOME', '${PATH}']
     lab.run('deploy', str(directory), 'literal', '--', str(program), *args)
     wait_for(output.exists)
