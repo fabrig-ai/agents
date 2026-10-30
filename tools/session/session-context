@@ -23,7 +23,7 @@ under SESSION_CONTEXT_STATE (default ~/.local/state/session-context), with a 10s
 Repeatable --watch ABSOLUTE_PATH adds notices when role sections change, with a
 silent first baseline. Notices use UserPromptSubmit, SessionStart resume/compact,
 or inactive Stop. Seen copies expire after seven idle days, checked once a day.
-Options: --window N (Claude; default 1000000), --threshold F (default 0.75).
+Options: --window N (Claude; default 1000000), --threshold F (default 0.85).
 Without an id or CLAUDE_CODE_SESSION_ID, exactly one session must have written
 to this directory's project folder in the last 30 minutes; otherwise pass an id.
 Exit 2 for ambiguous or absent recent sessions; 0 below the threshold, 3 at or
@@ -451,6 +451,13 @@ def hook(threshold, window, role=None, names=(), prefixes=(), coordinator=None, 
     active_stop = kind == 'Stop' and event.get('stop_hook_active')
     if active_stop and not watches:
         return 0  # the session is already continuing because of this hook: never loop
+    # A quiet Stop must not create a name cache just to decide its gate.
+    # Watches retain their independent baseline and delivery behaviour.
+    message = None
+    if kind == 'Stop' and not watches:
+        message = handover_message(event, threshold, window, role, coordinator, handover, handle)
+        if not message:
+            return 0
     name = None
     if names or prefixes:
         name = hook_name(event.get('session_id'))
@@ -458,7 +465,8 @@ def hook(threshold, window, role=None, names=(), prefixes=(), coordinator=None, 
             return 0
     deliver = not active_stop and (kind in ('UserPromptSubmit', 'Stop') or
                                   (kind == 'SessionStart' and event.get('source') in ('resume', 'compact')))
-    message = '' if active_stop else handover_message(event, threshold, window, role, coordinator, handover, handle)
+    if message is None:
+        message = '' if active_stop else handover_message(event, threshold, window, role, coordinator, handover, handle)
     identity = event.get('session_id')
     if message and isinstance(identity, str) and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]*', identity):
         if name is None:
@@ -503,7 +511,7 @@ def dispatch(argv):
                 print(f"{marker['session_id']} name={marker['name']} role={marker['role']} "
                       f"first_fired={marker['first_fired']} last_fired={marker['last_fired']}: {marker['reason']}")
         return 0
-    window, threshold, session, cwd, codex, as_hook = 1_000_000, 0.75, None, os.getcwd(), None, False
+    window, threshold, session, cwd, codex, as_hook = 1_000_000, 0.85, None, os.getcwd(), None, False
     as_hook = '--hook' in argv
     role = coordinator = handover = handle = None
     names, prefixes, watches = [], [], []

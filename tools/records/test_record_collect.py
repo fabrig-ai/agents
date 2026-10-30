@@ -77,7 +77,7 @@ if sys.argv[1:] == ['--fired', '--json']:
  print((Path(os.environ['HOME']) / 'fired.json').read_text())
  sys.exit(0)
 assert sys.argv[1] == '--name'
-print('12345678: 125,000 of 1,000,000 tokens (12%) at 2026-10-29T11:00:00Z; 42 calls; 0 compaction(s); threshold 75%')
+print('12345678: 125,000 of 1,000,000 tokens (12%) at 2026-10-29T11:00:00Z; 42 calls; 0 compaction(s); threshold 85%')
 """)
         self.write(self.home / 'agents.json', '[]')
         self.write(self.home / 'fired.json', '[]')
@@ -338,7 +338,7 @@ assert sys.argv[1:] != ['--name', 'lead/u/jig']
         self.write(self.home / 'context-exit', str(code))
         self.write(self.home / 'context-line',
                    f'{thread}: {percent * 1000:,} of 100,000 tokens ({percent}%) at {STAMP}; '
-                   f'2 compaction(s); threshold 75%' + (' REACHED: hand over now' if code == 3 else ''))
+                   f'2 compaction(s); threshold 85%' + (' REACHED: hand over now' if code == 3 else ''))
 
     def test_codex_unit_lifecycle_context_and_threshold_crossings(self):
         self.codex_fixture()
@@ -353,7 +353,7 @@ assert sys.argv[1:] != ['--name', 'lead/u/jig']
                          (50000, 2, 'jig', 'u'))
         self.assertNotIn('calls', context)
         self.assertEqual([e['kind'] for e in self.dry('sessions')], ['context'])
-        self.owner_reading(75, 3)
+        self.owner_reading(85, 3)
         first_preview = self.dry('sessions')
         second_preview = self.dry('sessions')
         first_hook = next(e for e in first_preview if e['kind'] == 'handover-needed')
@@ -364,14 +364,14 @@ assert sys.argv[1:] != ['--name', 'lead/u/jig']
         self.assertEqual(hooks()[0]['id'], first_hook['id'])
         self.assertEqual([e['kind'] for e in self.dry('sessions')], ['context'])
         # The exit status, rather than rounded output, decides crossing.
-        self.owner_reading(75, 0)
+        self.owner_reading(85, 0)
         self.run_collect('sessions')
-        self.owner_reading(75, 3)
+        self.owner_reading(85, 3)
         self.run_collect('sessions')
         self.assertEqual(len(hooks()), 2)
         self.assertNotEqual(hooks()[0]['id'], hooks()[1]['id'])
         # A fresh owner thread above threshold begins its own crossing.
-        self.owner_reading(80, 3, thread='ffffffff')
+        self.owner_reading(90, 3, thread='ffffffff')
         self.run_collect('sessions')
         self.assertEqual(len(hooks()), 3)
         self.write(self.home / 'unit-exit', '3')

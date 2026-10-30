@@ -79,12 +79,12 @@ sys.exit(int(os.environ.get("FAKE_EXIT", "0")))
         self.assertNotIn("REACHED", result.stdout)
 
     def test_threshold_exits_three(self):
-        self.transcript("bbbb2222-x", [call((0, 760_000, 0, 0))])
+        self.transcript("bbbb2222-x", [call((0, 860_000, 0, 0))])
         result = self.run_tool()
         self.assertEqual(result.returncode, 3)
         self.assertIn("REACHED: hand over now", result.stdout)
         self.assertEqual(self.run_tool("--window", "2000000").returncode, 0)
-        self.assertEqual(self.run_tool("--threshold", "0.8").returncode, 0)
+        self.assertEqual(self.run_tool("--threshold", "0.9").returncode, 0)
 
     def test_session_by_prefix_and_one_recent_writer(self):
         old = self.transcript("cccc3333-old", [call((0, 1_000, 0, 0))])
@@ -136,20 +136,37 @@ sys.exit(int(os.environ.get("FAKE_EXIT", "0")))
         return subprocess.run([sys.executable, "-I", "-B", str(TOOL), "--hook", *args], cwd=self.cwd, env=self.env,
                               input=json.dumps(event), text=True, capture_output=True)
 
-    def test_hook_asks_for_a_handover_once(self):
-        path = self.transcript("gggg7777-x", [call((0, 800_000, 0, 0))])
+    def test_hook_blocks_but_does_not_loop_on_active_stop(self):
+        path = self.transcript("gggg7777-x", [call((0, 850_000, 0, 0))])
         result = self.hook({"transcript_path": str(path), "stop_hook_active": False})
         self.assertEqual(result.returncode, 0, result.stderr)
         answer = json.loads(result.stdout)
         self.assertEqual(answer["decision"], "block")
-        self.assertIn("80%", answer["reason"])
+        self.assertIn("85%", answer["reason"])
         again = self.hook({"transcript_path": str(path), "stop_hook_active": True})
         self.assertEqual((again.returncode, again.stdout), (0, ""))
 
-    def test_hook_is_silent_below_the_threshold(self):
-        path = self.transcript("hhhh8888-x", [call((0, 100_000, 0, 0))])
-        result = self.hook({"transcript_path": str(path), "stop_hook_active": False})
-        self.assertEqual((result.returncode, result.stdout), (0, ""))
+    def test_hook_threshold_boundary_has_no_state_below_and_blocks_at_85(self):
+        self.env["FAKE_AGENTS"] = '[{"sessionId":"boundary-id","name":"lead/jig"}]'
+        for used in (849_000, 849_999, 850_000):
+            for options in ((), ("--name", "lead/jig"), ("--name-prefix", "lead/")):
+                with self.subTest(used=used, options=options):
+                    path = self.transcript("boundary-id", [call((0, used, 0, 0))])
+                    event = {"session_id": "boundary-id", "transcript_path": str(path),
+                             "stop_hook_active": False}
+                    result = self.hook(event, *options)
+                    self.assertEqual((result.returncode, result.stderr), (0, ""))
+                    if used < 850_000:
+                        self.assertEqual(result.stdout, "")
+                        self.assertFalse(self.state.exists())
+                        self.assertFalse(self.log.exists())
+                    else:
+                        answer = json.loads(result.stdout)
+                        self.assertEqual(answer["decision"], "block")
+                        self.assertIn("850,000 of 1,000,000", answer["reason"])
+                        self.assertIn("threshold 85% REACHED", answer["reason"])
+                        marker = json.loads((self.state / "fired/boundary-id.json").read_text())
+                        self.assertEqual(marker["reason"], answer["reason"])
 
     def codex_rollout(self, thread, used, window, compactions=0):
         day = self.home / ".codex/sessions/2026/10/29"
@@ -164,10 +181,10 @@ sys.exit(int(os.environ.get("FAKE_EXIT", "0")))
 
     def test_codex_thread_and_owner(self):
         thread = "01a10000-0000-7000-8000-000000000001"
-        self.codex_rollout(thread, 380_000, 475_000, compactions=2)
+        self.codex_rollout(thread, 403_750, 475_000, compactions=2)
         result = self.run_tool("--codex", thread)
         self.assertEqual(result.returncode, 3, result.stderr)
-        self.assertIn("380,000 of 475,000 tokens (80%)", result.stdout)
+        self.assertIn("403,750 of 475,000 tokens (85%)", result.stdout)
         self.assertIn("2 compaction(s)", result.stdout)
         owner = self.base / "dev/tmp/owners/ops/codex"
         owner.mkdir(parents=True)
@@ -217,7 +234,7 @@ sys.exit(int(os.environ.get("FAKE_EXIT", "0")))
         self.assertIn("300,000", result.stdout)
 
     def test_name_gate_caches_prefix_lookup_with_private_permissions(self):
-        path = self.transcript("gate-id", [call((0, 750_000, 0, 0))])
+        path = self.transcript("gate-id", [call((0, 850_000, 0, 0))])
         event = {"session_id": "gate", "transcript_path": str(path)}
         self.env["FAKE_AGENTS"] = json.dumps([{"sessionId": "gate-id", "name": "lead/jig"}])
         for _ in range(2):
@@ -233,7 +250,7 @@ sys.exit(int(os.environ.get("FAKE_EXIT", "0")))
         self.assertEqual(sorted(p.name for p in self.state.iterdir()), ["fired", "names.json"])
 
     def test_name_prefix_and_mismatch(self):
-        path = self.transcript("coord-id", [call((0, 800_000, 0, 0))])
+        path = self.transcript("coord-id", [call((0, 850_000, 0, 0))])
         event = {"session_id": "coord-id", "transcript_path": str(path)}
         self.env["FAKE_AGENTS"] = '[{"sessionId":"coord-id","name":"coordinator/dm/20261029T1200Z"}]'
         result = self.hook(event, "--name-prefix", "other/", "--name-prefix", "coordinator/dm/", "--role", "coordinator", "--handle", "dm", "--handover", "/a handover.md")
@@ -245,7 +262,7 @@ sys.exit(int(os.environ.get("FAKE_EXIT", "0")))
         self.assertEqual((mismatch.returncode, mismatch.stdout, mismatch.stderr), (0, "", ""))
 
     def test_failed_lookup_is_silent_and_does_not_cache(self):
-        path = self.transcript("gate-id", [call((0, 800_000, 0, 0))])
+        path = self.transcript("gate-id", [call((0, 850_000, 0, 0))])
         event = {"session_id": "gate", "transcript_path": str(path)}
         for output, code in (("invalid json", "0"), ("[]", "0"), ('[{"sessionId":"gate-id","name":"lead/jig"}]', "1")):
             self.env.update(FAKE_AGENTS=output, FAKE_EXIT=code)
@@ -433,7 +450,7 @@ sys.exit(int(os.environ.get("FAKE_EXIT", "0")))
         self.prepare_drift()
         self.drift()
         self.role_file.write_text(self.role_file.read_text() + "Rule added.\n")
-        self.drift_transcript = self.transcript("drift-id", [call((0, 800_000, 0, 0))])
+        self.drift_transcript = self.transcript("drift-id", [call((0, 850_000, 0, 0))])
         result = self.drift("Stop")
         self.assertEqual(len(result.stdout.splitlines()), 1)
         message = json.loads(result.stdout)["reason"]
@@ -519,14 +536,14 @@ sys.exit(int(os.environ.get("FAKE_EXIT", "0")))
 
     def test_unavailable_drift_store_does_not_suppress_handover(self):
         self.prepare_drift()
-        self.drift_transcript = self.transcript("drift-id", [call((0, 800_000, 0, 0))])
+        self.drift_transcript = self.transcript("drift-id", [call((0, 850_000, 0, 0))])
         self.state.write_text("Not a directory")
         result = self.drift("Stop")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("End now", json.loads(result.stdout)["reason"])
 
     def test_director_handover_message_for_current_and_legacy_names(self):
-        path = self.transcript("director-id", [call((0, 800_000, 0, 0))])
+        path = self.transcript("director-id", [call((0, 850_000, 0, 0))])
         expected = ("Hand over now: bring ~/src/rust/tmp/supervise/director/handover.md and state.md current, "
                     "start your successor with `tools/session/start director --next`, then warm-up and takeover. "
                     "If your handover is already under way, carry on with it.")
@@ -549,14 +566,14 @@ sys.exit(int(os.environ.get("FAKE_EXIT", "0")))
         event = {"hook_event_name": "SessionStart", "source": "startup", "session_id": "drift-id", "transcript_path": str(self.drift_transcript)}
         self.assertEqual(self.hook(event, *args).stdout, "")
         self.role_file.write_text(self.role_file.read_text() + "Rule added.\n")
-        self.transcript("drift-id", [call((0, 800_000, 0, 0))])
+        self.transcript("drift-id", [call((0, 850_000, 0, 0))])
         result = self.hook({**event, "hook_event_name": "Stop"}, *args)
         message = json.loads(result.stdout)["reason"]
         self.assertLess(message.index("Hand over now"), message.index("changed since"))
         self.assertIn("tools/session/start director --next", message)
 
     def test_fired_marker_first_timestamp_survives_later_firings(self):
-        path = self.transcript("fired-id", [call((0, 800_000, 0, 0))])
+        path = self.transcript("fired-id", [call((0, 850_000, 0, 0))])
         self.env["FAKE_AGENTS"] = '[{"sessionId":"fired-id","name":"lead/jig"}]'
         event = {"session_id": "fired-id", "transcript_path": str(path)}
         options = ("--name", "lead/jig", "--role", "lead", "--coordinator", "s/draft@hel8")
@@ -574,6 +591,7 @@ sys.exit(int(os.environ.get("FAKE_EXIT", "0")))
         second = self.hook(event, *options)
         updated = json.loads(marker.read_text())
         self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(json.loads(second.stdout)["decision"], "block")
         self.assertEqual(updated["first_fired"], original["first_fired"])
         self.assertGreater(updated["last_fired"], original["last_fired"])
         self.assertEqual(marker.stat().st_mode & 0o777, 0o600)
@@ -595,7 +613,7 @@ sys.exit(int(os.environ.get("FAKE_EXIT", "0")))
             self.assertEqual(marker["name"], "coordinator/q/20261029T1200Z")
 
     def test_fired_write_failure_preserves_hook_output(self):
-        path = self.transcript("write-id", [call((0, 800_000, 0, 0))])
+        path = self.transcript("write-id", [call((0, 850_000, 0, 0))])
         self.env["FAKE_AGENTS"] = '[{"sessionId":"write-id","name":"lead/jig"}]'
         event = {"hook_event_name": "Stop", "session_id": "write-id", "transcript_path": str(path)}
         options = ["--name", "lead/jig", "--role", "lead", "--coordinator", "s/draft@hel8"]
@@ -646,7 +664,7 @@ sys.exit(int(os.environ.get("FAKE_EXIT", "0")))
         self.assertFalse(self.log.exists())
 
     def test_ungated_due_hook_still_fires_if_name_lookup_fails(self):
-        path = self.transcript("no-name-id", [call((0, 800_000, 0, 0))])
+        path = self.transcript("no-name-id", [call((0, 850_000, 0, 0))])
         self.env["FAKE_AGENTS"] = "invalid json"
         result = self.hook({"session_id": "no-name-id", "transcript_path": str(path)})
         self.assertEqual(result.returncode, 0, result.stderr)
