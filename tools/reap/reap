@@ -125,8 +125,8 @@ def load_records(text):
             record['paths'].update(paths)
             if row['event'] == 'start':
                 record['ended'] = None
-            elif record['ended'] is None:
-                record['ended'] = when
+            else:
+                record['ended'] = when if record['ended'] is None else min(record['ended'], when)
         except (KeyError, ValueError, TypeError):
             continue
     return records
@@ -260,7 +260,9 @@ class Reaper:
             text = os.pread(fd, os.fstat(fd).st_size, 0).decode(errors='replace')
             prior = load_records(text).get((args.kind, args.id))
             if prior and set(paths) <= prior['paths']:
-                if (args.event == 'start') == (prior['ended'] is None):
+                if args.event == 'start' and prior['ended'] is None:
+                    return
+                if args.event == 'end' and prior['ended'] is not None and self.now >= prior['ended']:
                     return
             append_fd(fd, dict(event=args.event, time=self.now, kind=args.kind,
                                owner=args.owner, id=args.id, paths=paths))
@@ -272,16 +274,45 @@ class Reaper:
         except FileNotFoundError:
             return []
 
+    def codex_finality(self, path):
+        """Finality is producer evidence plus an inactive unit, never a guess."""
+        try:
+            with regular(path / 'final.json') as fd:
+                with os.fdopen(os.dup(fd), 'r', encoding='utf-8') as stream:
+                    final = json.load(stream)
+            if not isinstance(final, dict) or final.get('state') not in ('landed', 'withdrawn'):
+                raise ValueError('not final')
+            when = datetime.fromisoformat(final['time'])
+            if when.utcoffset() is None or when.utcoffset().total_seconds() != 0:
+                raise ValueError('final time must be UTC')
+            timestamp = when.timestamp()
+        except (OSError, ValueError, TypeError, KeyError, OverflowError):
+            return None, 'codex-run not final'
+        if self.now - timestamp <= self.config['classes']['codex-runs']['retention_seconds']:
+            return timestamp, 'codex-run retention'
+        try:
+            result = subprocess.run(['systemctl', '--user', 'is-active', f'codex-run-{path.name}'],
+                                    capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
+        except (OSError, subprocess.SubprocessError):
+            return timestamp, 'codex-run unit unavailable'
+        state = result.stdout.strip()
+        if result.returncode in (0, 3, 4):
+            if state in ('inactive', 'unknown'):
+                return timestamp, None
+            if state in ('active', 'activating', 'deactivating', 'reloading', 'failed'):
+                return timestamp, 'codex-run unit not inactive'
+        return timestamp, 'codex-run unit unavailable'
+
     def discover(self, classes):
         found = {}
-        def add(path, cls, timestamp=None, retention=None):
+        def add(path, cls, timestamp=None, retention=None, force=False):
             path = absolute(path)
             try:
                 with directory(path.parent) as parent:
                     info = os.stat(path.name, dir_fd=parent, follow_symlinks=False)
                 age = self.now - (info.st_mtime if timestamp is None else timestamp)
                 threshold = self.config['classes'][cls]['retention_seconds'] if retention is None else retention
-                if age < threshold:
+                if age < threshold and not force:
                     return
                 found.setdefault(path, dict(path=str(path), **{'class': cls}, age_seconds=int(age),
                                             identity=(info.st_dev, info.st_ino)))
@@ -328,11 +359,13 @@ class Reaper:
                             add(candidate, cls, record['ended'], retention)
                 elif cls == 'codex-runs':
                     for path in self.children(self.home / self.config['classes'][cls]['root']):
-                        try:
-                            with regular(path / 'ended') as fd:
-                                add(path, cls, os.fstat(fd).st_mtime)
-                        except (FileNotFoundError, NotADirectoryError):
-                            pass
+                        if not stat.S_ISDIR(path.lstat().st_mode):
+                            continue
+                        timestamp, reason = self.codex_finality(path)
+                        if reason != 'codex-run retention':
+                            # Unknown finality is visible as a kept candidate;
+                            # directory/marker mtimes never establish finality.
+                            add(path, cls, timestamp, force=reason is not None)
                 elif cls == 'precheck-logs':
                     for root in self.children(self.home / self.config['classes'][cls]['root']):
                         if root.name.endswith('.precheck-logs'):
@@ -366,7 +399,8 @@ class Reaper:
     def never(self, path):
         fixed = ['src/rust/tmp/logins', 'src/rust/tmp/heavy', 'src/rust/tmp/post',
                  '.ssh', '.claude/.credentials.json', '.claude/jobs/pins.json', '.claude.json', '.codex/auth.json',
-                 'archive', '.local/state/reap', 'src/rust/tmp/logs/heavy.tsv']
+                 'archive', '.local/state/reap', 'src/rust/tmp/logs/heavy.tsv',
+                 'src/fabrig/events', 'src/fabrig/records', 'src/rust/records']
         fixed += [f'src/fabrig/{name}' for name in ('claims', 'leases', 'queue', 'main', 'agents', 'current', 'releases')]
         fixed += [f'.local/state/{name}' for name in ('fleet-sync', 'fabrig', 'heavy')]
         if not inside(path, self.home) or any(intersects(path, self.home / p) for p in fixed):
@@ -541,6 +575,17 @@ class Reaper:
             return 'symlink'
         if not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
             return 'special file'
+        run_root = self.home / 'src/rust/tmp/codex-run'
+        if inside(path, run_root):
+            parts = path.relative_to(run_root).parts
+            if not parts:
+                return 'codex-run not final'
+            run = run_root / parts[0]
+            if not stat.S_ISDIR(run.lstat().st_mode):
+                return 'codex-run not final'
+            _, reason = self.codex_finality(run)
+            if reason:
+                return reason
         if any(intersects(path, active) for active in self.active):
             return 'record active'
         jobs = self.home / '.claude/jobs'

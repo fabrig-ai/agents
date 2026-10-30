@@ -1,6 +1,7 @@
 """Offline reaper tests: disposable HOME, service fakes and proc namespace."""
 import argparse
 from contextlib import contextmanager
+from datetime import datetime, timezone
 import copy
 import fcntl
 import json
@@ -76,6 +77,10 @@ class ReapTests(unittest.TestCase):
         os.utime(path, (NOW-days*DAY, NOW-days*DAY))
         return path
 
+    def final(self, path, state='landed', days=8, mtime_age=0):
+        when = datetime.fromtimestamp(NOW-days*DAY, timezone.utc).isoformat().replace('+00:00', 'Z')
+        return put(path / 'final.json', json.dumps(dict(state=state, time=when)), age=mtime_age)
+
     def record(self, event, path=None, kind='ops-scratch', identity='one', owner='lead/q/temper'):
         args = argparse.Namespace(event=event, kind=kind, owner=owner, id=identity, path=[] if path is None else [str(path)])
         self.reaper().record(args)
@@ -129,14 +134,138 @@ class ReapTests(unittest.TestCase):
         self.fake('claude', '', 1)
         self.reason(self.run_class('claude-jobs'), 'claude inventory unavailable')
 
-    def test_codex_runs_require_old_ended_file(self):
-        old = self.old('src/rust/tmp/codex-run/old', directory=True)
-        self.old('src/rust/tmp/codex-run/active', directory=True)
-        new = self.old('src/rust/tmp/codex-run/new', directory=True)
-        self.old('src/rust/tmp/codex-run/runs.tsv')
-        put(old / 'ended', age=8*DAY)
-        put(new / 'ended', age=DAY)
-        self.assertEqual(self.selected(self.run_class('codex-runs')), {old})
+    def test_codex_runs_require_explicit_old_final_time(self):
+        self.fake('systemctl', 'inactive', 3)
+        landed = self.old('src/rust/tmp/codex-run/landed', directory=True)
+        withdrawn = self.old('src/rust/tmp/codex-run/withdrawn', directory=True)
+        ended_only = self.old('src/rust/tmp/codex-run/ended-only', directory=True)
+        recent = self.old('src/rust/tmp/codex-run/recent', directory=True)
+        boundary = self.old('src/rust/tmp/codex-run/boundary', directory=True)
+        index = self.old('src/rust/tmp/codex-run/runs.tsv')
+        other = self.old('src/rust/tmp/codex-run/other-file')
+        self.final(landed)  # Fresh mtime, old producer timestamp.
+        self.final(withdrawn, 'withdrawn')
+        self.final(recent, days=1, mtime_age=30*DAY)
+        self.final(boundary, days=7, mtime_age=30*DAY)
+        put(ended_only / 'ended', age=30*DAY)
+        result = self.run_class('codex-runs')
+        self.assertEqual(self.selected(result), {landed, withdrawn})
+        self.reason(result, 'codex-run not final')
+        self.assertEqual({Path(row['path']) for row in result['candidates']}, {landed, withdrawn, ended_only})
+        self.assertTrue(index.exists())
+        self.assertTrue(other.exists())
+        calls = [json.loads(line)['args'] for line in (self.home / 'systemctl.calls').read_text().splitlines()]
+        self.assertTrue(all(row[:2] == ['--user', 'is-active'] for row in calls))
+        self.assertEqual({row[2] for row in calls}, {'codex-run-landed', 'codex-run-withdrawn'})
+
+    def test_codex_unknown_final_json_kept(self):
+        bad = ['not JSON', '[]', '{}', '{"state":"running","time":"2000-01-01T00:00:00Z"}',
+               '{"state":"landed"}', '{"state":"landed","time":0}',
+               '{"state":"landed","time":"2000-01-01"}',
+               '{"state":"landed","time":"2000-01-01T00:00:00+01:00"}',
+               '{"state":"landed","time":"invalid"}']
+        for index, content in enumerate(bad):
+            path = self.old(f'src/rust/tmp/codex-run/bad-{index}', directory=True)
+            put(path / 'final.json', content)
+        result = self.run_class('codex-runs', True)
+        self.assertEqual(result['kept'], {'codex-run not final': len(bad)})
+        self.assertFalse(self.selected(result))
+        self.assertFalse((self.home / 'systemctl.calls').exists())
+
+    def test_codex_nonregular_final_json_kept(self):
+        outside = put(Path(self.temp.name) / 'outside.json', '{"state":"landed","time":"2000-01-01T00:00:00Z"}')
+        for name in ('symlink', 'directory', 'fifo'):
+            path = self.old(f'src/rust/tmp/codex-run/{name}', directory=True)
+            final = path / 'final.json'
+            if name == 'symlink':
+                final.symlink_to(outside)
+            elif name == 'directory':
+                final.mkdir()
+            else:
+                os.mkfifo(final)
+        result = self.run_class('codex-runs', True)
+        self.assertEqual(result['kept'], {'codex-run not final': 3})
+        self.assertTrue(outside.exists())
+
+    def test_codex_unreadable_final_json_kept(self):
+        path = self.old('src/rust/tmp/codex-run/unreadable', directory=True)
+        self.final(path)
+        original = API['regular']
+        @contextmanager
+        def regular(target, *args, **kwargs):
+            if target == path / 'final.json':
+                raise PermissionError('fixture unreadable final')
+            with original(target, *args, **kwargs) as fd:
+                yield fd
+        with patch.dict(Reaper.codex_finality.__globals__, regular=regular):
+            self.reason(self.run_class('codex-runs', True), 'codex-run not final')
+        self.assertTrue(path.exists())
+
+    def test_codex_only_inactive_or_unknown_unit_is_eligible(self):
+        path = self.old('src/rust/tmp/codex-run/unit', directory=True)
+        self.final(path)
+        for state, code, eligible in [('inactive', 3, True), ('unknown', 4, True),
+                                      ('unknown', 3, True), ('active', 0, False),
+                                      ('activating', 0, False), ('failed', 3, False),
+                                      ('inactive', 1, False), ('unknown', 1, False), ('', 0, False)]:
+            with self.subTest(state=state, code=code):
+                self.fake('systemctl', state, code)
+                self.assertEqual(path in self.selected(self.run_class('codex-runs')), eligible)
+                self.assertTrue(path.exists())
+
+    def test_codex_systemctl_errors_keep_run(self):
+        path = self.old('src/rust/tmp/codex-run/unit', directory=True)
+        self.final(path)
+        for error in (FileNotFoundError('fixture systemctl absent'), subprocess.TimeoutExpired('systemctl', 30)):
+            with self.subTest(error=type(error).__name__):
+                with patch('subprocess.run', side_effect=error):
+                    self.assertEqual(self.reaper().codex_finality(path)[1], 'codex-run unit unavailable')
+
+    def test_codex_record_cannot_override_finality_or_remove_metadata(self):
+        path = self.old('src/rust/tmp/codex-run/recorded', directory=True)
+        index = self.old('src/rust/tmp/codex-run/runs.tsv')
+        self.ended(path, kind='codex-run')
+        self.ended(index, identity='index')
+        result = self.run_class('recorded', True)
+        self.assertEqual(result['kept'], {'codex-run not final': 2})
+        self.assertTrue(path.exists())
+        self.assertTrue(index.exists())
+        self.assertFalse((path / 'final.json').exists())  # No backfill.
+
+    def test_codex_live_removes_only_final_inactive_runs(self):
+        path = self.old('src/rust/tmp/codex-run/final', directory=True)
+        other = self.old('src/rust/tmp/codex-run/unknown', directory=True)
+        index = self.old('src/rust/tmp/codex-run/runs.tsv')
+        self.final(path)
+        self.fake('systemctl', 'inactive', 3)
+        self.assertEqual(self.selected(self.run_class('codex-runs', True)), {path})
+        self.assertFalse(path.exists())
+        self.assertTrue(other.exists())
+        self.assertTrue(index.exists())
+
+    def test_codex_finality_and_unit_rechecked_before_removal(self):
+        path = self.old('src/rust/tmp/codex-run/recheck', directory=True)
+        self.final(path)
+        original = Reaper.snapshot
+        for change in ('unit', 'final'):
+            with self.subTest(change=change):
+                self.final(path)
+                self.fake('systemctl', 'inactive', 3)
+                calls = []
+                def snapshot(instance):
+                    calls.append(1)
+                    result = original(instance)
+                    if len(calls) == 2:
+                        if change == 'unit':
+                            self.fake('systemctl', 'active', 0)
+                        else:
+                            self.final(path, state='running')
+                    return result
+                with patch.object(Reaper, 'snapshot', snapshot):
+                    result = self.run_class('codex-runs', True)
+                self.assertFalse(self.selected(result))
+                self.assertTrue(path.exists())
+                self.reason(result, 'codex-run unit not inactive' if change == 'unit' else 'codex-run not final')
 
     def test_heavy_logs_protect_history(self):
         old = self.old('src/rust/tmp/logs/old.log', 8)
@@ -219,6 +348,60 @@ class ReapTests(unittest.TestCase):
         record = self.reaper().records[('ops-scratch', 'one')]
         self.assertIsNone(record['ended'])
         self.assertEqual(len(record['paths']), 2)
+
+    def test_first_end_retention_for_every_kind(self):
+        paths = set()
+        for kind, retention in self.config['kinds'].items():
+            with self.subTest(kind=kind):
+                identity = kind
+                path = self.old(f'.claude/jobs/{identity}' if kind == 'claude-session' else f'scratch/{kind}', directory=True)
+                paths.add(path)
+                args = argparse.Namespace(event='start', kind=kind, owner='lead/q/temper', id=identity, path=[str(path)])
+                reaper = self.reaper()
+                reaper.now = NOW-4*retention
+                reaper.record(args)
+                args.event = 'end'
+                reaper.now = NOW-2*retention
+                reaper.record(args)
+                reaper.now = NOW
+                reaper.record(args)
+                self.assertEqual(self.reaper().records[(kind, identity)]['ended'], NOW-2*retention)
+                # Even a later append with an earlier timestamp uses the minimum.
+                reaper.now = NOW-3*retention
+                reaper.record(args)
+                self.assertEqual(self.reaper().records[(kind, identity)]['ended'], NOW-3*retention)
+                API['append'](reaper.state / 'records.jsonl', dict(event='end', kind=kind, id=identity,
+                                                               owner='fixture', paths=[], time=NOW))
+                self.assertEqual(self.reaper().records[(kind, identity)]['ended'], NOW-3*retention)
+        self.assertEqual(self.selected(self.run_class('recorded')), paths)
+
+    def test_resume_starts_new_retention_clock_for_every_kind(self):
+        for kind, retention in self.config['kinds'].items():
+            with self.subTest(kind=kind):
+                identity = kind
+                path = self.old(f'.claude/jobs/{identity}' if kind == 'claude-session' else f'scratch/{kind}', directory=True)
+                args = argparse.Namespace(event='start', kind=kind, owner='coordinator/dm/stamp', id=identity, path=[str(path)])
+                reaper = self.reaper()
+                reaper.now = NOW-3*retention
+                reaper.record(args)
+                args.event = 'end'
+                reaper.record(args)
+                args.event = 'start'
+                reaper.now = NOW
+                reaper.record(args)
+                self.assertIsNone(self.reaper().records[(kind, identity)]['ended'])
+                self.assertNotIn(path, {Path(row['path']) for row in self.reaper().discover({'recorded'})})
+                args.event = 'end'
+                reaper.now = NOW+100
+                reaper.record(args)
+                reaper.now += 100
+                reaper.record(args)
+                self.assertEqual(self.reaper().records[(kind, identity)]['ended'], NOW+100)
+                reaper.refresh_records()
+                reaper.now = NOW+100+retention-1
+                self.assertNotIn(path, {Path(row['path']) for row in reaper.discover({'recorded'})})
+                reaper.now += 2
+                self.assertIn(path, {Path(row['path']) for row in reaper.discover({'recorded'})})
 
     def test_active_records_protect_discovery(self):
         path = self.old('src/rust/tmp/logs/old', 8)
@@ -378,6 +561,7 @@ class ReapTests(unittest.TestCase):
         reaper = self.reaper()
         for path in ['src/rust/tmp/logins/a', 'src/rust/tmp/qa-focused/a', 'src/rust/tmp/qa/a',
                      'src/rust/tmp/heavy/a', 'src/rust/tmp/post/a', 'src/fabrig/claims/a',
+                     'src/fabrig/events/a', 'src/fabrig/records/a', 'src/rust/records/a',
                      'src/fabrig/leases/a', 'src/fabrig/queue/a', 'src/fabrig/main/a', 'src/fabrig/agents/a',
                      'src/fabrig/current/a', 'src/fabrig/releases/a', '.local/state/fleet-sync/a',
                      '.local/state/fabrig/a', '.local/state/heavy/a', '.ssh/id', '.claude/.credentials.json',
@@ -386,6 +570,16 @@ class ReapTests(unittest.TestCase):
                 self.assertTrue(reaper.never(self.home / path))
         self.assertTrue(reaper.never(Path(self.temp.name)))
         self.assertFalse(reaper.never(self.home / 'scratch'))
+
+    def test_collectors_events_and_records_never_reaped(self):
+        paths = []
+        for index, relative in enumerate(('src/fabrig/events', 'src/fabrig/records', 'src/rust/records')):
+            path = self.old(relative, directory=True)
+            self.ended(path, identity=f'protected-{index}')
+            paths.append(path)
+        self.assertEqual(self.run_class('recorded', True)['kept'], {'never path': 3})
+        for path in paths:
+            self.assertTrue((path / 'payload').exists())
 
     def test_recorded_never_path_kept_live(self):
         path = self.old('src/rust/tmp/qa-focused/one', directory=True)
