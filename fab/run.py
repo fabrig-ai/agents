@@ -21,7 +21,7 @@ REMOTES = {"agents": "git@github.com:fabrig-ai/agents.git", "fabrig": "git@githu
 ROLE = Path(__file__).resolve().parent / "roles" / "implementer.md"
 NOTIFY = "fab@hel8"  # codex-run posts its end here; nothing waits on it
 SLOTTED = ("fabrig",)  # repositories whose runs build in a builder's warm slot
-LAUNCHER = "codex-run"  # "codex-run" (fabrig's) or "fab" (fab codex start); see fab/codex.py
+LAUNCHER = "fab"  # "fab" (fab codex start) or "codex-run" (fabrig's, retired); see fab/codex.py
 
 
 def remote_home(host: Host) -> str:
@@ -58,6 +58,12 @@ def outcome(report: str) -> str:
     """The outcome named by the report's first non-blank line (OUTCOMES); anything else is failed."""
     first = next((line.strip() for line in report.splitlines() if line.strip()), "")
     return next((value for prefix, value in OUTCOMES.items() if first.startswith(prefix)), "failed")
+
+
+def role_text(repo: str) -> str:
+    """The implementer's role text, then the repository's notes (fab/roles/<repo>.md) when it has any."""
+    notes = ROLE.with_name(f"{repo}.md")
+    return ROLE.read_text() + (f"\n{notes.read_text()}" if notes.exists() else "")
 
 
 def brief(task: Task, role: str, *, run_id: str, branch: str, base: str, report: str) -> str:
@@ -108,7 +114,7 @@ def start(task: Task, host: Host, *, kind: str = "implement", events: Iterable[d
     directory = root / "runs" / run_id
     brief_path, report_path = directory / "brief.md", directory / "report.md"
     base = "origin/main"
-    text = brief(task, ROLE.read_text(), run_id=run_id, branch=branch, base=base,
+    text = brief(task, role_text(task.repo), run_id=run_id, branch=branch, base=base,
                  report=str(report_path))
 
     def remote(argv, *, input=None):

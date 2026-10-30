@@ -126,7 +126,7 @@ class RunStartTest(unittest.TestCase):
                                                    branch, str(worktree), "origin/main"])
                 self.assertEqual(commands[-2], ["bash", "-c",
                     f"cat > {directory}/brief.md.tmp && mv -- {directory}/brief.md.tmp {directory}/brief.md"])
-                expected = ["codex-run", "task", "--effort", "high", "--to", run.NOTIFY]
+                expected = ["fab", "codex", "start", "--effort", "high", "--to", run.NOTIFY]
                 if kind == "review":
                     expected.append("--read-only")
                 self.assertEqual(commands[-1], [*expected, str(directory / "brief.md"), str(worktree),
@@ -150,7 +150,7 @@ class RunStartTest(unittest.TestCase):
             path = home / "custom/events.jsonl"
             run.start(replace(TASK, repo="fabrig", effort="medium"), HOST, sh=fake, log_path=path)
             self.assertIn(run.REMOTES["fabrig"], command(fake.calls[1])[2])
-            self.assertEqual(command(fake.calls[-1])[2:4], ["--effort", "medium"])
+            self.assertEqual(command(fake.calls[-1])[3:5], ["--effort", "medium"])
             self.assertEqual(len(log.read(path)), 1)
             self.assertEqual(log.read(), [])
 
@@ -171,7 +171,7 @@ class RunStartTest(unittest.TestCase):
                     ["fab", "slot", "claim", "2", run_id, TASK.id],
                     ["git", "-C", str(slot), "fetch", "origin"],
                     ["git", "-C", str(slot), "switch", "-C", branch, source]])
-                expected = ["codex-run", "task", "--effort", task.effort, "--to", run.NOTIFY]
+                expected = ["fab", "codex", "start", "--effort", task.effort, "--to", run.NOTIFY]
                 if kind == "review":
                     expected.append("--read-only")
                 self.assertEqual(commands[-1], [*expected, str(directory / "brief.md"), str(slot),
@@ -555,3 +555,10 @@ class RunMainTest(unittest.TestCase):
                 self.assertEqual(run._load_spec(path), TASK)
                 load.assert_called_once_with(path.parent.parent / "plan.toml")
                 parse.assert_called_once_with("spec text", str(path), "draft", "agents")
+
+
+class RoleTextTest(unittest.TestCase):
+    def test_repository_notes_follow_the_role(self):
+        self.assertTrue(run.role_text("fabrig").startswith(run.ROLE.read_text()))
+        self.assertIn("# Working in fabrig", run.role_text("fabrig"))
+        self.assertEqual(run.role_text("agents"), run.ROLE.read_text())
