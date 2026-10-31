@@ -1245,6 +1245,19 @@ parts = []
                          + f"page - {log.home() / channel.PAGE}\n")
         self.assertEqual(len(log.read()), 1)
 
+    def test_direct_part_without_specs_starts_no_design_call(self):
+        path = self.directory / "plan.toml"
+        write(path, path.read_text().replace('mode = "feature"', 'mode = "direct"'))
+        (self.directory / "tasks/a.md").unlink()
+        self.assertEqual(self.tick(), [])
+        self.assertEqual(units(self.fake), [])
+        self.start.assert_not_called()
+
+    def test_start_passes_the_plans_checkout_root(self):
+        self.fake.rules.insert(0, (["git", "rev-parse", "--show-toplevel"], Result(0, str(self.home))))
+        self.tick()
+        self.assertEqual(self.start.call_args.kwargs["checkout"], self.home)
+
     def test_contract_unit_passes_the_part_and_plan(self):
         """The tick launches a contract with its part in the subject-named unit."""
         (self.directory / "tasks/a.md").unlink()
@@ -3463,6 +3476,98 @@ class IntegrationMergeTest(unittest.TestCase):
         self.assertEqual(len(self.runner.calls), count)
         self.assertEqual(log.read(), [])
 
+    def test_running_cut_releases_batches_once_and_finishes_with_its_last_push(self):
+        """Real git checks ancestry, repeated pushes and the final merge of one call branch."""
+        directory = self.checkout / "docs/plan/draft"
+        git(self.checkout, "switch", "-q", "-c", "calls/cut")
+        write_plan(directory, "draft", parts={"core": (), "later": ()}, tasks=("a",))
+        path = directory / "plan.toml"
+        write(path, path.read_text().replace('landing = "queue"', 'landing = "integration"')
+              .replace('reviews = true', 'reviews = false').replace('direct = false', 'direct = true')
+              .replace('mode = "feature"', 'mode = "direct"'))
+        git(self.checkout, "add", "docs")
+        git(self.checkout, "commit", "-q", "-m", "Release first specs")
+        first = git(self.checkout, "rev-parse", "HEAD")
+        git(self.checkout, "push", "-q", "origin", "calls/cut")
+        git(self.checkout, "switch", "-q", self.plan.trunk)
+        log.append(path=self.path, **call_started("cut", "cut", "draft/cut"))
+        hosts = {"builder": Host("builder", "fake@builder", ("builder",), places=2)}
+        self.runner.on(["ssh"], Result(0, "codex-1 /state/codex-1\n"))
+        with patch.object(call_review, "start", side_effect=AssertionError("unexpected review")):
+            actions = dispatch.tick(directory, hosts=hosts, sh=self.runner, log_path=self.path)
+            self.assertEqual([action.kind for action in actions], ["merge", "flow", "start"])
+            records = log.read(self.path)
+            landed, = [entry for entry in records if entry["ev"] == "branch.landed"]
+            self.assertEqual((landed["task"], landed["branch"], landed["tip"], landed["into"]),
+                             ("calls/cut", "calls/cut", first, self.plan.trunk))
+            started_run, = [entry for entry in records if entry["ev"] == "run.started"]
+            self.assertEqual((started_run["task"], started_run["base"]),
+                             ("draft/a", "origin/draft/integration"))
+            self.assertEqual(git(self.origin, "rev-parse", self.plan.trunk), landed["main"])
+            brief = (log.home() / "runs/draft/a-1/brief.md").read_text()
+            self.assertIn("docs/plan/draft/tasks/a.md", brief)
+            self.assertNotIn(str(self.checkout), brief)
+            dispatch.tick(directory, hosts=hosts, sh=self.runner, log_path=self.path)
+            self.assertEqual([entry for entry in log.read(self.path) if entry["ev"] == "branch.landed"],
+                             [landed])
+            git(self.checkout, "switch", "-q", "calls/cut")
+            write(directory / "tasks/b.md", '+++\nid = "b"\npart = "later"\nkind = "feature"\nneeds = []\n+++\n')
+            git(self.checkout, "add", "docs")
+            git(self.checkout, "commit", "-q", "-m", "Release remaining specs")
+            second = git(self.checkout, "rev-parse", "HEAD")
+            git(self.checkout, "push", "-q", "origin", "calls/cut")
+            git(self.checkout, "switch", "-q", self.plan.trunk)
+            actions = dispatch.tick(directory, hosts=hosts, sh=self.runner, log_path=self.path)
+            self.assertEqual([action.task for action in actions if action.kind == "start"], ["draft/b"])
+            self.assertFalse(any(entry["ev"] == "call.finished" for entry in log.read(self.path)))
+            git(self.checkout, "switch", "-q", "calls/cut")
+            write(directory / "notes/done.md", "The cut is complete.\n")
+            git(self.checkout, "add", "docs")
+            git(self.checkout, "commit", "-q", "-m", "Finish the cut")
+            last = git(self.checkout, "rev-parse", "HEAD")
+            git(self.checkout, "push", "-q", "origin", "calls/cut")
+            git(self.checkout, "switch", "-q", self.plan.trunk)
+            log.append(path=self.path, **call_ended("cut"))
+            dispatch.tick(directory, hosts=hosts, sh=self.runner, log_path=self.path)
+        records = log.read(self.path)
+        landings = [entry for entry in records if entry["ev"] == "branch.landed"]
+        self.assertEqual([entry["tip"] for entry in landings], [first, second, last])
+        self.assertEqual(git(self.origin, "rev-parse", self.plan.trunk), landings[-1]["main"])
+        self.assertEqual(git(self.origin, "rev-parse", "main"), self.base)
+        self.assertTrue((directory / "tasks/b.md").exists())
+        self.assertEqual([(entry["call"], entry["outcome"]) for entry in records
+                          if entry["ev"] == "call.finished"], [("cut", "done")])
+        dispatch.tick(directory, hosts=hosts, sh=self.runner, log_path=self.path)
+        records = log.read(self.path)
+        self.assertEqual([entry["task"] for entry in records if entry["ev"] == "run.started"],
+                         ["draft/a", "draft/b"])
+        self.assertEqual(len([entry for entry in records if entry["ev"] == "branch.landed"]), 3)
+        self.assertEqual(units(self.runner), [])
+
+    def test_running_cut_conflict_is_noted_and_resolved_push_retries(self):
+        tip = self.branch("calls/cut", "README.md", "cut edits\n")
+        write(self.checkout / "README.md", "trunk edits\n")
+        git(self.checkout, "commit", "-q", "-a", "-m", "Change trunk")
+        git(self.checkout, "push", "-q", "origin", self.plan.trunk)
+        before = git(self.origin, "rev-parse", self.plan.trunk)
+        log.append(path=self.path, **call_started("cut", "cut", "draft/cut"))
+        for _ in range(2):
+            dispatch._merge_cut(self.plan, self.checkout, self.checkout, {},
+                                sh=self.runner, log_path=self.path)
+        records = log.read(self.path)
+        self.assertEqual([entry["ev"] for entry in records], ["call.started", "note", "note"])
+        self.assertIn("CONFLICT", records[-1]["text"])
+        self.assertEqual(records[-1]["tip"], tip)
+        self.assertEqual(git(self.origin, "rev-parse", self.plan.trunk), before)
+        self.assertEqual(git(self.checkout, "status", "--porcelain"), "")
+        git(self.checkout, "switch", "-q", "calls/cut")
+        git(self.checkout, "merge", "--no-edit", "-s", "ours", self.plan.trunk)
+        git(self.checkout, "push", "-q", "origin", "calls/cut")
+        git(self.checkout, "switch", "-q", self.plan.trunk)
+        dispatch._merge_cut(self.plan, self.checkout, self.checkout, {},
+                            sh=self.runner, log_path=self.path)
+        self.assertEqual(log.read(self.path)[-1]["ev"], "branch.landed")
+
     def test_conflict_aborts_and_logs_findings_without_moving_trunk(self):
         tip = self.branch("draft/a", "README.md", "branch edits\n")
         write(self.checkout / "README.md", "trunk edits\n")
@@ -3618,6 +3723,50 @@ class IntegrationDeliveryTest(unittest.TestCase):
         self.assertEqual(log.read(self.path)[-1]["outcome"], "done")
         self.assertEqual(self.fake.argvs().count(push), 2)
         self.assertEqual(log.read(), [])
+
+    def test_running_cut_merges_only_its_pushed_unmerged_branch(self):
+        self.append(call_started("cut", "cut", "draft/cut"))
+        for landing, reviews, result in (("queue", False, Result(1)),
+                                          ("integration", True, Result(1)),
+                                          ("integration", False, Result(0))):
+            with self.subTest(landing=landing, reviews=reviews):
+                self.fake.calls.clear()
+                self.fake.rules.insert(0, (["git", "merge-base"], result))
+                actions = dispatch._merge_cut(replace(self.plan, landing=landing, reviews=reviews),
+                                              self.directory, self.home, {}, sh=self.fake, log_path=self.path)
+                self.assertEqual(actions, [])
+                self.assertFalse(any(argv[:2] == ["git", "push"] for argv in self.fake.argvs()))
+        for history in ([call_started("foreign", "cut", "other/cut")],
+                        [call_started("wrong", "skeleton", "draft/cut")],
+                        [call_started("cut", "cut", "draft/cut"), call_ended("cut")]):
+            with self.subTest(history=history):
+                path = self.home / "filtered.jsonl"
+                write(path, "")
+                for entry in history:
+                    log.append(path=path, **entry)
+                self.fake.calls.clear()
+                self.assertEqual(dispatch._merge_cut(self.plan, self.directory, self.home, {},
+                                                      sh=self.fake, log_path=path), [])
+                self.assertEqual(self.fake.calls, [])
+
+    def test_running_cut_without_push_waits_and_failed_push_retries(self):
+        self.append(call_started("cut", "cut", "draft/cut"))
+        pushed = ["git", "rev-parse", "--verify", "refs/remotes/origin/calls/cut^{commit}"]
+        self.fake.rules.insert(0, (pushed, Result(128)))
+        self.assertEqual(dispatch._merge_cut(self.plan, self.directory, self.home, {},
+                                              sh=self.fake, log_path=self.path), [])
+        self.assertEqual([entry["ev"] for entry in log.read(self.path)], ["call.started"])
+        self.fake.rules.pop(0)
+        self.fake.on(["git", "merge-base"], Result(1))
+        attempts = [Result(1, err="push unavailable"), Result(0)]
+        push = ["git", "push", "origin", "HEAD:refs/heads/draft/integration"]
+        self.fake.on(push, lambda call: attempts.pop(0))
+        for _ in range(2):
+            dispatch._merge_cut(self.plan, self.directory, self.home, {}, sh=self.fake, log_path=self.path)
+        self.assertEqual([entry["ev"] for entry in log.read(self.path)],
+                         ["call.started", "note", "branch.landed"])
+        self.assertEqual(self.fake.argvs().count(push), 2)
+        self.assertFalse(any(entry["ev"] == "call.finished" for entry in log.read(self.path)))
 
     def test_merge_rejection_keeps_last_forty_output_lines(self):
         self.fake.on(["git", "-c"], Result(1, "".join(f"line {n}\n" for n in range(50)), "stderr\n"))

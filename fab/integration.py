@@ -81,6 +81,11 @@ def next_step(plan: Plan, tasks: Mapping[str, Task], events: Sequence[dict]) -> 
     The third red stops before its generated repair can start. Pure."""
     if plan.landing != "integration":
         return None
+    ended = {event["call"] for event in events if event.get("ev") == "call.ended"}
+    if any(event.get("ev") == "call.started" and event.get("role") == "cut"
+           and event.get("subject") == f"{plan.draft}/cut" and event["call"] not in ended
+           for event in events):
+        return None
     tip = trunk_tip(plan, events)
     checks = _checks(plan, events)
     if tip is None or _first_merge(plan, events) is None or any(

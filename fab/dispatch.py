@@ -287,7 +287,8 @@ def _design_action(plan: Plan, tasks: Mapping[str, Task], views: Mapping[str, st
     statuses = state.part_statuses(plan, tasks, {key: view.status for key, view in views.items()})
     questioned = {part for question in plan.questions if not question.answer for part in question.parts}
     eligible = [part.id for part in plan.parts.values()
-                if statuses[part.id] == "not designed" and part.id not in questioned and all(
+                if part.mode != "direct" and statuses[part.id] == "not designed"
+                and part.id not in questioned and all(
                     statuses.get(need) == "done" or (
                         statuses.get(need) == "designed" and need not in part.needs_landed
                         and plan.parts[need].mode != "probe")
@@ -407,8 +408,10 @@ def _import_queue(tasks: Mapping[str, Task], events: list[dict], hosts: Mapping[
 def _merge_branch(branch: str, plan: Plan, checkout: Path, *, task: str | None = None,
                   sh: Runner, log_path: Path | None) -> bool:
     """Merge a branch into the plan's trunk once; log conflicts and retry refused pushes."""
-    if any(event.get("ev") == "branch.landed" and event.get("branch") == branch
-           and event.get("into") == plan.trunk for event in log.read(log_path)):
+    events = log.read(log_path)
+    landed = [event for event in events if event.get("ev") == "branch.landed"
+              and event.get("branch") == branch and event.get("into") == plan.trunk]
+    if landed and not branch.startswith("calls/"):
         return True
     sh(["git", "fetch", "origin"], cwd=str(checkout), check=True)
     sh(["git", "reset", "-q", "--hard", f"origin/{plan.trunk}"], cwd=str(checkout), check=True)
@@ -416,6 +419,8 @@ def _merge_branch(branch: str, plan: Plan, checkout: Path, *, task: str | None =
              cwd=str(checkout), check=True).out.strip()
     if not tip:
         raise ValueError("branch has no tip")
+    if any(event.get("tip") == tip for event in landed):
+        return True
     merged = sh(["git", "-c", "user.name=fab", "-c", "user.email=fab@localhost",
                  "merge", "--no-ff", "--no-edit", tip], cwd=str(checkout))
     if not merged.ok:
@@ -433,8 +438,17 @@ def _merge_branch(branch: str, plan: Plan, checkout: Path, *, task: str | None =
             trees = []
         if not trees:
             sh(["git", "merge", "--abort"], cwd=str(checkout), check=True)
-            log.append("branch.rejected", path=log_path, task=task or branch, branch=branch,
-                       tip=tip, step="merge", findings=findings)
+            ended = {event["call"] for event in events if event.get("ev") == "call.ended"}
+            cutting = any(event.get("ev") == "call.started" and event.get("role") == "cut"
+                          and event.get("subject") == f"{plan.draft}/cut"
+                          and f"calls/{event['call']}" == branch and event["call"] not in ended
+                          for event in events)
+            if cutting:
+                log.append("note", path=log_path, task=task or branch, branch=branch,
+                           tip=tip, text=f"cut merge conflict: {findings}")
+            else:
+                log.append("branch.rejected", path=log_path, task=task or branch, branch=branch,
+                           tip=tip, step="merge", findings=findings)
             return False
     sh(["git", "push", "origin", f"HEAD:refs/heads/{plan.trunk}"], cwd=str(checkout), check=True)
     main = sh(["git", "rev-parse", "HEAD"], cwd=str(checkout), check=True).out.strip()
@@ -588,7 +602,7 @@ def _take(action: Action, tasks: Mapping[str, Task], hosts: Mapping[str, Host], 
                 _merge_branch(action.branch, plan, checkout, task=action.task,
                               sh=sh, log_path=log_path)
             case "start":
-                _start(action, tasks, hosts, plan=plan, sh=sh, log_path=log_path)
+                _start(action, tasks, hosts, plan=plan, checkout=checkout, sh=sh, log_path=log_path)
             case "call":
                 _call(action, plan_dir, plan.draft, sh=sh)
             case "foreman":
@@ -748,6 +762,9 @@ def _tick_plan(plan: Plan, tasks: Mapping[str, Task], directory: Path, checkout:
                log_path: Path | None) -> list[Action]:
     """Take decisions, then question and refusal actions from one fresh snapshot in that
     order, then calls decided from the resulting log."""
+    released = _merge_cut(plan, directory, checkout, hosts, sh=sh, log_path=log_path)
+    if released:
+        plan, tasks = _load_plan(directory, log.read(log_path), checkout=checkout, sh=sh)
     tasks = _integration_tasks(plan, specs.checked_tasks(plan, tasks, log.read(log_path)), log.read(log_path))
     actions = decide(plan, tasks, log.read(log_path), hosts, calm)
     for action in actions:
@@ -764,6 +781,39 @@ def _tick_plan(plan: Plan, tasks: Mapping[str, Task], directory: Path, checkout:
         _take(action, tasks, hosts, directory, plan=plan, checkout=checkout, sh=sh, log_path=log_path)
     _check_calls(plan, directory, checkout, hosts, sh=sh, log_path=log_path)
     _integration(plan, tasks, checkout, hosts, sh=sh, log_path=log_path)
+    return released + actions
+
+
+def _merge_cut(plan: Plan, directory: Path, checkout: Path, hosts: Mapping[str, Host], *,
+               sh: Runner, log_path: Path | None) -> list[Action]:
+    """Merge each running cut's pushed tip before deciding tasks; failures retry next tick."""
+    if plan.landing != "integration" or plan.reviews:
+        return []
+    events = log.read(log_path)
+    ended = {event["call"] for event in events if event.get("ev") == "call.ended"}
+    actions = []
+    for event in events:
+        if (event.get("ev") != "call.started" or event.get("role") != "cut"
+                or event.get("subject") != f"{plan.draft}/cut" or event["call"] in ended):
+            continue
+        branch = f"calls/{event['call']}"
+        try:
+            pushed = sh(["git", "rev-parse", "--verify", f"refs/remotes/origin/{branch}^{{commit}}"],
+                        cwd=str(checkout))
+            if not pushed.ok or not pushed.out.strip():
+                continue
+            argv = ["git", "merge-base", "--is-ancestor", pushed.out.strip(), f"origin/{plan.trunk}"]
+            ancestor = sh(argv, cwd=str(checkout))
+            if ancestor.ok:
+                continue
+            if ancestor.code != 1:
+                raise Failed(argv, ancestor)
+            action = Action("merge", task=branch, branch=branch, detail=branch)
+            actions.append(action)
+            _take(action, {}, hosts, directory, plan=plan, checkout=checkout, sh=sh, log_path=log_path)
+        except (OSError, ValueError, Failed) as error:
+            log.append("note", path=log_path, task=branch,
+                       text="cut merge failed: " + " ".join(str(error).splitlines()))
     return actions
 
 
@@ -821,11 +871,11 @@ def _collect(action: Action, hosts: Mapping[str, Host], *, sh: Runner,
 
 
 def _start(action: Action, tasks: Mapping[str, Task], hosts: Mapping[str, Host], *,
-           plan: Plan, sh: Runner, log_path: Path | None) -> None:
+           plan: Plan, checkout: Path, sh: Runner, log_path: Path | None) -> None:
     """Start a task run with current events and the decision's rejection context."""
     runs.start(tasks[action.task], hosts[action.host], kind=action.run_kind,
                events=log.read(log_path), sh=sh, log_path=log_path, rejection=action.rejection,
-               trunk=plan.trunk)
+               trunk=plan.trunk, checkout=checkout)
 
 
 def _vet(action: Action, plan: Plan, checkout: Path, hosts: Mapping[str, Host], *,

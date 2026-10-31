@@ -11,7 +11,7 @@ from unittest.mock import patch
 from fab import atomic, cli, integration, log
 from fab.plan import Plan, Task
 from fab.sh import Result
-from fab.tests.support import FakeRunner, run_ended, run_started, tmp_home
+from fab.tests.support import FakeRunner, call_ended, call_started, run_ended, run_started, tmp_home
 
 
 PLAN = Plan("demo", "fabrig", (), 1, 2, {}, (), landing="integration")
@@ -77,6 +77,27 @@ class IntegrationTest(unittest.TestCase):
             step.kind = "ready"
         self.assertIsNone(integration.next_step(PLAN, tasks, events + checked()[:1]))
         self.assertEqual(integration.next_step(PLAN, tasks, events + checked(tip="old")), step)
+
+    def test_next_step_waits_for_own_cut_until_it_ends(self):
+        tasks = {TASK.id: TASK}
+        events = [merged()]
+        cut = call_started("cut", "cut", "demo/cut")
+        step = integration.Step("check", "tip", "tip")
+        for reviews in (False, True):
+            with self.subTest(reviews=reviews):
+                the_plan = replace(PLAN, reviews=reviews)
+                self.assertIsNone(integration.next_step(the_plan, tasks, [cut, *events]))
+                self.assertEqual(integration.next_step(the_plan, tasks,
+                                                       [cut, *events, call_ended("cut")]), step)
+        for role, subject in (("cut", "other/cut"), ("skeleton", "demo/cut"),
+                              ("cut", "demo/cut-more")):
+            with self.subTest(role=role, subject=subject):
+                self.assertEqual(integration.next_step(PLAN, tasks,
+                                                       [call_started("other", role, subject), *events]), step)
+        self.assertIsNone(integration.next_step(PLAN, tasks, [cut, *events, *checked()]))
+        self.assertIsNone(integration.next_step(PLAN, tasks,
+                                               [cut, *events, *checked(1, "failed"),
+                                                *checked(2, "failed"), *checked(3, "failed")]))
 
     def test_next_step_green_readies_once_or_stops_without_ready(self):
         events = [merged()] + checked()
