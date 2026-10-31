@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import shlex
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from datetime import datetime
 from pathlib import Path
 
@@ -305,7 +305,7 @@ def fetch_clone(host: Host, repo: str, *, sh: Runner = run) -> Path:
 
 def launch(host: Host, run_id: str, *, task: str, kind: str, workdir: str, branch: str,
            base: str, brief: str, effort: str, read_only: bool = False, sh: Runner = run,
-           log_path: Path | None = None, **fields) -> str:
+           log_path: Path | None = None, command: Sequence[str] | None = None, **fields) -> str:
     """Start Codex on host in workdir, a checkout the caller prepared, log run.started and
     return run_id. start uses it for every run; fab.call_review for review runs.
 
@@ -318,7 +318,8 @@ def launch(host: Host, run_id: str, *, task: str, kind: str, workdir: str, branc
     `<remote_home(host)>/runs/<run>/report.md`. Its output must be `<id> <absolute state
     directory>` on one line, else ValueError. run.started carries run, task, kind, host
     (host.name), dir (workdir), branch, base, codex (the id), state, report (REPORT) and
-    fields, flat as fab.log.record takes them."""
+    fields, flat as fab.log.record takes them. With command, append BRIEF, workdir and
+    REPORT to that command instead of the Codex launcher."""
     directory = Path(remote_home(host)) / "runs" / run_id
     brief_path, report_path = directory / "brief.md", directory / "report.md"
     temporary = brief_path.with_name("brief.md.tmp")
@@ -327,12 +328,13 @@ def launch(host: Host, run_id: str, *, task: str, kind: str, workdir: str, branc
              + shlex.join(["mv", "--", str(temporary), str(brief_path)]))
     sh(ssh(host.ssh, ["bash", "-c", write]), input=brief, check=True)
     atomic.write(log.home() / "runs" / run_id / "brief.md", brief)
-    if LAUNCHER == "fab":
-        command = ["fab", "codex", "start", "--effort", effort, "--model", MODEL]
-    else:
-        command = ["codex-run", "task", "--effort", effort, "--model", MODEL, "--to", NOTIFY]
-    if read_only:
-        command.append("--read-only")
+    if command is None:
+        if LAUNCHER == "fab":
+            command = ["fab", "codex", "start", "--effort", effort, "--model", MODEL]
+        else:
+            command = ["codex-run", "task", "--effort", effort, "--model", MODEL, "--to", NOTIFY]
+        if read_only:
+            command.append("--read-only")
     result = sh(ssh(host.ssh, [*command, str(brief_path), workdir, str(report_path)]), check=True)
     response = result.out.strip()
     answer = response.split(maxsplit=1)

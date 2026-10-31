@@ -898,6 +898,18 @@ class LaunchTest(unittest.TestCase):
                               "tip": "tip-sha", "slot": 2})
             self.assertEqual(log.read(), [])
 
+    def test_launch_custom_command_appends_paths_and_keeps_event_contract(self):
+        with tmp_home() as home:
+            fake = FakeRunner().on(["ssh"], Result(0, "check-1 /check/check-1\n"))
+            command = ("fab", "check", "start", "--tip", "tip", "--onto", "origin/draft/integration")
+            self.launch(fake, command=command, slot=2)
+            argv = shlex.split(shlex.split(fake.calls[-1].argv[-1])[2])
+            directory = ROOT / "runs/call-2"
+            self.assertEqual(argv, [*command, str(directory / "brief.md"), "/checkout", str(directory / "report.md")])
+            record, = log.read()
+            self.assertEqual((record["codex"], record["state"], record["slot"]), ("check-1", "/check/check-1", 2))
+            self.assertEqual((home / "fab/runs/call-2/brief.md").read_text(), "Review this.\n")
+
     def test_both_launchers_respect_read_only(self):
         for launcher in ("fab", "codex-run"):
             for read_only in (False, True):
