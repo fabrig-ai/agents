@@ -16,6 +16,7 @@ COMMANDS = {
     "status": ("fab.state", "a plan's tasks and their status"),
     "land": ("fab.land", "land a branch of this repository"),
     "run": ("fab.run", "start, inspect and collect Codex runs"),
+    "check": ("fab.integration", "check an integration trunk as a user unit"),
     "codex": ("fab.codex", "start a Codex run as a user unit (the builder's side of fab run)"),
     "hosts": ("fab.hosts", "the machines and their disk budget"),
     "slot": ("fab.slots", "a builder's slots: claim, release, reclaim"),
