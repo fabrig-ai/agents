@@ -555,7 +555,8 @@ before it lands (13.1).
   is a skeleton call with the role `contract` (`fab call contract PART`),
   its brief the skeleton author's with the contract's readers named. Its
   subject is the part's, `<draft>/<part>`, so a part is designed by one or
-  the other. One contract call and one skeleton call may run at once.
+  the other. Contract and skeleton calls share a plan's limit on design
+  calls in flight (13.4).
 - **The user's questions park parts, not the plan:** a part named by a
   question without an answer is not designed; its readers wait as for any
   need. A skeleton or contract brief shows the part's questions and their
@@ -581,9 +582,31 @@ before it lands (13.1).
 ### 13.4 Several plans, calls in parallel
 
 - **The tick takes every plan** listed in `FAB_HOME/plans` (one checkout path
-  per line), each its own draft; places are shared across plans.
-- **Skeleton calls run in parallel** for independent parts, up to two at a
-  time to start, growing as 13.2's target does.
+  per line), then those named (`fab tick [PLAN_DIR...]`), each its own
+  draft, in that order, under the tick's one lock (`fab/drafts.py`; the
+  list is `fab.channel.plan_dirs`'). One fetch per checkout, one import of
+  the queue's record over every plan's tasks, and one measure of the
+  builders (13.2) serve them all. Then each plan decides on the log as the
+  plans before it left it.
+- **Places are shared across plans:** a run started by one plan fills a
+  place the next plan sees. A calm builder's one extra place goes to one
+  plan per tick: a builder a plan started on is not calm for the plans
+  after it.
+- **A plan owns its draft's work:** its tasks' runs and their foreman runs,
+  its calls (subject the draft or under it), and the review runs of those
+  calls. A plan collects only its own runs, and its call limits (one answer,
+  review or amend call at a time) count only its own calls. Runs no ticked
+  plan owns are collected after every plan has ticked.
+- **A plan that cannot load** (its plan.toml, a fetch, a second plan of the
+  same draft) is printed and skipped; the others tick. It logs nothing,
+  and `fab tick` exits 1. A retired plan is skipped.
+- **Design calls run in parallel** for independent parts. A plan's
+  skeleton and contract calls in flight number at most its flow target
+  (13.2): two at its start, growing as the target does. The eligible parts
+  are independent, since a part waits for its needs' design. They are
+  started in plan order, each in its own role. A call's user unit is named
+  by its role and subject (`fab-call-<role>-<subject>`), so one subject
+  never has two calls running, even before the log shows the first.
 
 ### 13.5 Accounting
 

@@ -128,6 +128,16 @@
   of the log today is the retire skeleton call's; the accounting call's was
   answered in 13.5 (measured, not capped). The page
   is a file on hel8: where else the user reads it is the user's (14).
+- **Several plans are a skeleton:** `fab/drafts.py` holds 13.4's rules:
+  which runs in flight a draft owns, the strays no plan owns, a plan's
+  design calls up to its flow target, the calm a plan leaves the next, and
+  a call's unit named by its subject. The task `drafts` fills it.
+  `plans-tick` makes one tick take every plan in `FAB_HOME/plans`, after
+  `designer-tick`, `channel-tick` and `accounting`. Until it lands, `fab
+  tick PLAN_DIR` ticks one plan and collects every run in flight. It
+  starts one skeleton call at a time (one contract call beside it once
+  `designer-tick` lands), in units numbered by role. Its answer and review
+  limits, and the review's last-review time, count every draft's calls.
 - **Accounting is a skeleton:** `fab/accounting.py` holds 13.5's weights,
   the draft's calls and runs and the code report's Claude and Codex
   figures; `fab.calls.Usage` and `claude_usage` the reading of claude's

@@ -12,6 +12,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from fab import atomic
 from fab.sh import Failed, Result
 
 GIT_ENV = {
@@ -116,3 +117,58 @@ def git_pair(directory: Path) -> tuple[Path, Path]:
     shutil.copytree(template / "clone", clone, symlinks=True)
     git(clone, "remote", "set-url", "origin", str(origin))
     return origin, clone
+
+
+# Several plans in one tick (docs/design/fab.md, 13.4): plans on disk and the log's records.
+
+def write_plan(directory: Path, draft: str, parts: Mapping[str, Sequence[str]] | None = None, *,
+               contracts: Sequence[str] = (), tasks: Sequence[str] = (), repo: str = "agents") -> Path:
+    """A sound plan of draft at directory: plan.toml with parts (id to needs; default one
+    part `core`), each a feature part designed by `design.md`, those in contracts marked
+    contract, and one slice holding them all; then one spec `tasks/<name>.md` per name of
+    tasks, of the first part, needing nothing. Written through fab.atomic.write; returns
+    directory."""
+    parts = {"core": ()} if parts is None else parts
+    lines = [f'draft = "{draft}"', f'repo = "{repo}"']
+    for identifier, needs in parts.items():
+        lines += ["[[part]]", f'id = "{identifier}"', f'title = "{identifier.title()}"',
+                  'mode = "feature"', f"needs = {list(needs)!r}", 'design = "design.md"',
+                  f"contract = {str(identifier in contracts).lower()}"]
+    lines += ["[[slice]]", "id = 1", 'story = "It runs"', f"parts = {list(parts)!r}", "walk = false"]
+    atomic.write(directory / "plan.toml", "\n".join(lines) + "\n")
+    first = next(iter(parts))
+    for name in tasks:
+        atomic.write(directory / "tasks" / f"{name}.md",
+                     f'+++\nid = "{name}"\npart = "{first}"\nkind = "feature"\nneeds = []\n+++\n')
+    return directory
+
+
+def run_started(task: str, n: int = 1, *, kind: str = "implement", host: str = "builder",
+                **fields) -> dict:
+    """A run.started record: task a full task id (`<draft>/<name>`), a foreman's
+    `<draft>/<name>/foreman`, or a root call's id for a review run; run `<task>-<n>`."""
+    return {"ev": "run.started", "task": task, "run": f"{task}-{n}", "kind": kind,
+            "host": host, **fields}
+
+
+def run_ended(task: str, n: int = 1, outcome: str = "done", **fields) -> dict:
+    """The run.ended record of run_started(task, n)."""
+    return {"ev": "run.ended", "task": task, "run": f"{task}-{n}", "outcome": outcome,
+            "report": "report.md", **fields}
+
+
+def call_started(call: str, role: str, subject: str, **fields) -> dict:
+    """A call.started record of call (its id) on branch `calls/<call>`."""
+    return {"ev": "call.started", "call": call, "role": role, "subject": subject,
+            "branch": f"calls/{call}", **fields}
+
+
+def call_ended(call: str, outcome: str = "done", **fields) -> dict:
+    """The call.ended record of call."""
+    return {"ev": "call.ended", "call": call, "outcome": outcome, **fields}
+
+
+def units(fake: FakeRunner) -> list[str]:
+    """The unit names of the `systemd-run ... --unit NAME ...` commands fake ran, in order."""
+    return [call.argv[call.argv.index("--unit") + 1] for call in fake.calls
+            if call.argv[:1] == ["systemd-run"] and "--unit" in call.argv]
