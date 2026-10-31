@@ -193,7 +193,11 @@
   (`coord/fab-replay/simulation.md`), then run live once (10-31,
   15:32-16:49Z, hetzner11 and hetzner12): `component-kit/integration` green
   on the first end check at T+76.1 (codex-kit 54.75), never landed
-  (`coord/fab-replay/report.md`). Five bugs found live are fixed on main;
+  (`coord/fab-replay/report.md`). Five bugs found live are fixed on main. At the user's word
+  (10-31, after the replay) three changes are being built: light merges
+  without gates and the `files` gate removed (`light-merges`), the cut's
+  early release of specs (`cut-early`) and the run's own texts
+  (`run-texts`);
   what is left to match the run is in section 14. The replay ticked from
   its own install on hel8 (`FAB_HOME/replay-install`, a local hosts.toml),
   as a background command of a session, not a unit.

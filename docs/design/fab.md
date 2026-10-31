@@ -350,7 +350,6 @@ and Claude reads the code's structure in batches, never on the landing path.
 - **The gates** (`fab/gates.py`, not fabrig's `fab/gate.py`) are pure checks
   over the digest and the task. The tick runs them, in `fab land`'s clone and
   under its lock, before it lands a task's branch of this repository:
-  - `files`: every changed path is within the task's globs;
   - `shape`: no signature the base has is changed or removed, unless the
     task's kind is `interface` or `migration`;
   - `size`: no function the branch adds, or makes longer, is over 60 lines
@@ -834,7 +833,6 @@ weight go. The api gate (rustdoc JSON) is out of scope.
   grep (`fab/rust_digest.py`), not `fab.calls.inventory`.
 - **Rust gates, minimal** (`fab/rust_gates.py`, beside `fab/gates.py`): on
   a fabrig task branch, before it is readied, and on a fabrig skeleton's tip:
-  - `files`: every changed path within the task's globs (as section 12);
   - `ratchet`: for each tree the branch touches that has
     `scripts/old_forms.py`, its counts on the tip are not above the
     base's (`python3 -I -B scripts/old_forms.py` from the tree's root;
@@ -924,29 +922,38 @@ only as tweaks once a replay matches its run.
   plan checkout that tracks a branch: after its fetch it fast-forwards the
   checkout to its upstream, so it always reads the plan and specs at the
   trunk's tip.
-- **Merging, not landing.** For an integration plan, a task whose run ended
-  done is gated (the Rust gates, against the trunk) and then merged by the
-  tick, in the plan's checkout and under the tick's lock: reset to
+- **Merging, not landing, and light** (the user, 10-31, after the first
+  replay). For an integration plan, a task whose run ended done is merged
+  by the tick, in the plan's checkout and under the tick's lock: reset to
   `origin/<trunk>`, `git merge --no-ff origin/<branch>`, push the trunk
-  fast-forward only. It logs `branch.landed` with `main` the new trunk tip
-  and `into` the trunk. A conflict confined to old-form baselines
-  (`<tree>/scripts/old-forms.txt`, which every task lowers with `--write`)
-  is resolved by recounting, as the manual lead did: the trunk's side of
-  the file, then `python3 -I -B scripts/old_forms.py --write` in that tree,
-  which must exit 0 (it refuses a raise). Replaying codex-kit's 24 branches
-  in fab's order, 17 merges conflict, every one on that file alone. Every merge, clean or recounted, then runs `old_forms.py` (no
-  `--write`) in each tree it touches, on the merged tree: a raise over the
-  trunk's baseline is refused as `gate:ratchet`, since a branch based before
-  a form was counted (codex-kit's abort, before the ratchets) escapes the
-  branch's own ratchet gate. Any
-  other conflict, or a recount that exits non-zero, aborts the merge and logs
-  `branch.rejected` with step `merge` and the conflict as `findings`, so a
-  rebase run follows (13.1's refusal foreman first). Calls' branches
-  (`calls/<id>`), answers (`answers/<run>`) and repair sections
+  (the integration branch, never main) fast-forward only. No gates and no
+  ratchet check run at the merge: what to check, and when, is the agents'
+  (each implementer's own checks, the end check), as it was the lead's. It
+  logs `branch.landed` with `main` the new trunk tip and `into` the trunk.
+  A conflict confined to old-form baselines (`<tree>/scripts/old-forms.txt`,
+  which tasks lower with `--write`) is resolved by recounting, as the lead
+  did: the trunk's side of the file, then `python3 -I -B
+  scripts/old_forms.py --write` in that tree (17 of codex-kit's 24 merges
+  met there). Any other conflict, or a recount that exits non-zero, aborts
+  the merge and logs `branch.rejected` with step `merge` and the conflict as
+  `findings`, so a rebase run follows (13.1's refusal foreman first). Calls'
+  branches (`calls/<id>`), answers (`answers/<run>`) and repair sections
   (`repairs/<run>`) are merged into the trunk the same way, never readied.
   Since a merged task counts as landed, its dependents become runnable and
   start from the trunk's tip: the manual run's "dependents start from the
-  integration tip".
+  integration tip". The first replay's merges, gated, took 37-45 s each and
+  queued behind each other; a light merge is a fetch, a merge and a push.
+- **The cut releases its first specs early,** as the lead launched its first
+  tasks while it wrote the rest. During a cut of an integration plan with
+  reviews off, the cut may commit and push a consistent part of its plan
+  (plan.toml with every part, and the specs whose needs are already
+  written), then wake the tick (`fab wake cut <call>`). The tick merges an
+  in-flight cut's pushed branch into the trunk whenever its tip is not yet
+  there, so those tasks start from the trunk as any; the cut's last push
+  is merged when the call ends, as today. A spec the cut has released is
+  never changed after. While the plan's cut is in flight the end check
+  waits, and a direct part is never sent to a design call: the cut designs
+  it.
 - **The flow stays wide.** An integration plan keeps its target for runs
   in flight at its builders' places throughout: no halving on a refusal or
   an `Infra:` outcome and no growth (13.11's start-wide rule is the queue
@@ -986,18 +993,28 @@ only as tweaks once a replay matches its run.
   share in the plan's `notes/`, cited from each spec (the lead's
   `common.md`, `stage-common.md`, `lib-common.md`); implementers read them
   in their checkout.
-- **Run-derived texts,** so fab works as the manual lead did:
-  - a direct plan's cut gets `fab/roles/cut-direct.md` after its role
-    text: the lead's way of cutting (parallel Explore surveys of the sites,
-    decisions recorded in `notes/decisions.md`, small contract tasks first,
-    one crate family per site task, shared notes per family, pre-approved
-    defaults for the questions a task will meet, about ten minutes);
-  - an integration plan's fabrig runs get `fab/roles/fabrig-integration.md`
-    in place of `fab/roles/fabrig.md`: codex-kit's checks (fmt, the
-    ratchets, clippy of the changed packages, tests of them and their direct
-    dependents, dependents' `cargo check --tests` after an API change) and
-    no precheck, since the end check runs the queue's;
-  - an integration plan answers a queued question at once (an answer call
+- **The run's own texts** (the user, 10-31): the cut and the implementers
+  are told what the manual run's lead and implementers were told, and fab
+  adds only what its mechanics need.
+  - The cut of a direct integration plan gets `fab/roles/cut-run.md` in
+    place of `cut.md`, `cut-fabrig.md` and `cut-direct.md`: the run's brief
+    (a source) is the lead's instructions; fab's text says only the plan
+    and spec formats, that implementers read nothing but their spec, the
+    notes it cites and the repository, and the early release above. It asks
+    for no survey: the lead was not told to make one, and made it as it
+    saw fit.
+  - An implementer of an integration fabrig plan gets the spec and its
+    facts, with `fab/roles/fabrig-run.md` in place of `implementer.md`,
+    the taste file and `fabrig.md`: its slot is claimed and set up, it
+    commits and pushes its branch, fab merges it, and its report's first
+    line is `Done:`, `Question:`, `Infra:` or `Failed:` (codex-start's
+    report paragraph). The standing rules are the cut's notes, as the
+    lead's `common.md` was. The spec's path is given relative to the
+    repository.
+  - The `files` gate is gone (sections 12 and 13.11): a spec's `files`
+    say what a task owns, for the cut and the implementer, and nothing
+    refuses a branch for a path outside them.
+  - An integration plan answers a queued question at once (an answer call
     as soon as the foreman cannot settle it), as the lead did in two
     minutes, not at 4 queued or after 30 minutes.
 - **Retire waits for main.** An integration plan's parts are done when
