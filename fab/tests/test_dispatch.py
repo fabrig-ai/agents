@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
-from fab import call_review, cli, dispatch, flow, foreman, gates, log, plan, run as runs, state
+from fab import call_review, channel, cli, dispatch, flow, foreman, gates, log, plan, run as runs, state
 from fab.dispatch import Action, MAX_RUNS
 from fab.hosts import Host
 from fab.sh import Result, ssh
@@ -382,6 +382,7 @@ class DecideTest(unittest.TestCase):
 
 class CallActionsTest(unittest.TestCase):
     def setUp(self):
+        self.enterContext(tmp_home())
         # These tests are about batching; blocking() has its own tests below.
         self.enterContext(patch.object(dispatch, "blocking", return_value=False))
         self.plan = make_plan(part("core"), part("next"))
@@ -446,12 +447,40 @@ class CallActionsTest(unittest.TestCase):
 
     def test_a_call_that_asked_parks_its_part_until_answered(self):
         asked = [dict(self.call("skeleton", "s1"), subject="draft/core"),
-                 dict(ev="call.ended", call="s1", role="skeleton", outcome="question")]
+                 dict(ev="call.ended", call="s1", role="skeleton", subject="draft/core",
+                      ts=self.now, outcome="question")]
         self.assertEqual(self.actions(asked, ["core", "next"]),
                          [Action("call", task="next", run_kind="skeleton")])
-        answered = asked + [event("question.answered", "core", by="session", answer="see fab.md 12")]
+        answered = asked + [dict(ev=channel.ANSWERED, subject="draft/core", by="user", answer="see fab.md 12")]
         self.assertEqual(self.actions(answered, ["core", "next"]),
                          [Action("call", task="core", run_kind="skeleton")])
+
+    def test_task_answer_does_not_unpark_a_part_with_the_same_name(self):
+        events = [dict(self.call("skeleton", "s1"), subject="draft/core"),
+                  dict(ev="call.ended", call="s1", subject="draft/core", ts=self.now, outcome="question"),
+                  event("question.answered", "core", subject="draft/core", answer="Task only")]
+        self.assertEqual(self.actions(events, ["core", "next"]),
+                         [Action("call", task="next", run_kind="skeleton")])
+
+    def test_later_done_call_closes_subject_question(self):
+        events = [dict(ev="call.ended", call="first", subject="draft/core", ts=self.now, outcome="question"),
+                  dict(ev="call.ended", call="later", subject="draft/core", ts=self.now, outcome="done")]
+        self.assertEqual(dispatch._parked_subjects(events), set())
+        self.assertEqual(self.actions(events, ["core"]), [Action("call", task="core", run_kind="skeleton")])
+
+    def test_answer_question_parks_draft_until_subject_answer_or_later_done_call(self):
+        questions = [self.question(str(n)) for n in range(dispatch.ANSWER_AT + 1)]
+        asked = [self.call("answer", "a1"), dict(ev="call.ended", call="a1", subject="draft",
+                                               ts=self.now, outcome="question"), *questions]
+        answer = Action("call", task="draft", run_kind="answer")
+        self.assertEqual(self.actions(asked), [])
+        self.assertEqual(self.actions(asked + [dict(ev="question.answered", task="draft", subject="draft")]), [])
+        self.assertEqual(self.actions(asked + [dict(ev=channel.ANSWERED, subject="other")]), [])
+        self.assertEqual(self.actions(asked + [dict(ev=channel.ANSWERED, subject="draft")]), [answer])
+        done = [self.call("answer", "a2"), dict(ev="call.ended", call="a2", subject="draft",
+                                              ts=self.now, outcome="done"),
+                dict(ev="call.finished", call="a2", outcome="done")]
+        self.assertEqual(self.actions(asked + done), [answer])
 
     def test_only_first_design_part_and_role_exclusion(self):
         questions = [self.question(ts="2026-10-30T12:00:00.000Z")]
@@ -482,12 +511,12 @@ class CallActionsTest(unittest.TestCase):
         start = dict(self.call("contract", "c"), subject="draft/core")
         for outcome in ("done", "question", "failed"):
             with self.subTest(outcome=outcome):
-                history = [start, dict(ev="call.ended", call="c", outcome=outcome)]
+                history = [start, dict(ev="call.ended", call="c", subject="draft/core", ts=self.now, outcome=outcome)]
                 calls = [a for a in self.actions(history, ["core"]) if a.kind == "call"]
                 expected = [Action("call", task="core", run_kind="contract")]
                 self.assertEqual(calls, expected if outcome == "failed" else [])
                 if outcome == "question":
-                    history.append(event("question.answered", "core"))
+                    history.append(dict(ev=channel.ANSWERED, subject="draft/core"))
                     self.assertEqual(self.actions(history, ["core"]), expected)
 
     def test_retire_starts_only_when_every_part_is_done(self):
@@ -508,9 +537,9 @@ class CallActionsTest(unittest.TestCase):
         retire = Action("call", task="draft/retire", run_kind="retire")
         start = dict(self.call("retire", "r"), subject="draft/retire")
         self.assertEqual(self.actions([start]), [])
-        question = [start, dict(ev="call.ended", call="r", outcome="question")]
+        question = [start, dict(ev="call.ended", call="r", subject="draft/retire", ts=self.now, outcome="question")]
         self.assertEqual(self.actions(question), [])
-        self.assertEqual(self.actions(question + [event("question.answered", "retire")]), [retire])
+        self.assertEqual(self.actions(question + [dict(ev=channel.ANSWERED, subject="draft/retire")]), [retire])
         done = [start, dict(ev="call.ended", call="r", outcome="done"),
                 dict(ev="call.finished", call="r", outcome="done")]
         self.assertEqual(self.actions(done), [])
@@ -657,11 +686,12 @@ class CallActionsTest(unittest.TestCase):
 
     def test_review_question_parks_subject_until_matching_answer(self):
         asked = [dict(self.call("review", "r1"), ts="2026-10-30T12:00:00.000Z", subject="draft/review"),
-                 dict(ev="call.ended", call="r1", role="review", outcome="question"),
+                 dict(ev="call.ended", call="r1", role="review", subject="draft/review",
+                      ts=self.now, outcome="question"),
                  *self.landings(dispatch.REVIEW_AT)]
         self.assertEqual(self.actions(asked), [])
         self.assertEqual(self.actions(asked + [event("question.answered", "core")]), [])
-        self.assertEqual(self.actions(asked + [event("question.answered", "review")]),
+        self.assertEqual(self.actions(asked + [dict(ev=channel.ANSWERED, subject="draft/review")]),
                          [Action("call", task="draft/review", run_kind="review")])
 
     def test_review_start_follows_answer_and_skeleton(self):
@@ -759,6 +789,39 @@ walk = false
         self.assertEqual(self.fake.argvs().count(probe), 1)
         self.assertEqual([e["ev"] for e in log.read()], ["run.started"])
         self.start.assert_called_once()
+
+    def test_tick_writes_page_after_actions_using_explicit_log_and_registered_plans(self):
+        path = self.home / "custom/log.jsonl"
+        self.append(dict(ev="call.ended", call="cut", subject="draft/cut", outcome="question"), path=path)
+        write(log.home() / "calls/cut/report.md", "Question: Buy a host?\n")
+        registered = self.home / "other"
+        write(registered / "plan.toml", '''draft = "other"
+repo = "agents"
+part = []
+[[question]]
+id = "budget"
+text = "Choose the budget"
+parts = []
+''')
+        write(log.home() / channel.PLANS, str(registered) + "\n")
+        self.assertEqual([action.kind for action in self.tick(log_path=path)], ["start"])
+        page = (log.home() / channel.PAGE).read_text()
+        self.assertIn("Question: Buy a host?", page)
+        self.assertIn("Choose the budget", page)
+        self.assertEqual(self.out.getvalue().splitlines()[-1], f"page - {log.home() / channel.PAGE}")
+        self.assertEqual(log.read(), [])
+
+    def test_tick_page_failure_prints_one_line_logs_nothing_and_keeps_actions(self):
+        for failure in (OSError("disk\nfull"), ValueError("invalid\npage")):
+            with self.subTest(failure=failure):
+                self.out.seek(0)
+                self.out.truncate()
+                with patch.object(channel, "write", side_effect=failure):
+                    actions = self.tick()
+                self.assertEqual([action.kind for action in actions], ["start"])
+                self.assertEqual(self.out.getvalue().splitlines()[-1],
+                                 "page - failed: " + " ".join(str(failure).splitlines()))
+                self.assertEqual(log.read(), [])
 
     def test_tick_measures_even_with_free_places_and_failed_probe_is_not_calm(self):
         probe = ssh("fake@builder", flow.PROBE + ["/home/fake/src/fabrig/fab/heavy.jsonl"])
@@ -864,7 +927,8 @@ walk = false
         self.assertEqual(push.cwd, str(log.home() / "repos" / "fabrig"))
         self.assertEqual(self.out.getvalue().splitlines(),
                          ["flow draft target 3, 1 in flight",
-                          *[f"{a.kind} {a.task or '-'} {a.detail}" for a in actions]])
+                          *[f"{a.kind} {a.task or '-'} {a.detail}" for a in actions],
+                          f"page - {log.home() / channel.PAGE}"])
         # Ready and parked tasks are not handed off or parked twice.
         self.tick()
         self.assertEqual(len([e for e in log.read() if e["ev"] == "branch.ready"]), 1)
@@ -928,7 +992,8 @@ walk = false
                          ["systemd-run", "--user", "--collect", "--unit", "fab-call-skeleton-1",
                           "fab", "call", "skeleton", "next", "--plan", str(self.directory)])
         self.assertEqual(self.calls, [])
-        self.assertEqual(self.out.getvalue(), "flow draft target 2, 0 in flight\ndesign - next\ncall next \n")
+        self.assertEqual(self.out.getvalue(), "flow draft target 2, 0 in flight\ndesign - next\ncall next \n"
+                         + f"page - {log.home() / channel.PAGE}\n")
         self.assertEqual(len(log.read()), 1)
 
     def test_contract_unit_passes_the_part_and_plan(self):
@@ -1007,15 +1072,16 @@ walk = false
         (self.directory / "plan.toml").unlink()
         self.fake.on(["git", "remote", "get-url", "origin"], Result(0, runs.REMOTES["agents"]))
         self.append(dict(ev="call.started", call="cut", role="cut", subject="plan/cut"),
-                    dict(ev="call.ended", call="cut", outcome="question"))
+                    dict(ev="call.ended", call="cut", subject="plan/cut", outcome="question"))
         self.assertEqual(self.tick(), [])
-        self.append(dict(ev="question.answered", task="plan/cut"))
+        self.append(dict(ev=channel.ANSWERED, subject="plan/cut"))
         self.assertEqual(self.tick(), [])
         self.assertFalse(any(argv[0] == "systemd-run" for argv in self.fake.argvs()))
         self.assertEqual(self.calls, [])
 
     def test_retired_plan_prints_and_skips_import_measurement_and_actions(self):
         """After fetch, retirement exits before loading hosts or doing any plan work."""
+        write(log.home() / channel.PAGE, "keep page\n")
         path = self.directory / "plan.toml"
         write(path, 'retired = true\n' + path.read_text())
         self.append(started(), *chain_history("review"))
@@ -1026,6 +1092,7 @@ walk = false
              patch.object(dispatch, "decide", side_effect=AssertionError("actions decided")):
             self.assertEqual(dispatch.tick(self.directory, sh=self.fake), [])
         self.assertEqual(self.out.getvalue(), "retired draft\n")
+        self.assertEqual((log.home() / channel.PAGE).read_text(), "keep page\n")
         self.assertEqual(self.fake.argvs(), [["git", "rev-parse", "--show-toplevel"],
                                            ["git", "fetch", "origin"]])
         self.assertEqual(self.calls, [])
@@ -1312,9 +1379,12 @@ walk = false
         self.assertEqual({key: value for key, value in log.read(path)[-1].items() if key != "ts"},
                          dict(ev="call.parked", call="root", subject="draft/core",
                               reason="refused after its amendment", report="last-refusal.md"))
+        page = (log.home() / channel.PAGE).read_text()
+        self.assertIn("### draft/core, parked", page)
+        self.assertIn("refused after its amendment", page)
         self.assertEqual(self.tick(log_path=path), [])
         self.assertEqual(sum(entry["ev"] == "call.parked" for entry in log.read(path)), 1)
-        self.append(event("question.answered", "core"), path=path)
+        self.append(dict(ev=channel.ANSWERED, subject="draft/core"), path=path)
         with patch.object(call_review, "start") as vet:
             self.assertEqual(self.tick(log_path=path)[0].kind, "vet")
         vet.assert_called_once()
@@ -1389,7 +1459,8 @@ walk = false
         self.land.assert_called_once()
         self.assertEqual(self.out.getvalue().splitlines(),
                          ["flow draft target 2, 0 in flight", "finish answer-1 ",
-                          "flow draft target 2, 0 in flight"])
+                          f"page - {log.home() / channel.PAGE}", "flow draft target 2, 0 in flight",
+                          f"page - {log.home() / channel.PAGE}"])
 
     def test_finish_skeleton_needs_no_report_and_respects_explicit_log(self):
         path = self.home / "custom.jsonl"
@@ -1445,7 +1516,8 @@ walk = false
         self.assertEqual(note["text"], "land draft/a failed: offline retry later")
         self.assertEqual(self.out.getvalue().splitlines(),
                          ["flow draft target 2, 0 in flight",
-                          "land draft/a failed: offline retry later", "land draft/b draft/b"])
+                          "land draft/a failed: offline retry later", "land draft/b draft/b",
+                          f"page - {log.home() / channel.PAGE}"])
 
     def test_gate_findings_reject_without_landing_and_print_unique_gates(self):
         self.append(started(), ended())
@@ -1454,7 +1526,8 @@ walk = false
                                     gates.Finding("docs", "no docstring")]
         self.tick()
         self.land.assert_not_called()
-        self.assertEqual(self.out.getvalue(), "flow draft target 2, 0 in flight\nland draft/a rejected gate:files,docs\n")
+        self.assertEqual(self.out.getvalue(), "flow draft target 2, 0 in flight\nland draft/a rejected gate:files,docs\n"
+                         + f"page - {log.home() / channel.PAGE}\n")
         self.assertFalse(any(entry["ev"] == "note" for entry in log.read()))
 
     def test_clean_screen_precedes_landing_with_current_events_and_runner(self):
@@ -1472,7 +1545,8 @@ walk = false
         self.land.side_effect = landing
         self.tick(log_path=path)
         self.land.assert_called_once()
-        self.assertEqual(self.out.getvalue(), "flow draft target 2, 0 in flight\nland draft/a draft/a-r1\n")
+        self.assertEqual(self.out.getvalue(), "flow draft target 2, 0 in flight\nland draft/a draft/a-r1\n"
+                         + f"page - {log.home() / channel.PAGE}\n")
         self.assertEqual(log.read(path), history)
 
     def test_failed_screen_never_lands_and_next_action_runs(self):
@@ -1502,7 +1576,8 @@ walk = false
 
         self.land.side_effect = landing
         self.tick()
-        self.assertEqual(self.out.getvalue(), "flow draft target 2, 0 in flight\nland draft/a draft/a\n")
+        self.assertEqual(self.out.getvalue(), "flow draft target 2, 0 in flight\nland draft/a draft/a\n"
+                         + f"page - {log.home() / channel.PAGE}\n")
 
     def test_failed_land_output_is_printed_and_noted_on_one_line(self):
         self.append(started(), ended())
@@ -1513,8 +1588,9 @@ walk = false
 
         self.land.side_effect = landing
         self.tick()
-        self.assertEqual(self.out.getvalue(), "flow draft target 2, 0 in flight\nland draft/a failed: draft/a: rebase: conflict file.py\n")
-        self.assertEqual(log.read()[-1]["text"], self.out.getvalue().splitlines()[-1])
+        self.assertEqual(self.out.getvalue(), "flow draft target 2, 0 in flight\nland draft/a failed: draft/a: rebase: conflict file.py\n"
+                         + f"page - {log.home() / channel.PAGE}\n")
+        self.assertEqual(log.read()[-1]["text"], self.out.getvalue().splitlines()[-2])
 
     def test_run_failures_do_not_stop_following_actions(self):
         self.add_task("b")
@@ -1567,7 +1643,8 @@ walk = false
 
         def second_tick():
             try:
-                result.append(self.tick())
+                with patch.object(channel, "write", side_effect=AssertionError("page written while locked")):
+                    result.append(self.tick())
             except Exception as error:
                 errors.append(error)
             finally:

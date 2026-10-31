@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from fab import call_review, calls, designer, flow, foreman, gates, hosts as machines, land, log, plan as specs, repairs, run as runs, state
+from fab import call_review, calls, channel, designer, flow, foreman, gates, hosts as machines, land, log, plan as specs, repairs, run as runs, state
 from fab.hosts import Host
 from fab.plan import Plan, Task
 from fab.sh import Failed, Runner, run, ssh
@@ -59,8 +59,9 @@ def call_actions(plan: Plan, tasks: Mapping[str, Task], events: list[dict], desi
     unless in flight, parked, already done or held by an open chain of its subject.
     Answer calls count only queued questions, aged from their queued since timestamp,
     using ANSWER_AT or ANSWER_AFTER; structure reviews use REVIEW_AT or
-    REVIEW_AFTER since the last review started. Question outcomes park a subject until
-    question.answered names it. Pure; see docs/design/fab.md, 12 and 13.1."""
+    REVIEW_AFTER since the last review started. A question parks its subject (an answer
+    call's subject is its draft) until call.answered names it, or a later call of the
+    subject ends done. Pure; see docs/design/fab.md, 12 and 13.1."""
     started = {event["call"]: event for event in events if event.get("ev") == "call.started"}
     ended = {event["call"] for event in events if event.get("ev") == "call.ended"}
     flight = {key: event for key, event in started.items() if key not in ended}
@@ -74,7 +75,8 @@ def call_actions(plan: Plan, tasks: Mapping[str, Task], events: list[dict], desi
     roles.update(chain.role for chain in open_chains if chain.role in ("answer", "review"))
     questions = [question for question in foreman.questions(tasks, events)
                  if question.state == "queued"]
-    if "answer" not in roles and plan.draft not in subjects and questions:
+    parked = _parked_subjects(events)
+    if "answer" not in roles and plan.draft not in parked | subjects and questions:
         old_enough = (datetime.fromisoformat(now) -
                       min(datetime.fromisoformat(question.since) for question in questions)
                       >= timedelta(minutes=ANSWER_AFTER))
@@ -82,7 +84,6 @@ def call_actions(plan: Plan, tasks: Mapping[str, Task], events: list[dict], desi
                 tasks, events, [{"task": question.task} for question in questions],
                 calls_in_flight=bool(roles), design=design):
             actions.append(Action("call", task=plan.draft, run_kind="answer"))
-    parked = _parked_subjects(events, started)
     actions.extend(_part_calls(plan, design, started, events, roles, parked | subjects))
     subject = f"{plan.draft}/review"
     if "review" not in roles and subject not in parked | subjects and _review_due(tasks, events, now):
@@ -130,15 +131,9 @@ def _chain_actions(chains: Mapping[str, call_review.Chain], amending: bool) -> l
     return actions
 
 
-def _parked_subjects(events: list[dict], started: Mapping[str, dict]) -> set[str | None]:
-    # A call that asked a question parks its subject until question.answered names it.
-    parked = set()
-    for event in events:
-        if event.get("ev") == "call.ended" and event.get("outcome") == "question":
-            parked.add(started.get(event.get("call"), {}).get("subject"))
-        elif event.get("ev") == "question.answered":
-            parked.discard(event.get("task"))
-    return parked
+def _parked_subjects(events: list[dict]) -> set[str]:
+    """The call questions that still wait for the user, shared with the page's fold."""
+    return {ask.subject for ask in channel.asks((), events) if ask.kind == "call"}
 
 
 def _review_due(tasks: Mapping[str, Task], events: list[dict], now: str) -> bool:
@@ -492,7 +487,9 @@ def tick(plan_dir: Path, *, sh: Runner = run, hosts: Mapping[str, Host] | None =
     call decisions counting only queued questions: vet on the freest builder, amend in a user
     unit, park refusals once, or land approved branches and record answers and call.finished.
     Every action reports one line; a failure logs a note and leaves later actions running.
-    Return the actions taken. See docs/design/fab.md, 12 and 13.1."""
+    Rewrite the user's page after call actions; a page failure only prints its error.
+    Early returns for a held lock or retired plan write no page. Return the actions taken.
+    See docs/design/fab.md, 12, 13.1 and 13.6."""
     home = log.home()
     home.mkdir(parents=True, exist_ok=True)
     with open(home / "tick.lock", "a") as lock:
@@ -528,7 +525,17 @@ def tick(plan_dir: Path, *, sh: Runner = run, hosts: Mapping[str, Host] | None =
         for action in followups:
             _take(action, tasks, hosts, plan_dir, plan=plan, checkout=checkout,
                   sh=sh, log_path=log_path)
+        _page(plan_dir, log_path)
         return actions
+
+
+def _page(plan_dir: Path, log_path: Path | None) -> None:
+    """Refresh the user's page without letting a file failure stop the tick."""
+    try:
+        path = channel.write(channel.compose(channel.plan_dirs([plan_dir]), log.read(log_path), log.now()))
+        print(f"page - {path}")
+    except (OSError, ValueError) as error:
+        print(f"page - failed: {' '.join(str(error).splitlines())}")
 
 
 def _plan_ancestor(plan_dir: Path) -> Path:
