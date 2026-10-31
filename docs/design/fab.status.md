@@ -183,14 +183,16 @@
   every 2 minutes and wants pile up unread in `FAB_HOME/tick.want`. Once
   they land, `fab wake --install` on hel8 starts the units, and each
   builder needs ssh to hel8 for its runs' wakes.
-- **The flow of a real run (13.12) is being built** as fab's default:
-  `replay-options`, `replay-trunk` and `integration-merge` have landed (the
-  options, the trunk, the tick's merges, reviews off); `integration-check`
-  (the recount, the trunk's ratchet, the end check, its repairs, the ready,
-  answers at once), `replay-roles` (the cut's and the runs' run-derived
-  texts) and `run-defaults` (the defaults flipped; agents-rebuild names the
-  old flow) are in flight or next. Until `run-defaults` lands, a plan
-  without the keys keeps the old flow.
+- **The flow of a real run (13.12) is on main, not run live yet**
+  (10-31): the options with the run's defaults (agents-rebuild names the
+  old flow), the trunk throughout, the tick's merges with the baseline
+  recount and the trunk's ratchet, the end check (`fab check`), its
+  repairs and the ready, reviews off, answers at once, the flow kept at
+  the builders' places, and the run-derived texts (`cut-direct.md`,
+  `fabrig-integration.md`). Simulated against codex-kit
+  (`coord/fab-replay/simulation.md`), never ticked on fabrig. The builders'
+  and hel8's installs must move to this main before a live run
+  (`fab precheck --onto`, `fab check start`).
 - **Parts done by hand have no task specs** (package, slot-probe), so the
   tick's design line lists them.
 - **The slot bound of 25 GB is one measurement** (10-30 20:18Z): a
