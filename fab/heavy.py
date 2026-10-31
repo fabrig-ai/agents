@@ -36,10 +36,18 @@ class Settings:
 
 def settings(host: str | None = None, *, path: Path | None = None) -> Settings:
     """This machine's settings: host (default the FAB_HOST environment variable, else the entry
-    whose hostname is this machine's) names its fab/hosts.toml entry, whose builds and
-    headroom_gb override the defaults; an unknown or missing host keeps the defaults."""
-    with (path or Path(__file__).with_name("hosts.toml")).open("rb") as source:
-        entries = tomllib.load(source)
+    whose hostname is this machine's) names its fab/hosts.toml entry, with FAB_HOME's live
+    overrides applied (fab.hosts.tables; a bad overrides file is reported on stderr and left
+    out), whose builds and headroom_gb override the defaults; an unknown or missing host keeps
+    the defaults."""
+    text = (path or Path(__file__).with_name("hosts.toml")).read_text()
+    local = hosts.local_path()
+    try:
+        entries = hosts.tables(text, local.read_text() if local.exists() else None)
+    except ValueError as error:
+        # A bad override must not stop every build: say so and use the file as it is.
+        print(f"heavy: ignoring {local}: {error}", file=sys.stderr)
+        entries = tomllib.loads(text)
     host = hosts.this_name({name: entry.get("hostname", "") for name, entry in entries.items()}, host)
     if not host:
         return Settings()

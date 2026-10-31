@@ -1,5 +1,7 @@
 import io
+import os
 import sys
+import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
@@ -70,7 +72,7 @@ class RunnerTest(unittest.TestCase):
 
 class HostsTest(unittest.TestCase):
     def test_the_repository_hosts_fit_their_disks(self):
-        found = hosts.load()
+        found = hosts.load(local=Path(os.devnull))  # this machine's overrides left out
         self.assertIn("builder", found["hetzner6"].roles)
         self.assertEqual([p for h in found.values() for p in hosts.problems(h)], [])
 
@@ -91,6 +93,37 @@ builds = 1
         self.assertIn("exceeds", hosts.problems(host)[0])
         with self.assertRaises(ValueError):
             hosts.parse('[b]\nssh = "x"\nroles = ["chef"]\n')
+
+    def test_a_gate_budgets_one_more_bound_for_the_queue(self):
+        text = '[g]\nssh = "x"\nroles = ["gate", "builder"]\nslots = 2\nslot_bound_gb = 20\n'
+        self.assertEqual(hosts.parse(text)["g"].budget_gb(), 60)
+
+
+class OverrideTest(unittest.TestCase):
+    TEXT = '[a]\nssh = "x"\nroles = ["gate", "builder"]\nplaces = 4\nbuilds = 4\n[b]\nssh = "y"\nroles = []\n'
+
+    def test_overrides_replace_only_the_keys_they_name(self):
+        found = hosts.parse(self.TEXT, '[a]\nplaces = 1\nroles = ["builder"]\n')
+        self.assertEqual((found["a"].places, found["a"].builds, found["a"].roles), (1, 4, ("builder",)))
+        self.assertEqual(found["a"].ssh, "x")
+        self.assertEqual(found["b"], hosts.parse(self.TEXT)["b"])
+        self.assertEqual(hosts.tables(self.TEXT, ""), hosts.tables(self.TEXT))
+
+    def test_identity_unknown_hosts_and_bad_toml_are_refused(self):
+        for local in ('[a]\nssh = "z"\n', '[a]\nhostname = "z"\n', '[c]\nplaces = 1\n',
+                      'places = 1\n', '[a\n'):
+            with self.subTest(local=local), self.assertRaisesRegex(ValueError, hosts.LOCAL):
+                hosts.tables(self.TEXT, local)
+
+    def test_load_applies_the_overrides_file_when_it_exists(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path, local = Path(directory) / "hosts.toml", Path(directory) / hosts.LOCAL
+            path.write_text(self.TEXT)
+            self.assertEqual(hosts.load(path, local)["a"].places, 4)
+            local.write_text("[a]\nplaces = 2\n")
+            self.assertEqual(hosts.load(path, local)["a"].places, 2)
+            with patch.object(hosts, "local_path", return_value=local):
+                self.assertEqual(hosts.load(path)["a"].places, 2)
 
 
 class ThisHostTest(unittest.TestCase):

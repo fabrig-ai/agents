@@ -10,8 +10,13 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from fab import log
+
 DEFAULT = Path(__file__).resolve().parent / "hosts.toml"
 ROLES = {"dispatcher", "builder", "gate"}
+LOCAL = "hosts.local.toml"  # FAB_HOME's live overrides of this file, never in git (docs/design/fab.md, 7)
+OVERRIDES = frozenset({"roles", "disk_gb", "places", "slots", "slot_bound_gb", "kache_gb",
+                       "headroom_gb", "builds"})  # what an override may change: not a host's identity
 
 
 @dataclass(frozen=True)
@@ -29,13 +34,44 @@ class Host:
     builds: int = 0
 
     def budget_gb(self) -> int:
-        """What fab's own use of the disk may reach: kache + slots x bound + headroom."""
-        return self.kache_gb + self.slots * self.slot_bound_gb + self.headroom_gb
+        """What fab's own use of the disk may reach: kache + slots x bound + headroom, and one
+        bound more on a gate for the queue's target, which each batch sweeps as a slot's."""
+        queue = self.slot_bound_gb if "gate" in self.roles else 0
+        return self.kache_gb + self.slots * self.slot_bound_gb + queue + self.headroom_gb
 
 
-def parse(text: str) -> dict[str, Host]:
+def local_path() -> Path:
+    """FAB_HOME/LOCAL: this machine's live overrides of fab/hosts.toml."""
+    return log.home() / LOCAL
+
+
+def tables(text: str, local: str | None = None) -> dict[str, dict]:
+    """The tables of a hosts file's text with local's applied key by key. Pure.
+
+    local is the text of an overrides file (LOCAL): tables named after hosts of text, each
+    holding only OVERRIDES keys. Anything else, or TOML that does not parse, is a ValueError
+    naming LOCAL."""
+    entries = tomllib.loads(text)
+    if not local:
+        return entries
+    try:
+        changes = tomllib.loads(local)
+    except tomllib.TOMLDecodeError as error:
+        raise ValueError(f"{LOCAL}: {error}") from None
+    for name, table in changes.items():
+        if name not in entries or not isinstance(table, dict):
+            raise ValueError(f"{LOCAL}: {name}: not a host of fab/hosts.toml")
+        fixed = set(table) - OVERRIDES
+        if fixed:
+            raise ValueError(f"{LOCAL}: {name}: keys an override cannot change {sorted(fixed)}")
+        entries[name] = {**entries[name], **table}
+    return entries
+
+
+def parse(text: str, local: str | None = None) -> dict[str, Host]:
+    """The machines of a hosts file's text, with the overrides text local applied (tables)."""
     hosts = {}
-    for name, table in tomllib.loads(text).items():
+    for name, table in tables(text, local).items():
         unknown = set(table) - set(Host.__dataclass_fields__)
         if unknown:
             raise ValueError(f"{name}: unknown keys {sorted(unknown)}")
@@ -46,8 +82,12 @@ def parse(text: str) -> dict[str, Host]:
     return hosts
 
 
-def load(path: Path = DEFAULT) -> dict[str, Host]:
-    return parse(path.read_text())
+def load(path: Path = DEFAULT, local: Path | None = None) -> dict[str, Host]:
+    """The machines of path, with this machine's live overrides (local, default local_path())
+    applied when that file exists. Every reader of the machines goes through here, so an
+    override holds from the next tick, the next heavy command and the next deploy."""
+    local = local_path() if local is None else local
+    return parse(path.read_text(), local.read_text() if local.exists() else None)
 
 
 def this_name(hostnames: Mapping[str, str], name: str | None = None) -> str:
@@ -85,10 +125,17 @@ def main(argv: list[str]) -> int:
     parser.add_argument("action", choices=["check"])
     parser.parse_args(argv)
     found = []
+    local = local_path()
+    if local.exists():
+        tables(DEFAULT.read_text(), local.read_text())  # a bad override fails the check
+        for name, changed in tomllib.loads(local.read_text()).items():
+            print(f"{name}: overridden in {local}: "
+                  + ", ".join(f"{key} = {value!r}" for key, value in sorted(changed.items())))
     for host in load().values():
         if "builder" in host.roles:
-            print(f"{host.name}: {host.kache_gb} + {host.slots} x {host.slot_bound_gb} + {host.headroom_gb}"
-                  f" = {host.budget_gb()} of {host.disk_gb} GB")
+            queue = f" + {host.slot_bound_gb} (queue)" if "gate" in host.roles else ""
+            print(f"{host.name}: {host.kache_gb} + {host.slots} x {host.slot_bound_gb}{queue}"
+                  f" + {host.headroom_gb} = {host.budget_gb()} of {host.disk_gb} GB")
         found += problems(host)
     for problem in found:
         print(problem)

@@ -45,6 +45,7 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
 | `FAB_HOME/runs/<run>/` on hel8 | each run's brief, its collected report and metadata |
 | `FAB_HOME/reports/` on hel8 | the standing reports, one file per draft and day (section 10) |
 | `FAB_HOME/digests/<run>.md` on hel8 | each gated branch's structure digest (section 12) |
+| `FAB_HOME/hosts.local.toml` on any machine | live overrides of `fab/hosts.toml` there, by hand (section 7) |
 | `FAB_HOME/user.md` on hel8 | the user's page: their open questions and the latest reports (13.6) |
 | `FAB_HOME/tick.want` on hel8 | the reasons the tick was woken since it last ran (13.9) |
 | `FAB_HOME/repos/<repo>` on each machine | fab's own clones; `FAB_HOME/wt/<run>` worktrees for runs that build nothing |
@@ -191,8 +192,21 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
   from a swept slot peaked at 25 GB, 19 GB of it test executables and 3 GB
   incremental data (hetzner6, 10-30 20:18Z, kache warm).
 - **The builder's budget:** disk = kache cap + slots x slot bound + headroom
-  (5-10 GB). hetzner6: 50 + 8 x 25 + 10 = 260 of 305 GB, the rest for QA
-  boxes, archives and the system. `fab hosts check` computes it from
+  (5-10 GB), and one slot bound more on a gate for the queue's target, which
+  each batch sweeps as a slot's is. hetzner6: 50 + 8 x 25 + 10 = 260 of 305
+  GB, the rest for QA boxes, archives and the system. `fab hosts check`
+  computes it from `fab/hosts.toml`.
+- **Live overrides, by hand:** `FAB_HOME/hosts.local.toml`, never in git,
+  holds tables named after hosts of `fab/hosts.toml` with the keys to change
+  (`roles`, `places`, `builds`, `slots`, the disk figures; never `ssh` or
+  `hostname`). Every reader of the machines applies the file of the machine
+  it runs on: the dispatcher's on hel8 (`places`, `roles`: from the next
+  tick), heavy's on a builder (`builds`, `headroom_gb`: from its next
+  command), `fab queue install`'s at a deploy (`roles`). Scaling hetzner8's
+  builds down for the queue is `[hetzner8]` with `places` on hel8 and
+  `builds` on hetzner8; the running work drains. A bad file fails the tick
+  and `fab hosts check` (which lists the overrides in force), and heavy
+  reports it and builds on the file as it is. A lasting change goes into
   `fab/hosts.toml`.
 - **Claims are the builder's:** `slots/<n>.claim` is created exclusively and
   holds the run, task and time. `fab slot claim` and `fab slot release` run on

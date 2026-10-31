@@ -196,6 +196,17 @@ class SettingsTest(unittest.TestCase):
         self.assertEqual(heavy.settings("partial", path=self.path), heavy.Settings(builds=4))
         self.assertIsInstance(heavy.settings("partial", path=self.path).headroom, int)
 
+    def test_live_overrides_apply_and_a_bad_file_is_left_out(self):
+        local = self.home / "fab" / heavy.hosts.LOCAL
+        local.parent.mkdir(parents=True, exist_ok=True)
+        write(local, "[builder]\nbuilds = 1\n")
+        self.assertEqual(heavy.settings(path=self.path), heavy.Settings(builds=1, headroom=7 * heavy.GB))
+        write(local, "[builder]\nssh = 'z'\n")
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            self.assertEqual(heavy.settings(path=self.path).builds, 2)
+        self.assertIn("heavy: ignoring", stderr.getvalue())
+
     def test_unknown_and_missing_host_keep_defaults(self):
         self.assertEqual(heavy.settings("unknown", path=self.path), heavy.Settings())
         self.assertEqual(heavy.settings("", path=self.path), heavy.Settings())
