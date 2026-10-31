@@ -1,4 +1,4 @@
-"""The dispatcher: one idempotent tick keeps a plan's tasks moving (docs/design/fab.md, 13).
+"""The dispatcher: one idempotent tick keeps every plan's tasks moving (docs/design/fab.md, 13).
 
 `decide` is pure: from the plan, its tasks, the log and the machines it returns the actions
 to take now. `tick` gathers those inputs, carries the actions out through `fab.run`,
@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from fab import call_review, calls, channel, designer, flow, foreman, gates, hosts as machines, land, log, plan as specs, repairs, run as runs, state
+from fab import call_review, calls, channel, designer, drafts, flow, foreman, gates, hosts as machines, land, log, plan as specs, repairs, run as runs, state
 from fab.hosts import Host
 from fab.plan import Plan, Task
 from fab.sh import Failed, Runner, run, ssh
@@ -31,45 +31,46 @@ REVIEW_AFTER = 4 * 60  # minutes since the last review call that start one with 
 
 
 def blocking(tasks: Mapping[str, Task], events: list[dict], questions: list[dict], *,
-             calls_in_flight: bool = False, design: Sequence[str] = ()) -> bool:
+             calls_in_flight: bool = False, design: Sequence[str] = (),
+             draft: str | None = None) -> bool:
     """Whether an open question holds up other work, so it is answered at once rather than
     batched (the user, 10-30: keep the system live): a task not landed needs a task that is
     parked on one of the questions; or nothing moves while work remains: no run or call in
     flight, no task runnable or rejected, no part waiting for design, and some task not
-    landed."""
+    landed. With draft, only its owned runs count as moving."""
     views = state.fold(tasks, events)
     parked = {event["task"] for event in questions}
     open_work = [view for view in views.values() if view.status != "landed"]
     if any(need in parked for view in open_work for need in tasks[view.id].needs):
         return True
-    moving = (calls_in_flight or bool(design) or bool(in_flight(events))
+    flight = in_flight(events)
+    if draft is not None:
+        flight = drafts.owned(draft, flight, events)
+    moving = (calls_in_flight or bool(design) or bool(flight)
               or any(view.status in ("runnable", "rejected") for view in open_work))
     return not moving and bool(open_work)
 
 
 def call_actions(plan: Plan, tasks: Mapping[str, Task], events: list[dict], design: list[str],
                  now: str) -> list[Action]:
-    """Advance each call review chain in root-ending order, then start eligible calls.
+    """Advance this draft's chains, then answer, design, review and retire calls.
 
-    Only this draft's chains take steps. Review yields vet, approved yields finish,
-    amend yields an amend call, and hold parks the subject. Reviewing, amending, parked
-    and finished chains take no step. Open chains block their subject and further answer or review calls of their role. Calls in flight
-    also reserve their role. Successful part calls stay designed; start the first fresh
-    skeleton and contract independently. Retire follows review once all parts are done,
-    unless in flight, parked, already done or held by an open chain of its subject.
-    Answer calls count only queued questions, aged from their queued since timestamp,
-    using ANSWER_AT or ANSWER_AFTER; structure reviews use REVIEW_AT or
-    REVIEW_AFTER since the last review started. A question parks its subject (an answer
-    call's subject is its draft) until call.answered names it, or a later call of the
-    subject ends done. Pure; see docs/design/fab.md, 12 and 13.1."""
+    In-flight calls and open chains reserve answer, review and amend only within the
+    draft. Fresh skeleton and contract parts share its flow target, in design order.
+    Successful calls stay designed; parked subjects and open chains block their subject.
+    Queued questions use ANSWER_AT, ANSWER_AFTER or draft-local blocking; reviews use
+    REVIEW_AT or REVIEW_AFTER since this draft's last review started. Retire follows
+    review once every part is done. Pure; docs/design/fab.md, 12, 13.1 and 13.4.
+    """
     started = {event["call"]: event for event in events if event.get("ev") == "call.started"}
     ended = {event["call"] for event in events if event.get("ev") == "call.ended"}
-    flight = {key: event for key, event in started.items() if key not in ended}
+    flight = {key: event for key, event in started.items()
+              if key not in ended and drafts.under(plan.draft, event.get("subject"))}
     chains = call_review.chains(events)
     own = {root: chain for root, chain in chains.items()
-           if chain.subject == plan.draft or chain.subject.startswith(plan.draft + "/")}
+           if drafts.under(plan.draft, chain.subject)}
     actions = _chain_actions(own, any(event["role"] == "amend" for event in flight.values()))
-    open_chains = [chain for chain in chains.values() if chain.state != "finished"]
+    open_chains = [chain for chain in own.values() if chain.state != "finished"]
     subjects = {chain.subject for chain in open_chains}
     roles = {event["role"] for event in flight.values()}
     roles.update(chain.role for chain in open_chains if chain.role in ("answer", "review"))
@@ -82,11 +83,11 @@ def call_actions(plan: Plan, tasks: Mapping[str, Task], events: list[dict], desi
                       >= timedelta(minutes=ANSWER_AFTER))
         if len(questions) >= ANSWER_AT or old_enough or blocking(
                 tasks, events, [{"task": question.task} for question in questions],
-                calls_in_flight=bool(roles), design=design):
+                calls_in_flight=bool(roles), design=design, draft=plan.draft):
             actions.append(Action("call", task=plan.draft, run_kind="answer"))
-    actions.extend(_part_calls(plan, design, started, events, roles, parked | subjects))
+    actions.extend(_part_calls(plan, design, started, events, parked | subjects))
     subject = f"{plan.draft}/review"
-    if "review" not in roles and subject not in parked | subjects and _review_due(tasks, events, now):
+    if "review" not in roles and subject not in parked | subjects and _review_due(plan.draft, tasks, events, now):
         actions.append(Action("call", task=subject, run_kind="review"))
     subject = designer.subject(plan.draft, "retire")
     if ("retire" not in roles and subject not in parked | subjects
@@ -96,23 +97,18 @@ def call_actions(plan: Plan, tasks: Mapping[str, Task], events: list[dict], desi
 
 
 def _part_calls(plan: Plan, design: list[str], started: Mapping[str, dict], events: list[dict],
-                roles: set[str], blocked: set[str | None]) -> list[Action]:
-    """Start the first fresh part of each role, skeleton then contract, independently.
+                blocked: set[str | None]) -> list[Action]:
+    """Start fresh design parts in order up to the draft's shared design-call limit.
 
-    Done calls reserve their subject even before their specs reach the loaded plan;
-    parked subjects and open chains also block a part. Each in-flight role holds its lane.
+    Done calls reserve their subject before their specs reach the plan; parked subjects
+    and open chains also block a part. Skeleton and contract share the flow target.
     """
     completed = {event["call"] for event in events
                  if event.get("ev") == "call.ended" and event.get("outcome") == "done"}
     designed = {event.get("subject") for call, event in started.items() if call in completed}
     fresh = [part for part in design if f"{plan.draft}/{part}" not in designed | blocked]
-    contracts = {part.id for part in plan.parts.values() if part.contract}
-    actions = []
-    for role in ("skeleton", "contract"):
-        candidates = [part for part in fresh if (part in contracts) == (role == "contract")]
-        if role not in roles and candidates:
-            actions.append(Action("call", task=candidates[0], run_kind=role))
-    return actions
+    return [Action("call", task=part, run_kind=role)
+            for part, role in drafts.design_calls(plan, fresh, events)]
 
 
 def _chain_actions(chains: Mapping[str, call_review.Chain], amending: bool) -> list[Action]:
@@ -136,8 +132,9 @@ def _parked_subjects(events: list[dict]) -> set[str]:
     return {ask.subject for ask in channel.asks((), events) if ask.kind == "call"}
 
 
-def _review_due(tasks: Mapping[str, Task], events: list[dict], now: str) -> bool:
-    previous = calls.last_review(events)
+def _review_due(draft: str, tasks: Mapping[str, Task], events: list[dict], now: str) -> bool:
+    """Whether enough tasks landed, or time passed, since this draft's last review."""
+    previous = calls.last_review(events, draft=draft)
     landed = calls.landed_after(events, tasks, previous)
     return bool(landed) and (len(landed) >= REVIEW_AT or
                             datetime.fromisoformat(now) - datetime.fromisoformat(previous or landed[0]["ts"])
@@ -215,7 +212,7 @@ def decide(plan: Plan, tasks: Mapping[str, Task], events: list[dict], hosts: Map
     0. flow: one Action("flow", task=plan.draft, detail="target <n>, <m> in flight"), n being
        fab.flow.target(plan.draft, events) and m the runs in flight of the draft's tasks
        (task starting with `<draft>/`). It is printed, never carried out.
-    1. collect: every run in flight.
+    1. collect: only this draft's owned runs, including its calls' review runs.
     2. land (repo "agents") or ready (any other repo): every task whose status is done, with
        the branch of its last run.
     3. start: for rejected tasks first, then runnable ones in the tasks' order, while the
@@ -239,7 +236,7 @@ def decide(plan: Plan, tasks: Mapping[str, Task], events: list[dict], hosts: Map
     views = state.fold(tasks, events)
     actions = [Action("flow", task=plan.draft, detail=f"target {limit}, {occupied} in flight")]
     actions.extend(Action("collect", task=event["task"], run=event["run"], host=event["host"],
-                          detail=event["run"]) for event in flight)
+                          detail=event["run"]) for event in drafts.owned(plan.draft, flight, events))
     for identifier, view in views.items():
         if view.status == "done":
             actions.append(Action("land" if tasks[identifier].repo == "agents" else "ready",
@@ -321,13 +318,19 @@ def _start_kind(view: state.TaskView, events: list[dict]) -> tuple[str, dict | N
 
 
 def _import_queue(tasks: Mapping[str, Task], events: list[dict], hosts: Mapping[str, Host], *,
-                  sh: Runner, log_path: Path | None) -> None:
-    """Append new merge queue records for this plan, skipping torn remote lines."""
+                  sh: Runner, log_path: Path | None, plan_drafts: Sequence[str]) -> None:
+    """Import all loaded tasks once, reading from the oldest draft cursor.
+
+    Each cursor is its newest imported queue_ts, or empty before its first record.
+    Remote torn lines and other plans' records are skipped; imported keys deduplicate.
+    """
     gate_hosts = sorted(name for name, host in hosts.items() if "gate" in host.roles)
     if gate_hosts:
         imported = {(event.get("queue_ts"), event.get("ev"), event.get("branch"),
                      event.get("tip")) for event in events if "queue_ts" in event}
-        since = max((event["queue_ts"] for event in events if "queue_ts" in event), default="")
+        since = min((max((event["queue_ts"] for event in events if "queue_ts" in event
+                           and drafts.under(draft, event.get("task"))), default="")
+                     for draft in plan_drafts), default="")
         result = sh(ssh(hosts[gate_hosts[0]].ssh, ["fab", "queue", "log", "--since", since]))
         if not result.ok:
             # The queue's record is read again next tick; the other actions still run.
@@ -407,18 +410,20 @@ def _ready(action: Action, task: Task, hosts: Mapping[str, Host], *, sh: Runner,
                branch=action.branch, tip=tip)
 
 
-def _call(action: Action, plan_dir: Path, *, sh: Runner, log_path: Path | None) -> None:
-    """Launch a numbered call unit: parts for skeleton/contract, roots for amend,
-    no positional argument for answer, review or retire; every call gets --plan."""
-    events = log.read(log_path)
-    number = 1 + sum(event.get("ev") == "call.started" and
-                     event.get("role") == action.run_kind for event in events)
-    argv = ["fab", "call", action.run_kind]
-    if action.run_kind in ("skeleton", "contract", "amend"):
+def _call(action: Action, plan_dir: Path, draft: str, *, sh: Runner) -> None:
+    """Launch a subject-named call unit, passing parts or amend roots and --plan.
+
+    Skeleton and contract keys are draft/part; other roles use the action's task.
+    Answer, review and retire take no positional argument.
+    """
+    role = action.run_kind
+    key = f"{draft}/{action.task}" if role in drafts.DESIGN_ROLES else action.task
+    argv = ["fab", "call", role]
+    if role in ("skeleton", "contract", "amend"):
         argv.append(action.task)
     argv.extend(["--plan", str(plan_dir.resolve())])
     sh(["systemd-run", "--user", "--collect", "--unit",
-        f"fab-call-{action.run_kind}-{number}", *argv], check=True)
+        drafts.unit(role, key), *argv], check=True)
 
 
 def _finish(action: Action, *, log_path: Path | None) -> None:
@@ -433,8 +438,8 @@ def _finish(action: Action, *, log_path: Path | None) -> None:
 def _take(action: Action, tasks: Mapping[str, Task], hosts: Mapping[str, Host], plan_dir: Path, *,
           plan: Plan, checkout: Path, sh: Runner, log_path: Path | None) -> None:
     """Take a task, foreman or call-chain action, isolating failures and logging each finish
-    outcome. A foreman prints its asking run and chosen builder; a failed settlement leaves
-    the question unanswered for the next tick."""
+    outcome. Call units use the plan's draft and subject. Foremen print their asking run
+    and builder; failed settlements leave questions unanswered for the next tick."""
     detail = action.detail
     outcome = "failed"
     try:
@@ -448,7 +453,7 @@ def _take(action: Action, tasks: Mapping[str, Task], hosts: Mapping[str, Host], 
             case "start":
                 _start(action, tasks, hosts, sh=sh, log_path=log_path)
             case "call":
-                _call(action, plan_dir, sh=sh, log_path=log_path)
+                _call(action, plan_dir, plan.draft, sh=sh)
             case "foreman":
                 detail = _foreman(action, tasks, hosts, sh=sh, log_path=log_path)
             case "settle":
@@ -473,23 +478,20 @@ def _take(action: Action, tasks: Mapping[str, Task], hosts: Mapping[str, Host], 
     print(f"{action.kind} {action.task or '-'} {detail}")
 
 
-def tick(plan_dir: Path, *, sh: Runner = run, hosts: Mapping[str, Host] | None = None,
+def tick(*plan_dirs: Path, sh: Runner = run, hosts: Mapping[str, Host] | None = None,
          log_path: Path | None = None) -> list[Action]:
-    """Fetch the checkout and take task, foreman, then designer and review chain steps.
+    """Tick listed then given plans under one nonblocking lock (docs/design/fab.md, 13.4).
 
-    Find git from the nearest existing parent when a cut's directory is absent.
-    A logged cut substitutes an empty plan while plan.toml is absent. A retired plan prints
-    `retired <draft>` and returns [] before queue import, builder measurement or actions.
-
-    Hold a nonblocking FAB_HOME/tick.lock, validate the plan, import queue events and measure
-    builders through fab.flow.measure before deciding. Collect runs, gate and land tasks,
-    publish ready branches and start runs through the runner. Re-read events to start foremen and land settled answers, then again for
-    call decisions counting only queued questions: vet on the freest builder, amend in a user
-    unit, park refusals once, or land approved branches and record answers and call.finished.
-    Every action reports one line; a failure logs a note and leaves later actions running.
-    Rewrite the user's page after call actions; a page failure only prints its error.
-    Early returns for a held lock or retired plan write no page. Return the actions taken.
-    See docs/design/fab.md, 12, 13.1 and 13.6."""
+    Fetch each checkout once; print load failures without logging and skip retired plans.
+    Import the queue and measure builders once, then let each plan decide on fresh events.
+    Plans collect only their own runs and spend builders' calm extras once per tick.
+    Collect unowned runs last and refresh the page once. Return load, plan and stray
+    actions in order; no loaded plan means no import, measure or page.
+    """
+    directories = channel.plan_dirs(plan_dirs)
+    if not directories:
+        print("plans - none")
+        return []
     home = log.home()
     home.mkdir(parents=True, exist_ok=True)
     with open(home / "tick.lock", "a") as lock:
@@ -497,42 +499,96 @@ def tick(plan_dir: Path, *, sh: Runner = run, hosts: Mapping[str, Host] | None =
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             return []
-        result = sh(["git", "rev-parse", "--show-toplevel"], cwd=str(_plan_ancestor(plan_dir)))
-        checkout = Path(result.out.strip()) if result.ok and result.out.strip() else plan_dir.resolve()
-        if result.ok and result.out.strip():
-            sh(["git", "fetch", "origin"], cwd=str(checkout), check=True)
-        events = log.read(log_path)
-        plan, tasks = _load_plan(plan_dir, events, checkout=checkout, sh=sh)
-        if plan.retired:
-            print(f"retired {plan.draft}")
-            return []
+        loaded, actions = _load_plans(directories, log.read(log_path), sh=sh)
+        if not loaded:
+            return actions
         hosts = machines.load() if hosts is None else hosts
-        _import_queue(tasks, events, hosts, sh=sh, log_path=log_path)
+        tasks = {key: task for _, plan_tasks, _, _ in loaded for key, task in plan_tasks.items()}
+        _import_queue(tasks, log.read(log_path), hosts, sh=sh, log_path=log_path,
+                      plan_drafts=[plan.draft for plan, _, _, _ in loaded])
         calm = flow.measure(hosts, log.now(), sh=sh)
-        actions = decide(plan, tasks, events, hosts, calm)
-        for action in actions:
-            _take(action, tasks, hosts, plan_dir, plan=plan, checkout=checkout,
-                  sh=sh, log_path=log_path)
-        questions = foreman_actions(tasks, log.read(log_path))
-        for action in questions:
-            _take(action, tasks, hosts, plan_dir, plan=plan, checkout=checkout,
-                  sh=sh, log_path=log_path)
-        actions.extend(questions)
-        design = [part for action in actions if action.kind == "design"
-                  for part in action.detail.split(", ")]
-        followups = call_actions(plan, tasks, log.read(log_path), design, log.now())
-        actions.extend(followups)
-        for action in followups:
-            _take(action, tasks, hosts, plan_dir, plan=plan, checkout=checkout,
-                  sh=sh, log_path=log_path)
-        _page(plan_dir, log_path)
+        for plan, tasks, directory, checkout in loaded:
+            taken = _tick_plan(plan, tasks, directory, checkout, hosts, calm, sh=sh, log_path=log_path)
+            actions.extend(taken)
+            calm = drafts.spend(calm, (action.host for action in taken if action.kind == "start"))
+        events = log.read(log_path)
+        for record in drafts.strays([plan.draft for plan, _, _, _ in loaded], in_flight(events), events):
+            action = Action("collect", task=record["task"], run=record["run"],
+                            host=record["host"], detail=record["run"])
+            actions.append(action)
+            _take(action, tasks, hosts, directory, plan=plan, checkout=checkout, sh=sh, log_path=log_path)
+        _page(plan_dirs, log_path)
         return actions
 
 
-def _page(plan_dir: Path, log_path: Path | None) -> None:
-    """Refresh the user's page without letting a file failure stop the tick."""
+def _checkout(plan_dir: Path, fetched: dict[Path, Exception | None], *, sh: Runner) -> Path:
+    """Locate git and fetch each checkout once, retaining failures for its other plans."""
+    result = sh(["git", "rev-parse", "--show-toplevel"], cwd=str(_plan_ancestor(plan_dir)))
+    if not result.ok or not result.out.strip():
+        return plan_dir.resolve()
+    checkout = Path(result.out.strip()).resolve()
+    if checkout not in fetched:
+        fetched[checkout] = None
+        try:
+            sh(["git", "fetch", "origin"], cwd=str(checkout), check=True)
+        except (OSError, ValueError, Failed) as error:
+            fetched[checkout] = error
+    failure = fetched[checkout]
+    if failure is not None:
+        raise failure
+    return checkout
+
+
+def _load_plans(directories: Sequence[Path], events: list[dict], *, sh: Runner,
+                fetch: bool = True) -> tuple[list[tuple[Plan, dict[str, Task], Path, Path]], list[Action]]:
+    """Load plans in order, skipping retirement and reporting failures without log notes.
+
+    Reject duplicate drafts. With fetch, share one checkout fetch including its failure;
+    without it, use the same plan/cut loading path without fetching or locating normal plans.
+    Return loaded (plan, tasks, directory, checkout) tuples and failed load actions.
+    """
+    loaded, actions, seen, fetched = [], [], {}, {}
+    for directory in directories:
+        try:
+            checkout = _checkout(directory, fetched, sh=sh) if fetch else None
+            plan, tasks = _load_plan(directory, events, checkout=checkout, sh=sh)
+            if plan.retired:
+                print(f"retired {plan.draft}")
+                continue
+            if plan.draft in seen:
+                raise specs.PlanError(f"draft {plan.draft} is already ticked from {seen[plan.draft]}")
+            seen[plan.draft] = directory
+            loaded.append((plan, tasks, directory, checkout or directory))
+        except (specs.PlanError, OSError, ValueError, Failed) as error:
+            action = Action("load", task=str(directory), detail="failed: " + " ".join(str(error).splitlines()))
+            actions.append(action)
+            print(f"{action.kind} {action.task} {action.detail}")
+    return loaded, actions
+
+
+def _tick_plan(plan: Plan, tasks: Mapping[str, Task], directory: Path, checkout: Path,
+               hosts: Mapping[str, Host], calm: Mapping[str, bool], *, sh: Runner,
+               log_path: Path | None) -> list[Action]:
+    """Take one plan's decisions, foremen, then calls, reading events anew at each step."""
+    actions = decide(plan, tasks, log.read(log_path), hosts, calm)
+    for action in actions:
+        _take(action, tasks, hosts, directory, plan=plan, checkout=checkout, sh=sh, log_path=log_path)
+    questions = foreman_actions(tasks, log.read(log_path))
+    for action in questions:
+        _take(action, tasks, hosts, directory, plan=plan, checkout=checkout, sh=sh, log_path=log_path)
+    actions.extend(questions)
+    design = [part for action in actions if action.kind == "design" for part in action.detail.split(", ")]
+    followups = call_actions(plan, tasks, log.read(log_path), design, log.now())
+    actions.extend(followups)
+    for action in followups:
+        _take(action, tasks, hosts, directory, plan=plan, checkout=checkout, sh=sh, log_path=log_path)
+    return actions
+
+
+def _page(plan_dirs: Sequence[Path], log_path: Path | None) -> None:
+    """Refresh the page for listed and given plans once, printing file failures only."""
     try:
-        path = channel.write(channel.compose(channel.plan_dirs([plan_dir]), log.read(log_path), log.now()))
+        path = channel.write(channel.compose(channel.plan_dirs(plan_dirs), log.read(log_path), log.now()))
         print(f"page - {path}")
     except (OSError, ValueError) as error:
         print(f"page - failed: {' '.join(str(error).splitlines())}")
@@ -668,25 +724,29 @@ def _park(action: Action, *, log_path: Path | None) -> None:
 
 
 def main(argv: list[str]) -> int:
-    """`fab tick PLAN_DIR [--dry-run]`: one tick, or with --dry-run only print decide's actions
-    (no builder measured, so none is calm). A logged cut uses an empty plan while
-    plan.toml is absent; a retired plan prints `retired <draft>` and takes no action."""
+    """`fab tick [PLAN_DIR...] [--dry-run]`: tick listed and given plans; fail on bad loads.
+
+    Dry-run loads each plan without fetch, prints retirement, failed loads or decide's
+    actions on the same log and hosts, with no calm. It neither chains plans nor acts.
+    """
     parser = argparse.ArgumentParser(prog="fab tick", description=__doc__)
-    parser.add_argument("plan_dir", type=Path, metavar="PLAN_DIR")
+    parser.add_argument("plan_dirs", type=Path, nargs="*", metavar="PLAN_DIR")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
     try:
         if args.dry_run:
+            directories = channel.plan_dirs(args.plan_dirs)
+            if not directories:
+                print("plans - none")
             events = log.read()
-            plan, tasks = _load_plan(args.plan_dir, events, sh=run)
-            if plan.retired:
-                print(f"retired {plan.draft}")
-                return 0
-            for action in decide(plan, tasks, events, machines.load()):
-                print(f"{action.kind} {action.task or '-'} {action.detail}")
+            loaded, actions = _load_plans(directories, events, sh=run, fetch=False)
+            hosts = machines.load() if loaded else {}
+            for plan, tasks, _, _ in loaded:
+                for action in decide(plan, tasks, events, hosts):
+                    print(f"{action.kind} {action.task or '-'} {action.detail}")
         else:
-            tick(args.plan_dir)
+            actions = tick(*args.plan_dirs)
+        return int(any(action.kind == "load" and action.detail.startswith("failed:") for action in actions))
     except (OSError, ValueError, Failed) as error:
         print("fab tick: " + " ".join(str(error).splitlines()), file=sys.stderr)
         return 1
-    return 0

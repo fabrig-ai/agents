@@ -8,7 +8,7 @@ import sys
 # Each command lives in its own module and is imported only when used.
 COMMANDS = {
     "call": ("fab.calls", "run a Claude call on a compiled brief"),
-    "tick": ("fab.dispatch", "collect, land and start a plan's tasks"),
+    "tick": ("fab.dispatch", "collect, land and start every plan's tasks"),
     "test": ("fab.testrun", "run every test; fail past the 30 s budget"),
     "page": ("fab.channel", "the user's page: their questions and the latest reports; their answers"),
     "report": ("fab.report", "the standing reports of a plan and of the landing"),
