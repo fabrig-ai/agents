@@ -155,8 +155,9 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
   `tools/queue/mq`'s core: ready refs oldest first, a batch merged on main,
   the selected checks through `heavy --gate`, bisection of a red batch, a push
   that expects main's parent, ready and task branches deleted. Its record is
-  `FAB_HOME/queue.jsonl` there (`batch`, `landed`, `rejected`), which the
-  dispatcher reads; the tips it has tried are its only other state. The port
+  `FAB_HOME/queue.jsonl` there (`batch`, `landed`, `rejected`,
+  `collateral`), which the dispatcher reads; the tips it has tried and
+  their collateral reds (13.8) are its only other state. The port
   drops train, worker and recovery, and the publication journal (section 9).
 - **The selection and the steps are shared** (`fab/gate.py`): the queue runs
   them in the gate lane on the batch, precheck in the build lane on the tip
@@ -219,9 +220,10 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
 
 ## 9. Left out for now
 
-- **Receipts and evidence hashes** (precheck's `result.json` bound to tips and
-  trees): the log's `run.ended` and `branch.*` events carry tips; a check
-  binding them attaches at `fab land` and the queue's intake.
+- **Evidence hashes** (precheck's `result.json` bound to trees): the log's
+  `run.ended` and `branch.*` events carry tips, and the queue reuses a
+  receipt only for its tip and main (13.8); a check binding receipts to
+  trees attaches at `fab land` and the queue's intake.
 - **Publication journal and recovery:** the queue re-derives its state from
   git (main, ready refs) on start; a crash between push and cleanup leaves
   ready refs contained in main, which the next cycle deletes.
@@ -259,7 +261,9 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
   lost; the same per part.
 - **The landing report** (`fab/landing_report.py`): batches, their outcomes
   and branches; the share of the day in gate steps; rejections by step (the
-  red classes) and collateral ones (a rejected tip that later lands); ready to
+  red classes) and collateral ones (a rejected tip that later lands, and the
+  branches the queue retried after a collateral red, 13.8); batches landed
+  on a precheck receipt; ready to
   landed latency (from the log's `branch.ready`), branches waiting and the
   oldest wait; bisection runs and minutes; repair rounds; each step's
   durations, failures and timeouts; batches in error; heavy's waits on the
@@ -687,10 +691,39 @@ before it lands (13.1).
   receipt names the same main and passed lands on the receipt's checks
   alone, after fmt; the queue's own full checks still run on every fifth
   batch and on every batch of more than one.
+  - **The receipt travels with the ready:** when the dispatcher readies a
+    fabrig tip, it reads `FAB_HOME/precheck/<tip>.json` on the builder of
+    the task's last implement, repair or rebase run and hands it to the
+    gate (`fab queue receipt TIP`, kept as `FAB_HOME/receipts/<tip>.json`
+    there; `fab/receipts.py`). A receipt that is missing, red or does not
+    parse is no receipt: the queue checks the tip in full.
+  - **Reusable** means green, the same tip and the same main as the batch's
+    parent. The ratchet steps still run with `--write` (they shape the
+    candidate), then `fmt` for the queue's selection; the batch record
+    carries `receipt`, and the batch counts toward the fifth.
 - **Reds are classed before anyone hears them:** a failing test that passed
   in the branch's precheck is retried once alone; passing, the red is
   collateral, recorded as such, and the branch is retried without counting
   against it; failing twice, it is the branch's.
+  - **Which reds** (`fab/reds.py`): the gate's test steps (`default`,
+    `fuzzy`) write nextest's JUnit through an overlay config, as after
+    landing does. A red test step with at most five failed tests, each
+    passing in every merged branch's precheck (its receipt green, the step
+    run, the test's package in its selection), is classed before any
+    bisection; any other red stands as before.
+  - **The retry** runs each failed test alone, in order, with the step's
+    own scope and profile in the gate lane. All passing: the batch's
+    outcome is `collateral`, each merged branch gets a `collateral` record
+    (branch, tip, step, tests, log), nothing is rejected or marked tried,
+    and the batch goes again next cycle. One failing alone, or a retry that
+    cannot be read, and the red stands: bisection or rejection as before,
+    the record carrying `stands`, the reason.
+  - **Bounded:** a tip classed collateral twice has its next red stand, so
+    a test that fails under load every time cannot hold the queue. A
+    collateral attempt within a bisection ends that group's split.
+  - The landing report counts the branches retried and the batches landed
+    on a receipt, and raises a signal for each collateral red: a flake goes
+    to its owner.
 
 ### 13.9 Events drive the tick
 
@@ -752,6 +785,11 @@ things fab follows, whatever the clock says:
 - Report metrics the records do not hold yet: lines changed per landed
   branch, questions by kind, continuity, CPU per step against its budget,
   after-landing verdicts; targets and their signals once the user sets them.
+- The landing checks' next steps (13.8): a collateral red sent to the
+  failing test's owner, not only signalled; receipts reused for batches of
+  more than one, once numbers show how often a set's receipts all name its
+  main; receipts on the gate pruned; a step that exits for disk (heavy's
+  75) at the gate an error, not a red.
 - after-landing live: its unit on a builder and its slot, the old tool
   stopped, fabrig's package map moved to `.config/tiers/`; then new reds
   reaching their tasks through the dispatcher, bisection when several

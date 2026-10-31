@@ -150,6 +150,19 @@
   A call's subject draws its calls into the report only when it is the draft
   or one of its parts; the task widens that to every subject under the
   draft (review, cut, retire, decision).
+- **The landing checks are a skeleton:** `fab/receipts.py` (a receipt
+  kept on the gate, read, reusable for a tip and main, covering a test, and
+  carried from the builder at ready) and `fab/reds.py` (the test steps'
+  JUnit, the retry of a failed test alone, the verdict) hold 13.8's
+  contracts; `fab.queue.Queue.attempt`, `cycle` and `main` say how the queue
+  uses them. The task `receipts` fills the first and the queue's reuse and
+  `fab queue receipt`; `red-classes` the second, the queue's classing and
+  the landing report's figures; `receipts-ready` makes the dispatcher carry
+  each tip's receipt when it readies it, after the tick's other tasks on
+  `fab/dispatch.py`. Until then every batch runs its full checks and every
+  red rejects or bisects. The bound of two collateral reds per tip and five
+  retried tests per red are first guesses, to be set from the queue's
+  records.
 - **Parts done by hand have no task specs** (package, slot-probe), so the
   tick's design line lists them.
 - **The slot bound of 25 GB is one measurement** (10-30 20:18Z): a

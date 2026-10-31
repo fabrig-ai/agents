@@ -2,8 +2,10 @@
 
 Ready refs `ready/<draft>/<task>` are taken oldest first, merged on main as one batch, checked
 in the gate lane, and pushed to main; a red batch is bisected. State is re-derived from git
-on every cycle, except the tips already tried, kept in FAB_HOME/queue-state.json. Every
-outcome is recorded in FAB_HOME/queue.jsonl, which the dispatcher reads.
+on every cycle, except the tips already tried and the collateral reds each tip has had, kept in
+FAB_HOME/queue-state.json. Every outcome is recorded in FAB_HOME/queue.jsonl, which the
+dispatcher reads. A batch of one may land on its precheck receipt (fab.receipts), and a red is
+classed before anyone hears it (fab.reds; docs/design/fab.md, 13.8).
 """
 
 from __future__ import annotations
@@ -179,9 +181,30 @@ class Queue:
         green, red, conflict or error, log), `landed` (branch, tip, main), `rejected` (branch,
         tip, step, log). The checkout is left clean and detached.
 
+        A receipt (docs/design/fab.md, 13.8): when exactly one branch merged, the batch is not a
+        full one (not forced, and batches_since_full + 1 < full_every) and
+        fab.receipts.reusable(fab.receipts.load(home, tip), tip, parent) holds, the checks are the
+        ratchet steps with --write and their baseline commit as always, then only the `fmt` steps
+        of fab.gate.check_steps for the queue's own selection. The batch record gains receipt (the
+        receipt's path) and the batch counts toward the next full one (batches_since_full + 1,
+        whatever the selection).
+
+        Otherwise the test steps write their JUnit (fab.reds.with_junit, directory FAB_HOME/queue,
+        name the batch id). A red is classed (fab.reds.classify on the red result and its report,
+        with fab.receipts.load of each merged tip in merge order) unless a merged branch already
+        has fab.reds.LIMIT collateral reds at its tip in state["collateral"] ({name: {"tip",
+        "count"}}); the retries' results join the record's steps. Collateral: the outcome is
+        collateral and the record gains retried (the verdict's tests); per merged branch a
+        `collateral` record (branch, tip, step, tests, log) and its count raised (from 1 at a new
+        tip); nothing is rejected or marked tried, no full check is forced, and the attempt
+        returns False. A red that stands, classed or not, goes on as red, the record gaining
+        stands (the verdict's reason) when it was classed. Conflicts are rejected either way. A
+        branch landed or rejected loses its state["collateral"] entry.
+
         Whatever the outcome, the attempt ends by bounding the gate's target as a slot's is
         (docs/design/fab.md, 7): fab.slots.remove(fab.slots.sweep_plan(repo / "target",
-        <the attempt's start in ns>)), the bytes freed going into the batch record as freed."""
+        <the attempt's start in ns>)), the bytes freed going into the batch record as freed.
+        last_outcome is then the batch record's outcome."""
         started_ns = time.time_ns()
         started = log.now()
         batch_id = datetime.strptime(started, "%Y-%m-%dT%H:%M:%S.%fZ").strftime("%Y%m%dT%H%M%SZ")
@@ -297,7 +320,9 @@ class Queue:
     def cycle(self) -> bool:
         """Consume queue-untry requests (forget, save, remove, record), then fetch --prune.
         Take up to `batch` candidates and attempt them, bisecting when red;
-        return whether there was anything to do."""
+        return whether there was anything to do. A collateral attempt (last_outcome
+        "collateral") is not bisected: its branches go again next cycle. Within a bisection, a
+        collateral attempt counts as passed, so its group is not split further."""
         self._error_recorded = False
         self._force_full = False
         requests = self.home / "queue-untry"
@@ -348,7 +373,9 @@ def main(argv: list[str]) -> int:
     """`fab queue run|once [--repo PATH] [--batch N]` (repo default FAB_HOME/repos/fabrig; run stops
     at FAB_HOME/queue.stop), `fab queue plan` (the next batch's names, no checks),
     `fab queue log [--since TS]` (queue.jsonl records at or after TS, one per line),
-    `fab queue untry BRANCH` (ask the running queue to forget its tried tip next cycle)."""
+    `fab queue untry BRANCH` (ask the running queue to forget its tried tip next cycle),
+    `fab queue receipt TIP` (keep the precheck receipt on stdin for TIP, fab.receipts.store
+    with FAB_HOME; a refusal prints `fab queue: <error>` and exits 1)."""
     parser = argparse.ArgumentParser(prog="fab queue")
     parser.add_argument("command", choices=("run", "once", "plan", "log", "untry"))
     parser.add_argument("branch", nargs="?")
