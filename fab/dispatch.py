@@ -243,7 +243,8 @@ def decide(plan: Plan, tasks: Mapping[str, Task], events: list[dict], hosts: Map
     """
     flight = in_flight(events)
     free = places(hosts, flight, calm)
-    limit = flow.target(plan.draft, events)
+    limit = flow.target(plan.draft, events,
+                        start=sum(host.places for host in hosts.values() if "builder" in host.roles))
     occupied = sum(event["task"].startswith(plan.draft + "/") for event in flight)
     views = state.fold(tasks, events)
     actions = [Action("flow", task=plan.draft, detail=f"target {limit}, {occupied} in flight")]

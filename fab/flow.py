@@ -18,7 +18,7 @@ from fab.hosts import Host
 from fab.run import remote_home
 from fab.sh import Failed, Runner, run, ssh
 
-START = 2  # the target when a plan starts
+START = 2  # the default starting target for design calls
 FLOOR = 1  # the target never drops below this
 LOAD_LOW = 0.7  # a builder is calm below this 5-minute load per CPU
 WAIT_MINUTES = 30  # heavy's records this far back count toward calm
@@ -27,16 +27,17 @@ WAIT_LOW = 5.0  # and their lane and disk waits, summed in minutes, stay below t
 PROBE = ["sh", "-c", 'cat /proc/loadavg && nproc && { test ! -e "$1" || tail -n 1000 "$1"; }', "sh"]
 
 
-def target(draft: str, events: Iterable[dict]) -> int:
+def target(draft: str, events: Iterable[dict], *, start: int = START) -> int:
     """The draft's target for runs in flight after the events, folded in log order.
 
     Only events whose task starts with `<draft>/` count; other types are ignored. The target
-    starts at START. The fold keeps the draft's runs in flight (run.started adds its run,
+    starts at max(FLOOR, start): the sum of the plan's builders' places for dispatch, or
+    START by default for design calls. The fold keeps the draft's runs in flight (run.started adds its run,
     run.ended removes it) and, per task, its run.started count, whether it was ever
     rejected, and whether its latest run ended while the window was full: at that run.ended
     the runs in flight, counting the ending run itself, were at least the target then.
-    - run.ended with outcome infra: the target drops by one, never below FLOOR.
-    - branch.rejected: the task is marked rejected; the target drops by one, never below FLOOR,
+    - run.ended with outcome infra: the target halves, rounded down, never below FLOOR.
+    - branch.rejected: the task is marked rejected; the target halves, rounded down, never below FLOOR,
       unless the step is rebase or merge (a conflict between parallel branches).
     - branch.landed: the target grows by one when it is the task's first branch.landed, the
       task has exactly one run.started, was never rejected, and its latest run ended while
@@ -44,7 +45,7 @@ def target(draft: str, events: Iterable[dict]) -> int:
       the target does not grow it: an unused target says nothing about a larger one.
     A run.ended without its run.started still updates the target (infra) but is not counted
     as in flight. Never raises on a record missing a field: it is skipped for that rule."""
-    limit = START
+    limit = max(FLOOR, start)
     flight = set()
     attempts = Counter()
     rejected = set()
@@ -63,12 +64,12 @@ def target(draft: str, events: Iterable[dict]) -> int:
             full[task] = identifier in flight and len(flight) >= limit
             flight.discard(identifier)
             if event.get("outcome") == "infra":
-                limit = max(FLOOR, limit - 1)
+                limit = max(FLOOR, limit // 2)
         elif kind == "branch.rejected":
             rejected.add(task)
             # A rebase or merge conflict is parallel work meeting, not a fault of quality.
             if event.get("step") not in ("rebase", "merge"):
-                limit = max(FLOOR, limit - 1)
+                limit = max(FLOOR, limit // 2)
         elif kind == "branch.landed":
             if task not in landed and attempts[task] == 1 and task not in rejected and full.get(task):
                 limit += 1

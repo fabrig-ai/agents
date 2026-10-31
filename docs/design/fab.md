@@ -514,9 +514,9 @@ it, and the flow grows from a small start rather than to a fixed cap.
 ### 13.2 The flow grows
 
 - **Places are indicative.** A builder's `places` in `fab/hosts.toml` is a
-  hint, not a cap: the dispatcher's own target for runs in flight starts at 2
-  when a plan starts, grows by one with each task landed on its first
-  attempt, and drops by one with each rejection or infra outcome, never below
+  hint, not a cap: the dispatcher's own target for runs in flight starts at
+  the plan's places (13.11), grows by one with each task landed on its first
+  attempt, and halves with each rejection or infra outcome as in 13.11, never below
   1; it may pass `places` while the builder's load and heavy's waits stay low
   (heavy and the disk wait still bound what actually builds).
 - **The target is a fold** (`fab.flow.target`) over the plan's events in the

@@ -30,6 +30,30 @@ class TargetTest(unittest.TestCase):
     def test_start_with_no_events(self):
         self.assertEqual(flow.target("draft", iter(())), flow.START)
 
+    def test_fresh_plan_starts_at_its_places(self):
+        for places in (1, 3, 8):
+            with self.subTest(places=places):
+                self.assertEqual(flow.target("draft", iter(()), start=places), places)
+        self.assertEqual(flow.target("draft", [], start=0), flow.FLOOR)
+
+    def test_two_rejections_halve_eight_to_two(self):
+        events = [event("branch.rejected"), event("branch.rejected", "b")]
+        self.assertEqual(flow.target("draft", events[:1], start=8), 4)
+        self.assertEqual(flow.target("draft", events, start=8), 2)
+        self.assertEqual(flow.target("draft", events[:1], start=9), 4)
+
+    def test_infra_halves_three_to_one_and_holds_at_floor(self):
+        events = [ended("missing", outcome="infra")]
+        self.assertEqual(flow.target("draft", events, start=3), 1)
+        for start in (0, 1, 3):
+            with self.subTest(start=start):
+                self.assertEqual(flow.target("draft", events * 5, start=start), flow.FLOOR)
+
+    def test_first_landing_grows_from_plan_places_only_with_full_window(self):
+        events = [started(), started("b"), started("c"), ended(), event("branch.landed")]
+        self.assertEqual(flow.target("draft", events, start=3), 4)
+        self.assertEqual(flow.target("draft", events, start=4), 4)
+
     def test_first_landing_grows_only_if_full_at_run_end(self):
         full = [started(), started("b"), ended(), ended("b"), event("branch.landed")]
         self.assertEqual(flow.target("draft", full), flow.START + 1)
@@ -59,11 +83,11 @@ class TargetTest(unittest.TestCase):
         events = [event("branch.landed"), started(), started("b"), ended(), event("branch.landed")]
         self.assertEqual(flow.target("draft", events), flow.START)
 
-    def test_rejections_and_infra_drop_and_hold_at_floor(self):
+    def test_rejections_and_infra_halve_after_growth_and_hold_at_floor(self):
         full = [started(), started("b"), ended(), event("branch.landed")]
         for drop in (event("branch.rejected", "b"), ended("missing", outcome="infra")):
             with self.subTest(drop=drop):
-                self.assertEqual(flow.target("draft", full + [drop]), flow.START)
+                self.assertEqual(flow.target("draft", full + [drop]), flow.FLOOR)
                 self.assertEqual(flow.target("draft", full + [drop] * 5), flow.FLOOR)
 
     def test_unmatched_end_does_not_count_as_in_flight_or_qualify_landing(self):
@@ -173,7 +197,7 @@ class MeasureTest(unittest.TestCase):
 
 class ConflictRefusalTest(unittest.TestCase):
     def test_a_conflict_refusal_leaves_the_target(self):
-        start = flow.START
-        for step, expected in (("rebase", start), ("merge", start), ("test", max(flow.FLOOR, start - 1))):
+        start = 8
+        for step, expected in (("rebase", start), ("merge", start), ("test", start // 2)):
             events = [{"ev": "branch.rejected", "task": "d/a", "step": step, "ts": "t"}]
-            self.assertEqual(flow.target("d", events), expected, step)
+            self.assertEqual(flow.target("d", events, start=start), expected, step)
