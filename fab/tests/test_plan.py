@@ -11,6 +11,9 @@ from fab.tests.support import tmp_home
 MINIMAL = 'draft = "draft"\nrepo = "repo"\npart = []\n'
 FULL = '''draft = "draft"
 repo = "repo"
+landing = "queue"
+reviews = true
+direct = false
 sources = ["design.md", "another source"]
 [buffer]
 low = 0.5
@@ -50,9 +53,10 @@ class PlanTest(unittest.TestCase):
 
     def test_replay_options_defaults_and_trunk(self):
         plan = self.read(MINIMAL)
-        self.assertEqual((plan.landing, plan.ready, plan.reviews, plan.direct),
-                         ("queue", True, True, False))
-        self.assertEqual(plan.trunk, "main")
+        for plan in (plan, Plan("draft", "repo", (), 1.0, 2.0, {}, ())):
+            self.assertEqual((plan.landing, plan.ready, plan.reviews, plan.direct),
+                             ("integration", True, False, True))
+            self.assertEqual(plan.trunk, "draft/integration")
 
     def test_replay_options_load_and_select_trunk(self):
         for landing in LANDINGS:
@@ -72,7 +76,8 @@ class PlanTest(unittest.TestCase):
     def test_full_plan(self):
         expected = Plan("draft", "repo", ("design.md", "another source"), 0.5, 3.0,
                         {"core": Part("core", "Core files", "feature", (), "docs/design/fab.md, 4")},
-                        (Slice(1, "A task runs", ("core",), True),))
+                        (Slice(1, "A task runs", ("core",), True),),
+                        landing="queue", reviews=True, direct=False)
         self.assertEqual(self.read(FULL), expected)
         self.assertIs(type(self.read(FULL).high), float)
 
@@ -195,6 +200,9 @@ class PlanTest(unittest.TestCase):
             tasks = load_tasks(directory / "tasks", plan.draft, plan.repo)
             self.assertTrue(tasks)
             self.assertIn("agents-rebuild/files", tasks)
+            self.assertEqual((plan.landing, plan.ready, plan.reviews, plan.direct),
+                             ("queue", True, True, False))
+            self.assertEqual(plan.trunk, "main")
             self.assertEqual(problems(plan, tasks), [])
 
 
@@ -241,8 +249,13 @@ class LoadTest(unittest.TestCase):
             "# Task\n\nDo it.\n", str(self.directory / "tasks/task.md"))})
 
     def test_load_direct_part_with_specs_is_designed(self):
-        atomic.write(self.directory / "plan.toml", FULL.replace('mode = "feature"', 'mode = "direct"'))
+        text = FULL.replace('landing = "queue"\nreviews = true\ndirect = false\n', "")
+        atomic.write(self.directory / "plan.toml", text.replace('mode = "feature"', 'mode = "direct"'))
         plan, tasks = load(self.directory)
+        self.assertEqual((plan.landing, plan.ready, plan.reviews, plan.direct),
+                         ("integration", True, False, True))
+        self.assertEqual(plan.trunk, "draft/integration")
+        self.assertTrue(all(part.mode == "direct" for part in plan.parts.values()))
         self.assertEqual(plan.parts["core"].mode, "direct")
         self.assertFalse(plan.parts["core"].contract)
         self.assertEqual(list(tasks), ["draft/task"])
@@ -365,7 +378,8 @@ class ProblemsTest(unittest.TestCase):
     def setUp(self):
         self.parts = {name: Part(name, name, "feature", (), "design.md") for name in ("core", "next")}
         self.plan = Plan("draft", "repo", (), 1.0, 2.0, self.parts,
-                         (Slice(1, "story", ("core", "next"), True),))
+                         (Slice(1, "story", ("core", "next"), True),),
+                         landing="queue", reviews=True, direct=False)
 
     def test_direct_plan_names_only_non_direct_parts(self):
         self.assertEqual(problems(self.plan, {}), [])

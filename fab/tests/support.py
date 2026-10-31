@@ -123,13 +123,14 @@ def git_pair(directory: Path) -> tuple[Path, Path]:
 
 def write_plan(directory: Path, draft: str, parts: Mapping[str, Sequence[str]] | None = None, *,
                contracts: Sequence[str] = (), tasks: Sequence[str] = (), repo: str = "agents") -> Path:
-    """A sound plan of draft at directory: plan.toml with parts (id to needs; default one
-    part `core`), each a feature part designed by `design.md`, those in contracts marked
+    """A sound queue plan with reviews and non-direct parts at directory: plan.toml
+    with parts (id to needs; default one part `core`), each a feature part designed by `design.md`, those in contracts marked
     contract, and one slice holding them all; then one spec `tasks/<name>.md` per name of
     tasks, of the first part, needing nothing. Written through fab.atomic.write; returns
     directory."""
     parts = {"core": ()} if parts is None else parts
-    lines = [f'draft = "{draft}"', f'repo = "{repo}"']
+    lines = [f'draft = "{draft}"', f'repo = "{repo}"',
+             'landing = "queue"', 'reviews = true', 'direct = false']
     for identifier, needs in parts.items():
         lines += ["[[part]]", f'id = "{identifier}"', f'title = "{identifier.title()}"',
                   'mode = "feature"', f"needs = {list(needs)!r}", 'design = "design.md"',

@@ -34,7 +34,8 @@ def fixture(root):
     }
     plan = Plan("demo", "agents", (), 1.0, 2.0, parts,
                 (Slice(1, "Build the core", ("base", "core"), True),
-                 Slice(2, "Explore next", ("next",), False)))
+                 Slice(2, "Explore next", ("next",), False)),
+                landing="queue", reviews=True, direct=False)
     tasks = {}
     for name, part in (("one", "base"), ("two", "base"), ("three", "core")):
         path = f"docs/plan/demo/tasks/{name}.md"
@@ -48,6 +49,7 @@ def fixture(root):
     write(root / "docs/plan/agents-rebuild/tasks/files.md", "# Fixed example\nA format example.\n")
     write(root / "docs/plan/demo/plan.toml", '\n'.join([
         'draft = "demo"', 'repo = "agents"',
+        'landing = "queue"', 'reviews = true', 'direct = false',
         *[f'[[part]]\nid = "{part.id}"\ntitle = "{part.title}"\nmode = "{part.mode}"\n'
           f'needs = {json.dumps(part.needs)}\ndesign = "{part.design}"' for part in parts.values()],
         '[[slice]]\nid = 1\nstory = "Build the core"\nparts = ["base", "core", "next"]\nwalk = true',
@@ -986,7 +988,7 @@ class MainTest(unittest.TestCase):
             with self.subTest(role=role), tmp_home() as root:
                 fixture(root)
                 path = root / "docs/plan/demo/plan.toml"
-                write(path, 'landing = "integration"\n' + path.read_text())
+                write(path, path.read_text().replace('landing = "queue"', 'landing = "integration"'))
                 self.amend_chain()
                 fake = FakeRunner().on(["git", "rev-parse"], Result(0, str(root)))
                 args = {"skeleton": ["core"], "amend": ["root"]}.get(role, [])

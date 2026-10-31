@@ -1,6 +1,9 @@
 # The thin cut for rebuilding the pipelines' code as fab (docs/design/fab.md).
 draft = "agents-rebuild"
 repo = "agents"
+landing = "queue"
+reviews = true
+direct = false
 sources = [
   "docs/design/draft/code-producing-pipeline.md",
   "docs/design/draft/landing-pipeline.md",

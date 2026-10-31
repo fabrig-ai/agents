@@ -26,7 +26,8 @@ def sliced(*slices: Sequence[str], contracts: Collection[str] = ()) -> plan.Plan
                                              contract=name in contracts))
     return plan.Plan(DRAFT, "agents", (), 1.0, 2.0, parts,
                      tuple(plan.Slice(n, f"slice {n}", tuple(names), False)
-                           for n, names in enumerate(slices, 1)))
+                           for n, names in enumerate(slices, 1)),
+                     landing="queue", reviews=True, direct=False)
 
 
 def spec(name: str, part: str, *, consolidation: bool = False, kind: str = "feature") -> plan.Task:

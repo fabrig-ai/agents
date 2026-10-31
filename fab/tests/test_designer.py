@@ -25,6 +25,9 @@ def fixture(root):
     atomic.write(root / "fab/api.py", 'def existing():\n    """Existing primitive."""\n    return 1\n')
     atomic.write(root / "docs/plan/demo/plan.toml", '''draft = "demo"
 repo = "agents"
+landing = "queue"
+reviews = true
+direct = false
 sources = ["docs/design/draft/demo.md"]
 [[part]]
 id = "base"
@@ -59,7 +62,9 @@ walk = true
 
 
 def runner(root):
-    return (FakeRunner().on(["git", "rev-parse"], Result(0, str(root) + "\n"))
+    return (FakeRunner()
+            .on(["git", "rev-parse", "--abbrev-ref"], Result(0, "origin/new/integration\n"))
+            .on(["git", "rev-parse"], Result(0, str(root) + "\n"))
             .on(["git", "remote"], Result(0, runs.REMOTES["agents"] + "\n"))
             .on(["git", "log"], Result(0, "start\n"))
             .on(["git", "diff"], Result(0, DESIGN + "\n")))
@@ -85,12 +90,15 @@ class SubjectTest(unittest.TestCase):
         self.assertEqual(designer.uncut("draft", "agents", sources),
                          Plan("draft", "agents", tuple(sources), 1.0, 2.0, {}, ()))
         self.assertEqual(designer.uncut("draft", "agents").sources, ())
+        plan = designer.uncut("draft", "agents")
+        self.assertEqual((plan.landing, plan.ready, plan.reviews, plan.direct),
+                         ("integration", True, False, True))
 
     def test_uncut_carries_parsed_options(self):
-        options = parse_options(['landing="integration"', "ready=false", "reviews=false", "direct=true"])
+        options = parse_options(['landing="queue"', "ready=false", "reviews=true", "direct=false"])
         plan = designer.uncut("draft", "agents", [SOURCE], options)
         self.assertEqual(plan, replace(designer.uncut("draft", "agents", [SOURCE]), **options))
-        self.assertEqual(plan.trunk, "draft/integration")
+        self.assertEqual(plan.trunk, "main")
 
 
 class FilesTest(unittest.TestCase):
@@ -235,7 +243,8 @@ class HistoryPathTest(unittest.TestCase):
 class RetireDueTest(unittest.TestCase):
     def setUp(self):
         parts = {name: Part(name, name, "feature", (), DESIGN, done=True) for name in ("a", "b")}
-        self.plan = Plan("demo", "agents", (), 1, 2, parts, ())
+        self.plan = Plan("demo", "agents", (), 1, 2, parts, (),
+                         landing="queue", reviews=True, direct=False)
 
     def test_all_parts_marked_done_and_retired_or_empty_plan(self):
         self.assertTrue(designer.retire_due(self.plan, {}, []))
@@ -283,7 +292,9 @@ class BriefTest(unittest.TestCase):
             self.assertIn(fact, text)
 
     def cut(self):
-        return designer.cut_brief(designer.uncut("new", "agents", [SOURCE]), self.root, **FACTS)
+        plan = designer.uncut("new", "agents", [SOURCE],
+                              dict(landing="queue", reviews=True, direct=False))
+        return designer.cut_brief(plan, self.root, **FACTS)
 
     def decision(self):
         return designer.decision_brief(self.plan, "probe", self.tasks, {"demo/base": "landed"},
@@ -314,7 +325,7 @@ class BriefTest(unittest.TestCase):
 
     def test_cut_direct_instructions_and_shared_notes_only_when_enabled(self):
         plan = designer.uncut("new", "agents", [SOURCE])
-        for entries, direct in (((), False), (["reviews=false"], False),
+        for entries, direct in (((), True), (["reviews=false"], True),
                                 (["direct=false"], False), (["direct=true", "direct=false"], False),
                                 (["direct=true"], True)):
             with self.subTest(entries=entries):
@@ -332,7 +343,7 @@ class BriefTest(unittest.TestCase):
         fabrig_role = calls.ROLES["cut"].with_name("cut-fabrig.md").read_text()
         for repo in ("agents", "fabrig"):
             plan = designer.uncut("new", repo, [SOURCE])
-            for entries, direct in (((), False), (["direct=false"], False),
+            for entries, direct in (((), True), (["direct=false"], False),
                                     (["direct=true", "direct=false"], False),
                                     (["direct=false", "direct=true"], True)):
                 with self.subTest(repo=repo, entries=entries):
@@ -344,7 +355,8 @@ class BriefTest(unittest.TestCase):
                         self.assertLess(text.index(direct_role), text.index("# Call facts"))
 
     def test_plan_path_preserves_root_briefs_and_changes_only_destination(self):
-        cut_plan = designer.uncut("new", "agents", [SOURCE])
+        cut_plan = designer.uncut("new", "agents", [SOURCE],
+                                  dict(landing="queue", reviews=True, direct=False))
         compilers = (
             (lambda **options: designer.cut_brief(cut_plan, self.root, **FACTS, **options), "new"),
             (lambda **options: designer.decision_brief(
@@ -464,6 +476,8 @@ class MainTest(unittest.TestCase):
                 self.assertFalse((log.home() / "plans").exists())
 
     def test_nested_cut_brief_names_destination_and_keeps_sources_at_root(self):
+        self.fake.rules.insert(0, (["git", "rev-parse", "--abbrev-ref"],
+                                   Result(0, "origin/component-kit/integration\n")))
         for prefix in ("skein", "trees/skein"):
             relative = f"{prefix}/docs/plan/component-kit"
             with self.subTest(prefix=prefix), patch.object(calls, "start") as start:
@@ -495,7 +509,9 @@ class MainTest(unittest.TestCase):
     def test_fabrig_designer_calls_start_in_dispatcher_clone(self):
         path = self.directory / "plan.toml"
         atomic.write(path, path.read_text().replace('repo = "agents"', 'repo = "fabrig"'))
-        self.fake = (FakeRunner().on(["git", "rev-parse"], Result(0, str(self.root)))
+        self.fake = (FakeRunner()
+                     .on(["git", "rev-parse", "--abbrev-ref"], Result(0, "origin/new/integration\n"))
+                     .on(["git", "rev-parse"], Result(0, str(self.root)))
                      .on(["git", "remote"], Result(0, runs.REMOTES["fabrig"]))
                      .on(["git", "log"], Result(0, "start\n")))
         for role, args, directory in (("cut", ("--source", SOURCE), self.root / "docs/plan/new"),
@@ -540,7 +556,7 @@ class MainTest(unittest.TestCase):
             self.assertEqual((log.home() / "plans").read_text(), f"{directory}\n")
             self.assertEqual((role, subject, root), ("cut", "new/cut", self.root))
             self.assertIn("The user's draft, whole.", brief)
-            self.assertEqual(options, dict(sh=self.fake, base="main", fields=None))
+            self.assertEqual(options, dict(sh=self.fake, base="new/integration", fields=None))
             return dict(outcome="done", branch="calls/cut-id")
         with patch.object(calls, "start", side_effect=start) as launch:
             result, text, errors = self.invoke("cut", "--source", SOURCE, directory=directory, brief_only=False)
@@ -585,7 +601,7 @@ class MainTest(unittest.TestCase):
 
     def test_cut_direct_option_adds_role_through_cli(self):
         direct_role = calls.ROLES["cut"].with_name("cut-direct.md").read_text().rstrip("\n")
-        for args, direct in (((), False), (("--set", "direct=false"), False),
+        for args, direct in (((), True), (("--set", "direct=false"), False),
                              (("--set", "direct=true"), True)):
             with self.subTest(args=args):
                 result, text, errors = self.invoke("cut", "--source", SOURCE, *args,
@@ -623,7 +639,7 @@ class MainTest(unittest.TestCase):
 
     def test_designer_calls_start_on_plan_trunk(self):
         path = self.directory / "plan.toml"
-        atomic.write(path, 'landing = "integration"\n' + path.read_text())
+        atomic.write(path, path.read_text().replace('landing = "queue"', 'landing = "integration"'))
         for role, args in (("contract", ("base",)), ("decision", ("probe", "--run", "demo/probe-1")),
                            ("retire", ())):
             with self.subTest(role=role), patch.object(calls, "start", return_value={

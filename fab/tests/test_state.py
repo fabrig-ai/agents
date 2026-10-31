@@ -140,7 +140,7 @@ class PartStatusesTest(unittest.TestCase):
         self.plan = Plan("draft", "repo", (), 1, 2, {
             name: Part(name, name, "feature", (), "design.md")
             for name in ("empty", "core", "built")
-        }, ())
+        }, (), landing="queue", reviews=True, direct=False)
         self.plan.parts["built"] = replace(self.plan.parts["built"], done=True)
         self.tasks = {"draft/a": task("draft/a"), "draft/b": task("draft/b")}
 
@@ -180,6 +180,9 @@ class StatusTest(unittest.TestCase):
         (directory / "tasks").mkdir(parents=True)
         (directory / "plan.toml").write_text('''draft = "draft"
 repo = "repo"
+landing = "queue"
+reviews = true
+direct = false
 [[part]]
 id = "core"
 title = "Core"
@@ -258,7 +261,8 @@ class AnswerUnparksOnlyTest(unittest.TestCase):
 
 class CheckedTasksTest(unittest.TestCase):
     def setUp(self):
-        self.plan = Plan("draft", "agents", (), 1, 2, {"core": Part("core", "Core", "feature", (), "design.md")}, ())
+        self.plan = Plan("draft", "agents", (), 1, 2, {"core": Part("core", "Core", "feature", (), "design.md")}, (),
+                         landing="queue", reviews=True, direct=False)
         self.spec = '+++\nid = "a"\npart = "core"\nkind = "feature"\n+++\nBuild it.\n'
         self.checked = dict(ev="call.checked", subject="draft/core", call="root", root="root",
                             outcome="green", tip="tip", tasks=["draft/a"], paths=["tasks/a.md"], specs=[self.spec])

@@ -178,6 +178,9 @@ class ReportCommandTest(unittest.TestCase):
         directory = self.home / draft
         atomic.write(directory / "plan.toml", f'''draft = "{draft}"
 repo = "agents"
+landing = "queue"
+reviews = true
+direct = false
 [[part]]
 id = "core"
 title = "Core"

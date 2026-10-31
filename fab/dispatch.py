@@ -223,8 +223,9 @@ def decide(plan: Plan, tasks: Mapping[str, Task], events: list[dict], hosts: Map
     """The actions for now, in this order:
 
     0. flow: one Action("flow", task=plan.draft, detail="target <n>, <m> in flight"), n being
-       fab.flow.target(plan.draft, events) and m the runs in flight of the draft's tasks
-       (task starting with `<draft>/`). It is printed, never carried out.
+       the sum of builders' places for integration plans (13.12), or fab.flow.target
+       starting at those places for queue plans. m is the runs in flight of the draft's
+       tasks (task starting with `<draft>/`). It is printed, never carried out.
     1. collect: only this draft's owned runs, including its calls' review runs.
     2. merge (integration plans), land (repo "agents") or ready (any other repo): done tasks with
        the branch of its last run.
@@ -247,8 +248,8 @@ def decide(plan: Plan, tasks: Mapping[str, Task], events: list[dict], hosts: Map
     """
     flight = in_flight(events)
     free = places(hosts, flight, calm)
-    limit = flow.target(plan.draft, events,
-                        start=sum(host.places for host in hosts.values() if "builder" in host.roles))
+    capacity = sum(host.places for host in hosts.values() if "builder" in host.roles)
+    limit = capacity if plan.landing == "integration" else flow.target(plan.draft, events, start=capacity)
     occupied = sum(event["task"].startswith(plan.draft + "/") for event in flight)
     tasks = {**integration.repair_tasks(plan, events, {}), **specs.checked_tasks(plan, tasks, events)}
     views = state.fold(tasks, events)

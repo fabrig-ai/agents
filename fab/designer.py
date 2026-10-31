@@ -49,7 +49,8 @@ def uncut(draft: str, repo: str, sources: Sequence[str] = (),
     """The stand-in for a plan whose plan.toml does not exist yet: Plan(draft, repo,
     tuple(sources), 1.0, 2.0, {}, ()), no parts, slices or questions, not retired. The cut's
     brief reads its sources through fab.calls.drafts_text; the tick of a plan directory
-    being cut runs on it (fab.dispatch.tick). Parsed options replace the plan defaults."""
+    being cut runs on it (fab.dispatch.tick). It inherits Plan's integration and ready defaults, without reviews and
+    with every part direct (13.12); parsed options replace them."""
     return replace(Plan(draft, repo, tuple(sources), 1.0, 2.0, {}, ()), **(options or {}))
 
 
@@ -193,8 +194,9 @@ def cut_brief(plan: Plan, root: Path, *, call_id: str, branch: str, report: str,
        when it is empty (a repository without fab/).
 
     When options are given, insert `Plan options` after `The draft`, with parsed
-    KEY = VALUE lines to write verbatim at the top of plan.toml. With direct=true,
-    require direct parts, task specs written by the cut, shared notes under the plan's
+    KEY = VALUE lines to write verbatim at the top of plan.toml. With direct=true
+    (the plan's default unless overridden), include that section's instructions for
+    direct parts, task specs written by the cut, shared notes under the plan's
     notes/ cited by repository path, and needs naming tasks whose merged code is needed.
     plan_path overrides <PLANS>/<draft> with a repository-relative plan directory.
     ValueError past fab.calls.BRIEF_LIMIT, as every call's brief."""
@@ -205,17 +207,21 @@ def cut_brief(plan: Plan, root: Path, *, call_id: str, branch: str, report: str,
     if plan.repo == "fabrig":
         role_text += "\n\n" + calls.ROLES["cut"].with_name("cut-fabrig.md").read_text(encoding="utf-8")
     option_sections = []
-    if options:
-        parsed = parse_options(options)
+    parsed = parse_options(options)
+    text = ""
+    if parsed:
         lines = "\n".join(f"{key} = {json.dumps(value)}" for key, value in parsed.items())
         text = ("Write these keys at the top of plan.toml, before the first table, verbatim:\n\n"
                 f"```toml\n{lines}\n```")
-        if parsed.get("direct"):
-            role_text += "\n\n" + calls.ROLES["cut"].with_name("cut-direct.md").read_text(encoding="utf-8")
-            text += ("\n\nEvery part is `mode = \"direct\"`, so the cut writes every task spec itself. "
-                     f"Notes that several tasks share go once in `{plan_path}/notes/<name>.md`, "
-                     "cited from each spec by repository path; the implementers read them in their checkout. "
-                     "A task's `needs` name the tasks whose merged code it builds on.")
+    if parsed.get("direct", plan.direct):
+        role_text += "\n\n" + calls.ROLES["cut"].with_name("cut-direct.md").read_text(encoding="utf-8")
+        if text:
+            text += "\n\n"
+        text += ("Every part is `mode = \"direct\"`, so the cut writes every task spec itself. "
+                 f"Notes that several tasks share go once in `{plan_path}/notes/<name>.md`, "
+                 "cited from each spec by repository path; the implementers read them in their checkout. "
+                 "A task's `needs` name the tasks whose merged code it builds on.")
+    if text:
         option_sections.append(("Plan options", text))
     return calls._brief([
         ("Role", role_text),

@@ -36,7 +36,8 @@ def part(name, needs=()):
 
 
 def make_plan(*parts, low=1):
-    return plan.Plan("draft", "agents", (), low, 2, {p.id: p for p in parts}, ())
+    return plan.Plan("draft", "agents", (), low, 2, {p.id: p for p in parts}, (),
+                     landing="queue", reviews=True, direct=False)
 
 
 def event(ev, name="a", **fields):
@@ -909,6 +910,9 @@ class TickTest(unittest.TestCase):
         self.directory = self.home / "plan"
         write(self.directory / "plan.toml", '''draft = "draft"
 repo = "agents"
+landing = "queue"
+reviews = true
+direct = false
 [[part]]
 id = "core"
 title = "Core"
@@ -988,6 +992,9 @@ walk = false
         registered = self.home / "other"
         write(registered / "plan.toml", '''draft = "other"
 repo = "agents"
+landing = "queue"
+reviews = true
+direct = false
 part = []
 [[question]]
 id = "budget"
@@ -1265,7 +1272,9 @@ parts = []
         """A logged cut substitutes an empty plan, imports the queue and reviews its branch."""
         (self.directory / "plan.toml").unlink()
         path = self.home / "cut.jsonl"
-        self.append(*chain_history("review", role="cut", subject="plan/cut"), path=path)
+        history = chain_history("review", role="cut", subject="plan/cut")
+        history[0]["options"] = ['landing="queue"', 'reviews=true', 'direct=false']
+        self.append(*history, path=path)
         self.fake = FakeRunner().on(["git", "rev-parse", "--show-toplevel"],
                                     Result(0, "/checkout\n"))
         self.fake.on(["git", "remote", "get-url", "origin"], Result(0, runs.REMOTES["agents"] + "\n"))
@@ -1288,7 +1297,8 @@ parts = []
     def test_uncut_directory_need_not_exist_for_tick_or_dry_run(self):
         """Both tick modes locate git from an existing ancestor of an unwritten plan."""
         directory = self.home / "checkout/docs/plan/new"
-        self.append(dict(ev="call.started", call="cut", role="cut", subject="new/cut"))
+        self.append(dict(ev="call.started", call="cut", role="cut", subject="new/cut",
+                         options=['landing="queue"', 'reviews=true', 'direct=false']))
         fake = FakeRunner().on(["git", "rev-parse", "--show-toplevel"], Result(0, "/checkout\n"))
         fake.on(["git", "remote", "get-url", "origin"], Result(0, runs.REMOTES["agents"]))
         self.assertEqual(dispatch.tick(directory, sh=fake, hosts={}),
@@ -3261,6 +3271,45 @@ class IntegrationDecideTest(unittest.TestCase):
     def setUp(self):
         self.enterContext(tmp_home())
 
+    def test_rejection_and_infra_keep_integration_starts_at_builders_places(self):
+        the_plan = plan.Plan("draft", "agents", (), 1, 2,
+                             {"core": replace(part("core"), mode="direct")}, ())
+        tasks = {t.id: t for t in (task(name) for name in "abcdefghi")}
+        hosts = {"builder": Host("builder", "fake@builder", ("builder",), places=4),
+                 "second": Host("second", "fake@second", ("builder",), places=3),
+                 "gate": Host("gate", "fake@gate", ("gate",), places=99)}
+        histories = [[], [event("branch.rejected", "c", step="test")],
+                     [started("c"), ended("c", outcome="infra")]]
+        for events in histories:
+            with self.subTest(events=events):
+                before = deepcopy((the_plan, tasks, events, hosts))
+                actions = dispatch.decide(the_plan, tasks, events, hosts)
+                self.assertEqual(actions[0], Action("flow", task="draft", detail="target 7, 0 in flight"))
+                starts = [action for action in actions if action.kind == "start"]
+                self.assertEqual(len(starts), 7)
+                self.assertEqual(sum(action.host == "builder" for action in starts), 4)
+                self.assertEqual(sum(action.host == "second" for action in starts), 3)
+                if events:
+                    repair, = [action for action in starts if action.task == "draft/c"]
+                    self.assertEqual(repair.run_kind, "repair")
+                self.assertEqual((the_plan, tasks, events, hosts), before)
+
+    def test_clean_landings_do_not_grow_integration_target(self):
+        the_plan = plan.Plan("draft", "agents", (), 1, 2,
+                             {"core": replace(part("core"), mode="direct")}, ())
+        tasks = {t.id: t for t in (task(name) for name in "abcde")}
+        hosts = {"builder": Host("builder", "fake@builder", ("builder",), places=2)}
+        actions = dispatch.decide(the_plan, tasks, growth(), hosts)
+        self.assertEqual(actions[0], Action("flow", task="draft", detail="target 2, 0 in flight"))
+        self.assertEqual([action.task for action in actions if action.kind == "start"],
+                         ["draft/a", "draft/b"])
+
+    def test_integration_target_is_zero_without_builder_places(self):
+        the_plan = plan.Plan("draft", "agents", (), 1, 2, {}, ())
+        hosts = {"gate": Host("gate", "fake@gate", ("gate",), places=99)}
+        self.assertEqual(dispatch.decide(the_plan, {}, [], hosts),
+                         [Action("flow", task="draft", detail="target 0, 0 in flight")])
+
     def test_done_tasks_merge_only_for_integration_plans(self):
         for repo in ("agents", "fabrig"):
             for landing in ("queue", "integration"):
@@ -3307,7 +3356,7 @@ class CheckoutFollowTest(unittest.TestCase):
 
         def advance(call):
             path = one / "plan.toml"
-            write(path, 'landing = "integration"\n' + path.read_text())
+            write(path, path.read_text().replace('landing = "queue"', 'landing = "integration"'))
             return Result(0)
 
         self.fake.on(self.follow, advance)
@@ -3342,8 +3391,8 @@ class CheckoutFollowTest(unittest.TestCase):
         latest = call_started("latest", "cut", "draft/cut", options=['ready=false'])
         foreign = call_started("foreign", "cut", "other/cut", options=['reviews=false'])
         for events, landing, reviews, ready in (([first, foreign], "integration", False, True),
-                                                ([first, latest, foreign], "queue", True, False),
-                                                ([call_started("default", "cut", "draft/cut")], "queue", True, True)):
+                                                ([first, latest, foreign], "integration", False, False),
+                                                ([call_started("default", "cut", "draft/cut")], "integration", False, True)):
             with self.subTest(events=events):
                 the_plan, tasks = dispatch._load_plan(self.home / "draft", events,
                                                       checkout=self.home, sh=self.fake)
@@ -3507,7 +3556,9 @@ class IntegrationMergeTest(unittest.TestCase):
 
     def test_uncut_chain_without_reviews_merges_calls_branch_into_trunk(self):
         cut_plan = write_plan(self.home / "cut-plan", "draft")
-        contents = 'landing = "integration"\nreviews = false\n' + (cut_plan / "plan.toml").read_text()
+        contents = ((cut_plan / "plan.toml").read_text()
+                    .replace('landing = "queue"', 'landing = "integration"')
+                    .replace('reviews = true', 'reviews = false'))
         tip = self.branch("calls/cut", "docs/plan/draft/plan.toml", contents)
         directory = self.checkout / "docs/plan/draft"
         self.assertFalse((directory / "plan.toml").exists())
@@ -3625,7 +3676,8 @@ class IntegrationCheckTickTest(unittest.TestCase):
         self.home = self.enterContext(tmp_home())
         self.directory = write_plan(self.home / "plan", "draft", tasks=("a",), repo="fabrig")
         path = self.directory / "plan.toml"
-        write(path, 'landing = "integration"\nreviews = false\n' + path.read_text())
+        write(path, path.read_text().replace('landing = "queue"', 'landing = "integration"')
+              .replace('reviews = true', 'reviews = false'))
         self.plan, self.tasks = plan.load(self.directory)
         self.path = self.home / "events.jsonl"
         self.hosts = {name: Host(name, f"fake@{name}", ("builder",), places=places, slots=2)

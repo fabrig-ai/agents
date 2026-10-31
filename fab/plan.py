@@ -53,6 +53,9 @@ class Slice:
 
 @dataclass(frozen=True)
 class Plan:
+    """A plan defaults to integration landing, ready, without reviews, with every part direct
+    (docs/design/fab.md, 13.12). load_plan and fab.designer.uncut inherit these defaults."""
+
     draft: str
     repo: str
     sources: tuple[str, ...]
@@ -62,10 +65,10 @@ class Plan:
     slices: tuple[Slice, ...]
     retired: bool = False  # set by the retire call; the tick skips a retired plan
     questions: tuple[Question, ...] = ()
-    landing: str = "queue"
+    landing: str = "integration"
     ready: bool = True
-    reviews: bool = True
-    direct: bool = False
+    reviews: bool = False
+    direct: bool = True
 
     @property
     def trunk(self) -> str:
@@ -111,7 +114,8 @@ def load(plan_dir: Path) -> tuple[Plan, dict[str, Task]]:
 
 def load_plan(path: Path) -> Plan:
     """Read plan.toml: required keys draft, repo, parts; defaults sources=(), buffer low=1.0 high=2.0,
-    retired=false, landing="queue", ready=true, reviews=true, direct=false.
+    retired=false; the Plan defaults supply landing="integration", ready=true, reviews=false,
+    direct=true (docs/design/fab.md, 13.12).
     A part's contract defaults to false and needs_landed to ().
     Each `[[question]]` table requires id, text and parts (strings) and defaults answer="".
 
