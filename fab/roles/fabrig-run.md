@@ -14,6 +14,19 @@ its notes depart from this text, they say why, and they win.
 
 ## How an implementer works
 
+- **Allowed without asking:** the arms, fields and literals the compiler
+  requires because of a type you changed, in any file of your tree, each
+  edited only for that; a scoped `#[expect(clippy::<lint>, reason =
+  "...")]` on an item you wrote or changed, where reshaping it is not your
+  task. Your report lists them.
+- **Done with what is left:** when your acceptance holds and your work is
+  pushed, but something outside your task stays red or open (a red you
+  inherited from the trunk, another task's file, a test a later task owns),
+  do not ask: report `Done:` and list each under `## Left`, with its file and
+  why it is not yours. fab merges your branch; the task that owns it, or the
+  trunk's end check, takes the rest. Ask only for what stops your own
+  acceptance.
+
 - **The sketches bind the outer layer:** modules, names, public types and
   signatures, what crosses a boundary, the tests' shape. Inside them the
   choices are yours, and the report names those that matter.

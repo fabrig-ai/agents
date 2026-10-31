@@ -1531,6 +1531,26 @@ parts = []
         self.assertEqual(log.read()[-1]["ev"], "question.answered")
         self.assertFalse(any(event["ev"] == "branch.ready" for event in log.read()))
 
+    def test_an_integration_accept_answers_with_accept_only_when_the_branch_is_pushed(self):
+        self.settled_question()
+        write(log.home() / "runs/draft/a/foreman-1/report.md", "Accept: the lint is temper-fake's\nPushed abc.\n")
+        loaded, tasks = plan.load(self.directory)
+        events = log.read()
+        action = Action("settle", task="draft/a", run="draft/a/foreman-1", detail="draft/a/foreman-1")
+        for landing, pushed, accepted in (("integration", "abc\trefs/heads/draft/a\n", True),
+                                          ("integration", "", False), ("queue", "abc\trefs/heads/draft/a\n", False)):
+            with self.subTest(landing=landing, pushed=bool(pushed)):
+                path = self.home / f"settle-{landing}-{bool(pushed)}.jsonl"
+                self.append(*events, path=path)
+                fake = FakeRunner().on(["git", "rev-parse", "--show-toplevel"], Result(0, str(self.home) + "\n")) \
+                    .on(["git", "ls-remote", "origin", "refs/heads/draft/a"], Result(0, pushed))
+                with patch.object(foreman, "commit", return_value=None):
+                    dispatch._settle(action, tasks, self.directory, plan=replace(loaded, landing=landing),
+                                     sh=fake, log_path=path)
+                answered = log.read(path)[-1]
+                self.assertEqual((answered["ev"], answered["answer"]), ("question.answered", "the lint is temper-fake's"))
+                self.assertEqual(answered.get("accept", False), accepted)
+
     def test_settle_already_recorded_answer_skips_landing(self):
         self.settled_question()
         with patch.object(foreman, "commit", return_value=None) as commit:

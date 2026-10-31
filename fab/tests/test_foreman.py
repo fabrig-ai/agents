@@ -291,7 +291,10 @@ class AnswerTest(unittest.TestCase):
                          "A\n" + "\n".join(lines[:foreman.ANSWER_LINES]))
 
     def test_failed_and_empty_done_are_refused(self):
-        for report in ("Failed: undecided", "Done: \nEvidence", "", "\n \n", "Question: Why?"):
+        self.assertEqual(foreman.answer("Accept: the lint is theirs\nPushed."), "the lint is theirs\nPushed.")
+        self.assertTrue(foreman.accepts("\n Accept: left\n"))
+        self.assertFalse(foreman.accepts("Done: Accept: no"))
+        for report in ("Failed: undecided", "Done: \nEvidence", "Accept:", "", "\n \n", "Question: Why?"):
             with self.subTest(report=report), self.assertRaises(ValueError):
                 foreman.answer(report)
 

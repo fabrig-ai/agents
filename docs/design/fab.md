@@ -495,7 +495,8 @@ it, and the flow grows from a small start rather than to a fixed cap.
   question first goes to a foreman run (Codex, medium, kind `foreman`,
   `fab/roles/foreman.md`; it writes no code, code records what it decides) with the task spec and the report: when
   the spec's pre-approved options answer it, the foreman's answer is
-  recorded in the spec's Answers section and the task runs again; otherwise
+  recorded in the spec's Answers section and the task runs again (or, by
+  `Accept:`, the pushed run is the task done: 13.12); otherwise
   the question queues for the answerer: at once when it holds up other work
   (a task waits on the parked one, or nothing is running while work remains),
   otherwise at 4 queued or after 30 minutes (the user, 10-30; the model said 2
@@ -976,6 +977,28 @@ only as tweaks once a replay matches its run.
   never changed after. While the plan's cut is in flight the end check
   waits, and a direct part is never sent to a design call: the cut designs
   it.
+- **A run may leave what is not its own** (the user, 10-31, after the
+  playground replay: 48 of its 68 tasks waited at T+92 on two contract
+  tasks rerun for scope and lint questions, where playground-kit's lead
+  treated a pushed run with known reds as done and fixed them in its
+  integration runs). Three changes:
+  - The implementer's text (`fabrig-run.md`) allows without asking the
+    arms, fields and literals the compiler requires because of a type the
+    task changed, in any file of its tree, and a scoped
+    `#[expect(clippy::<lint>, reason)]` on an item it wrote or changed; and
+    when its acceptance holds and its work is pushed but something outside
+    it stays red or open, it reports `Done:` with a `## Left` list, and
+    fab merges it: the owning task or the end check takes the rest.
+  - The foreman may answer `Accept: <what is left>`: the run's work is
+    pushed, its acceptance met, and its question lies outside the task. In
+    an integration plan, once the asking run's branch is on origin, the
+    settle logs `question.answered` with `accept`, which folds the task
+    done (its branch kept), so the tick merges it as any done task. Without
+    the pushed branch, or in a queue plan, it is an ordinary answer.
+  - The cut's text writes the shapes that cross parts in `notes/contracts.md`
+    before the specs, as the lead's `binding.md`, gives each side of a
+    boundary its own task built to it, and keeps a task many others need
+    small: its surface first, its bodies and its readers' fallout later.
 - **The flow stays wide.** An integration plan keeps its target for runs
   in flight at its builders' places throughout: no halving on a refusal or
   an `Infra:` outcome and no growth (13.11's start-wide rule is the queue

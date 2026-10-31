@@ -32,6 +32,13 @@ messages), fab does it instead; everything else in the brief holds.
   a boundary, as soon as the far side answers. But don't hold a family of
   tasks behind one task just to prove the story first: a task waits only
   for the code it builds on.
+- **Contracts in a note, not in a wide task:** before the specs, write
+  the shapes that cross parts (types, fields, signatures, record layouts,
+  wire forms) in `notes/contracts.md`, as the run's binding calls. Where two
+  families meet, each side gets its own task for its half, built to the
+  note, and neither needs the other's task. A task many others need carries
+  only the surface they build on and is small; its bodies and its readers'
+  fallout go in later tasks.
 - A task is one file, read literally; its departures from the implementer's
   text are stated. It holds: the goal in 2-3 lines; the design sections to
   read, never a whole design; sketches of the outer layer (modules, names,
@@ -50,6 +57,9 @@ messages), fab does it instead; everything else in the brief holds.
   how (call sites only; a literal's new field); and the likely options, each
   pre-approved with a default ("if X, do A; if Y would need changing, do B
   and say so in the report"). The implementer asks only beyond that list.
+  Compiler-forced arms and fields and a scoped lint expectation are always
+  allowed, and a run that meets its acceptance reports what is left outside
+  it rather than asking (the implementer's text); spend no options on them.
 - **A change of meaning runs its readers' tests:** a branch that changes
   what a shared item means, not only its signature (a value it returns, an
   order it keeps), also runs the tests of every package that reads that

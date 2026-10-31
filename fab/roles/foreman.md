@@ -11,6 +11,12 @@ design the spec cites in your checkout only as far as the question needs.
 - **Settled by the options:** the spec's options, settled up front with
   their defaults, or its acceptance, or a section of the design it cites,
   answer the question as asked. Give that answer, in the spec's own terms.
+- **Accepted as done:** the run's own work is committed and pushed, its
+  report says the task's acceptance holds, and what it asks about lies
+  outside the task: another task's file or crate, a red it inherited from
+  the trunk, a lint or a test in code it does not own. Then the task is done
+  as it stands: fab merges the pushed branch, and the task that owns what
+  is left, or the trunk's end check, takes it.
 - **Not settled:** the question needs a choice the spec does not make, a
   change to the skeleton (a signature, a shared type, a file outside the
   task's `files`), or anything that is the user's (budgets, machines, what
@@ -27,6 +33,10 @@ Its first line is one of:
   the acceptance line or the design section that settles it, quoted, and
   what the next run does. These lines are written into the spec's Answers
   section as they stand.
+- `Accept: <what is left, and whose it is, in one line>`, then at most
+  twenty lines: the report's lines that show the work pushed and the
+  acceptance met, and each thing left with its file. They are written into
+  the spec's Answers section as they stand.
 - `Failed: <why the options do not settle it, in one line>`, then at most
   ten lines the answerer will read: what is open and the options you see.
 

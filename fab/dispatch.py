@@ -937,8 +937,22 @@ def _settle(action: Action, tasks: Mapping[str, Task], plan_dir: Path, *,
         run_id=action.run, day=log.now()[:10], sh=sh, trunk=plan.trunk)
     if branch is not None and not _deliver(branch, plan, checkout, sh=sh, log_path=log_path):
         return
+    report = (log.home() / "runs" / action.run / "report.md").read_text()
+    accept = (plan.landing == "integration" and foreman.accepts(report)
+              and _pushed(question, events, checkout, sh=sh))
     log.append("question.answered", path=log_path, task=question.task, by=action.run,
-               run=question.run, answer=answer.splitlines()[0])
+               run=question.run, answer=answer.splitlines()[0], **({"accept": True} if accept else {}))
+
+
+def _pushed(question: foreman.Question, events: list[dict], checkout: Path, *, sh: Runner) -> bool:
+    """Whether the asking run's branch is on origin, so an accepted task has work to merge;
+    without it an Accept is an ordinary answer and the task runs again."""
+    branch = next((event.get("branch") for event in events if event.get("ev") == "run.started"
+                   and event.get("run") == question.run), None)
+    if not branch:
+        return False
+    found = sh(["git", "ls-remote", "origin", f"refs/heads/{branch}"], cwd=str(checkout))
+    return found.ok and bool(found.out.strip())
 
 
 def _spec_checkout(plan_dir: Path, *, sh: Runner) -> Path:

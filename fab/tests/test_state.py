@@ -59,6 +59,13 @@ class FoldTest(unittest.TestCase):
         view = state.fold(self.tasks, events)["draft/a"]
         self.assertEqual((view.status, view.question), ("runnable", None))
 
+    def test_an_accepted_answer_makes_the_task_done_with_its_branch(self):
+        events = [self.start, event("run.ended", outcome="question"),
+                  event("question.asked", text="A lint outside the task?"),
+                  event("question.answered", answer="left to its owner", accept=True)]
+        view = state.fold(self.tasks, events)["draft/a"]
+        self.assertEqual((view.status, view.branch, view.question), ("done", "draft/a", None))
+
     def test_ready_landed_and_rejected(self):
         events = [self.start, event("run.ended", outcome="done"), event("branch.ready", tip="tip1")]
         view = state.fold(self.tasks, events)["draft/a"]

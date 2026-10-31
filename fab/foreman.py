@@ -150,17 +150,25 @@ def start(question: Question, task: Task, host: Host, events: Iterable[dict], *,
                                 effort=EFFORT, asked=question.run)
 
 
+def accepts(report: str) -> bool:
+    """Whether a foreman's report accepts the run's pushed work as the task done: its first
+    non-blank line starts `Accept:` (what is left lies outside the task; fab/roles/foreman.md)."""
+    return next((line.strip() for line in report.splitlines() if line.strip()), "").startswith("Accept:")
+
+
 def answer(report: str) -> str:
-    """The answer a foreman's report gives: its first non-blank line must start `Done:`
-    (else ValueError); the answer is that line's text after `Done:`, stripped, then the
+    """The answer a foreman's report gives: its first non-blank line must start `Done:` or
+    `Accept:` (else ValueError); the answer is that line's text after it, stripped, then the
     report's next lines, at most ANSWER_LINES, each right-stripped, the trailing blank ones
     dropped, joined by newlines. An empty first-line text is a ValueError: the role asks
     for the answer in one line there."""
     lines = report.splitlines()
     first = next((i for i, line in enumerate(lines) if line.strip()), None)
-    if first is None or not lines[first].strip().startswith("Done:"):
-        raise ValueError("foreman report must begin with Done:")
-    text = lines[first].strip().removeprefix("Done:").strip()
+    head = lines[first].strip() if first is not None else ""
+    prefix = next((word for word in ("Done:", "Accept:") if head.startswith(word)), None)
+    if prefix is None:
+        raise ValueError("foreman report must begin with Done: or Accept:")
+    text = head.removeprefix(prefix).strip()
     if not text:
         raise ValueError("foreman answer must not be empty")
     kept = [text, *(line.rstrip() for line in lines[first + 1:first + 1 + ANSWER_LINES])]

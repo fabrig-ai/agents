@@ -34,7 +34,7 @@ def fold(tasks: Mapping[str, Task], events: Iterable[dict]) -> dict[str, TaskVie
     - run.ended: outcome done -> done; question -> parked; failed -> parked, question is
       "Failed: " plus the event's report path; infra -> runnable.
     - question.asked: parked, question = text. question.answered: a parked task becomes
-      runnable; every task's question = None.
+      runnable, or done when the answer has accept (keeping branch); every task's question = None.
     - branch.ready: ready, tip. branch.landed: landed, tip, main. branch.rejected: rejected.
     - refusal.settled: retry -> done, keeping branch and tip; fix and none change no status.
     A task never started is waiting while any need is not landed, otherwise runnable.
@@ -65,8 +65,9 @@ def fold(tasks: Mapping[str, Task], events: Iterable[dict]) -> dict[str, TaskVie
                 view.question = event["text"]
             case "question.answered":
                 # An answer unparks a parked task; a task already past its question stays put.
+                # An accepted one (the foreman's Accept) makes it done, its pushed branch kept.
                 if view.status == "parked":
-                    view.status = "runnable"
+                    view.status = "done" if event.get("accept") else "runnable"
                 view.question = None
             case "branch.ready":
                 view.status = "ready"
