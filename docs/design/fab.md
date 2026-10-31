@@ -503,7 +503,12 @@ it, and the flow grows from a small start rather than to a fixed cap.
   - `fab/foreman.py` folds where each open question stands: at the
     foreman, deciding, settled or queued. Questions of implement, repair and
     rebase runs go to the foreman; the rest (a park at the run limit, one
-    logged by hand) queue at once. The answerer's thresholds and brief count
+    logged by hand) queue at once. A park's `question.asked` carries
+    `park = true`, since it names the task's last run, which may itself have
+    ended with a question; and an answer to a park grants the task a fresh
+    run limit, counted from the answer. Without both, the playground replay
+    (10-31) looped: the foreman settled each park and the task parked again
+    within a minute. The answerer's thresholds and brief count
     queued questions only, aged from when they queued.
   - A foreman run is an ordinary run whose task is `<task>/foreman` (run
     `<task>/foreman-<n>`), which no task has, so it is not one of the task's

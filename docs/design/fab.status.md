@@ -203,7 +203,9 @@
   `cut-run.md` allows designer subagents where the design is too wide for
   one writer (the user, 10-31: the playground replay's cut started four,
   then hit the call's 40-minute limit before they ended; the limit is now
-  60 minutes); and, with fabrig's `agents/` gone from its main
+  60 minutes); a park at the run limit goes to the answerer, never the
+  foreman, and its answer grants fresh runs (the playground replay's loop);
+  and, with fabrig's `agents/` gone from its main
   (`2c39875fd2`), `cut-run.md` and `fabrig-run.md` no longer name it;
   what is left to match the run is in section 14. The replay ticked from
   its own install on hel8 (`FAB_HOME/replay-install`, a local hosts.toml),

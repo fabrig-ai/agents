@@ -312,8 +312,9 @@ def _starts(candidates: Iterable[str], views: Mapping[str, state.TaskView], even
         # Rebase runs are mechanical (the model's foreman writes them) and do not count.
         kinds = {event["run"]: event.get("kind") for event in events if event.get("ev") == "run.started"}
         kind, rejection = _start_kind(view, events)
+        counted = _since_park(identifier, view.runs, events)
         if not (rejection or {}).get("skeleton") and sum(
-                kinds.get(run_id) != "rebase" for run_id in view.runs) >= MAX_RUNS:
+                kinds.get(run_id) != "rebase" for run_id in counted) >= MAX_RUNS:
             actions.append(Action("park", task=identifier,
                                   run=view.runs[-1],
                                   detail=f"{MAX_RUNS} runs without landing; needs judgement"))
@@ -1042,8 +1043,29 @@ def _answered(chain: call_review.Chain) -> list[str]:
 
 
 def _park(action: Action, *, log_path: Path | None) -> None:
-    """Park a task that exhausted its run allowance by asking for judgement."""
-    log.append("question.asked", path=log_path, task=action.task, run=action.run, text=action.detail)
+    """Park a task that exhausted its run allowance by asking for judgement; `park` marks the
+    question as the dispatcher's, so it never goes to the foreman (fab.foreman.questions)."""
+    log.append("question.asked", path=log_path, task=action.task, run=action.run, text=action.detail,
+               park=True)
+
+
+def _since_park(task_id: str, runs: list[str], events: list[dict]) -> list[str]:
+    """The runs of task_id started after the answer to its last answered park: an answer to a
+    park grants a fresh MAX_RUNS, or the task would park again at once (the playground replay,
+    10-31: a park answered every 45 s). All runs while no park has been answered."""
+    parked, answered = False, -1
+    for position, event in enumerate(events):
+        if event.get("task") != task_id:
+            continue
+        if event.get("ev") == "question.asked":
+            parked = bool(event.get("park"))
+        elif event.get("ev") == "question.answered" and parked:
+            answered, parked = position, False
+    if answered < 0:
+        return runs
+    later = {event["run"] for event in events[answered + 1:]
+             if event.get("ev") == "run.started" and event.get("task") == task_id and "run" in event}
+    return [run_id for run_id in runs if run_id in later]
 
 
 def main(argv: list[str]) -> int:

@@ -65,7 +65,8 @@ def questions(tasks: Mapping[str, Task], events: Iterable[dict]) -> list[Questio
 
     state and since, the first that holds:
     - queued, since the question.asked ts: it is not the foreman's (the dispatcher's park
-      at MAX_RUNS, a run of another kind, a question logged by hand);
+      at MAX_RUNS, marked `park`, even when its run ended with a question; a run of another
+      kind; a question logged by hand);
     - foreman, since the question.asked ts: no foreman run yet;
     - deciding, since the foreman run's run.started ts: it has no run.ended;
     - settled, since its run.ended ts: it ended done;
@@ -223,7 +224,7 @@ def _question(event: dict, position: int, starts: dict, ends: dict, foremen: dic
     task, run_id, stamp = event["task"], event["run"], event["ts"]
     state, since, foreman, report = "queued", stamp, None, ""
     started, ended = starts.get(run_id), ends.get(run_id)
-    if (started is not None and ended is not None and started[0] < position
+    if (not event.get("park") and started is not None and ended is not None and started[0] < position
             and ended[0] < position and started[1]["kind"] in ASKING
             and ended[1]["outcome"] == "question"):
         state = "foreman"

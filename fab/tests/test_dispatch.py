@@ -441,6 +441,21 @@ class DecideTest(unittest.TestCase):
                 events.append(ended(n=count))
                 self.assertEqual(self.decide([task("a")], events)[0].kind, "land")
 
+    def test_an_answered_park_grants_fresh_runs(self):
+        events = [e for n in range(1, MAX_RUNS + 1) for e in (started(n=n), ended(n=n, outcome="question"))]
+        events += [event("question.asked", run=f"draft/a-{MAX_RUNS}", text="limit", park=True),
+                   event("question.answered")]
+        self.assertEqual([a.kind for a in self.decide([task("a")], events)], ["start"])
+        # An answer to an ordinary question leaves the count alone.
+        plain = [*events[:-2], event("question.asked", run=f"draft/a-{MAX_RUNS}", text="Which?"),
+                 event("question.answered")]
+        self.assertEqual([a.kind for a in self.decide([task("a")], plain)], ["park"])
+        # Fresh runs count again from the answer.
+        more = [e for n in range(MAX_RUNS + 1, 2 * MAX_RUNS + 1)
+                for e in (started(n=n), ended(n=n, outcome="question"))]
+        self.assertEqual([a.kind for a in self.decide([task("a")], events + more + [event("question.answered")])],
+                         ["park"])
+
     def test_one_below_run_limit_can_repair(self):
         events = [e for n in range(1, MAX_RUNS)
                   for e in (started(n=n), ended(n=n, outcome="infra"))]

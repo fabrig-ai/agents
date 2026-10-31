@@ -68,6 +68,12 @@ class QuestionsTest(unittest.TestCase):
         question = self.question([_asking()[-1]])
         self.assertEqual(question, replace(QUESTION, state="queued"))
 
+    def test_park_after_a_question_run_queues_since_asked(self):
+        # The dispatcher's park names the task's last run, which may have ended with a question.
+        events = [*_asking()[:2], _event("question.asked", task=TASK.id, run=QUESTION.run,
+                                         text=QUESTION.text, park=True)]
+        self.assertEqual(self.question(events), replace(QUESTION, state="queued"))
+
     def test_review_question_queues_since_asked(self):
         self.assertEqual(self.question(_asking("review")), replace(QUESTION, state="queued"))
 
