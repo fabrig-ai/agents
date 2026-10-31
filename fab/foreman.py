@@ -17,6 +17,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from fab import atomic, log, run as runs
 from fab.hosts import Host
 from fab.plan import Task
 from fab.sh import Runner, run
@@ -47,7 +48,7 @@ def task_field(task_id: str) -> str:
     """The task field of a foreman run's records for task_id: `<task_id>/foreman`. No task
     has such an id, so fab.state.fold, decide's history and MAX_RUNS leave foreman runs out;
     fab.run.next_run over it numbers the runs `<task_id>/foreman-<n>`."""
-    raise NotImplementedError
+    return f"{task_id}/foreman"
 
 
 def questions(tasks: Mapping[str, Task], events: Iterable[dict]) -> list[Question]:
@@ -75,7 +76,24 @@ def questions(tasks: Mapping[str, Task], events: Iterable[dict]) -> list[Questio
 
     Walk the events once in log order, keeping each record's index, so equal timestamps keep
     their order. Pure: no file is read. Records missing a field the rule reads are skipped."""
-    raise NotImplementedError
+    starts, ends, foremen, reports, asked, answered = {}, {}, {}, {}, [], {}
+    for position, event in enumerate(events):
+        kind = event.get("ev")
+        if kind == "run.started" and all(key in event for key in ("run", "task", "kind", "ts")):
+            starts.setdefault(event["run"], (position, event))
+            if event["kind"] == KIND and "asked" in event:
+                foremen[event["task"], event["asked"]] = position, event
+        elif kind == "run.ended" and all(key in event for key in ("run", "outcome", "ts")):
+            ends.setdefault(event["run"], (position, event))
+            if "report" in event:
+                reports.setdefault(event["run"], event)
+        elif kind == "question.asked" and all(key in event for key in ("task", "run", "text", "ts")):
+            if event["task"] in tasks:
+                asked.append((position, event))
+        elif kind == "question.answered" and "task" in event:
+            answered[event["task"]] = position
+    return [_question(event, position, starts, ends, foremen, reports)
+            for position, event in asked if answered.get(event["task"], -1) < position]
 
 
 def brief(question: Question, task: Task, *, run_id: str, report: str, spec: str,
@@ -92,7 +110,13 @@ def brief(question: Question, task: Task, *, run_id: str, report: str, spec: str
     4. `# The task spec`: spec, the spec file's whole text (its `+++` header too), verbatim.
 
     Pure: the caller reads the files."""
-    raise NotImplementedError
+    facts = [f"- Run: {run_id}", f"- Task: {task.id} (spec `{task.path}`)",
+             f"- Asked by: {question.run}", f"- Report: write it to `{report}`",
+             "Your checkout is the task's repository at main, read-only."]
+    sections = [ROLE.read_text().rstrip("\n"), "# Your question\n\n" + "\n".join(facts),
+                "# The run's report\n\n```text\n" + asking.removesuffix("\n") + "\n```",
+                "# The task spec\n\n" + spec]
+    return "\n\n".join(sections) + ("" if spec.endswith("\n") else "\n")
 
 
 def start(question: Question, task: Task, host: Host, events: Iterable[dict], *,
@@ -111,7 +135,18 @@ def start(question: Question, task: Task, host: Host, events: Iterable[dict], *,
        fab.run.launch puts it.
     fab.run.collect ends the run as any other: its run.ended carries the outcome questions
     reads, and frees the worktree."""
-    raise NotImplementedError
+    run_id = runs.next_run(task_field(task.id), events)
+    spec = Path(task.path).read_text()
+    try:
+        asking = (log.home() / "runs" / question.run / "report.md").read_text()
+    except (OSError, UnicodeError):
+        asking = question.text
+    report = str(Path(runs.remote_home(host)) / "runs" / run_id / "report.md")
+    text = brief(question, task, run_id=run_id, report=report, spec=spec, asking=asking)
+    return runs.launch_detached(host, run_id, task.repo, "origin/main", sh=sh,
+                                log_path=log_path, task=task_field(task.id), kind=KIND,
+                                branch=task.id, base="origin/main", brief=text,
+                                effort=EFFORT, asked=question.run)
 
 
 def answer(report: str) -> str:
@@ -120,7 +155,17 @@ def answer(report: str) -> str:
     report's next lines, at most ANSWER_LINES, each right-stripped, the trailing blank ones
     dropped, joined by newlines. An empty first-line text is a ValueError: the role asks
     for the answer in one line there."""
-    raise NotImplementedError
+    lines = report.splitlines()
+    first = next((i for i, line in enumerate(lines) if line.strip()), None)
+    if first is None or not lines[first].strip().startswith("Done:"):
+        raise ValueError("foreman report must begin with Done:")
+    text = lines[first].strip().removeprefix("Done:").strip()
+    if not text:
+        raise ValueError("foreman answer must not be empty")
+    kept = [text, *(line.rstrip() for line in lines[first + 1:first + 1 + ANSWER_LINES])]
+    while not kept[-1]:
+        kept.pop()
+    return "\n".join(kept)
 
 
 def with_answer(spec: str, *, day: str, question: Question, answer: str, run: str) -> str:
@@ -136,7 +181,19 @@ def with_answer(spec: str, *, day: str, question: Question, answer: str, run: st
     - Without one, `## Answers`, a blank line and the entry are appended after one blank
       line, the spec's trailing newlines first stripped.
     Pure."""
-    raise NotImplementedError
+    lines = spec.splitlines()
+    if any(line.startswith("### ") and line.endswith(f" foreman {run})") for line in lines):
+        return spec
+    question_line = next((line.strip() for line in question.text.splitlines() if line.strip()), "")
+    question_line = question_line.removeprefix("Question:").strip()
+    entry = f"### {day}: {question_line} ({question.run}, foreman {run})\n\n{answer}"
+    if "## Answers" not in lines:
+        return spec.rstrip("\n") + "\n\n## Answers\n\n" + entry.rstrip("\n") + "\n"
+    section = lines.index("## Answers")
+    end = next((i for i in range(section + 1, len(lines)) if lines[i].startswith("## ")), len(lines))
+    before = "\n".join(lines[:end]).rstrip("\n")
+    after = "\n".join(lines[end:]).strip("\n")
+    return before + "\n\n" + entry.rstrip("\n") + ("\n\n" + after if after else "") + "\n"
 
 
 def commit(question: Question, task: Task, text: str, checkout: Path, *, run_id: str,
@@ -162,4 +219,50 @@ def commit(question: Question, task: Task, text: str, checkout: Path, *, run_id:
        HEAD:refs/heads/<branch>`.
     In every outcome, last: `git worktree remove --force <worktree>` and `git branch -D
     <branch>` in checkout, errors ignored. The pushed branch stays for fab.land.main."""
-    raise NotImplementedError
+    relative = Path(task.path).resolve().relative_to(checkout.resolve())
+    branch = f"answers/{run_id}"
+    worktree = log.home() / "runs" / run_id / "wt"
+
+    def git(*argv, cwd=checkout):
+        return sh(["git", *argv], cwd=str(cwd), check=True)
+
+    try:
+        git("fetch", "origin")
+        git("worktree", "add", "-B", branch, str(worktree), "origin/main")
+        path = worktree / relative
+        spec = path.read_text()
+        new = with_answer(spec, day=day, question=question, answer=text, run=run_id)
+        if new == spec:
+            return None
+        atomic.write(path, new)
+        git("-c", "user.name=fab", "-c", "user.email=fab@localhost", "commit", "-q", "-m",
+            f"Answer {task.id}'s question from its options", "--", str(relative), cwd=worktree)
+        git("push", "-q", "--force", "origin", f"HEAD:refs/heads/{branch}", cwd=worktree)
+        return branch
+    finally:
+        for argv in (("worktree", "remove", "--force", str(worktree)), ("branch", "-D", branch)):
+            try:
+                git(*argv)
+            except Exception:
+                pass
+
+
+def _question(event: dict, position: int, starts: dict, ends: dict, foremen: dict,
+              reports: dict) -> Question:
+    """Resolve one question against the run indexes without comparing timestamps."""
+    task, run_id, stamp = event["task"], event["run"], event["ts"]
+    state, since, foreman, report = "queued", stamp, None, ""
+    started, ended = starts.get(run_id), ends.get(run_id)
+    if (started is not None and ended is not None and started[0] < position
+            and ended[0] < position and started[1]["kind"] in ASKING
+            and ended[1]["outcome"] == "question"):
+        state = "foreman"
+        deciding = foremen.get((task_field(task), run_id))
+        if deciding is not None and deciding[0] > position:
+            first = deciding[1]
+            foreman, state, since = first["run"], "deciding", first["ts"]
+            last = reports.get(foreman)
+            if last is not None:
+                state = "settled" if last["outcome"] == "done" else "queued"
+                since, report = last["ts"], last["report"]
+    return Question(task, run_id, event["text"], stamp, state, since, foreman, report)
