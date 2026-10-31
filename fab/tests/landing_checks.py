@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from fab import atomic, nextest, tiers
+from fab.hosts import Host
 from fab.sh import Result
 
 TIP = "1" * 40
@@ -46,6 +47,13 @@ def kept(home: Path, value: dict) -> Path:
     path = home / "receipts" / f"{value['tip']}.json"
     atomic.write(path, receipt_text(value))
     return path
+
+
+def receipt_hosts() -> dict[str, Host]:
+    """A builder with its own user and two gates, inserted out of name order."""
+    return {"builder": Host("builder", "worker@build", ("builder",)),
+            "z-gate": Host("z-gate", "fab@last", ("gate",)),
+            "a-gate": Host("a-gate", "fab@first", ("gate",))}
 
 
 def junit_xml(cases: Sequence[tuple[str, str, str]]) -> str:
