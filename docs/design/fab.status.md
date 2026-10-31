@@ -88,9 +88,9 @@
   pending. The task `critic-run` fills them; `critique-tick` makes the tick
   critique every done task's branch before it lands or is readied, after
   `design-eligibility`. Until then every branch lands or is readied
-  uncritiqued. A task is critiqued once: the user's model checks every
-  branch, and a repaired or rebased tip goes on without a second critique
-  (14).
+  uncritiqued. Once it lands, every tip a run other than a fix leaves is
+  critiqued, a repair's and a rebase's too; a branch whose critic ends
+  infra three times parks for judgement rather than going on.
 - **The foreman only settles questions.** The user's execution model
   (`docs/design/draft/execution-modes.md`, roles) also has it write rebase
   and mechanical repair tasks; here the dispatcher starts rebase and repair

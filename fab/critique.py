@@ -2,11 +2,12 @@
 (docs/design/fab.md, 13.1).
 
 When a task's run ends done and the gates pass, a critic run (Codex, high, read-only) reviews
-the branch against its skeleton, the taste file and the gates' output. A critique with no
-findings lets the branch through at once. Findings go to the task's next run on the same
-branch, a fix run, once: after the fix ends done the branch lands or is readied without a
-second critique. `stages` folds where each task's critique stands from the log; the tick
-turns each stage into its next step.
+the branch's tip against its skeleton, the taste file and the gates' output. A critique with
+no findings lets the branch through at once. Findings go to the task's next run on the same
+branch, a fix run, once: after the fix ends done the branch lands or is readied. Every other
+run of the task that ends done (a repair, a rebase) makes a new tip, critiqued again. A
+branch whose critic cannot run is held, never let through uncritiqued. `stages` folds where
+each task's critique stands from the log; the tick turns each stage into its next step.
 
 Critic runs are ordinary runs whose task field is `task_field(<task>)`, which no task has, as
 foreman runs are (fab.foreman): the fold leaves them out of the task's own runs, and the tick
@@ -29,9 +30,9 @@ FIX = "fix"  # the kind of the task's run that fixes the findings (fab.run.KINDS
 EFFORT = "high"  # the critic's Codex effort (the user's model: Codex, high, read-only)
 ROLE = Path(__file__).resolve().parent / "roles" / "critic.md"  # the critic's role text
 STEP = "critique"  # the step of the rejection a fix run's brief carries (fab.run.brief)
-INFRA_LIMIT = 3  # critic runs ending infra after which the branch goes on uncritiqued
+INFRA_LIMIT = 3  # critic runs of one tip ending infra after which the task is held
 FINDINGS_LINES = 40  # lines of a critic's report that a fix run's brief quotes
-STAGES = ("critique", "critiquing", "fix", "clear")
+STAGES = ("critique", "critiquing", "fix", "hold", "clear")
 
 
 @dataclass(frozen=True)
@@ -40,9 +41,9 @@ class Stage:
 
     task: str  # the task's id, `<draft>/<task>`
     stage: str  # one of STAGES
-    critique: str | None = None  # the last critic run's id; None before the first
+    critique: str | None = None  # the reviewed run's last critic run; None before the first
     report: str = ""  # that run's collected report path (its run.ended's report), once ended
-    reason: str = ""  # for clear without an approval: why, one line
+    reason: str = ""  # for hold: why, one line
 
 
 def task_field(task_id: str) -> str:
@@ -56,26 +57,40 @@ def stages(tasks: Mapping[str, Task], events: Iterable[dict]) -> dict[str, Stage
     """Where each task's self-critique stands after the events, keyed by task id in the
     tasks' order. A task with no run.started of its own is left out.
 
-    The task's runs are the run.started records whose task is its id. Its critic runs are
-    the run.started records with task task_field(<id>) and kind KIND, each with the first
-    run.ended of the same run. The last critic run counts; critique is its id and report its
-    run.ended's report ("" before it ended or without one).
+    The task's runs are the run.started records whose task is its id. The reviewed run is
+    reviewed(<id>, events): the tip a critique covers. Its critic runs are the run.started
+    records with task task_field(<id>), kind KIND and `of` the reviewed run, each with the
+    first run.ended of the same run. The last of them counts; critique is its id and report
+    its run.ended's report ("" before it ended or without one).
 
     stage and reason, the first that holds:
-    - critique: no critic run yet;
+    - critique: no reviewed run (no run of the task's ended done yet), or no critic run of it;
     - critiquing: the last critic run has no run.ended;
-    - critique: it ended infra and fewer than INFRA_LIMIT of the task's critic runs did;
-    - clear, reason `<INFRA_LIMIT> critiques ended infra`: it ended infra;
+    - critique: it ended infra and fewer than INFRA_LIMIT of the reviewed run's critic runs
+      that started after the task's last question.answered (any, when none) did;
+    - hold, reason `<INFRA_LIMIT> critiques ended infra`: it ended infra. The branch is not
+      let through uncritiqued: the tick parks the task for judgement, and the answer
+      (question.answered naming the task) restarts the count, so the stage is critique again;
     - clear: it ended done, the critic found nothing;
     - clear: it ended with any other outcome (failed, question: the critic found something)
-      and a run of the task's own that started after that run.ended has a run.ended with
-      outcome done: the fix is in;
+      and a run of the task's own of kind FIX that started after that run.ended has a
+      run.ended with outcome done: the fix is in;
     - fix: it found something and no such run has ended done.
-    A critique runs once per task: later runs of the task (a repair after a rejection, a
-    rebase) leave the stage clear.
+    Every tip is critiqued: a later run of the task that ends done and is not a fix run (a
+    repair after a rejection, a rebase, a run after the task was parked) is the new reviewed
+    run, and its stage starts again at critique. The fix run's own tip is not critiqued
+    again: it answers the critique.
 
-    Walk the events once in log order, keeping each record's index, so equal timestamps keep
-    their order. Pure: no file is read. Records missing a field the rule reads are skipped."""
+    Read the events as one list in log order, keeping each record's index, so equal
+    timestamps keep their order. Pure: no file is read. Records missing a field the rule reads are skipped."""
+    raise NotImplementedError
+
+
+def reviewed(task_id: str, events: Iterable[dict]) -> dict | None:
+    """The run.started of the run whose tip task_id's next or current critique covers: the
+    task's last run (task field task_id) of a kind other than FIX whose first run.ended has
+    outcome done; None when no such run has ended done. Pure; records missing `run`, `kind`
+    or `outcome` are skipped."""
     raise NotImplementedError
 
 
@@ -103,8 +118,8 @@ def start(task: Task, host: Host, events: Iterable[dict], *, digest: str | None,
           sh: Runner = run, log_path: Path | None = None) -> str:
     """Start the critic run of task's branch on host (a builder) and return its run id.
 
-    1. The branch and the reviewed run: the branch and run of the task's last run.started in
-       events (none: ValueError naming the task, before any command).
+    1. The branch and the reviewed run: the branch and run of reviewed(task.id, events)
+       (None: ValueError naming the task, before any command).
     2. The run id fab.run.next_run(task_field(task.id), events): `<task>/critique-<n>`.
     3. fab.run.launch_detached(host, run_id, task.repo, "origin/<branch>", sh=sh,
        log_path=log_path, task=task_field(task.id), kind=KIND, branch=<branch>,

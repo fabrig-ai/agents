@@ -455,13 +455,18 @@ it, and the flow grows from a small start rather than to a fixed cap.
   - Its report's first line is `Done: no findings`, which clears the task,
     or `Failed: <findings>`; any outcome but done and infra is findings. An
     `Infra:` critique runs again, up to three times; after the third the
-    branch goes on uncritiqued, the reason printed with its landing.
+    task is held: it parks for judgement (a question), its branch neither
+    landed nor readied, and the answer starts the critique again. No branch
+    goes on uncritiqued.
   - Findings go to a run of kind `fix` on the task's branch (as a repair
     continues it), its brief quoting them under "The self-critique found".
     Fix runs, as rebase runs, do not count toward the task's run limit. Once
     a fix run ends done the task is clear.
-  - A critique runs once per task: a later repair or rebase lands or is
-    readied without another, gated as every landing is.
+  - Every tip is critiqued. A critique covers the tip of the task's last
+    run that ended done and is not a fix run; a later repair or rebase that
+    ends done leaves a new tip, which is gated and critiqued again before it
+    lands or is readied. The fix run's tip is the one not critiqued again:
+    it is the implementer's answer to the critique, as the model has it.
 - **The foreman writes the rebase and repair tasks,** as the user's model
   has it. When the landing refuses a branch, a foreman run reads the task,
   the refusal and the failing step's log, and writes the repair: an
@@ -711,8 +716,8 @@ things fab follows, whatever the clock says:
 
 ## 14. Later
 
-- A self-critique of each repaired or rebased tip, not only a task's first
-  done branch, if the numbers show repairs bring what the critic would find.
+- A critique of the fix run's tip too, if the numbers show fixes bring
+  findings of their own.
 - The flow (13.2) counting a fix run as part of a task's first attempt: today
   a task fixed after its critique does not grow the target when it lands.
 - fabrig's gates, over Rust and its public API against the skeleton.

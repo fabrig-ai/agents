@@ -10,10 +10,12 @@ minutes = 45
 # The tick critiques every task's branch before it lands or is readied
 
 Today a done task's branch is gated and landed (this repository) or readied
-(fabrig) in the same tick. From this change on, a done task's branch first
-passes the gates, then gets one critic run; a critique with no findings lets
-it land or be readied at once, and findings go to one fix run on the same
-branch, after which it lands or is readied without a second critique. The
+(fabrig) in the same tick. From this change on, every tip a done run leaves
+first passes the gates, then gets a critic run; a critique with no findings
+lets it land or be readied at once, and findings go to one fix run on the
+same branch, after which it lands or is readied. A repair or rebase that ends
+done leaves a new tip, critiqued again; a branch whose critic keeps ending
+infra parks, and never lands uncritiqued. The
 stages are `fab.critique.stages` (filled by `critic-run`); this task drives
 them from `decide` and the tick. Update the docstrings of every function you
 change to say what it now does. Design: `docs/design/fab.md`, 13.1; the
@@ -27,8 +29,15 @@ events in section 3.
     detail=<view.branch>)`;
   - critiquing: nothing;
   - fix: nothing here; the task is a start candidate (below);
-  - clear: land or ready as today; the detail is the branch, then
-    ` (<reason>)` when the stage has a reason.
+  - hold: `Action("park", task=<id>, run=<view.runs[-1]>, detail="<the
+    stage's reason>; the branch waits uncritiqued, needs judgement")`, which
+    the tick takes as it takes the MAX_RUNS park (a question.asked), so the
+    task is parked and asks once;
+  - clear: land or ready as today, the detail the branch.
+  A task the fold makes runnable whose stage is critique and that has a
+  reviewed run (`fab.critique.reviewed`; a hold that was answered) gets the
+  critique action too, and is not a start candidate: its tip is critiqued
+  again, not rebuilt.
 - **`decide`, its step 3** (starts): the candidates are the rejected tasks,
   then the fix candidates, then the runnable ones that are not fix
   candidates, each group in the tasks' order. A fix candidate is a task
@@ -72,8 +81,10 @@ events in section 3.
     gives land (agents) and ready (a fabrig task); a failed critique gives a
     fix start with run the critic run, ahead of a runnable task and behind a
     rejected one; a fix ended done gives land and no second critique; a fix
-    ended infra starts a fix again; INFRA_LIMIT infra critiques give land
-    with the reason in the detail, fewer give critique; a task with
+    ended infra starts a fix again; a repair ended done after a rejection
+    gives critique, not land; INFRA_LIMIT infra critiques give park with the
+    reason in the detail and no land, fewer give critique; that park
+    answered gives critique and no start; a task with
     MAX_RUNS - 1 implement and repair runs and one fix run that ended infra
     still starts its fix, not parks; a done task of another plan left out.
   - `tick` with `support.FakeRunner` and patched `fab.gates.screen`,

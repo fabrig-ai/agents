@@ -8,7 +8,7 @@ PENDING = "pending: agents-rebuild/critique"  # the task critic-run removes it w
 
 @unittest.skip(PENDING)
 class ExemplarTest(unittest.TestCase):
-    def test_findings_are_fixed_once_then_the_branch_goes_on(self):
+    def test_findings_are_fixed_once_and_every_new_tip_is_critiqued(self):
         story = Story().ran("implement", "done")
         assert_stage(self, story, "critique")
         story.started(critique.KIND)
@@ -18,7 +18,9 @@ class ExemplarTest(unittest.TestCase):
         story.fixed("done")
         assert_stage(self, story, "clear", critic_run=critic(1))
         story.rejected("gate:size").ran("repair", "done")
-        assert_stage(self, story, "clear", critic_run=critic(1))
+        assert_stage(self, story, "critique")
+        story.critiqued("done")
+        assert_stage(self, story, "clear", critic_run=critic(2))
 
 
 if __name__ == "__main__":
