@@ -335,3 +335,16 @@ id = 7
 story = "A plan living in fabrig runs from its cut to landed Rust through fabrig's queue, gated minimally, starting wide, measured per part"
 parts = ["fabrig-calls", "rust-gates", "wide-start", "accounting"]
 walk = false
+
+[[part]]
+id = "replay"
+title = "Replay a manual run: integration landing, reviews off, all-direct cuts with the run's inputs"
+mode = "feature"
+needs = ["fabrig-calls", "wide-start"]
+design = "docs/design/fab.md, 13.12"
+
+[[slice]]
+id = 8
+story = "fab replays the Codex manual run of skein's component kit: direct tasks merged into an integration branch, dependents from its tip, one full check at the end"
+parts = ["replay"]
+walk = false

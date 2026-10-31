@@ -68,10 +68,10 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
 | ev | fields | meaning |
 |---|---|---|
 | `task.added` | draft, task, repo, path, sha | a task spec exists on its repository's main |
-| `run.started` | run, task, kind, host, dir, branch, base | a Codex run began; kind is implement, repair, rebase, review or foreman |
+| `run.started` | run, task, kind, host, dir, branch, base | a Codex run began; kind is implement, repair, rebase, review or foreman; check is an integration branch's full check (13.12) |
 | `run.ended` | run, task, outcome, report, minutes, tokens | outcome is done, question, infra or failed (section 5); tokens is Codex's (13.5) |
 | `branch.ready` | task, branch, tip | handed to the landing pipeline |
-| `branch.landed` | task, branch, tip, main | on main |
+| `branch.landed` | task, branch, tip, main, into | on main; with into, merged into an integration plan's trunk, main being its new tip (13.12) |
 | `branch.rejected` | task, branch, tip, step, log | the landing refused it; its foreman decides what follows (13.1) |
 | `refusal.settled` | task, run, verdict, reason, branch, section | the tick acted on a refusal's foreman run: fix (its section landed in the spec), retry (the tip goes back unchanged) or none (13.1) |
 | `question.asked` | task, run, text | the task parks until answered |
@@ -880,6 +880,98 @@ weight go. The api gate (rustdoc JSON) is out of scope.
   summed), run ended to checks (the gating or readying), checks to ready,
   ready to landed; a boundary with no event is shown as `-`.
 
+### 13.12 Replaying a manual run
+
+At the user's word (10-31): fab runs the same execution as the Codex manual
+run of skein's component kit (`coord/codex-kit/`: a lead cutting the work
+into 24 direct tasks, Codex implementers in slots, every finished branch
+merged into one integration branch, dependents started from its tip, one
+full check at the end, a repair, never landed). First the replay reproduces
+that run on fab with similar results; tweaks start from that baseline. It
+is four plan options on today's mechanism, not a second engine.
+
+- **The options** (`plan.toml`, read by `fab.plan.load_plan`):
+  - `landing`: `"queue"` (the default: tasks are landed or readied as in
+    section 6) or `"integration"`;
+  - `ready` (default true): an integration plan readies its checked
+    branch for the queue once; false leaves it unlanded (an experiment);
+  - `reviews` (default true): false approves every call's chain without a
+    review run (13.1) and starts no structure review call (12). The code
+    gates (files, ratchet) stay;
+  - `direct` (default false): every part must be `mode = "direct"`, a
+    plan problem otherwise, so a cut that writes a skeleton part is caught
+    before anything runs.
+- **The trunk.** A plan's trunk is `main`, or `<draft>/integration` for an
+  integration plan. Everything that reads main for a plan reads its trunk
+  instead: a run's base (`origin/<trunk>` at its start), the Rust gates'
+  base (the tip's merge base with the trunk), a call's worktree, the
+  foreman's and the refusal foreman's checkouts, the spec edits of answers
+  and repair sections, and the implementer's precheck (`fab precheck SLOT
+  TIP --onto origin/<trunk>`; the brief's facts name the trunk).
+- **The plan lives on its trunk.** The operator makes the integration
+  branch at the run's base and a worktree of hel8's fabrig clone on it,
+  tracking it (`FAB_HOME/integration/<draft>`), and lists the plan
+  directory inside that worktree. Its first commit holds the run's inputs
+  that are not in the tree (below). The tick follows a
+  plan checkout that tracks a branch: after its fetch it fast-forwards the
+  checkout to its upstream, so it always reads the plan and specs at the
+  trunk's tip.
+- **Merging, not landing.** For an integration plan, a task whose run ended
+  done is gated (the Rust gates, against the trunk) and then merged by the
+  tick, in the plan's checkout and under the tick's lock: reset to
+  `origin/<trunk>`, `git merge --no-ff origin/<branch>`, push the trunk
+  fast-forward only. It logs `branch.landed` with `main` the new trunk tip
+  and `into` the trunk. A conflict aborts the merge and logs
+  `branch.rejected` with step `merge` and the conflict as `findings`, so a
+  rebase run follows (13.1's refusal foreman first). Calls' branches
+  (`calls/<id>`), answers (`answers/<run>`) and repair sections
+  (`repairs/<run>`) are merged into the trunk the same way, never readied.
+  Since a merged task counts as landed, its dependents become runnable and
+  start from the trunk's tip: the manual run's "dependents start from the
+  integration tip".
+- **The end check.** When every task of the plan has landed on the trunk,
+  the tick starts one check run of the trunk's tip: task
+  `<draft>/integration`, kind `check`, in an idle slot of the builder with
+  most free places. It runs `fab precheck` with the full selection
+  (`--full`: every ratchet, fmt, workspace clippy, the build, default and
+  fuzzy tests, as the queue's full checks) as a user unit with fab codex's
+  contract (`<id> <state>`, `ended`, `result.json`, the report), so
+  `fab run status` and `collect` read it as any run. Its report's first line
+  is `Done: green <tip>` or `Failed: <first red step>`.
+  - Green: with `ready`, the trunk is readied once (`ready/<draft>/integration`,
+    `branch.ready` for task `<draft>/integration`); without, the plan stops
+    there, logging nothing more.
+  - Red: a repair task `<draft>/repair-<n>` (folded from the log, never a
+    spec file; files `**`, its body the check's failing steps and report)
+    runs as an implement run from the trunk's tip, is merged like any task,
+    and the trunk is checked again. A third red parks the plan with a
+    question.
+  - A check run counts as the draft's run in flight and takes a place.
+- **The cut's inputs.** `fab call cut --set KEY=VALUE ...` passes plan options
+  to the cut: its brief says to write them into plan.toml verbatim, and its
+  `call.started` carries them (`options`), so the tick reads `landing` and
+  `reviews` for the cut's own chain before plan.toml exists. For a replay
+  the operator gives the cut the manual run's inputs as `--source`: the
+  draft (`skein/docs/design/draft/component-kit.md`), fabrig's
+  `AGENTS.md` and `agents/lead.md`, `implementer.md`, `operations.md` at
+  the base, and, committed under the plan directory's `inputs/`, the
+  kickoff, the review and the manual run's brief, with a README saying the
+  brief's How, Machines and Measure are fab's in this run. With `direct =
+  true` the cut writes every task spec itself and puts notes several tasks
+  share in the plan's `notes/`, cited from each spec (the lead's
+  `common.md`, `stage-common.md`, `lib-common.md`); implementers read them
+  in their checkout.
+- **Retire waits for main.** An integration plan's parts are done when
+  their tasks have merged, but its retire call starts only once the trunk
+  has landed on main (`branch.landed` for task `<draft>/integration` from
+  the queue's record).
+- **Departures from the user's drafts, by the user's request for this run**
+  (`execution-modes.md`): no surveys (not built), no skeletons or test
+  vocabulary (every part direct), no Codex review of the cut, no structure
+  review, and the code reaches main as one integration branch through one
+  check instead of each task through the merge queue. The self-critique
+  and test-writers are not built yet either.
+
 ## 14. Later
 
 - (The self-critique is 13.1's, part `critique`, not later.)
@@ -929,6 +1021,12 @@ weight go. The api gate (rustdoc JSON) is out of scope.
   question joins it.
 - A plan's question answered by `fab page answer`, writing plan.toml and
   landing it as the foreman lands its answers.
+- An integration plan's lighter checks (13.12): a workspace clippy of the
+  trunk after each merge, the codex-kit run's lesson (two parallel branches
+  meeting at clippy found only at the end check); once the replay matches
+  the manual run.
+- Claude implementer runs (`claude -p` in a slot, measured from its
+  stream) for a replay of the Claude-only manual run (`coord/manual-kit/`).
 - A cap on a call's context or turns, once the user sets one from the
   measurements (13.5); Claude and Codex usage against their plans' limits,
   once the limits are recorded somewhere fab can read.
