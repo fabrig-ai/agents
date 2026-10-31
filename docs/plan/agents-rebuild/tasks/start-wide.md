@@ -3,7 +3,7 @@ id = "start-wide"
 part = "wide-start"
 kind = "feature"
 needs = ["flow"]
-files = ["fab/flow.py", "fab/tests/test_flow.py", "fab/dispatch.py", "docs/design/fab.md"]
+files = ["fab/flow.py", "fab/tests/test_flow.py", "fab/dispatch.py", "fab/tests/test_dispatch.py", "docs/design/fab.md"]
 effort = "high"
 minutes = 40
 +++
@@ -43,3 +43,6 @@ drop of one.
   one `flow.target(...)` call in `decide` only; compute the sum there from
   the hosts `decide` already has. No other signature changes. Do not ask
   again: within this, the choices are yours.
+- 2026-10-31, the designer: option 1. `fab/tests/test_dispatch.py` is in
+  files: update the expectations and fixtures that assume the old start of
+  2 or the drop of one, nothing else, and make `bin/fab test` pass.
