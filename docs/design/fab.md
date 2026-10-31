@@ -67,7 +67,7 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
 | ev | fields | meaning |
 |---|---|---|
 | `task.added` | draft, task, repo, path, sha | a task spec exists on its repository's main |
-| `run.started` | run, task, kind, host, dir, branch, base | a Codex run began; kind is implement, repair, rebase, review or foreman |
+| `run.started` | run, task, kind, host, dir, branch, base | a Codex run began; kind is implement, repair, rebase, review, foreman or survey (with its topic, 13.10) |
 | `run.ended` | run, task, outcome, report, minutes, tokens | outcome is done, question, infra or failed (section 5); tokens is Codex's (13.5) |
 | `branch.ready` | task, branch, tip | handed to the landing pipeline |
 | `branch.landed` | task, branch, tip, main | on main |
@@ -725,11 +725,26 @@ things fab follows, whatever the clock says:
   the user's word of 10-31): its surveys, then its cut. A draft landing in
   `docs/design/draft/` starts nothing by itself; the timeline's T+0:00 is
   the user's start.
-- **Surveys:** read-only Codex runs (medium, kind `survey`), at intake (the
-  readers of what the draft changes, the primitives in reach with their
-  signatures, each area's test world) and before each skeleton call (the
+- **Surveys:** read-only Codex runs (medium, kind `survey`,
+  `fab/surveys.py`, `fab/roles/surveyor.md`), at intake (the readers of what
+  the draft changes, the primitives in reach with their signatures, each
+  area's test world) and before each skeleton or contract call (the
   primitives in reach, refreshed); their reports go into the cut's and the
   skeleton call's briefs, beside the code-built inventory.
+  - A survey is one run per topic, in a worktree detached at main, started
+    as review runs are. Its task is `<subject>/survey`, the subject being
+    its call's (`<draft>/cut` or `<draft>/<part>`), so its run is
+    `<subject>/survey-<n>` and its run.started carries `topic`; no task has
+    that id, and its draft owns it (13.4).
+  - A call waits for its surveys: the tick starts a design call only when
+    each of its topics has a survey that started after the subject's last
+    design call and ended within the last 60 minutes. Until then the part
+    keeps its place among the design calls (13.4) and the tick starts the
+    surveys due. A survey that ends in any outcome lets its call start: no
+    call waits for a second survey run.
+  - The brief's `Surveys` section, right after `Inventory`, quotes each
+    topic's latest ended survey: a done report up to 20,000 characters,
+    else a line saying how it ended.
 - **The buffer's order:** among runnable tasks, consolidation tasks from a
   structure review come first ("at the head of the buffer"), then repairs and
   rebases, then tasks of contract parts, then tasks by their part's slice, in
@@ -777,6 +792,8 @@ things fab follows, whatever the clock says:
   question joins it.
 - A plan's question answered by `fab page answer`, writing plan.toml and
   landing it as the foreman lands its answers.
+- Surveys before calls other than the cut, skeleton and contract (answer,
+  decision, review), once a call's output shows it missed what had landed.
 - A cap on a call's context or turns, once the user sets one from the
   measurements (13.5); Claude and Codex usage against their plans' limits,
   once the limits are recorded somewhere fab can read.

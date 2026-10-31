@@ -12,7 +12,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from fab import atomic
+from fab import atomic, log
 from fab.sh import Failed, Result
 
 GIT_ENV = {
@@ -172,3 +172,33 @@ def units(fake: FakeRunner) -> list[str]:
     """The unit names of the `systemd-run ... --unit NAME ...` commands fake ran, in order."""
     return [call.argv[call.argv.index("--unit") + 1] for call in fake.calls
             if call.argv[:1] == ["systemd-run"] and "--unit" in call.argv]
+
+
+# Surveys (docs/design/fab.md, 13.10): survey runs in the log, their collected reports, a launcher.
+
+def survey_started(subject: str, n: int = 1, *, topic: str = "primitives", host: str = "builder",
+                   **fields) -> dict:
+    """The run.started record of subject's survey n on topic: task `<subject>/survey`, run
+    `<subject>/survey-<n>`, kind survey."""
+    return run_started(f"{subject}/survey", n, kind="survey", host=host, topic=topic, **fields)
+
+
+def survey_ended(subject: str, n: int = 1, outcome: str = "done", **fields) -> dict:
+    """The run.ended record of survey_started(subject, n)."""
+    return run_ended(f"{subject}/survey", n, outcome, **fields)
+
+
+def write_report(run_id: str, text: str) -> Path:
+    """A run's collected report, FAB_HOME/runs/<run>/report.md as fab.run.collect leaves it,
+    written through fab.atomic.write; returns its path. Use inside tmp_home."""
+    path = log.home() / "runs" / run_id / "report.md"
+    atomic.write(path, text)
+    return path
+
+
+def launcher() -> FakeRunner:
+    """A FakeRunner for starting runs over ssh: every command succeeds with no output, but a
+    `fab codex start` answers `codex-1 /state/codex-1`, as fab.run.launch expects."""
+    def answer(call: Call) -> Result:
+        return Result(0, "codex-1 /state/codex-1\n" if "fab codex start" in call.argv[-1] else "")
+    return FakeRunner().on(["ssh"], answer)

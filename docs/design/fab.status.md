@@ -150,6 +150,15 @@
   A call's subject draws its calls into the report only when it is the draft
   or one of its parts; the task widens that to every subject under the
   draft (review, cut, retire, decision).
+- **Surveys are a skeleton:** `fab/surveys.py` holds 13.10's survey runs
+  (when a call's survey is due or ready, the run's brief and start, the
+  `Surveys` section of a brief), with `fab/roles/surveyor.md` written and
+  the tests' vocabulary in `fab/tests/support.py`. The task `surveys`
+  fills the module; `surveys-tick` makes the tick survey before each
+  skeleton and contract call and puts the reports in the skeleton,
+  contract and cut briefs, after `plans-tick` and `repairs-tick`. The
+  cut's own surveys start with the part `intake`. Until then no survey
+  runs and every brief has the inventory alone.
 - **Parts done by hand have no task specs** (package, slot-probe), so the
   tick's design line lists them.
 - **The slot bound of 25 GB is one measurement** (10-30 20:18Z): a
