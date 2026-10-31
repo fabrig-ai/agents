@@ -9,10 +9,12 @@ the batch's, as before.
 
 from __future__ import annotations
 
+import tomllib
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from fab import atomic, gate, nextest, receipts as prechecks, tiers
 from fab.gate import Step, StepResult
 from fab.nextest import Case
 from fab.sh import Runner, run
@@ -36,7 +38,12 @@ def overlay_text(repo: Path, profile: str, report: Path) -> str:
     appended after a newline when profile is "default" and tomllib finds no profile.default in
     it (nextest's default profile need not be written), then fab.nextest.overlay(that text,
     profile, report). ValueError from tomllib or overlay propagates."""
-    raise NotImplementedError
+    config = repo / tiers.NEXTEST_CONFIG
+    text = config.read_text() if config.exists() else ""
+    profiles = tomllib.loads(text).get("profile", {})
+    if profile == "default" and "default" not in profiles:
+        text += "\n[profile.default]\n"
+    return nextest.overlay(text, profile, report)
 
 
 def with_junit(steps: Sequence[Step], repo: Path, directory: Path,
@@ -49,14 +56,31 @@ def with_junit(steps: Sequence[Step], repo: Path, directory: Path,
     argv with `--config-file <that toml>`. A step whose overlay_text raises ValueError (a
     nextest config that does not parse) is left as it was and has no report, so its red stands.
     Other steps are unchanged."""
-    raise NotImplementedError
+    result, reports = [], {}
+    for step in steps:
+        if step.name not in STEPS:
+            result.append(step)
+            continue
+        report = directory / f"{name}-{step.name}.xml"
+        report.unlink(missing_ok=True)
+        try:
+            text = overlay_text(repo, step.name, report)
+        except ValueError:
+            result.append(step)
+            continue
+        config = directory / f"{name}-{step.name}.toml"
+        atomic.write(config, text)
+        result.append(Step(step.name, (*step.argv, "--config-file", str(config)), step.cwd))
+        reports[step.name] = report
+    return result, reports
 
 
 def suspect(case: Case, step: str, receipts: Sequence[dict | None]) -> bool:
     """Whether a test that failed at step may have failed for the batch's load rather than its
     code: receipts, one per branch of the batch, is not empty and fab.receipts.covers(receipt,
     step, case.binary) holds for each."""
-    raise NotImplementedError
+    return bool(receipts) and all(prechecks.covers(receipt, step, case.binary)
+                                  for receipt in receipts)
 
 
 def retry_step(repo: Path, failed: StepResult, case: Case, config: Path) -> Step:
@@ -65,7 +89,9 @@ def retry_step(repo: Path, failed: StepResult, case: Case, config: Path) -> Step
     and a path, then `--config-file <config>` and `-E <fab.nextest.exact_filter(case.binary,
     case.test)>`. Same lane, scope and profile, so nothing is built again. ValueError from
     exact_filter propagates."""
-    raise NotImplementedError
+    argv = failed.argv[:-2] if failed.argv[-2:-1] == ("--config-file",) else failed.argv
+    return Step(f"retry:{failed.name}", (*argv, "--config-file", str(config), "-E",
+                                        nextest.exact_filter(case.binary, case.test)), str(repo))
 
 
 def classify(repo: Path, failed: StepResult, report: Path | None, receipts: Sequence[dict | None],
@@ -92,4 +118,61 @@ def classify(repo: Path, failed: StepResult, report: Path | None, receipts: Sequ
     Anything else stands: `retry: <binary> <test>: <what>` (another exit, another case count or
     identity, a ValueError from fab.nextest). Every case passing: collateral, reason "".
     retries holds the result of every retry run."""
-    raise NotImplementedError
+    tests = ()
+
+    def stands(reason):
+        return Verdict(False, tests, reason, ())
+
+    if failed.name not in STEPS:
+        return stands(f"step {failed.name}")
+    if failed.code != tiers.TEST_FAILED:
+        return stands(f"exit {failed.code}")
+    if report is None:
+        return stands("no junit")
+    try:
+        cases = [case for case in nextest.junit(report, failed.name) if case.result == "fail"]
+    except ValueError as error:
+        return stands(f"junit: {error}")
+    tests = tuple(f"{case.binary} {case.test}" for case in cases)
+    if not cases:
+        return stands("no failed test")
+    if len(cases) > RETRIES:
+        return stands(f"{len(cases)} tests failed")
+    for case, identity in zip(cases, tests):
+        if not suspect(case, failed.name, receipts):
+            return stands(f"{identity} not prechecked")
+    return _retry(repo, failed, cases, report.parent, log, name=name, sh=sh)
+
+
+def _retry(repo: Path, failed: StepResult, cases: Sequence[Case], directory: Path,
+           log: Path, *, name: str, sh: Runner) -> Verdict:
+    """Retry the covered failures in order; stop at the first result that cannot pass alone."""
+    tests = tuple(f"{case.binary} {case.test}" for case in cases)
+    retries = []
+
+    def stands(reason):
+        return Verdict(False, tests, reason, tuple(retries))
+
+    for n, (case, identity) in enumerate(zip(cases, tests), 1):
+        retry_report = directory / f"{name}-{failed.name}-{n}.xml"
+        config = retry_report.with_suffix(".toml")
+        try:
+            retry_report.unlink(missing_ok=True)
+            atomic.write(config, overlay_text(repo, failed.name, retry_report))
+            step = retry_step(repo, failed, case, config)
+            retried, = gate.run_steps([step], log, sh=sh)
+            retries.append(retried)
+            if retried.code not in (0, tiers.TEST_FAILED):
+                return stands(f"retry: {identity}: exit {retried.code}")
+            ran = nextest.junit(retry_report, failed.name)
+            if len(ran) != 1:
+                return stands(f"retry: {identity}: {len(ran)} cases")
+            if ran[0].key != case.key:
+                return stands(f"retry: {identity}: different test")
+            if retried.code == tiers.TEST_FAILED and ran[0].result == "fail":
+                return stands(f"{identity} failed alone")
+            if retried.code != 0 or ran[0].result != "pass":
+                return stands(f"retry: {identity}: exit {retried.code}, {ran[0].result}")
+        except ValueError as error:
+            return stands(f"retry: {identity}: {error}")
+    return Verdict(True, tests, "", tuple(retries))

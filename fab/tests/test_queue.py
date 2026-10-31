@@ -8,9 +8,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from fab import gate, log, queue, receipts
+from fab import gate, log, queue, receipts, reds
 from fab.sh import Failed, Result, run
-from fab.tests.landing_checks import MAIN, TIP, kept, receipt, receipt_text
+from fab.tests.landing_checks import MAIN, TIP, FakeNextest, alone, kept, receipt, receipt_text
 from fab.tests.support import FakeRunner, GIT_ENV, git, git_pair, tmp_home
 
 
@@ -56,10 +56,11 @@ class GitTest(unittest.TestCase):
         self.home = context.__enter__()
         self.addCleanup(context.__exit__, None, None, None)
         # Disposable repositories do not need git's automatic maintenance after pushes or merges.
-        settings = patch.dict(os.environ, {'GIT_CONFIG_COUNT': '3',
+        settings = patch.dict(os.environ, {'GIT_CONFIG_COUNT': '4',
                               'GIT_CONFIG_KEY_0': 'receive.autogc', 'GIT_CONFIG_VALUE_0': 'false',
                               'GIT_CONFIG_KEY_1': 'maintenance.auto', 'GIT_CONFIG_VALUE_1': 'false',
-                              'GIT_CONFIG_KEY_2': 'gc.auto', 'GIT_CONFIG_VALUE_2': '0'})
+                              'GIT_CONFIG_KEY_2': 'gc.auto', 'GIT_CONFIG_VALUE_2': '0',
+                              'GIT_CONFIG_KEY_3': 'core.fsync', 'GIT_CONFIG_VALUE_3': 'none'})
         settings.start()
         self.addCleanup(settings.stop)
         self.origin, self.repo = git_pair(self.home)
@@ -72,6 +73,10 @@ class GitTest(unittest.TestCase):
         self.q = queue.Queue(self.repo, home=self.data, sh=self.runner, load=self.load)
 
     def runner(self, argv, **kwargs):
+        # Fake checks write neither checkout files nor ratchet baselines; clean is asserted below.
+        if (list(argv) in (['git', 'status', '--porcelain'], ['git', 'clean', '-fd']) or
+                list(argv[:5]) == ['git', 'diff', '--name-only', '-z', '--']):
+            return Result(0)
         if argv[0] in ('true', 'false'):
             return Result(0 if argv[0] == 'true' else 1)
         return run(argv, env={**os.environ, **GIT_ENV}, **kwargs)
@@ -97,12 +102,21 @@ class GitTest(unittest.TestCase):
         return git(self.repo, 'rev-parse', 'HEAD')
 
     def branch(self, name, files, *, base=None, timestamp=None, publish=True):
-        git(self.repo, 'switch', '-q', '--detach', base or self.base)
-        with patch.dict(os.environ, {} if timestamp is None else {
-                'GIT_AUTHOR_DATE': f'{timestamp} +0000', 'GIT_COMMITTER_DATE': f'{timestamp} +0000'}):
-            tip = self.commit(files)
+        # Import fixture commits without checking out and staging each branch's files.
+        stamp = timestamp or 1700000000
+        stream = (f"commit refs/fixtures/{name}\nmark :1\n"
+                  f"committer fab <fab@example.invalid> {stamp} +0000\n"
+                  f"data 15\nFixture change\n\nfrom {base or self.base}\n")
+        for path, content in files.items():
+            stream += f"M 100644 inline {json.dumps(path)}\ndata {len(content.encode())}\n{content}\n"
+        stream += "\nget-mark :1\ndone\n"
+        tip = self.runner(['git', 'fast-import', '--quiet'], cwd=str(self.repo),
+                          input=stream, check=True).out.strip()
         if publish:
-            git(self.repo, 'push', '-q', 'origin', f'{tip}:refs/heads/{name}', f'{tip}:refs/heads/ready/{name}')
+            published = stream.replace("\nget-mark :1\ndone\n",
+                f"\nreset refs/heads/{name}\nfrom :1\n\n"
+                f"reset refs/heads/ready/{name}\nfrom :1\n\ndone\n")
+            self.runner(['git', 'fast-import', '--quiet'], cwd=str(self.origin), input=published, check=True)
         return queue.Branch(name, tip, timestamp or 0)
 
     def records(self, ev=None):
@@ -123,6 +137,127 @@ class GitTest(unittest.TestCase):
             self.assertNotIn('refs/heads/ready/' + branch.name, refs)
         self.assertEqual({entry['tip'] for entry in self.records('landed')}, {b.tip for b in branches})
         self.assert_clean()
+
+    def _nextest(self, result="pass"):
+        fake = FakeNextest({None: [("pkg::wire", "round_trip", "fail")],
+                            alone("pkg::wire", "round_trip"): [("pkg::wire", "round_trip", result)]},
+                           fallback=self.runner)
+        self.q.sh = fake
+        patcher = patch('fab.gate.check_steps', return_value=[gate.Step(
+            'default', ('heavy', '--gate', 'cargo', 'nextest', 'run', '-p', 'pkg', '--no-fail-fast'),
+            str(self.repo))])
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return fake
+
+    def test_red_classes_across_group_bisection_limit_and_landing(self):
+        # Eight real attempts verify deferred groups, confirmed reds, limits and later landing.
+        branches = [self.branch(f'draft/{name}', {f'pkg/{name}.rs': name}) for name in 'abc']
+        for branch in branches:
+            kept(self.data, receipt(branch.tip, self.base))
+        fake = self._nextest()
+        with self.subTest(outcome='collateral group'):
+            self._assert_collateral_group(fake)
+        with self.subTest(outcome='confirmed red bisection'):
+            self._assert_confirmed_group(fake, branches)
+        self.q.batch = 1
+        with self.subTest(outcome='tip limit'):
+            self._assert_tip_limit(fake, branches[0])
+        with self.subTest(outcome='no receipt'):
+            self._assert_uncovered_red(fake, branches[0])
+        with self.subTest(outcome='collateral then landed'):
+            kept(self.data, receipt(branches[0].tip, git(self.origin, 'rev-parse', 'main')))
+            self._assert_collateral_landing(fake, branches)
+
+    def _assert_collateral_group(self, fake):
+        self.assertTrue(self.q.cycle())
+        self.assertEqual([entry['outcome'] for entry in self.records('batch')], ['collateral'])
+        self.assertEqual(len(self.records('collateral')), 3)
+        self.assertEqual((self.records('rejected'), self.q.state['tried']), ([], {}))
+        self.assertEqual(len(fake.calls), 2)
+        self.assert_clean()
+
+    def _assert_confirmed_group(self, fake, branches):
+        fake.results[alone('pkg::wire', 'round_trip')] = [('pkg::wire', 'round_trip', 'fail')]
+        self.q.state['batches_since_full'] = self.q.full_every - 1
+        original = self.q.attempt
+        groups = []
+
+        def attempt(group):
+            green = original(group)
+            groups.append(list(group))
+            fake.results[alone('pkg::wire', 'round_trip')] = [('pkg::wire', 'round_trip', 'pass')]
+            if len(groups) == 2:
+                fake.results[None] = [('pkg::wire', 'round_trip', 'pass')]
+            return green
+
+        with patch.object(self.q, 'attempt', side_effect=attempt):
+            self.q.cycle()
+        batches = self.records('batch')[1:]
+        self.assertEqual([entry['outcome'] for entry in batches], ['red', 'collateral', 'green'])
+        self.assertEqual(batches[0]['stands'], 'pkg::wire round_trip failed alone')
+        self.assertEqual([[branch.name for branch in group] for group in groups],
+                         [[branch.name for branch in group] for group in
+                          (branches, branches[:1], branches[1:])])
+        self.assertEqual(self.q.state['tried'], {branch.name: branch.tip for branch in branches[1:]})
+        self.assertEqual(self.q.state['collateral'], {
+            branches[0].name: {'tip': branches[0].tip, 'count': reds.LIMIT}})
+        self.assertTrue(self.q._force_full)
+        fake.results[None] = [('pkg::wire', 'round_trip', 'fail')]
+
+    def _assert_tip_limit(self, fake, branch):
+        self.q.full_every = 1
+        before = len(fake.calls)
+        self.assertEqual(len([entry for entry in self.records('collateral')
+                              if entry['branch'] == branch.name]), reds.LIMIT)
+        self.assertTrue(self.q.cycle())
+        self.assertEqual(self.q.last_outcome, 'red')
+        self.assertEqual(self.q.state['tried'][branch.name], branch.tip)
+        self.assertEqual(self.q.state['collateral'], {})
+        self.assertEqual(len(fake.calls) - before, 1)
+        self.assertNotIn('stands', self.records('batch')[-1])
+        rejection = self.records('rejected')[-1]
+        self.assertEqual((rejection['branch'], rejection['tip'], rejection['step']),
+                         (branch.name, branch.tip, 'default'))
+        self.assertTrue(self.q._force_full)
+
+    def _assert_collateral_landing(self, fake, branches):
+        branch = branches[0]
+        self.q.state['tried'].pop(branch.name)
+        tried = dict(self.q.state['tried'])
+        rejected = len(self.records('rejected'))
+        self.q.full_every = 5
+        self.q.state['batches_since_full'] = self.q.full_every - 1
+        self.assertTrue(self.q.cycle())
+        self.assertEqual(self.q.last_outcome, 'collateral')
+        batch = self.records('batch')[-1]
+        collateral = self.records('collateral')[-1]
+        self.assertEqual((batch['outcome'], batch['retried']), ('collateral', ['pkg::wire round_trip']))
+        self.assertEqual((collateral['branch'], collateral['tip'], collateral['step'], collateral['tests']),
+                         (branch.name, branch.tip, 'default', ['pkg::wire round_trip']))
+        self.assertEqual(collateral['log'], batch['log'])
+        self.assertEqual([step.rsplit(':', 2)[0] for step in batch['steps']], ['default', 'retry:default'])
+        self.assertEqual((len(self.records('rejected')), self.q.state['tried']), (rejected, tried))
+        self.assertFalse(self.q._force_full)
+        restored = queue.Queue(self.repo, home=self.data, sh=fake, load=self.load)
+        self.assertEqual(restored.state['collateral'], {branch.name: {'tip': branch.tip, 'count': 1}})
+        before = len(fake.calls)
+        self.assertTrue(restored.cycle())
+        self.assertEqual((restored.last_outcome, restored.state['collateral']), ('green', {}))
+        self.assertEqual(len(fake.calls), before)
+        self.assert_landed(branches)
+        self.q = restored
+
+    def _assert_uncovered_red(self, fake, branch):
+        self.q.state['tried'].pop(branch.name)
+        receipts.path(self.data, branch.tip).unlink()
+        before = len(fake.calls)
+        self.q.cycle()
+        batch = self.records('batch')[-1]
+        self.assertEqual((batch['outcome'], batch['stands']), ('red', 'pkg::wire round_trip not prechecked'))
+        self.assertEqual(len(fake.calls), before + 1)
+        self.assertEqual(self.q.state['tried'][branch.name], branch.tip)
+        self.assertEqual(self.q.state['collateral'], {})
 
     def test_single_receipt_lands_with_only_fmt_for_the_queues_package_selection(self):
         branch = self.branch('draft/a', {'pkg/src/lib.rs': 'pub fn a() {}'})
@@ -298,6 +433,42 @@ class ShellTest(unittest.TestCase):
         context = tmp_home()
         self.home = context.__enter__()
         self.addCleanup(context.__exit__, None, None, None)
+
+    def test_collateral_attempt_still_rejects_conflict_and_starts_new_tip_count(self):
+        a, b = queue.Branch('draft/a', TIP, 0), queue.Branch('draft/b', MAIN, 0)
+        fake = FakeNextest({None: [('pkg', 'unit', 'fail')],
+                            alone('pkg', 'unit'): [('pkg', 'unit', 'pass')]},
+                           fallback=FakeRunner().on(['git', 'rev-parse'], Result(0, MAIN + '\n')))
+        q = queue.Queue(self.home / 'clone', full_every=1, sh=fake)
+        q.state['collateral'][a.name] = {'tip': MAIN, 'count': reds.LIMIT}
+        q.state['collateral'][b.name] = {'tip': MAIN, 'count': 1}
+        kept(q.home, receipt())
+        with patch('fab.queue.build_batch', return_value=([a], [(b, 'conflict')])), \
+                patch('fab.gate.changed_paths', return_value=['Cargo.toml']), \
+                patch('fab.gate.check_steps', return_value=[gate.Step(
+                    'default', ('heavy', '--gate', 'cargo', 'nextest', 'run'), str(q.repo))]):
+            self.assertFalse(q.attempt([a, b]))
+        self.assertEqual(q.last_outcome, 'collateral')
+        self.assertEqual(q.state['tried'], {b.name: b.tip})
+        self.assertEqual(q.state['collateral'], {a.name: {'tip': TIP, 'count': 1}})
+        records = log.read(q.log_path)
+        self.assertEqual([entry['ev'] for entry in records], ['collateral', 'rejected', 'batch'])
+        self.assertEqual((records[1]['branch'], records[1]['step']), (b.name, 'merge'))
+
+    def test_collateral_half_stops_its_split_but_next_half_still_runs(self):
+        branches = [queue.Branch(f'draft/{n}', str(n), n) for n in range(4)]
+        q = queue.Queue(self.home / 'clone', sh=FakeRunner())
+        groups = []
+
+        def attempt(group):
+            groups.append(list(group))
+            q.last_merged = list(group)
+            q.last_outcome = ('red', 'collateral', 'green')[len(groups) - 1]
+            return q.last_outcome == 'green'
+
+        with patch('fab.queue.candidates', return_value=branches), patch.object(q, 'attempt', attempt):
+            self.assertTrue(q.cycle())
+        self.assertEqual(groups, [branches, branches[:2], branches[2:]])
 
     def test_reused_full_selection_counts_and_commits_baseline_before_only_fmt(self):
         repo = self.home / 'clone'

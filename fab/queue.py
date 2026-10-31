@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from fab import atomic, gate, log, receipts, slots
+from fab import atomic, gate, log, receipts, reds, slots
 from fab.sh import Runner, run
 
 
@@ -137,8 +137,10 @@ class Queue:
         self.log_path = self.home / "queue.jsonl"
         self.state = json.loads(self.state_path.read_text()) if self.state_path.exists() else {}
         self.state.setdefault("tried", {})
+        self.state.setdefault("collateral", {})
         self.state.setdefault("batches_since_full", 0)
         self.last_merged = []
+        self.last_outcome = None
         self._force_full = False
         self._error_recorded = False
 
@@ -150,6 +152,7 @@ class Queue:
 
     def _reject(self, branch: Branch, step: str, detail: Path) -> None:
         self.state["tried"][branch.name] = branch.tip
+        self.state["collateral"].pop(branch.name, None)
         log.append("rejected", path=self.log_path, branch=branch.name, tip=branch.tip,
                    step=step, log=str(detail))
 
@@ -162,6 +165,7 @@ class Queue:
         result = self._git("push", *(f"--force-with-lease={ref}:{tip}" for ref, tip in refs),
                            "origin", *(":" + ref for ref, _ in refs), check=False)
         for branch in branches:
+            self.state["collateral"].pop(branch.name, None)
             if result.ok:
                 self.state["tried"][branch.name] = branch.tip
             log.append("landed", path=self.log_path, branch=branch.name, tip=branch.tip, main=main)
@@ -205,6 +209,10 @@ class Queue:
         (docs/design/fab.md, 7): fab.slots.remove(fab.slots.sweep_plan(repo / "target",
         <the attempt's start in ns>)), the bytes freed going into the batch record as freed.
         last_outcome is then the batch record's outcome."""
+        return self._attempt(branches)
+
+    def _attempt(self, branches: Sequence[Branch]) -> bool:
+        """Keep an attempt's state, cleanup and outcome together, including errors."""
         started_ns = time.time_ns()
         started = log.now()
         batch_id = datetime.strptime(started, "%Y-%m-%dT%H:%M:%S.%fZ").strftime("%Y%m%dT%H%M%SZ")
@@ -215,6 +223,7 @@ class Queue:
         record = {"branches": [branch.name for branch in branches], "parent": "",
                   "selection": None, "steps": [], "outcome": "error", "log": str(detail)}
         tried_before = dict(self.state["tried"])
+        collateral_before = dict(self.state["collateral"])
         prepared = False
         clean = False
         self.last_merged = []
@@ -228,12 +237,16 @@ class Queue:
             return green
         except Exception as error:
             self.state["tried"] = tried_before
+            self.state["collateral"] = collateral_before
             record.update(outcome="error", error=str(error))
             atomic.extend(detail, f"\n{error}\n")
             self._error_recorded = True
             raise
         finally:
-            self._finish(started_ns, started, record, prepared, clean)
+            try:
+                self._finish(started_ns, started, record, prepared, clean)
+            finally:
+                self.last_outcome = record["outcome"]
 
     def _batch(self, branches: Sequence[Branch], detail: Path, record: dict) -> bool:
         """Merge, check and publish one batch, recording rejections and retirement errors."""
@@ -256,12 +269,13 @@ class Queue:
         if green:
             main = self._git("rev-parse", "origin/main").out.strip()
             cleanup_error = self._retire([*merged, *reachable], main)
-        elif len(merged) == 1:
+        elif len(merged) == 1 and record["outcome"] != "collateral":
             failed = next(step.name for step in outcomes if not step.green)
             self._reject(merged[0], failed, detail)
         for branch, _ in conflicts:
             self._reject(branch, "merge", detail)
-        record["outcome"] = ("conflict" if conflicts else "green") if green else "red"
+        if record["outcome"] != "collateral":
+            record["outcome"] = ("conflict" if conflicts else "green") if green else "red"
         if cleanup_error:
             record.update(outcome="error", error=cleanup_error)
             atomic.extend(detail, f"\n{cleanup_error}\n")
@@ -280,6 +294,7 @@ class Queue:
         record["selection"] = gate.shown(selected)
         outcomes = gate.run_steps(gate.ratchet_steps(self.repo, paths, write=True), detail, sh=self.sh)
         green = all(step.green for step in outcomes)
+        reports = {}
         if green:
             baselines = [f"{tree}/scripts/old-forms.txt" for tree in gate.TREES]
             changed = self._git("diff", "--name-only", "-z", "--", *baselines).out.split("\0")[:-1]
@@ -292,14 +307,41 @@ class Queue:
             checks = gate.check_steps(self.repo, selected, paths, meta, lane="gate")
             if reuse:
                 checks = [step for step in checks if step.name == "fmt"]
+            else:
+                checks, reports = reds.with_junit(checks, self.repo, detail.parent, detail.stem)
             outcomes += gate.run_steps(checks, detail, sh=self.sh)
             green = all(step.green for step in outcomes)
+        if not green:
+            self._red(outcomes, reports, detail, record, merged)
         record["steps"] = gate.step_texts(outcomes)
         self.state["batches_since_full"] = (
             0 if selected == "full" and not reuse else self.state["batches_since_full"] + 1)
-        if not green and selected == "full" and not reuse:
+        if not green and selected == "full" and not reuse and record.get("outcome") != "collateral":
             self._force_full = True
         return green, outcomes, selected
+
+    def _red(self, outcomes: list[gate.StepResult], reports: dict[str, Path], detail: Path,
+             record: dict, merged: Sequence[Branch]) -> None:
+        """Class a red within the tips' collateral limit and record its retries and counts."""
+        counts = self.state["collateral"]
+        if any(counts.get(branch.name, {}).get("tip") == branch.tip and
+               counts[branch.name]["count"] >= reds.LIMIT for branch in merged):
+            return
+        failed = outcomes[-1]
+        verdict = reds.classify(self.repo, failed, reports.get(failed.name),
+                                [receipts.load(self.home, branch.tip) for branch in merged],
+                                detail, name=detail.stem, sh=self.sh)
+        outcomes.extend(verdict.retries)
+        if not verdict.collateral:
+            record["stands"] = verdict.reason
+            return
+        record.update(outcome="collateral", retried=list(verdict.tests))
+        for branch in merged:
+            prior = counts.get(branch.name, {})
+            count = prior["count"] if prior.get("tip") == branch.tip else 0
+            counts[branch.name] = {"tip": branch.tip, "count": count + 1}
+            log.append("collateral", path=self.log_path, branch=branch.name, tip=branch.tip,
+                       step=failed.name, tests=list(verdict.tests), log=str(detail))
 
     def _publish(self, parent: str) -> None:
         """Push a clean candidate with a lease on main's parent and advance the local base."""
@@ -353,8 +395,8 @@ class Queue:
             nonlocal first
             if first:
                 first = False
-                return initial_green
-            return self.attempt(group)
+                return initial_green or self.last_outcome == "collateral"
+            return self.attempt(group) or self.last_outcome == "collateral"
 
         bisect(merged, check)
         return True
