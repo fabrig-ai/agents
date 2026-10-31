@@ -1,7 +1,7 @@
 +++
 id = "wake-tick"
 part = "events"
-kind = "feature"
+kind = "interface"
 needs = ["wake", "buffer-order"]
 files = ["fab/dispatch.py", "fab/wake.py", "fab/tests/test_dispatch.py", "fab/tests/test_wake.py", "fab/tests/wakes.py"]
 effort = "high"
