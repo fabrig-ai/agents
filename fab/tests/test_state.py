@@ -4,7 +4,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from copy import deepcopy
 
 from fab import log, state
-from fab.plan import Task
+from fab.plan import Part, Plan, Task
 from fab.tests.support import tmp_home
 
 
@@ -202,3 +202,23 @@ class AnswerUnparksOnlyTest(unittest.TestCase):
                   {"ev": "branch.landed", "task": "d/a", "tip": "t", "main": "t"},
                   {"ev": "question.answered", "task": "d/a", "answer": "x"}]
         self.assertEqual(state.fold(tasks, events)["d/a"].status, "landed")
+
+
+class PartStatusesTest(unittest.TestCase):
+    def test_part_statuses_preserve_plan_order_and_require_every_spec_landed(self):
+        parts = {name: Part(name, name, "feature", (), "design.md", done=(name == "manual"))
+                 for name in ("manual", "empty", "core")}
+        plan = Plan("draft", "agents", (), 1.0, 2.0, parts, ())
+        tasks = {name: task(name) for name in ("draft/a", "draft/b")}
+        self.assertEqual(state.part_statuses(plan, {}, {}),
+                         {"manual": "done", "empty": "not designed", "core": "not designed"})
+        for status in state.STATUSES:
+            with self.subTest(status=status):
+                statuses = {"draft/a": "landed", "draft/b": status}
+                result = state.part_statuses(plan, tasks, statuses)
+                self.assertEqual(list(result), ["manual", "empty", "core"])
+                self.assertEqual(result, {"manual": "done", "empty": "not designed",
+                                          "core": "done" if status == "landed" else "designed"})
+        self.assertEqual(state.part_statuses(plan, tasks, {"draft/a": "landed"})["core"], "designed")
+        manual_task = Task("draft/manual", "manual", "feature", "agents", (), (), "high", 25, "", "m.md")
+        self.assertEqual(state.part_statuses(plan, {manual_task.id: manual_task}, {})["manual"], "done")

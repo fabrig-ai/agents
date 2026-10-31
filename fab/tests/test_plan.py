@@ -3,7 +3,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from fab import atomic
-from fab.plan import (EFFORTS, KINDS, MODES, Part, Plan, PlanError, Slice, Task,
+from fab.plan import (EFFORTS, KINDS, MODES, RESERVED, Part, Plan, PlanError, Question, Slice, Task,
                      load, load_plan, load_tasks, parse_task, problems)
 from fab.tests.support import tmp_home
 
@@ -59,6 +59,40 @@ class PlanTest(unittest.TestCase):
         text = FULL.replace('design = "docs/design/fab.md, 4"', 'design = "docs/design/fab.md, 4"\ndone = true')
         self.assertTrue(self.read(text).parts["core"].done)
         self.assertFalse(self.read(FULL).parts["core"].done)
+
+    def test_designer_fields_and_defaults(self):
+        text = 'retired = true\n' + FULL.replace('needs = []', 'needs = []\ncontract = true')
+        text += ('[[question]]\nid = "budget"\ntext = "How much?"\nparts = ["core"]\n'
+                 'answer = "ten"\n[[question]]\nid = "machine"\ntext = "Where?"\nparts = ["core"]\n')
+        plan = self.read(text)
+        self.assertTrue(plan.retired)
+        self.assertTrue(plan.parts["core"].contract)
+        self.assertEqual(plan.questions, (Question("budget", "How much?", ("core",), "ten"),
+                                          Question("machine", "Where?", ("core",))))
+        defaults = self.read(FULL)
+        self.assertFalse(defaults.retired)
+        self.assertFalse(defaults.parts["core"].contract)
+        self.assertEqual(defaults.questions, ())
+
+    def test_designer_field_types_and_required_question_keys(self):
+        question = '[[question]]\nid = "q"\ntext = "Choose?"\nparts = ["core"]\nanswer = "yes"\n'
+        cases = [(f'retired = {value}\n' + MINIMAL, "retired has the wrong type")
+                 for value in ('1', '"true"', '[]')]
+        cases += [(FULL.replace('needs = []', f'needs = []\ncontract = {value}'),
+                   "contract has the wrong type") for value in ('1', '"true"', '[]')]
+        cases += [(MINIMAL + f'question = {value}\n', message) for value, message in (
+            ('"bad"', "question has the wrong type"), ('[1]', "question must be a table"))]
+        for key, value in (("id", '"q"'), ("text", '"Choose?"'), ("parts", '["core"]')):
+            cases.append((FULL + question.replace(f'{key} = {value}\n', ''), f"missing {key}"))
+        for old, new, message in (('id = "q"', 'id = 1', "id has the wrong type"),
+                                  ('text = "Choose?"', 'text = false', "text has the wrong type"),
+                                  ('parts = ["core"]', 'parts = "core"', "parts has the wrong type"),
+                                  ('parts = ["core"]', 'parts = [1]', "parts must contain strings"),
+                                  ('answer = "yes"', 'answer = false', "answer has the wrong type")):
+            cases.append((FULL + question.replace(old, new), message))
+        for text, message in cases:
+            with self.subTest(text=text), self.assertRaisesRegex(PlanError, "plan.toml: " + message):
+                self.read(text)
 
     def test_partial_buffer_uses_the_other_default(self):
         self.assertEqual(self.read(MINIMAL + "[buffer]\nlow = 2\n").high, 2.0)
@@ -264,6 +298,15 @@ class ProblemsTest(unittest.TestCase):
                     "task draft/a needs unknown task draft/missing"]
         self.assertEqual(problems(plan, tasks), expected)
         self.assertEqual(problems(replace(plan, parts=dict(reversed(list(self.parts.items())))), tasks), expected)
+
+    def test_reserved_ids_and_question_problems_are_sorted(self):
+        parts = {name: Part(name, name, "feature", (), "design.md") for name in RESERVED}
+        questions = (Question("q", "Choose?", ("missing",)), Question("q", "Again?", ("cut",)))
+        plan = replace(self.plan, parts=parts, questions=questions,
+                       slices=(Slice(1, "story", tuple(parts), False),))
+        self.assertEqual(problems(plan, {}), [
+            "part cut takes a reserved id", "part retire takes a reserved id", "part review takes a reserved id",
+            "question q is used twice", "question q names unknown part missing"])
 
     def test_part_cycle_and_self_cycle(self):
         self.parts["core"] = replace(self.parts["core"], needs=("next",))

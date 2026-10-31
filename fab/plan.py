@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import tomllib
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 
 MODES = ("feature", "migration", "fix", "probe")
@@ -99,22 +100,8 @@ def load_plan(path: Path) -> Plan:
 
     Raises PlanError for a missing key, a wrong type, an unknown mode, or a part id used twice.
     """
-    def value(table, key, expected, default=None, *, required=False):
-        if key not in table:
-            if required:
-                raise PlanError(f"{path}: missing {key}")
-            return default
-        result = table[key]
-        if type(result) not in expected:
-            raise PlanError(f"{path}: {key} has the wrong type")
-        return result
-
-    def strings(table, key, default=(), *, required=False):
-        items = value(table, key, (list,), default, required=required)
-        if any(not isinstance(item, str) for item in items):
-            raise PlanError(f"{path}: {key} must contain strings")
-        return tuple(items)
-
+    value = partial(_plan_value, path)
+    strings = partial(_plan_strings, path)
     try:
         data = tomllib.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, tomllib.TOMLDecodeError) as error:
@@ -122,6 +109,7 @@ def load_plan(path: Path) -> Plan:
     draft = value(data, "draft", (str,), required=True)
     repo = value(data, "repo", (str,), required=True)
     sources = strings(data, "sources")
+    retired = value(data, "retired", (bool,), False)
     buffer = value(data, "buffer", (dict,), {})
     low = value(buffer, "low", (int, float), 1.0)
     high = value(buffer, "high", (int, float), 2.0)
@@ -134,7 +122,8 @@ def load_plan(path: Path) -> Plan:
                     value(item, "mode", (str,), required=True),
                     strings(item, "needs", required=True),
                     value(item, "design", (str,), required=True),
-                    value(item, "done", (bool,), False))
+                    value(item, "done", (bool,), False),
+                    value(item, "contract", (bool,), False))
         if part.mode not in MODES:
             raise PlanError(f"{path}: part {part.id} has unknown mode {part.mode!r}")
         if part.id in parts:
@@ -148,7 +137,34 @@ def load_plan(path: Path) -> Plan:
                             value(item, "story", (str,), required=True),
                             strings(item, "parts", required=True),
                             value(item, "walk", (bool,), required=True)))
-    return Plan(draft, repo, sources, float(low), float(high), parts, tuple(slices))
+    questions = []
+    for item in value(data, "question", (list,), []):
+        if not isinstance(item, dict):
+            raise PlanError(f"{path}: question must be a table")
+        questions.append(Question(value(item, "id", (str,), required=True),
+                                  value(item, "text", (str,), required=True),
+                                  strings(item, "parts", required=True),
+                                  value(item, "answer", (str,), "")))
+    return Plan(draft, repo, sources, float(low), float(high), parts, tuple(slices),
+                retired, tuple(questions))
+
+
+def _plan_value(path, table, key, expected, default=None, *, required=False):
+    if key not in table:
+        if required:
+            raise PlanError(f"{path}: missing {key}")
+        return default
+    result = table[key]
+    if type(result) not in expected:
+        raise PlanError(f"{path}: {key} has the wrong type")
+    return result
+
+
+def _plan_strings(path, table, key, default=(), *, required=False):
+    items = _plan_value(path, table, key, (list,), default, required=required)
+    if any(not isinstance(item, str) for item in items):
+        raise PlanError(f"{path}: {key} must contain strings")
+    return tuple(items)
 
 
 def parse_task(text: str, path: str, draft: str, default_repo: str) -> Task:
@@ -231,11 +247,21 @@ def problems(plan: Plan, tasks: dict[str, Task]) -> list[str]:
     issues = []
     included = {part for item in plan.slices for part in item.parts}
     for part in plan.parts.values():
+        if part.id in RESERVED:
+            issues.append(f"part {part.id} takes a reserved id")
         for need in part.needs:
             if need not in plan.parts:
                 issues.append(f"part {part.id} needs unknown part {need}")
         if part.id not in included:
             issues.append(f"part {part.id} is in no slice")
+    seen_questions = set()
+    for question in plan.questions:
+        if question.id in seen_questions:
+            issues.append(f"question {question.id} is used twice")
+        seen_questions.add(question.id)
+        for part in question.parts:
+            if part not in plan.parts:
+                issues.append(f"question {question.id} names unknown part {part}")
     for item in plan.slices:
         for part in item.parts:
             if part not in plan.parts:
@@ -247,38 +273,42 @@ def problems(plan: Plan, tasks: dict[str, Task]) -> list[str]:
             if need not in tasks:
                 issues.append(f"task {task.id} needs unknown task {need}")
 
-    def cycles(graph, kind):
-        # Tarjan's components group overlapping cycles into one diagnostic.
-        indices, lowest = {}, {}
-        stack, active = [], set()
-
-        def visit(node):
-            indices[node] = lowest[node] = len(indices)
-            stack.append(node)
-            active.add(node)
-            for need in sorted(set(graph[node])):
-                if need not in graph:
-                    continue
-                if need not in indices:
-                    visit(need)
-                    lowest[node] = min(lowest[node], lowest[need])
-                elif need in active:
-                    lowest[node] = min(lowest[node], indices[need])
-            if lowest[node] == indices[node]:
-                members = []
-                while True:
-                    member = stack.pop()
-                    active.remove(member)
-                    members.append(member)
-                    if member == node:
-                        break
-                if len(members) > 1 or node in graph[node]:
-                    issues.append(f"{kind} cycle: {', '.join(sorted(members))}")
-
-        for node in sorted(graph):
-            if node not in indices:
-                visit(node)
-
-    cycles({key: part.needs for key, part in plan.parts.items()}, "part")
-    cycles({key: task.needs for key, task in tasks.items()}, "task")
+    issues.extend(_cycles({key: part.needs for key, part in plan.parts.items()}, "part"))
+    issues.extend(_cycles({key: task.needs for key, task in tasks.items()}, "task"))
     return sorted(issues)
+
+
+def _cycles(graph, kind):
+    issues = []
+    # Tarjan's components group overlapping cycles into one diagnostic.
+    indices, lowest = {}, {}
+    stack, active = [], set()
+
+    def visit(node):
+        indices[node] = lowest[node] = len(indices)
+        stack.append(node)
+        active.add(node)
+        for need in sorted(set(graph[node])):
+            if need not in graph:
+                continue
+            if need not in indices:
+                visit(need)
+                lowest[node] = min(lowest[node], lowest[need])
+            elif need in active:
+                lowest[node] = min(lowest[node], indices[need])
+        if lowest[node] == indices[node]:
+            members = []
+            while True:
+                member = stack.pop()
+                active.remove(member)
+                members.append(member)
+                if member == node:
+                    break
+            if len(members) > 1 or node in graph[node]:
+                issues.append(f"{kind} cycle: {', '.join(sorted(members))}")
+
+    for node in sorted(graph):
+        if node not in indices:
+            visit(node)
+
+    return issues
