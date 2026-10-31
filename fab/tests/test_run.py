@@ -932,3 +932,102 @@ class LaunchDetachedTest(unittest.TestCase):
             self.assertEqual(record["call"], "call")
             self.assertEqual(record["tip"], "tip-sha")
             self.assertEqual(log.read(), [])
+
+
+class ExcerptTest(unittest.TestCase):
+    def test_last_matching_step_until_next_command(self):
+        text = ("[test] old (cwd /repo)\nstale\n[build] build (cwd /repo)\n"
+                "[test] new (cwd /repo)\n[ERROR] failure\nred\n[next] true (cwd /repo)\nignored\n")
+        self.assertEqual(run.excerpt("test", text), "[test] new (cwd /repo)\n[ERROR] failure\nred")
+
+    def test_cut_at_120_lines_including_header(self):
+        lines = ["[test] check (cwd /repo)", *(f"line {i}" for i in range(150))]
+        self.assertEqual(run.excerpt("test", "\n".join(lines)), "\n".join(lines[:120]))
+
+    def test_missing_step_and_empty_log(self):
+        for text in ("", "[build] compile (cwd /repo)\nok"):
+            with self.subTest(text=text):
+                self.assertEqual(run.excerpt("test", text), "(log unreadable: step [test] not found)")
+
+    def test_unreadable_diagnostic_kept_and_cut(self):
+        lines = ["(log unreadable: offline)", *(f"line {i}" for i in range(150))]
+        self.assertEqual(run.excerpt("test", "\n".join(lines)), "\n".join(lines[:120]))
+
+    def test_diagnostic_takes_precedence_over_step_headers(self):
+        text = "(log unreadable: offline)\n[test] stray\n"
+        self.assertEqual(run.excerpt("test", text), text.rstrip("\n"))
+
+
+class RefusalTextTest(unittest.TestCase):
+    def test_findings_without_loading_hosts_or_commands(self):
+        with patch.object(run.hosts, "load") as load:
+            for findings in ("shape: signature changed\nfiles: outside task", ""):
+                with self.subTest(findings=findings):
+                    fake = FakeRunner()
+                    self.assertEqual(run.refusal_text({"findings": findings, "log": "ignored"},
+                                                       "agents", sh=fake), findings)
+                    self.assertEqual(fake.calls, [])
+            load.assert_not_called()
+
+    def test_findings_cut_at_120_lines(self):
+        lines = [f"finding {i}" for i in range(150)]
+        self.assertEqual(run.refusal_text({"findings": "\n".join(lines)}, "fabrig",
+                                         sh=FakeRunner()), "\n".join(lines[:120]))
+
+    def test_landed_repository_uses_log_verbatim(self):
+        text = "rebase conflict in fab/x.py\n  preserve indentation"
+        with patch.object(run.hosts, "load") as load:
+            fake = FakeRunner()
+            self.assertEqual(run.refusal_text({"step": "rebase", "log": text}, "agents", sh=fake), text)
+            self.assertEqual(fake.calls, [])
+            load.assert_not_called()
+
+    def test_landed_repository_log_missing(self):
+        for record in ({}, {"log": ""}):
+            with self.subTest(record=record), patch.object(run.hosts, "load") as load:
+                self.assertEqual(run.refusal_text(record, "agents", sh=FakeRunner()),
+                                 "(log unreadable: rejection has no log)")
+                load.assert_not_called()
+
+    def test_landed_repository_log_cut_at_120_lines(self):
+        lines = [f"detail {i}" for i in range(150)]
+        self.assertEqual(run.refusal_text({"log": "\n".join(lines)}, "agents", sh=FakeRunner()),
+                         "\n".join(lines[:120]))
+
+    def test_queue_log_on_first_gate_by_name_then_excerpt(self):
+        first = Host("a-gate", "a@invalid", ("gate",))
+        last = Host("z-gate", "z@invalid", ("gate",))
+        hosts = {last.name: last, HOST.name: HOST, first.name: first}
+        record = {"step": "test", "log": "/queue/red.log"}
+        lines = ["[test] check (cwd /repo)", *(f"line {i}" for i in range(150))]
+        text = "[build] build (cwd /repo)\n" + "\n".join(lines) + "\n[next] true (cwd /repo)\n"
+        with tmp_home(), patch.object(run.hosts, "load", return_value=hosts):
+            fake = FakeRunner().on(["ssh"], Result(0, text))
+            self.assertEqual(run.refusal_text(record, "fabrig", sh=fake), "\n".join(lines[:120]))
+            self.assertEqual(len(fake.calls), 1)
+            self.assertEqual(fake.calls[0].argv[5], first.ssh)
+            self.assertEqual(command(fake.calls[0]), ["tail", "-n", "+1", "--", record["log"]])
+            self.assertEqual(record, {"step": "test", "log": "/queue/red.log"})
+
+    def test_no_gate_host(self):
+        with tmp_home(), patch.object(run.hosts, "load", return_value={HOST.name: HOST}):
+            fake = FakeRunner()
+            self.assertEqual(run.refusal_text({"step": "test"}, "fabrig", sh=fake),
+                             "(log unreadable: no gate host configured)")
+            self.assertEqual(fake.calls, [])
+
+    def test_hosts_cannot_load(self):
+        for error in (OSError("hosts missing\ntry again"), ValueError("bad hosts")):
+            with self.subTest(error=error), tmp_home(), patch.object(run.hosts, "load", side_effect=error):
+                fake = FakeRunner()
+                self.assertEqual(run.refusal_text({}, "fabrig", sh=fake),
+                                 "(log unreadable: " + " ".join(str(error).splitlines()) + ")")
+                self.assertEqual(fake.calls, [])
+
+    def test_gate_log_read_failure_stays_a_diagnostic(self):
+        gate = Host("gate", "gate@invalid", ("gate",))
+        with tmp_home(), patch.object(run.hosts, "load", return_value={gate.name: gate}):
+            fake = FakeRunner().on(["ssh"], Result(1, err="permission denied"))
+            text = run.refusal_text({"step": "test", "log": "/red"}, "fabrig", sh=fake)
+            self.assertTrue(text.startswith("(log unreadable: "))
+            self.assertIn("permission denied", text)

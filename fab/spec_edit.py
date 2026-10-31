@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
+from fab import atomic
 from fab.plan import Task
 from fab.sh import Runner, run
 
@@ -35,4 +36,27 @@ def commit(task: Task, checkout: Path, edit: Callable[[str], str], *, branch: st
     <branch>` in checkout, errors ignored. The pushed branch stays for fab.land.main.
 
     fab.foreman.commit is this with with_answer as edit; its steps and argvs are unchanged."""
-    raise NotImplementedError
+    relative = Path(task.path).resolve().relative_to(checkout.resolve())
+
+    def git(*argv, cwd=checkout):
+        return sh(["git", *argv], cwd=str(cwd), check=True)
+
+    try:
+        git("fetch", "origin")
+        git("worktree", "add", "-B", branch, str(worktree), "origin/main")
+        path = worktree / relative
+        spec = path.read_text()
+        new = edit(spec)
+        if new == spec:
+            return None
+        atomic.write(path, new)
+        git("-c", "user.name=fab", "-c", "user.email=fab@localhost", "commit", "-q", "-m",
+            message, "--", str(relative), cwd=worktree)
+        git("push", "-q", "--force", "origin", f"HEAD:refs/heads/{branch}", cwd=worktree)
+        return branch
+    finally:
+        for argv in (("worktree", "remove", "--force", str(worktree)), ("branch", "-D", branch)):
+            try:
+                git(*argv)
+            except Exception:
+                pass

@@ -17,7 +17,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from fab import atomic, log, run as runs
+from fab import log, run as runs, spec_edit
 from fab.hosts import Host
 from fab.plan import Task
 from fab.sh import Runner, run
@@ -198,53 +198,16 @@ def with_answer(spec: str, *, day: str, question: Question, answer: str, run: st
 
 def commit(question: Question, task: Task, text: str, checkout: Path, *, run_id: str,
            day: str, sh: Runner = run) -> str | None:
-    """Record text, the foreman run run_id's answer, in the task's spec on a branch of
-    checkout's repository and return the branch to land, or None when origin/main already
-    records it.
+    """Record the answer through fab.spec_edit.commit with with_answer as its edit.
 
-    checkout is the plan's repository on this machine (a clone with origin; the tick's plan
-    checkout). The branch is `answers/<run_id>`; the worktree FAB_HOME/runs/<run_id>/wt.
-    The spec's path is Path(task.path).resolve() relative to checkout.resolve(); a spec
-    outside the checkout is a ValueError before any command. Each git command with
-    check=True:
-    1. `git fetch origin` in checkout;
-    2. `git worktree add -B <branch> <worktree> origin/main` in checkout (-B: an earlier
-       attempt's branch is reset);
-    3. the spec at that path, read in the worktree; new = with_answer(spec, day=day,
-       question=question, answer=text, run=run_id); equal to the spec means None, with
-       nothing committed or pushed;
-    4. otherwise new written there through fab.atomic.write, then in the worktree
-       `git -c user.name=fab -c user.email=fab@localhost commit -q -m "Answer <task.id>'s
-       question from its options" -- <spec path>` and `git push -q --force origin
-       HEAD:refs/heads/<branch>`.
-    In every outcome, last: `git worktree remove --force <worktree>` and `git branch -D
-    <branch>` in checkout, errors ignored. The pushed branch stays for fab.land.main."""
-    relative = Path(task.path).resolve().relative_to(checkout.resolve())
-    branch = f"answers/{run_id}"
-    worktree = log.home() / "runs" / run_id / "wt"
-
-    def git(*argv, cwd=checkout):
-        return sh(["git", *argv], cwd=str(cwd), check=True)
-
-    try:
-        git("fetch", "origin")
-        git("worktree", "add", "-B", branch, str(worktree), "origin/main")
-        path = worktree / relative
-        spec = path.read_text()
-        new = with_answer(spec, day=day, question=question, answer=text, run=run_id)
-        if new == spec:
-            return None
-        atomic.write(path, new)
-        git("-c", "user.name=fab", "-c", "user.email=fab@localhost", "commit", "-q", "-m",
-            f"Answer {task.id}'s question from its options", "--", str(relative), cwd=worktree)
-        git("push", "-q", "--force", "origin", f"HEAD:refs/heads/{branch}", cwd=worktree)
-        return branch
-    finally:
-        for argv in (("worktree", "remove", "--force", str(worktree)), ("branch", "-D", branch)):
-            try:
-                git(*argv)
-            except Exception:
-                pass
+    Return answers/<run_id> to land, or None when origin/main already records the answer;
+    the worktree is FAB_HOME/runs/<run_id>/wt. Commands and outcomes are spec_edit's.
+    """
+    return spec_edit.commit(
+        task, checkout, lambda spec: with_answer(spec, day=day, question=question,
+                                                answer=text, run=run_id),
+        branch=f"answers/{run_id}", message=f"Answer {task.id}'s question from its options",
+        worktree=log.home() / "runs" / run_id / "wt", sh=sh)
 
 
 def _question(event: dict, position: int, starts: dict, ends: dict, foremen: dict,

@@ -85,23 +85,15 @@ def brief(task: Task, role: str, *, run_id: str, branch: str, base: str, report:
     refusal = ""
     if rejection is not None:
         step = rejection.get("step", "unknown")
-        lines = rejection.get("text", "(log unreadable: no log text)").splitlines()
-        if "findings" not in rejection:
-            starts = [i for i, line in enumerate(lines) if line.startswith(f"[{step}]")]
-            if starts:
-                lines = lines[starts[-1]:]
-                end = next((i for i, line in enumerate(lines[1:], 1)
-                            if line.startswith("[") and " (cwd " in line), len(lines))
-                lines = lines[:end]
-            elif not lines or not lines[0].startswith("(log unreadable:"):
-                lines = [f"(log unreadable: step [{step}] not found)"]
-        excerpt = "\n".join(lines[:120])
+        text = rejection.get("text", "(log unreadable: no log text)")
+        quoted = ("\n".join(text.splitlines()[:120]) if "findings" in rejection
+                  else excerpt(step, text))
         refusal = ("## The landing refused this branch\n\n"
                    "The landing's checks failed; reproduce this first, in the lowest tier "
                    "that shows it. If it does not reproduce, say so in your report's first line.\n\n"
                    f"- Step: `{step}`\n"
                    f"- Queue log: `{rejection.get('log', '(missing)')}`\n\n"
-                   f"```text\n{excerpt}\n```\n\n")
+                   f"```text\n{quoted}\n```\n\n")
     return (f"{role.rstrip()}\n\n# Your task\n\n"
             f"- Task: {task.id} (spec `{task.path}`)\n"
             f"- Repository: {task.repo}\n"
@@ -136,7 +128,17 @@ def excerpt(step: str, text: str) -> str:
     as it is (cut at 120 lines); a text without the step's line gives the one line
     `(log unreadable: step [<step>] not found)`. brief's cut, moved here unchanged: brief
     calls it for a rejection without findings. Pure."""
-    raise NotImplementedError
+    lines = text.splitlines()
+    if not text.startswith("(log unreadable:"):
+        starts = [i for i, line in enumerate(lines) if line.startswith(f"[{step}]")]
+        if starts:
+            lines = lines[starts[-1]:]
+            end = next((i for i, line in enumerate(lines[1:], 1)
+                        if line.startswith("[") and " (cwd " in line), len(lines))
+            lines = lines[:end]
+        else:
+            lines = [f"(log unreadable: step [{step}] not found)"]
+    return "\n".join(lines[:120])
 
 
 def refusal_text(record: dict, repo: str, *, sh: Runner = run) -> str:
@@ -149,7 +151,13 @@ def refusal_text(record: dict, repo: str, *, sh: Runner = run) -> str:
       fab.hosts.load()>, sh=sh)); no gate host, or hosts that cannot be loaded, gives `(log
       unreadable: <why>)`.
     Never raises for an unreadable log."""
-    raise NotImplementedError
+    if "findings" in record:
+        text = record["findings"]
+    elif repo in LANDED:
+        text = record.get("log") or "(log unreadable: rejection has no log)"
+    else:
+        return excerpt(record.get("step", "unknown"), _gate_log(record, sh=sh))
+    return "\n".join(text.splitlines()[:120])
 
 
 def start(task: Task, host: Host, *, kind: str = "implement", events: Iterable[dict] = (),
@@ -479,16 +487,18 @@ def _load_spec(path: Path) -> Task:
 def _rejection(rejection: dict | None, *, sh: Runner) -> dict | None:
     """Supply findings or a gate-log excerpt without changing the rejection record."""
     if rejection is not None:
-        if "findings" in rejection:
-            red = rejection["findings"]
-        else:
-            try:
-                gates = sorted((host for host in hosts.load().values() if "gate" in host.roles),
-                               key=lambda host: host.name)
-                if not gates:
-                    raise ValueError("no gate host configured")
-                red = rejection_text(rejection, gates[0], sh=sh)
-            except (OSError, ValueError) as error:
-                red = "(log unreadable: " + " ".join(str(error).splitlines()) + ")"
+        red = rejection["findings"] if "findings" in rejection else _gate_log(rejection, sh=sh)
         rejection = {**rejection, "text": red}
     return rejection
+
+
+def _gate_log(record: dict, *, sh: Runner) -> str:
+    """Read the queue log on the first gate by name, or return an unreadable diagnostic."""
+    try:
+        gates = sorted((host for host in hosts.load().values() if "gate" in host.roles),
+                       key=lambda host: host.name)
+        if not gates:
+            raise ValueError("no gate host configured")
+        return rejection_text(record, gates[0], sh=sh)
+    except (OSError, ValueError) as error:
+        return "(log unreadable: " + " ".join(str(error).splitlines()) + ")"
