@@ -51,14 +51,6 @@ messages), fab does it instead; everything else in the brief holds.
   how (call sites only; a literal's new field); and the likely options, each
   pre-approved with a default ("if X, do A; if Y would need changing, do B
   and say so in the report"). The implementer asks only beyond that list.
-- **Size:** a feature task aims at about 20-30 implementer-minutes (all its
-  runs) as soft guidance: one coherent change that one run finishes, with
-  adjacent small items grouped by the lead. Same-kind small repairs (one
-  family of selectors, one fixture class) go out as one task. At today's
-  rate that is about 100-150 production added lines with their tests.
-  Exempt kinds, named in the task, are interface (expand), contraction,
-  repair, rebase and docs; a feature task under about 50 production lines
-  says why.
 - **A change of meaning runs its readers' tests:** a branch that changes
   what a shared item means, not only its signature (a value it returns, an
   order it keeps), also runs the tests of every package that reads that

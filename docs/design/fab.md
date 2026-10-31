@@ -1010,9 +1010,10 @@ only as tweaks once a replay matches its run.
     old machines). The cut's sources carry fabrig's `AGENTS.md` only;
     `cut-run.md` names its pipeline lines that do not hold and quotes, in
     `lead.md`'s own words, every line of it that still holds (the code's
-    shape, fanning out, one writer per crate, the task's contents and size,
+    shape, fanning out, one writer per crate, the task's contents,
     scope settled in the task after a reverse-dependency survey, readers'
-    tests, effort, skimming). `fabrig-run.md` does the same for
+    tests, effort, skimming; not its task size, which the cut decides, at
+    the user's word). `fabrig-run.md` does the same for
     `implementer.md`, and the cut's brief quotes it (`What each implementer
     is told`), as the run's lead read `implementer.md`; the brief names its
     sources `Sources`. fab's texts assume a fabrig `AGENTS.md` written for
