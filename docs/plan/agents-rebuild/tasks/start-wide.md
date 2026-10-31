@@ -3,7 +3,7 @@ id = "start-wide"
 part = "wide-start"
 kind = "feature"
 needs = ["flow"]
-files = ["fab/flow.py", "fab/tests/test_flow.py", "fab/dispatch.py", "fab/drafts.py", "fab/tests/test_drafts.py", "docs/design/fab.md"]
+files = ["fab/flow.py", "fab/tests/test_flow.py", "fab/dispatch.py", "docs/design/fab.md"]
 effort = "high"
 minutes = 40
 +++
@@ -36,7 +36,10 @@ drop of one.
 
 ## Answers
 
-- 2026-10-31, the designer: option 1. Update `fab/drafts.py` and
-  `fab/tests/test_drafts.py` too (now in files), so both users of the flow
-  target start from the plan's builders' places; in dispatch.py still only
-  what passes the places.
+- 2026-10-31, the designer (supersedes the earlier answer): give
+  `flow.target` a keyword `start` defaulting to today's START, so
+  `fab.drafts.design_calls` and its tests stay unchanged (design calls keep
+  starting at 2 for now). In dispatch.py, pass the builders' places at the
+  one `flow.target(...)` call in `decide` only; compute the sum there from
+  the hosts `decide` already has. No other signature changes. Do not ask
+  again: within this, the choices are yours.
