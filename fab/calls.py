@@ -357,7 +357,7 @@ def answer_brief(questions: list[dict], tasks: dict[str, Task], root: Path, *, c
 
 
 def review_brief(plan: Plan, tasks: dict[str, Task], events: list[dict], root: Path, *,
-                 call_id: str, branch: str, report: str) -> str:
+                 call_id: str, branch: str, report: str, plan_path: str | None = None) -> str:
     """The structure reviewer's brief (docs/design/fab.md, 12): its role text (ROLES["review"]);
     the call's facts; "Plan parts and slices", the same table skeleton_brief writes (shared,
     not copied), statuses from fab.state.fold(tasks, events), and a line `Specs:
@@ -369,7 +369,9 @@ def review_brief(plan: Plan, tasks: dict[str, Task], events: list[dict], root: P
     the file is missing; `(none)` when nothing landed; "Taste", the text of fab.run.TASTE;
     "Designs", per distinct path cited by the landed tasks' parts (the citation before its
     comma), in first-landed order, `## <path>` and design_text(root, citation); "Inventory".
+    plan_path overrides docs/plan/<draft> with a repository-relative plan directory.
     Raises ValueError past BRIEF_LIMIT, naming the largest section."""
+    plan_path = plan_path or f"docs/plan/{plan.draft}"
     landed = landed_after(events, tasks, last_review(events, done=True, draft=plan.draft))
     records = []
     designs = {}
@@ -394,7 +396,7 @@ def review_brief(plan: Plan, tasks: dict[str, Task], events: list[dict], root: P
         ("Role", ROLES["review"].read_text(encoding="utf-8")),
         ("Call facts", _facts(call_id, branch, report)),
         ("Plan parts and slices", _parts_table(plan, tasks, statuses) +
-         f"\n\nSpecs: docs/plan/{plan.draft}/tasks/"),
+         f"\n\nSpecs: {plan_path}/tasks/"),
         ("Landed since the last review", "\n\n".join(records) or "(none)"),
         ("Taste", TASTE.read_text(encoding="utf-8")),
         ("The user's drafts", drafts_text(plan, root)),
@@ -633,7 +635,8 @@ def main(argv: list[str]) -> int:
         plan = load_plan(directory / "plan.toml")
         tasks = load_tasks(directory / "tasks", plan.draft, plan.repo)
         checkout = run(["git", "rev-parse", "--show-toplevel"], cwd=str(directory), check=True)
-        root = Path(checkout.out.strip())
+        root = Path(checkout.out.strip()).resolve()
+        plan_path = directory.relative_to(root).as_posix()
         events = log.read()
         facts = dict(call_id="(assigned at start)", branch="(assigned at start)", report="(assigned at start)")
         options = {}
@@ -651,7 +654,7 @@ def main(argv: list[str]) -> int:
             text = skeleton_brief(plan, args.part, tasks, statuses, root, **facts)
             subject = f"{plan.draft}/{args.part}"
         elif args.role == "review":
-            text = review_brief(plan, tasks, events, root, **facts)
+            text = review_brief(plan, tasks, events, root, plan_path=plan_path, **facts)
             subject = f"{plan.draft}/review"
         else:
             questions = [dict(task=item.task, run=item.run, text=item.text, foreman=item.report)

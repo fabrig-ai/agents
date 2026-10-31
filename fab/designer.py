@@ -22,7 +22,7 @@ from fab.sh import Failed, Runner, run
 
 ROLES = ("cut", "contract", "decision", "retire")  # the designer's call roles, in fab.calls.ROLES
 DESIGNS = "docs/design"  # a repository's designs; its draft/ holds the user's drafts
-PLANS = "docs/plan"  # a repository's plans: <PLANS>/<draft>/plan.toml
+PLANS = "docs/plan"  # plans live under this suffix, with any repository-relative prefix
 
 
 def subject(draft: str, role: str, part: str | None = None) -> str:
@@ -95,7 +95,7 @@ def design_index(root: Path) -> str:
 
 
 def changed_designs(checkout: Path, draft: str, *, rev: str = "origin/main",
-                    sh: Runner = run) -> list[str]:
+                    sh: Runner = run, plan_path: str | None = None) -> list[str]:
     """The designs changed since the plan started: those a commit after the plan's start
     changed, or whose status file it changed, up to rev, as design paths, sorted.
 
@@ -106,15 +106,17 @@ def changed_designs(checkout: Path, draft: str, *, rev: str = "origin/main",
     <rev> -- <DESIGNS>/` when the start has no parent (`git rev-parse --verify -q
     <start>^`, check=False, fails). A path counts when it is directly in DESIGNS and is a
     design (designs' rule) or a design's status file (then its design is returned, whether
-    or not that design still exists at rev)."""
-    plan_path = f"{PLANS}/{draft}/plan.toml"
+    or not that design still exists at rev). plan_path overrides <PLANS>/<draft> with a
+    repository-relative plan directory."""
+    plan_path = plan_path or f"{PLANS}/{draft}"
+    plan_file = f"{plan_path}/plan.toml"
 
     def git(*args, check=True):
         return sh(["git", *args], cwd=str(checkout), check=check)
 
-    commits = git("log", "--format=%H", "--diff-filter=A", rev, "--", plan_path).out.splitlines()
+    commits = git("log", "--format=%H", "--diff-filter=A", rev, "--", plan_file).out.splitlines()
     if not commits:
-        raise ValueError(f"no commit added {plan_path}")
+        raise ValueError(f"no commit added {plan_file}")
     start = commits[-1]
     if git("rev-parse", "--verify", "-q", f"{start}^", check=False).ok:
         paths = git("diff", "--name-only", "--no-renames", f"{start}^", rev, "--", f"{DESIGNS}/").out
@@ -167,7 +169,8 @@ def enlist(plan_dir: Path) -> bool:
     return True
 
 
-def cut_brief(plan: Plan, root: Path, *, call_id: str, branch: str, report: str) -> str:
+def cut_brief(plan: Plan, root: Path, *, call_id: str, branch: str, report: str,
+              plan_path: str | None = None) -> str:
     """The cut's brief, plan being uncut(draft, repo, sources), through fab.calls' section
     builder and facts (fab.calls._brief, _facts), sections in this order:
 
@@ -177,13 +180,15 @@ def cut_brief(plan: Plan, root: Path, *, call_id: str, branch: str, report: str)
        \\`<PLANS>/<draft>/plan.toml\\``, `- Sources: \\`<source>\\`, ...` (comma-separated).
     4. `The user's drafts`: fab.calls.drafts_text(plan, root).
     5. `Designs`: design_index(root).
-    6. `Plans`: one line `- \\`<path>\\`` per `<PLANS>/*/plan.toml` under root, sorted;
+    6. `Plans`: one line `- \\`<path>\\`` per `**/<PLANS>/*/plan.toml` under root, sorted;
        `(none)` when there is none. Their format is the cut's to follow.
     7. `Inventory`: fab.calls.render_inventory(fab.calls.inventory(root)), or `(none)`
        when it is empty (a repository without fab/).
 
+    plan_path overrides <PLANS>/<draft> with a repository-relative plan directory.
     ValueError past fab.calls.BRIEF_LIMIT, as every call's brief."""
-    plans = sorted(path.relative_to(root).as_posix() for path in (root / PLANS).glob("*/plan.toml")
+    plan_path = plan_path or f"{PLANS}/{plan.draft}"
+    plans = sorted(path.relative_to(root).as_posix() for path in root.glob(f"**/{PLANS}/*/plan.toml")
                    if path.is_file())
     role_text = calls.ROLES["cut"].read_text(encoding="utf-8")
     if plan.repo == "fabrig":
@@ -192,7 +197,7 @@ def cut_brief(plan: Plan, root: Path, *, call_id: str, branch: str, report: str)
         ("Role", role_text),
         ("Call facts", calls._facts(call_id, branch, report)),
         ("The draft", f"- Draft: {plan.draft}\n- Repository: {plan.repo}\n"
-         f"- Plan: write `{PLANS}/{plan.draft}/plan.toml`\n"
+         f"- Plan: write `{plan_path}/plan.toml`\n"
          f"- Sources: {', '.join(f'`{source}`' for source in plan.sources)}"),
         ("The user's drafts", calls.drafts_text(plan, root)),
         ("Designs", design_index(root)),
@@ -202,7 +207,8 @@ def cut_brief(plan: Plan, root: Path, *, call_id: str, branch: str, report: str)
 
 
 def decision_brief(plan: Plan, part_id: str, tasks: dict[str, Task], statuses: dict[str, str],
-                   root: Path, run_id: str, *, call_id: str, branch: str, report: str) -> str:
+                   root: Path, run_id: str, *, call_id: str, branch: str, report: str,
+                   plan_path: str | None = None) -> str:
     """The decision's brief: a probe part's report in, a design section out. Sections, through
     fab.calls._brief, in this order:
 
@@ -219,8 +225,10 @@ def decision_brief(plan: Plan, part_id: str, tasks: dict[str, Task], statuses: d
     7. `The user's drafts`: fab.calls.drafts_text(plan, root).
     8. `Cited design`: fab.calls.design_text(root, <the probe's design>).
 
+    plan_path overrides <PLANS>/<draft> with a repository-relative plan directory.
     ValueError when part_id is not a part of the plan, its mode is not probe, or the report
     cannot be read (naming its path); past fab.calls.BRIEF_LIMIT as every call's brief."""
+    plan_path = plan_path or f"{PLANS}/{plan.draft}"
     if part_id not in plan.parts:
         raise ValueError(f"unknown part {part_id!r}")
     part = plan.parts[part_id]
@@ -238,7 +246,7 @@ def decision_brief(plan: Plan, part_id: str, tasks: dict[str, Task], statuses: d
         ("Role", calls.ROLES["decision"].read_text(encoding="utf-8")),
         ("Call facts", calls._facts(call_id, branch, report)),
         ("Plan parts and slices", calls._parts_table(plan, tasks, statuses) +
-         f"\n\nPlan: `{PLANS}/{plan.draft}/plan.toml`"),
+         f"\n\nPlan: `{plan_path}/plan.toml`"),
         ("The probe", f"- Part: {part.id}\n- Title: {part.title}\n- Design: {part.design}\n"
          f"- Run: {run_id}\n- Report: `{report_path}`"),
         ("The probe's report", probe_report),
@@ -249,7 +257,8 @@ def decision_brief(plan: Plan, part_id: str, tasks: dict[str, Task], statuses: d
 
 
 def retire_brief(plan: Plan, tasks: dict[str, Task], statuses: dict[str, str], root: Path,
-                 changed: Sequence[str], *, call_id: str, branch: str, report: str) -> str:
+                 changed: Sequence[str], *, call_id: str, branch: str, report: str,
+                 plan_path: str | None = None) -> str:
     """Retire's brief, changed being changed_designs(root, plan.draft). Sections, through
     fab.calls._brief, in this order:
 
@@ -264,8 +273,10 @@ def retire_brief(plan: Plan, tasks: dict[str, Task], statuses: dict[str, str], r
        `(none)` when changed is empty.
     6. `Inventory`: fab.calls.render_inventory(fab.calls.inventory(root)).
 
+    plan_path overrides <PLANS>/<draft> with a repository-relative plan directory.
     ValueError past fab.calls.BRIEF_LIMIT: the designs are quoted whole, and a plan that
     changed more than the limit holds is retired by hand."""
+    plan_path = plan_path or f"{PLANS}/{plan.draft}"
     designs_text = []
     for design in changed:
         path = root / design
@@ -278,7 +289,7 @@ def retire_brief(plan: Plan, tasks: dict[str, Task], statuses: dict[str, str], r
         ("Role", calls.ROLES["retire"].read_text(encoding="utf-8")),
         ("Call facts", calls._facts(call_id, branch, report)),
         ("Plan parts and slices", calls._parts_table(plan, tasks, statuses) +
-         f"\n\nPlan: `{PLANS}/{plan.draft}/plan.toml`"),
+         f"\n\nPlan: `{plan_path}/plan.toml`"),
         ("The user's drafts", calls.drafts_text(plan, root)),
         ("Designs changed since the plan started", "\n\n".join(designs_text) or "(none)"),
         ("Inventory", calls.render_inventory(calls.inventory(root))),
@@ -292,8 +303,8 @@ def main(argv: list[str]) -> int:
     - `fab call cut --plan PLAN_DIR --source PATH [--source PATH ...]`: the draft is
       PLAN_DIR's name; the checkout root is `git rev-parse --show-toplevel` in the nearest
       existing directory at or above PLAN_DIR; ValueError when PLAN_DIR is not
-      root/PLANS/<draft>, PLAN_DIR/plan.toml exists, or a source is not a relative path
-      naming a file under the root. The plan is
+      root/<prefix>docs/plan/<draft>, PLAN_DIR/plan.toml exists, or a source is not a
+      relative path naming a file under the root. The plan is
       uncut(draft, repository(root), sources); without --brief-only, enlist(PLAN_DIR)
       before the call.
     - `fab call contract PART --plan PLAN_DIR`: fab.calls.skeleton_brief with role
@@ -309,10 +320,10 @@ def main(argv: list[str]) -> int:
     `fab call: <error>` on stderr and exits 1, starting nothing."""
     args = _arguments(argv)
     try:
-        plan, tasks, root = _prepare(args)
+        plan, tasks, root, plan_path = _prepare(args)
         statuses = {key: view.status for key, view in state.fold(tasks, log.read()).items()}
         facts = dict(call_id="(assigned at start)", branch="(assigned at start)", report="(assigned at start)")
-        text = _compile(args, plan, tasks, statuses, root, facts)
+        text = _compile(args, plan, tasks, statuses, root, facts, plan_path)
         if args.brief_only:
             print(text)
             return 0
@@ -352,24 +363,25 @@ def _prepare(args):
     while not ancestor.exists():
         ancestor = ancestor.parent
     root = Path(run(["git", "rev-parse", "--show-toplevel"], cwd=str(ancestor), check=True).out.strip()).resolve()
+    plan_path = directory.relative_to(root)
     if args.role != "cut":
         plan = load_plan(directory / "plan.toml")
-        return plan, load_tasks(directory / "tasks", plan.draft, plan.repo), root
-    if directory != root / PLANS / directory.name:
-        raise ValueError(f"PLAN_DIR must be {root / PLANS}/<draft>: {directory}")
+        return plan, load_tasks(directory / "tasks", plan.draft, plan.repo), root, plan_path.as_posix()
+    if len(plan_path.parts) < 3 or plan_path.parts[-3:-1] != ("docs", "plan"):
+        raise ValueError(f"PLAN_DIR must be {root}/<prefix>docs/plan/<draft>: {directory}")
     if (directory / "plan.toml").exists():
         raise ValueError(f"plan.toml already exists: {directory / 'plan.toml'}")
     for source in args.source:
         path = root / source
         if Path(source).is_absolute() or not path.resolve().is_relative_to(root) or not path.is_file():
             raise ValueError(f"source must name a relative file under {root}: {source}")
-    return uncut(directory.name, repository(root, sh=run), args.source), {}, root
+    return uncut(directory.name, repository(root, sh=run), args.source), {}, root, plan_path.as_posix()
 
 
-def _compile(args, plan, tasks, statuses, root, facts):
+def _compile(args, plan, tasks, statuses, root, facts, plan_path):
     """Build a brief only after the role's preconditions hold."""
     if args.role == "cut":
-        return cut_brief(plan, root, **facts)
+        return cut_brief(plan, root, plan_path=plan_path, **facts)
     if args.role == "contract":
         if args.part not in plan.parts:
             raise ValueError(f"unknown part {args.part!r}")
@@ -377,7 +389,8 @@ def _compile(args, plan, tasks, statuses, root, facts):
             raise ValueError(f"part {args.part!r} is not a contract")
         return calls.skeleton_brief(plan, args.part, tasks, statuses, root, role="contract", **facts)
     if args.role == "decision":
-        return decision_brief(plan, args.part, tasks, statuses, root, args.run, **facts)
+        return decision_brief(plan, args.part, tasks, statuses, root, args.run, plan_path=plan_path, **facts)
     if plan.retired:
         raise ValueError(f"plan {plan.draft!r} is already retired")
-    return retire_brief(plan, tasks, statuses, root, changed_designs(root, plan.draft, sh=run), **facts)
+    changed = changed_designs(root, plan.draft, sh=run, plan_path=plan_path)
+    return retire_brief(plan, tasks, statuses, root, changed, plan_path=plan_path, **facts)

@@ -392,6 +392,18 @@ class BriefTest(unittest.TestCase):
                 self.assertNotIn(f"({root}/docs/plan", text)
                 self.assertIn("# Spec one", text)
 
+    def test_review_plan_path_keeps_root_default_and_names_nested_specs(self):
+        with tmp_home() as root:
+            plan, tasks = fixture(root)
+            facts = dict(call_id="c", branch="b", report="r")
+            expected = calls.review_brief(plan, tasks, [], root, **facts)
+            self.assertEqual(calls.review_brief(plan, tasks, [], root,
+                                                plan_path="docs/plan/demo", **facts), expected)
+            self.assertEqual(calls.review_brief(plan, tasks, [], root,
+                                                plan_path="skein/docs/plan/demo", **facts),
+                             expected.replace("Specs: docs/plan/demo/tasks/",
+                                              "Specs: skein/docs/plan/demo/tasks/"))
+
     def test_skeleton_limit_names_largest_section(self):
         with tmp_home() as root:
             plan, tasks = fixture(root)
@@ -838,6 +850,34 @@ class MainTest(unittest.TestCase):
                     self.assertNotIn("Other plan", text)
                 self.assertEqual(fake.argvs(), [["git", "rev-parse", "--show-toplevel"]])
                 self.assertEqual(fake.calls[0].cwd, str(root / "docs/plan/demo"))
+
+    def test_nested_plan_briefs_use_repository_relative_specs(self):
+        for role in ("skeleton", "answer", "review"):
+            with self.subTest(role=role), tmp_home() as root:
+                fixture(root)
+                relative = "trees/skein/docs/plan/demo"
+                directory = root / relative
+                directory.parent.mkdir(parents=True)
+                (root / "docs/plan/demo").rename(directory)
+                log.append("question.asked", task="demo/one", run="demo/one-1", text="Which type?")
+                fake = FakeRunner().on(["git", "rev-parse"], Result(0, str(root)))
+                output = io.StringIO()
+                args = ["core"] if role == "skeleton" else []
+                with patch.object(calls, "run", fake), patch.object(calls, "start") as start, redirect_stdout(output):
+                    self.assertEqual(cli.main(["call", role, *args, "--plan", str(directory),
+                                               "--brief-only"]), 0)
+                start.assert_not_called()
+                text = output.getvalue()
+                if role == "review":
+                    self.assertIn(f"Specs: {relative}/tasks/", text)
+                    self.assertNotIn("Specs: docs/plan/demo/tasks/", text)
+                elif role == "answer":
+                    self.assertIn(f"## Task spec ({relative}/tasks/one.md)", text)
+                    self.assertIn("# Spec one", text)
+                    self.assertNotIn(f"({root}/", text)
+                else:
+                    self.assertIn("- Id: core", text)
+                self.assertEqual(fake.argvs(), [["git", "rev-parse", "--show-toplevel"]])
 
     def test_fabrig_main_starts_each_call_in_dispatcher_clone(self):
         for role in ("skeleton", "answer", "review", "amend"):

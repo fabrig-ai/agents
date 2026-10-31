@@ -208,6 +208,24 @@ class HistoryTest(unittest.TestCase):
         self.assertEqual([item.kwargs["check"] for item in checked.call_args_list], [True, False, True])
 
 
+class HistoryPathTest(unittest.TestCase):
+    def test_nested_plan_history_uses_repository_relative_path(self):
+        plan_path = "trees/skein/docs/plan/demo"
+        fake = (FakeRunner().on(["git", "log"], Result(0, "start\n"))
+                .on(["git", "diff"], Result(0, DESIGN + "\n")))
+        with tmp_home() as root:
+            self.assertEqual(designer.changed_designs(root, "demo", plan_path=plan_path, sh=fake),
+                             [DESIGN])
+            self.assertEqual(fake.argvs()[0], [
+                "git", "log", "--format=%H", "--diff-filter=A", "origin/main", "--",
+                f"{plan_path}/plan.toml",
+            ])
+            self.assertEqual(fake.calls[0].cwd, str(root))
+            fake = FakeRunner().on(["git", "log"], Result(0, ""))
+            with self.assertRaisesRegex(ValueError, f"{plan_path}/plan.toml"):
+                designer.changed_designs(root, "demo", plan_path=plan_path, sh=fake)
+
+
 class RetireDueTest(unittest.TestCase):
     def setUp(self):
         parts = {name: Part(name, name, "feature", (), DESIGN, done=True) for name in ("a", "b")}
@@ -269,6 +287,33 @@ class BriefTest(unittest.TestCase):
                          "- `docs/plan/demo/plan.toml`", "Existing primitive."):
             self.assertIn(fragment, text)
         self.assertNotIn("Keep this contract.", text)
+
+    def test_plan_path_preserves_root_briefs_and_changes_only_destination(self):
+        cut_plan = designer.uncut("new", "agents", [SOURCE])
+        compilers = (
+            (lambda **options: designer.cut_brief(cut_plan, self.root, **FACTS, **options), "new"),
+            (lambda **options: designer.decision_brief(
+                self.plan, "probe", self.tasks, {}, self.root, "demo/probe-1", **FACTS, **options), "demo"),
+            (lambda **options: designer.retire_brief(
+                self.plan, self.tasks, {}, self.root, [DESIGN], **FACTS, **options), "demo"),
+        )
+        for compile, draft in compilers:
+            with self.subTest(draft=draft, compile=compile):
+                relative = f"docs/plan/{draft}"
+                expected = compile()
+                self.assertEqual(compile(plan_path=relative), expected)
+                self.assertEqual(compile(plan_path=f"skein/{relative}"),
+                                 expected.replace(f"`{relative}/plan.toml`", f"`skein/{relative}/plan.toml`"))
+
+    def test_cut_lists_root_and_nested_plans_in_path_order(self):
+        paths = ["docs/plan/demo/plan.toml", "skein/docs/plan/existing/plan.toml",
+                 "trees/skein/docs/plan/older/plan.toml"]
+        for path in paths[1:]:
+            atomic.write(self.root / path, 'draft = "example"\n')
+        (self.root / "skein/docs/plan/directory/plan.toml").mkdir(parents=True)
+        text = self.cut()
+        plans = text.split("# Plans\n\n", 1)[1].split("\n\n# Inventory", 1)[0]
+        self.assertEqual(plans, "\n".join(f"- `{path}`" for path in paths))
 
     def test_fabrig_cut_adds_rust_role_rules(self):
         text = designer.cut_brief(designer.uncut("new", "fabrig", [SOURCE]), self.root, **FACTS)
@@ -363,6 +408,35 @@ class MainTest(unittest.TestCase):
                 start.assert_not_called()
                 self.assertFalse((log.home() / "plans").exists())
 
+    def test_nested_cut_brief_names_destination_and_keeps_sources_at_root(self):
+        for prefix in ("skein", "trees/skein"):
+            relative = f"{prefix}/docs/plan/component-kit"
+            with self.subTest(prefix=prefix), patch.object(calls, "start") as start:
+                result, text, errors = self.invoke("cut", "--source", SOURCE,
+                                                   directory=self.root / relative)
+                self.assertEqual((result, errors), (0, ""))
+                self.assertIn(f"- Plan: write `{relative}/plan.toml`", text)
+                self.assertIn(f"- Sources: `{SOURCE}`", text)
+                self.assertIn("The user's draft, whole.", text)
+                self.assertNotIn("- Plan: write `docs/plan/component-kit/plan.toml`", text)
+                start.assert_not_called()
+                self.assertFalse((log.home() / "plans").exists())
+
+    def test_nested_decision_and_retire_use_plan_directory(self):
+        relative = "skein/docs/plan/demo"
+        directory = self.root / relative
+        directory.parent.mkdir(parents=True)
+        self.directory.rename(directory)
+        for role, args in (("decision", ("probe", "--run", "demo/probe-1")), ("retire", ())):
+            with self.subTest(role=role), patch.object(calls, "start") as start:
+                result, text, errors = self.invoke(role, *args, directory=directory)
+                self.assertEqual((result, errors), (0, ""))
+                self.assertIn(f"Plan: `{relative}/plan.toml`", text)
+                self.assertNotIn("Plan: `docs/plan/demo/plan.toml`", text)
+                start.assert_not_called()
+        self.assertIn(["git", "log", "--format=%H", "--diff-filter=A", "origin/main", "--",
+                       f"{relative}/plan.toml"], self.fake.argvs())
+
     def test_fabrig_designer_calls_start_in_dispatcher_clone(self):
         path = self.directory / "plan.toml"
         atomic.write(path, path.read_text().replace('repo = "agents"', 'repo = "fabrig"'))
@@ -382,6 +456,8 @@ class MainTest(unittest.TestCase):
     def test_cut_refuses_existing_plan_elsewhere_and_missing_source(self):
         cases = ((self.directory, SOURCE, "plan.toml already exists"),
                  (self.root / "elsewhere/new", SOURCE, "PLAN_DIR"),
+                 (self.root / "skein/docs/plans/new", SOURCE, "PLAN_DIR"),
+                 (self.root / "skein/docs/plan/new/child", SOURCE, "PLAN_DIR"),
                  (self.root / "docs/plan/new", "missing.md", "source"),
                  (self.root / "docs/plan/new", str(self.root / SOURCE), "source"),
                  (self.root / "docs/plan/new", "../outside.md", "source"))
