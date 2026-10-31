@@ -10,9 +10,10 @@ from contextlib import redirect_stderr, redirect_stdout
 from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timedelta
+from pathlib import Path
 from unittest.mock import patch
 
-from fab import call_review, cli, dispatch, flow, foreman, gates, log, plan, state
+from fab import call_review, cli, dispatch, flow, foreman, gates, log, plan, run as runs, state
 from fab.dispatch import Action, MAX_RUNS
 from fab.hosts import Host
 from fab.sh import Result, ssh
@@ -299,6 +300,17 @@ class DecideTest(unittest.TestCase):
         actions = self.decide(tasks, events, spec=spec)
         self.assertEqual(actions[-1], Action("design", detail="z, a, blocked, two"))
 
+    def test_open_plan_questions_hold_only_named_parts_until_answered(self):
+        """Open questions exclude their named parts while other eligible work proceeds."""
+        question = plan.Question("budget", "Which budget?", ("core", "held"))
+        spec = replace(make_plan(part("core"), part("held"), part("free"),
+                                 part("reader", ("core",))), questions=(question,))
+        self.assertEqual(self.decide([], spec=spec), [Action("design", detail="free")])
+        answered = replace(spec, questions=(replace(question, answer="Use the smaller budget"),))
+        self.assertEqual(self.decide([], spec=answered), [Action("design", detail="core, held, free")])
+        still_open = replace(answered, questions=(*answered.questions, question))
+        self.assertEqual(self.decide([], spec=still_open), [Action("design", detail="free")])
+
     def test_a_done_part_is_never_designed_and_counts_as_landed_for_its_readers(self):
         spec = make_plan(plan.Part("built", "built", "feature", (), "design.md", done=True),
                          part("reader", ("built",)))
@@ -450,6 +462,80 @@ class CallActionsTest(unittest.TestCase):
         self.assertEqual(self.actions(questions + [self.call("skeleton")], ["core"]), [answer])
         self.assertEqual(self.actions(questions + [self.call(), self.call("skeleton", "s")], ["core"]), [])
 
+    def test_contract_and_skeleton_start_independently_in_design_order(self):
+        """Each role starts its first fresh part, even with both eligible at once."""
+        self.plan = make_plan(replace(part("core"), contract=True), part("next"),
+                              replace(part("contract-two"), contract=True), part("last"))
+        contract = Action("call", task="core", run_kind="contract")
+        skeleton = Action("call", task="next", run_kind="skeleton")
+        self.assertEqual(self.actions(design=["core"]), [contract])
+        design = ["core", "next", "contract-two", "last"]
+        self.assertEqual(self.actions(design=design), [skeleton, contract])
+        busy = dict(self.call("contract", "c"), subject="draft/other")
+        self.assertEqual(self.actions([busy], design), [skeleton])
+        self.assertEqual(self.actions([self.call("skeleton")], design), [contract])
+        self.assertEqual(self.actions([busy, self.call("skeleton")], design), [])
+
+    def test_completed_and_question_contracts_reserve_their_part(self):
+        """Done contracts stay designed and question outcomes park until an answer."""
+        self.plan = make_plan(replace(part("core"), contract=True), part("next"))
+        start = dict(self.call("contract", "c"), subject="draft/core")
+        for outcome in ("done", "question", "failed"):
+            with self.subTest(outcome=outcome):
+                history = [start, dict(ev="call.ended", call="c", outcome=outcome)]
+                calls = [a for a in self.actions(history, ["core"]) if a.kind == "call"]
+                expected = [Action("call", task="core", run_kind="contract")]
+                self.assertEqual(calls, expected if outcome == "failed" else [])
+                if outcome == "question":
+                    history.append(event("question.answered", "core"))
+                    self.assertEqual(self.actions(history, ["core"]), expected)
+
+    def test_retire_starts_only_when_every_part_is_done(self):
+        """Retirement follows the last task landing and respects plan-marked done."""
+        self.tasks = {"draft/a": task("a"), "draft/b": task("b", part="next")}
+        landed = [event("branch.landed", name, tip="tip", main="main", ts=self.now)
+                  for name in ("a", "b")]
+        self.assertEqual(self.actions(landed[:1]), [])
+        retire = Action("call", task="draft/retire", run_kind="retire")
+        self.assertEqual(self.actions(landed), [retire])
+        self.plan = replace(self.plan, parts={key: replace(value, done=True)
+                                             for key, value in self.plan.parts.items()})
+        self.assertEqual(self.actions(), [retire])
+
+    def test_retire_waits_for_flight_parking_open_chains_and_completed_calls(self):
+        """Retirement starts once with the usual role and subject guards."""
+        self.plan = make_plan(replace(part("core"), done=True))
+        retire = Action("call", task="draft/retire", run_kind="retire")
+        start = dict(self.call("retire", "r"), subject="draft/retire")
+        self.assertEqual(self.actions([start]), [])
+        question = [start, dict(ev="call.ended", call="r", outcome="question")]
+        self.assertEqual(self.actions(question), [])
+        self.assertEqual(self.actions(question + [event("question.answered", "retire")]), [retire])
+        done = [start, dict(ev="call.ended", call="r", outcome="done"),
+                dict(ev="call.finished", call="r", outcome="done")]
+        self.assertEqual(self.actions(done), [])
+        for status in call_review.STATES:
+            with self.subTest(status=status):
+                history = chain_history(status, subject="draft/retire")
+                calls = [action for action in self.actions(history) if action.run_kind == "retire"]
+                self.assertEqual(calls, [retire] if status == "finished" else [])
+
+    def test_retire_follows_structure_review(self):
+        """A due structure review precedes retirement in the same tick."""
+        self.plan = make_plan(replace(part("core"), done=True))
+        self.assertEqual(self.actions(self.landings(dispatch.REVIEW_AT)),
+                         [Action("call", task="draft/review", run_kind="review"),
+                          Action("call", task="draft/retire", run_kind="retire")])
+
+    def test_another_drafts_chains_take_no_steps(self):
+        """The draft prefix selects chains without matching a longer draft name."""
+        for status in call_review.STATES:
+            for subject in ("other", "other/core", "draft-other/core"):
+                with self.subTest(status=status, subject=subject):
+                    self.assertEqual(self.actions(chain_history(status, subject=subject)), [])
+        history = chain_history("review", subject="draft")
+        self.assertEqual([action.kind for action in self.actions(history)], ["vet"])
+
     def test_ended_releases_role_and_only_done_needs_review(self):
         for outcome in ("done", "failed", "question", "infra"):
             with self.subTest(outcome=outcome):
@@ -511,9 +597,10 @@ class CallActionsTest(unittest.TestCase):
                                  if status == "finished" else [])
 
     def landings(self, count, ts="2026-10-30T12:29:00.000Z"):
+        """Build complete landings for both review counting and retirement folding."""
         tasks = [task(str(n)) for n in range(count)]
         self.tasks.update((item.id, item) for item in tasks)
-        return [dict(ev="branch.landed", task=item.id, ts=ts) for item in tasks]
+        return [dict(ev="branch.landed", task=item.id, ts=ts, tip="tip", main="main") for item in tasks]
 
     def test_review_count_threshold_and_plan_landings_only(self):
         landed = self.landings(dispatch.REVIEW_AT)
@@ -700,6 +787,7 @@ walk = false
 
 
     def test_queue_import_continues_after_a_torn_line_between_records(self):
+        """Import intact landings once even when finishing the plan starts retirement."""
         self.add_task("b")
         first = dict(ev="landed", ts="001", branch="draft/a", tip="a", main="main")
         second = dict(ev="landed", ts="002", branch="draft/b", tip="b", main="main")
@@ -710,8 +798,8 @@ walk = false
                          [("draft/a", "001"), ("draft/b", "002")])
         self.tick()
         self.assertEqual(len(log.read()), 2)
-        self.assertEqual(self.fake.argvs()[-2],
-                         ssh("fake@gate", ["fab", "queue", "log", "--since", "002"]))
+        queries = [argv for argv in self.fake.argvs() if argv[:len(prefix)] == prefix]
+        self.assertEqual(queries[-1], ssh("fake@gate", ["fab", "queue", "log", "--since", "002"]))
 
     def test_import_queue_records_once_including_shared_timestamps_and_rebases(self):
         self.add_task("b")
@@ -842,6 +930,105 @@ walk = false
         self.assertEqual(self.calls, [])
         self.assertEqual(self.out.getvalue(), "flow draft target 2, 0 in flight\ndesign - next\ncall next \n")
         self.assertEqual(len(log.read()), 1)
+
+    def test_contract_unit_passes_the_part_and_plan(self):
+        """The tick launches a contract with its part in the numbered contract unit."""
+        (self.directory / "tasks/a.md").unlink()
+        path = self.directory / "plan.toml"
+        write(path, path.read_text().replace('mode = "feature"', 'mode = "feature"\ncontract = true'))
+        self.assertEqual(self.tick(), [Action("design", detail="core"),
+                                      Action("call", task="core", run_kind="contract")])
+        self.assertEqual(self.fake.argvs()[-1],
+                         ["systemd-run", "--user", "--collect", "--unit", "fab-call-contract-1",
+                          "fab", "call", "contract", "core", "--plan", str(self.directory)])
+        self.assertEqual(self.calls, [])
+
+    def test_retire_unit_takes_no_part_and_counts_retire_starts(self):
+        """Retirement follows completion and has no subject argument in the call argv."""
+        self.append(event("branch.landed", tip="tip", main="main"),
+                    dict(ev="call.started", call="old", role="retire", subject="draft/retire"),
+                    dict(ev="call.ended", call="old", outcome="failed"))
+        self.assertEqual(self.tick(), [Action("call", task="draft/retire", run_kind="retire")])
+        self.assertEqual(self.fake.argvs()[-1],
+                         ["systemd-run", "--user", "--collect", "--unit", "fab-call-retire-2",
+                          "fab", "call", "retire", "--plan", str(self.directory)])
+        self.assertEqual(self.calls, [])
+
+    def test_uncut_plan_moves_its_cut_chain_after_fetch_with_no_tasks(self):
+        """A logged cut substitutes an empty plan, imports the queue and reviews its branch."""
+        (self.directory / "plan.toml").unlink()
+        path = self.home / "cut.jsonl"
+        self.append(*chain_history("review", role="cut", subject="plan/cut"), path=path)
+        self.fake = FakeRunner().on(["git", "rev-parse", "--show-toplevel"],
+                                    Result(0, "/checkout\n"))
+        self.fake.on(["git", "remote", "get-url", "origin"], Result(0, runs.REMOTES["agents"] + "\n"))
+        with patch.object(call_review, "start", return_value="root-1") as start:
+            actions = self.tick(log_path=path)
+        self.assertEqual(actions, [Action("vet", task="root", run="root", run_kind="cut",
+                                          branch="calls/root")])
+        self.assertEqual(start.call_args.args[1:3], ("agents", Path("/checkout")))
+        self.assertEqual(start.call_args.kwargs, dict(sh=self.fake, log_path=path))
+        self.assertEqual(self.fake.argvs()[:3], [["git", "rev-parse", "--show-toplevel"],
+                                               ["git", "fetch", "origin"],
+                                               ["git", "remote", "get-url", "origin"]])
+        self.assertEqual(self.fake.calls[2].cwd, "/checkout")
+        self.assertIn(ssh("fake@gate", ["fab", "queue", "log", "--since", ""]), self.fake.argvs())
+        self.assertEqual(len(self.fake.calls), 5)
+        self.assertEqual(self.calls, [])
+
+    def test_uncut_directory_need_not_exist_for_tick_or_dry_run(self):
+        """Both tick modes locate git from an existing ancestor of an unwritten plan."""
+        directory = self.home / "checkout/docs/plan/new"
+        self.append(dict(ev="call.started", call="cut", role="cut", subject="new/cut"))
+        fake = FakeRunner().on(["git", "rev-parse", "--show-toplevel"], Result(0, "/checkout\n"))
+        fake.on(["git", "remote", "get-url", "origin"], Result(0, runs.REMOTES["agents"]))
+        self.assertEqual(dispatch.tick(directory, sh=fake, hosts={}),
+                         [Action("flow", task="new", detail="target 2, 0 in flight")])
+        with patch.object(dispatch, "run", fake), patch("fab.hosts.load", return_value={}):
+            self.assertEqual(dispatch.main([str(directory), "--dry-run"]), 0)
+        lookups = [call for call in fake.calls if call.argv == ["git", "rev-parse", "--show-toplevel"]]
+        self.assertEqual([call.cwd for call in lookups], [str(self.home)] * 2)
+        self.assertEqual([call.cwd for call in fake.calls if call.argv ==
+                          ["git", "remote", "get-url", "origin"]], ["/checkout"] * 2)
+        self.assertFalse(directory.exists())
+
+    def test_missing_plan_without_its_cut_call_fails_before_import(self):
+        """A different draft or role does not authorize ticking a missing plan file."""
+        (self.directory / "plan.toml").unlink()
+        self.append(dict(ev="call.started", call="other", role="cut", subject="other/cut"),
+                    dict(ev="call.started", call="wrong", role="skeleton", subject="plan/cut"))
+        with self.assertRaisesRegex(plan.PlanError, str(self.directory)):
+            self.tick()
+        self.assertEqual(self.fake.argvs(), [["git", "rev-parse", "--show-toplevel"]])
+        self.assertEqual(self.calls, [])
+
+    def test_uncut_question_parks_until_answered(self):
+        """A cut asking the user stays idle until its subject is answered."""
+        (self.directory / "plan.toml").unlink()
+        self.fake.on(["git", "remote", "get-url", "origin"], Result(0, runs.REMOTES["agents"]))
+        self.append(dict(ev="call.started", call="cut", role="cut", subject="plan/cut"),
+                    dict(ev="call.ended", call="cut", outcome="question"))
+        self.assertEqual(self.tick(), [])
+        self.append(dict(ev="question.answered", task="plan/cut"))
+        self.assertEqual(self.tick(), [])
+        self.assertFalse(any(argv[0] == "systemd-run" for argv in self.fake.argvs()))
+        self.assertEqual(self.calls, [])
+
+    def test_retired_plan_prints_and_skips_import_measurement_and_actions(self):
+        """After fetch, retirement exits before loading hosts or doing any plan work."""
+        path = self.directory / "plan.toml"
+        write(path, 'retired = true\n' + path.read_text())
+        self.append(started(), *chain_history("review"))
+        self.fake = FakeRunner().on(["git", "rev-parse", "--show-toplevel"], Result(0, "/checkout\n"))
+        with patch("fab.hosts.load", side_effect=AssertionError("hosts loaded")), \
+             patch.object(dispatch, "_import_queue", side_effect=AssertionError("queue imported")), \
+             patch.object(flow, "measure", side_effect=AssertionError("builder measured")), \
+             patch.object(dispatch, "decide", side_effect=AssertionError("actions decided")):
+            self.assertEqual(dispatch.tick(self.directory, sh=self.fake), [])
+        self.assertEqual(self.out.getvalue(), "retired draft\n")
+        self.assertEqual(self.fake.argvs(), [["git", "rev-parse", "--show-toplevel"],
+                                           ["git", "fetch", "origin"]])
+        self.assertEqual(self.calls, [])
 
     def completed_call(self, role="answer", identifier="answer-1", path=None):
         self.append(dict(ev="call.started", call=identifier, role=role, subject="draft",
@@ -1105,14 +1292,15 @@ walk = false
         self.assertIn("draft/b/foreman-1", [entry.get("run") for entry in calls.call_args.args[2]])
 
     def test_done_calls_of_every_role_wait_for_review(self):
+        """Every reviewed role, including the designer's calls, waits for acceptance."""
         self.append(event("question.asked", text="Which?"))
         for role in call_review.REVIEWED:
             self.completed_call(role, role)
         with patch.object(call_review, "start") as vet:
             actions = self.tick()
-        self.assertEqual([action.kind for action in actions], ["vet", "vet", "vet"])
+        self.assertEqual([action.kind for action in actions], ["vet"] * len(call_review.REVIEWED))
         self.assertEqual([action.run_kind for action in actions], list(call_review.REVIEWED))
-        self.assertEqual(vet.call_count, 3)
+        self.assertEqual(vet.call_count, len(call_review.REVIEWED))
         self.land.assert_not_called()
 
     def test_hold_logs_last_refusal_once_and_answer_reopens_chain(self):
@@ -1451,6 +1639,43 @@ walk = false
         self.assertEqual(log.default_path().read_bytes(), before)
         self.assertFalse((log.home() / "tick.lock").exists())
         self.assertEqual(self.calls, [])
+
+    def test_dry_run_loads_uncut_plan_without_fetch_or_actions(self):
+        """Dry-run resolves an uncut repository without fetching, locking or starting reviews."""
+        (self.directory / "plan.toml").unlink()
+        self.append(*chain_history("review", role="cut", subject="plan/cut"))
+        fake = FakeRunner().on(["git", "rev-parse", "--show-toplevel"], Result(0, "/checkout\n"))
+        fake.on(["git", "remote", "get-url", "origin"], Result(0, runs.REMOTES["agents"]))
+        before = log.read()
+        with patch.object(dispatch, "run", fake), patch("fab.hosts.load", return_value=self.hosts), \
+             patch.object(flow, "measure", side_effect=AssertionError("builder measured")), \
+             patch.object(call_review, "start", side_effect=AssertionError("review started")):
+            self.assertEqual(dispatch.main([str(self.directory), "--dry-run"]), 0)
+        self.assertEqual(self.out.getvalue(), "flow plan target 2, 0 in flight\n")
+        self.assertEqual(fake.argvs(), [["git", "rev-parse", "--show-toplevel"],
+                                       ["git", "remote", "get-url", "origin"]])
+        self.assertEqual(log.read(), before)
+        self.assertFalse((log.home() / "tick.lock").exists())
+
+    def test_dry_run_skips_retired_plan_without_commands_or_hosts(self):
+        """A retired dry-run only prints the retirement line."""
+        path = self.directory / "plan.toml"
+        write(path, 'retired = true\n' + path.read_text())
+        with patch.object(dispatch, "run", side_effect=AssertionError("command ran")), \
+             patch("fab.hosts.load", side_effect=AssertionError("hosts loaded")), \
+             patch.object(dispatch, "decide", side_effect=AssertionError("actions decided")):
+            self.assertEqual(dispatch.main([str(self.directory), "--dry-run"]), 0)
+        self.assertEqual(self.out.getvalue(), "retired draft\n")
+        self.assertFalse(log.home().exists())
+
+    def test_dry_run_missing_plan_without_cut_names_directory(self):
+        """A missing plan is still invalid in dry-run without a matching cut start."""
+        (self.directory / "plan.toml").unlink()
+        err = io.StringIO()
+        with redirect_stderr(err), patch.object(dispatch, "run", side_effect=AssertionError("command ran")):
+            self.assertEqual(dispatch.main([str(self.directory), "--dry-run"]), 1)
+        self.assertIn(str(self.directory), err.getvalue())
+        self.assertFalse(log.home().exists())
 
     def test_main_invokes_tick_and_cli_registers_it(self):
         with patch("fab.dispatch.tick") as tick:
