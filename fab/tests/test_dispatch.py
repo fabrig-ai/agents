@@ -12,7 +12,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta
 from unittest.mock import patch
 
-from fab import call_review, cli, dispatch, flow, gates, log, plan, state
+from fab import call_review, cli, dispatch, flow, foreman, gates, log, plan, state
 from fab.dispatch import Action, MAX_RUNS
 from fab.hosts import Host
 from fab.sh import Result, ssh
@@ -32,6 +32,9 @@ def make_plan(*parts, low=1):
 
 
 def event(ev, name="a", **fields):
+    """Build a task event, giving questions the asking run required by their contract."""
+    if ev == "question.asked":
+        fields.setdefault("run", f"draft/{name}-1")
     return {"ev": ev, "task": f"draft/{name}", **fields}
 
 
@@ -83,6 +86,44 @@ def chain_history(status, *, role="skeleton", root="root", subject="draft/core")
     if status == "parked":
         events.append(dict(ev="call.parked", call=root, subject=subject))
     return events
+
+
+def question_history(name="a", status="foreman", *, since="2026-10-30T12:29:00.000Z"):
+    """Build a question's real event history in one of the foreman's four states or parked."""
+    asked = event("question.asked", name, run=f"draft/{name}-1", text=f"Choose for {name}?",
+                  ts="2026-10-30T09:00:00.000Z")
+    if status == "parked":
+        return [dict(asked, ts=since)]
+    history = [dict(started(name), kind="implement", ts="2026-10-30T08:00:00.000Z"),
+               dict(ended(name, outcome="question"), ts="2026-10-30T09:00:00.000Z"), asked]
+    if status == "foreman":
+        return history
+    run_id = f"draft/{name}/foreman-1"
+    history.append(dict(ev="run.started", task=f"draft/{name}/foreman", run=run_id,
+                        kind="foreman", asked=asked["run"], host="builder",
+                        ts="2026-10-30T10:00:00.000Z"))
+    if status != "deciding":
+        history.append(dict(ev="run.ended", task=f"draft/{name}/foreman", run=run_id,
+                            outcome="done" if status == "settled" else "failed",
+                            report=f"collected/{run_id}/report.md", ts=since))
+    return history
+
+
+class ForemanActionsTest(unittest.TestCase):
+    def test_states_question_order_plan_filter_and_purity(self):
+        tasks = {f"draft/{name}": task(name) for name in ("a", "b", "c", "d", "e")}
+        events = [*question_history("b", "settled"), *question_history("d", "deciding"),
+                  *question_history("a"), *question_history("c", "queued"),
+                  *question_history("e", "parked"),
+                  *(dict(entry, task="other/task") for entry in question_history("outside"))]
+        before = deepcopy((tasks, events))
+        expected = [Action("settle", task="draft/b", run="draft/b/foreman-1",
+                           detail="draft/b/foreman-1"),
+                    Action("foreman", task="draft/a", run="draft/a-1", detail="draft/a-1")]
+        self.assertEqual(dispatch.foreman_actions(tasks, events), expected)
+        self.assertEqual(dispatch.foreman_actions(tasks, events), expected)
+        self.assertEqual((tasks, events), before)
+        self.assertEqual(dispatch.foreman_actions({}, events), [])
 
 
 class DecideTest(unittest.TestCase):
@@ -318,6 +359,24 @@ class CallActionsTest(unittest.TestCase):
                 self.assertEqual(actions, [Action("call", task="draft", run_kind="answer")]
                                  if expected else [])
         self.assertEqual(self.actions(), [])
+
+    def test_only_queued_questions_count_toward_answer_threshold(self):
+        self.tasks.update({f"draft/{name}": task(name) for name in ("pending", "deciding", "settled")})
+        events = [entry for name in ("pending", "deciding", "settled")
+                  for entry in question_history(name, "foreman" if name == "pending" else name)]
+        events.extend(entry for n in range(dispatch.ANSWER_AT - 1)
+                      for entry in question_history(str(n), "parked"))
+        self.assertEqual(self.actions(events), [])
+        events.extend(question_history(str(dispatch.ANSWER_AT - 1), "parked"))
+        self.assertEqual(self.actions(events), [Action("call", task="draft", run_kind="answer")])
+
+    def test_queued_age_begins_at_foreman_end_and_park_age_at_question(self):
+        for since, due in (("2026-10-30T12:00:00.001Z", False),
+                           ("2026-10-30T12:00:00.000Z", True)):
+            for status in ("queued", "parked"):
+                with self.subTest(since=since, status=status):
+                    self.assertEqual(self.actions(question_history("0", status, since=since)),
+                                     [Action("call", task="draft", run_kind="answer")] if due else [])
 
     def test_a_part_with_a_successful_skeleton_call_is_not_designed_again(self):
         done = [dict(self.call("skeleton", "s1"), subject="draft/core"),
@@ -806,14 +865,198 @@ walk = false
         self.land.assert_not_called()
 
     def test_vet_without_builder_fails_without_landing(self):
+        """The shared builder selector refuses a review when no builder exists."""
         self.append(event("question.asked", text="Which?"))
         self.completed_call("skeleton", "root")
         with patch.object(call_review, "start") as vet:
             self.tick(hosts={})
         vet.assert_not_called()
         self.land.assert_not_called()
-        self.assertEqual(log.read()[-1]["text"], "vet root failed: no builder configured for call review")
+        self.assertEqual(log.read()[-1]["text"], "vet root failed: no builder configured")
         self.assertNotIn("call.finished", [entry["ev"] for entry in log.read()])
+
+    def test_collect_question_starts_foreman_on_freest_builder_even_at_zero(self):
+        for capacity, expected in ((3, "a"), (4, "a"), (5, "z"), (0, "a")):
+            with self.subTest(capacity=capacity):
+                path = self.home / f"questions-{capacity}.jsonl"
+                self.append(dict(started(), kind="implement"),
+                            dict(ev="run.started", run="busy-1", task="other/one", host="z"),
+                            dict(ev="run.started", run="busy-2", task="other/two", host="z"), path=path)
+                hosts = {"z": Host("z", "fake@z", ("builder",), places=capacity),
+                         "a": Host("a", "fake@a", ("builder",), places=min(2, capacity)),
+                         "gate": Host("gate", "fake@gate", ("gate",), places=100)}
+
+                def collect(run_id, *args, **kwargs):
+                    if run_id == "draft/a-1":
+                        self.append(ended(outcome="question"), event("question.asked", text="Which?"),
+                                    path=kwargs["log_path"])
+
+                self.collect.side_effect = collect
+                with patch.object(foreman, "start") as start:
+                    actions = self.tick(hosts=hosts, log_path=path)
+                self.assertEqual([action.kind for action in actions], ["collect"] * 3 + ["foreman"])
+                _, tasks = plan.load(self.directory)
+                start.assert_called_once_with(foreman.questions(tasks, log.read(path))[0],
+                                               tasks["draft/a"], hosts[expected], log.read(path),
+                                               sh=self.fake, log_path=path)
+                self.assertIn(f"foreman draft/a draft/a-1 {expected}\n", self.out.getvalue())
+                self.assertEqual(log.read(), [])
+
+    def settled_question(self, *, path=None):
+        """Provide a collected foreman answer and a fake checkout for settlement tests."""
+        self.append(*question_history(status="settled"), path=path)
+        write(log.home() / "runs/draft/a/foreman-1/report.md", "Done: Use option A\nDetails.\n")
+        self.fake = FakeRunner().on(["git", "rev-parse", "--show-toplevel"],
+                                    Result(0, str(self.home) + "\n"))
+
+    def test_settle_lands_then_answers_and_next_tick_restarts_task(self):
+        path = self.home / "settled.jsonl"
+        self.settled_question(path=path)
+        _, tasks = plan.load(self.directory)
+        question = foreman.questions(tasks, log.read(path))[0]
+        branch = "answers/draft/a/foreman-1"
+
+        def land_answer(argv):
+            self.assertFalse(any(entry["ev"] == "question.answered" for entry in log.read(path)))
+            return self.record_land(argv)
+
+        self.land.side_effect = land_answer
+        with patch.object(foreman, "commit", return_value=branch) as commit, \
+             patch.object(log, "now", return_value="2026-10-31T23:59:00.000Z"):
+            actions = self.tick(log_path=path)
+        self.assertEqual(actions, [Action("settle", task="draft/a", run="draft/a/foreman-1",
+                                          detail="draft/a/foreman-1")])
+        commit.assert_called_once_with(question, tasks["draft/a"], "Use option A\nDetails.", self.home,
+                                       run_id="draft/a/foreman-1", day="2026-10-31", sh=self.fake)
+        self.land.assert_called_once_with([branch])
+        answered = log.read(path)[-1]
+        self.assertEqual(answered, dict(ts="2026-10-31T23:59:00.000Z", ev="question.answered",
+                                        task="draft/a", by="draft/a/foreman-1", run="draft/a-1",
+                                        answer="Use option A"))
+        self.assertEqual([action.kind for action in self.tick(log_path=path)], ["start"])
+        self.start.assert_called_once()
+        self.assertEqual(log.read(), [])
+
+    def test_settle_already_recorded_answer_skips_landing(self):
+        self.settled_question()
+        with patch.object(foreman, "commit", return_value=None) as commit:
+            self.assertEqual([action.kind for action in self.tick()], ["settle"])
+        commit.assert_called_once()
+        self.land.assert_not_called()
+        self.assertEqual(log.read()[-1]["ev"], "question.answered")
+
+    def test_settle_refused_landing_retries_without_answering(self):
+        self.settled_question()
+        attempts = []
+
+        def land_answer(argv):
+            attempts.append(argv)
+            if len(attempts) == 1:
+                print("gate refused\ntry again")
+                return 1
+            return 0
+
+        self.land.side_effect = land_answer
+        with patch.object(foreman, "commit", return_value="answers/foreman") as commit:
+            self.assertEqual([action.kind for action in self.tick()], ["settle"])
+            self.assertEqual(log.read()[-1]["text"], "settle draft/a failed: gate refused try again")
+            self.assertFalse(any(entry["ev"] == "question.answered" for entry in log.read()))
+            _, tasks = plan.load(self.directory)
+            self.assertEqual(foreman.questions(tasks, log.read())[0].state, "settled")
+            self.assertEqual([action.kind for action in self.tick()], ["settle"])
+        self.assertEqual(commit.call_count, 2)
+        self.assertEqual(attempts, [["answers/foreman"], ["answers/foreman"]])
+        self.assertEqual(log.read()[-1]["ev"], "question.answered")
+
+    def test_settle_failure_never_answers_or_lands(self):
+        for reason in ("commit", "report", "checkout", "empty root"):
+            with self.subTest(reason=reason):
+                path = self.home / f"{reason}.jsonl"
+                self.settled_question(path=path)
+                if reason == "report":
+                    write(log.home() / "runs/draft/a/foreman-1/report.md", "Failed: no option\n")
+                elif reason in ("checkout", "empty root"):
+                    self.fake = FakeRunner().on(["git", "rev-parse"], Result(128 if reason == "checkout" else 0))
+                with patch.object(foreman, "commit", side_effect=RuntimeError("cannot commit")) as commit:
+                    self.assertEqual([action.kind for action in self.tick(log_path=path)], ["settle"])
+                self.assertEqual(commit.call_count, int(reason == "commit"))
+                self.assertEqual(log.read(path)[-1]["ev"], "note")
+                self.assertFalse(any(entry["ev"] == "question.answered" for entry in log.read(path)))
+        self.land.assert_not_called()
+
+    def test_foreman_without_builder_is_noted_without_starting(self):
+        self.append(*question_history())
+        with patch.object(foreman, "start") as start:
+            self.assertEqual([action.kind for action in self.tick(hosts={})], ["foreman"])
+        start.assert_not_called()
+        self.assertEqual(log.read()[-1]["text"], "foreman draft/a failed: no builder configured")
+
+    def test_collected_infra_foreman_queues_for_answerer_without_retry(self):
+        now = "2026-10-31T12:00:00.000Z"
+        self.append(*question_history(status="deciding"))
+        for name in ("b", "c", "d"):
+            self.add_task(name)
+            self.append(*question_history(name, "parked", since=now))
+
+        def collect(run_id, *args, **kwargs):
+            self.append(dict(ev="run.ended", run=run_id, task="draft/a/foreman", outcome="infra",
+                             report="collected/foreman/report.md"))
+
+        self.collect.side_effect = collect
+        with patch.object(foreman, "start") as start, patch.object(log, "now", return_value=now):
+            self.assertEqual([action.kind for action in self.tick()], ["collect", "call"])
+        start.assert_not_called()
+        self.assertEqual(self.fake.argvs()[-1][-5:], ["fab", "call", "answer", "--plan", str(self.directory)])
+
+    def test_foreman_actions_recompute_questions_before_acting(self):
+        for status in ("foreman", "settled"):
+            with self.subTest(status=status):
+                path = self.home / f"stale-{status}.jsonl"
+                self.append(*question_history(status=status), path=path)
+                decide_questions = dispatch.foreman_actions
+
+                def answered(tasks, events):
+                    actions = decide_questions(tasks, events)
+                    self.append(event("question.answered"), path=path)
+                    return actions
+
+                with patch.object(dispatch, "foreman_actions", side_effect=answered), \
+                     patch.object(foreman, "start") as start, patch.object(foreman, "commit") as commit:
+                    self.tick(log_path=path)
+                start.assert_not_called()
+                commit.assert_not_called()
+                self.assertIn(f"no {status} question for draft/a", log.read(path)[-1]["text"])
+        self.land.assert_not_called()
+
+    def test_foreman_actions_precede_call_decisions_and_calls_see_settlement(self):
+        self.settled_question()
+        self.append(*question_history("b"))
+        self.add_task("b")
+        self.completed_call("skeleton", "root")
+        order = []
+
+        def start(*args, **kwargs):
+            order.append("foreman")
+            self.append(dict(ev="run.started", task="draft/b/foreman", run="draft/b/foreman-1",
+                             kind="foreman", asked="draft/b-1", host="builder"))
+
+        def commit(*args, **kwargs):
+            order.append("settle")
+            return None
+
+        def vet(*args, **kwargs):
+            order.append("vet")
+            self.assertIn("question.answered", [entry["ev"] for entry in args[4]])
+            self.assertIn("draft/b/foreman-1", [entry.get("run") for entry in args[4]])
+
+        with patch.object(foreman, "start", side_effect=start), \
+             patch.object(foreman, "commit", side_effect=commit), \
+             patch.object(call_review, "start", side_effect=vet), \
+             patch.object(dispatch, "call_actions", wraps=dispatch.call_actions) as calls:
+            self.assertEqual([action.kind for action in self.tick()], ["settle", "foreman", "vet"])
+        self.assertEqual(order, ["settle", "foreman", "vet"])
+        self.assertIn("question.answered", [entry["ev"] for entry in calls.call_args.args[2]])
+        self.assertIn("draft/b/foreman-1", [entry.get("run") for entry in calls.call_args.args[2]])
 
     def test_done_calls_of_every_role_wait_for_review(self):
         self.append(event("question.asked", text="Which?"))

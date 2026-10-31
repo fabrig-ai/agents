@@ -18,14 +18,14 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from fab import call_review, calls, flow, gates, hosts as machines, land, log, plan as specs, run as runs, state
+from fab import call_review, calls, flow, foreman, gates, hosts as machines, land, log, plan as specs, run as runs, state
 from fab.hosts import Host
 from fab.plan import Plan, Task
 from fab.sh import Failed, Runner, run, ssh
 
 MAX_RUNS = 4  # a task with this many runs (rebases aside) and still not landed parks for judgement
-ANSWER_AFTER = 30  # minutes the oldest open question waits before an answer call (the user, 10-30)
-ANSWER_AT = 4  # open questions that start an answer call at once
+ANSWER_AFTER = 30  # minutes the oldest queued question waits before an answer call (the user, 10-30)
+ANSWER_AT = 4  # queued questions that start an answer call at once
 REVIEW_AT = 10  # tasks landed since the last review call that start one at once
 REVIEW_AFTER = 4 * 60  # minutes since the last review call that start one with any landed
 
@@ -55,7 +55,8 @@ def call_actions(plan: Plan, tasks: Mapping[str, Task], events: list[dict], desi
     the subject. Reviewing, amending, parked and finished chains take no step. Open chains
     block their subject and further answer or review calls of their role. Calls in flight
     also reserve their role. Skeleton parts whose calls ended done stay designed.
-    Answer calls use ANSWER_AT or ANSWER_AFTER; structure reviews use REVIEW_AT or
+    Answer calls count only queued questions, aged from their queued since timestamp,
+    using ANSWER_AT or ANSWER_AFTER; structure reviews use REVIEW_AT or
     REVIEW_AFTER since the last review started. Question outcomes park a subject until
     question.answered names it. Pure; see docs/design/fab.md, 12 and 13.1."""
     started = {event["call"]: event for event in events if event.get("ev") == "call.started"}
@@ -67,13 +68,15 @@ def call_actions(plan: Plan, tasks: Mapping[str, Task], events: list[dict], desi
     subjects = {chain.subject for chain in open_chains}
     roles = {event["role"] for event in flight.values()}
     roles.update(chain.role for chain in open_chains if chain.role in ("answer", "review"))
-    questions = [event for event in calls.open_questions(events) if event["task"] in tasks]
+    questions = [question for question in foreman.questions(tasks, events)
+                 if question.state == "queued"]
     if "answer" not in roles and plan.draft not in subjects and questions:
         old_enough = (datetime.fromisoformat(now) -
-                      min(datetime.fromisoformat(event["ts"]) for event in questions)
+                      min(datetime.fromisoformat(question.since) for question in questions)
                       >= timedelta(minutes=ANSWER_AFTER))
         if len(questions) >= ANSWER_AT or old_enough or blocking(
-                tasks, events, questions, calls_in_flight=bool(roles), design=design):
+                tasks, events, [{"task": question.task} for question in questions],
+                calls_in_flight=bool(roles), design=design):
             actions.append(Action("call", task=plan.draft, run_kind="answer"))
     # A part whose skeleton call succeeded is designed even before its specs reach this plan:
     # the tick that lands them decides on the plan it read before landing.
@@ -127,7 +130,7 @@ def _review_due(tasks: Mapping[str, Task], events: list[dict], now: str) -> bool
 
 @dataclass(frozen=True)
 class Action:
-    kind: str  # collect, land, ready, start, park, design, call, vet, hold, finish
+    kind: str  # collect, land, ready, start, park, design, foreman, settle, call, vet, hold, finish
     task: str | None = None
     run: str | None = None
     host: str | None = None
@@ -135,6 +138,20 @@ class Action:
     branch: str | None = None
     detail: str = ""
     rejection: dict | None = None
+
+
+def foreman_actions(tasks: Mapping[str, Task], events: list[dict]) -> list[Action]:
+    """Start foremen or settle their answers in question order, leaving deciding and queued
+    questions alone. Pure; only questions of tasks in this plan are considered."""
+    actions = []
+    for question in foreman.questions(tasks, events):
+        if question.state == "foreman":
+            actions.append(Action("foreman", task=question.task, run=question.run,
+                                  detail=question.run))
+        elif question.state == "settled":
+            actions.append(Action("settle", task=question.task, run=question.foreman,
+                                  detail=question.foreman))
+    return actions
 
 
 def in_flight(events: Iterable[dict]) -> list[dict]:
@@ -384,7 +401,9 @@ def _finish(action: Action, *, log_path: Path | None) -> None:
 
 def _take(action: Action, tasks: Mapping[str, Task], hosts: Mapping[str, Host], plan_dir: Path, *,
           plan: Plan, checkout: Path, sh: Runner, log_path: Path | None) -> None:
-    """Take a task or call-chain action, isolating failures and logging each finish outcome."""
+    """Take a task, foreman or call-chain action, isolating failures and logging each finish
+    outcome. A foreman prints its asking run and chosen builder; a failed settlement leaves
+    the question unanswered for the next tick."""
     detail = action.detail
     outcome = "failed"
     try:
@@ -399,6 +418,10 @@ def _take(action: Action, tasks: Mapping[str, Task], hosts: Mapping[str, Host], 
                 _start(action, tasks, hosts, sh=sh, log_path=log_path)
             case "call":
                 _call(action, plan_dir, sh=sh, log_path=log_path)
+            case "foreman":
+                detail = _foreman(action, tasks, hosts, sh=sh, log_path=log_path)
+            case "settle":
+                _settle(action, tasks, plan_dir, sh=sh, log_path=log_path)
             case "vet":
                 _vet(action, plan, checkout, hosts, sh=sh, log_path=log_path)
             case "hold":
@@ -421,12 +444,12 @@ def _take(action: Action, tasks: Mapping[str, Task], hosts: Mapping[str, Host], 
 
 def tick(plan_dir: Path, *, sh: Runner = run, hosts: Mapping[str, Host] | None = None,
          log_path: Path | None = None) -> list[Action]:
-    """Fetch the plan checkout and take its task actions, then its call review chain steps.
+    """Fetch the plan checkout and take task, foreman, then call review chain steps.
 
     Hold a nonblocking FAB_HOME/tick.lock, validate the plan, import queue events and measure
     builders through fab.flow.measure before deciding. Collect runs, gate and land tasks,
-    publish ready branches and start runs through
-    the runner. Re-read events for call decisions: vet on the freest builder, amend in a user
+    publish ready branches and start runs through the runner. Re-read events to start foremen and land settled answers, then again for
+    call decisions counting only queued questions: vet on the freest builder, amend in a user
     unit, park refusals once, or land approved branches and record answers and call.finished.
     Every action reports one line; a failure logs a note and leaves later actions running.
     Return the actions taken. See docs/design/fab.md, 12 and 13.1."""
@@ -450,6 +473,11 @@ def tick(plan_dir: Path, *, sh: Runner = run, hosts: Mapping[str, Host] | None =
         for action in actions:
             _take(action, tasks, hosts, plan_dir, plan=plan, checkout=checkout,
                   sh=sh, log_path=log_path)
+        questions = foreman_actions(tasks, log.read(log_path))
+        for action in questions:
+            _take(action, tasks, hosts, plan_dir, plan=plan, checkout=checkout,
+                  sh=sh, log_path=log_path)
+        actions.extend(questions)
         design = [part for action in actions if action.kind == "design"
                   for part in action.detail.split(", ")]
         followups = call_actions(plan, tasks, log.read(log_path), design, log.now())
@@ -475,14 +503,59 @@ def _start(action: Action, tasks: Mapping[str, Task], hosts: Mapping[str, Host],
 
 def _vet(action: Action, plan: Plan, checkout: Path, hosts: Mapping[str, Host], *,
          sh: Runner, log_path: Path | None) -> None:
-    """Review the current chain on the builder with most free places, even when none are free."""
+    """Review the current chain using the builder selection shared with foreman runs."""
     events = log.read(log_path)
+    host = _builder(hosts, events)
+    chain = call_review.chains(events)[action.task]
+    call_review.start(chain, plan.repo, checkout, host, events, sh=sh, log_path=log_path)
+
+
+def _builder(hosts: Mapping[str, Host], events: list[dict]) -> Host:
+    """Choose the builder with most free places, even at zero, breaking ties by name."""
     free = places(hosts, in_flight(events))
     if not free:
-        raise ValueError("no builder configured for call review")
-    name = min(free, key=lambda name: (-free[name], name))
-    chain = call_review.chains(events)[action.task]
-    call_review.start(chain, plan.repo, checkout, hosts[name], events, sh=sh, log_path=log_path)
+        raise ValueError("no builder configured")
+    return hosts[min(free, key=lambda name: (-free[name], name))]
+
+
+def _question(action: Action, tasks: Mapping[str, Task], events: list[dict],
+              status: str) -> foreman.Question:
+    """Find the action's question in the current state, refusing stale actions."""
+    for question in foreman.questions(tasks, events):
+        identifier = question.run if status == "foreman" else question.foreman
+        if question.task == action.task and identifier == action.run and question.state == status:
+            return question
+    raise ValueError(f"no {status} question for {action.task} {action.run}")
+
+
+def _foreman(action: Action, tasks: Mapping[str, Task], hosts: Mapping[str, Host], *,
+             sh: Runner, log_path: Path | None) -> str:
+    """Recompute a pending question and start its foreman on the freest builder."""
+    events = log.read(log_path)
+    question = _question(action, tasks, events, "foreman")
+    host = _builder(hosts, events)
+    foreman.start(question, tasks[action.task], host, log.read(log_path), sh=sh, log_path=log_path)
+    return f"{question.run} {host.name}"
+
+
+def _settle(action: Action, tasks: Mapping[str, Task], plan_dir: Path, *,
+            sh: Runner, log_path: Path | None) -> None:
+    """Commit and land a settled answer before recording it; failures leave it retryable.
+
+    Resolve the plan's git checkout through the runner, refusing a non-checkout. An answer
+    already recorded by commit needs no landing. Read the collected report locally and log
+    its first answer line with both the asking and foreman runs after success."""
+    question = _question(action, tasks, log.read(log_path), "settled")
+    result = sh(["git", "rev-parse", "--show-toplevel"], cwd=str(plan_dir), check=True)
+    if not result.out.strip():
+        raise ValueError("plan is not a git checkout")
+    answer = foreman.answer((log.home() / "runs" / action.run / "report.md").read_text())
+    branch = foreman.commit(question, tasks[action.task], answer, Path(result.out.strip()),
+                            run_id=action.run, day=log.now()[:10], sh=sh)
+    if branch is not None:
+        _land_branch([branch])
+    log.append("question.answered", path=log_path, task=question.task, by=action.run,
+               run=question.run, answer=answer.splitlines()[0])
 
 
 def _hold(action: Action, *, log_path: Path | None) -> None:
