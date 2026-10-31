@@ -49,3 +49,9 @@ Written to the report path in your facts, first line one of `Done: <the
 plan, in one line>`, `Question: ...` (then options and a recommendation;
 only when the draft cannot be cut without the answer) or `Failed: <why>`.
 Then: the parts and slices, the user's questions, and what you left out.
+
+## Part size
+
+- A part holds 2-6 tasks of 30-60 implementer-minutes each, one concept: merge
+  adjacent small parts rather than cutting thin ones. A skeleton call per two
+  tasks is too much design for the code it yields.

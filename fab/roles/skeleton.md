@@ -16,12 +16,14 @@ departure, the drafts' words, and the options.
 
 ## What you write
 
-- **The part's skeleton, as code:** its modules, public functions and types
-  with full signatures and docstrings that say exactly what each body must
-  do (inputs, outputs, errors, side effects, the order of steps), and bodies
-  that are only `raise NotImplementedError`. Constants and data types are
-  written out. The docstring is the contract a Codex implementer fills;
-  leave it nothing to guess at a boundary, and nothing more than it needs.
+- **The part's skeleton, as code, and contracts, not pseudocode:** its
+  modules, public functions and types with full signatures and a short
+  contract each (inputs, outputs, errors, side effects, invariants), never the
+  order of steps; bodies are only `raise NotImplementedError`. Private helpers
+  are the implementer's to choose. Constants and data types are written out.
+  Docstrings stay under about a quarter of the lines the part's tasks are
+  expected to write: the skeleton is 10-20% of the part's final production
+  lines, Codex writes the rest.
 - **The part's test vocabulary and an exemplar test:** the builders,
   fixtures and assertion helpers its tests will speak in, written as code,
   and one test that uses them end to end on the skeleton. Implementers and
@@ -33,10 +35,11 @@ departure, the drafts' words, and the options.
   main. Use them; a near-duplicate of one is a defect. A primitive that is
   missing and shared belongs in its own module, designed here.
 - **Its task specs**, one file per task under the plan's `tasks/`, in the
-  format of the examples in this brief: a `+++` TOML header (id, part, kind,
-  needs, files, effort, minutes) and a body with what to fill, the
-  acceptance (the tests that prove it, and their time budget), and the
-  options settled up front with their defaults. A feature task is one module or
+  format of the example in this brief: a `+++` TOML header (id, part, kind,
+  needs, files, effort, minutes) and a thin body: the skeleton items to fill,
+  the acceptance (the tests that prove it, and their time budget), and the
+  options settled up front with their defaults. Never restate what the
+  docstrings say. A part has 2-6 tasks. A feature task is one module or
   concept, about 400-500 production lines with its tests, 30-60
   implementer-minutes: longer runs cost fewer round trips. Split finer only
   where parts must run at once. Tasks that can run at once list
