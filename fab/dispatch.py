@@ -71,7 +71,8 @@ def call_actions(plan: Plan, tasks: Mapping[str, Task], events: list[dict], desi
     chains = call_review.chains(events)
     own = {root: chain for root, chain in chains.items()
            if drafts.under(plan.draft, chain.subject)}
-    actions = _chain_actions(own, any(event["role"] == "amend" for event in flight.values()))
+    actions = _chain_actions(own, any(event["role"] == "amend" for event in flight.values()),
+                             reviews=plan.reviews)
     open_chains = [chain for chain in own.values() if chain.state != "finished"]
     subjects = {chain.subject for chain in open_chains}
     roles = {event["role"] for event in flight.values()}
@@ -89,7 +90,8 @@ def call_actions(plan: Plan, tasks: Mapping[str, Task], events: list[dict], desi
             actions.append(Action("call", task=plan.draft, run_kind="answer"))
     actions.extend(_part_calls(plan, design, started, events, parked | subjects))
     subject = f"{plan.draft}/review"
-    if "review" not in roles and subject not in parked | subjects and _review_due(plan.draft, tasks, events, now):
+    if (plan.reviews and "review" not in roles and subject not in parked | subjects
+            and _review_due(plan.draft, tasks, events, now)):
         actions.append(Action("call", task=subject, run_kind="review"))
     subject = designer.subject(plan.draft, "retire")
     if ("retire" not in roles and subject not in parked | subjects
@@ -113,12 +115,13 @@ def _part_calls(plan: Plan, design: list[str], started: Mapping[str, dict], even
             for part, role in drafts.design_calls(plan, fresh, events)]
 
 
-def _chain_actions(chains: Mapping[str, call_review.Chain], amending: bool) -> list[Action]:
+def _chain_actions(chains: Mapping[str, call_review.Chain], amending: bool, *,
+                   reviews: bool = True) -> list[Action]:
     """Translate chain states in order, reserving at most one amend call at a time."""
     actions = []
     for chain in chains.values():
         if chain.state in ("review", "approved"):
-            actions.append(Action("vet" if chain.state == "review" else "finish",
+            actions.append(Action("vet" if chain.state == "review" and reviews else "finish",
                                   task=chain.root, run=chain.latest, branch=chain.branch,
                                   run_kind=chain.role))
         elif chain.state == "amend" and not amending:
@@ -145,7 +148,7 @@ def _review_due(draft: str, tasks: Mapping[str, Task], events: list[dict], now: 
 
 @dataclass(frozen=True)
 class Action:
-    kind: str  # collect, land, ready, start, park, design, foreman, settle, examine, remedy, call, vet, hold, finish
+    kind: str  # collect, land, ready, merge, start, park, design, foreman, settle, examine, remedy, call, vet, hold, finish
     task: str | None = None
     run: str | None = None
     host: str | None = None
@@ -223,7 +226,7 @@ def decide(plan: Plan, tasks: Mapping[str, Task], events: list[dict], hosts: Map
        fab.flow.target(plan.draft, events) and m the runs in flight of the draft's tasks
        (task starting with `<draft>/`). It is printed, never carried out.
     1. collect: only this draft's owned runs, including its calls' review runs.
-    2. land (repo "agents") or ready (any other repo): every task whose status is done, with
+    2. merge (integration plans), land (repo "agents") or ready (any other repo): done tasks with
        the branch of its last run.
     3. start: for rejected and runnable tasks in fab.buffer.order's order, refused
        being those whose start carries a refusal, while the draft's runs in flight plus
@@ -252,7 +255,7 @@ def decide(plan: Plan, tasks: Mapping[str, Task], events: list[dict], hosts: Map
     actions = [Action("flow", task=plan.draft, detail=f"target {limit}, {occupied} in flight")]
     actions.extend(Action("collect", task=event["task"], run=event["run"], host=event["host"],
                           detail=event["run"]) for event in drafts.owned(plan.draft, flight, events))
-    landings, rebases, events = _landing_actions(tasks, views, events)
+    landings, rebases, events = _landing_actions(plan, tasks, views, events)
     actions.extend(landings)
 
     candidates = [identifier for status in ("rejected", "runnable")
@@ -397,6 +400,43 @@ def _import_queue(tasks: Mapping[str, Task], events: list[dict], hosts: Mapping[
             imported.add(key)
 
 
+def _merge_branch(branch: str, plan: Plan, checkout: Path, *, task: str | None = None,
+                  sh: Runner, log_path: Path | None) -> bool:
+    """Merge a branch into the plan's trunk once; log conflicts and retry refused pushes."""
+    if any(event.get("ev") == "branch.landed" and event.get("branch") == branch
+           and event.get("into") == plan.trunk for event in log.read(log_path)):
+        return True
+    sh(["git", "fetch", "origin"], cwd=str(checkout), check=True)
+    sh(["git", "reset", "-q", "--hard", f"origin/{plan.trunk}"], cwd=str(checkout), check=True)
+    tip = sh(["git", "rev-parse", "--verify", f"refs/remotes/origin/{branch}^{{commit}}"],
+             cwd=str(checkout), check=True).out.strip()
+    if not tip:
+        raise ValueError("branch has no tip")
+    merged = sh(["git", "-c", "user.name=fab", "-c", "user.email=fab@localhost",
+                 "merge", "--no-ff", "--no-edit", tip], cwd=str(checkout))
+    if not merged.ok:
+        sh(["git", "merge", "--abort"], cwd=str(checkout), check=True)
+        log.append("branch.rejected", path=log_path, task=task or branch, branch=branch,
+                   tip=tip, step="merge", findings="\n".join((merged.out.splitlines() + merged.err.splitlines())[-40:]))
+        return False
+    sh(["git", "push", "origin", f"HEAD:refs/heads/{plan.trunk}"], cwd=str(checkout), check=True)
+    main = sh(["git", "rev-parse", "HEAD"], cwd=str(checkout), check=True).out.strip()
+    log.append("branch.landed", path=log_path, task=task or branch, branch=branch,
+               tip=tip, main=main, into=plan.trunk)
+    return True
+
+
+def _deliver(branch: str, plan: Plan, checkout: Path, *, sh: Runner,
+             log_path: Path | None, section: str = "") -> bool:
+    """Deliver a call or spec branch to its plan's trunk, retaining queued repair text."""
+    if plan.landing == "integration":
+        return _merge_branch(branch, plan, checkout, sh=sh, log_path=log_path)
+    if plan.repo == "fabrig":
+        return _queue_branch(branch, checkout, sh=sh, log_path=log_path, section=section)
+    _land_branch([branch])
+    return True
+
+
 def _queue_branch(branch: str, checkout: Path, *, sh: Runner, log_path: Path | None,
                   section: str = "") -> bool:
     """Ready a call or spec branch once; return True only after its queue landing imports."""
@@ -499,11 +539,8 @@ def _call(action: Action, plan_dir: Path, draft: str, *, sh: Runner) -> None:
 
 
 def _finish(action: Action, *, log_path: Path | None) -> None:
-    """Land an approved branch and record answers from the latest call's report or its root's."""
+    """Record answers from the delivered chain's latest report or its root's."""
     events = log.read(log_path)
-    if not any(event.get("ev") == "branch.landed" and event.get("branch") == action.branch
-               and "queue_ts" in event for event in events):
-        _land_branch([action.branch])
     chain = call_review.chains(events)[action.task]
     if chain.role == "answer":
         for identifier in dict.fromkeys(_answered(chain)):
@@ -515,7 +552,7 @@ def _take(action: Action, tasks: Mapping[str, Task], hosts: Mapping[str, Host], 
     """Take task, question, refusal or call-chain actions, logging failures as notes.
 
     Foremen print their asking run or refused step and builder; remedies print verdict and
-    reason. Failed settlements remain open for the next tick. Finish always logs its outcome.
+    reason. Failed settlements and integration deliveries remain open for the next tick.
     """
     detail = action.detail
     outcome = "failed"
@@ -528,18 +565,26 @@ def _take(action: Action, tasks: Mapping[str, Task], hosts: Mapping[str, Host], 
                 detail = _land(action, tasks, sh=sh, log_path=log_path)
             case "ready":
                 detail = _screen_ready(action, tasks[action.task], hosts, sh=sh, log_path=log_path)
+            case "merge":
+                findings = rust_gates.screen(tasks[action.task], log.read(log_path),
+                                            trunk=plan.trunk, sh=sh, log_path=log_path)
+                if findings:
+                    detail = "rejected gate:" + ",".join(dict.fromkeys(finding.gate for finding in findings))
+                else:
+                    _merge_branch(action.branch, plan, checkout, task=action.task,
+                                  sh=sh, log_path=log_path)
             case "start":
-                _start(action, tasks, hosts, sh=sh, log_path=log_path)
+                _start(action, tasks, hosts, plan=plan, sh=sh, log_path=log_path)
             case "call":
                 _call(action, plan_dir, plan.draft, sh=sh)
             case "foreman":
-                detail = _foreman(action, tasks, hosts, sh=sh, log_path=log_path)
+                detail = _foreman(action, tasks, hosts, plan=plan, sh=sh, log_path=log_path)
             case "settle":
-                _settle(action, tasks, plan_dir, sh=sh, log_path=log_path)
+                _settle(action, tasks, plan_dir, plan=plan, sh=sh, log_path=log_path)
             case "examine":
-                detail = _examine(action, tasks, hosts, sh=sh, log_path=log_path)
+                detail = _examine(action, tasks, hosts, plan=plan, sh=sh, log_path=log_path)
             case "remedy":
-                detail = _remedy(action, tasks, plan_dir, sh=sh, log_path=log_path)
+                detail = _remedy(action, tasks, plan_dir, plan=plan, sh=sh, log_path=log_path)
             case "vet":
                 _vet(action, plan, checkout, hosts, sh=sh, log_path=log_path)
             case "hold":
@@ -547,11 +592,7 @@ def _take(action: Action, tasks: Mapping[str, Task], hosts: Mapping[str, Host], 
             case "finish":
                 finish_tip = next((event["tip"] for event in reversed(log.read(log_path))
                                    if event.get("ev") == "call.checked" and event.get("call") == action.run), "")
-                if plan.repo == "fabrig":
-                    if _queue_branch(action.branch, checkout, sh=sh, log_path=log_path):
-                        _finish(action, log_path=log_path)
-                        outcome = "done"
-                else:
+                if _deliver(action.branch, plan, checkout, sh=sh, log_path=log_path):
                     _finish(action, log_path=log_path)
                     outcome = "done"
             case "park":
@@ -561,7 +602,8 @@ def _take(action: Action, tasks: Mapping[str, Task], hosts: Mapping[str, Host], 
         log.append("note", path=log_path,
                    text=f"{action.kind} {action.task or '-'} {detail}")
     finally:
-        if action.kind == "finish" and (plan.repo != "fabrig" or outcome == "done"):
+        if action.kind == "finish" and ((plan.repo != "fabrig" and plan.landing != "integration")
+                                        or outcome == "done"):
             fields = {"tip": finish_tip} if finish_tip else {}
             log.append("call.finished", path=log_path, call=action.run,
                        role=action.run_kind, outcome=outcome, **fields)
@@ -639,7 +681,7 @@ def _round(plan_dirs: Sequence[Path], *, sh: Runner, hosts: Mapping[str, Host] |
 
 
 def _checkout(plan_dir: Path, fetched: dict[Path, Exception | None], *, sh: Runner) -> Path:
-    """Locate git and fetch each checkout once, retaining failures for its other plans."""
+    """Fetch and follow each checkout's upstream once, sharing failures across its plans."""
     result = sh(["git", "rev-parse", "--show-toplevel"], cwd=str(_plan_ancestor(plan_dir)))
     if not result.ok or not result.out.strip():
         return plan_dir.resolve()
@@ -648,6 +690,10 @@ def _checkout(plan_dir: Path, fetched: dict[Path, Exception | None], *, sh: Runn
         fetched[checkout] = None
         try:
             sh(["git", "fetch", "origin"], cwd=str(checkout), check=True)
+            upstream = sh(["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
+                          cwd=str(checkout))
+            if upstream.ok:
+                sh(["git", "merge", "--ff-only", "@{upstream}"], cwd=str(checkout), check=True)
         except (OSError, ValueError, Failed) as error:
             fetched[checkout] = error
     failure = fetched[checkout]
@@ -741,13 +787,16 @@ def _load_plan(plan_dir: Path, events: list[dict], *, checkout: Path | None = No
             raise specs.PlanError(f"{plan_dir}: " + "\n".join(issues))
         return plan, tasks
     draft = plan_dir.name
-    if not any(event.get("ev") == "call.started" and event.get("role") == "cut"
-               and event.get("subject") == designer.subject(draft, "cut") for event in events):
+    cut = next((event for event in reversed(events)
+                if event.get("ev") == "call.started" and event.get("role") == "cut"
+                and event.get("subject") == designer.subject(draft, "cut")), None)
+    if cut is None:
         raise specs.PlanError(f"{plan_dir}: no plan.toml or cut call")
     if checkout is None:
         result = sh(["git", "rev-parse", "--show-toplevel"], cwd=str(_plan_ancestor(plan_dir)), check=True)
         checkout = Path(result.out.strip())
-    return designer.uncut(draft, designer.repository(checkout, sh=sh)), {}
+    return designer.uncut(draft, designer.repository(checkout, sh=sh),
+                          options=specs.parse_options(cut.get("options", ()))), {}
 
 
 def _collect(action: Action, hosts: Mapping[str, Host], *, sh: Runner,
@@ -757,10 +806,11 @@ def _collect(action: Action, hosts: Mapping[str, Host], *, sh: Runner,
 
 
 def _start(action: Action, tasks: Mapping[str, Task], hosts: Mapping[str, Host], *,
-           sh: Runner, log_path: Path | None) -> None:
+           plan: Plan, sh: Runner, log_path: Path | None) -> None:
     """Start a task run with current events and the decision's rejection context."""
     runs.start(tasks[action.task], hosts[action.host], kind=action.run_kind,
-               events=log.read(log_path), sh=sh, log_path=log_path, rejection=action.rejection)
+               events=log.read(log_path), sh=sh, log_path=log_path, rejection=action.rejection,
+               trunk=plan.trunk)
 
 
 def _vet(action: Action, plan: Plan, checkout: Path, hosts: Mapping[str, Host], *,
@@ -791,17 +841,18 @@ def _question(action: Action, tasks: Mapping[str, Task], events: list[dict],
 
 
 def _foreman(action: Action, tasks: Mapping[str, Task], hosts: Mapping[str, Host], *,
-             sh: Runner, log_path: Path | None) -> str:
+             plan: Plan, sh: Runner, log_path: Path | None) -> str:
     """Recompute a pending question and start its foreman on the freest builder."""
     events = log.read(log_path)
     question = _question(action, tasks, events, "foreman")
     host = _builder(hosts, events)
-    foreman.start(question, tasks[action.task], host, log.read(log_path), sh=sh, log_path=log_path)
+    foreman.start(question, tasks[action.task], host, log.read(log_path),
+                  sh=sh, log_path=log_path, trunk=plan.trunk)
     return f"{question.run} {host.name}"
 
 
 def _settle(action: Action, tasks: Mapping[str, Task], plan_dir: Path, *,
-            sh: Runner, log_path: Path | None) -> None:
+            plan: Plan, sh: Runner, log_path: Path | None) -> None:
     """Commit and land a settled answer before recording it; failures leave it retryable.
 
     Share checkout resolution with refusal remedies, refusing a non-checkout. An answer
@@ -809,7 +860,7 @@ def _settle(action: Action, tasks: Mapping[str, Task], plan_dir: Path, *,
     its first answer line with both the asking and foreman runs after success."""
     events = log.read(log_path)
     question = _question(action, tasks, events, "settled")
-    queued = specs.load_plan(plan_dir / "plan.toml").repo == "fabrig"
+    queued = plan.repo == "fabrig" and plan.landing == "queue"
     pending = f"answers/{action.run}"
     ready = queued and any(event.get("ev") == "branch.ready" and event.get("branch") == pending
                            for event in events)
@@ -817,13 +868,9 @@ def _settle(action: Action, tasks: Mapping[str, Task], plan_dir: Path, *,
     answer = foreman.answer((log.home() / "runs" / action.run / "report.md").read_text())
     branch = pending if ready else foreman.commit(
         question, tasks[action.task], answer, checkout,
-        run_id=action.run, day=log.now()[:10], sh=sh)
-    if branch is not None:
-        if queued:
-            if not _queue_branch(branch, checkout, sh=sh, log_path=log_path):
-                return
-        else:
-            _land_branch([branch])
+        run_id=action.run, day=log.now()[:10], sh=sh, trunk=plan.trunk)
+    if branch is not None and not _deliver(branch, plan, checkout, sh=sh, log_path=log_path):
+        return
     log.append("question.answered", path=log_path, task=question.task, by=action.run,
                run=question.run, answer=answer.splitlines()[0])
 
@@ -847,17 +894,18 @@ def _refusal(action: Action, tasks: Mapping[str, Task], events: list[dict],
 
 
 def _examine(action: Action, tasks: Mapping[str, Task], hosts: Mapping[str, Host], *,
-             sh: Runner, log_path: Path | None) -> str:
+             plan: Plan, sh: Runner, log_path: Path | None) -> str:
     """Recompute a pending refusal and start its foreman on the freest builder, even full."""
     events = log.read(log_path)
     refusal = _refusal(action, tasks, events, "foreman")
     host = _builder(hosts, events)
-    repairs.start(refusal, tasks[action.task], host, log.read(log_path), sh=sh, log_path=log_path)
+    repairs.start(refusal, tasks[action.task], host, log.read(log_path),
+                  sh=sh, log_path=log_path, trunk=plan.trunk)
     return f"{refusal.step} {host.name}"
 
 
 def _remedy(action: Action, tasks: Mapping[str, Task], plan_dir: Path, *,
-            sh: Runner, log_path: Path | None) -> str:
+            plan: Plan, sh: Runner, log_path: Path | None) -> str:
     """Settle a decided refusal from its collected report, treating unreadable as empty.
 
     Land a fix's spec section before recording it; retry and none need no commit.
@@ -873,7 +921,7 @@ def _remedy(action: Action, tasks: Mapping[str, Task], plan_dir: Path, *,
     branch, section = None, ""
     if verdict == "fix":
         section = repairs.section(refusal, day=log.now()[:10], run_id=action.run, body=body)
-        queued = specs.load_plan(plan_dir / "plan.toml").repo == "fabrig"
+        queued = plan.repo == "fabrig" and plan.landing == "queue"
         pending = f"repairs/{action.run}"
         ready = next((event for event in events if queued and event.get("ev") == "branch.ready"
                       and event.get("branch") == pending), None)
@@ -881,24 +929,21 @@ def _remedy(action: Action, tasks: Mapping[str, Task], plan_dir: Path, *,
             section = ready.get("section", section)
         checkout = _spec_checkout(plan_dir, sh=sh)
         branch = pending if ready else repairs.commit(
-            refusal, tasks[action.task], section, checkout, run_id=action.run, sh=sh)
+            refusal, tasks[action.task], section, checkout, run_id=action.run, sh=sh, trunk=plan.trunk)
         if branch is not None:
-            if queued:
-                if ready is None:
-                    relative = Path(tasks[action.task].path).resolve().relative_to(checkout.resolve())
-                    spec = sh(["git", "show", f"refs/remotes/origin/{branch}:{relative.as_posix()}"],
-                              cwd=str(checkout), check=True).out.splitlines(keepends=True)
-                    heading = next((index for index, line in enumerate(spec)
-                                    if line.startswith(("## Repair (", "## Rebase ("))
-                                    and line.rstrip().endswith(f" foreman {action.run})")), None)
-                    if heading is not None:
-                        end = next((index for index in range(heading + 1, len(spec))
-                                    if spec[index].startswith("## ")), len(spec))
-                        section = "".join(spec[heading:end]).rstrip("\n") + "\n"
-                if not _queue_branch(branch, checkout, sh=sh, log_path=log_path, section=section):
-                    return f"{verdict} {reason}"
-            else:
-                _land_branch([branch])
+            if queued and ready is None:
+                relative = Path(tasks[action.task].path).resolve().relative_to(checkout.resolve())
+                spec = sh(["git", "show", f"refs/remotes/origin/{branch}:{relative.as_posix()}"],
+                          cwd=str(checkout), check=True).out.splitlines(keepends=True)
+                heading = next((index for index, line in enumerate(spec)
+                                if line.startswith(("## Repair (", "## Rebase ("))
+                                and line.rstrip().endswith(f" foreman {action.run})")), None)
+                if heading is not None:
+                    end = next((index for index in range(heading + 1, len(spec))
+                                if spec[index].startswith("## ")), len(spec))
+                    section = "".join(spec[heading:end]).rstrip("\n") + "\n"
+            if not _deliver(branch, plan, checkout, sh=sh, log_path=log_path, section=section):
+                return f"{verdict} {reason}"
     log.append("refusal.settled", path=log_path, task=refusal.task, run=action.run,
                verdict=verdict, reason=reason, branch=branch or "", section=section)
     return f"{verdict} {reason}"
@@ -1073,7 +1118,7 @@ def _call_tests(chain: call_review.Chain, plan: Plan, checkout: Path, tip: str,
             sh(["git", "worktree", "remove", "--force", str(worktree)], cwd=str(checkout), check=True)
 
 
-def _landing_actions(tasks: Mapping[str, Task], views: Mapping[str, state.TaskView],
+def _landing_actions(plan: Plan, tasks: Mapping[str, Task], views: Mapping[str, state.TaskView],
                      events: list[dict]) -> tuple[list[Action], list[str], list[dict]]:
     """Hold optimistic landings until the skeleton lands, scheduling amendments as rebases.
 
@@ -1094,8 +1139,9 @@ def _landing_actions(tasks: Mapping[str, Task], views: Mapping[str, state.TaskVi
                 rebases.append(identifier)
                 events = [*events, {"ev": "branch.rejected", "task": identifier, **amendment}]
                 continue
-            actions.append(Action("land" if tasks[identifier].repo == "agents" else "ready",
-                                  task=identifier, branch=view.branch, detail=view.branch or ""))
+            kind = "merge" if plan.landing == "integration" else (
+                "land" if tasks[identifier].repo == "agents" else "ready")
+            actions.append(Action(kind, task=identifier, branch=view.branch, detail=view.branch or ""))
 
     return actions, rebases, events
 
