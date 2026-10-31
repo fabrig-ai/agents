@@ -1002,7 +1002,19 @@ only as tweaks once a replay matches its run.
     and spec formats, that implementers read nothing but their spec, the
     notes it cites and the repository, and the early release above. It asks
     for no survey: the lead was not told to make one, and made it as it
-    saw fit.
+    saw fit. It carries the plan and spec formats, and the brief leaves out
+    the Designs, Plans and Inventory sections.
+  - **fabrig's `agents/` files are not fed** (the user, 10-31): `lead.md`,
+    `implementer.md`, `operations.md` and `ledger.md` describe the pipeline
+    before fab (resident leads, `post`, `claim`, `precheck`, ready refs, the
+    old machines). The cut's sources carry fabrig's `AGENTS.md` only;
+    `cut-run.md` names its pipeline lines that do not hold and keeps, in a
+    few lines, what `lead.md` said of writing tasks that still holds (scope
+    settled in the task, readers named, options pre-approved). Implementers
+    are told to read neither `agents/` nor those lines (`fabrig-run.md`).
+    fabrig's own files brought to fab's era are fabrig's change, through its
+    queue: until then fab's texts name the departures, as the manual run's
+    notes did.
   - An implementer of an integration fabrig plan gets the spec and its
     facts, with `fab/roles/fabrig-run.md` in place of `implementer.md`,
     the taste file and `fabrig.md`: its slot is claimed and set up, it

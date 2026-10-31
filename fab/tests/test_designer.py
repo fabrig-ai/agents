@@ -421,10 +421,15 @@ class BriefTest(unittest.TestCase):
 
     def test_empty_cut_sections_and_sources_in_order(self):
         empty = self.root / "empty"
-        text = designer.cut_brief(designer.uncut("new", "agents", ["a.md", "b.md"]), empty, **FACTS)
+        queue = {"landing": "queue", "reviews": True, "direct": False}
+        text = designer.cut_brief(designer.uncut("new", "agents", ["a.md", "b.md"], queue), empty, **FACTS)
         for section in ("Designs", "Plans", "Inventory"):
             self.assertIn(f"# {section}\n\n(none)", text)
         self.assertIn("- Sources: `a.md`, `b.md`", text)
+        # A run's cut (the defaults: direct, integration) gets the formats from cut-run.md instead.
+        text = designer.cut_brief(designer.uncut("new", "agents", ["a.md", "b.md"]), empty, **FACTS)
+        for section in ("Designs", "Plans", "Inventory"):
+            self.assertNotIn(f"# {section}\n", text)
 
     def test_decision_sections_report_readers_and_cited_design(self):
         text = self.decision()

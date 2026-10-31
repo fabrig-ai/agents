@@ -193,6 +193,7 @@ def cut_brief(plan: Plan, root: Path, *, call_id: str, branch: str, report: str,
        `(none)` when there is none. Their format is the cut's to follow.
     7. `Inventory`: fab.calls.render_inventory(fab.calls.inventory(root)), or `(none)`
        when it is empty (a repository without fab/).
+    Sections 5 to 7 are left out when cut-run.md is the role: it holds the formats.
 
     When options are given, insert `Plan options` after `The draft`, with parsed
     KEY = VALUE lines to write verbatim at the top of plan.toml. With direct=true
@@ -238,9 +239,12 @@ def cut_brief(plan: Plan, root: Path, *, call_id: str, branch: str, report: str,
          f"- Sources: {', '.join(f'`{source}`' for source in plan.sources)}"),
         *option_sections,
         ("The user's drafts", calls.drafts_text(plan, root)),
-        ("Designs", design_index(root)),
-        ("Plans", "\n".join(f"- `{path}`" for path in plans) or "(none)"),
-        ("Inventory", calls.render_inventory(calls.inventory(root)) or "(none)"),
+        # cut-run.md carries the plan and spec formats; a run's cut reads designs itself.
+        *([] if run_role else [
+            ("Designs", design_index(root)),
+            ("Plans", "\n".join(f"- `{path}`" for path in plans) or "(none)"),
+            ("Inventory", calls.render_inventory(calls.inventory(root)) or "(none)"),
+        ]),
     ])
 
 

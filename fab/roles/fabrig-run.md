@@ -5,6 +5,11 @@ slot, a fabrig checkout whose `target/` stays warm, claimed for you and
 already on your branch at its base; never touch another slot. Your task is
 the spec below: read first what it tells you to read.
 
+- Read fabrig's `AGENTS.md` and the tree's `AGENTS.md` for the code, but
+  not their pipeline lines, and none of `agents/`: they describe the
+  pipeline before fab. No precheck, ready-check, claim, `tools/slots/trim`
+  or `post`: those tools are gone. Your slot is claimed and set up for you.
+
 - Commit on your branch and push it with `git push origin
   HEAD:refs/heads/<your branch>`. Never push the trunk, main or `ready/*`.
   fab merges your branch into the trunk when you are done.
