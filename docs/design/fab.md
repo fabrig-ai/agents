@@ -658,8 +658,10 @@ only the backstop.
 The user's example timeline (`execution-modes.md`, "Example") is the order of
 things fab follows, whatever the clock says:
 
-- **Intake:** a draft landing in a repository's `docs/design/draft/` starts
-  its intake: the surveys, then the cut. Nobody starts a cut by hand.
+- **Intake:** the user starts a draft by hand (`fab draft start PATH`, at
+  the user's word of 10-31): its surveys, then its cut. A draft landing in
+  `docs/design/draft/` starts nothing by itself; the timeline's T+0:00 is
+  the user's start.
 - **Surveys:** read-only Codex runs (medium, kind `survey`), at intake (the
   readers of what the draft changes, the primitives in reach with their
   signatures, each area's test world) and before each skeleton call (the
